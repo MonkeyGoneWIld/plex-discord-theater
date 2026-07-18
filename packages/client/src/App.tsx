@@ -25,6 +25,7 @@ export function App() {
   const { state: syncState, actions: syncActions } = useSync({
     instanceId,
     userId,
+    username,
     enabled: isReady,
   });
 
@@ -222,6 +223,9 @@ export function App() {
           <span style={styles.user}>
             {username} {effectiveIsHost ? "(Host)" : "(Viewer)"}
             {!effectiveIsHost && syncState.connected && " \u2022 Synced"}
+            {!effectiveIsHost && syncState.hostUsername && (
+              <span style={styles.hostLabel}> &middot; Host: {syncState.hostUsername}</span>
+            )}
           </span>
         </header>
       )}
@@ -229,6 +233,37 @@ export function App() {
       {/* Host promotion toast */}
       {promotedToast && (
         <div style={styles.promotedToast}>You are now the host</div>
+      )}
+
+      {/* Viewer suggestions — host only */}
+      {effectiveIsHost && syncState.suggestions.length > 0 && (
+        <div style={styles.suggestionsPanel}>
+          {syncState.suggestions.map((s) => (
+            <div key={s.ratingKey} style={styles.suggestionRow}>
+              <span style={styles.suggestionText}>
+                {s.fromUsername ? <strong>{s.fromUsername}</strong> : "Someone"} suggested{" "}
+                <strong>{s.title}</strong>{s.year ? ` (${s.year})` : ""}
+              </span>
+              <div style={styles.suggestionActions}>
+                <button
+                  onClick={() => {
+                    handleSelect({ ratingKey: s.ratingKey, title: s.title, type: s.type, thumb: s.thumb, year: s.year });
+                    syncActions.sendDismissSuggestion(s.ratingKey);
+                  }}
+                  style={styles.suggestionViewBtn}
+                >
+                  View
+                </button>
+                <button
+                  onClick={() => syncActions.sendDismissSuggestion(s.ratingKey)}
+                  style={styles.suggestionDismissBtn}
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
       )}
 
       {/* Now Playing rejoin banner for viewers */}
@@ -299,6 +334,7 @@ export function App() {
           onBack={popView}
           isPlaying={!!syncState.ratingKey}
           onAddToQueue={effectiveIsHost ? (qi) => syncActions.sendQueueAdd(qi) : undefined}
+          onSuggest={!effectiveIsHost ? (item) => syncActions.sendSuggest(item) : undefined}
         />
       )}
 
@@ -377,6 +413,10 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#888",
     fontWeight: 500,
   },
+  hostLabel: {
+    color: "#e5a00d",
+    fontWeight: 600,
+  },
   center: {
     display: "flex",
     flexDirection: "column",
@@ -407,6 +447,52 @@ const styles: Record<string, React.CSSProperties> = {
   hint: {
     fontSize: "14px",
     color: "#888",
+  },
+  suggestionsPanel: {
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: "8px",
+    margin: "16px 24px 0",
+  },
+  suggestionRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "12px",
+    padding: "12px 16px",
+    background: "linear-gradient(135deg, rgba(229,160,13,0.08), rgba(229,160,13,0.15))",
+    border: "1px solid rgba(229,160,13,0.25)",
+    borderRadius: "10px",
+  },
+  suggestionText: {
+    color: "#e0e0e0",
+    fontSize: "13px",
+  },
+  suggestionActions: {
+    display: "flex",
+    gap: "8px",
+    flexShrink: 0,
+  },
+  suggestionViewBtn: {
+    padding: "6px 14px",
+    borderRadius: "8px",
+    border: "none",
+    background: "#e5a00d",
+    color: "#000",
+    fontSize: "12px",
+    fontWeight: 700,
+    fontFamily: "inherit",
+    cursor: "pointer",
+  },
+  suggestionDismissBtn: {
+    padding: "6px 14px",
+    borderRadius: "8px",
+    border: "1px solid rgba(255,255,255,0.15)",
+    background: "transparent",
+    color: "#888",
+    fontSize: "12px",
+    fontFamily: "inherit",
+    cursor: "pointer",
   },
   waitingBanner: {
     display: "flex",

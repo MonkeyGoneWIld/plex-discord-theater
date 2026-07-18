@@ -124,6 +124,46 @@ router.get("/sections", async (_req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/plex/home
+ * Returns the Plex "homepage" hubs — Continue Watching, Recently Added,
+ * and any Collections/other hubs configured to show on Home — the same
+ * data the official Plex homepage renders (via /hubs), as opposed to
+ * /sections/:id/all which only returns one library's raw item list.
+ */
+interface PlexHub {
+  hubIdentifier: string;
+  title: string;
+  type: string;
+  Metadata?: PlexMetadataItem[];
+}
+
+router.get("/home", async (_req: Request, res: Response) => {
+  try {
+    const data = await plexJSON<{ MediaContainer: { Hub?: PlexHub[] } }>(
+      "/hubs",
+      { count: "20" },
+    );
+
+    const hubs = (data.MediaContainer.Hub || [])
+      // Only keep hubs relevant to movie/show libraries and drop empty ones
+      // (this app only supports "movie" and "show" sections — see
+      // ALLOWED_SECTION_TYPES above — so music/photo hubs are filtered out).
+      .filter((h) => h.Metadata && h.Metadata.length > 0)
+      .map((h) => ({
+        hubIdentifier: h.hubIdentifier,
+        title: h.title,
+        type: h.type,
+        items: h.Metadata!.map(mapItem),
+      }));
+
+    res.json({ hubs });
+  } catch (err) {
+    console.error("Home hubs error:", err);
+    res.status(502).json({ error: "Failed to fetch home hubs" });
+  }
+});
+
+/**
  * GET /api/plex/sections/:id/genres
  * List all genres available in a library section.
  */

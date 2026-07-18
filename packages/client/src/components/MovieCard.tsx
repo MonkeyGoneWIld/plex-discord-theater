@@ -38,7 +38,14 @@ export function MovieCard({ item, onClick }: MovieCardProps) {
       )}
       <div style={styles.info}>
         <div style={styles.title}>{item.title}</div>
-        {item.type === "season" && item.leafCount != null ? (
+        {item.type === "episode" ? (
+          <div style={styles.year}>
+            {item.showTitle}
+            {item.parentIndex != null && item.index != null
+              ? `${item.showTitle ? " \u00b7 " : ""}S${item.parentIndex}E${item.index}`
+              : ""}
+          </div>
+        ) : item.type === "season" && item.leafCount != null ? (
           <div style={styles.year}>{item.leafCount} {item.leafCount === 1 ? "episode" : "episodes"}</div>
         ) : item.year ? (
           <div style={styles.year}>{item.year}</div>
@@ -94,5 +101,8 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#666",
     marginTop: "3px",
     fontWeight: 500,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
   },
 };

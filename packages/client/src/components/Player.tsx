@@ -823,7 +823,7 @@ const styles: Record<string, React.CSSProperties> = {
   video: {
     width: "100%",
     height: "100%",
-    objectFit: "cover",
+    objectFit: "contain",
   },
   error: {
     position: "absolute",

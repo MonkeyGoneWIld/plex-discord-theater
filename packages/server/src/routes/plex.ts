@@ -867,7 +867,9 @@ router.get(
       const hlsHeaders = {
         "X-Plex-Session-Identifier": sessionId,
         "X-Plex-Client-Profile-Extra":
-          "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=h264&audioCodec=aac)",
+          "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=h264&audioCodec=aac,ac3,eac3)" +
+          "&add-direct-play-profile(type=videoProfile&container=mkv&videoCodec=h264&audioCodec=aac,ac3,eac3)" +
+          "&add-direct-play-profile(type=videoProfile&container=mp4&videoCodec=h264&audioCodec=aac,ac3,eac3)",
         "X-Plex-Client-Identifier": OUR_CLIENT_ID,
         "X-Plex-Product": "Plex Discord Theater",
         "X-Plex-Platform": "Chrome",

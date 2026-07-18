@@ -18,7 +18,7 @@ import {
   type PlexHub,
 } from "../lib/api";
 
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 200;
 
 interface LibraryProps {
   isHost: boolean;
@@ -401,7 +401,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
+    gridTemplateColumns: "repeat(10, 1fr)",
     gap: "14px",
     padding: "16px 24px",
   },
@@ -449,8 +449,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   hubLabel: {
     color: "#e0e0e0",
-    fontSize: "16px",
-    fontWeight: 600,
+    fontSize: "20px",
+    fontWeight: 700,
     marginBottom: "12px",
     letterSpacing: "-0.01em",
   },
@@ -462,7 +462,11 @@ const styles: Record<string, React.CSSProperties> = {
   },
   hubCard: {
     flexShrink: 0,
-    width: "160px",
+    flexGrow: 0,
+    // Matches the grid's `repeat(10, 1fr)` column width exactly: same
+    // container padding (24px each side) and same 14px gap, 9 gaps between
+    // 10 items — so Home cards are never smaller than Movies/TV Shows cards.
+    width: "calc((100% - 126px) / 10)",
   },
   continueSection: {
     padding: "0 24px 16px",

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { fetchMeta, setStreams, getSessionToken, type PlexItem, type PlexMeta } from "../lib/api";
 import { SkeletonBlock } from "./SkeletonBlock";
-import type { QueueItem } from "../hooks/useSync";
+import type { QueueItem, SuggestionItem } from "../hooks/useSync";
 
 interface MovieDetailProps {
   item: PlexItem;
@@ -10,6 +10,8 @@ interface MovieDetailProps {
   onBack: () => void;
   isPlaying?: boolean;
   onAddToQueue?: (item: QueueItem) => void;
+  /** Viewer-only: suggest this title to the host. Omit/undefined for the host. */
+  onSuggest?: (item: SuggestionItem) => void;
 }
 
 function authUrl(url: string): string {
@@ -27,12 +29,13 @@ function formatDuration(ms: number | undefined): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
-export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQueue }: MovieDetailProps) {
+export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQueue, onSuggest }: MovieDetailProps) {
   const [meta, setMeta] = useState<PlexMeta | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedAudio, setSelectedAudio] = useState<number | null>(null);
   const [selectedSubtitle, setSelectedSubtitle] = useState<number | null>(null);
+  const [suggested, setSuggested] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -250,7 +253,28 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                     )}
                   </>
                 ) : (
-                  <p style={styles.waitingText}>Waiting for the host to start playback...</p>
+                  <div style={styles.viewerActions}>
+                    <p style={styles.waitingText}>Waiting for the host to start playback...</p>
+                    {onSuggest && (
+                      <button
+                        onClick={() => {
+                          onSuggest({
+                            ratingKey: item.ratingKey,
+                            title: item.title,
+                            type: item.type,
+                            thumb: item.thumb,
+                            year: item.year,
+                          });
+                          setSuggested(true);
+                          setTimeout(() => setSuggested(false), 2500);
+                        }}
+                        disabled={suggested}
+                        style={suggested ? styles.suggestBtnSent : styles.suggestBtn}
+                      >
+                        {suggested ? "Suggested to host \u2713" : "Suggest to Host"}
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
@@ -461,6 +485,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "inherit",
     cursor: "pointer",
     appearance: "auto" as React.CSSProperties["appearance"],
+    colorScheme: "dark" as React.CSSProperties["colorScheme"],
   },
   actions: {
     marginTop: "28px",
@@ -488,6 +513,35 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#888",
     fontSize: "15px",
     fontStyle: "italic",
+  },
+  viewerActions: {
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: "12px",
+    alignItems: "flex-start",
+  },
+  suggestBtn: {
+    padding: "10px 22px",
+    borderRadius: "10px",
+    border: "1px solid rgba(229,160,13,0.4)",
+    background: "rgba(229,160,13,0.1)",
+    color: "#e5a00d",
+    fontSize: "14px",
+    fontWeight: 600,
+    fontFamily: "inherit",
+    cursor: "pointer",
+    transition: "background 0.15s ease",
+  },
+  suggestBtnSent: {
+    padding: "10px 22px",
+    borderRadius: "10px",
+    border: "1px solid rgba(46,160,67,0.4)",
+    background: "rgba(46,160,67,0.12)",
+    color: "#4caf50",
+    fontSize: "14px",
+    fontWeight: 600,
+    fontFamily: "inherit",
+    cursor: "default",
   },
   queueBtn: {
     padding: "10px 20px", borderRadius: "8px",

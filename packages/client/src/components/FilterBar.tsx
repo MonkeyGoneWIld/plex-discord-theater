@@ -6,7 +6,7 @@ const SORT_OPTIONS = [
   { value: "year:desc", label: "Year (Newest)" },
   { value: "year:asc", label: "Year (Oldest)" },
   { value: "addedAt:desc", label: "Recently Added" },
-  { value: "rating:desc", label: "Highest Rated" },
+  { value: "audienceRating:desc", label: "Highest Rated" },
 ] as const;
 
 interface FilterBarProps {

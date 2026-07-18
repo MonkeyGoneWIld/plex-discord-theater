@@ -17,6 +17,26 @@
       @keyframes spin { to { transform: rotate(360deg); } }
       @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
       @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } }
+
+      /* Themed horizontal scrollbar for hub/shelf rows — replaces the default
+         light/white system scrollbar so it blends with the dark UI. */
+      .scroll-row {
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255,255,255,0.15) transparent;
+      }
+      .scroll-row::-webkit-scrollbar {
+        height: 6px;
+      }
+      .scroll-row::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .scroll-row::-webkit-scrollbar-thumb {
+        background: rgba(255,255,255,0.15);
+        border-radius: 3px;
+      }
+      .scroll-row::-webkit-scrollbar-thumb:hover {
+        background: rgba(255,255,255,0.28);
+      }
     </style>
   </head>
   <body>

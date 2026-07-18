@@ -64,6 +64,22 @@ export function useDiscord(): DiscordState {
           },
         );
 
+        // Rich Presence: without this, Discord shows members as "Playing"
+        // this Activity by default. type: 3 = Watching (same enum as bot
+        // Gateway presences: 0 Playing, 1 Streaming, 2 Listening, 3 Watching).
+        try {
+          await sdk.commands.setActivity({
+            activity: {
+              type: 3,
+              details: "Watch Together",
+              state: "Browsing the library",
+            },
+          });
+        } catch (activityErr) {
+          // Non-fatal — app still works if Rich Presence can't be set
+          console.warn("setActivity failed:", activityErr);
+        }
+
         setState({
           isReady: true,
           isHost,

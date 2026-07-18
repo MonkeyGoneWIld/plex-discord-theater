@@ -200,7 +200,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       {isHost && continueWatching.length > 0 && (
         <div style={styles.continueSection}>
           <h3 style={styles.continueLabel}>Continue Watching</h3>
-          <div style={styles.continueRow}>
+          <div style={styles.continueRow} className="scroll-row">
             {continueWatching.map((cwItem) => {
               const pct = cwItem.duration > 0 ? (cwItem.position / cwItem.duration) * 100 : 0;
               const minLeft = Math.round((cwItem.duration - cwItem.position) / 60);
@@ -301,7 +301,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
             {homeHubs.map((hub) => (
               <div key={hub.hubIdentifier} style={styles.hubSection}>
                 <h3 style={styles.hubLabel}>{hub.title}</h3>
-                <div style={styles.hubRow}>
+                <div style={styles.hubRow} className="scroll-row">
                   {hub.items.map((hubItem) => (
                     <div key={hubItem.ratingKey} style={styles.hubCard}>
                       <MovieCard item={hubItem} onClick={handleClick} />

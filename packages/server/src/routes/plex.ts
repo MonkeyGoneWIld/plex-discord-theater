@@ -841,12 +841,12 @@ router.get(
         partIndex: "0",
         protocol: "hls",
         fastSeek: "1",
-        directPlay: "1",
-        directStream: "1",
+        directPlay: "0",
+        directStream: "0",
         directStreamAudio: "1",
         videoResolution: "1920x1080",
-        videoBitrate: "20000",
-        peakBitrate: "20000",
+        videoBitrate: "8000",
+        peakBitrate: "12000",
         videoQuality: "99",
         autoAdjustQuality: "0",
         location: "lan",
@@ -867,9 +867,7 @@ router.get(
       const hlsHeaders = {
         "X-Plex-Session-Identifier": sessionId,
         "X-Plex-Client-Profile-Extra":
-          "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=h264&audioCodec=aac,ac3,eac3)" +
-          "&add-direct-play-profile(type=videoProfile&container=mkv&videoCodec=h264&audioCodec=aac,ac3,eac3)" +
-          "&add-direct-play-profile(type=videoProfile&container=mp4&videoCodec=h264&audioCodec=aac,ac3,eac3)",
+          "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=h264&audioCodec=aac)",
         "X-Plex-Client-Identifier": OUR_CLIENT_ID,
         "X-Plex-Product": "Plex Discord Theater",
         "X-Plex-Platform": "Chrome",

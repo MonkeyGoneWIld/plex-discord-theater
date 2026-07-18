@@ -18,6 +18,27 @@
       @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
       @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } }
 
+      html {
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255,255,255,0.15) transparent;
+        /* Hints the browser to render native form controls (scrollbars,
+           select dropdowns) in a dark palette instead of the default light one. */
+        color-scheme: dark;
+      }
+      html::-webkit-scrollbar, body::-webkit-scrollbar {
+        width: 8px;
+      }
+      html::-webkit-scrollbar-track, body::-webkit-scrollbar-track {
+        background: #0d0d0d;
+      }
+      html::-webkit-scrollbar-thumb, body::-webkit-scrollbar-thumb {
+        background: rgba(255,255,255,0.15);
+        border-radius: 4px;
+      }
+      html::-webkit-scrollbar-thumb:hover, body::-webkit-scrollbar-thumb:hover {
+        background: rgba(255,255,255,0.28);
+      }
+
       /* Themed horizontal scrollbar for hub/shelf rows — replaces the default
          light/white system scrollbar so it blends with the dark UI. */
       .scroll-row {

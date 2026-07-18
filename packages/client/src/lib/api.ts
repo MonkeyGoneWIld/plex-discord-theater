@@ -124,6 +124,17 @@ export interface PlexMeta {
   subtitleTracks: StreamTrack[];
 }
 
+export interface PlexHub {
+  hubIdentifier: string;
+  title: string;
+  type: string;
+  items: PlexItem[];
+}
+
+export function fetchHome(): Promise<{ hubs: PlexHub[] }> {
+  return apiGet("/api/plex/home");
+}
+
 export function fetchSections(): Promise<{ sections: PlexSection[] }> {
   return apiGet("/api/plex/sections");
 }

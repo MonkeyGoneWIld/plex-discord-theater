@@ -71,6 +71,7 @@ interface QueueItem {
 interface RoomClient {
   ws: WebSocket;
   userId: string;
+  username: string | null;
   isHost: boolean;
 }
 
@@ -237,6 +238,11 @@ export function attachWebSocketServer(server: Server): void {
         const token = msg.sessionToken as string;
         const instanceId = msg.instanceId as string;
         const userId = msg.userId as string;
+        const rawUsername = msg.username;
+        const username =
+          typeof rawUsername === "string" && rawUsername.length > 0 && rawUsername.length <= 100
+            ? rawUsername
+            : null;
 
         if (!token || !instanceId || !userId) {
           sendTo(ws, { type: "error", message: "Missing join fields" });
@@ -279,16 +285,20 @@ export function attachWebSocketServer(server: Server): void {
           }
         }
 
-        client = { ws, userId, isHost };
+        client = { ws, userId, username, isHost };
         roomId = instanceId;
         room.clients.add(client);
 
         // If the host is (re)joining and there are other clients, clear their disconnect banner
+        // and refresh their view of who the host is (covers host reconnecting on a new device,
+        // or joining after other clients already have a stale/missing hostUsername).
         if (isHost && room.clients.size > 1) {
           broadcast(room, ws, { type: "host-reconnected" });
+          broadcast(room, ws, { type: "host-info", hostUsername: username });
         }
 
         // Send current state to newly joined client
+        const hostClient = [...room.clients].find((c) => c.isHost);
         sendTo(ws, {
           type: "state",
           ratingKey: room.state.ratingKey,
@@ -300,6 +310,7 @@ export function attachWebSocketServer(server: Server): void {
           lastCommandAt: room.state.updatedAt,
           browseContext: room.state.browseContext,
           queue: room.state.queue,
+          hostUsername: hostClient?.username ?? null,
         });
 
         return;
@@ -311,11 +322,36 @@ export function attachWebSocketServer(server: Server): void {
         return;
       }
 
-      // Only host can send control messages
-      if (!client.isHost) return;
-
       const room = rooms.get(roomId);
       if (!room) return;
+
+      // Viewer → host: suggest a title. Allowed for any joined client (host
+      // or viewer), unlike the rest of the control messages below.
+      if (type === "suggest") {
+        const item = msg.item as
+          | { ratingKey?: string; title?: string; type?: string; thumb?: string | null; year?: number }
+          | undefined;
+        if (!item || typeof item.ratingKey !== "string" || typeof item.title !== "string") return;
+        if (item.ratingKey.length > 50 || item.title.length > 500) return;
+
+        const suggestion = {
+          ratingKey: item.ratingKey,
+          title: item.title,
+          type: typeof item.type === "string" ? item.type : "movie",
+          thumb: typeof item.thumb === "string" ? item.thumb : null,
+          year: typeof item.year === "number" ? item.year : undefined,
+          fromUsername: client.username ?? "Someone",
+        };
+        for (const c of room.clients) {
+          if (c.isHost) {
+            sendTo(c.ws, { type: "suggestion", item: suggestion });
+          }
+        }
+        return;
+      }
+
+      // Only host can send remaining control messages
+      if (!client.isHost) return;
 
       switch (type) {
         case "play": {
@@ -425,6 +461,15 @@ export function attachWebSocketServer(server: Server): void {
           sendTo(ws, { type: "queue-updated", queue: room.state.queue });
           break;
         }
+        case "suggest-dismiss": {
+          // Suggestions aren't persisted in room state (ephemeral, host-only) —
+          // just echo back to the host so their client can drop it from the list.
+          const ratingKey = msg.ratingKey as string;
+          if (ratingKey) {
+            sendTo(ws, { type: "suggestion-dismissed", ratingKey });
+          }
+          break;
+        }
       }
     });
 
@@ -449,12 +494,12 @@ export function attachWebSocketServer(server: Server): void {
 
           console.log("[Sync] Host left, promoting", newHost.userId.substring(0, 8), "to host");
 
-          sendTo(newHost.ws, { type: "host-promoted" });
+          sendTo(newHost.ws, { type: "host-promoted", hostUsername: newHost.username });
 
           for (const c of room.clients) {
             if (c !== newHost) {
               sendTo(c.ws, { type: "host-disconnected" });
-              sendTo(c.ws, { type: "host-changed" });
+              sendTo(c.ws, { type: "host-changed", hostUsername: newHost.username });
             }
           }
         } else {

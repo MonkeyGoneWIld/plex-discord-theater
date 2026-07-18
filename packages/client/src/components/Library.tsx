@@ -46,6 +46,10 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   const [sort, setSort] = useState("titleSort:asc");
   const loadMoreAbort = useRef<AbortController | null>(null);
   const searchQueryRef = useRef("");
+  // Monotonically increasing id — lets an in-flight search's response detect
+  // it's been superseded (by a newer search or a clear) and discard itself,
+  // instead of overwriting the UI with stale results after the box was cleared.
+  const searchReqId = useRef(0);
   const [continueWatching, setContinueWatching] = useState<WatchProgressItem[]>([]);
 
   // Load sections on mount
@@ -147,9 +151,13 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
 
   const handleSearch = useCallback(async (query: string) => {
     searchQueryRef.current = query;
+    const reqId = ++searchReqId.current;
     setLoading(true);
     try {
       const { items: results } = await searchPlex(query);
+      // A newer search started or the box was cleared while this was in
+      // flight — this response is stale, discard it.
+      if (reqId !== searchReqId.current) return;
       rawSearchResults.current = results;
       // Filter by active tab: Movies tab → only movies, TV Shows tab → only shows (no episodes/seasons)
       const filtered = activeSectionType
@@ -157,9 +165,10 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
         : results;
       setSearchResults(filtered);
     } catch (err) {
+      if (reqId !== searchReqId.current) return;
       console.error("Search failed:", err);
     }
-    setLoading(false);
+    if (reqId === searchReqId.current) setLoading(false);
   }, [activeSectionType]);
 
   // Re-filter search results when switching tabs during an active search
@@ -172,8 +181,11 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   }, [activeSectionType]);
 
   const handleClearSearch = useCallback(() => {
+    // Invalidate any in-flight search so its response can't land after clear
+    searchReqId.current++;
     rawSearchResults.current = null;
     setSearchResults(null);
+    setLoading(false);
   }, []);
 
   const handleClick = useCallback(

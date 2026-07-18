@@ -233,7 +233,7 @@ router.get("/search", async (req: Request, res: Response) => {
   try {
     const data = await plexJSON<{
       MediaContainer: { Hub?: Array<{ Metadata?: PlexMetadataItem[] }> };
-    }>("/hubs/search", { query: q });
+    }>("/hubs/search", { query: q, limit: "10" });
     const hubs = data.MediaContainer.Hub || [];
     const items: ReturnType<typeof mapItem>[] = [];
     for (const hub of hubs) {

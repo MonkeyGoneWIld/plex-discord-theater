@@ -841,7 +841,7 @@ router.get(
         partIndex: "0",
         protocol: "hls",
         fastSeek: "1",
-        directPlay: "1",
+        directPlay: "0",
         directStream: "1",
         directStreamAudio: "1",
         videoResolution: "1920x1080",

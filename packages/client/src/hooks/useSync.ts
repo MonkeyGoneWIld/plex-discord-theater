@@ -15,6 +15,16 @@ export interface QueueItem {
   year?: number;
 }
 
+export interface SuggestionItem {
+  ratingKey: string;
+  title: string;
+  type: string;
+  thumb: string | null;
+  year?: number;
+  /** Set by the server from the sender's session — the client never sends this itself. */
+  fromUsername?: string;
+}
+
 export interface SyncState {
   connected: boolean;
   ratingKey: string | null;
@@ -26,6 +36,10 @@ export interface SyncState {
   hlsSessionId: string | null;
   /** null = no override (use initial value from useDiscord), true = promoted to host by server */
   isHost: boolean | null;
+  /** Display name of the current host — shown to viewers so they know who's hosting.
+   *  Requires the server to include `hostUsername` in "state", "host-promoted",
+   *  and "host-changed" messages. */
+  hostUsername: string | null;
   /** Increments only on explicit commands (play/pause/resume/seek), not heartbeats */
   commandSeq: number;
   /** Timestamp of the last host command — used to detect stale state on reconnect */
@@ -37,6 +51,10 @@ export interface SyncState {
   /** What the host is currently browsing, or null if playing/idle */
   browseContext: string | null;
   queue: QueueItem[];
+  /** Titles viewers have suggested — populated on the host's client only.
+   *  Requires the server to relay "suggest" messages from a viewer to the
+   *  host as a "suggestion" message: { type: "suggestion", item: {...} }. */
+  suggestions: SuggestionItem[];
 }
 
 export interface SyncActions {
@@ -51,11 +69,16 @@ export interface SyncActions {
   sendQueueRemove: (ratingKey: string) => void;
   sendQueueClear: () => void;
   sendQueueReorder: (queue: QueueItem[]) => void;
+  /** Viewer → host: suggest a title. No-op (safe to call) for the host. */
+  sendSuggest: (item: SuggestionItem) => void;
+  /** Host: dismiss a suggestion from the list once seen/handled. */
+  sendDismissSuggestion: (ratingKey: string) => void;
 }
 
 interface UseSyncOptions {
   instanceId: string | null;
   userId: string | null;
+  username: string | null;
   enabled: boolean;
 }
 
@@ -69,6 +92,8 @@ const INITIAL_STATE: SyncState = {
   hostDisconnected: false,
   hlsSessionId: null,
   isHost: null,
+  hostUsername: null,
+  suggestions: [],
   commandSeq: 0,
   lastCommandAt: 0,
   authFailed: false,
@@ -77,7 +102,7 @@ const INITIAL_STATE: SyncState = {
   queue: [],
 };
 
-export function useSync({ instanceId, userId, enabled }: UseSyncOptions): {
+export function useSync({ instanceId, userId, username, enabled }: UseSyncOptions): {
   state: SyncState;
   actions: SyncActions;
 } {
@@ -107,6 +132,8 @@ export function useSync({ instanceId, userId, enabled }: UseSyncOptions): {
       sendQueueRemove: (ratingKey: string) => send({ type: "queue-remove", ratingKey }),
       sendQueueClear: () => send({ type: "queue-clear" }),
       sendQueueReorder: (queue: QueueItem[]) => send({ type: "queue-reorder", queue }),
+      sendSuggest: (item: SuggestionItem) => send({ type: "suggest", item }),
+      sendDismissSuggestion: (ratingKey: string) => send({ type: "suggest-dismiss", ratingKey }),
     }),
     [send],
   );
@@ -133,6 +160,7 @@ export function useSync({ instanceId, userId, enabled }: UseSyncOptions): {
             sessionToken: token,
             instanceId,
             userId,
+            username,
           }),
         );
         setState((prev) => ({ ...prev, connected: true, hostDisconnected: false }));
@@ -161,6 +189,7 @@ export function useSync({ instanceId, userId, enabled }: UseSyncOptions): {
               lastCommandAt: (msg.lastCommandAt as number) ?? Date.now(),
               browseContext: (msg.browseContext as string) || null,
               queue: (msg.queue as QueueItem[]) || [],
+              hostUsername: (msg.hostUsername as string) || prev.hostUsername,
             }));
             break;
           case "play":
@@ -227,10 +256,28 @@ export function useSync({ instanceId, userId, enabled }: UseSyncOptions): {
               browseContext: (msg.context as string) || null,
             }));
             break;
+          case "host-info":
+            setState((prev) => ({
+              ...prev,
+              hostUsername: (msg.hostUsername as string) || null,
+            }));
+            break;
           case "queue-updated":
             setState((prev) => ({
               ...prev,
               queue: (msg.queue as QueueItem[]) || [],
+            }));
+            break;
+          case "suggestion":
+            setState((prev) => ({
+              ...prev,
+              suggestions: [...prev.suggestions, msg.item as SuggestionItem],
+            }));
+            break;
+          case "suggestion-dismissed":
+            setState((prev) => ({
+              ...prev,
+              suggestions: prev.suggestions.filter((s) => s.ratingKey !== msg.ratingKey),
             }));
             break;
           case "host-disconnected":
@@ -240,10 +287,20 @@ export function useSync({ instanceId, userId, enabled }: UseSyncOptions): {
             setState((prev) => ({ ...prev, hostDisconnected: false }));
             break;
           case "host-promoted":
-            setState((prev) => ({ ...prev, isHost: true, hostDisconnected: false }));
+            setState((prev) => ({
+              ...prev,
+              isHost: true,
+              hostDisconnected: false,
+              hostUsername: (msg.hostUsername as string) || prev.hostUsername,
+            }));
             break;
           case "host-changed":
-            setState((prev) => ({ ...prev, isHost: false, hostDisconnected: false }));
+            setState((prev) => ({
+              ...prev,
+              isHost: false,
+              hostDisconnected: false,
+              hostUsername: (msg.hostUsername as string) || prev.hostUsername,
+            }));
             break;
         }
       });
@@ -292,7 +349,7 @@ export function useSync({ instanceId, userId, enabled }: UseSyncOptions): {
         wsRef.current = null;
       }
     };
-  }, [enabled, instanceId, userId]);
+  }, [enabled, instanceId, userId, username]);
 
   return { state, actions };
 }

@@ -148,7 +148,12 @@ router.get("/home", async (_req: Request, res: Response) => {
       // Only keep hubs relevant to movie/show libraries and drop empty ones
       // (this app only supports "movie" and "show" sections — see
       // ALLOWED_SECTION_TYPES above — so music/photo hubs are filtered out).
+      // "Continue Watching" is excluded — this app tracks progress itself
+      // (see fetchProgress/WatchProgressItem) and renders its own row for it.
       .filter((h) => h.Metadata && h.Metadata.length > 0)
+      .filter((h) => !h.hubIdentifier?.startsWith("home.continue"))
+      .filter((h) => h.title !== "Recently Released Episodes")
+      .filter((h) => !h.hubIdentifier?.includes("recentlyaired"))
       .map((h) => ({
         hubIdentifier: h.hubIdentifier,
         title: h.title,

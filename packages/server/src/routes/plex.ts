@@ -154,6 +154,8 @@ router.get("/home", async (_req: Request, res: Response) => {
       // (see fetchProgress/WatchProgressItem) and renders its own row for it.
       .filter((h) => h.Metadata && h.Metadata.length > 0)
       .filter((h) => !h.hubIdentifier?.startsWith("home.continue"))
+      .filter((h) => !h.hubIdentifier?.startsWith("home.ondeck"))
+      .filter((h) => h.title !== "On Deck")
       .filter((h) => h.title !== "Recently Released Episodes")
       .filter((h) => !h.hubIdentifier?.includes("recentlyaired"))
       .map((h) => ({
@@ -209,6 +211,7 @@ const ALLOWED_SORTS = new Set([
   "year:asc",
   "addedAt:desc",
   "rating:desc",
+  "audienceRating:desc",
 ]);
 
 router.get("/sections/:id/all", async (req: Request, res: Response) => {
@@ -219,7 +222,7 @@ router.get("/sections/:id/all", async (req: Request, res: Response) => {
   }
 
   const start = Math.max(0, parseInt(req.query.start as string, 10) || 0);
-  const size = Math.min(100, Math.max(1, parseInt(req.query.size as string, 10) || 50));
+  const size = Math.min(200, Math.max(1, parseInt(req.query.size as string, 10) || 50));
 
   const params: Record<string, string> = {
     "X-Plex-Container-Start": String(start),
@@ -280,7 +283,7 @@ router.get("/search", async (req: Request, res: Response) => {
   try {
     const data = await plexJSON<{
       MediaContainer: { Hub?: Array<{ Metadata?: PlexMetadataItem[] }> };
-    }>("/hubs/search", { query: q, limit: "10" });
+    }>("/hubs/search", { query: q, limit: "30" });
     const hubs = data.MediaContainer.Hub || [];
     const items: ReturnType<typeof mapItem>[] = [];
     for (const hub of hubs) {

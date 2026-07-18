@@ -83,6 +83,7 @@ interface PlexMetadataItem {
   index?: number;
   parentIndex?: number;
   parentTitle?: string;
+  grandparentTitle?: string;
   leafCount?: number;
   childCount?: number;
 }
@@ -1349,6 +1350,7 @@ function mapItem(m: PlexMetadataItem) {
     ...(m.index != null && { index: m.index }),
     ...(m.parentIndex != null && { parentIndex: m.parentIndex }),
     ...(m.parentTitle != null && { parentTitle: m.parentTitle }),
+    ...(m.grandparentTitle != null && { showTitle: m.grandparentTitle }),
     ...(m.leafCount != null && { leafCount: m.leafCount }),
     ...(m.childCount != null && { childCount: m.childCount }),
     ...(m.summary != null && { summary: m.summary }),

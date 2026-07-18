@@ -82,6 +82,7 @@ export interface PlexItem {
   index?: number;
   parentIndex?: number;
   parentTitle?: string;
+  showTitle?: string;
   leafCount?: number;
   childCount?: number;
   summary?: string;

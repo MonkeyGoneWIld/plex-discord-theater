@@ -1,4 +1,4 @@
-const SKELETON_COUNT = 8;
+const SKELETON_COUNT = 10;
 
 export function SkeletonGrid() {
   return (
@@ -19,7 +19,7 @@ const shimmer = "shimmer 1.5s ease-in-out infinite";
 const styles: Record<string, React.CSSProperties> = {
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
+    gridTemplateColumns: "repeat(10, 1fr)",
     gap: "14px",
     padding: "16px 24px",
   },

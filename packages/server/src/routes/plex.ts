@@ -1,8 +1,6 @@
 import { Router, type Request, type Response } from "express";
-import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from
-"../services/plex.js";
-import { startPrefetch, stopPrefetch, getCachedSegment } from
-"../services/segment-prefetch.js";
+import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
+import { startPrefetch, stopPrefetch, getCachedSegment } from "../services/segment-prefetch.js";
 import * as thumbCache from "../services/thumb-cache.js";
 
 const router = Router();
@@ -13,8 +11,7 @@ function escapeRegExp(str: string): string {
 }
 
 const NUMERIC_RE = /^\d+$/;
-const UUID_RE =
-/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_PROXY_PATH_LENGTH = 500;
 
 const ALLOWED_IMAGE_TYPES = new Set([
@@ -31,13 +28,10 @@ const ALLOWED_MEDIA_TYPES = new Set([
   "application/vnd.apple.mpegurl",
 ]);
 
-// Pre-compile the Plex URL regex at module level (plexBase never changes at
-runtime)
+// Pre-compile the Plex URL regex at module level (plexBase never changes at runtime)
 const plexBase = process.env.PLEX_URL?.replace(/\/$/, "") ?? "";
-const PLEX_URL_REGEX = new RegExp(escapeRegExp(plexBase) + "(/[^\\s]{1,500})",
-"g");
-const RELATIVE_URL_REGEX =
-/^(?!#)(?!https?:\/\/)(?!\/api\/plex\/)(.{1,500}\.(?:m3u8|ts).{0,200})$/gm;
+const PLEX_URL_REGEX = new RegExp(escapeRegExp(plexBase) + "(/[^\\s]{1,500})", "g");
+const RELATIVE_URL_REGEX = /^(?!#)(?!https?:\/\/)(?!\/api\/plex\/)(.{1,500}\.(?:m3u8|ts).{0,200})$/gm;
 const PLEX_TOKEN_REGEX = /[?&]X-Plex-Token=[^&\s]*/g;
 
 // VPS relay config — when set, HLS segment URLs point to the VPS
@@ -68,13 +62,10 @@ interface PlexStream {
 
 interface PlexPart {
   id: number;
-  container?: string;
   Stream?: PlexStream[];
 }
 
 interface PlexMedia {
-  container?: string;
-  videoResolution?: string;
   Part?: PlexPart[];
 }
 
@@ -116,8 +107,7 @@ const ALLOWED_SECTION_TYPES = new Set(["movie", "show"]);
 
 router.get("/sections", async (_req: Request, res: Response) => {
   try {
-    const data = await plexJSON<{ MediaContainer: { Directory?: PlexDirectory[]
-} }>("/library/sections");
+    const data = await plexJSON<{ MediaContainer: { Directory?: PlexDirectory[] } }>("/library/sections");
     const directories = data.MediaContainer.Directory || [];
     const sections = directories
       .filter((d) => ALLOWED_SECTION_TYPES.has(d.type))
@@ -164,8 +154,7 @@ router.get("/sections/:id/genres", async (req: Request, res: Response) => {
  * List all items in a library section.
  * Optional query params:
  *   genre - comma-separated numeric genre IDs (AND logic)
- *   sort  - one of: titleSort:asc, year:desc, year:asc, addedAt:desc,
-rating:desc
+ *   sort  - one of: titleSort:asc, year:desc, year:asc, addedAt:desc, rating:desc
  */
 const ALLOWED_SORTS = new Set([
   "titleSort:asc",
@@ -183,8 +172,7 @@ router.get("/sections/:id/all", async (req: Request, res: Response) => {
   }
 
   const start = Math.max(0, parseInt(req.query.start as string, 10) || 0);
-  const size = Math.min(100, Math.max(1, parseInt(req.query.size as string, 10)
-|| 50));
+  const size = Math.min(100, Math.max(1, parseInt(req.query.size as string, 10) || 50));
 
   const params: Record<string, string> = {
     "X-Plex-Container-Start": String(start),
@@ -273,8 +261,7 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
   }
 
   try {
-    const data = await plexJSON<{ MediaContainer: { Metadata?:
-PlexMetadataItem[] } }>(
+    const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
       `/library/metadata/${ratingKey}`,
     );
     const metadata = data.MediaContainer.Metadata;
@@ -343,8 +330,7 @@ router.get("/children/:ratingKey", async (req: Request, res: Response) => {
   }
 
   try {
-    const data = await plexJSON<{ MediaContainer: { Metadata?:
-PlexMetadataItem[] } }>(
+    const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
       `/library/metadata/${ratingKey}/children`,
     );
     const items = (data.MediaContainer.Metadata || []).map(mapItem);
@@ -379,8 +365,7 @@ router.put("/streams/:partId", async (req: Request, res: Response) => {
   }
 
   try {
-    const plexRes = await plexFetch(`/library/parts/${partId}`, params,
-undefined, "PUT");
+    const plexRes = await plexFetch(`/library/parts/${partId}`, params, undefined, "PUT");
     if (!plexRes.ok) {
       res.status(plexRes.status).json({ error: "Failed to set streams" });
       return;
@@ -401,8 +386,7 @@ undefined, "PUT");
  */
 router.get("/thumb/*", async (req: Request, res: Response) => {
   const imagePath = "/" + (req.params[0] as string);
-  if (imagePath.length > MAX_PROXY_PATH_LENGTH ||
-!isAllowedThumbPath(imagePath)) {
+  if (imagePath.length > MAX_PROXY_PATH_LENGTH || !isAllowedThumbPath(imagePath)) {
     res.status(400).end();
     return;
   }
@@ -481,21 +465,16 @@ const OUR_CLIENT_ID = "plex-discord-theater";
 
 /**
  * Maps our session UUID → Plex's internal transcode key.
- * Plex generates its own key (visible in segment URLs like
-session/<key>/base/...)
- * which differs from the X-Plex-Session-Identifier we send. We need the Plex
-key
+ * Plex generates its own key (visible in segment URLs like session/<key>/base/...)
+ * which differs from the X-Plex-Session-Identifier we send. We need the Plex key
  * to reliably stop transcodes.
  */
 const plexTranscodeKeys = new Map<string, string>();
-/** Maps our session UUID → the ratingKey being played (needed for timeline
-stopped). */
+/** Maps our session UUID → the ratingKey being played (needed for timeline stopped). */
 const sessionRatingKeys = new Map<string, string>();
-/** Maps ratingKey → duration in ms (cached from metadata endpoint for timeline
-stopped). */
+/** Maps ratingKey → duration in ms (cached from metadata endpoint for timeline stopped). */
 const mediaDurations = new Map<string, number>();
-const PLEX_SESSION_KEY_RE =
-/session\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i;
+const PLEX_SESSION_KEY_RE = /session\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i;
 
 /** Look up the Plex internal transcode key for one of our session UUIDs. */
 export function getPlexTranscodeKey(sessionId: string): string | undefined {
@@ -543,8 +522,7 @@ export function clearSessionStopping(sessionId: string): void {
 
 /**
  * Every Plex transcode key allocated during this server instance's lifetime,
- * mapped to the timestamp when the key was first seen. Used by
-flushStaleTranscodes
+ * mapped to the timestamp when the key was first seen. Used by flushStaleTranscodes
  * to identify orphaned transcodes that belong to us. Entries older than 24h are
  * pruned periodically to prevent unbounded growth on long-running servers.
  */
@@ -570,15 +548,12 @@ export function markTranscodeStopped(sessionId: string): void {
 
 /**
  * Notify Plex that playback has stopped via the timeline endpoint.
- * This clears per-client session state that persists after the transcode is
-killed,
+ * This clears per-client session state that persists after the transcode is killed,
  * preventing 400 errors on subsequent transcode starts.
  */
-export async function notifyPlexStopped(ratingKey: string | null, sessionId:
-string): Promise<void> {
+export async function notifyPlexStopped(ratingKey: string | null, sessionId: string): Promise<void> {
   // Use the tracked ratingKey if caller doesn't provide one
-  const effectiveRatingKey = ratingKey || sessionRatingKeys.get(sessionId) ||
-"0";
+  const effectiveRatingKey = ratingKey || sessionRatingKeys.get(sessionId) || "0";
   const duration = mediaDurations.get(effectiveRatingKey);
   try {
     const res = await plexFetch(
@@ -597,8 +572,7 @@ string): Promise<void> {
       },
       "POST",
     );
-    console.log("[HLS] Timeline stopped for session:", sessionId.substring(0,
-8),
+    console.log("[HLS] Timeline stopped for session:", sessionId.substring(0, 8),
       "ratingKey:", effectiveRatingKey, "→", res.status);
   } catch (err) {
     console.log("[HLS] Timeline stopped failed (non-fatal):", err);
@@ -611,13 +585,11 @@ string): Promise<void> {
  * 1. Matches TranscodeSession.key against our exact plexKey
  * 2. Verifies Player.machineIdentifier is ours
  * 3. Verifies plexKey exists in our allKnownPlexKeys map
- * This ensures we never terminate another bot instance's or external user's
-session.
+ * This ensures we never terminate another bot instance's or external user's session.
  */
 async function terminatePlexSession(plexKey: string): Promise<void> {
   if (!allKnownPlexKeys.has(plexKey)) {
-    if (DEBUG) console.log("[HLS] Terminate skipped — plexKey not in
-allKnownPlexKeys:", plexKey.substring(0, 8));
+    if (DEBUG) console.log("[HLS] Terminate skipped — plexKey not in allKnownPlexKeys:", plexKey.substring(0, 8));
     return;
   }
 
@@ -638,14 +610,12 @@ allKnownPlexKeys:", plexKey.substring(0, 8));
       const keyUuid = transcodeKey?.split("/").pop();
 
       if (keyUuid !== plexKey) continue;
-      if (!s.Player?.machineIdentifier?.startsWith("plex-discord-theater"))
-continue;
+      if (!s.Player?.machineIdentifier?.startsWith("plex-discord-theater")) continue;
 
       const sessionId = s.Session?.id;
       if (!sessionId) continue;
 
-      console.log("[HLS] Terminating Plex session:", sessionId, "for transcode
-key:", plexKey.substring(0, 8));
+      console.log("[HLS] Terminating Plex session:", sessionId, "for transcode key:", plexKey.substring(0, 8));
       await plexFetch(
         "/status/sessions/terminate",
         { sessionId, reason: "Playback ended" },
@@ -655,8 +625,7 @@ key:", plexKey.substring(0, 8));
       return;
     }
 
-    if (DEBUG) console.log("[HLS] No matching Plex session found for
-terminate:", plexKey.substring(0, 8));
+    if (DEBUG) console.log("[HLS] No matching Plex session found for terminate:", plexKey.substring(0, 8));
   } catch (err) {
     console.log("[HLS] Terminate session failed (non-fatal):", err);
   }
@@ -677,8 +646,7 @@ export async function pingPlexTranscode(hlsSessionId: string): Promise<void> {
       },
     );
   } catch (err) {
-    console.error("[HLS] Server-side ping failed for", hlsSessionId.substring(0,
- 8), err);
+    console.error("[HLS] Server-side ping failed for", hlsSessionId.substring(0, 8), err);
   }
 }
 
@@ -707,8 +675,7 @@ async function flushStaleTranscodes(ratingKey?: string): Promise<number> {
     console.log("[HLS] /status/sessions:", sessions.length);
     for (const s of sessions) {
       const player = s.Player;
-      // Match both the base identifier and per-session identifiers (plex-
-discord-theater-XXXXXXXX)
+      // Match both the base identifier and per-session identifiers (plex-discord-theater-XXXXXXXX)
       const isOurs =
         player?.machineIdentifier?.startsWith("plex-discord-theater") ||
         player?.product === "Plex Discord Theater";
@@ -733,13 +700,11 @@ discord-theater-XXXXXXXX)
           stopped++;
         } catch {}
       } else {
-        // Direct stream session (no TranscodeSession) — stop via the session
-ID.
+        // Direct stream session (no TranscodeSession) — stop via the session ID.
         // These can still block new transcodes on the same client identifier.
         const sessionKey = s.Session?.id;
         if (sessionKey) {
-          if (DEBUG) console.log("[HLS] Stopping direct-stream session:",
-sessionKey);
+          if (DEBUG) console.log("[HLS] Stopping direct-stream session:", sessionKey);
           try {
             await plexFetch(
               "/video/:/transcode/universal/stop",
@@ -758,8 +723,7 @@ sessionKey);
 
   // 2. Check /transcode/sessions for orphaned transcodes (server-side only).
   //    These are transcode processes that persist after the client disconnects
-  //    and don't appear in /status/sessions. Only kill HLS transcodes (our
-protocol).
+  //    and don't appear in /status/sessions. Only kill HLS transcodes (our protocol).
   try {
     const data = await plexJSON<{
       MediaContainer: {
@@ -772,15 +736,12 @@ protocol).
     }>("/transcode/sessions");
 
     const transcodes = data.MediaContainer.TranscodeSession || [];
-    if (DEBUG) console.log("[HLS] /transcode/sessions count:",
-transcodes.length);
+    if (DEBUG) console.log("[HLS] /transcode/sessions count:", transcodes.length);
     for (const t of transcodes) {
-      // Only kill HLS transcodes whose Plex key we recognize from a manifest we
- parsed.
+      // Only kill HLS transcodes whose Plex key we recognize from a manifest we parsed.
       // Extract UUID from /transcode/sessions/<uuid> path
       const keyUuid = t.key?.split("/").pop();
-      if (t.key && t.protocol === "hls" && keyUuid &&
-allKnownPlexKeys.has(keyUuid)) {
+      if (t.key && t.protocol === "hls" && keyUuid && allKnownPlexKeys.has(keyUuid)) {
         if (DEBUG) console.log("[HLS] Killing orphaned HLS transcode:", t.key);
         try {
           await plexFetch(
@@ -800,47 +761,11 @@ allKnownPlexKeys.has(keyUuid)) {
   return stopped;
 }
 
-interface MediaStreamInfo {
-  videoCodec?: string;
-  audioCodec?: string;
-  container?: string;
-  videoResolution?: string;
-}
-
-async function getMediaStreamInfo(ratingKey: string): Promise<MediaStreamInfo | null> {
-  try {
-    const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
-      `/library/metadata/${ratingKey}`,
-    );
-    const metadata = data.MediaContainer.Metadata?.[0];
-    if (!metadata) return null;
-
-    const media = metadata.Media?.[0];
-    const part = media?.Part?.[0];
-    const streams = part?.Stream || [];
-
-    const videoStream = streams.find((s) => s.streamType === 1);
-    const audioStream = streams.find((s) => s.streamType === 2);
-
-    return {
-      videoCodec: videoStream?.codec?.toLowerCase(),
-      audioCodec: audioStream?.codec?.toLowerCase(),
-      container: part?.container?.toLowerCase() || media?.container?.toLowerCase() || "",
-      videoResolution: media?.videoResolution,
-    };
-  } catch (err) {
-    console.error("[HLS] Failed to inspect media streams:", err);
-    return null;
-  }
-}
-
 // ─── HLS manifest cache (for viewer session sharing) ────────────
 /** Cache rewritten master manifests so viewers reusing a host's sessionId
  *  don't trigger a second Plex transcode request. */
-const manifestCache = new Map<string, { manifest: string; createdAt: number
-}>();
-/** Dedup concurrent manifest requests — prevents duplicate decision+start calls
- to Plex */
+const manifestCache = new Map<string, { manifest: string; createdAt: number }>();
+/** Dedup concurrent manifest requests — prevents duplicate decision+start calls to Plex */
 const manifestInFlight = new Map<string, Promise<string>>();
 const MANIFEST_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -848,8 +773,7 @@ const MANIFEST_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 setInterval(() => {
   const now = Date.now();
   for (const [key, entry] of manifestCache) {
-    if (now - entry.createdAt > MANIFEST_CACHE_TTL_MS)
-manifestCache.delete(key);
+    if (now - entry.createdAt > MANIFEST_CACHE_TTL_MS) manifestCache.delete(key);
   }
 }, 2 * 60 * 1000).unref();
 
@@ -878,8 +802,7 @@ router.get(
     // Return cached manifest if available (viewer sharing the host's session)
     const cached = manifestCache.get(sessionId);
     if (cached && Date.now() - cached.createdAt < MANIFEST_CACHE_TTL_MS) {
-      if (DEBUG) console.log("[HLS] Returning cached manifest for session:",
-sessionId.substring(0, 8));
+      if (DEBUG) console.log("[HLS] Returning cached manifest for session:", sessionId.substring(0, 8));
       res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
       res.send(cached.manifest);
       return;
@@ -900,33 +823,17 @@ sessionId.substring(0, 8));
       return;
     }
 
-    // Optional offset (seconds) — used to resume from a position after
-audio/subtitle switch.
+    // Optional offset (seconds) — used to resume from a position after audio/subtitle switch.
     // Round to integer — Plex can reject offsets with many decimal places.
     const offsetSec = Math.round(parseFloat(req.query.offset as string));
-    const offset = Number.isFinite(offsetSec) && offsetSec > 0 ?
-String(offsetSec) : undefined;
-    // Subtitle mode — "none" when user explicitly disabled subtitles, otherwise
- "burn"
+    const offset = Number.isFinite(offsetSec) && offsetSec > 0 ? String(offsetSec) : undefined;
+    // Subtitle mode — "none" when user explicitly disabled subtitles, otherwise "burn"
     const subtitleMode = req.query.subtitles === "burn" ? "burn" : "none";
 
-    console.log("[HLS] Master manifest requested for ratingKey:", ratingKey,
-"session:", sessionId.substring(0, 8), offset ? `offset:${offset}s` : "");
+    console.log("[HLS] Master manifest requested for ratingKey:", ratingKey, "session:", sessionId.substring(0, 8), offset ? `offset:${offset}s` : "");
 
-    // Core manifest fetch logic — wrapped in a promise for in-flight
-deduplication
-    const fetchManifest = async (forceTranscode = false): Promise<string> => {
-      // Inspect source media to decide whether we can avoid video transcoding
-      const streamInfo = await getMediaStreamInfo(ratingKey);
-      const isH264 = streamInfo?.videoCodec === "h264";
-      const isDirectContainer = ["mp4", "mov", "m4v", "mkv"].includes(streamInfo?.container || "");
-
-      // Only allow direct play/stream when:
-      // - video is H.264 (browsers can't decode H.265/HEVC)
-      // - container is something Plex can remux to HLS
-      // If audio is not browser-native, Plex will direct-stream video and transcode audio.
-      const allowDirect = !forceTranscode && isH264 && isDirectContainer;
-
+    // Core manifest fetch logic — wrapped in a promise for in-flight deduplication
+    const fetchManifest = async (): Promise<string> => {
       const params: Record<string, string> = {
         hasMDE: "1",
         path: `/library/metadata/${ratingKey}`,
@@ -934,7 +841,7 @@ deduplication
         partIndex: "0",
         protocol: "hls",
         fastSeek: "1",
-        directPlay: allowDirect ? "1" : "0",
+        directPlay: "0",
         directStream: "1",
         directStreamAudio: "1",
         videoResolution: "1920x1080",
@@ -947,8 +854,7 @@ deduplication
         // Shorter segments transcode faster individually, so Plex can start
         // delivering them sooner on cold start. At 3s segments, Plex only needs
         // to transcode ~3s of video before the first segment is ready (vs ~6s
-        // with the default). Trade-off: more HTTP requests, but each is
-smaller.
+        // with the default). Trade-off: more HTTP requests, but each is smaller.
         secondsPerSegment: "3",
         subtitles: subtitleMode,
       };
@@ -957,98 +863,56 @@ smaller.
       // Use a single stable client identifier so Plex counts us as one player.
       // Per-session IDs caused Plex to count each session as a separate stream,
       // hitting the "remote streams per user" limit after 2 sessions.
-      // The decision + timeline stopped flow properly clears per-client state
-between sessions.
-      const baseProfile =
-        "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=h264&audioCodec=aac)";
-
-      const directPlayProfiles = allowDirect
-        ? "&add-direct-play-profile(type=videoProfile&container=mp4&videoCodec=h264&audioCodec=aac,mp3)" +
-          "&add-direct-play-profile(type=videoProfile&container=mov&videoCodec=h264&audioCodec=aac,mp3)" +
-          "&add-direct-play-profile(type=videoProfile&container=m4v&videoCodec=h264&audioCodec=aac,mp3)" +
-          "&add-direct-play-profile(type=videoProfile&container=mkv&videoCodec=h264&audioCodec=aac,mp3)" +
-          "&add-direct-stream-profile(type=videoProfile&container=mkv&videoCodec=h264&audioCodec=aac,ac3,eac3,mp3)" +
-          "&add-direct-stream-profile(type=videoProfile&container=mp4&videoCodec=h264&audioCodec=aac,ac3,eac3,mp3)"
-        : "";
-
+      // The decision + timeline stopped flow properly clears per-client state between sessions.
       const hlsHeaders = {
         "X-Plex-Session-Identifier": sessionId,
-        "X-Plex-Client-Profile-Extra": baseProfile + directPlayProfiles,
+        "X-Plex-Client-Profile-Extra":
+          "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=h264&audioCodec=aac)",
         "X-Plex-Client-Identifier": OUR_CLIENT_ID,
         "X-Plex-Product": "Plex Discord Theater",
         "X-Plex-Platform": "Chrome",
         "X-Plex-Device": "Browser",
       };
 
-      if (DEBUG) {
-        console.log(
-          "[HLS] Stream decision:",
-          allowDirect ? "direct-stream" : "transcode",
-          "videoCodec:",
-          streamInfo?.videoCodec,
-          "audioCodec:",
-          streamInfo?.audioCodec,
-          "container:",
-          streamInfo?.container,
-        );
-      }
-
-      // Call the decision endpoint first to prime Plex's per-client session
-state.
-      // Without this, Plex can reject start.m3u8 with 400 if it has stale per-
-client
-      // state from a previous session (even though the transcode itself was
-stopped).
+      // Call the decision endpoint first to prime Plex's per-client session state.
+      // Without this, Plex can reject start.m3u8 with 400 if it has stale per-client
+      // state from a previous session (even though the transcode itself was stopped).
       const decisionPath = "/video/:/transcode/universal/decision";
       try {
-        const decisionRes = await plexFetch(decisionPath, { ...params,
-transcodeSessionId: sessionId }, hlsHeaders);
+        const decisionRes = await plexFetch(decisionPath, { ...params, transcodeSessionId: sessionId }, hlsHeaders);
         // Log the decision body — contains generalDecisionCode that tells us
-        // whether Plex will direct play (1000), transcode (1001), or error
-(2xxx/4xxx)
+        // whether Plex will direct play (1000), transcode (1001), or error (2xxx/4xxx)
         try {
           const decBody = await decisionRes.json() as Record<string, unknown>;
-          const mc = decBody.MediaContainer as Record<string, unknown> |
-undefined;
+          const mc = decBody.MediaContainer as Record<string, unknown> | undefined;
           console.log("[HLS] Decision:", decisionRes.status,
             "code:", mc?.generalDecisionCode, mc?.generalDecisionText);
         } catch {
           console.log("[HLS] Decision:", decisionRes.status, "(no body)");
         }
         if (!decisionRes.ok) {
-          console.error("[HLS] Decision returned non-OK status:",
-decisionRes.status,
+          console.error("[HLS] Decision returned non-OK status:", decisionRes.status,
             "— transcode start may fail");
         }
       } catch (err) {
         console.log("[HLS] Decision failed (non-fatal):", err);
       }
 
-      // Pass session as both a query param and header (matching plex-mpv-shim
-behavior)
+      // Pass session as both a query param and header (matching plex-mpv-shim behavior)
       const startParams = { ...params, transcodeSessionId: sessionId };
       const hlsPath = "/video/:/transcode/universal/start.m3u8";
       let plexRes = await plexFetch(hlsPath, startParams, hlsHeaders);
 
       // On 400, flush stale transcodes and retry with increasing delays.
-      // Plex can take several seconds to fully release resources after a
-transcode is killed.
-      // Don't stop the current session — it was never started, so stopping it
-sends a ghost
+      // Plex can take several seconds to fully release resources after a transcode is killed.
+      // Don't stop the current session — it was never started, so stopping it sends a ghost
       // request with our UUID that pollutes Plex's per-client state.
       if (plexRes.status === 400) {
         console.log("[HLS] Start returned 400, flushing stale transcodes...");
         let flushed = await flushStaleTranscodes();
         console.log("[HLS] Flushed", flushed, "stale transcode(s)");
 
-        for (let attempt = 1; attempt <= 3 && plexRes.status === 400; attempt++)
- {
-          // On first retry, if we tried direct play/stream, fall back to forced transcode
-          if (attempt === 1 && allowDirect) {
-            console.log("[HLS] Direct stream failed, falling back to forced transcode");
-            return fetchManifest(true);
-          }
-
+        for (let attempt = 1; attempt <= 3 && plexRes.status === 400; attempt++) {
           const delay = flushed > 0 ? 3000 + attempt * 1500 : 2000 * attempt;
           console.log("[HLS] Retry", attempt, "in", delay, "ms");
           await new Promise((r) => setTimeout(r, delay));
@@ -1062,8 +926,7 @@ sends a ghost
           }
           // Re-prime decision before retry
           try {
-            const retryDecision = await plexFetch(decisionPath, { ...params,
-transcodeSessionId: sessionId }, hlsHeaders);
+            const retryDecision = await plexFetch(decisionPath, { ...params, transcodeSessionId: sessionId }, hlsHeaders);
             console.log("[HLS] Retry decision:", retryDecision.status);
           } catch {}
           plexRes = await plexFetch(hlsPath, startParams, hlsHeaders);
@@ -1073,8 +936,7 @@ transcodeSessionId: sessionId }, hlsHeaders);
 
       if (!plexRes.ok) {
         const text = await plexRes.text();
-        console.error("HLS start error:", plexRes.status, text.substring(0,
-200));
+        console.error("HLS start error:", plexRes.status, text.substring(0, 200));
         throw new Error(`Plex returned ${plexRes.status}`);
       }
 
@@ -1088,32 +950,26 @@ transcodeSessionId: sessionId }, hlsHeaders);
         sessionRatingKeys.set(sessionId, ratingKey);
         activeTranscodeKeys.add(plexKeyMatch[1]);
         allKnownPlexKeys.set(plexKeyMatch[1], Date.now());
-        console.log("[HLS] Plex transcode key:", plexKeyMatch[1].substring(0,
-8), "for session:", sessionId.substring(0, 8));
+        console.log("[HLS] Plex transcode key:", plexKeyMatch[1].substring(0, 8), "for session:", sessionId.substring(0, 8));
 
         // Start pre-fetching segments to absorb Plex's HTTP throttle
         startPrefetch(sessionId, plexKeyMatch[1]);
       } else {
-        console.error("[HLS] FATAL: Could not extract Plex transcode key from
-manifest for session:",
-          sessionId.substring(0, 8), "— aborting session to prevent phantom
-state");
+        console.error("[HLS] FATAL: Could not extract Plex transcode key from manifest for session:",
+          sessionId.substring(0, 8), "— aborting session to prevent phantom state");
         try {
           await plexFetch(
             "/video/:/transcode/universal/stop",
             { transcodeSessionId: sessionId },
-            { "X-Plex-Session-Identifier": sessionId, "X-Plex-Client-
-Identifier": OUR_CLIENT_ID },
+            { "X-Plex-Session-Identifier": sessionId, "X-Plex-Client-Identifier": OUR_CLIENT_ID },
           );
         } catch {}
         await notifyPlexStopped(ratingKey, sessionId);
         throw new Error("Could not extract Plex transcode key from manifest");
       }
 
-      // Send initial timeline "playing" at position 0 so Plex unthrottles
-delivery.
-      // Without this, Plex throttles segment HTTP delivery to ~1x because it
-has no
+      // Send initial timeline "playing" at position 0 so Plex unthrottles delivery.
+      // Without this, Plex throttles segment HTTP delivery to ~1x because it has no
       // playback position context. Subsequent pings update the position.
       const duration = mediaDurations.get(ratingKey);
       plexFetch(
@@ -1136,8 +992,7 @@ has no
       const authToken = req.query.token as string | undefined;
       const rewritten = rewriteManifestUrls(m3u8, authToken);
       // Cache for viewer session sharing
-      manifestCache.set(sessionId, { manifest: rewritten, createdAt: Date.now()
-});
+      manifestCache.set(sessionId, { manifest: rewritten, createdAt: Date.now() });
       return rewritten;
     };
 
@@ -1181,19 +1036,16 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
 
   // Block segment requests for stopped transcode sessions.
   // After the host stops, the viewer's hls.js keeps fetching for a moment —
-  // those requests hitting Plex create phantom state that blocks new
-transcodes.
+  // those requests hitting Plex create phantom state that blocks new transcodes.
   const segKeyMatch = segPath.match(PLEX_SESSION_KEY_RE);
-  if (segKeyMatch && allKnownPlexKeys.has(segKeyMatch[1]) &&
-!activeTranscodeKeys.has(segKeyMatch[1])) {
+  if (segKeyMatch && allKnownPlexKeys.has(segKeyMatch[1]) && !activeTranscodeKeys.has(segKeyMatch[1])) {
     res.status(410).end(); // Gone — transcode was stopped
     return;
   }
 
   if (DEBUG) console.log("[HLS seg] Fetching:", segPath.substring(0, 120));
 
-  // Check pre-fetch cache first — serves instantly if the segment was already
-fetched
+  // Check pre-fetch cache first — serves instantly if the segment was already fetched
   const cachedSeg = getCachedSegment(segPath);
   if (cachedSeg) {
     if (segPath.endsWith(".ts")) {
@@ -1216,23 +1068,20 @@ fetched
       plexRes.body?.cancel().catch(() => {});
 
       // If Plex returns 404 for a segment, the transcode was killed server-side
-      // (ping timeout, resource pressure, etc.). Mark it dead so we stop
-proxying
+      // (ping timeout, resource pressure, etc.). Mark it dead so we stop proxying
       // and return 410 immediately for all subsequent requests to this session,
       // instead of hammering Plex with dozens of doomed requests.
       if (plexRes.status === 404 && segKeyMatch) {
         const deadKey = segKeyMatch[1];
         if (activeTranscodeKeys.has(deadKey)) {
-          console.warn("[HLS seg] Plex returned 404 for active transcode",
-deadKey.substring(0, 8),
+          console.warn("[HLS seg] Plex returned 404 for active transcode", deadKey.substring(0, 8),
             "— marking dead");
           activeTranscodeKeys.delete(deadKey);
         }
         res.status(410).end();
         return;
       }
-      console.error("HLS seg proxy error:", plexRes.status, segPath.substring(0,
- 100));
+      console.error("HLS seg proxy error:", plexRes.status, segPath.substring(0, 100));
       res.status(plexRes.status).end();
       return;
     }
@@ -1248,8 +1097,7 @@ deadKey.substring(0, 8),
       res.setHeader("Content-Type", "application/octet-stream");
     }
 
-    // If this is a sub-manifest, rewrite all URLs (including bare filenames
-like 00000.ts)
+    // If this is a sub-manifest, rewrite all URLs (including bare filenames like 00000.ts)
     if (segPath.endsWith(".m3u8")) {
       const m3u8 = await plexRes.text();
       const authToken = req.query.token as string | undefined;
@@ -1267,8 +1115,7 @@ like 00000.ts)
 
 /**
  * GET /api/plex/hls/ping/:sessionId?time=<ms>
- * Keep a transcode session alive and update Plex timeline with current
-position.
+ * Keep a transcode session alive and update Plex timeline with current position.
  * Without timeline updates, Plex throttles segment delivery because it doesn't
  * know the client's playback position and rate-limits to ~1x realtime.
  */
@@ -1295,8 +1142,7 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
 
     // Send timeline update so Plex knows our playback position.
     // Without this, Plex throttles HTTP segment delivery to ~1x realtime.
-    const timeMs = typeof req.query.time === "string" ? parseInt(req.query.time,
- 10) : NaN;
+    const timeMs = typeof req.query.time === "string" ? parseInt(req.query.time, 10) : NaN;
     const ratingKey = sessionRatingKeys.get(sessionId);
     if (ratingKey && Number.isFinite(timeMs)) {
       const duration = mediaDurations.get(ratingKey);
@@ -1339,8 +1185,7 @@ router.delete(
     }
 
     if (stoppingSessions.has(sessionId)) {
-      if (DEBUG) console.log("[HLS] Stop session", sessionId.substring(0, 8),
-"(already stopping via sync)");
+      if (DEBUG) console.log("[HLS] Stop session", sessionId.substring(0, 8), "(already stopping via sync)");
       res.json({ ok: true });
       return;
     }
@@ -1353,10 +1198,8 @@ router.delete(
       const plexKey = plexTranscodeKeys.get(sessionId);
 
       // Only send the stop to Plex if we still have a valid Plex transcode key.
-      // If the mapping is gone, the WebSocket handler already stopped it —
-sending
-      // a stop with our UUID creates ghost state in Plex that blocks new
-transcodes.
+      // If the mapping is gone, the WebSocket handler already stopped it — sending
+      // a stop with our UUID creates ghost state in Plex that blocks new transcodes.
       if (plexKey) {
         try {
           const stopRes = await plexFetch(
@@ -1385,7 +1228,7 @@ transcodes.
       } else {
         sessionRatingKeys.delete(sessionId);
         if (DEBUG) console.log("[HLS] Stop session", sessionId.substring(0, 8),
-"(already stopped via sync)");
+          "(already stopped via sync)");
       }
 
       res.json({ ok: true });
@@ -1404,8 +1247,7 @@ router.delete("/hls/sessions", async (req: Request, res: Response) => {
   // Dev-only endpoint — refuse in production unless admin secret is provided
   const isDev = process.env.NODE_ENV !== "production";
   const adminSecret = process.env.ADMIN_SECRET;
-  if (!isDev && (!adminSecret || req.headers["x-admin-secret"] !== adminSecret))
- {
+  if (!isDev && (!adminSecret || req.headers["x-admin-secret"] !== adminSecret)) {
     res.status(403).json({ error: "Forbidden" });
     return;
   }
@@ -1426,19 +1268,16 @@ router.delete("/hls/sessions", async (req: Request, res: Response) => {
     let stopped = 0;
     for (const s of sessions) {
       // Only kill sessions started by our app (skip other Plex clients)
-      if (!s.Player?.machineIdentifier?.startsWith("plex-discord-theater"))
-continue;
+      if (!s.Player?.machineIdentifier?.startsWith("plex-discord-theater")) continue;
 
       const key = s.TranscodeSession?.key;
       if (key) {
         try {
-          const stopRes = await plexFetch(`/video/:/transcode/universal/stop`, {
- transcodeSessionId: key }, {
+          const stopRes = await plexFetch(`/video/:/transcode/universal/stop`, { transcodeSessionId: key }, {
             "X-Plex-Session-Identifier": key,
             "X-Plex-Client-Identifier": OUR_CLIENT_ID,
           });
-          if (DEBUG) console.log("[HLS] Killed session", key, "→",
-stopRes.status);
+          if (DEBUG) console.log("[HLS] Killed session", key, "→", stopRes.status);
           stopped++;
         } catch (err) {
           console.error("[HLS] Failed to kill session", key, err);
@@ -1472,8 +1311,7 @@ function mapItem(m: PlexMetadataItem) {
   };
 }
 
-/** Reject paths with traversal sequences, double slashes, null bytes, or
-backslashes. */
+/** Reject paths with traversal sequences, double slashes, null bytes, or backslashes. */
 function isAllowedProxyPath(p: string): boolean {
   let decoded = p;
   let prev: string;
@@ -1497,8 +1335,7 @@ function isAllowedProxyPath(p: string): boolean {
 const ALLOWED_THUMB_PREFIXES = ["/library/", "/photo/"];
 
 function isAllowedThumbPath(p: string): boolean {
-  return isAllowedProxyPath(p) && ALLOWED_THUMB_PREFIXES.some(prefix =>
-p.startsWith(prefix));
+  return isAllowedProxyPath(p) && ALLOWED_THUMB_PREFIXES.some(prefix => p.startsWith(prefix));
 }
 
 /**
@@ -1512,8 +1349,7 @@ p.startsWith(prefix));
  * Sub-manifests contain bare filenames like "00000.ts" which hls.js
  * resolves relative to the sub-manifest URL — these are left untouched.
  *
- * When authToken is provided (Safari native HLS), it is appended to segment
-URLs
+ * When authToken is provided (Safari native HLS), it is appended to segment URLs
  * so that the auth middleware can validate requests made by the native player.
  */
 const TRANSCODE_PREFIX = "/video/:/transcode/universal/";
@@ -1538,8 +1374,7 @@ function segProxyUrl(plexPath: string, authToken?: string): string {
   return url;
 }
 
-function rewriteManifestUrls(m3u8: string, authToken?: string, isSubManifest =
-false, baseDir = ""): string {
+function rewriteManifestUrls(m3u8: string, authToken?: string, isSubManifest = false, baseDir = ""): string {
   let result = m3u8;
 
   const cleanPlexToken = (path: string) => path.replace(PLEX_TOKEN_REGEX, "");
@@ -1551,10 +1386,8 @@ false, baseDir = ""): string {
   );
 
   // Rewrite relative paths in the manifest.
-  // Master manifests: prepend the Plex transcode prefix (e.g.
-session/<id>/base/index.m3u8)
-  // Sub-manifests: prepend the sub-manifest's base directory (e.g. 00000.ts →
-full Plex path)
+  // Master manifests: prepend the Plex transcode prefix (e.g. session/<id>/base/index.m3u8)
+  // Sub-manifests: prepend the sub-manifest's base directory (e.g. 00000.ts → full Plex path)
   RELATIVE_URL_REGEX.lastIndex = 0;
   const prefix = isSubManifest ? baseDir : TRANSCODE_PREFIX;
   result = result.replace(RELATIVE_URL_REGEX, (_match: string, path: string) =>
@@ -1592,10 +1425,8 @@ async function pipeBody(
   }
 }
 
-/** Stop transcode sessions started by this server instance during graceful
-shutdown.
- *  Only affects sessions in our plexTranscodeKeys map; other Plex clients are
-untouched. */
+/** Stop transcode sessions started by this server instance during graceful shutdown.
+ *  Only affects sessions in our plexTranscodeKeys map; other Plex clients are untouched. */
 export async function stopAllActiveSessions(): Promise<void> {
   const entries = [...plexTranscodeKeys.entries()];
   for (const [sessionId, plexKey] of entries) {
@@ -1604,8 +1435,7 @@ export async function stopAllActiveSessions(): Promise<void> {
       await plexFetch(
         "/video/:/transcode/universal/stop",
         { transcodeSessionId: plexKey },
-        { "X-Plex-Session-Identifier": plexKey, "X-Plex-Client-Identifier":
-OUR_CLIENT_ID },
+        { "X-Plex-Session-Identifier": plexKey, "X-Plex-Client-Identifier": OUR_CLIENT_ID },
       );
       console.log("[Shutdown] Stopped transcode:", plexKey.substring(0, 8));
     } catch {}

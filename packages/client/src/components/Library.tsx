@@ -4,6 +4,7 @@ import { FilterBar } from "./FilterBar";
 import { MovieCard } from "./MovieCard";
 import { SkeletonGrid } from "./SkeletonGrid";
 import {
+  fetchHome,
   fetchSections,
   fetchSectionItems,
   fetchGenres,
@@ -14,6 +15,7 @@ import {
   type PlexSection,
   type Genre,
   type WatchProgressItem,
+  type PlexHub,
 } from "../lib/api";
 
 const PAGE_SIZE = 50;
@@ -28,6 +30,11 @@ interface LibraryProps {
 
 export function Library({ isHost, onSelect, activeSection, onActiveSectionChange, onBrowseContext }: LibraryProps) {
   const [sections, setSections] = useState<PlexSection[]>([]);
+  // "home" is a virtual tab id representing the real Plex homepage (hubs).
+  // It's kept in the same activeSection state so tab switching logic is shared.
+  const isHomeTab = activeSection === "home";
+  const [homeHubs, setHomeHubs] = useState<PlexHub[]>([]);
+  const [homeLoading, setHomeLoading] = useState(true);
   const [items, setItems] = useState<PlexItem[]>([]);
   const [totalSize, setTotalSize] = useState(0);
   const [searchResults, setSearchResults] = useState<PlexItem[] | null>(null);
@@ -46,11 +53,21 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
     fetchSections()
       .then(({ sections: s }) => {
         setSections(s);
-        // Only default to first section if no section is persisted from a previous visit
-        if (s.length > 0 && !activeSection) onActiveSectionChange(s[0].id);
+        // Default to the Home tab (real Plex homepage) if nothing is persisted
+        // from a previous visit, instead of jumping straight into a library.
+        if (!activeSection) onActiveSectionChange("home");
       })
       .catch(console.error)
       .finally(() => setLoading(false));
+  }, []);
+
+  // Load Plex homepage hubs (Continue Watching, Recently Added, Collections, etc.)
+  useEffect(() => {
+    setHomeLoading(true);
+    fetchHome()
+      .then(({ hubs }) => setHomeHubs(hubs))
+      .catch(console.error)
+      .finally(() => setHomeLoading(false));
   }, []);
 
   // Fetch continue watching on mount when host
@@ -63,7 +80,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
 
   // Fetch genres when section changes
   useEffect(() => {
-    if (!activeSection) return;
+    if (!activeSection || isHomeTab) return;
     setGenres([]);
     setSelectedGenres([]);
     setSort("titleSort:asc");
@@ -74,7 +91,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
 
   // Load items when section, genres, or sort changes
   useEffect(() => {
-    if (!activeSection) return;
+    if (!activeSection || isHomeTab) return;
     // Cancel any in-flight load-more request
     loadMoreAbort.current?.abort();
     loadMoreAbort.current = null;
@@ -219,8 +236,8 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       )}
       <Search onSearch={handleSearch} onClear={handleClearSearch} />
 
-      {/* Filter bar (hidden during search) */}
-      {!searchResults && genres.length > 0 && (
+      {/* Filter bar (hidden during search and on Home) */}
+      {!searchResults && !isHomeTab && genres.length > 0 && (
         <FilterBar
           genres={genres}
           selectedGenres={selectedGenres}
@@ -231,8 +248,20 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       )}
 
       {/* Section tabs — visible during search so user can switch result type */}
-      {sections.length > 1 && (
+      {!searchResults && (
         <div style={styles.tabs}>
+          <button
+            onClick={() => {
+              onActiveSectionChange("home");
+              if (onBrowseContext) onBrowseContext("Browsing Home");
+            }}
+            style={{
+              ...styles.tab,
+              ...(isHomeTab ? styles.tabActive : {}),
+            }}
+          >
+            Home
+          </button>
           {sections.map((s) => (
             <button
               key={s.id}
@@ -252,7 +281,38 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       )}
 
 
-      {loading ? (
+      {isHomeTab && !searchResults ? (
+        homeLoading ? (
+          <SkeletonGrid />
+        ) : homeHubs.length === 0 ? (
+          <div style={styles.emptyState}>
+            <div style={styles.emptyIcon}>
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <circle cx="11" cy="11" r="8" /><path d="M21 21l-4.35-4.35" />
+              </svg>
+            </div>
+            <p style={styles.emptyText}>
+              Nothing to show on Home yet. Make sure your Plex collections are set to
+              be visible on Home in their collection settings.
+            </p>
+          </div>
+        ) : (
+          <div style={styles.hubsWrap}>
+            {homeHubs.map((hub) => (
+              <div key={hub.hubIdentifier} style={styles.hubSection}>
+                <h3 style={styles.hubLabel}>{hub.title}</h3>
+                <div style={styles.hubRow}>
+                  {hub.items.map((hubItem) => (
+                    <div key={hubItem.ratingKey} style={styles.hubCard}>
+                      <MovieCard item={hubItem} onClick={handleClick} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      ) : loading ? (
         <SkeletonGrid />
       ) : displayItems.length === 0 ? (
         <div style={styles.emptyState}>
@@ -365,6 +425,32 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
     fontFamily: "inherit",
     transition: "all 0.2s ease",
+  },
+  hubsWrap: {
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: "8px",
+    padding: "8px 0 32px",
+  },
+  hubSection: {
+    padding: "0 24px 8px",
+  },
+  hubLabel: {
+    color: "#e0e0e0",
+    fontSize: "16px",
+    fontWeight: 600,
+    marginBottom: "12px",
+    letterSpacing: "-0.01em",
+  },
+  hubRow: {
+    display: "flex",
+    gap: "14px",
+    overflowX: "auto" as const,
+    paddingBottom: "8px",
+  },
+  hubCard: {
+    flexShrink: 0,
+    width: "160px",
   },
   continueSection: {
     padding: "0 24px 16px",

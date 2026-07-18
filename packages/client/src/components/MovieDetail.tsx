@@ -133,9 +133,14 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
             <div style={styles.info}>
               {/* Episode label */}
               {item.type === "episode" && item.parentIndex != null && item.index != null && (
-                <div style={styles.episodeLabel}>
-                  Season {item.parentIndex}, Episode {item.index}
-                </div>
+                <>
+                  {item.showTitle && (
+                    <div style={styles.episodeShowTitle}>{item.showTitle}</div>
+                  )}
+                  <div style={styles.episodeLabel}>
+                    Season {item.parentIndex}, Episode {item.index}
+                  </div>
+                </>
               )}
 
               <h1 style={styles.title}>{meta.title}</h1>
@@ -348,6 +353,12 @@ const styles: Record<string, React.CSSProperties> = {
     flex: 1,
     minWidth: 0,
     paddingTop: "8px",
+  },
+  episodeShowTitle: {
+    fontSize: "15px",
+    fontWeight: 600,
+    color: "#ccc",
+    marginBottom: "4px",
   },
   episodeLabel: {
     fontSize: "13px",

@@ -60,7 +60,12 @@ export function useDiscord(): DiscordState {
           {
             instanceId: sdk.instanceId,
             userId: user.id,
-            guildId: sdk.guildId,
+            // null in a DM/group-DM voice call — there's no guild there.
+            guildId: sdk.guildId ?? null,
+            // Scopes "one active party" to this specific voice/DM channel
+            // instead of the whole server, so multiple voice channels in
+            // the same server can run independent watch parties.
+            channelId: sdk.channelId ?? null,
           },
         );
 

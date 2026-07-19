@@ -3,9 +3,10 @@ import { useState, useCallback, useRef, useEffect } from "react";
 interface SearchProps {
   onSearch: (query: string) => void;
   onClear: () => void;
+  placeholder?: string;
 }
 
-export function Search({ onSearch, onClear }: SearchProps) {
+export function Search({ onSearch, onClear, placeholder = "Search your library..." }: SearchProps) {
   const [value, setValue] = useState("");
   const [focused, setFocused] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -46,7 +47,7 @@ export function Search({ onSearch, onClear }: SearchProps) {
         </svg>
         <input
           type="text"
-          placeholder="Search your library..."
+          placeholder={placeholder}
           value={value}
           onChange={handleChange}
           onFocus={() => setFocused(true)}

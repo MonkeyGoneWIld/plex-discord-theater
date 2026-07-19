@@ -209,89 +209,92 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
 
   return (
     <div style={styles.container}>
-      {isHost && continueWatching.length > 0 && (
-        <div style={styles.continueSection}>
-          <h3 style={styles.continueLabel}>Continue Watching</h3>
-          <div style={styles.continueRow} className="scroll-row">
-            {continueWatching.map((cwItem) => {
-              const pct = cwItem.duration > 0 ? (cwItem.position / cwItem.duration) * 100 : 0;
-              const minLeft = Math.round((cwItem.duration - cwItem.position) / 60);
-              return (
-                <div
-                  key={cwItem.ratingKey}
-                  style={styles.continueCard}
-                  onClick={() => onSelect({
-                    ratingKey: cwItem.ratingKey,
-                    title: cwItem.title,
-                    type: cwItem.type,
-                    thumb: cwItem.thumb,
-                    parentTitle: cwItem.parentTitle,
-                    parentIndex: cwItem.parentIndex,
-                    index: cwItem.index,
-                  })}
-                >
-                  <div style={styles.continuePoster}>
-                    {cwItem.thumb && <img src={authThumbUrl(cwItem.thumb)} alt="" style={styles.continuePosterImg} loading="lazy" />}
+      <div style={styles.narrowWrap}>
+        {isHost && continueWatching.length > 0 && (
+          <div style={styles.continueSection}>
+            <h3 style={styles.continueLabel}>Continue Watching</h3>
+            <div style={styles.continueRow} className="scroll-row">
+              {continueWatching.map((cwItem) => {
+                const pct = cwItem.duration > 0 ? (cwItem.position / cwItem.duration) * 100 : 0;
+                const minLeft = Math.round((cwItem.duration - cwItem.position) / 60);
+                return (
+                  <div
+                    key={cwItem.ratingKey}
+                    style={styles.continueCard}
+                    onClick={() => onSelect({
+                      ratingKey: cwItem.ratingKey,
+                      title: cwItem.title,
+                      type: cwItem.type,
+                      thumb: cwItem.thumb,
+                      parentTitle: cwItem.parentTitle,
+                      parentIndex: cwItem.parentIndex,
+                      index: cwItem.index,
+                    })}
+                  >
+                    <div style={styles.continuePoster}>
+                      {cwItem.thumb && <img src={authThumbUrl(cwItem.thumb)} alt="" style={styles.continuePosterImg} loading="lazy" />}
+                    </div>
+                    <div style={styles.continueInfo}>
+                      <div style={styles.continueTitle}>{cwItem.title}</div>
+                      <div style={styles.continueTime}>{minLeft}m left</div>
+                    </div>
+                    <div style={styles.continueProgress}>
+                      <div style={{ ...styles.continueProgressFill, width: `${pct}%` }} />
+                    </div>
                   </div>
-                  <div style={styles.continueInfo}>
-                    <div style={styles.continueTitle}>{cwItem.title}</div>
-                    <div style={styles.continueTime}>{minLeft}m left</div>
-                  </div>
-                  <div style={styles.continueProgress}>
-                    <div style={{ ...styles.continueProgressFill, width: `${pct}%` }} />
-                  </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
-        </div>
-      )}
-      <Search onSearch={handleSearch} onClear={handleClearSearch} />
+        )}
+        <Search onSearch={handleSearch} onClear={handleClearSearch} />
 
-      {/* Filter bar (hidden during search and on Home) */}
-      {!searchResults && !isHomeTab && genres.length > 0 && (
-        <FilterBar
-          genres={genres}
-          selectedGenres={selectedGenres}
-          onGenresChange={setSelectedGenres}
-          sort={sort}
-          onSortChange={setSort}
-        />
-      )}
+        {/* Filter bar (hidden during search and on Home) */}
+        {!searchResults && !isHomeTab && genres.length > 0 && (
+          <FilterBar
+            genres={genres}
+            selectedGenres={selectedGenres}
+            onGenresChange={setSelectedGenres}
+            sort={sort}
+            onSortChange={setSort}
+          />
+        )}
 
-      {/* Section tabs — visible during search so user can switch result type */}
-      {!searchResults && (
-        <div style={styles.tabs}>
-          <button
-            onClick={() => {
-              onActiveSectionChange("home");
-              if (onBrowseContext) onBrowseContext("Browsing Home");
-            }}
-            style={{
-              ...styles.tab,
-              ...(isHomeTab ? styles.tabActive : {}),
-            }}
-          >
-            Home
-          </button>
-          {sections.map((s) => (
+        {/* Section tabs — visible during search so user can switch result type */}
+        {!searchResults && (
+          <div style={styles.tabs}>
             <button
-              key={s.id}
               onClick={() => {
-                onActiveSectionChange(s.id);
-                if (onBrowseContext) onBrowseContext(`Browsing ${s.title}`);
+                onActiveSectionChange("home");
+                if (onBrowseContext) onBrowseContext("Browsing Home");
               }}
               style={{
                 ...styles.tab,
-                ...(s.id === activeSection ? styles.tabActive : {}),
+                ...(isHomeTab ? styles.tabActive : {}),
               }}
             >
-              {s.title}
+              Home
             </button>
-          ))}
-        </div>
-      )}
+            {sections.map((s) => (
+              <button
+                key={s.id}
+                onClick={() => {
+                  onActiveSectionChange(s.id);
+                  if (onBrowseContext) onBrowseContext(`Browsing ${s.title}`);
+                }}
+                style={{
+                  ...styles.tab,
+                  ...(s.id === activeSection ? styles.tabActive : {}),
+                }}
+              >
+                {s.title}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
+      <div style={styles.wideWrap}>
 
       {isHomeTab && !searchResults ? (
         homeLoading ? (
@@ -367,13 +370,24 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
           )}
         </>
       )}
+      </div>
     </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
   container: {
+    width: "100%",
+  },
+  narrowWrap: {
     maxWidth: "1200px",
+    margin: "0 auto",
+  },
+  wideWrap: {
+    // Wider than the search/tabs column on purpose — this is what actually
+    // lets 10 panels render at a real size instead of squeezing into the
+    // same 1200px box the search bar uses (which just made them tiny).
+    maxWidth: "2000px",
     margin: "0 auto",
   },
   tabs: {

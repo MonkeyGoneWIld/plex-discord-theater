@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { formatMediaTitle } from "../lib/format";
 import type { QueueItem } from "../hooks/useSync";
 
 interface UpNextProps {
@@ -40,9 +41,7 @@ export function UpNext({ item, onPlayNow, onCancel }: UpNextProps) {
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [fire]);
 
-  const title = item.parentTitle
-    ? `${item.parentTitle} \u2014 S${item.parentIndex ?? "?"}E${item.index ?? "?"} \u00b7 ${item.title}`
-    : item.title;
+  const title = formatMediaTitle(item);
 
   return (
     <div style={styles.container}>

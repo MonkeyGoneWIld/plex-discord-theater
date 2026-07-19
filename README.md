@@ -50,7 +50,7 @@ How it works:
 - When the VPS (or a viewer) requests a segment, Express serves it instantly from cache
 - Cache miss falls through to on-demand Plex fetch (existing behavior)
 - Supports up to 2 concurrent watch party sessions
-- Memory-bounded: max 100 segments per session (~300 MB at 8 Mbps), with eviction prioritizing already-served segments
+- Memory-bounded: max 100 segments per session (~450 MB at the default 12 Mbps), with eviction prioritizing already-served segments
 
 Combined with timeline updates (which tell Plex the client's playback position), this ensures smooth playback from the very first second.
 
@@ -61,7 +61,7 @@ When no VPS is configured, viewers in the same watch session automatically form 
 - **BitTorrent tracker** — the server runs an embedded [bittorrent-tracker](https://github.com/webtorrent/bittorrent-tracker) over WebSocket for peer discovery and signaling
 - **Swarm per session** — viewers watching the same content share a swarm ID, so P2P only happens within a watch session
 - **Transparent fallback** — if a segment isn't available from peers in time, it falls back to fetching from the server normally
-- **Tuned for live-ish playback** — P2P prefetch window of 30s with 6s HTTP window and 2 concurrent HTTP downloads, so peers have time to supply segments before the client fetches them directly
+- **Tuned for live-ish playback** — P2P prefetch window of 60s with 6s HTTP window and 2 concurrent HTTP downloads, so peers have time to supply segments before the client fetches them directly
 - **NAT traversal** — uses a STUN server for WebRTC connections behind NAT
 
 P2P reduces bandwidth when multiple people are watching together, but is limited by the host's upload speed. For larger watch parties, the VPS relay is a better solution.
@@ -75,7 +75,7 @@ The server requests HLS transcoding from Plex with these settings:
 | Video codec | H.264 | Universal browser compatibility |
 | Audio codec | AAC preferred, MP3 fallback | Plex direct-streams compatible audio; transcodes to MP3 for incompatible codecs like TrueHD |
 | Max resolution | 1920×1080 | Good quality without excessive bandwidth |
-| Target bitrate | 8 Mbps (peak 12 Mbps) | Balances quality and bandwidth |
+| Target bitrate | 12 Mbps (peak 20 Mbps) | Balances quality and bandwidth — configurable via `VIDEO_BITRATE_KBPS` / `VIDEO_PEAK_BITRATE_KBPS` |
 | Segment duration | 3 seconds | Faster cold start — Plex only needs to transcode 3s before the first segment is ready |
 | Location | LAN | Treats the connection as local to avoid WAN throttling |
 | Direct stream audio | Enabled | Passes through compatible audio (e.g. AAC) without re-encoding; transcodes incompatible codecs (e.g. TrueHD) |

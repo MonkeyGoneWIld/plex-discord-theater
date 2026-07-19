@@ -136,9 +136,8 @@ export function Controls({
       const rect = progressRef.current.getBoundingClientRect();
       const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
       const newTime = pct * duration;
-      // Restart transcode at the new position — Plex only has segments for
-      // what it's already transcoded, so jumping far requires a new transcode
-      // with an offset. Falls back to in-place seek if restart isn't available.
+      // onSeekRestart is the host's smart seek: in-place when the target is
+      // reachable in the current transcode, transcode restart otherwise.
       if (onSeekRestart) {
         setCurrentTime(newTime); // show target time immediately while loading
         onSeekRestart(newTime);
@@ -150,21 +149,31 @@ export function Controls({
     [isHost, duration, videoRef, onSyncSeek, onSeekRestart],
   );
 
+  const skipTo = useCallback(
+    (newTime: number) => {
+      if (!videoRef.current) return;
+      if (onSeekRestart) {
+        setCurrentTime(newTime);
+        onSeekRestart(newTime);
+      } else {
+        videoRef.current.currentTime = newTime;
+        onSyncSeek?.(newTime);
+      }
+    },
+    [videoRef, onSyncSeek, onSeekRestart],
+  );
+
   const skipBack = useCallback(() => {
     const video = videoRef.current;
     if (!video || !isHost) return;
-    const newTime = Math.max(0, video.currentTime - 10);
-    video.currentTime = newTime;
-    onSyncSeek?.(newTime);
-  }, [videoRef, isHost, onSyncSeek]);
+    skipTo(Math.max(0, video.currentTime - 10));
+  }, [videoRef, isHost, skipTo]);
 
   const skipForward = useCallback(() => {
     const video = videoRef.current;
     if (!video || !isHost) return;
-    const newTime = Math.min(video.duration || 0, video.currentTime + 10);
-    video.currentTime = newTime;
-    onSyncSeek?.(newTime);
-  }, [videoRef, isHost, onSyncSeek]);
+    skipTo(Math.min(video.duration || 0, video.currentTime + 10));
+  }, [videoRef, isHost, skipTo]);
 
   const toggleMute = useCallback(() => {
     const video = videoRef.current;

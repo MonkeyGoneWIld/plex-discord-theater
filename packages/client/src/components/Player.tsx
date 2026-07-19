@@ -15,6 +15,18 @@ const DRIFT_THRESHOLD_S = 2;
 const HEARTBEAT_DRIFT_THRESHOLD_S = 3;
 const MAX_VIEWER_RETRIES = 3;
 const MAX_NETWORK_RETRIES = 5;
+// After an in-place seek to an unbuffered position, how long to wait for
+// segments before giving up and restarting the transcode at the target.
+const SEEK_STALL_TIMEOUT_MS = 6_000;
+
+/** Whether the video has enough buffered data at `t` to play from there. */
+function isPositionBuffered(video: HTMLVideoElement, t: number): boolean {
+  const { buffered } = video;
+  for (let i = 0; i < buffered.length; i++) {
+    if (t >= buffered.start(i) - 0.1 && t < buffered.end(i) - 0.3) return true;
+  }
+  return false;
+}
 
 interface PlayerProps {
   item: PlexItem;
@@ -51,6 +63,12 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
   const pendingStopRef = useRef<Promise<void> | null>(null);
   const bufferCleanupRef = useRef<(() => void) | null>(null);
   const seekOffsetRef = useRef(0);
+  // Offset the current transcode session started at — Plex has no segments
+  // before this position, so seeks behind it always need a restart.
+  // Note: a promoted host inherits the stream without knowing the original
+  // offset (stays 0); the stall-timeout fallback still recovers in that case.
+  const sessionStartOffsetRef = useRef(0);
+  const seekStallTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastProgressSaveRef = useRef(0);
   const PROGRESS_SAVE_INTERVAL_MS = 30_000;
 
@@ -105,6 +123,10 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
   }, [isHost]);
 
   const destroyLocal = useCallback(() => {
+    if (seekStallTimerRef.current !== null) {
+      clearTimeout(seekStallTimerRef.current);
+      seekStallTimerRef.current = null;
+    }
     if (pingIntervalRef.current !== null) {
       clearInterval(pingIntervalRef.current);
       pingIntervalRef.current = null;
@@ -152,6 +174,7 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
 
     const offset = seekOffsetRef.current;
     seekOffsetRef.current = 0;
+    if (sessionOwner) sessionStartOffsetRef.current = offset;
     const url = hlsMasterUrl(item.ratingKey, sessionId, { subtitles, offset: offset > 0 ? offset : undefined });
 
     async function start() {
@@ -175,6 +198,13 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
         const hlsConfig: Partial<import("hls.js").HlsConfig> = {
           maxBufferLength: 60,
           maxMaxBufferLength: 120,
+          // hls.js also caps the forward buffer by bytes (default 60 MB, which at
+          // 12-20 Mbps is only ~25-40s — silently undercutting maxBufferLength).
+          // Raise it so the 60s time target is the real limit.
+          maxBufferSize: 150 * 1000 * 1000,
+          // Keep 90s behind the playhead so short backward seeks replay from the
+          // buffer instead of refetching, while bounding total memory use.
+          backBufferLength: 90,
           maxBufferHole: 0.5,
           // Recover from stalls faster on cold start — default is 2s, but during
           // initial Plex transcode warm-up segments arrive slowly. A lower nudge
@@ -216,13 +246,23 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
                   `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/tracker${token ? `?token=${encodeURIComponent(token)}` : ""}`,
                 ],
                 highDemandTimeWindow: 15,
-                p2pDownloadTimeWindow: 30,
+                // Match maxBufferLength (60s) so the whole forward buffer can be
+                // filled from peers — beyond this window segments aren't fetched
+                // at all, so 30s was halving the effective buffer and giving
+                // peers less lead time to supply segments before the HTTP
+                // fallback kicks in.
+                p2pDownloadTimeWindow: 60,
                 httpDownloadTimeWindow: 6,
                 simultaneousP2PDownloads: 3,
                 simultaneousHttpDownloads: 2,
                 rtcConfig: {
+                  // Multiple STUN servers improve NAT traversal odds — every
+                  // peer pair that fails to connect falls back to HTTP, costing
+                  // server bandwidth.
                   iceServers: [
                     { urls: "stun:stun.l.google.com:19302" },
+                    { urls: "stun:stun1.l.google.com:19302" },
+                    { urls: "stun:stun2.l.google.com:19302" },
                   ],
                 },
                 httpRequestSetup: async (url, _byteRange, signal, requestByteRange) => {
@@ -508,6 +548,61 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
     }
   }, [syncState?.position]);
 
+  // Full seek recovery: restart the Plex transcode with an offset so segments
+  // exist at the target position. Used when the target can't be reached in-place.
+  const handleSeekRestart = useCallback((positionSeconds: number) => {
+    if (seekStallTimerRef.current !== null) {
+      clearTimeout(seekStallTimerRef.current);
+      seekStallTimerRef.current = null;
+    }
+    seekOffsetRef.current = positionSeconds;
+    setBuffering(true);
+    syncActionsRef.current?.sendSeek(positionSeconds);
+    setRetryKey((k) => k + 1);
+  }, []);
+
+  // Host seek entry point. Prefers a cheap in-place seek — the restart path
+  // tears down the HLS session and waits for a fresh Plex transcode (5-15s of
+  // buffering), which is only necessary when the target segments don't exist.
+  //  - Target buffered: instant in-place seek.
+  //  - Target unbuffered but at/after the session's start offset: in-place seek
+  //    (Plex has usually already transcoded well past what hls.js buffers, and
+  //    back-seeks hit segments already on disk). If segments don't arrive
+  //    within SEEK_STALL_TIMEOUT_MS, fall back to a transcode restart.
+  //  - Target before the session's start offset: segments can't exist — restart.
+  const handleHostSeek = useCallback((positionSeconds: number) => {
+    const video = videoRef.current;
+    if (!video) {
+      handleSeekRestart(positionSeconds);
+      return;
+    }
+    if (seekStallTimerRef.current !== null) {
+      clearTimeout(seekStallTimerRef.current);
+      seekStallTimerRef.current = null;
+    }
+
+    if (positionSeconds < sessionStartOffsetRef.current) {
+      handleSeekRestart(positionSeconds);
+      return;
+    }
+
+    const wasBuffered = isPositionBuffered(video, positionSeconds);
+    video.currentTime = positionSeconds;
+    syncActionsRef.current?.sendSeek(positionSeconds);
+    if (wasBuffered) return;
+
+    setBuffering(true);
+    seekStallTimerRef.current = setTimeout(() => {
+      seekStallTimerRef.current = null;
+      const v = videoRef.current;
+      if (!v) return;
+      if (!isPositionBuffered(v, v.currentTime)) {
+        console.warn(`[Seek] No data after ${SEEK_STALL_TIMEOUT_MS}ms — restarting transcode at ${v.currentTime.toFixed(1)}s`);
+        handleSeekRestart(v.currentTime);
+      }
+    }, SEEK_STALL_TIMEOUT_MS);
+  }, [handleSeekRestart]);
+
   // Keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -530,18 +625,12 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
         case "ArrowLeft":
           e.preventDefault();
           if (!isHostRef.current) return;
-          { const t = Math.max(0, video.currentTime - 10);
-            video.currentTime = t;
-            syncActionsRef.current?.sendSeek(t);
-          }
+          handleHostSeek(Math.max(0, video.currentTime - 10));
           break;
         case "ArrowRight":
           e.preventDefault();
           if (!isHostRef.current) return;
-          { const t = Math.min(video.duration || 0, video.currentTime + 10);
-            video.currentTime = t;
-            syncActionsRef.current?.sendSeek(t);
-          }
+          handleHostSeek(Math.min(video.duration || 0, video.currentTime + 10));
           break;
         case "m":
         case "M":
@@ -565,7 +654,7 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [handleHostSeek]);
 
   const handleBack = useCallback(() => {
     destroyLocal();
@@ -579,15 +668,6 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
     }
     onBack();
   }, [destroyLocal, onBack]);
-
-  // Seek to a position beyond the transcoded buffer — restarts the Plex transcode
-  // with an offset so segments exist at the target position.
-  const handleSeekRestart = useCallback((positionSeconds: number) => {
-    seekOffsetRef.current = positionSeconds;
-    setBuffering(true);
-    syncActionsRef.current?.sendSeek(positionSeconds);
-    setRetryKey((k) => k + 1);
-  }, []);
 
   const handleTrackChange = useCallback(async (partId: number, audioStreamID?: number, subtitleStreamID?: number) => {
     if (!sessionIdRef.current) return;
@@ -780,7 +860,7 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
         onSyncPause={isHost ? syncActions?.sendPause : undefined}
         onSyncResume={isHost ? syncActions?.sendResume : undefined}
         onSyncSeek={isHost ? syncActions?.sendSeek : undefined}
-        onSeekRestart={isHost ? handleSeekRestart : undefined}
+        onSeekRestart={isHost ? handleHostSeek : undefined}
         onOpenTrackSwitcher={isHost ? () => setShowTrackSwitcher(true) : undefined}
         queueCount={syncState?.queue?.length}
         onOpenQueue={isHost ? () => setShowQueuePanel(true) : undefined}

@@ -39,6 +39,24 @@ const PLEX_TOKEN_REGEX = /[?&]X-Plex-Token=[^&\s]*/g;
 const VPS_RELAY_URL = process.env.VPS_RELAY_URL?.replace(/\/$/, "");
 const VPS_RELAY_KEY = process.env.VPS_RELAY_KEY;
 
+/** Parse a positive-integer env var, falling back to a default. */
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  const n = raw ? parseInt(raw, 10) : NaN;
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return n;
+}
+
+// Transcode bitrate (kbps). The target is what Plex aims for on average; the
+// peak bounds spikes. Per-viewer bandwidth scales linearly with this, so it's
+// the single biggest bandwidth lever — 12000/20000 is visually solid 1080p
+// H.264 while costing 40%+ less than the old hardcoded 20000/100000.
+const VIDEO_BITRATE_KBPS = envInt("VIDEO_BITRATE_KBPS", 12000);
+const VIDEO_PEAK_BITRATE_KBPS = envInt(
+  "VIDEO_PEAK_BITRATE_KBPS",
+  Math.max(20000, VIDEO_BITRATE_KBPS),
+);
+
 // ─── Types ──────────────────────────────────────────────────────
 
 interface PlexDirectory {
@@ -895,8 +913,8 @@ router.get(
         directStream: "1",
         directStreamAudio: "1",
         videoResolution: "1920x1080",
-        videoBitrate: "20000",
-        peakBitrate: "100000",
+        videoBitrate: String(VIDEO_BITRATE_KBPS),
+        peakBitrate: String(VIDEO_PEAK_BITRATE_KBPS),
         videoQuality: "99",
         autoAdjustQuality: "0",
         location: "lan",
@@ -1069,6 +1087,20 @@ router.get(
  * The Plex path is passed as a query parameter to avoid special characters
  * (like ":/" in Plex transcode paths) being mangled by proxies.
  */
+/**
+ * Transcoded .ts segments are immutable for the life of a session — allow
+ * clients and the VPS nginx cache to reuse them for 5 minutes so hls.js
+ * recovery/retry refetches and multi-viewer fan-out don't hit Plex again.
+ * Sub-manifests grow as the transcode progresses and must never be cached.
+ */
+function setSegmentCacheHeaders(res: Response, segPath: string): void {
+  if (segPath.endsWith(".ts")) {
+    res.setHeader("Cache-Control", "public, max-age=300, immutable");
+  } else if (segPath.endsWith(".m3u8")) {
+    res.setHeader("Cache-Control", "no-cache");
+  }
+}
+
 router.get("/hls/seg", async (req: Request, res: Response) => {
   const rawPath = req.query.p;
   if (!rawPath || typeof rawPath !== "string") {
@@ -1098,6 +1130,7 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
   // Check pre-fetch cache first — serves instantly if the segment was already fetched
   const cachedSeg = getCachedSegment(segPath);
   if (cachedSeg) {
+    setSegmentCacheHeaders(res, segPath);
     if (segPath.endsWith(".ts")) {
       res.setHeader("Content-Type", "video/MP2T");
     } else if (segPath.endsWith(".m3u8")) {
@@ -1136,6 +1169,7 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
       return;
     }
 
+    setSegmentCacheHeaders(res, segPath);
     const contentType = plexRes.headers.get("content-type")?.split(";")[0];
     if (contentType && ALLOWED_MEDIA_TYPES.has(contentType)) {
       res.setHeader("Content-Type", contentType);

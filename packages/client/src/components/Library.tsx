@@ -206,6 +206,13 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   const searchQuery = searchQueryRef.current;
   const displayItems = searchResults ?? items;
   const hasMore = !searchResults && items.length < totalSize;
+  const searchPlaceholder = isHomeTab
+    ? "Search everything..."
+    : activeSectionType === "movie"
+      ? "Search movies..."
+      : activeSectionType === "show"
+        ? "Search TV shows..."
+        : "Search your library...";
 
   return (
     <div style={styles.container}>
@@ -247,7 +254,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
             </div>
           </div>
         )}
-        <Search onSearch={handleSearch} onClear={handleClearSearch} />
+        <Search onSearch={handleSearch} onClear={handleClearSearch} placeholder={searchPlaceholder} />
 
         {/* Filter bar (hidden during search and on Home) */}
         {!searchResults && !isHomeTab && genres.length > 0 && (

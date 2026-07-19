@@ -49,6 +49,9 @@ export function Controls({
   const [muted, setMuted] = useState(false);
   const [visible, setVisible] = useState(true);
   const [hoveringProgress, setHoveringProgress] = useState(false);
+  // Fraction (0-1) of the bar under the cursor, null when not hovering —
+  // drives the seek-preview timestamp tooltip and hover marker.
+  const [hoverPct, setHoverPct] = useState<number | null>(null);
   const [hintsVisible, setHintsVisible] = useState(showKeyboardHints);
   const progressRef = useRef<HTMLDivElement>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -206,6 +209,12 @@ export function Controls({
     [videoRef, muted],
   );
 
+  const handleProgressMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!progressRef.current) return;
+    const rect = progressRef.current.getBoundingClientRect();
+    setHoverPct(Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)));
+  }, []);
+
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
   const buffered = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
   const barHeight = hoveringProgress ? 8 : 5;
@@ -236,12 +245,28 @@ export function Controls({
           ref={progressRef}
           onClick={seek}
           onMouseEnter={() => setHoveringProgress(true)}
-          onMouseLeave={() => setHoveringProgress(false)}
+          onMouseMove={handleProgressMove}
+          onMouseLeave={() => { setHoveringProgress(false); setHoverPct(null); }}
           style={{ ...styles.progressHit, cursor: isHost ? "pointer" : "default" }}
         >
+          {/* Seek preview: timestamp under the cursor. clamp() keeps the
+              bubble from overflowing the bar edges. */}
+          {hoverPct != null && duration > 0 && isFinite(duration) && (
+            <div
+              style={{
+                ...styles.seekTooltip,
+                left: `clamp(30px, ${hoverPct * 100}%, calc(100% - 30px))`,
+              }}
+            >
+              {fmt(hoverPct * duration)}
+            </div>
+          )}
           <div style={{ ...styles.progressTrack, height: barHeight, transition: "height 0.15s ease" }}>
             <div style={{ ...styles.progressBuffer, width: `${buffered}%` }} />
             <div style={{ ...styles.progressFill, width: `${progress}%` }} />
+            {hoverPct != null && (
+              <div style={{ ...styles.hoverMarker, left: `${hoverPct * 100}%` }} />
+            )}
             <div
               style={{
                 position: "absolute",
@@ -373,9 +398,35 @@ const styles: Record<string, React.CSSProperties> = {
     paddingTop: "48px",
   },
   progressHit: {
+    position: "relative",
     padding: "8px 0",
     cursor: "pointer",
     marginBottom: "4px",
+  },
+  seekTooltip: {
+    position: "absolute",
+    bottom: "22px",
+    transform: "translateX(-50%)",
+    background: "rgba(15,15,15,0.92)",
+    border: "1px solid rgba(255,255,255,0.15)",
+    color: "#f0f0f0",
+    padding: "3px 8px",
+    borderRadius: "5px",
+    fontSize: "12px",
+    fontWeight: 500,
+    fontVariantNumeric: "tabular-nums",
+    whiteSpace: "nowrap",
+    pointerEvents: "none",
+    zIndex: 1,
+  },
+  hoverMarker: {
+    position: "absolute",
+    top: 0,
+    bottom: 0,
+    width: "2px",
+    transform: "translateX(-50%)",
+    background: "rgba(255,255,255,0.6)",
+    pointerEvents: "none",
   },
   progressTrack: {
     height: 5,

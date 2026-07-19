@@ -11,6 +11,8 @@ interface ControlsProps {
   onSeekRestart?: (position: number) => void;
   onToggleMute?: () => void;
   onOpenTrackSwitcher?: () => void;
+  onToggleStats?: () => void;
+  statsActive?: boolean;
   showKeyboardHints?: boolean;
   queueCount?: number;
   onOpenQueue?: () => void;
@@ -38,6 +40,8 @@ export function Controls({
   onSeekRestart,
   onToggleMute,
   onOpenTrackSwitcher,
+  onToggleStats,
+  statsActive,
   showKeyboardHints = true,
   queueCount,
   onOpenQueue,
@@ -321,6 +325,17 @@ export function Controls({
               <button onClick={onOpenQueue} style={styles.queueBtn} title="Queue">
                 <span style={{ fontSize: 14 }}>{"\u25B6"}</span>
                 <span style={styles.queueBadge}>{queueCount}</span>
+              </button>
+            )}
+            {onToggleStats && (
+              <button
+                onClick={onToggleStats}
+                style={{ ...styles.gearBtn, color: statsActive ? "#e5a00d" : "#fff" }}
+                title="Stats for nerds (i)"
+              >
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+                  <path d="M2 14V2M2 14H14M5 11V8M8 11V5M11 11V9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
               </button>
             )}
             {isHost && onOpenTrackSwitcher && (

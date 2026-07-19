@@ -20,6 +20,13 @@ import {
 
 const PAGE_SIZE = 200;
 
+function describeError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("429")
+    ? "You're sending requests too quickly and have been temporarily rate limited. Wait a few minutes, then retry."
+    : "Couldn't load the library. Check your connection, then retry.";
+}
+
 interface LibraryProps {
   isHost: boolean;
   onSelect: (item: PlexItem) => void;
@@ -51,6 +58,10 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   // instead of overwriting the UI with stale results after the box was cleared.
   const searchReqId = useRef(0);
   const [continueWatching, setContinueWatching] = useState<WatchProgressItem[]>([]);
+  const [homeError, setHomeError] = useState<string | null>(null);
+  const [itemsError, setItemsError] = useState<string | null>(null);
+  // Bumped by the Retry button to re-run the fetch effects after a failure
+  const [retryNonce, setRetryNonce] = useState(0);
 
   // Load sections on mount
   useEffect(() => {
@@ -61,18 +72,27 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
         // from a previous visit, instead of jumping straight into a library.
         if (!activeSection) onActiveSectionChange("home");
       })
-      .catch(console.error)
+      .catch((err) => {
+        console.error(err);
+        // Still land on the Home tab so the error state (not a blank screen)
+        // renders when every request is failing, e.g. while rate limited.
+        if (!activeSection) onActiveSectionChange("home");
+      })
       .finally(() => setLoading(false));
-  }, []);
+  }, [retryNonce]);
 
   // Load Plex homepage hubs (Continue Watching, Recently Added, Collections, etc.)
   useEffect(() => {
     setHomeLoading(true);
+    setHomeError(null);
     fetchHome()
       .then(({ hubs }) => setHomeHubs(hubs))
-      .catch(console.error)
+      .catch((err) => {
+        console.error(err);
+        setHomeError(describeError(err));
+      })
       .finally(() => setHomeLoading(false));
-  }, []);
+  }, [retryNonce]);
 
   // Fetch continue watching on mount when host
   useEffect(() => {
@@ -104,6 +124,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
     setLoading(true);
     setItems([]);
     setTotalSize(0);
+    setItemsError(null);
     fetchSectionItems(activeSection, {
       signal: controller.signal,
       start: 0,
@@ -118,10 +139,11 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       .catch((err) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
         console.error(err);
+        setItemsError(describeError(err));
       })
       .finally(() => setLoading(false));
     return () => controller.abort();
-  }, [activeSection, selectedGenres, sort]);
+  }, [activeSection, selectedGenres, sort, retryNonce]);
 
   const handleLoadMore = useCallback(() => {
     if (!activeSection || loadingMore) return;
@@ -306,6 +328,18 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       {isHomeTab && !searchResults ? (
         homeLoading ? (
           <SkeletonGrid />
+        ) : homeError ? (
+          <div style={styles.emptyState}>
+            <div style={styles.emptyIcon}>
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" />
+              </svg>
+            </div>
+            <p style={styles.emptyText}>{homeError}</p>
+            <button onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>
+              Retry
+            </button>
+          </div>
         ) : homeHubs.length === 0 ? (
           <div style={styles.emptyState}>
             <div style={styles.emptyIcon}>
@@ -336,6 +370,18 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
         )
       ) : loading ? (
         <SkeletonGrid />
+      ) : itemsError && !searchResults ? (
+        <div style={styles.emptyState}>
+          <div style={styles.emptyIcon}>
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" />
+            </svg>
+          </div>
+          <p style={styles.emptyText}>{itemsError}</p>
+          <button onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>
+            Retry
+          </button>
+        </div>
       ) : displayItems.length === 0 ? (
         <div style={styles.emptyState}>
           <div style={styles.emptyIcon}>
@@ -446,6 +492,18 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     justifyContent: "center",
     padding: "8px 24px 32px",
+  },
+  retryBtn: {
+    padding: "8px 24px",
+    borderRadius: "8px",
+    border: "1px solid rgba(229,160,13,0.3)",
+    background: "rgba(229,160,13,0.15)",
+    color: "#e5a00d",
+    cursor: "pointer",
+    fontSize: "13px",
+    fontWeight: 600,
+    fontFamily: "inherit",
+    transition: "all 0.2s ease",
   },
   loadMoreBtn: {
     padding: "10px 28px",

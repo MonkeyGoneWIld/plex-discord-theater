@@ -77,7 +77,17 @@ const authLimiter = rateLimit({
 
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: isDev ? 5000 : 300,
+  max: isDev ? 5000 : 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Thumbnails get their own high ceiling — a single 200-item library page
+// fires ~200 poster requests, so counting them against the general API
+// limiter locked users out of every /api endpoint mid-browse.
+const thumbLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: isDev ? 50000 : 5000,
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -94,11 +104,13 @@ app.use("/api/token", authLimiter);
 app.use("/api/register", authLimiter);
 app.use("/api/plex/hls/seg", hlsLimiter);
 app.use("/api/plex/hls/ping", hlsLimiter);
+app.use("/api/plex/thumb", thumbLimiter);
 // General API limiter — skip paths that have their own dedicated limiter
 app.use("/api", (req, res, next) => {
   if (
     req.path.startsWith("/plex/hls/seg") ||
     req.path.startsWith("/plex/hls/ping") ||
+    req.path.startsWith("/plex/thumb") ||
     req.path === "/token" ||
     req.path === "/register"
   ) {

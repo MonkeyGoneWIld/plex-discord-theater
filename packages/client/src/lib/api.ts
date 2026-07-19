@@ -111,12 +111,22 @@ export interface StreamTrack {
   selected: boolean;
 }
 
+/** A skippable intro/credits range detected by Plex. */
+export interface SkipMarker {
+  type: "intro" | "credits";
+  /** Seconds — directly comparable to video.currentTime. */
+  start: number;
+  /** Seconds — the position to seek to when skipping. */
+  end: number;
+}
+
 export interface PlexMeta {
   ratingKey: string;
   title: string;
   year?: number;
-  summary?: string;
+  /** Milliseconds (raw Plex value) — note markers below are in SECONDS. */
   duration?: number;
+  summary?: string;
   thumb: string | null;
   art: string | null;
   genres: string[];
@@ -124,6 +134,8 @@ export interface PlexMeta {
   partId: number | null;
   audioTracks: StreamTrack[];
   subtitleTracks: StreamTrack[];
+  /** Optional so a newer client served by an older server degrades to "no button". */
+  markers?: SkipMarker[];
 }
 
 export interface PlexHub {

@@ -7,9 +7,10 @@ import type { P2PStats } from "./StatsOverlay";
 import { TrackSwitcher } from "./TrackSwitcher";
 import { QueuePanel } from "./QueuePanel";
 import { UpNext } from "./UpNext";
-import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, saveProgress } from "../lib/api";
+import { SkipMarkerButton } from "./SkipMarkerButton";
+import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, saveProgress, fetchMeta } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
-import type { PlexItem } from "../lib/api";
+import type { PlexItem, SkipMarker } from "../lib/api";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
 
 const PING_INTERVAL_MS = 10_000; // 10s — matches Plex API recommendation for LAN timeline updates
@@ -72,6 +73,10 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
   // Cumulative P2P delivery counters, filled from the p2p-media-loader engine
   // events below and read by the StatsOverlay each poll.
   const p2pStatsRef = useRef<P2PStats>({ p2pBytes: 0, httpBytes: 0, uploadBytes: 0, peers: new Set() });
+  // Plex intro/credits markers for the current item, and whichever one the
+  // playhead currently sits inside (null when outside every window).
+  const [markers, setMarkers] = useState<SkipMarker[]>([]);
+  const [activeMarker, setActiveMarker] = useState<SkipMarker | null>(null);
   const [recovering, setRecovering] = useState(false);
   const recoveryAttemptRef = useRef(0);
   const recoveryPositionRef = useRef(0);
@@ -171,6 +176,24 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
       .then((config) => setVpsRelay(config.vpsRelay))
       .catch(() => setVpsRelay(false)); // default to non-VPS (P2P mode) if config fails
   }, []);
+
+  // Fetch intro/credits markers for the current item. Host only — the button is
+  // host-gated, so viewers skip the request entirely.
+  //
+  // Deliberately its own effect rather than part of the main HLS effect: that one
+  // depends on retryKey, which handleSeekRestart bumps, so markers would be
+  // refetched and blanked on every restart-seek. Keying on item.ratingKey also
+  // covers queue auto-advance, which reuses this same mounted Player.
+  useEffect(() => {
+    setMarkers([]);
+    setActiveMarker(null);
+    if (!isHost) return;
+    let cancelled = false;
+    fetchMeta(item.ratingKey)
+      .then((meta) => { if (!cancelled) setMarkers(meta.markers ?? []); })
+      .catch(() => { /* markers are optional — never surface an error over a working stream */ });
+    return () => { cancelled = true; };
+  }, [item.ratingKey, isHost]);
 
   // Single HLS session — no mid-stream switching
   useEffect(() => {
@@ -762,6 +785,17 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
     setRetryKey((k) => k + 1);
   }, []);
 
+  // Skip to the end of the active marker. Uses handleHostSeek (not
+  // handleSeekRestart) so a typical 60-100s intro takes the cheap in-place path —
+  // it's under FAR_SEEK_THRESHOLD_S, and the 6s stall timeout still covers the
+  // case where those segments turn out not to be buffered. handleHostSeek also
+  // calls sendSeek, so viewers follow with no sync-layer changes.
+  const handleSkipMarker = useCallback(() => {
+    if (!activeMarker) return;
+    setActiveMarker(null); // instant feedback; the timeupdate tick would clear it ~250ms later
+    handleHostSeek(activeMarker.end);
+  }, [activeMarker, handleHostSeek]);
+
   const advanceQueue = useCallback(() => {
     const queue = syncStateRef.current?.queue;
     if (!queue || queue.length === 0) return;
@@ -798,6 +832,24 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
     video.addEventListener("timeupdate", onTime);
     return () => video.removeEventListener("timeupdate", onTime);
   }, [isHost]);
+
+  // Track whether the playhead is inside an intro/credits window (host only).
+  // Unlike showUpNext, which latches on once shown, this is recomputed from
+  // scratch each tick — so the button clears within ~250ms when playback leaves
+  // the window in either direction, and reappears if the host rewinds into it.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !isHost || markers.length === 0) return;
+    const onTime = () => {
+      const t = video.currentTime;
+      const found = markers.find((m) => t >= m.start && t < m.end) ?? null;
+      // Marker objects are stable for the item's lifetime, so identity comparison
+      // is sound and keeps this to two re-renders per marker, not four per second.
+      setActiveMarker((prev) => (prev === found ? prev : found));
+    };
+    video.addEventListener("timeupdate", onTime);
+    return () => video.removeEventListener("timeupdate", onTime);
+  }, [isHost, markers]);
 
   // Build rich display title for Controls top bar
   const displayTitle = formatMediaTitle(item);
@@ -949,6 +1001,15 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
           onClear={() => syncActions?.sendQueueClear()}
           onReorder={(q) => syncActions?.sendQueueReorder(q)}
           onClose={() => setShowQueuePanel(false)}
+        />
+      )}
+      {activeMarker && isHost && (
+        <SkipMarkerButton
+          type={activeMarker.type}
+          onSkip={handleSkipMarker}
+          // Sit above the UpNext card when both are on screen — the condition
+          // mirrors UpNext's own render guard below so they can't disagree.
+          stacked={activeMarker.type === "credits" && showUpNext && !!syncState?.queue?.[0]}
         />
       )}
       {showUpNext && isHost && syncState?.queue?.[0] && (

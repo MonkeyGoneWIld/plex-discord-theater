@@ -1101,6 +1101,30 @@ function setSegmentCacheHeaders(res: Response, segPath: string): void {
   }
 }
 
+/**
+ * Check whether a Plex HLS transcode session is still alive server-side.
+ *
+ * A 404 on a segment is ambiguous: the transcode may have been killed (ping
+ * timeout, resource pressure), OR the requested segment is simply ahead of the
+ * transcode head — which happens legitimately when the viewer seeks forward,
+ * since Plex transcodes linearly and hasn't produced that segment yet. Only the
+ * former should mark the session dead, so we confirm against /transcode/sessions
+ * before poisoning it. Marking a healthy session dead makes every subsequent
+ * segment short-circuit to 410, stranding playback in a permanent buffering loop.
+ */
+async function isTranscodeSessionAlive(plexKey: string): Promise<boolean> {
+  try {
+    const data = await plexJSON<{
+      MediaContainer: { TranscodeSession?: Array<{ key?: string }> };
+    }>("/transcode/sessions");
+    const sessions = data.MediaContainer.TranscodeSession || [];
+    return sessions.some((t) => t.key?.split("/").pop() === plexKey);
+  } catch {
+    // If we can't tell, assume alive — don't kill a possibly-healthy session.
+    return true;
+  }
+}
+
 router.get("/hls/seg", async (req: Request, res: Response) => {
   const rawPath = req.query.p;
   if (!rawPath || typeof rawPath !== "string") {
@@ -1150,18 +1174,26 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
       // Drain the body so the underlying TCP connection is returned to the pool
       plexRes.body?.cancel().catch(() => {});
 
-      // If Plex returns 404 for a segment, the transcode was killed server-side
-      // (ping timeout, resource pressure, etc.). Mark it dead so we stop proxying
-      // and return 410 immediately for all subsequent requests to this session,
-      // instead of hammering Plex with dozens of doomed requests.
+      // A 404 for a segment can mean the transcode was killed server-side
+      // (ping timeout, resource pressure) OR that the segment is simply ahead of
+      // the transcode head after a forward seek — Plex transcodes linearly, so a
+      // far-ahead segment doesn't exist yet. Only the former should mark the
+      // session dead; doing so on a healthy session poisons activeTranscodeKeys
+      // and strands playback in a permanent 410 loop. Confirm the transcode is
+      // actually gone before marking dead; otherwise pass the 404 through and let
+      // the client restart the transcode at the seek offset.
       if (plexRes.status === 404 && segKeyMatch) {
-        const deadKey = segKeyMatch[1];
-        if (activeTranscodeKeys.has(deadKey)) {
-          console.warn("[HLS seg] Plex returned 404 for active transcode", deadKey.substring(0, 8),
-            "— marking dead");
-          activeTranscodeKeys.delete(deadKey);
+        const key = segKeyMatch[1];
+        if (activeTranscodeKeys.has(key) && !(await isTranscodeSessionAlive(key))) {
+          console.warn("[HLS seg] Transcode", key.substring(0, 8),
+            "gone — marking dead");
+          activeTranscodeKeys.delete(key);
+          res.status(410).end();
+          return;
         }
-        res.status(410).end();
+        if (DEBUG) console.log("[HLS seg] 404 for", segPath.substring(0, 80),
+          "— transcode alive, segment ahead of head");
+        res.status(404).end();
         return;
       }
       console.error("HLS seg proxy error:", plexRes.status, segPath.substring(0, 100));

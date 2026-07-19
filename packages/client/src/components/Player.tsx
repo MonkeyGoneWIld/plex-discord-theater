@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import Hls from "hls.js";
 import { HlsJsP2PEngine } from "p2p-media-loader-hlsjs";
 import { Controls } from "./Controls";
+import { StatsOverlay } from "./StatsOverlay";
+import type { P2PStats } from "./StatsOverlay";
 import { TrackSwitcher } from "./TrackSwitcher";
 import { QueuePanel } from "./QueuePanel";
 import { UpNext } from "./UpNext";
@@ -64,7 +66,11 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
   const [showTrackSwitcher, setShowTrackSwitcher] = useState(false);
   const [trackSwitching, setTrackSwitching] = useState<"audio" | "subtitle" | null>(null);
   const [showQueuePanel, setShowQueuePanel] = useState(false);
+  const [showStats, setShowStats] = useState(false);
   const [showUpNext, setShowUpNext] = useState(false);
+  // Cumulative P2P delivery counters, filled from the p2p-media-loader engine
+  // events below and read by the StatsOverlay each poll.
+  const p2pStatsRef = useRef<P2PStats>({ p2pBytes: 0, httpBytes: 0, uploadBytes: 0, peers: new Set() });
   const [recovering, setRecovering] = useState(false);
   const recoveryAttemptRef = useRef(0);
   const recoveryPositionRef = useRef(0);
@@ -289,6 +295,26 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
                 },
               },
               onHlsJsCreated: (hls) => {
+                // Reset counters for the new stream/session.
+                const stats = p2pStatsRef.current;
+                stats.p2pBytes = 0;
+                stats.httpBytes = 0;
+                stats.uploadBytes = 0;
+                stats.peers = new Set();
+
+                hls.p2pEngine.addEventListener("onSegmentLoaded", ({ bytesLength, downloadSource }) => {
+                  if (downloadSource === "p2p") stats.p2pBytes += bytesLength;
+                  else stats.httpBytes += bytesLength;
+                });
+                hls.p2pEngine.addEventListener("onChunkUploaded", (bytesLength) => {
+                  stats.uploadBytes += bytesLength;
+                });
+                hls.p2pEngine.addEventListener("onPeerConnect", ({ peerId }) => {
+                  stats.peers.add(peerId);
+                });
+                hls.p2pEngine.addEventListener("onPeerClose", ({ peerId }) => {
+                  stats.peers.delete(peerId);
+                });
                 hls.p2pEngine.addEventListener("onTrackerError", ({ error }) => {
                   console.error("[P2P] Tracker error:", error);
                 });
@@ -632,6 +658,13 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
       switch (e.key) {
+        case "i":
+        case "I":
+          // Stats-for-nerds panel — available to every viewer (each has their
+          // own HLS stream and buffer to inspect), not just the host.
+          e.preventDefault();
+          setShowStats((s) => !s);
+          break;
         case " ":
           e.preventDefault();
           if (!isHostRef.current) return;
@@ -873,11 +906,24 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
         </div>
       )}
 
+      {showStats && vpsRelay !== null && (
+        <StatsOverlay
+          videoRef={videoRef}
+          hlsRef={hlsRef}
+          vpsRelay={vpsRelay}
+          sessionId={sessionIdRef.current}
+          p2pStatsRef={p2pStatsRef}
+          onClose={() => setShowStats(false)}
+        />
+      )}
+
       <Controls
         videoRef={videoRef}
         isHost={isHost}
         title={displayTitle}
         onBack={handleBack}
+        onToggleStats={() => setShowStats((s) => !s)}
+        statsActive={showStats}
         onSyncPause={isHost ? syncActions?.sendPause : undefined}
         onSyncResume={isHost ? syncActions?.sendResume : undefined}
         onSyncSeek={isHost ? syncActions?.sendSeek : undefined}

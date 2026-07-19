@@ -19,7 +19,7 @@
     "streaming"
   ],
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "workspaces": [
     "packages/server",

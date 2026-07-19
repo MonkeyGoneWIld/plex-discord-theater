@@ -4,7 +4,7 @@ ARG TARGETPLATFORM=linux/amd64
 # ---------------------------------------------------------------------------
 # Stage 1 — Install dependencies (cached unless package files change)
 # ---------------------------------------------------------------------------
-FROM node:22-alpine AS deps
+FROM node:24-alpine AS deps
 WORKDIR /app
 
 COPY package.json package-lock.json ./
@@ -19,7 +19,7 @@ RUN apk add --no-cache python3 make g++ && \
 # ---------------------------------------------------------------------------
 # Stage 2 — Build client and server
 # ---------------------------------------------------------------------------
-FROM node:22-alpine AS build
+FROM node:24-alpine AS build
 WORKDIR /app
 
 COPY --from=deps /app/ .
@@ -38,7 +38,7 @@ RUN npm run build -w packages/client && \
 # ---------------------------------------------------------------------------
 # Stage 3 — Production image (minimal)
 # ---------------------------------------------------------------------------
-FROM node:22-alpine
+FROM node:24-alpine
 WORKDIR /app
 
 # Tini for proper PID 1 signal handling

@@ -13,9 +13,20 @@ const ALLOWED_GUILD_IDS = new Set(
 
 const INSTANCE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const MAX_INSTANCES = 10_000;
-export const instanceHosts = new Map<string, { hostUserId: string; guildId: string; createdAt: number }>();
-/** Maps guildId → active instanceId (one activity per server) */
-const guildInstances = new Map<string, string>();
+export const instanceHosts = new Map<
+  string,
+  { hostUserId: string; guildId: string | null; channelId: string | null; createdAt: number }
+>();
+/**
+ * Maps channelId → active instanceId. Scoped to the voice/DM channel, NOT
+ * the guild — this is what lets two different voice channels in the same
+ * Discord server run independent watch parties at once. (Previously this
+ * was keyed by guildId, which meant registering a second party anywhere in
+ * the same server silently evicted the first one's registration, orphaning
+ * it until the next reconnect/join, which then failed with "Unknown
+ * instance" / a misleading "Session expired" banner.)
+ */
+const channelInstances = new Map<string, string>();
 
 // SQLite persistence for instance registrations
 const dbDir = process.env.THUMB_CACHE_DIR
@@ -32,13 +43,25 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS instances (
     instance_id TEXT PRIMARY KEY,
     host_user_id TEXT NOT NULL,
-    guild_id TEXT NOT NULL,
+    guild_id TEXT,
+    channel_id TEXT,
     created_at INTEGER NOT NULL
   )
 `);
+// Idempotent migration: adds channel_id for DBs created before this column
+// existed. Safe to run on every startup — new installs already have the
+// column from CREATE TABLE above, so this just fails harmlessly on those.
+try {
+  db.exec(`ALTER TABLE instances ADD COLUMN channel_id TEXT`);
+} catch (err) {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!message.includes("duplicate column")) {
+    throw err;
+  }
+}
 
 const insertInstanceStmt = db.prepare(
-  "INSERT OR REPLACE INTO instances (instance_id, host_user_id, guild_id, created_at) VALUES (?, ?, ?, ?)"
+  "INSERT OR REPLACE INTO instances (instance_id, host_user_id, guild_id, channel_id, created_at) VALUES (?, ?, ?, ?, ?)"
 );
 const updateHostStmt = db.prepare("UPDATE instances SET host_user_id = ? WHERE instance_id = ?");
 
@@ -51,19 +74,23 @@ const deleteExpiredInstancesStmt = db.prepare("DELETE FROM instances WHERE creat
 // Load existing valid instances into memory on startup
 const validCutoff = Date.now() - INSTANCE_TTL_MS;
 deleteExpiredInstancesStmt.run(validCutoff);
-const existingInstances = db.prepare("SELECT instance_id, host_user_id, guild_id, created_at FROM instances").all() as Array<{
+const existingInstances = db.prepare("SELECT instance_id, host_user_id, guild_id, channel_id, created_at FROM instances").all() as Array<{
   instance_id: string;
   host_user_id: string;
-  guild_id: string;
+  guild_id: string | null;
+  channel_id: string | null;
   created_at: number;
 }>;
 for (const row of existingInstances) {
   instanceHosts.set(row.instance_id, {
     hostUserId: row.host_user_id,
-    guildId: row.guild_id,
+    guildId: row.guild_id || null,
+    channelId: row.channel_id || null,
     createdAt: row.created_at,
   });
-  guildInstances.set(row.guild_id, row.instance_id);
+  if (row.channel_id) {
+    channelInstances.set(row.channel_id, row.instance_id);
+  }
 }
 console.log(`[Discord] Loaded ${existingInstances.length} instances from SQLite`);
 
@@ -77,9 +104,9 @@ function pruneStaleInstances(): void {
     if (now - entry.createdAt > INSTANCE_TTL_MS) {
       instanceHosts.delete(id);
       deleteInstanceStmt.run(id);
-      // Clean up guild mapping too
-      if (guildInstances.get(entry.guildId) === id) {
-        guildInstances.delete(entry.guildId);
+      // Clean up channel mapping too
+      if (entry.channelId && channelInstances.get(entry.channelId) === id) {
+        channelInstances.delete(entry.channelId);
       }
     }
   }
@@ -164,18 +191,33 @@ router.post("/token", async (req: Request, res: Response) => {
  * Register the first user per instanceId as the host.
  */
 router.post("/register", (req: Request, res: Response) => {
-  const { instanceId, userId, guildId } = req.body;
-  if (!instanceId || !userId || !guildId) {
-    res.status(400).json({ error: "Missing instanceId, userId, or guildId" });
+  const { instanceId, userId, guildId, channelId } = req.body;
+
+  // guildId is now OPTIONAL: Discord Activities can also run in a DM/group-DM
+  // voice call, which has no guild at all — sdk.guildId is null there. The
+  // old code hard-required guildId, so launching outside a server failed
+  // immediately with "Missing instanceId, userId, or guildId".
+  if (!instanceId || !userId) {
+    res.status(400).json({ error: "Missing instanceId or userId" });
     return;
   }
 
-  if (typeof instanceId !== "string" || typeof userId !== "string" || typeof guildId !== "string") {
+  if (
+    typeof instanceId !== "string" ||
+    typeof userId !== "string" ||
+    (guildId != null && typeof guildId !== "string") ||
+    (channelId != null && typeof channelId !== "string")
+  ) {
     res.status(400).json({ error: "Invalid parameter types" });
     return;
   }
 
-  if (instanceId.length > 200 || userId.length > 200 || guildId.length > 200) {
+  if (
+    instanceId.length > 200 ||
+    userId.length > 200 ||
+    (typeof guildId === "string" && guildId.length > 200) ||
+    (typeof channelId === "string" && channelId.length > 200)
+  ) {
     res.status(400).json({ error: "Parameters too long" });
     return;
   }
@@ -199,19 +241,32 @@ router.post("/register", (req: Request, res: Response) => {
 
   pruneStaleInstances();
 
-  // Reject guilds not in the allowlist
-  if (ALLOWED_GUILD_IDS.size > 0 && !ALLOWED_GUILD_IDS.has(guildId)) {
-    res.status(403).json({ error: "This server is not authorized to use this activity." });
-    return;
+  const normalizedGuildId = typeof guildId === "string" && guildId.length > 0 ? guildId : "";
+  const normalizedChannelId = typeof channelId === "string" && channelId.length > 0 ? channelId : null;
+
+  // Reject guilds not in the allowlist. A DM (no guildId) can't be checked
+  // against a guild allowlist, so it's only permitted when the allowlist
+  // itself is disabled (ALLOWED_GUILD_IDS unset = open to everyone).
+  if (ALLOWED_GUILD_IDS.size > 0) {
+    if (!normalizedGuildId || !ALLOWED_GUILD_IDS.has(normalizedGuildId)) {
+      res.status(403).json({ error: "This server is not authorized to use this activity." });
+      return;
+    }
   }
 
-  // One active instance per guild — replace stale instances instead of blocking
-  const existingInstanceId = guildInstances.get(guildId);
-  if (existingInstanceId && existingInstanceId !== instanceId && instanceHosts.has(existingInstanceId)) {
-    // Remove the old instance so the new one can take over
-    deleteInstanceStmt.run(existingInstanceId);
-    instanceHosts.delete(existingInstanceId);
-    guildInstances.delete(guildId);
+  // One active instance per CHANNEL, not per guild — this is what allows
+  // multiple independent watch parties in different voice channels of the
+  // same server. Only evict a stale registration in the SAME channel;
+  // instances in other channels (or other guilds) are left untouched.
+  // Clients that don't send channelId (older builds) get no scoped eviction
+  // at all here, rather than falling back to the old guild-wide behavior.
+  if (normalizedChannelId) {
+    const existingInstanceId = channelInstances.get(normalizedChannelId);
+    if (existingInstanceId && existingInstanceId !== instanceId && instanceHosts.has(existingInstanceId)) {
+      deleteInstanceStmt.run(existingInstanceId);
+      instanceHosts.delete(existingInstanceId);
+      channelInstances.delete(normalizedChannelId);
+    }
   }
 
   if (instanceHosts.size >= MAX_INSTANCES) {
@@ -221,8 +276,8 @@ router.post("/register", (req: Request, res: Response) => {
       .sort((a, b) => a[1].createdAt - b[1].createdAt)
       .slice(0, toEvict);
     for (const [id, entry] of oldest) {
-      if (guildInstances.get(entry.guildId) === id) {
-        guildInstances.delete(entry.guildId);
+      if (entry.channelId && channelInstances.get(entry.channelId) === id) {
+        channelInstances.delete(entry.channelId);
       }
       deleteInstanceStmt.run(id);
       instanceHosts.delete(id);
@@ -231,9 +286,16 @@ router.post("/register", (req: Request, res: Response) => {
 
   if (!instanceHosts.has(instanceId)) {
     const now = Date.now();
-    instanceHosts.set(instanceId, { hostUserId: userId, guildId, createdAt: now });
-    guildInstances.set(guildId, instanceId);
-    insertInstanceStmt.run(instanceId, userId, guildId, now);
+    instanceHosts.set(instanceId, {
+      hostUserId: userId,
+      guildId: normalizedGuildId || null,
+      channelId: normalizedChannelId,
+      createdAt: now,
+    });
+    if (normalizedChannelId) {
+      channelInstances.set(normalizedChannelId, instanceId);
+    }
+    insertInstanceStmt.run(instanceId, userId, normalizedGuildId, normalizedChannelId, now);
   }
 
   const hostId = instanceHosts.get(instanceId)!.hostUserId;

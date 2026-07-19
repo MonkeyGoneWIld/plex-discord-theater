@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { fetchMeta, setStreams, getSessionToken, type PlexItem, type PlexMeta } from "../lib/api";
 import { SkeletonBlock } from "./SkeletonBlock";
 import type { QueueItem, SuggestionItem } from "../hooks/useSync";
@@ -28,6 +28,129 @@ function formatDuration(ms: number | undefined): string {
   const m = totalMin % 60;
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
+
+interface DropdownOption {
+  value: string;
+  label: string;
+}
+
+/**
+ * Custom dropdown replacing native <select>. Native selects hand their
+ * options popup off to the OS/browser, which renders it in a light theme
+ * on many platforms regardless of CSS (`color-scheme` is not reliably
+ * respected). Building it ourselves guarantees it always matches the UI.
+ */
+function TrackDropdown({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: DropdownOption[];
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, []);
+
+  const selected = options.find((o) => o.value === value);
+
+  return (
+    <div ref={ref} style={dropdownStyles.wrap}>
+      <button type="button" onClick={() => setOpen((o) => !o)} style={dropdownStyles.trigger}>
+        <span style={dropdownStyles.triggerLabel}>{selected?.label ?? ""}</span>
+        <svg width="10" height="6" viewBox="0 0 10 6" fill="none" style={{ flexShrink: 0, marginLeft: 8 }}>
+          <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && (
+        <div style={dropdownStyles.menu}>
+          {options.map((o) => (
+            <button
+              key={o.value}
+              type="button"
+              onClick={() => { onChange(o.value); setOpen(false); }}
+              style={{
+                ...dropdownStyles.option,
+                ...(o.value === value ? dropdownStyles.optionActive : {}),
+              }}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const dropdownStyles: Record<string, React.CSSProperties> = {
+  wrap: { position: "relative", width: "100%" },
+  trigger: {
+    width: "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "9px 12px",
+    borderRadius: "8px",
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(255,255,255,0.06)",
+    color: "#ddd",
+    fontSize: "14px",
+    fontFamily: "inherit",
+    cursor: "pointer",
+  },
+  triggerLabel: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  menu: {
+    position: "absolute",
+    top: "calc(100% + 6px)",
+    left: 0,
+    right: 0,
+    maxHeight: "260px",
+    overflowY: "auto" as const,
+    borderRadius: "10px",
+    border: "1px solid rgba(255,255,255,0.1)",
+    background: "rgba(20,20,20,0.98)",
+    backdropFilter: "blur(20px)",
+    boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+    zIndex: 50,
+    padding: "4px 0",
+  },
+  option: {
+    display: "block",
+    width: "100%",
+    padding: "9px 14px",
+    border: "none",
+    background: "transparent",
+    color: "#ccc",
+    fontSize: "13px",
+    fontFamily: "inherit",
+    textAlign: "left" as const,
+    cursor: "pointer",
+  },
+  optionActive: {
+    color: "#e5a00d",
+    background: "rgba(229,160,13,0.08)",
+  },
+};
 
 export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQueue, onSuggest }: MovieDetailProps) {
   const [meta, setMeta] = useState<PlexMeta | null>(null);
@@ -186,34 +309,25 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                 {meta.audioTracks.length > 1 && (
                   <div style={styles.trackField}>
                     <label style={styles.trackLabel}>Audio</label>
-                    <select
-                      value={selectedAudio ?? ""}
-                      onChange={(e) => setSelectedAudio(Number(e.target.value))}
-                      style={styles.trackSelect}
-                    >
-                      {meta.audioTracks.map((t) => (
-                        <option key={t.id} value={t.id}>{t.title}</option>
-                      ))}
-                    </select>
+                    <TrackDropdown
+                      value={selectedAudio != null ? String(selectedAudio) : ""}
+                      options={meta.audioTracks.map((t) => ({ value: String(t.id), label: t.title }))}
+                      onChange={(v) => setSelectedAudio(Number(v))}
+                    />
                   </div>
                 )}
 
                 {meta.subtitleTracks.length > 0 && (
                   <div style={styles.trackField}>
                     <label style={styles.trackLabel}>Subtitles</label>
-                    <select
-                      value={selectedSubtitle ?? ""}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        setSelectedSubtitle(v === "" ? null : Number(v));
-                      }}
-                      style={styles.trackSelect}
-                    >
-                      <option value="">None</option>
-                      {meta.subtitleTracks.map((t) => (
-                        <option key={t.id} value={t.id}>{t.title}</option>
-                      ))}
-                    </select>
+                    <TrackDropdown
+                      value={selectedSubtitle != null ? String(selectedSubtitle) : ""}
+                      options={[
+                        { value: "", label: "None" },
+                        ...meta.subtitleTracks.map((t) => ({ value: String(t.id), label: t.title })),
+                      ]}
+                      onChange={(v) => setSelectedSubtitle(v === "" ? null : Number(v))}
+                    />
                   </div>
                 )}
               </div>
@@ -473,19 +587,6 @@ const styles: Record<string, React.CSSProperties> = {
     textTransform: "uppercase",
     letterSpacing: "0.05em",
     marginBottom: "6px",
-  },
-  trackSelect: {
-    width: "100%",
-    padding: "9px 12px",
-    borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(255,255,255,0.06)",
-    color: "#ddd",
-    fontSize: "14px",
-    fontFamily: "inherit",
-    cursor: "pointer",
-    appearance: "auto" as React.CSSProperties["appearance"],
-    colorScheme: "dark" as React.CSSProperties["colorScheme"],
   },
   actions: {
     marginTop: "28px",

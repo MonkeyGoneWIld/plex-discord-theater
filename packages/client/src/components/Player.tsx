@@ -9,6 +9,7 @@ import { QueuePanel } from "./QueuePanel";
 import { UpNext } from "./UpNext";
 import { SkipMarkerButton } from "./SkipMarkerButton";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, saveProgress, fetchMeta } from "../lib/api";
+import { formatMediaTitle } from "../lib/format";
 import type { PlexItem, SkipMarker } from "../lib/api";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
 
@@ -375,7 +376,10 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
 
           // Host: broadcast play with sessionId when manifest is ready
           if (isHostRef.current) {
-            syncActionsRef.current?.sendPlay(item.ratingKey, item.title, subtitles, sessionId!);
+            // Send the formatted title, not the bare episode name — viewers
+            // reconstruct their item from sync state alone (no show/season
+            // fields), so this string is all they have to display.
+            syncActionsRef.current?.sendPlay(item.ratingKey, formatMediaTitle(item), subtitles, sessionId!);
           }
         });
 
@@ -495,7 +499,10 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
           if (!mounted) return;
           video.play().catch((err) => console.warn("Autoplay prevented:", err));
           if (isHostRef.current) {
-            syncActionsRef.current?.sendPlay(item.ratingKey, item.title, subtitles, sessionId!);
+            // Send the formatted title, not the bare episode name — viewers
+            // reconstruct their item from sync state alone (no show/season
+            // fields), so this string is all they have to display.
+            syncActionsRef.current?.sendPlay(item.ratingKey, formatMediaTitle(item), subtitles, sessionId!);
           }
         };
         video.addEventListener("loadedmetadata", onLoaded, { once: true });
@@ -845,11 +852,7 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
   }, [isHost, markers]);
 
   // Build rich display title for Controls top bar
-  const displayTitle = item.parentTitle
-    ? `${item.parentTitle} \u2014 S${item.parentIndex ?? "?"}E${item.index ?? "?"} \u00b7 ${item.title}`
-    : item.year
-      ? `${item.title} (${item.year})`
-      : item.title;
+  const displayTitle = formatMediaTitle(item);
 
   return (
     <div style={styles.container}>

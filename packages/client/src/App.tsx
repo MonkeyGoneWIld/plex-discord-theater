@@ -7,6 +7,7 @@ import { ShowDetail } from "./components/ShowDetail";
 import { SeasonDetail } from "./components/SeasonDetail";
 import { Player } from "./components/Player";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { formatMediaTitle } from "./lib/format";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem } from "./hooks/useSync";
 
@@ -133,12 +134,7 @@ export function App() {
       emitBrowse(`Looking at ${item.title}`);
     } else {
       pushView({ kind: "detail", item });
-      const label = item.parentTitle
-        ? `Looking at ${item.parentTitle} \u2014 S${item.parentIndex ?? "?"}E${item.index ?? "?"} \u00b7 ${item.title}`
-        : item.year
-          ? `Looking at ${item.title} (${item.year})`
-          : `Looking at ${item.title}`;
-      emitBrowse(label);
+      emitBrowse(`Looking at ${formatMediaTitle(item)}`);
     }
   }, [pushView, emitBrowse]);
 
@@ -160,10 +156,7 @@ export function App() {
 
   const handleSeasonEpisode = useCallback((episode: PlexItem) => {
     pushView({ kind: "detail", item: episode });
-    const label = episode.parentTitle
-      ? `Looking at ${episode.parentTitle} \u2014 S${episode.parentIndex ?? "?"}E${episode.index ?? "?"} \u00b7 ${episode.title}`
-      : `Looking at ${episode.title}`;
-    emitBrowse(label);
+    emitBrowse(`Looking at ${formatMediaTitle(episode)}`);
   }, [pushView, emitBrowse]);
 
   const handlePlayNext = useCallback((queueItem: QueueItem) => {

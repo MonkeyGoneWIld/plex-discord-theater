@@ -18,6 +18,13 @@ const MAX_NETWORK_RETRIES = 5;
 // After an in-place seek to an unbuffered position, how long to wait for
 // segments before giving up and restarting the transcode at the target.
 const SEEK_STALL_TIMEOUT_MS = 6_000;
+// How far past the delivered buffer an unbuffered forward seek may reach before
+// we skip the in-place attempt and restart the transcode outright. Plex
+// transcodes linearly, so a large forward jump lands past the transcode head —
+// those segments don't exist yet and never arrive, so the in-place seek can only
+// stall. Modest jumps stay in-place: Plex has usually transcoded a bit ahead of
+// what hls.js has buffered, and the stall timeout recovers if it hasn't.
+const FAR_SEEK_THRESHOLD_S = 120;
 
 /** Whether the video has enough buffered data at `t` to play from there. */
 function isPositionBuffered(video: HTMLVideoElement, t: number): boolean {
@@ -26,6 +33,12 @@ function isPositionBuffered(video: HTMLVideoElement, t: number): boolean {
     if (t >= buffered.start(i) - 0.1 && t < buffered.end(i) - 0.3) return true;
   }
   return false;
+}
+
+/** End of the furthest buffered range — approximates how far Plex has delivered. */
+function bufferedEnd(video: HTMLVideoElement): number {
+  const { buffered } = video;
+  return buffered.length > 0 ? buffered.end(buffered.length - 1) : video.currentTime;
 }
 
 interface PlayerProps {
@@ -587,6 +600,14 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
     }
 
     const wasBuffered = isPositionBuffered(video, positionSeconds);
+    // Large forward jump past the transcode head — segments can't exist yet, so
+    // an in-place seek would only stall for SEEK_STALL_TIMEOUT_MS before falling
+    // back to a restart anyway. Restart at the target directly and skip the stall.
+    if (!wasBuffered && positionSeconds - bufferedEnd(video) > FAR_SEEK_THRESHOLD_S) {
+      handleSeekRestart(positionSeconds);
+      return;
+    }
+
     video.currentTime = positionSeconds;
     syncActionsRef.current?.sendSeek(positionSeconds);
     if (wasBuffered) return;

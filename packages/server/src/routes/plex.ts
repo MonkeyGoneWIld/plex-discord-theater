@@ -87,6 +87,26 @@ interface PlexMedia {
   Part?: PlexPart[];
 }
 
+/**
+ * Raw Plex intro/credits marker. Offsets are in MILLISECONDS.
+ * `type` is left as a plain string because Plex has added marker types over
+ * time (e.g. "commercial") — a narrow union would turn an unknown type into a
+ * compile error rather than a harmless runtime no-op in mapMarkers().
+ */
+interface PlexMarker {
+  id?: number;
+  type: string;
+  startTimeOffset?: number;
+  endTimeOffset?: number;
+}
+
+/** Normalized marker sent to the client. Times are SECONDS (video.currentTime units). */
+interface SkipMarker {
+  type: "intro" | "credits";
+  start: number;
+  end: number;
+}
+
 interface PlexMetadataItem {
   ratingKey: string;
   title: string;
@@ -98,6 +118,7 @@ interface PlexMetadataItem {
   art?: string;
   Genre?: Array<{ tag: string }>;
   Media?: PlexMedia[];
+  Marker?: PlexMarker[];
   index?: number;
   parentIndex?: number;
   parentTitle?: string;
@@ -331,6 +352,7 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
   try {
     const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
       `/library/metadata/${ratingKey}`,
+      { includeMarkers: "1" },
     );
     const metadata = data.MediaContainer.Metadata;
     if (!metadata || metadata.length === 0) {
@@ -379,6 +401,7 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       partId: part?.id ?? null,
       audioTracks,
       subtitleTracks,
+      markers: mapMarkers(m.Marker),
     });
   } catch (err) {
     console.error("Metadata error:", err);
@@ -1395,6 +1418,30 @@ function mapItem(m: PlexMetadataItem) {
     ...(m.summary != null && { summary: m.summary }),
     ...(m.duration != null && { duration: m.duration }),
   };
+}
+
+const SKIPPABLE_MARKER_TYPES = new Set(["intro", "credits"]);
+
+/**
+ * Normalize Plex markers for the client: keep only skippable types and convert
+ * millisecond offsets to seconds, so the client can compare directly against
+ * video.currentTime and seek without any unit arithmetic of its own.
+ *
+ * Always returns an array — libraries without intro detection simply yield [],
+ * which the client renders as "no button" with no null handling. Degenerate
+ * zero-length markers are dropped so the button can't flash on and instantly off.
+ */
+function mapMarkers(markers: PlexMarker[] | undefined): SkipMarker[] {
+  if (!markers) return [];
+  return markers
+    .filter((m) => SKIPPABLE_MARKER_TYPES.has(m.type))
+    .map((m) => ({
+      type: m.type as "intro" | "credits",
+      start: (m.startTimeOffset ?? 0) / 1000,
+      end: (m.endTimeOffset ?? 0) / 1000,
+    }))
+    .filter((m) => Number.isFinite(m.start) && Number.isFinite(m.end) && m.end > m.start)
+    .sort((a, b) => a.start - b.start);
 }
 
 /** Reject paths with traversal sequences, double slashes, null bytes, or backslashes. */

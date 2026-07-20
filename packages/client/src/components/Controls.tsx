@@ -46,6 +46,23 @@ interface ControlsProps {
  */
 const PREVIEW_BUCKET_MS = 10_000;
 
+/**
+ * Minimum gap between preview-frame requests while the cursor is moving.
+ *
+ * Buckets are dense relative to the bar — a 2h film is ~720 buckets across
+ * ~800px, so roughly one per pixel. Without a throttle a single sweep queues
+ * hundreds of loads. Leading-edge, so the first move still shows a frame
+ * immediately, with a trailing flush so wherever the cursor stops always loads.
+ */
+const PREVIEW_THROTTLE_MS = 120;
+
+/**
+ * How many decoded frames to keep. Scrubbing back over ground you've already
+ * covered is the common motion, and a hit here is instant — no request, no
+ * decode, no flicker. ~200 frames is a couple of MB of already-decoded images.
+ */
+const PREVIEW_CACHE_MAX = 200;
+
 function fmt(seconds: number): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
@@ -100,6 +117,13 @@ export function Controls({
   // the thumb route forwards Plex's 404 without caching the negative, so without
   // this latch every hover would be a fresh live 404.
   const failedPartRef = useRef<number | null>(null);
+  // Frames that have already decoded, keyed by URL. Insertion-ordered, so the
+  // oldest key is the eviction candidate.
+  const previewCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  // Latest bucket the cursor has been over, and the throttle timer. Held in refs
+  // so mousemove never re-renders just to record where we're heading.
+  const pendingPreviewRef = useRef<string | null>(null);
+  const previewThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [hintsVisible, setHintsVisible] = useState(showKeyboardHints);
   const progressRef = useRef<HTMLDivElement>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -289,16 +313,82 @@ export function Controls({
     // No w/h params: those divert the thumb route through /photo/:/transcode,
     // which can't resolve a BIF path. Frames are already small — size with CSS.
     const url = authUrl(`/api/plex/thumb/library/parts/${previewPartId}/indexes/sd/${bucketMs}`);
-    setPreviewSrc((prev) => (prev === url ? prev : url));
+    if (pendingPreviewRef.current === url) return;
+    pendingPreviewRef.current = url;
+
+    // A cached frame is free — show it now and skip the throttle entirely, so
+    // retracing ground you've already scrubbed tracks the cursor exactly.
+    if (previewCacheRef.current.has(url)) {
+      setPreviewSrc(url);
+      setLoadedPreviewSrc(url);
+      return;
+    }
+
+    // Leading edge, then a single trailing flush to wherever the cursor ended up.
+    if (previewThrottleRef.current !== null) return;
+    setPreviewSrc(url);
+    previewThrottleRef.current = setTimeout(() => {
+      previewThrottleRef.current = null;
+      const latest = pendingPreviewRef.current;
+      if (latest && latest !== url) setPreviewSrc(latest);
+    }, PREVIEW_THROTTLE_MS);
   }, [previewPartId, duration]);
 
-  // Clear preview state when the item changes, including the failure latch so a
-  // new part gets a fresh chance.
+  // Load the wanted frame, promoting it to the display only once decoded.
+  //
+  // A superseded load is deliberately NOT aborted: it costs nothing extra at this
+  // point and lands in the cache, so sweeping across the bar warms the frames you
+  // then scrub back over. The previous implementation reassigned one <img>'s src,
+  // which aborted in flight — during a sweep almost nothing ever finished.
+  useEffect(() => {
+    if (!previewSrc) return;
+    const cache = previewCacheRef.current;
+    if (cache.has(previewSrc)) {
+      setLoadedPreviewSrc(previewSrc);
+      return;
+    }
+    let superseded = false;
+    const img = new Image();
+    img.onload = () => {
+      cache.set(previewSrc, img);
+      if (cache.size > PREVIEW_CACHE_MAX) {
+        const oldest = cache.keys().next().value;
+        if (oldest !== undefined) cache.delete(oldest);
+      }
+      if (!superseded) setLoadedPreviewSrc(previewSrc);
+    };
+    img.onerror = () => {
+      // Latch even when superseded. Since loads are no longer aborted, a part
+      // with no frames would otherwise keep firing 404s for the whole sweep
+      // before a non-superseded one happened to land.
+      if (previewPartId != null) failedPartRef.current = previewPartId;
+      if (superseded) return;
+      pendingPreviewRef.current = null;
+      setPreviewSrc(null);
+      setLoadedPreviewSrc(null);
+    };
+    img.src = previewSrc;
+    return () => { superseded = true; };
+  }, [previewSrc, previewPartId]);
+
+  // Clear preview state when the item changes, including the failure latch and
+  // the frame cache — those URLs belong to the previous part.
   useEffect(() => {
     setPreviewSrc(null);
     setLoadedPreviewSrc(null);
     failedPartRef.current = null;
+    previewCacheRef.current.clear();
+    pendingPreviewRef.current = null;
+    if (previewThrottleRef.current !== null) {
+      clearTimeout(previewThrottleRef.current);
+      previewThrottleRef.current = null;
+    }
   }, [previewPartId]);
+
+  // Drop the throttle timer on unmount.
+  useEffect(() => () => {
+    if (previewThrottleRef.current !== null) clearTimeout(previewThrottleRef.current);
+  }, []);
 
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
   const buffered = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
@@ -353,24 +443,6 @@ export function Controls({
               )}
               {fmt(hoverPct * duration)}
             </div>
-          )}
-          {/* Off-screen loader: a frame only becomes visible once it has decoded,
-              so the bubble never flashes empty while the next one is in flight.
-              Kept outside the hover conditional deliberately — remounting it on
-              every hover-out would lose the abort-on-src-change behaviour that
-              bounds us to one in-flight request. */}
-          {previewSrc && (
-            <img
-              src={previewSrc}
-              alt=""
-              style={{ display: "none" }}
-              onLoad={() => setLoadedPreviewSrc(previewSrc)}
-              onError={() => {
-                if (previewPartId != null) failedPartRef.current = previewPartId;
-                setPreviewSrc(null);
-                setLoadedPreviewSrc(null);
-              }}
-            />
           )}
           <div style={{ ...styles.progressTrack, height: barHeight, transition: "height 0.15s ease" }}>
             <div style={{ ...styles.progressBuffer, width: `${buffered}%` }} />

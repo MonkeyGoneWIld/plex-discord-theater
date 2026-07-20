@@ -7,6 +7,7 @@ import { ShowDetail } from "./components/ShowDetail";
 import { SeasonDetail } from "./components/SeasonDetail";
 import { Player } from "./components/Player";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { PeoplePanel } from "./components/PeoplePanel";
 import { formatMediaTitle } from "./lib/format";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem } from "./hooks/useSync";
@@ -47,6 +48,10 @@ export function App() {
 
   // Persist active library section across navigation
   const [librarySection, setLibrarySection] = useState<string | null>(null);
+
+  // Roster/roles panel, reachable from the header while browsing. The player has
+  // its own copy for use during playback (the header is hidden there).
+  const [showPeoplePanel, setShowPeoplePanel] = useState(false);
 
   const pushView = useCallback((v: View) => {
     setViewStack((s) => [...s, v]);
@@ -216,8 +221,21 @@ export function App() {
           <span style={styles.user}>
             {username} {effectiveIsHost ? "(Host)" : "(Viewer)"}
             {!effectiveIsHost && syncState.connected && " \u2022 Synced"}
-            {!effectiveIsHost && syncState.hostUsername && (
-              <span style={styles.hostLabel}> &middot; Host: {syncState.hostUsername}</span>
+            {syncState.connected && (
+              <button
+                onClick={() => setShowPeoplePanel(true)}
+                style={styles.peopleBtn}
+                title={effectiveIsHost ? "People & roles" : "Who's here"}
+              >
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                  <circle cx="6" cy="5" r="2.4" stroke="currentColor" strokeWidth="1.5"/>
+                  <path d="M1.5 13.5c0-2.2 2-3.6 4.5-3.6s4.5 1.4 4.5 3.6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                  <path d="M11 4.2a2.2 2.2 0 0 1 0 4.2M12.5 13.5c0-1.7-.7-2.9-2-3.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                </svg>
+                {effectiveIsHost
+                  ? syncState.participants.length || ""
+                  : `Host: ${syncState.hostUsername ?? "\u2014"}`}
+              </button>
             )}
           </span>
         </header>
@@ -226,6 +244,21 @@ export function App() {
       {/* Host promotion toast */}
       {promotedToast && (
         <div style={styles.promotedToast}>You are now the host</div>
+      )}
+
+      {/* People & roles — role controls inside are host-gated */}
+      {showPeoplePanel && (
+        <PeoplePanel
+          participants={syncState.participants}
+          selfUserId={userId}
+          isHost={effectiveIsHost}
+          onPromoteHost={(uid) => {
+            syncActions.sendPromoteHost(uid);
+            setShowPeoplePanel(false);
+          }}
+          onSetCoHost={(uid, value) => syncActions.sendSetCoHost(uid, value)}
+          onClose={() => setShowPeoplePanel(false)}
+        />
       )}
 
       {/* Viewer suggestions — host only */}
@@ -357,6 +390,7 @@ export function App() {
           <Player
             item={view.item}
             isHost={effectiveIsHost}
+            selfUserId={userId}
             subtitles={view.subtitles}
             onBack={popView}
             syncState={syncState}
@@ -406,9 +440,21 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#888",
     fontWeight: 500,
   },
-  hostLabel: {
+  peopleBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "5px",
+    marginLeft: "10px",
+    padding: "3px 9px",
+    borderRadius: "999px",
+    border: "1px solid rgba(229,160,13,0.35)",
+    background: "rgba(229,160,13,0.08)",
     color: "#e5a00d",
+    fontSize: "12px",
     fontWeight: 600,
+    cursor: "pointer",
+    fontFamily: "inherit",
+    verticalAlign: "middle",
   },
   center: {
     display: "flex",

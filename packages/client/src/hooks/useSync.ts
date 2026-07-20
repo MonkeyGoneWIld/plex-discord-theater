@@ -55,6 +55,23 @@ export interface SyncState {
    *  Requires the server to relay "suggest" messages from a viewer to the
    *  host as a "suggestion" message: { type: "suggestion", item: {...} }. */
   suggestions: SuggestionItem[];
+  /** Everyone currently in the room, with their roles. Refreshed by the server
+   *  on join, leave, and any role change. */
+  participants: Participant[];
+  /** Whether *this* client is a co-host (transport control, granted by the host).
+   *  Always false for the host, whose rights already supersede it. */
+  isCoHost: boolean;
+  /** A co-host asked for a subtitle change. Only the host acts on it, since
+   *  subtitles are burned in and applying one restarts the transcode. `seq`
+   *  makes repeat requests for the same track fire the effect again. */
+  subtitleRequest: { partId: number; subtitleStreamID: number; seq: number } | null;
+}
+
+export interface Participant {
+  userId: string;
+  username: string | null;
+  isHost: boolean;
+  isCoHost: boolean;
 }
 
 export interface SyncActions {
@@ -73,6 +90,12 @@ export interface SyncActions {
   sendSuggest: (item: SuggestionItem) => void;
   /** Host: dismiss a suggestion from the list once seen/handled. */
   sendDismissSuggestion: (ratingKey: string) => void;
+  /** Host: hand the host role to someone else. The sender drops to a plain viewer. */
+  sendPromoteHost: (userId: string) => void;
+  /** Host: grant or revoke transport control for a viewer. */
+  sendSetCoHost: (userId: string, value: boolean) => void;
+  /** Host or co-host: request a subtitle track. The host applies it. */
+  sendSetSubtitle: (partId: number, subtitleStreamID: number) => void;
 }
 
 interface UseSyncOptions {
@@ -100,6 +123,9 @@ const INITIAL_STATE: SyncState = {
   reconnectFailed: false,
   browseContext: null,
   queue: [],
+  participants: [],
+  isCoHost: false,
+  subtitleRequest: null,
 };
 
 export function useSync({ instanceId, userId, username, enabled }: UseSyncOptions): {
@@ -134,6 +160,11 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       sendQueueReorder: (queue: QueueItem[]) => send({ type: "queue-reorder", queue }),
       sendSuggest: (item: SuggestionItem) => send({ type: "suggest", item }),
       sendDismissSuggestion: (ratingKey: string) => send({ type: "suggest-dismiss", ratingKey }),
+      sendPromoteHost: (targetUserId: string) => send({ type: "promote-host", userId: targetUserId }),
+      sendSetCoHost: (targetUserId: string, value: boolean) =>
+        send({ type: "set-cohost", userId: targetUserId, value }),
+      sendSetSubtitle: (partId: number, subtitleStreamID: number) =>
+        send({ type: "set-subtitle", partId, subtitleStreamID }),
     }),
     [send],
   );
@@ -190,6 +221,34 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               browseContext: (msg.browseContext as string) || null,
               queue: (msg.queue as QueueItem[]) || [],
               hostUsername: (msg.hostUsername as string) || prev.hostUsername,
+              participants: (msg.participants as Participant[]) || [],
+              isCoHost:
+                ((msg.participants as Participant[]) || []).find((p) => p.userId === userId)
+                  ?.isCoHost ?? false,
+            }));
+            break;
+          case "participants": {
+            const participants = (msg.participants as Participant[]) || [];
+            setState((prev) => ({
+              ...prev,
+              participants,
+              // Re-derive our own role from the roster so a revoked co-host
+              // loses their controls without needing a separate message.
+              isCoHost: participants.find((p) => p.userId === userId)?.isCoHost ?? false,
+            }));
+            break;
+          }
+          case "cohost-changed":
+            setState((prev) => ({ ...prev, isCoHost: Boolean(msg.isCoHost) }));
+            break;
+          case "set-subtitle":
+            setState((prev) => ({
+              ...prev,
+              subtitleRequest: {
+                partId: msg.partId as number,
+                subtitleStreamID: msg.subtitleStreamID as number,
+                seq: (prev.subtitleRequest?.seq ?? 0) + 1,
+              },
             }));
             break;
           case "play":
@@ -290,6 +349,9 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             setState((prev) => ({
               ...prev,
               isHost: true,
+              // Host rights supersede co-host; clear it so the UI doesn't
+              // briefly show both badges before the roster arrives.
+              isCoHost: false,
               hostDisconnected: false,
               hostUsername: (msg.hostUsername as string) || prev.hostUsername,
             }));

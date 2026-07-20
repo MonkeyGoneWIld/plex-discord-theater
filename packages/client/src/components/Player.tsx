@@ -7,6 +7,7 @@ import type { P2PStats } from "./StatsOverlay";
 import { TrackSwitcher } from "./TrackSwitcher";
 import { QueuePanel } from "./QueuePanel";
 import { UpNext } from "./UpNext";
+import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, saveProgress, fetchMeta } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
@@ -48,6 +49,8 @@ function bufferedEnd(video: HTMLVideoElement): number {
 interface PlayerProps {
   item: PlexItem;
   isHost: boolean;
+  /** Our own Discord user id — lets the people panel label and skip ourselves. */
+  selfUserId?: string | null;
   subtitles: boolean;
   onBack: () => void;
   syncState?: SyncState;
@@ -55,7 +58,7 @@ interface PlayerProps {
   onPlayNext?: (item: QueueItem) => void;
 }
 
-export function Player({ item, isHost, subtitles, onBack, syncState, syncActions, onPlayNext }: PlayerProps) {
+export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syncState, syncActions, onPlayNext }: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -68,6 +71,7 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
   const [showTrackSwitcher, setShowTrackSwitcher] = useState(false);
   const [trackSwitching, setTrackSwitching] = useState<"audio" | "subtitle" | null>(null);
   const [showQueuePanel, setShowQueuePanel] = useState(false);
+  const [showPeoplePanel, setShowPeoplePanel] = useState(false);
   const [showStats, setShowStats] = useState(false);
   const [showUpNext, setShowUpNext] = useState(false);
   // Cumulative P2P delivery counters, filled from the p2p-media-loader engine
@@ -108,6 +112,14 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
   const isHostRef = useRef(isHost);
   isHostRef.current = isHost;
   const ownsSessionRef = useRef(isHost);
+
+  // Transport rights: the host, plus anyone the host has granted co-host.
+  // Note this is UX only — the server independently enforces the same rule.
+  // Session ownership stays strictly host-only (ownsSessionRef above): a co-host
+  // never pings or stops the Plex transcode.
+  const canControl = isHost || (syncState?.isCoHost ?? false);
+  const canControlRef = useRef(canControl);
+  canControlRef.current = canControl;
 
   // Whether this Player mounted as host — controls viewerHlsSessionId computation.
   // Using a mount-time ref prevents promotion from flipping the value to null
@@ -187,13 +199,13 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
   useEffect(() => {
     setMarkers([]);
     setActiveMarker(null);
-    if (!isHost) return;
+    if (!canControl) return;
     let cancelled = false;
     fetchMeta(item.ratingKey)
       .then((meta) => { if (!cancelled) setMarkers(meta.markers ?? []); })
       .catch(() => { /* markers are optional — never surface an error over a working stream */ });
     return () => { cancelled = true; };
-  }, [item.ratingKey, isHost]);
+  }, [item.ratingKey, canControl]);
 
   // Single HLS session — no mid-stream switching
   useEffect(() => {
@@ -570,12 +582,16 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
   // Viewer: respond to explicit host commands (play/pause/resume/seek)
   // Does NOT fire on heartbeats — both clients share the same HLS stream
   // so they naturally stay in sync without constant seeking.
+  // The host runs this too, because a co-host's transport commands arrive the
+  // same way. The server excludes the sender from its broadcast, so anything the
+  // host receives here necessarily originated elsewhere and is safe to apply.
   useEffect(() => {
-    if (isHostRef.current || !syncState || syncState.commandSeq === 0) return;
+    if (!syncState || syncState.commandSeq === 0) return;
+    const amHost = isHostRef.current;
 
     // Viewer recovery: if HLS died after exhausting retries, a new host command
     // means the stream may be alive again — reset and retry
-    if (hlsDeadRef.current) {
+    if (!amHost && hlsDeadRef.current) {
       hlsDeadRef.current = false;
       retryCountRef.current = 0;
       setRetryKey((k) => k + 1);
@@ -596,7 +612,14 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
     if (syncState.position > 0) {
       const drift = Math.abs(video.currentTime - syncState.position);
       if (drift > DRIFT_THRESHOLD_S) {
-        video.currentTime = syncState.position;
+        if (amHost) {
+          // The host owns the transcode, so a co-host's seek has to go through
+          // the smart path — a far jump needs a restart at the new offset, not a
+          // bare currentTime write. broadcast=false stops it echoing back out.
+          handleHostSeekRef.current(syncState.position, false);
+        } else {
+          video.currentTime = syncState.position;
+        }
       }
     }
   }, [syncState?.commandSeq]);
@@ -619,14 +642,16 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
 
   // Full seek recovery: restart the Plex transcode with an offset so segments
   // exist at the target position. Used when the target can't be reached in-place.
-  const handleSeekRestart = useCallback((positionSeconds: number) => {
+  // `broadcast` is false when we're applying a seek that came *from* someone else
+  // (a co-host) — re-sending it would echo the command back around the room.
+  const handleSeekRestart = useCallback((positionSeconds: number, broadcast = true) => {
     if (seekStallTimerRef.current !== null) {
       clearTimeout(seekStallTimerRef.current);
       seekStallTimerRef.current = null;
     }
     seekOffsetRef.current = positionSeconds;
     setBuffering(true);
-    syncActionsRef.current?.sendSeek(positionSeconds);
+    if (broadcast) syncActionsRef.current?.sendSeek(positionSeconds);
     setRetryKey((k) => k + 1);
   }, []);
 
@@ -639,10 +664,10 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
   //    back-seeks hit segments already on disk). If segments don't arrive
   //    within SEEK_STALL_TIMEOUT_MS, fall back to a transcode restart.
   //  - Target before the session's start offset: segments can't exist — restart.
-  const handleHostSeek = useCallback((positionSeconds: number) => {
+  const handleHostSeek = useCallback((positionSeconds: number, broadcast = true) => {
     const video = videoRef.current;
     if (!video) {
-      handleSeekRestart(positionSeconds);
+      handleSeekRestart(positionSeconds, broadcast);
       return;
     }
     if (seekStallTimerRef.current !== null) {
@@ -651,7 +676,7 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
     }
 
     if (positionSeconds < sessionStartOffsetRef.current) {
-      handleSeekRestart(positionSeconds);
+      handleSeekRestart(positionSeconds, broadcast);
       return;
     }
 
@@ -660,12 +685,12 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
     // an in-place seek would only stall for SEEK_STALL_TIMEOUT_MS before falling
     // back to a restart anyway. Restart at the target directly and skip the stall.
     if (!wasBuffered && positionSeconds - bufferedEnd(video) > FAR_SEEK_THRESHOLD_S) {
-      handleSeekRestart(positionSeconds);
+      handleSeekRestart(positionSeconds, broadcast);
       return;
     }
 
     video.currentTime = positionSeconds;
-    syncActionsRef.current?.sendSeek(positionSeconds);
+    if (broadcast) syncActionsRef.current?.sendSeek(positionSeconds);
     if (wasBuffered) return;
 
     setBuffering(true);
@@ -679,6 +704,29 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
       }
     }, SEEK_STALL_TIMEOUT_MS);
   }, [handleSeekRestart]);
+
+  // Live ref so the command-handling effect (declared above) can reach the
+  // current handleHostSeek without listing it as a dep — naming it directly in a
+  // dep array would evaluate it during render, before this const is initialised.
+  const handleHostSeekRef = useRef(handleHostSeek);
+  handleHostSeekRef.current = handleHostSeek;
+
+  /**
+   * Seek entry point for whoever is driving. The host owns the Plex transcode so
+   * it takes the smart path (in-place vs restart-at-offset). A co-host doesn't
+   * own the session — it just moves its own playhead and sends the command; the
+   * host receives it and does any transcode work, then re-announces the new
+   * session id via sendPlay on MANIFEST_PARSED.
+   */
+  const handleSeekCommand = useCallback((positionSeconds: number) => {
+    if (isHostRef.current) {
+      handleHostSeek(positionSeconds);
+      return;
+    }
+    const video = videoRef.current;
+    if (video) video.currentTime = positionSeconds;
+    syncActionsRef.current?.sendSeek(positionSeconds);
+  }, [handleHostSeek]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -697,7 +745,7 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
           break;
         case " ":
           e.preventDefault();
-          if (!isHostRef.current) return;
+          if (!canControlRef.current) return;
           if (video.paused) {
             video.play();
             syncActionsRef.current?.sendResume(video.currentTime);
@@ -708,13 +756,13 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
           break;
         case "ArrowLeft":
           e.preventDefault();
-          if (!isHostRef.current) return;
-          handleHostSeek(Math.max(0, video.currentTime - 10));
+          if (!canControlRef.current) return;
+          handleSeekCommand(Math.max(0, video.currentTime - 10));
           break;
         case "ArrowRight":
           e.preventDefault();
-          if (!isHostRef.current) return;
-          handleHostSeek(Math.min(video.duration || 0, video.currentTime + 10));
+          if (!canControlRef.current) return;
+          handleSeekCommand(Math.min(video.duration || 0, video.currentTime + 10));
           break;
         case "m":
         case "M":
@@ -785,6 +833,39 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
     setRetryKey((k) => k + 1);
   }, []);
 
+  // Live ref so the host can apply a co-host's subtitle request from an effect
+  // without listing handleTrackChange as a dep (it's declared above, but keeping
+  // the pattern consistent with handleHostSeekRef).
+  const handleTrackChangeRef = useRef(handleTrackChange);
+  handleTrackChangeRef.current = handleTrackChange;
+
+  /**
+   * Track selection from the switcher. The host applies it directly — it owns
+   * the transcode, and burned-in subtitles only change by restarting it. A
+   * co-host can't do that, so it sends the request and the host performs it.
+   */
+  const handleTrackSelect = useCallback(
+    (partId: number, audioStreamID?: number, subtitleStreamID?: number) => {
+      if (isHostRef.current) {
+        handleTrackChange(partId, audioStreamID, subtitleStreamID);
+        return;
+      }
+      // Co-hosts are limited to subtitles; audio never reaches here because the
+      // switcher renders in subtitlesOnly mode for them.
+      if (subtitleStreamID !== undefined) {
+        syncActionsRef.current?.sendSetSubtitle(partId, subtitleStreamID);
+      }
+    },
+    [handleTrackChange],
+  );
+
+  // Host: apply a subtitle change requested by a co-host.
+  useEffect(() => {
+    const req = syncState?.subtitleRequest;
+    if (!req || !isHostRef.current) return;
+    handleTrackChangeRef.current(req.partId, undefined, req.subtitleStreamID);
+  }, [syncState?.subtitleRequest?.seq]);
+
   // Skip to the end of the active marker. Uses handleHostSeek (not
   // handleSeekRestart) so a typical 60-100s intro takes the cheap in-place path —
   // it's under FAR_SEEK_THRESHOLD_S, and the 6s stall timeout still covers the
@@ -793,8 +874,8 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
   const handleSkipMarker = useCallback(() => {
     if (!activeMarker) return;
     setActiveMarker(null); // instant feedback; the timeupdate tick would clear it ~250ms later
-    handleHostSeek(activeMarker.end);
-  }, [activeMarker, handleHostSeek]);
+    handleSeekCommand(activeMarker.end);
+  }, [activeMarker, handleSeekCommand]);
 
   const advanceQueue = useCallback(() => {
     const queue = syncStateRef.current?.queue;
@@ -833,13 +914,14 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
     return () => video.removeEventListener("timeupdate", onTime);
   }, [isHost]);
 
-  // Track whether the playhead is inside an intro/credits window (host only).
+  // Track whether the playhead is inside an intro/credits window. Shown to
+  // anyone with transport rights, since skipping is a transport action.
   // Unlike showUpNext, which latches on once shown, this is recomputed from
   // scratch each tick — so the button clears within ~250ms when playback leaves
-  // the window in either direction, and reappears if the host rewinds into it.
+  // the window in either direction, and reappears on a rewind back into it.
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !isHost || markers.length === 0) return;
+    if (!video || !canControl || markers.length === 0) return;
     const onTime = () => {
       const t = video.currentTime;
       const found = markers.find((m) => t >= m.start && t < m.end) ?? null;
@@ -849,7 +931,7 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
     };
     video.addEventListener("timeupdate", onTime);
     return () => video.removeEventListener("timeupdate", onTime);
-  }, [isHost, markers]);
+  }, [canControl, markers]);
 
   // Build rich display title for Controls top bar
   const displayTitle = formatMediaTitle(item);
@@ -979,19 +1061,23 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
         onBack={handleBack}
         onToggleStats={() => setShowStats((s) => !s)}
         statsActive={showStats}
-        onSyncPause={isHost ? syncActions?.sendPause : undefined}
-        onSyncResume={isHost ? syncActions?.sendResume : undefined}
-        onSyncSeek={isHost ? syncActions?.sendSeek : undefined}
-        onSeekRestart={isHost ? handleHostSeek : undefined}
-        onOpenTrackSwitcher={isHost ? () => setShowTrackSwitcher(true) : undefined}
+        canControl={canControl}
+        onSyncPause={canControl ? syncActions?.sendPause : undefined}
+        onSyncResume={canControl ? syncActions?.sendResume : undefined}
+        onSyncSeek={canControl ? syncActions?.sendSeek : undefined}
+        onSeekRestart={canControl ? handleSeekCommand : undefined}
+        onOpenTrackSwitcher={canControl ? () => setShowTrackSwitcher(true) : undefined}
         queueCount={syncState?.queue?.length}
         onOpenQueue={isHost ? () => setShowQueuePanel(true) : undefined}
+        peopleCount={syncState?.participants?.length}
+        onOpenPeople={isHost ? () => setShowPeoplePanel(true) : undefined}
       />
       {showTrackSwitcher && (
         <TrackSwitcher
           ratingKey={item.ratingKey}
           onClose={() => setShowTrackSwitcher(false)}
-          onTrackChange={handleTrackChange}
+          onTrackChange={handleTrackSelect}
+          subtitlesOnly={!isHost}
         />
       )}
       {showQueuePanel && syncState && (
@@ -1003,7 +1089,20 @@ export function Player({ item, isHost, subtitles, onBack, syncState, syncActions
           onClose={() => setShowQueuePanel(false)}
         />
       )}
-      {activeMarker && isHost && (
+      {showPeoplePanel && syncState && (
+        <PeoplePanel
+          participants={syncState.participants}
+          selfUserId={selfUserId}
+          isHost={isHost}
+          onPromoteHost={(uid) => {
+            syncActions?.sendPromoteHost(uid);
+            setShowPeoplePanel(false);
+          }}
+          onSetCoHost={(uid, value) => syncActions?.sendSetCoHost(uid, value)}
+          onClose={() => setShowPeoplePanel(false)}
+        />
+      )}
+      {activeMarker && canControl && (
         <SkipMarkerButton
           type={activeMarker.type}
           onSkip={handleSkipMarker}

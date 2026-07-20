@@ -3,6 +3,7 @@ import { Search } from "./Search";
 import { FilterBar } from "./FilterBar";
 import { MovieCard } from "./MovieCard";
 import { SkeletonGrid } from "./SkeletonGrid";
+import { POSTER_GRID_COLUMNS, POSTER_ROW_CARD_WIDTH } from "../lib/grid";
 import {
   fetchHome,
   fetchSections,
@@ -468,7 +469,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(10, 1fr)",
+    gridTemplateColumns: POSTER_GRID_COLUMNS,
     gap: "14px",
     padding: "16px 24px",
   },
@@ -542,10 +543,9 @@ const styles: Record<string, React.CSSProperties> = {
   hubCard: {
     flexShrink: 0,
     flexGrow: 0,
-    // Matches the grid's `repeat(10, 1fr)` column width exactly: same
-    // container padding (24px each side) and same 14px gap, 9 gaps between
-    // 10 items — so Home cards are never smaller than Movies/TV Shows cards.
-    width: "calc((100% - 126px) / 10)",
+    // Shares its width formula with the poster grid (see lib/grid.ts), so a Home
+    // card is never a different size from a Movies/TV Shows card.
+    width: POSTER_ROW_CARD_WIDTH,
   },
   continueSection: {
     padding: "0 24px 16px",

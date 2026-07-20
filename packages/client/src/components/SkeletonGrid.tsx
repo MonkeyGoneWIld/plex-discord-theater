@@ -1,3 +1,5 @@
+import { POSTER_GRID_COLUMNS } from "../lib/grid";
+
 const SKELETON_COUNT = 10;
 
 export function SkeletonGrid() {
@@ -19,7 +21,9 @@ const shimmer = "shimmer 1.5s ease-in-out infinite";
 const styles: Record<string, React.CSSProperties> = {
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(10, 1fr)",
+    // Same columns as the real grid, so loading doesn't jump to a different
+    // layout when the posters arrive.
+    gridTemplateColumns: POSTER_GRID_COLUMNS,
     gap: "14px",
     padding: "16px 24px",
   },

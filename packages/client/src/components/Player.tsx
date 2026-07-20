@@ -149,6 +149,23 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
   isHostRef.current = isHost;
   const ownsSessionRef = useRef(isHost);
 
+  // Whether the transcode should burn in subtitles.
+  //
+  // The `subtitles` prop is fixed at play time, but subtitles can be switched
+  // mid-episode. Restarting with the launch-time value meant that picking a
+  // track after starting with subtitles off set the stream in Plex and then
+  // asked for subtitles=none anyway — so nothing was burned in and none
+  // appeared. This follows the live selection instead.
+  const subtitlesOnRef = useRef(subtitles);
+  // A new item resets to whatever that item was launched with. Done during
+  // render rather than in an effect so the value is correct before the HLS
+  // effect reads it, without an extra render or a second transcode start.
+  const subtitlesItemRef = useRef(item.ratingKey);
+  if (subtitlesItemRef.current !== item.ratingKey) {
+    subtitlesItemRef.current = item.ratingKey;
+    subtitlesOnRef.current = subtitles;
+  }
+
   // Transport rights: the host, plus anyone the host has granted co-host.
   // Note this is UX only — the server independently enforces the same rule.
   // Session ownership stays strictly host-only (ownsSessionRef above): a co-host
@@ -305,7 +322,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
     const offset = seekOffsetRef.current;
     seekOffsetRef.current = 0;
     if (sessionOwner) sessionStartOffsetRef.current = offset;
-    const url = hlsMasterUrl(item.ratingKey, sessionId, { subtitles, offset: offset > 0 ? offset : undefined });
+    const url = hlsMasterUrl(item.ratingKey, sessionId, {
+      subtitles: subtitlesOnRef.current,
+      offset: offset > 0 ? offset : undefined,
+    });
 
     async function start() {
       if (pendingStopRef.current) {
@@ -466,7 +486,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
             // Send the formatted title, not the bare episode name — viewers
             // reconstruct their item from sync state alone (no show/season
             // fields), so this string is all they have to display.
-            syncActionsRef.current?.sendPlay(item.ratingKey, formatMediaTitle(item), subtitles, sessionId!);
+            syncActionsRef.current?.sendPlay(item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId!);
           }
         });
 
@@ -589,7 +609,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
             // Send the formatted title, not the bare episode name — viewers
             // reconstruct their item from sync state alone (no show/season
             // fields), so this string is all they have to display.
-            syncActionsRef.current?.sendPlay(item.ratingKey, formatMediaTitle(item), subtitles, sessionId!);
+            syncActionsRef.current?.sendPlay(item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId!);
           }
         };
         video.addEventListener("loadedmetadata", onLoaded, { once: true });
@@ -902,6 +922,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
       canvasRef.current = null;
       return;
     }
+    // Follow the new selection, so the restart below asks Plex to burn in
+    // subtitles when a track is chosen (0 = None) rather than reusing whatever
+    // the episode happened to start with. Without this, selecting a track after
+    // starting with subtitles off restarts with subtitles=none and nothing
+    // appears. Untouched for an audio-only change.
+    if (subtitleStreamID !== undefined) {
+      subtitlesOnRef.current = subtitleStreamID !== 0;
+    }
+
     // Restart HLS session to apply new tracks, preserving current position
     if (video && video.currentTime > 0) {
       seekOffsetRef.current = video.currentTime;
@@ -980,17 +1009,17 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
     const queue = syncStateRef.current?.queue;
     const queued = queue && queue.length > 0 ? queue[0] : null;
     if (queued) playItem(queued, true);
-    else playItem(toQueueItem(nextEpisodeRef.current, subtitles));
+    else playItem(toQueueItem(nextEpisodeRef.current, subtitlesOnRef.current));
   }, [playItem, subtitles]);
 
   // Control-bar episode navigation. Deliberately ignores the queue: these mean
   // "move through the series", not "play whatever is queued next".
   const playPrevEpisode = useCallback(() => {
-    playItem(toQueueItem(prevEpisodeRef.current, subtitles));
+    playItem(toQueueItem(prevEpisodeRef.current, subtitlesOnRef.current));
   }, [playItem, subtitles]);
 
   const playNextEpisode = useCallback(() => {
-    playItem(toQueueItem(nextEpisodeRef.current, subtitles));
+    playItem(toQueueItem(nextEpisodeRef.current, subtitlesOnRef.current));
   }, [playItem, subtitles]);
 
   const playItemRef = useRef(playItem);
@@ -1010,7 +1039,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
     }
     for (const candidate of [nextEpisodeRef.current, prevEpisodeRef.current]) {
       if (candidate?.ratingKey === req.ratingKey) {
-        playItemRef.current(toQueueItem(candidate, subtitles));
+        playItemRef.current(toQueueItem(candidate, subtitlesOnRef.current));
         return;
       }
     }

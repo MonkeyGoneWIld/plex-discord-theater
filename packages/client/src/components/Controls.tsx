@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+import { loadVolume } from "../lib/volume";
 
 interface ControlsProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
@@ -63,7 +64,7 @@ export function Controls({
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(1);
+  const [volume, setVolume] = useState(loadVolume);
   const [muted, setMuted] = useState(false);
   const [visible, setVisible] = useState(true);
   const [hoveringProgress, setHoveringProgress] = useState(false);
@@ -74,8 +75,27 @@ export function Controls({
   const progressRef = useRef<HTMLDivElement>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hintsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const previousVolumeRef = useRef(1);
+  const previousVolumeRef = useRef(volume);
   const [bufferedEnd, setBufferedEnd] = useState(0);
+
+  // Mirror the element's volume, whoever changed it. Without this the slider
+  // and mute icon go stale when the keyboard shortcuts adjust volume, since
+  // those write video.volume directly. Also picks up the remembered level the
+  // player applies on mount.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const sync = () => {
+      setVolume(video.volume);
+      setMuted(video.volume === 0);
+      // Track the last audible level so unmuting restores it no matter which
+      // control silenced it.
+      if (video.volume > 0) previousVolumeRef.current = video.volume;
+    };
+    sync();
+    video.addEventListener("volumechange", sync);
+    return () => video.removeEventListener("volumechange", sync);
+  }, [videoRef]);
 
   // Fade out keyboard hints after 10s
   useEffect(() => {

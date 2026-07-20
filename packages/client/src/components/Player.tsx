@@ -355,15 +355,17 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
         const token = getSessionToken();
 
         const hlsConfig: Partial<import("hls.js").HlsConfig> = {
-          maxBufferLength: 60,
+          maxBufferLength: 120,
           maxMaxBufferLength: 120,
           // hls.js also caps the forward buffer by bytes (default 60 MB, which at
           // 12-20 Mbps is only ~25-40s — silently undercutting maxBufferLength).
-          // Raise it so the 60s time target is the real limit.
-          maxBufferSize: 150 * 1000 * 1000,
-          // Keep 90s behind the playhead so short backward seeks replay from the
-          // buffer instead of refetching, while bounding total memory use.
-          backBufferLength: 90,
+          // 120s at the 20 Mbps peak is ~300 MB, so this has to clear that or the
+          // byte cap binds first and quietly undercuts the time target again.
+          maxBufferSize: 320 * 1000 * 1000,
+          // Back buffer competes with the forward buffer for the same SourceBuffer
+          // memory, and 90s was ~135-225 MB of it. Trimmed to 30s to leave room for
+          // the deeper forward buffer: backward seeks beyond 30s now refetch.
+          backBufferLength: 30,
           maxBufferHole: 0.5,
           // Recover from stalls faster on cold start — default is 2s, but during
           // initial Plex transcode warm-up segments arrive slowly. A lower nudge
@@ -404,14 +406,27 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
                 announceTrackers: [
                   `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/tracker${token ? `?token=${encodeURIComponent(token)}` : ""}`,
                 ],
-                highDemandTimeWindow: 15,
-                // Match maxBufferLength (60s) so the whole forward buffer can be
-                // filled from peers — beyond this window segments aren't fetched
-                // at all, so 30s was halving the effective buffer and giving
-                // peers less lead time to supply segments before the HTTP
-                // fallback kicks in.
-                p2pDownloadTimeWindow: 60,
-                httpDownloadTimeWindow: 6,
+                // All three match maxBufferLength, and high-demand is the one that
+                // matters. This engine owns the fragment loader, so hls.js's buffer
+                // targets are only advisory. With no peers connected, high-demand is
+                // the *only* thing that triggers an HTTP fetch: p2p-downloadable is
+                // gated on a peer already holding the segment, and http-downloadable
+                // is read solely by loadRandomThroughHttp, which early-returns when
+                // there are no peers. So this window alone decides how far ahead a
+                // solo viewer buffers — at the old 15s it capped the buffer at 15s
+                // no matter what hls.js was configured for.
+                //
+                // Trade-off: high-demand segments prefer HTTP over P2P, so with this
+                // covering the whole buffer, peers contribute much less and more
+                // traffic comes from the server. Deliberate. If bandwidth becomes a
+                // problem, the fix is applyDynamicConfig() driven by onPeerConnect/
+                // onPeerClose — widen only while connectedPeerCount is 0.
+                highDemandTimeWindow: 120,
+                p2pDownloadTimeWindow: 120,
+                // Was 6, i.e. inverted below high-demand (library default is 3000).
+                // Only consulted when peers exist, but it must not be the smaller of
+                // the two or it makes no sense.
+                httpDownloadTimeWindow: 120,
                 simultaneousP2PDownloads: 3,
                 simultaneousHttpDownloads: 2,
                 rtcConfig: {

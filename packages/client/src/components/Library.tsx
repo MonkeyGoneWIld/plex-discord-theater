@@ -107,8 +107,12 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   useEffect(() => {
     if (!activeSection || isHomeTab) return;
     setGenres([]);
-    setSelectedGenres([]);
-    setSort("titleSort:asc");
+    // Keep the existing values when they're already at their defaults. A fresh
+    // [] or an identical string still counts as a change and would re-trigger
+    // the item load below, so switching tabs used to fire two requests and
+    // abort the first.
+    setSelectedGenres((prev) => (prev.length === 0 ? prev : []));
+    setSort((prev) => (prev === "titleSort:asc" ? prev : "titleSort:asc"));
     fetchGenres(activeSection)
       .then((res) => setGenres(res.genres))
       .catch(console.error);
@@ -142,7 +146,14 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
         console.error(err);
         setItemsError(describeError(err));
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        // Only the request that's still current may clear the loading flag.
+        // finally runs for aborted requests too, so a superseded load used to
+        // set loading=false while its replacement was still in flight — with
+        // items already emptied, that rendered "This library is empty" for a
+        // moment before the real results arrived.
+        if (!controller.signal.aborted) setLoading(false);
+      });
     return () => controller.abort();
   }, [activeSection, selectedGenres, sort, retryNonce]);
 

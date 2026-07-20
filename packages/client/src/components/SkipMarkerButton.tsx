@@ -1,24 +1,19 @@
 interface SkipMarkerButtonProps {
   type: "intro" | "credits";
   onSkip: () => void;
-  /** Raise above the UpNext banner when both are on screen. */
-  stacked?: boolean;
 }
 
 /**
  * "Skip Intro" / "Skip Credits" button, shown while playback sits inside a Plex
  * marker window.
  *
- * Deliberately stateless — unlike UpNext, which owns a countdown, visibility here
- * is entirely the parent's call: mounting means visible, and Player unmounts this
- * the moment playback leaves the marker window.
+ * Deliberately stateless — visibility is entirely the parent's call: mounting
+ * means visible, and Player unmounts this the moment playback leaves the marker
+ * window. Placement belongs to Player's bottom-right stack, not to this button.
  */
-export function SkipMarkerButton({ type, onSkip, stacked }: SkipMarkerButtonProps) {
+export function SkipMarkerButton({ type, onSkip }: SkipMarkerButtonProps) {
   return (
-    <button
-      onClick={onSkip}
-      style={{ ...styles.button, bottom: stacked ? "200px" : "80px" }}
-    >
+    <button onClick={onSkip} style={styles.button}>
       {type === "intro" ? "Skip Intro" : "Skip Credits"}
     </button>
   );
@@ -26,9 +21,6 @@ export function SkipMarkerButton({ type, onSkip, stacked }: SkipMarkerButtonProp
 
 const styles: Record<string, React.CSSProperties> = {
   button: {
-    position: "absolute",
-    right: "20px",
-    zIndex: 30,
     padding: "10px 20px",
     borderRadius: "8px",
     border: "none",

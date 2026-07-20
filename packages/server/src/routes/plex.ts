@@ -122,6 +122,10 @@ interface PlexMetadataItem {
   index?: number;
   parentIndex?: number;
   parentTitle?: string;
+  // Plex sends these; they're declared here for next-episode resolution only and
+  // deliberately NOT forwarded by mapItem(), so existing responses are unchanged.
+  parentRatingKey?: string;
+  grandparentRatingKey?: string;
   grandparentTitle?: string;
   grandparentThumb?: string;
   leafCount?: number;
@@ -429,6 +433,67 @@ router.get("/children/:ratingKey", async (req: Request, res: Response) => {
   } catch (err) {
     console.error("Children error:", err);
     res.status(502).json({ error: "Failed to fetch children" });
+  }
+});
+
+/**
+ * GET /api/plex/siblings/:ratingKey
+ * Resolve the episodes either side of this one: { prev, next }, each nullable.
+ *
+ * Uses /allLeaves, which returns every episode of a show already ordered by
+ * season then episode — so "the elements either side of mine" give season
+ * rollover (S1E10 → S2E1, and back) for free, with no extra request and no
+ * boundary special case. Both directions come from one pass, so previous costs
+ * nothing on top of next.
+ *
+ * Returns 200 with nulls — rather than an error — for movies, the first/last
+ * episode, and anything unresolvable, since "there is no episode that way" is a
+ * normal answer the client renders as a disabled button.
+ *
+ * Note: a show with a Season 0 has its specials in allLeaves (usually first), so
+ * the last special rolls into S1E1. Rare, and filtering would need a rule about
+ * whether the current episode is itself a special.
+ */
+router.get("/siblings/:ratingKey", async (req: Request, res: Response) => {
+  const ratingKey = req.params.ratingKey as string;
+  if (!NUMERIC_RE.test(ratingKey)) {
+    res.status(400).json({ error: "Invalid rating key" });
+    return;
+  }
+
+  try {
+    const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+      `/library/metadata/${ratingKey}`,
+    );
+    const m = data.MediaContainer.Metadata?.[0];
+    if (!m) {
+      res.status(404).json({ error: "Item not found" });
+      return;
+    }
+
+    if (m.type !== "episode" || !m.grandparentRatingKey) {
+      res.json({ prev: null, next: null });
+      return;
+    }
+
+    const leavesData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+      `/library/metadata/${m.grandparentRatingKey}/allLeaves`,
+    );
+    const leaves = (leavesData.MediaContainer.Metadata || []).filter((e) => e.type === "episode");
+    const i = leaves.findIndex((e) => e.ratingKey === ratingKey);
+    // -1 covers merged/split shows where the leaf list doesn't contain our key.
+    if (i === -1) {
+      res.json({ prev: null, next: null });
+      return;
+    }
+
+    res.json({
+      prev: i > 0 ? mapItem(leaves[i - 1]) : null,
+      next: i < leaves.length - 1 ? mapItem(leaves[i + 1]) : null,
+    });
+  } catch (err) {
+    console.error("Sibling episode error:", err);
+    res.status(502).json({ error: "Failed to resolve sibling episodes" });
   }
 });
 

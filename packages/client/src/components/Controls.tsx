@@ -22,6 +22,9 @@ interface ControlsProps {
   onOpenQueue?: () => void;
   peopleCount?: number;
   onOpenPeople?: () => void;
+  /** Episode navigation — omitted when there is no episode that way. */
+  onPrevEpisode?: () => void;
+  onNextEpisode?: () => void;
 }
 
 function fmt(seconds: number): string {
@@ -54,6 +57,8 @@ export function Controls({
   onOpenQueue,
   peopleCount,
   onOpenPeople,
+  onPrevEpisode,
+  onNextEpisode,
 }: ControlsProps) {
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -323,6 +328,25 @@ export function Controls({
                   <span style={{ fontSize: 16 }}>{"\u21BB"}</span>
                   <span style={{ fontSize: 11 }}>10</span>
                 </button>
+                {/* Episode nav sits together after the ±10s seek pair. Each is
+                    rendered only when that sibling exists, so there's never a
+                    dead control — the player omits the handler at series edges. */}
+                {onPrevEpisode && (
+                  <button onClick={onPrevEpisode} style={styles.skipBtn} title="Previous episode">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
+                      <rect x="2" y="2.5" width="2" height="11" rx="0.75"/>
+                      <path d="M13.5 3.2v9.6a.6.6 0 0 1-.93.5L5.6 8.5a.6.6 0 0 1 0-1l6.97-4.8a.6.6 0 0 1 .93.5Z"/>
+                    </svg>
+                  </button>
+                )}
+                {onNextEpisode && (
+                  <button onClick={onNextEpisode} style={styles.skipBtn} title="Next episode">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
+                      <path d="M2.5 3.2v9.6a.6.6 0 0 0 .93.5L10.4 8.5a.6.6 0 0 0 0-1L3.43 2.7a.6.6 0 0 0-.93.5Z"/>
+                      <rect x="12" y="2.5" width="2" height="11" rx="0.75"/>
+                    </svg>
+                  </button>
+                )}
               </>
             )}
             <span style={styles.time}>

@@ -63,6 +63,9 @@ interface QueueItem {
   thumb: string | null;
   subtitles: boolean;
   parentTitle?: string;
+  /** Show name for server-sourced items — see client lib/format.ts on the two
+   *  conventions. Type-level only here; queue items are stored opaquely. */
+  showTitle?: string;
   parentIndex?: number;
   index?: number;
   year?: number;
@@ -82,11 +85,12 @@ interface RoomClient {
  * queue changes, role changes — stays host-only. Deliberately narrow: a co-host
  * can steer playback but never change what is playing or who controls the room.
  *
- * "set-subtitle" is a request, not an action: subtitles are burned into the
- * transcode, so only the host can actually apply it (see the client's
- * handleTrackChange). Audio selection stays host-only.
+ * "set-subtitle" and "play-item" are requests, not actions: subtitles are burned
+ * into the transcode and starting a title is host-only, so in both cases the
+ * host is the one that actually performs the work. Audio selection stays
+ * host-only entirely.
  */
-const CO_HOST_ALLOWED_TYPES = new Set(["pause", "resume", "seek", "set-subtitle"]);
+const CO_HOST_ALLOWED_TYPES = new Set(["pause", "resume", "seek", "set-subtitle", "play-item"]);
 
 interface RoomState {
   ratingKey: string | null;
@@ -443,6 +447,19 @@ export function attachWebSocketServer(server: Server): void {
           const subtitleStreamID = msg.subtitleStreamID;
           if (typeof partId !== "number" || typeof subtitleStreamID !== "number") break;
           broadcast(room, ws, { type: "set-subtitle", partId, subtitleStreamID });
+          break;
+        }
+        case "play-item": {
+          // A co-host asking the host to switch to a specific item — used for
+          // both next and previous episode. Sent only to the host, not
+          // broadcast: a request nobody else can act on has no business reaching
+          // viewers (same reasoning as "suggest"). No room state changes here —
+          // the host's follow-up "play" does that.
+          const ratingKey = msg.ratingKey;
+          if (typeof ratingKey !== "string" || ratingKey.length > 50 || !/^\d+$/.test(ratingKey)) break;
+          for (const c of room.clients) {
+            if (c.isHost) sendTo(c.ws, { type: "play-item", ratingKey });
+          }
           break;
         }
         case "stop": {

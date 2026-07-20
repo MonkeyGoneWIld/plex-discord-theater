@@ -249,6 +249,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
   useEffect(() => {
     setNextEpisode(null);
     setDismissedFor(null);
+    // Must reset: `ended` latches nearEnd true, and without clearing it here the
+    // card would appear instantly at the start of the episode we just advanced to.
+    setNearEnd(false);
     if (!canControl) return;
     let cancelled = false;
     fetchNextEpisode(item.ratingKey)
@@ -972,11 +975,21 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
     const onTime = () => {
       const d = video.duration;
       const remaining = d - video.currentTime;
-      const near = Number.isFinite(d) && d > 60 && remaining <= 30 && remaining > 0;
+      // No `remaining > 0` guard: once the episode finishes there is nothing on
+      // screen but black, which is precisely when the card matters most. Nothing
+      // auto-advances any more, so hiding it here would strand the room.
+      const near = Number.isFinite(d) && d > 60 && remaining <= 30;
       setNearEnd((prev) => (prev === near ? prev : near));
     };
+    // timeupdate stops firing at the end, so latch explicitly on `ended` too —
+    // covers the video finishing without a final tick close enough to the end.
+    const onEnded = () => setNearEnd(true);
     video.addEventListener("timeupdate", onTime);
-    return () => video.removeEventListener("timeupdate", onTime);
+    video.addEventListener("ended", onEnded);
+    return () => {
+      video.removeEventListener("timeupdate", onTime);
+      video.removeEventListener("ended", onEnded);
+    };
   }, [canControl]);
 
   // Track whether the playhead is inside an intro/credits window. Shown to

@@ -10,6 +10,9 @@ export interface QueueItem {
   thumb: string | null;
   subtitles: boolean;
   parentTitle?: string;
+  /** Show name on server-sourced items (auto-resolved next episodes). Client-built
+   *  items put the show in parentTitle instead — see lib/format.ts. */
+  showTitle?: string;
   parentIndex?: number;
   index?: number;
   year?: number;
@@ -65,6 +68,9 @@ export interface SyncState {
    *  subtitles are burned in and applying one restarts the transcode. `seq`
    *  makes repeat requests for the same track fire the effect again. */
   subtitleRequest: { partId: number; subtitleStreamID: number; seq: number } | null;
+  /** A co-host asked to advance to the next item. Only the host acts on it,
+   *  since starting a title is host-only. `seq` re-fires the effect on repeats. */
+  playNextRequest: { ratingKey: string; seq: number } | null;
 }
 
 export interface Participant {
@@ -96,6 +102,8 @@ export interface SyncActions {
   sendSetCoHost: (userId: string, value: boolean) => void;
   /** Host or co-host: request a subtitle track. The host applies it. */
   sendSetSubtitle: (partId: number, subtitleStreamID: number) => void;
+  /** Co-host: ask the host to advance to the next item. */
+  sendPlayNext: (ratingKey: string) => void;
 }
 
 interface UseSyncOptions {
@@ -126,6 +134,7 @@ const INITIAL_STATE: SyncState = {
   participants: [],
   isCoHost: false,
   subtitleRequest: null,
+  playNextRequest: null,
 };
 
 export function useSync({ instanceId, userId, username, enabled }: UseSyncOptions): {
@@ -165,6 +174,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         send({ type: "set-cohost", userId: targetUserId, value }),
       sendSetSubtitle: (partId: number, subtitleStreamID: number) =>
         send({ type: "set-subtitle", partId, subtitleStreamID }),
+      sendPlayNext: (ratingKey: string) => send({ type: "play-next", ratingKey }),
     }),
     [send],
   );
@@ -248,6 +258,15 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
                 partId: msg.partId as number,
                 subtitleStreamID: msg.subtitleStreamID as number,
                 seq: (prev.subtitleRequest?.seq ?? 0) + 1,
+              },
+            }));
+            break;
+          case "play-next":
+            setState((prev) => ({
+              ...prev,
+              playNextRequest: {
+                ratingKey: msg.ratingKey as string,
+                seq: (prev.playNextRequest?.seq ?? 0) + 1,
               },
             }));
             break;

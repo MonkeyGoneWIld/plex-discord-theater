@@ -182,6 +182,15 @@ export function fetchMeta(ratingKey: string): Promise<PlexMeta> {
   return apiGet(`/api/plex/meta/${encodeURIComponent(ratingKey)}`);
 }
 
+/**
+ * Resolve the episode following this one. `next` is null for movies, the series
+ * finale, and anything unresolvable — all normal answers, not errors. Handles
+ * season rollover server-side (last of a season → first of the next).
+ */
+export function fetchNextEpisode(ratingKey: string): Promise<{ next: PlexItem | null }> {
+  return apiGet(`/api/plex/next/${encodeURIComponent(ratingKey)}`);
+}
+
 export function hlsMasterUrl(
   ratingKey: string,
   sessionId: string,

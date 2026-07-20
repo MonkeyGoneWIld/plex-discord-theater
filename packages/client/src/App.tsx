@@ -173,6 +173,7 @@ export function App() {
         type: queueItem.type,
         thumb: queueItem.thumb,
         parentTitle: queueItem.parentTitle,
+        showTitle: queueItem.showTitle,
         parentIndex: queueItem.parentIndex,
         index: queueItem.index,
       },

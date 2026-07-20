@@ -6,10 +6,10 @@ import { StatsOverlay } from "./StatsOverlay";
 import type { P2PStats } from "./StatsOverlay";
 import { TrackSwitcher } from "./TrackSwitcher";
 import { QueuePanel } from "./QueuePanel";
-import { UpNext } from "./UpNext";
+import { NextUpButton } from "./NextUpButton";
 import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
-import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, saveProgress, fetchMeta } from "../lib/api";
+import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, saveProgress, fetchMeta, fetchNextEpisode } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import type { PlexItem, SkipMarker } from "../lib/api";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
@@ -38,6 +38,29 @@ function isPositionBuffered(video: HTMLVideoElement, t: number): boolean {
     if (t >= buffered.start(i) - 0.1 && t < buffered.end(i) - 0.3) return true;
   }
   return false;
+}
+
+/**
+ * Convert a server-resolved episode into a QueueItem for playback.
+ *
+ * Copies `showTitle` rather than folding it into `parentTitle`: server items put
+ * the season in parentTitle and the show in showTitle, so collapsing them would
+ * render "Season 2 — S2E1 · Title". See lib/format.ts.
+ */
+function toQueueItem(ep: PlexItem | null, subtitles: boolean): QueueItem | null {
+  if (!ep) return null;
+  return {
+    ratingKey: ep.ratingKey,
+    title: ep.title,
+    type: ep.type,
+    thumb: ep.thumb,
+    subtitles, // inherit the current burn-in setting
+    parentTitle: ep.parentTitle,
+    showTitle: ep.showTitle,
+    parentIndex: ep.parentIndex,
+    index: ep.index,
+    year: ep.year,
+  };
 }
 
 /** End of the furthest buffered range — approximates how far Plex has delivered. */
@@ -73,7 +96,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
   const [showQueuePanel, setShowQueuePanel] = useState(false);
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
   const [showStats, setShowStats] = useState(false);
-  const [showUpNext, setShowUpNext] = useState(false);
+  // Next item to offer, auto-resolved from the series. Queue takes precedence
+  // over this at render time — a queued item is a deliberate choice, this is a guess.
+  const [nextEpisode, setNextEpisode] = useState<PlexItem | null>(null);
+  const [nearEnd, setNearEnd] = useState(false);
+  // Which item the card was dismissed for. Compared against the live ratingKey,
+  // so it self-clears on advance rather than latching.
+  const [dismissedFor, setDismissedFor] = useState<string | null>(null);
+  const nextEpisodeRef = useRef<PlexItem | null>(null);
+  nextEpisodeRef.current = nextEpisode;
   // Cumulative P2P delivery counters, filled from the p2p-media-loader engine
   // events below and read by the StatsOverlay each poll.
   const p2pStatsRef = useRef<P2PStats>({ p2pBytes: 0, httpBytes: 0, uploadBytes: 0, peers: new Set() });
@@ -207,12 +238,30 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
     return () => { cancelled = true; };
   }, [item.ratingKey, canControl]);
 
+  // Resolve the next episode in the series. Same effect discipline as markers
+  // above: its own effect (so retryKey restarts don't blank it) keyed on
+  // ratingKey (so it re-resolves after an advance, which reuses this Player).
+  //
+  // Deliberately not gated on item.type === "episode" — a co-host's item is a
+  // synthesized stub with type "movie" and no indices, so gating here would
+  // silently break the button for every co-host. The server decides instead and
+  // returns { next: null } for anything that isn't an episode.
+  useEffect(() => {
+    setNextEpisode(null);
+    setDismissedFor(null);
+    if (!canControl) return;
+    let cancelled = false;
+    fetchNextEpisode(item.ratingKey)
+      .then((r) => { if (!cancelled) setNextEpisode(r.next); })
+      .catch(() => { /* optional polish — never surface an error over a working stream */ });
+    return () => { cancelled = true; };
+  }, [item.ratingKey, canControl]);
+
   // Single HLS session — no mid-stream switching
   useEffect(() => {
     let mounted = true;
 
     destroyLocal();
-    setShowUpNext(false);
 
     // Host creates a new session; viewer reuses the host's session
     const sessionOwner = ownsSessionRef.current;
@@ -877,48 +926,64 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
     handleSeekCommand(activeMarker.end);
   }, [activeMarker, handleSeekCommand]);
 
-  const advanceQueue = useCallback(() => {
+  /**
+   * Advance to the next item: the queued one if there is one, else the
+   * auto-resolved next episode. Nothing calls this automatically — playback
+   * running to the end no longer advances on its own.
+   */
+  const playNextItem = useCallback(() => {
     const queue = syncStateRef.current?.queue;
-    if (!queue || queue.length === 0) return;
-    const next = queue[0];
-    syncActionsRef.current?.sendQueueRemove(next.ratingKey);
-    onPlayNext?.(next);
-  }, [onPlayNext]);
+    const queued = queue && queue.length > 0 ? queue[0] : null;
+    const target = queued ?? toQueueItem(nextEpisodeRef.current, subtitles);
+    if (!target) return;
 
-  // Auto-advance on video ended
+    // Starting a title is host-only server-side, so a co-host asks the host to
+    // do it rather than changing its own view to no room-wide effect.
+    if (!isHostRef.current) {
+      syncActionsRef.current?.sendPlayNext(target.ratingKey);
+      return;
+    }
+    if (queued) syncActionsRef.current?.sendQueueRemove(target.ratingKey);
+    onPlayNext?.(target);
+  }, [onPlayNext, subtitles]);
+
+  const playNextItemRef = useRef(playNextItem);
+  playNextItemRef.current = playNextItem;
+
+  // Host: perform an advance a co-host asked for. The ratingKey has to match one
+  // of the two candidates we already hold — that doubles as a staleness guard, so
+  // a laggy press can't jump the room somewhere unexpected after we've moved on.
+  useEffect(() => {
+    const req = syncState?.playNextRequest;
+    if (!req || !isHostRef.current) return;
+    const queued = syncStateRef.current?.queue?.[0];
+    const matches =
+      queued?.ratingKey === req.ratingKey || nextEpisodeRef.current?.ratingKey === req.ratingKey;
+    if (!matches) return;
+    playNextItemRef.current();
+  }, [syncState?.playNextRequest?.seq]);
+
+  // Track whether we're near the end of the item. Replaces a version that
+  // latched true and never cleared, so the card stayed up after rewinding —
+  // this recomputes each tick like the marker effect and only sets on a flip.
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !isHost) return;
-    const onEnded = () => {
-      const queue = syncStateRef.current?.queue;
-      if (queue && queue.length > 0) {
-        advanceQueue();
-      }
-    };
-    video.addEventListener("ended", onEnded);
-    return () => video.removeEventListener("ended", onEnded);
-  }, [isHost, advanceQueue]);
-
-  // Show "Up Next" banner when within 30s of the end (host only)
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !isHost) return;
+    if (!video || !canControl) return;
     const onTime = () => {
-      const queue = syncStateRef.current?.queue;
-      const remaining = (video.duration || 0) - video.currentTime;
-      if (queue && queue.length > 0 && remaining <= 30 && remaining > 0 && video.duration > 60) {
-        setShowUpNext(true);
-      }
+      const d = video.duration;
+      const remaining = d - video.currentTime;
+      const near = Number.isFinite(d) && d > 60 && remaining <= 30 && remaining > 0;
+      setNearEnd((prev) => (prev === near ? prev : near));
     };
     video.addEventListener("timeupdate", onTime);
     return () => video.removeEventListener("timeupdate", onTime);
-  }, [isHost]);
+  }, [canControl]);
 
   // Track whether the playhead is inside an intro/credits window. Shown to
   // anyone with transport rights, since skipping is a transport action.
-  // Unlike showUpNext, which latches on once shown, this is recomputed from
-  // scratch each tick — so the button clears within ~250ms when playback leaves
-  // the window in either direction, and reappears on a rewind back into it.
+  // Recomputed from scratch each tick rather than latched, so the button clears
+  // within ~250ms when playback leaves the window in either direction, and
+  // reappears on a rewind back into it.
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !canControl || markers.length === 0) return;
@@ -935,6 +1000,20 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
 
   // Build rich display title for Controls top bar
   const displayTitle = formatMediaTitle(item);
+
+  // What to offer next, and whether to offer it. A queued item wins over the
+  // auto-resolved sibling — it's a deliberate choice rather than a guess.
+  const queuedNext = syncState?.queue?.[0] ?? null;
+  const upNextItem = queuedNext ?? nextEpisode;
+  // Trigger on the credits marker OR near the end: credits markers aren't
+  // guaranteed (libraries without Plex credit detection return none), so a
+  // credits-only trigger would silently never fire for many users.
+  const showNextUp =
+    canControl &&
+    !!upNextItem &&
+    dismissedFor !== item.ratingKey &&
+    (nearEnd || activeMarker?.type === "credits");
+  const showSkip = !!activeMarker && canControl;
 
   return (
     <div style={styles.container}>
@@ -1102,27 +1181,46 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
           onClose={() => setShowPeoplePanel(false)}
         />
       )}
-      {activeMarker && canControl && (
-        <SkipMarkerButton
-          type={activeMarker.type}
-          onSkip={handleSkipMarker}
-          // Sit above the UpNext card when both are on screen — the condition
-          // mirrors UpNext's own render guard below so they can't disagree.
-          stacked={activeMarker.type === "credits" && showUpNext && !!syncState?.queue?.[0]}
-        />
-      )}
-      {showUpNext && isHost && syncState?.queue?.[0] && (
-        <UpNext
-          item={syncState.queue[0]}
-          onPlayNow={() => { setShowUpNext(false); advanceQueue(); }}
-          onCancel={() => { setShowUpNext(false); syncActions?.sendQueueRemove(syncState.queue[0].ratingKey); }}
-        />
+      {/* Bottom-right stack: owns placement so neither child positions itself and
+          a third affordance costs one line. Bottom-anchored, so it grows upward
+          and the skip button naturally sits above the card. */}
+      {(showSkip || showNextUp) && (
+        <div style={styles.bottomRightStack}>
+          {showSkip && (
+            <SkipMarkerButton type={activeMarker!.type} onSkip={handleSkipMarker} />
+          )}
+          {showNextUp && upNextItem && (
+            <NextUpButton
+              item={upNextItem}
+              source={queuedNext ? "queue" : "series"}
+              onPlay={playNextItem}
+              onDismiss={() => {
+                // Dismissing a queued item drops it from the queue (the old
+                // Cancel behaviour), which correctly falls through to the
+                // auto-resolved episode. Dismissing that just hides it for
+                // this item.
+                if (queuedNext) syncActions?.sendQueueRemove(queuedNext.ratingKey);
+                else setDismissedFor(item.ratingKey);
+              }}
+            />
+          )}
+        </div>
       )}
     </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  bottomRightStack: {
+    position: "absolute",
+    right: "20px",
+    bottom: "80px",
+    zIndex: 30,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-end",
+    gap: "12px",
+  },
   container: {
     position: "fixed",
     inset: 0,

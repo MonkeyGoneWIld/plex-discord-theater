@@ -24,6 +24,12 @@ export interface SuggestionItem {
   type: string;
   thumb: string | null;
   year?: number;
+  /** Episode context, so the host sees "Show — S1E4 · Name" rather than a bare
+   *  episode title. Without these an episode suggestion is unidentifiable. */
+  showTitle?: string;
+  parentTitle?: string;
+  parentIndex?: number;
+  index?: number;
   /** Set by the server from the sender's session — the client never sends this itself. */
   fromUsername?: string;
 }

@@ -378,6 +378,10 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                             type: item.type,
                             thumb: item.thumb,
                             year: item.year,
+                            showTitle: item.showTitle,
+                            parentTitle: item.parentTitle,
+                            parentIndex: item.parentIndex,
+                            index: item.index,
                           });
                           setSuggested(true);
                           setTimeout(() => setSuggested(false), 2500);

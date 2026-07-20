@@ -372,17 +372,32 @@ export function attachWebSocketServer(server: Server): void {
       // or viewer), unlike the rest of the control messages below.
       if (type === "suggest") {
         const item = msg.item as
-          | { ratingKey?: string; title?: string; type?: string; thumb?: string | null; year?: number }
+          | {
+              ratingKey?: string; title?: string; type?: string; thumb?: string | null;
+              year?: number; showTitle?: string; parentTitle?: string;
+              parentIndex?: number; index?: number;
+            }
           | undefined;
         if (!item || typeof item.ratingKey !== "string" || typeof item.title !== "string") return;
         if (item.ratingKey.length > 50 || item.title.length > 500) return;
+
+        // Whitelisted rebuild, so nothing the client sends reaches the host
+        // unvalidated. The episode fields are carried so the host can tell which
+        // show a suggested episode belongs to.
+        const str = (v: unknown, max: number) =>
+          typeof v === "string" && v.length <= max ? v : undefined;
+        const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 
         const suggestion = {
           ratingKey: item.ratingKey,
           title: item.title,
           type: typeof item.type === "string" ? item.type : "movie",
           thumb: typeof item.thumb === "string" ? item.thumb : null,
-          year: typeof item.year === "number" ? item.year : undefined,
+          year: num(item.year),
+          showTitle: str(item.showTitle, 500),
+          parentTitle: str(item.parentTitle, 500),
+          parentIndex: num(item.parentIndex),
+          index: num(item.index),
           fromUsername: client.username ?? "Someone",
         };
         for (const c of room.clients) {

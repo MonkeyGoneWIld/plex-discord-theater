@@ -269,12 +269,26 @@ export function App() {
             <div key={s.ratingKey} style={styles.suggestionRow}>
               <span style={styles.suggestionText}>
                 {s.fromUsername ? <strong>{s.fromUsername}</strong> : "Someone"} suggested{" "}
-                <strong>{s.title}</strong>{s.year ? ` (${s.year})` : ""}
+                {/* formatMediaTitle already appends the year for films, so no
+                    separate year suffix here. */}
+                <strong>{formatMediaTitle(s)}</strong>
               </span>
               <div style={styles.suggestionActions}>
                 <button
                   onClick={() => {
-                    handleSelect({ ratingKey: s.ratingKey, title: s.title, type: s.type, thumb: s.thumb, year: s.year });
+                    // Carry the episode fields through, or the detail view and
+                    // the browse label lose the show name all over again.
+                    handleSelect({
+                      ratingKey: s.ratingKey,
+                      title: s.title,
+                      type: s.type,
+                      thumb: s.thumb,
+                      year: s.year,
+                      showTitle: s.showTitle,
+                      parentTitle: s.parentTitle,
+                      parentIndex: s.parentIndex,
+                      index: s.index,
+                    });
                     syncActions.sendDismissSuggestion(s.ratingKey);
                   }}
                   style={styles.suggestionViewBtn}

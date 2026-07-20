@@ -117,6 +117,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
   // playhead currently sits inside (null when outside every window).
   const [markers, setMarkers] = useState<SkipMarker[]>([]);
   const [activeMarker, setActiveMarker] = useState<SkipMarker | null>(null);
+  // Plex part id for hover-preview frames, or null when this item has none.
+  const [previewPartId, setPreviewPartId] = useState<number | null>(null);
   const [recovering, setRecovering] = useState(false);
   const recoveryAttemptRef = useRef(0);
   const recoveryPositionRef = useRef(0);
@@ -255,21 +257,28 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
       .catch(() => setVpsRelay(false)); // default to non-VPS (P2P mode) if config fails
   }, []);
 
-  // Fetch intro/credits markers for the current item. Host only — the button is
-  // host-gated, so viewers skip the request entirely.
+  // Per-item metadata: intro/credits markers, and the part id for hover-preview
+  // frames. The request runs for everyone — scrubbing previews are read-only, so
+  // viewers get them — but markers stay gated, since the skip button is a control.
   //
   // Deliberately its own effect rather than part of the main HLS effect: that one
-  // depends on retryKey, which handleSeekRestart bumps, so markers would be
-  // refetched and blanked on every restart-seek. Keying on item.ratingKey also
-  // covers queue auto-advance, which reuses this same mounted Player.
+  // depends on retryKey, which handleSeekRestart bumps, so markers and the preview
+  // part id would be refetched and blanked on every restart-seek. Keying on
+  // item.ratingKey also covers queue auto-advance, which reuses this same Player.
   useEffect(() => {
     setMarkers([]);
     setActiveMarker(null);
-    if (!canControl) return;
+    setPreviewPartId(null);
     let cancelled = false;
     fetchMeta(item.ratingKey)
-      .then((meta) => { if (!cancelled) setMarkers(meta.markers ?? []); })
-      .catch(() => { /* markers are optional — never surface an error over a working stream */ });
+      .then((meta) => {
+        if (cancelled) return;
+        if (canControl) setMarkers(meta.markers ?? []);
+        // Null unless Plex actually has preview frames, so Controls renders a
+        // plain timestamp rather than chasing images that don't exist.
+        setPreviewPartId(meta.previewThumbs ? meta.partId : null);
+      })
+      .catch(() => { /* both are optional — never surface an error over a working stream */ });
     return () => { cancelled = true; };
   }, [item.ratingKey, canControl]);
 
@@ -1246,6 +1255,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
         // no button rather than a dead one.
         onPrevEpisode={canControl && prevEpisode ? playPrevEpisode : undefined}
         onNextEpisode={canControl && nextEpisode ? playNextEpisode : undefined}
+        // Undefined when the library has no generated preview thumbnails, so
+        // Controls shows a plain timestamp instead of chasing missing images.
+        previewPartId={previewPartId ?? undefined}
       />
       {showTrackSwitcher && (
         <TrackSwitcher

@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+import { authUrl } from "../lib/api";
 import { loadVolume } from "../lib/volume";
 
 interface ControlsProps {
@@ -26,7 +27,24 @@ interface ControlsProps {
   /** Episode navigation — omitted when there is no episode that way. */
   onPrevEpisode?: () => void;
   onNextEpisode?: () => void;
+  /** Plex part id for BIF hover-preview frames. Omitted when the item has no
+   *  generated preview thumbnails — the tooltip then shows the timestamp alone. */
+  previewPartId?: number;
 }
+
+/**
+ * Bucket size for preview-frame requests, in milliseconds.
+ *
+ * Plex stores BIF frames at a fixed interval and snaps any requested offset to
+ * the nearest one, so any value works. Quantizing is about cache hits: without
+ * it, every pixel of cursor travel produces a unique URL and neither the browser
+ * cache nor the server's thumb cache ever hits.
+ *
+ * 10s rather than 2s: it aligns with the common interval, and where the index is
+ * denser we show a slightly coarser frame in exchange for ~5x fewer distinct
+ * requests — a 2h film is then ~720 possible frames instead of ~3600.
+ */
+const PREVIEW_BUCKET_MS = 10_000;
 
 function fmt(seconds: number): string {
   const h = Math.floor(seconds / 3600);
@@ -60,6 +78,7 @@ export function Controls({
   onOpenPeople,
   onPrevEpisode,
   onNextEpisode,
+  previewPartId,
 }: ControlsProps) {
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -71,6 +90,16 @@ export function Controls({
   // Fraction (0-1) of the bar under the cursor, null when not hovering —
   // drives the seek-preview timestamp tooltip and hover marker.
   const [hoverPct, setHoverPct] = useState<number | null>(null);
+  // The frame we want (quantized) vs the one that has actually decoded. Two
+  // values so a slow load keeps showing the previous frame rather than blanking
+  // to an empty box mid-scrub.
+  const [previewSrc, setPreviewSrc] = useState<string | null>(null);
+  const [loadedPreviewSrc, setLoadedPreviewSrc] = useState<string | null>(null);
+  // Part whose frames turned out to be missing. previewThumbs can be optimistic
+  // — a library indexed after the item was added, or only partly indexed — and
+  // the thumb route forwards Plex's 404 without caching the negative, so without
+  // this latch every hover would be a fresh live 404.
+  const failedPartRef = useRef<number | null>(null);
   const [hintsVisible, setHintsVisible] = useState(showKeyboardHints);
   const progressRef = useRef<HTMLDivElement>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -250,8 +279,26 @@ export function Controls({
   const handleProgressMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!progressRef.current) return;
     const rect = progressRef.current.getBoundingClientRect();
-    setHoverPct(Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)));
-  }, []);
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    setHoverPct(pct);
+
+    if (previewPartId == null || failedPartRef.current === previewPartId) return;
+    if (!(duration > 0) || !isFinite(duration)) return;
+    // Floor rather than round, so the frame is at or before the cursor.
+    const bucketMs = Math.floor((pct * duration * 1000) / PREVIEW_BUCKET_MS) * PREVIEW_BUCKET_MS;
+    // No w/h params: those divert the thumb route through /photo/:/transcode,
+    // which can't resolve a BIF path. Frames are already small — size with CSS.
+    const url = authUrl(`/api/plex/thumb/library/parts/${previewPartId}/indexes/sd/${bucketMs}`);
+    setPreviewSrc((prev) => (prev === url ? prev : url));
+  }, [previewPartId, duration]);
+
+  // Clear preview state when the item changes, including the failure latch so a
+  // new part gets a fresh chance.
+  useEffect(() => {
+    setPreviewSrc(null);
+    setLoadedPreviewSrc(null);
+    failedPartRef.current = null;
+  }, [previewPartId]);
 
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
   const buffered = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
@@ -293,11 +340,37 @@ export function Controls({
             <div
               style={{
                 ...styles.seekTooltip,
-                left: `clamp(30px, ${hoverPct * 100}%, calc(100% - 30px))`,
+                ...(loadedPreviewSrc ? styles.seekTooltipWithPreview : null),
+                // A bare M:SS bubble only needs 30px of edge margin; a 160px
+                // preview needs half its width to avoid overflowing the bar.
+                left: loadedPreviewSrc
+                  ? `clamp(84px, ${hoverPct * 100}%, calc(100% - 84px))`
+                  : `clamp(30px, ${hoverPct * 100}%, calc(100% - 30px))`,
               }}
             >
+              {loadedPreviewSrc && (
+                <img src={loadedPreviewSrc} alt="" style={styles.seekPreviewImg} />
+              )}
               {fmt(hoverPct * duration)}
             </div>
+          )}
+          {/* Off-screen loader: a frame only becomes visible once it has decoded,
+              so the bubble never flashes empty while the next one is in flight.
+              Kept outside the hover conditional deliberately — remounting it on
+              every hover-out would lose the abort-on-src-change behaviour that
+              bounds us to one in-flight request. */}
+          {previewSrc && (
+            <img
+              src={previewSrc}
+              alt=""
+              style={{ display: "none" }}
+              onLoad={() => setLoadedPreviewSrc(previewSrc)}
+              onError={() => {
+                if (previewPartId != null) failedPartRef.current = previewPartId;
+                setPreviewSrc(null);
+                setLoadedPreviewSrc(null);
+              }}
+            />
           )}
           <div style={{ ...styles.progressTrack, height: barHeight, transition: "height 0.15s ease" }}>
             <div style={{ ...styles.progressBuffer, width: `${buffered}%` }} />
@@ -498,6 +571,23 @@ const styles: Record<string, React.CSSProperties> = {
     whiteSpace: "nowrap",
     pointerEvents: "none",
     zIndex: 1,
+  },
+  seekTooltipWithPreview: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: 3,
+    padding: 4,
+  },
+  seekPreviewImg: {
+    width: 160,
+    // Fixed height, so frames of differing dimensions don't jog the layout
+    // as the cursor moves along the bar.
+    height: 90,
+    objectFit: "cover",
+    borderRadius: 3,
+    display: "block",
+    background: "#000",
   },
   hoverMarker: {
     position: "absolute",

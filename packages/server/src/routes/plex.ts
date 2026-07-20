@@ -80,6 +80,13 @@ interface PlexStream {
 
 interface PlexPart {
   id: number;
+  /**
+   * "sd" when Plex has generated BIF video preview thumbnails for this part,
+   * i.e. when /library/parts/<id>/indexes/sd/<offsetMs> will resolve. Absent
+   * when the library has preview generation disabled (the default) or the item
+   * hasn't been indexed yet.
+   */
+  indexes?: string;
   Stream?: PlexStream[];
 }
 
@@ -403,6 +410,8 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       genres: (m.Genre || []).map((g) => g.tag),
       type: m.type,
       partId: part?.id ?? null,
+      /** Whether hover-preview frames exist for this part (see PlexPart.indexes). */
+      previewThumbs: part?.indexes === "sd",
       audioTracks,
       subtitleTracks,
       markers: mapMarkers(m.Marker),

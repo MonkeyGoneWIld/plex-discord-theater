@@ -8,6 +8,23 @@ export function getSessionToken(): string | null {
   return sessionToken;
 }
 
+/**
+ * Append the session token as a query param.
+ *
+ * For contexts that cannot send an Authorization header — `<img src>`,
+ * `<video src>`, direct navigation. `requireAuth` accepts `?token=` as a
+ * fallback for exactly this reason.
+ *
+ * Several components predate this and carry their own local copy with slightly
+ * different signatures; they're deliberately left alone. New callers use this.
+ */
+export function authUrl(url: string): string {
+  const token = getSessionToken();
+  if (!token || !url) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}token=${encodeURIComponent(token)}`;
+}
+
 const BASE = "";
 
 async function throwApiError(res: Response, path: string): Promise<never> {
@@ -132,6 +149,9 @@ export interface PlexMeta {
   genres: string[];
   type: string;
   partId: number | null;
+  /** Whether BIF hover-preview frames exist for this item. Optional so a newer
+   *  client served by an older server degrades to "no previews". */
+  previewThumbs?: boolean;
   audioTracks: StreamTrack[];
   subtitleTracks: StreamTrack[];
   /** Optional so a newer client served by an older server degrades to "no button". */

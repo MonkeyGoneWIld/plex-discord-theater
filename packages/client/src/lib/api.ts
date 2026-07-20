@@ -183,12 +183,15 @@ export function fetchMeta(ratingKey: string): Promise<PlexMeta> {
 }
 
 /**
- * Resolve the episode following this one. `next` is null for movies, the series
- * finale, and anything unresolvable — all normal answers, not errors. Handles
- * season rollover server-side (last of a season → first of the next).
+ * Resolve the episodes either side of this one. Either may be null — for movies,
+ * the first/last episode, and anything unresolvable. All normal answers, not
+ * errors. Season rollover is handled server-side (last of a season ↔ first of
+ * the next), and both directions come from a single request.
  */
-export function fetchNextEpisode(ratingKey: string): Promise<{ next: PlexItem | null }> {
-  return apiGet(`/api/plex/next/${encodeURIComponent(ratingKey)}`);
+export function fetchSiblingEpisodes(
+  ratingKey: string,
+): Promise<{ prev: PlexItem | null; next: PlexItem | null }> {
+  return apiGet(`/api/plex/siblings/${encodeURIComponent(ratingKey)}`);
 }
 
 export function hlsMasterUrl(

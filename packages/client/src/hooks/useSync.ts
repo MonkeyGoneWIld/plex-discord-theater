@@ -70,7 +70,7 @@ export interface SyncState {
   subtitleRequest: { partId: number; subtitleStreamID: number; seq: number } | null;
   /** A co-host asked to advance to the next item. Only the host acts on it,
    *  since starting a title is host-only. `seq` re-fires the effect on repeats. */
-  playNextRequest: { ratingKey: string; seq: number } | null;
+  playItemRequest: { ratingKey: string; seq: number } | null;
 }
 
 export interface Participant {
@@ -103,7 +103,7 @@ export interface SyncActions {
   /** Host or co-host: request a subtitle track. The host applies it. */
   sendSetSubtitle: (partId: number, subtitleStreamID: number) => void;
   /** Co-host: ask the host to advance to the next item. */
-  sendPlayNext: (ratingKey: string) => void;
+  sendPlayItem: (ratingKey: string) => void;
 }
 
 interface UseSyncOptions {
@@ -134,7 +134,7 @@ const INITIAL_STATE: SyncState = {
   participants: [],
   isCoHost: false,
   subtitleRequest: null,
-  playNextRequest: null,
+  playItemRequest: null,
 };
 
 export function useSync({ instanceId, userId, username, enabled }: UseSyncOptions): {
@@ -174,7 +174,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         send({ type: "set-cohost", userId: targetUserId, value }),
       sendSetSubtitle: (partId: number, subtitleStreamID: number) =>
         send({ type: "set-subtitle", partId, subtitleStreamID }),
-      sendPlayNext: (ratingKey: string) => send({ type: "play-next", ratingKey }),
+      sendPlayItem: (ratingKey: string) => send({ type: "play-item", ratingKey }),
     }),
     [send],
   );
@@ -261,12 +261,12 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               },
             }));
             break;
-          case "play-next":
+          case "play-item":
             setState((prev) => ({
               ...prev,
-              playNextRequest: {
+              playItemRequest: {
                 ratingKey: msg.ratingKey as string,
-                seq: (prev.playNextRequest?.seq ?? 0) + 1,
+                seq: (prev.playItemRequest?.seq ?? 0) + 1,
               },
             }));
             break;

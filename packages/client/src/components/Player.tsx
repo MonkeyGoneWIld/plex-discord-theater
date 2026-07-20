@@ -9,7 +9,7 @@ import { QueuePanel } from "./QueuePanel";
 import { NextUpButton } from "./NextUpButton";
 import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
-import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, saveProgress, fetchMeta, fetchNextEpisode } from "../lib/api";
+import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, saveProgress, fetchMeta, fetchSiblingEpisodes } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import type { PlexItem, SkipMarker } from "../lib/api";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
@@ -99,12 +99,16 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
   // Next item to offer, auto-resolved from the series. Queue takes precedence
   // over this at render time — a queued item is a deliberate choice, this is a guess.
   const [nextEpisode, setNextEpisode] = useState<PlexItem | null>(null);
+  // Previous episode, for the control-bar back button. Not used by the card.
+  const [prevEpisode, setPrevEpisode] = useState<PlexItem | null>(null);
   const [nearEnd, setNearEnd] = useState(false);
   // Which item the card was dismissed for. Compared against the live ratingKey,
   // so it self-clears on advance rather than latching.
   const [dismissedFor, setDismissedFor] = useState<string | null>(null);
   const nextEpisodeRef = useRef<PlexItem | null>(null);
   nextEpisodeRef.current = nextEpisode;
+  const prevEpisodeRef = useRef<PlexItem | null>(null);
+  prevEpisodeRef.current = prevEpisode;
   // Cumulative P2P delivery counters, filled from the p2p-media-loader engine
   // events below and read by the StatsOverlay each poll.
   const p2pStatsRef = useRef<P2PStats>({ p2pBytes: 0, httpBytes: 0, uploadBytes: 0, peers: new Set() });
@@ -248,14 +252,19 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
   // returns { next: null } for anything that isn't an episode.
   useEffect(() => {
     setNextEpisode(null);
+    setPrevEpisode(null);
     setDismissedFor(null);
     // Must reset: `ended` latches nearEnd true, and without clearing it here the
     // card would appear instantly at the start of the episode we just advanced to.
     setNearEnd(false);
     if (!canControl) return;
     let cancelled = false;
-    fetchNextEpisode(item.ratingKey)
-      .then((r) => { if (!cancelled) setNextEpisode(r.next); })
+    fetchSiblingEpisodes(item.ratingKey)
+      .then((r) => {
+        if (cancelled) return;
+        setNextEpisode(r.next);
+        setPrevEpisode(r.prev);
+      })
       .catch(() => { /* optional polish — never surface an error over a working stream */ });
     return () => { cancelled = true; };
   }, [item.ratingKey, canControl]);
@@ -934,37 +943,62 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
    * auto-resolved next episode. Nothing calls this automatically — playback
    * running to the end no longer advances on its own.
    */
-  const playNextItem = useCallback(() => {
-    const queue = syncStateRef.current?.queue;
-    const queued = queue && queue.length > 0 ? queue[0] : null;
-    const target = queued ?? toQueueItem(nextEpisodeRef.current, subtitles);
+  /** Switch the room to a specific item. Co-hosts relay; the host performs it. */
+  const playItem = useCallback((target: QueueItem | null, fromQueue = false) => {
     if (!target) return;
-
     // Starting a title is host-only server-side, so a co-host asks the host to
     // do it rather than changing its own view to no room-wide effect.
     if (!isHostRef.current) {
-      syncActionsRef.current?.sendPlayNext(target.ratingKey);
+      syncActionsRef.current?.sendPlayItem(target.ratingKey);
       return;
     }
-    if (queued) syncActionsRef.current?.sendQueueRemove(target.ratingKey);
+    if (fromQueue) syncActionsRef.current?.sendQueueRemove(target.ratingKey);
     onPlayNext?.(target);
-  }, [onPlayNext, subtitles]);
+  }, [onPlayNext]);
 
-  const playNextItemRef = useRef(playNextItem);
-  playNextItemRef.current = playNextItem;
+  /**
+   * The card's action: a queued item wins over the resolved sibling, since it's
+   * a deliberate choice rather than a guess.
+   */
+  const playNextItem = useCallback(() => {
+    const queue = syncStateRef.current?.queue;
+    const queued = queue && queue.length > 0 ? queue[0] : null;
+    if (queued) playItem(queued, true);
+    else playItem(toQueueItem(nextEpisodeRef.current, subtitles));
+  }, [playItem, subtitles]);
 
-  // Host: perform an advance a co-host asked for. The ratingKey has to match one
-  // of the two candidates we already hold — that doubles as a staleness guard, so
-  // a laggy press can't jump the room somewhere unexpected after we've moved on.
+  // Control-bar episode navigation. Deliberately ignores the queue: these mean
+  // "move through the series", not "play whatever is queued next".
+  const playPrevEpisode = useCallback(() => {
+    playItem(toQueueItem(prevEpisodeRef.current, subtitles));
+  }, [playItem, subtitles]);
+
+  const playNextEpisode = useCallback(() => {
+    playItem(toQueueItem(nextEpisodeRef.current, subtitles));
+  }, [playItem, subtitles]);
+
+  const playItemRef = useRef(playItem);
+  playItemRef.current = playItem;
+
+  // Host: perform a switch a co-host asked for. The ratingKey has to match one of
+  // the candidates we already hold (queued item, next or previous episode) —
+  // that doubles as a staleness guard, so a laggy press can't jump the room
+  // somewhere unexpected after we've already moved on.
   useEffect(() => {
-    const req = syncState?.playNextRequest;
+    const req = syncState?.playItemRequest;
     if (!req || !isHostRef.current) return;
-    const queued = syncStateRef.current?.queue?.[0];
-    const matches =
-      queued?.ratingKey === req.ratingKey || nextEpisodeRef.current?.ratingKey === req.ratingKey;
-    if (!matches) return;
-    playNextItemRef.current();
-  }, [syncState?.playNextRequest?.seq]);
+    const queued = syncStateRef.current?.queue?.[0] ?? null;
+    if (queued?.ratingKey === req.ratingKey) {
+      playItemRef.current(queued, true);
+      return;
+    }
+    for (const candidate of [nextEpisodeRef.current, prevEpisodeRef.current]) {
+      if (candidate?.ratingKey === req.ratingKey) {
+        playItemRef.current(toQueueItem(candidate, subtitles));
+        return;
+      }
+    }
+  }, [syncState?.playItemRequest?.seq]);
 
   // Track whether we're near the end of the item. Replaces a version that
   // latched true and never cleared, so the card stayed up after rewinding —
@@ -1163,6 +1197,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
         onOpenQueue={isHost ? () => setShowQueuePanel(true) : undefined}
         peopleCount={syncState?.participants?.length}
         onOpenPeople={isHost ? () => setShowPeoplePanel(true) : undefined}
+        // Undefined at the series edges (and for movies), so Controls renders
+        // no button rather than a dead one.
+        onPrevEpisode={canControl && prevEpisode ? playPrevEpisode : undefined}
+        onNextEpisode={canControl && nextEpisode ? playNextEpisode : undefined}
       />
       {showTrackSwitcher && (
         <TrackSwitcher

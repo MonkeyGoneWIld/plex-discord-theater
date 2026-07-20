@@ -437,22 +437,24 @@ router.get("/children/:ratingKey", async (req: Request, res: Response) => {
 });
 
 /**
- * GET /api/plex/next/:ratingKey
- * Resolve the episode that follows this one, or { next: null }.
+ * GET /api/plex/siblings/:ratingKey
+ * Resolve the episodes either side of this one: { prev, next }, each nullable.
  *
  * Uses /allLeaves, which returns every episode of a show already ordered by
- * season then episode — so "the element after mine" gives season rollover
- * (S1E10 → S2E1) for free, with no extra request and no boundary special case.
+ * season then episode — so "the elements either side of mine" give season
+ * rollover (S1E10 → S2E1, and back) for free, with no extra request and no
+ * boundary special case. Both directions come from one pass, so previous costs
+ * nothing on top of next.
  *
- * Returns 200 with next: null — rather than an error — for movies, the series
- * finale, and anything unresolvable, since "there is no next episode" is a
- * normal answer the client renders as simply not showing the button.
+ * Returns 200 with nulls — rather than an error — for movies, the first/last
+ * episode, and anything unresolvable, since "there is no episode that way" is a
+ * normal answer the client renders as a disabled button.
  *
  * Note: a show with a Season 0 has its specials in allLeaves (usually first), so
  * the last special rolls into S1E1. Rare, and filtering would need a rule about
  * whether the current episode is itself a special.
  */
-router.get("/next/:ratingKey", async (req: Request, res: Response) => {
+router.get("/siblings/:ratingKey", async (req: Request, res: Response) => {
   const ratingKey = req.params.ratingKey as string;
   if (!NUMERIC_RE.test(ratingKey)) {
     res.status(400).json({ error: "Invalid rating key" });
@@ -470,7 +472,7 @@ router.get("/next/:ratingKey", async (req: Request, res: Response) => {
     }
 
     if (m.type !== "episode" || !m.grandparentRatingKey) {
-      res.json({ next: null });
+      res.json({ prev: null, next: null });
       return;
     }
 
@@ -480,15 +482,18 @@ router.get("/next/:ratingKey", async (req: Request, res: Response) => {
     const leaves = (leavesData.MediaContainer.Metadata || []).filter((e) => e.type === "episode");
     const i = leaves.findIndex((e) => e.ratingKey === ratingKey);
     // -1 covers merged/split shows where the leaf list doesn't contain our key.
-    if (i === -1 || i === leaves.length - 1) {
-      res.json({ next: null });
+    if (i === -1) {
+      res.json({ prev: null, next: null });
       return;
     }
 
-    res.json({ next: mapItem(leaves[i + 1]) });
+    res.json({
+      prev: i > 0 ? mapItem(leaves[i - 1]) : null,
+      next: i < leaves.length - 1 ? mapItem(leaves[i + 1]) : null,
+    });
   } catch (err) {
-    console.error("Next episode error:", err);
-    res.status(502).json({ error: "Failed to resolve next episode" });
+    console.error("Sibling episode error:", err);
+    res.status(502).json({ error: "Failed to resolve sibling episodes" });
   }
 });
 

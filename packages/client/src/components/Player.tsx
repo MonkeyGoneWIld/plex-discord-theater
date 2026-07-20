@@ -11,6 +11,7 @@ import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, saveProgress, fetchMeta } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
+import { loadVolume, saveVolume } from "../lib/volume";
 import type { PlexItem, SkipMarker } from "../lib/api";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
 
@@ -180,6 +181,19 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
       hlsRef.current.destroy();
       hlsRef.current = null;
     }
+  }, []);
+
+  // Apply the remembered volume, and persist any later change. One listener on
+  // the element covers every source — the Controls slider, the mute button and
+  // the keyboard shortcuts all write video.volume — so nothing else needs to
+  // know about persistence.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.volume = loadVolume();
+    const onVolumeChange = () => saveVolume(video.volume);
+    video.addEventListener("volumechange", onVolumeChange);
+    return () => video.removeEventListener("volumechange", onVolumeChange);
   }, []);
 
   // Fetch VPS relay config once on mount — HLS init waits for this
@@ -771,7 +785,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
             (video as any).__prevVolume = video.volume;
             video.volume = 0;
           } else {
-            video.volume = (video as any).__prevVolume ?? 1;
+            // Fall back to the remembered level rather than full volume — this
+            // path is hit when something else (the slider) did the muting.
+            video.volume = (video as any).__prevVolume ?? loadVolume();
           }
           break;
         case "ArrowUp":

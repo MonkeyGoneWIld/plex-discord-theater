@@ -6,14 +6,25 @@ A Discord Activity that lets you browse your Plex library and watch movies and T
 
 - **Browse your Plex library** — movies and TV shows with search, genre filters, and sorting
 - **Synchronized playback** — the host controls play/pause/seek and all viewers stay in sync
-- **Audio & subtitle selection** — pick audio tracks and subtitles before playing
+- **Co-hosts & host transfer** — the host can grant transport control (play/pause/seek/subtitles) to others, or hand over the host role entirely, from a people panel
+- **Audio & subtitle selection** — switch tracks before playing or mid-episode; co-hosts can change subtitles
+- **Skip Intro / Skip Credits** — uses Plex's chapter markers, when the library has them
+- **Next & previous episode** — resolved automatically from the series (including season rollover), with a card at the end of an episode
+- **Queue & viewer suggestions** — the host can queue what's next, and viewers can suggest titles
+- **Continue watching** — playback position is saved so you can pick up where you left off
+- **Seek-bar thumbnail previews** — hover the progress bar to preview that moment, when Plex has generated preview thumbnails
+- **Volume memory** — starts at 50% and remembers your level across sessions
+- **Stats for nerds** — press `i` for resolution, codecs, bitrate, buffer health, and P2P counters
 - **VPS relay** — optional nginx caching proxy offloads segment delivery to a VPS with 1 Gbps, so your home upload isn't the bottleneck
 - **Segment pre-fetching** — server proactively fetches segments from Plex ahead of playback, eliminating throttle-related buffering at cold start
-- **P2P segment sharing** — when no VPS is configured, viewers share HLS segments with each other via WebRTC, reducing server bandwidth
-- **Automatic host promotion** — if the host leaves, the next viewer is promoted so the session continues
+- **P2P segment sharing** — when no VPS is configured, viewers can share HLS segments with each other via WebRTC
+- **Automatic host promotion** — if the host leaves, a co-host is promoted where there is one, otherwise another viewer, so the session continues
 - **Thumbnail caching** — artwork is cached server-side in SQLite for fast browsing
 - **Persistent sessions** — sessions and host roles survive server restarts (SQLite-backed)
 - **Secure** — your Plex token never leaves the server; the backend proxies everything
+
+> **Two features depend on Plex-side generation**, both off by default on many servers, and both silently do nothing without it:
+> Skip Intro/Credits needs *Detect intros and credits*, and seek-bar previews need *Generate video preview thumbnails* — each under Library → Edit → Advanced.
 
 ## How It Works
 
@@ -61,10 +72,12 @@ When no VPS is configured, viewers in the same watch session automatically form 
 - **BitTorrent tracker** — the server runs an embedded [bittorrent-tracker](https://github.com/webtorrent/bittorrent-tracker) over WebSocket for peer discovery and signaling
 - **Swarm per session** — viewers watching the same content share a swarm ID, so P2P only happens within a watch session
 - **Transparent fallback** — if a segment isn't available from peers in time, it falls back to fetching from the server normally
-- **Tuned for live-ish playback** — P2P prefetch window of 60s with 6s HTTP window and 2 concurrent HTTP downloads, so peers have time to supply segments before the client fetches them directly
+- **Window tuning** — all three loader windows (high-demand, P2P, HTTP) are set to 120s to match the client's forward buffer, with 2 concurrent HTTP downloads
 - **NAT traversal** — uses a STUN server for WebRTC connections behind NAT
 
-P2P reduces bandwidth when multiple people are watching together, but is limited by the host's upload speed. For larger watch parties, the VPS relay is a better solution.
+**How much P2P actually carries.** Less than it used to. The loader fetches "high-demand" segments over HTTP in preference to P2P, and that window now spans the entire 120s buffer — so in practice most segments come from the server and peers contribute at the margins. That was a deliberate trade: before the windows were widened, a viewer with no peers could only ever buffer ~15 seconds ahead, because the high-demand window was the only thing driving HTTP fetches.
+
+P2P still helps when several people watch together, but it is not the answer to upload bandwidth and is capped by your home connection either way. **For anything beyond a few viewers, use the VPS relay.**
 
 ### Transcode Configuration
 
@@ -87,11 +100,11 @@ The server requests HLS transcoding from Plex with these settings:
 | Client | React, hls.js, [p2p-media-loader](https://github.com/nicedoc/p2p-media-loader), Discord Embedded App SDK |
 | Server | Express, WebSocket (ws), bittorrent-tracker, better-sqlite3 |
 | Streaming | HLS via Plex transcoder, server-side segment pre-fetch cache, WebRTC P2P sharing |
-| Infrastructure | Docker, Node.js 22, optional nginx VPS relay |
+| Infrastructure | Docker, Node.js 24, optional nginx VPS relay |
 
 ## Prerequisites
 
-- **Node.js 22+** (or Docker)
+- **Node.js 24+** (or Docker)
 - **A Plex Media Server** accessible from the machine running the backend
 - **A Discord application** with Activities enabled
 - **A public HTTPS URL** pointing to the backend (for Discord's iframe proxy)

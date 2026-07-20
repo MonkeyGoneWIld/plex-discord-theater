@@ -81,8 +81,12 @@ interface RoomClient {
  * Messages a co-host may send. Everything else — starting a title, stopping,
  * queue changes, role changes — stays host-only. Deliberately narrow: a co-host
  * can steer playback but never change what is playing or who controls the room.
+ *
+ * "set-subtitle" is a request, not an action: subtitles are burned into the
+ * transcode, so only the host can actually apply it (see the client's
+ * handleTrackChange). Audio selection stays host-only.
  */
-const CO_HOST_ALLOWED_TYPES = new Set(["pause", "resume", "seek"]);
+const CO_HOST_ALLOWED_TYPES = new Set(["pause", "resume", "seek", "set-subtitle"]);
 
 interface RoomState {
   ratingKey: string | null;
@@ -428,6 +432,17 @@ export function attachWebSocketServer(server: Server): void {
           room.state.position = (msg.position as number) ?? room.state.position;
           room.state.updatedAt = Date.now();
           broadcast(room, ws, { type: "seek", position: room.state.position });
+          break;
+        }
+        case "set-subtitle": {
+          // Relay only — the host's client applies it by restarting the
+          // transcode with the new burn-in, then re-announces the session via
+          // "play". Nothing to persist here: room.state.subtitles tracks whether
+          // burn-in is on at all, not which track was picked.
+          const partId = msg.partId;
+          const subtitleStreamID = msg.subtitleStreamID;
+          if (typeof partId !== "number" || typeof subtitleStreamID !== "number") break;
+          broadcast(room, ws, { type: "set-subtitle", partId, subtitleStreamID });
           break;
         }
         case "stop": {

@@ -61,6 +61,10 @@ export interface SyncState {
   /** Whether *this* client is a co-host (transport control, granted by the host).
    *  Always false for the host, whose rights already supersede it. */
   isCoHost: boolean;
+  /** A co-host asked for a subtitle change. Only the host acts on it, since
+   *  subtitles are burned in and applying one restarts the transcode. `seq`
+   *  makes repeat requests for the same track fire the effect again. */
+  subtitleRequest: { partId: number; subtitleStreamID: number; seq: number } | null;
 }
 
 export interface Participant {
@@ -90,6 +94,8 @@ export interface SyncActions {
   sendPromoteHost: (userId: string) => void;
   /** Host: grant or revoke transport control for a viewer. */
   sendSetCoHost: (userId: string, value: boolean) => void;
+  /** Host or co-host: request a subtitle track. The host applies it. */
+  sendSetSubtitle: (partId: number, subtitleStreamID: number) => void;
 }
 
 interface UseSyncOptions {
@@ -119,6 +125,7 @@ const INITIAL_STATE: SyncState = {
   queue: [],
   participants: [],
   isCoHost: false,
+  subtitleRequest: null,
 };
 
 export function useSync({ instanceId, userId, username, enabled }: UseSyncOptions): {
@@ -156,6 +163,8 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       sendPromoteHost: (targetUserId: string) => send({ type: "promote-host", userId: targetUserId }),
       sendSetCoHost: (targetUserId: string, value: boolean) =>
         send({ type: "set-cohost", userId: targetUserId, value }),
+      sendSetSubtitle: (partId: number, subtitleStreamID: number) =>
+        send({ type: "set-subtitle", partId, subtitleStreamID }),
     }),
     [send],
   );
@@ -231,6 +240,16 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           }
           case "cohost-changed":
             setState((prev) => ({ ...prev, isCoHost: Boolean(msg.isCoHost) }));
+            break;
+          case "set-subtitle":
+            setState((prev) => ({
+              ...prev,
+              subtitleRequest: {
+                partId: msg.partId as number,
+                subtitleStreamID: msg.subtitleStreamID as number,
+                seq: (prev.subtitleRequest?.seq ?? 0) + 1,
+              },
+            }));
             break;
           case "play":
             setState((prev) => ({

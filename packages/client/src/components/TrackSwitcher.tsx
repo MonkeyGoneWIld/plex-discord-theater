@@ -5,10 +5,12 @@ interface TrackSwitcherProps {
   ratingKey: string;
   onClose: () => void;
   onTrackChange: (partId: number, audioStreamID?: number, subtitleStreamID?: number) => void;
+  /** Co-hosts may change subtitles but not audio — hides the Audio tab. */
+  subtitlesOnly?: boolean;
 }
 
-export function TrackSwitcher({ ratingKey, onClose, onTrackChange }: TrackSwitcherProps) {
-  const [tab, setTab] = useState<"audio" | "subtitles">("audio");
+export function TrackSwitcher({ ratingKey, onClose, onTrackChange, subtitlesOnly = false }: TrackSwitcherProps) {
+  const [tab, setTab] = useState<"audio" | "subtitles">(subtitlesOnly ? "subtitles" : "audio");
   const [audioTracks, setAudioTracks] = useState<StreamTrack[]>([]);
   const [subtitleTracks, setSubtitleTracks] = useState<StreamTrack[]>([]);
   const [partId, setPartId] = useState<number | null>(null);
@@ -39,20 +41,22 @@ export function TrackSwitcher({ ratingKey, onClose, onTrackChange }: TrackSwitch
     <div style={styles.backdrop} onClick={onClose}>
       <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
-          <span style={styles.headerTitle}>Track Settings</span>
+          <span style={styles.headerTitle}>{subtitlesOnly ? "Subtitles" : "Track Settings"}</span>
           <button onClick={onClose} style={styles.closeBtn}>{"\u2715"}</button>
         </div>
 
-        <div style={styles.tabs}>
-          <button
-            onClick={() => setTab("audio")}
-            style={{ ...styles.tab, ...(tab === "audio" ? styles.tabActive : {}) }}
-          >Audio</button>
-          <button
-            onClick={() => setTab("subtitles")}
-            style={{ ...styles.tab, ...(tab === "subtitles" ? styles.tabActive : {}) }}
-          >Subtitles</button>
-        </div>
+        {!subtitlesOnly && (
+          <div style={styles.tabs}>
+            <button
+              onClick={() => setTab("audio")}
+              style={{ ...styles.tab, ...(tab === "audio" ? styles.tabActive : {}) }}
+            >Audio</button>
+            <button
+              onClick={() => setTab("subtitles")}
+              style={{ ...styles.tab, ...(tab === "subtitles" ? styles.tabActive : {}) }}
+            >Subtitles</button>
+          </div>
+        )}
 
         {loading ? (
           <div style={styles.loading}>Loading tracks...</div>

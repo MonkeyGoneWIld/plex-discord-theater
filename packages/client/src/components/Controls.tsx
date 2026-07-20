@@ -359,8 +359,8 @@ export function Controls({
                 </svg>
               </button>
             )}
-            {isHost && onOpenTrackSwitcher && (
-              <button onClick={onOpenTrackSwitcher} style={styles.gearBtn} title="Audio & Subtitles">
+            {canControl && onOpenTrackSwitcher && (
+              <button onClick={onOpenTrackSwitcher} style={styles.gearBtn} title={isHost ? "Audio & Subtitles" : "Subtitles"}>
                 {"\u2699"}
               </button>
             )}

@@ -833,6 +833,39 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
     setRetryKey((k) => k + 1);
   }, []);
 
+  // Live ref so the host can apply a co-host's subtitle request from an effect
+  // without listing handleTrackChange as a dep (it's declared above, but keeping
+  // the pattern consistent with handleHostSeekRef).
+  const handleTrackChangeRef = useRef(handleTrackChange);
+  handleTrackChangeRef.current = handleTrackChange;
+
+  /**
+   * Track selection from the switcher. The host applies it directly — it owns
+   * the transcode, and burned-in subtitles only change by restarting it. A
+   * co-host can't do that, so it sends the request and the host performs it.
+   */
+  const handleTrackSelect = useCallback(
+    (partId: number, audioStreamID?: number, subtitleStreamID?: number) => {
+      if (isHostRef.current) {
+        handleTrackChange(partId, audioStreamID, subtitleStreamID);
+        return;
+      }
+      // Co-hosts are limited to subtitles; audio never reaches here because the
+      // switcher renders in subtitlesOnly mode for them.
+      if (subtitleStreamID !== undefined) {
+        syncActionsRef.current?.sendSetSubtitle(partId, subtitleStreamID);
+      }
+    },
+    [handleTrackChange],
+  );
+
+  // Host: apply a subtitle change requested by a co-host.
+  useEffect(() => {
+    const req = syncState?.subtitleRequest;
+    if (!req || !isHostRef.current) return;
+    handleTrackChangeRef.current(req.partId, undefined, req.subtitleStreamID);
+  }, [syncState?.subtitleRequest?.seq]);
+
   // Skip to the end of the active marker. Uses handleHostSeek (not
   // handleSeekRestart) so a typical 60-100s intro takes the cheap in-place path —
   // it's under FAR_SEEK_THRESHOLD_S, and the 6s stall timeout still covers the
@@ -1033,7 +1066,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
         onSyncResume={canControl ? syncActions?.sendResume : undefined}
         onSyncSeek={canControl ? syncActions?.sendSeek : undefined}
         onSeekRestart={canControl ? handleSeekCommand : undefined}
-        onOpenTrackSwitcher={isHost ? () => setShowTrackSwitcher(true) : undefined}
+        onOpenTrackSwitcher={canControl ? () => setShowTrackSwitcher(true) : undefined}
         queueCount={syncState?.queue?.length}
         onOpenQueue={isHost ? () => setShowQueuePanel(true) : undefined}
         peopleCount={syncState?.participants?.length}
@@ -1043,7 +1076,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
         <TrackSwitcher
           ratingKey={item.ratingKey}
           onClose={() => setShowTrackSwitcher(false)}
-          onTrackChange={handleTrackChange}
+          onTrackChange={handleTrackSelect}
+          subtitlesOnly={!isHost}
         />
       )}
       {showQueuePanel && syncState && (

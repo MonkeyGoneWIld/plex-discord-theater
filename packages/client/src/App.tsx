@@ -357,6 +357,7 @@ export function App() {
           <Player
             item={view.item}
             isHost={effectiveIsHost}
+            selfUserId={userId}
             subtitles={view.subtitles}
             onBack={popView}
             syncState={syncState}

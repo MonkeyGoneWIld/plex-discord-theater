@@ -2,7 +2,11 @@ import { useState, useCallback, useRef, useEffect } from "react";
 
 interface ControlsProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  /** Host-only affordances: queue, track switcher, people panel. */
   isHost: boolean;
+  /** Transport rights (play/pause/seek) — true for the host AND for co-hosts.
+   *  Defaults to isHost so existing call sites keep their behaviour. */
+  canControl?: boolean;
   title: string;
   onBack: () => void;
   onSyncPause?: (position: number) => void;
@@ -16,6 +20,8 @@ interface ControlsProps {
   showKeyboardHints?: boolean;
   queueCount?: number;
   onOpenQueue?: () => void;
+  peopleCount?: number;
+  onOpenPeople?: () => void;
 }
 
 function fmt(seconds: number): string {
@@ -32,6 +38,7 @@ const HIDE_DELAY_MS = 3000;
 export function Controls({
   videoRef,
   isHost,
+  canControl = isHost,
   title,
   onBack,
   onSyncPause,
@@ -45,6 +52,8 @@ export function Controls({
   showKeyboardHints = true,
   queueCount,
   onOpenQueue,
+  peopleCount,
+  onOpenPeople,
 }: ControlsProps) {
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -126,7 +135,7 @@ export function Controls({
 
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
-    if (!video || !isHost) return;
+    if (!video || !canControl) return;
     if (video.paused) {
       video.play();
       onSyncResume?.(video.currentTime);
@@ -134,11 +143,11 @@ export function Controls({
       video.pause();
       onSyncPause?.(video.currentTime);
     }
-  }, [videoRef, isHost, onSyncPause, onSyncResume]);
+  }, [videoRef, canControl, onSyncPause, onSyncResume]);
 
   const seek = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
-      if (!isHost || !progressRef.current || !videoRef.current) return;
+      if (!canControl || !progressRef.current || !videoRef.current) return;
       if (!duration || !isFinite(duration)) return;
       const rect = progressRef.current.getBoundingClientRect();
       const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
@@ -153,7 +162,7 @@ export function Controls({
         onSyncSeek?.(newTime);
       }
     },
-    [isHost, duration, videoRef, onSyncSeek, onSeekRestart],
+    [canControl, duration, videoRef, onSyncSeek, onSeekRestart],
   );
 
   const skipTo = useCallback(
@@ -172,15 +181,15 @@ export function Controls({
 
   const skipBack = useCallback(() => {
     const video = videoRef.current;
-    if (!video || !isHost) return;
+    if (!video || !canControl) return;
     skipTo(Math.max(0, video.currentTime - 10));
-  }, [videoRef, isHost, skipTo]);
+  }, [videoRef, canControl, skipTo]);
 
   const skipForward = useCallback(() => {
     const video = videoRef.current;
-    if (!video || !isHost) return;
+    if (!video || !canControl) return;
     skipTo(Math.min(video.duration || 0, video.currentTime + 10));
-  }, [videoRef, isHost, skipTo]);
+  }, [videoRef, canControl, skipTo]);
 
   const toggleMute = useCallback(() => {
     const video = videoRef.current;
@@ -251,7 +260,7 @@ export function Controls({
           onMouseEnter={() => setHoveringProgress(true)}
           onMouseMove={handleProgressMove}
           onMouseLeave={() => { setHoveringProgress(false); setHoverPct(null); }}
-          style={{ ...styles.progressHit, cursor: isHost ? "pointer" : "default" }}
+          style={{ ...styles.progressHit, cursor: canControl ? "pointer" : "default" }}
         >
           {/* Seek preview: timestamp under the cursor. clamp() keeps the
               bubble from overflowing the bar edges. */}
@@ -282,7 +291,7 @@ export function Controls({
                 borderRadius: "50%",
                 background: "#e5a00d",
                 boxShadow: "0 0 8px rgba(229,160,13,0.5)",
-                opacity: isHost && hoveringProgress ? 1 : 0,
+                opacity: canControl && hoveringProgress ? 1 : 0,
                 transition: "opacity 0.15s ease",
                 pointerEvents: "none",
               }}
@@ -292,7 +301,7 @@ export function Controls({
 
         <div style={styles.controls}>
           <div style={styles.left}>
-            {isHost && (
+            {canControl && (
               <>
                 <button onClick={togglePlay} style={styles.playBtn}>
                   {playing ? (
@@ -321,6 +330,18 @@ export function Controls({
             </span>
           </div>
           <div style={styles.right}>
+            {isHost && onOpenPeople && (
+              <button onClick={onOpenPeople} style={styles.queueBtn} title="People & roles">
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+                  <circle cx="6" cy="5" r="2.4" stroke="currentColor" strokeWidth="1.5"/>
+                  <path d="M1.5 13.5c0-2.2 2-3.6 4.5-3.6s4.5 1.4 4.5 3.6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                  <path d="M11 4.2a2.2 2.2 0 0 1 0 4.2M12.5 13.5c0-1.7-.7-2.9-2-3.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                </svg>
+                {peopleCount != null && peopleCount > 0 && (
+                  <span style={styles.queueBadge}>{peopleCount}</span>
+                )}
+              </button>
+            )}
             {isHost && queueCount != null && queueCount > 0 && onOpenQueue && (
               <button onClick={onOpenQueue} style={styles.queueBtn} title="Queue">
                 <span style={{ fontSize: 14 }}>{"\u25B6"}</span>

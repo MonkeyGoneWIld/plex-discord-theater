@@ -73,7 +73,16 @@ interface RoomClient {
   userId: string;
   username: string | null;
   isHost: boolean;
+  /** Granted by the host; allows transport control (pause/resume/seek) only. */
+  isCoHost: boolean;
 }
+
+/**
+ * Messages a co-host may send. Everything else — starting a title, stopping,
+ * queue changes, role changes — stays host-only. Deliberately narrow: a co-host
+ * can steer playback but never change what is playing or who controls the room.
+ */
+const CO_HOST_ALLOWED_TYPES = new Set(["pause", "resume", "seek"]);
 
 interface RoomState {
   ratingKey: string | null;
@@ -147,6 +156,28 @@ function broadcast(room: Room, sender: WebSocket, msg: object): void {
       client.ws.send(data);
     }
   }
+}
+
+/** Send to every client in the room, including the one that triggered it. */
+function sendToAll(room: Room, msg: object): void {
+  const data = JSON.stringify(msg);
+  for (const client of room.clients) {
+    if (client.ws.readyState === WebSocket.OPEN) client.ws.send(data);
+  }
+}
+
+function participantsOf(room: Room) {
+  return [...room.clients].map((c) => ({
+    userId: c.userId,
+    username: c.username,
+    isHost: c.isHost,
+    isCoHost: c.isCoHost,
+  }));
+}
+
+/** Push the roster to everyone — call after any membership or role change. */
+function broadcastParticipants(room: Room): void {
+  sendToAll(room, { type: "participants", participants: participantsOf(room) });
 }
 
 function sendTo(ws: WebSocket, msg: object): void {
@@ -285,7 +316,7 @@ export function attachWebSocketServer(server: Server): void {
           }
         }
 
-        client = { ws, userId, username, isHost };
+        client = { ws, userId, username, isHost, isCoHost: false };
         roomId = instanceId;
         room.clients.add(client);
 
@@ -311,7 +342,11 @@ export function attachWebSocketServer(server: Server): void {
           browseContext: room.state.browseContext,
           queue: room.state.queue,
           hostUsername: hostClient?.username ?? null,
+          participants: participantsOf(room),
         });
+
+        // Everyone else needs to see the new arrival in their roster
+        broadcastParticipants(room);
 
         return;
       }
@@ -350,8 +385,10 @@ export function attachWebSocketServer(server: Server): void {
         return;
       }
 
-      // Only host can send remaining control messages
-      if (!client.isHost) return;
+      // Remaining messages are host-only, except that a co-host may also send
+      // transport commands. This is the single authority for control rights —
+      // client-side gating is UX only and must never be trusted.
+      if (!client.isHost && !(client.isCoHost && CO_HOST_ALLOWED_TYPES.has(type))) return;
 
       switch (type) {
         case "play": {
@@ -461,6 +498,45 @@ export function attachWebSocketServer(server: Server): void {
           sendTo(ws, { type: "queue-updated", queue: room.state.queue });
           break;
         }
+        case "promote-host": {
+          // Host only — a co-host must never be able to seize or reassign the role.
+          if (!client.isHost) break;
+          const targetId = msg.userId as string;
+          const target = [...room.clients].find((c) => c.userId === targetId);
+          if (!target || target === client) break;
+
+          // Hand over: the old host drops to a plain viewer, and the target
+          // clears any co-host flag since host already supersedes it.
+          client.isHost = false;
+          client.isCoHost = false;
+          target.isHost = true;
+          target.isCoHost = false;
+
+          const instance = instanceHosts.get(roomId);
+          if (instance) instance.hostUserId = target.userId;
+          updateInstanceHost(roomId, target.userId);
+
+          console.log("[Sync] Host transferred to", target.userId.substring(0, 8));
+
+          sendTo(target.ws, { type: "host-promoted", hostUsername: target.username });
+          for (const c of room.clients) {
+            if (c !== target) sendTo(c.ws, { type: "host-changed", hostUsername: target.username });
+          }
+          broadcastParticipants(room);
+          break;
+        }
+        case "set-cohost": {
+          if (!client.isHost) break;
+          const targetId = msg.userId as string;
+          const target = [...room.clients].find((c) => c.userId === targetId);
+          // The host is already above co-host, so toggling it on themself is a no-op.
+          if (!target || target.isHost) break;
+
+          target.isCoHost = Boolean(msg.value);
+          sendTo(target.ws, { type: "cohost-changed", isCoHost: target.isCoHost });
+          broadcastParticipants(room);
+          break;
+        }
         case "suggest-dismiss": {
           // Suggestions aren't persisted in room state (ephemeral, host-only) —
           // just echo back to the host so their client can drop it from the list.
@@ -483,8 +559,12 @@ export function attachWebSocketServer(server: Server): void {
 
       if (client.isHost) {
         if (room.clients.size > 0) {
-          const newHost = room.clients.values().next().value!;
+          // Prefer a co-host as successor — the host already trusted them with
+          // control, so it's a less surprising handover than picking arbitrarily.
+          const newHost =
+            [...room.clients].find((c) => c.isCoHost) ?? room.clients.values().next().value!;
           newHost.isHost = true;
+          newHost.isCoHost = false;
 
           const instance = instanceHosts.get(roomId);
           if (instance) {
@@ -513,6 +593,9 @@ export function attachWebSocketServer(server: Server): void {
 
       if (room.clients.size === 0) {
         rooms.delete(roomId);
+      } else {
+        // Someone left — refresh everyone's roster
+        broadcastParticipants(room);
       }
     });
   });

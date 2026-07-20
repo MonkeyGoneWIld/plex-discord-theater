@@ -60,6 +60,11 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
   const prevFramesRef = useRef<{ frames: number; t: number } | null>(null);
   // Latest fragment download, captured from FRAG_BUFFERED.
   const lastFragRef = useRef<string>("—");
+  // Codecs captured from BUFFER_CODECS. The level's videoCodec/audioCodec come
+  // from the master playlist's CODECS attribute, which Plex's manifests don't
+  // include — so those are almost always undefined and the row read "— / —".
+  // BUFFER_CODECS instead reports what hls.js parsed out of the actual stream.
+  const codecsRef = useRef<{ video: string | null; audio: string | null }>({ video: null, audio: null });
   // The hls instance we attached the FRAG_BUFFERED listener to (may change on
   // recovery, which tears down and rebuilds the Hls instance).
   const attachedHlsRef = useRef<Hls | null>(null);
@@ -76,13 +81,32 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
       }
     };
 
+    const onBufferCodecs = (
+      _e: unknown,
+      data: { video?: { codec?: string }; audio?: { codec?: string }; audiovideo?: { codec?: string } },
+    ) => {
+      // audiovideo is the muxed case — one track carrying both, which is what
+      // MPEG-TS from Plex produces.
+      const video = data.video?.codec ?? data.audiovideo?.codec ?? null;
+      const audio = data.audio?.codec ?? null;
+      if (video) codecsRef.current.video = video;
+      if (audio) codecsRef.current.audio = audio;
+    };
+
     const attachFragListener = () => {
       const hls = hlsRef.current;
       if (hls === attachedHlsRef.current) return;
       if (attachedHlsRef.current) {
         attachedHlsRef.current.off(HlsPkg.Events.FRAG_BUFFERED, onFragBuffered);
+        attachedHlsRef.current.off(HlsPkg.Events.BUFFER_CODECS, onBufferCodecs);
       }
-      if (hls) hls.on(HlsPkg.Events.FRAG_BUFFERED, onFragBuffered);
+      if (hls) {
+        hls.on(HlsPkg.Events.FRAG_BUFFERED, onFragBuffered);
+        hls.on(HlsPkg.Events.BUFFER_CODECS, onBufferCodecs);
+      }
+      // A rebuilt Hls instance re-parses the stream, so drop stale codecs and
+      // let the new BUFFER_CODECS repopulate them.
+      codecsRef.current = { video: null, audio: null };
       attachedHlsRef.current = hls;
     };
 
@@ -126,9 +150,11 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
         if (level) {
           streamResolution = level.width && level.height ? `${level.width}×${level.height}` : "—";
           videoBitrate = mbps(level.bitrate);
-          videoCodec = level.videoCodec ?? "—";
-          audioCodec = level.audioCodec ?? "—";
         }
+        // Prefer what was parsed from the stream; fall back to the manifest's
+        // CODECS attribute on the off-chance a playlist does declare it.
+        videoCodec = codecsRef.current.video ?? level?.videoCodec ?? "—";
+        audioCodec = codecsRef.current.audio ?? level?.audioCodec ?? "—";
       }
 
       setSnap({
@@ -153,6 +179,7 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
       clearInterval(id);
       if (attachedHlsRef.current) {
         attachedHlsRef.current.off(HlsPkg.Events.FRAG_BUFFERED, onFragBuffered);
+        attachedHlsRef.current.off(HlsPkg.Events.BUFFER_CODECS, onBufferCodecs);
         attachedHlsRef.current = null;
       }
     };

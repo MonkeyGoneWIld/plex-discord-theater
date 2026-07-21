@@ -445,6 +445,16 @@ router.get("/discover/meta", async (req: Request, res: Response) => {
 const DISCOVER_BASE = "https://discover.provider.plex.tv";
 const METADATA_BASE = "https://metadata.provider.plex.tv";
 
+/**
+ * Token for plex.tv provider (Discover) calls. The local PLEX_TOKEN is a *server*
+ * token, which the cloud provider rejects with "Invalid token" on endpoints that
+ * validate (metadata) — search happens to be lenient. Set PLEX_ACCOUNT_TOKEN to
+ * your plex.tv account token for details to work; falls back to PLEX_TOKEN.
+ */
+function providerToken(): string | undefined {
+  return process.env.PLEX_ACCOUNT_TOKEN || process.env.PLEX_TOKEN;
+}
+
 // Cache of guid → in-library, so repeated ownership checks (search-as-you-type)
 // don't re-hit Plex for the same title.
 const ownedGuidCache = new Map<string, { owned: boolean; at: number }>();
@@ -523,7 +533,7 @@ async function fetchProviderMeta(base: string, id: string, token: string): Promi
 }
 
 async function fetchDiscoverMeta(id: string): Promise<PlexMetadataItem | null> {
-  const token = process.env.PLEX_TOKEN;
+  const token = providerToken();
   if (!token) return null;
   // Prefer the metadata provider (fuller detail — has the summary Plex shows);
   // fall back to the discover provider if it returns nothing/no summary.
@@ -540,7 +550,7 @@ async function fetchDiscoverMeta(id: string): Promise<PlexMetadataItem | null> {
  * works from local results alone.
  */
 async function searchDiscover(query: string): Promise<PlexMetadataItem[]> {
-  const token = process.env.PLEX_TOKEN;
+  const token = providerToken();
   if (!token) return [];
   const url = new URL(`${DISCOVER_BASE}/library/search`);
   url.searchParams.set("query", query);

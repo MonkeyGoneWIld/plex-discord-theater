@@ -97,6 +97,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
   const [showQueuePanel, setShowQueuePanel] = useState(false);
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
   const [showStats, setShowStats] = useState(false);
+  const [confirmingEnd, setConfirmingEnd] = useState(false);
   // Next item to offer, auto-resolved from the series. Queue takes precedence
   // over this at render time — a queued item is a deliberate choice, this is a guess.
   const [nextEpisode, setNextEpisode] = useState<PlexItem | null>(null);
@@ -912,7 +913,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [handleHostSeek]);
 
-  const handleBack = useCallback(() => {
+  const endPlayback = useCallback(() => {
     destroyLocal();
     // Only the session owner stops the Plex transcode
     if (ownsSessionRef.current && sessionIdRef.current) {
@@ -924,6 +925,19 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
     }
     onBack();
   }, [destroyLocal, onBack]);
+
+  const handleBack = useCallback(() => {
+    // The host backing out ends the stream for the whole room, so confirm
+    // first when anyone else is watching. Viewers only leave for themselves.
+    const hasOtherViewers = (syncStateRef.current?.participants ?? []).some(
+      (p) => p.userId !== selfUserId,
+    );
+    if (isHostRef.current && hasOtherViewers) {
+      setConfirmingEnd(true);
+      return;
+    }
+    endPlayback();
+  }, [endPlayback, selfUserId]);
 
   const handleTrackChange = useCallback(async (partId: number, audioStreamID?: number, subtitleStreamID?: number) => {
     if (!sessionIdRef.current) return;
@@ -1307,6 +1321,41 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
           onClose={() => setShowPeoplePanel(false)}
         />
       )}
+      {confirmingEnd && (() => {
+        const otherCount = (syncState?.participants ?? []).filter(
+          (p) => p.userId !== selfUserId,
+        ).length;
+        return (
+          <div style={styles.confirmBackdrop} onClick={() => setConfirmingEnd(false)}>
+            <div style={styles.confirmDialog} onClick={(e) => e.stopPropagation()}>
+              <div style={styles.confirmTitle}>End stream?</div>
+              <p style={styles.confirmText}>
+                {otherCount === 1
+                  ? "1 other person is watching"
+                  : `${otherCount} other people are watching`}
+                {" — going back stops playback for everyone."}
+              </p>
+              <div style={styles.confirmActions}>
+                <button
+                  style={styles.confirmCancelBtn}
+                  onClick={() => setConfirmingEnd(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  style={styles.confirmEndBtn}
+                  onClick={() => {
+                    setConfirmingEnd(false);
+                    endPlayback();
+                  }}
+                >
+                  End stream
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
       {/* Bottom-right stack: owns placement so neither child positions itself and
           a third affordance costs one line. Bottom-anchored, so it grows upward
           and the skip button naturally sits above the card. */}
@@ -1337,6 +1386,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  confirmBackdrop: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 110, display: "flex", alignItems: "center", justifyContent: "center" },
+  confirmDialog: { width: "340px", maxWidth: "85vw", background: "#1a1a1a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "12px", padding: "20px" },
+  confirmTitle: { color: "#f0f0f0", fontSize: "16px", fontWeight: 600, marginBottom: "8px" },
+  confirmText: { color: "#aaa", fontSize: "13px", lineHeight: 1.5, margin: "0 0 16px" },
+  confirmActions: { display: "flex", justifyContent: "flex-end", gap: "8px" },
+  confirmCancelBtn: { padding: "8px 14px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#ccc", fontSize: "13px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
+  confirmEndBtn: { padding: "8px 14px", borderRadius: "8px", border: "none", background: "#e5a00d", color: "#000", fontSize: "13px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
   bottomRightStack: {
     position: "absolute",
     right: "20px",

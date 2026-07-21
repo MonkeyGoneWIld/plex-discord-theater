@@ -479,7 +479,12 @@ async function fetchProviderMeta(base: string, id: string, token: string): Promi
   const timer = setTimeout(() => controller.abort(), 8000);
   try {
     const res = await fetch(url, {
-      headers: { Accept: "application/json", "X-Plex-Client-Identifier": OUR_CLIENT_ID },
+      // Match searchDiscover's headers — the provider 401s without X-Plex-Product.
+      headers: {
+        Accept: "application/json",
+        "X-Plex-Client-Identifier": OUR_CLIENT_ID,
+        "X-Plex-Product": "Plex Discord Theater",
+      },
       signal: controller.signal,
     });
     if (!res.ok) {

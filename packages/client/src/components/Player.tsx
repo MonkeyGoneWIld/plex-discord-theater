@@ -187,6 +187,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
   // generate a new UUID and orphan the running Plex transcode.
   const viewerHlsSessionId = mountedAsHostRef.current ? null : (syncState?.hlsSessionId ?? null);
 
+  // A host who mounts into an already-live stream (e.g. promoted while not in
+  // the player) adopts that running session instead of starting a second
+  // transcode. Captured once at mount and consumed on first use, so later
+  // restarts (subtitle burn-in, retries) mint a fresh session as normal.
+  const adoptSessionIdRef = useRef(mountedAsHostRef.current ? (syncState?.hlsSessionId ?? null) : null);
+  // True while playing an adopted session: skip the position-resetting "play"
+  // broadcast, and seek to the room's current position on load like a viewer.
+  const didAdoptRef = useRef(false);
+
   // Handle promotion: start ping + heartbeat when viewer becomes host mid-playback
   useEffect(() => {
     if (!isHost || ownsSessionRef.current) return;
@@ -327,9 +336,17 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
 
     // Host creates a new session; viewer reuses the host's session
     const sessionOwner = ownsSessionRef.current;
-    const sessionId = sessionOwner
-      ? crypto.randomUUID()
-      : viewerHlsSessionId;
+    let sessionId: string | null;
+    if (adoptSessionIdRef.current) {
+      // Adopt the live stream we were promoted into — reuse its transcode and
+      // sync to the room position rather than restarting from the top. One-shot.
+      sessionId = adoptSessionIdRef.current;
+      adoptSessionIdRef.current = null;
+      didAdoptRef.current = true;
+    } else {
+      didAdoptRef.current = false;
+      sessionId = sessionOwner ? crypto.randomUUID() : viewerHlsSessionId;
+    }
 
     if (!sessionId) {
       // Viewer doesn't have a session ID yet — wait for sync
@@ -503,9 +520,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
           // Clear recovery overlay
           setRecovering(false);
 
-          // Viewer joining mid-playback: seek to host's position immediately
-          // instead of waiting for the 5s heartbeat drift threshold
-          if (!isHostRef.current && syncActionsRef.current) {
+          // Viewer joining mid-playback (or a host adopting a live session):
+          // seek to the room's position immediately instead of waiting for the
+          // 5s heartbeat drift threshold.
+          if ((!isHostRef.current || didAdoptRef.current) && syncActionsRef.current) {
             const syncPos = syncStateRef.current?.position;
             if (syncPos && syncPos > DRIFT_THRESHOLD_S) {
               video.currentTime = syncPos;
@@ -515,8 +533,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
           // Pre-fetch cache ensures segments arrive instantly — play as soon as manifest is parsed
           video.play().catch((err) => console.warn("Autoplay prevented:", err));
 
-          // Host: broadcast play with sessionId when manifest is ready
-          if (isHostRef.current) {
+          // Host: broadcast play with sessionId when manifest is ready. Skip it
+          // when adopting an already-live session — the room is already on it,
+          // and "play" would reset everyone's position to 0.
+          if (isHostRef.current && !didAdoptRef.current) {
             // Send the formatted title, not the bare episode name — viewers
             // reconstruct their item from sync state alone (no show/season
             // fields), so this string is all they have to display.
@@ -639,7 +659,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
         const onLoaded = () => {
           if (!mounted) return;
           video.play().catch((err) => console.warn("Autoplay prevented:", err));
-          if (isHostRef.current) {
+          if (isHostRef.current && !didAdoptRef.current) {
             // Send the formatted title, not the bare episode name — viewers
             // reconstruct their item from sync state alone (no show/season
             // fields), so this string is all they have to display.

@@ -167,7 +167,12 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onBack }
           {/* Request any seasons you don't have yet (owned ones show above). */}
           {meta.tmdbId != null && (
             <div style={{ padding: "0 24px 24px" }}>
-              <SeasonRequestPanel tmdbId={meta.tmdbId} heading="Request seasons" hideAvailable />
+              <SeasonRequestPanel
+                tmdbId={meta.tmdbId}
+                heading="Request seasons"
+                hideAvailable
+                ownedSeasons={seasons.map((s) => s.index).filter((n): n is number => n != null)}
+              />
             </div>
           )}
         </div>

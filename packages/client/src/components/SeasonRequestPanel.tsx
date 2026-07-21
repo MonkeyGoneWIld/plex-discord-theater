@@ -5,9 +5,12 @@ interface SeasonRequestPanelProps {
   tmdbId: number;
   /** Section heading (default "Seasons"). */
   heading?: string;
-  /** Drop seasons already fully in the library — used on the library show view
-   *  where owned seasons already appear in the playable grid above. */
+  /** Drop seasons already in the library — used on the library show view where
+   *  owned seasons already appear in the playable grid above. */
   hideAvailable?: boolean;
+  /** Season numbers already in the local library. Source of truth for "owned",
+   *  independent of Seerr's sync state. */
+  ownedSeasons?: number[];
 }
 
 // Seerr MediaStatus → per-season badge.
@@ -23,7 +26,9 @@ const SEASON_STATUS: Record<number, { label: string; color: string }> = {
  * owned/requested show a status badge; the rest are selectable and requested via
  * Seerr. Renders nothing when Seerr isn't configured or there are no seasons.
  */
-export function SeasonRequestPanel({ tmdbId, heading = "Seasons", hideAvailable = false }: SeasonRequestPanelProps) {
+export function SeasonRequestPanel({
+  tmdbId, heading = "Seasons", hideAvailable = false, ownedSeasons = [],
+}: SeasonRequestPanelProps) {
   const [seasons, setSeasons] = useState<SeerrSeason[] | null>(null);
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -45,10 +50,13 @@ export function SeasonRequestPanel({ tmdbId, heading = "Seasons", hideAvailable 
       return next;
     });
 
-  // On the library show view, seasons already fully in the library are shown in
-  // the playable grid above, so drop them here.
-  const visible = (seasons ?? []).filter((s) => !hideAvailable || s.status !== 5);
-  const requestable = visible.filter((s) => s.status == null);
+  // A season counts as owned if it's in the local library or Seerr reports it
+  // available. On the library view (hideAvailable) owned seasons are dropped —
+  // they're already in the playable grid above.
+  const ownedSet = new Set(ownedSeasons);
+  const isOwned = (s: SeerrSeason) => ownedSet.has(s.seasonNumber) || s.status === 5;
+  const visible = (seasons ?? []).filter((s) => !hideAvailable || !isOwned(s));
+  const requestable = visible.filter((s) => s.status == null && !isOwned(s));
   const allSelected = requestable.length > 0 && requestable.every((s) => selected.has(s.seasonNumber));
   const toggleAll = () =>
     setSelected(allSelected ? new Set() : new Set(requestable.map((s) => s.seasonNumber)));
@@ -79,8 +87,11 @@ export function SeasonRequestPanel({ tmdbId, heading = "Seasons", hideAvailable 
       </div>
       <div style={styles.list}>
         {visible.map((s) => {
-          const st = s.status != null ? SEASON_STATUS[s.status] : null;
-          const selectable = s.status == null;
+          const owned = isOwned(s);
+          const st = owned
+            ? { label: "In library", color: "#4caf7d" }
+            : s.status != null ? SEASON_STATUS[s.status] : null;
+          const selectable = !owned && s.status == null;
           const isSel = selected.has(s.seasonNumber);
           return (
             <button

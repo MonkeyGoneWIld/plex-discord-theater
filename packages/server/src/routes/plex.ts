@@ -637,7 +637,9 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
   try {
     const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
       `/library/metadata/${ratingKey}`,
-      { includeMarkers: "1" },
+      // includeGuids so the external-id list (tmdb://…) is present — needed to
+      // offer Seerr season requests for library shows.
+      { includeMarkers: "1", includeGuids: "1" },
     );
     const metadata = data.MediaContainer.Metadata;
     if (!metadata || metadata.length === 0) {
@@ -693,7 +695,13 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       subtitleTracks,
       markers: mapMarkers(m.Marker),
       // TMDB id — lets the client offer Seerr season requests for library shows.
-      tmdbId: tmdbIdFromGuids(m.Guid),
+      tmdbId: (() => {
+        const t = tmdbIdFromGuids(m.Guid);
+        // TEMP DIAGNOSTIC — confirm the external id list is present; remove after.
+        console.log("[Meta] %s type=%o guids=%o tmdbId=%o", ratingKey, m.type,
+          (m.Guid || []).map((g) => g.id), t);
+        return t;
+      })(),
     });
   } catch (err) {
     console.error("Metadata error:", err);

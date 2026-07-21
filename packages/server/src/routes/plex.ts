@@ -1739,21 +1739,25 @@ function isAllowedExternalImage(u: string): boolean {
   }
 }
 
+/** Downsize TMDB's multi-MB "original" posters to a card-appropriate width. */
+function sizedExternalImage(url: string): string {
+  return url.replace(/(image\.tmdb\.org\/t\/p\/)(original|w\d+)(\/)/, "$1w500$3");
+}
+
 /**
- * Fetch an allowlisted external poster through Plex's public image proxy
- * (images.plex.tv), which fetches and resizes the source. So we never hit the
- * source CDN (e.g. TMDB) directly — Plex absorbs that — and only ever connect to
- * one host. No auth needed. Sized to match local library posters (320x480) so
- * quality is consistent across the grid.
+ * Fetch an allowlisted external poster directly, with a timeout. TMDB's image
+ * CDN isn't rate-limited per request (only ~20 concurrent connections, which we
+ * stay well under) and we cache each result, so hitting it directly is fine and
+ * keeps full poster quality.
  */
-async function fetchExternalImage(sourceUrl: string): Promise<globalThis.Response> {
-  const proxied =
-    `https://images.plex.tv/photo?width=320&height=480&minSize=1&upscale=1` +
-    `&url=${encodeURIComponent(sourceUrl)}`;
+async function fetchExternalImage(url: string): Promise<globalThis.Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
   try {
-    return await fetch(proxied, { headers: { Accept: "image/*" }, signal: controller.signal });
+    return await fetch(sizedExternalImage(url), {
+      headers: { Accept: "image/*" },
+      signal: controller.signal,
+    });
   } finally {
     clearTimeout(timer);
   }

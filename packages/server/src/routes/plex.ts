@@ -1743,12 +1743,13 @@ function isAllowedExternalImage(u: string): boolean {
  * Fetch an allowlisted external poster through Plex's public image proxy
  * (images.plex.tv), which fetches and resizes the source. So we never hit the
  * source CDN (e.g. TMDB) directly — Plex absorbs that — and only ever connect to
- * one host. No auth needed; this is how the Plex web app loads Discover art.
- * (size/scale match Plex web's own request; bump `size` if posters look soft.)
+ * one host. No auth needed. Sized to match local library posters (320x480) so
+ * quality is consistent across the grid.
  */
 async function fetchExternalImage(sourceUrl: string): Promise<globalThis.Response> {
   const proxied =
-    `https://images.plex.tv/photo?size=small-60&scale=2&url=${encodeURIComponent(sourceUrl)}`;
+    `https://images.plex.tv/photo?width=320&height=480&minSize=1&upscale=1` +
+    `&url=${encodeURIComponent(sourceUrl)}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
   try {

@@ -140,14 +140,28 @@ router.get("/tv/:tmdbId", async (req: Request, res: Response) => {
     }
     const data = (await r.json()) as {
       seasons?: Array<{ seasonNumber?: number; name?: string; episodeCount?: number }>;
-      mediaInfo?: { status?: number; seasons?: Array<{ seasonNumber?: number; status?: number }> };
+      mediaInfo?: {
+        status?: number;
+        seasons?: Array<{ seasonNumber?: number; status?: number }>;
+        requests?: Array<{ status?: number; seasons?: Array<{ seasonNumber?: number; status?: number }> }>;
+      };
     };
-    // TEMP DIAGNOSTIC — confirm the per-season status shape; remove once verified.
-    console.log("[Seerr] tv %s overall=%o seasonStatuses=%o", tmdbId,
-      data.mediaInfo?.status, (data.mediaInfo?.seasons ?? []).map((s) => [s.seasonNumber, s.status]));
+    // TEMP DIAGNOSTIC — confirm where per-season status lives; remove once verified.
+    console.log("[Seerr] tv %s mediaInfo=%s", tmdbId,
+      JSON.stringify(data.mediaInfo ?? null).slice(0, 600));
     const statusBySeason = new Map<number, number>();
+    // Availability of already-tracked seasons.
     for (const s of data.mediaInfo?.seasons ?? []) {
       if (s.seasonNumber != null && s.status != null) statusBySeason.set(s.seasonNumber, s.status);
+    }
+    // Requested seasons (pending/processing) live on the request objects; don't
+    // overwrite a richer availability status already recorded above.
+    for (const req of data.mediaInfo?.requests ?? []) {
+      for (const rs of req.seasons ?? []) {
+        if (rs.seasonNumber == null || statusBySeason.has(rs.seasonNumber)) continue;
+        // request.status: 1 = pending approval, 2 = approved/processing.
+        statusBySeason.set(rs.seasonNumber, req.status === 2 ? 3 : 2);
+      }
     }
     const seasons = (data.seasons ?? [])
       .filter((s) => (s.seasonNumber ?? 0) >= 1)

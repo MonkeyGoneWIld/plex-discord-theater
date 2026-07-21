@@ -416,12 +416,7 @@ async function searchDiscover(query: string): Promise<PlexMetadataItem[]> {
       return [];
     }
     const data = (await res.json()) as { MediaContainer?: Record<string, unknown> };
-    const found = extractDiscoverItems(data);
-    // TEMP DIAGNOSTIC — confirm the provider response shape/thumb; remove after.
-    console.log("[Discover] q=%o mcKeys=%o found=%d sample=%o", query,
-      Object.keys(data.MediaContainer ?? {}), found.length,
-      found.slice(0, 2).map((m) => ({ title: m.title, type: m.type, guid: m.guid, thumb: m.thumb })));
-    return found;
+    return extractDiscoverItems(data);
   } catch (err) {
     console.warn("[Discover] search error:", err);
     return [];
@@ -685,9 +680,10 @@ router.get("/thumb/*", async (req: Request, res: Response) => {
   if (w && !NUMERIC_RE.test(w)) { res.status(400).end(); return; }
   if (h && !NUMERIC_RE.test(h)) { res.status(400).end(); return; }
 
-  // External (Discover) artwork: /photo/:/transcode with a ?url= pointing at
-  // Plex's cloud image. Host-allowlisted so this can't become an open image
-  // proxy. When present, the transcoder fetches this URL instead of imagePath.
+  // External (Discover) artwork: a ?url= pointing at a cloud poster (TMDB or
+  // Plex CDN). Host-allowlisted so this can't become an open image proxy. When
+  // present, the server fetches this URL directly (see below) rather than the
+  // local library path — the local Plex server doesn't have these images.
   const externalUrl = typeof req.query.url === "string" ? req.query.url : undefined;
   if (req.query.url !== undefined) {
     if (externalUrl === undefined || imagePath !== "/photo/:/transcode" || !isAllowedExternalImage(externalUrl)) {
@@ -709,17 +705,20 @@ router.get("/thumb/*", async (req: Request, res: Response) => {
   }
 
   try {
-    // Use Plex photo transcoder for resized images (and always for external
-    // artwork, which the local server can't serve directly); raw fetch otherwise.
-    const plexRes = (w && h) || externalUrl
-      ? await plexFetch("/photo/:/transcode", {
-          width: w ?? "320",
-          height: h ?? "480",
-          minSize: "1",
-          upscale: "1",
-          url: transcodeSource,
-        })
-      : await plexFetch(imagePath);
+    // External artwork is fetched directly (Plex's transcoder won't reliably
+    // pull non-Plex CDNs like TMDB). Local images use the photo transcoder when
+    // resizing, otherwise a raw local fetch.
+    const plexRes = externalUrl
+      ? await fetchExternalImage(externalUrl)
+      : (w && h)
+        ? await plexFetch("/photo/:/transcode", {
+            width: w,
+            height: h,
+            minSize: "1",
+            upscale: "1",
+            url: imagePath,
+          })
+        : await plexFetch(imagePath);
 
     if (!plexRes.ok) {
       plexRes.body?.cancel().catch(() => {});
@@ -1726,9 +1725,33 @@ function isAllowedExternalImage(u: string): boolean {
   if (u.startsWith("/")) return isAllowedThumbPath(u);
   try {
     const host = new URL(u).hostname.toLowerCase();
-    return host === "plex.tv" || host.endsWith(".plex.tv") || host.endsWith(".plex.direct");
+    return (
+      host === "plex.tv" ||
+      host.endsWith(".plex.tv") ||
+      host.endsWith(".plex.direct") ||
+      host === "image.tmdb.org"
+    );
   } catch {
     return false;
+  }
+}
+
+/** Downsize TMDB's multi-MB "original" posters to a card-appropriate width. */
+function sizedExternalImage(url: string): string {
+  return url.replace(/(image\.tmdb\.org\/t\/p\/)(original|w\d+)(\/)/, "$1w500$3");
+}
+
+/** Fetch an allowlisted external poster directly, with a timeout. */
+async function fetchExternalImage(url: string): Promise<globalThis.Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    return await fetch(sizedExternalImage(url), {
+      headers: { Accept: "image/*" },
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
   }
 }
 

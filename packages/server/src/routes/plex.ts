@@ -335,37 +335,126 @@ router.get("/search", async (req: Request, res: Response) => {
   }
 
   try {
-    // includeExternal pulls in Plex's online (Discover) catalog alongside local
-    // library matches. Those items aren't playable here (no local file to
-    // transcode) — the client marks them and blocks playback.
-    const data = await plexJSON<{
-      MediaContainer: {
-        Hub?: Array<{ hubIdentifier?: string; type?: string; Metadata?: PlexMetadataItem[] }>;
-      };
-    }>("/hubs/search", { query: q, limit: "30", includeExternal: "1" });
+    // Local library search, plus Plex's online Discover catalog in parallel.
+    // Discover is best-effort — if it fails, local results still return.
+    const [data, discover] = await Promise.all([
+      plexJSON<{
+        MediaContainer: {
+          Hub?: Array<{ hubIdentifier?: string; type?: string; Metadata?: PlexMetadataItem[] }>;
+        };
+      }>("/hubs/search", { query: q, limit: "30" }),
+      searchDiscover(q),
+    ]);
+
     const hubs = data.MediaContainer.Hub || [];
     const items: Array<ReturnType<typeof mapItem> & { inLibrary: boolean }> = [];
+    const localGuids = new Set<string>();
     for (const hub of hubs) {
       if (!hub.Metadata) continue;
       for (const m of hub.Metadata) {
-        // Local library items carry a librarySectionID; online results don't.
-        const inLibrary = m.librarySectionID != null;
-        const base = mapItem(m);
-        items.push({
-          ...base,
-          inLibrary,
-          // Local thumbs stay as-is; online artwork is routed through the photo
-          // transcoder so it's same-origin (CSP) and cached like everything else.
-          thumb: inLibrary ? base.thumb : externalThumbUrl(m.thumb),
-        });
+        if (m.guid) localGuids.add(m.guid);
+        items.push({ ...mapItem(m), inLibrary: true });
       }
     }
+
+    // Append online results the user doesn't already own (deduped by guid).
+    // Only movies/shows — the client can't do anything with a bare person/etc.
+    for (const m of discover) {
+      if (m.guid && localGuids.has(m.guid)) continue;
+      if (m.type !== "movie" && m.type !== "show") continue;
+      items.push({
+        ...mapItem(m),
+        // Online items may have no local ratingKey; the client uses this as a
+        // list key, so fall back to the (unique) guid.
+        ratingKey: m.ratingKey ?? m.guid ?? m.title,
+        inLibrary: false,
+        // Cloud artwork routed through the photo transcoder so it stays
+        // same-origin (CSP) and cached like everything else.
+        thumb: externalThumbUrl(m.thumb),
+      });
+    }
+
     res.json({ items });
   } catch (err) {
     console.error("Search error:", err);
     res.status(502).json({ error: "Failed to search Plex" });
   }
 });
+
+/** Plex's online catalog lives on a separate cloud host from the local server. */
+const DISCOVER_BASE = "https://discover.provider.plex.tv";
+
+/**
+ * Search Plex's online Discover catalog (titles not necessarily in the library),
+ * authenticated with the plex.tv account token. Separate cloud host, so it can't
+ * go through plexFetch. Best-effort: returns [] on any failure so search still
+ * works from local results alone.
+ */
+async function searchDiscover(query: string): Promise<PlexMetadataItem[]> {
+  const token = process.env.PLEX_TOKEN;
+  if (!token) return [];
+  const url = new URL(`${DISCOVER_BASE}/library/search`);
+  url.searchParams.set("query", query);
+  url.searchParams.set("limit", "15");
+  url.searchParams.set("searchTypes", "movies,tv");
+  url.searchParams.set("searchProviders", "discover");
+  url.searchParams.set("X-Plex-Token", token);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        "X-Plex-Client-Identifier": OUR_CLIENT_ID,
+        "X-Plex-Product": "Plex Discord Theater",
+      },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      console.warn("[Discover] search failed:", res.status);
+      return [];
+    }
+    const data = (await res.json()) as { MediaContainer?: Record<string, unknown> };
+    const found = extractDiscoverItems(data);
+    // TEMP DIAGNOSTIC — confirm the provider response shape/thumb; remove after.
+    console.log("[Discover] q=%o mcKeys=%o found=%d sample=%o", query,
+      Object.keys(data.MediaContainer ?? {}), found.length,
+      found.slice(0, 2).map((m) => ({ title: m.title, type: m.type, guid: m.guid, thumb: m.thumb })));
+    return found;
+  } catch (err) {
+    console.warn("[Discover] search error:", err);
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Pull Metadata items out of the Discover response, tolerating shape variants
+ * across Plex versions (Metadata[] directly, SearchResult[].Metadata, or
+ * SearchResults[].SearchResult[].Metadata).
+ */
+function extractDiscoverItems(data: { MediaContainer?: Record<string, unknown> }): PlexMetadataItem[] {
+  const mc = data.MediaContainer;
+  if (!mc) return [];
+  const out: PlexMetadataItem[] = [];
+  const push = (m: unknown) => {
+    if (m && typeof m === "object" && "title" in m) out.push(m as PlexMetadataItem);
+  };
+  if (Array.isArray(mc.Metadata)) mc.Metadata.forEach(push);
+  if (Array.isArray(mc.SearchResult)) {
+    mc.SearchResult.forEach((r: unknown) => push((r as { Metadata?: unknown })?.Metadata));
+  }
+  if (Array.isArray(mc.SearchResults)) {
+    for (const group of mc.SearchResults as Array<{ SearchResult?: unknown }>) {
+      if (Array.isArray(group?.SearchResult)) {
+        group.SearchResult.forEach((r: unknown) => push((r as { Metadata?: unknown })?.Metadata));
+      }
+    }
+  }
+  return out;
+}
 
 /**
  * Same-origin proxy URL for an online (Discover) result's artwork.

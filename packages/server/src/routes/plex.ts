@@ -855,7 +855,13 @@ router.get("/thumb/*", async (req: Request, res: Response) => {
   }
 
   const transcodeSource = externalUrl ?? imagePath;
-  const cacheKey = w && h ? `${transcodeSource}:${w}x${h}` : transcodeSource;
+  // External images always render at a fixed size via images.plex.tv regardless
+  // of the client's w/h, so key them on the source alone — otherwise the same
+  // image caches under multiple keys and a stale low-res copy can linger. The
+  // "ext:" prefix also abandons pre-fix entries (e.g. the old ~120px ones).
+  const cacheKey = externalUrl
+    ? `ext:${externalUrl}`
+    : w && h ? `${transcodeSource}:${w}x${h}` : transcodeSource;
 
   // Check server-side cache first
   const cached = thumbCache.get(cacheKey);

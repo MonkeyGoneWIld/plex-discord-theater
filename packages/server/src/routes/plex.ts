@@ -141,6 +141,9 @@ interface PlexMetadataItem {
   // (Discover) results returned when /hubs/search is called with includeExternal.
   librarySectionID?: number;
   guid?: string;
+  contentRating?: string;
+  /** External ids, e.g. { id: "imdb://tt123" }, { id: "tmdb://456" }. */
+  Guid?: Array<{ id?: string }>;
 }
 
 // ─── Library browsing ────────────────────────────────────────────
@@ -347,7 +350,7 @@ router.get("/search", async (req: Request, res: Response) => {
     ]);
 
     const hubs = data.MediaContainer.Hub || [];
-    const items: Array<ReturnType<typeof mapItem> & { inLibrary: boolean }> = [];
+    const items: Array<ReturnType<typeof mapItem> & { inLibrary: boolean; guid?: string }> = [];
     const localGuids = new Set<string>();
     for (const hub of hubs) {
       if (!hub.Metadata) continue;
@@ -375,24 +378,19 @@ router.get("/search", async (req: Request, res: Response) => {
       ),
     );
 
-    let discoverKept = 0;
     candidates.forEach((m, i) => {
       if (owned[i]) return;
-      discoverKept++;
-      // TEMP DIAGNOSTIC — while tuning; remove once happy.
-      console.log("[Search] keep discover title=%o year=%o", m.title, m.year);
       items.push({
         ...mapItem(m),
         // Online items may have no local ratingKey; the client uses this as a
         // list key, so fall back to the (unique) guid.
         ratingKey: m.ratingKey ?? m.guid ?? m.title,
+        // Carry the guid so the client can fetch Discover detail metadata for it.
+        guid: m.guid,
         inLibrary: false,
         thumb: externalThumbUrl(m.thumb),
       });
     });
-    // TEMP DIAGNOSTIC — remove once happy.
-    console.log("[Search] q=%o local=%d discoverReturned=%d discoverKept=%d",
-      q, localGuids.size, discover.length, discoverKept);
 
     res.json({ items });
   } catch (err) {
@@ -401,8 +399,61 @@ router.get("/search", async (req: Request, res: Response) => {
   }
 });
 
-/** Plex's online catalog lives on a separate cloud host from the local server. */
+/**
+ * GET /api/plex/discover/meta?guid=plex://movie/<id>
+ * Detail metadata for an online (Discover) title the user doesn't own — summary,
+ * genres, runtime, rating. Comes from Plex's cloud provider since there's no
+ * local library item. Fields degrade gracefully when the provider omits them.
+ */
+router.get("/discover/meta", async (req: Request, res: Response) => {
+  const guid = req.query.guid;
+  if (typeof guid !== "string" || !guid.startsWith("plex://")) {
+    res.status(400).json({ error: "Invalid or missing guid" });
+    return;
+  }
+  const id = guid.split("/").pop();
+  if (!id) {
+    res.status(400).json({ error: "Invalid guid" });
+    return;
+  }
+  // TEMP DIAGNOSTIC — which item's details were requested.
+  console.log("[Discover] meta request guid=%o id=%o", guid, id);
+  try {
+    const m = await fetchDiscoverMeta(id);
+    if (!m) {
+      res.status(404).json({ error: "Details not available" });
+      return;
+    }
+    res.json({
+      title: m.title,
+      year: m.year ?? null,
+      summary: m.summary ?? null,
+      genres: (m.Genre || []).map((g) => g.tag),
+      duration: m.duration ?? null,
+      contentRating: m.contentRating ?? null,
+      type: m.type,
+      thumb: m.thumb ? externalThumbUrl(m.thumb) : null,
+    });
+  } catch (err) {
+    console.error("Discover meta error:", err);
+    res.status(502).json({ error: "Failed to fetch details" });
+  }
+});
+
+/** Plex's online catalog lives on separate cloud hosts from the local server.
+ *  Discover = search/hubs (thin records); metadata = fuller detail (summary, …). */
 const DISCOVER_BASE = "https://discover.provider.plex.tv";
+const METADATA_BASE = "https://metadata.provider.plex.tv";
+
+/**
+ * Token for plex.tv provider (Discover) calls. The local PLEX_TOKEN is a *server*
+ * token, which the cloud provider rejects with "Invalid token" on endpoints that
+ * validate (metadata) — search happens to be lenient. Set PLEX_ACCOUNT_TOKEN to
+ * your plex.tv account token for details to work; falls back to PLEX_TOKEN.
+ */
+function providerToken(): string | undefined {
+  return process.env.PLEX_ACCOUNT_TOKEN || process.env.PLEX_TOKEN;
+}
 
 // Cache of guid → in-library, so repeated ownership checks (search-as-you-type)
 // don't re-hit Plex for the same title.
@@ -422,16 +473,74 @@ async function isGuidInLibrary(guid: string): Promise<boolean> {
   try {
     const data = await plexJSON<{ MediaContainer: { size?: number } }>("/library/all", { guid });
     owned = (data.MediaContainer.size ?? 0) > 0;
-    // TEMP DIAGNOSTIC — confirm the guid lookup works; remove once happy.
-    if (owned) console.log("[Search] guid owned via library lookup:", guid);
-  } catch (err) {
-    // TEMP DIAGNOSTIC — surfaces a wrong endpoint/param rather than silently
-    // treating everything as not-owned.
-    console.warn("[Search] guid lookup failed for", guid, "-", (err as Error).message);
+  } catch {
     owned = false;
   }
   ownedGuidCache.set(guid, { owned, at: Date.now() });
   return owned;
+}
+
+/**
+ * Fetch a single title's metadata from the Discover cloud provider by its id
+ * (the trailing segment of a plex:// guid). Best-effort: null on any failure.
+ */
+async function fetchProviderMeta(base: string, id: string, token: string): Promise<PlexMetadataItem | null> {
+  const url = new URL(`${base}/library/metadata/${encodeURIComponent(id)}`);
+  // The metadata endpoint reads the X-Plex-* identity from the QUERY STRING, not
+  // headers (unlike search), and 401s without the full set. Mirror what the Plex
+  // web client sends.
+  const params: Record<string, string> = {
+    "X-Plex-Token": token,
+    "X-Plex-Client-Identifier": OUR_CLIENT_ID,
+    "X-Plex-Product": "Plex Discord Theater",
+    "X-Plex-Version": "1.0.0",
+    "X-Plex-Platform": "Web",
+    "X-Plex-Provider-Version": "7.2",
+    "X-Plex-Language": "en",
+  };
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  // TEMP DIAGNOSTIC — exact outbound URL, token redacted.
+  console.log("[Discover] meta GET %s",
+    url.toString().replace(/(X-Plex-Token=)[^&]+/, "$1REDACTED"));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      // TEMP DIAGNOSTIC — the response body usually says *why* (bad token, client).
+      const body = await res.text().catch(() => "");
+      console.warn("[Discover] meta failed:", new URL(base).host, res.status, body.slice(0, 300));
+      return null;
+    }
+    const data = (await res.json()) as { MediaContainer?: { Metadata?: PlexMetadataItem[] } };
+    const m = data.MediaContainer?.Metadata?.[0] ?? null;
+    // TEMP DIAGNOSTIC — dump the raw response so we can see exactly what each host
+    // returns for a title with no details. Remove once resolved.
+    console.log("[Discover] meta host=%s id=%s found=%s keys=%o summaryLen=%d guids=%o",
+      new URL(base).host, id, !!m, m ? Object.keys(m) : [], m?.summary?.length ?? 0,
+      (m?.Guid || []).map((g) => g.id));
+    console.log("[Discover] meta raw=%s", JSON.stringify(data.MediaContainer ?? {}).slice(0, 600));
+    return m;
+  } catch (err) {
+    console.warn("[Discover] meta error:", new URL(base).host, err);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchDiscoverMeta(id: string): Promise<PlexMetadataItem | null> {
+  const token = providerToken();
+  if (!token) return null;
+  // Prefer the metadata provider (fuller detail — has the summary Plex shows);
+  // fall back to the discover provider if it returns nothing/no summary.
+  const meta = await fetchProviderMeta(METADATA_BASE, id, token);
+  if (meta?.summary) return meta;
+  const discover = await fetchProviderMeta(DISCOVER_BASE, id, token);
+  return discover?.summary ? discover : (meta ?? discover);
 }
 
 /**
@@ -441,7 +550,7 @@ async function isGuidInLibrary(guid: string): Promise<boolean> {
  * works from local results alone.
  */
 async function searchDiscover(query: string): Promise<PlexMetadataItem[]> {
-  const token = process.env.PLEX_TOKEN;
+  const token = providerToken();
   if (!token) return [];
   const url = new URL(`${DISCOVER_BASE}/library/search`);
   url.searchParams.set("query", query);
@@ -746,7 +855,13 @@ router.get("/thumb/*", async (req: Request, res: Response) => {
   }
 
   const transcodeSource = externalUrl ?? imagePath;
-  const cacheKey = w && h ? `${transcodeSource}:${w}x${h}` : transcodeSource;
+  // External images always render at a fixed size via images.plex.tv regardless
+  // of the client's w/h, so key them on the source alone — otherwise the same
+  // image caches under multiple keys and a stale low-res copy can linger. The
+  // "ext:" prefix also abandons pre-fix entries (e.g. the old ~120px ones).
+  const cacheKey = externalUrl
+    ? `ext:${externalUrl}`
+    : w && h ? `${transcodeSource}:${w}x${h}` : transcodeSource;
 
   // Check server-side cache first
   const cached = thumbCache.get(cacheKey);

@@ -108,6 +108,9 @@ export interface PlexItem {
   /** False for online (Discover) search results that aren't in the library and
    *  can't be played here. Absent/true on everything else. */
   inLibrary?: boolean;
+  /** plex:// guid — present on online (Discover) results, used to fetch their
+   *  detail metadata. Absent on local library items. */
+  guid?: string;
 }
 
 export interface PlexSection {
@@ -206,6 +209,24 @@ export function fetchChildren(ratingKey: string): Promise<{ items: PlexItem[] }>
 
 export function fetchMeta(ratingKey: string): Promise<PlexMeta> {
   return apiGet(`/api/plex/meta/${encodeURIComponent(ratingKey)}`);
+}
+
+/** Detail metadata for an online (Discover) title, fetched by its plex:// guid. */
+export interface DiscoverMeta {
+  title: string;
+  year: number | null;
+  summary: string | null;
+  genres: string[];
+  /** Runtime in milliseconds, or null. */
+  duration: number | null;
+  contentRating: string | null;
+  type: string;
+  /** Proxied poster URL, or null. */
+  thumb: string | null;
+}
+
+export function fetchDiscoverMeta(guid: string): Promise<DiscoverMeta> {
+  return apiGet(`/api/plex/discover/meta?guid=${encodeURIComponent(guid)}`);
 }
 
 /**

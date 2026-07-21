@@ -168,6 +168,9 @@ export function App() {
   const showNowPlaying = !!syncState.ratingKey && view.kind !== "player";
 
   const handleSelect = useCallback((item: PlexItem) => {
+    // Online (Discover) results aren't playable here — the card already blocks
+    // the click; this is defense in depth.
+    if (item.inLibrary === false) return;
     if (item.type === "show") {
       pushView({ kind: "show", item });
       emitBrowse(`Looking at ${item.title}`);

@@ -137,6 +137,10 @@ interface PlexMetadataItem {
   grandparentThumb?: string;
   leafCount?: number;
   childCount?: number;
+  // Present on items that live in a local library section; absent on online
+  // (Discover) results returned when /hubs/search is called with includeExternal.
+  librarySectionID?: number;
+  guid?: string;
 }
 
 // ─── Library browsing ────────────────────────────────────────────
@@ -331,15 +335,29 @@ router.get("/search", async (req: Request, res: Response) => {
   }
 
   try {
+    // includeExternal pulls in Plex's online (Discover) catalog alongside local
+    // library matches. Those items aren't playable here (no local file to
+    // transcode) — the client marks them and blocks playback.
     const data = await plexJSON<{
       MediaContainer: { Hub?: Array<{ Metadata?: PlexMetadataItem[] }> };
-    }>("/hubs/search", { query: q, limit: "30" });
+    }>("/hubs/search", { query: q, limit: "30", includeExternal: "1" });
     const hubs = data.MediaContainer.Hub || [];
-    const items: ReturnType<typeof mapItem>[] = [];
+    const items: Array<ReturnType<typeof mapItem> & { inLibrary: boolean }> = [];
     for (const hub of hubs) {
       if (!hub.Metadata) continue;
       for (const m of hub.Metadata) {
-        items.push(mapItem(m));
+        // Local library items carry a librarySectionID; online results don't.
+        // VERIFY against a real includeExternal response and adjust if your Plex
+        // version distinguishes them differently (e.g. by guid prefix).
+        const inLibrary = m.librarySectionID != null;
+        const base = mapItem(m);
+        items.push({
+          ...base,
+          inLibrary,
+          // Local thumbs stay as-is; online artwork is routed through the photo
+          // transcoder so it's same-origin (CSP) and cached like everything else.
+          thumb: inLibrary ? base.thumb : externalThumbUrl(m.thumb),
+        });
       }
     }
     res.json({ items });
@@ -348,6 +366,23 @@ router.get("/search", async (req: Request, res: Response) => {
     res.status(502).json({ error: "Failed to search Plex" });
   }
 });
+
+/**
+ * Same-origin proxy URL for an online (Discover) result's artwork.
+ *
+ * The image lives on Plex's cloud rather than the local server, so it's routed
+ * through the /thumb handler's `url=` fetch (the local photo transcoder pulls and
+ * resizes it). Returns null when absent; the client falls back to a placeholder.
+ *
+ * VERIFY: the exact form of an external result's thumb (absolute URL vs Plex path)
+ * is version-dependent — confirm against a real response and adjust if needed.
+ */
+function externalThumbUrl(thumb: string | undefined): string | null {
+  if (!thumb) return null;
+  // No w/h here — the client's card helper appends those (and the token), so
+  // adding them would duplicate the params.
+  return `/api/plex/thumb/photo/:/transcode?url=${encodeURIComponent(thumb)}`;
+}
 
 /**
  * GET /api/plex/meta/:ratingKey
@@ -560,7 +595,20 @@ router.get("/thumb/*", async (req: Request, res: Response) => {
   const h = req.query.h as string | undefined;
   if (w && !NUMERIC_RE.test(w)) { res.status(400).end(); return; }
   if (h && !NUMERIC_RE.test(h)) { res.status(400).end(); return; }
-  const cacheKey = w && h ? `${imagePath}:${w}x${h}` : imagePath;
+
+  // External (Discover) artwork: /photo/:/transcode with a ?url= pointing at
+  // Plex's cloud image. Host-allowlisted so this can't become an open image
+  // proxy. When present, the transcoder fetches this URL instead of imagePath.
+  const externalUrl = typeof req.query.url === "string" ? req.query.url : undefined;
+  if (req.query.url !== undefined) {
+    if (externalUrl === undefined || imagePath !== "/photo/:/transcode" || !isAllowedExternalImage(externalUrl)) {
+      res.status(400).end();
+      return;
+    }
+  }
+
+  const transcodeSource = externalUrl ?? imagePath;
+  const cacheKey = w && h ? `${transcodeSource}:${w}x${h}` : transcodeSource;
 
   // Check server-side cache first
   const cached = thumbCache.get(cacheKey);
@@ -572,14 +620,15 @@ router.get("/thumb/*", async (req: Request, res: Response) => {
   }
 
   try {
-    // Use Plex photo transcoder for resized images, raw fetch for full-size
-    const plexRes = w && h
+    // Use Plex photo transcoder for resized images (and always for external
+    // artwork, which the local server can't serve directly); raw fetch otherwise.
+    const plexRes = (w && h) || externalUrl
       ? await plexFetch("/photo/:/transcode", {
-          width: w,
-          height: h,
+          width: w ?? "320",
+          height: h ?? "480",
           minSize: "1",
           upscale: "1",
-          url: imagePath,
+          url: transcodeSource,
         })
       : await plexFetch(imagePath);
 
@@ -1575,6 +1624,23 @@ const ALLOWED_THUMB_PREFIXES = ["/library/", "/photo/"];
 
 function isAllowedThumbPath(p: string): boolean {
   return isAllowedProxyPath(p) && ALLOWED_THUMB_PREFIXES.some(prefix => p.startsWith(prefix));
+}
+
+/**
+ * Guard for the external-artwork `?url=` on the thumb proxy — prevents it from
+ * becoming an open image proxy. Relative Plex paths are resolved by the local
+ * server (same safety as a normal thumb); absolute URLs must be Plex-hosted.
+ *
+ * VERIFY: if online results carry artwork on a non-Plex CDN, add its host here.
+ */
+function isAllowedExternalImage(u: string): boolean {
+  if (u.startsWith("/")) return isAllowedThumbPath(u);
+  try {
+    const host = new URL(u).hostname.toLowerCase();
+    return host === "plex.tv" || host.endsWith(".plex.tv") || host.endsWith(".plex.direct");
+  } catch {
+    return false;
+  }
 }
 
 /**

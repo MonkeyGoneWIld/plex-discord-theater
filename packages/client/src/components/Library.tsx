@@ -240,6 +240,11 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   const searchQuery = searchQueryRef.current;
   const displayItems = searchResults ?? items;
   const hasMore = !searchResults && items.length < totalSize;
+  // While searching, online (Discover) results are shown in a separate section
+  // below the library matches. When browsing, everything is a library item.
+  const isSearching = searchResults !== null;
+  const libraryItems = isSearching ? displayItems.filter((i) => i.inLibrary !== false) : displayItems;
+  const externalItems = isSearching ? displayItems.filter((i) => i.inLibrary === false) : [];
   const searchPlaceholder = isHomeTab
     ? "Search everything..."
     : activeSectionType === "movie"
@@ -411,11 +416,23 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
         </div>
       ) : (
         <>
-          <div style={styles.grid}>
-            {displayItems.map((item) => (
-              <MovieCard key={item.ratingKey} item={item} onClick={handleClick} />
-            ))}
-          </div>
+          {libraryItems.length > 0 && (
+            <div style={styles.grid}>
+              {libraryItems.map((item) => (
+                <MovieCard key={item.ratingKey} item={item} onClick={handleClick} />
+              ))}
+            </div>
+          )}
+          {externalItems.length > 0 && (
+            <>
+              <div style={styles.sectionHeader}>Not in your library</div>
+              <div style={styles.grid}>
+                {externalItems.map((item) => (
+                  <MovieCard key={item.ratingKey} item={item} onClick={handleClick} />
+                ))}
+              </div>
+            </>
+          )}
           {hasMore && (
             <div style={styles.loadMoreWrap}>
               <button
@@ -483,6 +500,14 @@ const styles: Record<string, React.CSSProperties> = {
     gridTemplateColumns: POSTER_GRID_COLUMNS,
     gap: "14px",
     padding: "16px 24px",
+  },
+  sectionHeader: {
+    padding: "8px 24px 0",
+    fontSize: "13px",
+    fontWeight: 600,
+    letterSpacing: "0.3px",
+    color: "rgba(255,255,255,0.45)",
+    textTransform: "uppercase" as const,
   },
   emptyState: {
     display: "flex",

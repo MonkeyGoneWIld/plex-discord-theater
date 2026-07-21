@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
-import { fetchChildren, fetchMeta, getSessionToken, type PlexItem } from "../lib/api";
-import { SeasonRequestPanel } from "./SeasonRequestPanel";
+import { fetchChildren, getSessionToken, type PlexItem } from "../lib/api";
 import { SkeletonBlock } from "./SkeletonBlock";
 import type { QueueItem } from "../hooks/useSync";
 
@@ -37,11 +36,6 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, isHost, is
   const [episodes, setEpisodes] = useState<PlexItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [hoveredKey, setHoveredKey] = useState<string | null>(null);
-  // For the request panel: the show's tmdb id and which seasons are owned.
-  // Matters most for single-season shows, where ShowDetail auto-navigates here
-  // and its request panel is never reachable.
-  const [showTmdbId, setShowTmdbId] = useState<number | null>(null);
-  const [ownedSeasons, setOwnedSeasons] = useState<number[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,22 +46,6 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, isHost, is
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [season.ratingKey]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setShowTmdbId(null);
-    setOwnedSeasons([]);
-    fetchMeta(show.ratingKey)
-      .then((m) => { if (!cancelled && m.tmdbId != null) setShowTmdbId(m.tmdbId); })
-      .catch(() => {});
-    fetchChildren(show.ratingKey)
-      .then((res) => {
-        if (cancelled) return;
-        setOwnedSeasons(res.items.map((s) => s.index).filter((n): n is number => n != null));
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [show.ratingKey]);
 
   const seasonLabel = season.index != null ? `Season ${season.index}` : season.title;
 
@@ -177,19 +155,6 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, isHost, is
               </button>
             );
           })}
-        </div>
-      )}
-
-      {/* Request seasons not in the library. Essential for single-season shows,
-          which auto-navigate here past ShowDetail's request panel. */}
-      {showTmdbId != null && (
-        <div style={{ maxWidth: "1100px", margin: "0 auto", padding: "0 24px 48px" }}>
-          <SeasonRequestPanel
-            tmdbId={showTmdbId}
-            heading="Request more seasons"
-            hideAvailable
-            ownedSeasons={ownedSeasons}
-          />
         </div>
       )}
     </div>

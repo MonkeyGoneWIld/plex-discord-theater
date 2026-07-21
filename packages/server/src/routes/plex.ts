@@ -701,9 +701,6 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
     }
 
     const tmdbId = await resolveTmdbId(m);
-    // TEMP DIAGNOSTIC — confirm the external id resolves for library shows; remove after.
-    console.log("[Meta] %s type=%o guid=%o guids=%o tmdbId=%o", ratingKey, m.type,
-      m.guid, (m.Guid || []).map((g) => g.id), tmdbId);
 
     res.json({
       ratingKey: m.ratingKey,

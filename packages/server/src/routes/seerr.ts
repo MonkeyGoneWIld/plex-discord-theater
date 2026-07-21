@@ -139,20 +139,22 @@ router.get("/tv/:tmdbId", async (req: Request, res: Response) => {
       return;
     }
     const data = (await r.json()) as {
-      seasons?: Array<{ seasonNumber?: number; name?: string; episodeCount?: number }>;
+      seasons?: Array<{ seasonNumber?: number; name?: string; episodeCount?: number; posterPath?: string | null }>;
       mediaInfo?: {
         status?: number;
         seasons?: Array<{ seasonNumber?: number; status?: number }>;
         requests?: Array<{ status?: number; seasons?: Array<{ seasonNumber?: number; status?: number }> }>;
       };
     };
-    // TEMP DIAGNOSTIC — confirm where per-season status lives; remove once verified.
-    console.log("[Seerr] tv %s mediaInfo=%s", tmdbId,
-      JSON.stringify(data.mediaInfo ?? null).slice(0, 600));
     const statusBySeason = new Map<number, number>();
-    // Availability of already-tracked seasons.
+    // Availability of already-tracked seasons. Seerr lists every season of a
+    // Sonarr-synced show here, with UNKNOWN (1) for the ones it doesn't have /
+    // that are unmonitored — those are exactly the requestable ones, so treat
+    // UNKNOWN as "no status" rather than recording it.
     for (const s of data.mediaInfo?.seasons ?? []) {
-      if (s.seasonNumber != null && s.status != null) statusBySeason.set(s.seasonNumber, s.status);
+      if (s.seasonNumber != null && s.status != null && s.status !== 1) {
+        statusBySeason.set(s.seasonNumber, s.status);
+      }
     }
     // Requested seasons (pending/processing) live on the request objects; don't
     // overwrite a richer availability status already recorded above.
@@ -172,6 +174,8 @@ router.get("/tv/:tmdbId", async (req: Request, res: Response) => {
         name: s.name || `Season ${s.seasonNumber}`,
         episodeCount: s.episodeCount ?? 0,
         status: statusBySeason.get(s.seasonNumber!) ?? null,
+        // TMDB poster path (e.g. "/abc.jpg") — served via GET /poster below.
+        posterPath: s.posterPath ?? null,
       }));
     res.json({ configured: true, status: data.mediaInfo?.status ?? null, seasons });
   } catch (err) {
@@ -224,6 +228,37 @@ router.post("/request", async (req: Request, res: Response) => {
   } catch (err) {
     console.error("[Seerr] request error:", err);
     res.status(502).json({ error: "Failed to reach Seerr" });
+  }
+});
+
+/**
+ * GET /api/seerr/poster?path=/abc.jpg
+ * Same-origin proxy for TMDB season posters (CSP is img-src 'self'). The path is
+ * a bare TMDB file path from /tv/:tmdbId above — strictly validated so this
+ * can't be pointed anywhere else.
+ */
+const TMDB_POSTER_RE = /^\/[A-Za-z0-9]+\.(?:jpg|png)$/;
+
+router.get("/poster", async (req: Request, res: Response) => {
+  const path = String(req.query.path ?? "");
+  if (!TMDB_POSTER_RE.test(path)) {
+    res.status(400).json({ error: "Invalid poster path" });
+    return;
+  }
+  try {
+    const r = await fetch(`https://image.tmdb.org/t/p/w342${path}`, {
+      signal: AbortSignal.timeout(SEERR_TIMEOUT_MS),
+    });
+    if (!r.ok) {
+      res.status(502).json({ error: "Poster fetch failed" });
+      return;
+    }
+    res.set("Content-Type", r.headers.get("content-type") ?? "image/jpeg");
+    res.set("Cache-Control", "public, max-age=86400");
+    res.send(Buffer.from(await r.arrayBuffer()));
+  } catch (err) {
+    console.error("[Seerr] poster error:", err);
+    res.status(502).json({ error: "Poster fetch failed" });
   }
 });
 

@@ -254,6 +254,13 @@ export interface SeerrSeason {
   name: string;
   episodeCount: number;
   status: number | null;
+  /** TMDB poster file path (e.g. "/abc.jpg"), served via seerrPosterUrl. */
+  posterPath?: string | null;
+}
+
+/** Same-origin proxied URL for a TMDB season poster, or null. */
+export function seerrPosterUrl(posterPath: string | null | undefined): string | null {
+  return posterPath ? `/api/seerr/poster?path=${encodeURIComponent(posterPath)}` : null;
 }
 
 export interface SeerrTv {

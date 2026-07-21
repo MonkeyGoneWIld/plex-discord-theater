@@ -25,6 +25,11 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
   const [requested, setRequested] = useState(false);
 
   useEffect(() => {
+    // TEMP DIAGNOSTIC — the currently selected item and what we'll look up by.
+    console.log("[ExternalDetail] selected item", {
+      guid: item.guid, title: item.title, ratingKey: item.ratingKey,
+      type: item.type, inLibrary: item.inLibrary,
+    });
     if (!item.guid) {
       setLoading(false);
       return;

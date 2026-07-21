@@ -416,6 +416,8 @@ router.get("/discover/meta", async (req: Request, res: Response) => {
     res.status(400).json({ error: "Invalid guid" });
     return;
   }
+  // TEMP DIAGNOSTIC — which item's details were requested.
+  console.log("[Discover] meta request guid=%o id=%o", guid, id);
   try {
     const m = await fetchDiscoverMeta(id);
     if (!m) {
@@ -487,6 +489,9 @@ async function fetchProviderMeta(base: string, id: string, token: string): Promi
     "X-Plex-Language": "en",
   };
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  // TEMP DIAGNOSTIC — exact outbound URL, token redacted.
+  console.log("[Discover] meta GET %s",
+    url.toString().replace(/(X-Plex-Token=)[^&]+/, "$1REDACTED"));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
   try {
@@ -495,7 +500,9 @@ async function fetchProviderMeta(base: string, id: string, token: string): Promi
       signal: controller.signal,
     });
     if (!res.ok) {
-      console.warn("[Discover] meta failed:", new URL(base).host, res.status);
+      // TEMP DIAGNOSTIC — the response body usually says *why* (bad token, client).
+      const body = await res.text().catch(() => "");
+      console.warn("[Discover] meta failed:", new URL(base).host, res.status, body.slice(0, 300));
       return null;
     }
     const data = (await res.json()) as { MediaContainer?: { Metadata?: PlexMetadataItem[] } };

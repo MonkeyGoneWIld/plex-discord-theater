@@ -1774,39 +1774,37 @@ function isAllowedThumbPath(p: string): boolean {
 function isAllowedExternalImage(u: string): boolean {
   if (u.startsWith("/")) return isAllowedThumbPath(u);
   try {
-    const host = new URL(u).hostname.toLowerCase();
-    // Plex sources metadata art from a handful of image CDNs; allow the known
-    // ones so posters aren't blocked. These serve only images (no SSRF surface).
-    return (
-      host === "plex.tv" ||
-      host.endsWith(".plex.tv") ||
-      host.endsWith(".plex.direct") ||
-      host === "image.tmdb.org" ||
-      host === "artworks.thetvdb.com" ||
-      host === "m.media-amazon.com" ||
-      host === "assets.fanart.tv"
-    );
+    // Any https source is fine: external art is fetched via images.plex.tv (see
+    // fetchExternalImage), so our server only ever connects to that one host —
+    // the source URL is just a param Plex's proxy resolves. This avoids an
+    // ever-growing per-CDN allowlist while keeping our own SSRF surface to one host.
+    return new URL(u).protocol === "https:";
   } catch {
     return false;
   }
 }
 
-/** Downsize TMDB's multi-MB "original" posters to a card-appropriate width. */
+/** Downsize TMDB's multi-MB "original" posters before proxying, so Plex isn't
+ *  asked to pull a huge source. Other CDNs already serve poster-sized art. */
 function sizedExternalImage(url: string): string {
   return url.replace(/(image\.tmdb\.org\/t\/p\/)(original|w\d+)(\/)/, "$1w500$3");
 }
 
 /**
- * Fetch an allowlisted external poster directly, with a timeout. TMDB's image
- * CDN isn't rate-limited per request (only ~20 concurrent connections, which we
- * stay well under) and we cache each result, so hitting it directly is fine and
- * keeps full poster quality.
+ * Fetch an external poster through Plex's public image proxy (images.plex.tv),
+ * which fetches + resizes the source. This means one host handles every source
+ * CDN (TMDB, TheTVDB, Amazon, fanart, …) — no per-CDN allowlist to chase — and
+ * our server only ever connects to images.plex.tv. Sized to 320x480 to match
+ * local library posters. No auth needed.
  */
 async function fetchExternalImage(url: string): Promise<globalThis.Response> {
+  const proxied =
+    `https://images.plex.tv/photo?width=320&height=480&minSize=1&upscale=1` +
+    `&url=${encodeURIComponent(sizedExternalImage(url))}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
   try {
-    return await fetch(sizedExternalImage(url), {
+    return await fetch(proxied, {
       headers: { Accept: "image/*" },
       signal: controller.signal,
     });

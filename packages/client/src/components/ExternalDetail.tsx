@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
 import {
-  authUrl, fetchDiscoverMeta, fetchSeerrStatus, seerrRequest,
-  type PlexItem, type DiscoverMeta, type SeerrMediaType,
+  authUrl, fetchDiscoverMeta, fetchSeerrStatus, fetchSeerrTv, seerrRequest,
+  type PlexItem, type DiscoverMeta, type SeerrMediaType, type SeerrTv,
 } from "../lib/api";
-import { SeasonRequestPanel } from "./SeasonRequestPanel";
+import { SeasonRequestGrid } from "./SeasonRequestGrid";
 
 interface ExternalDetailProps {
   item: PlexItem;
@@ -58,7 +58,7 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
   }, [item.guid]);
 
   // Once we know the TMDB id, pull the current request/availability status.
-  // TV shows use the per-season panel instead, which does its own lookup.
+  // TV shows use the per-season grid instead, fetched below.
   const tmdbId = meta?.tmdbId ?? null;
   useEffect(() => {
     if (tmdbId == null || mediaType !== "movie") return;
@@ -68,6 +68,18 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
       .catch(() => { if (!cancelled) setSeerrConfigured(false); });
     return () => { cancelled = true; };
   }, [tmdbId, mediaType]);
+
+  // TV: the full season list with per-season status, for the request grid.
+  const [seerrTv, setSeerrTv] = useState<SeerrTv | null>(null);
+  const [tvNonce, setTvNonce] = useState(0);
+  useEffect(() => {
+    if (tmdbId == null || mediaType !== "tv") return;
+    let cancelled = false;
+    fetchSeerrTv(tmdbId)
+      .then((tv) => { if (!cancelled) setSeerrTv(tv); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [tmdbId, mediaType, tvNonce]);
 
   const handleRequest = () => {
     if (tmdbId == null || requesting) return;
@@ -122,30 +134,41 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
           ) : (
             <div style={styles.summaryMuted}>No description available.</div>
           )}
-          {/* Requesting — TV shows get the per-season panel; movies a single
-              button. Both hidden when Seerr isn't set up or there's no TMDB id. */}
-          {tmdbId != null && (
-            mediaType === "tv" ? (
-              <SeasonRequestPanel tmdbId={tmdbId} />
-            ) : seerrConfigured !== false ? (
-              statusLabel ? (
-                <button disabled style={{ ...styles.requestBtn, ...styles.requestBtnDone }}>
-                  {statusLabel}
-                </button>
-              ) : (
-                <button
-                  onClick={handleRequest}
-                  disabled={requesting || seerrConfigured == null}
-                  style={styles.requestBtn}
-                >
-                  {requesting ? "Requesting…" : "Request"}
-                </button>
-              )
-            ) : null
+          {/* Requesting — movies get a single button here; TV shows the season
+              grid below. Both hidden when Seerr isn't set up or there's no
+              TMDB id. */}
+          {tmdbId != null && mediaType === "movie" && seerrConfigured !== false && (
+            statusLabel ? (
+              <button disabled style={{ ...styles.requestBtn, ...styles.requestBtnDone }}>
+                {statusLabel}
+              </button>
+            ) : (
+              <button
+                onClick={handleRequest}
+                disabled={requesting || seerrConfigured == null}
+                style={styles.requestBtn}
+              >
+                {requesting ? "Requesting…" : "Request"}
+              </button>
+            )
           )}
           {requestError && <div style={styles.requestError}>{requestError}</div>}
         </div>
       </div>
+      {/* TV: same season request grid as the library show page. */}
+      {tmdbId != null && mediaType === "tv" && seerrTv?.configured !== false && (
+        <div style={styles.seasonsWrap}>
+          {seerrTv == null ? (
+            <div style={styles.summaryMuted}>Loading seasons…</div>
+          ) : seerrTv.seasons.length > 0 ? (
+            <SeasonRequestGrid
+              tmdbId={tmdbId}
+              seasons={seerrTv.seasons}
+              onRequested={() => setTvNonce((n) => n + 1)}
+            />
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }
@@ -269,5 +292,10 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: "10px",
     color: "#e5834a",
     fontSize: "13px",
+  },
+  seasonsWrap: {
+    maxWidth: "900px",
+    margin: "0 auto",
+    padding: "0 24px 40px",
   },
 };

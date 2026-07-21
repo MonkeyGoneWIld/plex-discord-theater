@@ -117,8 +117,57 @@ router.get("/status", async (req: Request, res: Response) => {
 });
 
 /**
- * POST /api/seerr/request  { tmdbId, mediaType }
- * Create a request as your Seerr account. TV requests cover all seasons.
+ * GET /api/seerr/tv/:tmdbId
+ * All seasons of a show plus per-season availability/request status, so the
+ * detail view can show what's owned vs requestable. Season 0 (specials) omitted.
+ */
+router.get("/tv/:tmdbId", async (req: Request, res: Response) => {
+  const cfg = seerrConfig();
+  if (!cfg) {
+    res.json({ configured: false, status: null, seasons: [] });
+    return;
+  }
+  const tmdbId = String(req.params.tmdbId ?? "");
+  if (!/^\d+$/.test(tmdbId)) {
+    res.status(400).json({ error: "Invalid tmdbId" });
+    return;
+  }
+  try {
+    const r = await seerrFetch(cfg, `/tv/${tmdbId}`);
+    if (!r || !r.ok) {
+      res.json({ configured: true, status: null, seasons: [] });
+      return;
+    }
+    const data = (await r.json()) as {
+      seasons?: Array<{ seasonNumber?: number; name?: string; episodeCount?: number }>;
+      mediaInfo?: { status?: number; seasons?: Array<{ seasonNumber?: number; status?: number }> };
+    };
+    // TEMP DIAGNOSTIC — confirm the per-season status shape; remove once verified.
+    console.log("[Seerr] tv %s overall=%o seasonStatuses=%o", tmdbId,
+      data.mediaInfo?.status, (data.mediaInfo?.seasons ?? []).map((s) => [s.seasonNumber, s.status]));
+    const statusBySeason = new Map<number, number>();
+    for (const s of data.mediaInfo?.seasons ?? []) {
+      if (s.seasonNumber != null && s.status != null) statusBySeason.set(s.seasonNumber, s.status);
+    }
+    const seasons = (data.seasons ?? [])
+      .filter((s) => (s.seasonNumber ?? 0) >= 1)
+      .map((s) => ({
+        seasonNumber: s.seasonNumber!,
+        name: s.name || `Season ${s.seasonNumber}`,
+        episodeCount: s.episodeCount ?? 0,
+        status: statusBySeason.get(s.seasonNumber!) ?? null,
+      }));
+    res.json({ configured: true, status: data.mediaInfo?.status ?? null, seasons });
+  } catch (err) {
+    console.error("[Seerr] tv error:", err);
+    res.status(502).json({ error: "Failed to reach Seerr" });
+  }
+});
+
+/**
+ * POST /api/seerr/request  { tmdbId, mediaType, seasons? }
+ * Create a request as your Seerr account. For TV, `seasons` is an array of
+ * season numbers; omitted/empty requests all seasons.
  */
 router.post("/request", async (req: Request, res: Response) => {
   const cfg = seerrConfig();
@@ -126,14 +175,21 @@ router.post("/request", async (req: Request, res: Response) => {
     res.status(503).json({ error: "Requests are not configured" });
     return;
   }
-  const { tmdbId, mediaType } = (req.body ?? {}) as { tmdbId?: unknown; mediaType?: unknown };
+  const { tmdbId, mediaType, seasons } = (req.body ?? {}) as {
+    tmdbId?: unknown; mediaType?: unknown; seasons?: unknown;
+  };
   if (!Number.isInteger(tmdbId) || typeof mediaType !== "string" || !MEDIA_TYPES.has(mediaType)) {
     res.status(400).json({ error: "Invalid tmdbId or mediaType" });
     return;
   }
   try {
     const body: Record<string, unknown> = { mediaType, mediaId: tmdbId };
-    if (mediaType === "tv") body.seasons = "all";
+    if (mediaType === "tv") {
+      const picked = Array.isArray(seasons)
+        ? seasons.filter((n): n is number => Number.isInteger(n))
+        : [];
+      body.seasons = picked.length > 0 ? picked : "all";
+    }
     const r = await seerrFetch(cfg, "/request", { method: "POST", body: JSON.stringify(body) });
     if (!r) {
       res.status(502).json({ error: "Couldn't sign in to Seerr" });

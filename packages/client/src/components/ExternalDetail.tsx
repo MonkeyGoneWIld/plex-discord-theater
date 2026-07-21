@@ -3,6 +3,7 @@ import {
   authUrl, fetchDiscoverMeta, fetchSeerrStatus, seerrRequest,
   type PlexItem, type DiscoverMeta, type SeerrMediaType,
 } from "../lib/api";
+import { SeasonRequestPanel } from "./SeasonRequestPanel";
 
 interface ExternalDetailProps {
   item: PlexItem;
@@ -57,9 +58,10 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
   }, [item.guid]);
 
   // Once we know the TMDB id, pull the current request/availability status.
+  // TV shows use the per-season panel instead, which does its own lookup.
   const tmdbId = meta?.tmdbId ?? null;
   useEffect(() => {
-    if (tmdbId == null) return;
+    if (tmdbId == null || mediaType !== "movie") return;
     let cancelled = false;
     fetchSeerrStatus(tmdbId, mediaType)
       .then((s) => { if (!cancelled) { setSeerrConfigured(s.configured); setStatus(s.status); } })
@@ -120,23 +122,26 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
           ) : (
             <div style={styles.summaryMuted}>No description available.</div>
           )}
-          {/* Request button — hidden when Seerr isn't configured or the title has
-              no TMDB id to request by. Shows the tracked status when already
-              requested, otherwise a live Request action. */}
-          {seerrConfigured !== false && tmdbId != null && (
-            statusLabel ? (
-              <button disabled style={{ ...styles.requestBtn, ...styles.requestBtnDone }}>
-                {statusLabel}
-              </button>
-            ) : (
-              <button
-                onClick={handleRequest}
-                disabled={requesting || seerrConfigured == null}
-                style={styles.requestBtn}
-              >
-                {requesting ? "Requesting…" : "Request"}
-              </button>
-            )
+          {/* Requesting — TV shows get the per-season panel; movies a single
+              button. Both hidden when Seerr isn't set up or there's no TMDB id. */}
+          {tmdbId != null && (
+            mediaType === "tv" ? (
+              <SeasonRequestPanel tmdbId={tmdbId} />
+            ) : seerrConfigured !== false ? (
+              statusLabel ? (
+                <button disabled style={{ ...styles.requestBtn, ...styles.requestBtnDone }}>
+                  {statusLabel}
+                </button>
+              ) : (
+                <button
+                  onClick={handleRequest}
+                  disabled={requesting || seerrConfigured == null}
+                  style={styles.requestBtn}
+                >
+                  {requesting ? "Requesting…" : "Request"}
+                </button>
+              )
+            ) : null
           )}
           {requestError && <div style={styles.requestError}>{requestError}</div>}
         </div>

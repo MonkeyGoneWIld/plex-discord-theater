@@ -165,6 +165,8 @@ export interface PlexMeta {
   subtitleTracks: StreamTrack[];
   /** Optional so a newer client served by an older server degrades to "no button". */
   markers?: SkipMarker[];
+  /** TMDB id — for Seerr season requests on library shows. Optional/nullable. */
+  tmdbId?: number | null;
 }
 
 export interface PlexHub {
@@ -245,11 +247,31 @@ export function fetchSeerrStatus(tmdbId: number, mediaType: SeerrMediaType): Pro
   return apiGet(`/api/seerr/status?tmdbId=${tmdbId}&mediaType=${mediaType}`);
 }
 
+/** A show's season with its Seerr status (2=pending, 3=processing, 4=partial,
+ *  5=available, null=not requested/owned). */
+export interface SeerrSeason {
+  seasonNumber: number;
+  name: string;
+  episodeCount: number;
+  status: number | null;
+}
+
+export interface SeerrTv {
+  configured: boolean;
+  status: number | null;
+  seasons: SeerrSeason[];
+}
+
+export function fetchSeerrTv(tmdbId: number): Promise<SeerrTv> {
+  return apiGet(`/api/seerr/tv/${tmdbId}`);
+}
+
 export function seerrRequest(
   tmdbId: number,
   mediaType: SeerrMediaType,
+  seasons?: number[],
 ): Promise<{ ok: boolean; status: number | null }> {
-  return apiPost("/api/seerr/request", { tmdbId, mediaType });
+  return apiPost("/api/seerr/request", { tmdbId, mediaType, ...(seasons ? { seasons } : {}) });
 }
 
 /**

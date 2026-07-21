@@ -692,6 +692,8 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       audioTracks,
       subtitleTracks,
       markers: mapMarkers(m.Marker),
+      // TMDB id — lets the client offer Seerr season requests for library shows.
+      tmdbId: tmdbIdFromGuids(m.Guid),
     });
   } catch (err) {
     console.error("Metadata error:", err);

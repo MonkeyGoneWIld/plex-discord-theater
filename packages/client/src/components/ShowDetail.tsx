@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { fetchMeta, fetchChildren, getSessionToken, type PlexItem, type PlexMeta } from "../lib/api";
+import { SeasonRequestPanel } from "./SeasonRequestPanel";
 import { MovieCard } from "./MovieCard";
 import { SkeletonBlock } from "./SkeletonBlock";
 
@@ -161,6 +162,12 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onBack }
                   />
                 ))}
               </div>
+            </div>
+          )}
+          {/* Request any seasons you don't have yet (owned ones show above). */}
+          {meta.tmdbId != null && (
+            <div style={{ padding: "0 24px 24px" }}>
+              <SeasonRequestPanel tmdbId={meta.tmdbId} heading="Request seasons" hideAvailable />
             </div>
           )}
         </div>

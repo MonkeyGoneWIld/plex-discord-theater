@@ -1,6 +1,10 @@
 import { useState, useEffect } from "react";
-import { fetchMeta, fetchChildren, getSessionToken, type PlexItem, type PlexMeta } from "../lib/api";
+import {
+  fetchMeta, fetchChildren, fetchSeerrTv,
+  getSessionToken, type PlexItem, type PlexMeta, type SeerrSeason,
+} from "../lib/api";
 import { MovieCard } from "./MovieCard";
+import { SeasonRequestGrid } from "./SeasonRequestGrid";
 import { SkeletonBlock } from "./SkeletonBlock";
 
 interface ShowDetailProps {
@@ -22,6 +26,12 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onBack }
   const [seasons, setSeasons] = useState<PlexItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [autoNavigated, setAutoNavigated] = useState(false);
+  // Seasons the library is missing, per Seerr (posters from TMDB). seerrDone
+  // gates the single-season auto-nav: a partial show must land here, on the
+  // request UI, instead of skipping straight to the episode list.
+  const [missingSeasons, setMissingSeasons] = useState<SeerrSeason[]>([]);
+  const [seerrDone, setSeerrDone] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -32,14 +42,6 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onBack }
         if (cancelled) return;
         setMeta(m);
         setSeasons(c.items);
-
-        // Single-season show: replace this view with the season view
-        // so back goes to library instead of looping through auto-nav
-        if (c.items.length === 1 && !autoNavigated) {
-          setAutoNavigated(true);
-          const nav = onReplaceWithSeason ?? onSelectSeason;
-          nav(c.items[0], item);
-        }
       })
       .catch(console.error)
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -47,13 +49,50 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onBack }
     return () => { cancelled = true; };
   }, [item.ratingKey]);
 
+  // Once meta is in, ask Seerr which seasons exist that we don't have.
+  useEffect(() => {
+    if (loading || !meta) return;
+    if (meta.tmdbId == null) {
+      setSeerrDone(true);
+      return;
+    }
+    let cancelled = false;
+    const owned = new Set(seasons.map((s) => s.index).filter((n) => n != null));
+    fetchSeerrTv(meta.tmdbId)
+      .then((tv) => {
+        if (cancelled) return;
+        if (tv.configured) {
+          setMissingSeasons(tv.seasons.filter((s) => !owned.has(s.seasonNumber) && s.status !== 5));
+        }
+      })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setSeerrDone(true); });
+    return () => { cancelled = true; };
+  }, [loading, meta, seasons, reloadNonce]);
+
+  // Single-season show with nothing missing: replace this view with the season
+  // view so back goes to library instead of looping through auto-nav. Waits for
+  // the Seerr answer so partially-available shows keep this landing page.
+  useEffect(() => {
+    if (loading || autoNavigated || !seerrDone) return;
+    if (seasons.length === 1 && missingSeasons.length === 0) {
+      setAutoNavigated(true);
+      const nav = onReplaceWithSeason ?? onSelectSeason;
+      nav(seasons[0], item);
+    }
+  }, [loading, seerrDone, seasons, missingSeasons, autoNavigated]);
+
   const backdropUrl = meta?.art ? authUrl(meta.art) : null;
   const posterUrl = meta?.thumb ? authUrl(meta.thumb) : (item.thumb ? authUrl(item.thumb) : null);
 
   // If auto-navigated, render nothing (the parent will mount SeasonDetail)
   if (autoNavigated) return null;
 
-  if (loading) {
+  // Hold the skeleton while deciding whether a single-season show auto-navigates
+  // (Seerr answer pending) — avoids flashing this page before the redirect.
+  const deciding = !loading && !seerrDone && seasons.length === 1;
+
+  if (loading || deciding) {
     return (
       <div style={styles.page}>
         <button onClick={onBack} style={styles.backBtn}>
@@ -141,8 +180,9 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onBack }
             </div>
           </div>
 
-          {/* Seasons grid */}
-          {seasons.length === 0 && !loading ? (
+          {/* Seasons grid — owned (playable) cards plus the seasons we don't
+              have yet, rendered as selectable request cards with TMDB posters. */}
+          {seasons.length === 0 && missingSeasons.length === 0 && !loading ? (
             <div style={{
               display: "flex", flexDirection: "column" as const, alignItems: "center",
               padding: "48px 24px", gap: "12px",
@@ -151,8 +191,11 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onBack }
             </div>
           ) : (
             <div style={styles.seasonsSection}>
-              <h2 style={styles.seasonsTitle}>Seasons</h2>
-              <div style={styles.seasonsGrid}>
+              <SeasonRequestGrid
+                tmdbId={meta.tmdbId ?? null}
+                seasons={missingSeasons}
+                onRequested={() => setReloadNonce((n) => n + 1)}
+              >
                 {seasons.map((season) => (
                   <MovieCard
                     key={season.ratingKey}
@@ -160,7 +203,7 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onBack }
                     onClick={(s) => onSelectSeason(s, item)}
                   />
                 ))}
-              </div>
+              </SeasonRequestGrid>
             </div>
           )}
         </div>
@@ -320,16 +363,5 @@ const styles: Record<string, React.CSSProperties> = {
   },
   seasonsSection: {
     marginTop: "40px",
-  },
-  seasonsTitle: {
-    fontSize: "20px",
-    fontWeight: 600,
-    color: "#e0e0e0",
-    marginBottom: "16px",
-  },
-  seasonsGrid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
-    gap: "14px",
   },
 };

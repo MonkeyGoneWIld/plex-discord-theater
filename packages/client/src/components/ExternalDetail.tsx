@@ -1,5 +1,9 @@
 import { useState, useEffect } from "react";
-import { authUrl, fetchDiscoverMeta, type PlexItem, type DiscoverMeta } from "../lib/api";
+import {
+  authUrl, fetchDiscoverMeta, fetchSeerrStatus, fetchSeerrTv, seerrRequest,
+  type PlexItem, type DiscoverMeta, type SeerrMediaType, type SeerrTv,
+} from "../lib/api";
+import { SeasonRequestGrid } from "./SeasonRequestGrid";
 
 interface ExternalDetailProps {
   item: PlexItem;
@@ -14,6 +18,14 @@ function formatRuntime(ms: number | null): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+// Seerr MediaStatus → label for an already-tracked title.
+const STATUS_LABEL: Record<number, string> = {
+  2: "Requested",
+  3: "Processing",
+  4: "Partially available",
+  5: "Available",
+};
+
 /**
  * Detail view for an online (Discover) title the user doesn't own. Shows the
  * richer provider metadata (summary, genres, runtime) when available, falling
@@ -22,14 +34,16 @@ function formatRuntime(ms: number | null): string {
 export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
   const [meta, setMeta] = useState<DiscoverMeta | null>(null);
   const [loading, setLoading] = useState(true);
-  const [requested, setRequested] = useState(false);
+  const mediaType: SeerrMediaType = item.type === "show" ? "tv" : "movie";
+
+  // Seerr request state. configured: null=unknown, then true/false. status is the
+  // MediaStatus (null = not requested).
+  const [seerrConfigured, setSeerrConfigured] = useState<boolean | null>(null);
+  const [status, setStatus] = useState<number | null>(null);
+  const [requesting, setRequesting] = useState(false);
+  const [requestError, setRequestError] = useState<string | null>(null);
 
   useEffect(() => {
-    // TEMP DIAGNOSTIC — the currently selected item and what we'll look up by.
-    console.log("[ExternalDetail] selected item", {
-      guid: item.guid, title: item.title, ratingKey: item.ratingKey,
-      type: item.type, inLibrary: item.inLibrary,
-    });
     if (!item.guid) {
       setLoading(false);
       return;
@@ -43,6 +57,40 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
     return () => { cancelled = true; };
   }, [item.guid]);
 
+  // Once we know the TMDB id, pull the current request/availability status.
+  // TV shows use the per-season grid instead, fetched below.
+  const tmdbId = meta?.tmdbId ?? null;
+  useEffect(() => {
+    if (tmdbId == null || mediaType !== "movie") return;
+    let cancelled = false;
+    fetchSeerrStatus(tmdbId, mediaType)
+      .then((s) => { if (!cancelled) { setSeerrConfigured(s.configured); setStatus(s.status); } })
+      .catch(() => { if (!cancelled) setSeerrConfigured(false); });
+    return () => { cancelled = true; };
+  }, [tmdbId, mediaType]);
+
+  // TV: the full season list with per-season status, for the request grid.
+  const [seerrTv, setSeerrTv] = useState<SeerrTv | null>(null);
+  const [tvNonce, setTvNonce] = useState(0);
+  useEffect(() => {
+    if (tmdbId == null || mediaType !== "tv") return;
+    let cancelled = false;
+    fetchSeerrTv(tmdbId)
+      .then((tv) => { if (!cancelled) setSeerrTv(tv); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [tmdbId, mediaType, tvNonce]);
+
+  const handleRequest = () => {
+    if (tmdbId == null || requesting) return;
+    setRequesting(true);
+    setRequestError(null);
+    seerrRequest(tmdbId, mediaType)
+      .then((r) => setStatus(r.status ?? 2))
+      .catch((err) => setRequestError(err instanceof Error ? err.message : "Request failed"))
+      .finally(() => setRequesting(false));
+  };
+
   // Prefer detail metadata; fall back to what the search result carried.
   const title = meta?.title ?? item.title;
   const year = meta?.year ?? item.year ?? null;
@@ -52,6 +100,7 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
   const runtime = formatRuntime(meta?.duration ?? null);
   const rating = meta?.contentRating ?? null;
   const facts = [year, runtime, rating].filter(Boolean).join("  ·  ");
+  const statusLabel = status != null ? STATUS_LABEL[status] ?? null : null;
 
   return (
     <div style={styles.container}>
@@ -85,15 +134,41 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
           ) : (
             <div style={styles.summaryMuted}>No description available.</div>
           )}
-          <button
-            onClick={() => setRequested(true)}
-            disabled={requested}
-            style={{ ...styles.requestBtn, ...(requested ? styles.requestBtnDone : {}) }}
-          >
-            {requested ? "Requested ✓" : "Request"}
-          </button>
+          {/* Requesting — movies get a single button here; TV shows the season
+              grid below. Both hidden when Seerr isn't set up or there's no
+              TMDB id. */}
+          {tmdbId != null && mediaType === "movie" && seerrConfigured !== false && (
+            statusLabel ? (
+              <button disabled style={{ ...styles.requestBtn, ...styles.requestBtnDone }}>
+                {statusLabel}
+              </button>
+            ) : (
+              <button
+                onClick={handleRequest}
+                disabled={requesting || seerrConfigured == null}
+                style={styles.requestBtn}
+              >
+                {requesting ? "Requesting…" : "Request"}
+              </button>
+            )
+          )}
+          {requestError && <div style={styles.requestError}>{requestError}</div>}
         </div>
       </div>
+      {/* TV: same season request grid as the library show page. */}
+      {tmdbId != null && mediaType === "tv" && seerrTv?.configured !== false && (
+        <div style={styles.seasonsWrap}>
+          {seerrTv == null ? (
+            <div style={styles.summaryMuted}>Loading seasons…</div>
+          ) : seerrTv.seasons.length > 0 ? (
+            <SeasonRequestGrid
+              tmdbId={tmdbId}
+              seasons={seerrTv.seasons}
+              onRequested={() => setTvNonce((n) => n + 1)}
+            />
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }
@@ -212,5 +287,15 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(229,160,13,0.6)",
     color: "#e5a00d",
     cursor: "default",
+  },
+  requestError: {
+    marginTop: "10px",
+    color: "#e5834a",
+    fontSize: "13px",
+  },
+  seasonsWrap: {
+    maxWidth: "900px",
+    margin: "0 auto",
+    padding: "0 24px 40px",
   },
 };

@@ -416,8 +416,6 @@ router.get("/discover/meta", async (req: Request, res: Response) => {
     res.status(400).json({ error: "Invalid guid" });
     return;
   }
-  // TEMP DIAGNOSTIC — which item's details were requested.
-  console.log("[Discover] meta request guid=%o id=%o", guid, id);
   try {
     const m = await fetchDiscoverMeta(id);
     if (!m) {
@@ -433,6 +431,8 @@ router.get("/discover/meta", async (req: Request, res: Response) => {
       contentRating: m.contentRating ?? null,
       type: m.type,
       thumb: m.thumb ? externalThumbUrl(m.thumb) : null,
+      // TMDB id (for requesting via Seerr), pulled from the external id list.
+      tmdbId: tmdbIdFromGuids(m.Guid),
     });
   } catch (err) {
     console.error("Discover meta error:", err);
@@ -484,6 +484,39 @@ async function isGuidInLibrary(guid: string): Promise<boolean> {
  * Fetch a single title's metadata from the Discover cloud provider by its id
  * (the trailing segment of a plex:// guid). Best-effort: null on any failure.
  */
+/** Pull the TMDB id out of a metadata item's external id list (e.g. "tmdb://550"). */
+function tmdbIdFromGuids(guids?: Array<{ id?: string }>): number | null {
+  const hit = guids?.find((g) => g.id?.startsWith("tmdb://"));
+  if (!hit?.id) return null;
+  const n = parseInt(hit.id.slice("tmdb://".length), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Local library items don't always carry a tmdb:// guid — older metadata agents
+// only store tvdb/imdb ids. When the direct lookup misses, resolve via Plex's
+// metadata provider using the item's plex:// guid (the same path Discover uses),
+// so Seerr season requests still work. Cached per ratingKey (incl. misses).
+const tmdbIdCache = new Map<string, number | null>();
+
+async function resolveTmdbId(m: PlexMetadataItem): Promise<number | null> {
+  const direct = tmdbIdFromGuids(m.Guid);
+  if (direct != null) return direct;
+  // Only shows need the provider fallback for season requests; movies that lack a
+  // tmdb guid are rare and not season-requestable anyway.
+  if (m.type !== "show") return null;
+  const key = String(m.ratingKey ?? "");
+  if (key && tmdbIdCache.has(key)) return tmdbIdCache.get(key)!;
+  // plex://show/<providerId> — the provider metadata endpoint keys on <providerId>.
+  const providerId = /^plex:\/\/[^/]+\/(.+)$/.exec(m.guid ?? "")?.[1] ?? null;
+  let resolved: number | null = null;
+  if (providerId) {
+    const pm = await fetchDiscoverMeta(providerId);
+    resolved = pm ? tmdbIdFromGuids(pm.Guid) : null;
+  }
+  if (key) tmdbIdCache.set(key, resolved);
+  return resolved;
+}
+
 async function fetchProviderMeta(base: string, id: string, token: string): Promise<PlexMetadataItem | null> {
   const url = new URL(`${base}/library/metadata/${encodeURIComponent(id)}`);
   // The metadata endpoint reads the X-Plex-* identity from the QUERY STRING, not
@@ -499,9 +532,6 @@ async function fetchProviderMeta(base: string, id: string, token: string): Promi
     "X-Plex-Language": "en",
   };
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  // TEMP DIAGNOSTIC — exact outbound URL, token redacted.
-  console.log("[Discover] meta GET %s",
-    url.toString().replace(/(X-Plex-Token=)[^&]+/, "$1REDACTED"));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
   try {
@@ -510,20 +540,11 @@ async function fetchProviderMeta(base: string, id: string, token: string): Promi
       signal: controller.signal,
     });
     if (!res.ok) {
-      // TEMP DIAGNOSTIC — the response body usually says *why* (bad token, client).
-      const body = await res.text().catch(() => "");
-      console.warn("[Discover] meta failed:", new URL(base).host, res.status, body.slice(0, 300));
+      console.warn("[Discover] meta failed:", new URL(base).host, res.status);
       return null;
     }
     const data = (await res.json()) as { MediaContainer?: { Metadata?: PlexMetadataItem[] } };
-    const m = data.MediaContainer?.Metadata?.[0] ?? null;
-    // TEMP DIAGNOSTIC — dump the raw response so we can see exactly what each host
-    // returns for a title with no details. Remove once resolved.
-    console.log("[Discover] meta host=%s id=%s found=%s keys=%o summaryLen=%d guids=%o",
-      new URL(base).host, id, !!m, m ? Object.keys(m) : [], m?.summary?.length ?? 0,
-      (m?.Guid || []).map((g) => g.id));
-    console.log("[Discover] meta raw=%s", JSON.stringify(data.MediaContainer ?? {}).slice(0, 600));
-    return m;
+    return data.MediaContainer?.Metadata?.[0] ?? null;
   } catch (err) {
     console.warn("[Discover] meta error:", new URL(base).host, err);
     return null;
@@ -641,7 +662,9 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
   try {
     const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
       `/library/metadata/${ratingKey}`,
-      { includeMarkers: "1" },
+      // includeGuids so the external-id list (tmdb://…) is present — needed to
+      // offer Seerr season requests for library shows.
+      { includeMarkers: "1", includeGuids: "1" },
     );
     const metadata = data.MediaContainer.Metadata;
     if (!metadata || metadata.length === 0) {
@@ -677,6 +700,8 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       mediaDurations.set(m.ratingKey, m.duration);
     }
 
+    const tmdbId = await resolveTmdbId(m);
+
     res.json({
       ratingKey: m.ratingKey,
       title: m.title,
@@ -696,6 +721,8 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       audioTracks,
       subtitleTracks,
       markers: mapMarkers(m.Marker),
+      // TMDB id — lets the client offer Seerr season requests for library shows.
+      tmdbId,
     });
   } catch (err) {
     console.error("Metadata error:", err);

@@ -94,16 +94,27 @@ export function App() {
     setViewStack((s) => (i >= 0 && i < s.length - 1 ? s.slice(0, i + 1) : s));
   }, []);
 
-  // Scroll handling on navigation: new views (push/replace) start at the top;
-  // going back restores the position saved for the view being returned to. The
-  // restore retries across a few frames because detail views may still be
-  // rendering their (cached) data when the effect first fires.
-  const prevStackRef = useRef<{ len: number; top: View }>({ len: 1, top: viewStack[0] });
+  // Breadcrumb jump to a synthesized ancestor (a show/season view that was never
+  // on the stack — e.g. an episode opened straight from search): replace
+  // everything from stackIndex onward with the given view.
+  const jumpToView = useCallback((stackIndex: number, v: View) => {
+    setViewStack((s) => [...s.slice(0, stackIndex), v]);
+  }, []);
+
+  // Scroll handling on navigation: new views start at the top; going back to a
+  // view that's still on the stack restores its saved position. "Going back" is
+  // detected by object identity (same View at the new top), so breadcrumb jumps
+  // to synthesized views correctly land at the top instead. The restore retries
+  // across a few frames because detail views may still be rendering their
+  // (cached) data when the effect first fires.
+  const prevStackRef = useRef<View[]>(viewStack);
   useLayoutEffect(() => {
     const prev = prevStackRef.current;
+    if (viewStack === prev) return;
+    prevStackRef.current = viewStack;
     const top = viewStack[viewStack.length - 1];
-    prevStackRef.current = { len: viewStack.length, top };
-    if (viewStack.length < prev.len) {
+    const returning = viewStack.length < prev.length && prev[viewStack.length - 1] === top;
+    if (returning) {
       const target = scrollPosRef.current[viewStack.length - 1] ?? 0;
       let tries = 0;
       const attempt = () => {
@@ -111,7 +122,7 @@ export function App() {
         if (window.scrollY < target - 2 && tries++ < 30) requestAnimationFrame(attempt);
       };
       attempt();
-    } else if (viewStack.length > prev.len || top !== prev.top) {
+    } else if (top !== prev[prev.length - 1]) {
       window.scrollTo(0, 0);
     }
   }, [viewStack]);
@@ -309,6 +320,62 @@ export function App() {
     });
   }, []);
 
+  // Breadcrumb trail. Mostly mirrors the view stack, but synthesizes missing
+  // ancestors so an episode always shows the full Home › Show › Season › Episode
+  // path — even when reached without walking through those views (an episode
+  // straight from search, or a single-season show whose show view was replaced
+  // by auto-navigation). Synthetic crumbs navigate via jumpToView with a stub
+  // item; the detail views fetch everything else by ratingKey.
+  const crumbs: Array<{ label: string; home?: boolean; onClick?: () => void }> = [];
+  viewStack.forEach((v, i) => {
+    const isLast = i === viewStack.length - 1;
+    const prevKind = viewStack[i - 1]?.kind;
+
+    if (v.kind === "season" && prevKind !== "show" && v.show.ratingKey) {
+      const show = v.show;
+      crumbs.push({
+        label: show.title,
+        onClick: () => jumpToView(i, { kind: "show", item: show }),
+      });
+    }
+    if (v.kind === "detail" && v.item.type === "episode" && prevKind !== "season") {
+      const ep = v.item;
+      const showStub: PlexItem | null = ep.grandparentRatingKey
+        ? {
+            ratingKey: ep.grandparentRatingKey,
+            title: ep.showTitle ?? "Show",
+            type: "show",
+            thumb: ep.showThumb ?? null,
+          }
+        : null;
+      if (showStub) {
+        crumbs.push({
+          label: showStub.title,
+          onClick: () => jumpToView(i, { kind: "show", item: showStub }),
+        });
+        if (ep.parentRatingKey) {
+          const seasonStub: PlexItem = {
+            ratingKey: ep.parentRatingKey,
+            title: ep.parentTitle ?? (ep.parentIndex != null ? `Season ${ep.parentIndex}` : "Season"),
+            type: "season",
+            thumb: null,
+            ...(ep.parentIndex != null ? { index: ep.parentIndex } : {}),
+          };
+          crumbs.push({
+            label: crumbLabel({ kind: "season", item: seasonStub, show: showStub }),
+            onClick: () => jumpToView(i, { kind: "season", item: seasonStub, show: showStub }),
+          });
+        }
+      }
+    }
+
+    crumbs.push({
+      label: crumbLabel(v),
+      home: v.kind === "library",
+      onClick: isLast ? undefined : i === 0 ? goHome : () => truncateToView(i),
+    });
+  });
+
   if (error) {
     return (
       <div style={styles.center}>
@@ -337,34 +404,30 @@ export function App() {
                reset (goHome); other crumbs jump back within the stack, keeping
                the library and any saved scroll positions intact. */
             <nav style={styles.breadcrumbs}>
-              {viewStack.map((v, i) => {
-                const isLast = i === viewStack.length - 1;
-                const label = crumbLabel(v);
-                return (
-                  <span key={i} style={styles.crumbWrap}>
-                    {i > 0 && <span style={styles.crumbSep}>&rsaquo;</span>}
-                    {isLast ? (
-                      <span style={{ ...styles.crumb, ...styles.crumbCurrent }} title={label}>
-                        <span style={styles.crumbText}>{label}</span>
-                      </span>
-                    ) : (
-                      <button
-                        onClick={() => (i === 0 ? goHome() : truncateToView(i))}
-                        style={{ ...styles.crumb, ...styles.crumbLink }}
-                        title={label}
-                      >
-                        {i === 0 && (
-                          <svg width="14" height="14" viewBox="0 0 20 20" fill="none" style={{ flexShrink: 0 }}>
-                            <path d="M3 10L10 3L17 10M5 8.5V16A1 1 0 006 17H9V12H11V17H14A1 1 0 0015 16V8.5"
-                              stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-                          </svg>
-                        )}
-                        <span style={styles.crumbText}>{label}</span>
-                      </button>
-                    )}
-                  </span>
-                );
-              })}
+              {crumbs.map((c, i) => (
+                <span key={i} style={styles.crumbWrap}>
+                  {i > 0 && <span style={styles.crumbSep}>&rsaquo;</span>}
+                  {c.onClick ? (
+                    <button
+                      onClick={c.onClick}
+                      style={{ ...styles.crumb, ...styles.crumbLink }}
+                      title={c.label}
+                    >
+                      {c.home && (
+                        <svg width="14" height="14" viewBox="0 0 20 20" fill="none" style={{ flexShrink: 0 }}>
+                          <path d="M3 10L10 3L17 10M5 8.5V16A1 1 0 006 17H9V12H11V17H14A1 1 0 0015 16V8.5"
+                            stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                        </svg>
+                      )}
+                      <span style={styles.crumbText}>{c.label}</span>
+                    </button>
+                  ) : (
+                    <span style={{ ...styles.crumb, ...styles.crumbCurrent }} title={c.label}>
+                      <span style={styles.crumbText}>{c.label}</span>
+                    </span>
+                  )}
+                </span>
+              ))}
             </nav>
           ) : (
             <h1 style={styles.logo}>Watch Together</h1>

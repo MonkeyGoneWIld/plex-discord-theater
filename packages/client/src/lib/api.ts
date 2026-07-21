@@ -122,6 +122,10 @@ export interface PlexItem {
   index?: number;
   parentIndex?: number;
   parentTitle?: string;
+  /** Season rating key for episodes; show rating key for seasons. */
+  parentRatingKey?: string;
+  /** Show rating key for episodes. */
+  grandparentRatingKey?: string;
   showTitle?: string;
   showThumb?: string | null;
   leafCount?: number;

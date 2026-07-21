@@ -68,23 +68,6 @@ export function App() {
     setViewStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
   }, []);
 
-  // Mouse "back" button (side button 3) navigates back like a browser, mirroring
-  // the on-screen Back button. Skipped on the player: its back flow has an
-  // end-stream confirmation that a stray side-click shouldn't bypass.
-  useEffect(() => {
-    const onMouseUp = (e: MouseEvent) => {
-      if (e.button !== 3) return;
-      e.preventDefault();
-      setViewStack((s) => {
-        const top = s[s.length - 1];
-        if (top?.kind === "player" || s.length <= 1) return s;
-        return s.slice(0, -1);
-      });
-    };
-    window.addEventListener("mouseup", onMouseUp);
-    return () => window.removeEventListener("mouseup", onMouseUp);
-  }, []);
-
   const emitBrowse = useCallback((context: string) => {
     if (effectiveIsHost && syncActions) {
       syncActions.sendBrowse(context);

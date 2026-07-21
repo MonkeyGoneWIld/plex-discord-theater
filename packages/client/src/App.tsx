@@ -118,7 +118,7 @@ export function App() {
 
   const handleRejoin = useCallback(() => {
     if (!syncState.ratingKey) return;
-    pushView({
+    const playerView: View = {
       kind: "player",
       item: {
         ratingKey: syncState.ratingKey,
@@ -127,8 +127,16 @@ export function App() {
         thumb: null,
       },
       subtitles: syncState.subtitles,
+    };
+    // Replace a top player rather than appending: the rejoin banner has onClick
+    // on both the wrapper and its inner button, so a button click fires this
+    // twice (bubbling). Appending twice would stack two player views and force
+    // a double back-press. Matches handlePlayNext / the auto-navigate effect.
+    setViewStack((s) => {
+      const base = s[s.length - 1]?.kind === "player" ? s.slice(0, -1) : s;
+      return [...base, playerView];
     });
-  }, [syncState.ratingKey, syncState.title, syncState.subtitles, pushView]);
+  }, [syncState.ratingKey, syncState.title, syncState.subtitles]);
 
   // Show "Now Playing" banner when viewer is not on the player but host is playing
   const showNowPlaying = !effectiveIsHost && !!syncState.ratingKey && view.kind !== "player";

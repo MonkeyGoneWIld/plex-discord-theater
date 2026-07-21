@@ -227,4 +227,43 @@ router.post("/request", async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * GET /api/seerr/partial
+ * Plex rating keys of shows that are only partially available, so the library
+ * grid can flag them. One cached lookup rather than per-card requests.
+ */
+let partialCache: { keys: string[]; at: number } | null = null;
+const PARTIAL_TTL_MS = 5 * 60 * 1000;
+
+router.get("/partial", async (_req: Request, res: Response) => {
+  const cfg = seerrConfig();
+  if (!cfg) {
+    res.json({ configured: false, ratingKeys: [] });
+    return;
+  }
+  if (partialCache && Date.now() - partialCache.at < PARTIAL_TTL_MS) {
+    res.json({ configured: true, ratingKeys: partialCache.keys });
+    return;
+  }
+  try {
+    const r = await seerrFetch(cfg, "/media?filter=partial&take=500&sort=added");
+    if (!r || !r.ok) {
+      res.json({ configured: true, ratingKeys: [] });
+      return;
+    }
+    const data = (await r.json()) as { results?: Array<{ ratingKey?: string; tmdbId?: number }> };
+    // TEMP DIAGNOSTIC — confirm partial media carry a Plex ratingKey; remove after.
+    console.log("[Seerr] partial count=%d sample=%s", data.results?.length ?? 0,
+      JSON.stringify((data.results ?? [])[0] ?? null).slice(0, 300));
+    const keys = (data.results ?? [])
+      .map((m) => m.ratingKey)
+      .filter((k): k is string => typeof k === "string" && k.length > 0);
+    partialCache = { keys, at: Date.now() };
+    res.json({ configured: true, ratingKeys: keys });
+  } catch (err) {
+    console.error("[Seerr] partial error:", err);
+    res.status(502).json({ error: "Failed to reach Seerr" });
+  }
+});
+
 export default router;

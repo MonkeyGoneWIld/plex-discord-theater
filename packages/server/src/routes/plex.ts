@@ -359,12 +359,16 @@ router.get("/search", async (req: Request, res: Response) => {
 
     // Append online results the user doesn't already own (deduped by guid).
     // Only movies/shows — the client can't do anything with a bare person/etc.
+    let discoverKept = 0;
     for (const m of discover) {
       if (m.guid && localGuids.has(m.guid)) continue;
       if (m.type !== "movie" && m.type !== "show") continue;
-      // Skip bare catalog entries with basically no details — no poster and no
-      // year, just a title. They're low-value noise in the results.
-      if (!m.thumb && m.year == null) continue;
+      // Drop anything without a poster — no art almost always means a low-value
+      // stub not worth surfacing.
+      if (!m.thumb) continue;
+      discoverKept++;
+      // TEMP DIAGNOSTIC — while tuning the filter; remove once happy.
+      console.log("[Search] keep discover title=%o year=%o thumb=%o", m.title, m.year, m.thumb);
       items.push({
         ...mapItem(m),
         // Online items may have no local ratingKey; the client uses this as a
@@ -376,6 +380,9 @@ router.get("/search", async (req: Request, res: Response) => {
         thumb: externalThumbUrl(m.thumb),
       });
     }
+    // TEMP DIAGNOSTIC — remove once happy.
+    console.log("[Search] q=%o local=%d discoverReturned=%d discoverKept=%d",
+      q, localGuids.size, discover.length, discoverKept);
 
     res.json({ items });
   } catch (err) {

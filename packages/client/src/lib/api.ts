@@ -223,10 +223,33 @@ export interface DiscoverMeta {
   type: string;
   /** Proxied poster URL, or null. */
   thumb: string | null;
+  /** TMDB id for requesting via Seerr; null if unknown. */
+  tmdbId: number | null;
 }
 
 export function fetchDiscoverMeta(guid: string): Promise<DiscoverMeta> {
   return apiGet(`/api/plex/discover/meta?guid=${encodeURIComponent(guid)}`);
+}
+
+/** Seerr (Overseerr/Jellyseerr) request integration. `status` is Seerr's
+ *  MediaStatus: 2=pending, 3=processing, 4=partially available, 5=available;
+ *  null = not requested. `configured` is false when Seerr isn't set up. */
+export interface SeerrStatus {
+  configured: boolean;
+  status: number | null;
+}
+
+export type SeerrMediaType = "movie" | "tv";
+
+export function fetchSeerrStatus(tmdbId: number, mediaType: SeerrMediaType): Promise<SeerrStatus> {
+  return apiGet(`/api/seerr/status?tmdbId=${tmdbId}&mediaType=${mediaType}`);
+}
+
+export function seerrRequest(
+  tmdbId: number,
+  mediaType: SeerrMediaType,
+): Promise<{ ok: boolean; status: number | null }> {
+  return apiPost("/api/seerr/request", { tmdbId, mediaType });
 }
 
 /**

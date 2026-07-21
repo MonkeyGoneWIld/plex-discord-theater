@@ -1,5 +1,8 @@
 import { useState, useEffect } from "react";
-import { authUrl, fetchDiscoverMeta, type PlexItem, type DiscoverMeta } from "../lib/api";
+import {
+  authUrl, fetchDiscoverMeta, fetchSeerrStatus, seerrRequest,
+  type PlexItem, type DiscoverMeta, type SeerrMediaType,
+} from "../lib/api";
 
 interface ExternalDetailProps {
   item: PlexItem;
@@ -14,6 +17,14 @@ function formatRuntime(ms: number | null): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+// Seerr MediaStatus → label for an already-tracked title.
+const STATUS_LABEL: Record<number, string> = {
+  2: "Requested",
+  3: "Processing",
+  4: "Partially available",
+  5: "Available",
+};
+
 /**
  * Detail view for an online (Discover) title the user doesn't own. Shows the
  * richer provider metadata (summary, genres, runtime) when available, falling
@@ -22,14 +33,16 @@ function formatRuntime(ms: number | null): string {
 export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
   const [meta, setMeta] = useState<DiscoverMeta | null>(null);
   const [loading, setLoading] = useState(true);
-  const [requested, setRequested] = useState(false);
+  const mediaType: SeerrMediaType = item.type === "show" ? "tv" : "movie";
+
+  // Seerr request state. configured: null=unknown, then true/false. status is the
+  // MediaStatus (null = not requested).
+  const [seerrConfigured, setSeerrConfigured] = useState<boolean | null>(null);
+  const [status, setStatus] = useState<number | null>(null);
+  const [requesting, setRequesting] = useState(false);
+  const [requestError, setRequestError] = useState<string | null>(null);
 
   useEffect(() => {
-    // TEMP DIAGNOSTIC — the currently selected item and what we'll look up by.
-    console.log("[ExternalDetail] selected item", {
-      guid: item.guid, title: item.title, ratingKey: item.ratingKey,
-      type: item.type, inLibrary: item.inLibrary,
-    });
     if (!item.guid) {
       setLoading(false);
       return;
@@ -43,6 +56,27 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
     return () => { cancelled = true; };
   }, [item.guid]);
 
+  // Once we know the TMDB id, pull the current request/availability status.
+  const tmdbId = meta?.tmdbId ?? null;
+  useEffect(() => {
+    if (tmdbId == null) return;
+    let cancelled = false;
+    fetchSeerrStatus(tmdbId, mediaType)
+      .then((s) => { if (!cancelled) { setSeerrConfigured(s.configured); setStatus(s.status); } })
+      .catch(() => { if (!cancelled) setSeerrConfigured(false); });
+    return () => { cancelled = true; };
+  }, [tmdbId, mediaType]);
+
+  const handleRequest = () => {
+    if (tmdbId == null || requesting) return;
+    setRequesting(true);
+    setRequestError(null);
+    seerrRequest(tmdbId, mediaType)
+      .then((r) => setStatus(r.status ?? 2))
+      .catch((err) => setRequestError(err instanceof Error ? err.message : "Request failed"))
+      .finally(() => setRequesting(false));
+  };
+
   // Prefer detail metadata; fall back to what the search result carried.
   const title = meta?.title ?? item.title;
   const year = meta?.year ?? item.year ?? null;
@@ -52,6 +86,7 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
   const runtime = formatRuntime(meta?.duration ?? null);
   const rating = meta?.contentRating ?? null;
   const facts = [year, runtime, rating].filter(Boolean).join("  ·  ");
+  const statusLabel = status != null ? STATUS_LABEL[status] ?? null : null;
 
   return (
     <div style={styles.container}>
@@ -85,13 +120,25 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
           ) : (
             <div style={styles.summaryMuted}>No description available.</div>
           )}
-          <button
-            onClick={() => setRequested(true)}
-            disabled={requested}
-            style={{ ...styles.requestBtn, ...(requested ? styles.requestBtnDone : {}) }}
-          >
-            {requested ? "Requested ✓" : "Request"}
-          </button>
+          {/* Request button — hidden when Seerr isn't configured or the title has
+              no TMDB id to request by. Shows the tracked status when already
+              requested, otherwise a live Request action. */}
+          {seerrConfigured !== false && tmdbId != null && (
+            statusLabel ? (
+              <button disabled style={{ ...styles.requestBtn, ...styles.requestBtnDone }}>
+                {statusLabel}
+              </button>
+            ) : (
+              <button
+                onClick={handleRequest}
+                disabled={requesting || seerrConfigured == null}
+                style={styles.requestBtn}
+              >
+                {requesting ? "Requesting…" : "Request"}
+              </button>
+            )
+          )}
+          {requestError && <div style={styles.requestError}>{requestError}</div>}
         </div>
       </div>
     </div>
@@ -212,5 +259,10 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(229,160,13,0.6)",
     color: "#e5a00d",
     cursor: "default",
+  },
+  requestError: {
+    marginTop: "10px",
+    color: "#e5834a",
+    fontSize: "13px",
   },
 };

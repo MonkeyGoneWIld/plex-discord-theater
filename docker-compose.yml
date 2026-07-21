@@ -20,6 +20,8 @@ services:
       - ALLOWED_GUILD_IDS=${ALLOWED_GUILD_IDS}
       - VPS_RELAY_URL=${VPS_RELAY_URL}
       - VPS_RELAY_KEY=${VPS_RELAY_KEY}
+      - SEERR_URL=${SEERR_URL}
+      - SEERR_API_KEY=${SEERR_API_KEY}
       - PORT=${PORT:-3000}
       - THUMB_CACHE_DIR=/data
     volumes:

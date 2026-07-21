@@ -9,6 +9,7 @@ import { Player } from "./components/Player";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PeoplePanel } from "./components/PeoplePanel";
 import { formatMediaTitle } from "./lib/format";
+import { authUrl, fetchMeta } from "./lib/api";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem } from "./hooks/useSync";
 
@@ -166,6 +167,22 @@ export function App() {
   // Also shown to a host who is out of the player while a stream is live — e.g.
   // promoted back to host after leaving — so they aren't stranded with no way in.
   const showNowPlaying = !!syncState.ratingKey && view.kind !== "player";
+
+  // Poster for the Now Playing banner. Sync state carries only ratingKey/title,
+  // not artwork, so resolve the thumb by ratingKey whenever something is playing.
+  const [nowPlayingThumb, setNowPlayingThumb] = useState<string | null>(null);
+  useEffect(() => {
+    const rk = syncState.ratingKey;
+    if (!rk) {
+      setNowPlayingThumb(null);
+      return;
+    }
+    let cancelled = false;
+    fetchMeta(rk)
+      .then((meta) => { if (!cancelled) setNowPlayingThumb(meta.thumb); })
+      .catch(() => { if (!cancelled) setNowPlayingThumb(null); });
+    return () => { cancelled = true; };
+  }, [syncState.ratingKey]);
 
   const handleSelect = useCallback((item: PlexItem) => {
     if (item.type === "show") {
@@ -344,7 +361,15 @@ export function App() {
       {/* Now Playing rejoin banner for viewers */}
       {showNowPlaying && (
         <div style={styles.nowPlayingBanner} onClick={handleRejoin}>
-          <div style={styles.nowPlayingPoster} />
+          {nowPlayingThumb ? (
+            <img
+              src={authUrl(nowPlayingThumb)}
+              alt=""
+              style={{ ...styles.nowPlayingPoster, objectFit: "cover" }}
+            />
+          ) : (
+            <div style={styles.nowPlayingPoster} />
+          )}
           <div style={styles.nowPlayingInfo}>
             <div style={styles.nowPlayingLabel}>NOW PLAYING</div>
             <div style={styles.nowPlayingTitle}>{syncState.title || "Untitled"}</div>

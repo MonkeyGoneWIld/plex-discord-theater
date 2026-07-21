@@ -853,6 +853,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
       const video = videoRef.current;
       if (!video) return;
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      // Chords with Ctrl/Cmd/Alt belong to the browser or OS (Ctrl+Shift+I =
+      // DevTools, Ctrl+Shift+M = device toolbar) — never treat them as ours
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
 
       switch (e.key) {
         case "i":

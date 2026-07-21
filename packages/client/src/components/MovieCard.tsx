@@ -17,7 +17,8 @@ function authThumbUrl(thumb: string, w?: number, h?: number): string {
 }
 
 export function MovieCard({ item, onClick }: MovieCardProps) {
-  // Online (Discover) result: in search but not in the library, so not playable.
+  // Online (Discover) result: in search but not in the library. Clickable — it
+  // opens a detail view (with a request button) rather than playback.
   const external = item.inLibrary === false;
   const [imgError, setImgError] = useState(false);
   // Episodes: use the show's poster (portrait, matches other cards) instead of
@@ -27,14 +28,14 @@ export function MovieCard({ item, onClick }: MovieCardProps) {
   const showImg = !!posterSrc && !imgError;
   return (
     <button
-      onClick={external ? undefined : () => onClick(item)}
-      style={{ ...styles.card, ...(external ? styles.cardExternal : {}) }}
-      onMouseEnter={external ? undefined : (e) => {
+      onClick={() => onClick(item)}
+      style={styles.card}
+      onMouseEnter={(e) => {
         const el = e.currentTarget;
         el.style.transform = "scale(1.03)";
         el.style.boxShadow = "0 4px 24px rgba(229,160,13,0.12)";
       }}
-      onMouseLeave={external ? undefined : (e) => {
+      onMouseLeave={(e) => {
         const el = e.currentTarget;
         el.style.transform = "scale(1)";
         el.style.boxShadow = "none";
@@ -85,10 +86,6 @@ const styles: Record<string, React.CSSProperties> = {
     transition: "transform 0.2s ease, box-shadow 0.2s ease",
     width: "100%",
     fontFamily: "inherit",
-  },
-  cardExternal: {
-    cursor: "default",
-    opacity: 0.72,
   },
   posterWrap: {
     position: "relative",

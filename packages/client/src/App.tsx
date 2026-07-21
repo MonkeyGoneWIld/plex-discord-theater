@@ -6,6 +6,7 @@ import { MovieDetail } from "./components/MovieDetail";
 import { ShowDetail } from "./components/ShowDetail";
 import { SeasonDetail } from "./components/SeasonDetail";
 import { Player } from "./components/Player";
+import { ExternalDetail } from "./components/ExternalDetail";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PeoplePanel } from "./components/PeoplePanel";
 import { formatMediaTitle } from "./lib/format";
@@ -18,6 +19,7 @@ type View =
   | { kind: "show"; item: PlexItem }
   | { kind: "season"; item: PlexItem; show: PlexItem }
   | { kind: "detail"; item: PlexItem }
+  | { kind: "external-detail"; item: PlexItem }
   | { kind: "player"; item: PlexItem; subtitles: boolean };
 
 export function App() {
@@ -190,9 +192,13 @@ export function App() {
   }, [syncState.ratingKey]);
 
   const handleSelect = useCallback((item: PlexItem) => {
-    // Online (Discover) results aren't playable here — the card already blocks
-    // the click; this is defense in depth.
-    if (item.inLibrary === false) return;
+    // Online (Discover) results aren't in the library — open a detail view with
+    // metadata and a request button instead of the playable detail/player path.
+    if (item.inLibrary === false) {
+      pushView({ kind: "external-detail", item });
+      emitBrowse(`Looking at ${item.title}`);
+      return;
+    }
     if (item.type === "show") {
       pushView({ kind: "show", item });
       emitBrowse(`Looking at ${item.title}`);
@@ -444,6 +450,10 @@ export function App() {
           onAddToQueue={effectiveIsHost ? (qi) => syncActions.sendQueueAdd(qi) : undefined}
           onSuggest={!effectiveIsHost ? (item) => syncActions.sendSuggest(item) : undefined}
         />
+      )}
+
+      {view.kind === "external-detail" && (
+        <ExternalDetail item={view.item} onBack={popView} />
       )}
 
       {view.kind === "player" && (

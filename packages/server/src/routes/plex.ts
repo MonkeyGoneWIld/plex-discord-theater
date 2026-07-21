@@ -141,6 +141,7 @@ interface PlexMetadataItem {
   // (Discover) results returned when /hubs/search is called with includeExternal.
   librarySectionID?: number;
   guid?: string;
+  contentRating?: string;
 }
 
 // ─── Library browsing ────────────────────────────────────────────
@@ -347,7 +348,7 @@ router.get("/search", async (req: Request, res: Response) => {
     ]);
 
     const hubs = data.MediaContainer.Hub || [];
-    const items: Array<ReturnType<typeof mapItem> & { inLibrary: boolean }> = [];
+    const items: Array<ReturnType<typeof mapItem> & { inLibrary: boolean; guid?: string }> = [];
     const localGuids = new Set<string>();
     for (const hub of hubs) {
       if (!hub.Metadata) continue;
@@ -375,29 +376,63 @@ router.get("/search", async (req: Request, res: Response) => {
       ),
     );
 
-    let discoverKept = 0;
     candidates.forEach((m, i) => {
       if (owned[i]) return;
-      discoverKept++;
-      // TEMP DIAGNOSTIC — while tuning; remove once happy.
-      console.log("[Search] keep discover title=%o year=%o", m.title, m.year);
       items.push({
         ...mapItem(m),
         // Online items may have no local ratingKey; the client uses this as a
         // list key, so fall back to the (unique) guid.
         ratingKey: m.ratingKey ?? m.guid ?? m.title,
+        // Carry the guid so the client can fetch Discover detail metadata for it.
+        guid: m.guid,
         inLibrary: false,
         thumb: externalThumbUrl(m.thumb),
       });
     });
-    // TEMP DIAGNOSTIC — remove once happy.
-    console.log("[Search] q=%o local=%d discoverReturned=%d discoverKept=%d",
-      q, localGuids.size, discover.length, discoverKept);
 
     res.json({ items });
   } catch (err) {
     console.error("Search error:", err);
     res.status(502).json({ error: "Failed to search Plex" });
+  }
+});
+
+/**
+ * GET /api/plex/discover/meta?guid=plex://movie/<id>
+ * Detail metadata for an online (Discover) title the user doesn't own — summary,
+ * genres, runtime, rating. Comes from Plex's cloud provider since there's no
+ * local library item. Fields degrade gracefully when the provider omits them.
+ */
+router.get("/discover/meta", async (req: Request, res: Response) => {
+  const guid = req.query.guid;
+  if (typeof guid !== "string" || !guid.startsWith("plex://")) {
+    res.status(400).json({ error: "Invalid or missing guid" });
+    return;
+  }
+  const id = guid.split("/").pop();
+  if (!id) {
+    res.status(400).json({ error: "Invalid guid" });
+    return;
+  }
+  try {
+    const m = await fetchDiscoverMeta(id);
+    if (!m) {
+      res.status(404).json({ error: "Details not available" });
+      return;
+    }
+    res.json({
+      title: m.title,
+      year: m.year ?? null,
+      summary: m.summary ?? null,
+      genres: (m.Genre || []).map((g) => g.tag),
+      duration: m.duration ?? null,
+      contentRating: m.contentRating ?? null,
+      type: m.type,
+      thumb: m.thumb ? externalThumbUrl(m.thumb) : null,
+    });
+  } catch (err) {
+    console.error("Discover meta error:", err);
+    res.status(502).json({ error: "Failed to fetch details" });
   }
 });
 
@@ -422,16 +457,45 @@ async function isGuidInLibrary(guid: string): Promise<boolean> {
   try {
     const data = await plexJSON<{ MediaContainer: { size?: number } }>("/library/all", { guid });
     owned = (data.MediaContainer.size ?? 0) > 0;
-    // TEMP DIAGNOSTIC — confirm the guid lookup works; remove once happy.
-    if (owned) console.log("[Search] guid owned via library lookup:", guid);
-  } catch (err) {
-    // TEMP DIAGNOSTIC — surfaces a wrong endpoint/param rather than silently
-    // treating everything as not-owned.
-    console.warn("[Search] guid lookup failed for", guid, "-", (err as Error).message);
+  } catch {
     owned = false;
   }
   ownedGuidCache.set(guid, { owned, at: Date.now() });
   return owned;
+}
+
+/**
+ * Fetch a single title's metadata from the Discover cloud provider by its id
+ * (the trailing segment of a plex:// guid). Best-effort: null on any failure.
+ */
+async function fetchDiscoverMeta(id: string): Promise<PlexMetadataItem | null> {
+  const token = process.env.PLEX_TOKEN;
+  if (!token) return null;
+  const url = new URL(`${DISCOVER_BASE}/library/metadata/${encodeURIComponent(id)}`);
+  url.searchParams.set("X-Plex-Token", token);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      headers: { Accept: "application/json", "X-Plex-Client-Identifier": OUR_CLIENT_ID },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      console.warn("[Discover] meta failed:", res.status);
+      return null;
+    }
+    const data = (await res.json()) as { MediaContainer?: { Metadata?: PlexMetadataItem[] } };
+    const m = data.MediaContainer?.Metadata?.[0] ?? null;
+    // TEMP DIAGNOSTIC — confirm provider metadata shape; remove once happy.
+    console.log("[Discover] meta id=%o title=%o summaryLen=%o genres=%o",
+      id, m?.title, m?.summary?.length ?? 0, (m?.Genre || []).map((g) => g.tag));
+    return m;
+  } catch (err) {
+    console.warn("[Discover] meta error:", err);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

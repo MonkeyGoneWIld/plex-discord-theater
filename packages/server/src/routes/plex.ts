@@ -357,29 +357,39 @@ router.get("/search", async (req: Request, res: Response) => {
       }
     }
 
-    // Append online results the user doesn't already own (deduped by guid).
-    // Only movies/shows — the client can't do anything with a bare person/etc.
+    // Append online results the user doesn't already own. Only movies/shows —
+    // the client can't do anything with a bare person/etc — and only ones with
+    // a poster (no art usually means a low-value stub).
+    const candidates = discover.filter(
+      (m) => (m.type === "movie" || m.type === "show") && !!m.thumb,
+    );
+    // Ownership: an item is owned if it appeared in the local search OR a library
+    // guid lookup finds it. Discover surfaces titles the local text search misses
+    // (e.g. "spiderman brand" → owned Spider-Man), so the local results alone
+    // don't dedup. Lookups are cached, so as-you-type stays cheap.
+    const owned = await Promise.all(
+      candidates.map((m) =>
+        !m.guid ? Promise.resolve(false)
+          : localGuids.has(m.guid) ? Promise.resolve(true)
+            : isGuidInLibrary(m.guid),
+      ),
+    );
+
     let discoverKept = 0;
-    for (const m of discover) {
-      if (m.guid && localGuids.has(m.guid)) continue;
-      if (m.type !== "movie" && m.type !== "show") continue;
-      // Drop anything without a poster — no art almost always means a low-value
-      // stub not worth surfacing.
-      if (!m.thumb) continue;
+    candidates.forEach((m, i) => {
+      if (owned[i]) return;
       discoverKept++;
-      // TEMP DIAGNOSTIC — while tuning the filter; remove once happy.
-      console.log("[Search] keep discover title=%o year=%o thumb=%o", m.title, m.year, m.thumb);
+      // TEMP DIAGNOSTIC — while tuning; remove once happy.
+      console.log("[Search] keep discover title=%o year=%o", m.title, m.year);
       items.push({
         ...mapItem(m),
         // Online items may have no local ratingKey; the client uses this as a
         // list key, so fall back to the (unique) guid.
         ratingKey: m.ratingKey ?? m.guid ?? m.title,
         inLibrary: false,
-        // Cloud artwork routed through the photo transcoder so it stays
-        // same-origin (CSP) and cached like everything else.
         thumb: externalThumbUrl(m.thumb),
       });
-    }
+    });
     // TEMP DIAGNOSTIC — remove once happy.
     console.log("[Search] q=%o local=%d discoverReturned=%d discoverKept=%d",
       q, localGuids.size, discover.length, discoverKept);
@@ -393,6 +403,36 @@ router.get("/search", async (req: Request, res: Response) => {
 
 /** Plex's online catalog lives on a separate cloud host from the local server. */
 const DISCOVER_BASE = "https://discover.provider.plex.tv";
+
+// Cache of guid → in-library, so repeated ownership checks (search-as-you-type)
+// don't re-hit Plex for the same title.
+const ownedGuidCache = new Map<string, { owned: boolean; at: number }>();
+const OWNED_GUID_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Whether a plex:// guid exists in any local library section. Used to dedup
+ * Discover results the local text search didn't surface (it matches differently
+ * than Discover). Errors resolve to false — show the online result rather than
+ * risk hiding a real one.
+ */
+async function isGuidInLibrary(guid: string): Promise<boolean> {
+  const hit = ownedGuidCache.get(guid);
+  if (hit && Date.now() - hit.at < OWNED_GUID_TTL_MS) return hit.owned;
+  let owned = false;
+  try {
+    const data = await plexJSON<{ MediaContainer: { size?: number } }>("/library/all", { guid });
+    owned = (data.MediaContainer.size ?? 0) > 0;
+    // TEMP DIAGNOSTIC — confirm the guid lookup works; remove once happy.
+    if (owned) console.log("[Search] guid owned via library lookup:", guid);
+  } catch (err) {
+    // TEMP DIAGNOSTIC — surfaces a wrong endpoint/param rather than silently
+    // treating everything as not-owned.
+    console.warn("[Search] guid lookup failed for", guid, "-", (err as Error).message);
+    owned = false;
+  }
+  ownedGuidCache.set(guid, { owned, at: Date.now() });
+  return owned;
+}
 
 /**
  * Search Plex's online Discover catalog (titles not necessarily in the library),

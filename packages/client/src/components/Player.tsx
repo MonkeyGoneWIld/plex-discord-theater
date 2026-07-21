@@ -215,6 +215,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
     }
   }, [isHost]);
 
+  // Mirror of the promotion effect: a host who hands control to someone else
+  // must relinquish session ownership. Without this, ownsSessionRef stays true
+  // after demotion, so backing out (endPlayback) or hitting an HLS error would
+  // stop or restart the Plex transcode the *new* host is still using — killing
+  // their stream and forcing a fresh transcode (a phantom second stream).
+  useEffect(() => {
+    if (!isHost) ownsSessionRef.current = false;
+  }, [isHost]);
+
   const destroyLocal = useCallback(() => {
     if (seekStallTimerRef.current !== null) {
       clearTimeout(seekStallTimerRef.current);

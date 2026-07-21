@@ -118,6 +118,8 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "24px",
     alignItems: "flex-start",
     flexWrap: "wrap",
+    maxWidth: "900px",
+    margin: "0 auto",
     padding: "8px 24px 40px",
   },
   poster: {

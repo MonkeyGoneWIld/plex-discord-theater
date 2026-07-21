@@ -179,7 +179,12 @@ export function App() {
     }
     let cancelled = false;
     fetchMeta(rk)
-      .then((meta) => { if (!cancelled) setNowPlayingThumb(meta.thumb); })
+      .then((meta) => {
+        if (cancelled) return;
+        // Episodes: prefer the portrait show poster over the landscape still.
+        const poster = meta.type === "episode" ? (meta.showThumb ?? meta.thumb) : meta.thumb;
+        setNowPlayingThumb(poster);
+      })
       .catch(() => { if (!cancelled) setNowPlayingThumb(null); });
     return () => { cancelled = true; };
   }, [syncState.ratingKey]);

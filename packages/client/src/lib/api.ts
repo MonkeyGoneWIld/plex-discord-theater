@@ -145,6 +145,9 @@ export interface PlexMeta {
   duration?: number;
   summary?: string;
   thumb: string | null;
+  /** Show (grandparent) poster for episodes; null/absent for movies. Optional so
+   *  a newer client served by an older server degrades to the episode thumb. */
+  showThumb?: string | null;
   art: string | null;
   genres: string[];
   type: string;

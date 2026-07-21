@@ -406,6 +406,9 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       summary: m.summary,
       duration: m.duration,
       thumb: m.thumb ? `/api/plex/thumb${m.thumb}` : null,
+      // Show (grandparent) poster for episodes — lets clients prefer the portrait
+      // show art over the landscape episode still. Null for movies.
+      showThumb: m.grandparentThumb ? `/api/plex/thumb${m.grandparentThumb}` : null,
       art: m.art ? `/api/plex/thumb${m.art}` : null,
       genres: (m.Genre || []).map((g) => g.tag),
       type: m.type,

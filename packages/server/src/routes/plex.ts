@@ -1775,11 +1775,16 @@ function isAllowedExternalImage(u: string): boolean {
   if (u.startsWith("/")) return isAllowedThumbPath(u);
   try {
     const host = new URL(u).hostname.toLowerCase();
+    // Plex sources metadata art from a handful of image CDNs; allow the known
+    // ones so posters aren't blocked. These serve only images (no SSRF surface).
     return (
       host === "plex.tv" ||
       host.endsWith(".plex.tv") ||
       host.endsWith(".plex.direct") ||
-      host === "image.tmdb.org"
+      host === "image.tmdb.org" ||
+      host === "artworks.thetvdb.com" ||
+      host === "m.media-amazon.com" ||
+      host === "assets.fanart.tv"
     );
   } catch {
     return false;

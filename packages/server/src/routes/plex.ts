@@ -1849,6 +1849,10 @@ function mapItem(m: PlexMetadataItem) {
     ...(m.index != null && { index: m.index }),
     ...(m.parentIndex != null && { parentIndex: m.parentIndex }),
     ...(m.parentTitle != null && { parentTitle: m.parentTitle }),
+    // Ancestor keys — let the client build a full breadcrumb path (show/season)
+    // for episodes reached without walking through those views (search, etc.).
+    ...(m.parentRatingKey != null && { parentRatingKey: m.parentRatingKey }),
+    ...(m.grandparentRatingKey != null && { grandparentRatingKey: m.grandparentRatingKey }),
     ...(m.grandparentTitle != null && { showTitle: m.grandparentTitle }),
     ...(m.grandparentThumb != null && { showThumb: `/api/plex/thumb${m.grandparentThumb}` }),
     ...(m.leafCount != null && { leafCount: m.leafCount }),

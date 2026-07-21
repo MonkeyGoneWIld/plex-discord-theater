@@ -505,6 +505,13 @@ export function attachWebSocketServer(server: Server): void {
             type: "heartbeat",
             position: room.state.position,
             playing: room.state.playing,
+            // Carry the "what's playing" snapshot so a viewer whose ratingKey
+            // got cleared (e.g. a stray stop during a host handoff) can self-heal
+            // from the next heartbeat instead of being stuck with no way to rejoin.
+            ratingKey: room.state.ratingKey,
+            title: room.state.title,
+            subtitles: room.state.subtitles,
+            hlsSessionId: room.state.hlsSessionId,
           });
           break;
         }

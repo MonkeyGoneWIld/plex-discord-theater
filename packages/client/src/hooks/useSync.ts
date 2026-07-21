@@ -332,6 +332,18 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               ...prev,
               position: (msg.position as number) ?? prev.position,
               playing: msg.playing !== false,
+              // Self-heal: if our "what's playing" state was cleared (e.g. a stray
+              // stop during a host handoff), recover it from the heartbeat so the
+              // rejoin path works again. Only fill when missing, to avoid churn
+              // and spurious re-navigation while already watching.
+              ...(prev.ratingKey == null && msg.ratingKey
+                ? {
+                    ratingKey: msg.ratingKey as string,
+                    title: (msg.title as string) || null,
+                    subtitles: Boolean(msg.subtitles),
+                    hlsSessionId: (msg.hlsSessionId as string) || null,
+                  }
+                : {}),
             }));
             break;
           case "browse":

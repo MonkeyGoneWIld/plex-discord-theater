@@ -362,6 +362,9 @@ router.get("/search", async (req: Request, res: Response) => {
     for (const m of discover) {
       if (m.guid && localGuids.has(m.guid)) continue;
       if (m.type !== "movie" && m.type !== "show") continue;
+      // Skip bare catalog entries with basically no details — no poster and no
+      // year, just a title. They're low-value noise in the results.
+      if (!m.thumb && m.year == null) continue;
       items.push({
         ...mapItem(m),
         // Online items may have no local ratingKey; the client uses this as a

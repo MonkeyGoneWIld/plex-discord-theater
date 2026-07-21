@@ -156,10 +156,12 @@ router.get("/tv/:tmdbId", async (req: Request, res: Response) => {
     }
     // Requested seasons (pending/processing) live on the request objects; don't
     // overwrite a richer availability status already recorded above.
+    // request.status: 1 = pending approval, 2 = approved, 3 = declined, 4 = failed.
+    // Only pending/approved reserve a season — declined/failed leave it requestable.
     for (const req of data.mediaInfo?.requests ?? []) {
+      if (req.status !== 1 && req.status !== 2) continue;
       for (const rs of req.seasons ?? []) {
         if (rs.seasonNumber == null || statusBySeason.has(rs.seasonNumber)) continue;
-        // request.status: 1 = pending approval, 2 = approved/processing.
         statusBySeason.set(rs.seasonNumber, req.status === 2 ? 3 : 2);
       }
     }

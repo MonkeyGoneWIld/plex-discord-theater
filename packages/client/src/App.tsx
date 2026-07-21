@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import { useDiscord } from "./hooks/useDiscord";
 import { useSync } from "./hooks/useSync";
 import { Library } from "./components/Library";
@@ -21,6 +21,15 @@ type View =
   | { kind: "detail"; item: PlexItem }
   | { kind: "external-detail"; item: PlexItem }
   | { kind: "player"; item: PlexItem; subtitles: boolean };
+
+// Breadcrumb label for a stack entry.
+function crumbLabel(v: View): string {
+  switch (v.kind) {
+    case "library": return "Home";
+    case "season": return v.item.index != null ? `Season ${v.item.index}` : v.item.title;
+    default: return v.item.title;
+  }
+}
 
 export function App() {
   const { isReady, isHost, userId, username, instanceId, error } = useDiscord();
@@ -52,12 +61,24 @@ export function App() {
   // Persist active library section across navigation
   const [librarySection, setLibrarySection] = useState<string | null>(null);
 
+  // Remounts Library from scratch (cleared search/filters/scroll). Bumped only by
+  // goHome — Back keeps the always-mounted Library exactly as it was left, which
+  // is what distinguishes the two.
+  const [libraryEpoch, setLibraryEpoch] = useState(0);
+
   // Roster/roles panel, reachable from the header while browsing. The player has
   // its own copy for use during playback (the header is hidden there).
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
 
+  // Saved window scroll per stack depth: slot i holds where view i was when
+  // something was pushed on top of it. Restored when the stack shrinks back.
+  const scrollPosRef = useRef<number[]>([0]);
+
   const pushView = useCallback((v: View) => {
-    setViewStack((s) => [...s, v]);
+    setViewStack((s) => {
+      scrollPosRef.current[s.length - 1] = window.scrollY;
+      return [...s, v];
+    });
   }, []);
 
   const replaceView = useCallback((v: View) => {
@@ -68,6 +89,33 @@ export function App() {
     setViewStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
   }, []);
 
+  // Breadcrumb jump: keep the stack up to (and including) index i.
+  const truncateToView = useCallback((i: number) => {
+    setViewStack((s) => (i >= 0 && i < s.length - 1 ? s.slice(0, i + 1) : s));
+  }, []);
+
+  // Scroll handling on navigation: new views (push/replace) start at the top;
+  // going back restores the position saved for the view being returned to. The
+  // restore retries across a few frames because detail views may still be
+  // rendering their (cached) data when the effect first fires.
+  const prevStackRef = useRef<{ len: number; top: View }>({ len: 1, top: viewStack[0] });
+  useLayoutEffect(() => {
+    const prev = prevStackRef.current;
+    const top = viewStack[viewStack.length - 1];
+    prevStackRef.current = { len: viewStack.length, top };
+    if (viewStack.length < prev.len) {
+      const target = scrollPosRef.current[viewStack.length - 1] ?? 0;
+      let tries = 0;
+      const attempt = () => {
+        window.scrollTo(0, target);
+        if (window.scrollY < target - 2 && tries++ < 30) requestAnimationFrame(attempt);
+      };
+      attempt();
+    } else if (viewStack.length > prev.len || top !== prev.top) {
+      window.scrollTo(0, 0);
+    }
+  }, [viewStack]);
+
   const emitBrowse = useCallback((context: string) => {
     if (effectiveIsHost && syncActions) {
       syncActions.sendBrowse(context);
@@ -76,6 +124,9 @@ export function App() {
 
   const goHome = useCallback(() => {
     setViewStack([{ kind: "library" }]);
+    // Fresh library — unlike Back, Home resets search, filters, and scroll.
+    setLibraryEpoch((n) => n + 1);
+    scrollPosRef.current = [0];
     emitBrowse("Browsing the library");
   }, [emitBrowse]);
 
@@ -103,7 +154,9 @@ export function App() {
         subtitles: syncState.subtitles,
       };
       setViewStack((s) => {
-        const base = s[s.length - 1]?.kind === "player" ? s.slice(0, -1) : s;
+        const covering = s[s.length - 1]?.kind !== "player";
+        if (covering) scrollPosRef.current[s.length - 1] = window.scrollY;
+        const base = covering ? s : s.slice(0, -1);
         return [...base, playerView];
       });
     }
@@ -138,7 +191,9 @@ export function App() {
       subtitles: syncState.subtitles,
     };
     setViewStack((s) => {
-      const base = s[s.length - 1]?.kind === "player" ? s.slice(0, -1) : s;
+      const covering = s[s.length - 1]?.kind !== "player";
+      if (covering) scrollPosRef.current[s.length - 1] = window.scrollY;
+      const base = covering ? s : s.slice(0, -1);
       return [...base, playerView];
     });
   }, [effectiveIsHost, syncState.ratingKey, syncState.title, syncState.subtitles, view.kind]);
@@ -160,7 +215,9 @@ export function App() {
     // twice (bubbling). Appending twice would stack two player views and force
     // a double back-press. Matches handlePlayNext / the auto-navigate effect.
     setViewStack((s) => {
-      const base = s[s.length - 1]?.kind === "player" ? s.slice(0, -1) : s;
+      const covering = s[s.length - 1]?.kind !== "player";
+      if (covering) scrollPosRef.current[s.length - 1] = window.scrollY;
+      const base = covering ? s : s.slice(0, -1);
       return [...base, playerView];
     });
   }, [syncState.ratingKey, syncState.title, syncState.subtitles]);
@@ -245,7 +302,9 @@ export function App() {
       subtitles: queueItem.subtitles,
     };
     setViewStack((s) => {
-      const base = s[s.length - 1]?.kind === "player" ? s.slice(0, -1) : s;
+      const covering = s[s.length - 1]?.kind !== "player";
+      if (covering) scrollPosRef.current[s.length - 1] = window.scrollY;
+      const base = covering ? s : s.slice(0, -1);
       return [...base, playerView];
     });
   }, []);
@@ -274,13 +333,39 @@ export function App() {
       {view.kind !== "player" && (
         <header style={styles.header}>
           {view.kind !== "library" ? (
-            <button onClick={goHome} style={styles.homeBtn}>
-              <svg width="18" height="18" viewBox="0 0 20 20" fill="none">
-                <path d="M3 10L10 3L17 10M5 8.5V16A1 1 0 006 17H9V12H11V17H14A1 1 0 0015 16V8.5"
-                  stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-              Home
-            </button>
+            /* Breadcrumb trail — every ancestor is clickable. Home is a full
+               reset (goHome); other crumbs jump back within the stack, keeping
+               the library and any saved scroll positions intact. */
+            <nav style={styles.breadcrumbs}>
+              {viewStack.map((v, i) => {
+                const isLast = i === viewStack.length - 1;
+                const label = crumbLabel(v);
+                return (
+                  <span key={i} style={styles.crumbWrap}>
+                    {i > 0 && <span style={styles.crumbSep}>&rsaquo;</span>}
+                    {isLast ? (
+                      <span style={{ ...styles.crumb, ...styles.crumbCurrent }} title={label}>
+                        <span style={styles.crumbText}>{label}</span>
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => (i === 0 ? goHome() : truncateToView(i))}
+                        style={{ ...styles.crumb, ...styles.crumbLink }}
+                        title={label}
+                      >
+                        {i === 0 && (
+                          <svg width="14" height="14" viewBox="0 0 20 20" fill="none" style={{ flexShrink: 0 }}>
+                            <path d="M3 10L10 3L17 10M5 8.5V16A1 1 0 006 17H9V12H11V17H14A1 1 0 0015 16V8.5"
+                              stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                          </svg>
+                        )}
+                        <span style={styles.crumbText}>{label}</span>
+                      </button>
+                    )}
+                  </span>
+                );
+              })}
+            </nav>
           ) : (
             <h1 style={styles.logo}>Watch Together</h1>
           )}
@@ -394,30 +479,32 @@ export function App() {
         </div>
       )}
 
-      {view.kind === "library" && (
-        <>
-          {!effectiveIsHost && !syncState.ratingKey && (
-            <div style={styles.waitingBanner}>
-              <div style={styles.waitingDot} />
-              <div>
-                <div style={styles.waitingPrimary}>
-                  {syncState.browseContext
-                    ? `Host is ${syncState.browseContext.charAt(0).toLowerCase()}${syncState.browseContext.slice(1)}`
-                    : "Host is browsing the library..."}
-                </div>
-                <div style={styles.waitingSecondary}>You can browse too — playback starts when the host picks something</div>
+      {/* Library stays mounted (hidden) while browsing details, so Back returns
+          to the exact search results, filters, loaded pages, and scroll. Home
+          bumps libraryEpoch to remount it fresh instead. */}
+      <div style={{ display: view.kind === "library" ? undefined : "none" }}>
+        {view.kind === "library" && !effectiveIsHost && !syncState.ratingKey && (
+          <div style={styles.waitingBanner}>
+            <div style={styles.waitingDot} />
+            <div>
+              <div style={styles.waitingPrimary}>
+                {syncState.browseContext
+                  ? `Host is ${syncState.browseContext.charAt(0).toLowerCase()}${syncState.browseContext.slice(1)}`
+                  : "Host is browsing the library..."}
               </div>
+              <div style={styles.waitingSecondary}>You can browse too — playback starts when the host picks something</div>
             </div>
-          )}
-          <Library
-            isHost={effectiveIsHost}
-            onSelect={handleSelect}
-            activeSection={librarySection}
-            onActiveSectionChange={setLibrarySection}
-            onBrowseContext={effectiveIsHost ? (ctx) => syncActions.sendBrowse(ctx) : undefined}
-          />
-        </>
-      )}
+          </div>
+        )}
+        <Library
+          key={libraryEpoch}
+          isHost={effectiveIsHost}
+          onSelect={handleSelect}
+          activeSection={librarySection}
+          onActiveSectionChange={setLibrarySection}
+          onBrowseContext={effectiveIsHost ? (ctx) => syncActions.sendBrowse(ctx) : undefined}
+        />
+      </div>
 
       {view.kind === "show" && (
         <ShowDetail
@@ -513,19 +600,55 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#e5a00d",
     letterSpacing: "-0.02em",
   },
-  homeBtn: {
+  breadcrumbs: {
+    display: "flex",
+    alignItems: "center",
+    gap: "2px",
+    minWidth: 0,
+    flex: 1,
+    marginRight: "16px",
+    overflow: "hidden",
+  },
+  crumbWrap: {
+    display: "flex",
+    alignItems: "center",
+    gap: "2px",
+    minWidth: 0,
+  },
+  crumbSep: {
+    color: "#555",
+    fontSize: "16px",
+    padding: "0 4px",
+    flexShrink: 0,
+  },
+  crumb: {
     display: "flex",
     alignItems: "center",
     gap: "6px",
-    padding: "6px 14px",
-    borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.1)",
-    background: "rgba(255,255,255,0.05)",
-    color: "#e5a00d",
-    cursor: "pointer",
     fontSize: "14px",
     fontWeight: 600,
+    maxWidth: "220px",
+    minWidth: 0,
     fontFamily: "inherit",
+  },
+  crumbText: {
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    minWidth: 0,
+  },
+  crumbLink: {
+    padding: "6px 10px",
+    borderRadius: "8px",
+    border: "none",
+    background: "none",
+    color: "#e5a00d",
+    cursor: "pointer",
+  },
+  crumbCurrent: {
+    padding: "6px 4px",
+    color: "#e0e0e0",
+    cursor: "default",
   },
   user: {
     fontSize: "13px",

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchMeta, setStreams, getSessionToken, type PlexItem, type PlexMeta } from "../lib/api";
+import { fetchMeta, invalidateMeta, setStreams, getSessionToken, type PlexItem, type PlexMeta } from "../lib/api";
 import { SkeletonBlock } from "./SkeletonBlock";
 import type { QueueItem, SuggestionItem } from "../hooks/useSync";
 
@@ -186,6 +186,8 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
           audioStreamID: selectedAudio,
           subtitleStreamID: selectedSubtitle ?? 0,
         });
+        // The cached meta now reports stale selected-track flags — drop it.
+        invalidateMeta(item.ratingKey);
       }
       onPlay(item, selectedSubtitle != null);
     } catch (err) {

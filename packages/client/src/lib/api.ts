@@ -56,6 +56,29 @@ export async function apiGet<T = unknown>(
   return res.json();
 }
 
+// Short-lived cache for stable Plex metadata (fetchMeta, fetchChildren, …), so
+// navigating back through detail views doesn't refetch what was just shown.
+// Not used for anything whose answer changes with user actions (Seerr statuses,
+// section listings, search).
+const apiCache = new Map<string, { at: number; promise: Promise<unknown> }>();
+const API_CACHE_TTL_MS = 5 * 60 * 1000;
+const API_CACHE_MAX = 200;
+
+function cachedGet<T = unknown>(path: string): Promise<T> {
+  const hit = apiCache.get(path);
+  if (hit && Date.now() - hit.at < API_CACHE_TTL_MS) return hit.promise as Promise<T>;
+  const promise = apiGet<T>(path);
+  // Failures shouldn't stick — drop the entry so the next call retries.
+  promise.catch(() => apiCache.delete(path));
+  apiCache.delete(path); // re-insert at the end so eviction is oldest-first
+  apiCache.set(path, { at: Date.now(), promise });
+  if (apiCache.size > API_CACHE_MAX) {
+    const oldest = apiCache.keys().next().value;
+    if (oldest !== undefined) apiCache.delete(oldest);
+  }
+  return promise;
+}
+
 export async function apiPost<T = unknown>(
   path: string,
   body: Record<string, unknown>,
@@ -206,11 +229,17 @@ export function searchPlex(query: string): Promise<{ items: PlexItem[] }> {
 }
 
 export function fetchChildren(ratingKey: string): Promise<{ items: PlexItem[] }> {
-  return apiGet(`/api/plex/children/${encodeURIComponent(ratingKey)}`);
+  return cachedGet(`/api/plex/children/${encodeURIComponent(ratingKey)}`);
 }
 
 export function fetchMeta(ratingKey: string): Promise<PlexMeta> {
-  return apiGet(`/api/plex/meta/${encodeURIComponent(ratingKey)}`);
+  return cachedGet(`/api/plex/meta/${encodeURIComponent(ratingKey)}`);
+}
+
+/** Drop a cached fetchMeta entry — call after mutating what it reports
+ *  (e.g. setStreams changes the selected audio/subtitle tracks). */
+export function invalidateMeta(ratingKey: string): void {
+  apiCache.delete(`/api/plex/meta/${encodeURIComponent(ratingKey)}`);
 }
 
 /** Detail metadata for an online (Discover) title, fetched by its plex:// guid. */
@@ -230,7 +259,7 @@ export interface DiscoverMeta {
 }
 
 export function fetchDiscoverMeta(guid: string): Promise<DiscoverMeta> {
-  return apiGet(`/api/plex/discover/meta?guid=${encodeURIComponent(guid)}`);
+  return cachedGet(`/api/plex/discover/meta?guid=${encodeURIComponent(guid)}`);
 }
 
 /** Seerr (Overseerr/Jellyseerr) request integration. `status` is Seerr's
@@ -290,7 +319,7 @@ export function seerrRequest(
 export function fetchSiblingEpisodes(
   ratingKey: string,
 ): Promise<{ prev: PlexItem | null; next: PlexItem | null }> {
-  return apiGet(`/api/plex/siblings/${encodeURIComponent(ratingKey)}`);
+  return cachedGet(`/api/plex/siblings/${encodeURIComponent(ratingKey)}`);
 }
 
 export function hlsMasterUrl(

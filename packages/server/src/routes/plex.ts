@@ -142,6 +142,8 @@ interface PlexMetadataItem {
   librarySectionID?: number;
   guid?: string;
   contentRating?: string;
+  /** External ids, e.g. { id: "imdb://tt123" }, { id: "tmdb://456" }. */
+  Guid?: Array<{ id?: string }>;
 }
 
 // ─── Library browsing ────────────────────────────────────────────
@@ -436,8 +438,10 @@ router.get("/discover/meta", async (req: Request, res: Response) => {
   }
 });
 
-/** Plex's online catalog lives on a separate cloud host from the local server. */
+/** Plex's online catalog lives on separate cloud hosts from the local server.
+ *  Discover = search/hubs (thin records); metadata = fuller detail (summary, …). */
 const DISCOVER_BASE = "https://discover.provider.plex.tv";
+const METADATA_BASE = "https://metadata.provider.plex.tv";
 
 // Cache of guid → in-library, so repeated ownership checks (search-as-you-type)
 // don't re-hit Plex for the same title.
@@ -468,10 +472,8 @@ async function isGuidInLibrary(guid: string): Promise<boolean> {
  * Fetch a single title's metadata from the Discover cloud provider by its id
  * (the trailing segment of a plex:// guid). Best-effort: null on any failure.
  */
-async function fetchDiscoverMeta(id: string): Promise<PlexMetadataItem | null> {
-  const token = process.env.PLEX_TOKEN;
-  if (!token) return null;
-  const url = new URL(`${DISCOVER_BASE}/library/metadata/${encodeURIComponent(id)}`);
+async function fetchProviderMeta(base: string, id: string, token: string): Promise<PlexMetadataItem | null> {
+  const url = new URL(`${base}/library/metadata/${encodeURIComponent(id)}`);
   url.searchParams.set("X-Plex-Token", token);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
@@ -481,21 +483,32 @@ async function fetchDiscoverMeta(id: string): Promise<PlexMetadataItem | null> {
       signal: controller.signal,
     });
     if (!res.ok) {
-      console.warn("[Discover] meta failed:", res.status);
+      console.warn("[Discover] meta failed:", new URL(base).host, res.status);
       return null;
     }
     const data = (await res.json()) as { MediaContainer?: { Metadata?: PlexMetadataItem[] } };
     const m = data.MediaContainer?.Metadata?.[0] ?? null;
-    // TEMP DIAGNOSTIC — confirm provider metadata shape; remove once happy.
-    console.log("[Discover] meta id=%o title=%o summaryLen=%o genres=%o",
-      id, m?.title, m?.summary?.length ?? 0, (m?.Genre || []).map((g) => g.tag));
+    // TEMP DIAGNOSTIC — confirm which host/source has the details; remove once happy.
+    console.log("[Discover] meta host=%o id=%o title=%o summaryLen=%o guids=%o",
+      new URL(base).host, id, m?.title, m?.summary?.length ?? 0, (m?.Guid || []).map((g) => g.id));
     return m;
   } catch (err) {
-    console.warn("[Discover] meta error:", err);
+    console.warn("[Discover] meta error:", new URL(base).host, err);
     return null;
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function fetchDiscoverMeta(id: string): Promise<PlexMetadataItem | null> {
+  const token = process.env.PLEX_TOKEN;
+  if (!token) return null;
+  // Prefer the metadata provider (fuller detail — has the summary Plex shows);
+  // fall back to the discover provider if it returns nothing/no summary.
+  const meta = await fetchProviderMeta(METADATA_BASE, id, token);
+  if (meta?.summary) return meta;
+  const discover = await fetchProviderMeta(DISCOVER_BASE, id, token);
+  return discover?.summary ? discover : (meta ?? discover);
 }
 
 /**

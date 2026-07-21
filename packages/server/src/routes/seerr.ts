@@ -2,38 +2,92 @@ import { Router, type Request, type Response } from "express";
 
 /**
  * Requesting non-library titles via a Seerr instance (Overseerr / Jellyseerr).
- * Configured with SEERR_URL + SEERR_API_KEY; disabled (configured: false) when
- * either is missing. All calls use the X-Api-Key header and TMDB ids.
+ *
+ * Requests are attributed to *your* Seerr account rather than the admin API key:
+ * the server logs in with your plex.tv token (POST /auth/plex) and reuses that
+ * session cookie. Enabled by setting SEERR_URL; authenticates with the same
+ * PLEX_ACCOUNT_TOKEN that Discover uses (falls back to PLEX_TOKEN).
  */
 const router = Router();
 
 const MEDIA_TYPES = new Set(["movie", "tv"]);
 const SEERR_TIMEOUT_MS = 8000;
+const SESSION_TTL_MS = 6 * 60 * 60 * 1000;
 
-function seerrConfig(): { url: string; apiKey: string } | null {
+type SeerrConfig = { url: string; token: string };
+
+function seerrConfig(): SeerrConfig | null {
   const url = process.env.SEERR_URL?.replace(/\/$/, "");
-  const apiKey = process.env.SEERR_API_KEY;
-  return url && apiKey ? { url, apiKey } : null;
+  const token = process.env.PLEX_ACCOUNT_TOKEN || process.env.PLEX_TOKEN;
+  return url && token ? { url, token } : null;
 }
 
-async function seerrFetch(cfg: { url: string; apiKey: string }, path: string, init?: RequestInit) {
-  return fetch(`${cfg.url}/api/v1${path}`, {
-    ...init,
-    headers: {
-      "X-Api-Key": cfg.apiKey,
-      Accept: "application/json",
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
-      ...init?.headers,
-    },
-    signal: AbortSignal.timeout(SEERR_TIMEOUT_MS),
-  });
+// Cached Seerr session cookie from the Plex login; refreshed on TTL or a 401.
+let sessionCookie: string | null = null;
+let sessionAt = 0;
+
+async function login(cfg: SeerrConfig): Promise<string | null> {
+  try {
+    const r = await fetch(`${cfg.url}/api/v1/auth/plex`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ authToken: cfg.token }),
+      signal: AbortSignal.timeout(SEERR_TIMEOUT_MS),
+    });
+    if (!r.ok) {
+      console.warn("[Seerr] plex login failed:", r.status);
+      return null;
+    }
+    sessionCookie = r.headers.get("set-cookie")?.match(/connect\.sid=[^;]+/)?.[0] ?? null;
+    sessionAt = Date.now();
+    return sessionCookie;
+  } catch (err) {
+    console.error("[Seerr] plex login error:", err);
+    return null;
+  }
+}
+
+async function currentSession(cfg: SeerrConfig): Promise<string | null> {
+  if (sessionCookie && Date.now() - sessionAt < SESSION_TTL_MS) return sessionCookie;
+  return login(cfg);
+}
+
+/** Authenticated Seerr call via the Plex session cookie. Retries once with a
+ *  fresh login if the session has expired. Returns null if we can't authenticate. */
+async function seerrFetch(
+  cfg: SeerrConfig,
+  path: string,
+  init?: RequestInit,
+): Promise<globalThis.Response | null> {
+  const call = (cookie: string) =>
+    fetch(`${cfg.url}/api/v1${path}`, {
+      ...init,
+      headers: {
+        Cookie: cookie,
+        Accept: "application/json",
+        ...(init?.body ? { "Content-Type": "application/json" } : {}),
+        ...init?.headers,
+      },
+      signal: AbortSignal.timeout(SEERR_TIMEOUT_MS),
+    });
+
+  let cookie = await currentSession(cfg);
+  if (!cookie) return null;
+  let r = await call(cookie);
+  if (r.status === 401) {
+    sessionCookie = null;
+    cookie = await login(cfg);
+    if (!cookie) return null;
+    r = await call(cookie);
+  }
+  return r;
 }
 
 /**
  * GET /api/seerr/status?tmdbId=123&mediaType=movie
- * Availability/request status for a title. Returns { configured, status } where
- * status is Seerr's MediaStatus (2=pending, 3=processing, 4=partial, 5=available)
- * or null when the title hasn't been requested.
+ * Availability/request status. { configured, status } where status is Seerr's
+ * MediaStatus (2=pending, 3=processing, 4=partial, 5=available) or null (not
+ * requested). configured is false when SEERR_URL isn't set.
  */
 router.get("/status", async (req: Request, res: Response) => {
   const cfg = seerrConfig();
@@ -49,8 +103,8 @@ router.get("/status", async (req: Request, res: Response) => {
   }
   try {
     const r = await seerrFetch(cfg, `/${mediaType}/${tmdbId}`);
-    if (!r.ok) {
-      // Not found in Seerr yet just means "not requested".
+    if (!r || !r.ok) {
+      // Login failed or title not tracked yet — either way, "not requested".
       res.json({ configured: true, status: null });
       return;
     }
@@ -64,7 +118,7 @@ router.get("/status", async (req: Request, res: Response) => {
 
 /**
  * POST /api/seerr/request  { tmdbId, mediaType }
- * Create a request. TV requests cover all seasons. Returns { ok, status }.
+ * Create a request as your Seerr account. TV requests cover all seasons.
  */
 router.post("/request", async (req: Request, res: Response) => {
   const cfg = seerrConfig();
@@ -81,10 +135,13 @@ router.post("/request", async (req: Request, res: Response) => {
     const body: Record<string, unknown> = { mediaType, mediaId: tmdbId };
     if (mediaType === "tv") body.seasons = "all";
     const r = await seerrFetch(cfg, "/request", { method: "POST", body: JSON.stringify(body) });
+    if (!r) {
+      res.status(502).json({ error: "Couldn't sign in to Seerr" });
+      return;
+    }
     if (!r.ok) {
       const text = await r.text().catch(() => "");
       console.warn("[Seerr] request failed:", r.status, text.slice(0, 200));
-      // 409 = already exists — treat as "already requested" rather than an error.
       res.status(r.status === 409 ? 409 : 502)
         .json({ error: r.status === 409 ? "Already requested" : "Request failed" });
       return;

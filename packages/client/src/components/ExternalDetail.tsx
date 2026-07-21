@@ -50,7 +50,12 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
 
   return (
     <div style={styles.container}>
-      <button onClick={onBack} style={styles.backBtn}>← Back</button>
+      <button onClick={onBack} style={styles.backBtn}>
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        Back
+      </button>
       <div style={styles.body}>
         {poster ? (
           <img src={authUrl(poster)} alt={title} style={styles.poster} />
@@ -90,18 +95,22 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
 
 const styles: Record<string, React.CSSProperties> = {
   container: {
-    maxWidth: "900px",
-    margin: "0 auto",
-    padding: "20px 24px 40px",
+    width: "100%",
   },
+  // Matches MovieDetail's back button so navigation is consistent across pages.
   backBtn: {
-    background: "none",
-    border: "none",
-    color: "#aaa",
-    fontSize: "14px",
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    margin: "16px 24px",
+    padding: "8px 16px",
+    borderRadius: "8px",
+    border: "1px solid rgba(255,255,255,0.1)",
+    background: "rgba(255,255,255,0.05)",
+    color: "#f0f0f0",
     cursor: "pointer",
-    padding: "4px 0",
-    marginBottom: "16px",
+    fontSize: "14px",
+    fontWeight: 500,
     fontFamily: "inherit",
   },
   body: {
@@ -109,6 +118,7 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "24px",
     alignItems: "flex-start",
     flexWrap: "wrap",
+    padding: "8px 24px 40px",
   },
   poster: {
     width: "220px",
@@ -191,8 +201,9 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "inherit",
   },
   requestBtnDone: {
-    background: "rgba(255,255,255,0.1)",
-    color: "#9c9",
+    background: "rgba(255,255,255,0.06)",
+    border: "1px solid rgba(229,160,13,0.6)",
+    color: "#e5a00d",
     cursor: "default",
   },
 };

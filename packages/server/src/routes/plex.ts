@@ -488,9 +488,12 @@ async function fetchProviderMeta(base: string, id: string, token: string): Promi
     }
     const data = (await res.json()) as { MediaContainer?: { Metadata?: PlexMetadataItem[] } };
     const m = data.MediaContainer?.Metadata?.[0] ?? null;
-    // TEMP DIAGNOSTIC — confirm which host/source has the details; remove once happy.
-    console.log("[Discover] meta host=%o id=%o title=%o summaryLen=%o guids=%o",
-      new URL(base).host, id, m?.title, m?.summary?.length ?? 0, (m?.Guid || []).map((g) => g.id));
+    // TEMP DIAGNOSTIC — dump the raw response so we can see exactly what each host
+    // returns for a title with no details. Remove once resolved.
+    console.log("[Discover] meta host=%s id=%s found=%s keys=%o summaryLen=%d guids=%o",
+      new URL(base).host, id, !!m, m ? Object.keys(m) : [], m?.summary?.length ?? 0,
+      (m?.Guid || []).map((g) => g.id));
+    console.log("[Discover] meta raw=%s", JSON.stringify(data.MediaContainer ?? {}).slice(0, 600));
     return m;
   } catch (err) {
     console.warn("[Discover] meta error:", new URL(base).host, err);

@@ -344,20 +344,12 @@ router.get("/search", async (req: Request, res: Response) => {
       };
     }>("/hubs/search", { query: q, limit: "30", includeExternal: "1" });
     const hubs = data.MediaContainer.Hub || [];
-    // TEMP DIAGNOSTIC — remove once the includeExternal shape is confirmed.
-    console.log("[Search] q=%o hubs=%o", q,
-      hubs.map((h) => ({ id: h.hubIdentifier, type: h.type, n: h.Metadata?.length ?? 0 })));
     const items: Array<ReturnType<typeof mapItem> & { inLibrary: boolean }> = [];
     for (const hub of hubs) {
       if (!hub.Metadata) continue;
       for (const m of hub.Metadata) {
         // Local library items carry a librarySectionID; online results don't.
-        // VERIFY against a real includeExternal response and adjust if your Plex
-        // version distinguishes them differently (e.g. by guid prefix).
         const inLibrary = m.librarySectionID != null;
-        // TEMP DIAGNOSTIC — remove once confirmed.
-        console.log("[Search]  item title=%o type=%o librarySectionID=%o guid=%o thumb=%o",
-          m.title, m.type, m.librarySectionID, m.guid, m.thumb);
         const base = mapItem(m);
         items.push({
           ...base,

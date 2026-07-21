@@ -474,17 +474,24 @@ async function isGuidInLibrary(guid: string): Promise<boolean> {
  */
 async function fetchProviderMeta(base: string, id: string, token: string): Promise<PlexMetadataItem | null> {
   const url = new URL(`${base}/library/metadata/${encodeURIComponent(id)}`);
-  url.searchParams.set("X-Plex-Token", token);
+  // The metadata endpoint reads the X-Plex-* identity from the QUERY STRING, not
+  // headers (unlike search), and 401s without the full set. Mirror what the Plex
+  // web client sends.
+  const params: Record<string, string> = {
+    "X-Plex-Token": token,
+    "X-Plex-Client-Identifier": OUR_CLIENT_ID,
+    "X-Plex-Product": "Plex Discord Theater",
+    "X-Plex-Version": "1.0.0",
+    "X-Plex-Platform": "Web",
+    "X-Plex-Provider-Version": "7.2",
+    "X-Plex-Language": "en",
+  };
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
   try {
     const res = await fetch(url, {
-      // Match searchDiscover's headers — the provider 401s without X-Plex-Product.
-      headers: {
-        Accept: "application/json",
-        "X-Plex-Client-Identifier": OUR_CLIENT_ID,
-        "X-Plex-Product": "Plex Discord Theater",
-      },
+      headers: { Accept: "application/json" },
       signal: controller.signal,
     });
     if (!res.ok) {

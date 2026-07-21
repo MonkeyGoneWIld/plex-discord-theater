@@ -116,9 +116,15 @@ export function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveIsHost, syncState.ratingKey]);
 
-  const handleRejoin = useCallback(() => {
-    if (!syncState.ratingKey) return;
-    pushView({
+  // A host with a live stream but no player open (e.g. promoted while on the
+  // library) gets pulled into it, the way viewers are — otherwise they're stuck
+  // as host of a stream they can't see. The viewer auto-navigate effect above
+  // bails for hosts, so this handles the host case. Fires only in that state:
+  // a host starting playback is already on the player, and a host who stops has
+  // a null ratingKey (sendStop clears it), so neither triggers a spurious push.
+  useEffect(() => {
+    if (!effectiveIsHost || !syncState.ratingKey || view.kind === "player") return;
+    const playerView: View = {
       kind: "player",
       item: {
         ratingKey: syncState.ratingKey,
@@ -127,11 +133,39 @@ export function App() {
         thumb: null,
       },
       subtitles: syncState.subtitles,
+    };
+    setViewStack((s) => {
+      const base = s[s.length - 1]?.kind === "player" ? s.slice(0, -1) : s;
+      return [...base, playerView];
     });
-  }, [syncState.ratingKey, syncState.title, syncState.subtitles, pushView]);
+  }, [effectiveIsHost, syncState.ratingKey, syncState.title, syncState.subtitles, view.kind]);
+
+  const handleRejoin = useCallback(() => {
+    if (!syncState.ratingKey) return;
+    const playerView: View = {
+      kind: "player",
+      item: {
+        ratingKey: syncState.ratingKey,
+        title: syncState.title || "Untitled",
+        type: "movie",
+        thumb: null,
+      },
+      subtitles: syncState.subtitles,
+    };
+    // Replace a top player rather than appending: the rejoin banner has onClick
+    // on both the wrapper and its inner button, so a button click fires this
+    // twice (bubbling). Appending twice would stack two player views and force
+    // a double back-press. Matches handlePlayNext / the auto-navigate effect.
+    setViewStack((s) => {
+      const base = s[s.length - 1]?.kind === "player" ? s.slice(0, -1) : s;
+      return [...base, playerView];
+    });
+  }, [syncState.ratingKey, syncState.title, syncState.subtitles]);
 
   // Show "Now Playing" banner when viewer is not on the player but host is playing
-  const showNowPlaying = !effectiveIsHost && !!syncState.ratingKey && view.kind !== "player";
+  // Also shown to a host who is out of the player while a stream is live — e.g.
+  // promoted back to host after leaving — so they aren't stranded with no way in.
+  const showNowPlaying = !!syncState.ratingKey && view.kind !== "player";
 
   const handleSelect = useCallback((item: PlexItem) => {
     if (item.type === "show") {

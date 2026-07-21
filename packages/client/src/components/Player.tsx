@@ -97,6 +97,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
   const [showQueuePanel, setShowQueuePanel] = useState(false);
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
   const [showStats, setShowStats] = useState(false);
+  const [confirmingEnd, setConfirmingEnd] = useState(false);
   // Next item to offer, auto-resolved from the series. Queue takes precedence
   // over this at render time — a queued item is a deliberate choice, this is a guess.
   const [nextEpisode, setNextEpisode] = useState<PlexItem | null>(null);
@@ -186,6 +187,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
   // generate a new UUID and orphan the running Plex transcode.
   const viewerHlsSessionId = mountedAsHostRef.current ? null : (syncState?.hlsSessionId ?? null);
 
+  // A host who mounts into an already-live stream (e.g. promoted while not in
+  // the player) adopts that running session instead of starting a second
+  // transcode. Captured once at mount and consumed on first use, so later
+  // restarts (subtitle burn-in, retries) mint a fresh session as normal.
+  const adoptSessionIdRef = useRef(mountedAsHostRef.current ? (syncState?.hlsSessionId ?? null) : null);
+  // True while playing an adopted session: skip the position-resetting "play"
+  // broadcast, and seek to the room's current position on load like a viewer.
+  const didAdoptRef = useRef(false);
+
   // Handle promotion: start ping + heartbeat when viewer becomes host mid-playback
   useEffect(() => {
     if (!isHost || ownsSessionRef.current) return;
@@ -212,6 +222,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
         }
       }, HEARTBEAT_INTERVAL_MS);
     }
+  }, [isHost]);
+
+  // Mirror of the promotion effect: a host who hands control to someone else
+  // must relinquish session ownership. Without this, ownsSessionRef stays true
+  // after demotion, so backing out (endPlayback) or hitting an HLS error would
+  // stop or restart the Plex transcode the *new* host is still using — killing
+  // their stream and forcing a fresh transcode (a phantom second stream).
+  useEffect(() => {
+    if (!isHost) ownsSessionRef.current = false;
   }, [isHost]);
 
   const destroyLocal = useCallback(() => {
@@ -317,9 +336,17 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
 
     // Host creates a new session; viewer reuses the host's session
     const sessionOwner = ownsSessionRef.current;
-    const sessionId = sessionOwner
-      ? crypto.randomUUID()
-      : viewerHlsSessionId;
+    let sessionId: string | null;
+    if (adoptSessionIdRef.current) {
+      // Adopt the live stream we were promoted into — reuse its transcode and
+      // sync to the room position rather than restarting from the top. One-shot.
+      sessionId = adoptSessionIdRef.current;
+      adoptSessionIdRef.current = null;
+      didAdoptRef.current = true;
+    } else {
+      didAdoptRef.current = false;
+      sessionId = sessionOwner ? crypto.randomUUID() : viewerHlsSessionId;
+    }
 
     if (!sessionId) {
       // Viewer doesn't have a session ID yet — wait for sync
@@ -493,9 +520,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
           // Clear recovery overlay
           setRecovering(false);
 
-          // Viewer joining mid-playback: seek to host's position immediately
-          // instead of waiting for the 5s heartbeat drift threshold
-          if (!isHostRef.current && syncActionsRef.current) {
+          // Viewer joining mid-playback (or a host adopting a live session):
+          // seek to the room's position immediately instead of waiting for the
+          // 5s heartbeat drift threshold.
+          if ((!isHostRef.current || didAdoptRef.current) && syncActionsRef.current) {
             const syncPos = syncStateRef.current?.position;
             if (syncPos && syncPos > DRIFT_THRESHOLD_S) {
               video.currentTime = syncPos;
@@ -505,8 +533,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
           // Pre-fetch cache ensures segments arrive instantly — play as soon as manifest is parsed
           video.play().catch((err) => console.warn("Autoplay prevented:", err));
 
-          // Host: broadcast play with sessionId when manifest is ready
-          if (isHostRef.current) {
+          // Host: broadcast play with sessionId when manifest is ready. Skip it
+          // when adopting an already-live session — the room is already on it,
+          // and "play" would reset everyone's position to 0.
+          if (isHostRef.current && !didAdoptRef.current) {
             // Send the formatted title, not the bare episode name — viewers
             // reconstruct their item from sync state alone (no show/season
             // fields), so this string is all they have to display.
@@ -629,7 +659,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
         const onLoaded = () => {
           if (!mounted) return;
           video.play().catch((err) => console.warn("Autoplay prevented:", err));
-          if (isHostRef.current) {
+          if (isHostRef.current && !didAdoptRef.current) {
             // Send the formatted title, not the bare episode name — viewers
             // reconstruct their item from sync state alone (no show/season
             // fields), so this string is all they have to display.
@@ -912,7 +942,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [handleHostSeek]);
 
-  const handleBack = useCallback(() => {
+  const endPlayback = useCallback(() => {
     destroyLocal();
     // Only the session owner stops the Plex transcode
     if (ownsSessionRef.current && sessionIdRef.current) {
@@ -924,6 +954,19 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
     }
     onBack();
   }, [destroyLocal, onBack]);
+
+  const handleBack = useCallback(() => {
+    // The host backing out ends the stream for the whole room, so confirm
+    // first when anyone else is watching. Viewers only leave for themselves.
+    const hasOtherViewers = (syncStateRef.current?.participants ?? []).some(
+      (p) => p.userId !== selfUserId,
+    );
+    if (isHostRef.current && hasOtherViewers) {
+      setConfirmingEnd(true);
+      return;
+    }
+    endPlayback();
+  }, [endPlayback, selfUserId]);
 
   const handleTrackChange = useCallback(async (partId: number, audioStreamID?: number, subtitleStreamID?: number) => {
     if (!sessionIdRef.current) return;
@@ -1307,6 +1350,41 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
           onClose={() => setShowPeoplePanel(false)}
         />
       )}
+      {confirmingEnd && (() => {
+        const otherCount = (syncState?.participants ?? []).filter(
+          (p) => p.userId !== selfUserId,
+        ).length;
+        return (
+          <div style={styles.confirmBackdrop} onClick={() => setConfirmingEnd(false)}>
+            <div style={styles.confirmDialog} onClick={(e) => e.stopPropagation()}>
+              <div style={styles.confirmTitle}>End stream?</div>
+              <p style={styles.confirmText}>
+                {otherCount === 1
+                  ? "1 other person is watching"
+                  : `${otherCount} other people are watching`}
+                {" — going back stops playback for everyone."}
+              </p>
+              <div style={styles.confirmActions}>
+                <button
+                  style={styles.confirmCancelBtn}
+                  onClick={() => setConfirmingEnd(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  style={styles.confirmEndBtn}
+                  onClick={() => {
+                    setConfirmingEnd(false);
+                    endPlayback();
+                  }}
+                >
+                  End stream
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
       {/* Bottom-right stack: owns placement so neither child positions itself and
           a third affordance costs one line. Bottom-anchored, so it grows upward
           and the skip button naturally sits above the card. */}
@@ -1337,6 +1415,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  confirmBackdrop: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 110, display: "flex", alignItems: "center", justifyContent: "center" },
+  confirmDialog: { width: "340px", maxWidth: "85vw", background: "#1a1a1a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "12px", padding: "20px" },
+  confirmTitle: { color: "#f0f0f0", fontSize: "16px", fontWeight: 600, marginBottom: "8px" },
+  confirmText: { color: "#aaa", fontSize: "13px", lineHeight: 1.5, margin: "0 0 16px" },
+  confirmActions: { display: "flex", justifyContent: "flex-end", gap: "8px" },
+  confirmCancelBtn: { padding: "8px 14px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#ccc", fontSize: "13px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
+  confirmEndBtn: { padding: "8px 14px", borderRadius: "8px", border: "none", background: "#e5a00d", color: "#000", fontSize: "13px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
   bottomRightStack: {
     position: "absolute",
     right: "20px",

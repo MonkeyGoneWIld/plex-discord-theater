@@ -165,7 +165,21 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       sendPause: (position: number) => send({ type: "pause", position }),
       sendResume: (position: number) => send({ type: "resume", position }),
       sendSeek: (position: number) => send({ type: "seek", position }),
-      sendStop: () => send({ type: "stop" }),
+      sendStop: () => {
+        send({ type: "stop" });
+        // Optimistically clear local playback state. The server excludes the
+        // sender from the "stop" broadcast, so without this the stopping host
+        // keeps a stale ratingKey and would look like a live stream to the
+        // rejoin banner / host pull-in.
+        setState((prev) => ({
+          ...prev,
+          ratingKey: null,
+          title: null,
+          hlsSessionId: null,
+          playing: false,
+          position: 0,
+        }));
+      },
       sendHeartbeat: (position: number, playing: boolean) =>
         send({ type: "heartbeat", position, playing }),
       sendBrowse: (context: string) => send({ type: "browse", context }),
@@ -332,6 +346,18 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               ...prev,
               position: (msg.position as number) ?? prev.position,
               playing: msg.playing !== false,
+              // Self-heal: if our "what's playing" state was cleared (e.g. a stray
+              // stop during a host handoff), recover it from the heartbeat so the
+              // rejoin path works again. Only fill when missing, to avoid churn
+              // and spurious re-navigation while already watching.
+              ...(prev.ratingKey == null && msg.ratingKey
+                ? {
+                    ratingKey: msg.ratingKey as string,
+                    title: (msg.title as string) || null,
+                    subtitles: Boolean(msg.subtitles),
+                    hlsSessionId: (msg.hlsSessionId as string) || null,
+                  }
+                : {}),
             }));
             break;
           case "browse":

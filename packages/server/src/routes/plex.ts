@@ -137,6 +137,10 @@ interface PlexMetadataItem {
   grandparentThumb?: string;
   leafCount?: number;
   childCount?: number;
+  // Present on items that live in a local library section; absent on online
+  // (Discover) results returned when /hubs/search is called with includeExternal.
+  librarySectionID?: number;
+  guid?: string;
 }
 
 // ─── Library browsing ────────────────────────────────────────────
@@ -331,23 +335,188 @@ router.get("/search", async (req: Request, res: Response) => {
   }
 
   try {
-    const data = await plexJSON<{
-      MediaContainer: { Hub?: Array<{ Metadata?: PlexMetadataItem[] }> };
-    }>("/hubs/search", { query: q, limit: "30" });
+    // Local library search, plus Plex's online Discover catalog in parallel.
+    // Discover is best-effort — if it fails, local results still return.
+    const [data, discover] = await Promise.all([
+      plexJSON<{
+        MediaContainer: {
+          Hub?: Array<{ hubIdentifier?: string; type?: string; Metadata?: PlexMetadataItem[] }>;
+        };
+      }>("/hubs/search", { query: q, limit: "30" }),
+      searchDiscover(q),
+    ]);
+
     const hubs = data.MediaContainer.Hub || [];
-    const items: ReturnType<typeof mapItem>[] = [];
+    const items: Array<ReturnType<typeof mapItem> & { inLibrary: boolean }> = [];
+    const localGuids = new Set<string>();
     for (const hub of hubs) {
       if (!hub.Metadata) continue;
       for (const m of hub.Metadata) {
-        items.push(mapItem(m));
+        if (m.guid) localGuids.add(m.guid);
+        items.push({ ...mapItem(m), inLibrary: true });
       }
     }
+
+    // Append online results the user doesn't already own. Only movies/shows —
+    // the client can't do anything with a bare person/etc — and only ones with
+    // a poster (no art usually means a low-value stub).
+    const candidates = discover.filter(
+      (m) => (m.type === "movie" || m.type === "show") && !!m.thumb,
+    );
+    // Ownership: an item is owned if it appeared in the local search OR a library
+    // guid lookup finds it. Discover surfaces titles the local text search misses
+    // (e.g. "spiderman brand" → owned Spider-Man), so the local results alone
+    // don't dedup. Lookups are cached, so as-you-type stays cheap.
+    const owned = await Promise.all(
+      candidates.map((m) =>
+        !m.guid ? Promise.resolve(false)
+          : localGuids.has(m.guid) ? Promise.resolve(true)
+            : isGuidInLibrary(m.guid),
+      ),
+    );
+
+    let discoverKept = 0;
+    candidates.forEach((m, i) => {
+      if (owned[i]) return;
+      discoverKept++;
+      // TEMP DIAGNOSTIC — while tuning; remove once happy.
+      console.log("[Search] keep discover title=%o year=%o", m.title, m.year);
+      items.push({
+        ...mapItem(m),
+        // Online items may have no local ratingKey; the client uses this as a
+        // list key, so fall back to the (unique) guid.
+        ratingKey: m.ratingKey ?? m.guid ?? m.title,
+        inLibrary: false,
+        thumb: externalThumbUrl(m.thumb),
+      });
+    });
+    // TEMP DIAGNOSTIC — remove once happy.
+    console.log("[Search] q=%o local=%d discoverReturned=%d discoverKept=%d",
+      q, localGuids.size, discover.length, discoverKept);
+
     res.json({ items });
   } catch (err) {
     console.error("Search error:", err);
     res.status(502).json({ error: "Failed to search Plex" });
   }
 });
+
+/** Plex's online catalog lives on a separate cloud host from the local server. */
+const DISCOVER_BASE = "https://discover.provider.plex.tv";
+
+// Cache of guid → in-library, so repeated ownership checks (search-as-you-type)
+// don't re-hit Plex for the same title.
+const ownedGuidCache = new Map<string, { owned: boolean; at: number }>();
+const OWNED_GUID_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Whether a plex:// guid exists in any local library section. Used to dedup
+ * Discover results the local text search didn't surface (it matches differently
+ * than Discover). Errors resolve to false — show the online result rather than
+ * risk hiding a real one.
+ */
+async function isGuidInLibrary(guid: string): Promise<boolean> {
+  const hit = ownedGuidCache.get(guid);
+  if (hit && Date.now() - hit.at < OWNED_GUID_TTL_MS) return hit.owned;
+  let owned = false;
+  try {
+    const data = await plexJSON<{ MediaContainer: { size?: number } }>("/library/all", { guid });
+    owned = (data.MediaContainer.size ?? 0) > 0;
+    // TEMP DIAGNOSTIC — confirm the guid lookup works; remove once happy.
+    if (owned) console.log("[Search] guid owned via library lookup:", guid);
+  } catch (err) {
+    // TEMP DIAGNOSTIC — surfaces a wrong endpoint/param rather than silently
+    // treating everything as not-owned.
+    console.warn("[Search] guid lookup failed for", guid, "-", (err as Error).message);
+    owned = false;
+  }
+  ownedGuidCache.set(guid, { owned, at: Date.now() });
+  return owned;
+}
+
+/**
+ * Search Plex's online Discover catalog (titles not necessarily in the library),
+ * authenticated with the plex.tv account token. Separate cloud host, so it can't
+ * go through plexFetch. Best-effort: returns [] on any failure so search still
+ * works from local results alone.
+ */
+async function searchDiscover(query: string): Promise<PlexMetadataItem[]> {
+  const token = process.env.PLEX_TOKEN;
+  if (!token) return [];
+  const url = new URL(`${DISCOVER_BASE}/library/search`);
+  url.searchParams.set("query", query);
+  url.searchParams.set("limit", "15");
+  url.searchParams.set("searchTypes", "movies,tv");
+  url.searchParams.set("searchProviders", "discover");
+  url.searchParams.set("X-Plex-Token", token);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        "X-Plex-Client-Identifier": OUR_CLIENT_ID,
+        "X-Plex-Product": "Plex Discord Theater",
+      },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      console.warn("[Discover] search failed:", res.status);
+      return [];
+    }
+    const data = (await res.json()) as { MediaContainer?: Record<string, unknown> };
+    return extractDiscoverItems(data);
+  } catch (err) {
+    console.warn("[Discover] search error:", err);
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Pull Metadata items out of the Discover response, tolerating shape variants
+ * across Plex versions (Metadata[] directly, SearchResult[].Metadata, or
+ * SearchResults[].SearchResult[].Metadata).
+ */
+function extractDiscoverItems(data: { MediaContainer?: Record<string, unknown> }): PlexMetadataItem[] {
+  const mc = data.MediaContainer;
+  if (!mc) return [];
+  const out: PlexMetadataItem[] = [];
+  const push = (m: unknown) => {
+    if (m && typeof m === "object" && "title" in m) out.push(m as PlexMetadataItem);
+  };
+  if (Array.isArray(mc.Metadata)) mc.Metadata.forEach(push);
+  if (Array.isArray(mc.SearchResult)) {
+    mc.SearchResult.forEach((r: unknown) => push((r as { Metadata?: unknown })?.Metadata));
+  }
+  if (Array.isArray(mc.SearchResults)) {
+    for (const group of mc.SearchResults as Array<{ SearchResult?: unknown }>) {
+      if (Array.isArray(group?.SearchResult)) {
+        group.SearchResult.forEach((r: unknown) => push((r as { Metadata?: unknown })?.Metadata));
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Same-origin proxy URL for an online (Discover) result's artwork.
+ *
+ * The image lives on Plex's cloud rather than the local server, so it's routed
+ * through the /thumb handler's `url=` fetch (the local photo transcoder pulls and
+ * resizes it). Returns null when absent; the client falls back to a placeholder.
+ *
+ * VERIFY: the exact form of an external result's thumb (absolute URL vs Plex path)
+ * is version-dependent — confirm against a real response and adjust if needed.
+ */
+function externalThumbUrl(thumb: string | undefined): string | null {
+  if (!thumb) return null;
+  // No w/h here — the client's card helper appends those (and the token), so
+  // adding them would duplicate the params.
+  return `/api/plex/thumb/photo/:/transcode?url=${encodeURIComponent(thumb)}`;
+}
 
 /**
  * GET /api/plex/meta/:ratingKey
@@ -563,7 +732,21 @@ router.get("/thumb/*", async (req: Request, res: Response) => {
   const h = req.query.h as string | undefined;
   if (w && !NUMERIC_RE.test(w)) { res.status(400).end(); return; }
   if (h && !NUMERIC_RE.test(h)) { res.status(400).end(); return; }
-  const cacheKey = w && h ? `${imagePath}:${w}x${h}` : imagePath;
+
+  // External (Discover) artwork: a ?url= pointing at a cloud poster (TMDB or
+  // Plex CDN). Host-allowlisted so this can't become an open image proxy. When
+  // present, the server fetches this URL directly (see below) rather than the
+  // local library path — the local Plex server doesn't have these images.
+  const externalUrl = typeof req.query.url === "string" ? req.query.url : undefined;
+  if (req.query.url !== undefined) {
+    if (externalUrl === undefined || imagePath !== "/photo/:/transcode" || !isAllowedExternalImage(externalUrl)) {
+      res.status(400).end();
+      return;
+    }
+  }
+
+  const transcodeSource = externalUrl ?? imagePath;
+  const cacheKey = w && h ? `${transcodeSource}:${w}x${h}` : transcodeSource;
 
   // Check server-side cache first
   const cached = thumbCache.get(cacheKey);
@@ -575,16 +758,20 @@ router.get("/thumb/*", async (req: Request, res: Response) => {
   }
 
   try {
-    // Use Plex photo transcoder for resized images, raw fetch for full-size
-    const plexRes = w && h
-      ? await plexFetch("/photo/:/transcode", {
-          width: w,
-          height: h,
-          minSize: "1",
-          upscale: "1",
-          url: imagePath,
-        })
-      : await plexFetch(imagePath);
+    // External artwork is fetched directly (Plex's transcoder won't reliably
+    // pull non-Plex CDNs like TMDB). Local images use the photo transcoder when
+    // resizing, otherwise a raw local fetch.
+    const plexRes = externalUrl
+      ? await fetchExternalImage(externalUrl)
+      : (w && h)
+        ? await plexFetch("/photo/:/transcode", {
+            width: w,
+            height: h,
+            minSize: "1",
+            upscale: "1",
+            url: imagePath,
+          })
+        : await plexFetch(imagePath);
 
     if (!plexRes.ok) {
       plexRes.body?.cancel().catch(() => {});
@@ -1578,6 +1765,55 @@ const ALLOWED_THUMB_PREFIXES = ["/library/", "/photo/"];
 
 function isAllowedThumbPath(p: string): boolean {
   return isAllowedProxyPath(p) && ALLOWED_THUMB_PREFIXES.some(prefix => p.startsWith(prefix));
+}
+
+/**
+ * Guard for the external-artwork `?url=` on the thumb proxy — prevents it from
+ * becoming an open image proxy. Relative Plex paths are resolved by the local
+ * server (same safety as a normal thumb); absolute URLs must be Plex-hosted.
+ *
+ * VERIFY: if online results carry artwork on a non-Plex CDN, add its host here.
+ */
+function isAllowedExternalImage(u: string): boolean {
+  if (u.startsWith("/")) return isAllowedThumbPath(u);
+  try {
+    // Any https source is fine: external art is fetched via images.plex.tv (see
+    // fetchExternalImage), so our server only ever connects to that one host —
+    // the source URL is just a param Plex's proxy resolves. This avoids an
+    // ever-growing per-CDN allowlist while keeping our own SSRF surface to one host.
+    return new URL(u).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/** Downsize TMDB's multi-MB "original" posters before proxying, so Plex isn't
+ *  asked to pull a huge source. Other CDNs already serve poster-sized art. */
+function sizedExternalImage(url: string): string {
+  return url.replace(/(image\.tmdb\.org\/t\/p\/)(original|w\d+)(\/)/, "$1w500$3");
+}
+
+/**
+ * Fetch an external poster through Plex's public image proxy (images.plex.tv),
+ * which fetches + resizes the source. This means one host handles every source
+ * CDN (TMDB, TheTVDB, Amazon, fanart, …) — no per-CDN allowlist to chase — and
+ * our server only ever connects to images.plex.tv. Sized to 320x480 to match
+ * local library posters. No auth needed.
+ */
+async function fetchExternalImage(url: string): Promise<globalThis.Response> {
+  const proxied =
+    `https://images.plex.tv/photo?width=320&height=480&minSize=1&upscale=1` +
+    `&url=${encodeURIComponent(sizedExternalImage(url))}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    return await fetch(proxied, {
+      headers: { Accept: "image/*" },
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

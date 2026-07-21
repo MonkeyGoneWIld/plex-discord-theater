@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { PlexItem } from "../lib/api";
 import { getSessionToken } from "../lib/api";
 
@@ -16,33 +17,43 @@ function authThumbUrl(thumb: string, w?: number, h?: number): string {
 }
 
 export function MovieCard({ item, onClick }: MovieCardProps) {
+  // Online (Discover) result: in search but not in the library, so not playable.
+  const external = item.inLibrary === false;
+  const [imgError, setImgError] = useState(false);
+  // Episodes: use the show's poster (portrait, matches other cards) instead of
+  // the episode still (landscape — looks cropped in a portrait card). Fall back
+  // to the still if no show poster is available.
+  const posterSrc = item.type === "episode" ? (item.showThumb ?? item.thumb) : item.thumb;
+  const showImg = !!posterSrc && !imgError;
   return (
     <button
-      onClick={() => onClick(item)}
-      style={styles.card}
-      onMouseEnter={(e) => {
+      onClick={external ? undefined : () => onClick(item)}
+      style={{ ...styles.card, ...(external ? styles.cardExternal : {}) }}
+      onMouseEnter={external ? undefined : (e) => {
         const el = e.currentTarget;
         el.style.transform = "scale(1.03)";
         el.style.boxShadow = "0 4px 24px rgba(229,160,13,0.12)";
       }}
-      onMouseLeave={(e) => {
+      onMouseLeave={external ? undefined : (e) => {
         const el = e.currentTarget;
         el.style.transform = "scale(1)";
         el.style.boxShadow = "none";
       }}
     >
-      {(() => {
-        // Episodes: use the show's poster (portrait, matches other cards)
-        // instead of the episode still (landscape — looks cropped/ugly when
-        // forced into a portrait card). Fall back to the still if no show
-        // poster is available.
-        const posterSrc = item.type === "episode" ? (item.showThumb ?? item.thumb) : item.thumb;
-        return posterSrc ? (
-          <img src={authThumbUrl(posterSrc, 320, 480)} alt={item.title} style={styles.poster} loading="lazy" />
+      <div style={styles.posterWrap}>
+        {showImg ? (
+          <img
+            src={authThumbUrl(posterSrc!, 320, 480)}
+            alt={item.title}
+            style={styles.poster}
+            loading="lazy"
+            onError={() => setImgError(true)}
+          />
         ) : (
           <div style={styles.placeholder}>No Poster</div>
-        );
-      })()}
+        )}
+        {external && <div style={styles.badge}>Not in library</div>}
+      </div>
       <div style={styles.info}>
         <div style={styles.title}>{item.title}</div>
         {item.type === "episode" ? (
@@ -74,6 +85,26 @@ const styles: Record<string, React.CSSProperties> = {
     transition: "transform 0.2s ease, box-shadow 0.2s ease",
     width: "100%",
     fontFamily: "inherit",
+  },
+  cardExternal: {
+    cursor: "default",
+    opacity: 0.72,
+  },
+  posterWrap: {
+    position: "relative",
+  },
+  badge: {
+    position: "absolute",
+    top: "8px",
+    left: "8px",
+    padding: "3px 7px",
+    borderRadius: "5px",
+    background: "rgba(0,0,0,0.72)",
+    color: "rgba(255,255,255,0.85)",
+    fontSize: "10px",
+    fontWeight: 600,
+    letterSpacing: "0.3px",
+    textTransform: "uppercase" as const,
   },
   poster: {
     width: "100%",

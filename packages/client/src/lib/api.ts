@@ -105,6 +105,9 @@ export interface PlexItem {
   childCount?: number;
   summary?: string;
   duration?: number;
+  /** False for online (Discover) search results that aren't in the library and
+   *  can't be played here. Absent/true on everything else. */
+  inLibrary?: boolean;
 }
 
 export interface PlexSection {

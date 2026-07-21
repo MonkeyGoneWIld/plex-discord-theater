@@ -11,7 +11,6 @@ import {
   fetchGenres,
   searchPlex,
   fetchProgress,
-  fetchSeerrPartial,
   getSessionToken,
   type PlexItem,
   type PlexSection,
@@ -64,17 +63,6 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   const [itemsError, setItemsError] = useState<string | null>(null);
   // Bumped by the Retry button to re-run the fetch effects after a failure
   const [retryNonce, setRetryNonce] = useState(0);
-
-  // Plex rating keys of partially-available shows (missing seasons), for a badge.
-  const [partialKeys, setPartialKeys] = useState<Set<string>>(new Set());
-  useEffect(() => {
-    let cancelled = false;
-    fetchSeerrPartial()
-      .then((r) => { if (!cancelled) setPartialKeys(new Set(r.ratingKeys)); })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, []);
-  const isPartial = (item: PlexItem) => item.type === "show" && partialKeys.has(item.ratingKey);
 
   // Load sections on mount
   useEffect(() => {
@@ -389,7 +377,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
                 <div style={styles.hubRow} className="scroll-row">
                   {hub.items.map((hubItem) => (
                     <div key={hubItem.ratingKey} style={styles.hubCard}>
-                      <MovieCard item={hubItem} onClick={handleClick} partial={isPartial(hubItem)} />
+                      <MovieCard item={hubItem} onClick={handleClick} />
                     </div>
                   ))}
                 </div>
@@ -431,7 +419,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
           {libraryItems.length > 0 && (
             <div style={styles.grid}>
               {libraryItems.map((item) => (
-                <MovieCard key={item.ratingKey} item={item} onClick={handleClick} partial={isPartial(item)} />
+                <MovieCard key={item.ratingKey} item={item} onClick={handleClick} />
               ))}
             </div>
           )}
@@ -440,7 +428,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
               <div style={styles.sectionHeader}>Not in your library</div>
               <div style={styles.grid}>
                 {externalItems.map((item) => (
-                  <MovieCard key={item.ratingKey} item={item} onClick={handleClick} partial={isPartial(item)} />
+                  <MovieCard key={item.ratingKey} item={item} onClick={handleClick} />
                 ))}
               </div>
             </>

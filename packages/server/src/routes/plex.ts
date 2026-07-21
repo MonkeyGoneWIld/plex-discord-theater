@@ -492,6 +492,31 @@ function tmdbIdFromGuids(guids?: Array<{ id?: string }>): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+// Local library items don't always carry a tmdb:// guid — older metadata agents
+// only store tvdb/imdb ids. When the direct lookup misses, resolve via Plex's
+// metadata provider using the item's plex:// guid (the same path Discover uses),
+// so Seerr season requests still work. Cached per ratingKey (incl. misses).
+const tmdbIdCache = new Map<string, number | null>();
+
+async function resolveTmdbId(m: PlexMetadataItem): Promise<number | null> {
+  const direct = tmdbIdFromGuids(m.Guid);
+  if (direct != null) return direct;
+  // Only shows need the provider fallback for season requests; movies that lack a
+  // tmdb guid are rare and not season-requestable anyway.
+  if (m.type !== "show") return null;
+  const key = String(m.ratingKey ?? "");
+  if (key && tmdbIdCache.has(key)) return tmdbIdCache.get(key)!;
+  // plex://show/<providerId> — the provider metadata endpoint keys on <providerId>.
+  const providerId = /^plex:\/\/[^/]+\/(.+)$/.exec(m.guid ?? "")?.[1] ?? null;
+  let resolved: number | null = null;
+  if (providerId) {
+    const pm = await fetchDiscoverMeta(providerId);
+    resolved = pm ? tmdbIdFromGuids(pm.Guid) : null;
+  }
+  if (key) tmdbIdCache.set(key, resolved);
+  return resolved;
+}
+
 async function fetchProviderMeta(base: string, id: string, token: string): Promise<PlexMetadataItem | null> {
   const url = new URL(`${base}/library/metadata/${encodeURIComponent(id)}`);
   // The metadata endpoint reads the X-Plex-* identity from the QUERY STRING, not
@@ -675,6 +700,11 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       mediaDurations.set(m.ratingKey, m.duration);
     }
 
+    const tmdbId = await resolveTmdbId(m);
+    // TEMP DIAGNOSTIC — confirm the external id resolves for library shows; remove after.
+    console.log("[Meta] %s type=%o guid=%o guids=%o tmdbId=%o", ratingKey, m.type,
+      m.guid, (m.Guid || []).map((g) => g.id), tmdbId);
+
     res.json({
       ratingKey: m.ratingKey,
       title: m.title,
@@ -695,13 +725,7 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       subtitleTracks,
       markers: mapMarkers(m.Marker),
       // TMDB id — lets the client offer Seerr season requests for library shows.
-      tmdbId: (() => {
-        const t = tmdbIdFromGuids(m.Guid);
-        // TEMP DIAGNOSTIC — confirm the external id list is present; remove after.
-        console.log("[Meta] %s type=%o guids=%o tmdbId=%o", ratingKey, m.type,
-          (m.Guid || []).map((g) => g.id), t);
-        return t;
-      })(),
+      tmdbId,
     });
   } catch (err) {
     console.error("Metadata error:", err);

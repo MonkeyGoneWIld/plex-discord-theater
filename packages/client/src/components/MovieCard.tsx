@@ -5,8 +5,6 @@ import { getSessionToken } from "../lib/api";
 interface MovieCardProps {
   item: PlexItem;
   onClick: (item: PlexItem) => void;
-  /** Show is in the library but missing seasons — flags a "Partial" badge. */
-  partial?: boolean;
 }
 
 function authThumbUrl(thumb: string, w?: number, h?: number): string {
@@ -18,7 +16,7 @@ function authThumbUrl(thumb: string, w?: number, h?: number): string {
   return url;
 }
 
-export function MovieCard({ item, onClick, partial }: MovieCardProps) {
+export function MovieCard({ item, onClick }: MovieCardProps) {
   // Online (Discover) result: in search but not in the library. Clickable — it
   // opens a detail view (with a request button) rather than playback.
   const external = item.inLibrary === false;
@@ -56,7 +54,6 @@ export function MovieCard({ item, onClick, partial }: MovieCardProps) {
           <div style={styles.placeholder}>No Poster</div>
         )}
         {external && <div style={styles.badge}>Not in library</div>}
-        {!external && partial && <div style={styles.partialBadge}>Partial</div>}
       </div>
       <div style={styles.info}>
         <div style={styles.title}>{item.title}</div>
@@ -103,19 +100,6 @@ const styles: Record<string, React.CSSProperties> = {
     color: "rgba(255,255,255,0.85)",
     fontSize: "10px",
     fontWeight: 600,
-    letterSpacing: "0.3px",
-    textTransform: "uppercase" as const,
-  },
-  partialBadge: {
-    position: "absolute",
-    top: "8px",
-    left: "8px",
-    padding: "3px 7px",
-    borderRadius: "5px",
-    background: "rgba(229,160,13,0.9)",
-    color: "#000",
-    fontSize: "10px",
-    fontWeight: 700,
     letterSpacing: "0.3px",
     textTransform: "uppercase" as const,
   },

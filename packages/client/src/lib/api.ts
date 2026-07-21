@@ -266,12 +266,6 @@ export function fetchSeerrTv(tmdbId: number): Promise<SeerrTv> {
   return apiGet(`/api/seerr/tv/${tmdbId}`);
 }
 
-/** Plex rating keys of shows that are only partially available (some seasons
- *  missing), so the library grid can flag them. */
-export function fetchSeerrPartial(): Promise<{ configured: boolean; ratingKeys: string[] }> {
-  return apiGet("/api/seerr/partial");
-}
-
 export function seerrRequest(
   tmdbId: number,
   mediaType: SeerrMediaType,

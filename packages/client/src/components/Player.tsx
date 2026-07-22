@@ -92,6 +92,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
   const [retryKey, setRetryKey] = useState(0);
   const [vpsRelay, setVpsRelay] = useState<boolean | null>(null); // null = not yet loaded
   const [buffering, setBuffering] = useState(true);
+  // Viewers-only: transient "host is seeking" flag, raised on each seek command
+  // and auto-cleared shortly after (see effect below).
+  const [hostSeeking, setHostSeeking] = useState(false);
   const [showTrackSwitcher, setShowTrackSwitcher] = useState(false);
   const [trackSwitching, setTrackSwitching] = useState<"audio" | "subtitle" | null>(null);
   const [showQueuePanel, setShowQueuePanel] = useState(false);
@@ -754,6 +757,16 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
     }
   }, [syncState?.commandSeq]);
 
+  // Viewer status: flash "Host is seeking…" for a moment after each seek command.
+  // seekSeq bumps once per host seek; the flag auto-clears so it reads as a brief
+  // transient rather than a stuck state. Host/co-hosts (who can control) skip it.
+  useEffect(() => {
+    if (!syncState || syncState.seekSeq === 0 || canControl) return;
+    setHostSeeking(true);
+    const timer = setTimeout(() => setHostSeeking(false), 1400);
+    return () => clearTimeout(timer);
+  }, [syncState?.seekSeq, canControl]);
+
   // Viewer: periodic drift correction on heartbeats (larger threshold than explicit commands).
   // Also fires on explicit command position updates, but the command-based effect above
   // already corrects at a tighter 2s threshold, making this a no-op in that case.
@@ -1158,6 +1171,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
     (nearEnd || activeMarker?.type === "credits");
   const showSkip = !!activeMarker && canControl;
 
+  // Viewer status pill: what the host is doing to shared playback. Seeking is a
+  // brief flash (takes precedence); paused persists while the stream sits paused.
+  // Only for pure viewers, and never over an error/disconnect/recovery banner.
+  const streamActive = !!syncState?.ratingKey && !error && !recovering && !syncState?.hostDisconnected;
+  const hostPaused = !canControl && streamActive && syncState?.playing === false;
+  const viewerStatus = !canControl && streamActive
+    ? (hostSeeking ? "Host is seeking…" : hostPaused ? "Host paused the video" : null)
+    : null;
+
   return (
     <div style={styles.container}>
       {syncState?.authFailed ? (
@@ -1169,6 +1191,21 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
       ) : syncState?.hostDisconnected ? (
         <div style={styles.hostDisconnected}>Host disconnected — waiting for reconnection...</div>
       ) : null}
+
+      {/* Viewer status — what the host is doing to shared playback */}
+      {viewerStatus && (
+        <div style={styles.viewerStatus} role="status" aria-live="polite">
+          {hostSeeking ? (
+            <span style={styles.viewerStatusSpinner} />
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style={{ flexShrink: 0 }}>
+              <rect x="4" y="3" width="3" height="10" rx="1" />
+              <rect x="9" y="3" width="3" height="10" rx="1" />
+            </svg>
+          )}
+          {viewerStatus}
+        </div>
+      )}
 
       {/* Buffering indicator */}
       {buffering && !error && (
@@ -1459,6 +1496,36 @@ const styles: Record<string, React.CSSProperties> = {
     background: "rgba(0,0,0,0.4)",
     zIndex: 5,
     pointerEvents: "none",
+  },
+  viewerStatus: {
+    position: "absolute",
+    top: "18px",
+    left: "50%",
+    transform: "translateX(-50%)",
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    padding: "8px 16px",
+    borderRadius: "999px",
+    background: "rgba(0,0,0,0.72)",
+    color: "rgba(255,255,255,0.92)",
+    fontSize: "13px",
+    fontWeight: 600,
+    letterSpacing: "0.2px",
+    zIndex: 16,
+    pointerEvents: "none",
+    backdropFilter: "blur(6px)",
+    border: "1px solid rgba(255,255,255,0.1)",
+    boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+  },
+  viewerStatusSpinner: {
+    width: "13px",
+    height: "13px",
+    flexShrink: 0,
+    border: "2px solid rgba(229,160,13,0.35)",
+    borderTopColor: "#e5a00d",
+    borderRadius: "50%",
+    animation: "spin 0.8s linear infinite",
   },
   bufferingSpinner: {
     width: "48px",

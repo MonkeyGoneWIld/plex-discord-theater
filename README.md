@@ -15,13 +15,10 @@ A Discord Activity that lets you browse your Plex library and watch movies and T
 - **Queue & viewer suggestions** — the host can queue what's next, and viewers can suggest titles
 - **Playback status for viewers** — a badge shows when the host has paused or is seeking, so viewers know why playback stalled
 - **Seek-bar thumbnail previews** — hover the progress bar to preview that moment, when Plex has generated preview thumbnails
-- **Volume memory** — starts at 50% and remembers your level across sessions
-- **Stats for nerds** — press `i` for resolution, codecs, bitrate, buffer health, and P2P counters
 - **VPS relay** — optional nginx caching proxy offloads segment delivery to a VPS with 1 Gbps, so your home upload isn't the bottleneck
 - **Segment pre-fetching** — server proactively fetches segments from Plex ahead of playback, eliminating throttle-related buffering at cold start
 - **P2P segment sharing** — when no VPS is configured, viewers can share HLS segments with each other via WebRTC
 - **Automatic host promotion** — if the host leaves, a co-host is promoted where there is one, otherwise another viewer, so the session continues
-- **Thumbnail caching** — artwork is cached server-side in SQLite for fast browsing
 - **Persistent sessions** — sessions and host roles survive server restarts (SQLite-backed)
 - **Secure** — your Plex token never leaves the server; the backend proxies everything
 

@@ -51,6 +51,9 @@ export interface SyncState {
   hostUsername: string | null;
   /** Increments only on explicit commands (play/pause/resume/seek), not heartbeats */
   commandSeq: number;
+  /** Increments each time the host issues a seek — lets viewers surface a
+   *  transient "seeking" status without inferring it from position jumps. */
+  seekSeq: number;
   /** Timestamp of the last host command — used to detect stale state on reconnect */
   lastCommandAt: number;
   /** True if the WebSocket closed due to authentication failure (code 1008) */
@@ -132,6 +135,7 @@ const INITIAL_STATE: SyncState = {
   hostUsername: null,
   suggestions: [],
   commandSeq: 0,
+  seekSeq: 0,
   lastCommandAt: 0,
   authFailed: false,
   reconnectFailed: false,
@@ -325,6 +329,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               ...prev,
               position: (msg.position as number) ?? prev.position,
               commandSeq: prev.commandSeq + 1,
+              seekSeq: prev.seekSeq + 1,
             }));
             break;
           case "stop":

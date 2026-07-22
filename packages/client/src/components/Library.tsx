@@ -10,12 +10,9 @@ import {
   fetchSectionItems,
   fetchGenres,
   searchPlex,
-  fetchProgress,
-  getSessionToken,
   type PlexItem,
   type PlexSection,
   type Genre,
-  type WatchProgressItem,
   type PlexHub,
 } from "../lib/api";
 
@@ -58,7 +55,6 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   // it's been superseded (by a newer search or a clear) and discard itself,
   // instead of overwriting the UI with stale results after the box was cleared.
   const searchReqId = useRef(0);
-  const [continueWatching, setContinueWatching] = useState<WatchProgressItem[]>([]);
   const [homeError, setHomeError] = useState<string | null>(null);
   const [itemsError, setItemsError] = useState<string | null>(null);
   // Bumped by the Retry button to re-run the fetch effects after a failure
@@ -94,14 +90,6 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       })
       .finally(() => setHomeLoading(false));
   }, [retryNonce]);
-
-  // Fetch continue watching on mount when host
-  useEffect(() => {
-    if (!isHost) return;
-    fetchProgress()
-      .then(({ items }) => setContinueWatching(items))
-      .catch(() => {});
-  }, [isHost]);
 
   // Fetch genres when section changes
   useEffect(() => {
@@ -229,14 +217,6 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
     [onSelect],
   );
 
-  function authThumbUrl(thumb: string | null): string {
-    if (!thumb) return "";
-    const token = getSessionToken();
-    if (!token) return thumb;
-    const sep = thumb.includes("?") ? "&" : "?";
-    return `${thumb}${sep}token=${encodeURIComponent(token)}`;
-  }
-
   const searchQuery = searchQueryRef.current;
   const displayItems = searchResults ?? items;
   const hasMore = !searchResults && items.length < totalSize;
@@ -256,43 +236,6 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   return (
     <div style={styles.container}>
       <div style={styles.narrowWrap}>
-        {isHost && continueWatching.length > 0 && (
-          <div style={styles.continueSection}>
-            <h3 style={styles.continueLabel}>Continue Watching</h3>
-            <div style={styles.continueRow} className="scroll-row">
-              {continueWatching.map((cwItem) => {
-                const pct = cwItem.duration > 0 ? (cwItem.position / cwItem.duration) * 100 : 0;
-                const minLeft = Math.round((cwItem.duration - cwItem.position) / 60);
-                return (
-                  <div
-                    key={cwItem.ratingKey}
-                    style={styles.continueCard}
-                    onClick={() => onSelect({
-                      ratingKey: cwItem.ratingKey,
-                      title: cwItem.title,
-                      type: cwItem.type,
-                      thumb: cwItem.thumb,
-                      parentTitle: cwItem.parentTitle,
-                      parentIndex: cwItem.parentIndex,
-                      index: cwItem.index,
-                    })}
-                  >
-                    <div style={styles.continuePoster}>
-                      {cwItem.thumb && <img src={authThumbUrl(cwItem.thumb)} alt="" style={styles.continuePosterImg} loading="lazy" />}
-                    </div>
-                    <div style={styles.continueInfo}>
-                      <div style={styles.continueTitle}>{cwItem.title}</div>
-                      <div style={styles.continueTime}>{minLeft}m left</div>
-                    </div>
-                    <div style={styles.continueProgress}>
-                      <div style={{ ...styles.continueProgressFill, width: `${pct}%` }} />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
         <Search onSearch={handleSearch} onClear={handleClearSearch} placeholder={searchPlaceholder} />
 
         {/* Filter bar (hidden during search and on Home) */}
@@ -582,67 +525,5 @@ const styles: Record<string, React.CSSProperties> = {
     // Shares its width formula with the poster grid (see lib/grid.ts), so a Home
     // card is never a different size from a Movies/TV Shows card.
     width: POSTER_ROW_CARD_WIDTH,
-  },
-  continueSection: {
-    padding: "0 24px 16px",
-  },
-  continueLabel: {
-    color: "#e5a00d",
-    fontSize: "14px",
-    fontWeight: 600,
-    marginBottom: "12px",
-    letterSpacing: "-0.01em",
-  },
-  continueRow: {
-    display: "flex",
-    gap: "12px",
-    overflowX: "auto" as const,
-    paddingBottom: "8px",
-  },
-  continueCard: {
-    flexShrink: 0,
-    width: "140px",
-    cursor: "pointer",
-    borderRadius: "8px",
-    overflow: "hidden",
-    background: "rgba(255,255,255,0.04)",
-    border: "1px solid rgba(255,255,255,0.06)",
-    transition: "transform 0.15s ease",
-  },
-  continuePoster: {
-    width: "100%",
-    aspectRatio: "2/3",
-    background: "rgba(255,255,255,0.04)",
-    overflow: "hidden",
-  },
-  continuePosterImg: {
-    width: "100%",
-    height: "100%",
-    objectFit: "cover" as const,
-  },
-  continueInfo: {
-    padding: "8px",
-  },
-  continueTitle: {
-    color: "#f0f0f0",
-    fontSize: "12px",
-    fontWeight: 600,
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap" as const,
-  },
-  continueTime: {
-    color: "#888",
-    fontSize: "11px",
-    marginTop: "2px",
-  },
-  continueProgress: {
-    height: "3px",
-    background: "rgba(255,255,255,0.1)",
-  },
-  continueProgressFill: {
-    height: "100%",
-    background: "#e5a00d",
-    borderRadius: "2px",
   },
 };

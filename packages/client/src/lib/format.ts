@@ -1,6 +1,6 @@
 /**
  * Fields needed to render a media title. Structural rather than a union of
- * PlexItem | QueueItem | WatchProgressItem so any item-ish shape works.
+ * PlexItem | QueueItem so any item-ish shape works.
  */
 export interface TitleParts {
   title: string;

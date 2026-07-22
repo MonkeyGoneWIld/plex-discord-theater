@@ -364,38 +364,3 @@ export interface AppConfig {
 export function fetchConfig(): Promise<AppConfig> {
   return apiGet("/api/plex/config");
 }
-
-export interface WatchProgressItem {
-  ratingKey: string;
-  title: string;
-  thumb: string | null;
-  type: string;
-  parentTitle?: string;
-  parentIndex?: number;
-  index?: number;
-  position: number;
-  duration: number;
-  updatedAt: number;
-}
-
-export function fetchProgress(): Promise<{ items: WatchProgressItem[] }> {
-  return apiGet("/api/progress");
-}
-
-export function saveProgress(data: {
-  ratingKey: string;
-  title: string;
-  thumb: string | null;
-  type: string;
-  parentTitle?: string;
-  parentIndex?: number;
-  index?: number;
-  position: number;
-  duration: number;
-}): Promise<{ ok: boolean }> {
-  return apiPut("/api/progress", data);
-}
-
-export function deleteProgressItem(ratingKey: string): Promise<void> {
-  return apiDelete(`/api/progress/${encodeURIComponent(ratingKey)}`);
-}

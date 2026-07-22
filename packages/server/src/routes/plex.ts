@@ -458,6 +458,17 @@ function providerToken(): string | undefined {
   return process.env.PLEX_ACCOUNT_TOKEN || process.env.PLEX_TOKEN;
 }
 
+/**
+ * Extra params that authenticate an admin-only Plex read as the account owner.
+ * The server PLEX_TOKEN is frequently *not* permitted on /status/sessions,
+ * /transcode/sessions, or terminate (403), which breaks session cleanup. When a
+ * PLEX_ACCOUNT_TOKEN is set, override the token for exactly those calls. Passed
+ * through params, which plexUrl applies after the default token, so it wins.
+ */
+function adminAuthParams(): Record<string, string> {
+  return process.env.PLEX_ACCOUNT_TOKEN ? { "X-Plex-Token": process.env.PLEX_ACCOUNT_TOKEN } : {};
+}
+
 // Cache of guid → in-library, so repeated ownership checks (search-as-you-type)
 // don't re-hit Plex for the same title.
 const ownedGuidCache = new Map<string, { owned: boolean; at: number }>();
@@ -1135,7 +1146,7 @@ async function reapOrphanTranscodes(): Promise<void> {
   try {
     const data = await plexJSON<{
       MediaContainer: { TranscodeSession?: Array<{ key?: string; protocol?: string }> };
-    }>("/transcode/sessions");
+    }>("/transcode/sessions", adminAuthParams());
     for (const t of data.MediaContainer.TranscodeSession ?? []) {
       const keyUuid = t.key?.split("/").pop();
       if (!keyUuid || t.protocol !== "hls") continue;
@@ -1144,8 +1155,11 @@ async function reapOrphanTranscodes(): Promise<void> {
         await stopTranscodeKey(keyUuid).catch(() => {});
       }
     }
-  } catch {
-    // Plex unreachable — nothing to do; the next tick retries.
+  } catch (err) {
+    // Log rather than swallow — if /transcode/sessions is 403/unreachable the
+    // reaper is silently useless, and we need to know (it's the safety net).
+    console.warn("[HLS] Orphan reaper could not read /transcode/sessions:",
+      err instanceof Error ? err.message : err);
   }
 }
 setInterval(() => { reapOrphanTranscodes(); }, 60_000).unref();
@@ -1206,7 +1220,7 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
           Session?: { id?: string };
         }>;
       };
-    }>("/status/sessions");
+    }>("/status/sessions", adminAuthParams());
 
     const sessions = data.MediaContainer.Metadata || [];
     for (const s of sessions) {
@@ -1223,8 +1237,7 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
       // /status/sessions/terminate needs an account-privileged token — the server
       // PLEX_TOKEN gets 403'd, leaving the session (and its transcode) to linger.
       // Use PLEX_ACCOUNT_TOKEN when set (same one Discover/Seerr use).
-      const termParams: Record<string, string> = { sessionId, reason: "Playback ended" };
-      if (process.env.PLEX_ACCOUNT_TOKEN) termParams["X-Plex-Token"] = process.env.PLEX_ACCOUNT_TOKEN;
+      const termParams: Record<string, string> = { sessionId, reason: "Playback ended", ...adminAuthParams() };
       const termRes = await plexFetch("/status/sessions/terminate", termParams, undefined, "POST");
       if (!termRes.ok) {
         console.warn("[HLS] Terminate returned", termRes.status,
@@ -1298,7 +1311,7 @@ async function flushStaleTranscodes(ratingKey?: string, exceptKey?: string): Pro
           key?: string;
         }>;
       };
-    }>("/status/sessions");
+    }>("/status/sessions", adminAuthParams());
 
     const sessions = data.MediaContainer.Metadata || [];
     console.log("[HLS] /status/sessions:", sessions.length);
@@ -1364,7 +1377,7 @@ async function flushStaleTranscodes(ratingKey?: string, exceptKey?: string): Pro
           videoDecision?: string;
         }>;
       };
-    }>("/transcode/sessions");
+    }>("/transcode/sessions", adminAuthParams());
 
     const transcodes = data.MediaContainer.TranscodeSession || [];
     if (DEBUG) console.log("[HLS] /transcode/sessions count:", transcodes.length);
@@ -1692,7 +1705,7 @@ async function isTranscodeSessionAlive(plexKey: string): Promise<boolean> {
   try {
     const data = await plexJSON<{
       MediaContainer: { TranscodeSession?: Array<{ key?: string }> };
-    }>("/transcode/sessions");
+    }>("/transcode/sessions", adminAuthParams());
     const sessions = data.MediaContainer.TranscodeSession || [];
     return sessions.some((t) => t.key?.split("/").pop() === plexKey);
   } catch {
@@ -1980,7 +1993,7 @@ router.delete("/hls/sessions", async (req: Request, res: Response) => {
           Player?: { machineIdentifier?: string };
         }>;
       };
-    }>("/status/sessions");
+    }>("/status/sessions", adminAuthParams());
 
     const sessions = data.MediaContainer.Metadata || [];
     if (DEBUG) console.log("[HLS] Active sessions:", sessions.length);

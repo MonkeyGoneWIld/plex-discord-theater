@@ -1458,8 +1458,12 @@ router.get(
         allKnownPlexKeys.set(plexKeyMatch[1], Date.now());
         console.log("[HLS] Plex transcode key:", plexKeyMatch[1].substring(0, 8), "for session:", sessionId.substring(0, 8));
 
-        // Start pre-fetching segments to absorb Plex's HTTP throttle
-        startPrefetch(sessionId, plexKeyMatch[1]);
+        // Start pre-fetching segments to absorb Plex's HTTP throttle. After a
+        // seek the transcode begins at `offset`, so tell the prefetcher which
+        // segment playback starts on (segments are secondsPerSegment=3s each) —
+        // otherwise it fetches from segment 0 and starves the seek target.
+        const startSeg = offset ? Math.floor(parseInt(offset, 10) / 3) : 0;
+        startPrefetch(sessionId, plexKeyMatch[1], startSeg);
       } else {
         console.error("[HLS] FATAL: Could not extract Plex transcode key from manifest for session:",
           sessionId.substring(0, 8), "— aborting session to prevent phantom state");

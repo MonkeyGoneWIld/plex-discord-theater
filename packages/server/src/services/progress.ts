@@ -3,7 +3,14 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.resolve(__dirname, "../../../data");
+// Persist to the mounted data volume (same one the thumb cache uses) when set —
+// the previous ../../../data path resolved to /app/packages/data in the
+// container, which the non-root runtime user can't create (EACCES) and which
+// isn't the mounted volume anyway, so progress was never saved. Fall back to the
+// repo-local path for local dev.
+const DATA_DIR = process.env.THUMB_CACHE_DIR
+  ? path.resolve(process.env.THUMB_CACHE_DIR)
+  : path.resolve(__dirname, "../../../data");
 const PROGRESS_FILE = path.join(DATA_DIR, "watch-progress.json");
 const MAX_ITEMS_PER_USER = 6;
 

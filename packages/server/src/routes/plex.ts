@@ -1025,6 +1025,12 @@ export function clearSessionStopping(sessionId: string): void {
  */
 const allKnownPlexKeys = new Map<string, number>();
 const KNOWN_KEY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+// Grace window after a transcode key is first seen during which a segment 404 is
+// always treated as "ahead of the transcode head", never as a dead session. A
+// fresh transcode (notably after a far-seek restart) hasn't filled its head yet
+// and may not appear in /transcode/sessions, so the liveness check would false-
+// negative and strand every client in a 410 buffering loop.
+const TRANSCODE_DEAD_GRACE_MS = 20_000;
 
 setInterval(() => {
   const cutoff = Date.now() - KNOWN_KEY_TTL_MS;
@@ -1613,7 +1619,18 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
       // the client restart the transcode at the seek offset.
       if (plexRes.status === 404 && segKeyMatch) {
         const key = segKeyMatch[1];
-        if (activeTranscodeKeys.has(key) && !(await isTranscodeSessionAlive(key))) {
+        // A just-started transcode (e.g. right after a far-seek restart) legitimately
+        // 404s on segments ahead of its head, and Plex may not list it in
+        // /transcode/sessions yet — so isTranscodeSessionAlive would return a false
+        // negative and mark it dead. That poisons activeTranscodeKeys and short-
+        // circuits every later request to 410, stranding the host AND all viewers in
+        // a permanent buffering loop (worse with viewers: many concurrent ahead-of-head
+        // 404s hit the window at once). Never mark a young key dead — by definition it
+        // is still filling its head, not gone.
+        const startedAt = allKnownPlexKeys.get(key) ?? 0;
+        const ageMs = Date.now() - startedAt;
+        if (ageMs > TRANSCODE_DEAD_GRACE_MS &&
+            activeTranscodeKeys.has(key) && !(await isTranscodeSessionAlive(key))) {
           console.warn("[HLS seg] Transcode", key.substring(0, 8),
             "gone — marking dead");
           activeTranscodeKeys.delete(key);
@@ -1621,7 +1638,9 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
           return;
         }
         if (DEBUG) console.log("[HLS seg] 404 for", segPath.substring(0, 80),
-          "— transcode alive, segment ahead of head");
+          ageMs <= TRANSCODE_DEAD_GRACE_MS
+            ? `— transcode ${key.substring(0, 8)} young (${ageMs}ms), segment ahead of head`
+            : "— transcode alive, segment ahead of head");
         res.status(404).end();
         return;
       }

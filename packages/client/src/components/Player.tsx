@@ -9,7 +9,7 @@ import { QueuePanel } from "./QueuePanel";
 import { NextUpButton } from "./NextUpButton";
 import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
-import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, saveProgress, fetchMeta, fetchSiblingEpisodes } from "../lib/api";
+import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, fetchMeta, fetchSiblingEpisodes } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { loadVolume, saveVolume } from "../lib/volume";
 import type { PlexItem, SkipMarker } from "../lib/api";
@@ -137,8 +137,6 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
   // offset (stays 0); the stall-timeout fallback still recovers in that case.
   const sessionStartOffsetRef = useRef(0);
   const seekStallTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastProgressSaveRef = useRef(0);
-  const PROGRESS_SAVE_INTERVAL_MS = 30_000;
 
   // Stable refs so the HLS effect doesn't re-run when these change
   const syncActionsRef = useRef(syncActions);
@@ -693,23 +691,6 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
           const v = videoRef.current;
           if (v && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
             syncActionsRef.current?.sendHeartbeat(v.currentTime, !v.paused);
-
-            // Save progress every 30s
-            const now = Date.now();
-            if (now - lastProgressSaveRef.current >= PROGRESS_SAVE_INTERVAL_MS) {
-              lastProgressSaveRef.current = now;
-              saveProgress({
-                ratingKey: item.ratingKey,
-                title: item.title,
-                thumb: item.thumb,
-                type: item.type,
-                parentTitle: item.parentTitle,
-                parentIndex: item.parentIndex,
-                index: item.index,
-                position: v.currentTime,
-                duration: v.duration || 0,
-              }).catch(() => {});
-            }
           }
         }, HEARTBEAT_INTERVAL_MS);
       }

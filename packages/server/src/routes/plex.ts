@@ -210,8 +210,8 @@ router.get("/home", async (_req: Request, res: Response) => {
       // Only keep hubs relevant to movie/show libraries and drop empty ones
       // (this app only supports "movie" and "show" sections — see
       // ALLOWED_SECTION_TYPES above — so music/photo hubs are filtered out).
-      // "Continue Watching" is excluded — this app tracks progress itself
-      // (see fetchProgress/WatchProgressItem) and renders its own row for it.
+      // "Continue Watching" / "On Deck" are dropped — resume-progress isn't a
+      // feature of this app.
       .filter((h) => h.Metadata && h.Metadata.length > 0)
       .filter((h) => !h.hubIdentifier?.startsWith("home.continue"))
       .filter((h) => !h.hubIdentifier?.startsWith("home.ondeck"))

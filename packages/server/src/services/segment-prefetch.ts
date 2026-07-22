@@ -23,6 +23,10 @@ interface PrefetchSession {
   knownSegments: Set<string>;
   fetchQueue: string[];
   activeWorkers: number;
+  /** Segment index playback starts at (offset ÷ segment seconds). After a
+   *  far-seek restart the transcode begins here, so the queue is ordered from
+   *  this point forward rather than from segment 0. */
+  startIndex: number;
 }
 
 // ─── Constants ──────────────────────────────────────────────────
@@ -56,6 +60,23 @@ function parseSegmentPaths(m3u8Text: string, baseDir: string): string[] {
     }
   }
   return segments;
+}
+
+/** Numeric segment index from a path like ".../00976.ts" (0 if unparseable). */
+function segmentIndex(path: string): number {
+  const m = path.match(/(\d+)\.ts$/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
+/**
+ * Order key for the fetch queue given the playback start segment. Segments at or
+ * ahead of the playhead are fetched first, nearest-first (so playback is served
+ * before anything else); segments behind the seek point sink to the tail — the
+ * client is unlikely to need them after seeking forward.
+ */
+function queuePriority(startIndex: number, path: string): number {
+  const idx = segmentIndex(path);
+  return idx >= startIndex ? idx - startIndex : 1_000_000 + (startIndex - idx);
 }
 
 // ─── Eviction ───────────────────────────────────────────────────
@@ -182,8 +203,17 @@ async function pollSubManifest(session: PrefetchSession): Promise<void> {
     }
 
     if (newCount > 0) {
+      // After a far-seek restart, fetch from the playhead forward instead of from
+      // segment 0 — otherwise the queue burns throttle on pre-seek segments the
+      // client will never request while it starves for the ones it's playing.
+      if (session.startIndex > 0) {
+        session.fetchQueue.sort(
+          (a, b) => queuePriority(session.startIndex, a) - queuePriority(session.startIndex, b),
+        );
+      }
       console.log("[Prefetch]", session.plexKey.substring(0, 8),
-        "discovered", newCount, "new segments (total:", session.knownSegments.size, ")");
+        "discovered", newCount, "new segments (total:", session.knownSegments.size,
+        session.startIndex > 0 ? `, from seg ${session.startIndex})` : ")");
       drainQueue(session);
     }
   } catch {
@@ -199,7 +229,7 @@ async function pollSubManifest(session: PrefetchSession): Promise<void> {
  */
 const MAX_CONCURRENT_SESSIONS = 2;
 
-export function startPrefetch(sessionId: string, plexKey: string): void {
+export function startPrefetch(sessionId: string, plexKey: string, startIndex = 0): void {
   stopPrefetch(sessionId);
 
   // Guard: one Express process serves up to 2 Discord servers
@@ -218,6 +248,7 @@ export function startPrefetch(sessionId: string, plexKey: string): void {
     knownSegments: new Set(),
     fetchQueue: [],
     activeWorkers: 0,
+    startIndex: Math.max(0, startIndex),
   };
 
   sessions.set(sessionId, session);

@@ -5,13 +5,15 @@ A Discord Activity that lets you browse your Plex library and watch movies and T
 ## Features
 
 - **Browse your Plex library** — movies and TV shows with search, genre filters, and sorting
+- **Discover titles beyond your library** — search also surfaces movies and shows you don't own (marked "Not in library" and non-playable), with full detail pages
+- **Request what's missing** — optional [Seerr](#requesting-titles-optional) (Overseerr / Jellyseerr) integration adds a Request button for movies and per-season TV requests, attributed to your own Seerr account
 - **Synchronized playback** — the host controls play/pause/seek and all viewers stay in sync
 - **Co-hosts & host transfer** — the host can grant transport control (play/pause/seek/subtitles) to others, or hand over the host role entirely, from a people panel
 - **Audio & subtitle selection** — switch tracks before playing or mid-episode; co-hosts can change subtitles
 - **Skip Intro / Skip Credits** — uses Plex's chapter markers, when the library has them
 - **Next & previous episode** — resolved automatically from the series (including season rollover), with a card at the end of an episode
 - **Queue & viewer suggestions** — the host can queue what's next, and viewers can suggest titles
-- **Continue watching** — playback position is saved so you can pick up where you left off
+- **Playback status for viewers** — a badge shows when the host has paused or is seeking, so viewers know why playback stalled
 - **Seek-bar thumbnail previews** — hover the progress bar to preview that moment, when Plex has generated preview thumbnails
 - **Volume memory** — starts at 50% and remembers your level across sessions
 - **Stats for nerds** — press `i` for resolution, codecs, bitrate, buffer health, and P2P counters
@@ -58,6 +60,7 @@ The server proactively fetches HLS segments from Plex into an in-memory cache be
 How it works:
 - After starting a transcode, the server polls the HLS sub-manifest every 2 seconds to discover available segments
 - 3 concurrent workers fetch discovered segments from Plex and cache them in memory
+- After a seek, fetching is ordered from the seek target forward (not from the start), so the segments actually being played are warmed first
 - When the VPS (or a viewer) requests a segment, Express serves it instantly from cache
 - Cache miss falls through to on-demand Plex fetch (existing behavior)
 - Supports up to 2 concurrent watch party sessions
@@ -92,6 +95,23 @@ The server requests HLS transcoding from Plex with these settings:
 | Segment duration | 3 seconds | Faster cold start — Plex only needs to transcode 3s before the first segment is ready |
 | Location | LAN | Treats the connection as local to avoid WAN throttling |
 | Direct stream audio | Enabled | Passes through compatible audio (e.g. AAC) without re-encoding; transcodes incompatible codecs (e.g. TrueHD) |
+
+### Requesting Titles (Optional)
+
+Search surfaces Plex's online "Discover" catalog alongside your library, so results
+include movies and shows you don't own — flagged **Not in library** and non-playable.
+Opening one shows its detail page, and when a Seerr (Overseerr / Jellyseerr) instance
+is configured, a **Request** button.
+
+- Set `SEERR_URL` to enable it; left unset, the Request button is hidden.
+- Requests are attributed to **your own Seerr account** — the server signs in with
+  `PLEX_ACCOUNT_TOKEN` (`POST /auth/plex`), not an admin API key.
+- Movies request in one click; TV shows offer **per-season** selection, showing which
+  seasons you already have, which are already requested/processing, and which are
+  available to request.
+
+Because the Activity runs in a sandboxed cross-origin iframe, all Seerr calls go
+through the server — it can't reuse your browser's Overseerr session.
 
 ## Tech Stack
 
@@ -138,6 +158,16 @@ PLEX_TOKEN=your_plex_token
 PORT=3000
 REDIRECT_URI=https://your-public-url.example.com
 ALLOWED_ORIGINS=https://your-public-url.example.com
+
+# Optional — plex.tv ACCOUNT token (not the server token above). Used for online
+# "Discover" search detail lookups, and to sign in to Seerr. Without it, Discover
+# results still appear but their detail pages have no description.
+# PLEX_ACCOUNT_TOKEN=your_plex_account_token
+
+# Optional — Seerr (Overseerr / Jellyseerr) URL, enables the Request button (see
+# "Requesting Titles" below). Requests use your own Seerr account via the account
+# token above — no API key needed.
+# SEERR_URL=https://requests.yourdomain.com
 
 # Optional — VPS relay (see "VPS Relay Setup" section below)
 # VPS_RELAY_URL=https://theater.yourdomain.com

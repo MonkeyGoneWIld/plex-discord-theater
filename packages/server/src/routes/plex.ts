@@ -1042,14 +1042,52 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000).unref(); // prune every hour
 
+// DIAGNOSTIC: last reported playback position per session, to spot a frozen
+// timeline — the host's position not advancing makes Plex stop encoding ahead,
+// which freezes the transcode head and stalls the whole party. Remove once the
+// stall dynamics are understood and addressed.
+const lastPingInfo = new Map<string, { timeMs: number; at: number }>();
+
+// DIAGNOSTIC: transcode "head" per plexKey — the highest segment index Plex has
+// actually delivered, and when it last advanced. Lets us log when the head
+// freezes (clients requesting past a head that isn't moving = the stall).
+const transcodeHead = new Map<string, { maxSeg: number; at: number; stallLogAt: number }>();
+const HEAD_STALL_MS = 12_000;
+
+/** Numeric segment index from a proxied .ts path (−1 if not a .ts). */
+function segIndexOf(segPath: string): number {
+  const m = segPath.match(/(\d+)\.ts(?:$|\?)/);
+  return m ? parseInt(m[1], 10) : -1;
+}
+
+/** Record that Plex delivered a segment — advances the tracked head. */
+function noteHeadAdvance(key: string, segPath: string): void {
+  const idx = segIndexOf(segPath);
+  if (idx < 0) return;
+  const h = transcodeHead.get(key);
+  if (!h) {
+    transcodeHead.set(key, { maxSeg: idx, at: Date.now(), stallLogAt: 0 });
+  } else if (idx > h.maxSeg) {
+    h.maxSeg = idx;
+    h.at = Date.now();
+  }
+}
+
 /** Mark a Plex transcode key as stopped — segment requests will be rejected. */
 export function markTranscodeStopped(sessionId: string): void {
   stopPrefetch(sessionId);
   const plexKey = plexTranscodeKeys.get(sessionId);
-  if (plexKey) activeTranscodeKeys.delete(plexKey);
+  if (plexKey) {
+    activeTranscodeKeys.delete(plexKey);
+    transcodeHead.delete(plexKey);
+  }
   plexTranscodeKeys.delete(sessionId);
   sessionRatingKeys.delete(sessionId);
   manifestCache.delete(sessionId);
+  lastPingInfo.delete(sessionId);
+  // DIAGNOSTIC: should trend back toward 0 between watch sessions.
+  console.log("[HLS] Transcode stopped for session", sessionId.substring(0, 8),
+    `— active transcodes: ${activeTranscodeKeys.size}`);
 }
 
 /**
@@ -1456,7 +1494,12 @@ router.get(
         sessionRatingKeys.set(sessionId, ratingKey);
         activeTranscodeKeys.add(plexKeyMatch[1]);
         allKnownPlexKeys.set(plexKeyMatch[1], Date.now());
-        console.log("[HLS] Plex transcode key:", plexKeyMatch[1].substring(0, 8), "for session:", sessionId.substring(0, 8));
+        console.log("[HLS] Plex transcode key:", plexKeyMatch[1].substring(0, 8),
+          "for session:", sessionId.substring(0, 8),
+          // DIAGNOSTIC: active transcode count — climbing over a session means old
+          // ones aren't being reaped (the terminate-403 / stale-flush problem), which
+          // is what eventually overloads Plex.
+          `— active transcodes: ${activeTranscodeKeys.size}`);
 
         // Start pre-fetching segments to absorb Plex's HTTP throttle. After a
         // seek the transcode begins at `offset`, so tell the prefetcher which
@@ -1605,6 +1648,7 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
       res.setHeader("Content-Type", "application/octet-stream");
     }
     if (DEBUG) console.log("[HLS seg] Cache HIT:", segPath.substring(0, 80));
+    if (segKeyMatch) noteHeadAdvance(segKeyMatch[1], segPath);
     res.send(cachedSeg);
     return;
   }
@@ -1644,6 +1688,19 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
           res.status(410).end();
           return;
         }
+        // DIAGNOSTIC: the transcode is alive but a client wants a segment past
+        // the head — if the head hasn't advanced in a while, it's frozen (Plex
+        // stopped encoding forward). Log once per ~10s while it stays stuck.
+        const h = transcodeHead.get(key);
+        const reqSeg = segIndexOf(segPath);
+        if (h && reqSeg > h.maxSeg) {
+          const stalledMs = Date.now() - h.at;
+          if (stalledMs > HEAD_STALL_MS && Date.now() - h.stallLogAt > 10_000) {
+            h.stallLogAt = Date.now();
+            console.warn("[HLS seg] Head STALLED %s at seg %d for %ss — client wants seg %d",
+              key.substring(0, 8), h.maxSeg, (stalledMs / 1000).toFixed(0), reqSeg);
+          }
+        }
         if (DEBUG) console.log("[HLS seg] 404 for", segPath.substring(0, 80),
           ageMs <= TRANSCODE_DEAD_GRACE_MS
             ? `— transcode ${key.substring(0, 8)} young (${ageMs}ms), segment ahead of head`
@@ -1677,6 +1734,8 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
       return;
     }
 
+    // DIAGNOSTIC: a live .ts came back from Plex — the head reached this segment.
+    if (segKeyMatch) noteHeadAdvance(segKeyMatch[1], segPath);
     await pipeBody(plexRes.body, res);
   } catch (err) {
     console.error("HLS segment proxy error:", err);
@@ -1716,6 +1775,20 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
     const timeMs = typeof req.query.time === "string" ? parseInt(req.query.time, 10) : NaN;
     const ratingKey = sessionRatingKeys.get(sessionId);
     if (ratingKey && Number.isFinite(timeMs)) {
+      // DIAGNOSTIC: compare against the previous ping to see whether the host's
+      // reported position is actually advancing. A near-zero Δpos over several
+      // seconds of wall time = the timeline is frozen, which is what makes Plex
+      // stop advancing the transcode head and stalls everyone.
+      const prev = lastPingInfo.get(sessionId);
+      const wallMs = prev ? Date.now() - prev.at : 0;
+      const posDeltaMs = prev ? timeMs - prev.timeMs : 0;
+      const stalled = !!prev && wallMs > 4000 && Math.abs(posDeltaMs) < 500;
+      lastPingInfo.set(sessionId, { timeMs, at: Date.now() });
+      console.log("[Ping] %s pos=%ss Δpos=%ss / %ss wall%s",
+        sessionId.substring(0, 8), (timeMs / 1000).toFixed(1),
+        (posDeltaMs / 1000).toFixed(1), (wallMs / 1000).toFixed(1),
+        stalled ? "  ⚠ TIMELINE STALLED" : "");
+
       const duration = mediaDurations.get(ratingKey);
       plexFetch(
         "/:/timeline",

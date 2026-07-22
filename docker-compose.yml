@@ -23,6 +23,8 @@ services:
       - SEERR_URL=${SEERR_URL}
       - PORT=${PORT:-3000}
       - THUMB_CACHE_DIR=/data
+      # Set DEBUG=1 to turn on verbose HLS segment/session logging.
+      - DEBUG=${DEBUG:-}
     volumes:
       - app-data:/data
     restart: unless-stopped

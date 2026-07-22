@@ -4,7 +4,10 @@ import { startPrefetch, stopPrefetch, getCachedSegment } from "../services/segme
 import * as thumbCache from "../services/thumb-cache.js";
 
 const router = Router();
-const DEBUG = process.env.NODE_ENV !== "production";
+// Verbose HLS logging. On outside production, or force it in a production
+// container by setting DEBUG=1 (e.g. in docker-compose) without flipping
+// NODE_ENV and its other production behaviour.
+const DEBUG = process.env.DEBUG === "1" || process.env.NODE_ENV !== "production";
 
 function escapeRegExp(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

@@ -6,6 +6,9 @@
 
 import { plexFetchSegment } from "./plex.js";
 
+// Verbose per-poll logging, off in production unless DEBUG=1 (mirrors routes/plex.ts).
+const DEBUG = process.env.DEBUG === "1" || process.env.NODE_ENV !== "production";
+
 // ─── Types ──────────────────────────────────────────────────────
 
 interface CachedSegment {
@@ -23,10 +26,13 @@ interface PrefetchSession {
   knownSegments: Set<string>;
   fetchQueue: string[];
   activeWorkers: number;
-  /** Segment index playback starts at (offset ÷ segment seconds). After a
-   *  far-seek restart the transcode begins here, so the queue is ordered from
-   *  this point forward rather than from segment 0. */
+  /** First segment to fetch — the seek offset's segment (0 for play-from-start).
+   *  Segments before this are never fetched: the client seeked past them. */
   startIndex: number;
+  /** Highest segment index actually delivered by Plex ≈ the transcode head. The
+   *  fetch window extends LEAD_SEGMENTS past this, and it advances as segments
+   *  come in, so the prefetcher tracks the head instead of racing past it. */
+  maxFetchedIndex: number;
 }
 
 // ─── Constants ──────────────────────────────────────────────────
@@ -35,6 +41,10 @@ const POLL_INTERVAL_MS = 2_000;
 const MAX_CONCURRENT_FETCHES = 3;
 const MAX_CACHE_SIZE = 100;
 const EVICTION_THRESHOLD = 50;
+// How far past the transcode head to keep requesting. Bounds how far ahead the
+// prefetcher reaches so it can't burn the whole queue on ahead-of-head 404s;
+// large enough (×3s ≈ 150s) to stay well ahead of the client's 120s buffer.
+const LEAD_SEGMENTS = 50;
 const TRANSCODE_BASE = "/video/:/transcode/universal/";
 
 // ─── Module State ───────────────────────────────────────────────
@@ -66,17 +76,6 @@ function parseSegmentPaths(m3u8Text: string, baseDir: string): string[] {
 function segmentIndex(path: string): number {
   const m = path.match(/(\d+)\.ts$/);
   return m ? parseInt(m[1], 10) : 0;
-}
-
-/**
- * Order key for the fetch queue given the playback start segment. Segments at or
- * ahead of the playhead are fetched first, nearest-first (so playback is served
- * before anything else); segments behind the seek point sink to the tail — the
- * client is unlikely to need them after seeking forward.
- */
-function queuePriority(startIndex: number, path: string): number {
-  const idx = segmentIndex(path);
-  return idx >= startIndex ? idx - startIndex : 1_000_000 + (startIndex - idx);
 }
 
 // ─── Eviction ───────────────────────────────────────────────────
@@ -132,6 +131,10 @@ async function fetchWorker(session: PrefetchSession): Promise<void> {
 
         if (!res.ok) {
           res.body?.cancel().catch(() => {});
+          // 404 = ahead of the transcode head (not produced yet). Un-mark it so a
+          // later poll re-queues it once the head reaches it — dropping it forever
+          // is what let the head stop being pulled and the buffer drain.
+          if (res.status === 404) session.knownSegments.delete(segPath);
           continue;
         }
 
@@ -143,6 +146,9 @@ async function fetchWorker(session: PrefetchSession): Promise<void> {
           served: false,
           cachedAt: Date.now(),
         });
+        // This segment exists, so the head is at least here — slide the window.
+        const idx = segmentIndex(segPath);
+        if (idx > session.maxFetchedIndex) session.maxFetchedIndex = idx;
 
         evictIfNeeded(session);
       } catch {
@@ -193,26 +199,25 @@ async function pollSubManifest(session: PrefetchSession): Promise<void> {
     const m3u8 = await res.text();
     const segments = parseSegmentPaths(m3u8, baseDir);
 
+    // Queue only segments within the window [startIndex, head + LEAD], in order.
+    // Below startIndex: seeked past. Above the window: not yet — they get queued
+    // on a later poll once the head (maxFetchedIndex) advances toward them. This
+    // keeps the prefetcher tracking the head instead of racing past it, and (with
+    // the 404 un-mark in the worker) re-queuing near-head segments until produced.
+    const windowTop = session.maxFetchedIndex + LEAD_SEGMENTS;
     let newCount = 0;
     for (const segPath of segments) {
-      if (!session.knownSegments.has(segPath)) {
-        session.knownSegments.add(segPath);
-        session.fetchQueue.push(segPath);
-        newCount++;
-      }
+      const idx = segmentIndex(segPath);
+      if (idx < session.startIndex || idx > windowTop) continue;
+      if (session.knownSegments.has(segPath)) continue;
+      session.knownSegments.add(segPath);
+      session.fetchQueue.push(segPath);
+      newCount++;
     }
 
     if (newCount > 0) {
-      // After a far-seek restart, fetch from the playhead forward instead of from
-      // segment 0 — otherwise the queue burns throttle on pre-seek segments the
-      // client will never request while it starves for the ones it's playing.
-      if (session.startIndex > 0) {
-        session.fetchQueue.sort(
-          (a, b) => queuePriority(session.startIndex, a) - queuePriority(session.startIndex, b),
-        );
-      }
-      console.log("[Prefetch]", session.plexKey.substring(0, 8),
-        "discovered", newCount, "new segments (total:", session.knownSegments.size,
+      if (DEBUG) console.log("[Prefetch]", session.plexKey.substring(0, 8),
+        "queued", newCount, "segments (head~", session.maxFetchedIndex,
         session.startIndex > 0 ? `, from seg ${session.startIndex})` : ")");
       drainQueue(session);
     }
@@ -239,6 +244,7 @@ export function startPrefetch(sessionId: string, plexKey: string, startIndex = 0
     return;
   }
 
+  const start = Math.max(0, startIndex);
   const session: PrefetchSession = {
     sessionId,
     plexKey,
@@ -248,7 +254,10 @@ export function startPrefetch(sessionId: string, plexKey: string, startIndex = 0
     knownSegments: new Set(),
     fetchQueue: [],
     activeWorkers: 0,
-    startIndex: Math.max(0, startIndex),
+    startIndex: start,
+    // Seed the head at the start segment so the initial window is
+    // [start, start + LEAD]; it advances as real segments come in.
+    maxFetchedIndex: start,
   };
 
   sessions.set(sessionId, session);

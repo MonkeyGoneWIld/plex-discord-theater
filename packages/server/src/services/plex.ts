@@ -66,6 +66,15 @@ export async function plexJSON<T = unknown>(
   params?: Record<string, string>,
 ): Promise<T> {
   const res = await plexFetch(path, params);
-  if (!res.ok) throw new Error(`Plex API error: ${res.status}`);
+  if (!res.ok) {
+    // Include Plex's error body — its 403s carry a code/message (e.g. an XML
+    // <Response code="1080" status="A valid server token is required."/>) that
+    // distinguishes a permission problem from a degraded server-claim state.
+    let detail = "";
+    try {
+      detail = (await res.text()).replace(/\s+/g, " ").trim().slice(0, 300);
+    } catch { /* body unreadable — status alone */ }
+    throw new Error(`Plex API error: ${res.status}${detail ? ` — ${detail}` : ""}`);
+  }
   return res.json() as Promise<T>;
 }

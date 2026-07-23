@@ -1042,15 +1042,125 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000).unref(); // prune every hour
 
+// Last host-reported playback position per session. `posChangedAt` is when the
+// position last actually advanced — used to detect a stalled (frozen but still
+// playing) timeline, distinct from the host merely going silent.
+const hostPingInfo = new Map<string, { timeMs: number; at: number; posChangedAt: number }>();
+const HOST_SILENT_MS = 25_000;
+// How long the reported position may sit frozen (while still playing) before we
+// nudge Plex's timeline forward to keep the encoder from parking.
+const STALL_NUDGE_MS = 8_000;
+
+// DIAGNOSTIC: transcode "head" per plexKey — the highest segment index Plex has
+// actually delivered, and when it last advanced. Lets us log when the head
+// freezes (clients requesting past a head that isn't moving = the stall).
+const transcodeHead = new Map<string, { maxSeg: number; at: number; stallLogAt: number }>();
+const HEAD_STALL_MS = 12_000;
+
+/** Numeric segment index from a proxied .ts path (−1 if not a .ts). */
+function segIndexOf(segPath: string): number {
+  const m = segPath.match(/(\d+)\.ts(?:$|\?)/);
+  return m ? parseInt(m[1], 10) : -1;
+}
+
+/** Record that Plex delivered a segment — advances the tracked head. */
+function noteHeadAdvance(key: string, segPath: string): void {
+  const idx = segIndexOf(segPath);
+  if (idx < 0) return;
+  const h = transcodeHead.get(key);
+  if (!h) {
+    transcodeHead.set(key, { maxSeg: idx, at: Date.now(), stallLogAt: 0 });
+  } else if (idx > h.maxSeg) {
+    // DIAGNOSTIC: if we'd logged this head as stalled, note that it recovered —
+    // that's the signal the timeline nudge actually un-parked the encoder.
+    if (h.stallLogAt > 0) {
+      if (DEBUG) console.log("[HLS] Head resumed %s → seg %d (was stalled at %d)",
+        key.substring(0, 8), idx, h.maxSeg);
+      h.stallLogAt = 0;
+    }
+    h.maxSeg = idx;
+    h.at = Date.now();
+  }
+}
+
 /** Mark a Plex transcode key as stopped — segment requests will be rejected. */
 export function markTranscodeStopped(sessionId: string): void {
   stopPrefetch(sessionId);
   const plexKey = plexTranscodeKeys.get(sessionId);
-  if (plexKey) activeTranscodeKeys.delete(plexKey);
+  if (plexKey) {
+    activeTranscodeKeys.delete(plexKey);
+    transcodeHead.delete(plexKey);
+  }
   plexTranscodeKeys.delete(sessionId);
   sessionRatingKeys.delete(sessionId);
   manifestCache.delete(sessionId);
+  hostPingInfo.delete(sessionId);
+  // DIAGNOSTIC: should trend back toward 0 between watch sessions.
+  if (DEBUG) console.log("[HLS] Transcode stopped for session", sessionId.substring(0, 8),
+    `— active transcodes: ${activeTranscodeKeys.size}`);
 }
+
+/** Stop a single Plex HLS transcode by its key. */
+async function stopTranscodeKey(plexKey: string): Promise<void> {
+  await plexFetch(
+    "/video/:/transcode/universal/stop",
+    { transcodeSessionId: plexKey },
+    { "X-Plex-Session-Identifier": plexKey, "X-Plex-Client-Identifier": OUR_CLIENT_ID },
+  );
+}
+
+/**
+ * POST a Plex timeline "playing" update so it knows the playback position and
+ * keeps transcoding ahead (Plex throttles/stalls the encoder without one).
+ */
+async function postTimeline(
+  sessionId: string, ratingKey: string, timeMs: number, clientId: string,
+): Promise<void> {
+  const duration = mediaDurations.get(ratingKey);
+  await plexFetch(
+    "/:/timeline",
+    {
+      ratingKey,
+      key: `/library/metadata/${ratingKey}`,
+      state: "playing",
+      time: String(Math.round(timeMs)),
+      duration: duration ? String(duration) : "0",
+      identifier: "com.plexapp.plugins.library",
+    },
+    { "X-Plex-Session-Identifier": sessionId, "X-Plex-Client-Identifier": clientId },
+    "POST",
+  );
+}
+
+/**
+ * Reap orphaned transcodes: ones we started (in allKnownPlexKeys) and have
+ * already marked stopped (no longer in activeTranscodeKeys) but that Plex still
+ * shows running — i.e. the normal stop/terminate failed to kill them. Safe
+ * across concurrent parties because a *live* transcode is always in
+ * activeTranscodeKeys and therefore skipped. Runs on a timer to keep Plex from
+ * accumulating zombie encoders (which eventually overloads it).
+ */
+async function reapOrphanTranscodes(): Promise<void> {
+  try {
+    const data = await plexJSON<{
+      MediaContainer: { TranscodeSession?: Array<{ key?: string; protocol?: string }> };
+    }>("/transcode/sessions");
+    for (const t of data.MediaContainer.TranscodeSession ?? []) {
+      const keyUuid = t.key?.split("/").pop();
+      if (!keyUuid || t.protocol !== "hls") continue;
+      if (allKnownPlexKeys.has(keyUuid) && !activeTranscodeKeys.has(keyUuid)) {
+        console.warn("[HLS] Reaping orphan transcode", keyUuid.substring(0, 8));
+        await stopTranscodeKey(keyUuid).catch(() => {});
+      }
+    }
+  } catch (err) {
+    // Log rather than swallow — if /transcode/sessions is 403/unreachable the
+    // reaper is silently useless, and we need to know (it's the safety net).
+    console.warn("[HLS] Orphan reaper could not read /transcode/sessions:",
+      err instanceof Error ? err.message : err);
+  }
+}
+setInterval(() => { reapOrphanTranscodes(); }, 60_000).unref();
 
 /**
  * Notify Plex that playback has stopped via the timeline endpoint.
@@ -1122,12 +1232,15 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
       if (!sessionId) continue;
 
       console.log("[HLS] Terminating Plex session:", sessionId, "for transcode key:", plexKey.substring(0, 8));
-      await plexFetch(
-        "/status/sessions/terminate",
-        { sessionId, reason: "Playback ended" },
-        undefined,
-        "POST",
-      );
+      // /status/sessions/terminate needs an account-privileged token — the server
+      // PLEX_TOKEN gets 403'd, leaving the session (and its transcode) to linger.
+      // Use PLEX_ACCOUNT_TOKEN when set (same one Discover/Seerr use).
+      const termParams: Record<string, string> = { sessionId, reason: "Playback ended" };
+      const termRes = await plexFetch("/status/sessions/terminate", termParams, undefined, "POST");
+      if (!termRes.ok) {
+        console.warn("[HLS] Terminate returned", termRes.status,
+          process.env.PLEX_ACCOUNT_TOKEN ? "" : "(no PLEX_ACCOUNT_TOKEN set)");
+      }
       return;
     }
 
@@ -1154,6 +1267,27 @@ export async function pingPlexTranscode(hlsSessionId: string): Promise<void> {
   } catch (err) {
     console.error("[HLS] Server-side ping failed for", hlsSessionId.substring(0, 8), err);
   }
+
+  // #4: keep Plex's timeline advancing ourselves when the host has gone silent
+  // (e.g. backgrounded tab throttling its ping timer). Without an advancing
+  // position Plex stops encoding ahead and the head freezes, stalling everyone.
+  // When the host is actively pinging it drives the timeline, so we stay out.
+  const host = hostPingInfo.get(hlsSessionId);
+  const ratingKey = sessionRatingKeys.get(hlsSessionId);
+  if (host && ratingKey && Date.now() - host.at > HOST_SILENT_MS) {
+    const duration = mediaDurations.get(ratingKey);
+    // Extrapolate forward at ~1x from the last known host position, capped at the
+    // media duration so we never run the timeline past the end of the file.
+    const estMs = host.timeMs + (Date.now() - host.at);
+    const cappedMs = duration ? Math.min(estMs, duration) : estMs;
+    try {
+      await postTimeline(hlsSessionId, ratingKey, cappedMs, getSessionClientId(hlsSessionId));
+      if (DEBUG) console.log("[HLS] Server-driven timeline for", hlsSessionId.substring(0, 8),
+        "→", (cappedMs / 1000).toFixed(0) + "s (host silent)");
+    } catch (err) {
+      console.error("[HLS] Server-driven timeline failed for", hlsSessionId.substring(0, 8), err);
+    }
+  }
 }
 
 /**
@@ -1161,7 +1295,7 @@ export async function pingPlexTranscode(hlsSessionId: string): Promise<void> {
  * When ratingKey is provided, only stops sessions for that specific media item
  * to avoid killing unrelated watch parties in other guilds.
  */
-async function flushStaleTranscodes(ratingKey?: string): Promise<number> {
+async function flushStaleTranscodes(ratingKey?: string, exceptKey?: string): Promise<number> {
   let stopped = 0;
 
   // 1. Check /status/sessions for active playback sessions (client-visible)
@@ -1194,6 +1328,8 @@ async function flushStaleTranscodes(ratingKey?: string): Promise<number> {
 
       const key = s.TranscodeSession?.key;
       if (key) {
+        // Never stop the transcode we're currently bringing up.
+        if (exceptKey && key.split("/").pop() === exceptKey) continue;
         try {
           await plexFetch(
             "/video/:/transcode/universal/stop",
@@ -1247,6 +1383,10 @@ async function flushStaleTranscodes(ratingKey?: string): Promise<number> {
       // Only kill HLS transcodes whose Plex key we recognize from a manifest we parsed.
       // Extract UUID from /transcode/sessions/<uuid> path
       const keyUuid = t.key?.split("/").pop();
+      if (keyUuid && keyUuid === exceptKey) continue;
+      // Never kill a transcode that's still live for someone — only orphans we
+      // started and already marked stopped. Protects other concurrent parties.
+      if (keyUuid && activeTranscodeKeys.has(keyUuid)) continue;
       if (t.key && t.protocol === "hls" && keyUuid && allKnownPlexKeys.has(keyUuid)) {
         if (DEBUG) console.log("[HLS] Killing orphaned HLS transcode:", t.key);
         try {
@@ -1415,7 +1555,7 @@ router.get(
       // request with our UUID that pollutes Plex's per-client state.
       if (plexRes.status === 400) {
         console.log("[HLS] Start returned 400, flushing stale transcodes...");
-        let flushed = await flushStaleTranscodes();
+        let flushed = await flushStaleTranscodes(ratingKey);
         console.log("[HLS] Flushed", flushed, "stale transcode(s)");
 
         for (let attempt = 1; attempt <= 3 && plexRes.status === 400; attempt++) {
@@ -1423,7 +1563,7 @@ router.get(
           console.log("[HLS] Retry", attempt, "in", delay, "ms");
           await new Promise((r) => setTimeout(r, delay));
           if (attempt === 2 && plexRes.status === 400) {
-            const reflushed = await flushStaleTranscodes();
+            const reflushed = await flushStaleTranscodes(ratingKey);
             if (reflushed > 0) {
               flushed += reflushed;
               console.log("[HLS] Re-flushed", reflushed, "more transcode(s)");
@@ -1456,12 +1596,18 @@ router.get(
         sessionRatingKeys.set(sessionId, ratingKey);
         activeTranscodeKeys.add(plexKeyMatch[1]);
         allKnownPlexKeys.set(plexKeyMatch[1], Date.now());
-        console.log("[HLS] Plex transcode key:", plexKeyMatch[1].substring(0, 8), "for session:", sessionId.substring(0, 8));
+        console.log("[HLS] Plex transcode key:", plexKeyMatch[1].substring(0, 8),
+          "for session:", sessionId.substring(0, 8),
+          // DIAGNOSTIC (DEBUG only): active transcode count — climbing over a
+          // session means old ones aren't being reaped (the terminate-403 /
+          // stale-flush problem), which is what eventually overloads Plex.
+          DEBUG ? `— active transcodes: ${activeTranscodeKeys.size}` : "");
 
         // Start pre-fetching segments to absorb Plex's HTTP throttle. After a
-        // seek the transcode begins at `offset`, so tell the prefetcher which
-        // segment playback starts on (segments are secondsPerSegment=3s each) —
-        // otherwise it fetches from segment 0 and starves the seek target.
+        // seek the transcode begins at `offset`, so start there (segments are
+        // secondsPerSegment=3s each) — the prefetcher now bounds itself to a
+        // window ahead of the head and retries near-head 404s, so it tracks the
+        // head instead of racing past it and starving the seek target.
         const startSeg = offset ? Math.floor(parseInt(offset, 10) / 3) : 0;
         startPrefetch(sessionId, plexKeyMatch[1], startSeg);
       } else {
@@ -1605,6 +1751,7 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
       res.setHeader("Content-Type", "application/octet-stream");
     }
     if (DEBUG) console.log("[HLS seg] Cache HIT:", segPath.substring(0, 80));
+    if (segKeyMatch) noteHeadAdvance(segKeyMatch[1], segPath);
     res.send(cachedSeg);
     return;
   }
@@ -1644,6 +1791,19 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
           res.status(410).end();
           return;
         }
+        // DIAGNOSTIC: the transcode is alive but a client wants a segment past
+        // the head — if the head hasn't advanced in a while, it's frozen (Plex
+        // stopped encoding forward). Log once per ~10s while it stays stuck.
+        const h = transcodeHead.get(key);
+        const reqSeg = segIndexOf(segPath);
+        if (h && reqSeg > h.maxSeg) {
+          const stalledMs = Date.now() - h.at;
+          if (stalledMs > HEAD_STALL_MS && Date.now() - h.stallLogAt > 10_000) {
+            h.stallLogAt = Date.now();
+            if (DEBUG) console.warn("[HLS seg] Head STALLED %s at seg %d for %ss — client wants seg %d",
+              key.substring(0, 8), h.maxSeg, (stalledMs / 1000).toFixed(0), reqSeg);
+          }
+        }
         if (DEBUG) console.log("[HLS seg] 404 for", segPath.substring(0, 80),
           ageMs <= TRANSCODE_DEAD_GRACE_MS
             ? `— transcode ${key.substring(0, 8)} young (${ageMs}ms), segment ahead of head`
@@ -1677,6 +1837,8 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
       return;
     }
 
+    // DIAGNOSTIC: a live .ts came back from Plex — the head reached this segment.
+    if (segKeyMatch) noteHeadAdvance(segKeyMatch[1], segPath);
     await pipeBody(plexRes.body, res);
   } catch (err) {
     console.error("HLS segment proxy error:", err);
@@ -1714,25 +1876,46 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
     // Send timeline update so Plex knows our playback position.
     // Without this, Plex throttles HTTP segment delivery to ~1x realtime.
     const timeMs = typeof req.query.time === "string" ? parseInt(req.query.time, 10) : NaN;
+    // playing=0 means an intentional pause; absent (older client) is treated as
+    // playing so the nudge still helps.
+    const playing = req.query.playing !== "0";
     const ratingKey = sessionRatingKeys.get(sessionId);
     if (ratingKey && Number.isFinite(timeMs)) {
-      const duration = mediaDurations.get(ratingKey);
-      plexFetch(
-        "/:/timeline",
-        {
-          ratingKey,
-          key: `/library/metadata/${ratingKey}`,
-          state: "playing",
-          time: String(timeMs),
-          duration: duration ? String(duration) : "0",
-          identifier: "com.plexapp.plugins.library",
-        },
-        {
-          "X-Plex-Session-Identifier": sessionId,
-          "X-Plex-Client-Identifier": clientId,
-        },
-        "POST",
-      ).catch(() => {}); // fire-and-forget — don't block the ping response
+      const now = Date.now();
+      const prev = hostPingInfo.get(sessionId);
+      const posAdvanced = !prev || Math.abs(timeMs - prev.timeMs) > 500;
+      const posChangedAt = posAdvanced ? now : prev!.posChangedAt;
+      const frozenMs = now - posChangedAt;
+
+      // DIAGNOSTIC: near-zero Δpos over several seconds of wall time = frozen
+      // timeline, which is what makes Plex park the encoder and stall everyone.
+      // The client's forward buffer (seconds) rides along so a drain-to-zero is
+      // visible right next to the position and (server-side) the transcode head.
+      const wallMs = prev ? now - prev.at : 0;
+      const posDeltaMs = prev ? timeMs - prev.timeMs : 0;
+      const stalled = !!prev && wallMs > 4000 && Math.abs(posDeltaMs) < 500;
+      const bufS = typeof req.query.buffer === "string" ? req.query.buffer : "?";
+      if (DEBUG) console.log("[Ping] %s pos=%ss Δpos=%ss buf=%ss / %ss wall%s",
+        sessionId.substring(0, 8), (timeMs / 1000).toFixed(1),
+        (posDeltaMs / 1000).toFixed(1), bufS, (wallMs / 1000).toFixed(1),
+        stalled ? "  ⚠ TIMELINE STALLED" : "");
+
+      hostPingInfo.set(sessionId, { timeMs, at: now, posChangedAt });
+
+      // If the reported position has been frozen while still playing, the host's
+      // playback stalled — Plex will park the encoder at its readahead limit and
+      // the buffer can never refill. Report an extrapolated (advancing) position
+      // so Plex keeps transcoding; once real playback resumes this self-clears.
+      // A real pause reports playing=false, so it's left frozen (correct).
+      let reportMs = timeMs;
+      if (playing && frozenMs > STALL_NUDGE_MS) {
+        const duration = mediaDurations.get(ratingKey);
+        const est = timeMs + frozenMs;
+        reportMs = duration ? Math.min(est, duration) : est;
+        if (DEBUG) console.log("[HLS] Timeline nudge (host stalled) %s → %ss",
+          sessionId.substring(0, 8), (reportMs / 1000).toFixed(0));
+      }
+      postTimeline(sessionId, ratingKey, reportMs, clientId).catch(() => {}); // fire-and-forget
     }
 
     res.json({ ok: true });

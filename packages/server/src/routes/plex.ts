@@ -458,17 +458,6 @@ function providerToken(): string | undefined {
   return process.env.PLEX_ACCOUNT_TOKEN || process.env.PLEX_TOKEN;
 }
 
-/**
- * Extra params that authenticate an admin-only Plex read as the account owner.
- * The server PLEX_TOKEN is frequently *not* permitted on /status/sessions,
- * /transcode/sessions, or terminate (403), which breaks session cleanup. When a
- * PLEX_ACCOUNT_TOKEN is set, override the token for exactly those calls. Passed
- * through params, which plexUrl applies after the default token, so it wins.
- */
-function adminAuthParams(): Record<string, string> {
-  return process.env.PLEX_ACCOUNT_TOKEN ? { "X-Plex-Token": process.env.PLEX_ACCOUNT_TOKEN } : {};
-}
-
 // Cache of guid → in-library, so repeated ownership checks (search-as-you-type)
 // don't re-hit Plex for the same title.
 const ownedGuidCache = new Map<string, { owned: boolean; at: number }>();
@@ -1053,12 +1042,14 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000).unref(); // prune every hour
 
-// Last host-reported playback position per session. Serves two purposes: the
-// server-side keepalive uses it to keep Plex's timeline advancing when the host
-// stops pinging (backgrounded tab), and the DIAGNOSTIC [Ping] log uses it to
-// flag a frozen timeline (position not advancing).
-const hostPingInfo = new Map<string, { timeMs: number; at: number }>();
+// Last host-reported playback position per session. `posChangedAt` is when the
+// position last actually advanced — used to detect a stalled (frozen but still
+// playing) timeline, distinct from the host merely going silent.
+const hostPingInfo = new Map<string, { timeMs: number; at: number; posChangedAt: number }>();
 const HOST_SILENT_MS = 25_000;
+// How long the reported position may sit frozen (while still playing) before we
+// nudge Plex's timeline forward to keep the encoder from parking.
+const STALL_NUDGE_MS = 8_000;
 
 // DIAGNOSTIC: transcode "head" per plexKey — the highest segment index Plex has
 // actually delivered, and when it last advanced. Lets us log when the head
@@ -1146,7 +1137,7 @@ async function reapOrphanTranscodes(): Promise<void> {
   try {
     const data = await plexJSON<{
       MediaContainer: { TranscodeSession?: Array<{ key?: string; protocol?: string }> };
-    }>("/transcode/sessions", adminAuthParams());
+    }>("/transcode/sessions");
     for (const t of data.MediaContainer.TranscodeSession ?? []) {
       const keyUuid = t.key?.split("/").pop();
       if (!keyUuid || t.protocol !== "hls") continue;
@@ -1220,7 +1211,7 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
           Session?: { id?: string };
         }>;
       };
-    }>("/status/sessions", adminAuthParams());
+    }>("/status/sessions");
 
     const sessions = data.MediaContainer.Metadata || [];
     for (const s of sessions) {
@@ -1237,7 +1228,7 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
       // /status/sessions/terminate needs an account-privileged token — the server
       // PLEX_TOKEN gets 403'd, leaving the session (and its transcode) to linger.
       // Use PLEX_ACCOUNT_TOKEN when set (same one Discover/Seerr use).
-      const termParams: Record<string, string> = { sessionId, reason: "Playback ended", ...adminAuthParams() };
+      const termParams: Record<string, string> = { sessionId, reason: "Playback ended" };
       const termRes = await plexFetch("/status/sessions/terminate", termParams, undefined, "POST");
       if (!termRes.ok) {
         console.warn("[HLS] Terminate returned", termRes.status,
@@ -1311,7 +1302,7 @@ async function flushStaleTranscodes(ratingKey?: string, exceptKey?: string): Pro
           key?: string;
         }>;
       };
-    }>("/status/sessions", adminAuthParams());
+    }>("/status/sessions");
 
     const sessions = data.MediaContainer.Metadata || [];
     console.log("[HLS] /status/sessions:", sessions.length);
@@ -1377,7 +1368,7 @@ async function flushStaleTranscodes(ratingKey?: string, exceptKey?: string): Pro
           videoDecision?: string;
         }>;
       };
-    }>("/transcode/sessions", adminAuthParams());
+    }>("/transcode/sessions");
 
     const transcodes = data.MediaContainer.TranscodeSession || [];
     if (DEBUG) console.log("[HLS] /transcode/sessions count:", transcodes.length);
@@ -1705,7 +1696,7 @@ async function isTranscodeSessionAlive(plexKey: string): Promise<boolean> {
   try {
     const data = await plexJSON<{
       MediaContainer: { TranscodeSession?: Array<{ key?: string }> };
-    }>("/transcode/sessions", adminAuthParams());
+    }>("/transcode/sessions");
     const sessions = data.MediaContainer.TranscodeSession || [];
     return sessions.some((t) => t.key?.split("/").pop() === plexKey);
   } catch {
@@ -1877,14 +1868,20 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
     // Send timeline update so Plex knows our playback position.
     // Without this, Plex throttles HTTP segment delivery to ~1x realtime.
     const timeMs = typeof req.query.time === "string" ? parseInt(req.query.time, 10) : NaN;
+    // playing=0 means an intentional pause; absent (older client) is treated as
+    // playing so the nudge still helps.
+    const playing = req.query.playing !== "0";
     const ratingKey = sessionRatingKeys.get(sessionId);
     if (ratingKey && Number.isFinite(timeMs)) {
-      // DIAGNOSTIC: compare against the previous ping to see whether the host's
-      // reported position is actually advancing. A near-zero Δpos over several
-      // seconds of wall time = the timeline is frozen, which is what makes Plex
-      // stop advancing the transcode head and stalls everyone.
+      const now = Date.now();
       const prev = hostPingInfo.get(sessionId);
-      const wallMs = prev ? Date.now() - prev.at : 0;
+      const posAdvanced = !prev || Math.abs(timeMs - prev.timeMs) > 500;
+      const posChangedAt = posAdvanced ? now : prev!.posChangedAt;
+      const frozenMs = now - posChangedAt;
+
+      // DIAGNOSTIC: near-zero Δpos over several seconds of wall time = frozen
+      // timeline, which is what makes Plex park the encoder and stall everyone.
+      const wallMs = prev ? now - prev.at : 0;
       const posDeltaMs = prev ? timeMs - prev.timeMs : 0;
       const stalled = !!prev && wallMs > 4000 && Math.abs(posDeltaMs) < 500;
       console.log("[Ping] %s pos=%ss Δpos=%ss / %ss wall%s",
@@ -1892,9 +1889,22 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
         (posDeltaMs / 1000).toFixed(1), (wallMs / 1000).toFixed(1),
         stalled ? "  ⚠ TIMELINE STALLED" : "");
 
-      // Record for the server-side keepalive fallback (see pingPlexTranscode).
-      hostPingInfo.set(sessionId, { timeMs, at: Date.now() });
-      postTimeline(sessionId, ratingKey, timeMs, clientId).catch(() => {}); // fire-and-forget
+      hostPingInfo.set(sessionId, { timeMs, at: now, posChangedAt });
+
+      // If the reported position has been frozen while still playing, the host's
+      // playback stalled — Plex will park the encoder at its readahead limit and
+      // the buffer can never refill. Report an extrapolated (advancing) position
+      // so Plex keeps transcoding; once real playback resumes this self-clears.
+      // A real pause reports playing=false, so it's left frozen (correct).
+      let reportMs = timeMs;
+      if (playing && frozenMs > STALL_NUDGE_MS) {
+        const duration = mediaDurations.get(ratingKey);
+        const est = timeMs + frozenMs;
+        reportMs = duration ? Math.min(est, duration) : est;
+        console.log("[HLS] Timeline nudge (host stalled) %s → %ss",
+          sessionId.substring(0, 8), (reportMs / 1000).toFixed(0));
+      }
+      postTimeline(sessionId, ratingKey, reportMs, clientId).catch(() => {}); // fire-and-forget
     }
 
     res.json({ ok: true });
@@ -1993,7 +2003,7 @@ router.delete("/hls/sessions", async (req: Request, res: Response) => {
           Player?: { machineIdentifier?: string };
         }>;
       };
-    }>("/status/sessions", adminAuthParams());
+    }>("/status/sessions");
 
     const sessions = data.MediaContainer.Metadata || [];
     if (DEBUG) console.log("[HLS] Active sessions:", sessions.length);

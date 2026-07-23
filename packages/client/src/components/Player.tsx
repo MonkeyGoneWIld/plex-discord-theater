@@ -208,8 +208,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
     if (pingIntervalRef.current === null) {
       pingIntervalRef.current = setInterval(() => {
         if (sessionIdRef.current) {
-          const timeMs = videoRef.current ? videoRef.current.currentTime * 1000 : undefined;
-          pingSession(sessionIdRef.current, timeMs).catch(console.error);
+          const v = videoRef.current;
+          const timeMs = v ? v.currentTime * 1000 : undefined;
+          // playing=false only for a real pause; a stalled/buffering video is
+          // still "playing" (paused === false), which is exactly what lets the
+          // server distinguish a stall from a pause.
+          pingSession(sessionIdRef.current, timeMs, v ? !v.paused : undefined).catch(console.error);
         }
       }, PING_INTERVAL_MS);
     }
@@ -682,8 +686,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
         }
         pingIntervalRef.current = setInterval(() => {
           if (sessionIdRef.current) {
-            const timeMs = videoRef.current ? videoRef.current.currentTime * 1000 : undefined;
-            pingSession(sessionIdRef.current, timeMs).catch(console.error);
+            const v = videoRef.current;
+            const timeMs = v ? v.currentTime * 1000 : undefined;
+            pingSession(sessionIdRef.current, timeMs, v ? !v.paused : undefined).catch(console.error);
           }
         }, PING_INTERVAL_MS);
       }

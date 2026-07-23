@@ -345,12 +345,19 @@ export function setStreams(
   return apiPut(`/api/plex/streams/${partId}`, options);
 }
 
-export async function pingSession(sessionId: string, timeMs?: number): Promise<void> {
-  let url = `/api/plex/hls/ping/${encodeURIComponent(sessionId)}`;
-  if (timeMs != null && Number.isFinite(timeMs)) {
-    url += `?time=${Math.round(timeMs)}`;
-  }
-  await apiGet(url);
+export async function pingSession(
+  sessionId: string,
+  timeMs?: number,
+  playing?: boolean,
+): Promise<void> {
+  const params = new URLSearchParams();
+  if (timeMs != null && Number.isFinite(timeMs)) params.set("time", String(Math.round(timeMs)));
+  // The server uses this to tell an intentional pause (frozen position, expected)
+  // from a stall (frozen position, not expected) so it can nudge Plex's timeline
+  // to keep the transcode advancing only in the latter case.
+  if (playing != null) params.set("playing", playing ? "1" : "0");
+  const qs = params.toString();
+  await apiGet(`/api/plex/hls/ping/${encodeURIComponent(sessionId)}${qs ? `?${qs}` : ""}`);
 }
 
 export function stopSession(sessionId: string): Promise<void> {

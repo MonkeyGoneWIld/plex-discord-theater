@@ -70,6 +70,17 @@ function bufferedEnd(video: HTMLVideoElement): number {
   return buffered.length > 0 ? buffered.end(buffered.length - 1) : video.currentTime;
 }
 
+/** Seconds of contiguous buffer ahead of the current playhead (0 if none). */
+function bufferAheadSeconds(video: HTMLVideoElement): number {
+  const { buffered, currentTime } = video;
+  for (let i = 0; i < buffered.length; i++) {
+    if (currentTime >= buffered.start(i) - 0.1 && currentTime <= buffered.end(i) + 0.1) {
+      return Math.max(0, buffered.end(i) - currentTime);
+    }
+  }
+  return 0;
+}
+
 interface PlayerProps {
   item: PlexItem;
   isHost: boolean;
@@ -213,7 +224,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
           // playing=false only for a real pause; a stalled/buffering video is
           // still "playing" (paused === false), which is exactly what lets the
           // server distinguish a stall from a pause.
-          pingSession(sessionIdRef.current, timeMs, v ? !v.paused : undefined).catch(console.error);
+          pingSession(sessionIdRef.current, timeMs, v ? !v.paused : undefined,
+            v ? bufferAheadSeconds(v) : undefined).catch(console.error);
         }
       }, PING_INTERVAL_MS);
     }
@@ -688,7 +700,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
           if (sessionIdRef.current) {
             const v = videoRef.current;
             const timeMs = v ? v.currentTime * 1000 : undefined;
-            pingSession(sessionIdRef.current, timeMs, v ? !v.paused : undefined).catch(console.error);
+            pingSession(sessionIdRef.current, timeMs, v ? !v.paused : undefined,
+              v ? bufferAheadSeconds(v) : undefined).catch(console.error);
           }
         }, PING_INTERVAL_MS);
       }

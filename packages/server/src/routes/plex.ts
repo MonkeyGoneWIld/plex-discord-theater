@@ -1071,6 +1071,13 @@ function noteHeadAdvance(key: string, segPath: string): void {
   if (!h) {
     transcodeHead.set(key, { maxSeg: idx, at: Date.now(), stallLogAt: 0 });
   } else if (idx > h.maxSeg) {
+    // DIAGNOSTIC: if we'd logged this head as stalled, note that it recovered —
+    // that's the signal the timeline nudge actually un-parked the encoder.
+    if (h.stallLogAt > 0) {
+      console.log("[HLS] Head resumed %s → seg %d (was stalled at %d)",
+        key.substring(0, 8), idx, h.maxSeg);
+      h.stallLogAt = 0;
+    }
     h.maxSeg = idx;
     h.at = Date.now();
   }
@@ -1881,12 +1888,15 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
 
       // DIAGNOSTIC: near-zero Δpos over several seconds of wall time = frozen
       // timeline, which is what makes Plex park the encoder and stall everyone.
+      // The client's forward buffer (seconds) rides along so a drain-to-zero is
+      // visible right next to the position and (server-side) the transcode head.
       const wallMs = prev ? now - prev.at : 0;
       const posDeltaMs = prev ? timeMs - prev.timeMs : 0;
       const stalled = !!prev && wallMs > 4000 && Math.abs(posDeltaMs) < 500;
-      console.log("[Ping] %s pos=%ss Δpos=%ss / %ss wall%s",
+      const bufS = typeof req.query.buffer === "string" ? req.query.buffer : "?";
+      console.log("[Ping] %s pos=%ss Δpos=%ss buf=%ss / %ss wall%s",
         sessionId.substring(0, 8), (timeMs / 1000).toFixed(1),
-        (posDeltaMs / 1000).toFixed(1), (wallMs / 1000).toFixed(1),
+        (posDeltaMs / 1000).toFixed(1), bufS, (wallMs / 1000).toFixed(1),
         stalled ? "  ⚠ TIMELINE STALLED" : "");
 
       hostPingInfo.set(sessionId, { timeMs, at: now, posChangedAt });

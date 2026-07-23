@@ -349,6 +349,7 @@ export async function pingSession(
   sessionId: string,
   timeMs?: number,
   playing?: boolean,
+  bufferAheadS?: number,
 ): Promise<void> {
   const params = new URLSearchParams();
   if (timeMs != null && Number.isFinite(timeMs)) params.set("time", String(Math.round(timeMs)));
@@ -356,6 +357,11 @@ export async function pingSession(
   // from a stall (frozen position, not expected) so it can nudge Plex's timeline
   // to keep the transcode advancing only in the latter case.
   if (playing != null) params.set("playing", playing ? "1" : "0");
+  // Forward buffer in seconds — DIAGNOSTIC only, logged server-side alongside the
+  // position so a drain-to-zero is visible in the same place as the transcode head.
+  if (bufferAheadS != null && Number.isFinite(bufferAheadS)) {
+    params.set("buffer", bufferAheadS.toFixed(1));
+  }
   const qs = params.toString();
   await apiGet(`/api/plex/hls/ping/${encodeURIComponent(sessionId)}${qs ? `?${qs}` : ""}`);
 }

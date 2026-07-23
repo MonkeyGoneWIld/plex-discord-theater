@@ -1603,12 +1603,14 @@ router.get(
           // is what eventually overloads Plex.
           `— active transcodes: ${activeTranscodeKeys.size}`);
 
-        // Start pre-fetching segments to absorb Plex's HTTP throttle. After a
-        // seek the transcode begins at `offset`, so tell the prefetcher which
-        // segment playback starts on (segments are secondsPerSegment=3s each) —
-        // otherwise it fetches from segment 0 and starves the seek target.
-        const startSeg = offset ? Math.floor(parseInt(offset, 10) / 3) : 0;
-        startPrefetch(sessionId, plexKeyMatch[1], startSeg);
+        // Start pre-fetching segments to absorb Plex's HTTP throttle. NOTE: we
+        // deliberately fetch in file order (from segment 0), NOT from the seek
+        // offset. Starting at the offset makes the prefetcher slam straight into
+        // the transcode head, burn the queue on ahead-of-head 404s (which are
+        // marked "known" and never retried), then quit — so nothing keeps pulling
+        // the head forward and the client's buffer drains to zero after a far
+        // seek. Fetching from 0 arrives at the head gradually and stays with it.
+        startPrefetch(sessionId, plexKeyMatch[1]);
       } else {
         console.error("[HLS] FATAL: Could not extract Plex transcode key from manifest for session:",
           sessionId.substring(0, 8), "— aborting session to prevent phantom state");

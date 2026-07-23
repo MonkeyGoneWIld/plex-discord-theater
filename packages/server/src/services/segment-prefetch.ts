@@ -6,6 +6,9 @@
 
 import { plexFetchSegment } from "./plex.js";
 
+// Verbose per-poll logging, off in production unless DEBUG=1 (mirrors routes/plex.ts).
+const DEBUG = process.env.DEBUG === "1" || process.env.NODE_ENV !== "production";
+
 // ─── Types ──────────────────────────────────────────────────────
 
 interface CachedSegment {
@@ -213,7 +216,7 @@ async function pollSubManifest(session: PrefetchSession): Promise<void> {
     }
 
     if (newCount > 0) {
-      console.log("[Prefetch]", session.plexKey.substring(0, 8),
+      if (DEBUG) console.log("[Prefetch]", session.plexKey.substring(0, 8),
         "queued", newCount, "segments (head~", session.maxFetchedIndex,
         session.startIndex > 0 ? `, from seg ${session.startIndex})` : ")");
       drainQueue(session);

@@ -1074,7 +1074,7 @@ function noteHeadAdvance(key: string, segPath: string): void {
     // DIAGNOSTIC: if we'd logged this head as stalled, note that it recovered —
     // that's the signal the timeline nudge actually un-parked the encoder.
     if (h.stallLogAt > 0) {
-      console.log("[HLS] Head resumed %s → seg %d (was stalled at %d)",
+      if (DEBUG) console.log("[HLS] Head resumed %s → seg %d (was stalled at %d)",
         key.substring(0, 8), idx, h.maxSeg);
       h.stallLogAt = 0;
     }
@@ -1096,7 +1096,7 @@ export function markTranscodeStopped(sessionId: string): void {
   manifestCache.delete(sessionId);
   hostPingInfo.delete(sessionId);
   // DIAGNOSTIC: should trend back toward 0 between watch sessions.
-  console.log("[HLS] Transcode stopped for session", sessionId.substring(0, 8),
+  if (DEBUG) console.log("[HLS] Transcode stopped for session", sessionId.substring(0, 8),
     `— active transcodes: ${activeTranscodeKeys.size}`);
 }
 
@@ -1282,7 +1282,7 @@ export async function pingPlexTranscode(hlsSessionId: string): Promise<void> {
     const cappedMs = duration ? Math.min(estMs, duration) : estMs;
     try {
       await postTimeline(hlsSessionId, ratingKey, cappedMs, getSessionClientId(hlsSessionId));
-      console.log("[HLS] Server-driven timeline for", hlsSessionId.substring(0, 8),
+      if (DEBUG) console.log("[HLS] Server-driven timeline for", hlsSessionId.substring(0, 8),
         "→", (cappedMs / 1000).toFixed(0) + "s (host silent)");
     } catch (err) {
       console.error("[HLS] Server-driven timeline failed for", hlsSessionId.substring(0, 8), err);
@@ -1598,10 +1598,10 @@ router.get(
         allKnownPlexKeys.set(plexKeyMatch[1], Date.now());
         console.log("[HLS] Plex transcode key:", plexKeyMatch[1].substring(0, 8),
           "for session:", sessionId.substring(0, 8),
-          // DIAGNOSTIC: active transcode count — climbing over a session means old
-          // ones aren't being reaped (the terminate-403 / stale-flush problem), which
-          // is what eventually overloads Plex.
-          `— active transcodes: ${activeTranscodeKeys.size}`);
+          // DIAGNOSTIC (DEBUG only): active transcode count — climbing over a
+          // session means old ones aren't being reaped (the terminate-403 /
+          // stale-flush problem), which is what eventually overloads Plex.
+          DEBUG ? `— active transcodes: ${activeTranscodeKeys.size}` : "");
 
         // Start pre-fetching segments to absorb Plex's HTTP throttle. After a
         // seek the transcode begins at `offset`, so start there (segments are
@@ -1800,7 +1800,7 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
           const stalledMs = Date.now() - h.at;
           if (stalledMs > HEAD_STALL_MS && Date.now() - h.stallLogAt > 10_000) {
             h.stallLogAt = Date.now();
-            console.warn("[HLS seg] Head STALLED %s at seg %d for %ss — client wants seg %d",
+            if (DEBUG) console.warn("[HLS seg] Head STALLED %s at seg %d for %ss — client wants seg %d",
               key.substring(0, 8), h.maxSeg, (stalledMs / 1000).toFixed(0), reqSeg);
           }
         }
@@ -1895,7 +1895,7 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
       const posDeltaMs = prev ? timeMs - prev.timeMs : 0;
       const stalled = !!prev && wallMs > 4000 && Math.abs(posDeltaMs) < 500;
       const bufS = typeof req.query.buffer === "string" ? req.query.buffer : "?";
-      console.log("[Ping] %s pos=%ss Δpos=%ss buf=%ss / %ss wall%s",
+      if (DEBUG) console.log("[Ping] %s pos=%ss Δpos=%ss buf=%ss / %ss wall%s",
         sessionId.substring(0, 8), (timeMs / 1000).toFixed(1),
         (posDeltaMs / 1000).toFixed(1), bufS, (wallMs / 1000).toFixed(1),
         stalled ? "  ⚠ TIMELINE STALLED" : "");
@@ -1912,7 +1912,7 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
         const duration = mediaDurations.get(ratingKey);
         const est = timeMs + frozenMs;
         reportMs = duration ? Math.min(est, duration) : est;
-        console.log("[HLS] Timeline nudge (host stalled) %s → %ss",
+        if (DEBUG) console.log("[HLS] Timeline nudge (host stalled) %s → %ss",
           sessionId.substring(0, 8), (reportMs / 1000).toFixed(0));
       }
       postTimeline(sessionId, ratingKey, reportMs, clientId).catch(() => {}); // fire-and-forget

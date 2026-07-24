@@ -56,7 +56,8 @@ export function MovieCard({ item, onClick }: MovieCardProps) {
         {external && <div style={styles.badge}>Not in library</div>}
       </div>
       <div style={styles.info}>
-        <div style={styles.title}>{item.title}</div>
+        {/* title attr shows the full name on hover — card titles ellipsize when long */}
+        <div style={styles.title} title={item.title}>{item.title}</div>
         {item.type === "episode" ? (
           <div style={styles.year}>
             {item.showTitle}

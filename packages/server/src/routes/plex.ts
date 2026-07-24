@@ -1415,11 +1415,16 @@ const manifestCache = new Map<string, { manifest: string; createdAt: number }>()
 const manifestInFlight = new Map<string, Promise<string>>();
 const MANIFEST_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
-// Prune stale entries every 2 minutes
+// Prune stale entries every 2 minutes — but keep a manifest as long as its
+// transcode is still alive, so a session's manifest outlives the TTL and can be
+// reused for its whole life (the transcode is torn down via markTranscodeStopped,
+// which clears the manifest). Only genuinely orphaned manifests get swept.
 setInterval(() => {
   const now = Date.now();
   for (const [key, entry] of manifestCache) {
-    if (now - entry.createdAt > MANIFEST_CACHE_TTL_MS) manifestCache.delete(key);
+    if (now - entry.createdAt <= MANIFEST_CACHE_TTL_MS) continue;
+    const plexKey = plexTranscodeKeys.get(key);
+    if (!plexKey || !activeTranscodeKeys.has(plexKey)) manifestCache.delete(key);
   }
 }, 2 * 60 * 1000).unref();
 
@@ -1445,10 +1450,23 @@ router.get(
       return;
     }
 
-    // Return cached manifest if available (viewer sharing the host's session)
+    // Optional offset (seconds) — a real seek/restart. Parsed up front because a
+    // request WITH an offset must start a fresh transcode at that position, while
+    // one WITHOUT should reuse the session's existing transcode if it's alive.
+    const offsetSec = Math.round(parseFloat(req.query.offset as string));
+    const offset = Number.isFinite(offsetSec) && offsetSec > 0 ? String(offsetSec) : undefined;
+
+    // Reuse the running transcode for this session rather than starting a new one.
+    // A viewer joining, a reconnect, a promoted host, or a re-focus all re-request
+    // this manifest; keying reuse on "is the transcode still alive" (not a 10-min
+    // manifest TTL) keeps ONE transcode per session for its whole life instead of
+    // orphaning the live one — which killed everyone's stream. A request with an
+    // offset is a deliberate seek/restart and falls through to a fresh transcode.
     const cached = manifestCache.get(sessionId);
-    if (cached && Date.now() - cached.createdAt < MANIFEST_CACHE_TTL_MS) {
-      if (DEBUG) console.log("[HLS] Returning cached manifest for session:", sessionId.substring(0, 8));
+    const livePlexKey = plexTranscodeKeys.get(sessionId);
+    if (cached && !offset && livePlexKey && activeTranscodeKeys.has(livePlexKey)) {
+      if (DEBUG) console.log("[HLS] Reusing live transcode for session:", sessionId.substring(0, 8),
+        "plexKey:", livePlexKey.substring(0, 8));
       res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
       res.send(cached.manifest);
       return;
@@ -1469,10 +1487,6 @@ router.get(
       return;
     }
 
-    // Optional offset (seconds) — used to resume from a position after audio/subtitle switch.
-    // Round to integer — Plex can reject offsets with many decimal places.
-    const offsetSec = Math.round(parseFloat(req.query.offset as string));
-    const offset = Number.isFinite(offsetSec) && offsetSec > 0 ? String(offsetSec) : undefined;
     // Subtitle mode — "none" when user explicitly disabled subtitles, otherwise "burn"
     const subtitleMode = req.query.subtitles === "burn" ? "burn" : "none";
 

@@ -610,7 +610,17 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
           if (recoveryAttemptRef.current < MAX_RECOVERY_ATTEMPTS) {
             recoveryAttemptRef.current++;
             const video = videoRef.current;
-            recoveryPositionRef.current = video?.currentTime ?? 0;
+            // A promoted host (one that didn't mount as host) lands here when the
+            // departing host's transcode is torn down on transfer — its own
+            // playhead may have drifted from the room. Resume at the room's
+            // last-synced position (where the old host actually was) rather than
+            // this client's drifted currentTime, so the fresh transcode starts at
+            // the right place instead of somewhere ahead of or behind the room.
+            const roomPos = syncStateRef.current?.position;
+            recoveryPositionRef.current =
+              !mountedAsHostRef.current && typeof roomPos === "number" && roomPos > 0
+                ? roomPos
+                : (video?.currentTime ?? 0);
 
             // Capture freeze frame (reuse canvasRef from track switching)
             if (video && video.videoWidth > 0) {

@@ -29,6 +29,9 @@ export function MovieCard({ item, onClick }: MovieCardProps) {
   return (
     <button
       onClick={() => onClick(item)}
+      // Native tooltip on the whole card, so the full title shows on hover
+      // anywhere over it (poster included), not only over the ellipsized text.
+      title={item.title}
       style={styles.card}
       onMouseEnter={(e) => {
         const el = e.currentTarget;
@@ -56,8 +59,7 @@ export function MovieCard({ item, onClick }: MovieCardProps) {
         {external && <div style={styles.badge}>Not in library</div>}
       </div>
       <div style={styles.info}>
-        {/* title attr shows the full name on hover — card titles ellipsize when long */}
-        <div style={styles.title} title={item.title}>{item.title}</div>
+        <div style={styles.title}>{item.title}</div>
         {item.type === "episode" ? (
           <div style={styles.year}>
             {item.showTitle}

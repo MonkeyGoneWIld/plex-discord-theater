@@ -28,6 +28,12 @@ const PROGRESS_WRITE_INTERVAL_MS = 15_000;
 /** Rows kept per user; the oldest beyond this are pruned after each insert. */
 const MAX_ROWS_PER_USER = 500;
 const META_CACHE_TTL_MS = 60 * 60 * 1000;
+/** Shorter than the metadata TTL: an airing show gains episodes, and a stale
+ *  list is what would stop a newly available episode becoming "next up". */
+const LEAVES_CACHE_TTL_MS = 10 * 60 * 1000;
+/** How many history rows to consider when assembling the Continue Watching row.
+ *  Bounds the Plex lookups a single request can trigger (one per distinct show). */
+const CANDIDATE_SCAN_LIMIT = 100;
 
 // Same data directory as the session/instance/thumb databases.
 const dbDir = process.env.THUMB_CACHE_DIR
@@ -91,6 +97,7 @@ interface HistoryRow {
   year: number | null;
   parent_rating_key: string | null;
   grandparent_rating_key: string | null;
+  dismissed: number;
   updated_at: number;
 }
 
@@ -156,29 +163,55 @@ const upsertStmt = db.prepare(`
 const SELECT_COLUMNS = `
   rating_key, position_ms, duration_ms, watched, title, type, thumb, show_thumb,
   show_title, parent_title, parent_index, item_index, year, parent_rating_key,
-  grandparent_rating_key, updated_at
+  grandparent_rating_key, dismissed, updated_at
 `;
 
 const selectOneStmt = db.prepare(
   `SELECT ${SELECT_COLUMNS} FROM watch_history WHERE user_id = ? AND rating_key = ?`,
 );
-// Continue Watching is a strict subset of history: same rows, filtered to those
-// still worth resuming and not dismissed from the row by hand.
-const selectContinueStmt = db.prepare(`
+// Rows that can put something in the Continue Watching row: anything still
+// worth resuming, plus finished episodes, which contribute their successor
+// rather than themselves. Both exclude anything dismissed by hand.
+const selectContinueCandidatesStmt = db.prepare(`
   SELECT ${SELECT_COLUMNS} FROM watch_history
-  WHERE user_id = ? AND watched = 0 AND position_ms >= ? AND dismissed = 0
+  WHERE user_id = ? AND dismissed = 0
+    AND (
+      (watched = 0 AND position_ms >= ?)
+      OR (watched = 1 AND type = 'episode')
+    )
   ORDER BY updated_at DESC LIMIT ?
 `);
+// A row at position 0 that's been dismissed was never actually watched — it's
+// the marker left by dismissing a "next up" suggestion (see
+// dismissFromContinueWatching). It exists to keep that suggestion suppressed,
+// so it has no business appearing in a list of what someone has watched.
+const NOT_A_DISMISSAL_MARKER = `NOT (dismissed = 1 AND position_ms = 0)`;
+
 const selectHistoryStmt = db.prepare(`
   SELECT ${SELECT_COLUMNS} FROM watch_history
-  WHERE user_id = ?
+  WHERE user_id = ? AND ${NOT_A_DISMISSAL_MARKER}
   ORDER BY updated_at DESC LIMIT ? OFFSET ?
 `);
-const countStmt = db.prepare("SELECT COUNT(*) AS count FROM watch_history WHERE user_id = ?");
+const countStmt = db.prepare(
+  `SELECT COUNT(*) AS count FROM watch_history WHERE user_id = ? AND ${NOT_A_DISMISSAL_MARKER}`,
+);
 const deleteOneStmt = db.prepare("DELETE FROM watch_history WHERE user_id = ? AND rating_key = ?");
 const dismissStmt = db.prepare(
   "UPDATE watch_history SET dismissed = 1 WHERE user_id = ? AND rating_key = ?",
 );
+const insertDismissalMarkerStmt = db.prepare(`
+  INSERT OR IGNORE INTO watch_history (
+    user_id, rating_key, position_ms, duration_ms, watched,
+    title, type, thumb, show_thumb, show_title, parent_title,
+    parent_index, item_index, year, parent_rating_key, grandparent_rating_key,
+    dismissed, updated_at
+  ) VALUES (
+    @user_id, @rating_key, 0, @duration_ms, 0,
+    @title, @type, @thumb, @show_thumb, @show_title, @parent_title,
+    @parent_index, @item_index, @year, @parent_rating_key, @grandparent_rating_key,
+    1, @updated_at
+  )
+`);
 const deleteAllStmt = db.prepare("DELETE FROM watch_history WHERE user_id = ?");
 const pruneStmt = db.prepare(`
   DELETE FROM watch_history
@@ -230,6 +263,7 @@ interface ItemSummary {
 const metaCache = new Map<string, { at: number; summary: ItemSummary }>();
 
 interface PlexHistoryMetadata {
+  ratingKey?: string;
   title?: string;
   type?: string;
   thumb?: string;
@@ -242,6 +276,25 @@ interface PlexHistoryMetadata {
   grandparentTitle?: string;
   grandparentThumb?: string;
   grandparentRatingKey?: string;
+}
+
+function toSummary(m: PlexHistoryMetadata): ItemSummary {
+  return {
+    title: m.title ?? "Untitled",
+    type: m.type ?? "movie",
+    // Same `/api/plex/thumb` prefix the library endpoints apply, so the client
+    // treats these URLs exactly like any other poster.
+    thumb: m.thumb ? `/api/plex/thumb${m.thumb}` : null,
+    showThumb: m.grandparentThumb ? `/api/plex/thumb${m.grandparentThumb}` : null,
+    showTitle: m.grandparentTitle ?? null,
+    parentTitle: m.parentTitle ?? null,
+    parentIndex: m.parentIndex ?? null,
+    index: m.index ?? null,
+    year: m.year ?? null,
+    parentRatingKey: m.parentRatingKey ?? null,
+    grandparentRatingKey: m.grandparentRatingKey ?? null,
+    durationMs: m.duration ?? 0,
+  };
 }
 
 /**
@@ -259,22 +312,7 @@ async function fetchItemSummary(ratingKey: string): Promise<ItemSummary | null> 
   const m = data.MediaContainer.Metadata?.[0];
   if (!m) return null;
 
-  const summary: ItemSummary = {
-    title: m.title ?? "Untitled",
-    type: m.type ?? "movie",
-    // Same `/api/plex/thumb` prefix the library endpoints apply, so the client
-    // treats these URLs exactly like any other poster.
-    thumb: m.thumb ? `/api/plex/thumb${m.thumb}` : null,
-    showThumb: m.grandparentThumb ? `/api/plex/thumb${m.grandparentThumb}` : null,
-    showTitle: m.grandparentTitle ?? null,
-    parentTitle: m.parentTitle ?? null,
-    parentIndex: m.parentIndex ?? null,
-    index: m.index ?? null,
-    year: m.year ?? null,
-    parentRatingKey: m.parentRatingKey ?? null,
-    grandparentRatingKey: m.grandparentRatingKey ?? null,
-    durationMs: m.duration ?? 0,
-  };
+  const summary = toSummary(m);
 
   metaCache.set(ratingKey, { at: Date.now(), summary });
   if (metaCache.size > 500) {
@@ -282,6 +320,95 @@ async function fetchItemSummary(ratingKey: string): Promise<ItemSummary | null> 
     if (oldest !== undefined) metaCache.delete(oldest);
   }
   return summary;
+}
+
+// ─── Next episode ───────────────────────────────────────────────
+
+const leavesCache = new Map<string, { at: number; episodes: PlexHistoryMetadata[] }>();
+
+/**
+ * Every episode of a show, ordered by season then episode.
+ *
+ * /allLeaves returns them already in that order, so "the element after mine"
+ * gives season rollover (S1E10 → S2E1) for free, with no boundary case and no
+ * second request — the same approach as the /siblings route. Cached briefly
+ * rather than for the full metadata TTL, since an airing show gains episodes
+ * and a stale list is what would hold back a new "next up".
+ */
+async function fetchShowEpisodes(showRatingKey: string): Promise<PlexHistoryMetadata[]> {
+  const cached = leavesCache.get(showRatingKey);
+  if (cached && Date.now() - cached.at < LEAVES_CACHE_TTL_MS) return cached.episodes;
+
+  const data = await plexJSON<{ MediaContainer: { Metadata?: PlexHistoryMetadata[] } }>(
+    `/library/metadata/${showRatingKey}/allLeaves`,
+  );
+  const episodes = (data.MediaContainer.Metadata || []).filter(
+    (e) => e.type === "episode" && e.ratingKey,
+  );
+
+  leavesCache.set(showRatingKey, { at: Date.now(), episodes });
+  if (leavesCache.size > 200) {
+    const oldest = leavesCache.keys().next().value;
+    if (oldest !== undefined) leavesCache.delete(oldest);
+  }
+  return episodes;
+}
+
+/**
+ * What to offer for a show once its most recent episode is finished: the next
+ * episode the user hasn't already seen, or null when there's nothing left.
+ *
+ * Scans forward from the finished episode rather than taking the immediate
+ * successor, so an out-of-order rewatch doesn't offer something already
+ * watched. Hitting a dismissed episode stops the scan and returns null — the
+ * user removed this show from the row, and walking past that to suggest the
+ * episode after it would defeat the dismissal.
+ *
+ * `after` carries the finished episode's timestamp so the suggestion sorts by
+ * when the show was last watched, like every other entry in the row.
+ */
+async function resolveNextUp(
+  userId: string,
+  after: HistoryEntry,
+): Promise<HistoryEntry | null> {
+  const showKey = after.grandparentRatingKey
+    ?? (await fetchItemSummary(after.ratingKey))?.grandparentRatingKey;
+  if (!showKey) return null;
+
+  const episodes = await fetchShowEpisodes(showKey);
+  const i = episodes.findIndex((e) => e.ratingKey === after.ratingKey);
+  // -1 covers merged/split shows whose leaf list doesn't contain our key.
+  if (i === -1) return null;
+
+  for (const episode of episodes.slice(i + 1)) {
+    const existing = selectOneStmt.get(userId, episode.ratingKey!) as HistoryRow | undefined;
+    if (existing?.dismissed === 1) return null;
+    if (existing?.watched === 1) continue;
+    // Part-watched already: hand back the real row so its resume position shows.
+    if (existing) return toEntry(existing);
+    // Never played — synthesize an entry to start from the beginning.
+    const summary = toSummary(episode);
+    return {
+      ratingKey: episode.ratingKey!,
+      title: summary.title,
+      type: summary.type,
+      thumb: summary.thumb,
+      showThumb: summary.showThumb,
+      showTitle: summary.showTitle,
+      parentTitle: summary.parentTitle,
+      parentIndex: summary.parentIndex,
+      index: summary.index,
+      year: summary.year,
+      parentRatingKey: summary.parentRatingKey,
+      grandparentRatingKey: summary.grandparentRatingKey ?? showKey,
+      positionMs: 0,
+      durationMs: summary.durationMs,
+      watched: false,
+      updatedAt: after.updatedAt,
+    };
+  }
+  // Ran off the end of the show — everything after this point is watched.
+  return null;
 }
 
 // ─── Writes ─────────────────────────────────────────────────────
@@ -358,10 +485,64 @@ export async function recordProgress(
 
 // ─── Reads ──────────────────────────────────────────────────────
 
-/** In-progress items for a user, most recently watched first. */
-export function getContinueWatching(userId: string, limit = 20): HistoryEntry[] {
-  const rows = selectContinueStmt.all(userId, MIN_RESUME_MS, limit) as HistoryRow[];
-  return rows.map(toEntry);
+/**
+ * What a user should watch next, most recently active first.
+ *
+ * Films appear only while part-watched — a finished film has nothing to follow
+ * it. Shows appear as one card each: the episode in progress, or, once that
+ * episode is finished, the next one (rolling into the following season at a
+ * season boundary). A show watched to its last episode drops out entirely.
+ *
+ * One card per show, decided by the most recent activity, so finishing an
+ * episode replaces it in the row rather than adding to it.
+ */
+export async function getContinueWatching(userId: string, limit = 20): Promise<HistoryEntry[]> {
+  const rows = selectContinueCandidatesStmt.all(
+    userId,
+    MIN_RESUME_MS,
+    CANDIDATE_SCAN_LIMIT,
+  ) as HistoryRow[];
+
+  const out: HistoryEntry[] = [];
+  const seenShows = new Set<string>();
+
+  for (const row of rows) {
+    if (out.length >= limit) break;
+    const entry = toEntry(row);
+
+    if (entry.type !== "episode") {
+      // The candidate query already excluded finished films; this is belt and
+      // braces for a row whose type was recorded before that filter existed.
+      if (!entry.watched) out.push(entry);
+      continue;
+    }
+
+    // Fall back to the episode's own key for a show whose ancestry Plex didn't
+    // report, so it still gets deduped against itself rather than every other
+    // orphan episode.
+    const showKey = entry.grandparentRatingKey ?? entry.ratingKey;
+    // Rows are newest-first, so the first one seen for a show is the current
+    // one; older episodes of the same show are already superseded.
+    if (seenShows.has(showKey)) continue;
+    seenShows.add(showKey);
+
+    if (!entry.watched) {
+      out.push(entry);
+      continue;
+    }
+
+    // Finished: offer what comes after it, or nothing if the show is done.
+    // A Plex failure here drops one show from the row rather than failing the
+    // whole request — the rest of someone's Continue Watching still renders.
+    try {
+      const next = await resolveNextUp(userId, entry);
+      if (next) out.push(next);
+    } catch (err) {
+      console.error("[History] Failed to resolve next episode after", entry.ratingKey, err);
+    }
+  }
+
+  return out;
 }
 
 /** Everything a user has watched or part-watched, most recent first. */
@@ -404,9 +585,38 @@ export function deleteHistoryEntry(userId: string, ratingKey: string): void {
  * the detail view still offers to resume it — this only stops it occupying the
  * row on Home. Watching any more of it clears the flag (see the upsert above),
  * which is what makes the dismissal recoverable rather than permanent.
+ *
+ * A "next up" suggestion has no row of its own, since the user has never played
+ * it. Dismissing one records a marker so the suggestion stays suppressed —
+ * resolveNextUp stops there, which is what makes dismissing the card mean "stop
+ * offering me this show" rather than "skip to the episode after".
  */
-export function dismissFromContinueWatching(userId: string, ratingKey: string): void {
-  dismissStmt.run(userId, ratingKey);
+export async function dismissFromContinueWatching(
+  userId: string,
+  ratingKey: string,
+): Promise<void> {
+  const { changes } = dismissStmt.run(userId, ratingKey);
+  if (changes > 0) return;
+
+  const summary = await fetchItemSummary(ratingKey);
+  if (!summary) return;
+  insertDismissalMarkerStmt.run({
+    user_id: userId,
+    rating_key: ratingKey,
+    duration_ms: summary.durationMs,
+    title: summary.title,
+    type: summary.type,
+    thumb: summary.thumb,
+    show_thumb: summary.showThumb,
+    show_title: summary.showTitle,
+    parent_title: summary.parentTitle,
+    parent_index: summary.parentIndex,
+    item_index: summary.index,
+    year: summary.year,
+    parent_rating_key: summary.parentRatingKey,
+    grandparent_rating_key: summary.grandparentRatingKey,
+    updated_at: Date.now(),
+  });
 }
 
 export function clearHistory(userId: string): void {

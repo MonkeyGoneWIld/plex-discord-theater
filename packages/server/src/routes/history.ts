@@ -58,11 +58,18 @@ function parseLimit(raw: unknown, fallback: number, max: number): number {
  * GET /api/history/continue?limit=20
  * In-progress items for the caller, most recently watched first.
  */
-router.get("/continue", (req: Request, res: Response) => {
+router.get("/continue", async (req: Request, res: Response) => {
   const userId = requireUserId(req, res);
   if (!userId) return;
   const limit = parseLimit(req.query.limit, 20, 50);
-  res.json({ items: getContinueWatching(userId, limit) });
+  try {
+    res.json({ items: await getContinueWatching(userId, limit) });
+  } catch (err) {
+    // Only reachable if the database itself fails — per-show Plex lookups are
+    // already caught individually so one bad show can't empty the row.
+    console.error("Continue watching error:", err);
+    res.status(500).json({ error: "Failed to load Continue Watching" });
+  }
 });
 
 /**
@@ -70,7 +77,7 @@ router.get("/continue", (req: Request, res: Response) => {
  * Drop one item from Continue Watching, keeping its history entry and position.
  * Contrast with DELETE /entry/:ratingKey, which forgets the item outright.
  */
-router.delete("/continue/:ratingKey", (req: Request, res: Response) => {
+router.delete("/continue/:ratingKey", async (req: Request, res: Response) => {
   const userId = requireUserId(req, res);
   if (!userId) return;
   const ratingKey = req.params.ratingKey as string;
@@ -78,8 +85,13 @@ router.delete("/continue/:ratingKey", (req: Request, res: Response) => {
     res.status(400).json({ error: "Invalid rating key" });
     return;
   }
-  dismissFromContinueWatching(userId, ratingKey);
-  res.json({ ok: true });
+  try {
+    await dismissFromContinueWatching(userId, ratingKey);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Dismiss error:", err);
+    res.status(500).json({ error: "Failed to update Continue Watching" });
+  }
 });
 
 /**

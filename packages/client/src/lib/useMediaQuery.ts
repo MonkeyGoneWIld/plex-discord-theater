@@ -38,25 +38,12 @@ export const NARROW_QUERY = "(max-width: 720px)";
 export const MOBILE_LANDSCAPE_QUERY = "(orientation: landscape) and (max-height: 600px)";
 
 /**
- * Phone held upright, where Discord lays its own header strip — the server-name
- * dropdown and the Leave pill — over the top of the Activity. Width-capped for
- * the same reason MOBILE_LANDSCAPE_QUERY is height-capped: orientation alone
- * matches plenty of desktop windows.
- */
-export const MOBILE_PORTRAIT_QUERY = "(orientation: portrait) and (max-width: 820px)";
-
-/**
  * Screens with no room for a full-size player control bar: a phone in portrait
  * runs out of width, a phone in landscape runs out of height. Comma is OR.
  */
 export const COMPACT_CONTROLS_QUERY = "(max-width: 820px), (max-height: 600px)";
 
-/**
- * How much of the viewport Discord's own chrome covers, in px.
- *
- * A guess, and necessarily so: the embedded-app SDK reports nothing about the
- * host client's layout, and `env(safe-area-inset-*)` describes the device notch
- * rather than Discord's overlay. Erring generous costs a little space; erring
- * short leaves a control that can't be tapped.
- */
-export const DISCORD_CHROME_PX = 56;
+// Note: keeping clear of Discord's own chrome is NOT done with a media query.
+// Discord publishes the space it occupies as --discord-safe-area-inset-*, which
+// index.html folds into --sait/--saib/--sail/--sair; the bars add those to their
+// padding. Real numbers, both orientations, no breakpoint to maintain.

@@ -15,6 +15,24 @@
       }
       #root { min-height: 100vh; }
 
+      /* Safe areas.
+         Discord reports how much of the viewport its own chrome covers on
+         mobile — the header strip and Leave pill, the collapse chevron — as
+         these custom properties, and they track orientation changes for us.
+         The env() fallback covers iOS device notches and any dev testing done
+         outside Discord; the 0px inside it keeps the declaration valid where
+         there is no inset at all.
+         Deliberately NOT applied to <body>, which is what Discord's own example
+         does: that would inset the player too and letterbox the video. Only the
+         bars that hold controls take them — see the calc() paddings in App.tsx
+         and Controls.tsx. */
+      :root {
+        --sait: var(--discord-safe-area-inset-top, env(safe-area-inset-top, 0px));
+        --saib: var(--discord-safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+        --sail: var(--discord-safe-area-inset-left, env(safe-area-inset-left, 0px));
+        --sair: var(--discord-safe-area-inset-right, env(safe-area-inset-right, 0px));
+      }
+
       /* Focus indication.
          Nothing styled :focus-visible, so every button fell back to Chromium's
          `outline: auto` ring — which `color-scheme: dark` below paints as a

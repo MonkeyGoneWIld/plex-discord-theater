@@ -1,13 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useImperativeHandle } from "react";
 import { authUrl } from "../lib/api";
 import { loadVolume } from "../lib/volume";
-import {
-  useMediaQuery,
-  COMPACT_CONTROLS_QUERY,
-  MOBILE_LANDSCAPE_QUERY,
-  MOBILE_PORTRAIT_QUERY,
-  DISCORD_CHROME_PX,
-} from "../lib/useMediaQuery";
+import { useMediaQuery, COMPACT_CONTROLS_QUERY } from "../lib/useMediaQuery";
 
 export interface ControlsHandle {
   /**
@@ -177,13 +171,8 @@ export function Controls({
   // Phone-sized: the volume slider moves into a vertical popover rather than
   // eating the width of a row that has nowhere to put it.
   const compact = useMediaQuery(COMPACT_CONTROLS_QUERY);
-  // Phone landscape is where Discord parks its own controls on top of the
-  // Activity — a collapse chevron bottom right, the Leave pill top right. Both
-  // corners have to be kept clear of anything that needs tapping.
-  const mobileLandscape = useMediaQuery(MOBILE_LANDSCAPE_QUERY);
-  // Upright, Discord's strip covers the top edge instead of the corners, landing
-  // on the Back button and title.
-  const mobilePortrait = useMediaQuery(MOBILE_PORTRAIT_QUERY);
+  // Discord's own chrome is kept clear by the safe-area insets baked into the
+  // bar paddings, so nothing here needs to know the orientation.
   const [volumeOpen, setVolumeOpen] = useState(false);
   const volumeWrapRef = useRef<HTMLDivElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
@@ -614,13 +603,7 @@ export function Controls({
         }}
       >
       {/* Top bar: back + title */}
-      <div
-        style={{
-          ...styles.topBar,
-          ...(mobileLandscape ? styles.clearDiscordRight : {}),
-          ...(mobilePortrait ? styles.clearDiscordTop : {}),
-        }}
-      >
+      <div style={styles.topBar}>
         <button onClick={onBack} style={styles.backBtn}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style={{ marginRight: 4 }}>
             <path d="M10 12L6 8L10 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
@@ -631,13 +614,7 @@ export function Controls({
       </div>
 
       {/* Bottom bar */}
-      <div
-        style={{
-          ...styles.bottomBar,
-          ...(compact ? styles.bottomBarCompact : {}),
-          ...(mobileLandscape ? styles.clearDiscordRight : {}),
-        }}
-      >
+      <div style={{ ...styles.bottomBar, ...(compact ? styles.bottomBarCompact : {}) }}>
         {/* Chunky progress bar */}
         <div
           ref={progressRef}
@@ -918,15 +895,12 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     gap: "12px",
-    // Padding longhands, not the shorthand: clearDiscordRight overrides
-    // paddingRight, and a shorthand paired with a longhand override can't be
-    // undone when the override stops applying — rotating back to portrait would
-    // clear the padding to zero instead of restoring this value. (Same trap as
-    // the border colours fixed in SeasonDetail.)
-    paddingTop: "16px",
-    paddingRight: "20px",
+    // Base spacing plus whatever Discord reports it is covering — its header
+    // strip in portrait, the Leave pill in landscape. Defined in index.html.
+    paddingTop: "calc(16px + var(--sait, 0px))",
+    paddingRight: "calc(20px + var(--sair, 0px))",
     paddingBottom: "16px",
-    paddingLeft: "20px",
+    paddingLeft: "calc(20px + var(--sail, 0px))",
     background: "linear-gradient(to bottom, rgba(0,0,0,0.8), transparent)",
   },
   backBtn: {
@@ -952,11 +926,12 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#f0f0f0",
   },
   bottomBar: {
-    // Longhands — see the note on topBar.
+    // Insets on three sides — see the note on topBar. The bottom one clears
+    // Discord's collapse chevron in landscape and the home indicator on iOS.
     paddingTop: "48px",
-    paddingRight: "20px",
-    paddingBottom: "16px",
-    paddingLeft: "20px",
+    paddingRight: "calc(20px + var(--sair, 0px))",
+    paddingBottom: "calc(16px + var(--saib, 0px))",
+    paddingLeft: "calc(20px + var(--sail, 0px))",
     background: "linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%)",
   },
   progressHit: {
@@ -1037,35 +1012,12 @@ const styles: Record<string, React.CSSProperties> = {
   // Same row, tightened. The buttons all stay: they're the reason to open the
   // player at all, and the time readout is what gives when width runs short.
   bottomBarCompact: {
-    // Longhands, matching bottomBar — see the note on topBar.
+    // Tighter base spacing, still carrying the safe-area insets so the bar
+    // stays clear of Discord's chrome on a phone.
     paddingTop: "28px",
-    paddingRight: "12px",
-    paddingBottom: "10px",
-    paddingLeft: "12px",
-  },
-  /**
-   * Keeps the right edge clear of Discord's floating buttons in phone
-   * landscape: the collapse chevron sits over the bottom-right corner, on top
-   * of the volume and gear, and the Leave pill over the top-right.
-   *
-   * Applied to the bars rather than to the button groups so the progress bar
-   * shrinks with them — its right end, and the drag handle when playback is
-   * near the end, were under the chevron too.
-   *
-   * The width is a guess at Discord's chrome, which the Activity is never told
-   * about. Erring wide costs a little unused bar; erring narrow costs a control
-   * you can't press.
-   */
-  clearDiscordRight: {
-    paddingRight: "64px",
-  },
-  /**
-   * The portrait counterpart: Discord's header strip is drawn over the top of
-   * the Activity, landing on the Back button and title. Only the top bar moves —
-   * insetting the whole player would letterbox the video.
-   */
-  clearDiscordTop: {
-    paddingTop: `${16 + DISCORD_CHROME_PX}px`,
+    paddingRight: "calc(12px + var(--sair, 0px))",
+    paddingBottom: "calc(10px + var(--saib, 0px))",
+    paddingLeft: "calc(12px + var(--sail, 0px))",
   },
   groupCompact: {
     gap: "6px",

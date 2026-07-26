@@ -1,9 +1,20 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useImperativeHandle } from "react";
 import { authUrl } from "../lib/api";
 import { loadVolume } from "../lib/volume";
 
+export interface ControlsHandle {
+  /**
+   * Add ±seconds to the pending skip, exactly as the on-screen ±10s buttons do.
+   * Lets the player's keyboard shortcuts feed one accumulator rather than
+   * keeping a second, competing one.
+   */
+  queueSkip: (amount: number) => void;
+}
+
 interface ControlsProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  /** Imperative handle — see ControlsHandle. */
+  handleRef?: React.Ref<ControlsHandle>;
   /** Host-only affordances: queue, track switcher, people panel. */
   isHost: boolean;
   /** Transport rights (play/pause/seek) — true for the host AND for co-hosts.
@@ -89,6 +100,7 @@ const SKIP_INDICATOR_LINGER_MS = 400;
 
 export function Controls({
   videoRef,
+  handleRef,
   isHost,
   canControl = isHost,
   title,
@@ -336,6 +348,8 @@ export function Controls({
 
   const skipBack = useCallback(() => queueSkip(-10), [queueSkip]);
   const skipForward = useCallback(() => queueSkip(10), [queueSkip]);
+
+  useImperativeHandle(handleRef, () => ({ queueSkip }), [queueSkip]);
 
   // Drop pending timers on unmount so a queued seek can't fire into a torn-down
   // player (or a transcode the next item has already replaced).

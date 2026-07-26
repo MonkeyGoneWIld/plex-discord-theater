@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import Hls from "hls.js";
 import { HlsJsP2PEngine } from "p2p-media-loader-hlsjs";
-import { Controls } from "./Controls";
+import { Controls, type ControlsHandle } from "./Controls";
 import { StatsOverlay } from "./StatsOverlay";
 import type { P2PStats } from "./StatsOverlay";
 import { TrackSwitcher } from "./TrackSwitcher";
@@ -157,6 +157,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // offset (stays 0); the stall-timeout fallback still recovers in that case.
   const sessionStartOffsetRef = useRef(0);
   const seekStallTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Reaches the controls' skip accumulator, so the arrow keys stack the same way
+  // the ±10s buttons do instead of seeking on every press.
+  const controlsRef = useRef<ControlsHandle>(null);
 
   // Stable refs so the HLS effect doesn't re-run when these change
   const syncActionsRef = useRef(syncActions);
@@ -952,15 +955,17 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             syncActionsRef.current?.sendPause(video.currentTime);
           }
           break;
+        // Routed through the controls' skip accumulator rather than seeking
+        // here, so holding or spamming an arrow key stacks into one seek and
+        // shows the same running total as the on-screen ±10s buttons. Clamping
+        // and the canControl check live in there too.
         case "ArrowLeft":
           e.preventDefault();
-          if (!canControlRef.current) return;
-          handleSeekCommand(Math.max(0, video.currentTime - 10));
+          controlsRef.current?.queueSkip(-10);
           break;
         case "ArrowRight":
           e.preventDefault();
-          if (!canControlRef.current) return;
-          handleSeekCommand(Math.min(video.duration || 0, video.currentTime + 10));
+          controlsRef.current?.queueSkip(10);
           break;
         case "m":
         case "M":
@@ -986,7 +991,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [handleHostSeek]);
+    // Everything the handler touches is a ref or a stable setter now that the
+    // arrows go through controlsRef — the old handleHostSeek dep only existed to
+    // keep the seek closure fresh, and rebinding the listener on every change of
+    // it was never doing anything else.
+  }, []);
 
   const endPlayback = useCallback(() => {
     destroyLocal();
@@ -1367,6 +1376,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
       <Controls
         videoRef={videoRef}
+        handleRef={controlsRef}
         isHost={isHost}
         title={displayTitle}
         onBack={handleBack}

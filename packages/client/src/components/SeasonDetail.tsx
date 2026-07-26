@@ -256,13 +256,22 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex", flexDirection: "column", gap: "10px",
   },
   episodeCard: {
+    // `border` here and in episodeCardHover must stay the same property. React
+    // clears style keys the next render drops by assigning "", and because the
+    // shorthand has already expanded into border-color in the CSSOM, clearing a
+    // borderColor override doesn't fall back to this line — it falls back to
+    // the CSS initial value, currentColor, i.e. the near-white text colour. That
+    // left every hovered card wearing a solid white border afterwards.
     display: "flex", gap: "14px", padding: "10px", borderRadius: "8px",
     border: "1px solid rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.03)",
     cursor: "pointer", color: "inherit", textAlign: "left", fontFamily: "inherit",
     transition: "all 0.2s ease", width: "100%",
   },
   episodeCardHover: {
-    borderColor: "rgba(229,160,13,0.3)", background: "rgba(255,255,255,0.05)",
+    // Whole `border` shorthand, not just borderColor: the base style sets
+    // `border`, and an override that names only the longhand leaves React
+    // unable to restore it. See the note on episodeCard.
+    border: "1px solid rgba(229,160,13,0.3)", background: "rgba(255,255,255,0.05)",
     transform: "scale(1.01)",
   },
   thumbWrap: {

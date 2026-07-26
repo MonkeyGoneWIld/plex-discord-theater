@@ -212,7 +212,9 @@ const styles: Record<string, React.CSSProperties> = {
     transition: "border-color 0.15s ease, box-shadow 0.15s ease",
   },
   cardSelected: {
-    borderColor: "rgba(229,160,13,0.7)",
+    // Full shorthand — see the note in SeasonDetail's episodeCard. Deselecting
+    // a season otherwise leaves its card outlined in white.
+    border: "1px solid rgba(229,160,13,0.7)",
     boxShadow: "0 0 0 1px rgba(229,160,13,0.4)",
   },
   posterWrap: {
@@ -253,7 +255,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   checkOn: {
     background: "#e5a00d",
-    borderColor: "#e5a00d",
+    // Full shorthand — see the note in SeasonDetail's episodeCard.
+    border: "1px solid #e5a00d",
   },
   statusBadge: {
     position: "absolute",

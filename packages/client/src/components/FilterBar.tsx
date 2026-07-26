@@ -202,7 +202,8 @@ const styles: Record<string, React.CSSProperties> = {
     whiteSpace: "nowrap",
   },
   dropdownBtnActive: {
-    borderColor: "rgba(229,160,13,0.3)",
+    // Full shorthand — see the note in SeasonDetail's episodeCard.
+    border: "1px solid rgba(229,160,13,0.3)",
     color: "#e5a00d",
     background: "rgba(229,160,13,0.08)",
   },
@@ -249,7 +250,9 @@ const styles: Record<string, React.CSSProperties> = {
   },
   checkboxChecked: {
     background: "#e5a00d",
-    borderColor: "#e5a00d",
+    // Full shorthand, and the same 1.5px width as `checkbox` — unchecking a box
+    // otherwise leaves it outlined in white.
+    border: "1.5px solid #e5a00d",
   },
   checkLabel: {
     color: "#ccc",

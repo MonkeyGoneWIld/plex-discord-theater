@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useImperativeHandle } from "react";
 import { authUrl } from "../lib/api";
 import { loadVolume } from "../lib/volume";
-import { useMediaQuery, COMPACT_CONTROLS_QUERY } from "../lib/useMediaQuery";
+import { useMediaQuery, COMPACT_CONTROLS_QUERY, MOBILE_LANDSCAPE_QUERY } from "../lib/useMediaQuery";
 
 export interface ControlsHandle {
   /**
@@ -171,6 +171,10 @@ export function Controls({
   // Phone-sized: the volume slider moves into a vertical popover rather than
   // eating the width of a row that has nowhere to put it.
   const compact = useMediaQuery(COMPACT_CONTROLS_QUERY);
+  // Phone landscape is where Discord parks its own controls on top of the
+  // Activity — a collapse chevron bottom right, the Leave pill top right. Both
+  // corners have to be kept clear of anything that needs tapping.
+  const mobileLandscape = useMediaQuery(MOBILE_LANDSCAPE_QUERY);
   const [volumeOpen, setVolumeOpen] = useState(false);
   const volumeWrapRef = useRef<HTMLDivElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
@@ -601,7 +605,7 @@ export function Controls({
         }}
       >
       {/* Top bar: back + title */}
-      <div style={styles.topBar}>
+      <div style={{ ...styles.topBar, ...(mobileLandscape ? styles.clearDiscordRight : {}) }}>
         <button onClick={onBack} style={styles.backBtn}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style={{ marginRight: 4 }}>
             <path d="M10 12L6 8L10 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
@@ -612,7 +616,13 @@ export function Controls({
       </div>
 
       {/* Bottom bar */}
-      <div style={{ ...styles.bottomBar, ...(compact ? styles.bottomBarCompact : {}) }}>
+      <div
+        style={{
+          ...styles.bottomBar,
+          ...(compact ? styles.bottomBarCompact : {}),
+          ...(mobileLandscape ? styles.clearDiscordRight : {}),
+        }}
+      >
         {/* Chunky progress bar */}
         <div
           ref={progressRef}
@@ -893,7 +903,15 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     gap: "12px",
-    padding: "16px 20px",
+    // Padding longhands, not the shorthand: clearDiscordRight overrides
+    // paddingRight, and a shorthand paired with a longhand override can't be
+    // undone when the override stops applying — rotating back to portrait would
+    // clear the padding to zero instead of restoring this value. (Same trap as
+    // the border colours fixed in SeasonDetail.)
+    paddingTop: "16px",
+    paddingRight: "20px",
+    paddingBottom: "16px",
+    paddingLeft: "20px",
     background: "linear-gradient(to bottom, rgba(0,0,0,0.8), transparent)",
   },
   backBtn: {
@@ -919,9 +937,12 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#f0f0f0",
   },
   bottomBar: {
-    padding: "0 20px 16px",
-    background: "linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%)",
+    // Longhands — see the note on topBar.
     paddingTop: "48px",
+    paddingRight: "20px",
+    paddingBottom: "16px",
+    paddingLeft: "20px",
+    background: "linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%)",
   },
   progressHit: {
     position: "relative",
@@ -1001,8 +1022,27 @@ const styles: Record<string, React.CSSProperties> = {
   // Same row, tightened. The buttons all stay: they're the reason to open the
   // player at all, and the time readout is what gives when width runs short.
   bottomBarCompact: {
-    padding: "0 12px 10px",
+    // Longhands, matching bottomBar — see the note on topBar.
     paddingTop: "28px",
+    paddingRight: "12px",
+    paddingBottom: "10px",
+    paddingLeft: "12px",
+  },
+  /**
+   * Keeps the right edge clear of Discord's floating buttons in phone
+   * landscape: the collapse chevron sits over the bottom-right corner, on top
+   * of the volume and gear, and the Leave pill over the top-right.
+   *
+   * Applied to the bars rather than to the button groups so the progress bar
+   * shrinks with them — its right end, and the drag handle when playback is
+   * near the end, were under the chevron too.
+   *
+   * The width is a guess at Discord's chrome, which the Activity is never told
+   * about. Erring wide costs a little unused bar; erring narrow costs a control
+   * you can't press.
+   */
+  clearDiscordRight: {
+    paddingRight: "64px",
   },
   groupCompact: {
     gap: "6px",

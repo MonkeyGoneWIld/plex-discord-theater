@@ -36,3 +36,9 @@ export const NARROW_QUERY = "(max-width: 720px)";
  * so the height cap is what keeps this to devices that are actually short.
  */
 export const MOBILE_LANDSCAPE_QUERY = "(orientation: landscape) and (max-height: 600px)";
+
+/**
+ * Screens with no room for a full-size player control bar: a phone in portrait
+ * runs out of width, a phone in landscape runs out of height. Comma is OR.
+ */
+export const COMPACT_CONTROLS_QUERY = "(max-width: 820px), (max-height: 600px)";

@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useImperativeHandle } from "react";
 import { authUrl } from "../lib/api";
 import { loadVolume } from "../lib/volume";
+import { useMediaQuery, COMPACT_CONTROLS_QUERY } from "../lib/useMediaQuery";
 
 export interface ControlsHandle {
   /**
@@ -167,6 +168,11 @@ export function Controls({
   const pendingPreviewRef = useRef<string | null>(null);
   const previewThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [hintsVisible, setHintsVisible] = useState(showKeyboardHints);
+  // Phone-sized: the volume slider moves into a vertical popover rather than
+  // eating the width of a row that has nowhere to put it.
+  const compact = useMediaQuery(COMPACT_CONTROLS_QUERY);
+  const [volumeOpen, setVolumeOpen] = useState(false);
+  const volumeWrapRef = useRef<HTMLDivElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hintsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -531,6 +537,25 @@ export function Controls({
     if (previewThrottleRef.current !== null) clearTimeout(previewThrottleRef.current);
   }, []);
 
+  // Dismiss the volume popover on a tap anywhere else. Pointerdown rather than
+  // click so it closes on the press that starts an interaction elsewhere,
+  // instead of hanging around over whatever the user is reaching for.
+  useEffect(() => {
+    if (!volumeOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (volumeWrapRef.current?.contains(e.target as Node)) return;
+      setVolumeOpen(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    return () => document.removeEventListener("pointerdown", onDown);
+  }, [volumeOpen]);
+
+  // The popover is anchored to a button in the control bar, so it can't outlive
+  // the bar fading out from under it.
+  useEffect(() => {
+    if (!visible) setVolumeOpen(false);
+  }, [visible]);
+
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
   // Where the bar points: the drag if one is in progress, otherwise the pending
   // skip total, otherwise playback. Both show you the destination before the
@@ -749,18 +774,63 @@ export function Controls({
                 {"\u2699"}
               </button>
             )}
-            <button onClick={toggleMute} style={styles.muteBtn} title={muted ? "Unmute" : "Mute"}>
-              {muted ? "\u{1F507}" : "\u{1F50A}"}
-            </button>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
-              value={volume}
-              onChange={handleVolume}
-              style={styles.volume}
-            />
+            {compact ? (
+              /* Vertical slider in a popover. A horizontal one needs ~80px of a
+                 row with none to give on a phone, and it was the control being
+                 pushed off the edge of the screen. */
+              <div ref={volumeWrapRef} style={styles.volumeWrap}>
+                {volumeOpen && (
+                  <div style={styles.volumePopover}>
+                    {/* A rotated element keeps its unrotated layout box, so the
+                        wrapper carries the size the slider occupies on screen
+                        and the slider itself overflows it invisibly. */}
+                    <div style={styles.volumeVerticalWrap}>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={volume}
+                        onChange={handleVolume}
+                        aria-label="Volume"
+                        style={{ ...styles.volume, ...styles.volumeVertical }}
+                      />
+                    </div>
+                    <button
+                      onClick={toggleMute}
+                      style={styles.muteBtn}
+                      title={muted ? "Unmute" : "Mute"}
+                    >
+                      {muted ? "\u{1F507}" : "\u{1F50A}"}
+                    </button>
+                  </div>
+                )}
+                <button
+                  onClick={() => setVolumeOpen((o) => !o)}
+                  style={styles.muteBtn}
+                  title="Volume"
+                  aria-expanded={volumeOpen}
+                >
+                  {muted ? "\u{1F507}" : "\u{1F50A}"}
+                </button>
+              </div>
+            ) : (
+              <>
+                <button onClick={toggleMute} style={styles.muteBtn} title={muted ? "Unmute" : "Mute"}>
+                  {muted ? "\u{1F507}" : "\u{1F50A}"}
+                </button>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={volume}
+                  onChange={handleVolume}
+                  aria-label="Volume"
+                  style={styles.volume}
+                />
+              </>
+            )}
             {hintsVisible && (
               <div style={styles.hints}>
                 <span style={styles.hintBadge}>Space</span>
@@ -997,6 +1067,44 @@ const styles: Record<string, React.CSSProperties> = {
   volume: {
     width: "80px",
     accentColor: "#e5a00d",
+  },
+  volumeWrap: {
+    position: "relative",
+    display: "flex",
+    alignItems: "center",
+  },
+  volumePopover: {
+    position: "absolute",
+    bottom: "calc(100% + 10px)",
+    left: "50%",
+    transform: "translateX(-50%)",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "6px",
+    padding: "14px 8px 8px",
+    borderRadius: "12px",
+    background: "rgba(15,15,15,0.95)",
+    border: "1px solid rgba(255,255,255,0.15)",
+    backdropFilter: "blur(12px)",
+  },
+  volumeVerticalWrap: {
+    // The on-screen footprint of the rotated slider below. Fixed, so the slider
+    // overflowing its own box doesn't stretch the popover.
+    width: "26px",
+    height: "110px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  volumeVertical: {
+    // Rotation rather than `writing-mode: vertical-*`, which only lands a
+    // usable vertical range input on very recent Chromium — and this runs in
+    // whatever webview Discord ships on the device.
+    width: "110px",
+    transform: "rotate(-90deg)",
+    // Drags belong to the slider, not to the page behind it.
+    touchAction: "none",
   },
   hints: {
     display: "flex",

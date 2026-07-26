@@ -11,6 +11,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PeoplePanel } from "./components/PeoplePanel";
 import { formatMediaTitle } from "./lib/format";
 import { authUrl, fetchMeta } from "./lib/api";
+import { useMediaQuery, MOBILE_LANDSCAPE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem } from "./hooks/useSync";
 
@@ -71,6 +72,10 @@ export function App() {
   // Roster/roles panel, reachable from the header while browsing. The player has
   // its own copy for use during playback (the header is hidden there).
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
+
+  // Phone held sideways, where Discord overlays its own controls on the corners
+  // of the Activity. See the header below.
+  const mobileLandscape = useMediaQuery(MOBILE_LANDSCAPE_QUERY);
 
   // Saved window scroll per stack depth: slot i holds where view i was when
   // something was pushed on top of it. Restored when the stack shrinks back.
@@ -447,13 +452,21 @@ export function App() {
           ) : (
             <h1 style={styles.logo}>Watch Together</h1>
           )}
+          {/* On a phone in landscape Discord's own Leave pill overlaps the top
+              right of the Activity, sitting right on top of this button. Moving
+              it to the left of the name puts it back in reach \u2014 the label is
+              what gets clipped there instead, which costs nothing. */}
           <span style={styles.user}>
-            {username} {effectiveIsHost ? "(Host)" : "(Viewer)"}
-            {!effectiveIsHost && syncState.connected && " \u2022 Synced"}
+            <span style={styles.userName}>
+              {username} {effectiveIsHost ? "(Host)" : "(Viewer)"}
+              {!effectiveIsHost && syncState.connected && " • Synced"}
+            </span>
             {syncState.connected && (
               <button
                 onClick={() => setShowPeoplePanel(true)}
-                style={styles.peopleBtn}
+                // Visual order only — the DOM order stays name-then-button, so
+                // reading order and focus order are unchanged either way.
+                style={{ ...styles.peopleBtn, ...(mobileLandscape ? styles.peopleBtnLandscape : {}) }}
                 title={effectiveIsHost ? "People & roles" : "Who's here"}
               >
                 <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
@@ -738,12 +751,23 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "13px",
     color: "#888",
     fontWeight: 500,
+    // Flex so the people button can be reordered in landscape without moving it
+    // in the DOM. `gap` replaces the margin the button used to carry.
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "10px",
+    minWidth: 0,
+  },
+  userName: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    minWidth: 0,
   },
   peopleBtn: {
     display: "inline-flex",
     alignItems: "center",
     gap: "5px",
-    marginLeft: "10px",
     padding: "3px 9px",
     borderRadius: "999px",
     border: "1px solid rgba(229,160,13,0.35)",
@@ -754,6 +778,11 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
     fontFamily: "inherit",
     verticalAlign: "middle",
+    flexShrink: 0,
+  },
+  peopleBtnLandscape: {
+    // Ahead of the name, putting it clear of Discord's Leave pill in the corner.
+    order: -1,
   },
   center: {
     display: "flex",

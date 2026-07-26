@@ -377,3 +377,74 @@ export interface AppConfig {
 export function fetchConfig(): Promise<AppConfig> {
   return apiGet("/api/plex/config");
 }
+
+/**
+ * A watched (or part-watched) item from the host's history. Shares its item
+ * fields with PlexItem so history entries render through MovieCard unchanged;
+ * the progress fields are the addition.
+ */
+export interface HistoryEntry {
+  ratingKey: string;
+  title: string;
+  type: string;
+  thumb: string | null;
+  showThumb: string | null;
+  showTitle: string | null;
+  parentTitle: string | null;
+  parentIndex: number | null;
+  index: number | null;
+  year: number | null;
+  parentRatingKey: string | null;
+  grandparentRatingKey: string | null;
+  /** Resume position in milliseconds. */
+  positionMs: number;
+  /** Total runtime in milliseconds; 0 when Plex reported none. */
+  durationMs: number;
+  watched: boolean;
+  updatedAt: number;
+}
+
+/** History entries carry nulls where PlexItem wants undefined — bridge the two. */
+export function historyEntryToItem(entry: HistoryEntry): PlexItem {
+  return {
+    ratingKey: entry.ratingKey,
+    title: entry.title,
+    type: entry.type,
+    thumb: entry.thumb,
+    ...(entry.showThumb != null && { showThumb: entry.showThumb }),
+    ...(entry.showTitle != null && { showTitle: entry.showTitle }),
+    ...(entry.parentTitle != null && { parentTitle: entry.parentTitle }),
+    ...(entry.parentIndex != null && { parentIndex: entry.parentIndex }),
+    ...(entry.index != null && { index: entry.index }),
+    ...(entry.year != null && { year: entry.year }),
+    ...(entry.parentRatingKey != null && { parentRatingKey: entry.parentRatingKey }),
+    ...(entry.grandparentRatingKey != null && { grandparentRatingKey: entry.grandparentRatingKey }),
+  };
+}
+
+export function fetchContinueWatching(limit?: number): Promise<{ items: HistoryEntry[] }> {
+  return apiGet(`/api/history/continue${limit != null ? `?limit=${limit}` : ""}`);
+}
+
+export function fetchHistory(
+  options?: { limit?: number; offset?: number },
+): Promise<{ items: HistoryEntry[]; total: number }> {
+  const params = new URLSearchParams();
+  if (options?.limit != null) params.set("limit", String(options.limit));
+  if (options?.offset != null) params.set("offset", String(options.offset));
+  const qs = params.toString();
+  return apiGet(`/api/history${qs ? `?${qs}` : ""}`);
+}
+
+/** Saved progress for one item, or null if it's never been played. */
+export function fetchProgress(ratingKey: string): Promise<{ progress: HistoryEntry | null }> {
+  return apiGet(`/api/history/progress/${encodeURIComponent(ratingKey)}`);
+}
+
+export function deleteHistoryEntry(ratingKey: string): Promise<void> {
+  return apiDelete(`/api/history/entry/${encodeURIComponent(ratingKey)}`);
+}
+
+export function clearHistory(): Promise<void> {
+  return apiDelete("/api/history");
+}

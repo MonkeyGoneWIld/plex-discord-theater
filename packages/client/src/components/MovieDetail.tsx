@@ -1,12 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchMeta, invalidateMeta, setStreams, getSessionToken, type PlexItem, type PlexMeta } from "../lib/api";
+import { fetchMeta, fetchProgress, invalidateMeta, setStreams, getSessionToken, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
+import { formatTimecode } from "../lib/format";
 import { SkeletonBlock } from "./SkeletonBlock";
 import type { QueueItem, SuggestionItem } from "../hooks/useSync";
 
 interface MovieDetailProps {
   item: PlexItem;
   isHost: boolean;
-  onPlay: (item: PlexItem, subtitles: boolean) => void;
+  /** `resumePosition` (seconds) is set only when the host picked Resume. */
+  onPlay: (item: PlexItem, subtitles: boolean, resumePosition?: number) => void;
   onBack: () => void;
   isPlaying?: boolean;
   onAddToQueue?: (item: QueueItem) => void;
@@ -159,6 +161,9 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   const [selectedAudio, setSelectedAudio] = useState<number | null>(null);
   const [selectedSubtitle, setSelectedSubtitle] = useState<number | null>(null);
   const [suggested, setSuggested] = useState(false);
+  // The host's own saved position for this item, or null if they've never
+  // played it. Only the host can start playback, so only the host fetches it.
+  const [progress, setProgress] = useState<HistoryEntry | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -177,7 +182,19 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
     return () => { cancelled = true; };
   }, [item.ratingKey]);
 
-  const handlePlay = useCallback(async () => {
+  // Deliberately not cached (unlike fetchMeta): this changes every time the item
+  // is watched, and a stale resume point is worse than an extra request.
+  useEffect(() => {
+    setProgress(null);
+    if (!isHost) return;
+    let cancelled = false;
+    fetchProgress(item.ratingKey)
+      .then((r) => { if (!cancelled) setProgress(r.progress); })
+      .catch(() => { /* resume is a convenience — never block playback on it */ });
+    return () => { cancelled = true; };
+  }, [item.ratingKey, isHost]);
+
+  const handlePlay = useCallback(async (resumeFromMs?: number) => {
     if (!meta?.partId) return;
     try {
       setError(null);
@@ -189,12 +206,22 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
         // The cached meta now reports stale selected-track flags — drop it.
         invalidateMeta(item.ratingKey);
       }
-      onPlay(item, selectedSubtitle != null);
+      // The player works in seconds; history stores milliseconds.
+      onPlay(item, selectedSubtitle != null, resumeFromMs != null ? resumeFromMs / 1000 : undefined);
     } catch (err) {
       console.error("Failed to set streams:", err);
       setError("Failed to configure playback. Please try again.");
     }
   }, [meta, selectedAudio, selectedSubtitle, item, onPlay]);
+
+  // Offer a resume only for a genuine part-watch: far enough in to matter, and
+  // not already finished (the server flags that, so a rewatch starts clean).
+  const resumeMs =
+    progress && !progress.watched && progress.positionMs >= 60_000 ? progress.positionMs : null;
+  const progressRatio =
+    progress && progress.durationMs > 0
+      ? Math.min(1, progress.positionMs / progress.durationMs)
+      : null;
 
   const backdropUrl = meta?.art ? authUrl(meta.art) : null;
   const posterUrl = meta?.thumb ? authUrl(meta.thumb) : (item.thumb ? authUrl(item.thumb) : null);
@@ -336,16 +363,46 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
 
               {error && <p style={styles.errorText}>{error}</p>}
 
+              {/* Progress from a previous sitting — host only, since only the
+                  host's history is tracked and only the host can resume it. */}
+              {isHost && progressRatio != null && resumeMs != null && (
+                <div style={styles.progressWrap}>
+                  <div style={styles.progressTrack}>
+                    <div style={{ ...styles.progressFill, width: `${progressRatio * 100}%` }} />
+                  </div>
+                  <span style={styles.progressLabel}>
+                    {formatTimecode(progress!.durationMs - progress!.positionMs)} left
+                  </span>
+                </div>
+              )}
+              {isHost && progress?.watched && (
+                <div style={styles.watchedNote}>You've finished this</div>
+              )}
+
               {/* Play / Waiting */}
               <div style={styles.actions}>
                 {isHost ? (
                   <>
-                    <button onClick={handlePlay} style={styles.playBtn}>
-                      <svg width="22" height="22" viewBox="0 0 22 22" fill="none" style={{ marginRight: 8 }}>
-                        <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor"/>
-                      </svg>
-                      Play
-                    </button>
+                    {resumeMs != null ? (
+                      <>
+                        <button onClick={() => handlePlay(resumeMs)} style={styles.playBtn}>
+                          <svg width="22" height="22" viewBox="0 0 22 22" fill="none" style={{ marginRight: 8 }}>
+                            <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor"/>
+                          </svg>
+                          Resume from {formatTimecode(resumeMs)}
+                        </button>
+                        <button onClick={() => handlePlay()} style={styles.startOverBtn}>
+                          Start Over
+                        </button>
+                      </>
+                    ) : (
+                      <button onClick={() => handlePlay()} style={styles.playBtn}>
+                        <svg width="22" height="22" viewBox="0 0 22 22" fill="none" style={{ marginRight: 8 }}>
+                          <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor"/>
+                        </svg>
+                        {progress?.watched ? "Watch Again" : "Play"}
+                      </button>
+                    )}
                     {isPlaying && onAddToQueue && (
                       <button
                         onClick={() => {
@@ -655,6 +712,43 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(229,160,13,0.4)", background: "transparent",
     color: "#e5a00d", fontSize: "14px", fontWeight: 600,
     cursor: "pointer", fontFamily: "inherit",
+  },
+  startOverBtn: {
+    padding: "14px 26px", borderRadius: "12px",
+    border: "1px solid rgba(255,255,255,0.18)", background: "transparent",
+    color: "#ccc", fontSize: "15px", fontWeight: 600,
+    cursor: "pointer", fontFamily: "inherit",
+  },
+  progressWrap: {
+    display: "flex",
+    alignItems: "center",
+    gap: "12px",
+    marginTop: "24px",
+    maxWidth: "420px",
+  },
+  progressTrack: {
+    flex: 1,
+    height: "5px",
+    borderRadius: "3px",
+    background: "rgba(255,255,255,0.12)",
+    overflow: "hidden",
+  },
+  progressFill: {
+    height: "100%",
+    background: "#e5a00d",
+    borderRadius: "3px",
+  },
+  progressLabel: {
+    color: "#888",
+    fontSize: "13px",
+    fontWeight: 500,
+    whiteSpace: "nowrap" as const,
+  },
+  watchedNote: {
+    marginTop: "24px",
+    color: "#6a9955",
+    fontSize: "13px",
+    fontWeight: 600,
   },
   errorText: {
     color: "#e74c3c",

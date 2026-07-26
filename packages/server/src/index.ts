@@ -8,8 +8,10 @@ import { fileURLToPath } from "url";
 import discordRoutes, { closeInstanceDb } from "./routes/discord.js";
 import plexRoutes from "./routes/plex.js";
 import seerrRoutes from "./routes/seerr.js";
+import historyRoutes from "./routes/history.js";
 import { requireAuth, closeSessionDb } from "./middleware/auth.js";
 import * as thumbCache from "./services/thumb-cache.js";
+import { closeHistoryDb } from "./services/watch-history.js";
 import { attachWebSocketServer, closeWebSocketServer } from "./services/sync.js";
 
 const required = ["DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET", "PLEX_URL", "PLEX_TOKEN", "REDIRECT_URI"] as const;
@@ -122,6 +124,7 @@ app.use("/api", (req, res, next) => {
 app.use("/api", discordRoutes);
 app.use("/api/plex", requireAuth, plexRoutes);
 app.use("/api/seerr", requireAuth, seerrRoutes);
+app.use("/api/history", requireAuth, historyRoutes);
 
 const clientDist = path.resolve(__dirname, "../../client/dist");
 app.use(express.static(clientDist));
@@ -153,6 +156,7 @@ async function shutdown(signal: string) {
     thumbCache.close();
     closeSessionDb();
     closeInstanceDb();
+    closeHistoryDb();
     process.exit(0);
   });
   // Fallback: force exit if server.close() hangs (e.g. lingering keep-alive connections)

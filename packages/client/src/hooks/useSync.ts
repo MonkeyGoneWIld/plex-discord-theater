@@ -90,7 +90,15 @@ export interface Participant {
 }
 
 export interface SyncActions {
-  sendPlay: (ratingKey: string, title: string, subtitles: boolean, hlsSessionId: string) => void;
+  /** `position` is the offset the transcode was started at (resume or seek-restart),
+   *  so viewers land there rather than at 0:00. Omit for a plain start. */
+  sendPlay: (
+    ratingKey: string,
+    title: string,
+    subtitles: boolean,
+    hlsSessionId: string,
+    position?: number,
+  ) => void;
   sendPause: (position: number) => void;
   sendResume: (position: number) => void;
   sendSeek: (position: number) => void;
@@ -164,8 +172,13 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
 
   const actions: SyncActions = useMemo(
     () => ({
-      sendPlay: (ratingKey: string, title: string, subtitles: boolean, hlsSessionId: string) =>
-        send({ type: "play", ratingKey, title, subtitles, hlsSessionId }),
+      sendPlay: (
+        ratingKey: string,
+        title: string,
+        subtitles: boolean,
+        hlsSessionId: string,
+        position?: number,
+      ) => send({ type: "play", ratingKey, title, subtitles, hlsSessionId, position }),
       sendPause: (position: number) => send({ type: "pause", position }),
       sendResume: (position: number) => send({ type: "resume", position }),
       sendSeek: (position: number) => send({ type: "seek", position }),
@@ -302,7 +315,9 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               subtitles: Boolean(msg.subtitles),
               hlsSessionId: (msg.hlsSessionId as string) || null,
               playing: true,
-              position: 0,
+              // Non-zero when the host resumed from history or restarted the
+              // transcode at a seek target; 0 for a plain start.
+              position: (msg.position as number) ?? 0,
               hostDisconnected: false,
               commandSeq: prev.commandSeq + 1,
               browseContext: null,

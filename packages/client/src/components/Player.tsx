@@ -87,13 +87,16 @@ interface PlayerProps {
   /** Our own Discord user id — lets the people panel label and skip ourselves. */
   selfUserId?: string | null;
   subtitles: boolean;
+  /** Seconds to start at, from the host's watch history. Consumed once, on mount:
+   *  a later item (queue advance, next episode) starts from the beginning. */
+  resumePosition?: number;
   onBack: () => void;
   syncState?: SyncState;
   syncActions?: SyncActions;
   onPlayNext?: (item: QueueItem) => void;
 }
 
-export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syncState, syncActions, onPlayNext }: PlayerProps) {
+export function Player({ item, isHost, selfUserId = null, subtitles, resumePosition, onBack, syncState, syncActions, onPlayNext }: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -144,7 +147,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
   const networkRetryRef = useRef(0);
   const pendingStopRef = useRef<Promise<void> | null>(null);
   const bufferCleanupRef = useRef<(() => void) | null>(null);
-  const seekOffsetRef = useRef(0);
+  // Offset for the next transcode start. Seeded with the resume position so the
+  // very first session starts there; the HLS effect clears it after each use, so
+  // restarts and later items begin at 0 unless a seek sets it again.
+  const seekOffsetRef = useRef(resumePosition && resumePosition > 0 ? resumePosition : 0);
   // Offset the current transcode session started at — Plex has no segments
   // before this position, so seeks behind it always need a restart.
   // Note: a promoted host inherits the stream without knowing the original
@@ -557,7 +563,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
             // Send the formatted title, not the bare episode name — viewers
             // reconstruct their item from sync state alone (no show/season
             // fields), so this string is all they have to display.
-            syncActionsRef.current?.sendPlay(item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId!);
+            //
+            // The offset goes with it so the room's position starts where this
+            // transcode does — a resume from history, or a seek that needed a
+            // restart. Without it "play" resets everyone to 0:00 until the next
+            // heartbeat drags them back.
+            syncActionsRef.current?.sendPlay(
+              item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId!,
+              offset > 0 ? offset : undefined,
+            );
           }
         });
 
@@ -690,7 +704,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
             // Send the formatted title, not the bare episode name — viewers
             // reconstruct their item from sync state alone (no show/season
             // fields), so this string is all they have to display.
-            syncActionsRef.current?.sendPlay(item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId!);
+            syncActionsRef.current?.sendPlay(
+              item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId!,
+              offset > 0 ? offset : undefined,
+            );
           }
         };
         video.addEventListener("loadedmetadata", onLoaded, { once: true });

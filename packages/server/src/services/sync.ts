@@ -5,6 +5,7 @@ import { instanceHosts, updateInstanceHost } from "../routes/discord.js";
 import { plexFetch } from "./plex.js";
 import { getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode } from "../routes/plex.js";
 import { createTracker, handleTrackerSocket, destroyTracker } from "./tracker.js";
+import { recordProgress } from "./watch-history.js";
 
 /** Interval between WebSocket pings to detect dead connections. */
 const WS_PING_INTERVAL_MS = 30_000;
@@ -198,6 +199,27 @@ function interpolatedPosition(state: RoomState): number {
   if (!state.playing) return state.position;
   const elapsed = (Date.now() - state.updatedAt) / 1000;
   return state.position + elapsed;
+}
+
+/**
+ * Save the room's position to the host's watch history.
+ *
+ * The room position is the host's own playhead (they're the only one who sends
+ * heartbeats), so recording it against the host user id needs nothing from the
+ * client. `hostUserId` is passed explicitly rather than looked up, because the
+ * one caller that matters most — a host disconnecting — has to attribute the
+ * progress to the *departing* host, before the successor is installed.
+ *
+ * Unforced calls are throttled inside the history service; pause, seek, stop and
+ * disconnect force a write so the final position always lands. Fire-and-forget:
+ * a history failure must never interfere with playback.
+ */
+function persistProgress(room: Room, hostUserId: string | undefined, force: boolean): void {
+  const ratingKey = room.state.ratingKey;
+  if (!hostUserId || !ratingKey) return;
+  recordProgress(hostUserId, ratingKey, interpolatedPosition(room.state), { force }).catch(
+    (err) => console.error("[History] Failed to record progress:", err),
+  );
 }
 
 export function attachWebSocketServer(server: Server): void {
@@ -415,12 +437,20 @@ export function attachWebSocketServer(server: Server): void {
 
       switch (type) {
         case "play": {
+          // The transcode may start at an offset — resuming from watch history,
+          // or a seek that needed a restart. Carrying it here means viewers
+          // joining on this announcement land at the right place immediately
+          // instead of starting at 0:00 until the next heartbeat corrects them.
+          const startPosition =
+            typeof msg.position === "number" && Number.isFinite(msg.position) && msg.position > 0
+              ? msg.position
+              : 0;
           room.state.ratingKey = (msg.ratingKey as string) || null;
           room.state.title = (msg.title as string) || null;
           room.state.subtitles = Boolean(msg.subtitles);
           room.state.hlsSessionId = (msg.hlsSessionId as string) || null;
           room.state.playing = true;
-          room.state.position = 0;
+          room.state.position = startPosition;
           room.state.updatedAt = Date.now();
           room.state.browseContext = null;
           if (room.state.hlsSessionId) startRoomPing(roomId, room.state.hlsSessionId);
@@ -430,6 +460,7 @@ export function attachWebSocketServer(server: Server): void {
             title: room.state.title,
             subtitles: room.state.subtitles,
             hlsSessionId: room.state.hlsSessionId,
+            position: startPosition,
           });
           break;
         }
@@ -437,6 +468,7 @@ export function attachWebSocketServer(server: Server): void {
           room.state.playing = false;
           room.state.position = (msg.position as number) ?? room.state.position;
           room.state.updatedAt = Date.now();
+          persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
           broadcast(room, ws, { type: "pause", position: room.state.position });
           break;
         }
@@ -450,6 +482,7 @@ export function attachWebSocketServer(server: Server): void {
         case "seek": {
           room.state.position = (msg.position as number) ?? room.state.position;
           room.state.updatedAt = Date.now();
+          persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
           broadcast(room, ws, { type: "seek", position: room.state.position });
           break;
         }
@@ -478,6 +511,9 @@ export function attachWebSocketServer(server: Server): void {
           break;
         }
         case "stop": {
+          // Save where we got to before the state is torn down — this is the
+          // moment most resumes are created from.
+          persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
           // Capture before clearing so we can kill the exact Plex transcode
           const stoppingSessionId = room.state.hlsSessionId;
           room.state.ratingKey = null;
@@ -501,6 +537,8 @@ export function attachWebSocketServer(server: Server): void {
           room.state.position = (msg.position as number) ?? room.state.position;
           room.state.playing = msg.playing !== false;
           room.state.updatedAt = Date.now();
+          // Throttled inside the history service — this fires every 5s per room.
+          persistProgress(room, instanceHosts.get(roomId)?.hostUserId, false);
           broadcast(room, ws, {
             type: "heartbeat",
             position: room.state.position,
@@ -612,6 +650,11 @@ export function attachWebSocketServer(server: Server): void {
       room.clients.delete(client);
 
       if (client.isHost) {
+        // Attribute the position to the host who is leaving, before a successor
+        // takes over the instance record. Closing the tab is the other common
+        // way a watch ends, so this is as important as the explicit stop path.
+        persistProgress(room, client.userId, true);
+
         if (room.clients.size > 0) {
           // Prefer a co-host as successor — the host already trusted them with
           // control, so it's a less surprising handover than picking arbitrarily.

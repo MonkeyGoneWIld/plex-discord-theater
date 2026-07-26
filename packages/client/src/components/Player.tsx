@@ -353,6 +353,17 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
   // Single HLS session — no mid-stream switching
   useEffect(() => {
+    // Wait for the VPS relay config before touching anything. It arrives a beat
+    // after mount, so this effect always runs once with vpsRelay still null and
+    // then again once it resolves — and the state below is consumed on read:
+    // the adopted session id and the resume offset are both one-shot. Bailing
+    // out here rather than inside start() is what keeps the second run from
+    // finding them already spent (which started every resume at 0:00).
+    //
+    // It also avoids a double HLS start: initializing on the false default and
+    // then tearing down and re-initializing when the real config lands.
+    if (vpsRelay === null) return;
+
     let mounted = true;
 
     destroyLocal();
@@ -393,10 +404,6 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         // Give Plex time to fully release transcode resources
         await new Promise(r => setTimeout(r, 500));
       }
-
-      // Wait for VPS config before initializing HLS — prevents double-start
-      // (P2P init on false default, then teardown+re-init when config arrives)
-      if (vpsRelay === null) return;
 
       const video = videoRef.current;
       if (!mounted || !video) return;

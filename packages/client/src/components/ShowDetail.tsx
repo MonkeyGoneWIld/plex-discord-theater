@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
 import {
-  fetchMeta, fetchChildren, fetchSeerrTv,
-  getSessionToken, type PlexItem, type PlexMeta, type SeerrSeason,
+  fetchMeta, fetchChildren, fetchSeerrTv, fetchShowNextUp, historyEntryToItem,
+  getSessionToken, type HistoryEntry, type PlexItem, type PlexMeta, type SeerrSeason,
 } from "../lib/api";
+import { formatTimecode } from "../lib/format";
 import { MovieCard } from "./MovieCard";
 import { SeasonRequestGrid } from "./SeasonRequestGrid";
 import { SkeletonBlock } from "./SkeletonBlock";
@@ -11,6 +12,8 @@ interface ShowDetailProps {
   item: PlexItem;
   onSelectSeason: (season: PlexItem, show: PlexItem) => void;
   onReplaceWithSeason?: (season: PlexItem, show: PlexItem) => void;
+  /** Open an episode's detail view — used by the resume button. Omit to hide it. */
+  onSelectEpisode?: (episode: PlexItem) => void;
   onBack: () => void;
 }
 
@@ -21,7 +24,7 @@ function authUrl(url: string): string {
   return `${url}${sep}token=${encodeURIComponent(token)}`;
 }
 
-export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onBack }: ShowDetailProps) {
+export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelectEpisode, onBack }: ShowDetailProps) {
   const [meta, setMeta] = useState<PlexMeta | null>(null);
   const [seasons, setSeasons] = useState<PlexItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -32,6 +35,18 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onBack }
   const [missingSeasons, setMissingSeasons] = useState<SeerrSeason[]>([]);
   const [seerrDone, setSeerrDone] = useState(false);
   const [reloadNonce, setReloadNonce] = useState(0);
+  // Where this viewer left the show: the episode in progress, or the one after
+  // the last they finished. Null when never started or watched to the end.
+  const [nextUp, setNextUp] = useState<HistoryEntry | null>(null);
+
+  useEffect(() => {
+    setNextUp(null);
+    let cancelled = false;
+    fetchShowNextUp(item.ratingKey)
+      .then((res) => { if (!cancelled) setNextUp(res.nextUp); })
+      .catch(() => { /* the seasons grid is the real content — never block on this */ });
+    return () => { cancelled = true; };
+  }, [item.ratingKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -176,6 +191,38 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onBack }
 
               {meta.summary && (
                 <p style={styles.summary}>{meta.summary}</p>
+              )}
+
+              {/* Pick up where this viewer left off. Opens the episode's detail
+                  view rather than playing outright, so the audio/subtitle choice
+                  and the Resume/Start Over decision still happen there — the same
+                  route every other play in the app takes. */}
+              {nextUp && onSelectEpisode && (
+                <button
+                  onClick={() => onSelectEpisode(historyEntryToItem(nextUp))}
+                  style={styles.resumeBtn}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "#f0ad1a"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "#e5a00d"; }}
+                >
+                  <svg width="20" height="20" viewBox="0 0 22 22" fill="none" style={{ flexShrink: 0 }}>
+                    <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor"/>
+                  </svg>
+                  <span style={styles.resumeText}>
+                    <span style={styles.resumeLabel}>
+                      {/* Mid-episode reads as resuming; a fresh episode as
+                          continuing the show. */}
+                      {nextUp.positionMs > 0 ? "Resume Watching" : "Continue Watching"}
+                    </span>
+                    <span style={styles.resumeEpisode}>
+                      {nextUp.parentIndex != null && nextUp.index != null
+                        ? `Season ${nextUp.parentIndex} · Episode ${nextUp.index}`
+                        : nextUp.title}
+                      {nextUp.parentIndex != null && nextUp.index != null && ` — ${nextUp.title}`}
+                      {nextUp.positionMs > 0 && nextUp.durationMs > 0 &&
+                        ` · ${formatTimecode(nextUp.durationMs - nextUp.positionMs)} left`}
+                    </span>
+                  </span>
+                </button>
               )}
             </div>
           </div>
@@ -350,6 +397,38 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#aaa",
     fontSize: "13px",
     fontWeight: 500,
+  },
+  resumeBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "12px",
+    alignSelf: "flex-start",
+    padding: "12px 24px",
+    borderRadius: "12px",
+    border: "none",
+    background: "#e5a00d",
+    color: "#000",
+    cursor: "pointer",
+    fontFamily: "inherit",
+    textAlign: "left" as const,
+    transition: "background 0.15s ease",
+    boxShadow: "0 4px 20px rgba(229,160,13,0.3)",
+    maxWidth: "100%",
+  },
+  resumeText: {
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: "2px",
+    minWidth: 0,
+  },
+  resumeLabel: { fontSize: "15px", fontWeight: 700, lineHeight: 1.2 },
+  resumeEpisode: {
+    fontSize: "12px",
+    fontWeight: 600,
+    opacity: 0.75,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap" as const,
   },
   summary: {
     fontSize: "15px",

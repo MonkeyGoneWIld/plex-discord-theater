@@ -20,7 +20,9 @@ type View =
   | { kind: "season"; item: PlexItem; show: PlexItem }
   | { kind: "detail"; item: PlexItem }
   | { kind: "external-detail"; item: PlexItem }
-  | { kind: "player"; item: PlexItem; subtitles: boolean };
+  // resumePosition (seconds) is set only when the host chose "Resume" on the
+  // detail view; every other route into the player starts from the beginning.
+  | { kind: "player"; item: PlexItem; subtitles: boolean; resumePosition?: number };
 
 // Breadcrumb label for a stack entry.
 function crumbLabel(v: View): string {
@@ -140,6 +142,19 @@ export function App() {
     scrollPosRef.current = [0];
     emitBrowse("Browsing the library");
   }, [emitBrowse]);
+
+  // Bumped whenever a watch ends, so the Library reloads Continue Watching and
+  // History. The Library stays mounted behind detail views, so without a nudge
+  // it would still show the progress from before the film was played.
+  const [historyNonce, setHistoryNonce] = useState(0);
+  const prevPlayingKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevPlayingKeyRef.current;
+    prevPlayingKeyRef.current = syncState.ratingKey;
+    // Fires both on stop (key → null) and on switching titles mid-session,
+    // which is exactly when the previous item's saved position changed.
+    if (prev && prev !== syncState.ratingKey) setHistoryNonce((n) => n + 1);
+  }, [syncState.ratingKey]);
 
   // Track previous ratingKey to detect changes
   const prevRatingKeyRef = useRef<string | null>(null);
@@ -276,8 +291,8 @@ export function App() {
     }
   }, [pushView, emitBrowse]);
 
-  const handlePlay = useCallback((item: PlexItem, subtitles: boolean) => {
-    pushView({ kind: "player", item, subtitles });
+  const handlePlay = useCallback((item: PlexItem, subtitles: boolean, resumePosition?: number) => {
+    pushView({ kind: "player", item, subtitles, resumePosition });
   }, [pushView]);
 
   const handleShowSeason = useCallback((season: PlexItem, show: PlexItem) => {
@@ -566,6 +581,8 @@ export function App() {
           activeSection={librarySection}
           onActiveSectionChange={setLibrarySection}
           onBrowseContext={effectiveIsHost ? (ctx) => syncActions.sendBrowse(ctx) : undefined}
+          historyNonce={historyNonce}
+          visible={view.kind === "library"}
         />
       </div>
 
@@ -574,6 +591,9 @@ export function App() {
           item={view.item}
           onSelectSeason={handleShowSeason}
           onReplaceWithSeason={handleReplaceShowWithSeason}
+          // Resume jumps straight to the episode; the breadcrumb synthesizes the
+          // show and season it skipped past, so Back still walks up properly.
+          onSelectEpisode={handleSeasonEpisode}
           onBack={popView}
         />
       )}
@@ -634,6 +654,7 @@ export function App() {
             isHost={effectiveIsHost}
             selfUserId={userId}
             subtitles={view.subtitles}
+            resumePosition={view.resumePosition}
             onBack={popView}
             syncState={syncState}
             syncActions={syncActions}

@@ -5,6 +5,16 @@ import { getSessionToken } from "../lib/api";
 interface MovieCardProps {
   item: PlexItem;
   onClick: (item: PlexItem) => void;
+  /** Watched fraction (0-1) — draws a progress bar across the bottom of the poster. */
+  progress?: number | null;
+  /** Marks the poster with a "watched" tick. Used by the history view. */
+  watched?: boolean;
+  /** Adds a dismiss control to the poster. Omit for a plain card. */
+  onRemove?: (item: PlexItem) => void;
+  /** Tooltip and accessible name for that control — the two surfaces that use
+   *  it do different things (leave Continue Watching vs. forget entirely), so
+   *  the wording has to come from the caller. */
+  removeLabel?: string;
 }
 
 function authThumbUrl(thumb: string, w?: number, h?: number): string {
@@ -16,7 +26,7 @@ function authThumbUrl(thumb: string, w?: number, h?: number): string {
   return url;
 }
 
-export function MovieCard({ item, onClick }: MovieCardProps) {
+export function MovieCard({ item, onClick, progress, watched, onRemove, removeLabel = "Remove" }: MovieCardProps) {
   // Online (Discover) result: in search but not in the library. Clickable — it
   // opens a detail view (with a request button) rather than playback.
   const external = item.inLibrary === false;
@@ -57,6 +67,41 @@ export function MovieCard({ item, onClick }: MovieCardProps) {
           <div style={styles.placeholder}>No Poster</div>
         )}
         {external && <div style={styles.badge}>Not in library</div>}
+        {watched && (
+          <div style={styles.watchedBadge} title="Watched">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+              <path d="M3 8.5L6.5 12L13 4.5" stroke="currentColor" strokeWidth="2.2"
+                strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </div>
+        )}
+        {/* A nested <button> would be invalid inside the card button, so the
+            dismiss control is a span with an explicit role and key handling. */}
+        {onRemove && (
+          <span
+            role="button"
+            tabIndex={0}
+            aria-label={`${removeLabel}: ${item.title}`}
+            title={removeLabel}
+            style={styles.removeBtn}
+            onClick={(e) => { e.stopPropagation(); onRemove(item); }}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter" && e.key !== " ") return;
+              e.preventDefault();
+              e.stopPropagation();
+              onRemove(item);
+            }}
+          >
+            <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+              <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+            </svg>
+          </span>
+        )}
+        {progress != null && progress > 0 && (
+          <div style={styles.progressTrack}>
+            <div style={{ ...styles.progressFill, width: `${Math.min(100, progress * 100)}%` }} />
+          </div>
+        )}
       </div>
       <div style={styles.info}>
         <div style={styles.title}>{item.title}</div>
@@ -105,6 +150,45 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     letterSpacing: "0.3px",
     textTransform: "uppercase" as const,
+  },
+  watchedBadge: {
+    position: "absolute",
+    top: "8px",
+    right: "8px",
+    width: "22px",
+    height: "22px",
+    borderRadius: "50%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "rgba(0,0,0,0.72)",
+    color: "#6a9955",
+  },
+  removeBtn: {
+    position: "absolute",
+    top: "8px",
+    left: "8px",
+    width: "22px",
+    height: "22px",
+    borderRadius: "50%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "rgba(0,0,0,0.72)",
+    color: "rgba(255,255,255,0.75)",
+    cursor: "pointer",
+  },
+  progressTrack: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: "4px",
+    background: "rgba(0,0,0,0.55)",
+  },
+  progressFill: {
+    height: "100%",
+    background: "#e5a00d",
   },
   poster: {
     width: "100%",

@@ -10,13 +10,27 @@ import {
   fetchSectionItems,
   fetchGenres,
   searchPlex,
+  fetchContinueWatching,
+  fetchHistory,
+  deleteHistoryEntry,
+  dismissFromContinueWatching,
+  clearHistory,
+  historyEntryToItem,
+  type HistoryEntry,
   type PlexItem,
   type PlexSection,
   type Genre,
   type PlexHub,
 } from "../lib/api";
+import { formatWhen } from "../lib/format";
 
 const PAGE_SIZE = 200;
+const HISTORY_PAGE_SIZE = 100;
+
+/** Watched fraction for a history entry, or null when the runtime is unknown. */
+function progressOf(entry: HistoryEntry): number | null {
+  return entry.durationMs > 0 ? Math.min(1, entry.positionMs / entry.durationMs) : null;
+}
 
 function describeError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
@@ -31,13 +45,28 @@ interface LibraryProps {
   activeSection: string | null;
   onActiveSectionChange: (id: string) => void;
   onBrowseContext?: (context: string) => void;
+  /** Bumped when a watch ends, so Continue Watching and History reload. Catches
+   *  playback ending while the library is already on screen, which no
+   *  navigation signal would. */
+  historyNonce?: number;
+  /** Whether the library is the view on screen. It stays mounted (hidden) behind
+   *  detail and player views, so this is what tells the history rows to reload
+   *  on the way back — otherwise they'd still show pre-playback positions. */
+  visible?: boolean;
 }
 
-export function Library({ isHost, onSelect, activeSection, onActiveSectionChange, onBrowseContext }: LibraryProps) {
+export function Library({ isHost, onSelect, activeSection, onActiveSectionChange, onBrowseContext, historyNonce = 0, visible = true }: LibraryProps) {
   const [sections, setSections] = useState<PlexSection[]>([]);
-  // "home" is a virtual tab id representing the real Plex homepage (hubs).
-  // It's kept in the same activeSection state so tab switching logic is shared.
+  // "home" and "history" are virtual tab ids — one for the real Plex homepage
+  // (hubs), one for this app's own watch history. Both are kept in the same
+  // activeSection state so tab switching logic is shared with real sections.
   const isHomeTab = activeSection === "home";
+  const isHistoryTab = activeSection === "history";
+  const [continueItems, setContinueItems] = useState<HistoryEntry[]>([]);
+  const [historyItems, setHistoryItems] = useState<HistoryEntry[]>([]);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [homeHubs, setHomeHubs] = useState<PlexHub[]>([]);
   const [homeLoading, setHomeLoading] = useState(true);
   const [items, setItems] = useState<PlexItem[]>([]);
@@ -78,7 +107,9 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       .finally(() => setLoading(false));
   }, [retryNonce]);
 
-  // Load Plex homepage hubs (Continue Watching, Recently Added, Collections, etc.)
+  // Load Plex homepage hubs (Recently Added, Collections, etc.). Plex's own
+  // Continue Watching hub is filtered out server-side — it tracks the shared
+  // Plex account, not the Discord host, so this app keeps its own (below).
   useEffect(() => {
     setHomeLoading(true);
     setHomeError(null);
@@ -91,9 +122,70 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       .finally(() => setHomeLoading(false));
   }, [retryNonce]);
 
+  // Continue Watching — the caller's own in-progress items. Refetched every time
+  // the row comes back on screen (returning from a detail or player view,
+  // switching to the Home tab) as well as when a watch ends, since positions
+  // change while this component sits mounted and hidden.
+  useEffect(() => {
+    if (!visible || !isHomeTab) return;
+    fetchContinueWatching()
+      .then(({ items: entries }) => setContinueItems(entries))
+      // A missing row is invisible, not an error state — never let history
+      // trouble take the whole Home tab down with it.
+      .catch(() => setContinueItems([]));
+  }, [visible, isHomeTab, retryNonce, historyNonce]);
+
+  // Full history — same refresh discipline, only while its own tab is open.
+  useEffect(() => {
+    if (!visible || !isHistoryTab) return;
+    setHistoryLoading(true);
+    setHistoryError(null);
+    fetchHistory({ limit: HISTORY_PAGE_SIZE })
+      .then((res) => {
+        setHistoryItems(res.items);
+        setHistoryTotal(res.total);
+      })
+      .catch((err) => {
+        console.error(err);
+        const msg = err instanceof Error ? err.message : String(err);
+        setHistoryError(
+          msg.includes("429")
+            ? "You're sending requests too quickly and have been temporarily rate limited. Wait a few minutes, then retry."
+            : "Couldn't load your watch history. Check your connection, then retry.",
+        );
+      })
+      .finally(() => setHistoryLoading(false));
+  }, [isHistoryTab, retryNonce, historyNonce]);
+
+  // Leave Continue Watching but stay in history. Only the row is affected, so
+  // the History tab's copy of the item is deliberately left alone.
+  // All of these are optimistic: the card goes immediately, and a failed
+  // request just means it reappears on the next load rather than the click
+  // appearing to do nothing.
+  const handleDismissFromContinue = useCallback((item: PlexItem) => {
+    setContinueItems((prev) => prev.filter((e) => e.ratingKey !== item.ratingKey));
+    dismissFromContinueWatching(item.ratingKey).catch(console.error);
+  }, []);
+
+  // Forget the item outright. Continue Watching is a subset of history, so this
+  // has to clear it from both.
+  const handleForgetFromHistory = useCallback((item: PlexItem) => {
+    setContinueItems((prev) => prev.filter((e) => e.ratingKey !== item.ratingKey));
+    setHistoryItems((prev) => prev.filter((e) => e.ratingKey !== item.ratingKey));
+    setHistoryTotal((n) => Math.max(0, n - 1));
+    deleteHistoryEntry(item.ratingKey).catch(console.error);
+  }, []);
+
+  const handleClearHistory = useCallback(() => {
+    setContinueItems([]);
+    setHistoryItems([]);
+    setHistoryTotal(0);
+    clearHistory().catch(console.error);
+  }, []);
+
   // Fetch genres when section changes
   useEffect(() => {
-    if (!activeSection || isHomeTab) return;
+    if (!activeSection || isHomeTab || isHistoryTab) return;
     setGenres([]);
     // Keep the existing values when they're already at their defaults. A fresh
     // [] or an identical string still counts as a change and would re-trigger
@@ -108,7 +200,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
 
   // Load items when section, genres, or sort changes
   useEffect(() => {
-    if (!activeSection || isHomeTab) return;
+    if (!activeSection || isHomeTab || isHistoryTab) return;
     // Cancel any in-flight load-more request
     loadMoreAbort.current?.abort();
     loadMoreAbort.current = null;
@@ -279,13 +371,78 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
                 {s.title}
               </button>
             ))}
+            <button
+              onClick={() => {
+                onActiveSectionChange("history");
+                if (onBrowseContext) onBrowseContext("Browsing their watch history");
+              }}
+              style={{
+                ...styles.tab,
+                ...(isHistoryTab ? styles.tabActive : {}),
+              }}
+            >
+              History
+            </button>
           </div>
         )}
       </div>
 
       <div style={styles.wideWrap}>
 
-      {isHomeTab && !searchResults ? (
+      {isHistoryTab && !searchResults ? (
+        historyLoading ? (
+          <SkeletonGrid />
+        ) : historyError ? (
+          <div style={styles.emptyState}>
+            <div style={styles.emptyIcon}>
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" />
+              </svg>
+            </div>
+            <p style={styles.emptyText}>{historyError}</p>
+            <button onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>
+              Retry
+            </button>
+          </div>
+        ) : historyItems.length === 0 ? (
+          <div style={styles.emptyState}>
+            <div style={styles.emptyIcon}>
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+              </svg>
+            </div>
+            <p style={styles.emptyText}>
+              Nothing watched yet. Anything you play while hosting shows up here.
+            </p>
+          </div>
+        ) : (
+          <>
+            <div style={styles.historyHeader}>
+              <span style={styles.historyCount}>
+                {historyTotal} {historyTotal === 1 ? "title" : "titles"}
+              </span>
+              <button onClick={handleClearHistory} style={styles.clearBtn}>
+                Clear history
+              </button>
+            </div>
+            <div style={styles.grid}>
+              {historyItems.map((entry) => (
+                <div key={entry.ratingKey}>
+                  <MovieCard
+                    item={historyEntryToItem(entry)}
+                    onClick={handleClick}
+                    progress={progressOf(entry)}
+                    watched={entry.watched}
+                    onRemove={handleForgetFromHistory}
+                    removeLabel="Remove from watch history"
+                  />
+                  <div style={styles.historyWhen}>{formatWhen(entry.updatedAt)}</div>
+                </div>
+              ))}
+            </div>
+          </>
+        )
+      ) : isHomeTab && !searchResults ? (
         homeLoading ? (
           <SkeletonGrid />
         ) : homeError ? (
@@ -300,7 +457,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
               Retry
             </button>
           </div>
-        ) : homeHubs.length === 0 ? (
+        ) : homeHubs.length === 0 && continueItems.length === 0 ? (
           <div style={styles.emptyState}>
             <div style={styles.emptyIcon}>
               <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -314,6 +471,26 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
           </div>
         ) : (
           <div style={styles.hubsWrap}>
+            {/* Ours, not Plex's — the server drops Plex's own Continue Watching
+                hub, since this app tracks progress per Discord host instead. */}
+            {continueItems.length > 0 && (
+              <div style={styles.hubSection}>
+                <h3 style={styles.hubLabel}>Continue Watching</h3>
+                <div style={styles.hubRow} className="scroll-row">
+                  {continueItems.map((entry) => (
+                    <div key={entry.ratingKey} style={styles.hubCard}>
+                      <MovieCard
+                        item={historyEntryToItem(entry)}
+                        onClick={handleClick}
+                        progress={progressOf(entry)}
+                        onRemove={handleDismissFromContinue}
+                        removeLabel="Remove from Continue Watching"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             {homeHubs.map((hub) => (
               <div key={hub.hubIdentifier} style={styles.hubSection}>
                 <h3 style={styles.hubLabel}>{hub.title}</h3>
@@ -451,6 +628,36 @@ const styles: Record<string, React.CSSProperties> = {
     letterSpacing: "0.3px",
     color: "rgba(255,255,255,0.45)",
     textTransform: "uppercase" as const,
+  },
+  historyHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "8px 24px 0",
+  },
+  historyCount: {
+    fontSize: "13px",
+    fontWeight: 600,
+    letterSpacing: "0.3px",
+    color: "rgba(255,255,255,0.45)",
+    textTransform: "uppercase" as const,
+  },
+  clearBtn: {
+    padding: "6px 14px",
+    borderRadius: "8px",
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "transparent",
+    color: "#888",
+    cursor: "pointer",
+    fontSize: "12px",
+    fontWeight: 600,
+    fontFamily: "inherit",
+  },
+  historyWhen: {
+    padding: "6px 2px 0",
+    fontSize: "11px",
+    color: "#666",
+    fontWeight: 500,
   },
   emptyState: {
     display: "flex",

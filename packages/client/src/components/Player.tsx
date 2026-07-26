@@ -87,13 +87,16 @@ interface PlayerProps {
   /** Our own Discord user id — lets the people panel label and skip ourselves. */
   selfUserId?: string | null;
   subtitles: boolean;
+  /** Seconds to start at, from the host's watch history. Consumed once, on mount:
+   *  a later item (queue advance, next episode) starts from the beginning. */
+  resumePosition?: number;
   onBack: () => void;
   syncState?: SyncState;
   syncActions?: SyncActions;
   onPlayNext?: (item: QueueItem) => void;
 }
 
-export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syncState, syncActions, onPlayNext }: PlayerProps) {
+export function Player({ item, isHost, selfUserId = null, subtitles, resumePosition, onBack, syncState, syncActions, onPlayNext }: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -144,7 +147,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
   const networkRetryRef = useRef(0);
   const pendingStopRef = useRef<Promise<void> | null>(null);
   const bufferCleanupRef = useRef<(() => void) | null>(null);
-  const seekOffsetRef = useRef(0);
+  // Offset for the next transcode start. Seeded with the resume position so the
+  // very first session starts there; the HLS effect clears it after each use, so
+  // restarts and later items begin at 0 unless a seek sets it again.
+  const seekOffsetRef = useRef(resumePosition && resumePosition > 0 ? resumePosition : 0);
   // Offset the current transcode session started at — Plex has no segments
   // before this position, so seeks behind it always need a restart.
   // Note: a promoted host inherits the stream without knowing the original
@@ -347,6 +353,17 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
 
   // Single HLS session — no mid-stream switching
   useEffect(() => {
+    // Wait for the VPS relay config before touching anything. It arrives a beat
+    // after mount, so this effect always runs once with vpsRelay still null and
+    // then again once it resolves — and the state below is consumed on read:
+    // the adopted session id and the resume offset are both one-shot. Bailing
+    // out here rather than inside start() is what keeps the second run from
+    // finding them already spent (which started every resume at 0:00).
+    //
+    // It also avoids a double HLS start: initializing on the false default and
+    // then tearing down and re-initializing when the real config lands.
+    if (vpsRelay === null) return;
+
     let mounted = true;
 
     destroyLocal();
@@ -387,10 +404,6 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
         // Give Plex time to fully release transcode resources
         await new Promise(r => setTimeout(r, 500));
       }
-
-      // Wait for VPS config before initializing HLS — prevents double-start
-      // (P2P init on false default, then teardown+re-init when config arrives)
-      if (vpsRelay === null) return;
 
       const video = videoRef.current;
       if (!mounted || !video) return;
@@ -557,7 +570,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
             // Send the formatted title, not the bare episode name — viewers
             // reconstruct their item from sync state alone (no show/season
             // fields), so this string is all they have to display.
-            syncActionsRef.current?.sendPlay(item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId!);
+            //
+            // The offset goes with it so the room's position starts where this
+            // transcode does — a resume from history, or a seek that needed a
+            // restart. Without it "play" resets everyone to 0:00 until the next
+            // heartbeat drags them back.
+            syncActionsRef.current?.sendPlay(
+              item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId!,
+              offset > 0 ? offset : undefined,
+            );
           }
         });
 
@@ -610,7 +631,17 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
           if (recoveryAttemptRef.current < MAX_RECOVERY_ATTEMPTS) {
             recoveryAttemptRef.current++;
             const video = videoRef.current;
-            recoveryPositionRef.current = video?.currentTime ?? 0;
+            // A promoted host (one that didn't mount as host) lands here when the
+            // departing host's transcode is torn down on transfer — its own
+            // playhead may have drifted from the room. Resume at the room's
+            // last-synced position (where the old host actually was) rather than
+            // this client's drifted currentTime, so the fresh transcode starts at
+            // the right place instead of somewhere ahead of or behind the room.
+            const roomPos = syncStateRef.current?.position;
+            recoveryPositionRef.current =
+              !mountedAsHostRef.current && typeof roomPos === "number" && roomPos > 0
+                ? roomPos
+                : (video?.currentTime ?? 0);
 
             // Capture freeze frame (reuse canvasRef from track switching)
             if (video && video.videoWidth > 0) {
@@ -680,7 +711,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, onBack, syn
             // Send the formatted title, not the bare episode name — viewers
             // reconstruct their item from sync state alone (no show/season
             // fields), so this string is all they have to display.
-            syncActionsRef.current?.sendPlay(item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId!);
+            syncActionsRef.current?.sendPlay(
+              item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId!,
+              offset > 0 ? offset : undefined,
+            );
           }
         };
         video.addEventListener("loadedmetadata", onLoaded, { once: true });

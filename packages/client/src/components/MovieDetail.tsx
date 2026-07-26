@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { fetchMeta, fetchProgress, invalidateMeta, setStreams, getSessionToken, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
 import { formatTimecode } from "../lib/format";
+import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { SkeletonBlock } from "./SkeletonBlock";
 import type { QueueItem, SuggestionItem } from "../hooks/useSync";
 
@@ -164,6 +165,10 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   // The host's own saved position for this item, or null if they've never
   // played it. Only the host can start playback, so only the host fetches it.
   const [progress, setProgress] = useState<HistoryEntry | null>(null);
+  // Phone portrait: the poster and the detail column can't sit side by side.
+  // At 390px the fixed 240px poster leaves the text roughly 66px, which wraps
+  // the title one word per line and pushes the buttons off the screen edge.
+  const narrow = useMediaQuery(NARROW_QUERY);
 
   useEffect(() => {
     let cancelled = false;
@@ -278,12 +283,20 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
       </button>
 
       {meta ? (
-        <div style={styles.content}>
-          {/* Poster + Info layout */}
-          <div style={styles.layout}>
+        <div style={{ ...styles.content, ...(narrow ? styles.contentNarrow : {}) }}>
+          {/* Poster + Info layout — stacks on phone portrait */}
+          <div style={{ ...styles.layout, ...(narrow ? styles.layoutNarrow : {}) }}>
             {/* Poster */}
             {posterUrl && (
-              <div style={{ ...styles.posterWrap, ...(item.type === "episode" ? styles.posterWrapEpisode : {}) }}>
+              <div
+                style={{
+                  ...styles.posterWrap,
+                  ...(item.type === "episode" ? styles.posterWrapEpisode : {}),
+                  ...(narrow
+                    ? (item.type === "episode" ? styles.posterWrapNarrowEpisode : styles.posterWrapNarrow)
+                    : {}),
+                }}
+              >
                 <img
                   src={posterUrl}
                   alt={meta.title}
@@ -306,7 +319,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                 </>
               )}
 
-              <h1 style={styles.title}>{meta.title}</h1>
+              <h1 style={{ ...styles.title, ...(narrow ? styles.titleNarrow : {}) }}>{meta.title}</h1>
 
               {/* Meta row */}
               <div style={styles.metaRow}>
@@ -334,7 +347,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
               )}
 
               {/* Audio & Subtitle selectors */}
-              <div style={styles.trackRow}>
+              <div style={{ ...styles.trackRow, ...(narrow ? styles.trackRowNarrow : {}) }}>
                 {meta.audioTracks.length > 1 && (
                   <div style={styles.trackField}>
                     <label style={styles.trackLabel}>Audio</label>
@@ -380,23 +393,26 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
               )}
 
               {/* Play / Waiting */}
-              <div style={styles.actions}>
+              <div style={{ ...styles.actions, ...(narrow ? styles.actionsNarrow : {}) }}>
                 {isHost ? (
                   <>
                     {resumeMs != null ? (
                       <>
-                        <button onClick={() => handlePlay(resumeMs)} style={styles.playBtn}>
+                        <button onClick={() => handlePlay(resumeMs)} style={{ ...styles.playBtn, ...(narrow ? styles.playBtnNarrow : {}) }}>
                           <svg width="22" height="22" viewBox="0 0 22 22" fill="none" style={{ marginRight: 8 }}>
                             <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor"/>
                           </svg>
                           Resume from {formatTimecode(resumeMs)}
                         </button>
-                        <button onClick={() => handlePlay()} style={styles.startOverBtn}>
+                        <button
+                          onClick={() => handlePlay()}
+                          style={{ ...styles.startOverBtn, ...(narrow ? styles.startOverBtnNarrow : {}) }}
+                        >
                           Start Over
                         </button>
                       </>
                     ) : (
-                      <button onClick={() => handlePlay()} style={styles.playBtn}>
+                      <button onClick={() => handlePlay()} style={{ ...styles.playBtn, ...(narrow ? styles.playBtnNarrow : {}) }}>
                         <svg width="22" height="22" viewBox="0 0 22 22" fill="none" style={{ marginRight: 8 }}>
                           <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor"/>
                         </svg>
@@ -544,6 +560,48 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     gap: "36px",
     alignItems: "flex-start",
+  },
+  // ─── Phone portrait overrides ──────────────────────────────────
+  // Everything below is the same panel with the poster stacked above the text
+  // instead of beside it, so the detail column gets the full screen width.
+  contentNarrow: {
+    padding: "0 16px 40px",
+  },
+  layoutNarrow: {
+    flexDirection: "column",
+    gap: "20px",
+    alignItems: "stretch",
+  },
+  posterWrapNarrow: {
+    // Centred and capped rather than full-bleed: a 2:3 poster at full phone
+    // width is taller than the screen and buries everything below it.
+    width: "min(180px, 45%)",
+    alignSelf: "center",
+  },
+  posterWrapNarrowEpisode: {
+    // Stills are 16:9, so full width costs little vertical space.
+    width: "100%",
+  },
+  titleNarrow: {
+    fontSize: "24px",
+  },
+  trackRowNarrow: {
+    flexDirection: "column",
+    gap: "12px",
+  },
+  actionsNarrow: {
+    flexDirection: "column",
+    alignItems: "stretch",
+  },
+  playBtnNarrow: {
+    // Stretched to the column, so a long label like "Resume from 1:01:55"
+    // wraps inside the button instead of running off the screen edge.
+    justifyContent: "center",
+    padding: "14px 20px",
+    textAlign: "center",
+  },
+  startOverBtnNarrow: {
+    textAlign: "center",
   },
   posterWrap: {
     flexShrink: 0,

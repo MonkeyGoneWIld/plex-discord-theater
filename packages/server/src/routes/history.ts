@@ -14,6 +14,7 @@ import {
   getHistory,
   getProgress,
   getProgressMany,
+  getShowNextUp,
   deleteHistoryEntry,
   dismissFromContinueWatching,
   clearHistory,
@@ -92,6 +93,27 @@ router.delete("/continue/:ratingKey", async (req: Request, res: Response) => {
   } catch (err) {
     console.error("Dismiss error:", err);
     res.status(500).json({ error: "Failed to update Continue Watching" });
+  }
+});
+
+/**
+ * GET /api/history/show/:ratingKey/next-up
+ * The episode to pick this show back up on, or null when it has never been
+ * started or is finished. Powers the resume button on a show's page.
+ */
+router.get("/show/:ratingKey/next-up", async (req: Request, res: Response) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+  const ratingKey = req.params.ratingKey as string;
+  if (!RATING_KEY_RE.test(ratingKey)) {
+    res.status(400).json({ error: "Invalid rating key" });
+    return;
+  }
+  try {
+    res.json({ nextUp: await getShowNextUp(userId, ratingKey) });
+  } catch (err) {
+    console.error("Show next-up error:", err);
+    res.status(502).json({ error: "Failed to resolve next episode" });
   }
 });
 

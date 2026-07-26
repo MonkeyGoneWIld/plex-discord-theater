@@ -370,7 +370,13 @@ async function fetchShowEpisodes(showRatingKey: string): Promise<PlexHistoryMeta
 async function resolveNextUp(
   userId: string,
   after: HistoryEntry,
+  options: { respectDismissals?: boolean } = {},
 ): Promise<HistoryEntry | null> {
+  // Dismissals are about the Continue Watching row, not the show itself. Someone
+  // opening the show's own page has asked about it directly, so the resume
+  // button there ignores them — the same reasoning that keeps a dismissed film
+  // resumable from its detail view.
+  const respectDismissals = options.respectDismissals !== false;
   const showKey = after.grandparentRatingKey
     ?? (await fetchItemSummary(after.ratingKey))?.grandparentRatingKey;
   if (!showKey) return null;
@@ -382,7 +388,7 @@ async function resolveNextUp(
 
   for (const episode of episodes.slice(i + 1)) {
     const existing = selectOneStmt.get(userId, episode.ratingKey!) as HistoryRow | undefined;
-    if (existing?.dismissed === 1) return null;
+    if (respectDismissals && existing?.dismissed === 1) return null;
     if (existing?.watched === 1) continue;
     // Part-watched already: hand back the real row so its resume position shows.
     if (existing) return toEntry(existing);
@@ -554,6 +560,31 @@ export function getHistory(
   const rows = selectHistoryStmt.all(userId, limit, offset) as HistoryRow[];
   const { count } = countStmt.get(userId) as { count: number };
   return { items: rows.map(toEntry), total: count };
+}
+
+const selectLatestForShowStmt = db.prepare(`
+  SELECT ${SELECT_COLUMNS} FROM watch_history
+  WHERE user_id = ? AND grandparent_rating_key = ? AND ${NOT_A_DISMISSAL_MARKER}
+  ORDER BY updated_at DESC LIMIT 1
+`);
+
+/**
+ * Where to pick a show back up: the episode in progress, or the next one after
+ * the last one finished. Null when the user has never played any of it (there's
+ * nothing to resume) or has watched it through to the end.
+ *
+ * Unlike the Continue Watching row, this ignores dismissals — see resolveNextUp.
+ */
+export async function getShowNextUp(
+  userId: string,
+  showRatingKey: string,
+): Promise<HistoryEntry | null> {
+  const row = selectLatestForShowStmt.get(userId, showRatingKey) as HistoryRow | undefined;
+  if (!row) return null;
+
+  const entry = toEntry(row);
+  if (!entry.watched) return entry;
+  return resolveNextUp(userId, entry, { respectDismissals: false });
 }
 
 /** A single item's saved progress, or null if this user has never played it. */

@@ -441,6 +441,12 @@ export function fetchProgress(ratingKey: string): Promise<{ progress: HistoryEnt
   return apiGet(`/api/history/progress/${encodeURIComponent(ratingKey)}`);
 }
 
+/** Where to pick a show back up, or null if it's never been started or is
+ *  finished. Ignores Continue Watching dismissals — see the server for why. */
+export function fetchShowNextUp(showRatingKey: string): Promise<{ nextUp: HistoryEntry | null }> {
+  return apiGet(`/api/history/show/${encodeURIComponent(showRatingKey)}/next-up`);
+}
+
 /** Progress for several items in one request, keyed by rating key. Items never
  *  played are absent from the map rather than null. */
 export function fetchProgressMany(

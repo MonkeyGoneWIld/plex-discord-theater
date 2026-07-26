@@ -591,6 +591,9 @@ export function App() {
           item={view.item}
           onSelectSeason={handleShowSeason}
           onReplaceWithSeason={handleReplaceShowWithSeason}
+          // Resume jumps straight to the episode; the breadcrumb synthesizes the
+          // show and season it skipped past, so Back still walks up properly.
+          onSelectEpisode={handleSeasonEpisode}
           onBack={popView}
         />
       )}

@@ -441,6 +441,14 @@ export function fetchProgress(ratingKey: string): Promise<{ progress: HistoryEnt
   return apiGet(`/api/history/progress/${encodeURIComponent(ratingKey)}`);
 }
 
+/** Progress for several items in one request, keyed by rating key. Items never
+ *  played are absent from the map rather than null. */
+export function fetchProgressMany(
+  ratingKeys: string[],
+): Promise<{ entries: Record<string, HistoryEntry> }> {
+  return apiGet(`/api/history/progress?keys=${encodeURIComponent(ratingKeys.join(","))}`);
+}
+
 /** Forget an item outright — it leaves both History and Continue Watching. */
 export function deleteHistoryEntry(ratingKey: string): Promise<void> {
   return apiDelete(`/api/history/entry/${encodeURIComponent(ratingKey)}`);

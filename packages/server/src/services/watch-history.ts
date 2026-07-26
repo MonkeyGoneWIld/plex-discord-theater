@@ -562,6 +562,43 @@ export function getProgress(userId: string, ratingKey: string): HistoryEntry | n
   return row ? toEntry(row) : null;
 }
 
+// One prepared statement per IN-list size, reused across calls. Episode counts
+// repeat heavily (every season of a show is usually the same length), so this
+// stays tiny while avoiding a re-prepare on each request.
+const manyStmtCache = new Map<number, ReturnType<typeof db.prepare>>();
+
+function progressManyStmt(count: number) {
+  let stmt = manyStmtCache.get(count);
+  if (!stmt) {
+    const placeholders = new Array(count).fill("?").join(",");
+    stmt = db.prepare(
+      `SELECT ${SELECT_COLUMNS} FROM watch_history
+       WHERE user_id = ? AND rating_key IN (${placeholders})`,
+    );
+    manyStmtCache.set(count, stmt);
+  }
+  return stmt;
+}
+
+/**
+ * Saved progress for several items at once, keyed by rating key. Items the user
+ * has never played are simply absent, so the caller checks for a key rather than
+ * a null. Lets an episode list mark itself up in one request instead of one per
+ * episode.
+ */
+export function getProgressMany(
+  userId: string,
+  ratingKeys: string[],
+): Record<string, HistoryEntry> {
+  const out: Record<string, HistoryEntry> = {};
+  if (ratingKeys.length === 0) return out;
+  // Bound values go as a single array rather than spread arguments — the arity
+  // varies with the episode count, which a spread can't express to the types.
+  const rows = progressManyStmt(ratingKeys.length).all([userId, ...ratingKeys]) as HistoryRow[];
+  for (const row of rows) out[row.rating_key] = toEntry(row);
+  return out;
+}
+
 /** Whether an entry is far enough in to be worth offering a resume for. */
 export function isResumable(entry: HistoryEntry): boolean {
   return !entry.watched && entry.positionMs >= MIN_RESUME_MS;

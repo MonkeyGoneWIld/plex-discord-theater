@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { fetchChildren, getSessionToken, type PlexItem } from "../lib/api";
+import { fetchChildren, fetchProgressMany, getSessionToken, type HistoryEntry, type PlexItem } from "../lib/api";
+import { formatTimecode } from "../lib/format";
 import { SkeletonBlock } from "./SkeletonBlock";
 import type { QueueItem } from "../hooks/useSync";
 
@@ -36,6 +37,10 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, isHost, is
   const [episodes, setEpisodes] = useState<PlexItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [hoveredKey, setHoveredKey] = useState<string | null>(null);
+  // The viewer's own watch history for these episodes, keyed by rating key.
+  // Not host-gated: it's their history either way, and it's information rather
+  // than a control, so there's nothing here a viewer shouldn't see.
+  const [progress, setProgress] = useState<Record<string, HistoryEntry>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -46,6 +51,19 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, isHost, is
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [season.ratingKey]);
+
+  // One request for the whole season, once the episode keys are known. This
+  // component remounts on every visit, so backing out of an episode refreshes
+  // the marks without any extra signal.
+  useEffect(() => {
+    setProgress({});
+    if (episodes.length === 0) return;
+    let cancelled = false;
+    fetchProgressMany(episodes.map((e) => e.ratingKey))
+      .then((res) => { if (!cancelled) setProgress(res.entries); })
+      .catch(() => { /* marks are a nicety — never break the list over them */ });
+    return () => { cancelled = true; };
+  }, [episodes]);
 
   const seasonLabel = season.index != null ? `Season ${season.index}` : season.title;
 
@@ -89,6 +107,14 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, isHost, is
         <div style={styles.list}>
           {episodes.map((ep) => {
             const isHovered = hoveredKey === ep.ratingKey;
+            const seen = progress[ep.ratingKey];
+            const watched = seen?.watched === true;
+            // Part-watched only: a finished episode gets the tick instead, and a
+            // full-width bar under it would read as "still going".
+            const partial =
+              seen && !watched && seen.durationMs > 0 && seen.positionMs > 0
+                ? Math.min(1, seen.positionMs / seen.durationMs)
+                : null;
             return (
               <button
                 key={ep.ratingKey}
@@ -102,7 +128,14 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, isHost, is
               >
                 <div style={styles.thumbWrap}>
                   {ep.thumb ? (
-                    <img src={authUrl(ep.thumb, 400, 225)} alt="" style={styles.episodeThumb} loading="lazy" />
+                    <img
+                      src={authUrl(ep.thumb, 400, 225)}
+                      alt=""
+                      // Dimmed when finished, so a season scans at a glance
+                      // rather than needing the badges read one by one.
+                      style={{ ...styles.episodeThumb, ...(watched ? styles.thumbWatched : {}) }}
+                      loading="lazy"
+                    />
                   ) : (
                     <div style={styles.episodePlaceholder}>No Image</div>
                   )}
@@ -113,8 +146,24 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, isHost, is
                       </svg>
                     </div>
                   </div>
+                  {watched && (
+                    <div style={styles.watchedBadge} title="Watched">
+                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                        <path d="M3 8.5L6.5 12L13 4.5" stroke="currentColor" strokeWidth="2.2"
+                          strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                    </div>
+                  )}
                   {ep.duration && (
-                    <div style={styles.durationBadge}>{fmtDuration(ep.duration)}</div>
+                    // Lifted clear of the progress bar when there is one.
+                    <div style={{ ...styles.durationBadge, ...(partial != null ? { bottom: "10px" } : {}) }}>
+                      {fmtDuration(ep.duration)}
+                    </div>
+                  )}
+                  {partial != null && (
+                    <div style={styles.progressTrack}>
+                      <div style={{ ...styles.progressFill, width: `${partial * 100}%` }} />
+                    </div>
                   )}
                   {isHost && isPlaying && onAddToQueue && (
                     <button
@@ -147,6 +196,13 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, isHost, is
                   <div style={styles.episodeMeta}>
                     <span style={styles.episodeNumber}>E{ep.index ?? "?"}</span>
                     <span style={styles.episodeTitle}>{ep.title}</span>
+                    {watched ? (
+                      <span style={styles.watchedTag}>Watched</span>
+                    ) : partial != null ? (
+                      <span style={styles.partialTag}>
+                        {formatTimecode(seen!.durationMs - seen!.positionMs)} left
+                      </span>
+                    ) : null}
                   </div>
                   {ep.summary && (
                     <p style={styles.episodeSummary}>{ep.summary}</p>
@@ -228,6 +284,25 @@ const styles: Record<string, React.CSSProperties> = {
   episodeTitle: {
     color: "#f0f0f0", fontSize: "14px", fontWeight: 500,
     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+  },
+  thumbWatched: { opacity: 0.45 },
+  watchedBadge: {
+    position: "absolute", top: "6px", right: "6px",
+    width: "22px", height: "22px", borderRadius: "50%",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    background: "rgba(0,0,0,0.72)", color: "#6a9955",
+  },
+  progressTrack: {
+    position: "absolute", left: 0, right: 0, bottom: 0,
+    height: "4px", background: "rgba(0,0,0,0.55)",
+  },
+  progressFill: { height: "100%", background: "#e5a00d" },
+  watchedTag: {
+    flexShrink: 0, color: "#6a9955", fontSize: "11px", fontWeight: 600,
+    letterSpacing: "0.3px", textTransform: "uppercase" as const,
+  },
+  partialTag: {
+    flexShrink: 0, color: "rgba(229,160,13,0.75)", fontSize: "11px", fontWeight: 600,
   },
   episodeSummary: {
     color: "#888", fontSize: "12px", lineHeight: "1.4", margin: 0,

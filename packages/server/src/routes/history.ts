@@ -13,6 +13,7 @@ import {
   getContinueWatching,
   getHistory,
   getProgress,
+  getProgressMany,
   deleteHistoryEntry,
   dismissFromContinueWatching,
   clearHistory,
@@ -92,6 +93,36 @@ router.delete("/continue/:ratingKey", async (req: Request, res: Response) => {
     console.error("Dismiss error:", err);
     res.status(500).json({ error: "Failed to update Continue Watching" });
   }
+});
+
+/** Cap on a batch progress lookup — comfortably past the longest season. */
+const MAX_BATCH_KEYS = 200;
+
+/**
+ * GET /api/history/progress?keys=1,2,3
+ * Saved progress for several items, keyed by rating key. Items never played are
+ * absent rather than null. Lets an episode list mark itself up in one request.
+ */
+router.get("/progress", (req: Request, res: Response) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+
+  const raw = typeof req.query.keys === "string" ? req.query.keys : "";
+  const keys = raw.split(",").map((k) => k.trim()).filter(Boolean);
+  if (keys.length === 0) {
+    res.json({ entries: {} });
+    return;
+  }
+  if (keys.length > MAX_BATCH_KEYS) {
+    res.status(400).json({ error: "Too many rating keys" });
+    return;
+  }
+  if (!keys.every((k) => RATING_KEY_RE.test(k))) {
+    res.status(400).json({ error: "Invalid rating key" });
+    return;
+  }
+
+  res.json({ entries: getProgressMany(userId, keys) });
 });
 
 /**

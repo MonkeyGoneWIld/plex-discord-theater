@@ -107,6 +107,15 @@ export function Controls({
   // Fraction (0-1) of the bar under the cursor, null when not hovering —
   // drives the seek-preview timestamp tooltip and hover marker.
   const [hoverPct, setHoverPct] = useState<number | null>(null);
+  // Fraction being dragged, null when not scrubbing. The fill and handle follow
+  // this instead of playback, so the bar tracks the finger/cursor while the
+  // video carries on underneath. Deliberately NOT seeking per move: each seek
+  // can restart the Plex transcode, so a drag commits exactly once, on release.
+  const [scrubPct, setScrubPct] = useState<number | null>(null);
+  // Mirrors scrubPct for the handlers. A pointermove can arrive before React has
+  // re-rendered with the state set by pointerdown, which would drop the drag.
+  const draggingRef = useRef(false);
+  const scrubPctRef = useRef(0);
   // The frame we want (quantized) vs the one that has actually decoded. Two
   // values so a slow load keeps showing the previous frame rather than blanking
   // to an empty box mid-scrub.
@@ -223,12 +232,19 @@ export function Controls({
     }
   }, [videoRef, canControl, onSyncPause, onSyncResume]);
 
-  const seek = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      if (!canControl || !progressRef.current || !videoRef.current) return;
+  /** Where along the bar a client X coordinate falls, 0-1. Null if unmeasurable. */
+  const pctFromClientX = useCallback((clientX: number): number | null => {
+    const el = progressRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0) return null;
+    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  }, []);
+
+  const commitSeekToPct = useCallback(
+    (pct: number) => {
+      if (!canControl || !videoRef.current) return;
       if (!duration || !isFinite(duration)) return;
-      const rect = progressRef.current.getBoundingClientRect();
-      const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
       const newTime = pct * duration;
       // onSeekRestart is the host's smart seek: in-place when the target is
       // reachable in the current transcode, transcode restart otherwise.
@@ -300,10 +316,9 @@ export function Controls({
     [videoRef, muted],
   );
 
-  const handleProgressMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (!progressRef.current) return;
-    const rect = progressRef.current.getBoundingClientRect();
-    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  /** Point the tooltip and preview frame at a position on the bar. Shared by
+   *  hovering and dragging — a scrub wants exactly the same affordances. */
+  const showPreviewAt = useCallback((pct: number) => {
     setHoverPct(pct);
 
     if (previewPartId == null || failedPartRef.current === previewPartId) return;
@@ -333,6 +348,59 @@ export function Controls({
       if (latest && latest !== url) setPreviewSrc(latest);
     }, PREVIEW_THROTTLE_MS);
   }, [previewPartId, duration]);
+
+  // ─── Scrubbing ────────────────────────────────────────────────
+  //
+  // Pointer events rather than mouse events, so a finger drag on the Discord
+  // mobile Activity works the same as a mouse drag. Pointer capture keeps the
+  // events coming to the bar once the drag starts, so sliding off it (or off the
+  // window entirely) still tracks and still commits.
+
+  const handleProgressPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!canControl) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    const pct = pctFromClientX(e.clientX);
+    if (pct == null) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    draggingRef.current = true;
+    scrubPctRef.current = pct;
+    setScrubPct(pct);
+    setHoveringProgress(true);
+    showPreviewAt(pct);
+    // Hold the controls open for the length of the drag. Touch produces no
+    // mousemove, so the usual idle-hide would pull the bar out from under it.
+    setVisible(true);
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+  }, [canControl, pctFromClientX, showPreviewAt]);
+
+  const handleProgressPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const pct = pctFromClientX(e.clientX);
+    if (pct == null) return;
+    // Hover affordances are for pointers that can hover; a dragging finger gets
+    // them too, since it's asking the same question of the bar.
+    if (e.pointerType === "mouse" || draggingRef.current) showPreviewAt(pct);
+    if (!draggingRef.current) return;
+    scrubPctRef.current = pct;
+    setScrubPct(pct);
+  }, [pctFromClientX, showPreviewAt]);
+
+  const handleProgressPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    // A plain click is just a zero-distance drag, so it lands here too — which
+    // is why the bar no longer needs its own onClick.
+    const pct = pctFromClientX(e.clientX) ?? scrubPctRef.current;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    setScrubPct(null);
+    if (e.pointerType !== "mouse") {
+      setHoveringProgress(false);
+      setHoverPct(null);
+    }
+    commitSeekToPct(pct);
+    resetHideTimer();
+  }, [pctFromClientX, commitSeekToPct, resetHideTimer]);
 
   // Load the wanted frame, promoting it to the display only once decoded.
   //
@@ -391,8 +459,10 @@ export function Controls({
   }, []);
 
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
+  // While scrubbing the bar shows where you're headed, not where playback is.
+  const fillPct = scrubPct != null ? scrubPct * 100 : progress;
   const buffered = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
-  const barHeight = hoveringProgress ? 8 : 5;
+  const barHeight = hoveringProgress || scrubPct != null ? 8 : 5;
 
   return (
     <div
@@ -418,11 +488,25 @@ export function Controls({
         {/* Chunky progress bar */}
         <div
           ref={progressRef}
-          onClick={seek}
-          onMouseEnter={() => setHoveringProgress(true)}
-          onMouseMove={handleProgressMove}
-          onMouseLeave={() => { setHoveringProgress(false); setHoverPct(null); }}
-          style={{ ...styles.progressHit, cursor: canControl ? "pointer" : "default" }}
+          onPointerDown={handleProgressPointerDown}
+          onPointerMove={handleProgressPointerMove}
+          onPointerUp={handleProgressPointerUp}
+          // Losing the pointer (a system gesture, a phone call) should still land
+          // the scrub where the user left it rather than silently dropping it.
+          onPointerCancel={handleProgressPointerUp}
+          onPointerEnter={(e) => { if (e.pointerType === "mouse") setHoveringProgress(true); }}
+          onPointerLeave={(e) => {
+            if (e.pointerType !== "mouse" || draggingRef.current) return;
+            setHoveringProgress(false);
+            setHoverPct(null);
+          }}
+          style={{
+            ...styles.progressHit,
+            cursor: canControl ? (scrubPct != null ? "grabbing" : "pointer") : "default",
+            // Without this the browser claims the gesture for scrolling and the
+            // drag dies after a few pixels of vertical wobble.
+            touchAction: "none",
+          }}
         >
           {/* Seek preview: timestamp under the cursor. clamp() keeps the
               bubble from overflowing the bar edges. */}
@@ -446,23 +530,29 @@ export function Controls({
           )}
           <div style={{ ...styles.progressTrack, height: barHeight, transition: "height 0.15s ease" }}>
             <div style={{ ...styles.progressBuffer, width: `${buffered}%` }} />
-            <div style={{ ...styles.progressFill, width: `${progress}%` }} />
-            {hoverPct != null && (
+            <div style={{ ...styles.progressFill, width: `${fillPct}%` }} />
+            {/* Redundant with the handle while dragging — the handle is already
+                sitting exactly here, and two markers on one spot reads as a bug. */}
+            {hoverPct != null && scrubPct == null && (
               <div style={{ ...styles.hoverMarker, left: `${hoverPct * 100}%` }} />
             )}
             <div
               style={{
                 position: "absolute",
-                left: `${progress}%`,
+                left: `${fillPct}%`,
                 top: "50%",
                 transform: "translate(-50%, -50%)",
-                width: 14,
-                height: 14,
+                // Grows under the finger/cursor while dragging, so it reads as
+                // grabbed rather than merely hovered.
+                width: scrubPct != null ? 18 : 14,
+                height: scrubPct != null ? 18 : 14,
                 borderRadius: "50%",
                 background: "#e5a00d",
-                boxShadow: "0 0 8px rgba(229,160,13,0.5)",
-                opacity: canControl && hoveringProgress ? 1 : 0,
-                transition: "opacity 0.15s ease",
+                boxShadow: scrubPct != null
+                  ? "0 0 0 5px rgba(229,160,13,0.25), 0 0 10px rgba(229,160,13,0.6)"
+                  : "0 0 8px rgba(229,160,13,0.5)",
+                opacity: canControl && (hoveringProgress || scrubPct != null) ? 1 : 0,
+                transition: "opacity 0.15s ease, width 0.12s ease, height 0.12s ease",
                 pointerEvents: "none",
               }}
             />
@@ -515,7 +605,9 @@ export function Controls({
               </>
             )}
             <span style={styles.time}>
-              {fmt(currentTime)} / {fmt(duration)}
+              {/* Reads out the scrub target mid-drag, so the number agrees with
+                  where the handle is rather than with playback behind it. */}
+              {fmt(scrubPct != null ? scrubPct * duration : currentTime)} / {fmt(duration)}
             </span>
           </div>
           <div style={styles.right}>

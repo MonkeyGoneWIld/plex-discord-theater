@@ -441,8 +441,15 @@ export function fetchProgress(ratingKey: string): Promise<{ progress: HistoryEnt
   return apiGet(`/api/history/progress/${encodeURIComponent(ratingKey)}`);
 }
 
+/** Forget an item outright — it leaves both History and Continue Watching. */
 export function deleteHistoryEntry(ratingKey: string): Promise<void> {
   return apiDelete(`/api/history/entry/${encodeURIComponent(ratingKey)}`);
+}
+
+/** Drop an item from Continue Watching only; it stays in History, still
+ *  resumable from its detail view. Watching more of it brings the row back. */
+export function dismissFromContinueWatching(ratingKey: string): Promise<void> {
+  return apiDelete(`/api/history/continue/${encodeURIComponent(ratingKey)}`);
 }
 
 export function clearHistory(): Promise<void> {

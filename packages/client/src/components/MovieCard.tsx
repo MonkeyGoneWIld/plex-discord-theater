@@ -9,8 +9,12 @@ interface MovieCardProps {
   progress?: number | null;
   /** Marks the poster with a "watched" tick. Used by the history view. */
   watched?: boolean;
-  /** Adds a dismiss control that forgets this item. Omit for a plain card. */
+  /** Adds a dismiss control to the poster. Omit for a plain card. */
   onRemove?: (item: PlexItem) => void;
+  /** Tooltip and accessible name for that control — the two surfaces that use
+   *  it do different things (leave Continue Watching vs. forget entirely), so
+   *  the wording has to come from the caller. */
+  removeLabel?: string;
 }
 
 function authThumbUrl(thumb: string, w?: number, h?: number): string {
@@ -22,7 +26,7 @@ function authThumbUrl(thumb: string, w?: number, h?: number): string {
   return url;
 }
 
-export function MovieCard({ item, onClick, progress, watched, onRemove }: MovieCardProps) {
+export function MovieCard({ item, onClick, progress, watched, onRemove, removeLabel = "Remove" }: MovieCardProps) {
   // Online (Discover) result: in search but not in the library. Clickable — it
   // opens a detail view (with a request button) rather than playback.
   const external = item.inLibrary === false;
@@ -77,8 +81,8 @@ export function MovieCard({ item, onClick, progress, watched, onRemove }: MovieC
           <span
             role="button"
             tabIndex={0}
-            aria-label={`Remove ${item.title} from history`}
-            title="Remove from history"
+            aria-label={`${removeLabel}: ${item.title}`}
+            title={removeLabel}
             style={styles.removeBtn}
             onClick={(e) => { e.stopPropagation(); onRemove(item); }}
             onKeyDown={(e) => {

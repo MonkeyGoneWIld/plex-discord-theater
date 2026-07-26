@@ -13,6 +13,7 @@ import {
   fetchContinueWatching,
   fetchHistory,
   deleteHistoryEntry,
+  dismissFromContinueWatching,
   clearHistory,
   historyEntryToItem,
   type HistoryEntry,
@@ -156,9 +157,19 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       .finally(() => setHistoryLoading(false));
   }, [isHistoryTab, retryNonce, historyNonce]);
 
-  const handleForget = useCallback((item: PlexItem) => {
-    // Optimistic: the row disappears immediately, and a failed delete simply
-    // reappears on the next load rather than blocking the click.
+  // Leave Continue Watching but stay in history. Only the row is affected, so
+  // the History tab's copy of the item is deliberately left alone.
+  // All of these are optimistic: the card goes immediately, and a failed
+  // request just means it reappears on the next load rather than the click
+  // appearing to do nothing.
+  const handleDismissFromContinue = useCallback((item: PlexItem) => {
+    setContinueItems((prev) => prev.filter((e) => e.ratingKey !== item.ratingKey));
+    dismissFromContinueWatching(item.ratingKey).catch(console.error);
+  }, []);
+
+  // Forget the item outright. Continue Watching is a subset of history, so this
+  // has to clear it from both.
+  const handleForgetFromHistory = useCallback((item: PlexItem) => {
     setContinueItems((prev) => prev.filter((e) => e.ratingKey !== item.ratingKey));
     setHistoryItems((prev) => prev.filter((e) => e.ratingKey !== item.ratingKey));
     setHistoryTotal((n) => Math.max(0, n - 1));
@@ -422,7 +433,8 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
                     onClick={handleClick}
                     progress={progressOf(entry)}
                     watched={entry.watched}
-                    onRemove={handleForget}
+                    onRemove={handleForgetFromHistory}
+                    removeLabel="Remove from watch history"
                   />
                   <div style={styles.historyWhen}>{formatWhen(entry.updatedAt)}</div>
                 </div>
@@ -471,7 +483,8 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
                         item={historyEntryToItem(entry)}
                         onClick={handleClick}
                         progress={progressOf(entry)}
-                        onRemove={handleForget}
+                        onRemove={handleDismissFromContinue}
+                        removeLabel="Remove from Continue Watching"
                       />
                     </div>
                   ))}

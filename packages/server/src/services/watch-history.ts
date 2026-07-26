@@ -58,12 +58,22 @@ db.exec(`
     year INTEGER,
     parent_rating_key TEXT,
     grandparent_rating_key TEXT,
+    dismissed INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (user_id, rating_key)
   );
   CREATE INDEX IF NOT EXISTS idx_watch_history_user_updated
     ON watch_history (user_id, updated_at DESC);
 `);
+// Idempotent migration for databases created before `dismissed` existed. New
+// installs already have it from CREATE TABLE, where this fails harmlessly.
+// (Same pattern as routes/discord.ts.)
+try {
+  db.exec(`ALTER TABLE watch_history ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0`);
+} catch (err) {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!message.includes("duplicate column")) throw err;
+}
 
 interface HistoryRow {
   rating_key: string;
@@ -123,6 +133,9 @@ const upsertStmt = db.prepare(`
     @updated_at
   )
   ON CONFLICT(user_id, rating_key) DO UPDATE SET
+    -- Playing something makes it current again: a title dismissed from Continue
+    -- Watching and then watched some more belongs back in the row.
+    dismissed = 0,
     position_ms = excluded.position_ms,
     duration_ms = excluded.duration_ms,
     watched = excluded.watched,
@@ -149,9 +162,11 @@ const SELECT_COLUMNS = `
 const selectOneStmt = db.prepare(
   `SELECT ${SELECT_COLUMNS} FROM watch_history WHERE user_id = ? AND rating_key = ?`,
 );
+// Continue Watching is a strict subset of history: same rows, filtered to those
+// still worth resuming and not dismissed from the row by hand.
 const selectContinueStmt = db.prepare(`
   SELECT ${SELECT_COLUMNS} FROM watch_history
-  WHERE user_id = ? AND watched = 0 AND position_ms >= ?
+  WHERE user_id = ? AND watched = 0 AND position_ms >= ? AND dismissed = 0
   ORDER BY updated_at DESC LIMIT ?
 `);
 const selectHistoryStmt = db.prepare(`
@@ -161,6 +176,9 @@ const selectHistoryStmt = db.prepare(`
 `);
 const countStmt = db.prepare("SELECT COUNT(*) AS count FROM watch_history WHERE user_id = ?");
 const deleteOneStmt = db.prepare("DELETE FROM watch_history WHERE user_id = ? AND rating_key = ?");
+const dismissStmt = db.prepare(
+  "UPDATE watch_history SET dismissed = 1 WHERE user_id = ? AND rating_key = ?",
+);
 const deleteAllStmt = db.prepare("DELETE FROM watch_history WHERE user_id = ?");
 const pruneStmt = db.prepare(`
   DELETE FROM watch_history
@@ -370,9 +388,25 @@ export function isResumable(entry: HistoryEntry): boolean {
 
 // ─── Deletes ────────────────────────────────────────────────────
 
+/**
+ * Forget an item entirely. Continue Watching is a view over these same rows, so
+ * this necessarily removes it from there too — the subset can't outlive the set.
+ */
 export function deleteHistoryEntry(userId: string, ratingKey: string): void {
   deleteOneStmt.run(userId, ratingKey);
   lastWriteAt.delete(`${userId}:${ratingKey}`);
+}
+
+/**
+ * Drop an item from Continue Watching without forgetting it.
+ *
+ * The row and its position survive, so the title still appears in history and
+ * the detail view still offers to resume it — this only stops it occupying the
+ * row on Home. Watching any more of it clears the flag (see the upsert above),
+ * which is what makes the dismissal recoverable rather than permanent.
+ */
+export function dismissFromContinueWatching(userId: string, ratingKey: string): void {
+  dismissStmt.run(userId, ratingKey);
 }
 
 export function clearHistory(userId: string): void {

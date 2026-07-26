@@ -14,6 +14,7 @@ import {
   getHistory,
   getProgress,
   deleteHistoryEntry,
+  dismissFromContinueWatching,
   clearHistory,
 } from "../services/watch-history.js";
 
@@ -62,6 +63,23 @@ router.get("/continue", (req: Request, res: Response) => {
   if (!userId) return;
   const limit = parseLimit(req.query.limit, 20, 50);
   res.json({ items: getContinueWatching(userId, limit) });
+});
+
+/**
+ * DELETE /api/history/continue/:ratingKey
+ * Drop one item from Continue Watching, keeping its history entry and position.
+ * Contrast with DELETE /entry/:ratingKey, which forgets the item outright.
+ */
+router.delete("/continue/:ratingKey", (req: Request, res: Response) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+  const ratingKey = req.params.ratingKey as string;
+  if (!RATING_KEY_RE.test(ratingKey)) {
+    res.status(400).json({ error: "Invalid rating key" });
+    return;
+  }
+  dismissFromContinueWatching(userId, ratingKey);
+  res.json({ ok: true });
 });
 
 /**

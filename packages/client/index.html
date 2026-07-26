@@ -14,6 +14,28 @@
         min-height: 100vh;
       }
       #root { min-height: 100vh; }
+
+      /* Focus indication.
+         Nothing styled :focus-visible, so every button fell back to Chromium's
+         `outline: auto` ring — which `color-scheme: dark` below paints as a
+         heavy white outline. It reads as a rendering glitch rather than a focus
+         cue, and it lingers: a click leaves focus behind, then the next keypress
+         (arrow keys scrolling a list, space, anything) flips the browser into
+         keyboard modality and lights up whatever was last clicked, until focus
+         moves again.
+         Replacing it rather than removing it — keyboard users still need to see
+         where they are, it just belongs in the app's own amber. */
+      :focus-visible {
+        outline: 2px solid rgba(229, 160, 13, 0.9);
+        outline-offset: 2px;
+      }
+      /* Pointer focus leaves no ring. This is already how modern Chromium
+         behaves, stated explicitly because the Activity runs in Discord's
+         embedded webview rather than a browser we choose. */
+      :focus:not(:focus-visible) {
+        outline: none;
+      }
+
       @keyframes spin { to { transform: rotate(360deg); } }
       @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
       @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } }

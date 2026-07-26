@@ -73,7 +73,9 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: "hidden",
   },
   inputWrapFocused: {
-    borderColor: "rgba(229,160,13,0.3)",
+    // Full shorthand — see the note in SeasonDetail's episodeCard. A
+    // borderColor-only override leaves the box white-bordered after blur.
+    border: "1px solid rgba(229,160,13,0.3)",
     boxShadow: "0 0 0 3px rgba(229,160,13,0.08), inset 0 1px 4px rgba(0,0,0,0.2)",
   },
   searchIcon: {

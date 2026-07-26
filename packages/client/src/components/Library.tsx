@@ -612,7 +612,10 @@ const styles: Record<string, React.CSSProperties> = {
   tabActive: {
     background: "rgba(229,160,13,0.15)",
     color: "#e5a00d",
-    borderColor: "rgba(229,160,13,0.3)",
+    // Full shorthand so it overrides `tab`'s `border` rather than half of it —
+    // a borderColor-only override can't be undone, leaving the tab you just
+    // switched away from with a solid white outline.
+    border: "1px solid rgba(229,160,13,0.3)",
     fontWeight: 600,
   },
   grid: {

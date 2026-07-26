@@ -67,6 +67,19 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, isHost, is
 
   const seasonLabel = season.index != null ? `Season ${season.index}` : season.title;
 
+  const addToQueue = (ep: PlexItem) => {
+    onAddToQueue?.({
+      ratingKey: ep.ratingKey,
+      title: ep.title,
+      type: ep.type,
+      thumb: ep.thumb,
+      subtitles: false,
+      parentTitle: show.title,
+      parentIndex: season.index,
+      index: ep.index,
+    });
+  };
+
   return (
     <div style={styles.page}>
       <button onClick={onBack} style={styles.backBtn}>
@@ -166,30 +179,29 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, isHost, is
                     </div>
                   )}
                   {isHost && isPlaying && onAddToQueue && (
-                    <button
+                    // A <button> here would be nested inside the card's own
+                    // button — invalid HTML, and browsers handle the nesting
+                    // inconsistently. React builds it via the DOM API so it
+                    // renders anyway, which is what made it easy to miss.
+                    // Same span/role treatment as MovieCard's dismiss control.
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Add ${ep.title} to the queue`}
                       onClick={(e) => {
                         e.stopPropagation();
-                        onAddToQueue({
-                          ratingKey: ep.ratingKey,
-                          title: ep.title,
-                          type: ep.type,
-                          thumb: ep.thumb,
-                          subtitles: false,
-                          parentTitle: show.title,
-                          parentIndex: season.index,
-                          index: ep.index,
-                        });
+                        addToQueue(ep);
                       }}
-                      style={{
-                        padding: "4px 10px", borderRadius: "6px",
-                        border: "1px solid rgba(229,160,13,0.4)", background: "rgba(0,0,0,0.6)",
-                        color: "#e5a00d", fontSize: "11px", fontWeight: 600,
-                        cursor: "pointer", fontFamily: "inherit",
-                        position: "absolute", bottom: "8px", right: "8px",
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter" && e.key !== " ") return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        addToQueue(ep);
                       }}
+                      style={styles.queueBtn}
                     >
                       + Queue
-                    </button>
+                    </span>
                   )}
                 </div>
                 <div style={styles.episodeInfo}>
@@ -244,13 +256,22 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex", flexDirection: "column", gap: "10px",
   },
   episodeCard: {
+    // `border` here and in episodeCardHover must stay the same property. React
+    // clears style keys the next render drops by assigning "", and because the
+    // shorthand has already expanded into border-color in the CSSOM, clearing a
+    // borderColor override doesn't fall back to this line — it falls back to
+    // the CSS initial value, currentColor, i.e. the near-white text colour. That
+    // left every hovered card wearing a solid white border afterwards.
     display: "flex", gap: "14px", padding: "10px", borderRadius: "8px",
     border: "1px solid rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.03)",
     cursor: "pointer", color: "inherit", textAlign: "left", fontFamily: "inherit",
     transition: "all 0.2s ease", width: "100%",
   },
   episodeCardHover: {
-    borderColor: "rgba(229,160,13,0.3)", background: "rgba(255,255,255,0.05)",
+    // Whole `border` shorthand, not just borderColor: the base style sets
+    // `border`, and an override that names only the longhand leaves React
+    // unable to restore it. See the note on episodeCard.
+    border: "1px solid rgba(229,160,13,0.3)", background: "rgba(255,255,255,0.05)",
     transform: "scale(1.01)",
   },
   thumbWrap: {
@@ -284,6 +305,13 @@ const styles: Record<string, React.CSSProperties> = {
   episodeTitle: {
     color: "#f0f0f0", fontSize: "14px", fontWeight: 500,
     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+  },
+  queueBtn: {
+    position: "absolute", bottom: "8px", right: "8px",
+    padding: "4px 10px", borderRadius: "6px",
+    border: "1px solid rgba(229,160,13,0.4)", background: "rgba(0,0,0,0.6)",
+    color: "#e5a00d", fontSize: "11px", fontWeight: 600,
+    cursor: "pointer", fontFamily: "inherit",
   },
   thumbWatched: { opacity: 0.45 },
   watchedBadge: {

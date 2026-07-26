@@ -612,7 +612,7 @@ export function Controls({
       </div>
 
       {/* Bottom bar */}
-      <div style={styles.bottomBar}>
+      <div style={{ ...styles.bottomBar, ...(compact ? styles.bottomBarCompact : {}) }}>
         {/* Chunky progress bar */}
         <div
           ref={progressRef}
@@ -688,10 +688,10 @@ export function Controls({
         </div>
 
         <div style={styles.controls}>
-          <div style={styles.left}>
+          <div style={{ ...styles.left, ...(compact ? styles.groupCompact : {}) }}>
             {canControl && (
               <>
-                <button onClick={togglePlay} style={styles.playBtn}>
+                <button onClick={togglePlay} style={{ ...styles.playBtn, ...(compact ? styles.playBtnCompact : {}) }}>
                   {playing ? (
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                       <rect x="3" y="2" width="4" height="12" rx="1"/>
@@ -732,14 +732,14 @@ export function Controls({
                 )}
               </>
             )}
-            <span style={styles.time}>
+            <span style={{ ...styles.time, ...(compact ? styles.timeCompact : {}) }}>
               {/* Reads out the pending destination — a drag in progress, or a
                   stack of ±10s presses — so the number agrees with where the
                   handle is rather than with playback behind it. */}
               {fmt(pendingTime ?? currentTime)} / {fmt(duration)}
             </span>
           </div>
-          <div style={styles.right}>
+          <div style={{ ...styles.right, ...(compact ? styles.rightCompact : {}) }}>
             {isHost && onOpenPeople && (
               <button onClick={onOpenPeople} style={styles.queueBtn} title="People & roles">
                 <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
@@ -761,7 +761,11 @@ export function Controls({
             {onToggleStats && (
               <button
                 onClick={onToggleStats}
-                style={{ ...styles.gearBtn, color: statsActive ? "#e5a00d" : "#fff" }}
+                style={{
+                  ...styles.gearBtn,
+                  ...(compact ? styles.gearBtnCompact : {}),
+                  color: statsActive ? "#e5a00d" : "#fff",
+                }}
                 title="Stats for nerds (i)"
               >
                 <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
@@ -770,7 +774,7 @@ export function Controls({
               </button>
             )}
             {canControl && onOpenTrackSwitcher && (
-              <button onClick={onOpenTrackSwitcher} style={styles.gearBtn} title={isHost ? "Audio & Subtitles" : "Subtitles"}>
+              <button onClick={onOpenTrackSwitcher} style={{ ...styles.gearBtn, ...(compact ? styles.gearBtnCompact : {}) }} title={isHost ? "Audio & Subtitles" : "Subtitles"}>
                 {"\u2699"}
               </button>
             )}
@@ -831,7 +835,9 @@ export function Controls({
                 />
               </>
             )}
-            {hintsVisible && (
+            {/* Keyboard hints have nothing to say on a touch device, and this
+                is the row with no width to spare. */}
+            {hintsVisible && !compact && (
               <div style={styles.hints}>
                 <span style={styles.hintBadge}>Space</span>
                 <span style={styles.hintBadge}>{"\u2190\u2192"}</span>
@@ -989,6 +995,36 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
+    gap: "8px",
+  },
+  // ─── Phone-sized overrides ─────────────────────────────────────
+  // Same row, tightened. The buttons all stay: they're the reason to open the
+  // player at all, and the time readout is what gives when width runs short.
+  bottomBarCompact: {
+    padding: "0 12px 10px",
+    paddingTop: "28px",
+  },
+  groupCompact: {
+    gap: "6px",
+    // Lets the time truncate rather than shoving controls off the screen edge.
+    minWidth: 0,
+    overflow: "hidden",
+  },
+  rightCompact: {
+    gap: "6px",
+    // The controls side never gives — every item here is a target to tap.
+    flexShrink: 0,
+  },
+  playBtnCompact: {
+    width: "32px",
+    height: "32px",
+  },
+  gearBtnCompact: {
+    width: "28px",
+    height: "28px",
+  },
+  timeCompact: {
+    fontSize: "11px",
   },
   left: {
     display: "flex",
@@ -1030,6 +1066,12 @@ const styles: Record<string, React.CSSProperties> = {
     color: "rgba(255,255,255,0.7)",
     fontVariantNumeric: "tabular-nums",
     fontWeight: 500,
+    // "2:06:07 / 2:23:55" broke across two lines once the row ran out of width,
+    // which is what made the bar look twice as tall as it should.
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    minWidth: 0,
   },
   gearBtn: {
     display: "flex",

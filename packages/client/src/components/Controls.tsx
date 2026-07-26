@@ -1,7 +1,13 @@
 import { useState, useCallback, useRef, useEffect, useImperativeHandle } from "react";
 import { authUrl } from "../lib/api";
 import { loadVolume } from "../lib/volume";
-import { useMediaQuery, COMPACT_CONTROLS_QUERY, MOBILE_LANDSCAPE_QUERY } from "../lib/useMediaQuery";
+import {
+  useMediaQuery,
+  COMPACT_CONTROLS_QUERY,
+  MOBILE_LANDSCAPE_QUERY,
+  MOBILE_PORTRAIT_QUERY,
+  DISCORD_CHROME_PX,
+} from "../lib/useMediaQuery";
 
 export interface ControlsHandle {
   /**
@@ -175,6 +181,9 @@ export function Controls({
   // Activity — a collapse chevron bottom right, the Leave pill top right. Both
   // corners have to be kept clear of anything that needs tapping.
   const mobileLandscape = useMediaQuery(MOBILE_LANDSCAPE_QUERY);
+  // Upright, Discord's strip covers the top edge instead of the corners, landing
+  // on the Back button and title.
+  const mobilePortrait = useMediaQuery(MOBILE_PORTRAIT_QUERY);
   const [volumeOpen, setVolumeOpen] = useState(false);
   const volumeWrapRef = useRef<HTMLDivElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
@@ -605,7 +614,13 @@ export function Controls({
         }}
       >
       {/* Top bar: back + title */}
-      <div style={{ ...styles.topBar, ...(mobileLandscape ? styles.clearDiscordRight : {}) }}>
+      <div
+        style={{
+          ...styles.topBar,
+          ...(mobileLandscape ? styles.clearDiscordRight : {}),
+          ...(mobilePortrait ? styles.clearDiscordTop : {}),
+        }}
+      >
         <button onClick={onBack} style={styles.backBtn}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style={{ marginRight: 4 }}>
             <path d="M10 12L6 8L10 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
@@ -1043,6 +1058,14 @@ const styles: Record<string, React.CSSProperties> = {
    */
   clearDiscordRight: {
     paddingRight: "64px",
+  },
+  /**
+   * The portrait counterpart: Discord's header strip is drawn over the top of
+   * the Activity, landing on the Back button and title. Only the top bar moves —
+   * insetting the whole player would letterbox the video.
+   */
+  clearDiscordTop: {
+    paddingTop: `${16 + DISCORD_CHROME_PX}px`,
   },
   groupCompact: {
     gap: "6px",

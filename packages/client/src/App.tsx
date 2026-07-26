@@ -11,7 +11,12 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PeoplePanel } from "./components/PeoplePanel";
 import { formatMediaTitle } from "./lib/format";
 import { authUrl, fetchMeta } from "./lib/api";
-import { useMediaQuery, MOBILE_LANDSCAPE_QUERY } from "./lib/useMediaQuery";
+import {
+  useMediaQuery,
+  MOBILE_LANDSCAPE_QUERY,
+  MOBILE_PORTRAIT_QUERY,
+  DISCORD_CHROME_PX,
+} from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem } from "./hooks/useSync";
 
@@ -76,6 +81,9 @@ export function App() {
   // Phone held sideways, where Discord overlays its own controls on the corners
   // of the Activity. See the header below.
   const mobileLandscape = useMediaQuery(MOBILE_LANDSCAPE_QUERY);
+  // Phone upright, where Discord's header strip covers the top of the Activity
+  // instead — the same overlay problem on a different edge.
+  const mobilePortrait = useMediaQuery(MOBILE_PORTRAIT_QUERY);
 
   // Saved window scroll per stack depth: slot i holds where view i was when
   // something was pushed on top of it. Restored when the stack shrinks back.
@@ -418,7 +426,7 @@ export function App() {
     <div style={styles.app}>
       {/* Header — visible on all non-player views */}
       {view.kind !== "player" && (
-        <header style={styles.header}>
+        <header style={{ ...styles.header, ...(mobilePortrait ? styles.headerMobilePortrait : {}) }}>
           {view.kind !== "library" ? (
             /* Breadcrumb trail — every ancestor is clickable. Home is a full
                reset (goHome); other crumbs jump back within the stack, keeping
@@ -688,8 +696,22 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
-    padding: "16px 24px",
+    // Padding longhands, not the shorthand: headerMobilePortrait below overrides
+    // paddingTop, and a shorthand paired with a longhand override can't be
+    // undone — React clears the longhand when the override stops applying and
+    // never re-applies the shorthand, so rotating back to landscape would flatten
+    // this to zero rather than restoring 16px. (Same trap as the border colours
+    // fixed in SeasonDetail.)
+    paddingTop: "16px",
+    paddingRight: "24px",
+    paddingBottom: "16px",
+    paddingLeft: "24px",
     borderBottom: "1px solid rgba(255,255,255,0.06)",
+  },
+  headerMobilePortrait: {
+    // Clear of Discord's header strip, which is drawn over the top of the
+    // Activity rather than above it.
+    paddingTop: `${16 + DISCORD_CHROME_PX}px`,
   },
   logo: {
     fontSize: "20px",

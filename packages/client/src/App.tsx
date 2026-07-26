@@ -582,6 +582,7 @@ export function App() {
           onActiveSectionChange={setLibrarySection}
           onBrowseContext={effectiveIsHost ? (ctx) => syncActions.sendBrowse(ctx) : undefined}
           historyNonce={historyNonce}
+          visible={view.kind === "library"}
         />
       </div>
 

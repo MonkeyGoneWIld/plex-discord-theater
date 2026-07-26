@@ -44,13 +44,17 @@ interface LibraryProps {
   activeSection: string | null;
   onActiveSectionChange: (id: string) => void;
   onBrowseContext?: (context: string) => void;
-  /** Bumped when a watch ends, so Continue Watching and History reload. The
-   *  Library stays mounted while browsing detail views, so without this the
-   *  rows would still show the position from before the film was watched. */
+  /** Bumped when a watch ends, so Continue Watching and History reload. Catches
+   *  playback ending while the library is already on screen, which no
+   *  navigation signal would. */
   historyNonce?: number;
+  /** Whether the library is the view on screen. It stays mounted (hidden) behind
+   *  detail and player views, so this is what tells the history rows to reload
+   *  on the way back — otherwise they'd still show pre-playback positions. */
+  visible?: boolean;
 }
 
-export function Library({ isHost, onSelect, activeSection, onActiveSectionChange, onBrowseContext, historyNonce = 0 }: LibraryProps) {
+export function Library({ isHost, onSelect, activeSection, onActiveSectionChange, onBrowseContext, historyNonce = 0, visible = true }: LibraryProps) {
   const [sections, setSections] = useState<PlexSection[]>([]);
   // "home" and "history" are virtual tab ids — one for the real Plex homepage
   // (hubs), one for this app's own watch history. Both are kept in the same
@@ -102,7 +106,9 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       .finally(() => setLoading(false));
   }, [retryNonce]);
 
-  // Load Plex homepage hubs (Continue Watching, Recently Added, Collections, etc.)
+  // Load Plex homepage hubs (Recently Added, Collections, etc.). Plex's own
+  // Continue Watching hub is filtered out server-side — it tracks the shared
+  // Plex account, not the Discord host, so this app keeps its own (below).
   useEffect(() => {
     setHomeLoading(true);
     setHomeError(null);
@@ -115,19 +121,22 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       .finally(() => setHomeLoading(false));
   }, [retryNonce]);
 
-  // Continue Watching — the caller's own in-progress items. Reloads whenever a
-  // watch ends (historyNonce) so the row reflects what just happened.
+  // Continue Watching — the caller's own in-progress items. Refetched every time
+  // the row comes back on screen (returning from a detail or player view,
+  // switching to the Home tab) as well as when a watch ends, since positions
+  // change while this component sits mounted and hidden.
   useEffect(() => {
+    if (!visible || !isHomeTab) return;
     fetchContinueWatching()
       .then(({ items: entries }) => setContinueItems(entries))
       // A missing row is invisible, not an error state — never let history
       // trouble take the whole Home tab down with it.
       .catch(() => setContinueItems([]));
-  }, [retryNonce, historyNonce]);
+  }, [visible, isHomeTab, retryNonce, historyNonce]);
 
-  // Full history — only fetched while its tab is open.
+  // Full history — same refresh discipline, only while its own tab is open.
   useEffect(() => {
-    if (!isHistoryTab) return;
+    if (!visible || !isHistoryTab) return;
     setHistoryLoading(true);
     setHistoryError(null);
     fetchHistory({ limit: HISTORY_PAGE_SIZE })

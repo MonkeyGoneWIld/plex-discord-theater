@@ -74,6 +74,19 @@ function fmt(seconds: number): string {
 
 const HIDE_DELAY_MS = 3000;
 
+/**
+ * How long the ±10s buttons keep collecting before the seek actually happens.
+ *
+ * Every seek can restart the Plex transcode, so firing one per click makes
+ * spamming the button the worst thing you can do to the stream. Clicks inside
+ * this window fold into a single jump instead, the way YouTube's do — each one
+ * pushes the deadline back, so a burst costs one seek no matter how long it is.
+ */
+const SKIP_STACK_MS = 700;
+
+/** How long the accumulated total lingers after the seek lands. */
+const SKIP_INDICATOR_LINGER_MS = 400;
+
 export function Controls({
   videoRef,
   isHost,
@@ -116,6 +129,14 @@ export function Controls({
   // re-rendered with the state set by pointerdown, which would drop the drag.
   const draggingRef = useRef(false);
   const scrubPctRef = useRef(0);
+  // Accumulated ±10s presses waiting to be applied as one seek, and where they
+  // add up to. Null when nothing is pending. `delta` drives the on-screen total,
+  // `target` is what the eventual seek uses.
+  const [skipPreview, setSkipPreview] = useState<{ delta: number; target: number } | null>(null);
+  const skipBaseRef = useRef(0);
+  const skipDeltaRef = useRef(0);
+  const skipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const skipClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The frame we want (quantized) vs the one that has actually decoded. Two
   // values so a slow load keeps showing the previous frame rather than blanking
   // to an empty box mid-scrub.
@@ -273,17 +294,55 @@ export function Controls({
     [videoRef, onSyncSeek, onSeekRestart],
   );
 
-  const skipBack = useCallback(() => {
+  /**
+   * Add to the pending skip rather than seeking now.
+   *
+   * The position a burst is measured from is captured on its first click, so
+   * every click in the burst adds a clean ±10s to that same origin — reading
+   * video.currentTime each time would fold in however much played during the
+   * burst and make the total drift.
+   */
+  const queueSkip = useCallback((amount: number) => {
     const video = videoRef.current;
     if (!video || !canControl) return;
-    skipTo(Math.max(0, video.currentTime - 10));
-  }, [videoRef, canControl, skipTo]);
+    const total = video.duration || duration || 0;
 
-  const skipForward = useCallback(() => {
-    const video = videoRef.current;
-    if (!video || !canControl) return;
-    skipTo(Math.min(video.duration || 0, video.currentTime + 10));
-  }, [videoRef, canControl, skipTo]);
+    const burstInProgress = skipTimerRef.current !== null;
+    if (!burstInProgress) skipBaseRef.current = video.currentTime;
+    skipDeltaRef.current = (burstInProgress ? skipDeltaRef.current : 0) + amount;
+
+    const target = Math.max(0, Math.min(total || Infinity, skipBaseRef.current + skipDeltaRef.current));
+    setSkipPreview({ delta: skipDeltaRef.current, target });
+
+    if (skipTimerRef.current !== null) clearTimeout(skipTimerRef.current);
+    skipTimerRef.current = setTimeout(() => {
+      skipTimerRef.current = null;
+      skipTo(target);
+      // Held a beat past the seek so the total doesn't vanish the instant it
+      // is applied, which reads as the click having been dropped.
+      skipClearTimerRef.current = setTimeout(
+        () => setSkipPreview(null),
+        SKIP_INDICATOR_LINGER_MS,
+      );
+    }, SKIP_STACK_MS);
+
+    // A new click during the linger cancels the fade — the burst is continuing.
+    if (skipClearTimerRef.current !== null) {
+      clearTimeout(skipClearTimerRef.current);
+      skipClearTimerRef.current = null;
+    }
+    resetHideTimer();
+  }, [videoRef, canControl, duration, skipTo, resetHideTimer]);
+
+  const skipBack = useCallback(() => queueSkip(-10), [queueSkip]);
+  const skipForward = useCallback(() => queueSkip(10), [queueSkip]);
+
+  // Drop pending timers on unmount so a queued seek can't fire into a torn-down
+  // player (or a transcode the next item has already replaced).
+  useEffect(() => () => {
+    if (skipTimerRef.current !== null) clearTimeout(skipTimerRef.current);
+    if (skipClearTimerRef.current !== null) clearTimeout(skipClearTimerRef.current);
+  }, []);
 
   const toggleMute = useCallback(() => {
     const video = videoRef.current;
@@ -459,19 +518,49 @@ export function Controls({
   }, []);
 
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
-  // While scrubbing the bar shows where you're headed, not where playback is.
-  const fillPct = scrubPct != null ? scrubPct * 100 : progress;
+  // Where the bar points: the drag if one is in progress, otherwise the pending
+  // skip total, otherwise playback. Both show you the destination before the
+  // seek that gets you there actually runs.
+  const pendingTime =
+    scrubPct != null
+      ? scrubPct * duration
+      : skipPreview != null
+        ? skipPreview.target
+        : null;
+  const fillPct = pendingTime != null && duration > 0 ? (pendingTime / duration) * 100 : progress;
   const buffered = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
   const barHeight = hoveringProgress || scrubPct != null ? 8 : 5;
 
   return (
-    <div
-      style={{
-        ...styles.overlay,
-        opacity: visible ? 1 : 0,
-        pointerEvents: visible ? "auto" : "none",
-      }}
-    >
+    <>
+      {/* Accumulated skip, on the side it's heading. Deliberately outside the
+          overlay below: that fades out on idle, and spamming the buttons is
+          exactly when you most need to see the running total. */}
+      {skipPreview != null && skipPreview.delta !== 0 && (
+        <div
+          style={{
+            ...styles.skipIndicator,
+            ...(skipPreview.delta < 0
+              ? { left: "6%", alignItems: "flex-start" }
+              : { right: "6%", alignItems: "flex-end" }),
+          }}
+        >
+          <div style={styles.skipChevrons}>
+            {skipPreview.delta < 0 ? "«" : "»"}
+          </div>
+          <div style={styles.skipAmount}>
+            {Math.abs(skipPreview.delta)} seconds
+          </div>
+        </div>
+      )}
+
+      <div
+        style={{
+          ...styles.overlay,
+          opacity: visible ? 1 : 0,
+          pointerEvents: visible ? "auto" : "none",
+        }}
+      >
       {/* Top bar: back + title */}
       <div style={styles.topBar}>
         <button onClick={onBack} style={styles.backBtn}>
@@ -605,9 +694,10 @@ export function Controls({
               </>
             )}
             <span style={styles.time}>
-              {/* Reads out the scrub target mid-drag, so the number agrees with
-                  where the handle is rather than with playback behind it. */}
-              {fmt(scrubPct != null ? scrubPct * duration : currentTime)} / {fmt(duration)}
+              {/* Reads out the pending destination — a drag in progress, or a
+                  stack of ±10s presses — so the number agrees with where the
+                  handle is rather than with playback behind it. */}
+              {fmt(pendingTime ?? currentTime)} / {fmt(duration)}
             </span>
           </div>
           <div style={styles.right}>
@@ -663,14 +753,43 @@ export function Controls({
                 <span style={styles.hintBadge}>{"\u2190\u2192"}</span>
               </div>
             )}
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  skipIndicator: {
+    position: "absolute",
+    top: "50%",
+    transform: "translateY(-50%)",
+    display: "flex",
+    flexDirection: "column",
+    gap: "4px",
+    padding: "18px 26px",
+    borderRadius: "999px",
+    background: "rgba(0,0,0,0.55)",
+    backdropFilter: "blur(6px)",
+    color: "#f0f0f0",
+    pointerEvents: "none",
+    // Above the control overlay, which the indicator deliberately outlives.
+    zIndex: 11,
+  },
+  skipChevrons: {
+    fontSize: "26px",
+    lineHeight: 1,
+    fontWeight: 700,
+    color: "#e5a00d",
+  },
+  skipAmount: {
+    fontSize: "13px",
+    fontWeight: 600,
+    whiteSpace: "nowrap",
+    fontVariantNumeric: "tabular-nums",
+  },
   overlay: {
     position: "absolute",
     inset: 0,

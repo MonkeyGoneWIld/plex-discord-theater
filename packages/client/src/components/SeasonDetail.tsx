@@ -67,6 +67,19 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, isHost, is
 
   const seasonLabel = season.index != null ? `Season ${season.index}` : season.title;
 
+  const addToQueue = (ep: PlexItem) => {
+    onAddToQueue?.({
+      ratingKey: ep.ratingKey,
+      title: ep.title,
+      type: ep.type,
+      thumb: ep.thumb,
+      subtitles: false,
+      parentTitle: show.title,
+      parentIndex: season.index,
+      index: ep.index,
+    });
+  };
+
   return (
     <div style={styles.page}>
       <button onClick={onBack} style={styles.backBtn}>
@@ -166,30 +179,29 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, isHost, is
                     </div>
                   )}
                   {isHost && isPlaying && onAddToQueue && (
-                    <button
+                    // A <button> here would be nested inside the card's own
+                    // button — invalid HTML, and browsers handle the nesting
+                    // inconsistently. React builds it via the DOM API so it
+                    // renders anyway, which is what made it easy to miss.
+                    // Same span/role treatment as MovieCard's dismiss control.
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Add ${ep.title} to the queue`}
                       onClick={(e) => {
                         e.stopPropagation();
-                        onAddToQueue({
-                          ratingKey: ep.ratingKey,
-                          title: ep.title,
-                          type: ep.type,
-                          thumb: ep.thumb,
-                          subtitles: false,
-                          parentTitle: show.title,
-                          parentIndex: season.index,
-                          index: ep.index,
-                        });
+                        addToQueue(ep);
                       }}
-                      style={{
-                        padding: "4px 10px", borderRadius: "6px",
-                        border: "1px solid rgba(229,160,13,0.4)", background: "rgba(0,0,0,0.6)",
-                        color: "#e5a00d", fontSize: "11px", fontWeight: 600,
-                        cursor: "pointer", fontFamily: "inherit",
-                        position: "absolute", bottom: "8px", right: "8px",
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter" && e.key !== " ") return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        addToQueue(ep);
                       }}
+                      style={styles.queueBtn}
                     >
                       + Queue
-                    </button>
+                    </span>
                   )}
                 </div>
                 <div style={styles.episodeInfo}>
@@ -284,6 +296,13 @@ const styles: Record<string, React.CSSProperties> = {
   episodeTitle: {
     color: "#f0f0f0", fontSize: "14px", fontWeight: 500,
     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+  },
+  queueBtn: {
+    position: "absolute", bottom: "8px", right: "8px",
+    padding: "4px 10px", borderRadius: "6px",
+    border: "1px solid rgba(229,160,13,0.4)", background: "rgba(0,0,0,0.6)",
+    color: "#e5a00d", fontSize: "11px", fontWeight: 600,
+    cursor: "pointer", fontFamily: "inherit",
   },
   thumbWatched: { opacity: 0.45 },
   watchedBadge: {

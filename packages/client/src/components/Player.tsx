@@ -11,6 +11,7 @@ import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, fetchMeta, fetchSiblingEpisodes } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
+import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
 import type { PlexItem, SkipMarker } from "../lib/api";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
@@ -31,6 +32,9 @@ const SEEK_STALL_TIMEOUT_MS = 6_000;
 // stall. Modest jumps stay in-place: Plex has usually transcoded a bit ahead of
 // what hls.js has buffered, and the stall timeout recovers if it hasn't.
 const FAR_SEEK_THRESHOLD_S = 120;
+// Cadence of the periodic player health sample. Matches the ping interval so
+// client and server lines interleave one-for-one in the merged log.
+const HEALTH_SAMPLE_MS = 10_000;
 
 /** Whether the video has enough buffered data at `t` to play from there. */
 function isPositionBuffered(video: HTMLVideoElement, t: number): boolean {
@@ -79,6 +83,26 @@ function bufferAheadSeconds(video: HTMLVideoElement): number {
     }
   }
   return 0;
+}
+
+/**
+ * Everything worth knowing about the playhead at the instant something
+ * happened. Attached to every teardown/restart log so a stop in the file can be
+ * read without guessing what the player looked like when it was decided.
+ */
+function snapshot(video: HTMLVideoElement | null): Record<string, unknown> {
+  if (!video) return { video: "none" };
+  return {
+    posS: video.currentTime,
+    bufAheadS: bufferAheadSeconds(video),
+    bufEndS: bufferedEnd(video),
+    ranges: video.buffered.length,
+    paused: video.paused,
+    seeking: video.seeking,
+    readyState: video.readyState,
+    networkState: video.networkState,
+    ...(video.error ? { mediaError: `${video.error.code}: ${video.error.message}` } : {}),
+  };
 }
 
 interface PlayerProps {
@@ -161,6 +185,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // against us on the first command we see.
   const appliedSeekSeqRef = useRef(syncState?.seekSeq ?? 0);
   const seekStallTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Previous value of the HLS effect's dependency array, so a restart can name
+  // the dep that triggered it rather than just appearing in the log.
+  const hlsDepsRef = useRef<Record<string, unknown> | null>(null);
+  const healthIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Reaches the controls' skip accumulator, so the arrow keys stack the same way
   // the ±10s buttons do instead of seeking on every press.
   const controlsRef = useRef<ControlsHandle>(null);
@@ -228,6 +256,17 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // Promoted to host — take over session ownership
     ownsSessionRef.current = true;
 
+    // Promotion changes who is allowed to stop the transcode and where a
+    // recovery restart takes its position from, so it's a turning point for
+    // anything that goes wrong afterwards.
+    logEvent("Player", "promoted to host mid-playback", {
+      session: sessionIdRef.current?.substring(0, 8) ?? "none",
+      mountedAsHost: mountedAsHostRef.current,
+      roomPosS: syncStateRef.current?.position ?? "none",
+      hadPingInterval: pingIntervalRef.current !== null,
+      ...snapshot(videoRef.current),
+    });
+
     // Start pinging to keep transcode alive (the old host was doing this)
     if (pingIntervalRef.current === null) {
       pingIntervalRef.current = setInterval(() => {
@@ -260,7 +299,14 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // stop or restart the Plex transcode the *new* host is still using — killing
   // their stream and forcing a fresh transcode (a phantom second stream).
   useEffect(() => {
-    if (!isHost) ownsSessionRef.current = false;
+    if (!isHost) {
+      if (ownsSessionRef.current) {
+        logEvent("Player", "demoted, releasing session ownership", {
+          session: sessionIdRef.current?.substring(0, 8) ?? "none",
+        });
+      }
+      ownsSessionRef.current = false;
+    }
   }, [isHost]);
 
   const destroyLocal = useCallback(() => {
@@ -275,6 +321,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     if (heartbeatIntervalRef.current !== null) {
       clearInterval(heartbeatIntervalRef.current);
       heartbeatIntervalRef.current = null;
+    }
+    if (healthIntervalRef.current !== null) {
+      clearInterval(healthIntervalRef.current);
+      healthIntervalRef.current = null;
     }
     if (bufferCleanupRef.current) {
       bufferCleanupRef.current();
@@ -373,6 +423,27 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
     let mounted = true;
 
+    // Which dependency moved. This effect owns the whole HLS lifecycle, so
+    // every restart in the log traces back to one of these — and "which one"
+    // is otherwise unknowable from the outside.
+    const deps = { ratingKey: item.ratingKey, subtitles, viewerHlsSessionId, retryKey, vpsRelay };
+    const prev = hlsDepsRef.current;
+    const changed = prev
+      ? (Object.keys(deps) as Array<keyof typeof deps>).filter((k) => deps[k] !== prev[k])
+      : ["initial-mount"];
+    hlsDepsRef.current = deps;
+
+    logEvent("HLS", "session effect running", {
+      trigger: changed.join(",") || "none",
+      ratingKey: item.ratingKey,
+      retryKey,
+      isHost: isHostRef.current,
+      ownsSession: ownsSessionRef.current,
+      mountedAsHost: mountedAsHostRef.current,
+      pendingOffsetS: seekOffsetRef.current,
+      adopting: adoptSessionIdRef.current?.substring(0, 8) ?? "no",
+    });
+
     destroyLocal();
 
     // Host creates a new session; viewer reuses the host's session
@@ -391,6 +462,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
     if (!sessionId) {
       // Viewer doesn't have a session ID yet — wait for sync
+      logEvent("HLS", "no session id yet, waiting for sync", { isHost: isHostRef.current });
       return;
     }
 
@@ -399,6 +471,20 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     const offset = seekOffsetRef.current;
     seekOffsetRef.current = 0;
     if (sessionOwner) sessionStartOffsetRef.current = offset;
+
+    // The offset is the single most useful number in a restart: a transcode
+    // starting somewhere other than where playback was is the signature of a
+    // stale position having reached this client.
+    logEvent("HLS", "starting session", {
+      session: sessionId.substring(0, 8),
+      owner: sessionOwner,
+      adopted: didAdoptRef.current,
+      offsetS: offset,
+      subtitles: subtitlesOnRef.current,
+      vpsRelay,
+      roomPosS: syncStateRef.current?.position ?? "none",
+    });
+
     const url = hlsMasterUrl(item.ratingKey, sessionId, {
       subtitles: subtitlesOnRef.current,
       offset: offset > 0 ? offset : undefined,
@@ -547,8 +633,16 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
         hlsRef.current = hls;
 
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
           if (!mounted) return;
+          logEvent("HLS", "manifest parsed", {
+            session: sessionId?.substring(0, 8),
+            levels: data?.levels?.length,
+            startOffsetS: offset,
+            roomPosS: syncStateRef.current?.position ?? "none",
+            willSeekToRoom: (!isHostRef.current || didAdoptRef.current)
+              && (syncStateRef.current?.position ?? 0) > DRIFT_THRESHOLD_S,
+          });
 
           // Clear track switching overlay
           setTrackSwitching(null);
@@ -601,13 +695,37 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           }
         });
 
+        // Non-fatal errors are the early warning: a run of fragment timeouts or
+        // gap-jumps usually precedes the fatal one by several seconds, and
+        // without them the log shows a stream dying with no run-up.
+        hls.on(Hls.Events.ERROR, (_event, data) => {
+          if (data.fatal) return;
+          logWarn("HLS", "non-fatal error", {
+            type: data.type,
+            details: data.details,
+            session: sessionId?.substring(0, 8),
+            frag: data.frag?.sn,
+            httpStatus: data.response?.code,
+            ...snapshot(videoRef.current),
+          });
+        });
+
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (!data.fatal) return;
-          console.error("HLS fatal error:", data);
+          logError("HLS", "fatal error", {
+            type: data.type,
+            details: data.details,
+            session: sessionId?.substring(0, 8),
+            owner: ownsSessionRef.current,
+            host: isHostRef.current,
+            httpStatus: data.response?.code,
+            url: data.frag?.url ?? data.url,
+            ...snapshot(videoRef.current),
+          });
 
           // MEDIA_ERROR: try HLS.js built-in recovery first
           if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-            console.warn("[HLS] Fatal media error, attempting recoverMediaError");
+            logWarn("HLS", "recoverMediaError", { details: data.details });
             hls.recoverMediaError();
             return;
           }
@@ -615,6 +733,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // NETWORK_ERROR: try hls.startLoad() first (transient failures)
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRetryRef.current < MAX_NETWORK_RETRIES) {
             networkRetryRef.current++;
+            logWarn("HLS", "network retry via startLoad", {
+              attempt: networkRetryRef.current,
+              max: MAX_NETWORK_RETRIES,
+              details: data.details,
+            });
             hls.startLoad();
             return;
           }
@@ -623,11 +746,20 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           if (!ownsSessionRef.current) {
             if (retryCountRef.current < MAX_VIEWER_RETRIES) {
               retryCountRef.current++;
-              console.warn(`[Viewer] HLS fatal error, retry ${retryCountRef.current}/${MAX_VIEWER_RETRIES} in 2s`);
+              logWarn("Viewer", "fatal error, scheduling retry", {
+                attempt: retryCountRef.current,
+                max: MAX_VIEWER_RETRIES,
+                inMs: 2000,
+                type: data.type,
+              });
               setTimeout(() => {
                 if (mounted) setRetryKey((k) => k + 1);
               }, 2000);
             } else {
+              logError("Viewer", "retries exhausted, marking stream dead", {
+                type: data.type,
+                details: data.details,
+              });
               if (mounted) setError(`Playback error: ${data.type}`);
               hlsDeadRef.current = true;
             }
@@ -664,14 +796,31 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
               setError(null);
             }
 
-            console.warn(`[Host] Stream interrupted, auto-recovery attempt ${recoveryAttemptRef.current}/${MAX_RECOVERY_ATTEMPTS}`);
+            logWarn("Host", "stream interrupted, auto-recovery scheduled", {
+              attempt: recoveryAttemptRef.current,
+              max: MAX_RECOVERY_ATTEMPTS,
+              // Which of the two sources the resume position came from — a
+              // promoted host trusts room state over its own drifted playhead,
+              // and that choice decides where the fresh transcode starts.
+              resumeFrom: !mountedAsHostRef.current && typeof roomPos === "number" && roomPos > 0
+                ? "roomPosition"
+                : "currentTime",
+              resumeAtS: recoveryPositionRef.current,
+              roomPosS: roomPos ?? "none",
+              currentTimeS: video?.currentTime ?? "none",
+              inMs: 2000,
+            });
 
             // Wait 2s then restart transcode at saved position
             setTimeout(() => {
               if (!mounted) return;
               destroyLocal();
               if (sessionIdRef.current) {
-                pendingStopRef.current = stopSession(sessionIdRef.current).catch(() => {});
+                logEvent("Host", "stopping session for recovery restart", {
+                  session: sessionIdRef.current.substring(0, 8),
+                  restartAtS: recoveryPositionRef.current,
+                });
+                pendingStopRef.current = stopSession(sessionIdRef.current, "hls-recovery").catch(() => {});
                 sessionIdRef.current = null;
               }
               seekOffsetRef.current = recoveryPositionRef.current;
@@ -679,13 +828,18 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             }, 2000);
           } else {
             // Recovery exhausted — show manual retry
+            logError("Host", "recovery exhausted, tearing down", {
+              attempts: recoveryAttemptRef.current,
+              session: sessionIdRef.current?.substring(0, 8) ?? "none",
+              ...snapshot(videoRef.current),
+            });
             if (mounted) {
               setError(null);
               setRecovering(false);
             }
             destroyLocal();
             if (sessionIdRef.current) {
-              pendingStopRef.current = stopSession(sessionIdRef.current).catch(() => {});
+              pendingStopRef.current = stopSession(sessionIdRef.current, "recovery-exhausted").catch(() => {});
               sessionIdRef.current = null;
             }
           }
@@ -695,16 +849,55 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         hls.attachMedia(video);
 
         // Buffering indicator events
-        const onWaiting = () => { if (!video.paused) setBuffering(true); };
-        const onPlaying = () => setBuffering(false);
-        const onSeeked = () => { if (!video.paused) setBuffering(false); };
+        const onWaiting = () => {
+          logWarn("Video", "waiting (buffer starved)", snapshot(video));
+          if (!video.paused) setBuffering(true);
+        };
+        const onPlaying = () => {
+          logEvent("Video", "playing", snapshot(video));
+          setBuffering(false);
+        };
+        const onSeeked = () => {
+          logEvent("Video", "seeked", snapshot(video));
+          if (!video.paused) setBuffering(false);
+        };
+        // The element's own failure and end-of-stream events. hls.js doesn't
+        // surface all of these, and a `stalled` or `emptied` with no
+        // corresponding HLS error is exactly the case the log couldn't explain
+        // before: something detached the media without going through the error
+        // handler above.
+        const onStalled = () => logWarn("Video", "stalled (no data from network)", snapshot(video));
+        const onSuspend = () => logEvent("Video", "suspend", snapshot(video));
+        const onEmptied = () => logWarn("Video", "emptied (media detached)", snapshot(video));
+        const onAbort = () => logWarn("Video", "abort", snapshot(video));
+        const onEnded = () => logEvent("Video", "ended", snapshot(video));
+        const onError = () => logError("Video", "element error", snapshot(video));
+        const onRateChange = () => logEvent("Video", "ratechange", { rate: video.playbackRate });
+        const onPause = () => logEvent("Video", "pause", snapshot(video));
+
         video.addEventListener("waiting", onWaiting);
         video.addEventListener("playing", onPlaying);
         video.addEventListener("seeked", onSeeked);
+        video.addEventListener("stalled", onStalled);
+        video.addEventListener("suspend", onSuspend);
+        video.addEventListener("emptied", onEmptied);
+        video.addEventListener("abort", onAbort);
+        video.addEventListener("ended", onEnded);
+        video.addEventListener("error", onError);
+        video.addEventListener("ratechange", onRateChange);
+        video.addEventListener("pause", onPause);
         bufferCleanupRef.current = () => {
           video.removeEventListener("waiting", onWaiting);
           video.removeEventListener("playing", onPlaying);
           video.removeEventListener("seeked", onSeeked);
+          video.removeEventListener("stalled", onStalled);
+          video.removeEventListener("suspend", onSuspend);
+          video.removeEventListener("emptied", onEmptied);
+          video.removeEventListener("abort", onAbort);
+          video.removeEventListener("ended", onEnded);
+          video.removeEventListener("error", onError);
+          video.removeEventListener("ratechange", onRateChange);
+          video.removeEventListener("pause", onPause);
         };
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
         const token = getSessionToken();
@@ -734,6 +927,16 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       // Fire immediately to send the first timeline update ASAP — Plex
       // throttles HTTP segment delivery until it knows our playback position.
       if (sessionOwner) {
+        // This assignment is unguarded, so if the promotion effect started an
+        // interval while start() was still awaiting above, that one is orphaned
+        // here and keeps pinging forever. Symptom in the server log: two ping
+        // cadences for one session. Flagged rather than silently overwritten so
+        // it's attributable if it shows up.
+        if (pingIntervalRef.current !== null) {
+          logWarn("Ping", "overwriting an existing ping interval (previous one is orphaned)", {
+            session: sessionIdRef.current?.substring(0, 8) ?? "none",
+          });
+        }
         if (sessionIdRef.current) {
           pingSession(sessionIdRef.current, 0).catch(console.error);
         }
@@ -756,6 +959,29 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           }
         }, HEARTBEAT_INTERVAL_MS);
       }
+
+      // Periodic health sample. Everything else here is edge-triggered, so
+      // without this a stream that degrades slowly (buffer draining over a
+      // minute, playback rate drifting) leaves no trace until it finally breaks
+      // — and the log jumps from "started" straight to "stopped".
+      healthIntervalRef.current = setInterval(() => {
+        const v = videoRef.current;
+        if (!v) return;
+        const stats = p2pStatsRef.current;
+        logEvent("Health", "sample", {
+          session: sessionIdRef.current?.substring(0, 8) ?? "none",
+          role: isHostRef.current ? "host" : "viewer",
+          owner: ownsSessionRef.current,
+          roomPosS: syncStateRef.current?.position ?? "none",
+          driftS: syncStateRef.current?.position != null
+            ? v.currentTime - syncStateRef.current.position
+            : "n/a",
+          peers: stats.peers.size,
+          p2pMB: stats.p2pBytes / 1e6,
+          httpMB: stats.httpBytes / 1e6,
+          ...snapshot(v),
+        });
+      }, HEALTH_SAMPLE_MS);
     }
 
     start();
@@ -765,8 +991,17 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       destroyLocal();
       // Only the session owner stops the Plex transcode
       if (ownsSessionRef.current && sessionIdRef.current) {
-        pendingStopRef.current = stopSession(sessionIdRef.current).catch(() => {});
+        logEvent("HLS", "effect cleanup stopping session", {
+          session: sessionIdRef.current.substring(0, 8),
+          ...snapshot(videoRef.current),
+        });
+        pendingStopRef.current = stopSession(sessionIdRef.current, "effect-cleanup").catch(() => {});
         sessionIdRef.current = null;
+      } else {
+        logEvent("HLS", "effect cleanup (not session owner, transcode left running)", {
+          session: sessionIdRef.current?.substring(0, 8) ?? "none",
+          ownsSession: ownsSessionRef.current,
+        });
       }
     };
   }, [item.ratingKey, subtitles, destroyLocal, viewerHlsSessionId, retryKey, vpsRelay]);
@@ -806,6 +1041,20 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       video.pause();
     }
 
+    // Every command this client acts on, with both positions. This is where the
+    // stale-position bug lived, so the decision is recorded whether or not it
+    // ends up moving anything.
+    logEvent("Sync", "command applied", {
+      commandSeq: syncState.commandSeq,
+      seekSeq: syncState.seekSeq,
+      isNewSeek,
+      roomPlaying: syncState.playing,
+      roomPosS: syncState.position,
+      driftS: syncState.position > 0 ? video.currentTime - syncState.position : "n/a",
+      role: amHost ? "host" : "viewer",
+      ...snapshot(video),
+    });
+
     // Seek correction — only on explicit commands, with generous threshold
     if (syncState.position > 0) {
       const drift = Math.abs(video.currentTime - syncState.position);
@@ -821,8 +1070,22 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // host's own playhead and can be minutes stale. Acting on those let a
           // co-host's pause drag the running transcode backwards and restart it
           // mid-episode. A real seek still lands; a stale position no longer does.
-          if (isNewSeek) handleHostSeekRef.current(syncState.position, false);
+          if (isNewSeek) {
+            handleHostSeekRef.current(syncState.position, false);
+          } else {
+            logWarn("Sync", "host ignoring drifting position on non-seek command", {
+              commandSeq: syncState.commandSeq,
+              roomPosS: syncState.position,
+              ownPosS: video.currentTime,
+              driftS: drift,
+            });
+          }
         } else {
+          logEvent("Sync", "viewer correcting to room position", {
+            fromS: video.currentTime,
+            toS: syncState.position,
+            driftS: drift,
+          });
           video.currentTime = syncState.position;
         }
       }
@@ -864,6 +1127,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       clearTimeout(seekStallTimerRef.current);
       seekStallTimerRef.current = null;
     }
+    // The expensive path: this tears down a working transcode and waits out a
+    // fresh one. Logged with where playback actually was, so a restart to a
+    // position nowhere near the playhead is obvious at a glance.
+    logWarn("Seek", "restarting transcode", {
+      targetS: positionSeconds,
+      broadcast,
+      sessionStartOffsetS: sessionStartOffsetRef.current,
+      ...snapshot(videoRef.current),
+    });
     seekOffsetRef.current = positionSeconds;
     setBuffering(true);
     if (broadcast) syncActionsRef.current?.sendSeek(positionSeconds);
@@ -882,6 +1154,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const handleHostSeek = useCallback((positionSeconds: number, broadcast = true) => {
     const video = videoRef.current;
     if (!video) {
+      logWarn("Seek", "no video element, going straight to restart", { targetS: positionSeconds });
       handleSeekRestart(positionSeconds, broadcast);
       return;
     }
@@ -890,7 +1163,23 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       seekStallTimerRef.current = null;
     }
 
+    // Which of the three branches below was taken, and the numbers that decided
+    // it. A seek turning into a restart is the difference between a half-second
+    // jump and ten seconds of rebuffering, so the reason needs to be on record.
+    logEvent("Seek", "host seek", {
+      targetS: positionSeconds,
+      broadcast,
+      buffered: isPositionBuffered(video, positionSeconds),
+      sessionStartOffsetS: sessionStartOffsetRef.current,
+      pastBufferS: positionSeconds - bufferedEnd(video),
+      ...snapshot(video),
+    });
+
     if (positionSeconds < sessionStartOffsetRef.current) {
+      logEvent("Seek", "target precedes session start offset → restart", {
+        targetS: positionSeconds,
+        sessionStartOffsetS: sessionStartOffsetRef.current,
+      });
       handleSeekRestart(positionSeconds, broadcast);
       return;
     }
@@ -900,6 +1189,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // an in-place seek would only stall for SEEK_STALL_TIMEOUT_MS before falling
     // back to a restart anyway. Restart at the target directly and skip the stall.
     if (!wasBuffered && positionSeconds - bufferedEnd(video) > FAR_SEEK_THRESHOLD_S) {
+      logEvent("Seek", "far forward jump past transcode head → restart", {
+        targetS: positionSeconds,
+        bufferedEndS: bufferedEnd(video),
+        thresholdS: FAR_SEEK_THRESHOLD_S,
+      });
       handleSeekRestart(positionSeconds, broadcast);
       return;
     }
@@ -914,8 +1208,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       const v = videoRef.current;
       if (!v) return;
       if (!isPositionBuffered(v, v.currentTime)) {
-        console.warn(`[Seek] No data after ${SEEK_STALL_TIMEOUT_MS}ms — restarting transcode at ${v.currentTime.toFixed(1)}s`);
+        logWarn("Seek", "in-place seek starved, falling back to restart", {
+          waitedMs: SEEK_STALL_TIMEOUT_MS,
+          ...snapshot(v),
+        });
         handleSeekRestart(v.currentTime);
+      } else {
+        logEvent("Seek", "in-place seek satisfied", snapshot(v));
       }
     }, SEEK_STALL_TIMEOUT_MS);
   }, [handleSeekRestart]);
@@ -1015,10 +1314,16 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   }, []);
 
   const endPlayback = useCallback(() => {
+    logEvent("Player", "endPlayback (user left the player)", {
+      isHost: isHostRef.current,
+      ownsSession: ownsSessionRef.current,
+      session: sessionIdRef.current?.substring(0, 8) ?? "none",
+      ...snapshot(videoRef.current),
+    });
     destroyLocal();
     // Only the session owner stops the Plex transcode
     if (ownsSessionRef.current && sessionIdRef.current) {
-      pendingStopRef.current = stopSession(sessionIdRef.current).catch(() => {});
+      pendingStopRef.current = stopSession(sessionIdRef.current, "end-playback").catch(() => {});
       sessionIdRef.current = null;
     }
     if (isHostRef.current) {

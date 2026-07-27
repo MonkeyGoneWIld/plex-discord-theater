@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
 import { startPrefetch, stopPrefetch, getCachedSegment } from "../services/segment-prefetch.js";
 import * as thumbCache from "../services/thumb-cache.js";
+import { logEvent } from "../services/logger.js";
 
 const router = Router();
 // Verbose HLS logging. On outside production, or force it in a production
@@ -1878,6 +1879,17 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
     const plexKey = plexTranscodeKeys.get(sessionId) ?? sessionId;
     const clientId = getSessionClientId(sessionId);
 
+    // A ping for a session we no longer hold a transcode key for means a client
+    // is still running its keep-alive loop against a stream that's already gone
+    // — an orphaned interval, or a client that missed the teardown. Either way
+    // it's invisible from the client side, so surface it here.
+    if (!plexTranscodeKeys.has(sessionId)) {
+      logEvent("Ping", "for unknown/stopped session", {
+        session: sessionId.substring(0, 8),
+        knownRatingKey: sessionRatingKeys.has(sessionId),
+      });
+    }
+
     // Ping to keep transcode alive
     await plexFetch(
       "/video/:/transcode/universal/ping",
@@ -1910,10 +1922,40 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
       const posDeltaMs = prev ? timeMs - prev.timeMs : 0;
       const stalled = !!prev && wallMs > 4000 && Math.abs(posDeltaMs) < 500;
       const bufS = typeof req.query.buffer === "string" ? req.query.buffer : "?";
-      if (DEBUG) console.log("[Ping] %s pos=%ss Δpos=%ss buf=%ss / %ss wall%s",
+      if (DEBUG) console.log("[Ping] %s pos=%ss Δpos=%ss buf=%ss / %ss wall%s playing=%s",
         sessionId.substring(0, 8), (timeMs / 1000).toFixed(1),
         (posDeltaMs / 1000).toFixed(1), bufS, (wallMs / 1000).toFixed(1),
-        stalled ? "  ⚠ TIMELINE STALLED" : "");
+        stalled ? "  ⚠ TIMELINE STALLED" : "", playing ? "1" : "0");
+
+      // Two conditions worth calling out even when DEBUG is off, because both
+      // precede a stream dying and neither is obvious in the ping stream:
+      //  - a gap far longer than the 10s cadence (client backgrounded, network
+      //    dropped, or a second ping loop was killed off)
+      //  - the position jumping, which means a seek happened without the
+      //    transcode restarting
+      if (prev && wallMs > 25_000) {
+        logEvent("Ping", "gap in keep-alive", {
+          session: sessionId.substring(0, 8),
+          gapS: wallMs / 1000,
+          posS: timeMs / 1000,
+        });
+      }
+      if (prev && Math.abs(posDeltaMs) > 30_000) {
+        logEvent("Ping", "position jumped without restart", {
+          session: sessionId.substring(0, 8),
+          fromS: prev.timeMs / 1000,
+          toS: timeMs / 1000,
+          overWallS: wallMs / 1000,
+        });
+      }
+      if (stalled) {
+        logEvent("Ping", "timeline stalled", {
+          session: sessionId.substring(0, 8),
+          posS: timeMs / 1000,
+          frozenForS: frozenMs / 1000,
+          bufferS: bufS,
+        });
+      }
 
       hostPingInfo.set(sessionId, { timeMs, at: now, posChangedAt });
 
@@ -1952,6 +1994,21 @@ router.delete(
       res.status(400).json({ error: "Invalid session ID" });
       return;
     }
+
+    // The client tags every teardown with the branch that asked for it. Logged
+    // with the session's last known playback state so a stop that arrives
+    // mid-stream can be read without guessing: which code path, how far in, how
+    // much buffer was left, and how long since the last ping.
+    const reason = typeof req.query.reason === "string" ? req.query.reason.slice(0, 64) : "unspecified";
+    const lastPing = hostPingInfo.get(sessionId);
+    logEvent("HLS", "Stop requested", {
+      session: sessionId.substring(0, 8),
+      reason,
+      lastPosS: lastPing ? (lastPing.timeMs / 1000).toFixed(1) : "none",
+      sinceLastPingMs: lastPing ? Date.now() - lastPing.at : "none",
+      ratingKey: sessionRatingKeys.get(sessionId) ?? "unknown",
+      hadPlexKey: plexTranscodeKeys.has(sessionId),
+    });
 
     if (stoppingSessions.has(sessionId)) {
       if (DEBUG) console.log("[HLS] Stop session", sessionId.substring(0, 8), "(already stopping via sync)");

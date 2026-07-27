@@ -1,9 +1,21 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useImperativeHandle } from "react";
 import { authUrl } from "../lib/api";
 import { loadVolume } from "../lib/volume";
+import { useMediaQuery, COMPACT_CONTROLS_QUERY } from "../lib/useMediaQuery";
+
+export interface ControlsHandle {
+  /**
+   * Add ±seconds to the pending skip, exactly as the on-screen ±10s buttons do.
+   * Lets the player's keyboard shortcuts feed one accumulator rather than
+   * keeping a second, competing one.
+   */
+  queueSkip: (amount: number) => void;
+}
 
 interface ControlsProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  /** Imperative handle — see ControlsHandle. */
+  handleRef?: React.Ref<ControlsHandle>;
   /** Host-only affordances: queue, track switcher, people panel. */
   isHost: boolean;
   /** Transport rights (play/pause/seek) — true for the host AND for co-hosts.
@@ -74,8 +86,22 @@ function fmt(seconds: number): string {
 
 const HIDE_DELAY_MS = 3000;
 
+/**
+ * How long the ±10s buttons keep collecting before the seek actually happens.
+ *
+ * Every seek can restart the Plex transcode, so firing one per click makes
+ * spamming the button the worst thing you can do to the stream. Clicks inside
+ * this window fold into a single jump instead, the way YouTube's do — each one
+ * pushes the deadline back, so a burst costs one seek no matter how long it is.
+ */
+const SKIP_STACK_MS = 700;
+
+/** How long the accumulated total lingers after the seek lands. */
+const SKIP_INDICATOR_LINGER_MS = 400;
+
 export function Controls({
   videoRef,
+  handleRef,
   isHost,
   canControl = isHost,
   title,
@@ -107,6 +133,23 @@ export function Controls({
   // Fraction (0-1) of the bar under the cursor, null when not hovering —
   // drives the seek-preview timestamp tooltip and hover marker.
   const [hoverPct, setHoverPct] = useState<number | null>(null);
+  // Fraction being dragged, null when not scrubbing. The fill and handle follow
+  // this instead of playback, so the bar tracks the finger/cursor while the
+  // video carries on underneath. Deliberately NOT seeking per move: each seek
+  // can restart the Plex transcode, so a drag commits exactly once, on release.
+  const [scrubPct, setScrubPct] = useState<number | null>(null);
+  // Mirrors scrubPct for the handlers. A pointermove can arrive before React has
+  // re-rendered with the state set by pointerdown, which would drop the drag.
+  const draggingRef = useRef(false);
+  const scrubPctRef = useRef(0);
+  // Accumulated ±10s presses waiting to be applied as one seek, and where they
+  // add up to. Null when nothing is pending. `delta` drives the on-screen total,
+  // `target` is what the eventual seek uses.
+  const [skipPreview, setSkipPreview] = useState<{ delta: number; target: number } | null>(null);
+  const skipBaseRef = useRef(0);
+  const skipDeltaRef = useRef(0);
+  const skipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const skipClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The frame we want (quantized) vs the one that has actually decoded. Two
   // values so a slow load keeps showing the previous frame rather than blanking
   // to an empty box mid-scrub.
@@ -125,6 +168,13 @@ export function Controls({
   const pendingPreviewRef = useRef<string | null>(null);
   const previewThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [hintsVisible, setHintsVisible] = useState(showKeyboardHints);
+  // Phone-sized: the volume slider moves into a vertical popover rather than
+  // eating the width of a row that has nowhere to put it.
+  const compact = useMediaQuery(COMPACT_CONTROLS_QUERY);
+  // Discord's own chrome is kept clear by the safe-area insets baked into the
+  // bar paddings, so nothing here needs to know the orientation.
+  const [volumeOpen, setVolumeOpen] = useState(false);
+  const volumeWrapRef = useRef<HTMLDivElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hintsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -223,12 +273,19 @@ export function Controls({
     }
   }, [videoRef, canControl, onSyncPause, onSyncResume]);
 
-  const seek = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      if (!canControl || !progressRef.current || !videoRef.current) return;
+  /** Where along the bar a client X coordinate falls, 0-1. Null if unmeasurable. */
+  const pctFromClientX = useCallback((clientX: number): number | null => {
+    const el = progressRef.current;
+    if (!el) return null;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0) return null;
+    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  }, []);
+
+  const commitSeekToPct = useCallback(
+    (pct: number) => {
+      if (!canControl || !videoRef.current) return;
       if (!duration || !isFinite(duration)) return;
-      const rect = progressRef.current.getBoundingClientRect();
-      const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
       const newTime = pct * duration;
       // onSeekRestart is the host's smart seek: in-place when the target is
       // reachable in the current transcode, transcode restart otherwise.
@@ -257,17 +314,57 @@ export function Controls({
     [videoRef, onSyncSeek, onSeekRestart],
   );
 
-  const skipBack = useCallback(() => {
+  /**
+   * Add to the pending skip rather than seeking now.
+   *
+   * The position a burst is measured from is captured on its first click, so
+   * every click in the burst adds a clean ±10s to that same origin — reading
+   * video.currentTime each time would fold in however much played during the
+   * burst and make the total drift.
+   */
+  const queueSkip = useCallback((amount: number) => {
     const video = videoRef.current;
     if (!video || !canControl) return;
-    skipTo(Math.max(0, video.currentTime - 10));
-  }, [videoRef, canControl, skipTo]);
+    const total = video.duration || duration || 0;
 
-  const skipForward = useCallback(() => {
-    const video = videoRef.current;
-    if (!video || !canControl) return;
-    skipTo(Math.min(video.duration || 0, video.currentTime + 10));
-  }, [videoRef, canControl, skipTo]);
+    const burstInProgress = skipTimerRef.current !== null;
+    if (!burstInProgress) skipBaseRef.current = video.currentTime;
+    skipDeltaRef.current = (burstInProgress ? skipDeltaRef.current : 0) + amount;
+
+    const target = Math.max(0, Math.min(total || Infinity, skipBaseRef.current + skipDeltaRef.current));
+    setSkipPreview({ delta: skipDeltaRef.current, target });
+
+    if (skipTimerRef.current !== null) clearTimeout(skipTimerRef.current);
+    skipTimerRef.current = setTimeout(() => {
+      skipTimerRef.current = null;
+      skipTo(target);
+      // Held a beat past the seek so the total doesn't vanish the instant it
+      // is applied, which reads as the click having been dropped.
+      skipClearTimerRef.current = setTimeout(
+        () => setSkipPreview(null),
+        SKIP_INDICATOR_LINGER_MS,
+      );
+    }, SKIP_STACK_MS);
+
+    // A new click during the linger cancels the fade — the burst is continuing.
+    if (skipClearTimerRef.current !== null) {
+      clearTimeout(skipClearTimerRef.current);
+      skipClearTimerRef.current = null;
+    }
+    resetHideTimer();
+  }, [videoRef, canControl, duration, skipTo, resetHideTimer]);
+
+  const skipBack = useCallback(() => queueSkip(-10), [queueSkip]);
+  const skipForward = useCallback(() => queueSkip(10), [queueSkip]);
+
+  useImperativeHandle(handleRef, () => ({ queueSkip }), [queueSkip]);
+
+  // Drop pending timers on unmount so a queued seek can't fire into a torn-down
+  // player (or a transcode the next item has already replaced).
+  useEffect(() => () => {
+    if (skipTimerRef.current !== null) clearTimeout(skipTimerRef.current);
+    if (skipClearTimerRef.current !== null) clearTimeout(skipClearTimerRef.current);
+  }, []);
 
   const toggleMute = useCallback(() => {
     const video = videoRef.current;
@@ -300,10 +397,9 @@ export function Controls({
     [videoRef, muted],
   );
 
-  const handleProgressMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (!progressRef.current) return;
-    const rect = progressRef.current.getBoundingClientRect();
-    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  /** Point the tooltip and preview frame at a position on the bar. Shared by
+   *  hovering and dragging — a scrub wants exactly the same affordances. */
+  const showPreviewAt = useCallback((pct: number) => {
     setHoverPct(pct);
 
     if (previewPartId == null || failedPartRef.current === previewPartId) return;
@@ -333,6 +429,59 @@ export function Controls({
       if (latest && latest !== url) setPreviewSrc(latest);
     }, PREVIEW_THROTTLE_MS);
   }, [previewPartId, duration]);
+
+  // ─── Scrubbing ────────────────────────────────────────────────
+  //
+  // Pointer events rather than mouse events, so a finger drag on the Discord
+  // mobile Activity works the same as a mouse drag. Pointer capture keeps the
+  // events coming to the bar once the drag starts, so sliding off it (or off the
+  // window entirely) still tracks and still commits.
+
+  const handleProgressPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!canControl) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    const pct = pctFromClientX(e.clientX);
+    if (pct == null) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    draggingRef.current = true;
+    scrubPctRef.current = pct;
+    setScrubPct(pct);
+    setHoveringProgress(true);
+    showPreviewAt(pct);
+    // Hold the controls open for the length of the drag. Touch produces no
+    // mousemove, so the usual idle-hide would pull the bar out from under it.
+    setVisible(true);
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+  }, [canControl, pctFromClientX, showPreviewAt]);
+
+  const handleProgressPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const pct = pctFromClientX(e.clientX);
+    if (pct == null) return;
+    // Hover affordances are for pointers that can hover; a dragging finger gets
+    // them too, since it's asking the same question of the bar.
+    if (e.pointerType === "mouse" || draggingRef.current) showPreviewAt(pct);
+    if (!draggingRef.current) return;
+    scrubPctRef.current = pct;
+    setScrubPct(pct);
+  }, [pctFromClientX, showPreviewAt]);
+
+  const handleProgressPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    // A plain click is just a zero-distance drag, so it lands here too — which
+    // is why the bar no longer needs its own onClick.
+    const pct = pctFromClientX(e.clientX) ?? scrubPctRef.current;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    setScrubPct(null);
+    if (e.pointerType !== "mouse") {
+      setHoveringProgress(false);
+      setHoverPct(null);
+    }
+    commitSeekToPct(pct);
+    resetHideTimer();
+  }, [pctFromClientX, commitSeekToPct, resetHideTimer]);
 
   // Load the wanted frame, promoting it to the display only once decoded.
   //
@@ -390,18 +539,69 @@ export function Controls({
     if (previewThrottleRef.current !== null) clearTimeout(previewThrottleRef.current);
   }, []);
 
+  // Dismiss the volume popover on a tap anywhere else. Pointerdown rather than
+  // click so it closes on the press that starts an interaction elsewhere,
+  // instead of hanging around over whatever the user is reaching for.
+  useEffect(() => {
+    if (!volumeOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (volumeWrapRef.current?.contains(e.target as Node)) return;
+      setVolumeOpen(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    return () => document.removeEventListener("pointerdown", onDown);
+  }, [volumeOpen]);
+
+  // The popover is anchored to a button in the control bar, so it can't outlive
+  // the bar fading out from under it.
+  useEffect(() => {
+    if (!visible) setVolumeOpen(false);
+  }, [visible]);
+
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
+  // Where the bar points: the drag if one is in progress, otherwise the pending
+  // skip total, otherwise playback. Both show you the destination before the
+  // seek that gets you there actually runs.
+  const pendingTime =
+    scrubPct != null
+      ? scrubPct * duration
+      : skipPreview != null
+        ? skipPreview.target
+        : null;
+  const fillPct = pendingTime != null && duration > 0 ? (pendingTime / duration) * 100 : progress;
   const buffered = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
-  const barHeight = hoveringProgress ? 8 : 5;
+  const barHeight = hoveringProgress || scrubPct != null ? 8 : 5;
 
   return (
-    <div
-      style={{
-        ...styles.overlay,
-        opacity: visible ? 1 : 0,
-        pointerEvents: visible ? "auto" : "none",
-      }}
-    >
+    <>
+      {/* Accumulated skip, on the side it's heading. Deliberately outside the
+          overlay below: that fades out on idle, and spamming the buttons is
+          exactly when you most need to see the running total. */}
+      {skipPreview != null && skipPreview.delta !== 0 && (
+        <div
+          style={{
+            ...styles.skipIndicator,
+            ...(skipPreview.delta < 0
+              ? { left: "6%", alignItems: "flex-start" }
+              : { right: "6%", alignItems: "flex-end" }),
+          }}
+        >
+          <div style={styles.skipChevrons}>
+            {skipPreview.delta < 0 ? "«" : "»"}
+          </div>
+          <div style={styles.skipAmount}>
+            {Math.abs(skipPreview.delta)} seconds
+          </div>
+        </div>
+      )}
+
+      <div
+        style={{
+          ...styles.overlay,
+          opacity: visible ? 1 : 0,
+          pointerEvents: visible ? "auto" : "none",
+        }}
+      >
       {/* Top bar: back + title */}
       <div style={styles.topBar}>
         <button onClick={onBack} style={styles.backBtn}>
@@ -414,15 +614,29 @@ export function Controls({
       </div>
 
       {/* Bottom bar */}
-      <div style={styles.bottomBar}>
+      <div style={{ ...styles.bottomBar, ...(compact ? styles.bottomBarCompact : {}) }}>
         {/* Chunky progress bar */}
         <div
           ref={progressRef}
-          onClick={seek}
-          onMouseEnter={() => setHoveringProgress(true)}
-          onMouseMove={handleProgressMove}
-          onMouseLeave={() => { setHoveringProgress(false); setHoverPct(null); }}
-          style={{ ...styles.progressHit, cursor: canControl ? "pointer" : "default" }}
+          onPointerDown={handleProgressPointerDown}
+          onPointerMove={handleProgressPointerMove}
+          onPointerUp={handleProgressPointerUp}
+          // Losing the pointer (a system gesture, a phone call) should still land
+          // the scrub where the user left it rather than silently dropping it.
+          onPointerCancel={handleProgressPointerUp}
+          onPointerEnter={(e) => { if (e.pointerType === "mouse") setHoveringProgress(true); }}
+          onPointerLeave={(e) => {
+            if (e.pointerType !== "mouse" || draggingRef.current) return;
+            setHoveringProgress(false);
+            setHoverPct(null);
+          }}
+          style={{
+            ...styles.progressHit,
+            cursor: canControl ? (scrubPct != null ? "grabbing" : "pointer") : "default",
+            // Without this the browser claims the gesture for scrolling and the
+            // drag dies after a few pixels of vertical wobble.
+            touchAction: "none",
+          }}
         >
           {/* Seek preview: timestamp under the cursor. clamp() keeps the
               bubble from overflowing the bar edges. */}
@@ -446,23 +660,29 @@ export function Controls({
           )}
           <div style={{ ...styles.progressTrack, height: barHeight, transition: "height 0.15s ease" }}>
             <div style={{ ...styles.progressBuffer, width: `${buffered}%` }} />
-            <div style={{ ...styles.progressFill, width: `${progress}%` }} />
-            {hoverPct != null && (
+            <div style={{ ...styles.progressFill, width: `${fillPct}%` }} />
+            {/* Redundant with the handle while dragging — the handle is already
+                sitting exactly here, and two markers on one spot reads as a bug. */}
+            {hoverPct != null && scrubPct == null && (
               <div style={{ ...styles.hoverMarker, left: `${hoverPct * 100}%` }} />
             )}
             <div
               style={{
                 position: "absolute",
-                left: `${progress}%`,
+                left: `${fillPct}%`,
                 top: "50%",
                 transform: "translate(-50%, -50%)",
-                width: 14,
-                height: 14,
+                // Grows under the finger/cursor while dragging, so it reads as
+                // grabbed rather than merely hovered.
+                width: scrubPct != null ? 18 : 14,
+                height: scrubPct != null ? 18 : 14,
                 borderRadius: "50%",
                 background: "#e5a00d",
-                boxShadow: "0 0 8px rgba(229,160,13,0.5)",
-                opacity: canControl && hoveringProgress ? 1 : 0,
-                transition: "opacity 0.15s ease",
+                boxShadow: scrubPct != null
+                  ? "0 0 0 5px rgba(229,160,13,0.25), 0 0 10px rgba(229,160,13,0.6)"
+                  : "0 0 8px rgba(229,160,13,0.5)",
+                opacity: canControl && (hoveringProgress || scrubPct != null) ? 1 : 0,
+                transition: "opacity 0.15s ease, width 0.12s ease, height 0.12s ease",
                 pointerEvents: "none",
               }}
             />
@@ -470,10 +690,10 @@ export function Controls({
         </div>
 
         <div style={styles.controls}>
-          <div style={styles.left}>
+          <div style={{ ...styles.left, ...(compact ? styles.groupCompact : {}) }}>
             {canControl && (
               <>
-                <button onClick={togglePlay} style={styles.playBtn}>
+                <button onClick={togglePlay} style={{ ...styles.playBtn, ...(compact ? styles.playBtnCompact : {}) }}>
                   {playing ? (
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                       <rect x="3" y="2" width="4" height="12" rx="1"/>
@@ -514,11 +734,14 @@ export function Controls({
                 )}
               </>
             )}
-            <span style={styles.time}>
-              {fmt(currentTime)} / {fmt(duration)}
+            <span style={{ ...styles.time, ...(compact ? styles.timeCompact : {}) }}>
+              {/* Reads out the pending destination — a drag in progress, or a
+                  stack of ±10s presses — so the number agrees with where the
+                  handle is rather than with playback behind it. */}
+              {fmt(pendingTime ?? currentTime)} / {fmt(duration)}
             </span>
           </div>
-          <div style={styles.right}>
+          <div style={{ ...styles.right, ...(compact ? styles.rightCompact : {}) }}>
             {isHost && onOpenPeople && (
               <button onClick={onOpenPeople} style={styles.queueBtn} title="People & roles">
                 <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
@@ -540,7 +763,11 @@ export function Controls({
             {onToggleStats && (
               <button
                 onClick={onToggleStats}
-                style={{ ...styles.gearBtn, color: statsActive ? "#e5a00d" : "#fff" }}
+                style={{
+                  ...styles.gearBtn,
+                  ...(compact ? styles.gearBtnCompact : {}),
+                  color: statsActive ? "#e5a00d" : "#fff",
+                }}
                 title="Stats for nerds (i)"
               >
                 <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
@@ -549,36 +776,112 @@ export function Controls({
               </button>
             )}
             {canControl && onOpenTrackSwitcher && (
-              <button onClick={onOpenTrackSwitcher} style={styles.gearBtn} title={isHost ? "Audio & Subtitles" : "Subtitles"}>
+              <button onClick={onOpenTrackSwitcher} style={{ ...styles.gearBtn, ...(compact ? styles.gearBtnCompact : {}) }} title={isHost ? "Audio & Subtitles" : "Subtitles"}>
                 {"\u2699"}
               </button>
             )}
-            <button onClick={toggleMute} style={styles.muteBtn} title={muted ? "Unmute" : "Mute"}>
-              {muted ? "\u{1F507}" : "\u{1F50A}"}
-            </button>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
-              value={volume}
-              onChange={handleVolume}
-              style={styles.volume}
-            />
-            {hintsVisible && (
+            {compact ? (
+              /* Vertical slider in a popover. A horizontal one needs ~80px of a
+                 row with none to give on a phone, and it was the control being
+                 pushed off the edge of the screen. */
+              <div ref={volumeWrapRef} style={styles.volumeWrap}>
+                {volumeOpen && (
+                  <div style={styles.volumePopover}>
+                    {/* A rotated element keeps its unrotated layout box, so the
+                        wrapper carries the size the slider occupies on screen
+                        and the slider itself overflows it invisibly. */}
+                    <div style={styles.volumeVerticalWrap}>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={volume}
+                        onChange={handleVolume}
+                        aria-label="Volume"
+                        style={{ ...styles.volume, ...styles.volumeVertical }}
+                      />
+                    </div>
+                    <button
+                      onClick={toggleMute}
+                      style={styles.muteBtn}
+                      title={muted ? "Unmute" : "Mute"}
+                    >
+                      {muted ? "\u{1F507}" : "\u{1F50A}"}
+                    </button>
+                  </div>
+                )}
+                <button
+                  onClick={() => setVolumeOpen((o) => !o)}
+                  style={styles.muteBtn}
+                  title="Volume"
+                  aria-expanded={volumeOpen}
+                >
+                  {muted ? "\u{1F507}" : "\u{1F50A}"}
+                </button>
+              </div>
+            ) : (
+              <>
+                <button onClick={toggleMute} style={styles.muteBtn} title={muted ? "Unmute" : "Mute"}>
+                  {muted ? "\u{1F507}" : "\u{1F50A}"}
+                </button>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={volume}
+                  onChange={handleVolume}
+                  aria-label="Volume"
+                  style={styles.volume}
+                />
+              </>
+            )}
+            {/* Keyboard hints have nothing to say on a touch device, and this
+                is the row with no width to spare. */}
+            {hintsVisible && !compact && (
               <div style={styles.hints}>
                 <span style={styles.hintBadge}>Space</span>
                 <span style={styles.hintBadge}>{"\u2190\u2192"}</span>
               </div>
             )}
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  skipIndicator: {
+    position: "absolute",
+    top: "50%",
+    transform: "translateY(-50%)",
+    display: "flex",
+    flexDirection: "column",
+    gap: "4px",
+    padding: "18px 26px",
+    borderRadius: "999px",
+    background: "rgba(0,0,0,0.55)",
+    backdropFilter: "blur(6px)",
+    color: "#f0f0f0",
+    pointerEvents: "none",
+    // Above the control overlay, which the indicator deliberately outlives.
+    zIndex: 11,
+  },
+  skipChevrons: {
+    fontSize: "26px",
+    lineHeight: 1,
+    fontWeight: 700,
+    color: "#e5a00d",
+  },
+  skipAmount: {
+    fontSize: "13px",
+    fontWeight: 600,
+    whiteSpace: "nowrap",
+    fontVariantNumeric: "tabular-nums",
+  },
   overlay: {
     position: "absolute",
     inset: 0,
@@ -592,7 +895,12 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     gap: "12px",
-    padding: "16px 20px",
+    // Base spacing plus whatever Discord reports it is covering — its header
+    // strip in portrait, the Leave pill in landscape. Defined in index.html.
+    paddingTop: "calc(16px + var(--sait, 0px))",
+    paddingRight: "calc(20px + var(--sair, 0px))",
+    paddingBottom: "16px",
+    paddingLeft: "calc(20px + var(--sail, 0px))",
     background: "linear-gradient(to bottom, rgba(0,0,0,0.8), transparent)",
   },
   backBtn: {
@@ -618,9 +926,13 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#f0f0f0",
   },
   bottomBar: {
-    padding: "0 20px 16px",
-    background: "linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%)",
+    // Insets on three sides — see the note on topBar. The bottom one clears
+    // Discord's collapse chevron in landscape and the home indicator on iOS.
     paddingTop: "48px",
+    paddingRight: "calc(20px + var(--sair, 0px))",
+    paddingBottom: "calc(16px + var(--saib, 0px))",
+    paddingLeft: "calc(20px + var(--sail, 0px))",
+    background: "linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%)",
   },
   progressHit: {
     position: "relative",
@@ -694,6 +1006,40 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
+    gap: "8px",
+  },
+  // ─── Phone-sized overrides ─────────────────────────────────────
+  // Same row, tightened. The buttons all stay: they're the reason to open the
+  // player at all, and the time readout is what gives when width runs short.
+  bottomBarCompact: {
+    // Tighter base spacing, still carrying the safe-area insets so the bar
+    // stays clear of Discord's chrome on a phone.
+    paddingTop: "28px",
+    paddingRight: "calc(12px + var(--sair, 0px))",
+    paddingBottom: "calc(10px + var(--saib, 0px))",
+    paddingLeft: "calc(12px + var(--sail, 0px))",
+  },
+  groupCompact: {
+    gap: "6px",
+    // Lets the time truncate rather than shoving controls off the screen edge.
+    minWidth: 0,
+    overflow: "hidden",
+  },
+  rightCompact: {
+    gap: "6px",
+    // The controls side never gives — every item here is a target to tap.
+    flexShrink: 0,
+  },
+  playBtnCompact: {
+    width: "32px",
+    height: "32px",
+  },
+  gearBtnCompact: {
+    width: "28px",
+    height: "28px",
+  },
+  timeCompact: {
+    fontSize: "11px",
   },
   left: {
     display: "flex",
@@ -735,6 +1081,12 @@ const styles: Record<string, React.CSSProperties> = {
     color: "rgba(255,255,255,0.7)",
     fontVariantNumeric: "tabular-nums",
     fontWeight: 500,
+    // "2:06:07 / 2:23:55" broke across two lines once the row ran out of width,
+    // which is what made the bar look twice as tall as it should.
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    minWidth: 0,
   },
   gearBtn: {
     display: "flex",
@@ -772,6 +1124,44 @@ const styles: Record<string, React.CSSProperties> = {
   volume: {
     width: "80px",
     accentColor: "#e5a00d",
+  },
+  volumeWrap: {
+    position: "relative",
+    display: "flex",
+    alignItems: "center",
+  },
+  volumePopover: {
+    position: "absolute",
+    bottom: "calc(100% + 10px)",
+    left: "50%",
+    transform: "translateX(-50%)",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "6px",
+    padding: "14px 8px 8px",
+    borderRadius: "12px",
+    background: "rgba(15,15,15,0.95)",
+    border: "1px solid rgba(255,255,255,0.15)",
+    backdropFilter: "blur(12px)",
+  },
+  volumeVerticalWrap: {
+    // The on-screen footprint of the rotated slider below. Fixed, so the slider
+    // overflowing its own box doesn't stretch the popover.
+    width: "26px",
+    height: "110px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  volumeVertical: {
+    // Rotation rather than `writing-mode: vertical-*`, which only lands a
+    // usable vertical range input on very recent Chromium — and this runs in
+    // whatever webview Discord ships on the device.
+    width: "110px",
+    transform: "rotate(-90deg)",
+    // Drags belong to the slider, not to the page behind it.
+    touchAction: "none",
   },
   hints: {
     display: "flex",

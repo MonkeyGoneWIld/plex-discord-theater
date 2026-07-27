@@ -9,7 +9,7 @@ import { QueuePanel } from "./QueuePanel";
 import { NextUpButton } from "./NextUpButton";
 import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
-import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, fetchMeta, fetchSiblingEpisodes } from "../lib/api";
+import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, fetchMeta, fetchSiblingEpisodes, invalidateMeta } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
@@ -1614,11 +1614,31 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     try {
       await setStreams(partId, { audioStreamID, subtitleStreamID });
     } catch (err) {
-      console.error("Failed to set streams:", err);
+      logError("Player", "failed to set streams", {
+        partId,
+        audioStreamID,
+        subtitleStreamID,
+        error: err instanceof Error ? err.message : String(err),
+      });
       setTrackSwitching(null);
       canvasRef.current = null;
       return;
     }
+
+    // fetchMeta is cached for five minutes and carries the per-track `selected`
+    // flags the switcher renders its checkmark from. Without dropping it, the
+    // burn-in changes but reopening the switcher still shows the old choice —
+    // "None" ticked while subtitles are plainly on screen. MovieDetail already
+    // does this after its own setStreams; the in-playback path was missing it.
+    invalidateMeta(item.ratingKey);
+
+    logEvent("Player", "track changed", {
+      partId,
+      audioStreamID: audioStreamID ?? "unchanged",
+      subtitleStreamID: subtitleStreamID ?? "unchanged",
+      subtitlesOn: subtitleStreamID !== undefined ? subtitleStreamID !== 0 : subtitlesOnRef.current,
+    });
+
     // Follow the new selection, so the restart below asks Plex to burn in
     // subtitles when a track is chosen (0 = None) rather than reusing whatever
     // the episode happened to start with. Without this, selecting a track after
@@ -1634,7 +1654,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     }
     setShowTrackSwitcher(false);
     setRetryKey((k) => k + 1);
-  }, []);
+    // ratingKey is a real dependency now that the meta cache is invalidated by
+    // key — this Player is reused across a queue advance, so a captured initial
+    // value would clear the wrong episode's entry.
+  }, [item.ratingKey]);
 
   // Live ref so the host can apply a co-host's subtitle request from an effect
   // without listing handleTrackChange as a dep (it's declared above, but keeping
@@ -1657,9 +1680,14 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       // switcher renders in subtitlesOnly mode for them.
       if (subtitleStreamID !== undefined) {
         syncActionsRef.current?.sendSetSubtitle(partId, subtitleStreamID);
+        // The host does the actual setStreams, so this client would otherwise
+        // keep serving its own five-minute-old meta and show the pre-change
+        // selection next time the switcher opens — same stale checkmark the
+        // host used to get, reached by a different route.
+        invalidateMeta(item.ratingKey);
       }
     },
-    [handleTrackChange],
+    [handleTrackChange, item.ratingKey],
   );
 
   // Host: apply a subtitle change requested by a co-host.

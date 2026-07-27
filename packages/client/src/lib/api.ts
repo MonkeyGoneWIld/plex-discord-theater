@@ -366,8 +366,14 @@ export async function pingSession(
   await apiGet(`/api/plex/hls/ping/${encodeURIComponent(sessionId)}${qs ? `?${qs}` : ""}`);
 }
 
-export function stopSession(sessionId: string): Promise<void> {
-  return apiDelete(`/api/plex/hls/session/${encodeURIComponent(sessionId)}`);
+/**
+ * `reason` is diagnostic only — the server logs it so a teardown in the log can
+ * be traced back to the branch of Player.tsx that asked for it, instead of just
+ * showing that a DELETE arrived.
+ */
+export function stopSession(sessionId: string, reason?: string): Promise<void> {
+  const qs = reason ? `?reason=${encodeURIComponent(reason)}` : "";
+  return apiDelete(`/api/plex/hls/session/${encodeURIComponent(sessionId)}${qs}`);
 }
 
 export interface AppConfig {

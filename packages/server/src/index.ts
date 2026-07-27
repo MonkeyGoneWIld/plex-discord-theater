@@ -1,4 +1,9 @@
 import "dotenv/config";
+// Installs the console tee as a side effect of being imported, so every later
+// line also lands in <data>/logs. Must stay above the imports below: ESM
+// evaluates modules in import order, and auth.ts / watch-history.ts both log
+// while initialising. Calling initLogger() further down would run after them.
+import { closeLogger } from "./services/logger.js";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -9,6 +14,7 @@ import discordRoutes, { closeInstanceDb } from "./routes/discord.js";
 import plexRoutes from "./routes/plex.js";
 import seerrRoutes from "./routes/seerr.js";
 import historyRoutes from "./routes/history.js";
+import logRoutes from "./routes/logs.js";
 import { requireAuth, closeSessionDb } from "./middleware/auth.js";
 import * as thumbCache from "./services/thumb-cache.js";
 import { closeHistoryDb } from "./services/watch-history.js";
@@ -65,6 +71,11 @@ app.use(
   }),
 );
 
+// Log batches are the one payload that legitimately exceeds the general 10kb
+// ceiling — a couple of hundred player events with their fields attached. Runs
+// first so body-parser marks the body as read and the global limit below skips
+// it; every other route keeps the tighter cap.
+app.use("/api/logs", express.json({ limit: "512kb" }));
 app.use(express.json({ limit: "10kb" }));
 
 const isDev = process.env.NODE_ENV !== "production";
@@ -102,17 +113,28 @@ const hlsLimiter = rateLimit({
   keyGenerator: (req) => req.ip || req.socket.remoteAddress || "unknown",
 });
 
+// Diagnostics ship on a timer from every connected client, so they'd eat most
+// of the general budget on their own. Own ceiling, sized for a full room.
+const logLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: isDev ? 20000 : 4000,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 app.use("/api/token", authLimiter);
 app.use("/api/register", authLimiter);
 app.use("/api/plex/hls/seg", hlsLimiter);
 app.use("/api/plex/hls/ping", hlsLimiter);
 app.use("/api/plex/thumb", thumbLimiter);
+app.use("/api/logs", logLimiter);
 // General API limiter — skip paths that have their own dedicated limiter
 app.use("/api", (req, res, next) => {
   if (
     req.path.startsWith("/plex/hls/seg") ||
     req.path.startsWith("/plex/hls/ping") ||
     req.path.startsWith("/plex/thumb") ||
+    req.path.startsWith("/logs") ||
     req.path === "/token" ||
     req.path === "/register"
   ) {
@@ -125,6 +147,7 @@ app.use("/api", discordRoutes);
 app.use("/api/plex", requireAuth, plexRoutes);
 app.use("/api/seerr", requireAuth, seerrRoutes);
 app.use("/api/history", requireAuth, historyRoutes);
+app.use("/api/logs", requireAuth, logRoutes);
 
 const clientDist = path.resolve(__dirname, "../../client/dist");
 app.use(express.static(clientDist));
@@ -157,11 +180,13 @@ async function shutdown(signal: string) {
     closeSessionDb();
     closeInstanceDb();
     closeHistoryDb();
+    closeLogger(); // last — everything above may still log on the way out
     process.exit(0);
   });
   // Fallback: force exit if server.close() hangs (e.g. lingering keep-alive connections)
   setTimeout(() => {
     console.warn("Shutdown timeout — forcing exit");
+    closeLogger();
     process.exit(1);
   }, 15000).unref();
 }

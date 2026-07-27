@@ -6,6 +6,7 @@ import { plexFetch } from "./plex.js";
 import { getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode } from "../routes/plex.js";
 import { createTracker, handleTrackerSocket, destroyTracker } from "./tracker.js";
 import { recordProgress } from "./watch-history.js";
+import { logEvent } from "./logger.js";
 
 /** Interval between WebSocket pings to detect dead connections. */
 const WS_PING_INTERVAL_MS = 30_000;
@@ -29,19 +30,22 @@ async function killPlexTranscode(hlsSessionId: string | null): Promise<void> {
     const plexKey = getPlexTranscodeKey(hlsSessionId);
     const clientId = getSessionClientId(hlsSessionId);
     const ratingKey = getSessionRatingKey(hlsSessionId) || null;
-    const stopKey = plexKey || hlsSessionId;
-
     try {
+      // Always our session id: `stop` takes a `session` parameter and matches on
+      // the identifier we gave Plex at start, never on the transcode GUID it
+      // allocated. Passing the latter is a silent 400 (see plexTranscodeControl
+      // in routes/plex.ts). plexKey is still worth having — it gates the
+      // terminate call below — but it is not what identifies the session here.
       const res = await plexFetch(
         "/video/:/transcode/universal/stop",
-        { transcodeSessionId: stopKey },
+        { session: hlsSessionId },
         {
-          "X-Plex-Session-Identifier": stopKey,
+          "X-Plex-Session-Identifier": hlsSessionId,
           "X-Plex-Client-Identifier": clientId,
         },
       );
-      console.log("[Sync] Stop transcode", stopKey.substring(0, 8),
-        plexKey ? "(mapped plex key)" : "(our UUID, no mapping)",
+      console.log("[Sync] Stop transcode", hlsSessionId.substring(0, 8),
+        plexKey ? "(plex key known)" : "(no plex key mapping)",
         "→", res.status);
     } catch (err) {
       console.error("[Sync] Stop transcode error:", err);
@@ -435,6 +439,24 @@ export function attachWebSocketServer(server: Server): void {
       // client-side gating is UX only and must never be trusted.
       if (!client.isHost && !(client.isCoHost && CO_HOST_ALLOWED_TYPES.has(type))) return;
 
+      // Every transport command, with the position the sender attached *and* the
+      // room's current one. A command whose position lags the room is the exact
+      // shape of the bug where a stale value reached the host and restarted its
+      // transcode — invisible unless both numbers are recorded side by side.
+      if (type === "play" || type === "pause" || type === "resume" || type === "seek" || type === "stop") {
+        const sent = typeof msg.position === "number" ? msg.position : null;
+        logEvent("Sync", `command ${type}`, {
+          room: roomId.substring(0, 8),
+          from: client.username ?? client.userId ?? "?",
+          role: client.isHost ? "host" : client.isCoHost ? "cohost" : "viewer",
+          sentPosS: sent === null ? "none" : sent,
+          roomPosS: room.state.position,
+          driftS: sent === null ? "n/a" : sent - room.state.position,
+          roomPlaying: room.state.playing,
+          session: room.state.hlsSessionId?.substring(0, 8) ?? "none",
+        });
+      }
+
       switch (type) {
         case "play": {
           // The transcode may start at an offset — resuming from watch history,
@@ -608,7 +630,16 @@ export function attachWebSocketServer(server: Server): void {
           if (instance) instance.hostUserId = target.userId;
           updateInstanceHost(roomId, target.userId);
 
-          console.log("[Sync] Host transferred to", target.userId.substring(0, 8));
+          // Handover is a prime suspect for a stream dying: the promoted client
+          // adopts a transcode it didn't start, and its idea of the position
+          // comes from room state rather than its own playhead.
+          logEvent("Sync", "host transferred", {
+            room: roomId.substring(0, 8),
+            from: client.username ?? client.userId,
+            to: target.username ?? target.userId,
+            roomPosS: room.state.position,
+            session: room.state.hlsSessionId?.substring(0, 8) ?? "none",
+          });
 
           sendTo(target.ws, { type: "host-promoted", hostUsername: target.username });
           for (const c of room.clients) {
@@ -669,7 +700,14 @@ export function attachWebSocketServer(server: Server): void {
           }
           updateInstanceHost(roomId, newHost.userId);
 
-          console.log("[Sync] Host left, promoting", newHost.userId.substring(0, 8), "to host");
+          logEvent("Sync", "host left, promoting successor", {
+            room: roomId.substring(0, 8),
+            left: client.username ?? client.userId,
+            promoted: newHost.username ?? newHost.userId,
+            remaining: room.clients.size,
+            roomPosS: room.state.position,
+            session: room.state.hlsSessionId?.substring(0, 8) ?? "none",
+          });
 
           sendTo(newHost.ws, { type: "host-promoted", hostUsername: newHost.username });
 
@@ -681,6 +719,12 @@ export function attachWebSocketServer(server: Server): void {
           }
         } else {
           const disconnectedSessionId = room.state.hlsSessionId;
+          logEvent("Sync", "last client left, killing transcode", {
+            room: roomId.substring(0, 8),
+            left: client.username ?? client.userId,
+            session: disconnectedSessionId?.substring(0, 8) ?? "none",
+            roomPosS: room.state.position,
+          });
           room.state.playing = false;
           room.state.hlsSessionId = null;
           stopRoomPing(roomId);

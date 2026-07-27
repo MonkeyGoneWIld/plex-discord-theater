@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { DiscordSDK } from "@discord/embedded-app-sdk";
 import { apiPost, setSessionToken } from "../lib/api";
+import { initClientLogging, logEvent } from "../lib/log";
 
 interface DiscordState {
   isReady: boolean;
@@ -48,6 +49,9 @@ export function useDiscord(): DiscordState {
         }>("/api/token", { code });
         if (session_token) {
           setSessionToken(session_token);
+          // Only now can shipped logs authenticate, so this is the earliest
+          // point worth starting the uploader.
+          initClientLogging();
         } else {
           console.warn("No session token received from server");
         }
@@ -68,6 +72,16 @@ export function useDiscord(): DiscordState {
             channelId: sdk.channelId ?? null,
           },
         );
+
+        // Identity for every later log line — one file holds the whole room, so
+        // without this there's no way to tell whose client made a call.
+        logEvent("Discord", "joined", {
+          userId: user.id,
+          username: user.username,
+          isHost,
+          instanceId: sdk.instanceId,
+          channelId: sdk.channelId ?? "none",
+        });
 
         // Rich Presence: without this, Discord shows members as "Playing"
         // this Activity by default. type: 3 = Watching (same enum as bot

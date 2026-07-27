@@ -156,6 +156,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // Note: a promoted host inherits the stream without knowing the original
   // offset (stays 0); the stall-timeout fallback still recovers in that case.
   const sessionStartOffsetRef = useRef(0);
+  // seekSeq of the last seek this client has already acted on. Seeded from the
+  // room's current value so a seek that happened before we joined isn't replayed
+  // against us on the first command we see.
+  const appliedSeekSeqRef = useRef(syncState?.seekSeq ?? 0);
   const seekStallTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Reaches the controls' skip accumulator, so the arrow keys stack the same way
   // the ±10s buttons do instead of seeking on every press.
@@ -789,6 +793,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     const video = videoRef.current;
     if (!video) return;
 
+    // Did this command carry a seek we haven't acted on, or is it a play/pause/
+    // resume that merely came with a position attached? Consumed here so the
+    // same seek can't be re-applied by the next unrelated command.
+    const isNewSeek = syncState.seekSeq !== appliedSeekSeqRef.current;
+    appliedSeekSeqRef.current = syncState.seekSeq;
+
     // Sync play/pause state
     if (syncState.playing && video.paused) {
       video.play().catch(() => {});
@@ -804,7 +814,14 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // The host owns the transcode, so a co-host's seek has to go through
           // the smart path — a far jump needs a restart at the new offset, not a
           // bare currentTime write. broadcast=false stops it echoing back out.
-          handleHostSeekRef.current(syncState.position, false);
+          //
+          // Gated on an actual seek, because that restart is expensive and the
+          // host is the authority on position: pause/resume are rebroadcast with
+          // the room's *cached* position (server sync.ts), which lags behind the
+          // host's own playhead and can be minutes stale. Acting on those let a
+          // co-host's pause drag the running transcode backwards and restart it
+          // mid-episode. A real seek still lands; a stale position no longer does.
+          if (isNewSeek) handleHostSeekRef.current(syncState.position, false);
         } else {
           video.currentTime = syncState.position;
         }

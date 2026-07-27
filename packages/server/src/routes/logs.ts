@@ -42,7 +42,7 @@ function renderData(data: unknown): string {
  * malformed batch that gets partially written is more useful than a 400.
  */
 router.post("/client", (req: Request, res: Response) => {
-  const body = req.body as { clientId?: string; entries?: ClientLogEntry[] };
+  const body = req.body as { clientId?: string; sentAt?: number; entries?: ClientLogEntry[] };
   const entries = Array.isArray(body?.entries) ? body.entries.slice(0, MAX_ENTRIES_PER_BATCH) : [];
   if (entries.length === 0) {
     res.json({ ok: true, written: 0 });
@@ -52,14 +52,24 @@ router.post("/client", (req: Request, res: Response) => {
   const clientId = String(body.clientId ?? "unknown").slice(0, 16);
   const ip = req.ip ?? "?";
 
+  // Rebase browser timestamps onto our clock. A merged log is only worth having
+  // if it sorts, and browser clocks don't agree with ours or with each other —
+  // one client in a stress-test run was 25s behind, so its events appeared to
+  // happen before the server lines they caused. Skew is measured from when the
+  // batch was sent, so it absorbs the clock offset and leaves only the one-way
+  // network delay. The browser's own reading is kept as clientT for reference.
+  const skewMs = Number.isFinite(body.sentAt) ? Date.now() - (body.sentAt as number) : 0;
+
   for (const entry of entries) {
-    const when = Number.isFinite(entry.t) ? new Date(entry.t as number) : new Date();
+    const rawT = Number.isFinite(entry.t) ? (entry.t as number) : Date.now();
+    const when = new Date(rawT + skewMs);
     const level = String(entry.level ?? "log").toUpperCase().slice(0, 5);
     const tag = String(entry.tag ?? "Client").slice(0, 32);
     const msg = String(entry.msg ?? "").slice(0, MAX_MESSAGE_CHARS);
     const levelTag = level === "LOG" || level === "INFO" ? "" : ` [${level}]`;
+    const clientT = Math.abs(skewMs) > 1000 ? ` clientT=${new Date(rawT).toISOString()}` : "";
     writeClientLine(
-      `${when.toISOString()}${levelTag} [client:${clientId}] [${tag}] ${msg}${renderData(entry.data)} ip=${ip}`,
+      `${when.toISOString()}${levelTag} [client:${clientId}] [${tag}] ${msg}${renderData(entry.data)}${clientT} ip=${ip}`,
     );
   }
 

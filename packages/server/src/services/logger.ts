@@ -48,10 +48,17 @@ let installed = false;
  * Strip anything that would turn a shared log file into a credential leak.
  * Plex tokens ride in query strings on nearly every upstream URL we log, and
  * our own session tokens arrive as `?token=` on segment and ping requests.
+ *
+ * The leading boundary is load-bearing. Without it the bare `key` alternative
+ * matched the tail of every field ending in "Key" — `ratingKey=`, `retryKey=`,
+ * `plexKey=` all came out `<redacted>`, which quietly destroyed the diagnostic
+ * fields the log exists for. Only match a name that starts at a delimiter.
  */
+const SECRET_PARAM = /(^|[?&\s"'[{,])((?:x-plex-token|token|key|api_key|apikey)=)[^&\s"'`\]}]+/gi;
+
 function redact(line: string): string {
   return line
-    .replace(/((?:X-Plex-Token|token|key|api_key|apikey)=)[^&\s"'`]+/gi, "$1<redacted>")
+    .replace(SECRET_PARAM, "$1$2<redacted>")
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]+=*/g, "$1<redacted>");
 }
 

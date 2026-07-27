@@ -1883,7 +1883,13 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
     // is still running its keep-alive loop against a stream that's already gone
     // — an orphaned interval, or a client that missed the teardown. Either way
     // it's invisible from the client side, so surface it here.
-    if (!plexTranscodeKeys.has(sessionId)) {
+    //
+    // Gated on having seen this session ping before, because the client fires
+    // its first ping immediately on start to get Plex's timeline moving, and
+    // that races the master-manifest request that registers the transcode key.
+    // The ping won that race every time in practice, so warning on it flagged
+    // every healthy session start as a fault.
+    if (!plexTranscodeKeys.has(sessionId) && hostPingInfo.has(sessionId)) {
       logEvent("Ping", "for unknown/stopped session", {
         session: sessionId.substring(0, 8),
         knownRatingKey: sessionRatingKeys.has(sessionId),

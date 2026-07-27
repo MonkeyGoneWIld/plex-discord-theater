@@ -55,7 +55,11 @@ async function flush(): Promise<void> {
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify({ clientId, entries: batch }),
+      // sentAt lets the server rebase these onto its own clock. Browser clocks
+      // drift freely — one client in a stress-test run was 25s behind the
+      // server, which left the merged file unsortable and made the client's
+      // events look like they preceded their own consequences.
+      body: JSON.stringify({ clientId, sentAt: Date.now(), entries: batch }),
       keepalive: true,
     });
   } catch {
@@ -78,7 +82,7 @@ function flushOnUnload(): void {
   const batch = drain();
   const token = getSessionToken();
   const url = token ? `${ENDPOINT}?token=${encodeURIComponent(token)}` : ENDPOINT;
-  const payload = JSON.stringify({ clientId, entries: batch });
+  const payload = JSON.stringify({ clientId, sentAt: Date.now(), entries: batch });
   try {
     if (navigator.sendBeacon) {
       navigator.sendBeacon(url, new Blob([payload], { type: "application/json" }));

@@ -12,7 +12,9 @@ import path from "node:path";
  * a DELETE arrive.
  *
  * Layout: <data>/logs/theater-YYYY-MM-DD.log, rotated by size within the day
- * (…-1.log, …-2.log) and pruned by age.
+ * (…-1.log, …-2.log) and pruned by age. Pull them off a running container with
+ * `docker cp plex-discord-theater:/data/logs ./logs` — there's deliberately no
+ * HTTP route to read them back.
  */
 
 const dataDir = process.env.THUMB_CACHE_DIR
@@ -211,22 +213,6 @@ export function logEvent(tag: string, message: string, fields?: Record<string, u
 /** Append an already-formatted line from a client, bypassing the console tee. */
 export function writeClientLine(line: string): void {
   enqueue(line);
-}
-
-/** List log files newest-first, for the download endpoint. */
-export function listLogFiles(): Array<{ name: string; size: number; modified: string }> {
-  try {
-    return fs
-      .readdirSync(LOG_DIR)
-      .filter((n) => n.startsWith("theater-") && n.endsWith(".log"))
-      .map((name) => {
-        const stat = fs.statSync(path.join(LOG_DIR, name));
-        return { name, size: stat.size, modified: new Date(stat.mtimeMs).toISOString() };
-      })
-      .sort((a, b) => b.modified.localeCompare(a.modified));
-  } catch {
-    return [];
-  }
 }
 
 export function closeLogger(): void {

@@ -1,7 +1,5 @@
 import { Router, type Request, type Response } from "express";
-import fs from "node:fs";
-import path from "node:path";
-import { LOG_DIR, listLogFiles, writeClientLine } from "../services/logger.js";
+import { writeClientLine } from "../services/logger.js";
 
 const router = Router();
 
@@ -66,30 +64,6 @@ router.post("/client", (req: Request, res: Response) => {
   }
 
   res.json({ ok: true, written: entries.length });
-});
-
-/**
- * GET /api/logs/files — list persisted log files.
- * GET /api/logs/file/:name — download one.
- *
- * Saves a docker exec when someone reports a broken stream. Both are behind
- * requireAuth (mounted that way in index.ts); the name is matched against the
- * known-files list rather than joined blindly, so there's no path to traverse.
- */
-router.get("/files", (_req: Request, res: Response) => {
-  res.json({ dir: LOG_DIR, files: listLogFiles() });
-});
-
-router.get("/file/:name", (req: Request, res: Response) => {
-  const requested = String(req.params.name);
-  const known = listLogFiles().some((f) => f.name === requested);
-  if (!known) {
-    res.status(404).json({ error: "No such log file" });
-    return;
-  }
-  const full = path.join(LOG_DIR, path.basename(requested));
-  res.type("text/plain");
-  fs.createReadStream(full).pipe(res);
 });
 
 export default router;

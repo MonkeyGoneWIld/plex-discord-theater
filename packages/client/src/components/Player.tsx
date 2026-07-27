@@ -152,6 +152,27 @@ function snapshot(video: HTMLVideoElement | null): Record<string, unknown> {
 }
 
 /**
+ * Chromium's non-standard heap counters, when the embedder exposes them.
+ *
+ * Directional rather than exact: much of what this player holds lives in
+ * ArrayBuffers and the MSE SourceBuffer, which Chrome accounts for outside the
+ * JS heap, so this under-reports true tab footprint. What it is good for is the
+ * shape of the curve — a number that climbs across a session and never comes
+ * down is the signature that was missing while the tab kept dying at ~3 GB with
+ * nothing in the log to show for it.
+ */
+function heapSample(): Record<string, unknown> {
+  const mem = (performance as Performance & {
+    memory?: { usedJSHeapSize: number; totalJSHeapSize: number; jsHeapSizeLimit: number };
+  }).memory;
+  if (!mem) return {};
+  return {
+    heapUsedMB: mem.usedJSHeapSize / 1e6,
+    heapLimitMB: mem.jsHeapSizeLimit / 1e6,
+  };
+}
+
+/**
  * Drop buffered media outside [currentTime − BACK_BUFFER_S, currentTime +
  * FORWARD_BUFFER_S], returning what was trimmed.
  *
@@ -716,6 +737,24 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
                 announceTrackers: [
                   `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/tracker${token ? `?token=${encodeURIComponent(token)}` : ""}`,
                 ],
+                // The engine keeps every segment it downloads so it can serve
+                // peers, and left to itself it will hold 4 GiB before evicting
+                // anything: its desktop default. Worse, for VOD it only evicts
+                // *at* the limit — `if (!isMemoryLimitReached && !isLiveStream)
+                // return;` — so there is no steady-state trimming to save us on
+                // the way up. Discord runs this in an Electron renderer that
+                // dies around 3 GB, so the tab was always going to lose that
+                // race: ~45 minutes in, "RangeError: Array buffer allocation
+                // failed", fatal hls.js error, transcode restart. Bounding the
+                // media element's own buffer didn't touch this, because this
+                // cache is separate from the SourceBuffer.
+                //
+                // 512 MiB sits comfortably above the ~300 MB the 120s
+                // high-demand window needs at our 20 Mbps peak — segments ahead
+                // of the playhead are never evicted, so the limit has to clear
+                // that or eviction runs on every append for nothing — while
+                // capping the whole cache eight times lower than the default.
+                segmentMemoryStorageLimit: 512,
                 // All three match maxBufferLength, and high-demand is the one that
                 // matters. This engine owns the fragment loader, so hls.js's buffer
                 // targets are only advisory. With no peers connected, high-demand is
@@ -1186,6 +1225,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           peers: stats.peers.size,
           p2pMB: stats.p2pBytes / 1e6,
           httpMB: stats.httpBytes / 1e6,
+          ...heapSample(),
           ...snapshot(v),
         });
       }, HEALTH_SAMPLE_MS);

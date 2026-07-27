@@ -2124,7 +2124,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         queueCount={syncState?.queue?.length}
         onOpenQueue={isHost ? () => setShowQueuePanel(true) : undefined}
         peopleCount={syncState?.participants?.length}
-        onOpenPeople={isHost ? () => setShowPeoplePanel(true) : undefined}
+        // Everyone, not just the host: seeing who else is in the room is
+        // read-only information, and gating it meant a viewer had to leave the
+        // video to find out. PeoplePanel already hides every role action behind
+        // its own isHost prop, so a viewer opening this gets the roster and the
+        // HOST/CO-HOST badges and no buttons.
+        onOpenPeople={() => setShowPeoplePanel(true)}
         // Undefined at the series edges (and for movies), so Controls renders
         // no button rather than a dead one.
         onPrevEpisode={canControl && prevEpisode ? playPrevEpisode : undefined}

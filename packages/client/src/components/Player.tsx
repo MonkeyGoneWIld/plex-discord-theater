@@ -1082,14 +1082,20 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         const v = videoRef.current;
         if (!v) return;
         const stats = p2pStatsRef.current;
+        const amHost = isHostRef.current;
+        const roomPos = syncStateRef.current?.position;
         logEvent("Health", "sample", {
           session: sessionIdRef.current?.substring(0, 8) ?? "none",
-          role: isHostRef.current ? "host" : "viewer",
+          role: amHost ? "host" : "viewer",
           owner: ownsSessionRef.current,
-          roomPosS: syncStateRef.current?.position ?? "none",
-          driftS: syncStateRef.current?.position != null
-            ? v.currentTime - syncStateRef.current.position
-            : "n/a",
+          roomPosS: roomPos ?? "none",
+          // Drift is only meaningful for a viewer. The server excludes the
+          // sender from its own broadcast, so the host's copy of the room
+          // position is whatever it last *received* — it sits at the session
+          // start offset all session and produced readings like driftS=466 on a
+          // perfectly healthy stream, which is noise in exactly the log you go
+          // to when something is wrong.
+          driftS: !amHost && roomPos != null ? v.currentTime - roomPos : "n/a(host)",
           peers: stats.peers.size,
           p2pMB: stats.p2pBytes / 1e6,
           httpMB: stats.httpBytes / 1e6,

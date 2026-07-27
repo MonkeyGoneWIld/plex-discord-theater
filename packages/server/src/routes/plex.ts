@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
-import { startPrefetch, stopPrefetch, getCachedSegment } from "../services/segment-prefetch.js";
+import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition } from "../services/segment-prefetch.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
 
@@ -1102,13 +1102,61 @@ export function markTranscodeStopped(sessionId: string): void {
     `— active transcodes: ${activeTranscodeKeys.size}`);
 }
 
-/** Stop a single Plex HLS transcode by its key. */
-async function stopTranscodeKey(plexKey: string): Promise<void> {
-  await plexFetch(
-    "/video/:/transcode/universal/stop",
-    { transcodeSessionId: plexKey },
-    { "X-Plex-Session-Identifier": plexKey, "X-Plex-Client-Identifier": OUR_CLIENT_ID },
+/**
+ * Call `ping` or `stop` under /video/:/transcode/universal.
+ *
+ * These two take a `session` parameter, and it means the session identifier
+ * *we* supplied at decision / start.m3u8 time — our own HLS session UUID — not
+ * the transcode GUID Plex allocated in reply. Passing `transcodeSessionId`
+ * instead gets a bare 400 and, only in Plex's own log:
+ *
+ *     ERROR - [Req#…/Transcode] Missing required query parameter session
+ *
+ * which is how this went unnoticed. Every keep-alive ping the server had ever
+ * sent was rejected — 11 for 11 in the captured session — so nothing told Plex
+ * a client was still watching and no transcode was ever cleanly stopped. Plex's
+ * own teardown line names the session by our UUID
+ * ("Terminating session 0x…:a3cbf0ac-…"), which is the confirmation that this
+ * is the identifier it wants.
+ *
+ * `decision` and `start.m3u8` are the endpoints that take `transcodeSessionId`.
+ * The asymmetry is Plex's; don't tidy these into one shape.
+ */
+function plexTranscodeControl(
+  action: "ping" | "stop",
+  sessionIdentifier: string,
+  clientId: string = OUR_CLIENT_ID,
+  // Inferred from plexFetch: a bare `Response` here would resolve to Express's,
+  // which is imported into this module and shadows the fetch global.
+): ReturnType<typeof plexFetch> {
+  return plexFetch(
+    `/video/:/transcode/universal/${action}`,
+    { session: sessionIdentifier },
+    {
+      "X-Plex-Session-Identifier": sessionIdentifier,
+      "X-Plex-Client-Identifier": clientId,
+    },
   );
+}
+
+/**
+ * Our session id for a Plex transcode key, while we still hold the mapping.
+ * Undefined once the session has been torn down, which is exactly when a
+ * transcode shows up as an orphan — see the caller for what to do then.
+ */
+function sessionIdForPlexKey(plexKey: string): string | undefined {
+  for (const [sessionId, key] of plexTranscodeKeys) {
+    if (key === plexKey) return sessionId;
+  }
+  return undefined;
+}
+
+/** Stop a single Plex HLS transcode, identified the way `stop` expects. */
+async function stopTranscodeKey(sessionIdentifier: string): Promise<void> {
+  const res = await plexTranscodeControl("stop", sessionIdentifier);
+  if (!res.ok) {
+    console.warn("[HLS] stopTranscodeKey", sessionIdentifier.substring(0, 8), "→", res.status);
+  }
 }
 
 /**
@@ -1256,16 +1304,17 @@ export { terminatePlexSession };
 
 /** Ping Plex to keep a transcode session alive. Called server-side per room. */
 export async function pingPlexTranscode(hlsSessionId: string): Promise<void> {
-  const plexKey = plexTranscodeKeys.get(hlsSessionId) ?? hlsSessionId;
   try {
-    await plexFetch(
-      "/video/:/transcode/universal/ping",
-      { transcodeSessionId: plexKey },
-      {
-        "X-Plex-Session-Identifier": plexKey,
-        "X-Plex-Client-Identifier": OUR_CLIENT_ID,
-      },
-    );
+    // Our session id, not the mapped Plex key — see plexTranscodeControl.
+    const res = await plexTranscodeControl("ping", hlsSessionId);
+    if (!res.ok) {
+      // Loud, because a silently-rejected keep-alive is exactly the failure this
+      // call site had for its entire life.
+      logEvent("HLS", "server-side keep-alive rejected", {
+        session: hlsSessionId.substring(0, 8),
+        status: res.status,
+      });
+    }
   } catch (err) {
     console.error("[HLS] Server-side ping failed for", hlsSessionId.substring(0, 8), err);
   }
@@ -1329,38 +1378,26 @@ async function flushStaleTranscodes(ratingKey?: string, exceptKey?: string): Pro
       }
 
       const key = s.TranscodeSession?.key;
+      // Session.id is the identifier we handed Plex when the transcode started,
+      // and it is what `stop` matches on — the TranscodeSession key is Plex's own
+      // GUID and gets a 400. Prefer the former for the call, keep the latter for
+      // the exceptKey check, which really is comparing transcode GUIDs.
+      const sessionKey = s.Session?.id;
       if (key) {
         // Never stop the transcode we're currently bringing up.
         if (exceptKey && key.split("/").pop() === exceptKey) continue;
         try {
-          await plexFetch(
-            "/video/:/transcode/universal/stop",
-            { transcodeSessionId: key },
-            {
-              "X-Plex-Session-Identifier": key,
-              "X-Plex-Client-Identifier": OUR_CLIENT_ID,
-            },
-          );
+          await plexTranscodeControl("stop", sessionKey ?? key);
           stopped++;
         } catch {}
-      } else {
-        // Direct stream session (no TranscodeSession) — stop via the session ID.
-        // These can still block new transcodes on the same client identifier.
-        const sessionKey = s.Session?.id;
-        if (sessionKey) {
-          if (DEBUG) console.log("[HLS] Stopping direct-stream session:", sessionKey);
-          try {
-            await plexFetch(
-              "/video/:/transcode/universal/stop",
-              { transcodeSessionId: sessionKey },
-              {
-                "X-Plex-Session-Identifier": sessionKey,
-                "X-Plex-Client-Identifier": OUR_CLIENT_ID,
-              },
-            );
-            stopped++;
-          } catch {}
-        }
+      } else if (sessionKey) {
+        // Direct stream session (no TranscodeSession). These can still block new
+        // transcodes on the same client identifier.
+        if (DEBUG) console.log("[HLS] Stopping direct-stream session:", sessionKey);
+        try {
+          await plexTranscodeControl("stop", sessionKey);
+          stopped++;
+        } catch {}
       }
     }
   } catch {}
@@ -1391,17 +1428,19 @@ async function flushStaleTranscodes(ratingKey?: string, exceptKey?: string): Pro
       if (keyUuid && activeTranscodeKeys.has(keyUuid)) continue;
       if (t.key && t.protocol === "hls" && keyUuid && allKnownPlexKeys.has(keyUuid)) {
         if (DEBUG) console.log("[HLS] Killing orphaned HLS transcode:", t.key);
+        // /transcode/sessions reports only Plex's own GUID, so `stop` can only
+        // be addressed properly while we still hold the reverse mapping — and by
+        // the time something is an orphan we usually don't. The call is kept as
+        // a cheap best effort (it will 400 without a session id); the mechanism
+        // that actually reaps these is terminatePlexSession below.
+        const orphanSessionId = sessionIdForPlexKey(keyUuid);
         try {
-          await plexFetch(
-            "/video/:/transcode/universal/stop",
-            { transcodeSessionId: t.key },
-            {
-              "X-Plex-Session-Identifier": t.key,
-              "X-Plex-Client-Identifier": OUR_CLIENT_ID,
-            },
-          );
+          await plexTranscodeControl("stop", orphanSessionId ?? keyUuid);
           stopped++;
         } catch {}
+        if (!orphanSessionId) {
+          await terminatePlexSession(keyUuid).catch(() => {});
+        }
       }
     }
   } catch {}
@@ -1630,11 +1669,7 @@ router.get(
         console.error("[HLS] FATAL: Could not extract Plex transcode key from manifest for session:",
           sessionId.substring(0, 8), "— aborting session to prevent phantom state");
         try {
-          await plexFetch(
-            "/video/:/transcode/universal/stop",
-            { transcodeSessionId: sessionId },
-            { "X-Plex-Session-Identifier": sessionId, "X-Plex-Client-Identifier": OUR_CLIENT_ID },
-          );
+          await plexTranscodeControl("stop", sessionId);
         } catch {}
         await notifyPlexStopped(ratingKey, sessionId);
         throw new Error("Could not extract Plex transcode key from manifest");
@@ -1876,7 +1911,6 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
   }
 
   try {
-    const plexKey = plexTranscodeKeys.get(sessionId) ?? sessionId;
     const clientId = getSessionClientId(sessionId);
 
     // A ping for a session we no longer hold a transcode key for means a client
@@ -1896,15 +1930,15 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
       });
     }
 
-    // Ping to keep transcode alive
-    await plexFetch(
-      "/video/:/transcode/universal/ping",
-      { transcodeSessionId: plexKey },
-      {
-        "X-Plex-Session-Identifier": plexKey,
-        "X-Plex-Client-Identifier": clientId,
-      },
-    );
+    // Ping to keep transcode alive. Identified by our session id — see
+    // plexTranscodeControl for why the obvious-looking plexKey is wrong here.
+    const pingRes = await plexTranscodeControl("ping", sessionId, clientId);
+    if (!pingRes.ok) {
+      logEvent("Ping", "Plex rejected keep-alive", {
+        session: sessionId.substring(0, 8),
+        status: pingRes.status,
+      });
+    }
 
     // Send timeline update so Plex knows our playback position.
     // Without this, Plex throttles HTTP segment delivery to ~1x realtime.
@@ -1964,6 +1998,11 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
       }
 
       hostPingInfo.set(sessionId, { timeMs, at: now, posChangedAt });
+
+      // Anchor the prefetch ceiling to the viewer. Without this the prefetcher
+      // hangs its window off the transcode head, which it advances itself, and
+      // the whole thing runs away to the end of the file.
+      updatePrefetchPosition(sessionId, timeMs / 1000);
 
       // If the reported position has been frozen while still playing, the host's
       // playback stalled — Plex will park the encoder at its readahead limit and
@@ -2031,17 +2070,12 @@ router.delete(
 
       // Only send the stop to Plex if we still have a valid Plex transcode key.
       // If the mapping is gone, the WebSocket handler already stopped it — sending
-      // a stop with our UUID creates ghost state in Plex that blocks new transcodes.
+      // a stop for a session Plex has forgotten creates ghost state that blocks
+      // new transcodes. The key gates the call; the *identifier* sent is our
+      // session id, which is what `stop` matches on.
       if (plexKey) {
         try {
-          const stopRes = await plexFetch(
-            "/video/:/transcode/universal/stop",
-            { transcodeSessionId: plexKey },
-            {
-              "X-Plex-Session-Identifier": plexKey,
-              "X-Plex-Client-Identifier": OUR_CLIENT_ID,
-            },
-          );
+          const stopRes = await plexTranscodeControl("stop", sessionId, OUR_CLIENT_ID);
           console.log("[HLS] Stop session", sessionId.substring(0, 8),
             `(plex key: ${plexKey.substring(0, 8)})`, "→", stopRes.status);
         } catch (err) {
@@ -2103,12 +2137,12 @@ router.delete("/hls/sessions", async (req: Request, res: Response) => {
       if (!s.Player?.machineIdentifier?.startsWith("plex-discord-theater")) continue;
 
       const key = s.TranscodeSession?.key;
-      if (key) {
+      // Same identifier rule as the reaper — `stop` matches on the session id we
+      // supplied, not on Plex's transcode GUID.
+      const stopId = s.Session?.id ?? key;
+      if (key && stopId) {
         try {
-          const stopRes = await plexFetch(`/video/:/transcode/universal/stop`, { transcodeSessionId: key }, {
-            "X-Plex-Session-Identifier": key,
-            "X-Plex-Client-Identifier": OUR_CLIENT_ID,
-          });
+          const stopRes = await plexTranscodeControl("stop", stopId);
           if (DEBUG) console.log("[HLS] Killed session", key, "→", stopRes.status);
           stopped++;
         } catch (err) {
@@ -2343,12 +2377,10 @@ export async function stopAllActiveSessions(): Promise<void> {
   for (const [sessionId, plexKey] of entries) {
     const ratingKey = sessionRatingKeys.get(sessionId) || null;
     try {
-      await plexFetch(
-        "/video/:/transcode/universal/stop",
-        { transcodeSessionId: plexKey },
-        { "X-Plex-Session-Identifier": plexKey, "X-Plex-Client-Identifier": OUR_CLIENT_ID },
-      );
-      console.log("[Shutdown] Stopped transcode:", plexKey.substring(0, 8));
+      // Our session id — the mapping is still intact here, which is what makes a
+      // clean shutdown stop actually land.
+      const res = await plexTranscodeControl("stop", sessionId);
+      console.log("[Shutdown] Stopped transcode:", plexKey.substring(0, 8), "→", res.status);
     } catch {}
     markTranscodeStopped(sessionId);
     await notifyPlexStopped(ratingKey, sessionId).catch(() => {});

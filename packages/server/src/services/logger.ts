@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { format } from "node:util";
 
 /**
  * File-backed logging.
@@ -151,14 +152,24 @@ function enqueue(line: string): void {
   if (buffer.length >= MAX_BUFFER_LINES) flush();
 }
 
-function formatArg(arg: unknown): string {
-  if (typeof arg === "string") return arg;
-  if (arg instanceof Error) return arg.stack || `${arg.name}: ${arg.message}`;
-  try {
-    return JSON.stringify(arg);
-  } catch {
-    return String(arg);
+/**
+ * Render console arguments the way the console itself would.
+ *
+ * Joining them with spaces looked equivalent and wasn't: the codebase uses
+ * printf-style calls like console.log("[Ping] %s pos=%ss", id, pos), and a plain
+ * join left the specifiers and the values sitting next to each other unexpanded
+ * — `[Ping] %s pos=%ss … a3cbf0ac 3565.1` — turning the most frequent
+ * diagnostic line in the file into something you had to decode positionally.
+ * util.format applies the substitutions and falls back to appending extras,
+ * which is exactly console's own behaviour.
+ */
+function formatArgs(args: unknown[]): string {
+  if (args.length === 1) {
+    const [only] = args;
+    if (typeof only === "string") return only;
+    if (only instanceof Error) return only.stack || `${only.name}: ${only.message}`;
   }
+  return format(...args);
 }
 
 /**
@@ -177,7 +188,7 @@ export function initLogger(): void {
     console[level] = (...args: unknown[]) => {
       original(...args);
       const tag = level === "log" || level === "info" ? "" : ` [${level.toUpperCase()}]`;
-      enqueue(`${new Date().toISOString()}${tag} ${args.map(formatArg).join(" ")}`);
+      enqueue(`${new Date().toISOString()}${tag} ${formatArgs(args)}`);
     };
   }
 
@@ -191,7 +202,7 @@ export function initLogger(): void {
     throw err;
   });
   process.on("unhandledRejection", (reason) => {
-    enqueue(`${new Date().toISOString()} [FATAL] unhandledRejection ${formatArg(reason)}`);
+    enqueue(`${new Date().toISOString()} [FATAL] unhandledRejection ${formatArgs([reason])}`);
     flush();
   });
 

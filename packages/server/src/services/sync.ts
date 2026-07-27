@@ -30,19 +30,22 @@ async function killPlexTranscode(hlsSessionId: string | null): Promise<void> {
     const plexKey = getPlexTranscodeKey(hlsSessionId);
     const clientId = getSessionClientId(hlsSessionId);
     const ratingKey = getSessionRatingKey(hlsSessionId) || null;
-    const stopKey = plexKey || hlsSessionId;
-
     try {
+      // Always our session id: `stop` takes a `session` parameter and matches on
+      // the identifier we gave Plex at start, never on the transcode GUID it
+      // allocated. Passing the latter is a silent 400 (see plexTranscodeControl
+      // in routes/plex.ts). plexKey is still worth having — it gates the
+      // terminate call below — but it is not what identifies the session here.
       const res = await plexFetch(
         "/video/:/transcode/universal/stop",
-        { transcodeSessionId: stopKey },
+        { session: hlsSessionId },
         {
-          "X-Plex-Session-Identifier": stopKey,
+          "X-Plex-Session-Identifier": hlsSessionId,
           "X-Plex-Client-Identifier": clientId,
         },
       );
-      console.log("[Sync] Stop transcode", stopKey.substring(0, 8),
-        plexKey ? "(mapped plex key)" : "(our UUID, no mapping)",
+      console.log("[Sync] Stop transcode", hlsSessionId.substring(0, 8),
+        plexKey ? "(plex key known)" : "(no plex key mapping)",
         "→", res.status);
     } catch (err) {
       console.error("[Sync] Stop transcode error:", err);

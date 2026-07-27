@@ -47,6 +47,19 @@ const SEEK_RESTART_DEBOUNCE_MS = 350;
 // Cadence of the periodic player health sample. Matches the ping interval so
 // client and server lines interleave one-for-one in the merged log.
 const HEALTH_SAMPLE_MS = 10_000;
+// Media kept behind and ahead of the playhead. These bound how much decoded
+// video sits in the SourceBuffer, which is the tab's dominant memory cost:
+// Discord runs this in an Electron renderer, and at these bitrates an untrimmed
+// buffer reached ~3GB and took the tab out with
+// "RangeError: Array buffer allocation failed" roughly once an hour.
+// BACK_BUFFER_S mirrors hlsConfig.backBufferLength; FORWARD_BUFFER_FLUSH_S
+// mirrors maxBufferLength, so trimming never fights the loader for ground it is
+// actively trying to fill.
+const BACK_BUFFER_S = 30;
+const FORWARD_BUFFER_FLUSH_S = 120;
+// Don't bother flushing slivers — avoids issuing a remove on every tick for a
+// second or two of overshoot.
+const BUFFER_TRIM_SLACK_S = 10;
 
 /** Whether the video has enough buffered data at `t` to play from there. */
 function isPositionBuffered(video: HTMLVideoElement, t: number): boolean {
@@ -115,17 +128,67 @@ function bufferAheadSeconds(video: HTMLVideoElement): number {
  */
 function snapshot(video: HTMLVideoElement | null): Record<string, unknown> {
   if (!video) return { video: "none" };
+  const { buffered } = video;
+  // bufStartS/bufSpanS are the memory numbers. bufAheadS only describes what is
+  // still to play; what actually occupies the SourceBuffer — and killed the tab
+  // at ~3GB — is everything from bufStartS to bufEndS. A bufStartS that stays
+  // near the session's start offset while playback advances means eviction is
+  // not happening, which is precisely the thing that needs to be visible.
+  const bufStart = buffered.length > 0 ? buffered.start(0) : null;
+  const bufEnd = bufferedEnd(video);
   return {
     posS: video.currentTime,
     bufAheadS: bufferAheadSeconds(video),
-    bufEndS: bufferedEnd(video) ?? "none",
-    ranges: video.buffered.length,
+    bufStartS: bufStart ?? "none",
+    bufEndS: bufEnd ?? "none",
+    bufSpanS: bufStart !== null && bufEnd !== null ? bufEnd - bufStart : "none",
+    ranges: buffered.length,
     paused: video.paused,
     seeking: video.seeking,
     readyState: video.readyState,
     networkState: video.networkState,
     ...(video.error ? { mediaError: `${video.error.code}: ${video.error.message}` } : {}),
   };
+}
+
+/**
+ * Drop buffered media outside [currentTime − BACK_BUFFER_S, currentTime +
+ * FORWARD_BUFFER_S], returning what was trimmed.
+ *
+ * hls.js has `backBufferLength`/`frontBufferFlushThreshold` for this, but its
+ * eviction runs from one place — `trimBuffers()` on FRAG_CHANGED — and this
+ * player drives hls.js through the p2p-media-loader mixin, which owns the
+ * fragment loader. Rather than depend on that path firing, evict on our own
+ * clock too. `BUFFER_FLUSHING` with a falsy `type` is the same public event
+ * hls.js's own back-buffer path raises, and it queues behind in-flight appends,
+ * so this is idempotent: when hls.js has already trimmed, the guards below
+ * make it a no-op.
+ */
+function trimMediaBuffer(hls: Hls, video: HTMLVideoElement): Record<string, unknown> | null {
+  const { buffered } = video;
+  if (buffered.length === 0) return null;
+  const now = video.currentTime;
+  const backTarget = now - BACK_BUFFER_S;
+  const frontTarget = now + FORWARD_BUFFER_FLUSH_S;
+  const start = buffered.start(0);
+  const end = buffered.end(buffered.length - 1);
+
+  const trimmed: Record<string, unknown> = {};
+  if (backTarget > start + BUFFER_TRIM_SLACK_S) {
+    hls.trigger(Hls.Events.BUFFER_FLUSHING, { startOffset: 0, endOffset: backTarget, type: null });
+    trimmed.backFromS = start;
+    trimmed.backToS = backTarget;
+  }
+  if (end > frontTarget + BUFFER_TRIM_SLACK_S) {
+    hls.trigger(Hls.Events.BUFFER_FLUSHING, {
+      startOffset: frontTarget,
+      endOffset: Number.POSITIVE_INFINITY,
+      type: null,
+    });
+    trimmed.frontFromS = frontTarget;
+    trimmed.frontToS = end;
+  }
+  return Object.keys(trimmed).length > 0 ? { ...trimmed, spanBeforeS: end - start } : null;
 }
 
 interface PlayerProps {
@@ -605,7 +668,14 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // Back buffer competes with the forward buffer for the same SourceBuffer
           // memory, and 90s was ~135-225 MB of it. Trimmed to 30s to leave room for
           // the deeper forward buffer: backward seeks beyond 30s now refetch.
-          backBufferLength: 30,
+          backBufferLength: BACK_BUFFER_S,
+          // hls.js defaults this to Infinity, meaning the forward buffer is never
+          // reclaimed — only *capped* while loading. Seek backwards 30 minutes and
+          // the half hour you skipped over stays resident, which is why such a
+          // seek was instant and why the tab climbed to ~3GB before dying with
+          // "Array buffer allocation failed". Bounding it to the same window we
+          // load into makes the buffer a window rather than a recording.
+          frontBufferFlushThreshold: FORWARD_BUFFER_FLUSH_S,
           maxBufferHole: 0.5,
           // Recover from stalls faster on cold start — default is 2s, but during
           // initial Plex transcode warm-up segments arrive slowly. A lower nudge
@@ -1081,6 +1151,23 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       healthIntervalRef.current = setInterval(() => {
         const v = videoRef.current;
         if (!v) return;
+
+        // Reclaim media outside the window before sampling, so the numbers
+        // logged below describe the buffer we intend to hold rather than
+        // whatever accumulated. Belt and braces alongside hls.js's own
+        // eviction — the cost of that not firing is the tab dying.
+        const activeHls = hlsRef.current;
+        if (activeHls && !v.seeking) {
+          try {
+            const trimmed = trimMediaBuffer(activeHls, v);
+            if (trimmed) logEvent("Buffer", "trimmed", trimmed);
+          } catch (err) {
+            logWarn("Buffer", "trim failed", {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+
         const stats = p2pStatsRef.current;
         const amHost = isHostRef.current;
         const roomPos = syncStateRef.current?.position;

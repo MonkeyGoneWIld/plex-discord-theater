@@ -742,8 +742,15 @@ export function Controls({
             </span>
           </div>
           <div style={{ ...styles.right, ...(compact ? styles.rightCompact : {}) }}>
-            {isHost && onOpenPeople && (
-              <button onClick={onOpenPeople} style={styles.queueBtn} title="People & roles">
+            {/* Not host-gated: the roster is read-only, and PeoplePanel decides
+                for itself whether to offer role controls. Gating it here meant a
+                viewer had to back out of the video to see who else was watching. */}
+            {onOpenPeople && (
+              <button
+                onClick={onOpenPeople}
+                style={styles.queueBtn}
+                title={isHost ? "People & roles" : "Who's here"}
+              >
                 <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
                   <circle cx="6" cy="5" r="2.4" stroke="currentColor" strokeWidth="1.5"/>
                   <path d="M1.5 13.5c0-2.2 2-3.6 4.5-3.6s4.5 1.4 4.5 3.6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>

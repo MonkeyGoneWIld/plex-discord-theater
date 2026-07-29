@@ -466,27 +466,44 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
                 announceTrackers: [
                   `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/tracker${token ? `?token=${encodeURIComponent(token)}` : ""}`,
                 ],
-                // All three match maxBufferLength, and high-demand is the one that
-                // matters. This engine owns the fragment loader, so hls.js's buffer
-                // targets are only advisory. With no peers connected, high-demand is
-                // the *only* thing that triggers an HTTP fetch: p2p-downloadable is
+                // This engine owns the fragment loader, so hls.js's buffer targets
+                // are only advisory. With no peers connected, high-demand is the
+                // *only* thing that triggers an HTTP fetch: p2p-downloadable is
                 // gated on a peer already holding the segment, and http-downloadable
                 // is read solely by loadRandomThroughHttp, which early-returns when
-                // there are no peers. So this window alone decides how far ahead a
-                // solo viewer buffers — at the old 15s it capped the buffer at 15s
-                // no matter what hls.js was configured for.
+                // there are no peers. So this window decides how far ahead a solo
+                // viewer buffers — at the old 15s it capped the buffer at 15s no
+                // matter what hls.js was configured for.
+                //
+                // It must be STRICTLY GREATER than maxBufferLength (120), not equal.
+                // hls.js requests fragments to fill up to maxBufferLength; the engine
+                // fetches a requested fragment only if it falls inside high-demand
+                // (no peers ⇒ no other path). When the two are equal, the fragment
+                // that would top the buffer off sits exactly at the window edge, and
+                // because hls.js measures its buffer and the engine measures its
+                // window from currentTime sampled a beat apart, that fragment lands
+                // just outside high-demand often enough to matter. The engine then
+                // neither HTTP-fetches nor P2P-fetches it, the request hangs, hls.js
+                // waits on a fragment that never arrives, and the buffer drains to a
+                // hard stall with no error thrown — permanent "Loading…" mid-video,
+                // all clients stuck at the same segment. 150 keeps every fragment
+                // hls.js can ask for (≤120s ahead) comfortably inside the window with
+                // a 30s / 10-segment margin, and matches the server's 150s prefetch
+                // lead (segment-prefetch LEAD_SEGMENTS×3s). The effective buffer is
+                // still 120s — maxBufferLength binds the append; high-demand only
+                // guarantees the next fragment is already fetched.
                 //
                 // Trade-off: high-demand segments prefer HTTP over P2P, so with this
                 // covering the whole buffer, peers contribute much less and more
                 // traffic comes from the server. Deliberate. If bandwidth becomes a
                 // problem, the fix is applyDynamicConfig() driven by onPeerConnect/
                 // onPeerClose — widen only while connectedPeerCount is 0.
-                highDemandTimeWindow: 120,
-                p2pDownloadTimeWindow: 120,
+                highDemandTimeWindow: 150,
+                p2pDownloadTimeWindow: 150,
                 // Was 6, i.e. inverted below high-demand (library default is 3000).
                 // Only consulted when peers exist, but it must not be the smaller of
-                // the two or it makes no sense.
-                httpDownloadTimeWindow: 120,
+                // the two or it makes no sense — keep it ≥ high-demand.
+                httpDownloadTimeWindow: 150,
                 simultaneousP2PDownloads: 3,
                 simultaneousHttpDownloads: 2,
                 rtcConfig: {

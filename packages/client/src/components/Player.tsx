@@ -14,6 +14,7 @@ import { formatMediaTitle } from "../lib/format";
 import { loadVolume, saveVolume } from "../lib/volume";
 import type { PlexItem, SkipMarker } from "../lib/api";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
+import { logEvent, logWarn } from "../lib/log";
 
 const PING_INTERVAL_MS = 10_000; // 10s — matches Plex API recommendation for LAN timeline updates
 const HEARTBEAT_INTERVAL_MS = 5_000;
@@ -81,6 +82,72 @@ function bufferAheadSeconds(video: HTMLVideoElement): number {
   return 0;
 }
 
+/** How often the health sample and stall watchdog run, in ms. */
+const HEALTH_SAMPLE_MS = 10_000;
+
+/** Buffer/playback fields for a health or stall log line. */
+function snapshot(video: HTMLVideoElement | null): Record<string, unknown> {
+  if (!video) return { video: "none" };
+  const { buffered } = video;
+  const bufStart = buffered.length > 0 ? buffered.start(0) : null;
+  const bufEnd = bufferedEnd(video);
+  return {
+    posS: video.currentTime,
+    bufAheadS: bufferAheadSeconds(video),
+    bufStartS: bufStart ?? "none",
+    bufEndS: bufEnd ?? "none",
+    bufSpanS: bufStart !== null && bufEnd !== null ? bufEnd - bufStart : "none",
+    ranges: buffered.length,
+    paused: video.paused,
+    seeking: video.seeking,
+    readyState: video.readyState,
+    networkState: video.networkState,
+    ...(video.error ? { mediaError: `${video.error.code}: ${video.error.message}` } : {}),
+  };
+}
+
+/** Chromium's non-standard heap counters, when the embedder exposes them. */
+function heapSample(): Record<string, unknown> {
+  const mem = (performance as Performance & {
+    memory?: { usedJSHeapSize: number; totalJSHeapSize: number; jsHeapSizeLimit: number };
+  }).memory;
+  if (!mem) return {};
+  return {
+    heapUsedMB: mem.usedJSHeapSize / 1e6,
+    heapLimitMB: mem.jsHeapSizeLimit / 1e6,
+  };
+}
+
+/**
+ * Pull the integer segment index out of an HLS segment URL — Plex/VPS segments
+ * end in `00179.ts` (optionally `media-00179.ts`, optionally `?query`). Returns
+ * -1 when the shape is unfamiliar, so callers can log "unknown" rather than NaN.
+ */
+function segIndexFromUrl(url: string | undefined | null): number {
+  if (!url) return -1;
+  const m = url.match(/(\d+)\.ts(?:[?#]|$)/);
+  return m ? parseInt(m[1], 10) : -1;
+}
+
+/**
+ * hls.js's stream-controller state and current fragment, read defensively off
+ * fields hls.js does not expose in its types. This is the one signal that
+ * distinguishes "the loader stopped asking for fragments" from "it is stuck
+ * waiting on one" when a stall throws no error — see the stall watchdog.
+ */
+function hlsLoadingState(hls: unknown): Record<string, unknown> {
+  const sc = (hls as { streamController?: {
+    state?: string;
+    fragCurrent?: { sn?: number; url?: string };
+  } })?.streamController;
+  if (!sc) return { hlsState: "unknown" };
+  return {
+    hlsState: sc.state ?? "unknown",
+    hlsFragSn: sc.fragCurrent?.sn ?? "none",
+    hlsFragSeg: segIndexFromUrl(sc.fragCurrent?.url),
+  };
+}
+
 interface PlayerProps {
   item: PlexItem;
   isHost: boolean;
@@ -131,6 +198,24 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // Cumulative P2P delivery counters, filled from the p2p-media-loader engine
   // events below and read by the StatsOverlay each poll.
   const p2pStatsRef = useRef<P2PStats>({ p2pBytes: 0, httpBytes: 0, uploadBytes: 0, peers: new Set() });
+  // Periodic health sample + stall watchdog.
+  const healthIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Rolling record of the p2p-media-loader engine's fragment-loader activity,
+  // filled from its onSegment* events below. A silent mid-video stall parks the
+  // buffer with no error thrown, and the health sample alone can't say whether
+  // the engine stopped fetching segments or hls.js stopped appending them. This
+  // captures the last thing the engine actually did so the stall watchdog can
+  // attribute the freeze to one side or the other.
+  const engineLoaderRef = useRef({
+    lastStartSeg: -1, lastLoadedSeg: -1, lastErrorSeg: -1,
+    lastEventAt: 0, lastError: null as string | null,
+    starts: 0, loaded: 0, errors: 0, aborts: 0,
+  });
+  // Stall-watchdog bookkeeping: currentTime at the previous health tick, and
+  // whether the current stall episode has already been logged — a multi-minute
+  // freeze must produce one diagnostic, not one per tick.
+  const lastTickTimeRef = useRef(-1);
+  const stallLoggedRef = useRef(false);
   // Plex intro/credits markers for the current item, and whichever one the
   // playhead currently sits inside (null when outside every window).
   const [markers, setMarkers] = useState<SkipMarker[]>([]);
@@ -271,6 +356,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     if (heartbeatIntervalRef.current !== null) {
       clearInterval(heartbeatIntervalRef.current);
       heartbeatIntervalRef.current = null;
+    }
+    if (healthIntervalRef.current !== null) {
+      clearInterval(healthIntervalRef.current);
+      healthIntervalRef.current = null;
     }
     if (bufferCleanupRef.current) {
       bufferCleanupRef.current();
@@ -534,9 +623,37 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
                 stats.uploadBytes = 0;
                 stats.peers = new Set();
 
-                hls.p2pEngine.addEventListener("onSegmentLoaded", ({ bytesLength, downloadSource }) => {
+                const eng = engineLoaderRef.current;
+                hls.p2pEngine.addEventListener("onSegmentLoaded", ({ segmentUrl, bytesLength, downloadSource }) => {
                   if (downloadSource === "p2p") stats.p2pBytes += bytesLength;
                   else stats.httpBytes += bytesLength;
+                  eng.lastLoadedSeg = segIndexFromUrl(segmentUrl);
+                  eng.lastEventAt = Date.now();
+                  eng.loaded++;
+                });
+                // onSegmentStart/Error/Abort are the loader's own account of what
+                // it tried, independent of hls.js. If a freeze shows the engine's
+                // lastStartSeg stuck at the buffer edge with no matching load, the
+                // engine stopped fetching (window/peer wedge); if it started and
+                // errored, the fetch itself failed; if it loaded past the edge but
+                // the media buffer didn't grow, the wedge is in hls.js's appending.
+                hls.p2pEngine.addEventListener("onSegmentStart", ({ segment }) => {
+                  eng.lastStartSeg = segment.externalId ?? segIndexFromUrl(segment.url);
+                  eng.lastEventAt = Date.now();
+                  eng.starts++;
+                });
+                hls.p2pEngine.addEventListener("onSegmentError", ({ segment, error, downloadSource }) => {
+                  eng.lastErrorSeg = segment.externalId ?? segIndexFromUrl(segment.url);
+                  eng.lastError = error instanceof Error ? error.message : String(error);
+                  eng.lastEventAt = Date.now();
+                  eng.errors++;
+                  logWarn("P2P", "segment error", {
+                    seg: eng.lastErrorSeg, source: downloadSource, error: eng.lastError,
+                  });
+                });
+                hls.p2pEngine.addEventListener("onSegmentAbort", () => {
+                  eng.aborts++;
+                  eng.lastEventAt = Date.now();
                 });
                 hls.p2pEngine.addEventListener("onChunkUploaded", (bytesLength) => {
                   stats.uploadBytes += bytesLength;
@@ -559,6 +676,70 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         }
 
         hlsRef.current = hls;
+
+        // Periodic health telemetry + a stall watchdog. Both persist through the
+        // logging transport, so a freeze during a real watch party is diagnosable
+        // from the server logs afterwards rather than only in a viewer's console.
+        if (healthIntervalRef.current === null) {
+          healthIntervalRef.current = setInterval(() => {
+            const v = videoRef.current;
+            if (!v) return;
+            const stats = p2pStatsRef.current;
+            const amHost = isHostRef.current;
+            const roomPos = syncStateRef.current?.position;
+            logEvent("Health", "sample", {
+              session: sessionIdRef.current?.substring(0, 8) ?? "none",
+              role: amHost ? "host" : "viewer",
+              owner: ownsSessionRef.current,
+              roomPosS: roomPos ?? "none",
+              // Drift only means anything for a viewer; the host's copy of the
+              // room position is whatever it last received and sits at the
+              // session offset all session.
+              driftS: !amHost && roomPos != null ? v.currentTime - roomPos : "n/a(host)",
+              peers: stats.peers.size,
+              p2pMB: stats.p2pBytes / 1e6,
+              httpMB: stats.httpBytes / 1e6,
+              ...heapSample(),
+              ...snapshot(v),
+            });
+
+            // Stall watchdog. A stall that throws an error is handled by the
+            // hls.js ERROR path; this catches the silent one — playback wedged
+            // with the buffer parked and nothing logged. When the playhead has
+            // not advanced between ticks while the element still believes it is
+            // playing and the forward buffer is spent, dump the two states that
+            // pin the cause: what the engine last fetched, and what hls.js's
+            // stream controller is doing. Logged once per episode.
+            const prevTime = lastTickTimeRef.current;
+            const advanced = prevTime < 0 || v.currentTime - prevTime > 0.1;
+            lastTickTimeRef.current = v.currentTime;
+            // currentTime > 1 excludes cold-start pre-roll, where sitting at 0
+            // while the first segments arrive is buffering, not a wedge.
+            const wedged = v.currentTime > 1 && !v.paused && !v.seeking
+              && !advanced && bufferAheadSeconds(v) < 1;
+            if (wedged && !stallLoggedRef.current) {
+              stallLoggedRef.current = true;
+              const eng = engineLoaderRef.current;
+              logWarn("Stall", "playhead wedged with buffer spent", {
+                session: sessionIdRef.current?.substring(0, 8) ?? "none",
+                role: amHost ? "host" : "viewer",
+                peers: stats.peers.size,
+                // Engine side: has it fetched anything past the buffer edge?
+                engStartSeg: eng.lastStartSeg,
+                engLoadedSeg: eng.lastLoadedSeg,
+                engErrorSeg: eng.lastErrorSeg,
+                engLastError: eng.lastError,
+                engIdleMs: eng.lastEventAt ? Date.now() - eng.lastEventAt : "n/a",
+                engCounts: `start=${eng.starts} loaded=${eng.loaded} err=${eng.errors} abort=${eng.aborts}`,
+                // hls.js side: is the stream controller still trying to load?
+                ...hlsLoadingState(hlsRef.current),
+                ...snapshot(v),
+              });
+            } else if (advanced) {
+              stallLoggedRef.current = false;
+            }
+          }, HEALTH_SAMPLE_MS);
+        }
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           if (!mounted) return;

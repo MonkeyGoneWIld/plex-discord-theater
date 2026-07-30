@@ -169,6 +169,13 @@ ALLOWED_ORIGINS=https://your-public-url.example.com
 # token above — no API key needed.
 # SEERR_URL=https://requests.yourdomain.com
 
+# Optional — TMDB API key. On a movie's detail page, the "also in this
+# collection" row then shows the film's whole TMDB franchise, with titles you
+# don't own marked "Not in library" (and requestable when Seerr is set). Without
+# it, that row lists only the films already in your library. Free v3 key from
+# https://www.themoviedb.org/settings/api
+# TMDB_API_KEY=your_tmdb_api_key
+
 # Optional — VPS relay (see "VPS Relay Setup" section below)
 # VPS_RELAY_URL=https://theater.yourdomain.com
 # VPS_RELAY_KEY=your-secret-key

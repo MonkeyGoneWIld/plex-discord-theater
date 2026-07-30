@@ -59,8 +59,10 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
   }, [item.guid]);
 
   // Once we know the TMDB id, pull the current request/availability status.
-  // TV shows use the per-season grid instead, fetched below.
-  const tmdbId = meta?.tmdbId ?? null;
+  // TV shows use the per-season grid instead, fetched below. Out-of-library
+  // collection members carry their tmdbId directly (no plex:// guid to resolve),
+  // so fall back to that when the provider metadata didn't supply one.
+  const tmdbId = meta?.tmdbId ?? item.tmdbId ?? null;
   useEffect(() => {
     if (tmdbId == null || mediaType !== "movie") return;
     let cancelled = false;

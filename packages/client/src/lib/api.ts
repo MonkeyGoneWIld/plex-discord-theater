@@ -138,6 +138,10 @@ export interface PlexItem {
   /** plex:// guid — present on online (Discover) results, used to fetch their
    *  detail metadata. Absent on local library items. */
   guid?: string;
+  /** TMDB id — carried on out-of-library collection members (which have no
+   *  plex:// guid) so their detail page can drive ratings and the request flow
+   *  directly. Absent on library items and Discover search results. */
+  tmdbId?: number;
 }
 
 export interface PlexSection {

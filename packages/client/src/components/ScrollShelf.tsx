@@ -19,44 +19,61 @@ interface ScrollShelfProps {
  * always was. On a mouse-driven desktop it gains: edge-fade chevrons (click to
  * page, hold to glide) that hide at each end, click-and-drag to pan, a
  * vertical-wheel-to-horizontal shortcut that passes through to the page at the
- * ends, and a scrollbar that only appears on hover.
+ * ends, and a custom thin scrollbar that only appears on hover.
+ *
+ * The scrollbar is a drawn element rather than the browser's: the app sets an
+ * inherited `scrollbar-color` on <html>, and once that's inherited Chromium
+ * renders the standard scrollbar (with end-arrow buttons) and ignores every
+ * `::-webkit-scrollbar` rule — so a native bar can't be made arrow-less here.
  */
 export function ScrollShelf({ children, rowStyle }: ScrollShelfProps) {
   const isDesktop = useMediaQuery(DESKTOP_POINTER_QUERY);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const leftRef = useRef<HTMLDivElement>(null);
   const rightRef = useRef<HTMLDivElement>(null);
+  const barRef = useRef<HTMLDivElement>(null);
+  const thumbRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef({ down: false, startX: 0, startLeft: 0, moved: false });
   const holdRef = useRef<{ raf: number; hold: boolean; timer: number } | null>(null);
 
-  // Hide the chevron at whichever end the scroll has reached.
-  const syncEdges = useCallback(() => {
+  // Reconcile the chevrons and the custom scrollbar with the current scroll
+  // position: hide each chevron at its end, size/place the thumb, keep the
+  // chevrons centered on the poster art (a fixed 2:3 image, so its height is the
+  // card width x 1.5 — measured from the first card so it tracks the layout).
+  const sync = useCallback(() => {
     const sc = scrollerRef.current;
     if (!sc) return;
     const max = sc.scrollWidth - sc.clientWidth;
     leftRef.current?.classList.toggle("shelf-chev-dis", sc.scrollLeft <= 1);
     rightRef.current?.classList.toggle("shelf-chev-dis", sc.scrollLeft >= max - 1);
-  }, []);
 
-  // Keep the chevrons centered on the poster art. The card's poster is a fixed
-  // 2:3 image at the top of the card (see MovieCard), so its height is the card
-  // width x 1.5 — measured from the first card so it tracks the responsive width.
-  const syncSize = useCallback(() => {
-    const sc = scrollerRef.current;
-    const first = sc?.firstElementChild as HTMLElement | null;
-    if (!first) return;
-    const posterH = `${first.getBoundingClientRect().width * 1.5}px`;
-    if (leftRef.current) leftRef.current.style.height = posterH;
-    if (rightRef.current) rightRef.current.style.height = posterH;
+    const first = sc.firstElementChild as HTMLElement | null;
+    if (first) {
+      const posterH = `${first.getBoundingClientRect().width * 1.5}px`;
+      if (leftRef.current) leftRef.current.style.height = posterH;
+      if (rightRef.current) rightRef.current.style.height = posterH;
+    }
+
+    const bar = barRef.current;
+    const thumb = thumbRef.current;
+    if (bar && thumb) {
+      if (max <= 0) {
+        bar.style.visibility = "hidden";
+      } else {
+        bar.style.visibility = "";
+        const tw = Math.max(36, (sc.clientWidth / sc.scrollWidth) * bar.clientWidth);
+        thumb.style.width = `${tw}px`;
+        thumb.style.left = `${(sc.scrollLeft / max) * (bar.clientWidth - tw)}px`;
+      }
+    }
   }, []);
 
   useEffect(() => {
     if (!isDesktop) return;
     const sc = scrollerRef.current;
     if (!sc) return;
-    syncSize();
-    syncEdges();
-    const ro = new ResizeObserver(() => { syncSize(); syncEdges(); });
+    sync();
+    const ro = new ResizeObserver(sync);
     ro.observe(sc);
     // Vertical wheel scrolls the row sideways, but only while it still can —
     // at either end the event passes through so the page keeps scrolling.
@@ -69,7 +86,7 @@ export function ScrollShelf({ children, rowStyle }: ScrollShelfProps) {
     };
     sc.addEventListener("wheel", onWheel, { passive: false });
     return () => { ro.disconnect(); sc.removeEventListener("wheel", onWheel); };
-  }, [isDesktop, syncSize, syncEdges, children]);
+  }, [isDesktop, sync, children]);
 
   // Click-and-drag to pan. A small threshold distinguishes a pan from a click,
   // and onClickCapture swallows the trailing click so a drag never opens a card.
@@ -125,6 +142,27 @@ export function ScrollShelf({ children, rowStyle }: ScrollShelfProps) {
     clearTimeout(h.timer); h.hold = false; cancelAnimationFrame(h.raf);
   }, []);
 
+  // Drag the custom scrollbar thumb to scroll.
+  const onThumbDown = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    const sc = scrollerRef.current, bar = barRef.current, thumb = thumbRef.current;
+    if (!sc || !bar || !thumb) return;
+    const startX = e.clientX, startLeft = sc.scrollLeft, tw = thumb.offsetWidth;
+    const trackable = bar.clientWidth - tw, max = sc.scrollWidth - sc.clientWidth;
+    thumb.style.cursor = "grabbing";
+    const move = (ev: PointerEvent) => {
+      if (trackable <= 0) return;
+      sc.scrollLeft = startLeft + ((ev.clientX - startX) / trackable) * max;
+    };
+    const up = () => {
+      thumb.style.removeProperty("cursor");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }, []);
+
   if (!isDesktop) {
     return <div style={rowStyle} className="scroll-row">{children}</div>;
   }
@@ -147,7 +185,7 @@ export function ScrollShelf({ children, rowStyle }: ScrollShelfProps) {
         ref={scrollerRef}
         className="shelf-scroller"
         style={rowStyle}
-        onScroll={syncEdges}
+        onScroll={sync}
         onPointerDown={onPointerDown}
         onClickCapture={onClickCapture}
       >
@@ -164,6 +202,9 @@ export function ScrollShelf({ children, rowStyle }: ScrollShelfProps) {
         onPointerLeave={release}
       >
         <span>&rsaquo;</span>
+      </div>
+      <div className="shelf-bar" ref={barRef}>
+        <div className="shelf-thumb" ref={thumbRef} onPointerDown={onThumbDown} />
       </div>
     </div>
   );

@@ -109,13 +109,22 @@
          edge-fade chevrons stay invisible until the row is hovered; the chevrons
          also hide at whichever end the scroll has reached (.shelf-chev-dis). */
       .shelf { position: relative; }
-      .shelf-scroller::-webkit-scrollbar { height: 8px; }
-      .shelf-scroller::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
-      .shelf-scroller::-webkit-scrollbar-track { background: transparent; }
-      .shelf-scroller::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
-      .shelf:hover .shelf-scroller::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); border-radius: 4px; }
-      .shelf:hover .shelf-scroller::-webkit-scrollbar-thumb { background: rgba(229,160,13,0.5); }
-      .shelf:hover .shelf-scroller::-webkit-scrollbar-thumb:hover { background: rgba(229,160,13,0.8); }
+      /* Hide the native scrollbar. It inherits <html>'s scrollbar-color, which
+         makes Chromium render the standard bar (with end arrows) and ignore
+         ::-webkit-scrollbar, so it's replaced by the drawn .shelf-bar below. */
+      .shelf-scroller { scrollbar-width: none; }
+      .shelf-scroller::-webkit-scrollbar { display: none; width: 0; height: 0; }
+      /* Drawn scrollbar: sits in the row's bottom padding, revealed on hover. */
+      .shelf-bar {
+        position: relative; height: 8px; margin-top: -8px; z-index: 4;
+        opacity: 0; transition: opacity 0.2s ease;
+      }
+      .shelf:hover .shelf-bar { opacity: 1; }
+      .shelf-thumb {
+        position: absolute; top: 0; height: 8px; min-width: 36px;
+        background: rgba(229,160,13,0.55); border-radius: 4px; cursor: grab;
+      }
+      .shelf-thumb:hover { background: rgba(229,160,13,0.8); }
       .shelf-chev {
         position: absolute; top: 0; width: 72px;
         display: flex; align-items: center;

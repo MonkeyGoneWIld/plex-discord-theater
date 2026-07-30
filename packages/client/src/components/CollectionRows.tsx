@@ -59,16 +59,20 @@ export function CollectionRows({ ratingKey, onSelect }: CollectionRowsProps) {
   );
 }
 
-// Mirrors Library.tsx's hub row styles so a detail-page collection is
-// pixel-for-pixel the Home tab's collection row. The horizontal padding the Home
-// tab's wrapper adds is left off here — the detail-page content column already
-// supplies it.
+// Mirrors Library.tsx's hub row styles (and its wide wrapper) so a detail-page
+// collection is pixel-for-pixel the Home tab's collection row — same 2000px max
+// width and 24px gutters, so the shelf stretches the full page and tops out at
+// ten cards, instead of being penned into the narrow detail column.
 const styles: Record<string, React.CSSProperties> = {
   wrap: {
+    // Matches Library's wideWrap — wider than the detail column on purpose, so
+    // the row reaches ten full-size cards at max stretch like the Home tab.
+    maxWidth: "2000px",
+    margin: "40px auto 0",
+    padding: "0 24px",
     display: "flex",
     flexDirection: "column",
     gap: "8px",
-    marginTop: "40px",
   },
   section: {
     paddingBottom: "8px",

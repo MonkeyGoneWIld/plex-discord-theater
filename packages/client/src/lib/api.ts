@@ -177,6 +177,9 @@ export interface PlexMeta {
   /** Milliseconds (raw Plex value) — note markers below are in SECONDS. */
   duration?: number;
   summary?: string;
+  /** Cut/edition label ("Director's Cut", "Extended Edition", "IMAX Edition", …)
+   *  for a special edition; null/absent for a plain theatrical release. */
+  editionTitle?: string | null;
   thumb: string | null;
   /** Show (grandparent) poster for episodes; null/absent for movies. Optional so
    *  a newer client served by an older server degrades to the episode thumb. */

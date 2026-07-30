@@ -162,6 +162,7 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelect
       </button>
 
       {meta ? (
+        <>
         <div style={styles.content}>
           {/* Poster + Info layout */}
           <div style={styles.layout}>
@@ -266,11 +267,13 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelect
               </SeasonRequestGrid>
             </div>
           )}
-
-          {/* "Also in this collection" — same rows as the Home tab, for the
-              small collections this show belongs to. */}
-          {onSelect && <CollectionRows ratingKey={item.ratingKey} onSelect={onSelect} />}
         </div>
+
+        {/* "Also in this collection" — same rows as the Home tab, for the small
+            collections this show belongs to. Rendered outside the narrow detail
+            column so it spans the page like the Home rows. */}
+        {onSelect && <CollectionRows ratingKey={item.ratingKey} onSelect={onSelect} />}
+        </>
       ) : (
         <div style={styles.loadingWrap}>
           <p style={styles.loadingText}>Failed to load show details</p>

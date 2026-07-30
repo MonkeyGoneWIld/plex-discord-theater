@@ -126,6 +126,10 @@ interface PlexMetadataItem {
   thumb?: string;
   summary?: string;
   duration?: number;
+  /** Movie cut/edition label, e.g. "Director's Cut", "Extended Edition",
+   *  "IMAX Edition". Set on the file's edition in Plex; absent on a plain
+   *  theatrical release. */
+  editionTitle?: string;
   art?: string;
   Genre?: Array<{ tag: string }>;
   Media?: PlexMedia[];
@@ -727,6 +731,9 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       year: m.year,
       summary: m.summary,
       duration: m.duration,
+      // Cut/edition label ("Director's Cut", "Extended Edition", …) when this
+      // file is a special edition; null for a plain theatrical release.
+      editionTitle: m.editionTitle ?? null,
       thumb: m.thumb ? `/api/plex/thumb${m.thumb}` : null,
       // Show (grandparent) poster for episodes — lets clients prefer the portrait
       // show art over the landscape episode still. Null for movies.
@@ -788,10 +795,10 @@ const COLLECTION_MAX_ITEMS = 10;
  * GET /api/plex/collections/:ratingKey
  * The (small) collections this library item belongs to, each with its members —
  * for the "also in this collection" rows on a movie/show detail page. The item
- * itself is removed from each row, and collections with more than
- * COLLECTION_MAX_ITEMS members are dropped entirely. Returns { collections: [] }
- * (never an error) for items in no collection, so the client can render it or
- * nothing.
+ * itself is kept in each row (as Plex does on its own detail pages), and
+ * collections with more than COLLECTION_MAX_ITEMS members are dropped entirely.
+ * Returns { collections: [] } (never an error) for items in no collection, so
+ * the client can render it or nothing.
  */
 router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
   const ratingKey = req.params.ratingKey as string;
@@ -843,11 +850,9 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
       const childrenData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
         `/library/collections/${c.ratingKey}/children`,
       );
-      const items = (childrenData.MediaContainer.Metadata || [])
-        // Drop the item being viewed — it's the page you're already on.
-        .filter((child) => child.ratingKey !== ratingKey)
-        .map(mapItem);
-      // A collection of only this item leaves an empty row — skip it.
+      // The item being viewed is kept in the row (Plex shows it in the
+      // collection on its own detail page too), so the full set is visible.
+      const items = (childrenData.MediaContainer.Metadata || []).map(mapItem);
       if (items.length > 0) {
         collections.push({ ratingKey: c.ratingKey, title: c.title, items });
       }

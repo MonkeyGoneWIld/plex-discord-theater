@@ -108,22 +108,37 @@ export function App() {
     setViewStack((s) => [...s.slice(0, stackIndex), v]);
   }, []);
 
-  // Navigate to an ancestor of the current (top) view from an in-content link
-  // — the show/season titles on the detail pages, mirroring the header
-  // breadcrumb. If a matching ancestor is already on the stack, go back to it
-  // (which restores its scroll); otherwise synthesize it in place of the top.
-  // Either way it lands on that view, never deeper.
-  const jumpToAncestor = useCallback(
-    (match: (v: View) => boolean, synthesize: () => View | null) => {
-      setViewStack((s) => {
-        const existing = s.findIndex(match);
-        if (existing >= 0 && existing < s.length - 1) return s.slice(0, existing + 1);
-        const v = synthesize();
-        return v ? [...s.slice(0, -1), v] : s;
-      });
-    },
-    [],
-  );
+  // In-content breadcrumb navigation (the clickable show/season titles on the
+  // detail pages). Both rebuild the view stack exactly the way the header
+  // breadcrumb does, so the trail stays a clean Home › Show › Season › Episode
+  // chain regardless of how the current view was reached. If a real ancestor
+  // view is already on the stack we truncate back to it (restoring its scroll);
+  // otherwise we synthesize it at its proper position. The stack root (index 0)
+  // is always the library, so the show sits right above it. For a single-season
+  // show there is no show view (it was replaced by the season) — synthesizing
+  // one and landing on it just lets ShowDetail auto-navigate back to the season,
+  // which is the same place the header's show crumb leads.
+  const goToShow = useCallback((show: PlexItem) => {
+    setViewStack((s) => {
+      const si = s.findIndex((v) => v.kind === "show" && v.item.ratingKey === show.ratingKey);
+      if (si >= 0) return s.slice(0, si + 1);
+      return [s[0], { kind: "show", item: show }];
+    });
+  }, []);
+
+  const goToSeason = useCallback((season: PlexItem, show: PlexItem) => {
+    setViewStack((s) => {
+      const sj = s.findIndex((v) => v.kind === "season" && v.item.ratingKey === season.ratingKey);
+      if (sj >= 0) return s.slice(0, sj + 1);
+      // No season view on the stack (e.g. an episode opened from search): place
+      // the synthesized season after the show if it's present, else above the
+      // library root. Never leaves a standalone show view behind a season for a
+      // single-season show, which would re-trigger the auto-nav loop.
+      const si = s.findIndex((v) => v.kind === "show" && v.item.ratingKey === show.ratingKey);
+      const base = si >= 0 ? s.slice(0, si + 1) : [s[0]];
+      return [...base, { kind: "season", item: season, show }];
+    });
+  }, []);
 
   // Scroll handling on navigation: new views start at the top; going back to a
   // view that's still on the stack restores its saved position. "Going back" is
@@ -334,63 +349,43 @@ export function App() {
     emitBrowse(`Looking at ${formatMediaTitle(episode)}`);
   }, [pushView, emitBrowse]);
 
-  // In-content breadcrumb navigation from the episode detail page. The show and
-  // season are synthesized from the episode's grandparent/parent fields when
-  // they aren't already on the stack (e.g. the episode was opened from search or
-  // history), so the detail views can fetch the rest by ratingKey.
+  // Show/season stubs are built from the episode's grandparent/parent fields so
+  // the detail views can fetch the rest by ratingKey. `?? "Show"`/"Season" are
+  // just placeholder labels for the rare item missing those strings.
   const handleEpisodeShowClick = useCallback((ep: PlexItem) => {
     const showKey = ep.grandparentRatingKey;
-    jumpToAncestor(
-      (v) => v.kind === "show" && v.item.ratingKey === showKey,
-      () =>
-        showKey
-          ? {
-              kind: "show",
-              item: {
-                ratingKey: showKey,
-                title: ep.showTitle ?? "Show",
-                type: "show",
-                thumb: ep.showThumb ?? null,
-              },
-            }
-          : null,
-    );
-  }, [jumpToAncestor]);
+    if (!showKey) return;
+    goToShow({
+      ratingKey: showKey,
+      title: ep.showTitle ?? "Show",
+      type: "show",
+      thumb: ep.showThumb ?? null,
+    });
+  }, [goToShow]);
 
   const handleEpisodeSeasonClick = useCallback((ep: PlexItem) => {
     const seasonKey = ep.parentRatingKey;
     const showKey = ep.grandparentRatingKey;
-    jumpToAncestor(
-      (v) => v.kind === "season" && v.item.ratingKey === seasonKey,
-      () => {
-        if (!seasonKey || !showKey) return null;
-        const show: PlexItem = {
-          ratingKey: showKey,
-          title: ep.showTitle ?? "Show",
-          type: "show",
-          thumb: ep.showThumb ?? null,
-        };
-        const season: PlexItem = {
-          ratingKey: seasonKey,
-          title: ep.parentTitle ?? (ep.parentIndex != null ? `Season ${ep.parentIndex}` : "Season"),
-          type: "season",
-          thumb: null,
-          ...(ep.parentIndex != null ? { index: ep.parentIndex } : {}),
-        };
-        return { kind: "season", item: season, show };
-      },
-    );
-  }, [jumpToAncestor]);
+    if (!seasonKey || !showKey) return;
+    const show: PlexItem = {
+      ratingKey: showKey,
+      title: ep.showTitle ?? "Show",
+      type: "show",
+      thumb: ep.showThumb ?? null,
+    };
+    const season: PlexItem = {
+      ratingKey: seasonKey,
+      title: ep.parentTitle ?? (ep.parentIndex != null ? `Season ${ep.parentIndex}` : "Season"),
+      type: "season",
+      thumb: null,
+      ...(ep.parentIndex != null ? { index: ep.parentIndex } : {}),
+    };
+    goToSeason(season, show);
+  }, [goToSeason]);
 
-  // In-content breadcrumb navigation from the season detail page: back to the
-  // show landing page (synthesized from the season's own `show` when the show
-  // view was never on the stack, e.g. a single-season show).
   const handleSeasonShowClick = useCallback((show: PlexItem) => {
-    jumpToAncestor(
-      (v) => v.kind === "show" && v.item.ratingKey === show.ratingKey,
-      () => ({ kind: "show", item: show }),
-    );
-  }, [jumpToAncestor]);
+    goToShow(show);
+  }, [goToShow]);
 
   const handlePlayNext = useCallback((queueItem: QueueItem) => {
     const playerView: View = {

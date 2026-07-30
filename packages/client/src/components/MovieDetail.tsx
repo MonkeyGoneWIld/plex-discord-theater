@@ -5,6 +5,7 @@ import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { SkeletonBlock } from "./SkeletonBlock";
 import { RatingsRow } from "./RatingsRow";
 import { CollectionRows } from "./CollectionRows";
+import { RecommendationsRow } from "./RecommendationsRow";
 import type { QueueItem, SuggestionItem } from "../hooks/useSync";
 
 interface MovieDetailProps {
@@ -524,12 +525,15 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
           </div>
         </div>
 
-        {/* "Also in this collection" — same rows as the Home tab, for the small
-            collections this movie belongs to. Rendered outside the narrow detail
-            column so it spans the page like the Home rows. Movies only:
-            episodes belong to a show, not a collection. */}
+        {/* "Also in this collection" then "More Like This" — same rows as the
+            Home tab. Rendered outside the narrow detail column so they span the
+            page. Movies only: episodes belong to a show, not a collection, and
+            TMDB has no per-episode recommendations. */}
         {item.type === "movie" && onSelect && (
-          <CollectionRows ratingKey={item.ratingKey} onSelect={onSelect} />
+          <>
+            <CollectionRows ratingKey={item.ratingKey} onSelect={onSelect} />
+            <RecommendationsRow ratingKey={item.ratingKey} title="More Like This" onSelect={onSelect} />
+          </>
         )}
         </>
       ) : (

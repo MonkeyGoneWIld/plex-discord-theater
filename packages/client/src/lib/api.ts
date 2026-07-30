@@ -262,6 +262,14 @@ export function fetchItemCollections(ratingKey: string): Promise<{ collections: 
   return cachedGet(`/api/plex/collections/${encodeURIComponent(ratingKey)}`);
 }
 
+/** TMDB "you might also like" suggestions for a movie/show (the "More Like This"
+ *  row). Library titles come first, then out-of-library ones (inLibrary=false,
+ *  with a tmdbId for the request flow). Empty without a server TMDB key. Cached —
+ *  recommendations are stable. */
+export function fetchRecommendations(ratingKey: string): Promise<{ items: PlexItem[] }> {
+  return cachedGet(`/api/plex/recommendations/${encodeURIComponent(ratingKey)}`);
+}
+
 export function fetchMeta(ratingKey: string): Promise<PlexMeta> {
   return cachedGet(`/api/plex/meta/${encodeURIComponent(ratingKey)}`);
 }

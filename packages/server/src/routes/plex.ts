@@ -806,6 +806,7 @@ interface TmdbPart {
   title?: string;
   name?: string;
   release_date?: string;
+  first_air_date?: string;
   poster_path?: string | null;
 }
 
@@ -873,6 +874,46 @@ function tmdbPartYear(part: TmdbPart): number | undefined {
  *  the two fields an out-of-library (TMDB) member needs: the inLibrary=false
  *  flag MovieCard keys off, and the tmdbId that drives its request flow. */
 type CollectionItem = ReturnType<typeof mapItem> & { inLibrary?: boolean; tmdbId?: number };
+
+/** TMDB "recommendations" results for a movie or show (same shape as parts,
+ *  plus the alternate date/name fields TV uses). */
+async function tmdbRecommendations(kind: "movie" | "tv", tmdbId: number): Promise<TmdbPart[]> {
+  const data = await tmdbGet<{ results?: TmdbPart[] }>(`/${kind}/${tmdbId}/recommendations`);
+  return Array.isArray(data?.results) ? data!.results! : [];
+}
+
+/** Release/air year of a TMDB result (movies use release_date, TV first_air_date). */
+function tmdbResultYear(part: TmdbPart): number | undefined {
+  const raw = part.release_date ?? part.first_air_date;
+  const y = raw ? parseInt(raw.slice(0, 4), 10) : NaN;
+  return Number.isFinite(y) ? y : undefined;
+}
+
+// Cache tmdbId → the library item that owns it (or null), so recommendation rows
+// don't re-resolve the same title on every visit. Keyed by type since a movie
+// and a show can share a tmdbId across their separate id spaces.
+const libraryByTmdbCache = new Map<string, PlexMetadataItem | null>();
+
+/** The library item matching a TMDB id, or null when it isn't owned. Resolved
+ *  via Plex's guid filter (best-effort — an unmatched owned title just shows as
+ *  "not in library" rather than breaking the row). */
+async function findLibraryItemByTmdb(tmdbId: number, type: string): Promise<PlexMetadataItem | null> {
+  const key = `${type}:${tmdbId}`;
+  if (libraryByTmdbCache.has(key)) return libraryByTmdbCache.get(key)!;
+  let found: PlexMetadataItem | null = null;
+  try {
+    const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+      "/library/all",
+      { guid: `tmdb://${tmdbId}` },
+    );
+    const items = data.MediaContainer.Metadata || [];
+    found = items.find((it) => it.type === type) ?? items[0] ?? null;
+  } catch {
+    found = null;
+  }
+  libraryByTmdbCache.set(key, found);
+  return found;
+}
 
 /**
  * GET /api/plex/collections/:ratingKey
@@ -1018,6 +1059,90 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
   } catch (err) {
     console.error("Collections error:", err);
     res.status(502).json({ error: "Failed to fetch collections" });
+  }
+});
+
+/** How many TMDB recommendations to keep for the "More Like This" row. Bounds
+ *  the per-title library-ownership lookups below. */
+const RECOMMENDATIONS_LIMIT = 20;
+
+/**
+ * GET /api/plex/recommendations/:ratingKey
+ * TMDB's "you might also like" list for a movie/show, for the "More Like This"
+ * row on its detail page. Titles already in the library come first (as playable
+ * cards), then the rest as "Not in library" cards (inLibrary=false + tmdbId)
+ * that open the request flow — so owned suggestions lead and requestable ones
+ * follow. Requires TMDB_API_KEY; returns { items: [] } without it (or when the
+ * title has no TMDB id / no recommendations), so the client renders nothing.
+ */
+router.get("/recommendations/:ratingKey", async (req: Request, res: Response) => {
+  const ratingKey = req.params.ratingKey as string;
+  if (!NUMERIC_RE.test(ratingKey)) {
+    res.status(400).json({ error: "Invalid rating key" });
+    return;
+  }
+
+  try {
+    if (!TMDB_API_KEY) {
+      res.json({ items: [] });
+      return;
+    }
+    const metaData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+      `/library/metadata/${ratingKey}`,
+      { includeGuids: "1" },
+    );
+    const m = metaData.MediaContainer.Metadata?.[0];
+    if (!m) {
+      res.status(404).json({ error: "Item not found" });
+      return;
+    }
+    // Only movies and shows have TMDB recommendations; episodes/seasons don't.
+    if (m.type !== "movie" && m.type !== "show") {
+      res.json({ items: [] });
+      return;
+    }
+
+    const tmdbId = await resolveTmdbId(m);
+    if (tmdbId == null) {
+      res.json({ items: [] });
+      return;
+    }
+
+    const kind = m.type === "show" ? "tv" : "movie";
+    const recs = (await tmdbRecommendations(kind, tmdbId))
+      // Needs a poster to render a card, and an id to resolve/request.
+      .filter((r) => r.id != null && !!r.poster_path)
+      .slice(0, RECOMMENDATIONS_LIMIT);
+
+    // Resolve library ownership for each in parallel — owned ones become
+    // playable cards, the rest requestable "not in library" cards.
+    const resolved = await Promise.all(
+      recs.map(async (r) => {
+        const owned = await findLibraryItemByTmdb(r.id, m.type);
+        if (owned) return { inLibrary: true, item: mapItem(owned) as CollectionItem };
+        const external: CollectionItem = {
+          ratingKey: `tmdb:${r.id}`,
+          title: r.title ?? r.name ?? "",
+          year: tmdbResultYear(r),
+          type: m.type,
+          thumb: externalThumbUrl(`https://image.tmdb.org/t/p/w500${r.poster_path}`),
+          inLibrary: false,
+          tmdbId: r.id,
+        };
+        return { inLibrary: false, item: external };
+      }),
+    );
+
+    // Library titles first, then out-of-library — each keeping TMDB's order.
+    const items = [
+      ...resolved.filter((r) => r.inLibrary).map((r) => r.item),
+      ...resolved.filter((r) => !r.inLibrary).map((r) => r.item),
+    ];
+
+    res.json({ items });
+  } catch (err) {
+    console.error("Recommendations error:", err);
+    res.status(502).json({ error: "Failed to fetch recommendations" });
   }
 });
 

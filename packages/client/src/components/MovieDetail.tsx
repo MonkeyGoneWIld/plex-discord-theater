@@ -3,6 +3,7 @@ import { fetchMeta, fetchProgress, invalidateMeta, setStreams, getSessionToken, 
 import { formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { SkeletonBlock } from "./SkeletonBlock";
+import { RatingsRow } from "./RatingsRow";
 import type { QueueItem, SuggestionItem } from "../hooks/useSync";
 
 interface MovieDetailProps {
@@ -360,6 +361,16 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                 )}
               </div>
 
+              {/* External ratings — movies only (not episodes, per design). */}
+              {item.type === "movie" && (
+                <RatingsRow
+                  imdbId={meta.imdbId}
+                  tmdbId={meta.tmdbId}
+                  mediaType="movie"
+                  style={styles.ratings}
+                />
+              )}
+
               {/* Genres */}
               {meta.genres.length > 0 && (
                 <div style={styles.genres}>
@@ -716,6 +727,9 @@ const styles: Record<string, React.CSSProperties> = {
   metaDot: {
     color: "#555",
     fontSize: "15px",
+  },
+  ratings: {
+    marginBottom: "20px",
   },
   genres: {
     display: "flex",

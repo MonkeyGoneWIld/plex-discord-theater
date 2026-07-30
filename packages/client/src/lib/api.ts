@@ -194,6 +194,8 @@ export interface PlexMeta {
   markers?: SkipMarker[];
   /** TMDB id — for Seerr season requests on library shows. Optional/nullable. */
   tmdbId?: number | null;
+  /** IMDb id (e.g. "tt0111161") — for external ratings. Optional/nullable. */
+  imdbId?: string | null;
 }
 
 export interface PlexHub {
@@ -278,6 +280,31 @@ export type SeerrMediaType = "movie" | "tv";
 
 export function fetchSeerrStatus(tmdbId: number, mediaType: SeerrMediaType): Promise<SeerrStatus> {
   return apiGet(`/api/seerr/status?tmdbId=${tmdbId}&mediaType=${mediaType}`);
+}
+
+/**
+ * External ratings for a movie/show detail page, sourced from MDBList.
+ * `imdb` is 0–10; `tmdb`, `rtCritic` and `rtAudience` are 0–100 percentages.
+ * Any field is null when that source has no score. `configured` is false when
+ * the server has no MDBList API key set (the ratings row is then hidden).
+ */
+export interface Ratings {
+  imdb: number | null;
+  tmdb: number | null;
+  rtCritic: number | null;
+  rtAudience: number | null;
+}
+
+export type RatingsMediaType = "movie" | "show";
+
+export function fetchRatings(
+  opts: { imdbId?: string | null; tmdbId?: number | null; mediaType: RatingsMediaType },
+): Promise<{ configured: boolean; ratings: Ratings }> {
+  const params = new URLSearchParams({ mediaType: opts.mediaType });
+  if (opts.imdbId) params.set("imdbId", opts.imdbId);
+  if (opts.tmdbId != null) params.set("tmdbId", String(opts.tmdbId));
+  // Cached (ratings are stable) so navigating back to a detail view is free.
+  return cachedGet(`/api/ratings?${params.toString()}`);
 }
 
 /** A show's season with its Seerr status (2=pending, 3=processing, 4=partial,

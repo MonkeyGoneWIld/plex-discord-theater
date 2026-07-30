@@ -110,7 +110,7 @@ export function SeasonRequestGrid({
             >
               <div style={styles.posterWrap}>
                 {poster ? (
-                  <img src={authUrl(poster)} alt={s.name} style={styles.poster} loading="lazy" />
+                  <img src={authUrl(poster)} alt={s.name} style={styles.poster} loading="eager" />
                 ) : (
                   <div style={styles.placeholder}>No Poster</div>
                 )}

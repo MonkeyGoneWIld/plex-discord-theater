@@ -16,11 +16,15 @@ import type { PlexItem } from "./lib/api";
 import type { QueueItem } from "./hooks/useSync";
 
 type View =
+  // `flat` marks a title opened from a collection / "More Like This" row. Such a
+  // title is a sibling, not a child, of the page it was opened from, so its
+  // breadcrumb collapses to just Home › <title> instead of nesting under an
+  // unrelated ancestor. Back still walks the stack normally.
   | { kind: "library" }
-  | { kind: "show"; item: PlexItem }
+  | { kind: "show"; item: PlexItem; flat?: boolean }
   | { kind: "season"; item: PlexItem; show: PlexItem }
-  | { kind: "detail"; item: PlexItem }
-  | { kind: "external-detail"; item: PlexItem }
+  | { kind: "detail"; item: PlexItem; flat?: boolean }
+  | { kind: "external-detail"; item: PlexItem; flat?: boolean }
   // resumePosition (seconds) is set only when the host chose "Resume" on the
   // detail view; every other route into the player starts from the beginning.
   | { kind: "player"; item: PlexItem; subtitles: boolean; resumePosition?: number };
@@ -32,6 +36,11 @@ function crumbLabel(v: View): string {
     case "season": return v.item.index != null ? `Season ${v.item.index}` : v.item.title;
     default: return v.item.title;
   }
+}
+
+// A title opened from a related row — its breadcrumb collapses to Home › title.
+function isFlatView(v: View): boolean {
+  return (v.kind === "show" || v.kind === "detail" || v.kind === "external-detail") && v.flat === true;
 }
 
 export function App() {
@@ -311,22 +320,29 @@ export function App() {
     return () => { cancelled = true; };
   }, [syncState.ratingKey]);
 
-  const handleSelect = useCallback((item: PlexItem) => {
+  const handleSelect = useCallback((item: PlexItem, flat = false) => {
     // Online (Discover) results aren't in the library — open a detail view with
     // metadata and a request button instead of the playable detail/player path.
     if (item.inLibrary === false) {
-      pushView({ kind: "external-detail", item });
+      pushView({ kind: "external-detail", item, flat });
       emitBrowse(`Looking at ${item.title}`);
       return;
     }
     if (item.type === "show") {
-      pushView({ kind: "show", item });
+      pushView({ kind: "show", item, flat });
       emitBrowse(`Looking at ${item.title}`);
     } else {
-      pushView({ kind: "detail", item });
+      pushView({ kind: "detail", item, flat });
       emitBrowse(`Looking at ${formatMediaTitle(item)}`);
     }
   }, [pushView, emitBrowse]);
+
+  // Navigation from a collection / "More Like This" row — flags the opened title
+  // as `flat` so its breadcrumb collapses to Home › <title> (see isFlatView).
+  const handleSelectRelated = useCallback(
+    (item: PlexItem) => handleSelect(item, true),
+    [handleSelect],
+  );
 
   const handlePlay = useCallback((item: PlexItem, subtitles: boolean, resumePosition?: number) => {
     pushView({ kind: "player", item, subtitles, resumePosition });
@@ -417,6 +433,14 @@ export function App() {
   // by auto-navigation). Synthetic crumbs navigate via jumpToView with a stub
   // item; the detail views fetch everything else by ratingKey.
   const crumbs: Array<{ label: string; home?: boolean; onClick?: () => void }> = [];
+  // A title opened from a related row shows a flat Home › <title> trail rather
+  // than nesting under whatever page it was reached from (which is a sibling,
+  // not an ancestor). Back still pops the real stack, so the previous page is a
+  // click away — it just isn't drawn as a parent here.
+  if (isFlatView(view)) {
+    crumbs.push({ label: "Home", home: true, onClick: goHome });
+    crumbs.push({ label: crumbLabel(view) });
+  } else {
   viewStack.forEach((v, i) => {
     const isLast = i === viewStack.length - 1;
     const prevKind = viewStack[i - 1]?.kind;
@@ -465,6 +489,7 @@ export function App() {
       onClick: isLast ? undefined : i === 0 ? goHome : () => truncateToView(i),
     });
   });
+  }
 
   if (error) {
     return (
@@ -677,6 +702,7 @@ export function App() {
           // Resume jumps straight to the episode; the breadcrumb synthesizes the
           // show and season it skipped past, so Back still walks up properly.
           onSelectEpisode={handleSeasonEpisode}
+          onSelect={handleSelectRelated}
           onBack={popView}
         />
       )}
@@ -705,6 +731,7 @@ export function App() {
           isPlaying={!!syncState.ratingKey}
           onAddToQueue={effectiveIsHost ? (qi) => syncActions.sendQueueAdd(qi) : undefined}
           onSuggest={!effectiveIsHost ? (item) => syncActions.sendSuggest(item) : undefined}
+          onSelect={handleSelectRelated}
         />
       )}
 

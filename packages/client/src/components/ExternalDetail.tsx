@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import {
-  authUrl, fetchDiscoverMeta, fetchSeerrStatus, fetchSeerrTv, seerrRequest,
+  authUrl, fetchDiscoverMeta, fetchTmdbMeta, fetchSeerrStatus, fetchSeerrTv, seerrRequest,
   type PlexItem, type DiscoverMeta, type SeerrMediaType, type SeerrTv,
 } from "../lib/api";
 import { SeasonRequestGrid } from "./SeasonRequestGrid";
@@ -45,22 +45,33 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
   const [requestError, setRequestError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!item.guid) {
+    // Discover search results resolve full detail from their plex:// guid;
+    // out-of-library collection/recommendation members have no guid but carry a
+    // tmdbId, so fetch their detail from TMDB instead. Without either, fall back
+    // to whatever fields the card already provided.
+    const load = item.guid
+      ? fetchDiscoverMeta(item.guid)
+      : item.tmdbId != null
+        ? fetchTmdbMeta(item.tmdbId, item.type === "show" ? "show" : "movie")
+        : null;
+    if (!load) {
       setLoading(false);
       return;
     }
     let cancelled = false;
     setLoading(true);
-    fetchDiscoverMeta(item.guid)
+    load
       .then((m) => { if (!cancelled) setMeta(m); })
       .catch(() => { /* degrade to the fields search already provided */ })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [item.guid]);
+  }, [item.guid, item.tmdbId, item.type]);
 
   // Once we know the TMDB id, pull the current request/availability status.
-  // TV shows use the per-season grid instead, fetched below.
-  const tmdbId = meta?.tmdbId ?? null;
+  // TV shows use the per-season grid instead, fetched below. Out-of-library
+  // collection members carry their tmdbId directly (no plex:// guid to resolve),
+  // so fall back to that when the provider metadata didn't supply one.
+  const tmdbId = meta?.tmdbId ?? item.tmdbId ?? null;
   useEffect(() => {
     if (tmdbId == null || mediaType !== "movie") return;
     let cancelled = false;

@@ -119,12 +119,20 @@
       .shelf-bar {
         position: relative; height: 8px; margin-top: 6px; z-index: 4;
         background: rgba(255,255,255,0.08); border-radius: 4px;
-        opacity: 0; transition: opacity 0.2s ease;
+        opacity: 0; transition: opacity 0.2s ease; cursor: pointer;
       }
       .shelf:hover .shelf-bar { opacity: 1; }
       .shelf-thumb {
         position: absolute; top: 0; height: 8px; min-width: 36px;
         background: rgba(229,160,13,0.85); border-radius: 4px; cursor: grab;
+      }
+      /* Invisible hit area so the thin 8px thumb is easy to grab. It's a child of
+         the thumb, so pointer-downs on it still start the drag — it just extends
+         the grabbable zone (mostly downward, into empty space, to avoid stealing
+         clicks from the poster row above) without changing the visual size. */
+      .shelf-thumb::before {
+        content: ""; position: absolute;
+        top: -6px; bottom: -12px; left: -4px; right: -4px;
       }
       .shelf-thumb:hover { background: rgba(229,160,13,1); }
       .shelf-chev {

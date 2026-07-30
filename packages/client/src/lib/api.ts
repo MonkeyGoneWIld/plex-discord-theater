@@ -138,6 +138,10 @@ export interface PlexItem {
   /** plex:// guid — present on online (Discover) results, used to fetch their
    *  detail metadata. Absent on local library items. */
   guid?: string;
+  /** TMDB id — carried on out-of-library collection members (which have no
+   *  plex:// guid) so their detail page can drive ratings and the request flow
+   *  directly. Absent on library items and Discover search results. */
+  tmdbId?: number;
 }
 
 export interface PlexSection {
@@ -177,6 +181,9 @@ export interface PlexMeta {
   /** Milliseconds (raw Plex value) — note markers below are in SECONDS. */
   duration?: number;
   summary?: string;
+  /** Cut/edition label ("Director's Cut", "Extended Edition", "IMAX Edition", …)
+   *  for a special edition; null/absent for a plain theatrical release. */
+  editionTitle?: string | null;
   thumb: string | null;
   /** Show (grandparent) poster for episodes; null/absent for movies. Optional so
    *  a newer client served by an older server degrades to the episode thumb. */
@@ -238,6 +245,29 @@ export function fetchChildren(ratingKey: string): Promise<{ items: PlexItem[] }>
   return cachedGet(`/api/plex/children/${encodeURIComponent(ratingKey)}`);
 }
 
+/** A collection an item belongs to, with the other members to show alongside it
+ *  on a detail page. Server-filtered to small collections only (see
+ *  fetchRelated). */
+export interface PlexCollection {
+  ratingKey: string;
+  title: string;
+  items: PlexItem[];
+}
+
+/** Related rows for a movie/show detail page:
+ *  - `collections`: the small collections it belongs to (large ones like
+ *    Trending filtered out server-side; the item itself is kept in each row).
+ *  - `recommendations`: TMDB's "you might also like" list (the "More Like This"
+ *    row), library titles first then out-of-library ones (inLibrary=false, with
+ *    a tmdbId for the request flow), excluding anything already in a collection.
+ *  Both empty without a server TMDB key where they depend on it. Cached — the
+ *  membership and suggestions are stable. */
+export function fetchRelated(
+  ratingKey: string,
+): Promise<{ collections: PlexCollection[]; recommendations: PlexItem[] }> {
+  return cachedGet(`/api/plex/collections/${encodeURIComponent(ratingKey)}`);
+}
+
 export function fetchMeta(ratingKey: string): Promise<PlexMeta> {
   return cachedGet(`/api/plex/meta/${encodeURIComponent(ratingKey)}`);
 }
@@ -266,6 +296,13 @@ export interface DiscoverMeta {
 
 export function fetchDiscoverMeta(guid: string): Promise<DiscoverMeta> {
   return cachedGet(`/api/plex/discover/meta?guid=${encodeURIComponent(guid)}`);
+}
+
+/** Detail metadata for an out-of-library collection/recommendation member, which
+ *  carries a TMDB id but no plex:// guid. Same shape as fetchDiscoverMeta so the
+ *  external detail page renders it the same way. */
+export function fetchTmdbMeta(tmdbId: number, type: "movie" | "show"): Promise<DiscoverMeta> {
+  return cachedGet(`/api/plex/tmdb/meta?tmdbId=${tmdbId}&type=${type}`);
 }
 
 /** Seerr (Overseerr/Jellyseerr) request integration. `status` is Seerr's

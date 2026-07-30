@@ -4,6 +4,7 @@ import { formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { SkeletonBlock } from "./SkeletonBlock";
 import { RatingsRow } from "./RatingsRow";
+import { RelatedRows } from "./RelatedRows";
 import type { QueueItem, SuggestionItem } from "../hooks/useSync";
 
 interface MovieDetailProps {
@@ -20,6 +21,9 @@ interface MovieDetailProps {
    *  Omitted for movies (and when there's nothing to navigate to). */
   onShowClick?: () => void;
   onSeasonClick?: () => void;
+  /** Open another title's detail page — used by the "also in this collection"
+   *  rows. Omit to hide those rows. */
+  onSelect?: (item: PlexItem) => void;
 }
 
 function authUrl(url: string): string {
@@ -160,7 +164,7 @@ const dropdownStyles: Record<string, React.CSSProperties> = {
   },
 };
 
-export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQueue, onSuggest, onShowClick, onSeasonClick }: MovieDetailProps) {
+export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQueue, onSuggest, onShowClick, onSeasonClick, onSelect }: MovieDetailProps) {
   const [meta, setMeta] = useState<PlexMeta | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -288,6 +292,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
       </button>
 
       {meta ? (
+        <>
         <div style={{ ...styles.content, ...(narrow ? styles.contentNarrow : {}) }}>
           {/* Poster + Info layout — stacks on phone portrait */}
           <div style={{ ...styles.layout, ...(narrow ? styles.layoutNarrow : {}) }}>
@@ -358,6 +363,12 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                     <span style={styles.metaDot}>&middot;</span>
                     <span style={styles.metaItem}>{formatDuration(meta.duration)}</span>
                   </>
+                )}
+                {/* Special-edition label ("Director's Cut", "Extended Edition",
+                    "IMAX Edition", …) — only present when this file is a special
+                    cut, so a plain theatrical release shows nothing. */}
+                {meta.editionTitle && (
+                  <span style={styles.editionBadge}>{meta.editionTitle}</span>
                 )}
               </div>
 
@@ -512,6 +523,15 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
             </div>
           </div>
         </div>
+
+        {/* Collections then "More Like This" — same rows as the Home tab,
+            rendered outside the narrow detail column so they span the page.
+            Movies only: episodes belong to a show, not a collection, and TMDB
+            has no per-episode recommendations. */}
+        {item.type === "movie" && onSelect && (
+          <RelatedRows ratingKey={item.ratingKey} recommendationsTitle="More Like This" onSelect={onSelect} />
+        )}
+        </>
       ) : (
         <div style={styles.loadingWrap}>
           <p style={styles.loadingText}>Failed to load metadata</p>
@@ -727,6 +747,19 @@ const styles: Record<string, React.CSSProperties> = {
   metaDot: {
     color: "#555",
     fontSize: "15px",
+  },
+  // Gold pill that sets a special edition apart from the plain year/runtime text
+  // beside it, so an Extended/Director's/IMAX cut is obvious at a glance.
+  editionBadge: {
+    padding: "2px 10px",
+    borderRadius: "6px",
+    background: "rgba(229,160,13,0.15)",
+    border: "1px solid rgba(229,160,13,0.3)",
+    color: "#e5a00d",
+    fontSize: "12px",
+    fontWeight: 700,
+    textTransform: "uppercase",
+    letterSpacing: "0.03em",
   },
   ratings: {
     marginBottom: "20px",

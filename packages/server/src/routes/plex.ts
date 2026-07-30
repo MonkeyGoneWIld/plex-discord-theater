@@ -126,6 +126,10 @@ interface PlexMetadataItem {
   thumb?: string;
   summary?: string;
   duration?: number;
+  /** Movie cut/edition label, e.g. "Director's Cut", "Extended Edition",
+   *  "IMAX Edition". Set on the file's edition in Plex; absent on a plain
+   *  theatrical release. */
+  editionTitle?: string;
   art?: string;
   Genre?: Array<{ tag: string }>;
   Media?: PlexMedia[];
@@ -148,6 +152,10 @@ interface PlexMetadataItem {
   contentRating?: string;
   /** External ids, e.g. { id: "imdb://tt123" }, { id: "tmdb://456" }. */
   Guid?: Array<{ id?: string }>;
+  /** Collections this item belongs to (present with includeCollections=1). The
+   *  `tag` is the collection's title; used to find the real collection (with its
+   *  ratingKey/childCount) in the section's collection list. */
+  Collection?: Array<{ tag: string; id?: number }>;
 }
 
 // ─── Library browsing ────────────────────────────────────────────
@@ -723,6 +731,9 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       year: m.year,
       summary: m.summary,
       duration: m.duration,
+      // Cut/edition label ("Director's Cut", "Extended Edition", …) when this
+      // file is a special edition; null for a plain theatrical release.
+      editionTitle: m.editionTitle ?? null,
       thumb: m.thumb ? `/api/plex/thumb${m.thumb}` : null,
       // Show (grandparent) poster for episodes — lets clients prefer the portrait
       // show art over the landscape episode still. Null for movies.
@@ -768,6 +779,520 @@ router.get("/children/:ratingKey", async (req: Request, res: Response) => {
   } catch (err) {
     console.error("Children error:", err);
     res.status(502).json({ error: "Failed to fetch children" });
+  }
+});
+
+/**
+ * Largest a collection may be to appear on an item's detail page. Curated sets
+ * fit under this and render as "also in this collection" rows; sprawling
+ * auto-collections like "Trending" (40+ items) are filtered out so they don't
+ * take over the page. Inclusive — a collection of exactly this many still shows.
+ *
+ * Movies get a higher cap than shows: film franchises/box sets run large (e.g.
+ * a 20+ Marvel or Bond collection) and are still worth showing, whereas a show's
+ * collections are typically small and a big one is more likely noise.
+ */
+const COLLECTION_MAX_ITEMS_MOVIE = 30;
+const COLLECTION_MAX_ITEMS_SHOW = 10;
+
+/** The size cap for a given item type. */
+function collectionMaxItems(type: string): number {
+  return type === "movie" ? COLLECTION_MAX_ITEMS_MOVIE : COLLECTION_MAX_ITEMS_SHOW;
+}
+
+// ─── TMDB collections ───────────────────────────────────────────
+//
+// A Plex library collection only contains items you own, so it can't show the
+// franchise films you're missing. TMDB knows the full membership, so when a
+// TMDB_API_KEY is configured we fetch the movie's TMDB collection and render the
+// whole franchise — owned films playable, the rest as "Not in library" cards
+// that open the existing request flow. Movies only; TMDB has no TV equivalent.
+const TMDB_API_KEY = process.env.TMDB_API_KEY;
+const TMDB_API_BASE = "https://api.themoviedb.org/3";
+
+interface TmdbPart {
+  id: number;
+  title?: string;
+  name?: string;
+  release_date?: string;
+  first_air_date?: string;
+  poster_path?: string | null;
+}
+
+// Cache movie→collection and collection→parts (both including misses) so
+// browsing detail pages doesn't re-hit TMDB for the same title.
+const tmdbMovieCollectionCache = new Map<number, { id: number; name: string } | null>();
+const tmdbCollectionCache = new Map<number, { name: string; parts: TmdbPart[] } | null>();
+
+async function tmdbGet<T>(path: string): Promise<T | null> {
+  if (!TMDB_API_KEY) return null;
+  const url = new URL(`${TMDB_API_BASE}${path}`);
+  url.searchParams.set("api_key", TMDB_API_KEY);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(url, { headers: { Accept: "application/json" }, signal: controller.signal });
+    if (!res.ok) {
+      console.warn("[TMDB] request failed:", path, res.status);
+      return null;
+    }
+    return (await res.json()) as T;
+  } catch (err) {
+    console.warn("[TMDB] request error:", path, err);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The TMDB collection a movie belongs to, or null when it's a standalone film
+ *  (or TMDB has no key/entry). Cached, misses included. */
+async function tmdbMovieCollection(tmdbId: number): Promise<{ id: number; name: string } | null> {
+  if (tmdbMovieCollectionCache.has(tmdbId)) return tmdbMovieCollectionCache.get(tmdbId)!;
+  const data = await tmdbGet<{ belongs_to_collection?: { id: number; name: string } | null }>(
+    `/movie/${tmdbId}`,
+  );
+  const coll = data?.belongs_to_collection ?? null;
+  tmdbMovieCollectionCache.set(tmdbId, coll);
+  return coll;
+}
+
+/** Every film in a TMDB collection, or null on failure. Cached, misses included. */
+async function tmdbCollectionParts(collectionId: number): Promise<{ name: string; parts: TmdbPart[] } | null> {
+  if (tmdbCollectionCache.has(collectionId)) return tmdbCollectionCache.get(collectionId)!;
+  const data = await tmdbGet<{ name?: string; parts?: TmdbPart[] }>(`/collection/${collectionId}`);
+  const result =
+    data && Array.isArray(data.parts) ? { name: data.name ?? "Collection", parts: data.parts } : null;
+  tmdbCollectionCache.set(collectionId, result);
+  return result;
+}
+
+/** Loose title key for matching a TMDB part to a library item — case- and
+ *  punctuation-insensitive, so "Spider-Man: Homecoming" == "spidermanhomecoming". */
+function collectionTitleKey(title: string): string {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** Release year of a TMDB part, or null. */
+function tmdbPartYear(part: TmdbPart): number | undefined {
+  const y = part.release_date ? parseInt(part.release_date.slice(0, 4), 10) : NaN;
+  return Number.isFinite(y) ? y : undefined;
+}
+
+/** A collection member sent to the client. Extends a mapped library item with
+ *  the two fields an out-of-library (TMDB) member needs: the inLibrary=false
+ *  flag MovieCard keys off, and the tmdbId that drives its request flow. */
+type CollectionItem = ReturnType<typeof mapItem> & { inLibrary?: boolean; tmdbId?: number };
+
+/** TMDB "recommendations" results for a movie or show (same shape as parts,
+ *  plus the alternate date/name fields TV uses). */
+async function tmdbRecommendations(kind: "movie" | "tv", tmdbId: number): Promise<TmdbPart[]> {
+  const data = await tmdbGet<{ results?: TmdbPart[] }>(`/${kind}/${tmdbId}/recommendations`);
+  return Array.isArray(data?.results) ? data!.results! : [];
+}
+
+/** Release/air year of a TMDB result (movies use release_date, TV first_air_date). */
+function tmdbResultYear(part: TmdbPart): number | undefined {
+  const raw = part.release_date ?? part.first_air_date;
+  const y = raw ? parseInt(raw.slice(0, 4), 10) : NaN;
+  return Number.isFinite(y) ? y : undefined;
+}
+
+// Cache tmdbId → the library item that matches it (or null), so recommendation
+// rows don't re-resolve the same title on every visit. Keyed by type since a
+// movie and a show can share a tmdbId across their separate id spaces.
+const libraryMatchCache = new Map<string, PlexMetadataItem | null>();
+
+/**
+ * The library item matching a TMDB result, or null when it isn't owned. Resolved
+ * via Plex search (not the `?guid=tmdb://…` filter, which only matches an item's
+ * *primary* plex:// guid and so misses owned titles whose TMDB id is a secondary
+ * guid). Among the search hits it prefers, in order:
+ *   1. an exact TMDB-id match (the search asks for guids) — authoritative, and
+ *      immune to naming differences;
+ *   2. an exact normalised-title match within a year;
+ *   3. a title that is a prefix/suffix of the other within the same year — so
+ *      Plex's "Daredevil" still matches TMDB's "Marvel's Daredevil".
+ */
+async function findLibraryMatch(part: TmdbPart, type: string): Promise<PlexMetadataItem | null> {
+  const title = part.title ?? part.name ?? "";
+  const key = `${type}:${part.id}`;
+  if (libraryMatchCache.has(key)) return libraryMatchCache.get(key)!;
+  let found: PlexMetadataItem | null = null;
+  if (title) {
+    try {
+      const data = await plexJSON<{ MediaContainer: { Hub?: Array<{ Metadata?: PlexMetadataItem[] }> } }>(
+        "/hubs/search",
+        { query: title, limit: "12", includeGuids: "1" },
+      );
+      const wantKey = collectionTitleKey(title);
+      const year = tmdbResultYear(part);
+      // Library hits of the right type (a section id means it's owned, not an
+      // online Discover result).
+      const candidates = (data.MediaContainer.Hub || [])
+        .flatMap((h) => h.Metadata || [])
+        .filter((c) => c.type === type && c.librarySectionID != null && c.title != null);
+
+      const yearOk = (c: PlexMetadataItem) =>
+        year == null || c.year == null || Math.abs(c.year - year) <= 1;
+      const keyOf = (c: PlexMetadataItem) => collectionTitleKey(c.title!);
+
+      found =
+        // 1. Exact TMDB id — authoritative regardless of how the title is spelled.
+        candidates.find((c) => tmdbIdFromGuids(c.Guid) === part.id) ??
+        // 2. Exact normalised title within a year.
+        candidates.find((c) => keyOf(c) === wantKey && yearOk(c)) ??
+        // 3. Prefix/suffix title (e.g. "daredevil" ⊂ "marvelsdaredevil"), same
+        //    year — a studio prefix TMDB adds shouldn't drop the match. Guard on
+        //    a real year so a short title can't loosely match an unrelated one.
+        candidates.find(
+          (c) =>
+            year != null &&
+            c.year === year &&
+            (keyOf(c).includes(wantKey) || wantKey.includes(keyOf(c))),
+        ) ??
+        null;
+    } catch {
+      found = null;
+    }
+  }
+  libraryMatchCache.set(key, found);
+  return found;
+}
+
+/**
+ * GET /api/plex/collections/:ratingKey
+ * The (small) collections this library item belongs to, each with its members —
+ * for the "also in this collection" rows on a movie/show detail page. The item
+ * itself is kept in each row (as Plex does on its own detail pages), and
+ * collections larger than the per-type cap (movies 30, shows 10) are dropped
+ * entirely.
+ *
+ * For movies, when a TMDB_API_KEY is set, the film's TMDB collection supplies
+ * the *full* franchise: owned films render as playable cards, missing ones as
+ * "Not in library" cards (inLibrary=false + tmdbId) that open the request flow —
+ * so the row shows the whole set, not only what's owned. The matching owned-only
+ * Plex collection is dropped in favour of this fuller row; any unrelated Plex
+ * collections (e.g. a personal "Christmas Movies") are kept as-is.
+ *
+ * Also returns `recommendations` — TMDB's "you might also like" list for the
+ * "More Like This" row — computed here (rather than in its own endpoint) so it
+ * can exclude anything already shown in a collection above. See
+ * buildRecommendations for the library-first, fill-to-target ordering.
+ *
+ * Returns { collections: [], recommendations: [] } (never an error) when there's
+ * nothing to show, so the client can render each row or nothing.
+ */
+router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
+  const ratingKey = req.params.ratingKey as string;
+  if (!NUMERIC_RE.test(ratingKey)) {
+    res.status(400).json({ error: "Invalid rating key" });
+    return;
+  }
+
+  try {
+    // Which collections does this item belong to? Plex only lists them on the
+    // item's own metadata (as Collection tags), and only with includeCollections.
+    // includeGuids brings the external-id list (tmdb://…) needed to resolve the
+    // TMDB collection below.
+    const metaData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+      `/library/metadata/${ratingKey}`,
+      { includeCollections: "1", includeGuids: "1" },
+    );
+    const m = metaData.MediaContainer.Metadata?.[0];
+    if (!m) {
+      res.status(404).json({ error: "Item not found" });
+      return;
+    }
+
+    const sectionId = m.librarySectionID;
+    // Not a local library item (online result) — nothing to show.
+    if (sectionId == null) {
+      res.json({ collections: [] });
+      return;
+    }
+
+    // Size cap depends on the item type — movies allow larger sets than shows.
+    const maxItems = collectionMaxItems(m.type);
+    // Resolved once — used for the movie's TMDB franchise row and for the
+    // recommendations row below. Null when there's no TMDB id (or no key).
+    const itemTmdbId = TMDB_API_KEY ? await resolveTmdbId(m) : null;
+
+    // ── Owned rows: the small Plex collections this item is in ──────────
+    // Each carries its owned members (used both to render the row and, below, to
+    // tell which TMDB franchise films are already in the library).
+    const memberTitles = new Set((m.Collection || []).map((c) => c.tag).filter(Boolean));
+    const plexRows: Array<{ ratingKey: string; title: string; children: PlexMetadataItem[] }> = [];
+    if (memberTitles.size > 0) {
+      // The item's Collection tags carry only titles — the ratingKey (to list
+      // members) and childCount (to size-filter) live on the section's
+      // collection list, matched back by title.
+      const collData = await plexJSON<{
+        MediaContainer: { Metadata?: PlexMetadataItem[]; Directory?: PlexMetadataItem[] };
+      }>(`/library/sections/${sectionId}/collections`);
+      const sectionCollections =
+        collData.MediaContainer.Metadata || collData.MediaContainer.Directory || [];
+
+      // Only the small collections this item is in — sized down here so a large
+      // collection (Trending) is skipped without ever fetching its members.
+      const matched = sectionCollections.filter(
+        (c) =>
+          memberTitles.has(c.title) &&
+          (c.childCount ?? 0) > 0 &&
+          (c.childCount ?? 0) <= maxItems,
+      );
+      for (const c of matched) {
+        const childrenData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+          `/library/collections/${c.ratingKey}/children`,
+        );
+        const children = childrenData.MediaContainer.Metadata || [];
+        if (children.length > 0) plexRows.push({ ratingKey: String(c.ratingKey), title: c.title, children });
+      }
+    }
+
+    // ── Franchise row: the full TMDB collection, owned + missing (movies) ──
+    let tmdbRow: { ratingKey: string; title: string; items: CollectionItem[] } | null = null;
+    let consumedPlexRatingKey: string | null = null;
+    if (m.type === "movie" && TMDB_API_KEY) {
+      const coll = itemTmdbId != null ? await tmdbMovieCollection(itemTmdbId) : null;
+      const collParts = coll ? await tmdbCollectionParts(coll.id) : null;
+      // Same size cap as Plex collections (movie cap) — skip a sprawling
+      // franchise entirely.
+      if (coll && collParts && collParts.parts.length > 0 && collParts.parts.length <= maxItems) {
+        // Everything the library owns that could be a franchise film: this movie
+        // plus every member of the matched Plex collections, keyed by loose title.
+        const ownedByTitle = new Map<string, PlexMetadataItem>();
+        const addOwned = (item: PlexMetadataItem) => {
+          if (item.title) ownedByTitle.set(collectionTitleKey(item.title), item);
+        };
+        addOwned(m);
+        for (const row of plexRows) for (const child of row.children) addOwned(child);
+
+        // Chronological, but undated films (typically unreleased entries with no
+        // year, always out-of-library) sort to the very end rather than the front
+        // — an empty release_date would otherwise sort before every real date.
+        const parts = [...collParts.parts].sort((a, b) =>
+          (a.release_date || "9999-99-99").localeCompare(b.release_date || "9999-99-99"),
+        );
+        const items: CollectionItem[] = await Promise.all(
+          parts.map(async (part) => {
+            const partTitle = part.title ?? part.name ?? "";
+            // Prefer the item from the movie's Plex collection (no lookup needed);
+            // otherwise search the library, so a franchise film that's owned but
+            // not in any Plex collection still resolves as owned instead of
+            // wrongly showing "Not in library".
+            const owned =
+              ownedByTitle.get(collectionTitleKey(partTitle)) ?? (await findLibraryMatch(part, "movie"));
+            if (owned) return mapItem(owned);
+            // Missing from the library — a non-playable, requestable card. Poster
+            // is proxied the same way as Discover search results.
+            return {
+              ratingKey: `tmdb:${part.id}`,
+              title: partTitle,
+              year: tmdbPartYear(part),
+              type: "movie",
+              thumb: part.poster_path
+                ? externalThumbUrl(`https://image.tmdb.org/t/p/w500${part.poster_path}`)
+                : null,
+              inLibrary: false,
+              tmdbId: part.id,
+            } as CollectionItem;
+          }),
+        );
+        tmdbRow = { ratingKey: `tmdb-collection:${coll.id}`, title: coll.name, items };
+
+        // Drop the Plex collection that is this same franchise so the page doesn't
+        // show two near-identical rows; unrelated personal collections stay. The
+        // TMDB row already holds those owned films (resolved to their library
+        // ratingKeys), so a Plex collection whose every member appears in the TMDB
+        // row is the duplicate. Matching on ratingKey — not title — survives films
+        // Plex and TMDB name differently (e.g. the regional "Salazar's Revenge" vs
+        // "Dead Men Tell No Tales"), which a title match would miss, leaving both
+        // rows on screen.
+        const tmdbOwnedKeys = new Set(
+          items.filter((it) => it.inLibrary !== false).map((it) => String(it.ratingKey)),
+        );
+        const franchiseRow = plexRows.find(
+          (row) =>
+            row.children.length > 0 &&
+            row.children.every((child) => tmdbOwnedKeys.has(String(child.ratingKey))),
+        );
+        if (franchiseRow) consumedPlexRatingKey = franchiseRow.ratingKey;
+      }
+    }
+
+    // Franchise row first, then the remaining (unrelated) owned collections. The
+    // item being viewed stays in every row — Plex keeps it on its own detail
+    // pages too.
+    const collections: Array<{ ratingKey: string; title: string; items: CollectionItem[] }> = [];
+    const seenTitles = new Set<string>();
+    // Never emit two rows with the same collection name. The ratingKey dedup above
+    // drops the Plex collection matching the TMDB franchise, but as a safety net
+    // this also collapses an identically-named Plex collection it missed (or a
+    // duplicate collection in the library), so "Pirates of the Caribbean
+    // Collection" can't render twice. First one wins — the TMDB row leads.
+    const add = (row: { ratingKey: string; title: string; items: CollectionItem[] }) => {
+      const key = collectionTitleKey(row.title);
+      if (seenTitles.has(key)) return;
+      seenTitles.add(key);
+      collections.push(row);
+    };
+    if (tmdbRow) add(tmdbRow);
+    for (const row of plexRows) {
+      if (row.ratingKey === consumedPlexRatingKey) continue;
+      add({ ratingKey: row.ratingKey, title: row.title, items: row.children.map(mapItem) });
+    }
+
+    // ── "More Like This": TMDB recommendations, minus collection items ──
+    const recommendations = await buildRecommendations(m, itemTmdbId, collections);
+
+    res.json({ collections, recommendations });
+  } catch (err) {
+    console.error("Collections error:", err);
+    res.status(502).json({ error: "Failed to fetch collections" });
+  }
+});
+
+// How many TMDB recommendations to resolve ownership for (bounds the per-title
+// Plex searches), and the size the row is topped up to with out-of-library
+// suggestions when the library doesn't supply enough on its own.
+const RECOMMENDATIONS_POOL = 20;
+const RECOMMENDATIONS_MIN_TOTAL = 8;
+
+/**
+ * Build the "More Like This" row for a movie/show from TMDB recommendations.
+ *
+ * Titles already shown in one of the page's collection rows are excluded (no
+ * repeats). What's left is split into library titles and out-of-library ones;
+ * every library title is shown, and out-of-library titles top the row up only
+ * until it reaches RECOMMENDATIONS_MIN_TOTAL. So a library-rich list shows all
+ * of its owned matches and nothing external, while a sparse one is filled with
+ * requestable suggestions to the target size.
+ *
+ * Empty without a TMDB key / id, for episodes-and-the-like, or on any failure —
+ * the row is a nicety, never allowed to break the page.
+ */
+async function buildRecommendations(
+  m: PlexMetadataItem,
+  itemTmdbId: number | null,
+  collections: Array<{ items: CollectionItem[] }>,
+): Promise<CollectionItem[]> {
+  if (!TMDB_API_KEY || itemTmdbId == null || (m.type !== "movie" && m.type !== "show")) return [];
+  try {
+    // Everything already on the page (in a collection row) — excluded so a
+    // suggestion never duplicates a collection entry. Keyed loosely by title,
+    // plus by tmdbId for the out-of-library collection members that carry one.
+    const shownTitleKeys = new Set<string>();
+    const shownTmdbIds = new Set<number>();
+    for (const coll of collections)
+      for (const it of coll.items) {
+        if (it.title) shownTitleKeys.add(collectionTitleKey(it.title));
+        if (it.tmdbId != null) shownTmdbIds.add(it.tmdbId);
+      }
+
+    const kind = m.type === "show" ? "tv" : "movie";
+    const recs = (await tmdbRecommendations(kind, itemTmdbId))
+      // Needs a poster to render a card and an id to resolve/request; drop any
+      // that's already shown in a collection above.
+      .filter((r) => r.id != null && !!r.poster_path)
+      .filter(
+        (r) =>
+          !shownTmdbIds.has(r.id) &&
+          !shownTitleKeys.has(collectionTitleKey(r.title ?? r.name ?? "")),
+      )
+      .slice(0, RECOMMENDATIONS_POOL);
+
+    // Resolve library ownership for each in parallel — owned ones become
+    // playable cards, the rest requestable "not in library" cards.
+    const resolved = await Promise.all(
+      recs.map(async (r) => {
+        const owned = await findLibraryMatch(r, m.type);
+        if (owned) return { inLibrary: true, item: mapItem(owned) as CollectionItem };
+        const external: CollectionItem = {
+          ratingKey: `tmdb:${r.id}`,
+          title: r.title ?? r.name ?? "",
+          year: tmdbResultYear(r),
+          type: m.type,
+          thumb: externalThumbUrl(`https://image.tmdb.org/t/p/w500${r.poster_path}`),
+          inLibrary: false,
+          tmdbId: r.id,
+        };
+        return { inLibrary: false, item: external };
+      }),
+    );
+
+    // A search-resolved owned title can still turn out to be a collection member
+    // (the pre-filter keys off the TMDB title, the match off Plex's) — drop those.
+    const libraryRecs = resolved
+      .filter((r) => r.inLibrary)
+      .map((r) => r.item)
+      .filter((it) => !it.title || !shownTitleKeys.has(collectionTitleKey(it.title)));
+    const externalRecs = resolved.filter((r) => !r.inLibrary).map((r) => r.item);
+
+    // Show every library suggestion; fill with out-of-library ones only up to
+    // the target total.
+    const fill = Math.max(0, RECOMMENDATIONS_MIN_TOTAL - libraryRecs.length);
+    return [...libraryRecs, ...externalRecs.slice(0, fill)];
+  } catch (err) {
+    console.error("Recommendations error:", err);
+    return [];
+  }
+}
+
+/**
+ * GET /api/plex/tmdb/meta?tmdbId=123&type=movie|show
+ * Full detail metadata for an out-of-library collection/recommendation member.
+ * Those carry a TMDB id but no plex:// guid, so /discover/meta (which keys off
+ * the guid) can't resolve them — their detail page would otherwise show no
+ * description. Returns the same shape as /discover/meta so ExternalDetail renders
+ * it identically. Requires TMDB_API_KEY.
+ */
+router.get("/tmdb/meta", async (req: Request, res: Response) => {
+  const tmdbId = String(req.query.tmdbId ?? "");
+  const type = String(req.query.type ?? "movie");
+  if (!NUMERIC_RE.test(tmdbId) || (type !== "movie" && type !== "show")) {
+    res.status(400).json({ error: "Invalid tmdbId or type" });
+    return;
+  }
+  if (!TMDB_API_KEY) {
+    res.status(404).json({ error: "Details not available" });
+    return;
+  }
+  try {
+    const data = await tmdbGet<{
+      title?: string;
+      name?: string;
+      overview?: string;
+      release_date?: string;
+      first_air_date?: string;
+      runtime?: number;
+      episode_run_time?: number[];
+      poster_path?: string | null;
+      genres?: Array<{ name?: string }>;
+    }>(`/${type === "show" ? "tv" : "movie"}/${tmdbId}`);
+    if (!data) {
+      res.status(404).json({ error: "Details not available" });
+      return;
+    }
+    const yearStr = (data.release_date ?? data.first_air_date ?? "").slice(0, 4);
+    // Movie runtime is a single value; TV reports a per-episode array.
+    const runtimeMin = data.runtime ?? data.episode_run_time?.[0] ?? null;
+    res.json({
+      title: data.title ?? data.name ?? "",
+      year: yearStr ? Number(yearStr) : null,
+      summary: data.overview || null,
+      genres: (data.genres ?? []).map((g) => g.name).filter(Boolean),
+      duration: runtimeMin != null ? runtimeMin * 60000 : null,
+      contentRating: null,
+      type,
+      thumb: data.poster_path
+        ? externalThumbUrl(`https://image.tmdb.org/t/p/w500${data.poster_path}`)
+        : null,
+      tmdbId: Number(tmdbId),
+    });
+  } catch (err) {
+    console.error("TMDB meta error:", err);
+    res.status(502).json({ error: "Failed to fetch details" });
   }
 });
 

@@ -132,6 +132,22 @@ export function ScrollShelf({ children, rowStyle }: ScrollShelfProps) {
     clearTimeout(h.timer); h.hold = false; cancelAnimationFrame(h.raf);
   }, []);
 
+  // Click anywhere on the track to jump there — the thumb re-centres on the
+  // click and the row scrolls to match. Clicks on the thumb are left to the drag
+  // handler below (they'd otherwise jump by a hair before the drag starts).
+  const onBarDown = useCallback((e: React.PointerEvent) => {
+    if (e.target === thumbRef.current) return;
+    const sc = scrollerRef.current, bar = barRef.current, thumb = thumbRef.current;
+    if (!sc || !bar || !thumb) return;
+    const tw = thumb.offsetWidth;
+    const trackable = bar.clientWidth - tw;
+    const max = sc.scrollWidth - sc.clientWidth;
+    if (trackable <= 0 || max <= 0) return;
+    const clickX = e.clientX - bar.getBoundingClientRect().left - tw / 2;
+    const ratio = Math.max(0, Math.min(1, clickX / trackable));
+    sc.scrollTo({ left: ratio * max, behavior: "smooth" });
+  }, []);
+
   // Drag the custom scrollbar thumb to scroll.
   const onThumbDown = useCallback((e: React.PointerEvent) => {
     e.preventDefault();
@@ -193,7 +209,7 @@ export function ScrollShelf({ children, rowStyle }: ScrollShelfProps) {
       >
         <span>&rsaquo;</span>
       </div>
-      <div className="shelf-bar" ref={barRef}>
+      <div className="shelf-bar" ref={barRef} onPointerDown={onBarDown}>
         <div className="shelf-thumb" ref={thumbRef} onPointerDown={onThumbDown} />
       </div>
     </div>

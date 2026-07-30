@@ -20,21 +20,34 @@ const TOTAL_GAP_PX = (MAX_COLUMNS - 1) * GAP_PX;
 const FULL_ROW_COLUMN = `(100% - ${TOTAL_GAP_PX}px) / ${MAX_COLUMNS}`;
 
 /**
- * Poster grid columns.
+ * The single poster-card width, shared by the Movies/TV Shows/History grid and
+ * the horizontally-scrolling Home rows so a card is exactly the same size on
+ * every tab.
  *
  * `max()` is what makes this reflow properly: while there's room, the
- * ten-column width is the larger value and auto-fill lands on exactly ten
- * columns, preserving the intended layout. Once the window narrows enough that
- * ten columns would push a poster below MIN_CARD_PX, the floor wins and
- * auto-fill drops to fewer columns instead — so posters keep their size and the
- * count changes, rather than ten posters shrinking indefinitely.
+ * ten-column width is the larger value and the grid lands on exactly ten
+ * columns filling the row. Once the window narrows enough that ten columns
+ * would push a poster below MIN_CARD_PX, the floor wins — the card holds at
+ * MIN_CARD_PX and the column count steps down, rather than ten posters
+ * shrinking indefinitely.
  */
-export const POSTER_GRID_COLUMNS =
-  `repeat(auto-fill, minmax(max(${MIN_CARD_PX}px, ${FULL_ROW_COLUMN}), 1fr))`;
+const POSTER_CARD_WIDTH = `max(${MIN_CARD_PX}px, ${FULL_ROW_COLUMN})`;
+
+/**
+ * Poster grid columns — fixed-width tracks, not `minmax(…, 1fr)`.
+ *
+ * The width is exactly POSTER_CARD_WIDTH, the same value the Home rows use. A
+ * `1fr` max would let the grid stretch its columns to fill the row once the
+ * count steps down at the MIN_CARD_PX floor, making grid posters wider than the
+ * fixed-width Home-row posters at the same window size. Keeping the track fixed
+ * means every tab renders an identical card; the grid simply leaves trailing
+ * space on the right when the columns don't divide the row evenly, exactly like
+ * a Home row.
+ */
+export const POSTER_GRID_COLUMNS = `repeat(auto-fill, ${POSTER_CARD_WIDTH})`;
 
 /**
  * Width for cards in the horizontally-scrolling Home rows, which are flex items
- * rather than grid cells. Uses the same two values so a Home poster is never a
- * different size from a Movies/TV Shows poster at the same window width.
+ * rather than grid cells. Identical to the grid track above.
  */
-export const POSTER_ROW_CARD_WIDTH = `max(${MIN_CARD_PX}px, ${FULL_ROW_COLUMN})`;
+export const POSTER_ROW_CARD_WIDTH = POSTER_CARD_WIDTH;

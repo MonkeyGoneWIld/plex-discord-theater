@@ -336,15 +336,19 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
 
   return (
     <div style={styles.container}>
-      {/* Back out of search — placed top-left to match the detail views' Back. */}
-      {isSearching && (
-        <button onClick={handleBackFromSearch} style={styles.backBtn}>
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-          Back
-        </button>
-      )}
+      {/* Search header: Back sits at the view's top-left (matching the detail
+          pages), overlaid on the same row as the centered search bar. */}
+      <div style={styles.searchHeader}>
+        <div style={styles.searchSide}>
+          {isSearching && (
+            <button onClick={handleBackFromSearch} style={styles.backBtn}>
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+              Back
+            </button>
+          )}
+        </div>
       <div style={styles.narrowWrap}>
         <Search onSearch={handleSearch} onClear={handleClearSearch} placeholder={searchPlaceholder} clearSignal={searchResetSignal} />
 
@@ -403,6 +407,8 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
             </button>
           </div>
         )}
+      </div>
+        <div style={styles.searchSide} />
       </div>
 
       <div style={styles.wideWrap}>
@@ -599,14 +605,27 @@ const styles: Record<string, React.CSSProperties> = {
   container: {
     width: "100%",
   },
+  // 3-cell flex row: Back sits at the view's top-left, the search bar stays
+  // centered next to it on the same line, and the empty right cell balances the
+  // centering. No overlap at any width — the center cell shrinks first.
+  searchHeader: {
+    display: "flex",
+    alignItems: "center",
+    width: "100%",
+  },
+  searchSide: {
+    flex: 1,
+    display: "flex",
+    alignItems: "center",
+    minWidth: 0,
+  },
   // Matches the Back button in the detail views (MovieDetail.backBtn).
   backBtn: {
-    position: "relative",
-    zIndex: 10,
     display: "flex",
     alignItems: "center",
     gap: "6px",
-    margin: "16px 24px",
+    flexShrink: 0,
+    marginLeft: "24px",
     padding: "8px 16px",
     borderRadius: "8px",
     border: "1px solid rgba(255,255,255,0.1)",
@@ -619,8 +638,8 @@ const styles: Record<string, React.CSSProperties> = {
     backdropFilter: "blur(12px)",
   },
   narrowWrap: {
-    maxWidth: "1200px",
-    margin: "0 auto",
+    flex: "0 1 1200px",
+    minWidth: 0,
   },
   wideWrap: {
     // Wider than the search/tabs column on purpose — this is what actually

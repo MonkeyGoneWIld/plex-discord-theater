@@ -268,6 +268,29 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   const handleSearch = useCallback(async (query: string) => {
     searchQueryRef.current = query;
     const reqId = ++searchReqId.current;
+
+    // History tab: scope the search to the user's own watch history. As long as
+    // there's any history, matches come only from those entries — nothing from
+    // the wider library, and no "Not in your library" online results. Only when
+    // the history is empty do we fall through to the global search below
+    // ("if there is no history, then search everything").
+    if (isHistoryTab && historyItems.length > 0) {
+      const q = query.toLowerCase();
+      const matches = historyItems
+        .filter(
+          (e) =>
+            e.title.toLowerCase().includes(q) ||
+            (e.showTitle?.toLowerCase().includes(q) ?? false),
+        )
+        .map(historyEntryToItem);
+      // Not a Plex search — clear the raw buffer so the tab-switch re-filter
+      // effect below leaves these results alone.
+      rawSearchResults.current = null;
+      setSearchResults(matches);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     try {
       const { items: results } = await searchPlex(query);
@@ -285,7 +308,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       console.error("Search failed:", err);
     }
     if (reqId === searchReqId.current) setLoading(false);
-  }, [activeSectionType]);
+  }, [activeSectionType, isHistoryTab, historyItems]);
 
   // Re-filter search results when switching tabs during an active search
   useEffect(() => {
@@ -328,11 +351,15 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   const externalItems = isSearching ? displayItems.filter((i) => i.inLibrary === false) : [];
   const searchPlaceholder = isHomeTab
     ? "Search everything..."
-    : activeSectionType === "movie"
-      ? "Search movies..."
-      : activeSectionType === "show"
-        ? "Search TV shows..."
-        : "Search your library...";
+    : isHistoryTab
+      ? historyItems.length > 0
+        ? "Search your history..."
+        : "Search everything..."
+      : activeSectionType === "movie"
+        ? "Search movies..."
+        : activeSectionType === "show"
+          ? "Search TV shows..."
+          : "Search your library...";
 
   return (
     <div style={styles.container}>
@@ -350,18 +377,10 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       <div style={styles.narrowWrap}>
         <Search onSearch={handleSearch} onClear={handleClearSearch} placeholder={searchPlaceholder} clearSignal={searchResetSignal} />
 
-        {/* Filter bar (hidden during search and on Home) */}
-        {!searchResults && !isHomeTab && genres.length > 0 && (
-          <FilterBar
-            genres={genres}
-            selectedGenres={selectedGenres}
-            onGenresChange={setSelectedGenres}
-            sort={sort}
-            onSortChange={setSort}
-          />
-        )}
-
-        {/* Section tabs — visible during search so user can switch result type */}
+        {/* Section tabs — visible during search so user can switch result type.
+            These sit directly under the search bar and keep a fixed position: the
+            Genre/Sort filter bar renders BELOW them (see next block) so switching
+            to a Movies/TV Shows tab never shoves the tab row down. */}
         {!searchResults && (
           <div style={styles.tabs}>
             <button
@@ -404,6 +423,20 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
               History
             </button>
           </div>
+        )}
+
+        {/* Filter bar — below the tabs, and only on a real library section
+            (never Home or History, and never during search). Keeping it here
+            rather than above the tabs means the tab row stays put when it
+            appears/disappears. */}
+        {!searchResults && !isHomeTab && !isHistoryTab && genres.length > 0 && (
+          <FilterBar
+            genres={genres}
+            selectedGenres={selectedGenres}
+            onGenresChange={setSelectedGenres}
+            sort={sort}
+            onSortChange={setSort}
+          />
         )}
       </div>
 

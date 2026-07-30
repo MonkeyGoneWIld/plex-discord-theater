@@ -108,6 +108,23 @@ export function App() {
     setViewStack((s) => [...s.slice(0, stackIndex), v]);
   }, []);
 
+  // Navigate to an ancestor of the current (top) view from an in-content link
+  // — the show/season titles on the detail pages, mirroring the header
+  // breadcrumb. If a matching ancestor is already on the stack, go back to it
+  // (which restores its scroll); otherwise synthesize it in place of the top.
+  // Either way it lands on that view, never deeper.
+  const jumpToAncestor = useCallback(
+    (match: (v: View) => boolean, synthesize: () => View | null) => {
+      setViewStack((s) => {
+        const existing = s.findIndex(match);
+        if (existing >= 0 && existing < s.length - 1) return s.slice(0, existing + 1);
+        const v = synthesize();
+        return v ? [...s.slice(0, -1), v] : s;
+      });
+    },
+    [],
+  );
+
   // Scroll handling on navigation: new views start at the top; going back to a
   // view that's still on the stack restores its saved position. "Going back" is
   // detected by object identity (same View at the new top), so breadcrumb jumps
@@ -316,6 +333,64 @@ export function App() {
     pushView({ kind: "detail", item: episode });
     emitBrowse(`Looking at ${formatMediaTitle(episode)}`);
   }, [pushView, emitBrowse]);
+
+  // In-content breadcrumb navigation from the episode detail page. The show and
+  // season are synthesized from the episode's grandparent/parent fields when
+  // they aren't already on the stack (e.g. the episode was opened from search or
+  // history), so the detail views can fetch the rest by ratingKey.
+  const handleEpisodeShowClick = useCallback((ep: PlexItem) => {
+    const showKey = ep.grandparentRatingKey;
+    jumpToAncestor(
+      (v) => v.kind === "show" && v.item.ratingKey === showKey,
+      () =>
+        showKey
+          ? {
+              kind: "show",
+              item: {
+                ratingKey: showKey,
+                title: ep.showTitle ?? "Show",
+                type: "show",
+                thumb: ep.showThumb ?? null,
+              },
+            }
+          : null,
+    );
+  }, [jumpToAncestor]);
+
+  const handleEpisodeSeasonClick = useCallback((ep: PlexItem) => {
+    const seasonKey = ep.parentRatingKey;
+    const showKey = ep.grandparentRatingKey;
+    jumpToAncestor(
+      (v) => v.kind === "season" && v.item.ratingKey === seasonKey,
+      () => {
+        if (!seasonKey || !showKey) return null;
+        const show: PlexItem = {
+          ratingKey: showKey,
+          title: ep.showTitle ?? "Show",
+          type: "show",
+          thumb: ep.showThumb ?? null,
+        };
+        const season: PlexItem = {
+          ratingKey: seasonKey,
+          title: ep.parentTitle ?? (ep.parentIndex != null ? `Season ${ep.parentIndex}` : "Season"),
+          type: "season",
+          thumb: null,
+          ...(ep.parentIndex != null ? { index: ep.parentIndex } : {}),
+        };
+        return { kind: "season", item: season, show };
+      },
+    );
+  }, [jumpToAncestor]);
+
+  // In-content breadcrumb navigation from the season detail page: back to the
+  // show landing page (synthesized from the season's own `show` when the show
+  // view was never on the stack, e.g. a single-season show).
+  const handleSeasonShowClick = useCallback((show: PlexItem) => {
+    jumpToAncestor(
+      (v) => v.kind === "show" && v.item.ratingKey === show.ratingKey,
+      () => ({ kind: "show", item: show }),
+    );
+  }, [jumpToAncestor]);
 
   const handlePlayNext = useCallback((queueItem: QueueItem) => {
     const playerView: View = {
@@ -616,6 +691,7 @@ export function App() {
           season={view.item}
           show={view.show}
           onSelectEpisode={handleSeasonEpisode}
+          onShowClick={() => handleSeasonShowClick(view.show)}
           onBack={popView}
           isHost={effectiveIsHost}
           isPlaying={!!syncState.ratingKey}
@@ -629,6 +705,8 @@ export function App() {
           isHost={effectiveIsHost}
           onPlay={handlePlay}
           onBack={popView}
+          onShowClick={() => handleEpisodeShowClick(view.item)}
+          onSeasonClick={() => handleEpisodeSeasonClick(view.item)}
           isPlaying={!!syncState.ratingKey}
           onAddToQueue={effectiveIsHost ? (qi) => syncActions.sendQueueAdd(qi) : undefined}
           onSuggest={!effectiveIsHost ? (item) => syncActions.sendSuggest(item) : undefined}

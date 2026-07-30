@@ -9,6 +9,8 @@ interface SeasonDetailProps {
   show: PlexItem;
   onSelectEpisode: (episode: PlexItem) => void;
   onBack: () => void;
+  /** Jump to the show landing page from the in-content breadcrumb. */
+  onShowClick?: () => void;
   isHost?: boolean;
   isPlaying?: boolean;
   onAddToQueue?: (item: QueueItem) => void;
@@ -33,7 +35,7 @@ function fmtDuration(ms: number): string {
     : `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-export function SeasonDetail({ season, show, onSelectEpisode, onBack, isHost, isPlaying, onAddToQueue }: SeasonDetailProps) {
+export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClick, isHost, isPlaying, onAddToQueue }: SeasonDetailProps) {
   const [episodes, setEpisodes] = useState<PlexItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [hoveredKey, setHoveredKey] = useState<string | null>(null);
@@ -90,8 +92,21 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, isHost, is
       </button>
 
       <div style={styles.breadcrumb}>
-        <span style={styles.breadcrumbShow}>{show.title}</span>
+        {onShowClick ? (
+          <button
+            type="button"
+            onClick={onShowClick}
+            style={{ ...styles.buttonReset, ...styles.breadcrumbShow }}
+            onMouseEnter={(e) => (e.currentTarget.style.textDecoration = "underline")}
+            onMouseLeave={(e) => (e.currentTarget.style.textDecoration = "none")}
+          >
+            {show.title}
+          </button>
+        ) : (
+          <span style={styles.breadcrumbShow}>{show.title}</span>
+        )}
         <span style={styles.breadcrumbSep}>&rsaquo;</span>
+        {/* The season is the current page, so it stays static (not a link). */}
         <span style={styles.breadcrumbSeason}>{seasonLabel}</span>
       </div>
 
@@ -240,6 +255,12 @@ const styles: Record<string, React.CSSProperties> = {
   breadcrumb: {
     display: "flex", alignItems: "center", gap: "8px",
     padding: "0 24px 16px", maxWidth: "1100px", margin: "0 auto",
+  },
+  // Strips native button chrome so the linked crumb matches the static text.
+  // Spread before breadcrumbShow so its font/color win.
+  buttonReset: {
+    background: "transparent", border: "none", padding: 0, margin: 0,
+    fontFamily: "inherit", cursor: "pointer",
   },
   breadcrumbShow: { fontSize: "14px", color: "#888", fontWeight: 500 },
   breadcrumbSep: { fontSize: "16px", color: "#555" },

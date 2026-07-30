@@ -15,6 +15,10 @@ interface MovieDetailProps {
   onAddToQueue?: (item: QueueItem) => void;
   /** Viewer-only: suggest this title to the host. Omit/undefined for the host. */
   onSuggest?: (item: SuggestionItem) => void;
+  /** Episodes only: jump to the show landing page / the season's episode list.
+   *  Omitted for movies (and when there's nothing to navigate to). */
+  onShowClick?: () => void;
+  onSeasonClick?: () => void;
 }
 
 function authUrl(url: string): string {
@@ -155,7 +159,7 @@ const dropdownStyles: Record<string, React.CSSProperties> = {
   },
 };
 
-export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQueue, onSuggest }: MovieDetailProps) {
+export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQueue, onSuggest, onShowClick, onSeasonClick }: MovieDetailProps) {
   const [meta, setMeta] = useState<PlexMeta | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -310,11 +314,35 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
               {/* Episode label */}
               {item.type === "episode" && item.parentIndex != null && item.index != null && (
                 <>
-                  {item.showTitle && (
-                    <div style={styles.episodeShowTitle}>{item.showTitle}</div>
-                  )}
+                  {item.showTitle &&
+                    (onShowClick ? (
+                      <button
+                        type="button"
+                        onClick={onShowClick}
+                        style={{ ...styles.buttonReset, ...styles.episodeShowTitle }}
+                        onMouseEnter={(e) => (e.currentTarget.style.textDecoration = "underline")}
+                        onMouseLeave={(e) => (e.currentTarget.style.textDecoration = "none")}
+                      >
+                        {item.showTitle}
+                      </button>
+                    ) : (
+                      <div style={styles.episodeShowTitle}>{item.showTitle}</div>
+                    ))}
                   <div style={styles.episodeLabel}>
-                    Season {item.parentIndex}, Episode {item.index}
+                    {onSeasonClick ? (
+                      <button
+                        type="button"
+                        onClick={onSeasonClick}
+                        style={{ ...styles.buttonReset, ...styles.episodeLabelLink }}
+                        onMouseEnter={(e) => (e.currentTarget.style.textDecoration = "underline")}
+                        onMouseLeave={(e) => (e.currentTarget.style.textDecoration = "none")}
+                      >
+                        Season {item.parentIndex}
+                      </button>
+                    ) : (
+                      <>Season {item.parentIndex}</>
+                    )}
+                    , Episode {item.index}
                   </div>
                 </>
               )}
@@ -629,11 +657,25 @@ const styles: Record<string, React.CSSProperties> = {
     minWidth: 0,
     paddingTop: "8px",
   },
+  // Strips the native button chrome so an inline text button inherits the
+  // surrounding typography. Spread it BEFORE the text style so font/color win.
+  buttonReset: {
+    background: "transparent",
+    border: "none",
+    padding: 0,
+    margin: 0,
+    fontFamily: "inherit",
+    cursor: "pointer",
+    display: "inline",
+  },
   episodeShowTitle: {
     fontSize: "15px",
     fontWeight: 600,
     color: "#ccc",
     marginBottom: "4px",
+    // Block so it sits on its own line like the original <div>.
+    display: "block",
+    textAlign: "left",
   },
   episodeLabel: {
     fontSize: "13px",
@@ -642,6 +684,15 @@ const styles: Record<string, React.CSSProperties> = {
     textTransform: "uppercase",
     letterSpacing: "0.04em",
     marginBottom: "6px",
+  },
+  // The clickable "Season N" inside episodeLabel — inherits the gold uppercase
+  // run so only the interactivity (cursor/underline) sets it apart.
+  episodeLabelLink: {
+    fontSize: "inherit",
+    fontWeight: "inherit",
+    color: "inherit",
+    textTransform: "inherit",
+    letterSpacing: "inherit",
   },
   title: {
     fontSize: "32px",

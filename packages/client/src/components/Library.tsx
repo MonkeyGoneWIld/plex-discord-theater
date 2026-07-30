@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Search } from "./Search";
 import { FilterBar } from "./FilterBar";
+import { ScrollShelf } from "./ScrollShelf";
 import { MovieCard } from "./MovieCard";
 import { SkeletonGrid } from "./SkeletonGrid";
 import { POSTER_GRID_COLUMNS, POSTER_ROW_CARD_WIDTH } from "../lib/grid";
@@ -591,7 +592,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
             {continueItems.length > 0 && (
               <div style={styles.hubSection}>
                 <h3 style={styles.hubLabel}>Continue Watching</h3>
-                <div style={styles.hubRow} className="scroll-row">
+                <ScrollShelf rowStyle={styles.hubRow}>
                   {continueItems.map((entry) => (
                     <div key={entry.ratingKey} style={styles.hubCard}>
                       <MovieCard
@@ -603,19 +604,19 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
                       />
                     </div>
                   ))}
-                </div>
+                </ScrollShelf>
               </div>
             )}
             {homeHubs.map((hub) => (
               <div key={hub.hubIdentifier} style={styles.hubSection}>
                 <h3 style={styles.hubLabel}>{hub.title}</h3>
-                <div style={styles.hubRow} className="scroll-row">
+                <ScrollShelf rowStyle={styles.hubRow}>
                   {hub.items.map((hubItem) => (
                     <div key={hubItem.ratingKey} style={styles.hubCard}>
                       <MovieCard item={hubItem} onClick={handleClick} />
                     </div>
                   ))}
-                </div>
+                </ScrollShelf>
               </div>
             ))}
           </div>

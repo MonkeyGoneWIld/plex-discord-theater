@@ -104,6 +104,42 @@
       .scroll-row::-webkit-scrollbar-thumb:hover {
         background: rgba(255,255,255,0.28);
       }
+
+      /* Desktop-only poster shelf (see ScrollShelf.tsx). The scrollbar and the
+         edge-fade chevrons stay invisible until the row is hovered; the chevrons
+         also hide at whichever end the scroll has reached (.shelf-chev-dis). */
+      .shelf { position: relative; }
+      .shelf-scroller::-webkit-scrollbar { height: 8px; }
+      .shelf-scroller::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+      .shelf-scroller::-webkit-scrollbar-track { background: transparent; }
+      .shelf-scroller::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
+      .shelf:hover .shelf-scroller::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); border-radius: 4px; }
+      .shelf:hover .shelf-scroller::-webkit-scrollbar-thumb { background: rgba(229,160,13,0.5); }
+      .shelf:hover .shelf-scroller::-webkit-scrollbar-thumb:hover { background: rgba(229,160,13,0.8); }
+      .shelf-chev {
+        position: absolute; top: 0; width: 72px;
+        display: flex; align-items: center;
+        cursor: pointer; color: #fff; z-index: 4;
+        opacity: 0; pointer-events: none;
+        user-select: none; -webkit-user-select: none;
+        transition: opacity 0.22s ease;
+      }
+      .shelf-chev > span {
+        display: inline-block; font-size: 32px; line-height: 1;
+        text-shadow: 0 1px 5px rgba(0,0,0,0.7);
+        transition: transform 0.12s ease;
+      }
+      .shelf-chev:hover > span { transform: scale(1.28); }
+      .shelf:hover .shelf-chev:not(.shelf-chev-dis) { opacity: 1; pointer-events: auto; }
+      .shelf-chev-dis { opacity: 0 !important; pointer-events: none !important; }
+      .shelf-chev-l {
+        left: 0; justify-content: flex-start; padding-left: 12px;
+        background-image: linear-gradient(to right, rgba(13,13,13,0.95), rgba(13,13,13,0.45) 42%, rgba(13,13,13,0));
+      }
+      .shelf-chev-r {
+        right: 0; justify-content: flex-end; padding-right: 12px;
+        background-image: linear-gradient(to left, rgba(13,13,13,0.95), rgba(13,13,13,0.45) 42%, rgba(13,13,13,0));
+      }
     </style>
   </head>
   <body>

@@ -72,6 +72,8 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   const [items, setItems] = useState<PlexItem[]>([]);
   const [totalSize, setTotalSize] = useState(0);
   const [searchResults, setSearchResults] = useState<PlexItem[] | null>(null);
+  // Bumped to tell the Search box to clear itself when Back exits search.
+  const [searchResetSignal, setSearchResetSignal] = useState(0);
   const rawSearchResults = useRef<PlexItem[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -302,6 +304,13 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
     setLoading(false);
   }, []);
 
+  // Back out of search entirely: drop results and clear the box, returning to
+  // the browse grid (and its tabs).
+  const handleBackFromSearch = useCallback(() => {
+    handleClearSearch();
+    setSearchResetSignal((n) => n + 1);
+  }, [handleClearSearch]);
+
   const handleClick = useCallback(
     (item: PlexItem) => {
       onSelect(item);
@@ -327,8 +336,17 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
 
   return (
     <div style={styles.container}>
+      {/* Back out of search — placed top-left to match the detail views' Back. */}
+      {isSearching && (
+        <button onClick={handleBackFromSearch} style={styles.backBtn}>
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          Back
+        </button>
+      )}
       <div style={styles.narrowWrap}>
-        <Search onSearch={handleSearch} onClear={handleClearSearch} placeholder={searchPlaceholder} isSearching={isSearching} />
+        <Search onSearch={handleSearch} onClear={handleClearSearch} placeholder={searchPlaceholder} clearSignal={searchResetSignal} />
 
         {/* Filter bar (hidden during search and on Home) */}
         {!searchResults && !isHomeTab && genres.length > 0 && (
@@ -580,6 +598,25 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
 const styles: Record<string, React.CSSProperties> = {
   container: {
     width: "100%",
+  },
+  // Matches the Back button in the detail views (MovieDetail.backBtn).
+  backBtn: {
+    position: "relative",
+    zIndex: 10,
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    margin: "16px 24px",
+    padding: "8px 16px",
+    borderRadius: "8px",
+    border: "1px solid rgba(255,255,255,0.1)",
+    background: "rgba(255,255,255,0.05)",
+    color: "#f0f0f0",
+    cursor: "pointer",
+    fontSize: "14px",
+    fontWeight: 500,
+    fontFamily: "inherit",
+    backdropFilter: "blur(12px)",
   },
   narrowWrap: {
     maxWidth: "1200px",

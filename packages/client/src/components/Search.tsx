@@ -4,13 +4,11 @@ interface SearchProps {
   onSearch: (query: string) => void;
   onClear: () => void;
   placeholder?: string;
-  // True while search results are showing. Renders a Back affordance so the user
-  // can leave search and return to browsing without hunting for the tabs (which
-  // are hidden during search).
-  isSearching?: boolean;
+  // Bumped by the parent (e.g. its Back button) to clear the field from outside.
+  clearSignal?: number;
 }
 
-export function Search({ onSearch, onClear, placeholder = "Search your library...", isSearching = false }: SearchProps) {
+export function Search({ onSearch, onClear, placeholder = "Search your library...", clearSignal = 0 }: SearchProps) {
   const [value, setValue] = useState("");
   const [focused, setFocused] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -24,6 +22,15 @@ export function Search({ onSearch, onClear, placeholder = "Search your library..
   useEffect(() => {
     return () => clearTimeout(debounceRef.current);
   }, []);
+
+  // External clear (parent bumped clearSignal). Skip the initial value so we
+  // don't blow away a query on first mount.
+  const firstSignal = useRef(clearSignal);
+  useEffect(() => {
+    if (clearSignal === firstSignal.current) return;
+    clearTimeout(debounceRef.current);
+    setValue("");
+  }, [clearSignal]);
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -40,64 +47,46 @@ export function Search({ onSearch, onClear, placeholder = "Search your library..
     [],
   );
 
-  // Reset the box and drop back to the library. `refocus` keeps the cursor in the
-  // field (the "X" — clear and keep searching); otherwise we blur (Back — leave
-  // search entirely).
-  const clearInput = useCallback((refocus: boolean) => {
+  // Clear the box and keep the cursor in the field, so the user can keep typing.
+  const clearInput = useCallback(() => {
     clearTimeout(debounceRef.current);
     setValue("");
     onClearRef.current();
-    if (refocus) inputRef.current?.focus();
-    else inputRef.current?.blur();
+    inputRef.current?.focus();
   }, []);
 
   return (
     <div style={styles.container}>
-      <div style={styles.row}>
-        {isSearching && (
+      <div style={{
+        ...styles.inputWrap,
+        ...(focused ? styles.inputWrapFocused : {}),
+      }}>
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" style={styles.searchIcon}>
+          <circle cx="7.5" cy="7.5" r="5.5" stroke="#666" strokeWidth="1.5"/>
+          <path d="M12 12L16 16" stroke="#666" strokeWidth="1.5" strokeLinecap="round"/>
+        </svg>
+        <input
+          ref={inputRef}
+          type="text"
+          placeholder={placeholder}
+          value={value}
+          onChange={handleChange}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          style={styles.input}
+        />
+        {value.length > 0 && (
           <button
             type="button"
-            onClick={() => clearInput(false)}
-            style={styles.backBtn}
-            aria-label="Back to browsing"
+            onClick={clearInput}
+            style={styles.clearBtn}
+            aria-label="Clear search"
           >
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
             </svg>
-            Back
           </button>
         )}
-        <div style={{
-          ...styles.inputWrap,
-          ...(focused ? styles.inputWrapFocused : {}),
-        }}>
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" style={styles.searchIcon}>
-            <circle cx="7.5" cy="7.5" r="5.5" stroke="#666" strokeWidth="1.5"/>
-            <path d="M12 12L16 16" stroke="#666" strokeWidth="1.5" strokeLinecap="round"/>
-          </svg>
-          <input
-            ref={inputRef}
-            type="text"
-            placeholder={placeholder}
-            value={value}
-            onChange={handleChange}
-            onFocus={() => setFocused(true)}
-            onBlur={() => setFocused(false)}
-            style={styles.input}
-          />
-          {value.length > 0 && (
-            <button
-              type="button"
-              onClick={() => clearInput(true)}
-              style={styles.clearBtn}
-              aria-label="Clear search"
-            >
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
-              </svg>
-            </button>
-          )}
-        </div>
       </div>
     </div>
   );
@@ -107,31 +96,9 @@ const styles: Record<string, React.CSSProperties> = {
   container: {
     padding: "16px 24px",
   },
-  row: {
-    display: "flex",
-    alignItems: "center",
-    gap: "10px",
-  },
-  backBtn: {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    flexShrink: 0,
-    padding: "10px 14px",
-    borderRadius: "10px",
-    border: "1px solid rgba(255,255,255,0.1)",
-    background: "rgba(255,255,255,0.05)",
-    color: "#f0f0f0",
-    cursor: "pointer",
-    fontSize: "14px",
-    fontWeight: 500,
-    fontFamily: "inherit",
-  },
   inputWrap: {
     display: "flex",
     alignItems: "center",
-    flex: 1,
-    minWidth: 0,
     borderRadius: "10px",
     border: "1px solid rgba(255,255,255,0.08)",
     background: "rgba(255,255,255,0.04)",

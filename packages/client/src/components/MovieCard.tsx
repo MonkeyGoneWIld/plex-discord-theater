@@ -26,6 +26,11 @@ function authThumbUrl(thumb: string, w?: number, h?: number): string {
   return url;
 }
 
+// Not-in-library posters are desaturated and dimmed so the tile reads as "not
+// owned" at a glance — the small badge alone is easy to miss. Lifted on hover to
+// signal the card is still clickable (it opens the request page).
+const EXTERNAL_POSTER_FILTER = "grayscale(65%) brightness(0.55)";
+
 export function MovieCard({ item, onClick, progress, watched, onRemove, removeLabel = "Remove" }: MovieCardProps) {
   // Online (Discover) result: in search but not in the library. Clickable — it
   // opens a detail view (with a request button) rather than playback.
@@ -42,16 +47,25 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
       // Native tooltip on the whole card, so the full title shows on hover
       // anywhere over it (poster included), not only over the ellipsized text.
       title={item.title}
-      style={styles.card}
+      style={external ? { ...styles.card, ...styles.cardExternal } : styles.card}
       onMouseEnter={(e) => {
         const el = e.currentTarget;
         el.style.transform = "scale(1.03)";
         el.style.boxShadow = "0 4px 24px rgba(229,160,13,0.12)";
+        // Reveal a dimmed not-in-library poster at full colour on hover.
+        if (external) {
+          const img = el.querySelector("img");
+          if (img) img.style.filter = "none";
+        }
       }}
       onMouseLeave={(e) => {
         const el = e.currentTarget;
         el.style.transform = "scale(1)";
         el.style.boxShadow = "none";
+        if (external) {
+          const img = el.querySelector("img");
+          if (img) img.style.filter = EXTERNAL_POSTER_FILTER;
+        }
       }}
     >
       <div style={styles.posterWrap}>
@@ -59,7 +73,7 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
           <img
             src={authThumbUrl(posterSrc!, 320, 480)}
             alt={item.title}
-            style={styles.poster}
+            style={external ? { ...styles.poster, filter: EXTERNAL_POSTER_FILTER } : styles.poster}
             // Eager, not lazy: load every poster up front so nothing pops in as
             // the user scrolls the (non-virtualized) rows and grids.
             loading="eager"
@@ -137,6 +151,12 @@ const styles: Record<string, React.CSSProperties> = {
     width: "100%",
     fontFamily: "inherit",
   },
+  // Muted tile for a not-in-library card — a darker body and dashed border set it
+  // apart from owned cards even beyond the dimmed poster and badge.
+  cardExternal: {
+    background: "#101010",
+    border: "1px dashed rgba(255,255,255,0.14)",
+  },
   posterWrap: {
     position: "relative",
   },
@@ -144,14 +164,17 @@ const styles: Record<string, React.CSSProperties> = {
     position: "absolute",
     top: "8px",
     left: "8px",
-    padding: "3px 7px",
+    padding: "3px 8px",
     borderRadius: "5px",
-    background: "rgba(0,0,0,0.72)",
-    color: "rgba(255,255,255,0.85)",
+    // Amber-tinted rather than plain black, so the "Not in library" label reads
+    // as a status flag instead of blending into the dimmed poster behind it.
+    background: "rgba(229,160,13,0.92)",
+    color: "#1a1205",
     fontSize: "10px",
-    fontWeight: 600,
+    fontWeight: 700,
     letterSpacing: "0.3px",
     textTransform: "uppercase" as const,
+    boxShadow: "0 1px 6px rgba(0,0,0,0.5)",
   },
   watchedBadge: {
     position: "absolute",
@@ -197,6 +220,8 @@ const styles: Record<string, React.CSSProperties> = {
     aspectRatio: "2/3",
     objectFit: "cover",
     display: "block",
+    // Smoothes the not-in-library dim lifting/settling on hover.
+    transition: "filter 0.2s ease",
   },
   placeholder: {
     width: "100%",

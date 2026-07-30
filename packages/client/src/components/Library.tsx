@@ -206,6 +206,10 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       setHistoryItems((prev) => prev.filter((e) => !keys.has(e.ratingKey)));
       setHistoryTotal((n) => Math.max(0, n - keys.size));
       for (const key of keys) deleteHistoryEntry(key).catch(console.error);
+      // Drop the filter and empty the search box, returning to the full history
+      // (now minus what was just cleared).
+      setHistoryQuery("");
+      setSearchResetSignal((n) => n + 1);
       return;
     }
     // No filter: clear the whole history.
@@ -514,11 +518,14 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
                   ? `${filteredHistoryItems.length} ${filteredHistoryItems.length === 1 ? "title" : "titles"}`
                   : `${historyTotal} ${historyTotal === 1 ? "title" : "titles"}`}
               </span>
-              <button onClick={handleClearHistory} style={styles.clearBtn}>
-                {/* When filtering, it only clears the visible matches, so the
-                    label reflects that instead of implying a full wipe. */}
-                {historyQ ? "Clear results" : "Clear history"}
-              </button>
+              {/* Hidden while a filter matches nothing — there's nothing to
+                  clear. When a filter matches, it only clears those visible
+                  matches, so the label says so rather than implying a full wipe. */}
+              {(!historyQ || filteredHistoryItems.length > 0) && (
+                <button onClick={handleClearHistory} style={styles.clearBtn}>
+                  {historyQ ? "Clear filtered History" : "Clear history"}
+                </button>
+              )}
             </div>
             {filteredHistoryItems.length === 0 ? (
               <div style={styles.emptyState}>

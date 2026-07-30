@@ -328,7 +328,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   return (
     <div style={styles.container}>
       <div style={styles.narrowWrap}>
-        <Search onSearch={handleSearch} onClear={handleClearSearch} placeholder={searchPlaceholder} />
+        <Search onSearch={handleSearch} onClear={handleClearSearch} placeholder={searchPlaceholder} isSearching={isSearching} />
 
         {/* Filter bar (hidden during search and on Home) */}
         {!searchResults && !isHomeTab && genres.length > 0 && (

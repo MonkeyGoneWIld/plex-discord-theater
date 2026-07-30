@@ -898,29 +898,52 @@ function tmdbResultYear(part: TmdbPart): number | undefined {
   return Number.isFinite(y) ? y : undefined;
 }
 
-// Cache tmdbId → the library item that owns it (or null), so recommendation rows
-// don't re-resolve the same title on every visit. Keyed by type since a movie
-// and a show can share a tmdbId across their separate id spaces.
-const libraryByTmdbCache = new Map<string, PlexMetadataItem | null>();
+// Cache tmdbId → the library item that matches it (or null), so recommendation
+// rows don't re-resolve the same title on every visit. Keyed by type since a
+// movie and a show can share a tmdbId across their separate id spaces.
+const libraryMatchCache = new Map<string, PlexMetadataItem | null>();
 
-/** The library item matching a TMDB id, or null when it isn't owned. Resolved
- *  via Plex's guid filter (best-effort — an unmatched owned title just shows as
- *  "not in library" rather than breaking the row). */
-async function findLibraryItemByTmdb(tmdbId: number, type: string): Promise<PlexMetadataItem | null> {
-  const key = `${type}:${tmdbId}`;
-  if (libraryByTmdbCache.has(key)) return libraryByTmdbCache.get(key)!;
+/**
+ * The library item matching a TMDB result, or null when it isn't owned. Matched
+ * by title + year via Plex search rather than by guid: Plex's `?guid=tmdb://…`
+ * filter only matches an item's *primary* guid (a `plex://…` for the modern
+ * agent), so it misses owned titles whose TMDB id lives in the secondary Guid
+ * list. A title/year search is what the app's own search uses and reliably
+ * returns library items with their ratingKeys.
+ */
+async function findLibraryMatch(part: TmdbPart, type: string): Promise<PlexMetadataItem | null> {
+  const title = part.title ?? part.name ?? "";
+  const key = `${type}:${part.id}`;
+  if (libraryMatchCache.has(key)) return libraryMatchCache.get(key)!;
   let found: PlexMetadataItem | null = null;
-  try {
-    const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
-      "/library/all",
-      { guid: `tmdb://${tmdbId}` },
-    );
-    const items = data.MediaContainer.Metadata || [];
-    found = items.find((it) => it.type === type) ?? items[0] ?? null;
-  } catch {
-    found = null;
+  if (title) {
+    try {
+      const data = await plexJSON<{ MediaContainer: { Hub?: Array<{ Metadata?: PlexMetadataItem[] }> } }>(
+        "/hubs/search",
+        { query: title, limit: "12" },
+      );
+      const wantKey = collectionTitleKey(title);
+      const year = tmdbResultYear(part);
+      const candidates: PlexMetadataItem[] = [];
+      for (const hub of data.MediaContainer.Hub || []) {
+        for (const md of hub.Metadata || []) candidates.push(md);
+      }
+      found =
+        candidates.find(
+          (c) =>
+            c.type === type &&
+            // A library item (has a section) — not an online Discover result.
+            c.librarySectionID != null &&
+            c.title != null &&
+            collectionTitleKey(c.title) === wantKey &&
+            // Tolerate a one-year drift between TMDB and Plex release years.
+            (year == null || c.year == null || Math.abs(c.year - year) <= 1),
+        ) ?? null;
+    } catch {
+      found = null;
+    }
   }
-  libraryByTmdbCache.set(key, found);
+  libraryMatchCache.set(key, found);
   return found;
 }
 
@@ -1025,8 +1048,11 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
         addOwned(m);
         for (const row of plexRows) for (const child of row.children) addOwned(child);
 
+        // Chronological, but undated films (typically unreleased entries with no
+        // year, always out-of-library) sort to the very end rather than the front
+        // — an empty release_date would otherwise sort before every real date.
         const parts = [...collParts.parts].sort((a, b) =>
-          (a.release_date ?? "").localeCompare(b.release_date ?? ""),
+          (a.release_date || "9999-99-99").localeCompare(b.release_date || "9999-99-99"),
         );
         const items: CollectionItem[] = parts.map((part) => {
           const partTitle = part.title ?? part.name ?? "";
@@ -1132,7 +1158,7 @@ router.get("/recommendations/:ratingKey", async (req: Request, res: Response) =>
     // playable cards, the rest requestable "not in library" cards.
     const resolved = await Promise.all(
       recs.map(async (r) => {
-        const owned = await findLibraryItemByTmdb(r.id, m.type);
+        const owned = await findLibraryMatch(r, m.type);
         if (owned) return { inLibrary: true, item: mapItem(owned) as CollectionItem };
         const external: CollectionItem = {
           ratingKey: `tmdb:${r.id}`,

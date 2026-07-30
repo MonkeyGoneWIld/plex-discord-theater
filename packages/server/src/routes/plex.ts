@@ -1510,7 +1510,16 @@ router.get(
         protocol: "hls",
         fastSeek: "1",
         directPlay: "0",
-        directStream: "1",
+        // Force a real video re-encode instead of a remux (copy). Direct-streaming
+        // (directStream=1 → videoDecision=copy) hands the source's elementary h264
+        // stream to the browser untouched, including any keyframe/timestamp
+        // discontinuity the file carries. The browser's MSE cannot append across
+        // such a discontinuity, so playback wedges at a fixed point mid-episode
+        // (bufferStalledError, buffer stops growing) and never recovers. Re-encoding
+        // produces clean, monotonic, uniformly-keyframed HLS that MSE plays through.
+        // Audio copy is left on — the discontinuity is in the video stream, and
+        // AAC passthrough is cheap and reliable.
+        directStream: "0",
         directStreamAudio: "1",
         videoResolution: "1920x1080",
         videoBitrate: String(VIDEO_BITRATE_KBPS),

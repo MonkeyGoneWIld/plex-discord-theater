@@ -1165,6 +1165,7 @@ async function stopTranscodeKey(sessionIdentifier: string): Promise<void> {
  */
 async function postTimeline(
   sessionId: string, ratingKey: string, timeMs: number, clientId: string,
+  state: "playing" | "buffering" = "playing",
 ): Promise<void> {
   const duration = mediaDurations.get(ratingKey);
   await plexFetch(
@@ -1172,7 +1173,7 @@ async function postTimeline(
     {
       ratingKey,
       key: `/library/metadata/${ratingKey}`,
-      state: "playing",
+      state,
       time: String(Math.round(timeMs)),
       duration: duration ? String(duration) : "0",
       identifier: "com.plexapp.plugins.library",
@@ -1327,14 +1328,20 @@ export async function pingPlexTranscode(hlsSessionId: string): Promise<void> {
   const ratingKey = sessionRatingKeys.get(hlsSessionId);
   if (host && ratingKey && Date.now() - host.at > HOST_SILENT_MS) {
     const duration = mediaDurations.get(ratingKey);
-    // Extrapolate forward at ~1x from the last known host position, capped at the
-    // media duration so we never run the timeline past the end of the file.
+    // Two reasons the host stops pinging, needing opposite timelines:
+    //   • backgrounded tab still playing — the position was advancing right up to
+    //     the silence, so extrapolate forward at ~1x to keep Plex encoding ahead.
+    //   • stalled — the position was already frozen before the silence, so the
+    //     client is starved; report state=buffering at the frozen position so Plex
+    //     keeps producing the stuck segment instead of racing its head past it.
+    const wasStalled = host.at - host.posChangedAt > STALL_NUDGE_MS;
     const estMs = host.timeMs + (Date.now() - host.at);
-    const cappedMs = duration ? Math.min(estMs, duration) : estMs;
+    const reportMs = wasStalled ? host.timeMs : (duration ? Math.min(estMs, duration) : estMs);
     try {
-      await postTimeline(hlsSessionId, ratingKey, cappedMs, getSessionClientId(hlsSessionId));
+      await postTimeline(hlsSessionId, ratingKey, reportMs, getSessionClientId(hlsSessionId),
+        wasStalled ? "buffering" : "playing");
       if (DEBUG) console.log("[HLS] Server-driven timeline for", hlsSessionId.substring(0, 8),
-        "→", (cappedMs / 1000).toFixed(0) + "s (host silent)");
+        "→", (reportMs / 1000).toFixed(0) + "s", wasStalled ? "(host silent, stalled)" : "(host silent)");
     } catch (err) {
       console.error("[HLS] Server-driven timeline failed for", hlsSessionId.substring(0, 8), err);
     }
@@ -1543,7 +1550,16 @@ router.get(
         protocol: "hls",
         fastSeek: "1",
         directPlay: "0",
-        directStream: "1",
+        // Force a real video re-encode instead of a remux (copy). Direct-streaming
+        // (directStream=1 → videoDecision=copy) hands the source's elementary h264
+        // stream to the browser untouched, including any keyframe/timestamp
+        // discontinuity the file carries. The browser's MSE cannot append across
+        // such a discontinuity, so playback wedges at a fixed point mid-episode
+        // (bufferStalledError, buffer stops growing) and never recovers. Re-encoding
+        // produces clean, monotonic, uniformly-keyframed HLS that MSE plays through.
+        // Audio copy is left on — the discontinuity is in the video stream, and
+        // AAC passthrough is cheap and reliable.
+        directStream: "0",
         directStreamAudio: "1",
         videoResolution: "1920x1080",
         videoBitrate: String(VIDEO_BITRATE_KBPS),
@@ -2004,20 +2020,20 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
       // the whole thing runs away to the end of the file.
       updatePrefetchPosition(sessionId, timeMs / 1000);
 
-      // If the reported position has been frozen while still playing, the host's
-      // playback stalled — Plex will park the encoder at its readahead limit and
-      // the buffer can never refill. Report an extrapolated (advancing) position
-      // so Plex keeps transcoding; once real playback resumes this self-clears.
-      // A real pause reports playing=false, so it's left frozen (correct).
-      let reportMs = timeMs;
-      if (playing && frozenMs > STALL_NUDGE_MS) {
-        const duration = mediaDurations.get(ratingKey);
-        const est = timeMs + frozenMs;
-        reportMs = duration ? Math.min(est, duration) : est;
-        if (DEBUG) console.log("[HLS] Timeline nudge (host stalled) %s → %ss",
-          sessionId.substring(0, 8), (reportMs / 1000).toFixed(0));
-      }
-      postTimeline(sessionId, ratingKey, reportMs, clientId).catch(() => {}); // fire-and-forget
+      // If the reported position has frozen while still playing, the host's
+      // playback stalled and the client is starved. Match what Plex's own web
+      // client does here (verified from its HAR): report state=buffering at the
+      // real, frozen position — do NOT advance it. Buffering tells Plex to keep
+      // producing the segment the client is stuck on; the previous forward
+      // "nudge" moved the transcode head *past* that segment, which is what
+      // turned a transient encoder stall into a permanent one. A real pause
+      // reports playing=false and stays a plain playing timeline at its position.
+      const stalledWhilePlaying = playing && frozenMs > STALL_NUDGE_MS;
+      if (stalledWhilePlaying && DEBUG) console.log(
+        "[HLS] Host stalled — reporting buffering %s @ %ss",
+        sessionId.substring(0, 8), (timeMs / 1000).toFixed(0));
+      postTimeline(sessionId, ratingKey, timeMs, clientId,
+        stalledWhilePlaying ? "buffering" : "playing").catch(() => {}); // fire-and-forget
     }
 
     res.json({ ok: true });

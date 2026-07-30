@@ -15,6 +15,7 @@ import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
 import type { PlexItem, SkipMarker } from "../lib/api";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
+import { logEvent, logWarn } from "../lib/log";
 
 const PING_INTERVAL_MS = 10_000; // 10s — matches Plex API recommendation for LAN timeline updates
 const HEARTBEAT_INTERVAL_MS = 5_000;
@@ -212,6 +213,36 @@ function trimMediaBuffer(hls: Hls, video: HTMLVideoElement): Record<string, unkn
   return Object.keys(trimmed).length > 0 ? { ...trimmed, spanBeforeS: end - start } : null;
 }
 
+/**
+ * Pull the integer segment index out of an HLS segment URL — Plex/VPS segments
+ * end in `00179.ts` (optionally `media-00179.ts`, optionally `?query`). Returns
+ * -1 when the shape is unfamiliar, so callers can log "unknown" rather than NaN.
+ */
+function segIndexFromUrl(url: string | undefined | null): number {
+  if (!url) return -1;
+  const m = url.match(/(\d+)\.ts(?:[?#]|$)/);
+  return m ? parseInt(m[1], 10) : -1;
+}
+
+/**
+ * hls.js's stream-controller state and current fragment, read defensively off
+ * fields hls.js does not expose in its types. This is the one signal that
+ * distinguishes "the loader stopped asking for fragments" from "it is stuck
+ * waiting on one" when a stall throws no error — see the stall watchdog.
+ */
+function hlsLoadingState(hls: unknown): Record<string, unknown> {
+  const sc = (hls as { streamController?: {
+    state?: string;
+    fragCurrent?: { sn?: number; url?: string };
+  } })?.streamController;
+  if (!sc) return { hlsState: "unknown" };
+  return {
+    hlsState: sc.state ?? "unknown",
+    hlsFragSn: sc.fragCurrent?.sn ?? "none",
+    hlsFragSeg: segIndexFromUrl(sc.fragCurrent?.url),
+  };
+}
+
 interface PlayerProps {
   item: PlexItem;
   isHost: boolean;
@@ -262,6 +293,22 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // Cumulative P2P delivery counters, filled from the p2p-media-loader engine
   // events below and read by the StatsOverlay each poll.
   const p2pStatsRef = useRef<P2PStats>({ p2pBytes: 0, httpBytes: 0, uploadBytes: 0, peers: new Set() });
+  // Rolling record of the p2p-media-loader engine's fragment-loader activity,
+  // filled from its onSegment* events below. A silent mid-video stall parks the
+  // buffer with no error thrown, and the health sample alone can't say whether
+  // the engine stopped fetching segments or hls.js stopped appending them. This
+  // captures the last thing the engine actually did so the stall watchdog can
+  // attribute the freeze to one side or the other.
+  const engineLoaderRef = useRef({
+    lastStartSeg: -1, lastLoadedSeg: -1, lastErrorSeg: -1,
+    lastEventAt: 0, lastError: null as string | null,
+    starts: 0, loaded: 0, errors: 0, aborts: 0,
+  });
+  // Stall-watchdog bookkeeping: currentTime at the previous health tick, and
+  // whether the current stall episode has already been logged — a multi-minute
+  // freeze must produce one diagnostic, not one per tick.
+  const lastTickTimeRef = useRef(-1);
+  const stallLoggedRef = useRef(false);
   // Plex intro/credits markers for the current item, and whichever one the
   // playhead currently sits inside (null when outside every window).
   const [markers, setMarkers] = useState<SkipMarker[]>([]);
@@ -755,27 +802,44 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
                 // that or eviction runs on every append for nothing — while
                 // capping the whole cache eight times lower than the default.
                 segmentMemoryStorageLimit: 512,
-                // All three match maxBufferLength, and high-demand is the one that
-                // matters. This engine owns the fragment loader, so hls.js's buffer
-                // targets are only advisory. With no peers connected, high-demand is
-                // the *only* thing that triggers an HTTP fetch: p2p-downloadable is
+                // This engine owns the fragment loader, so hls.js's buffer targets
+                // are only advisory. With no peers connected, high-demand is the
+                // *only* thing that triggers an HTTP fetch: p2p-downloadable is
                 // gated on a peer already holding the segment, and http-downloadable
                 // is read solely by loadRandomThroughHttp, which early-returns when
-                // there are no peers. So this window alone decides how far ahead a
-                // solo viewer buffers — at the old 15s it capped the buffer at 15s
-                // no matter what hls.js was configured for.
+                // there are no peers. So this window decides how far ahead a solo
+                // viewer buffers — at the old 15s it capped the buffer at 15s no
+                // matter what hls.js was configured for.
+                //
+                // It must be STRICTLY GREATER than maxBufferLength (120), not equal.
+                // hls.js requests fragments to fill up to maxBufferLength; the engine
+                // fetches a requested fragment only if it falls inside high-demand
+                // (no peers ⇒ no other path). When the two are equal, the fragment
+                // that would top the buffer off sits exactly at the window edge, and
+                // because hls.js measures its buffer and the engine measures its
+                // window from currentTime sampled a beat apart, that fragment lands
+                // just outside high-demand often enough to matter. The engine then
+                // neither HTTP-fetches nor P2P-fetches it, the request hangs, hls.js
+                // waits on a fragment that never arrives, and the buffer drains to a
+                // hard stall with no error thrown — permanent "Loading…" mid-video,
+                // all clients stuck at the same segment. 150 keeps every fragment
+                // hls.js can ask for (≤120s ahead) comfortably inside the window with
+                // a 30s / 10-segment margin, and matches the server's 150s prefetch
+                // lead (segment-prefetch LEAD_SEGMENTS×3s). The effective buffer is
+                // still 120s — maxBufferLength binds the append; high-demand only
+                // guarantees the next fragment is already fetched.
                 //
                 // Trade-off: high-demand segments prefer HTTP over P2P, so with this
                 // covering the whole buffer, peers contribute much less and more
                 // traffic comes from the server. Deliberate. If bandwidth becomes a
                 // problem, the fix is applyDynamicConfig() driven by onPeerConnect/
                 // onPeerClose — widen only while connectedPeerCount is 0.
-                highDemandTimeWindow: 120,
-                p2pDownloadTimeWindow: 120,
+                highDemandTimeWindow: 150,
+                p2pDownloadTimeWindow: 150,
                 // Was 6, i.e. inverted below high-demand (library default is 3000).
                 // Only consulted when peers exist, but it must not be the smaller of
-                // the two or it makes no sense.
-                httpDownloadTimeWindow: 120,
+                // the two or it makes no sense — keep it ≥ high-demand.
+                httpDownloadTimeWindow: 150,
                 simultaneousP2PDownloads: 3,
                 simultaneousHttpDownloads: 2,
                 rtcConfig: {
@@ -806,9 +870,37 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
                 stats.uploadBytes = 0;
                 stats.peers = new Set();
 
-                hls.p2pEngine.addEventListener("onSegmentLoaded", ({ bytesLength, downloadSource }) => {
+                const eng = engineLoaderRef.current;
+                hls.p2pEngine.addEventListener("onSegmentLoaded", ({ segmentUrl, bytesLength, downloadSource }) => {
                   if (downloadSource === "p2p") stats.p2pBytes += bytesLength;
                   else stats.httpBytes += bytesLength;
+                  eng.lastLoadedSeg = segIndexFromUrl(segmentUrl);
+                  eng.lastEventAt = Date.now();
+                  eng.loaded++;
+                });
+                // onSegmentStart/Error/Abort are the loader's own account of what
+                // it tried, independent of hls.js. If a freeze shows the engine's
+                // lastStartSeg stuck at the buffer edge with no matching load, the
+                // engine stopped fetching (window/peer wedge); if it started and
+                // errored, the fetch itself failed; if it loaded past the edge but
+                // the media buffer didn't grow, the wedge is in hls.js's appending.
+                hls.p2pEngine.addEventListener("onSegmentStart", ({ segment }) => {
+                  eng.lastStartSeg = segment.externalId ?? segIndexFromUrl(segment.url);
+                  eng.lastEventAt = Date.now();
+                  eng.starts++;
+                });
+                hls.p2pEngine.addEventListener("onSegmentError", ({ segment, error, downloadSource }) => {
+                  eng.lastErrorSeg = segment.externalId ?? segIndexFromUrl(segment.url);
+                  eng.lastError = error instanceof Error ? error.message : String(error);
+                  eng.lastEventAt = Date.now();
+                  eng.errors++;
+                  logWarn("P2P", "segment error", {
+                    seg: eng.lastErrorSeg, source: downloadSource, error: eng.lastError,
+                  });
+                });
+                hls.p2pEngine.addEventListener("onSegmentAbort", () => {
+                  eng.aborts++;
+                  eng.lastEventAt = Date.now();
                 });
                 hls.p2pEngine.addEventListener("onChunkUploaded", (bytesLength) => {
                   stats.uploadBytes += bytesLength;
@@ -1228,6 +1320,42 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           ...heapSample(),
           ...snapshot(v),
         });
+
+        // Stall watchdog. A stall that throws an error is handled by the
+        // hls.js ERROR path; this catches the silent one — playback wedged
+        // with the buffer parked and nothing logged. When the playhead has
+        // not advanced between ticks while the element still believes it is
+        // playing and the forward buffer is spent, dump the two states that
+        // pin the cause: what the engine last fetched, and what hls.js's
+        // stream controller is doing. Logged once per episode.
+        const prevTime = lastTickTimeRef.current;
+        const advanced = prevTime < 0 || v.currentTime - prevTime > 0.1;
+        lastTickTimeRef.current = v.currentTime;
+        // currentTime > 1 excludes cold-start pre-roll, where sitting at 0
+        // while the first segments arrive is buffering, not a wedge.
+        const wedged = v.currentTime > 1 && !v.paused && !v.seeking
+          && !advanced && bufferAheadSeconds(v) < 1;
+        if (wedged && !stallLoggedRef.current) {
+          stallLoggedRef.current = true;
+          const eng = engineLoaderRef.current;
+          logWarn("Stall", "playhead wedged with buffer spent", {
+            session: sessionIdRef.current?.substring(0, 8) ?? "none",
+            role: amHost ? "host" : "viewer",
+            peers: stats.peers.size,
+            // Engine side: has it fetched anything past the buffer edge?
+            engStartSeg: eng.lastStartSeg,
+            engLoadedSeg: eng.lastLoadedSeg,
+            engErrorSeg: eng.lastErrorSeg,
+            engLastError: eng.lastError,
+            engIdleMs: eng.lastEventAt ? Date.now() - eng.lastEventAt : "n/a",
+            engCounts: `start=${eng.starts} loaded=${eng.loaded} err=${eng.errors} abort=${eng.aborts}`,
+            // hls.js side: is the stream controller still trying to load?
+            ...hlsLoadingState(hlsRef.current),
+            ...snapshot(v),
+          });
+        } else if (advanced) {
+          stallLoggedRef.current = false;
+        }
       }, HEALTH_SAMPLE_MS);
     }
 

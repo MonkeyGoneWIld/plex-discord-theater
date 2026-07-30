@@ -65,6 +65,10 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   const [continueItems, setContinueItems] = useState<HistoryEntry[]>([]);
   const [historyItems, setHistoryItems] = useState<HistoryEntry[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
+  // In-place filter query for the History tab. Unlike a regular search (which
+  // sets searchResults and swaps to the dedicated search view), this only
+  // narrows the History grid — the tabs, "Clear history" and layout all stay.
+  const [historyQuery, setHistoryQuery] = useState("");
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [homeHubs, setHomeHubs] = useState<PlexHub[]>([]);
@@ -269,25 +273,14 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
     searchQueryRef.current = query;
     const reqId = ++searchReqId.current;
 
-    // History tab: scope the search to the user's own watch history. As long as
-    // there's any history, matches come only from those entries — nothing from
-    // the wider library, and no "Not in your library" online results. Only when
-    // the history is empty do we fall through to the global search below
+    // History tab with history present: filter the History grid in place. No
+    // separate search view — the tabs, the "Clear history" button and the
+    // history layout all stay exactly as they are; only the visible cards
+    // narrow down (see filteredHistoryItems below). When there's no history we
+    // fall through to the global search, which behaves just like Home
     // ("if there is no history, then search everything").
     if (isHistoryTab && historyItems.length > 0) {
-      const q = query.toLowerCase();
-      const matches = historyItems
-        .filter(
-          (e) =>
-            e.title.toLowerCase().includes(q) ||
-            (e.showTitle?.toLowerCase().includes(q) ?? false),
-        )
-        .map(historyEntryToItem);
-      // Not a Plex search — clear the raw buffer so the tab-switch re-filter
-      // effect below leaves these results alone.
-      rawSearchResults.current = null;
-      setSearchResults(matches);
-      setLoading(false);
+      setHistoryQuery(query);
       return;
     }
 
@@ -308,7 +301,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
       console.error("Search failed:", err);
     }
     if (reqId === searchReqId.current) setLoading(false);
-  }, [activeSectionType, isHistoryTab, historyItems]);
+  }, [activeSectionType, isHistoryTab, historyItems.length]);
 
   // Re-filter search results when switching tabs during an active search
   useEffect(() => {
@@ -319,12 +312,23 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
     setSearchResults(filtered);
   }, [activeSectionType]);
 
+  // Switching tabs drops the in-place History filter and empties the search
+  // box, so a query typed on History doesn't linger when you leave and return.
+  // (The Search box ignores the initial signal, so mount is unaffected.)
+  useEffect(() => {
+    setHistoryQuery("");
+    setSearchResetSignal((n) => n + 1);
+  }, [activeSection]);
+
   const handleClearSearch = useCallback(() => {
     // Invalidate any in-flight search so its response can't land after clear
     searchReqId.current++;
     rawSearchResults.current = null;
     setSearchResults(null);
     setLoading(false);
+    // Emptying the box (via its "X" or by deleting the text) also drops the
+    // in-place History filter, restoring the full history grid.
+    setHistoryQuery("");
   }, []);
 
   // Back out of search entirely: drop results and clear the box, returning to
@@ -342,6 +346,16 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   );
 
   const searchQuery = searchQueryRef.current;
+  // History tab in-place filter (see handleSearch). Matches title or, for
+  // episodes, the show title. Empty query => the full history grid.
+  const historyQ = historyQuery.trim().toLowerCase();
+  const filteredHistoryItems = historyQ
+    ? historyItems.filter(
+        (e) =>
+          e.title.toLowerCase().includes(historyQ) ||
+          (e.showTitle?.toLowerCase().includes(historyQ) ?? false),
+      )
+    : historyItems;
   const displayItems = searchResults ?? items;
   const hasMore = !searchResults && items.length < totalSize;
   // While searching, online (Discover) results are shown in a separate section
@@ -472,27 +486,44 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
           <>
             <div style={styles.historyHeader}>
               <span style={styles.historyCount}>
-                {historyTotal} {historyTotal === 1 ? "title" : "titles"}
+                {/* Reflects the filtered set while searching, the full total
+                    otherwise — the header itself never leaves. */}
+                {historyQ
+                  ? `${filteredHistoryItems.length} ${filteredHistoryItems.length === 1 ? "title" : "titles"}`
+                  : `${historyTotal} ${historyTotal === 1 ? "title" : "titles"}`}
               </span>
               <button onClick={handleClearHistory} style={styles.clearBtn}>
                 Clear history
               </button>
             </div>
-            <div style={styles.grid}>
-              {historyItems.map((entry) => (
-                <div key={entry.ratingKey}>
-                  <MovieCard
-                    item={historyEntryToItem(entry)}
-                    onClick={handleClick}
-                    progress={progressOf(entry)}
-                    watched={entry.watched}
-                    onRemove={handleForgetFromHistory}
-                    removeLabel="Remove from watch history"
-                  />
-                  <div style={styles.historyWhen}>{formatWhen(entry.updatedAt)}</div>
+            {filteredHistoryItems.length === 0 ? (
+              <div style={styles.emptyState}>
+                <div style={styles.emptyIcon}>
+                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <circle cx="11" cy="11" r="8" /><path d="M21 21l-4.35-4.35" />
+                  </svg>
                 </div>
-              ))}
-            </div>
+                <p style={styles.emptyText}>
+                  No history matches &ldquo;{historyQuery.trim()}&rdquo;
+                </p>
+              </div>
+            ) : (
+              <div style={styles.grid}>
+                {filteredHistoryItems.map((entry) => (
+                  <div key={entry.ratingKey}>
+                    <MovieCard
+                      item={historyEntryToItem(entry)}
+                      onClick={handleClick}
+                      progress={progressOf(entry)}
+                      watched={entry.watched}
+                      onRemove={handleForgetFromHistory}
+                      removeLabel="Remove from watch history"
+                    />
+                    <div style={styles.historyWhen}>{formatWhen(entry.updatedAt)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </>
         )
       ) : isHomeTab && !searchResults ? (

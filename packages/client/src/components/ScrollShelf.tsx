@@ -17,9 +17,9 @@ interface ScrollShelfProps {
 /**
  * A horizontally-scrolling poster row. On touch it's exactly the plain row it
  * always was. On a mouse-driven desktop it gains: edge-fade chevrons (click to
- * page, hold to glide) that hide at each end, click-and-drag to pan, a
- * vertical-wheel-to-horizontal shortcut that passes through to the page at the
- * ends, and a custom thin scrollbar that only appears on hover.
+ * page, hold to glide) that hide at each end, click-and-drag to pan, and a
+ * custom thin scrollbar that only appears on hover. The mouse wheel is left
+ * alone — it always scrolls the page vertically.
  *
  * The scrollbar is a drawn element rather than the browser's: the app sets an
  * inherited `scrollbar-color` on <html>, and once that's inherited Chromium
@@ -75,17 +75,7 @@ export function ScrollShelf({ children, rowStyle }: ScrollShelfProps) {
     sync();
     const ro = new ResizeObserver(sync);
     ro.observe(sc);
-    // Vertical wheel scrolls the row sideways, but only while it still can —
-    // at either end the event passes through so the page keeps scrolling.
-    const onWheel = (e: WheelEvent) => {
-      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
-      const max = sc.scrollWidth - sc.clientWidth;
-      if ((sc.scrollLeft <= 0 && e.deltaY < 0) || (sc.scrollLeft >= max && e.deltaY > 0)) return;
-      sc.scrollLeft += e.deltaY;
-      e.preventDefault();
-    };
-    sc.addEventListener("wheel", onWheel, { passive: false });
-    return () => { ro.disconnect(); sc.removeEventListener("wheel", onWheel); };
+    return () => ro.disconnect();
   }, [isDesktop, sync, children]);
 
   // Click-and-drag to pan. A small threshold distinguishes a pan from a click,

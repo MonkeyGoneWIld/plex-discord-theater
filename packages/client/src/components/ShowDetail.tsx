@@ -6,6 +6,7 @@ import {
 import { formatTimecode } from "../lib/format";
 import { MovieCard } from "./MovieCard";
 import { RatingsRow } from "./RatingsRow";
+import { CollectionRows } from "./CollectionRows";
 import { SeasonRequestGrid } from "./SeasonRequestGrid";
 import { SkeletonBlock } from "./SkeletonBlock";
 
@@ -15,6 +16,9 @@ interface ShowDetailProps {
   onReplaceWithSeason?: (season: PlexItem, show: PlexItem) => void;
   /** Open an episode's detail view — used by the resume button. Omit to hide it. */
   onSelectEpisode?: (episode: PlexItem) => void;
+  /** Open another show's detail page — used by the "also in this collection"
+   *  rows. Omit to hide those rows. */
+  onSelect?: (item: PlexItem) => void;
   onBack: () => void;
 }
 
@@ -25,7 +29,7 @@ function authUrl(url: string): string {
   return `${url}${sep}token=${encodeURIComponent(token)}`;
 }
 
-export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelectEpisode, onBack }: ShowDetailProps) {
+export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelectEpisode, onSelect, onBack }: ShowDetailProps) {
   const [meta, setMeta] = useState<PlexMeta | null>(null);
   const [seasons, setSeasons] = useState<PlexItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -262,6 +266,10 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelect
               </SeasonRequestGrid>
             </div>
           )}
+
+          {/* "Also in this collection" — same rows as the Home tab, for the
+              small collections this show belongs to. */}
+          {onSelect && <CollectionRows ratingKey={item.ratingKey} onSelect={onSelect} />}
         </div>
       ) : (
         <div style={styles.loadingWrap}>

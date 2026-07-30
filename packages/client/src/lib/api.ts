@@ -238,6 +238,23 @@ export function fetchChildren(ratingKey: string): Promise<{ items: PlexItem[] }>
   return cachedGet(`/api/plex/children/${encodeURIComponent(ratingKey)}`);
 }
 
+/** A collection an item belongs to, with the other members to show alongside it
+ *  on a detail page. Server-filtered to small collections only (see
+ *  fetchItemCollections). */
+export interface PlexCollection {
+  ratingKey: string;
+  title: string;
+  items: PlexItem[];
+}
+
+/** The small collections a movie/show belongs to (for the "also in this
+ *  collection" rows on its detail page). Large collections like Trending are
+ *  filtered out server-side; the current item is already excluded from each
+ *  row. Cached — collection membership is stable. */
+export function fetchItemCollections(ratingKey: string): Promise<{ collections: PlexCollection[] }> {
+  return cachedGet(`/api/plex/collections/${encodeURIComponent(ratingKey)}`);
+}
+
 export function fetchMeta(ratingKey: string): Promise<PlexMeta> {
   return cachedGet(`/api/plex/meta/${encodeURIComponent(ratingKey)}`);
 }

@@ -148,6 +148,10 @@ interface PlexMetadataItem {
   contentRating?: string;
   /** External ids, e.g. { id: "imdb://tt123" }, { id: "tmdb://456" }. */
   Guid?: Array<{ id?: string }>;
+  /** Collections this item belongs to (present with includeCollections=1). The
+   *  `tag` is the collection's title; used to find the real collection (with its
+   *  ratingKey/childCount) in the section's collection list. */
+  Collection?: Array<{ tag: string; id?: number }>;
 }
 
 // ─── Library browsing ────────────────────────────────────────────
@@ -768,6 +772,90 @@ router.get("/children/:ratingKey", async (req: Request, res: Response) => {
   } catch (err) {
     console.error("Children error:", err);
     res.status(502).json({ error: "Failed to fetch children" });
+  }
+});
+
+/**
+ * Largest a collection may be to appear on an item's detail page. Curated sets
+ * like "Harry Potter" (8 films) fit under this and render as "also in this
+ * collection" rows; sprawling auto-collections like "Trending" (40+ items) are
+ * filtered out so they don't take over the page. "Fewer than" — so exactly this
+ * many is already too many.
+ */
+const COLLECTION_MAX_ITEMS = 10;
+
+/**
+ * GET /api/plex/collections/:ratingKey
+ * The (small) collections this library item belongs to, each with its members —
+ * for the "also in this collection" rows on a movie/show detail page. The item
+ * itself is removed from each row, and collections with COLLECTION_MAX_ITEMS or
+ * more members are dropped entirely. Returns { collections: [] } (never an
+ * error) for items in no collection, so the client can render it or nothing.
+ */
+router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
+  const ratingKey = req.params.ratingKey as string;
+  if (!NUMERIC_RE.test(ratingKey)) {
+    res.status(400).json({ error: "Invalid rating key" });
+    return;
+  }
+
+  try {
+    // Which collections does this item belong to? Plex only lists them on the
+    // item's own metadata (as Collection tags), and only with includeCollections.
+    const metaData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+      `/library/metadata/${ratingKey}`,
+      { includeCollections: "1" },
+    );
+    const m = metaData.MediaContainer.Metadata?.[0];
+    if (!m) {
+      res.status(404).json({ error: "Item not found" });
+      return;
+    }
+
+    const sectionId = m.librarySectionID;
+    const memberTitles = new Set((m.Collection || []).map((c) => c.tag).filter(Boolean));
+    if (sectionId == null || memberTitles.size === 0) {
+      res.json({ collections: [] });
+      return;
+    }
+
+    // The item's Collection tags carry only titles — the ratingKey (to list
+    // members) and childCount (to size-filter) live on the section's collection
+    // list, matched back by title.
+    const collData = await plexJSON<{
+      MediaContainer: { Metadata?: PlexMetadataItem[]; Directory?: PlexMetadataItem[] };
+    }>(`/library/sections/${sectionId}/collections`);
+    const sectionCollections =
+      collData.MediaContainer.Metadata || collData.MediaContainer.Directory || [];
+
+    // Only the small collections this item is in — sized down here so a large
+    // collection (Trending) is skipped without ever fetching its members.
+    const matched = sectionCollections.filter(
+      (c) =>
+        memberTitles.has(c.title) &&
+        (c.childCount ?? 0) > 0 &&
+        (c.childCount ?? 0) < COLLECTION_MAX_ITEMS,
+    );
+
+    const collections: Array<{ ratingKey: string; title: string; items: ReturnType<typeof mapItem>[] }> = [];
+    for (const c of matched) {
+      const childrenData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+        `/library/collections/${c.ratingKey}/children`,
+      );
+      const items = (childrenData.MediaContainer.Metadata || [])
+        // Drop the item being viewed — it's the page you're already on.
+        .filter((child) => child.ratingKey !== ratingKey)
+        .map(mapItem);
+      // A collection of only this item leaves an empty row — skip it.
+      if (items.length > 0) {
+        collections.push({ ratingKey: c.ratingKey, title: c.title, items });
+      }
+    }
+
+    res.json({ collections });
+  } catch (err) {
+    console.error("Collections error:", err);
+    res.status(502).json({ error: "Failed to fetch collections" });
   }
 });
 

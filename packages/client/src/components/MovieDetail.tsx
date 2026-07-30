@@ -4,6 +4,7 @@ import { formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { SkeletonBlock } from "./SkeletonBlock";
 import { RatingsRow } from "./RatingsRow";
+import { CollectionRows } from "./CollectionRows";
 import type { QueueItem, SuggestionItem } from "../hooks/useSync";
 
 interface MovieDetailProps {
@@ -20,6 +21,9 @@ interface MovieDetailProps {
    *  Omitted for movies (and when there's nothing to navigate to). */
   onShowClick?: () => void;
   onSeasonClick?: () => void;
+  /** Open another title's detail page — used by the "also in this collection"
+   *  rows. Omit to hide those rows. */
+  onSelect?: (item: PlexItem) => void;
 }
 
 function authUrl(url: string): string {
@@ -160,7 +164,7 @@ const dropdownStyles: Record<string, React.CSSProperties> = {
   },
 };
 
-export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQueue, onSuggest, onShowClick, onSeasonClick }: MovieDetailProps) {
+export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQueue, onSuggest, onShowClick, onSeasonClick, onSelect }: MovieDetailProps) {
   const [meta, setMeta] = useState<PlexMeta | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -511,6 +515,13 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
               </div>
             </div>
           </div>
+
+          {/* "Also in this collection" — same rows as the Home tab, for the
+              small collections this movie belongs to. Movies only: episodes
+              belong to a show, not a collection. */}
+          {item.type === "movie" && onSelect && (
+            <CollectionRows ratingKey={item.ratingKey} onSelect={onSelect} />
+          )}
         </div>
       ) : (
         <div style={styles.loadingWrap}>

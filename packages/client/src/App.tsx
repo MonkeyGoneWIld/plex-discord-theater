@@ -677,6 +677,7 @@ export function App() {
           // Resume jumps straight to the episode; the breadcrumb synthesizes the
           // show and season it skipped past, so Back still walks up properly.
           onSelectEpisode={handleSeasonEpisode}
+          onSelect={handleSelect}
           onBack={popView}
         />
       )}
@@ -705,6 +706,7 @@ export function App() {
           isPlaying={!!syncState.ratingKey}
           onAddToQueue={effectiveIsHost ? (qi) => syncActions.sendQueueAdd(qi) : undefined}
           onSuggest={!effectiveIsHost ? (item) => syncActions.sendSuggest(item) : undefined}
+          onSelect={handleSelect}
         />
       )}
 

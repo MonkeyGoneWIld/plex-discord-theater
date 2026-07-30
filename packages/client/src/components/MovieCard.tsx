@@ -60,7 +60,9 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
             src={authThumbUrl(posterSrc!, 320, 480)}
             alt={item.title}
             style={styles.poster}
-            loading="lazy"
+            // Eager, not lazy: load every poster up front so nothing pops in as
+            // the user scrolls the (non-virtualized) rows and grids.
+            loading="eager"
             onError={() => setImgError(true)}
           />
         ) : (

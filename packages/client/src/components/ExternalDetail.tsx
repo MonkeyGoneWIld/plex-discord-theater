@@ -4,6 +4,7 @@ import {
   type PlexItem, type DiscoverMeta, type SeerrMediaType, type SeerrTv,
 } from "../lib/api";
 import { SeasonRequestGrid } from "./SeasonRequestGrid";
+import { RatingsRow } from "./RatingsRow";
 
 interface ExternalDetailProps {
   item: PlexItem;
@@ -127,6 +128,13 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
               ))}
             </div>
           )}
+          {/* External ratings — keyed off the TMDB id the provider metadata gives
+              us (Discover results carry no imdb id). */}
+          <RatingsRow
+            tmdbId={tmdbId}
+            mediaType={item.type === "show" ? "show" : "movie"}
+            style={styles.ratings}
+          />
           {loading && !summary ? (
             <div style={styles.summaryMuted}>Loading details…</div>
           ) : summary ? (
@@ -251,6 +259,9 @@ const styles: Record<string, React.CSSProperties> = {
     flexWrap: "wrap",
     gap: "6px",
     marginBottom: "16px",
+  },
+  ratings: {
+    marginBottom: "18px",
   },
   genre: {
     padding: "3px 10px",

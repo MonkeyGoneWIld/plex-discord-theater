@@ -13,6 +13,7 @@ import { fileURLToPath } from "url";
 import discordRoutes, { closeInstanceDb } from "./routes/discord.js";
 import plexRoutes from "./routes/plex.js";
 import seerrRoutes from "./routes/seerr.js";
+import ratingsRoutes from "./routes/ratings.js";
 import historyRoutes from "./routes/history.js";
 import logRoutes from "./routes/logs.js";
 import { requireAuth, closeSessionDb } from "./middleware/auth.js";
@@ -146,6 +147,7 @@ app.use("/api", (req, res, next) => {
 app.use("/api", discordRoutes);
 app.use("/api/plex", requireAuth, plexRoutes);
 app.use("/api/seerr", requireAuth, seerrRoutes);
+app.use("/api/ratings", requireAuth, ratingsRoutes);
 app.use("/api/history", requireAuth, historyRoutes);
 app.use("/api/logs", requireAuth, logRoutes);
 

@@ -5,6 +5,7 @@ import {
 } from "../lib/api";
 import { formatTimecode } from "../lib/format";
 import { MovieCard } from "./MovieCard";
+import { RatingsRow } from "./RatingsRow";
 import { SeasonRequestGrid } from "./SeasonRequestGrid";
 import { SkeletonBlock } from "./SkeletonBlock";
 
@@ -188,6 +189,14 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelect
                   ))}
                 </div>
               )}
+
+              {/* External ratings for the show as a whole (not per-season). */}
+              <RatingsRow
+                imdbId={meta.imdbId}
+                tmdbId={meta.tmdbId}
+                mediaType="show"
+                style={styles.ratings}
+              />
 
               {meta.summary && (
                 <p style={styles.summary}>{meta.summary}</p>
@@ -382,6 +391,9 @@ const styles: Record<string, React.CSSProperties> = {
   metaDot: {
     color: "#555",
     fontSize: "15px",
+  },
+  ratings: {
+    marginBottom: "20px",
   },
   genres: {
     display: "flex",

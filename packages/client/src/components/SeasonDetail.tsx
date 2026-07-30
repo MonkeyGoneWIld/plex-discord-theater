@@ -162,7 +162,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                       // Dimmed when finished, so a season scans at a glance
                       // rather than needing the badges read one by one.
                       style={{ ...styles.episodeThumb, ...(watched ? styles.thumbWatched : {}) }}
-                      loading="lazy"
+                      loading="eager"
                     />
                   ) : (
                     <div style={styles.episodePlaceholder}>No Image</div>

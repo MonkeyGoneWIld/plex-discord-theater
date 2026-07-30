@@ -205,7 +205,7 @@ router.get("/home", async (_req: Request, res: Response) => {
     const data = await plexJSON<{ MediaContainer: { Hub?: PlexHub[] } }>(
       "/hubs",
       // Items per hub row on the Home page.
-      { count: "40" },
+      { count: "50" },
     );
 
     const hubs = (data.MediaContainer.Hub || [])
@@ -490,6 +490,13 @@ async function isGuidInLibrary(guid: string): Promise<boolean> {
  * Fetch a single title's metadata from the Discover cloud provider by its id
  * (the trailing segment of a plex:// guid). Best-effort: null on any failure.
  */
+/** Pull the IMDb id out of a metadata item's external id list (e.g. "imdb://tt0111161"). */
+function imdbIdFromGuids(guids?: Array<{ id?: string }>): string | null {
+  const hit = guids?.find((g) => g.id?.startsWith("imdb://"));
+  const id = hit?.id?.slice("imdb://".length);
+  return id && /^tt\d{5,10}$/.test(id) ? id : null;
+}
+
 /** Pull the TMDB id out of a metadata item's external id list (e.g. "tmdb://550"). */
 function tmdbIdFromGuids(guids?: Array<{ id?: string }>): number | null {
   const hit = guids?.find((g) => g.id?.startsWith("tmdb://"));
@@ -707,6 +714,8 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
     }
 
     const tmdbId = await resolveTmdbId(m);
+    // IMDb id (when Plex stored one) — the preferred key for external ratings.
+    const imdbId = imdbIdFromGuids(m.Guid);
 
     res.json({
       ratingKey: m.ratingKey,
@@ -729,6 +738,9 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       markers: mapMarkers(m.Marker),
       // TMDB id — lets the client offer Seerr season requests for library shows.
       tmdbId,
+      // IMDb id — used by the client to look up external ratings. Null when
+      // Plex's metadata agent never stored one.
+      imdbId,
     });
   } catch (err) {
     console.error("Metadata error:", err);

@@ -1074,24 +1074,31 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
         const parts = [...collParts.parts].sort((a, b) =>
           (a.release_date || "9999-99-99").localeCompare(b.release_date || "9999-99-99"),
         );
-        const items: CollectionItem[] = parts.map((part) => {
-          const partTitle = part.title ?? part.name ?? "";
-          const owned = ownedByTitle.get(collectionTitleKey(partTitle));
-          if (owned) return mapItem(owned);
-          // Missing from the library — a non-playable, requestable card. Poster
-          // is proxied the same way as Discover search results.
-          return {
-            ratingKey: `tmdb:${part.id}`,
-            title: partTitle,
-            year: tmdbPartYear(part),
-            type: "movie",
-            thumb: part.poster_path
-              ? externalThumbUrl(`https://image.tmdb.org/t/p/w500${part.poster_path}`)
-              : null,
-            inLibrary: false,
-            tmdbId: part.id,
-          } as CollectionItem;
-        });
+        const items: CollectionItem[] = await Promise.all(
+          parts.map(async (part) => {
+            const partTitle = part.title ?? part.name ?? "";
+            // Prefer the item from the movie's Plex collection (no lookup needed);
+            // otherwise search the library, so a franchise film that's owned but
+            // not in any Plex collection still resolves as owned instead of
+            // wrongly showing "Not in library".
+            const owned =
+              ownedByTitle.get(collectionTitleKey(partTitle)) ?? (await findLibraryMatch(part, "movie"));
+            if (owned) return mapItem(owned);
+            // Missing from the library — a non-playable, requestable card. Poster
+            // is proxied the same way as Discover search results.
+            return {
+              ratingKey: `tmdb:${part.id}`,
+              title: partTitle,
+              year: tmdbPartYear(part),
+              type: "movie",
+              thumb: part.poster_path
+                ? externalThumbUrl(`https://image.tmdb.org/t/p/w500${part.poster_path}`)
+                : null,
+              inLibrary: false,
+              tmdbId: part.id,
+            } as CollectionItem;
+          }),
+        );
         tmdbRow = { ratingKey: `tmdb-collection:${coll.id}`, title: coll.name, items };
 
         // Drop the Plex collection that is this same franchise (all its owned

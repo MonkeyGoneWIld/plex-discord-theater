@@ -205,7 +205,7 @@ router.get("/home", async (_req: Request, res: Response) => {
     const data = await plexJSON<{ MediaContainer: { Hub?: PlexHub[] } }>(
       "/hubs",
       // Items per hub row on the Home page.
-      { count: "40" },
+      { count: "50" },
     );
 
     const hubs = (data.MediaContainer.Hub || [])

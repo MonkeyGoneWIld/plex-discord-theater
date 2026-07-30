@@ -779,8 +779,8 @@ router.get("/children/:ratingKey", async (req: Request, res: Response) => {
  * Largest a collection may be to appear on an item's detail page. Curated sets
  * like "Harry Potter" (8 films) fit under this and render as "also in this
  * collection" rows; sprawling auto-collections like "Trending" (40+ items) are
- * filtered out so they don't take over the page. "Fewer than" — so exactly this
- * many is already too many.
+ * filtered out so they don't take over the page. Inclusive — a collection of
+ * exactly this many still shows.
  */
 const COLLECTION_MAX_ITEMS = 10;
 
@@ -788,9 +788,10 @@ const COLLECTION_MAX_ITEMS = 10;
  * GET /api/plex/collections/:ratingKey
  * The (small) collections this library item belongs to, each with its members —
  * for the "also in this collection" rows on a movie/show detail page. The item
- * itself is removed from each row, and collections with COLLECTION_MAX_ITEMS or
- * more members are dropped entirely. Returns { collections: [] } (never an
- * error) for items in no collection, so the client can render it or nothing.
+ * itself is removed from each row, and collections with more than
+ * COLLECTION_MAX_ITEMS members are dropped entirely. Returns { collections: [] }
+ * (never an error) for items in no collection, so the client can render it or
+ * nothing.
  */
 router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
   const ratingKey = req.params.ratingKey as string;
@@ -834,7 +835,7 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
       (c) =>
         memberTitles.has(c.title) &&
         (c.childCount ?? 0) > 0 &&
-        (c.childCount ?? 0) < COLLECTION_MAX_ITEMS,
+        (c.childCount ?? 0) <= COLLECTION_MAX_ITEMS,
     );
 
     const collections: Array<{ ratingKey: string; title: string; items: ReturnType<typeof mapItem>[] }> = [];

@@ -32,6 +32,16 @@ function progressOf(entry: HistoryEntry): number | null {
   return entry.durationMs > 0 ? Math.min(1, entry.positionMs / entry.durationMs) : null;
 }
 
+/** In-place History filter predicate. `q` must already be lowercased/trimmed.
+ *  Matches the title or, for episodes, the show title. Shared by the render and
+ *  the "Clear history" handler so both agree on exactly what's "visible". */
+function historyMatches(entry: HistoryEntry, q: string): boolean {
+  return (
+    entry.title.toLowerCase().includes(q) ||
+    (entry.showTitle?.toLowerCase().includes(q) ?? false)
+  );
+}
+
 function describeError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   return msg.includes("429")
@@ -183,11 +193,27 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   }, []);
 
   const handleClearHistory = useCallback(() => {
+    const q = historyQuery.trim().toLowerCase();
+    // Filter active: clear only the items currently visible under the filter,
+    // leaving the rest of the history intact. Same optimistic pattern as the
+    // per-card remove — a single entry delete covers Continue Watching too.
+    if (q) {
+      const keys = new Set(
+        historyItems.filter((e) => historyMatches(e, q)).map((e) => e.ratingKey),
+      );
+      if (keys.size === 0) return;
+      setContinueItems((prev) => prev.filter((e) => !keys.has(e.ratingKey)));
+      setHistoryItems((prev) => prev.filter((e) => !keys.has(e.ratingKey)));
+      setHistoryTotal((n) => Math.max(0, n - keys.size));
+      for (const key of keys) deleteHistoryEntry(key).catch(console.error);
+      return;
+    }
+    // No filter: clear the whole history.
     setContinueItems([]);
     setHistoryItems([]);
     setHistoryTotal(0);
     clearHistory().catch(console.error);
-  }, []);
+  }, [historyItems, historyQuery]);
 
   // Fetch genres when section changes
   useEffect(() => {
@@ -350,11 +376,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   // episodes, the show title. Empty query => the full history grid.
   const historyQ = historyQuery.trim().toLowerCase();
   const filteredHistoryItems = historyQ
-    ? historyItems.filter(
-        (e) =>
-          e.title.toLowerCase().includes(historyQ) ||
-          (e.showTitle?.toLowerCase().includes(historyQ) ?? false),
-      )
+    ? historyItems.filter((e) => historyMatches(e, historyQ))
     : historyItems;
   const displayItems = searchResults ?? items;
   const hasMore = !searchResults && items.length < totalSize;
@@ -493,7 +515,9 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
                   : `${historyTotal} ${historyTotal === 1 ? "title" : "titles"}`}
               </span>
               <button onClick={handleClearHistory} style={styles.clearBtn}>
-                Clear history
+                {/* When filtering, it only clears the visible matches, so the
+                    label reflects that instead of implying a full wipe. */}
+                {historyQ ? "Clear results" : "Clear history"}
               </button>
             </div>
             {filteredHistoryItems.length === 0 ? (

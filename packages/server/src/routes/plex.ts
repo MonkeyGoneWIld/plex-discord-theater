@@ -784,12 +784,21 @@ router.get("/children/:ratingKey", async (req: Request, res: Response) => {
 
 /**
  * Largest a collection may be to appear on an item's detail page. Curated sets
- * like "Harry Potter" (8 films) fit under this and render as "also in this
- * collection" rows; sprawling auto-collections like "Trending" (40+ items) are
- * filtered out so they don't take over the page. Inclusive — a collection of
- * exactly this many still shows.
+ * fit under this and render as "also in this collection" rows; sprawling
+ * auto-collections like "Trending" (40+ items) are filtered out so they don't
+ * take over the page. Inclusive — a collection of exactly this many still shows.
+ *
+ * Movies get a higher cap than shows: film franchises/box sets run large (e.g.
+ * a 20+ Marvel or Bond collection) and are still worth showing, whereas a show's
+ * collections are typically small and a big one is more likely noise.
  */
-const COLLECTION_MAX_ITEMS = 10;
+const COLLECTION_MAX_ITEMS_MOVIE = 30;
+const COLLECTION_MAX_ITEMS_SHOW = 10;
+
+/** The size cap for a given item type. */
+function collectionMaxItems(type: string): number {
+  return type === "movie" ? COLLECTION_MAX_ITEMS_MOVIE : COLLECTION_MAX_ITEMS_SHOW;
+}
 
 // ─── TMDB collections ───────────────────────────────────────────
 //
@@ -920,7 +929,8 @@ async function findLibraryItemByTmdb(tmdbId: number, type: string): Promise<Plex
  * The (small) collections this library item belongs to, each with its members —
  * for the "also in this collection" rows on a movie/show detail page. The item
  * itself is kept in each row (as Plex does on its own detail pages), and
- * collections with more than COLLECTION_MAX_ITEMS members are dropped entirely.
+ * collections larger than the per-type cap (movies 30, shows 10) are dropped
+ * entirely.
  *
  * For movies, when a TMDB_API_KEY is set, the film's TMDB collection supplies
  * the *full* franchise: owned films render as playable cards, missing ones as
@@ -961,6 +971,9 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
       return;
     }
 
+    // Size cap depends on the item type — movies allow larger sets than shows.
+    const maxItems = collectionMaxItems(m.type);
+
     // ── Owned rows: the small Plex collections this item is in ──────────
     // Each carries its owned members (used both to render the row and, below, to
     // tell which TMDB franchise films are already in the library).
@@ -982,7 +995,7 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
         (c) =>
           memberTitles.has(c.title) &&
           (c.childCount ?? 0) > 0 &&
-          (c.childCount ?? 0) <= COLLECTION_MAX_ITEMS,
+          (c.childCount ?? 0) <= maxItems,
       );
       for (const c of matched) {
         const childrenData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
@@ -1000,8 +1013,9 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
       const movieTmdbId = await resolveTmdbId(m);
       const coll = movieTmdbId != null ? await tmdbMovieCollection(movieTmdbId) : null;
       const collParts = coll ? await tmdbCollectionParts(coll.id) : null;
-      // Same size cap as Plex collections — skip a sprawling franchise entirely.
-      if (coll && collParts && collParts.parts.length > 0 && collParts.parts.length <= COLLECTION_MAX_ITEMS) {
+      // Same size cap as Plex collections (movie cap) — skip a sprawling
+      // franchise entirely.
+      if (coll && collParts && collParts.parts.length > 0 && collParts.parts.length <= maxItems) {
         // Everything the library owns that could be a franchise film: this movie
         // plus every member of the matched Plex collections, keyed by loose title.
         const ownedByTitle = new Map<string, PlexMetadataItem>();

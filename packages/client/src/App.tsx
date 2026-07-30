@@ -698,6 +698,12 @@ const styles: Record<string, React.CSSProperties> = {
     borderBottom: "1px solid rgba(255,255,255,0.06)",
   },
   logo: {
+    // Match the breadcrumb row's height (its crumb buttons carry 6px vertical
+    // padding) so the header is the same height on the library and detail views
+    // and their Back buttons line up.
+    display: "flex",
+    alignItems: "center",
+    minHeight: "32px",
     fontSize: "20px",
     fontWeight: 700,
     color: "#e5a00d",
@@ -706,6 +712,9 @@ const styles: Record<string, React.CSSProperties> = {
   breadcrumbs: {
     display: "flex",
     alignItems: "center",
+    // Same fixed row height as the library logo so both headers match — see the
+    // note on `logo`.
+    minHeight: "32px",
     gap: "2px",
     minWidth: 0,
     flex: 1,

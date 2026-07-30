@@ -904,12 +904,15 @@ function tmdbResultYear(part: TmdbPart): number | undefined {
 const libraryMatchCache = new Map<string, PlexMetadataItem | null>();
 
 /**
- * The library item matching a TMDB result, or null when it isn't owned. Matched
- * by title + year via Plex search rather than by guid: Plex's `?guid=tmdb://…`
- * filter only matches an item's *primary* guid (a `plex://…` for the modern
- * agent), so it misses owned titles whose TMDB id lives in the secondary Guid
- * list. A title/year search is what the app's own search uses and reliably
- * returns library items with their ratingKeys.
+ * The library item matching a TMDB result, or null when it isn't owned. Resolved
+ * via Plex search (not the `?guid=tmdb://…` filter, which only matches an item's
+ * *primary* plex:// guid and so misses owned titles whose TMDB id is a secondary
+ * guid). Among the search hits it prefers, in order:
+ *   1. an exact TMDB-id match (the search asks for guids) — authoritative, and
+ *      immune to naming differences;
+ *   2. an exact normalised-title match within a year;
+ *   3. a title that is a prefix/suffix of the other within the same year — so
+ *      Plex's "Daredevil" still matches TMDB's "Marvel's Daredevil".
  */
 async function findLibraryMatch(part: TmdbPart, type: string): Promise<PlexMetadataItem | null> {
   const title = part.title ?? part.name ?? "";
@@ -920,25 +923,35 @@ async function findLibraryMatch(part: TmdbPart, type: string): Promise<PlexMetad
     try {
       const data = await plexJSON<{ MediaContainer: { Hub?: Array<{ Metadata?: PlexMetadataItem[] }> } }>(
         "/hubs/search",
-        { query: title, limit: "12" },
+        { query: title, limit: "12", includeGuids: "1" },
       );
       const wantKey = collectionTitleKey(title);
       const year = tmdbResultYear(part);
-      const candidates: PlexMetadataItem[] = [];
-      for (const hub of data.MediaContainer.Hub || []) {
-        for (const md of hub.Metadata || []) candidates.push(md);
-      }
+      // Library hits of the right type (a section id means it's owned, not an
+      // online Discover result).
+      const candidates = (data.MediaContainer.Hub || [])
+        .flatMap((h) => h.Metadata || [])
+        .filter((c) => c.type === type && c.librarySectionID != null && c.title != null);
+
+      const yearOk = (c: PlexMetadataItem) =>
+        year == null || c.year == null || Math.abs(c.year - year) <= 1;
+      const keyOf = (c: PlexMetadataItem) => collectionTitleKey(c.title!);
+
       found =
+        // 1. Exact TMDB id — authoritative regardless of how the title is spelled.
+        candidates.find((c) => tmdbIdFromGuids(c.Guid) === part.id) ??
+        // 2. Exact normalised title within a year.
+        candidates.find((c) => keyOf(c) === wantKey && yearOk(c)) ??
+        // 3. Prefix/suffix title (e.g. "daredevil" ⊂ "marvelsdaredevil"), same
+        //    year — a studio prefix TMDB adds shouldn't drop the match. Guard on
+        //    a real year so a short title can't loosely match an unrelated one.
         candidates.find(
           (c) =>
-            c.type === type &&
-            // A library item (has a section) — not an online Discover result.
-            c.librarySectionID != null &&
-            c.title != null &&
-            collectionTitleKey(c.title) === wantKey &&
-            // Tolerate a one-year drift between TMDB and Plex release years.
-            (year == null || c.year == null || Math.abs(c.year - year) <= 1),
-        ) ?? null;
+            year != null &&
+            c.year === year &&
+            (keyOf(c).includes(wantKey) || wantKey.includes(keyOf(c))),
+        ) ??
+        null;
     } catch {
       found = null;
     }

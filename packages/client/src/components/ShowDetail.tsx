@@ -182,14 +182,6 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelect
                 )}
               </div>
 
-              {/* External ratings for the show as a whole (not per-season). */}
-              <RatingsRow
-                imdbId={meta.imdbId}
-                tmdbId={meta.tmdbId}
-                mediaType="show"
-                style={styles.ratings}
-              />
-
               {meta.genres.length > 0 && (
                 <div style={styles.genres}>
                   {meta.genres.map((g) => (
@@ -197,6 +189,14 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelect
                   ))}
                 </div>
               )}
+
+              {/* External ratings for the show as a whole (not per-season). */}
+              <RatingsRow
+                imdbId={meta.imdbId}
+                tmdbId={meta.tmdbId}
+                mediaType="show"
+                style={styles.ratings}
+              />
 
               {meta.summary && (
                 <p style={styles.summary}>{meta.summary}</p>

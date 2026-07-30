@@ -361,6 +361,15 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                 )}
               </div>
 
+              {/* Genres */}
+              {meta.genres.length > 0 && (
+                <div style={styles.genres}>
+                  {meta.genres.map((g) => (
+                    <span key={g} style={styles.genrePill}>{g}</span>
+                  ))}
+                </div>
+              )}
+
               {/* External ratings — movies only (not episodes, per design). */}
               {item.type === "movie" && (
                 <RatingsRow
@@ -369,15 +378,6 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                   mediaType="movie"
                   style={styles.ratings}
                 />
-              )}
-
-              {/* Genres */}
-              {meta.genres.length > 0 && (
-                <div style={styles.genres}>
-                  {meta.genres.map((g) => (
-                    <span key={g} style={styles.genrePill}>{g}</span>
-                  ))}
-                </div>
               )}
 
               {/* Summary */}

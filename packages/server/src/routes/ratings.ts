@@ -102,8 +102,10 @@ async function fetchFromMdblist(
   return {
     imdb: outOfTen(findRating(list, "imdb")),
     tmdb: percent(findRating(list, "tmdb")),
+    // MDBList's critic Tomatometer is "tomatoes"; the audience score is "popcorn"
+    // (older payloads called it "tomatoesaudience", kept as a fallback).
     rtCritic: percent(findRating(list, "tomatoes")),
-    rtAudience: percent(findRating(list, "tomatoesaudience")),
+    rtAudience: percent(findRating(list, "popcorn") ?? findRating(list, "tomatoesaudience")),
   };
 }
 

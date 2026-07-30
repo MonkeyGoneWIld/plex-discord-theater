@@ -962,8 +962,13 @@ async function findLibraryMatch(part: TmdbPart, type: string): Promise<PlexMetad
  * Plex collection is dropped in favour of this fuller row; any unrelated Plex
  * collections (e.g. a personal "Christmas Movies") are kept as-is.
  *
- * Returns { collections: [] } (never an error) for items in no collection, so
- * the client can render it or nothing.
+ * Also returns `recommendations` — TMDB's "you might also like" list for the
+ * "More Like This" row — computed here (rather than in its own endpoint) so it
+ * can exclude anything already shown in a collection above. See
+ * buildRecommendations for the library-first, fill-to-target ordering.
+ *
+ * Returns { collections: [], recommendations: [] } (never an error) when there's
+ * nothing to show, so the client can render each row or nothing.
  */
 router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
   const ratingKey = req.params.ratingKey as string;
@@ -996,6 +1001,9 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
 
     // Size cap depends on the item type — movies allow larger sets than shows.
     const maxItems = collectionMaxItems(m.type);
+    // Resolved once — used for the movie's TMDB franchise row and for the
+    // recommendations row below. Null when there's no TMDB id (or no key).
+    const itemTmdbId = TMDB_API_KEY ? await resolveTmdbId(m) : null;
 
     // ── Owned rows: the small Plex collections this item is in ──────────
     // Each carries its owned members (used both to render the row and, below, to
@@ -1033,8 +1041,7 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
     let tmdbRow: { ratingKey: string; title: string; items: CollectionItem[] } | null = null;
     let consumedPlexRatingKey: string | null = null;
     if (m.type === "movie" && TMDB_API_KEY) {
-      const movieTmdbId = await resolveTmdbId(m);
-      const coll = movieTmdbId != null ? await tmdbMovieCollection(movieTmdbId) : null;
+      const coll = itemTmdbId != null ? await tmdbMovieCollection(itemTmdbId) : null;
       const collParts = coll ? await tmdbCollectionParts(coll.id) : null;
       // Same size cap as Plex collections (movie cap) — skip a sprawling
       // franchise entirely.
@@ -1095,64 +1102,64 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
       collections.push({ ratingKey: row.ratingKey, title: row.title, items: row.children.map(mapItem) });
     }
 
-    res.json({ collections });
+    // ── "More Like This": TMDB recommendations, minus collection items ──
+    const recommendations = await buildRecommendations(m, itemTmdbId, collections);
+
+    res.json({ collections, recommendations });
   } catch (err) {
     console.error("Collections error:", err);
     res.status(502).json({ error: "Failed to fetch collections" });
   }
 });
 
-/** How many TMDB recommendations to keep for the "More Like This" row. Bounds
- *  the per-title library-ownership lookups below. */
-const RECOMMENDATIONS_LIMIT = 20;
+// How many TMDB recommendations to resolve ownership for (bounds the per-title
+// Plex searches), and the size the row is topped up to with out-of-library
+// suggestions when the library doesn't supply enough on its own.
+const RECOMMENDATIONS_POOL = 20;
+const RECOMMENDATIONS_MIN_TOTAL = 8;
 
 /**
- * GET /api/plex/recommendations/:ratingKey
- * TMDB's "you might also like" list for a movie/show, for the "More Like This"
- * row on its detail page. Titles already in the library come first (as playable
- * cards), then the rest as "Not in library" cards (inLibrary=false + tmdbId)
- * that open the request flow — so owned suggestions lead and requestable ones
- * follow. Requires TMDB_API_KEY; returns { items: [] } without it (or when the
- * title has no TMDB id / no recommendations), so the client renders nothing.
+ * Build the "More Like This" row for a movie/show from TMDB recommendations.
+ *
+ * Titles already shown in one of the page's collection rows are excluded (no
+ * repeats). What's left is split into library titles and out-of-library ones;
+ * every library title is shown, and out-of-library titles top the row up only
+ * until it reaches RECOMMENDATIONS_MIN_TOTAL. So a library-rich list shows all
+ * of its owned matches and nothing external, while a sparse one is filled with
+ * requestable suggestions to the target size.
+ *
+ * Empty without a TMDB key / id, for episodes-and-the-like, or on any failure —
+ * the row is a nicety, never allowed to break the page.
  */
-router.get("/recommendations/:ratingKey", async (req: Request, res: Response) => {
-  const ratingKey = req.params.ratingKey as string;
-  if (!NUMERIC_RE.test(ratingKey)) {
-    res.status(400).json({ error: "Invalid rating key" });
-    return;
-  }
-
+async function buildRecommendations(
+  m: PlexMetadataItem,
+  itemTmdbId: number | null,
+  collections: Array<{ items: CollectionItem[] }>,
+): Promise<CollectionItem[]> {
+  if (!TMDB_API_KEY || itemTmdbId == null || (m.type !== "movie" && m.type !== "show")) return [];
   try {
-    if (!TMDB_API_KEY) {
-      res.json({ items: [] });
-      return;
-    }
-    const metaData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
-      `/library/metadata/${ratingKey}`,
-      { includeGuids: "1" },
-    );
-    const m = metaData.MediaContainer.Metadata?.[0];
-    if (!m) {
-      res.status(404).json({ error: "Item not found" });
-      return;
-    }
-    // Only movies and shows have TMDB recommendations; episodes/seasons don't.
-    if (m.type !== "movie" && m.type !== "show") {
-      res.json({ items: [] });
-      return;
-    }
-
-    const tmdbId = await resolveTmdbId(m);
-    if (tmdbId == null) {
-      res.json({ items: [] });
-      return;
-    }
+    // Everything already on the page (in a collection row) — excluded so a
+    // suggestion never duplicates a collection entry. Keyed loosely by title,
+    // plus by tmdbId for the out-of-library collection members that carry one.
+    const shownTitleKeys = new Set<string>();
+    const shownTmdbIds = new Set<number>();
+    for (const coll of collections)
+      for (const it of coll.items) {
+        if (it.title) shownTitleKeys.add(collectionTitleKey(it.title));
+        if (it.tmdbId != null) shownTmdbIds.add(it.tmdbId);
+      }
 
     const kind = m.type === "show" ? "tv" : "movie";
-    const recs = (await tmdbRecommendations(kind, tmdbId))
-      // Needs a poster to render a card, and an id to resolve/request.
+    const recs = (await tmdbRecommendations(kind, itemTmdbId))
+      // Needs a poster to render a card and an id to resolve/request; drop any
+      // that's already shown in a collection above.
       .filter((r) => r.id != null && !!r.poster_path)
-      .slice(0, RECOMMENDATIONS_LIMIT);
+      .filter(
+        (r) =>
+          !shownTmdbIds.has(r.id) &&
+          !shownTitleKeys.has(collectionTitleKey(r.title ?? r.name ?? "")),
+      )
+      .slice(0, RECOMMENDATIONS_POOL);
 
     // Resolve library ownership for each in parallel — owned ones become
     // playable cards, the rest requestable "not in library" cards.
@@ -1173,18 +1180,23 @@ router.get("/recommendations/:ratingKey", async (req: Request, res: Response) =>
       }),
     );
 
-    // Library titles first, then out-of-library — each keeping TMDB's order.
-    const items = [
-      ...resolved.filter((r) => r.inLibrary).map((r) => r.item),
-      ...resolved.filter((r) => !r.inLibrary).map((r) => r.item),
-    ];
+    // A search-resolved owned title can still turn out to be a collection member
+    // (the pre-filter keys off the TMDB title, the match off Plex's) — drop those.
+    const libraryRecs = resolved
+      .filter((r) => r.inLibrary)
+      .map((r) => r.item)
+      .filter((it) => !it.title || !shownTitleKeys.has(collectionTitleKey(it.title)));
+    const externalRecs = resolved.filter((r) => !r.inLibrary).map((r) => r.item);
 
-    res.json({ items });
+    // Show every library suggestion; fill with out-of-library ones only up to
+    // the target total.
+    const fill = Math.max(0, RECOMMENDATIONS_MIN_TOTAL - libraryRecs.length);
+    return [...libraryRecs, ...externalRecs.slice(0, fill)];
   } catch (err) {
     console.error("Recommendations error:", err);
-    res.status(502).json({ error: "Failed to fetch recommendations" });
+    return [];
   }
-});
+}
 
 /**
  * GET /api/plex/siblings/:ratingKey

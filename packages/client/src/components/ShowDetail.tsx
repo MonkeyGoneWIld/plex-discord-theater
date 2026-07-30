@@ -6,8 +6,7 @@ import {
 import { formatTimecode } from "../lib/format";
 import { MovieCard } from "./MovieCard";
 import { RatingsRow } from "./RatingsRow";
-import { CollectionRows } from "./CollectionRows";
-import { RecommendationsRow } from "./RecommendationsRow";
+import { RelatedRows } from "./RelatedRows";
 import { SeasonRequestGrid } from "./SeasonRequestGrid";
 import { SkeletonBlock } from "./SkeletonBlock";
 
@@ -270,14 +269,10 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelect
           )}
         </div>
 
-        {/* "Also in this collection" then "More Like This" — same rows as the
-            Home tab, rendered outside the narrow detail column so they span the
-            page. */}
+        {/* Collections then "More Like This" — same rows as the Home tab,
+            rendered outside the narrow detail column so they span the page. */}
         {onSelect && (
-          <>
-            <CollectionRows ratingKey={item.ratingKey} onSelect={onSelect} />
-            <RecommendationsRow ratingKey={item.ratingKey} title="More Like This" onSelect={onSelect} />
-          </>
+          <RelatedRows ratingKey={item.ratingKey} recommendationsTitle="More Like This" onSelect={onSelect} />
         )}
         </>
       ) : (

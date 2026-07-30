@@ -247,27 +247,25 @@ export function fetchChildren(ratingKey: string): Promise<{ items: PlexItem[] }>
 
 /** A collection an item belongs to, with the other members to show alongside it
  *  on a detail page. Server-filtered to small collections only (see
- *  fetchItemCollections). */
+ *  fetchRelated). */
 export interface PlexCollection {
   ratingKey: string;
   title: string;
   items: PlexItem[];
 }
 
-/** The small collections a movie/show belongs to (for the "also in this
- *  collection" rows on its detail page). Large collections like Trending are
- *  filtered out server-side; the current item is already excluded from each
- *  row. Cached — collection membership is stable. */
-export function fetchItemCollections(ratingKey: string): Promise<{ collections: PlexCollection[] }> {
+/** Related rows for a movie/show detail page:
+ *  - `collections`: the small collections it belongs to (large ones like
+ *    Trending filtered out server-side; the item itself is kept in each row).
+ *  - `recommendations`: TMDB's "you might also like" list (the "More Like This"
+ *    row), library titles first then out-of-library ones (inLibrary=false, with
+ *    a tmdbId for the request flow), excluding anything already in a collection.
+ *  Both empty without a server TMDB key where they depend on it. Cached — the
+ *  membership and suggestions are stable. */
+export function fetchRelated(
+  ratingKey: string,
+): Promise<{ collections: PlexCollection[]; recommendations: PlexItem[] }> {
   return cachedGet(`/api/plex/collections/${encodeURIComponent(ratingKey)}`);
-}
-
-/** TMDB "you might also like" suggestions for a movie/show (the "More Like This"
- *  row). Library titles come first, then out-of-library ones (inLibrary=false,
- *  with a tmdbId for the request flow). Empty without a server TMDB key. Cached —
- *  recommendations are stable. */
-export function fetchRecommendations(ratingKey: string): Promise<{ items: PlexItem[] }> {
-  return cachedGet(`/api/plex/recommendations/${encodeURIComponent(ratingKey)}`);
 }
 
 export function fetchMeta(ratingKey: string): Promise<PlexMeta> {

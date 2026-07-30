@@ -32,8 +32,8 @@ export function PosterShelf({ title, items, onSelect }: PosterShelfProps) {
   );
 }
 
-// Shared with CollectionRows / RecommendationsRow so every detail-page shelf is
-// laid out identically. `wrap` mirrors Library.tsx's hub styling but in a
+// Shared with RelatedRows so every detail-page shelf is laid out identically.
+// `wrap` mirrors Library.tsx's hub styling but in a
 // narrower centred column that tops out at eight cards (see grid.ts), and lifts
 // the row above the detail page's absolutely-positioned backdrop so its heading
 // isn't hidden on tall/fullscreen viewports.

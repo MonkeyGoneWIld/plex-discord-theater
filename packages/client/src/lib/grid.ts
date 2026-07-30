@@ -51,3 +51,38 @@ export const POSTER_GRID_COLUMNS = `repeat(auto-fill, ${POSTER_CARD_WIDTH})`;
  * rather than grid cells. Identical to the grid track above.
  */
 export const POSTER_ROW_CARD_WIDTH = POSTER_CARD_WIDTH;
+
+// ─── Detail-page collection rows ────────────────────────────────
+//
+// The "also in this collection" rows use the same card size as the Home rows
+// but top out at eight cards instead of ten, in a narrower centred wrapper. The
+// card size is held constant by pairing an eight-column width formula with a
+// wrapper whose max width is scaled to match: at full stretch a card is the same
+// ~182px it is in a ten-column Home row at 2000px, and exactly eight fit.
+
+/** Cards a collection row shows at maximum stretch. */
+const COLLECTION_MAX_COLUMNS = 8;
+const COLLECTION_TOTAL_GAP_PX = (COLLECTION_MAX_COLUMNS - 1) * GAP_PX;
+const COLLECTION_FULL_ROW_COLUMN = `(100% - ${COLLECTION_TOTAL_GAP_PX}px) / ${COLLECTION_MAX_COLUMNS}`;
+
+/** Collection-row card width — same floor and full-stretch size as a Home card,
+ *  but divided across eight columns rather than ten. */
+export const COLLECTION_ROW_CARD_WIDTH = `max(${MIN_CARD_PX}px, ${COLLECTION_FULL_ROW_COLUMN})`;
+
+// Home wideWrap width and its 24px-per-side gutters — the reference the card
+// full-stretch size is derived from (see Library.tsx wideWrap / hubSection).
+const HOME_WRAP_MAX_PX = 2000;
+const ROW_GUTTERS_PX = 48;
+/** A Home card's width at full ten-column stretch inside the 2000px wideWrap. */
+const HOME_FULL_STRETCH_CARD_PX =
+  (HOME_WRAP_MAX_PX - ROW_GUTTERS_PX - (MAX_COLUMNS - 1) * GAP_PX) / MAX_COLUMNS;
+
+/**
+ * Max width of the collection-row wrapper (content + its 24px gutters). Sized so
+ * eight cards at the Home full-stretch width exactly fill it — 8 cards + 7 gaps
+ * + 2 gutters — so the shelf stays centred and caps at eight without shrinking
+ * the thumbnails.
+ */
+export const COLLECTION_ROW_MAX_WIDTH_PX = Math.round(
+  COLLECTION_MAX_COLUMNS * HOME_FULL_STRETCH_CARD_PX + COLLECTION_TOTAL_GAP_PX + ROW_GUTTERS_PX,
+);

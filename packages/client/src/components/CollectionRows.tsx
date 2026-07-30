@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ScrollShelf } from "./ScrollShelf";
 import { MovieCard } from "./MovieCard";
-import { POSTER_ROW_CARD_WIDTH } from "../lib/grid";
+import { COLLECTION_ROW_CARD_WIDTH, COLLECTION_ROW_MAX_WIDTH_PX } from "../lib/grid";
 import { fetchItemCollections, type PlexCollection, type PlexItem } from "../lib/api";
 
 interface CollectionRowsProps {
@@ -59,20 +59,25 @@ export function CollectionRows({ ratingKey, onSelect }: CollectionRowsProps) {
   );
 }
 
-// Mirrors Library.tsx's hub row styles (and its wide wrapper) so a detail-page
-// collection is pixel-for-pixel the Home tab's collection row — same 2000px max
-// width and 24px gutters, so the shelf stretches the full page and tops out at
-// ten cards, instead of being penned into the narrow detail column.
+// Mirrors Library.tsx's hub row styles (same card look, 24px gutters, gaps) but
+// in a narrower centred wrapper that tops out at eight cards instead of ten,
+// keeping each thumbnail the Home-row size. position/zIndex lift the whole row
+// above the detail page's absolutely-positioned backdrop, which otherwise paints
+// over the heading on tall/fullscreen viewports.
 const styles: Record<string, React.CSSProperties> = {
   wrap: {
-    // Matches Library's wideWrap — wider than the detail column on purpose, so
-    // the row reaches ten full-size cards at max stretch like the Home tab.
-    maxWidth: "2000px",
+    // Capped so eight full-size cards exactly fill the row at max stretch, and
+    // centred — a little tighter than the Home tab's ten-wide rows.
+    maxWidth: `${COLLECTION_ROW_MAX_WIDTH_PX}px`,
     margin: "40px auto 0",
     padding: "0 24px",
     display: "flex",
     flexDirection: "column",
     gap: "8px",
+    // Sit above the backdrop image (position:absolute, top of the page) so the
+    // collection heading isn't hidden behind it.
+    position: "relative",
+    zIndex: 10,
   },
   section: {
     paddingBottom: "8px",
@@ -93,6 +98,6 @@ const styles: Record<string, React.CSSProperties> = {
   card: {
     flexShrink: 0,
     flexGrow: 0,
-    width: POSTER_ROW_CARD_WIDTH,
+    width: COLLECTION_ROW_CARD_WIDTH,
   },
 };

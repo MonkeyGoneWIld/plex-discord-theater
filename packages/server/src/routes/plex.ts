@@ -1125,10 +1125,22 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
     // item being viewed stays in every row — Plex keeps it on its own detail
     // pages too.
     const collections: Array<{ ratingKey: string; title: string; items: CollectionItem[] }> = [];
-    if (tmdbRow) collections.push(tmdbRow);
+    const seenTitles = new Set<string>();
+    // Never emit two rows with the same collection name. The ratingKey dedup above
+    // drops the Plex collection matching the TMDB franchise, but as a safety net
+    // this also collapses an identically-named Plex collection it missed (or a
+    // duplicate collection in the library), so "Pirates of the Caribbean
+    // Collection" can't render twice. First one wins — the TMDB row leads.
+    const add = (row: { ratingKey: string; title: string; items: CollectionItem[] }) => {
+      const key = collectionTitleKey(row.title);
+      if (seenTitles.has(key)) return;
+      seenTitles.add(key);
+      collections.push(row);
+    };
+    if (tmdbRow) add(tmdbRow);
     for (const row of plexRows) {
       if (row.ratingKey === consumedPlexRatingKey) continue;
-      collections.push({ ratingKey: row.ratingKey, title: row.title, items: row.children.map(mapItem) });
+      add({ ratingKey: row.ratingKey, title: row.title, items: row.children.map(mapItem) });
     }
 
     // ── "More Like This": TMDB recommendations, minus collection items ──

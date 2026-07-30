@@ -523,7 +523,7 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
                   matches, so the label says so rather than implying a full wipe. */}
               {(!historyQ || filteredHistoryItems.length > 0) && (
                 <button onClick={handleClearHistory} style={styles.clearBtn}>
-                  {historyQ ? "Clear Filtered History" : "Clear History"}
+                  {historyQ ? "Forget Filtered History" : "Clear History"}
                 </button>
               )}
             </div>

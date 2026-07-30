@@ -298,6 +298,13 @@ export function fetchDiscoverMeta(guid: string): Promise<DiscoverMeta> {
   return cachedGet(`/api/plex/discover/meta?guid=${encodeURIComponent(guid)}`);
 }
 
+/** Detail metadata for an out-of-library collection/recommendation member, which
+ *  carries a TMDB id but no plex:// guid. Same shape as fetchDiscoverMeta so the
+ *  external detail page renders it the same way. */
+export function fetchTmdbMeta(tmdbId: number, type: "movie" | "show"): Promise<DiscoverMeta> {
+  return cachedGet(`/api/plex/tmdb/meta?tmdbId=${tmdbId}&type=${type}`);
+}
+
 /** Seerr (Overseerr/Jellyseerr) request integration. `status` is Seerr's
  *  MediaStatus: 2=pending, 3=processing, 4=partially available, 5=available;
  *  null = not requested. `configured` is false when Seerr isn't set up. */

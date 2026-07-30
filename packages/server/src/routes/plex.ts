@@ -1199,6 +1199,63 @@ async function buildRecommendations(
 }
 
 /**
+ * GET /api/plex/tmdb/meta?tmdbId=123&type=movie|show
+ * Full detail metadata for an out-of-library collection/recommendation member.
+ * Those carry a TMDB id but no plex:// guid, so /discover/meta (which keys off
+ * the guid) can't resolve them — their detail page would otherwise show no
+ * description. Returns the same shape as /discover/meta so ExternalDetail renders
+ * it identically. Requires TMDB_API_KEY.
+ */
+router.get("/tmdb/meta", async (req: Request, res: Response) => {
+  const tmdbId = String(req.query.tmdbId ?? "");
+  const type = String(req.query.type ?? "movie");
+  if (!NUMERIC_RE.test(tmdbId) || (type !== "movie" && type !== "show")) {
+    res.status(400).json({ error: "Invalid tmdbId or type" });
+    return;
+  }
+  if (!TMDB_API_KEY) {
+    res.status(404).json({ error: "Details not available" });
+    return;
+  }
+  try {
+    const data = await tmdbGet<{
+      title?: string;
+      name?: string;
+      overview?: string;
+      release_date?: string;
+      first_air_date?: string;
+      runtime?: number;
+      episode_run_time?: number[];
+      poster_path?: string | null;
+      genres?: Array<{ name?: string }>;
+    }>(`/${type === "show" ? "tv" : "movie"}/${tmdbId}`);
+    if (!data) {
+      res.status(404).json({ error: "Details not available" });
+      return;
+    }
+    const yearStr = (data.release_date ?? data.first_air_date ?? "").slice(0, 4);
+    // Movie runtime is a single value; TV reports a per-episode array.
+    const runtimeMin = data.runtime ?? data.episode_run_time?.[0] ?? null;
+    res.json({
+      title: data.title ?? data.name ?? "",
+      year: yearStr ? Number(yearStr) : null,
+      summary: data.overview || null,
+      genres: (data.genres ?? []).map((g) => g.name).filter(Boolean),
+      duration: runtimeMin != null ? runtimeMin * 60000 : null,
+      contentRating: null,
+      type,
+      thumb: data.poster_path
+        ? externalThumbUrl(`https://image.tmdb.org/t/p/w500${data.poster_path}`)
+        : null,
+      tmdbId: Number(tmdbId),
+    });
+  } catch (err) {
+    console.error("TMDB meta error:", err);
+    res.status(502).json({ error: "Failed to fetch details" });
+  }
+});
+
+/**
  * GET /api/plex/siblings/:ratingKey
  * Resolve the episodes either side of this one: { prev, next }, each nullable.
  *

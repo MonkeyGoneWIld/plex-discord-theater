@@ -610,22 +610,23 @@ const styles: Record<string, React.CSSProperties> = {
   // centering. No overlap at any width — the center cell shrinks first.
   searchHeader: {
     display: "flex",
-    alignItems: "center",
+    alignItems: "flex-start",
     width: "100%",
   },
   searchSide: {
     flex: 1,
     display: "flex",
-    alignItems: "center",
+    alignItems: "flex-start",
     minWidth: 0,
   },
-  // Matches the Back button in the detail views (MovieDetail.backBtn).
+  // Identical to the Back button in the detail views (MovieDetail.backBtn),
+  // including its 16px/24px offset, so it lands in the exact same spot.
   backBtn: {
     display: "flex",
     alignItems: "center",
     gap: "6px",
     flexShrink: 0,
-    marginLeft: "24px",
+    margin: "16px 24px",
     padding: "8px 16px",
     borderRadius: "8px",
     border: "1px solid rgba(255,255,255,0.1)",

@@ -1101,12 +1101,21 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
         );
         tmdbRow = { ratingKey: `tmdb-collection:${coll.id}`, title: coll.name, items };
 
-        // Drop the Plex collection that is this same franchise (all its owned
-        // members are TMDB parts) so the page doesn't show two near-identical
-        // rows; unrelated personal collections don't match and stay.
-        const partTitleKeys = new Set(parts.map((p) => collectionTitleKey(p.title ?? p.name ?? "")));
-        const franchiseRow = plexRows.find((row) =>
-          row.children.every((child) => child.title && partTitleKeys.has(collectionTitleKey(child.title))),
+        // Drop the Plex collection that is this same franchise so the page doesn't
+        // show two near-identical rows; unrelated personal collections stay. The
+        // TMDB row already holds those owned films (resolved to their library
+        // ratingKeys), so a Plex collection whose every member appears in the TMDB
+        // row is the duplicate. Matching on ratingKey — not title — survives films
+        // Plex and TMDB name differently (e.g. the regional "Salazar's Revenge" vs
+        // "Dead Men Tell No Tales"), which a title match would miss, leaving both
+        // rows on screen.
+        const tmdbOwnedKeys = new Set(
+          items.filter((it) => it.inLibrary !== false).map((it) => String(it.ratingKey)),
+        );
+        const franchiseRow = plexRows.find(
+          (row) =>
+            row.children.length > 0 &&
+            row.children.every((child) => tmdbOwnedKeys.has(String(child.ratingKey))),
         );
         if (franchiseRow) consumedPlexRatingKey = franchiseRow.ratingKey;
       }

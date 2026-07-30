@@ -336,19 +336,17 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
 
   return (
     <div style={styles.container}>
-      {/* Search header: Back sits at the view's top-left (matching the detail
-          pages), overlaid on the same row as the centered search bar. */}
-      <div style={styles.searchHeader}>
-        <div style={styles.searchSide}>
-          {isSearching && (
-            <button onClick={handleBackFromSearch} style={styles.backBtn}>
-              <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-                <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-              Back
-            </button>
-          )}
-        </div>
+      {/* Back sits at the view's top-left, at the same 16/24 offset as the
+          detail pages. Absolutely positioned so it never affects the centered
+          search bar's position. */}
+      {isSearching && (
+        <button onClick={handleBackFromSearch} style={styles.backBtn}>
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          Back
+        </button>
+      )}
       <div style={styles.narrowWrap}>
         <Search onSearch={handleSearch} onClear={handleClearSearch} placeholder={searchPlaceholder} clearSignal={searchResetSignal} />
 
@@ -407,8 +405,6 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
             </button>
           </div>
         )}
-      </div>
-        <div style={styles.searchSide} />
       </div>
 
       <div style={styles.wideWrap}>
@@ -604,29 +600,19 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
 const styles: Record<string, React.CSSProperties> = {
   container: {
     width: "100%",
+    position: "relative",
   },
-  // 3-cell flex row: Back sits at the view's top-left, the search bar stays
-  // centered next to it on the same line, and the empty right cell balances the
-  // centering. No overlap at any width — the center cell shrinks first.
-  searchHeader: {
-    display: "flex",
-    alignItems: "flex-start",
-    width: "100%",
-  },
-  searchSide: {
-    flex: 1,
-    display: "flex",
-    alignItems: "flex-start",
-    minWidth: 0,
-  },
-  // Identical to the Back button in the detail views (MovieDetail.backBtn),
-  // including its 16px/24px offset, so it lands in the exact same spot.
+  // Identical to MovieDetail.backBtn (same 16/24 offset, same look), but pinned
+  // absolutely to the view's top-left so it lands in the exact same spot as the
+  // detail-page Back and never shifts the centered search bar.
   backBtn: {
+    position: "absolute",
+    top: "16px",
+    left: "24px",
+    zIndex: 10,
     display: "flex",
     alignItems: "center",
     gap: "6px",
-    flexShrink: 0,
-    margin: "16px 24px",
     padding: "8px 16px",
     borderRadius: "8px",
     border: "1px solid rgba(255,255,255,0.1)",
@@ -639,8 +625,8 @@ const styles: Record<string, React.CSSProperties> = {
     backdropFilter: "blur(12px)",
   },
   narrowWrap: {
-    flex: "0 1 1200px",
-    minWidth: 0,
+    maxWidth: "1200px",
+    margin: "0 auto",
   },
   wideWrap: {
     // Wider than the search/tabs column on purpose — this is what actually

@@ -61,6 +61,12 @@
       html {
         scrollbar-width: thin;
         scrollbar-color: rgba(255,255,255,0.15) transparent;
+        /* Always reserve the scrollbar gutter so content width stays constant
+           whether or not the vertical scrollbar is present. Without this, pages
+           that don't overflow (e.g. a short search-result set) are ~thin-bar
+           wider than pages that do, and centered elements like the search bar
+           jump sideways between views. */
+        scrollbar-gutter: stable;
         /* Hints the browser to render native form controls (scrollbars,
            select dropdowns) in a dark palette instead of the default light one. */
         color-scheme: dark;

@@ -33,7 +33,8 @@ export function ShelfSkeleton({
         style={{
           display: "flex",
           gap: cast ? "18px" : "14px",
-          padding: cast ? "18px 0 2px" : "20px 0 22px",
+          // Matches the real rows, which carry the page gutter themselves.
+          padding: cast ? "18px 24px 2px" : "20px 24px 22px",
           overflow: "hidden",
         }}
       >

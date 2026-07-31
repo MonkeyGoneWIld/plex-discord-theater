@@ -136,15 +136,17 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     marginBottom: 0,
     letterSpacing: "-0.01em",
+    // The page gutter, which shelfStyles.wrap no longer carries.
+    padding: "0 24px",
   },
-  // Horizontal padding stays at zero for the same reason as the poster shelves,
-  // but the bottom is tight: these cards carry no hover glow to leave room for,
-  // so the poster rows' 22px just left a gap before the scrollbar.
+  // Side gutter matches the poster shelves so the first face lines up with the
+  // first poster. The bottom stays tight: these cards have no hover glow to
+  // leave room for, and this row draws no scrollbar under it.
   row: {
     display: "flex",
     gap: "18px",
     overflowX: "auto" as const,
-    padding: "18px 0 2px",
+    padding: "18px 24px 2px",
   },
   person: {
     flexShrink: 0,

@@ -166,8 +166,8 @@ export function PersonDetail({ name, thumb, onSelect, onBack }: PersonDetailProp
       <div style={shelfStyles.wrap}>
         {loading && !person ? (
           <>
-            <SkeletonBlock width={140} height={20} />
-            <div style={{ display: "flex", gap: "14px", padding: "20px 0 22px" }}>
+            <SkeletonBlock width={140} height={20} style={{ marginLeft: 24 }} />
+            <div style={{ display: "flex", gap: "14px", padding: "20px 24px 22px" }}>
               {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
                 <div key={i} style={{ flexShrink: 0, width: 182 }}>
                   <SkeletonBlock width={182} height={273} borderRadius={10} />
@@ -185,7 +185,9 @@ export function PersonDetail({ name, thumb, onSelect, onBack }: PersonDetailProp
               <PosterShelf title="TV Shows" items={person.shows} onSelect={onSelect} />
             )}
             {person && person.movies.length === 0 && person.shows.length === 0 && (
-              <p style={styles.muted}>Nothing in your library credits this person.</p>
+              <p style={{ ...styles.muted, padding: "0 24px" }}>
+                Nothing in your library credits this person.
+              </p>
             )}
           </>
         )}

@@ -940,8 +940,10 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "8px 0 32px",
   },
   hubSection: {
-    // No bottom padding — hubRow's 22px bottom padding already separates rows.
-    padding: "0 24px",
+    // No padding at all: the bottom gap comes from hubRow's own 22px, and the
+    // 24px side gutter now sits on the label and the row instead. Keeping it
+    // here would clip the cards' hover glow at the scroller's edge.
+    padding: 0,
   },
   hubLabel: {
     color: "#e0e0e0",
@@ -950,22 +952,26 @@ const styles: Record<string, React.CSSProperties> = {
     // The row's own top padding (below) supplies the gap to the cards.
     marginBottom: 0,
     letterSpacing: "-0.01em",
+    // Carries the gutter hubSection gave up, so headings stay aligned with the
+    // first card.
+    padding: "0 24px",
   },
   hubRow: {
     display: "flex",
     gap: "14px",
     overflowX: "auto" as const,
-    // Padding on all four sides so the card hover-glow has room inside the
-    // scroller's clip box — overflowX:auto clips the vertical axis too, and the
-    // first and last card were losing their halo to the left and right edges.
+    // Gutter on all four sides, with the scroller spanning the full width of
+    // its section rather than being inset by it. Two things fall out of that:
+    // the hover glow has room inside the clip box on every side, and the
+    // content box still measures exactly what it did when the gutter sat on
+    // hubSection — so POSTER_ROW_CARD_WIDTH's `100%` is unchanged and ten cards
+    // still fill the row exactly, with no eleventh showing through.
     //
-    // The negative margin is what makes the horizontal half safe. Padding alone
-    // would shrink the content box that POSTER_ROW_CARD_WIDTH's `100%` divides
-    // by, narrowing the ten cards until an eleventh peeked in. Pulling the row
-    // out by the same 24px it pads back in leaves that width exactly as it was,
-    // while the clip box grows outward to cover the glow.
+    // An earlier attempt padded the row and pulled it back out with a negative
+    // margin. That widened the visible box past the section instead of insetting
+    // the content, so cards showed in the overhang, the chevrons sat away from
+    // the cards they scroll, and the scrollbar no longer spanned the row.
     padding: "20px 24px 22px",
-    margin: "0 -24px",
   },
   hubCard: {
     flexShrink: 0,

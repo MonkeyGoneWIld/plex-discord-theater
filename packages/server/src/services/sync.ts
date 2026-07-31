@@ -231,6 +231,57 @@ function sendTo(ws: WebSocket, msg: object): void {
  */
 const MAX_EXTRAPOLATION_S = 30;
 
+/**
+ * A playback position from a client message, or the fallback if it is unusable.
+ *
+ * `msg.position ?? state.position` was not enough: `??` only rejects null and
+ * undefined, so NaN, Infinity, a negative number and a string all passed
+ * straight into room state — and room state is broadcast to everyone. One
+ * malformed message from any client with transport rights poisoned the position
+ * for the whole room, and NaN in particular propagates through every later
+ * interpolation and drift check.
+ */
+function safePosition(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : fallback;
+}
+
+/** Longest queue the server will hold. The client can only add one at a time;
+ *  this bounds a malformed or hostile `queue-reorder`, which replaces the lot. */
+const MAX_QUEUE = 100;
+
+/**
+ * Rebuild a queue entry from scratch, keeping only known fields at sane sizes.
+ *
+ * The queue is echoed to every client, so an unvalidated object here is a
+ * broadcast of whatever was sent — the same reasoning that already applies to
+ * "suggest". Returns null when the entry can't be trusted at all.
+ */
+function sanitizeQueueItem(raw: unknown): QueueItem | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const str = (v: unknown, max: number) =>
+    typeof v === "string" && v.length <= max ? v : undefined;
+  const num = (v: unknown) =>
+    typeof v === "number" && Number.isFinite(v) ? v : undefined;
+
+  const ratingKey = str(o.ratingKey, 50);
+  const title = str(o.title, 500);
+  if (!ratingKey || !title) return null;
+
+  return {
+    ratingKey,
+    title,
+    type: str(o.type, 30) ?? "movie",
+    thumb: str(o.thumb, 500) ?? null,
+    subtitles: Boolean(o.subtitles),
+    parentTitle: str(o.parentTitle, 500),
+    showTitle: str(o.showTitle, 500),
+    parentIndex: num(o.parentIndex),
+    index: num(o.index),
+    year: num(o.year),
+  };
+}
+
 function interpolatedPosition(state: RoomState): number {
   if (!state.playing) return state.position;
   const elapsed = (Date.now() - state.updatedAt) / 1000;
@@ -521,7 +572,7 @@ export function attachWebSocketServer(server: Server): void {
         }
         case "pause": {
           room.state.playing = false;
-          room.state.position = (msg.position as number) ?? room.state.position;
+          room.state.position = safePosition(msg.position, room.state.position);
           room.state.updatedAt = Date.now();
           persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
           broadcast(room, ws, { type: "pause", position: room.state.position });
@@ -529,13 +580,13 @@ export function attachWebSocketServer(server: Server): void {
         }
         case "resume": {
           room.state.playing = true;
-          room.state.position = (msg.position as number) ?? room.state.position;
+          room.state.position = safePosition(msg.position, room.state.position);
           room.state.updatedAt = Date.now();
           broadcast(room, ws, { type: "resume", position: room.state.position });
           break;
         }
         case "seek": {
-          room.state.position = (msg.position as number) ?? room.state.position;
+          room.state.position = safePosition(msg.position, room.state.position);
           room.state.updatedAt = Date.now();
           persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
           broadcast(room, ws, { type: "seek", position: room.state.position });
@@ -589,7 +640,7 @@ export function attachWebSocketServer(server: Server): void {
         }
         case "heartbeat": {
           if (!room.state.ratingKey) break;
-          room.state.position = (msg.position as number) ?? room.state.position;
+          room.state.position = safePosition(msg.position, room.state.position);
           room.state.playing = msg.playing !== false;
           room.state.updatedAt = Date.now();
           // Throttled inside the history service — this fires every 5s per room.
@@ -609,16 +660,19 @@ export function attachWebSocketServer(server: Server): void {
           break;
         }
         case "browse": {
-          room.state.browseContext = (msg.context as string) || null;
+          // Broadcast verbatim to every client, so it gets the same length cap
+          // as every other free-text field that crosses the room.
+          room.state.browseContext =
+            typeof msg.context === "string" && msg.context.length <= 300 ? msg.context : null;
           broadcast(room, ws, { type: "browse", context: room.state.browseContext });
           break;
         }
         case "queue-add": {
-          const item = msg.item as QueueItem;
-          if (item?.ratingKey) {
+          const item = sanitizeQueueItem(msg.item);
+          if (item) {
             // Prevent duplicate items in the queue
             const alreadyQueued = room.state.queue.some((q) => q.ratingKey === item.ratingKey);
-            if (!alreadyQueued) {
+            if (!alreadyQueued && room.state.queue.length < MAX_QUEUE) {
               room.state.queue.push(item);
             }
             broadcast(room, ws, { type: "queue-updated", queue: room.state.queue });
@@ -627,7 +681,8 @@ export function attachWebSocketServer(server: Server): void {
           break;
         }
         case "queue-remove": {
-          const ratingKey = msg.ratingKey as string;
+          const ratingKey = typeof msg.ratingKey === "string" ? msg.ratingKey : "";
+          if (!ratingKey) break;
           room.state.queue = room.state.queue.filter((q) => q.ratingKey !== ratingKey);
           broadcast(room, ws, { type: "queue-updated", queue: room.state.queue });
           sendTo(ws, { type: "queue-updated", queue: room.state.queue });
@@ -640,7 +695,14 @@ export function attachWebSocketServer(server: Server): void {
           break;
         }
         case "queue-reorder": {
-          room.state.queue = (msg.queue as QueueItem[]) || [];
+          // Rebuilt rather than trusted: this replaces the whole queue, so an
+          // unchecked array is an arbitrary payload echoed to every client.
+          room.state.queue = Array.isArray(msg.queue)
+            ? msg.queue
+                .slice(0, MAX_QUEUE)
+                .map(sanitizeQueueItem)
+                .filter((q): q is QueueItem => q !== null)
+            : [];
           broadcast(room, ws, { type: "queue-updated", queue: room.state.queue });
           sendTo(ws, { type: "queue-updated", queue: room.state.queue });
           break;

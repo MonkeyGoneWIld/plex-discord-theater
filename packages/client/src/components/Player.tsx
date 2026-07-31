@@ -2316,7 +2316,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           and unlike that card, viewers see it too. Nothing auto-advances. */}
       {playbackEnded && upNextItem && (
         <EndCard
-          item={upNextItem as PlexItem}
+          item={upNextItem}
           source={queuedNext ? "queue" : "series"}
           onPlay={canControl ? playNextItem : undefined}
           onExit={endPlayback}

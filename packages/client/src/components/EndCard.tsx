@@ -1,8 +1,21 @@
-import { posterThumbUrl, type PlexItem } from "../lib/api";
+import { posterThumbUrl } from "../lib/api";
+
+/** Only what this card draws. Structural on purpose: what comes next is a
+ *  QueueItem when the host queued it and a PlexItem when it was resolved from
+ *  the series, and neither is assignable to the other. */
+interface NextItem {
+  ratingKey: string;
+  title: string;
+  thumb: string | null;
+  parentTitle?: string;
+  showTitle?: string;
+  parentIndex?: number;
+  index?: number;
+}
 
 interface EndCardProps {
   /** The episode offered next. */
-  item: PlexItem;
+  item: NextItem;
   /** "queue" = the host queued this deliberately; "series" = the next episode. */
   source: "queue" | "series";
   /** Start it. Absent for a plain viewer, who can't drive the room. */

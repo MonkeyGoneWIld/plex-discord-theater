@@ -458,8 +458,16 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           return;
         }
 
-        // Reconnect with exponential backoff
-        const delay = Math.min(1000 * Math.pow(2, retryRef.current), 15000);
+        // Reconnect with exponential backoff, jittered.
+        //
+        // Without the jitter every client in the room retries on the same
+        // schedule — they were all disconnected by the same event, so they all
+        // start their timers within milliseconds of each other. The server then
+        // takes the whole room's reconnects, joins and state sends in one burst
+        // at 1s, again at 2s, again at 4s. Spreading each delay by ±25% costs
+        // nothing and turns the burst back into arrivals.
+        const base = Math.min(1000 * Math.pow(2, retryRef.current), 15000);
+        const delay = Math.round(base * (0.75 + Math.random() * 0.5));
         retryRef.current++;
         retryTimerRef.current = setTimeout(connect, delay);
       });

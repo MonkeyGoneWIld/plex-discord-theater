@@ -735,6 +735,7 @@ export function App() {
           // show and season it skipped past, so Back still walks up properly.
           onSelectEpisode={handleSeasonEpisode}
           onSelect={handleSelectRelated}
+          onSelectPerson={handleSelectPerson}
           onBack={popView}
         />
       )}
@@ -764,6 +765,7 @@ export function App() {
           onAddToQueue={effectiveIsHost ? (qi) => syncActions.sendQueueAdd(qi) : undefined}
           onSuggest={!effectiveIsHost ? (item) => syncActions.sendSuggest(item) : undefined}
           onSelect={handleSelectRelated}
+          onSelectPerson={handleSelectPerson}
         />
       )}
 

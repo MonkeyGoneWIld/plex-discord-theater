@@ -27,6 +27,32 @@ function ageFrom(birthday: string | null, deathday: string | null): number | nul
   return age >= 0 && age < 130 ? age : null;
 }
 
+/** Lines of biography shown before it's collapsed behind "Show more". Enough to
+ *  place the person; TMDB biographies routinely run past a screen otherwise, and
+ *  the filmography — the reason for the page — ends up below the fold. */
+const BIO_CLAMP_LINES = 5;
+
+function Biography({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  // Only offer the control when there's meaningfully more to read. The
+  // threshold is deliberately generous: a toggle that reveals one extra line is
+  // more annoying than the line it hides.
+  const longEnough = text.length > 420;
+
+  return (
+    <>
+      <p style={expanded || !longEnough ? styles.bio : { ...styles.bio, ...styles.bioClamped }}>
+        {text}
+      </p>
+      {longEnough && (
+        <button type="button" style={styles.moreBtn} onClick={() => setExpanded((e) => !e)}>
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      )}
+    </>
+  );
+}
+
 function formatDate(iso: string | null): string | null {
   if (!iso) return null;
   const d = new Date(iso);
@@ -127,7 +153,7 @@ export function PersonDetail({ name, thumb, onSelect, onBack }: PersonDetailProp
               <SkeletonBlock width="70%" height={14} />
             </div>
           ) : person?.biography ? (
-            <p style={styles.bio}>{person.biography}</p>
+            <Biography text={person.biography} />
           ) : failed ? (
             <p style={styles.muted}>Couldn't load this person's details.</p>
           ) : null}
@@ -262,7 +288,25 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "15px",
     lineHeight: 1.65,
     marginTop: "20px",
+    marginBottom: 0,
     maxWidth: "70ch",
+  },
+  bioClamped: {
+    display: "-webkit-box",
+    WebkitLineClamp: BIO_CLAMP_LINES,
+    WebkitBoxOrient: "vertical" as const,
+    overflow: "hidden",
+  },
+  moreBtn: {
+    marginTop: "10px",
+    padding: 0,
+    background: "none",
+    border: "none",
+    color: "#e5a00d",
+    fontSize: "14px",
+    fontWeight: 600,
+    fontFamily: "inherit",
+    cursor: "pointer",
   },
   bioSkeleton: {
     display: "flex",

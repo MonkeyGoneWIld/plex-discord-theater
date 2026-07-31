@@ -32,8 +32,15 @@ interface MovieDetailProps {
   onSelectPerson?: (person: Credit) => void;
 }
 
-/** How long to wait for a page to assemble before showing it unfinished. */
-const REVEAL_TIMEOUT_MS = 6000;
+/**
+ * Hard cap on the placeholder.
+ *
+ * The gate below waits for the page's parts, but never for longer than this —
+ * a second is about the limit of what reads as "loading" rather than "stuck",
+ * and past it an unfinished page beats a placeholder. In practice a warm cache
+ * resolves well inside it and the skeleton is never seen.
+ */
+const REVEAL_TIMEOUT_MS = 1000;
 
 function authUrl(url: string): string {
   const token = getSessionToken();
@@ -286,8 +293,26 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   const dDuration = meta?.duration ?? item.duration;
   const dSummary = meta?.summary ?? item.summary ?? null;
 
+  // Episodes carry neither a ratings row nor related rows, and a metadata
+  // failure renders neither — in those cases nothing would ever report in.
+  const wantsRatings = item.type === "movie" && meta != null;
+  const wantsRelated = item.type === "movie" && meta != null && !!onSelect;
+  const wantsCast = meta != null && !!(meta.cast?.length || meta.directors?.length);
+  const revealTimedOut = useRevealTimeout(item.ratingKey, REVEAL_TIMEOUT_MS);
+  const pageReady =
+    ((meta != null || metaFailed) &&
+      (posterLoaded || !posterUrl) &&
+      (!wantsRatings || ratingsReady) &&
+      (!wantsCast || castReady) &&
+      (!wantsRelated || relatedReady)) ||
+    revealTimedOut;
+
   return (
     <div style={styles.page}>
+      {!pageReady && <DetailSkeleton wide={item.type === "episode"} />}
+      {/* Kept mounted behind the placeholder: the images and row requests the
+          gate is waiting on only make progress once they're in the tree. */}
+      <div style={pageReady ? styles.revealed : styles.prerender} aria-hidden={!pageReady}>
       {/* Backdrop — the one part that can't come from the clicked card, so it
           fades in on load rather than snapping into place. */}
       {backdropUrl && (
@@ -599,6 +624,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
           />
         )}
         </>
+      </div>
     </div>
   );
 }

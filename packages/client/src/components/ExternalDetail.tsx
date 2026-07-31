@@ -18,8 +18,15 @@ interface ExternalDetailProps {
   onBack: () => void;
 }
 
-/** How long to wait for the page to assemble before showing it unfinished. */
-const REVEAL_TIMEOUT_MS = 6000;
+/**
+ * Hard cap on the placeholder.
+ *
+ * The gate below waits for the page's parts, but never for longer than this —
+ * a second is about the limit of what reads as "loading" rather than "stuck",
+ * and past it an unfinished page beats a placeholder. In practice a warm cache
+ * resolves well inside it and the skeleton is never seen.
+ */
+const REVEAL_TIMEOUT_MS = 1000;
 
 function formatRuntime(ms: number | null): string {
   if (!ms) return "";

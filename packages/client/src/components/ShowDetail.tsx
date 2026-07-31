@@ -26,8 +26,15 @@ interface ShowDetailProps {
   onBack: () => void;
 }
 
-/** How long to wait for a page to assemble before showing it unfinished. */
-const REVEAL_TIMEOUT_MS = 6000;
+/**
+ * Hard cap on the placeholder.
+ *
+ * The gate below waits for the page's parts, but never for longer than this —
+ * a second is about the limit of what reads as "loading" rather than "stuck",
+ * and past it an unfinished page beats a placeholder. In practice a warm cache
+ * resolves well inside it and the skeleton is never seen.
+ */
+const REVEAL_TIMEOUT_MS = 1000;
 
 function authUrl(url: string): string {
   const token = getSessionToken();
@@ -125,8 +132,25 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
   const dYear = meta?.year ?? item.year;
   const dSummary = meta?.summary ?? item.summary ?? null;
 
+  // Appear once, complete — see MovieDetail. The season list is part of it:
+  // it's the reason to be on this page at all.
+  const wantsRelated = meta != null && !!onSelect;
+  const wantsCast = meta != null && !!(meta.cast?.length || meta.directors?.length);
+  const revealTimedOut = useRevealTimeout(item.ratingKey, REVEAL_TIMEOUT_MS);
+  const pageReady =
+    (meta != null &&
+      !loading &&
+      (posterLoaded || !posterUrl) &&
+      ratingsReady &&
+      (!wantsCast || castReady) &&
+      (!wantsRelated || relatedReady)) ||
+    revealTimedOut;
+
   return (
     <div style={styles.page}>
+      {!pageReady && <DetailSkeleton seasons />}
+      {/* Kept mounted behind the placeholder — see MovieDetail. */}
+      <div style={pageReady ? styles.revealed : styles.prerender} aria-hidden={!pageReady}>
       {/* Backdrop — the one part not available from the clicked card. */}
       {backdropUrl && (
         <div style={styles.backdropWrap}>
@@ -289,6 +313,7 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
           />
         )}
         </>
+      </div>
     </div>
   );
 }

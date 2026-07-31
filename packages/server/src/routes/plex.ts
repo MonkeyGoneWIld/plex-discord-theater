@@ -376,9 +376,9 @@ router.get("/search", async (req: Request, res: Response) => {
             hubIdentifier?: string;
             type?: string;
             Metadata?: PlexMetadataItem[];
-            /** People hubs carry Directory entries (tag id + name + photo)
-             *  rather than Metadata. */
-            Directory?: Array<{ id?: number; tag?: string; thumb?: string; type?: string }>;
+            /** People hubs carry Directory entries rather than Metadata — the
+             *  name is `tag` here, not `title`. */
+            Directory?: Array<{ tag?: string; title?: string; thumb?: string; type?: string }>;
           }>;
         };
       }>("/hubs/search", { query: q, limit: "30" }),
@@ -388,26 +388,42 @@ router.get("/search", async (req: Request, res: Response) => {
     const hubs = data.MediaContainer.Hub || [];
     const items: Array<ReturnType<typeof mapItem> & { inLibrary: boolean; guid?: string }> = [];
     const localGuids = new Set<string>();
-    // Cast and crew whose names match. Plex returns these in their own hubs as
-    // Directory entries, so they're collected separately from the titles and
-    // returned alongside them for the client to render as its own row.
-    const people: Array<{ id: number; name: string; thumb: string | null }> = [];
-    const seenPeople = new Set<number>();
+    // Cast and crew whose names match, collected separately from the titles.
+    //
+    // Which container Plex puts these in has changed across versions — some put
+    // people in `Directory` under a role-named hub, some in `Metadata` with a
+    // tag type — and the hub identifier is spelled differently again ("actor"
+    // vs "search.actor"). Rather than pin one shape, this accepts a person from
+    // either container whenever the hub or the entry looks person-shaped.
+    const people: Array<{ name: string; thumb: string | null }> = [];
+    const seenPeople = new Set<string>();
+    const addPerson = (name?: string, thumb?: string) => {
+      if (!name || seenPeople.has(name)) return;
+      seenPeople.add(name);
+      people.push({
+        name,
+        thumb: thumb
+          ? thumb.startsWith("http") ? externalThumbUrl(thumb) : `/api/plex/thumb${thumb}`
+          : null,
+      });
+    };
+
     for (const hub of hubs) {
+      const peopleHub =
+        PERSON_HUB_RE.test(hub.hubIdentifier ?? "") || PERSON_HUB_RE.test(hub.type ?? "");
       for (const d of hub.Directory ?? []) {
-        if (!PERSON_HUBS.has(hub.hubIdentifier ?? "") || d.id == null || !d.tag) continue;
-        if (seenPeople.has(d.id)) continue;
-        seenPeople.add(d.id);
-        people.push({
-          id: d.id,
-          name: d.tag,
-          thumb: d.thumb
-            ? d.thumb.startsWith("http") ? externalThumbUrl(d.thumb) : `/api/plex/thumb${d.thumb}`
-            : null,
-        });
+        if (peopleHub || PERSON_HUB_RE.test(d.type ?? "")) addPerson(d.tag ?? d.title, d.thumb);
       }
       if (!hub.Metadata) continue;
       for (const m of hub.Metadata) {
+        // A person can also arrive as Metadata with a tag-ish type.
+        if (peopleHub || PERSON_HUB_RE.test(m.type ?? "")) {
+          addPerson(m.title, m.thumb);
+          continue;
+        }
+        // Titles only. Episodes and seasons matched on their own names, which
+        // buried the show they belong to under a list of its parts.
+        if (m.type !== "movie" && m.type !== "show") continue;
         if (m.guid) localGuids.add(m.guid);
         items.push({ ...mapItem(m), inLibrary: true });
       }
@@ -452,9 +468,10 @@ router.get("/search", async (req: Request, res: Response) => {
   }
 });
 
-/** Search hubs that hold people rather than titles. Plex names them by role, and
- *  only these map to a person page. */
-const PERSON_HUBS = new Set(["actor", "director", "writer", "producer"]);
+/** Matches the hub identifiers, hub types and entry types Plex uses for people.
+ *  Loose on purpose: the exact spelling varies by Plex version ("actor" vs
+ *  "search.actor"), and a false positive here costs a stray name in a row. */
+const PERSON_HUB_RE = /actor|director|writer|producer|^tag$/i;
 
 /**
  * GET /api/plex/discover/meta?guid=plex://movie/<id>

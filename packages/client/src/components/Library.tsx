@@ -6,6 +6,7 @@ import { MovieCard } from "./MovieCard";
 import { SkeletonGrid } from "./SkeletonGrid";
 import { POSTER_GRID_COLUMNS, POSTER_ROW_CARD_WIDTH } from "../lib/grid";
 import {
+  authUrl,
   fetchHome,
   fetchSections,
   fetchSectionItems,
@@ -364,6 +365,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     searchReqId.current++;
     rawSearchResults.current = null;
     setSearchResults(null);
+    setPeople([]);
     setLoading(false);
     // Emptying the box (via its "X" or by deleting the text) also drops the
     // in-place History filter, restoring the full history grid.
@@ -669,6 +671,34 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 <MovieCard key={item.ratingKey} item={item} onClick={handleClick} />
               ))}
             </div>
+          )}
+          {/* Cast and crew sit between what the library has and what it
+              doesn't: a person you own films by is a better answer than a film
+              you'd have to request, and a worse one than a film already here. */}
+          {showPeople && (
+            <>
+              <div style={styles.sectionHeader}>Cast &amp; Crew</div>
+              <div style={styles.peopleRow}>
+                {people.map((p) => (
+                  <button
+                    key={p.name}
+                    type="button"
+                    style={styles.personCard}
+                    onClick={() => onSelectPerson?.(p)}
+                    title={p.name}
+                  >
+                    {p.thumb ? (
+                      <img src={authUrl(p.thumb)} alt="" style={styles.personPhoto} />
+                    ) : (
+                      <div style={{ ...styles.personPhoto, ...styles.personPhotoEmpty }}>
+                        {p.name.split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase() ?? "").join("")}
+                      </div>
+                    )}
+                    <div style={styles.personName}>{p.name}</div>
+                  </button>
+                ))}
+              </div>
+            </>
           )}
           {externalItems.length > 0 && (
             <>

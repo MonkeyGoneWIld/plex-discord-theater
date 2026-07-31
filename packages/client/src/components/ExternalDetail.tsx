@@ -22,10 +22,10 @@ interface ExternalDetailProps {
  * Hard cap on the wait.
  *
  * The gate below reveals as soon as the page's header is in — poster, metadata
- * and ratings — and gives up waiting at this point regardless. A cached page
+ * and ratings — and gives up waiting after a second regardless. A cached page
  * satisfies it within a frame or two and never shows the spinner at all.
  */
-const REVEAL_TIMEOUT_MS = 1500;
+const REVEAL_TIMEOUT_MS = 1000;
 
 function formatRuntime(ms: number | null): string {
   if (!ms) return "";

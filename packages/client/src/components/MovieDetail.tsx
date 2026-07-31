@@ -2,9 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { fetchMeta, fetchProgress, invalidateMeta, setStreams, getSessionToken, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
 import { formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
-import { useImageReady } from "../lib/useImageReady";
 import { loadSubtitlePref, saveSubtitlePref, matchSubtitleTrack } from "../lib/subtitlePref";
-import { SkeletonBlock } from "./SkeletonBlock";
 import { RatingsRow } from "./RatingsRow";
 import { RelatedRows } from "./RelatedRows";
 import { CastRow } from "./CastRow";
@@ -170,13 +168,17 @@ const dropdownStyles: Record<string, React.CSSProperties> = {
 
 export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQueue, onSuggest, onShowClick, onSeasonClick, onSelect }: MovieDetailProps) {
   const [meta, setMeta] = useState<PlexMeta | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedAudio, setSelectedAudio] = useState<number | null>(null);
   const [selectedSubtitle, setSelectedSubtitle] = useState<number | null>(null);
   const [suggested, setSuggested] = useState(false);
-  // Backstop so a backdrop that never loads can't strand the page (see `pageReady`).
-  const [revealTimedOut, setRevealTimedOut] = useState(false);
+  // Distinguishes "metadata hasn't arrived yet" from "metadata failed". The page
+  // renders either way now, so a failure is a note beside real content rather
+  // than a blank screen.
+  const [metaFailed, setMetaFailed] = useState(false);
+  // The backdrop is the one thing that can't be drawn from the clicked card, so
+  // it fades in on load instead of appearing hard.
+  const [backdropLoaded, setBackdropLoaded] = useState(false);
   // The host's own saved position for this item, or null if they've never
   // played it. Only the host can start playback, so only the host fetches it.
   const [progress, setProgress] = useState<HistoryEntry | null>(null);
@@ -185,18 +187,10 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   // the title one word per line and pushes the buttons off the screen edge.
   const narrow = useMediaQuery(NARROW_QUERY);
 
-  // Reset the reveal gate whenever a different title is opened, and start its
-  // backstop timer. Short, because the only thing it guards is the backdrop
-  // image — waiting longer than this for artwork is worse than going without it.
-  useEffect(() => {
-    setRevealTimedOut(false);
-    const timer = window.setTimeout(() => setRevealTimedOut(true), 1500);
-    return () => clearTimeout(timer);
-  }, [item.ratingKey]);
-
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    setMetaFailed(false);
+    setBackdropLoaded(false);
     fetchMeta(item.ratingKey)
       .then((m) => {
         if (cancelled) return;
@@ -209,8 +203,11 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
         const match = matchSubtitleTrack(m.subtitleTracks, loadSubtitlePref());
         setSelectedSubtitle(match ? match.id : null);
       })
-      .catch(console.error)
-      .finally(() => { if (!cancelled) setLoading(false); });
+      .catch((err) => {
+        console.error(err);
+        if (!cancelled) setMetaFailed(true);
+      })
+;
     return () => { cancelled = true; };
   }, [item.ratingKey]);
 
@@ -258,97 +255,34 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   const backdropUrl = meta?.art ? authUrl(meta.art) : null;
   const posterUrl = meta?.thumb ? authUrl(meta.thumb) : (item.thumb ? authUrl(item.thumb) : null);
 
-  // ── Reveal the page ──────────────────────────────────────────
+  // ── Optimistic render ────────────────────────────────────────
   //
-  // Wait for the metadata and the backdrop, and nothing else. An earlier version
-  // also waited on the ratings and the related rows, which meant every page paid
-  // for the slowest request on it — /collections is several Plex calls plus a
-  // TMDB recommendations lookup, so the reveal routinely hit its timeout and the
-  // skeleton sat there for seconds.
+  // There is no loading screen. The card that was clicked already carries the
+  // title, year, runtime, synopsis and poster — and that poster is decoded in
+  // the browser cache, because the card was displaying it a moment ago — so the
+  // page can be drawn in full on the first frame and simply thicken as the
+  // metadata lands.
   //
-  // Those two parts are allowed to fill in on their own instead: the ratings row
-  // reserves its height up front, and the related rows sit below the fold. The
-  // things that would actually shift the page — the artwork, title, synopsis and
-  // buttons — all arrive together, which is what the staging looked wrong for.
-  const backdropReady = useImageReady(backdropUrl);
-  const pageReady = (!loading && backdropReady) || revealTimedOut;
-
-  // Everything on this page is revealed together (see `pageReady` below), so the
-  // skeleton is a value rather than an early return — the real content has to
-  // stay mounted underneath it for its children to fetch at all.
-  const skeleton = (
-      <div>
-        <button onClick={onBack} style={styles.backBtn}>
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-          Back
-        </button>
-        <SkeletonBlock width="100%" height={300} borderRadius={0} />
-        <div style={{ display: "flex", gap: "24px", padding: "24px", maxWidth: 1100 }}>
-          <SkeletonBlock
-            width={item.type === "episode" ? 320 : 180}
-            height={item.type === "episode" ? 180 : 270}
-            borderRadius={8}
-          />
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "12px" }}>
-            <SkeletonBlock width="60%" height={24} />
-            <SkeletonBlock width="40%" height={16} />
-            <div style={{ display: "flex", gap: "8px" }}>
-              <SkeletonBlock width={60} height={24} borderRadius={12} />
-              <SkeletonBlock width={80} height={24} borderRadius={12} />
-              <SkeletonBlock width={50} height={24} borderRadius={12} />
-            </div>
-            <SkeletonBlock width="100%" height={14} />
-            <SkeletonBlock width="90%" height={14} />
-            <SkeletonBlock width="70%" height={14} />
-            {/* Play/queue buttons — without these the skeleton left a wide gap
-                exactly where the page's most prominent controls land. */}
-            <div style={{ display: "flex", gap: "10px", marginTop: "8px" }}>
-              <SkeletonBlock width={130} height={44} borderRadius={8} />
-              <SkeletonBlock width={44} height={44} borderRadius={8} />
-            </div>
-          </div>
-        </div>
-        {/* A cast row and one poster shelf, so the lower half of the page has
-            roughly the shape it will have — the previous skeleton stopped at the
-            synopsis and left everything below it blank. */}
-        <div style={shelfStyles.wrap}>
-          <SkeletonBlock width={160} height={20} />
-          <div style={{ display: "flex", gap: "18px", padding: "18px 0 2px" }}>
-            {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
-              <div key={i} style={{ flexShrink: 0, width: 150 }}>
-                <SkeletonBlock width={150} height={150} borderRadius="50%" />
-                <SkeletonBlock width="70%" height={13} style={{ marginTop: 10 }} />
-              </div>
-            ))}
-          </div>
-          <SkeletonBlock width={200} height={20} style={{ marginTop: 24 }} />
-          <div style={{ display: "flex", gap: "14px", padding: "20px 0 22px" }}>
-            {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
-              <div key={i} style={{ flexShrink: 0, width: 182 }}>
-                <SkeletonBlock width={182} height={273} borderRadius={10} />
-                <SkeletonBlock width="80%" height={13} style={{ marginTop: 8 }} />
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-  );
+  // Only what genuinely isn't known yet waits: genres, ratings, the track
+  // pickers, the cast. Each of those reserves its space (see `ratingsSlot` and
+  // `trackSlot`) so filling in never moves the text above it.
+  const dTitle = meta?.title ?? item.title;
+  const dYear = meta?.year ?? item.year;
+  const dDuration = meta?.duration ?? item.duration;
+  const dSummary = meta?.summary ?? item.summary ?? null;
 
   return (
     <div style={styles.page}>
-      {!pageReady && skeleton}
-      {/* Kept mounted while the skeleton shows — RatingsRow and RelatedRows only
-          fetch once they're in the tree, so hiding this behind an early return
-          would serialise the very requests we're waiting on. Absolutely
-          positioned and transparent so it neither paints nor takes up space
-          until everything has landed. */}
-      <div style={pageReady ? styles.revealed : styles.prerender} aria-hidden={!pageReady}>
-      {/* Backdrop */}
+      {/* Backdrop — the one part that can't come from the clicked card, so it
+          fades in on load rather than snapping into place. */}
       {backdropUrl && (
         <div style={styles.backdropWrap}>
-          <img src={backdropUrl} alt="" style={styles.backdropImg} />
+          <img
+            src={backdropUrl}
+            alt=""
+            style={{ ...styles.backdropImg, opacity: backdropLoaded ? 1 : 0 }}
+            onLoad={() => setBackdropLoaded(true)}
+          />
           <div style={styles.backdropOverlay} />
         </div>
       )}
@@ -361,8 +295,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
         Back
       </button>
 
-      {meta ? (
-        <>
+      <>
         <div style={{ ...styles.content, ...(narrow ? styles.contentNarrow : {}) }}>
           {/* Poster + Info layout — stacks on phone portrait */}
           <div style={{ ...styles.layout, ...(narrow ? styles.layoutNarrow : {}) }}>
@@ -379,7 +312,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
               >
                 <img
                   src={posterUrl}
-                  alt={meta.title}
+                  alt={dTitle}
                   style={{ ...styles.poster, ...(item.type === "episode" ? styles.posterEpisode : {}) }}
                 />
               </div>
@@ -423,52 +356,62 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                 </>
               )}
 
-              <h1 style={{ ...styles.title, ...(narrow ? styles.titleNarrow : {}) }}>{meta.title}</h1>
+              <h1 style={{ ...styles.title, ...(narrow ? styles.titleNarrow : {}) }}>{dTitle}</h1>
 
               {/* Meta row */}
               <div style={styles.metaRow}>
-                {meta.year && <span style={styles.metaItem}>{meta.year}</span>}
-                {meta.duration && (
+                {dYear && <span style={styles.metaItem}>{dYear}</span>}
+                {dDuration && (
                   <>
                     <span style={styles.metaDot}>&middot;</span>
-                    <span style={styles.metaItem}>{formatDuration(meta.duration)}</span>
+                    <span style={styles.metaItem}>{formatDuration(dDuration)}</span>
                   </>
                 )}
                 {/* Special-edition label ("Director's Cut", "Extended Edition",
                     "IMAX Edition", …) — only present when this file is a special
                     cut, so a plain theatrical release shows nothing. */}
-                {meta.editionTitle && (
+                {meta?.editionTitle && (
                   <span style={styles.editionBadge}>{meta.editionTitle}</span>
                 )}
               </div>
 
-              {/* Genres */}
-              {meta.genres.length > 0 && (
-                <div style={styles.genres}>
-                  {meta.genres.map((g) => (
-                    <span key={g} style={styles.genrePill}>{g}</span>
-                  ))}
+              {/* Genres — not on the card, so this appears with the metadata.
+                  The row reserves its height so the synopsis doesn't jump. */}
+              <div style={styles.genresSlot}>
+                {meta && meta.genres.length > 0 && (
+                  <div style={styles.genres}>
+                    {meta.genres.map((g) => (
+                      <span key={g} style={styles.genrePill}>{g}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* External ratings — movies only (not episodes, per design).
+                  Height reserved for the same reason as the genres above. */}
+              {item.type === "movie" && (
+                <div style={styles.ratingsSlot}>
+                  {meta && (
+                    <RatingsRow
+                      imdbId={meta.imdbId}
+                      tmdbId={meta.tmdbId}
+                      mediaType="movie"
+                      style={styles.ratings}
+                    />
+                  )}
                 </div>
               )}
 
-              {/* External ratings — movies only (not episodes, per design). */}
-              {item.type === "movie" && (
-                <RatingsRow
-                  imdbId={meta.imdbId}
-                  tmdbId={meta.tmdbId}
-                  mediaType="movie"
-                  style={styles.ratings}
-                />
+              {/* Summary — from the clicked card until the fuller one arrives. */}
+              {dSummary && (
+                <p style={styles.summary}>{dSummary}</p>
               )}
 
-              {/* Summary */}
-              {meta.summary && (
-                <p style={styles.summary}>{meta.summary}</p>
-              )}
-
-              {/* Audio & Subtitle selectors */}
-              <div style={{ ...styles.trackRow, ...(narrow ? styles.trackRowNarrow : {}) }}>
-                {meta.audioTracks.length > 1 && (
+              {/* Audio & Subtitle selectors — these need the stream list, so they
+                  can't be drawn from the card. The row holds its height while
+                  the metadata is in flight so the Play button doesn't move. */}
+              <div style={{ ...styles.trackRow, ...(narrow ? styles.trackRowNarrow : {}), ...styles.trackSlot }}>
+                {meta && meta.audioTracks.length > 1 && (
                   <div style={styles.trackField}>
                     <label style={styles.trackLabel}>Audio</label>
                     <TrackDropdown
@@ -479,7 +422,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                   </div>
                 )}
 
-                {meta.subtitleTracks.length > 0 && (
+                {meta && meta.subtitleTracks.length > 0 && (
                   <div style={styles.trackField}>
                     <label style={styles.trackLabel}>Subtitles</label>
                     <TrackDropdown
@@ -501,6 +444,13 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
               </div>
 
               {error && <p style={styles.errorText}>{error}</p>}
+              {/* The page still shows everything the card knew, so this is a
+                  note about what's missing rather than a dead end. */}
+              {metaFailed && (
+                <p style={styles.errorText}>
+                  Couldn't load the full details for this title, so playback isn't available.
+                </p>
+              )}
 
               {/* Progress from a previous sitting — host only, since only the
                   host's history is tracked and only the host can resume it. */}
@@ -524,7 +474,11 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                   <>
                     {resumeMs != null ? (
                       <>
-                        <button onClick={() => handlePlay(resumeMs)} style={{ ...styles.playBtn, ...(narrow ? styles.playBtnNarrow : {}) }}>
+                        <button
+                          onClick={() => handlePlay(resumeMs)}
+                          disabled={!meta}
+                          style={{ ...styles.playBtn, ...(narrow ? styles.playBtnNarrow : {}), ...(meta ? {} : styles.btnPending) }}
+                        >
                           <svg width="22" height="22" viewBox="0 0 22 22" fill="none" style={{ marginRight: 8 }}>
                             <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor"/>
                           </svg>
@@ -532,13 +486,18 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                         </button>
                         <button
                           onClick={() => handlePlay()}
-                          style={{ ...styles.startOverBtn, ...(narrow ? styles.startOverBtnNarrow : {}) }}
+                          disabled={!meta}
+                          style={{ ...styles.startOverBtn, ...(narrow ? styles.startOverBtnNarrow : {}), ...(meta ? {} : styles.btnPending) }}
                         >
                           Start Over
                         </button>
                       </>
                     ) : (
-                      <button onClick={() => handlePlay()} style={{ ...styles.playBtn, ...(narrow ? styles.playBtnNarrow : {}) }}>
+                      <button
+                        onClick={() => handlePlay()}
+                        disabled={!meta}
+                        style={{ ...styles.playBtn, ...(narrow ? styles.playBtnNarrow : {}), ...(meta ? {} : styles.btnPending) }}
+                      >
                         <svg width="22" height="22" viewBox="0 0 22 22" fill="none" style={{ marginRight: 8 }}>
                           <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor"/>
                         </svg>
@@ -604,7 +563,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
             where those are about what to watch next. Shares the shelves' wrapper
             so every row on the page lines up on the same left edge. */}
         <div style={shelfStyles.wrap}>
-          <CastRow cast={meta.cast} directors={meta.directors} writers={meta.writers} />
+          <CastRow cast={meta?.cast} directors={meta?.directors} writers={meta?.writers} />
         </div>
 
         {/* Collections then "More Like This" — same rows as the Home tab,
@@ -615,12 +574,6 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
           <RelatedRows ratingKey={item.ratingKey} recommendationsTitle="More Like This" onSelect={onSelect} />
         )}
         </>
-      ) : (
-        <div style={styles.loadingWrap}>
-          <p style={styles.loadingText}>Failed to load metadata</p>
-        </div>
-      )}
-      </div>
     </div>
   );
 }
@@ -632,21 +585,23 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#0d0d0d",
     overflow: "hidden",
   },
-  // The two halves of the atomic reveal (see `pageReady`). `prerender` keeps the
-  // real page mounted and laid out at full width — so its images fetch and the
-  // shelves measure correctly — while contributing nothing visible. Width is set
-  // explicitly because an absolutely-positioned box would otherwise shrink-wrap.
-  prerender: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    width: "100%",
-    opacity: 0,
-    pointerEvents: "none" as const,
+  // Height reservations for the parts that can't be drawn from the clicked card
+  // (see the optimistic-render note). Each holds exactly the space its content
+  // will take, so filling in never nudges what sits below it.
+  genresSlot: {
+    minHeight: "34px",
   },
-  revealed: {
-    opacity: 1,
-    transition: "opacity 0.25s ease",
+  ratingsSlot: {
+    minHeight: "26px",
+  },
+  trackSlot: {
+    minHeight: "62px",
+  },
+  // A control that exists but can't act yet, because it needs the stream list.
+  // Dimmed rather than hidden so the button doesn't pop into the layout.
+  btnPending: {
+    opacity: 0.55,
+    cursor: "default",
   },
   backdropWrap: {
     position: "absolute",
@@ -662,6 +617,7 @@ const styles: Record<string, React.CSSProperties> = {
     objectFit: "cover",
     filter: "blur(20px) brightness(0.3)",
     transform: "scale(1.1)",
+    transition: "opacity 0.4s ease",
   },
   backdropOverlay: {
     position: "absolute",
@@ -685,28 +641,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
     fontFamily: "inherit",
     backdropFilter: "blur(12px)",
-  },
-  loadingWrap: {
-    position: "relative",
-    zIndex: 10,
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
-    minHeight: "50vh",
-    gap: "16px",
-  },
-  spinner: {
-    width: "32px",
-    height: "32px",
-    border: "3px solid rgba(255,255,255,0.1)",
-    borderTopColor: "#e5a00d",
-    borderRadius: "50%",
-    animation: "spin 0.8s linear infinite",
-  },
-  loadingText: {
-    color: "#888",
-    fontSize: "15px",
   },
   content: {
     position: "relative",

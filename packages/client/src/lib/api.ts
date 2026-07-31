@@ -242,6 +242,27 @@ export function fetchSectionItems(
   return apiGet(`/api/plex/sections/${encodeURIComponent(sectionId)}/all${qs ? `?${qs}` : ""}`, options);
 }
 
+/**
+ * Warm the caches for a title the user looks like they're about to open.
+ *
+ * Called on card hover (see MovieCard), so by the time the click lands the
+ * detail page usually has its data already. Safe to call repeatedly: cachedGet
+ * stores the in-flight promise, so a second call during the first request joins
+ * it rather than starting another.
+ *
+ * Errors are swallowed on purpose — this is speculative work for a page the user
+ * may never open, and the real fetch will surface any problem properly.
+ */
+export function prefetchDetail(item: Pick<PlexItem, "ratingKey" | "type" | "inLibrary">): void {
+  // Not-in-library results resolve through a different endpoint keyed on guid or
+  // tmdbId, and episodes have no related rows — neither is worth speculating on.
+  if (item.inLibrary === false) return;
+  void fetchMeta(item.ratingKey).catch(() => {});
+  if (item.type === "movie" || item.type === "show") {
+    void fetchRelated(item.ratingKey).catch(() => {});
+  }
+}
+
 export function searchPlex(query: string): Promise<{ items: PlexItem[] }> {
   return apiGet(`/api/plex/search?q=${encodeURIComponent(query)}`);
 }

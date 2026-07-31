@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { PlexItem } from "../lib/api";
-import { getSessionToken } from "../lib/api";
+import { getSessionToken, prefetchDetail } from "../lib/api";
 
 interface MovieCardProps {
   item: PlexItem;
@@ -31,7 +31,15 @@ function authThumbUrl(thumb: string, w?: number, h?: number): string {
 // signal the card is still clickable (it opens the request page).
 const EXTERNAL_POSTER_FILTER = "grayscale(65%) brightness(0.55)";
 
+/** How long the pointer must rest on a card before it counts as intent to open
+ *  it. Long enough to skip cards being swept past, short enough that the fetch
+ *  is usually done by the time a deliberate click lands. */
+const HOVER_INTENT_MS = 120;
+
 export function MovieCard({ item, onClick, progress, watched, onRemove, removeLabel = "Remove" }: MovieCardProps) {
+  const prefetchTimer = useRef<number | undefined>(undefined);
+  // A card can unmount while its timer is pending (filtering, tab switch).
+  useEffect(() => () => { if (prefetchTimer.current) window.clearTimeout(prefetchTimer.current); }, []);
   // Online (Discover) result: in search but not in the library. Clickable — it
   // opens a detail view (with a request button) rather than playback.
   const external = item.inLibrary === false;
@@ -49,6 +57,11 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
       title={item.title}
       style={external ? { ...styles.card, ...styles.cardExternal } : styles.card}
       onMouseEnter={(e) => {
+        // Prefetch what the detail page needs, but only once the pointer has
+        // settled — sweeping across a row would otherwise fire a request per
+        // card. Cancelled on leave, and cheap to repeat (the API cache holds the
+        // in-flight promise, so a re-entry joins the existing request).
+        prefetchTimer.current = window.setTimeout(() => prefetchDetail(item), HOVER_INTENT_MS);
         const el = e.currentTarget;
         el.style.transform = "scale(1.03)";
         // Even, soft amber halo — 0 offset so it reads the same on every side.
@@ -62,6 +75,7 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
         }
       }}
       onMouseLeave={(e) => {
+        if (prefetchTimer.current) window.clearTimeout(prefetchTimer.current);
         const el = e.currentTarget;
         el.style.transform = "scale(1)";
         el.style.boxShadow = "none";

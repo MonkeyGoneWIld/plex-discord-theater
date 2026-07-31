@@ -4,14 +4,12 @@ import {
   getSessionToken, type HistoryEntry, type PlexItem, type PlexMeta, type SeerrSeason,
 } from "../lib/api";
 import { formatTimecode } from "../lib/format";
-import { useImageReady } from "../lib/useImageReady";
 import { MovieCard } from "./MovieCard";
 import { RatingsRow } from "./RatingsRow";
 import { RelatedRows } from "./RelatedRows";
 import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
 import { SeasonRequestGrid } from "./SeasonRequestGrid";
-import { SkeletonBlock } from "./SkeletonBlock";
 
 interface ShowDetailProps {
   item: PlexItem;
@@ -38,14 +36,10 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
   // Seasons the library is missing, per Seerr (posters from TMDB).
   const [missingSeasons, setMissingSeasons] = useState<SeerrSeason[]>([]);
   const [reloadNonce, setReloadNonce] = useState(0);
-  // Backstop so a backdrop that never loads can't strand the page.
-  const [revealTimedOut, setRevealTimedOut] = useState(false);
-
-  useEffect(() => {
-    setRevealTimedOut(false);
-    const timer = window.setTimeout(() => setRevealTimedOut(true), 1500);
-    return () => clearTimeout(timer);
-  }, [item.ratingKey]);
+  // The backdrop is the one part that can't come from the clicked card, so it
+  // fades in on load rather than appearing hard.
+  const [backdropLoaded, setBackdropLoaded] = useState(false);
+  useEffect(() => setBackdropLoaded(false), [item.ratingKey]);
   // Where this viewer left the show: the episode in progress, or the one after
   // the last they finished. Null when never started or watched to the end.
   const [nextUp, setNextUp] = useState<HistoryEntry | null>(null);
@@ -98,63 +92,24 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
   // auto-navigate straight to its episode list, which skipped the synopsis,
   // ratings, cast and related rows this page carries.
   //
-  // Wait for the show's own data and its backdrop, and nothing else — see the
-  // note in MovieDetail. In particular this no longer waits on Seerr: that
-  // answer only decides whether a "missing seasons" block appears below the
-  // season grid, which isn't worth holding the page for.
-  const backdropReady = useImageReady(backdropUrl);
-  const pageReady = (!loading && backdropReady) || revealTimedOut;
-
-  const skeleton = (
-      <div>
-        <button onClick={onBack} style={styles.backBtn}>
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-          Back
-        </button>
-        <SkeletonBlock width="100%" height={300} borderRadius={0} />
-        <div style={{ display: "flex", gap: "24px", padding: "24px", maxWidth: 1100 }}>
-          <SkeletonBlock width={180} height={270} borderRadius={8} />
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "12px" }}>
-            <SkeletonBlock width="60%" height={24} />
-            <SkeletonBlock width="40%" height={16} />
-            <SkeletonBlock width="100%" height={14} />
-            <SkeletonBlock width="90%" height={14} />
-          </div>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: "16px", padding: "0 24px 24px" }}>
-          {[0, 1, 2, 3].map((i) => (
-            <div key={i}>
-              <SkeletonBlock height={240} borderRadius={8} />
-              <SkeletonBlock width="70%" height={14} style={{ marginTop: 8 }} />
-            </div>
-          ))}
-        </div>
-        {/* Cast row placeholder, so the page below the seasons isn't just blank. */}
-        <div style={shelfStyles.wrap}>
-          <SkeletonBlock width={160} height={20} />
-          <div style={{ display: "flex", gap: "18px", padding: "18px 0 2px" }}>
-            {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
-              <div key={i} style={{ flexShrink: 0, width: 150 }}>
-                <SkeletonBlock width={150} height={150} borderRadius="50%" />
-                <SkeletonBlock width="70%" height={13} style={{ marginTop: 10 }} />
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-  );
+  // Optimistic render, as in MovieDetail: the card that was clicked already has
+  // the title, year, poster and synopsis, so the page is drawn immediately and
+  // the metadata fills in the parts it alone knows.
+  const dTitle = meta?.title ?? item.title;
+  const dYear = meta?.year ?? item.year;
+  const dSummary = meta?.summary ?? item.summary ?? null;
 
   return (
     <div style={styles.page}>
-      {!pageReady && skeleton}
-      {/* Kept mounted behind the skeleton so its children fetch — see MovieDetail. */}
-      <div style={pageReady ? styles.revealed : styles.prerender} aria-hidden={!pageReady}>
-      {/* Backdrop */}
+      {/* Backdrop — the one part not available from the clicked card. */}
       {backdropUrl && (
         <div style={styles.backdropWrap}>
-          <img src={backdropUrl} alt="" style={styles.backdropImg} />
+          <img
+            src={backdropUrl}
+            alt=""
+            style={{ ...styles.backdropImg, opacity: backdropLoaded ? 1 : 0 }}
+            onLoad={() => setBackdropLoaded(true)}
+          />
           <div style={styles.backdropOverlay} />
         </div>
       )}
@@ -167,25 +122,24 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
         Back
       </button>
 
-      {meta ? (
-        <>
+      <>
         <div style={styles.content}>
           {/* Poster + Info layout */}
           <div style={styles.layout}>
             {posterUrl && (
               <div style={styles.posterWrap}>
-                <img src={posterUrl} alt={meta.title} style={styles.poster} />
+                <img src={posterUrl} alt={dTitle} style={styles.poster} />
               </div>
             )}
 
             <div style={styles.info}>
-              <h1 style={styles.title}>{meta.title}</h1>
+              <h1 style={styles.title}>{dTitle}</h1>
 
               <div style={styles.metaRow}>
-                {meta.year && <span style={styles.metaItem}>{meta.year}</span>}
+                {dYear && <span style={styles.metaItem}>{dYear}</span>}
                 {item.childCount != null && (
                   <>
-                    {meta.year && <span style={styles.metaDot}>&middot;</span>}
+                    {dYear && <span style={styles.metaDot}>&middot;</span>}
                     <span style={styles.metaItem}>
                       {item.childCount} {item.childCount === 1 ? "Season" : "Seasons"}
                     </span>
@@ -193,24 +147,32 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
                 )}
               </div>
 
-              {meta.genres.length > 0 && (
-                <div style={styles.genres}>
-                  {meta.genres.map((g) => (
-                    <span key={g} style={styles.genrePill}>{g}</span>
-                  ))}
-                </div>
-              )}
+              {/* Genres and ratings need the metadata, so both reserve their
+                  height to keep the synopsis from jumping when they land. */}
+              <div style={styles.genresSlot}>
+                {meta && meta.genres.length > 0 && (
+                  <div style={styles.genres}>
+                    {meta.genres.map((g) => (
+                      <span key={g} style={styles.genrePill}>{g}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
 
               {/* External ratings for the show as a whole (not per-season). */}
-              <RatingsRow
-                imdbId={meta.imdbId}
-                tmdbId={meta.tmdbId}
-                mediaType="show"
-                style={styles.ratings}
-              />
+              <div style={styles.ratingsSlot}>
+                {meta && (
+                  <RatingsRow
+                    imdbId={meta.imdbId}
+                    tmdbId={meta.tmdbId}
+                    mediaType="show"
+                    style={styles.ratings}
+                  />
+                )}
+              </div>
 
-              {meta.summary && (
-                <p style={styles.summary}>{meta.summary}</p>
+              {dSummary && (
+                <p style={styles.summary}>{dSummary}</p>
               )}
 
               {/* Pick up where this viewer left off. Opens the episode's detail
@@ -259,7 +221,7 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
           ) : (
             <div style={styles.seasonsSection}>
               <SeasonRequestGrid
-                tmdbId={meta.tmdbId ?? null}
+                tmdbId={meta?.tmdbId ?? null}
                 seasons={missingSeasons}
                 onRequested={() => setReloadNonce((n) => n + 1)}
               >
@@ -277,7 +239,7 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
 
         {/* Cast & Crew before the collection rows — see MovieDetail. */}
         <div style={shelfStyles.wrap}>
-          <CastRow cast={meta.cast} directors={meta.directors} writers={meta.writers} />
+          <CastRow cast={meta?.cast} directors={meta?.directors} writers={meta?.writers} />
         </div>
 
         {/* Collections then "More Like This" — same rows as the Home tab,
@@ -290,12 +252,6 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
           />
         )}
         </>
-      ) : (
-        <div style={styles.loadingWrap}>
-          <p style={styles.loadingText}>Failed to load show details</p>
-        </div>
-      )}
-      </div>
     </div>
   );
 }
@@ -307,18 +263,12 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#0d0d0d",
     overflow: "hidden",
   },
-  // Atomic reveal — see MovieDetail for the reasoning.
-  prerender: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    width: "100%",
-    opacity: 0,
-    pointerEvents: "none" as const,
+  // Height reservations for the parts that need the metadata — see MovieDetail.
+  genresSlot: {
+    minHeight: "34px",
   },
-  revealed: {
-    opacity: 1,
-    transition: "opacity 0.25s ease",
+  ratingsSlot: {
+    minHeight: "26px",
   },
   backdropWrap: {
     position: "absolute",
@@ -334,6 +284,7 @@ const styles: Record<string, React.CSSProperties> = {
     objectFit: "cover",
     filter: "blur(20px) brightness(0.3)",
     transform: "scale(1.1)",
+    transition: "opacity 0.4s ease",
   },
   backdropOverlay: {
     position: "absolute",
@@ -357,28 +308,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
     fontFamily: "inherit",
     backdropFilter: "blur(12px)",
-  },
-  loadingWrap: {
-    position: "relative",
-    zIndex: 10,
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
-    minHeight: "50vh",
-    gap: "16px",
-  },
-  spinner: {
-    width: "32px",
-    height: "32px",
-    border: "3px solid rgba(255,255,255,0.1)",
-    borderTopColor: "#e5a00d",
-    borderRadius: "50%",
-    animation: "spin 0.8s linear infinite",
-  },
-  loadingText: {
-    color: "#888",
-    fontSize: "15px",
   },
   content: {
     position: "relative",

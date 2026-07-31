@@ -156,6 +156,17 @@ interface PlexMetadataItem {
    *  `tag` is the collection's title; used to find the real collection (with its
    *  ratingKey/childCount) in the section's collection list. */
   Collection?: Array<{ tag: string; id?: number }>;
+  /** Cast, in Plex's billing order. `tag` is the actor, `role` the character. */
+  Role?: PlexTag[];
+  Director?: PlexTag[];
+  Writer?: PlexTag[];
+}
+
+/** A credited person. `thumb` is a full remote URL (TMDB), not a Plex path. */
+interface PlexTag {
+  tag: string;
+  role?: string;
+  thumb?: string;
 }
 
 // ─── Library browsing ────────────────────────────────────────────
@@ -447,6 +458,10 @@ router.get("/discover/meta", async (req: Request, res: Response) => {
       thumb: m.thumb ? externalThumbUrl(m.thumb) : null,
       // TMDB id (for requesting via Seerr), pulled from the external id list.
       tmdbId: tmdbIdFromGuids(m.Guid),
+      // Credits, when Plex's online catalog carries them for this title.
+      cast: mapCredits(m.Role),
+      directors: mapCredits(m.Director, 10),
+      writers: mapCredits(m.Writer, 10),
     });
   } catch (err) {
     console.error("Discover meta error:", err);
@@ -669,6 +684,29 @@ function externalThumbUrl(thumb: string | undefined): string | null {
   return `/api/plex/thumb/photo/:/transcode?url=${encodeURIComponent(thumb)}`;
 }
 
+/** How many cast members the detail pages show. Plex's own list is unbounded and
+ *  the tail is bit parts with no headshots, which make for a poor row. */
+const MAX_CAST = 30;
+
+/**
+ * Map Plex's Role/Director/Writer tags to the client's credit shape.
+ *
+ * Person thumbs are absolute URLs on Plex's own metadata CDN rather than local
+ * library paths, so they go through the same external-image proxy the Discover
+ * posters use — the client never talks to that CDN directly.
+ */
+function mapCredits(tags: PlexTag[] | undefined, limit = MAX_CAST) {
+  return (tags || []).slice(0, limit).map((t) => ({
+    name: t.tag,
+    role: t.role ?? null,
+    thumb: t.thumb
+      ? t.thumb.startsWith("http")
+        ? externalThumbUrl(t.thumb)
+        : `/api/plex/thumb${t.thumb}`
+      : null,
+  }));
+}
+
 /**
  * GET /api/plex/meta/:ratingKey
  * Get detailed metadata for a single item.
@@ -752,6 +790,11 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       // IMDb id — used by the client to look up external ratings. Null when
       // Plex's metadata agent never stored one.
       imdbId,
+      // Credits for the detail page's Cast & Crew row. Episodes carry their own
+      // guest cast; shows carry the series regulars.
+      cast: mapCredits(m.Role),
+      directors: mapCredits(m.Director, 10),
+      writers: mapCredits(m.Writer, 10),
     });
   } catch (err) {
     console.error("Metadata error:", err);
@@ -824,10 +867,11 @@ interface TmdbPart {
 const tmdbMovieCollectionCache = new Map<number, { id: number; name: string } | null>();
 const tmdbCollectionCache = new Map<number, { name: string; parts: TmdbPart[] } | null>();
 
-async function tmdbGet<T>(path: string): Promise<T | null> {
+async function tmdbGet<T>(path: string, params?: Record<string, string>): Promise<T | null> {
   if (!TMDB_API_KEY) return null;
   const url = new URL(`${TMDB_API_BASE}${path}`);
   url.searchParams.set("api_key", TMDB_API_KEY);
+  for (const [k, v] of Object.entries(params ?? {})) url.searchParams.set(k, v);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
   try {
@@ -843,6 +887,27 @@ async function tmdbGet<T>(path: string): Promise<T | null> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Map a TMDB cast/crew array to the same credit shape the Plex path produces,
+ * so the client renders one component for library and Discover titles alike.
+ */
+function tmdbCredits<T extends { name?: string; profile_path?: string | null }>(
+  people: T[] | undefined,
+  limit: number,
+  roleOf: (p: T) => string | undefined,
+) {
+  return (people ?? [])
+    .filter((p) => p.name)
+    .slice(0, limit)
+    .map((p) => ({
+      name: p.name as string,
+      role: roleOf(p) || null,
+      thumb: p.profile_path
+        ? externalThumbUrl(`https://image.tmdb.org/t/p/w185${p.profile_path}`)
+        : null,
+    }));
 }
 
 /** The TMDB collection a movie belongs to, or null when it's a standalone film
@@ -1269,7 +1334,16 @@ router.get("/tmdb/meta", async (req: Request, res: Response) => {
       episode_run_time?: number[];
       poster_path?: string | null;
       genres?: Array<{ name?: string }>;
-    }>(`/${type === "show" ? "tv" : "movie"}/${tmdbId}`);
+      credits?: {
+        cast?: Array<{ name?: string; character?: string; profile_path?: string | null }>;
+        crew?: Array<{ name?: string; job?: string; profile_path?: string | null }>;
+      };
+    }>(
+      `/${type === "show" ? "tv" : "movie"}/${tmdbId}`,
+      // Credits ride along on the detail request rather than costing a second
+      // round trip — the cast row is rendered with the rest of the page.
+      { append_to_response: "credits" },
+    );
     if (!data) {
       res.status(404).json({ error: "Details not available" });
       return;
@@ -1289,6 +1363,17 @@ router.get("/tmdb/meta", async (req: Request, res: Response) => {
         ? externalThumbUrl(`https://image.tmdb.org/t/p/w500${data.poster_path}`)
         : null,
       tmdbId: Number(tmdbId),
+      // Same credit shape the library meta endpoint returns, so the detail pages
+      // render one Cast & Crew component regardless of where the title came from.
+      cast: tmdbCredits(data.credits?.cast, MAX_CAST, (c) => c.character),
+      directors: tmdbCredits(
+        (data.credits?.crew ?? []).filter((c) => c.job === "Director"), 10, (c) => c.job,
+      ),
+      writers: tmdbCredits(
+        (data.credits?.crew ?? []).filter((c) => c.job === "Writer" || c.job === "Screenplay"),
+        10,
+        (c) => c.job,
+      ),
     });
   } catch (err) {
     console.error("TMDB meta error:", err);

@@ -203,6 +203,11 @@ export interface PlexMeta {
   tmdbId?: number | null;
   /** IMDb id (e.g. "tt0111161") — for external ratings. Optional/nullable. */
   imdbId?: string | null;
+  /** Credits for the Cast & Crew row. Optional so a newer client served by an
+   *  older server simply renders no row. */
+  cast?: Credit[];
+  directors?: Credit[];
+  writers?: Credit[];
 }
 
 export interface PlexHub {
@@ -292,6 +297,20 @@ export interface DiscoverMeta {
   thumb: string | null;
   /** TMDB id for requesting via Seerr; null if unknown. */
   tmdbId: number | null;
+  /** Optional so a newer client served by an older server degrades to no row. */
+  cast?: Credit[];
+  directors?: Credit[];
+  writers?: Credit[];
+}
+
+/** One credited person on a title — an actor with their character, or a
+ *  director/writer with their job. */
+export interface Credit {
+  name: string;
+  /** Character name for cast; job title for crew. Null when unknown. */
+  role: string | null;
+  /** Proxied headshot URL, or null when the provider has no photo. */
+  thumb: string | null;
 }
 
 export function fetchDiscoverMeta(guid: string): Promise<DiscoverMeta> {

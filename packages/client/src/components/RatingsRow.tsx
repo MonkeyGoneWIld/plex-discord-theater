@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchRatings, type Ratings, type RatingsMediaType } from "../lib/api";
 // Rating-source marks — the same icons Rotten Tomatoes and Seerr use.
 // RT: Fresh tomato / Rotten green splat, and upright / spilled audience popcorn.
@@ -16,6 +16,9 @@ interface RatingsRowProps {
   mediaType: RatingsMediaType;
   /** Extra style for the row container (e.g. margins) set by the caller. */
   style?: React.CSSProperties;
+  /** Fired once the lookup settles, so a detail page can reveal the whole page
+   *  at once rather than letting the scores fade in on their own. */
+  onReady?: () => void;
 }
 
 // Reserve the row's height from first paint so filling in the (async) ratings
@@ -30,19 +33,22 @@ const ROW_MIN_HEIGHT = 26;
  * is in flight and the scores fade in without shifting the layout. If nothing is
  * available (no key configured, or the title is unknown to MDBList) it collapses.
  */
-export function RatingsRow({ imdbId, tmdbId, mediaType, style }: RatingsRowProps) {
+export function RatingsRow({ imdbId, tmdbId, mediaType, style, onReady }: RatingsRowProps) {
   const [ratings, setRatings] = useState<Ratings | null>(null);
   const [loading, setLoading] = useState(true);
+  // Ref, not a dependency — see RelatedRows.
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
 
   useEffect(() => {
     setRatings(null);
-    if (!imdbId && tmdbId == null) { setLoading(false); return; }
+    if (!imdbId && tmdbId == null) { setLoading(false); onReadyRef.current?.(); return; }
     setLoading(true);
     let cancelled = false;
     fetchRatings({ imdbId, tmdbId, mediaType })
       .then((res) => { if (!cancelled && res.configured) setRatings(res.ratings); })
       .catch(() => { /* ratings are a nicety — never surface an error for them */ })
-      .finally(() => { if (!cancelled) setLoading(false); });
+      .finally(() => { if (!cancelled) { setLoading(false); onReadyRef.current?.(); } });
     return () => { cancelled = true; };
   }, [imdbId, tmdbId, mediaType]);
 

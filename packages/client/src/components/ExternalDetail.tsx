@@ -5,6 +5,9 @@ import {
 } from "../lib/api";
 import { SeasonRequestGrid } from "./SeasonRequestGrid";
 import { RatingsRow } from "./RatingsRow";
+import { SkeletonBlock } from "./SkeletonBlock";
+import { CastRow } from "./CastRow";
+import { shelfStyles } from "./PosterShelf";
 
 interface ExternalDetailProps {
   item: PlexItem;
@@ -41,6 +44,11 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
   // MediaStatus (null = not requested).
   const [seerrConfigured, setSeerrConfigured] = useState<boolean | null>(null);
   const [status, setStatus] = useState<number | null>(null);
+  // Whether the Seerr lookup has come back. The button stays a skeleton until it
+  // has: rendering "Request" first and swapping it for "Available"/"Processing" a
+  // moment later offers an action that was never really there, and a mis-aimed
+  // click in that window fires a request for something already owned.
+  const [statusLoaded, setStatusLoaded] = useState(false);
   const [requesting, setRequesting] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
 
@@ -75,9 +83,11 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
   useEffect(() => {
     if (tmdbId == null || mediaType !== "movie") return;
     let cancelled = false;
+    setStatusLoaded(false);
     fetchSeerrStatus(tmdbId, mediaType)
       .then((s) => { if (!cancelled) { setSeerrConfigured(s.configured); setStatus(s.status); } })
-      .catch(() => { if (!cancelled) setSeerrConfigured(false); });
+      .catch(() => { if (!cancelled) setSeerrConfigured(false); })
+      .finally(() => { if (!cancelled) setStatusLoaded(true); });
     return () => { cancelled = true; };
   }, [tmdbId, mediaType]);
 
@@ -157,14 +167,17 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
               grid below. Both hidden when Seerr isn't set up or there's no
               TMDB id. */}
           {tmdbId != null && mediaType === "movie" && seerrConfigured !== false && (
-            statusLabel ? (
+            !statusLoaded ? (
+              // Same footprint as the real button, so nothing shifts when it lands.
+              <SkeletonBlock width={140} height={40} borderRadius={8} />
+            ) : statusLabel ? (
               <button disabled style={{ ...styles.requestBtn, ...styles.requestBtnDone }}>
                 {statusLabel}
               </button>
             ) : (
               <button
                 onClick={handleRequest}
-                disabled={requesting || seerrConfigured == null}
+                disabled={requesting}
                 style={styles.requestBtn}
               >
                 {requesting ? "Requesting…" : "Request"}
@@ -174,6 +187,11 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
           {requestError && <div style={styles.requestError}>{requestError}</div>}
         </div>
       </div>
+      {/* Cast & Crew — from TMDB here rather than Plex, but the same row. */}
+      <div style={shelfStyles.wrap}>
+        <CastRow cast={meta?.cast} directors={meta?.directors} writers={meta?.writers} />
+      </div>
+
       {/* TV: same season request grid as the library show page. */}
       {tmdbId != null && mediaType === "tv" && seerrTv?.configured !== false && (
         <div style={styles.seasonsWrap}>

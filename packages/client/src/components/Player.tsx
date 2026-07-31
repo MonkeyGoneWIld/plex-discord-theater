@@ -1748,6 +1748,26 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     syncActionsRef.current?.sendSeek(positionSeconds);
   }, [handleHostSeek]);
 
+  /**
+   * Toggle playback and announce it to the room. Shared by the spacebar shortcut
+   * and by clicking the video itself, so both stay in step.
+   *
+   * Refs rather than state throughout: this is called from a window key listener
+   * that is attached once, and re-binding it on every play/pause flip would drop
+   * keystrokes during the swap.
+   */
+  const togglePlayPause = useCallback(() => {
+    const video = videoRef.current;
+    if (!video || !canControlRef.current) return;
+    if (video.paused) {
+      video.play();
+      syncActionsRef.current?.sendResume(video.currentTime);
+    } else {
+      video.pause();
+      syncActionsRef.current?.sendPause(video.currentTime);
+    }
+  }, []);
+
   // Keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1768,14 +1788,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           break;
         case " ":
           e.preventDefault();
-          if (!canControlRef.current) return;
-          if (video.paused) {
-            video.play();
-            syncActionsRef.current?.sendResume(video.currentTime);
-          } else {
-            video.pause();
-            syncActionsRef.current?.sendPause(video.currentTime);
-          }
+          togglePlayPause();
           break;
         // Routed through the controls' skip accumulator rather than seeking
         // here, so holding or spamming an arrow key stacks into one seek and
@@ -2137,10 +2150,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         </div>
       )}
 
+      {/* Click the picture to play/pause, as every other video player does.
+          togglePlayPause no-ops for a plain viewer, so the cursor is the only
+          hint that differs. Overlays (controls, dialogs, skip buttons) sit above
+          this and handle their own clicks, so they never fall through to here. */}
       <video
         ref={videoRef}
-        style={styles.video}
+        style={canControl ? { ...styles.video, cursor: "pointer" } : styles.video}
         playsInline
+        onClick={togglePlayPause}
       />
 
       {/* Track switching freeze-frame overlay */}

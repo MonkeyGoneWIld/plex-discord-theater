@@ -10,7 +10,8 @@ import { ExternalDetail } from "./components/ExternalDetail";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PeoplePanel } from "./components/PeoplePanel";
 import { formatMediaTitle } from "./lib/format";
-import { authUrl, fetchMeta } from "./lib/api";
+import { authUrl, fetchMeta, invalidateMeta, setStreams } from "./lib/api";
+import { loadSubtitlePref, matchSubtitleTrack } from "./lib/subtitlePref";
 import { useMediaQuery, MOBILE_LANDSCAPE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem } from "./hooks/useSync";
@@ -355,11 +356,6 @@ export function App() {
 
   // For single-season shows: replace the show view with the season view
   // so back goes straight to library instead of looping
-  const handleReplaceShowWithSeason = useCallback((season: PlexItem, show: PlexItem) => {
-    replaceView({ kind: "season", item: season, show });
-    emitBrowse(`Looking at ${show.title} \u2014 Season ${season.index ?? "?"}`);
-  }, [replaceView, emitBrowse]);
-
   const handleSeasonEpisode = useCallback((episode: PlexItem) => {
     pushView({ kind: "detail", item: episode });
     emitBrowse(`Looking at ${formatMediaTitle(episode)}`);
@@ -403,7 +399,29 @@ export function App() {
     goToShow(show);
   }, [goToShow]);
 
-  const handlePlayNext = useCallback((queueItem: QueueItem) => {
+  const handlePlayNext = useCallback(async (queueItem: QueueItem) => {
+    // Re-apply the viewer's remembered subtitle choice to the incoming item.
+    //
+    // Nothing else does this on the auto-advance path: MovieDetail is where
+    // tracks normally get chosen, and moving to the next episode skips it
+    // entirely, so Plex would fall back to the part's own default. The stream
+    // has to be selected *before* the player mounts — once the transcode has
+    // started, changing it costs a restart. A failure here is non-fatal: the
+    // episode still plays, just with whatever Plex defaults to.
+    let subtitles = queueItem.subtitles;
+    try {
+      const meta = await fetchMeta(queueItem.ratingKey);
+      const pref = loadSubtitlePref();
+      if (pref && meta.partId != null) {
+        const match = matchSubtitleTrack(meta.subtitleTracks, pref);
+        await setStreams(meta.partId, { subtitleStreamID: match?.id ?? 0 });
+        invalidateMeta(queueItem.ratingKey);
+        subtitles = match != null;
+      }
+    } catch (err) {
+      console.error("Failed to carry subtitle preference to next item:", err);
+    }
+
     const playerView: View = {
       kind: "player",
       item: {
@@ -416,7 +434,7 @@ export function App() {
         parentIndex: queueItem.parentIndex,
         index: queueItem.index,
       },
-      subtitles: queueItem.subtitles,
+      subtitles,
     };
     setViewStack((s) => {
       const covering = s[s.length - 1]?.kind !== "player";
@@ -698,7 +716,6 @@ export function App() {
         <ShowDetail
           item={view.item}
           onSelectSeason={handleShowSeason}
-          onReplaceWithSeason={handleReplaceShowWithSeason}
           // Resume jumps straight to the episode; the breadcrumb synthesizes the
           // show and season it skipped past, so Back still walks up properly.
           onSelectEpisode={handleSeasonEpisode}

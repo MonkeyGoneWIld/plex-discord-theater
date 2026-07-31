@@ -55,16 +55,17 @@ export const shelfStyles: Record<string, React.CSSProperties> = {
     color: "#e0e0e0",
     fontSize: "20px",
     fontWeight: 700,
-    marginBottom: "12px",
+    marginBottom: 0,
     letterSpacing: "-0.01em",
   },
   row: {
     display: "flex",
     gap: "14px",
     overflowX: "auto" as const,
-    // See Library.tsx hubRow: symmetric padding keeps the card hover halo from
-    // being clipped by the scroller's overflow box.
-    padding: "16px 16px 18px",
+    // See Library.tsx hubRow — vertical-only padding, kept >= the hover-glow
+    // radius. Horizontal padding here would shrink the cards and let an extra
+    // one peek in at the row's edge.
+    padding: "20px 0 22px",
   },
   card: {
     flexShrink: 0,

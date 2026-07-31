@@ -853,23 +853,27 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "8px 0 32px",
   },
   hubSection: {
-    padding: "0 24px 8px",
+    // No bottom padding — hubRow's 22px bottom padding already separates rows.
+    padding: "0 24px",
   },
   hubLabel: {
     color: "#e0e0e0",
     fontSize: "20px",
     fontWeight: 700,
-    marginBottom: "12px",
+    // The row's own top padding (below) supplies the gap to the cards.
+    marginBottom: 0,
     letterSpacing: "-0.01em",
   },
   hubRow: {
     display: "flex",
     gap: "14px",
     overflowX: "auto" as const,
-    // Symmetric padding gives the card's hover halo room inside the scroller's
-    // clip box — overflowX:auto also clips the vertical axis, so without this the
-    // glow gets sheared off top/bottom and at the first/last card.
-    padding: "16px 16px 18px",
+    // Vertical padding only, and it must stay >= the card's hover-glow radius:
+    // overflowX:auto also clips the vertical axis, so without this the halo gets
+    // sheared off top and bottom. Horizontal padding would shrink the content box
+    // that POSTER_ROW_CARD_WIDTH's `100%` divides by, making the ten cards narrow
+    // enough for an eleventh to peek in at the right edge — so keep it at zero.
+    padding: "20px 0 22px",
   },
   hubCard: {
     flexShrink: 0,

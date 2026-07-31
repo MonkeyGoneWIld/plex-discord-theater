@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PosterShelf, shelfStyles } from "./PosterShelf";
 import { fetchRelated, type PlexCollection, type PlexItem } from "../lib/api";
 
@@ -9,6 +9,9 @@ interface RelatedRowsProps {
   recommendationsTitle: string;
   /** Open a title's detail page — the same navigation the library grid uses. */
   onSelect: (item: PlexItem) => void;
+  /** Fired once the fetch settles, success or not, so the detail page can hold
+   *  its reveal until these rows are ready to appear with everything else. */
+  onReady?: () => void;
 }
 
 /**
@@ -21,9 +24,13 @@ interface RelatedRowsProps {
  * tab. Renders nothing until there's at least one row to show, so an item with
  * neither leaves no empty headers behind.
  */
-export function RelatedRows({ ratingKey, recommendationsTitle, onSelect }: RelatedRowsProps) {
+export function RelatedRows({ ratingKey, recommendationsTitle, onSelect, onReady }: RelatedRowsProps) {
   const [collections, setCollections] = useState<PlexCollection[]>([]);
   const [recommendations, setRecommendations] = useState<PlexItem[]>([]);
+  // Ref, not a dependency: parents pass an inline arrow, and depending on it
+  // would refetch on every parent render.
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
 
   useEffect(() => {
     setCollections([]);
@@ -41,7 +48,8 @@ export function RelatedRows({ ratingKey, recommendationsTitle, onSelect }: Relat
         if (cancelled) return;
         setCollections([]);
         setRecommendations([]);
-      });
+      })
+      .finally(() => { if (!cancelled) onReadyRef.current?.(); });
     return () => { cancelled = true; };
   }, [ratingKey]);
 

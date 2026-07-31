@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { fetchMeta, type StreamTrack } from "../lib/api";
+import { saveSubtitlePref } from "../lib/subtitlePref";
 
 interface TrackSwitcherProps {
   ratingKey: string;
@@ -32,6 +33,9 @@ export function TrackSwitcher({ ratingKey, onClose, onTrackChange, subtitlesOnly
     if (type === "audio") {
       onTrackChange(partId, streamId, undefined);
     } else {
+      // Remember the choice (streamId 0 is the "None" row) so the next episode
+      // comes up with the same kind of subtitle already on.
+      saveSubtitlePref(subtitleTracks.find((t) => t.id === streamId) ?? null);
       onTrackChange(partId, undefined, streamId);
     }
     onClose();

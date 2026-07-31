@@ -2,9 +2,13 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { fetchMeta, fetchProgress, invalidateMeta, setStreams, getSessionToken, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
 import { formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
+import { useImageReady } from "../lib/useImageReady";
+import { loadSubtitlePref, saveSubtitlePref, matchSubtitleTrack } from "../lib/subtitlePref";
 import { SkeletonBlock } from "./SkeletonBlock";
 import { RatingsRow } from "./RatingsRow";
 import { RelatedRows } from "./RelatedRows";
+import { CastRow } from "./CastRow";
+import { shelfStyles } from "./PosterShelf";
 import type { QueueItem, SuggestionItem } from "../hooks/useSync";
 
 interface MovieDetailProps {
@@ -171,6 +175,11 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   const [selectedAudio, setSelectedAudio] = useState<number | null>(null);
   const [selectedSubtitle, setSelectedSubtitle] = useState<number | null>(null);
   const [suggested, setSuggested] = useState(false);
+  // Readiness of the page's independently-fetched parts (see `pageReady`).
+  const [ratingsReady, setRatingsReady] = useState(false);
+  const [relatedReady, setRelatedReady] = useState(false);
+  // Backstop: one slow or wedged side request must not hold the page hostage.
+  const [revealTimedOut, setRevealTimedOut] = useState(false);
   // The host's own saved position for this item, or null if they've never
   // played it. Only the host can start playback, so only the host fetches it.
   const [progress, setProgress] = useState<HistoryEntry | null>(null);
@@ -178,6 +187,16 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   // At 390px the fixed 240px poster leaves the text roughly 66px, which wraps
   // the title one word per line and pushes the buttons off the screen edge.
   const narrow = useMediaQuery(NARROW_QUERY);
+
+  // Reset the reveal gate whenever a different title is opened, and start its
+  // backstop timer.
+  useEffect(() => {
+    setRatingsReady(false);
+    setRelatedReady(false);
+    setRevealTimedOut(false);
+    const timer = window.setTimeout(() => setRevealTimedOut(true), 5000);
+    return () => clearTimeout(timer);
+  }, [item.ratingKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -188,8 +207,11 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
         setMeta(m);
         const defaultAudio = m.audioTracks.find((t) => t.selected) ?? m.audioTracks[0];
         if (defaultAudio) setSelectedAudio(defaultAudio.id);
-        // Default to no subtitles
-        setSelectedSubtitle(null);
+        // Re-apply the viewer's remembered subtitle choice — matched by language
+        // and flavour, since stream ids differ from episode to episode. With no
+        // stored preference this resolves to null, the previous "off" default.
+        const match = matchSubtitleTrack(m.subtitleTracks, loadSubtitlePref());
+        setSelectedSubtitle(match ? match.id : null);
       })
       .catch(console.error)
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -240,9 +262,26 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   const backdropUrl = meta?.art ? authUrl(meta.art) : null;
   const posterUrl = meta?.thumb ? authUrl(meta.thumb) : (item.thumb ? authUrl(item.thumb) : null);
 
-  if (loading) {
-    return (
-      <div style={styles.page}>
+  // ── Reveal the page in one go ────────────────────────────────
+  //
+  // The backdrop, ratings and related rows each fetch on their own schedule, so
+  // rendering as soon as the metadata landed made the page assemble itself in
+  // stages. Instead the skeleton holds until every part is in hand.
+  //
+  // Only wait on the pieces this item will actually render: episodes show no
+  // ratings row and no related rows, and a metadata failure shows neither — in
+  // those cases nothing would ever report ready.
+  const wantsRatings = item.type === "movie" && meta != null;
+  const wantsRelated = item.type === "movie" && meta != null && !!onSelect;
+  const backdropReady = useImageReady(backdropUrl);
+  const contentReady = (!wantsRatings || ratingsReady) && (!wantsRelated || relatedReady);
+  const pageReady = (!loading && backdropReady && contentReady) || revealTimedOut;
+
+  // Everything on this page is revealed together (see `pageReady` below), so the
+  // skeleton is a value rather than an early return — the real content has to
+  // stay mounted underneath it for its children to fetch at all.
+  const skeleton = (
+      <div>
         <button onClick={onBack} style={styles.backBtn}>
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
@@ -270,11 +309,17 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
           </div>
         </div>
       </div>
-    );
-  }
+  );
 
   return (
     <div style={styles.page}>
+      {!pageReady && skeleton}
+      {/* Kept mounted while the skeleton shows — RatingsRow and RelatedRows only
+          fetch once they're in the tree, so hiding this behind an early return
+          would serialise the very requests we're waiting on. Absolutely
+          positioned and transparent so it neither paints nor takes up space
+          until everything has landed. */}
+      <div style={pageReady ? styles.revealed : styles.prerender} aria-hidden={!pageReady}>
       {/* Backdrop */}
       {backdropUrl && (
         <div style={styles.backdropWrap}>
@@ -388,6 +433,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                   tmdbId={meta.tmdbId}
                   mediaType="movie"
                   style={styles.ratings}
+                  onReady={() => setRatingsReady(true)}
                 />
               )}
 
@@ -418,7 +464,13 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                         { value: "", label: "None" },
                         ...meta.subtitleTracks.map((t) => ({ value: String(t.id), label: t.title })),
                       ]}
-                      onChange={(v) => setSelectedSubtitle(v === "" ? null : Number(v))}
+                      onChange={(v) => {
+                        const id = v === "" ? null : Number(v);
+                        setSelectedSubtitle(id);
+                        // Remember it so the next episode starts with the same
+                        // kind of track already selected.
+                        saveSubtitlePref(meta.subtitleTracks.find((t) => t.id === id) ?? null);
+                      }}
                     />
                   </div>
                 )}
@@ -524,12 +576,24 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
           </div>
         </div>
 
+        {/* Cast & Crew sits ahead of the collection rows — it's about this title,
+            where those are about what to watch next. Shares the shelves' wrapper
+            so every row on the page lines up on the same left edge. */}
+        <div style={shelfStyles.wrap}>
+          <CastRow cast={meta.cast} directors={meta.directors} writers={meta.writers} />
+        </div>
+
         {/* Collections then "More Like This" — same rows as the Home tab,
             rendered outside the narrow detail column so they span the page.
             Movies only: episodes belong to a show, not a collection, and TMDB
             has no per-episode recommendations. */}
         {item.type === "movie" && onSelect && (
-          <RelatedRows ratingKey={item.ratingKey} recommendationsTitle="More Like This" onSelect={onSelect} />
+          <RelatedRows
+            ratingKey={item.ratingKey}
+            recommendationsTitle="More Like This"
+            onSelect={onSelect}
+            onReady={() => setRelatedReady(true)}
+          />
         )}
         </>
       ) : (
@@ -537,6 +601,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
           <p style={styles.loadingText}>Failed to load metadata</p>
         </div>
       )}
+      </div>
     </div>
   );
 }
@@ -547,6 +612,22 @@ const styles: Record<string, React.CSSProperties> = {
     minHeight: "100vh",
     background: "#0d0d0d",
     overflow: "hidden",
+  },
+  // The two halves of the atomic reveal (see `pageReady`). `prerender` keeps the
+  // real page mounted and laid out at full width — so its images fetch and the
+  // shelves measure correctly — while contributing nothing visible. Width is set
+  // explicitly because an absolutely-positioned box would otherwise shrink-wrap.
+  prerender: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    opacity: 0,
+    pointerEvents: "none" as const,
+  },
+  revealed: {
+    opacity: 1,
+    transition: "opacity 0.25s ease",
   },
   backdropWrap: {
     position: "absolute",

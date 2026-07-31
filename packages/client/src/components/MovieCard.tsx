@@ -51,9 +51,10 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
       onMouseEnter={(e) => {
         const el = e.currentTarget;
         el.style.transform = "scale(1.03)";
-        // Even, soft amber halo — 0 offset so it reads the same on every side
-        // (a downward-offset shadow looked lopsided and got clipped by the row).
-        el.style.boxShadow = "0 0 28px 2px rgba(229,160,13,0.18)";
+        // Even, soft amber halo — 0 offset so it reads the same on every side.
+        // Its ~18px reach is deliberately kept under the shelf rows' 20/22px
+        // vertical padding (see Library.tsx hubRow) so nothing gets clipped.
+        el.style.boxShadow = "0 0 18px 1px rgba(229,160,13,0.16)";
         // Reveal a dimmed not-in-library poster at full colour on hover.
         if (external) {
           const img = el.querySelector("img");

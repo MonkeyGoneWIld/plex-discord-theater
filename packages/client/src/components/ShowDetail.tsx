@@ -4,16 +4,18 @@ import {
   getSessionToken, type HistoryEntry, type PlexItem, type PlexMeta, type SeerrSeason,
 } from "../lib/api";
 import { formatTimecode } from "../lib/format";
+import { useImageReady } from "../lib/useImageReady";
 import { MovieCard } from "./MovieCard";
 import { RatingsRow } from "./RatingsRow";
 import { RelatedRows } from "./RelatedRows";
+import { CastRow } from "./CastRow";
+import { shelfStyles } from "./PosterShelf";
 import { SeasonRequestGrid } from "./SeasonRequestGrid";
 import { SkeletonBlock } from "./SkeletonBlock";
 
 interface ShowDetailProps {
   item: PlexItem;
   onSelectSeason: (season: PlexItem, show: PlexItem) => void;
-  onReplaceWithSeason?: (season: PlexItem, show: PlexItem) => void;
   /** Open an episode's detail view — used by the resume button. Omit to hide it. */
   onSelectEpisode?: (episode: PlexItem) => void;
   /** Open another show's detail page — used by the "also in this collection"
@@ -29,17 +31,27 @@ function authUrl(url: string): string {
   return `${url}${sep}token=${encodeURIComponent(token)}`;
 }
 
-export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelectEpisode, onSelect, onBack }: ShowDetailProps) {
+export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, onBack }: ShowDetailProps) {
   const [meta, setMeta] = useState<PlexMeta | null>(null);
   const [seasons, setSeasons] = useState<PlexItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [autoNavigated, setAutoNavigated] = useState(false);
-  // Seasons the library is missing, per Seerr (posters from TMDB). seerrDone
-  // gates the single-season auto-nav: a partial show must land here, on the
-  // request UI, instead of skipping straight to the episode list.
+  // Seasons the library is missing, per Seerr (posters from TMDB).
   const [missingSeasons, setMissingSeasons] = useState<SeerrSeason[]>([]);
   const [seerrDone, setSeerrDone] = useState(false);
   const [reloadNonce, setReloadNonce] = useState(0);
+  // Readiness of the page's independently-fetched parts (see `pageReady`).
+  const [ratingsReady, setRatingsReady] = useState(false);
+  const [relatedReady, setRelatedReady] = useState(false);
+  // Backstop: one slow side request must not hold the whole page.
+  const [revealTimedOut, setRevealTimedOut] = useState(false);
+
+  useEffect(() => {
+    setRatingsReady(false);
+    setRelatedReady(false);
+    setRevealTimedOut(false);
+    const timer = window.setTimeout(() => setRevealTimedOut(true), 5000);
+    return () => clearTimeout(timer);
+  }, [item.ratingKey]);
   // Where this viewer left the show: the episode in progress, or the one after
   // the last they finished. Null when never started or watched to the end.
   const [nextUp, setNextUp] = useState<HistoryEntry | null>(null);
@@ -90,31 +102,30 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelect
     return () => { cancelled = true; };
   }, [loading, meta, seasons, reloadNonce]);
 
-  // Single-season show with nothing missing: replace this view with the season
-  // view so back goes to library instead of looping through auto-nav. Waits for
-  // the Seerr answer so partially-available shows keep this landing page.
-  useEffect(() => {
-    if (loading || autoNavigated || !seerrDone) return;
-    if (seasons.length === 1 && missingSeasons.length === 0) {
-      setAutoNavigated(true);
-      const nav = onReplaceWithSeason ?? onSelectSeason;
-      nav(seasons[0], item);
-    }
-  }, [loading, seerrDone, seasons, missingSeasons, autoNavigated]);
-
   const backdropUrl = meta?.art ? authUrl(meta.art) : null;
   const posterUrl = meta?.thumb ? authUrl(meta.thumb) : (item.thumb ? authUrl(item.thumb) : null);
 
-  // If auto-navigated, render nothing (the parent will mount SeasonDetail)
-  if (autoNavigated) return null;
+  // Every show lands here, single-season included — a one-season show used to
+  // auto-navigate straight to its episode list, which skipped the synopsis,
+  // ratings, cast and related rows this page carries.
+  //
+  // Hold the skeleton until Seerr has answered too, so the request UI and the
+  // season grid appear together rather than the latter popping in afterwards.
+  const deciding = !loading && !seerrDone;
 
-  // Hold the skeleton while deciding whether a single-season show auto-navigates
-  // (Seerr answer pending) — avoids flashing this page before the redirect.
-  const deciding = !loading && !seerrDone && seasons.length === 1;
+  // The rest of the page's parts fetch independently, so — as in MovieDetail —
+  // hold the skeleton until they've all landed and reveal in one go.
+  // A metadata failure renders neither row, so nothing would ever report ready.
+  const wantsRatings = meta != null;
+  const wantsRelated = meta != null && !!onSelect;
+  const backdropReady = useImageReady(backdropUrl);
+  const pageReady =
+    (!loading && !deciding && backdropReady &&
+      (!wantsRatings || ratingsReady) && (!wantsRelated || relatedReady)) ||
+    revealTimedOut;
 
-  if (loading || deciding) {
-    return (
-      <div style={styles.page}>
+  const skeleton = (
+      <div>
         <button onClick={onBack} style={styles.backBtn}>
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
@@ -140,11 +151,13 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelect
           ))}
         </div>
       </div>
-    );
-  }
+  );
 
   return (
     <div style={styles.page}>
+      {!pageReady && skeleton}
+      {/* Kept mounted behind the skeleton so its children fetch — see MovieDetail. */}
+      <div style={pageReady ? styles.revealed : styles.prerender} aria-hidden={!pageReady}>
       {/* Backdrop */}
       {backdropUrl && (
         <div style={styles.backdropWrap}>
@@ -201,6 +214,7 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelect
                 tmdbId={meta.tmdbId}
                 mediaType="show"
                 style={styles.ratings}
+                onReady={() => setRatingsReady(true)}
               />
 
               {meta.summary && (
@@ -269,10 +283,20 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelect
           )}
         </div>
 
+        {/* Cast & Crew before the collection rows — see MovieDetail. */}
+        <div style={shelfStyles.wrap}>
+          <CastRow cast={meta.cast} directors={meta.directors} writers={meta.writers} />
+        </div>
+
         {/* Collections then "More Like This" — same rows as the Home tab,
             rendered outside the narrow detail column so they span the page. */}
         {onSelect && (
-          <RelatedRows ratingKey={item.ratingKey} recommendationsTitle="More Like This" onSelect={onSelect} />
+          <RelatedRows
+            ratingKey={item.ratingKey}
+            recommendationsTitle="More Like This"
+            onSelect={onSelect}
+            onReady={() => setRelatedReady(true)}
+          />
         )}
         </>
       ) : (
@@ -280,6 +304,7 @@ export function ShowDetail({ item, onSelectSeason, onReplaceWithSeason, onSelect
           <p style={styles.loadingText}>Failed to load show details</p>
         </div>
       )}
+      </div>
     </div>
   );
 }
@@ -290,6 +315,19 @@ const styles: Record<string, React.CSSProperties> = {
     minHeight: "100vh",
     background: "#0d0d0d",
     overflow: "hidden",
+  },
+  // Atomic reveal — see MovieDetail for the reasoning.
+  prerender: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    opacity: 0,
+    pointerEvents: "none" as const,
+  },
+  revealed: {
+    opacity: 1,
+    transition: "opacity 0.25s ease",
   },
   backdropWrap: {
     position: "absolute",

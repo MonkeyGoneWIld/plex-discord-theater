@@ -2139,8 +2139,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // latched true and never cleared, so the card stayed up after rewinding —
   // this recomputes each tick like the marker effect and only sets on a flip.
   useEffect(() => {
+    // Deliberately not gated on canControl. It used to be, which meant a viewer
+    // never learned the item had finished — the end-of-playback screen is for
+    // everyone, and a viewer sitting on black is exactly the case it exists for.
+    // The corner "up next" card stays host-only; that gate lives on `showNextUp`,
+    // not here.
     const video = videoRef.current;
-    if (!video || !canControl) return;
+    if (!video) return;
     const onTime = () => {
       const d = video.duration;
       const remaining = d - video.currentTime;
@@ -2152,7 +2157,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     };
     // timeupdate stops firing at the end, so latch explicitly on `ended` too —
     // covers the video finishing without a final tick close enough to the end.
+    // Confirmed against the server logs: `ended` does fire here, on viewers'
+    // elements as well as the host's, so this is the trigger rather than a
+    // guess at one.
     const onEnded = () => {
+      logEvent("Video", "reached end of item", {
+        ratingKey: item.ratingKey,
+        canControl,
+        ...snapshot(video),
+      });
       setNearEnd(true);
       setPlaybackEnded(true);
     };
@@ -2162,7 +2175,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       video.removeEventListener("timeupdate", onTime);
       video.removeEventListener("ended", onEnded);
     };
-  }, [canControl]);
+  }, [canControl, item.ratingKey]);
 
   // Track whether the playhead is inside an intro/credits window. Shown to
   // anyone with transport rights, since skipping is a transport action.

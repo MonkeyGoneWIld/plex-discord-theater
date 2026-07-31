@@ -119,10 +119,28 @@ const rooms = new Map<string, Room>();
 /** Server-side ping intervals per room — keeps transcode alive independent of client connectivity. */
 const roomPingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
+/** Consecutive "no such session" answers before the room stops pinging. Two,
+ *  not one, so a single odd response can't silence a live session's keep-alive. */
+const PING_GONE_LIMIT = 2;
+
 function startRoomPing(instanceId: string, hlsSessionId: string): void {
   stopRoomPing(instanceId);
+  let gone = 0;
   const interval = setInterval(() => {
-    pingPlexTranscode(hlsSessionId).catch(() => {});
+    pingPlexTranscode(hlsSessionId)
+      .then((alive) => {
+        // Plex has discarded this transcode. Nothing will bring it back, so the
+        // timer is only generating rejected round trips and misleading warnings
+        // — one evening's log had 36 of them across four dead sessions.
+        gone = alive ? 0 : gone + 1;
+        if (gone < PING_GONE_LIMIT) return;
+        logEvent("Sync", "stopping keep-alive for a session Plex has dropped", {
+          room: instanceId.substring(0, 8),
+          session: hlsSessionId.substring(0, 8),
+        });
+        stopRoomPing(instanceId);
+      })
+      .catch(() => {});
   }, 30_000);
   interval.unref();
   roomPingIntervals.set(instanceId, interval);

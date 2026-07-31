@@ -2235,8 +2235,17 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
 
 export { terminatePlexSession };
 
-/** Ping Plex to keep a transcode session alive. Called server-side per room. */
-export async function pingPlexTranscode(hlsSessionId: string): Promise<void> {
+/**
+ * Ping Plex to keep a transcode session alive. Called server-side per room.
+ *
+ * Resolves false when Plex says the session is gone, so the caller can stop
+ * pinging it. Without that signal the room timer kept calling this every 30s
+ * for sessions Plex had already discarded — in one evening's log, four dead
+ * sessions accounted for 36 rejected keep-alives, each one a wasted round trip
+ * and a misleading warning.
+ */
+export async function pingPlexTranscode(hlsSessionId: string): Promise<boolean> {
+  let alive = true;
   try {
     // Our session id, not the mapped Plex key — see plexTranscodeControl.
     const res = await plexTranscodeControl("ping", hlsSessionId);
@@ -2247,6 +2256,9 @@ export async function pingPlexTranscode(hlsSessionId: string): Promise<void> {
         session: hlsSessionId.substring(0, 8),
         status: res.status,
       });
+      // 404 is Plex saying it has no such session. Anything else (5xx, a blip)
+      // is worth retrying — only "gone" means gone.
+      if (res.status === 404) alive = false;
     }
   } catch (err) {
     console.error("[HLS] Server-side ping failed for", hlsSessionId.substring(0, 8), err);
@@ -2278,6 +2290,8 @@ export async function pingPlexTranscode(hlsSessionId: string): Promise<void> {
       console.error("[HLS] Server-driven timeline failed for", hlsSessionId.substring(0, 8), err);
     }
   }
+
+  return alive;
 }
 
 /**

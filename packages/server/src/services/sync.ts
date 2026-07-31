@@ -219,10 +219,23 @@ function sendTo(ws: WebSocket, msg: object): void {
   }
 }
 
+/**
+ * How far the room position may be advanced past its last report.
+ *
+ * The host heartbeats every 5s, so a gap much beyond that means it isn't
+ * reporting — stalled, buffering, or gone — and the elapsed wall time no longer
+ * describes playback. Extrapolating anyway sent a joiner to a position minutes
+ * past anything transcoded: they seek into nothing, stall, and are then dragged
+ * back by the next heartbeat. Past this bound the last confirmed position is
+ * the more honest answer, and the next heartbeat corrects it within seconds.
+ */
+const MAX_EXTRAPOLATION_S = 30;
+
 function interpolatedPosition(state: RoomState): number {
   if (!state.playing) return state.position;
   const elapsed = (Date.now() - state.updatedAt) / 1000;
-  return state.position + elapsed;
+  if (elapsed > MAX_EXTRAPOLATION_S) return state.position;
+  return state.position + Math.max(0, elapsed);
 }
 
 /**

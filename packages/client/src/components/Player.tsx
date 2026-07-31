@@ -7,6 +7,7 @@ import type { P2PStats } from "./StatsOverlay";
 import { TrackSwitcher } from "./TrackSwitcher";
 import { QueuePanel } from "./QueuePanel";
 import { NextUpButton } from "./NextUpButton";
+import { EndCard } from "./EndCard";
 import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, fetchMeta, fetchSiblingEpisodes, invalidateMeta } from "../lib/api";
@@ -318,6 +319,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // Previous episode, for the control-bar back button. Not used by the card.
   const [prevEpisode, setPrevEpisode] = useState<PlexItem | null>(null);
   const [nearEnd, setNearEnd] = useState(false);
+  // The item has genuinely finished, as opposed to merely being close to the
+  // end. Drives the end-of-playback screen; nearEnd only drives the corner card.
+  const [playbackEnded, setPlaybackEnded] = useState(false);
+  // Whether the "what comes after this" lookup has answered. The end screen has
+  // to wait for it: an item that ends before the answer arrives would otherwise
+  // look like it has no next episode and close the player on a series.
+  const [siblingsResolved, setSiblingsResolved] = useState(false);
   // Which item the card was dismissed for. Compared against the live ratingKey,
   // so it self-clears on advance rather than latching.
   const [dismissedFor, setDismissedFor] = useState<string | null>(null);
@@ -628,8 +636,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     setDismissedFor(null);
     // Must reset: `ended` latches nearEnd true, and without clearing it here the
     // card would appear instantly at the start of the episode we just advanced to.
+    setPlaybackEnded(false);
     setNearEnd(false);
-    if (!canControl) return;
+    setSiblingsResolved(false);
+    // Viewers resolve this too now. They can't act on it — the transport
+    // buttons stay host-only — but the end-of-playback screen shows everyone
+    // what follows, and without this a viewer reached the end of an episode and
+    // was told there was nothing after it.
     let cancelled = false;
     fetchSiblingEpisodes(item.ratingKey)
       .then((r) => {
@@ -637,9 +650,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         setNextEpisode(r.next);
         setPrevEpisode(r.prev);
       })
-      .catch(() => { /* optional polish — never surface an error over a working stream */ });
+      .catch(() => { /* optional polish — never surface an error over a working stream */ })
+      .finally(() => { if (!cancelled) setSiblingsResolved(true); });
     return () => { cancelled = true; };
-  }, [item.ratingKey, canControl]);
+  }, [item.ratingKey]);
 
   // Single HLS session — no mid-stream switching
   useEffect(() => {
@@ -2138,7 +2152,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     };
     // timeupdate stops firing at the end, so latch explicitly on `ended` too —
     // covers the video finishing without a final tick close enough to the end.
-    const onEnded = () => setNearEnd(true);
+    const onEnded = () => {
+      setNearEnd(true);
+      setPlaybackEnded(true);
+    };
     video.addEventListener("timeupdate", onTime);
     video.addEventListener("ended", onEnded);
     return () => {
@@ -2182,6 +2199,26 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     dismissedFor !== item.ratingKey &&
     (nearEnd || activeMarker?.type === "credits");
   const showSkip = !!activeMarker && canControl;
+
+  // Finished, with nothing to follow it — a film, or the last episode of a run.
+  // Leaving the player puts everyone back on the title's page, which is where
+  // you'd go anyway; sitting on black was never a state anyone wanted to be in.
+  //
+  // Waits for the sibling lookup so a series never exits on a stale "nothing
+  // next", and runs once — endPlayback tears down the session, and a second
+  // call would try to stop a session that no longer exists.
+  const exitedOnEndRef = useRef(false);
+  useEffect(() => {
+    if (!playbackEnded || !siblingsResolved || upNextItem) return;
+    if (exitedOnEndRef.current) return;
+    exitedOnEndRef.current = true;
+    logEvent("Player", "playback finished with nothing next, leaving player", {
+      ratingKey: item.ratingKey,
+      isHost: isHostRef.current,
+    });
+    endPlayback();
+  }, [playbackEnded, siblingsResolved, upNextItem, endPlayback, item.ratingKey]);
+  useEffect(() => { exitedOnEndRef.current = false; }, [item.ratingKey]);
 
   // Viewer status pill: what the host is doing to shared playback. Seeking is a
   // brief flash (takes precedence); paused persists while the stream sits paused.
@@ -2272,6 +2309,18 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             </svg>
           )}
         </div>
+      )}
+
+      {/* Finished, with something to follow it. Full-screen rather than the
+          corner card, because at this point there is nothing else on screen —
+          and unlike that card, viewers see it too. Nothing auto-advances. */}
+      {playbackEnded && upNextItem && (
+        <EndCard
+          item={upNextItem as PlexItem}
+          source={queuedNext ? "queue" : "series"}
+          onPlay={canControl ? playNextItem : undefined}
+          onExit={endPlayback}
+        />
       )}
 
       {/* Track switching freeze-frame overlay */}

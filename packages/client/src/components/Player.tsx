@@ -278,12 +278,15 @@ interface PlayerProps {
    *  a later item (queue advance, next episode) starts from the beginning. */
   resumePosition?: number;
   onBack: () => void;
+  /** Where an episode goes when it finishes, or when the end card is dismissed:
+   *  the show's page. Omit to fall back to a plain back. */
+  onFinished?: (item: PlexItem) => void;
   syncState?: SyncState;
   syncActions?: SyncActions;
   onPlayNext?: (item: QueueItem) => void;
 }
 
-export function Player({ item, isHost, selfUserId = null, subtitles, resumePosition, onBack, syncState, syncActions, onPlayNext }: PlayerProps) {
+export function Player({ item, isHost, selfUserId = null, subtitles, resumePosition, onBack, onFinished, syncState, syncActions, onPlayNext }: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -1930,8 +1933,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // it was never doing anything else.
   }, []);
 
-  const endPlayback = useCallback(() => {
-    logEvent("Player", "endPlayback (user left the player)", {
+  /** Tear the stream down without deciding where to go afterwards. */
+  const teardownPlayback = useCallback((reason: string) => {
+    logEvent("Player", "tearing down playback", {
+      reason,
       isHost: isHostRef.current,
       ownsSession: ownsSessionRef.current,
       session: sessionIdRef.current?.substring(0, 8) ?? "none",
@@ -1951,8 +1956,31 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     if (isHostRef.current) {
       syncActionsRef.current?.sendStop();
     }
+  }, [destroyLocal]);
+
+  const endPlayback = useCallback(() => {
+    teardownPlayback("user left the player");
     onBack();
-  }, [destroyLocal, onBack]);
+  }, [teardownPlayback, onBack]);
+
+  /**
+   * Leave a finished episode for the show it belongs to, rather than for the
+   * episode's own page.
+   *
+   * Backing out of an episode normally returns to where you came from, which is
+   * right when you chose to leave. Reaching the end of one is different: the
+   * episode you just watched is the least useful thing to be looking at, and
+   * the show is where the rest of it is. Falls back to a plain back when there
+   * is no show to go to — a film, or an episode whose parent we never learned.
+   */
+  const exitToShow = useCallback(() => {
+    teardownPlayback("item finished");
+    if (item.type === "episode" && item.grandparentRatingKey && onFinished) {
+      onFinished(item);
+      return;
+    }
+    onBack();
+  }, [teardownPlayback, onBack, onFinished, item]);
 
   const handleBack = useCallback(() => {
     // The host backing out ends the stream for the whole room, so confirm
@@ -2227,10 +2255,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     exitedOnEndRef.current = true;
     logEvent("Player", "playback finished with nothing next, leaving player", {
       ratingKey: item.ratingKey,
+      type: item.type,
       isHost: isHostRef.current,
     });
-    endPlayback();
-  }, [playbackEnded, siblingsResolved, upNextItem, endPlayback, item.ratingKey]);
+    exitToShow();
+  }, [playbackEnded, siblingsResolved, upNextItem, exitToShow, item.ratingKey, item.type]);
   useEffect(() => { exitedOnEndRef.current = false; }, [item.ratingKey]);
 
   // Viewer status pill: what the host is doing to shared playback. Seeking is a
@@ -2332,7 +2361,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           item={upNextItem}
           source={queuedNext ? "queue" : "series"}
           onPlay={canControl ? playNextItem : undefined}
-          onExit={endPlayback}
+          onExit={exitToShow}
         />
       )}
 

@@ -826,6 +826,10 @@ export function App() {
             subtitles={view.subtitles}
             resumePosition={view.resumePosition}
             onBack={popView}
+            // Finishing an episode lands on the show, not on the episode that
+            // just ended. Same rebuild the in-page show breadcrumb uses, so the
+            // trail reads Home › Show rather than keeping the player's ancestry.
+            onFinished={handleEpisodeShowClick}
             syncState={syncState}
             syncActions={syncActions}
             onPlayNext={handlePlayNext}

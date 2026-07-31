@@ -78,7 +78,9 @@ export function EndCard({ item, source, onPlay, onExit }: EndCardProps) {
             </button>
           )}
           <button type="button" onClick={onExit} style={styles.exitBtn}>
-            {onPlay ? "Back to show" : "Back"}
+            {/* Keyed to where it goes, not to who is pressing it: this leaves
+                for the show whenever there is one, host or viewer alike. */}
+            {show ? "Back to show" : "Back"}
           </button>
         </div>
 

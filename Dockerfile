@@ -41,6 +41,11 @@ RUN npm run build -w packages/client && \
 FROM node:24-alpine
 WORKDIR /app
 
+# Pick up Alpine security patches published since the base image was cut. The
+# scanner flags busybox/ssl_client and nghttp2-libs here, and neither is pinned
+# by anything we install, so upgrading in place is the whole fix.
+RUN apk upgrade --no-cache
+
 # Tini for proper PID 1 signal handling
 RUN apk add --no-cache tini curl
 
@@ -54,11 +59,20 @@ COPY packages/server/package.json packages/server/
 RUN mkdir -p packages/client && \
     echo '{"name":"@plex-discord-theater/client","private":true}' > packages/client/package.json
 
-# better-sqlite3 needs build tools for native addon
+# better-sqlite3 needs build tools for native addon.
+#
+# npm itself is then deleted. The container starts with `node …` and never
+# shells out to npm, but npm ships its own vendored copies of tar, undici and
+# brace-expansion — which is where the scanner's node-tar gzip-bomb CVE and the
+# undici advisories come from. None of it is reachable by the running app, and
+# removing the tool removes the finding rather than arguing about reachability.
 RUN apk add --no-cache python3 make g++ && \
     npm ci --omit=dev && \
     apk del python3 make g++ && \
-    npm cache clean --force
+    npm cache clean --force && \
+    rm -rf /usr/local/lib/node_modules/npm \
+           /usr/local/bin/npm /usr/local/bin/npx \
+           /root/.npm /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg
 
 # Copy built artifacts
 COPY --from=build /app/packages/server/dist packages/server/dist

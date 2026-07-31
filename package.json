@@ -40,5 +40,23 @@
   "devDependencies": {
     "concurrently": "^9.1.0",
     "typescript": "^5.7.0"
+  },
+  "//overrides": [
+    "Transitive pins for advisories that our direct dependencies haven't picked",
+    "up yet. Each is the patched release on the same major line the dependent",
+    "already asks for, so nothing changes but the fix:",
+    "  path-to-regexp 0.1.13 — ReDoS via 3+ params in one route segment (express 4)",
+    "  qs 6.15.3       — stringify crash, and arrayLimit bypass in comma parsing",
+    "  body-parser 1.20.6 — an invalid limit silently disabled the size cap",
+    "  ip-address 10.4.0  — XSS in the HTML-emitting Address6 helpers (via socks)",
+    "  ws 8.21.1       — memory-exhaustion DoS, and uninitialized memory disclosure",
+    "Revisit whenever express / bittorrent-tracker ship their own bumps."
+  ],
+  "overrides": {
+    "path-to-regexp": "0.1.13",
+    "qs": "^6.15.3",
+    "body-parser": "^1.20.6",
+    "ip-address": "^10.4.0",
+    "ws": "^8.21.1"
   }
 }

@@ -378,7 +378,14 @@ router.get("/search", async (req: Request, res: Response) => {
             Metadata?: PlexMetadataItem[];
             /** People hubs carry Directory entries rather than Metadata — the
              *  name is `tag` here, not `title`. */
-            Directory?: Array<{ tag?: string; title?: string; thumb?: string; type?: string }>;
+            Directory?: Array<{
+              tag?: string;
+              title?: string;
+              thumb?: string;
+              type?: string;
+              /** Present on library objects (collections, titles); absent on tags. */
+              ratingKey?: string;
+            }>;
           }>;
         };
       }>("/hubs/search", { query: q, limit: "30" }),
@@ -409,15 +416,19 @@ router.get("/search", async (req: Request, res: Response) => {
     };
 
     for (const hub of hubs) {
-      const peopleHub =
-        PERSON_HUB_RE.test(hub.hubIdentifier ?? "") || PERSON_HUB_RE.test(hub.type ?? "");
+      // Only the hub identifier decides this. An entry's own `type` is "tag" for
+      // people, genres and collections alike, so testing it can't tell them
+      // apart — that's what put a collection in the People row.
+      const peopleHub = PERSON_HUB_RE.test(hub.hubIdentifier ?? "");
       for (const d of hub.Directory ?? []) {
-        if (peopleHub || PERSON_HUB_RE.test(d.type ?? "")) addPerson(d.tag ?? d.title, d.thumb);
+        // A ratingKey means a library object (a collection, a title), not a
+        // person tag — a second guard in case a build files people elsewhere.
+        if (peopleHub && d.ratingKey == null) addPerson(d.tag ?? d.title, d.thumb);
       }
       if (!hub.Metadata) continue;
       for (const m of hub.Metadata) {
-        // A person can also arrive as Metadata with a tag-ish type.
-        if (peopleHub || PERSON_HUB_RE.test(m.type ?? "")) {
+        // Some builds return people as Metadata rather than Directory.
+        if (peopleHub) {
           addPerson(m.title, m.thumb);
           continue;
         }
@@ -468,10 +479,16 @@ router.get("/search", async (req: Request, res: Response) => {
   }
 });
 
-/** Matches the hub identifiers, hub types and entry types Plex uses for people.
- *  Loose on purpose: the exact spelling varies by Plex version ("actor" vs
- *  "search.actor"), and a false positive here costs a stray name in a row. */
-const PERSON_HUB_RE = /actor|director|writer|producer|^tag$/i;
+/**
+ * Hub identifiers Plex uses for people — "actor", "search.director", "writers".
+ *
+ * Anchored to the role word as a whole token, because Plex labels every
+ * tag-shaped hub with `type: "tag"` — genres, moods, labels *and collections*
+ * all share it. Matching "tag" swept collections into the People row, so a
+ * collection named "The Space Odyssey Series" was offered as a person. The hub
+ * identifier is the only field that actually names the role.
+ */
+const PERSON_HUB_RE = /(^|\.)(actor|director|writer|producer)s?$/i;
 
 /**
  * GET /api/plex/discover/meta?guid=plex://movie/<id>

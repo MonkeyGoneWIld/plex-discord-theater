@@ -276,6 +276,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // second toggle restarts the animation instead of being swallowed by React
   // seeing the same value.
   const [tapAck, setTapAck] = useState<{ kind: "play" | "pause"; at: number } | null>(null);
+  // Target of an in-flight seek-restart, or null when playback is settled. The
+  // scrub bar reads this so it stays where the viewer aimed instead of snapping
+  // to 0:00 while the replacement transcode spins up.
+  const [restartingTo, setRestartingTo] = useState<number | null>(null);
   const [showQueuePanel, setShowQueuePanel] = useState(false);
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
   const [showStats, setShowStats] = useState(false);
@@ -1177,6 +1181,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           logEvent("Video", "playing", snapshot(video));
           noteGoodPosition(video);
           setBuffering(false);
+          // Frames are moving again, so the element's own clock is the truth
+          // once more and the bar can stop holding the seek target.
+          setRestartingTo(null);
         };
         const onSeeked = () => {
           logEvent("Video", "seeked", snapshot(video));
@@ -1511,7 +1518,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   useEffect(() => {
     if (!syncState || syncState.seekSeq === 0 || canControl) return;
     setHostSeeking(true);
-    const timer = setTimeout(() => setHostSeeking(false), 1400);
+    // Hold the bar at where the host is heading. A host seek that restarts the
+    // transcode mints a new session id, which tears down and rebuilds every
+    // viewer's HLS too — so viewers watched their own scrub bar drop to 0:00
+    // and crawl back exactly like the host did.
+    setRestartingTo(syncState.position);
+    const timer = setTimeout(() => {
+      setHostSeeking(false);
+      setRestartingTo(null);
+    }, 1400);
     return () => clearTimeout(timer);
   }, [syncState?.seekSeq, canControl]);
 
@@ -1611,6 +1626,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // waiting out the debounce below. Only the local teardown is delayed.
     seekOffsetRef.current = positionSeconds;
     setBuffering(true);
+    setRestartingTo(positionSeconds);
     if (broadcast) syncActionsRef.current?.sendSeek(positionSeconds);
 
     // Coalesce. Each restart kills a Plex transcode and waits out a new one, so
@@ -2304,6 +2320,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         onSeekRestart={canControl ? handleSeekCommand : undefined}
         onOpenTrackSwitcher={canControl ? () => setShowTrackSwitcher(true) : undefined}
         onSurfaceClick={canControl ? togglePlayPause : undefined}
+        restartingTo={restartingTo}
         queueCount={syncState?.queue?.length}
         onOpenQueue={isHost ? () => setShowQueuePanel(true) : undefined}
         peopleCount={syncState?.participants?.length}

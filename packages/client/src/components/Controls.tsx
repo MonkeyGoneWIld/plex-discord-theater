@@ -32,6 +32,11 @@ interface ControlsProps {
   /** Click on the empty picture area (not a control) — used for click-to-pause.
    *  Omit for a viewer without transport control. */
   onSurfaceClick?: () => void;
+  /** Where a restart-in-progress is heading, in seconds, or null when playback
+   *  is settled. A transcode restart detaches the media and the element reports
+   *  0 until the replacement loads, which snapped the bar back to the start
+   *  mid-seek; holding the target keeps it where the viewer aimed it. */
+  restartingTo?: number | null;
   onToggleStats?: () => void;
   statsActive?: boolean;
   showKeyboardHints?: boolean;
@@ -116,6 +121,7 @@ export function Controls({
   onToggleMute,
   onOpenTrackSwitcher,
   onSurfaceClick,
+  restartingTo = null,
   onToggleStats,
   statsActive,
   showKeyboardHints = true,
@@ -585,7 +591,7 @@ export function Controls({
       ? scrubPct * duration
       : skipPreview != null
         ? skipPreview.target
-        : null;
+        : restartingTo;
   const fillPct = pendingTime != null && duration > 0 ? (pendingTime / duration) * 100 : progress;
   const buffered = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
   const barHeight = hoveringProgress || scrubPct != null ? 8 : 5;

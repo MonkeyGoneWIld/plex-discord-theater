@@ -29,10 +29,9 @@ interface ShowDetailProps {
 /**
  * Hard cap on the wait.
  *
- * The gate below reveals as soon as the page's parts are in — poster, metadata,
- * ratings, most of the cast, the related rows — and gives up waiting at this
- * point regardless. A cached page satisfies the gate in a frame or two and
- * never shows the spinner at all; past this an unfinished page beats a wait.
+ * The gate below reveals as soon as the page's header is in — poster, metadata
+ * and ratings — and gives up waiting at this point regardless. A cached page
+ * satisfies it within a frame or two and never shows the spinner at all.
  */
 const REVEAL_TIMEOUT_MS = 1500;
 
@@ -56,15 +55,6 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
   // Reveal gate — see `pageReady`.
   const [posterLoaded, setPosterLoaded] = useState(false);
   const [ratingsReady, setRatingsReady] = useState(false);
-  const [castReady, setCastReady] = useState(false);
-  const [relatedReady, setRelatedReady] = useState(false);
-  useEffect(() => {
-    setBackdropLoaded(false);
-    setPosterLoaded(false);
-    setRatingsReady(false);
-    setCastReady(false);
-    setRelatedReady(false);
-  }, [item.ratingKey]);
   // Where this viewer left the show: the episode in progress, or the one after
   // the last they finished. Null when never started or watched to the end.
   const [nextUp, setNextUp] = useState<HistoryEntry | null>(null);
@@ -132,18 +122,11 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
   const dYear = meta?.year ?? item.year;
   const dSummary = meta?.summary ?? item.summary ?? null;
 
-  // Appear once, complete — see MovieDetail. The season list is part of it:
-  // it's the reason to be on this page at all.
-  const wantsRelated = meta != null && !!onSelect;
-  const wantsCast = meta != null && !!(meta.cast?.length || meta.directors?.length);
+  // Header and season list only — see MovieDetail for why the cast and the
+  // collection rows are left to fill in on their own.
   const revealTimedOut = useRevealTimeout(item.ratingKey, REVEAL_TIMEOUT_MS);
   const pageReady =
-    (meta != null &&
-      !loading &&
-      (posterLoaded || !posterUrl) &&
-      ratingsReady &&
-      (!wantsCast || castReady) &&
-      (!wantsRelated || relatedReady)) ||
+    (meta != null && !loading && (posterLoaded || !posterUrl) && ratingsReady) ||
     revealTimedOut;
 
   return (
@@ -305,7 +288,6 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
             directors={meta?.directors}
             onSelectPerson={onSelectPerson}
             loading={!meta}
-            onImagesReady={() => setCastReady(true)}
           />
         </div>
 
@@ -316,7 +298,6 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
             ratingKey={item.ratingKey}
             recommendationsTitle="More Like This"
             onSelect={onSelect}
-            onReady={() => setRelatedReady(true)}
           />
         )}
         </>

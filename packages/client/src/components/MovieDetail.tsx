@@ -35,10 +35,9 @@ interface MovieDetailProps {
 /**
  * Hard cap on the wait.
  *
- * The gate below reveals as soon as the page's parts are in — poster, metadata,
- * ratings, most of the cast, the related rows — and gives up waiting at this
- * point regardless. A cached page satisfies the gate in a frame or two and
- * never shows the spinner at all; past this an unfinished page beats a wait.
+ * The gate below reveals as soon as the page's header is in — poster, metadata
+ * and ratings — and gives up waiting at this point regardless. A cached page
+ * satisfies it within a frame or two and never shows the spinner at all.
  */
 const REVEAL_TIMEOUT_MS = 1500;
 
@@ -196,8 +195,6 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   // Reveal gate — see `pageReady`.
   const [posterLoaded, setPosterLoaded] = useState(false);
   const [ratingsReady, setRatingsReady] = useState(false);
-  const [castReady, setCastReady] = useState(false);
-  const [relatedReady, setRelatedReady] = useState(false);
   // The host's own saved position for this item, or null if they've never
   // played it. Only the host can start playback, so only the host fetches it.
   const [progress, setProgress] = useState<HistoryEntry | null>(null);
@@ -293,18 +290,19 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   const dDuration = meta?.duration ?? item.duration;
   const dSummary = meta?.summary ?? item.summary ?? null;
 
-  // Episodes carry neither a ratings row nor related rows, and a metadata
-  // failure renders neither — in those cases nothing would ever report in.
+  // Waits on the header only: the poster, the metadata behind the title block,
+  // and the ratings. The cast row and the collection rows are deliberately not
+  // part of this — they sit below the fold and fill in on their own, and making
+  // the whole page wait on the slowest headshot or on /collections is what made
+  // every open feel long.
+  //
+  // Episodes have no ratings row, and a metadata failure renders none either.
   const wantsRatings = item.type === "movie" && meta != null;
-  const wantsRelated = item.type === "movie" && meta != null && !!onSelect;
-  const wantsCast = meta != null && !!(meta.cast?.length || meta.directors?.length);
   const revealTimedOut = useRevealTimeout(item.ratingKey, REVEAL_TIMEOUT_MS);
   const pageReady =
     ((meta != null || metaFailed) &&
       (posterLoaded || !posterUrl) &&
-      (!wantsRatings || ratingsReady) &&
-      (!wantsCast || castReady) &&
-      (!wantsRelated || relatedReady)) ||
+      (!wantsRatings || ratingsReady)) ||
     revealTimedOut;
 
   return (
@@ -615,7 +613,6 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
             directors={meta?.directors}
             onSelectPerson={onSelectPerson}
             loading={!meta && !metaFailed}
-            onImagesReady={() => setCastReady(true)}
           />
         </div>
 
@@ -628,7 +625,6 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
             ratingKey={item.ratingKey}
             recommendationsTitle="More Like This"
             onSelect={onSelect}
-            onReady={() => setRelatedReady(true)}
           />
         )}
         </>

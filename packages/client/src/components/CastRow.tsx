@@ -3,9 +3,6 @@ import { ScrollShelf } from "./ScrollShelf";
 import { authUrl, type Credit } from "../lib/api";
 import { ShelfSkeleton } from "./ShelfSkeleton";
 
-/** Share of headshots that must resolve before the row counts as ready. */
-const READY_FRACTION = 0.7;
-
 /** Diameter of a headshot. Plex's own cast row uses a similar circular crop. */
 const AVATAR_PX = 150;
 
@@ -17,9 +14,6 @@ interface CastRowProps {
   /** True while the metadata carrying these credits is still in flight, so the
    *  row holds its space instead of appearing from nothing. */
   loading?: boolean;
-  /** Fired once most of the headshots have settled — see READY_FRACTION. Lets a
-   *  detail page hold its reveal until the row is worth looking at. */
-  onImagesReady?: () => void;
 }
 
 /** Initials fallback for someone with no headshot — better than an empty disc. */
@@ -32,21 +26,10 @@ function initials(name: string): string {
     .join("");
 }
 
-function CastAvatar({
-  person,
-  onSelect,
-  onSettled,
-}: {
-  person: Credit;
-  onSelect?: () => void;
-  /** Called once this headshot resolves, either way — see READY_FRACTION. */
-  onSettled: () => void;
-}) {
+function CastAvatar({ person, onSelect }: { person: Credit; onSelect?: () => void }) {
   const [failed, setFailed] = useState(false);
   const show = person.thumb && !failed;
   const clickable = !!onSelect;
-  // A credit with no photo has nothing to wait for, so it counts immediately.
-  useEffect(() => { if (!person.thumb) onSettled(); }, [person.thumb, onSettled]);
   return (
     <div
       style={clickable ? { ...styles.person, ...styles.personClickable } : styles.person}
@@ -77,11 +60,7 @@ function CastAvatar({
           alt={person.name}
           style={styles.avatar}
           loading="eager"
-          onLoad={onSettled}
-          onError={() => { setFailed(true); onSettled(); }}
-          // A cached headshot can finish decoding before onLoad is attached, in
-          // which case the event never arrives and the gate waits for nothing.
-          ref={(el) => { if (el?.complete) onSettled(); }}
+          onError={() => setFailed(true)}
         />
       ) : (
         <div style={{ ...styles.avatar, ...styles.avatarFallback }}>{initials(person.name)}</div>
@@ -99,7 +78,7 @@ function CastAvatar({
  * Renders nothing at all when a title has no credits, which is the normal case
  * for a library item Plex never matched against its metadata agent.
  */
-export function CastRow({ cast, directors, onSelectPerson, loading, onImagesReady }: CastRowProps) {
+export function CastRow({ cast, directors, onSelectPerson, loading }: CastRowProps) {
   // The director leads, then the billed cast. Appending crew instead put them
   // past thirty actors — off the end of a row nobody scrolls that far — so the
   // one crew credit people actually look for was effectively missing. Writers
@@ -125,21 +104,6 @@ export function CastRow({ cast, directors, onSelectPerson, loading, onImagesRead
   }
   const people = [...byName.values()];
 
-  // Report readiness once enough faces have resolved. Waiting for every one
-  // would hand the slowest headshot on the row a veto over the whole page.
-  const settled = useRef(0);
-  const fired = useRef(false);
-  const total = people.length;
-  const onReadyRef = useRef(onImagesReady);
-  onReadyRef.current = onImagesReady;
-  useEffect(() => { settled.current = 0; fired.current = false; }, [total]);
-  const handleSettled = useCallback(() => {
-    settled.current++;
-    if (!fired.current && total > 0 && settled.current / total >= READY_FRACTION) {
-      fired.current = true;
-      onReadyRef.current?.();
-    }
-  }, [total]);
   // Holding the space while the credits are in flight is the point — returning
   // null here and a full row a moment later is exactly the jolt this avoids.
   if (people.length === 0) return loading ? <ShelfSkeleton variant="cast" labelWidth={140} /> : null;
@@ -155,7 +119,6 @@ export function CastRow({ cast, directors, onSelectPerson, loading, onImagesRead
             key={`${p.name}-${p.role ?? i}`}
             person={p}
             onSelect={onSelectPerson ? () => onSelectPerson(p) : undefined}
-            onSettled={handleSettled}
           />
         ))}
       </ScrollShelf>

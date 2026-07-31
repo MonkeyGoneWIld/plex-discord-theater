@@ -21,10 +21,9 @@ interface ExternalDetailProps {
 /**
  * Hard cap on the wait.
  *
- * The gate below reveals as soon as the page's parts are in — poster, metadata,
- * ratings, most of the cast, the related rows — and gives up waiting at this
- * point regardless. A cached page satisfies the gate in a frame or two and
- * never shows the spinner at all; past this an unfinished page beats a wait.
+ * The gate below reveals as soon as the page's header is in — poster, metadata
+ * and ratings — and gives up waiting at this point regardless. A cached page
+ * satisfies it within a frame or two and never shows the spinner at all.
  */
 const REVEAL_TIMEOUT_MS = 1500;
 
@@ -68,12 +67,7 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
   // Reveal gate — see `pageReady`.
   const [posterLoaded, setPosterLoaded] = useState(false);
   const [ratingsReady, setRatingsReady] = useState(false);
-  const [castReady, setCastReady] = useState(false);
-  useEffect(() => {
-    setPosterLoaded(false);
-    setRatingsReady(false);
-    setCastReady(false);
-  }, [item.ratingKey]);
+
 
   useEffect(() => {
     // Discover search results resolve full detail from their plex:// guid;
@@ -150,7 +144,6 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
   // Appear once, complete — the same gate the library detail pages use. The
   // Seerr answer is part of it here, because the request button is what this
   // page exists for and showing it in the wrong state is worse than waiting.
-  const wantsCast = !!(meta?.cast?.length || meta?.directors?.length);
   const wantsStatus = tmdbId != null && mediaType === "movie";
   const wantsSeasons = tmdbId != null && mediaType === "tv";
   const revealTimedOut = useRevealTimeout(item.ratingKey, REVEAL_TIMEOUT_MS);
@@ -158,7 +151,6 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
     (!loading &&
       (posterLoaded || !poster) &&
       ratingsReady &&
-      (!wantsCast || castReady) &&
       (!wantsStatus || statusLoaded) &&
       (!wantsSeasons || seerrTv != null)) ||
     revealTimedOut;
@@ -259,7 +251,6 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
           directors={meta?.directors}
           onSelectPerson={onSelectPerson}
           loading={loading}
-          onImagesReady={() => setCastReady(true)}
         />
       </div>
       </div>

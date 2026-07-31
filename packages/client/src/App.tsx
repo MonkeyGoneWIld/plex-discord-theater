@@ -734,6 +734,10 @@ export function App() {
 
       {view.kind === "show" && (
         <ShowDetail
+          // Remount per title: the reveal gate's state has to start clean, and
+          // clearing it in an effect raced the image refs (which fire during
+          // commit) — the effect wiped a poster that had already reported in.
+          key={view.item.ratingKey}
           item={view.item}
           onSelectSeason={handleShowSeason}
           // Resume jumps straight to the episode; the breadcrumb synthesizes the
@@ -760,6 +764,7 @@ export function App() {
 
       {view.kind === "detail" && (
         <MovieDetail
+          key={view.item.ratingKey}
           item={view.item}
           isHost={effectiveIsHost}
           onPlay={handlePlay}
@@ -775,7 +780,12 @@ export function App() {
       )}
 
       {view.kind === "external-detail" && (
-        <ExternalDetail item={view.item} onBack={popView} onSelectPerson={handleSelectPerson} />
+        <ExternalDetail
+          key={view.item.ratingKey}
+          item={view.item}
+          onBack={popView}
+          onSelectPerson={handleSelectPerson}
+        />
       )}
 
       {view.kind === "person" && (

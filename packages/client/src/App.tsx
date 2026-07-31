@@ -10,6 +10,7 @@ import { ExternalDetail } from "./components/ExternalDetail";
 import { PersonDetail } from "./components/PersonDetail";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PeoplePanel } from "./components/PeoplePanel";
+import { InviteButton } from "./components/InviteButton";
 import { formatMediaTitle } from "./lib/format";
 import { authUrl, fetchMeta, invalidateMeta, setStreams } from "./lib/api";
 import { loadSubtitlePref, matchSubtitleTrack } from "./lib/subtitlePref";
@@ -56,7 +57,8 @@ function isFlatView(v: View): boolean {
 }
 
 export function App() {
-  const { isReady, isHost, userId, username, instanceId, error } = useDiscord();
+  const { isReady, isHost, userId, username, instanceId, error, canInvite, openInvite } =
+    useDiscord();
   const [viewStack, setViewStack] = useState<View[]>([{ kind: "library" }]);
   const view = viewStack[viewStack.length - 1];
 
@@ -588,6 +590,10 @@ export function App() {
               it to the left of the name puts it back in reach \u2014 the label is
               what gets clipped there instead, which costs nothing. */}
           <span style={styles.user}>
+            {/* Sits with the roster rather than inside it: inviting is about
+                who isn't here yet, which is the same question the people
+                button answers from the other side. */}
+            {canInvite && <InviteButton onInvite={openInvite} />}
             <span style={styles.userName}>
               {username} {effectiveIsHost ? "(Host)" : "(Viewer)"}
               {!effectiveIsHost && syncState.connected && " • Synced"}
@@ -830,6 +836,7 @@ export function App() {
             // just ended. Same rebuild the in-page show breadcrumb uses, so the
             // trail reads Home › Show rather than keeping the player's ancestry.
             onFinished={handleEpisodeShowClick}
+            onInvite={canInvite ? openInvite : undefined}
             syncState={syncState}
             syncActions={syncActions}
             onPlayNext={handlePlayNext}

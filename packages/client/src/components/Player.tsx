@@ -281,12 +281,14 @@ interface PlayerProps {
   /** Where an episode goes when it finishes, or when the end card is dismissed:
    *  the show's page. Omit to fall back to a plain back. */
   onFinished?: (item: PlexItem) => void;
+  /** Opens Discord's invite dialog. Omit where there's nothing to invite to. */
+  onInvite?: () => Promise<boolean>;
   syncState?: SyncState;
   syncActions?: SyncActions;
   onPlayNext?: (item: QueueItem) => void;
 }
 
-export function Player({ item, isHost, selfUserId = null, subtitles, resumePosition, onBack, onFinished, syncState, syncActions, onPlayNext }: PlayerProps) {
+export function Player({ item, isHost, selfUserId = null, subtitles, resumePosition, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext }: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -2472,6 +2474,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         onSeekRestart={canControl ? handleSeekCommand : undefined}
         onOpenTrackSwitcher={canControl ? () => setShowTrackSwitcher(true) : undefined}
         onSurfaceClick={canControl ? togglePlayPause : undefined}
+        onInvite={onInvite}
         restartingTo={restartingTo}
         queueCount={syncState?.queue?.length}
         onOpenQueue={isHost ? () => setShowQueuePanel(true) : undefined}

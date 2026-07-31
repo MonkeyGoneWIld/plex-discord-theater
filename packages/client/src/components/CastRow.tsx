@@ -32,10 +32,21 @@ function initials(name: string): string {
     .join("");
 }
 
-function CastAvatar({ person, onSelect }: { person: Credit; onSelect?: () => void }) {
+function CastAvatar({
+  person,
+  onSelect,
+  onSettled,
+}: {
+  person: Credit;
+  onSelect?: () => void;
+  /** Called once this headshot resolves, either way — see READY_FRACTION. */
+  onSettled: () => void;
+}) {
   const [failed, setFailed] = useState(false);
   const show = person.thumb && !failed;
   const clickable = !!onSelect;
+  // A credit with no photo has nothing to wait for, so it counts immediately.
+  useEffect(() => { if (!person.thumb) onSettled(); }, [person.thumb, onSettled]);
   return (
     <div
       style={clickable ? { ...styles.person, ...styles.personClickable } : styles.person}
@@ -66,7 +77,11 @@ function CastAvatar({ person, onSelect }: { person: Credit; onSelect?: () => voi
           alt={person.name}
           style={styles.avatar}
           loading="eager"
-          onError={() => setFailed(true)}
+          onLoad={onSettled}
+          onError={() => { setFailed(true); onSettled(); }}
+          // A cached headshot can finish decoding before onLoad is attached, in
+          // which case the event never arrives and the gate waits for nothing.
+          ref={(el) => { if (el?.complete) onSettled(); }}
         />
       ) : (
         <div style={{ ...styles.avatar, ...styles.avatarFallback }}>{initials(person.name)}</div>
@@ -140,6 +155,7 @@ export function CastRow({ cast, directors, onSelectPerson, loading, onImagesRead
             key={`${p.name}-${p.role ?? i}`}
             person={p}
             onSelect={onSelectPerson ? () => onSelectPerson(p) : undefined}
+            onSettled={handleSettled}
           />
         ))}
       </ScrollShelf>

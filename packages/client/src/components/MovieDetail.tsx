@@ -37,10 +37,10 @@ interface MovieDetailProps {
  *
  * The gate below reveals as soon as the page's parts are in — poster, metadata,
  * ratings, most of the cast, the related rows — and gives up waiting at this
- * point regardless. Two seconds is enough for most of it to land on a warm
- * cache, and past that an unfinished page beats a spinner.
+ * point regardless. A cached page satisfies the gate in a frame or two and
+ * never shows the spinner at all; past this an unfinished page beats a wait.
  */
-const REVEAL_TIMEOUT_MS = 2000;
+const REVEAL_TIMEOUT_MS = 1500;
 
 function authUrl(url: string): string {
   const token = getSessionToken();
@@ -354,6 +354,12 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                   src={posterUrl}
                   alt={dTitle}
                   style={{ ...styles.poster, ...(item.type === "episode" ? styles.posterEpisode : {}) }}
+                  onLoad={() => setPosterLoaded(true)}
+                  onError={() => setPosterLoaded(true)}
+                  // A poster served from the browser cache can finish decoding
+                  // before onLoad is attached, in which case the event never
+                  // arrives and the gate would wait for nothing.
+                  ref={(el) => { if (el?.complete) setPosterLoaded(true); }}
                 />
               </div>
             )}
@@ -437,6 +443,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                       tmdbId={meta.tmdbId}
                       mediaType="movie"
                       style={styles.ratings}
+                      onReady={() => setRatingsReady(true)}
                     />
                   )}
                 </div>
@@ -608,6 +615,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
             directors={meta?.directors}
             onSelectPerson={onSelectPerson}
             loading={!meta && !metaFailed}
+            onImagesReady={() => setCastReady(true)}
           />
         </div>
 

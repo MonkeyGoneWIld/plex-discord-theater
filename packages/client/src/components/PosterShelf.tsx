@@ -41,12 +41,7 @@ export const shelfStyles: Record<string, React.CSSProperties> = {
   wrap: {
     maxWidth: `${COLLECTION_ROW_MAX_WIDTH_PX}px`,
     margin: "40px auto 0",
-    // The 24px page gutter lives on the row and the label rather than on this
-    // wrapper. Putting it here instead would clip the cards' hover glow at the
-    // scroller's own edge — the glow needs to fall inside the scroll box, not
-    // outside it. Keeping the total width identical is what stops the cards
-    // being resized, which is what let an eleventh peek in.
-    padding: 0,
+    padding: "0 24px",
     display: "flex",
     flexDirection: "column",
     gap: "8px",
@@ -60,21 +55,14 @@ export const shelfStyles: Record<string, React.CSSProperties> = {
     color: "#e0e0e0",
     fontSize: "20px",
     fontWeight: 700,
-    marginBottom: 0,
+    marginBottom: "12px",
     letterSpacing: "-0.01em",
-    // Carries the gutter the wrapper gave up, so headings still line up with
-    // the first card.
-    padding: "0 24px",
   },
   row: {
     display: "flex",
     gap: "14px",
     overflowX: "auto" as const,
-    // Gutter on all four sides. The scroller spans the full wrapper width and
-    // insets its own content, so the hover glow falls inside the scroll box
-    // instead of being sheared off at the edge, and the cards keep exactly the
-    // width they had when the gutter sat on the wrapper.
-    padding: "20px 24px 22px",
+    paddingBottom: "8px",
   },
   card: {
     flexShrink: 0,

@@ -28,6 +28,13 @@ const EXTERNAL_POSTER_FILTER = "grayscale(65%) brightness(0.55)";
  *  is usually done by the time a deliberate click lands. */
 const HOVER_INTENT_MS = 120;
 
+// Card edge colours. Hover swaps between them, so they have to match what the
+// `card` / `cardExternal` styles below set, or leaving a card would repaint it
+// with the wrong resting edge.
+const IDLE_BORDER = "rgba(255,255,255,0.06)";
+const EXTERNAL_BORDER = "rgba(255,255,255,0.14)";
+const ACCENT_BORDER = "rgba(229,160,13,0.85)";
+
 export function MovieCard({ item, onClick, progress, watched, onRemove, removeLabel = "Remove" }: MovieCardProps) {
   const prefetchTimer = useRef<number | undefined>(undefined);
   // A card can unmount while its timer is pending (filtering, tab switch).
@@ -56,10 +63,16 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
         prefetchTimer.current = window.setTimeout(() => prefetchDetail(item), HOVER_INTENT_MS);
         const el = e.currentTarget;
         el.style.transform = "scale(1.03)";
-        // Even, soft amber halo — 0 offset so it reads the same on every side.
-        // Its ~18px reach is deliberately kept under the shelf rows' 20/22px
-        // vertical padding (see Library.tsx hubRow) so nothing gets clipped.
-        el.style.boxShadow = "0 0 18px 1px rgba(229,160,13,0.16)";
+        // Amber edge rather than an outer halo.
+        //
+        // A glow is drawn outside the element's box, and these cards live in a
+        // horizontally scrolling row — `overflow-x: auto` clips both axes, so
+        // the first and last card always lost part of it, and every card lost
+        // the top and bottom. Padding the row to make space only shrinks the
+        // cards, which lets an extra one show at the edge. A border is inside
+        // the card's own box, so there is nothing to clip and the row keeps the
+        // exact geometry it had.
+        el.style.borderColor = ACCENT_BORDER;
         // Reveal a dimmed not-in-library poster at full colour on hover.
         if (external) {
           const img = el.querySelector("img");
@@ -70,7 +83,7 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
         if (prefetchTimer.current) window.clearTimeout(prefetchTimer.current);
         const el = e.currentTarget;
         el.style.transform = "scale(1)";
-        el.style.boxShadow = "none";
+        el.style.borderColor = external ? EXTERNAL_BORDER : IDLE_BORDER;
         if (external) {
           const img = el.querySelector("img");
           if (img) img.style.filter = EXTERNAL_POSTER_FILTER;
@@ -156,7 +169,7 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(255,255,255,0.06)",
     color: "inherit",
     textAlign: "left",
-    transition: "transform 0.2s ease, box-shadow 0.2s ease",
+    transition: "transform 0.2s ease, border-color 0.2s ease",
     width: "100%",
     fontFamily: "inherit",
   },

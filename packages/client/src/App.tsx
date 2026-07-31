@@ -773,7 +773,6 @@ export function App() {
 
       {view.kind === "person" && (
         <PersonDetail
-          personId={view.personId}
           name={view.name}
           thumb={view.thumb}
           onSelect={handleSelectRelated}

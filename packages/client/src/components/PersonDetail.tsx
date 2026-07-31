@@ -4,10 +4,8 @@ import { PosterShelf, shelfStyles } from "./PosterShelf";
 import { SkeletonBlock } from "./SkeletonBlock";
 
 interface PersonDetailProps {
-  /** Plex tag id — the key this page is fetched by. */
-  personId: number;
-  /** Name from the credit that was clicked. Shown immediately (the same
-   *  optimistic trick the title pages use) and used to match TMDB's record. */
+  /** The key this page is fetched by — every credit carries a name, where tag
+   *  ids are inconsistent across Plex versions and absent from TMDB credits. */
   name: string;
   /** Headshot from the credit, so the photo is up before the fetch returns. */
   thumb?: string | null;
@@ -45,7 +43,7 @@ function formatDate(iso: string | null): string | null {
  * dates come from TMDB and are optional; without them the page is still a useful
  * index of their work.
  */
-export function PersonDetail({ personId, name, thumb, onSelect, onBack }: PersonDetailProps) {
+export function PersonDetail({ name, thumb, onSelect, onBack }: PersonDetailProps) {
   const [person, setPerson] = useState<Person | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -56,12 +54,12 @@ export function PersonDetail({ personId, name, thumb, onSelect, onBack }: Person
     setLoading(true);
     setFailed(false);
     setImgFailed(false);
-    fetchPerson(personId, name)
+    fetchPerson(name)
       .then((p) => { if (!cancelled) setPerson(p); })
       .catch(() => { if (!cancelled) setFailed(true); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [personId, name]);
+  }, [name]);
 
   // Name and photo come from the credit that was clicked, so the page has a
   // subject from the first frame — same reasoning as the title pages.
@@ -80,6 +78,7 @@ export function PersonDetail({ personId, name, thumb, onSelect, onBack }: Person
         Back
       </button>
 
+      <div style={styles.content}>
       <div style={styles.header}>
         {photo && !imgFailed ? (
           <img src={authUrl(photo)} alt={dName} style={styles.photo} onError={() => setImgFailed(true)} />
@@ -133,6 +132,7 @@ export function PersonDetail({ personId, name, thumb, onSelect, onBack }: Person
             <p style={styles.muted}>Couldn't load this person's details.</p>
           ) : null}
         </div>
+      </div>
       </div>
 
       {/* Their work, as far as the library goes. Movies and shows are kept in
@@ -190,23 +190,30 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "inherit",
     cursor: "pointer",
   },
-  header: {
+  // Same measurements as the title pages (MovieDetail content/layout/posterWrap),
+  // so a person sits in exactly the column a film does — the photo lands where
+  // the poster lands, and the text starts on the same line.
+  content: {
     position: "relative",
     zIndex: 10,
-    display: "flex",
-    gap: "32px",
-    padding: "28px 24px 8px",
     maxWidth: "1100px",
+    margin: "0 auto",
+    padding: "24px 24px 8px",
+  },
+  header: {
+    display: "flex",
+    gap: "36px",
+    alignItems: "flex-start",
     flexWrap: "wrap",
   },
   photo: {
     width: "240px",
     aspectRatio: "2 / 3",
     objectFit: "cover",
-    borderRadius: "10px",
+    borderRadius: "12px",
     flexShrink: 0,
     background: "#1a1a1a",
-    border: "1px solid rgba(255,255,255,0.07)",
+    boxShadow: "0 8px 32px rgba(0,0,0,0.6)",
   },
   photoPlaceholder: {
     display: "flex",

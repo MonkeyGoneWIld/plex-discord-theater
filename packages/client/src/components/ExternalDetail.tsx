@@ -8,6 +8,8 @@ import { RatingsRow } from "./RatingsRow";
 import { SkeletonBlock } from "./SkeletonBlock";
 import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
+import { DetailSkeleton } from "./DetailSkeleton";
+import { useRevealTimeout } from "../lib/useRevealTimeout";
 
 interface ExternalDetailProps {
   item: PlexItem;
@@ -15,6 +17,9 @@ interface ExternalDetailProps {
   onSelectPerson?: (person: Credit) => void;
   onBack: () => void;
 }
+
+/** How long to wait for the page to assemble before showing it unfinished. */
+const REVEAL_TIMEOUT_MS = 6000;
 
 function formatRuntime(ms: number | null): string {
   if (!ms) return "";
@@ -53,6 +58,15 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
   const [statusLoaded, setStatusLoaded] = useState(false);
   const [requesting, setRequesting] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
+  // Reveal gate — see `pageReady`.
+  const [posterLoaded, setPosterLoaded] = useState(false);
+  const [ratingsReady, setRatingsReady] = useState(false);
+  const [castReady, setCastReady] = useState(false);
+  useEffect(() => {
+    setPosterLoaded(false);
+    setRatingsReady(false);
+    setCastReady(false);
+  }, [item.ratingKey]);
 
   useEffect(() => {
     // Discover search results resolve full detail from their plex:// guid;
@@ -126,8 +140,26 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
   const facts = [year, runtime, rating].filter(Boolean).join("  ·  ");
   const statusLabel = status != null ? STATUS_LABEL[status] ?? null : null;
 
+  // Appear once, complete — the same gate the library detail pages use. The
+  // Seerr answer is part of it here, because the request button is what this
+  // page exists for and showing it in the wrong state is worse than waiting.
+  const wantsCast = !!(meta?.cast?.length || meta?.directors?.length);
+  const wantsStatus = tmdbId != null && mediaType === "movie";
+  const wantsSeasons = tmdbId != null && mediaType === "tv";
+  const revealTimedOut = useRevealTimeout(item.ratingKey, REVEAL_TIMEOUT_MS);
+  const pageReady =
+    (!loading &&
+      (posterLoaded || !poster) &&
+      ratingsReady &&
+      (!wantsCast || castReady) &&
+      (!wantsStatus || statusLoaded) &&
+      (!wantsSeasons || seerrTv != null)) ||
+    revealTimedOut;
+
   return (
     <div style={styles.container}>
+      {!pageReady && <DetailSkeleton seasons={mediaType === "tv"} />}
+      <div style={pageReady ? styles.revealed : styles.prerender} aria-hidden={!pageReady}>
       <button onClick={onBack} style={styles.backBtn}>
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
           <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
@@ -136,7 +168,13 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
       </button>
       <div style={styles.body}>
         {poster ? (
-          <img src={authUrl(poster)} alt={title} style={styles.poster} />
+          <img
+            src={authUrl(poster)}
+            alt={title}
+            style={styles.poster}
+            onLoad={() => setPosterLoaded(true)}
+            onError={() => setPosterLoaded(true)}
+          />
         ) : (
           <div style={{ ...styles.poster, ...styles.posterPlaceholder }}>No Poster</div>
         )}
@@ -157,6 +195,7 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
             tmdbId={tmdbId}
             mediaType={item.type === "show" ? "show" : "movie"}
             style={styles.ratings}
+            onReady={() => setRatingsReady(true)}
           />
           {loading && !summary ? (
             <div style={styles.summaryMuted}>Loading details…</div>
@@ -189,17 +228,9 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
           {requestError && <div style={styles.requestError}>{requestError}</div>}
         </div>
       </div>
-      {/* Cast & Crew — from TMDB here rather than Plex, but the same row. */}
-      <div style={shelfStyles.wrap}>
-        <CastRow
-          cast={meta?.cast}
-          directors={meta?.directors}
-          onSelectPerson={onSelectPerson}
-          loading={loading}
-        />
-      </div>
-
-      {/* TV: same season request grid as the library show page. */}
+      {/* TV: same season request grid as the library show page. It comes before
+          the credits — requesting the show is what this page is for, and the
+          cast is context for that decision rather than the point of it. */}
       {tmdbId != null && mediaType === "tv" && seerrTv?.configured !== false && (
         <div style={styles.seasonsWrap}>
           {seerrTv == null ? (
@@ -213,6 +244,18 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
           ) : null}
         </div>
       )}
+
+      {/* Cast & Crew — from TMDB here rather than Plex, but the same row. */}
+      <div style={shelfStyles.wrap}>
+        <CastRow
+          cast={meta?.cast}
+          directors={meta?.directors}
+          onSelectPerson={onSelectPerson}
+          loading={loading}
+          onImagesReady={() => setCastReady(true)}
+        />
+      </div>
+      </div>
     </div>
   );
 }
@@ -220,6 +263,20 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
 const styles: Record<string, React.CSSProperties> = {
   container: {
     width: "100%",
+    position: "relative",
+  },
+  // Reveal gate — see MovieDetail.
+  prerender: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    opacity: 0,
+    pointerEvents: "none" as const,
+  },
+  revealed: {
+    opacity: 1,
+    transition: "opacity 0.28s ease",
   },
   // Matches MovieDetail's back button so navigation is consistent across pages.
   backBtn: {

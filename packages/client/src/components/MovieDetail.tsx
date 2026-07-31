@@ -2,11 +2,13 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, setStreams, getSessionToken, type Credit, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
 import { formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
+import { useRevealTimeout } from "../lib/useRevealTimeout";
 import { loadSubtitlePref, saveSubtitlePref, matchSubtitleTrack } from "../lib/subtitlePref";
 import { RatingsRow } from "./RatingsRow";
 import { RelatedRows } from "./RelatedRows";
 import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
+import { DetailSkeleton } from "./DetailSkeleton";
 import type { QueueItem, SuggestionItem } from "../hooks/useSync";
 
 interface MovieDetailProps {
@@ -29,6 +31,9 @@ interface MovieDetailProps {
   /** Open a cast/crew member's page. Omit to render the row unclickable. */
   onSelectPerson?: (person: Credit) => void;
 }
+
+/** How long to wait for a page to assemble before showing it unfinished. */
+const REVEAL_TIMEOUT_MS = 6000;
 
 function authUrl(url: string): string {
   const token = getSessionToken();
@@ -181,6 +186,11 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   // The backdrop is the one thing that can't be drawn from the clicked card, so
   // it fades in on load instead of appearing hard.
   const [backdropLoaded, setBackdropLoaded] = useState(false);
+  // Reveal gate — see `pageReady`.
+  const [posterLoaded, setPosterLoaded] = useState(false);
+  const [ratingsReady, setRatingsReady] = useState(false);
+  const [castReady, setCastReady] = useState(false);
+  const [relatedReady, setRelatedReady] = useState(false);
   // The host's own saved position for this item, or null if they've never
   // played it. Only the host can start playback, so only the host fetches it.
   const [progress, setProgress] = useState<HistoryEntry | null>(null);
@@ -581,7 +591,12 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
             Movies only: episodes belong to a show, not a collection, and TMDB
             has no per-episode recommendations. */}
         {item.type === "movie" && onSelect && (
-          <RelatedRows ratingKey={item.ratingKey} recommendationsTitle="More Like This" onSelect={onSelect} />
+          <RelatedRows
+            ratingKey={item.ratingKey}
+            recommendationsTitle="More Like This"
+            onSelect={onSelect}
+            onReady={() => setRelatedReady(true)}
+          />
         )}
         </>
     </div>
@@ -594,6 +609,22 @@ const styles: Record<string, React.CSSProperties> = {
     minHeight: "100vh",
     background: "#0d0d0d",
     overflow: "hidden",
+  },
+  // The two halves of the reveal. `prerender` keeps the real page mounted and
+  // laid out at full width — so its images load and the shelves measure — while
+  // painting nothing. Width is explicit because an absolutely-positioned box
+  // would otherwise shrink-wrap.
+  prerender: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    opacity: 0,
+    pointerEvents: "none" as const,
+  },
+  revealed: {
+    opacity: 1,
+    transition: "opacity 0.28s ease",
   },
   // Height reservations for the parts that can't be drawn from the clicked card
   // (see the optimistic-render note). Each holds exactly the space its content

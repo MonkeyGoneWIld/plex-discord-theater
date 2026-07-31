@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PosterShelf, shelfStyles } from "./PosterShelf";
 import { fetchRelated, type PlexCollection, type PlexItem } from "../lib/api";
 import { ShelfSkeleton } from "./ShelfSkeleton";
@@ -10,6 +10,9 @@ interface RelatedRowsProps {
   recommendationsTitle: string;
   /** Open a title's detail page — the same navigation the library grid uses. */
   onSelect: (item: PlexItem) => void;
+  /** Fired once the fetch settles, so a detail page can wait for these rows'
+   *  outline before revealing itself. */
+  onReady?: () => void;
 }
 
 /**
@@ -22,7 +25,7 @@ interface RelatedRowsProps {
  * tab. Renders nothing until there's at least one row to show, so an item with
  * neither leaves no empty headers behind.
  */
-export function RelatedRows({ ratingKey, recommendationsTitle, onSelect }: RelatedRowsProps) {
+export function RelatedRows({ ratingKey, recommendationsTitle, onSelect, onReady }: RelatedRowsProps) {
   const [collections, setCollections] = useState<PlexCollection[]>([]);
   const [recommendations, setRecommendations] = useState<PlexItem[]>([]);
 

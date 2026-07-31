@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ScrollShelf } from "./ScrollShelf";
 import { authUrl, type Credit } from "../lib/api";
 import { ShelfSkeleton } from "./ShelfSkeleton";
+
+/** Share of headshots that must resolve before the row counts as ready. */
+const READY_FRACTION = 0.7;
 
 /** Diameter of a headshot. Plex's own cast row uses a similar circular crop. */
 const AVATAR_PX = 150;
@@ -9,11 +12,14 @@ const AVATAR_PX = 150;
 interface CastRowProps {
   cast?: Credit[];
   directors?: Credit[];
-  /** Open a person's page. Credits without a Plex tag id aren't clickable. */
+  /** Open a person's page. */
   onSelectPerson?: (person: Credit) => void;
   /** True while the metadata carrying these credits is still in flight, so the
    *  row holds its space instead of appearing from nothing. */
   loading?: boolean;
+  /** Fired once most of the headshots have settled — see READY_FRACTION. Lets a
+   *  detail page hold its reveal until the row is worth looking at. */
+  onImagesReady?: () => void;
 }
 
 /** Initials fallback for someone with no headshot — better than an empty disc. */
@@ -78,7 +84,7 @@ function CastAvatar({ person, onSelect }: { person: Credit; onSelect?: () => voi
  * Renders nothing at all when a title has no credits, which is the normal case
  * for a library item Plex never matched against its metadata agent.
  */
-export function CastRow({ cast, directors, onSelectPerson, loading }: CastRowProps) {
+export function CastRow({ cast, directors, onSelectPerson, loading, onImagesReady }: CastRowProps) {
   // The director leads, then the billed cast. Appending crew instead put them
   // past thirty actors — off the end of a row nobody scrolls that far — so the
   // one crew credit people actually look for was effectively missing. Writers
@@ -103,6 +109,22 @@ export function CastRow({ cast, directors, onSelectPerson, loading }: CastRowPro
     if (!existing.thumb && p.thumb) existing.thumb = p.thumb;
   }
   const people = [...byName.values()];
+
+  // Report readiness once enough faces have resolved. Waiting for every one
+  // would hand the slowest headshot on the row a veto over the whole page.
+  const settled = useRef(0);
+  const fired = useRef(false);
+  const total = people.length;
+  const onReadyRef = useRef(onImagesReady);
+  onReadyRef.current = onImagesReady;
+  useEffect(() => { settled.current = 0; fired.current = false; }, [total]);
+  const handleSettled = useCallback(() => {
+    settled.current++;
+    if (!fired.current && total > 0 && settled.current / total >= READY_FRACTION) {
+      fired.current = true;
+      onReadyRef.current?.();
+    }
+  }, [total]);
   // Holding the space while the credits are in flight is the point — returning
   // null here and a full row a moment later is exactly the jolt this avoids.
   if (people.length === 0) return loading ? <ShelfSkeleton variant="cast" labelWidth={140} /> : null;
@@ -117,7 +139,7 @@ export function CastRow({ cast, directors, onSelectPerson, loading }: CastRowPro
           <CastAvatar
             key={`${p.name}-${p.role ?? i}`}
             person={p}
-            onSelect={onSelectPerson && p.id != null ? () => onSelectPerson(p) : undefined}
+            onSelect={onSelectPerson ? () => onSelectPerson(p) : undefined}
           />
         ))}
       </ScrollShelf>

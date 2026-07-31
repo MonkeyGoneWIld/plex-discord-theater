@@ -377,8 +377,10 @@ export interface PersonDetail {
   shows: PlexItem[];
 }
 
-export function fetchPerson(tagId: number, name: string): Promise<PersonDetail> {
-  return cachedGet(`/api/plex/person/${tagId}?name=${encodeURIComponent(name)}`);
+/** Keyed by name, which every credit carries — Plex doesn't reliably expose a
+ *  tag id on cast entries, and TMDB credits have none at all. */
+export function fetchPerson(name: string): Promise<PersonDetail> {
+  return cachedGet(`/api/plex/person?name=${encodeURIComponent(name)}`);
 }
 
 export function fetchDiscoverMeta(guid: string): Promise<DiscoverMeta> {

@@ -4,12 +4,14 @@ import {
   getSessionToken, type Credit, type HistoryEntry, type PlexItem, type PlexMeta, type SeerrSeason,
 } from "../lib/api";
 import { formatTimecode } from "../lib/format";
+import { useRevealTimeout } from "../lib/useRevealTimeout";
 import { MovieCard } from "./MovieCard";
 import { RatingsRow } from "./RatingsRow";
 import { RelatedRows } from "./RelatedRows";
 import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
 import { SeasonRequestGrid } from "./SeasonRequestGrid";
+import { DetailSkeleton } from "./DetailSkeleton";
 
 interface ShowDetailProps {
   item: PlexItem;
@@ -23,6 +25,9 @@ interface ShowDetailProps {
   onSelectPerson?: (person: Credit) => void;
   onBack: () => void;
 }
+
+/** How long to wait for a page to assemble before showing it unfinished. */
+const REVEAL_TIMEOUT_MS = 6000;
 
 function authUrl(url: string): string {
   const token = getSessionToken();
@@ -41,7 +46,18 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
   // The backdrop is the one part that can't come from the clicked card, so it
   // fades in on load rather than appearing hard.
   const [backdropLoaded, setBackdropLoaded] = useState(false);
-  useEffect(() => setBackdropLoaded(false), [item.ratingKey]);
+  // Reveal gate — see `pageReady`.
+  const [posterLoaded, setPosterLoaded] = useState(false);
+  const [ratingsReady, setRatingsReady] = useState(false);
+  const [castReady, setCastReady] = useState(false);
+  const [relatedReady, setRelatedReady] = useState(false);
+  useEffect(() => {
+    setBackdropLoaded(false);
+    setPosterLoaded(false);
+    setRatingsReady(false);
+    setCastReady(false);
+    setRelatedReady(false);
+  }, [item.ratingKey]);
   // Where this viewer left the show: the episode in progress, or the one after
   // the last they finished. Null when never started or watched to the end.
   const [nextUp, setNextUp] = useState<HistoryEntry | null>(null);
@@ -138,7 +154,13 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
           <div style={styles.layout}>
             {posterUrl && (
               <div style={styles.posterWrap}>
-                <img src={posterUrl} alt={dTitle} style={styles.poster} />
+                <img
+                  src={posterUrl}
+                  alt={dTitle}
+                  style={styles.poster}
+                  onLoad={() => setPosterLoaded(true)}
+                  onError={() => setPosterLoaded(true)}
+                />
               </div>
             )}
 
@@ -277,6 +299,19 @@ const styles: Record<string, React.CSSProperties> = {
     minHeight: "100vh",
     background: "#0d0d0d",
     overflow: "hidden",
+  },
+  // Reveal gate — see MovieDetail for both halves.
+  prerender: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    opacity: 0,
+    pointerEvents: "none" as const,
+  },
+  revealed: {
+    opacity: 1,
+    transition: "opacity 0.28s ease",
   },
   // Height reservations for the parts that need the metadata — see MovieDetail.
   genresSlot: {

@@ -1491,64 +1491,77 @@ router.get("/tmdb/meta", async (req: Request, res: Response) => {
  * It's optional: with no TMDB key, or no match, the page still lists the
  * filmography and simply omits the prose.
  */
-router.get("/person/:tagId", async (req: Request, res: Response) => {
-  const tagId = req.params.tagId as string;
-  if (!NUMERIC_RE.test(tagId)) {
-    res.status(400).json({ error: "Invalid person id" });
+router.get("/person", async (req: Request, res: Response) => {
+  const name = typeof req.query.name === "string" ? req.query.name.trim().slice(0, 200) : "";
+  if (!name) {
+    res.status(400).json({ error: "Missing name" });
     return;
   }
-  const name = typeof req.query.name === "string" ? req.query.name.slice(0, 200) : "";
 
   try {
-    const sections = await plexJSON<{ MediaContainer: { Directory?: PlexDirectory[] } }>(
-      "/library/sections",
-    );
-    const dirs = (sections.MediaContainer.Directory || []).filter((d) =>
-      ALLOWED_SECTION_TYPES.has(d.type),
-    );
-
-    // Both credit kinds, across every section. A person can be an actor in one
-    // title and the director of another, and the page shows the union.
-    const perSection = await Promise.all(
-      dirs.flatMap((d) =>
-        (["actor", "director"] as const).map(async (field) => {
-          try {
-            const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
-              `/library/sections/${d.key}/all`,
-              { [field]: tagId },
-            );
-            return data.MediaContainer.Metadata || [];
-          } catch {
-            return [];
-          }
-        }),
-      ),
-    );
-
-    const seen = new Set<string>();
-    const movies: ReturnType<typeof mapItem>[] = [];
-    const shows: ReturnType<typeof mapItem>[] = [];
-    for (const m of perSection.flat()) {
-      if (seen.has(m.ratingKey)) continue;
-      seen.add(m.ratingKey);
-      if (m.type === "movie") movies.push(mapItem(m));
-      else if (m.type === "show") shows.push(mapItem(m));
+    const person = await tmdbPerson(name);
+    if (!person) {
+      // No TMDB key, or nobody by that name. The page still renders — it just
+      // has nothing to show, which is a truthful answer rather than an error.
+      res.json({ name, thumb: null, biography: null, birthday: null, deathday: null,
+                 placeOfBirth: null, knownFor: null, movies: [], shows: [] });
+      return;
     }
+
+    const credits = await tmdbGet<{
+      cast?: TmdbCredit[];
+      crew?: TmdbCredit[];
+    }>(`/person/${person.tmdbId}/combined_credits`);
+
+    // Acting roles plus directing credits — the two kinds the cast row links
+    // from. Other crew jobs would pad the page with titles nobody associates
+    // with the person.
+    const all = [
+      ...(credits?.cast ?? []),
+      ...(credits?.crew ?? []).filter((c) => c.job === "Director"),
+    ];
+
+    // Most-known first, so the per-title library lookups below are spent on the
+    // credits actually worth showing.
+    const rank = (c: TmdbCredit) => c.popularity ?? 0;
+    const pick = (mediaType: string) => {
+      const byId = new Map<number, TmdbCredit>();
+      for (const c of all) {
+        if (c.media_type !== mediaType || c.id == null) continue;
+        if (!byId.has(c.id)) byId.set(c.id, c);
+      }
+      return [...byId.values()].sort((a, b) => rank(b) - rank(a)).slice(0, MAX_PERSON_CREDITS);
+    };
+
+    // Only what's actually here. findLibraryMatch is the same ownership check the
+    // recommendation rows use, and it's cached, so a second visit is nearly free.
+    const resolve = async (credits: TmdbCredit[], type: string) => {
+      const matches = await Promise.all(
+        credits.map(async (c) => {
+          const owned = await findLibraryMatch(c, type);
+          return owned ? mapItem(owned) : null;
+        }),
+      );
+      return matches.filter((m): m is ReturnType<typeof mapItem> => m !== null);
+    };
+
+    const [movies, shows] = await Promise.all([
+      resolve(pick("movie"), "movie"),
+      resolve(pick("tv"), "show"),
+    ]);
+
     const byYear = (a: { year?: number }, b: { year?: number }) => (b.year ?? 0) - (a.year ?? 0);
     movies.sort(byYear);
     shows.sort(byYear);
 
-    const bio = name ? await tmdbPerson(name) : null;
-
     res.json({
-      name: bio?.name || name,
-      thumb: bio?.thumb ?? null,
-      // "Actor" unless they only ever appear here as a director.
-      biography: bio?.biography ?? null,
-      birthday: bio?.birthday ?? null,
-      deathday: bio?.deathday ?? null,
-      placeOfBirth: bio?.placeOfBirth ?? null,
-      knownFor: bio?.knownFor ?? null,
+      name: person.name,
+      thumb: person.thumb,
+      biography: person.biography,
+      birthday: person.birthday,
+      deathday: person.deathday,
+      placeOfBirth: person.placeOfBirth,
+      knownFor: person.knownFor,
       movies,
       shows,
     });
@@ -1558,11 +1571,24 @@ router.get("/person/:tagId", async (req: Request, res: Response) => {
   }
 });
 
+/** Credits to test for ownership per kind. Beyond this the tail is bit parts
+ *  and guest spots, and each one costs a library lookup. */
+const MAX_PERSON_CREDITS = 40;
+
+/** A TMDB combined-credits entry. Extends TmdbPart so it can be handed straight
+ *  to findLibraryMatch, which is the same ownership test the related rows use. */
+interface TmdbCredit extends TmdbPart {
+  media_type?: string;
+  job?: string;
+  popularity?: number;
+}
+
 /** TMDB person lookup by name, cached (misses included — a name TMDB doesn't
  *  know won't start knowing it on the next page view). */
 const tmdbPersonCache = new Map<string, TmdbPerson | null>();
 
 interface TmdbPerson {
+  tmdbId: number;
   name: string;
   thumb: string | null;
   biography: string | null;
@@ -1593,6 +1619,7 @@ async function tmdbPerson(name: string): Promise<TmdbPerson | null> {
     }>(`/person/${id}`);
     if (p) {
       result = {
+        tmdbId: id,
         name: p.name ?? name,
         thumb: p.profile_path
           ? externalThumbUrl(`https://image.tmdb.org/t/p/w500${p.profile_path}`)

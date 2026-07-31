@@ -27,9 +27,10 @@ type View =
   | { kind: "season"; item: PlexItem; show: PlexItem }
   | { kind: "detail"; item: PlexItem; flat?: boolean }
   | { kind: "external-detail"; item: PlexItem; flat?: boolean }
-  // A cast/crew member's page, keyed by their Plex tag id. Name and photo come
-  // from the credit that was clicked so the page has a subject immediately.
-  | { kind: "person"; personId: number; name: string; thumb?: string | null }
+  // A cast/crew member's page, keyed by name — which is what the person endpoint
+  // looks up. The photo comes from the credit clicked, so the page has a subject
+  // immediately.
+  | { kind: "person"; name: string; thumb?: string | null }
   // resumePosition (seconds) is set only when the host chose "Resume" on the
   // detail view; every other route into the player starts from the beginning.
   | { kind: "player"; item: PlexItem; subtitles: boolean; resumePosition?: number };
@@ -106,10 +107,6 @@ export function App() {
       scrollPosRef.current[s.length - 1] = window.scrollY;
       return [...s, v];
     });
-  }, []);
-
-  const replaceView = useCallback((v: View) => {
-    setViewStack((s) => (s.length > 1 ? [...s.slice(0, -1), v] : [v]));
   }, []);
 
   const popView = useCallback(() => {
@@ -355,10 +352,12 @@ export function App() {
     [handleSelect],
   );
 
+  // Keyed by name, which is what the person endpoint looks up and all Plex
+  // gives us on a credit. An earlier version gated this on a tag id that no
+  // credit ever carried, so every cast member was silently unclickable.
   const handleSelectPerson = useCallback(
-    (person: { id?: number | null; name: string; thumb?: string | null }) => {
-      if (person.id == null) return;
-      pushView({ kind: "person", personId: person.id, name: person.name, thumb: person.thumb });
+    (person: { name: string; thumb?: string | null }) => {
+      pushView({ kind: "person", name: person.name, thumb: person.thumb });
       emitBrowse(`Looking at ${person.name}`);
     },
     [pushView, emitBrowse],

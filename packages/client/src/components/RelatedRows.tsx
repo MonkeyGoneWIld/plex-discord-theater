@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { PosterShelf, shelfStyles } from "./PosterShelf";
 import { fetchRelated, type PlexCollection, type PlexItem } from "../lib/api";
 import { ShelfSkeleton } from "./ShelfSkeleton";
@@ -10,9 +10,6 @@ interface RelatedRowsProps {
   recommendationsTitle: string;
   /** Open a title's detail page — the same navigation the library grid uses. */
   onSelect: (item: PlexItem) => void;
-  /** Fired once the fetch settles, so a detail page can wait for these rows'
-   *  outline before revealing itself. */
-  onReady?: () => void;
 }
 
 /**
@@ -25,13 +22,15 @@ interface RelatedRowsProps {
  * tab. Renders nothing until there's at least one row to show, so an item with
  * neither leaves no empty headers behind.
  */
-export function RelatedRows({ ratingKey, recommendationsTitle, onSelect, onReady }: RelatedRowsProps) {
+export function RelatedRows({ ratingKey, recommendationsTitle, onSelect }: RelatedRowsProps) {
   const [collections, setCollections] = useState<PlexCollection[]>([]);
   const [recommendations, setRecommendations] = useState<PlexItem[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setCollections([]);
     setRecommendations([]);
+    setLoading(true);
     let cancelled = false;
     fetchRelated(ratingKey)
       .then((res) => {
@@ -46,9 +45,21 @@ export function RelatedRows({ ratingKey, recommendationsTitle, onSelect, onReady
         setCollections([]);
         setRecommendations([]);
       })
-;
+      .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [ratingKey]);
+
+  // Hold one row's worth of space while the request is out. Nearly every title
+  // has either a collection or recommendations, so collapsing to nothing and
+  // then expanding a full shelf a moment later shifts the page under the reader
+  // — the outline keeps that ground reserved.
+  if (loading) {
+    return (
+      <div style={shelfStyles.wrap}>
+        <ShelfSkeleton variant="poster" labelWidth={200} />
+      </div>
+    );
+  }
 
   if (collections.length === 0 && recommendations.length === 0) return null;
 

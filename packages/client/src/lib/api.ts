@@ -35,7 +35,12 @@ export function authUrl(url: string): string {
  * appear instantly. Everything that renders poster art goes through here.
  */
 export function posterThumbUrl(thumb: string): string {
-  return `${authUrl(thumb)}&w=${POSTER_THUMB_W}&h=${POSTER_THUMB_H}`;
+  // Separator has to be worked out rather than assumed: authUrl returns the URL
+  // untouched when there's no session token yet, so a hardcoded "&" would append
+  // the size to the path instead of the query and the request would 400.
+  const withToken = authUrl(thumb);
+  const sep = withToken.includes("?") ? "&" : "?";
+  return `${withToken}${sep}w=${POSTER_THUMB_W}&h=${POSTER_THUMB_H}`;
 }
 
 export const POSTER_THUMB_W = 400;
@@ -345,9 +350,6 @@ export interface DiscoverMeta {
 /** One credited person on a title — an actor with their character, or a
  *  director/writer with their job. */
 export interface Credit {
-  /** Plex tag id — the key for this person's page. Null when Plex didn't
-   *  supply one (older servers), in which case the credit isn't clickable. */
-  id?: number | null;
   name: string;
   /** Character name for cast; job title for crew. Null when unknown. */
   role: string | null;
@@ -357,7 +359,6 @@ export interface Credit {
 
 /** A person as returned by search — enough to render a row and open their page. */
 export interface PersonResult {
-  id: number;
   name: string;
   thumb: string | null;
 }

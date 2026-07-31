@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { ScrollShelf } from "./ScrollShelf";
 import { authUrl, type Credit } from "../lib/api";
 import { ShelfSkeleton } from "./ShelfSkeleton";

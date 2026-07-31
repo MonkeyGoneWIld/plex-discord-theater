@@ -686,6 +686,17 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                     style={styles.personCard}
                     onClick={() => onSelectPerson?.(p)}
                     title={p.name}
+                    // Same hover language as the cast row and the poster cards:
+                    // the edge lights amber. Without it these were the only
+                    // clickable things in the results that gave no response.
+                    onMouseEnter={(e) => {
+                      const disc = e.currentTarget.firstElementChild as HTMLElement | null;
+                      if (disc) disc.style.borderColor = "rgba(229,160,13,0.85)";
+                    }}
+                    onMouseLeave={(e) => {
+                      const disc = e.currentTarget.firstElementChild as HTMLElement | null;
+                      if (disc) disc.style.borderColor = "rgba(255,255,255,0.08)";
+                    }}
                   >
                     {p.thumb ? (
                       <img src={authUrl(p.thumb)} alt="" style={styles.personPhoto} />
@@ -915,6 +926,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: "block",
     background: "#1c1c1c",
     border: "1px solid rgba(255,255,255,0.08)",
+    transition: "border-color 0.18s ease",
   },
   personPhotoEmpty: {
     display: "flex",

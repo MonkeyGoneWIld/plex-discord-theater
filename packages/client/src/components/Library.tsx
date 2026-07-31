@@ -955,12 +955,17 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     gap: "14px",
     overflowX: "auto" as const,
-    // Vertical padding only, and it must stay >= the card's hover-glow radius:
-    // overflowX:auto also clips the vertical axis, so without this the halo gets
-    // sheared off top and bottom. Horizontal padding would shrink the content box
-    // that POSTER_ROW_CARD_WIDTH's `100%` divides by, making the ten cards narrow
-    // enough for an eleventh to peek in at the right edge — so keep it at zero.
-    padding: "20px 0 22px",
+    // Padding on all four sides so the card hover-glow has room inside the
+    // scroller's clip box — overflowX:auto clips the vertical axis too, and the
+    // first and last card were losing their halo to the left and right edges.
+    //
+    // The negative margin is what makes the horizontal half safe. Padding alone
+    // would shrink the content box that POSTER_ROW_CARD_WIDTH's `100%` divides
+    // by, narrowing the ten cards until an eleventh peeked in. Pulling the row
+    // out by the same 24px it pads back in leaves that width exactly as it was,
+    // while the clip box grows outward to cover the glow.
+    padding: "20px 24px 22px",
+    margin: "0 -24px",
   },
   hubCard: {
     flexShrink: 0,

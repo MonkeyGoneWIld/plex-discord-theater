@@ -62,10 +62,10 @@ export const shelfStyles: Record<string, React.CSSProperties> = {
     display: "flex",
     gap: "14px",
     overflowX: "auto" as const,
-    // See Library.tsx hubRow — vertical-only padding, kept >= the hover-glow
-    // radius. Horizontal padding here would shrink the cards and let an extra
-    // one peek in at the row's edge.
-    padding: "20px 0 22px",
+    // See Library.tsx hubRow for why the horizontal padding is paired with an
+    // equal negative margin.
+    padding: "20px 24px 22px",
+    margin: "0 -24px",
   },
   card: {
     flexShrink: 0,

@@ -331,7 +331,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // Offset for the next transcode start. Seeded with the resume position so the
   // very first session starts there; the HLS effect clears it after each use, so
   // restarts and later items begin at 0 unless a seek sets it again.
-  const seekOffsetRef = useRef(resumePosition && resumePosition > 0 ? resumePosition : 0);
+  const seekOffsetRef = useRef<number | null>(
+    resumePosition && resumePosition > 0 ? resumePosition : null,
+  );
   // Last position this client is confident playback actually reached for the
   // current item. Updated only from a video that is genuinely playing, so it is
   // never polluted by the transient 0 a torn-down element reports mid-restart.
@@ -682,9 +684,16 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // So 0 is treated as "nothing pending" rather than "start at the
     // beginning", and we fall back to the last position known to be real for
     // *this* item. Only a genuine fresh start leaves the fallback empty.
+    // `null` means nothing pending — a number, including 0, is a real target.
+    //
+    // These used to be the same value. Seeking to 00:00 set the pending offset
+    // to 0, which the check below read as "no seek requested", so the restart
+    // took the fallback and resumed at the position the viewer had just seeked
+    // away from. Dragging the bar to the start visibly reloaded and then jumped
+    // back to where it was.
     let offset = seekOffsetRef.current;
-    seekOffsetRef.current = 0;
-    if (sessionOwner && offset === 0) {
+    seekOffsetRef.current = null;
+    if (sessionOwner && offset === null) {
       const fallback = lastGoodPositionRef.current;
       if (fallback > 0) {
         logWarn("HLS", "no pending offset on restart, resuming from last known position", {
@@ -694,6 +703,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         offset = fallback;
       }
     }
+    const startOffset = offset ?? 0;
 
     // The offset is the single most useful number in a restart: a transcode
     // starting somewhere other than where playback was is the signature of a
@@ -702,7 +712,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       session: sessionId.substring(0, 8),
       owner: sessionOwner,
       adopted: didAdoptRef.current,
-      offsetS: offset,
+      offsetS: startOffset,
       lastGoodPosS: lastGoodPositionRef.current,
       subtitles: subtitlesOnRef.current,
       vpsRelay,
@@ -711,7 +721,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
     const url = hlsMasterUrl(item.ratingKey, sessionId, {
       subtitles: subtitlesOnRef.current,
-      offset: offset > 0 ? offset : undefined,
+      offset: startOffset > 0 ? startOffset : undefined,
     });
 
     async function start() {
@@ -944,7 +954,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // meant a seek could be compared against a transcode that had been
           // asked for but never existed.
           restartPendingRef.current = false;
-          if (sessionOwner) sessionStartOffsetRef.current = offset;
+          if (sessionOwner) sessionStartOffsetRef.current = startOffset;
 
           // Clear track switching overlay
           setTrackSwitching(null);
@@ -980,7 +990,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             // heartbeat drags them back.
             syncActionsRef.current?.sendPlay(
               item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId!,
-              offset > 0 ? offset : undefined,
+              startOffset > 0 ? startOffset : undefined,
             );
           }
         });
@@ -1231,7 +1241,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             // fields), so this string is all they have to display.
             syncActionsRef.current?.sendPlay(
               item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId!,
-              offset > 0 ? offset : undefined,
+              startOffset > 0 ? startOffset : undefined,
             );
           }
         };

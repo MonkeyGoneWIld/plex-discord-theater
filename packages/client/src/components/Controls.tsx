@@ -130,6 +130,8 @@ export function Controls({
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  // Only a genuinely different item invalidates the duration — see onDur below.
+  useEffect(() => { setDuration(0); }, [title]);
   const [volume, setVolume] = useState(loadVolume);
   const [muted, setMuted] = useState(false);
   const [visible, setVisible] = useState(true);
@@ -250,7 +252,19 @@ export function Controls({
         setBufferedEnd(video.buffered.end(video.buffered.length - 1));
       }
     };
-    const onDur = () => setDuration(video.duration || 0);
+    // Keep the last real duration through a restart.
+    //
+    // Tearing down hls.js detaches the media, and the element then reports a
+    // NaN duration until the replacement manifest loads. Writing that through
+    // collapsed `duration` to 0, which is what made the scrub bar and the time
+    // readout vanish for the several seconds a seek-restart takes — the bar
+    // disappeared, playback reloaded, and it came back at the target. The
+    // duration of the item hasn't changed across a restart, so there is nothing
+    // to relearn; the title effect below clears it when the item really does.
+    const onDur = () => {
+      const d = video.duration;
+      if (Number.isFinite(d) && d > 0) setDuration(d);
+    };
     video.addEventListener("play", onPlay);
     video.addEventListener("pause", onPause);
     video.addEventListener("timeupdate", onTime);

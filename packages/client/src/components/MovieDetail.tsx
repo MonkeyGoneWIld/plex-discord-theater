@@ -715,7 +715,10 @@ const styles: Record<string, React.CSSProperties> = {
   },
   content: {
     position: "relative",
-    zIndex: 10,
+    // Above the shelves below it (shelfStyles.wrap is z-index 10). At equal
+    // z-index the later element wins, so the Cast & Crew row painted over the
+    // open audio/subtitle dropdown and clipped the list.
+    zIndex: 20,
     maxWidth: "1100px",
     margin: "0 auto",
     padding: "0 24px 48px",

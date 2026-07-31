@@ -1523,11 +1523,14 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // viewer's HLS too — so viewers watched their own scrub bar drop to 0:00
     // and crawl back exactly like the host did.
     setRestartingTo(syncState.position);
-    const timer = setTimeout(() => {
-      setHostSeeking(false);
-      setRestartingTo(null);
-    }, 1400);
-    return () => clearTimeout(timer);
+    // Two different lifetimes. The "seeking" badge is a deliberate flash. The
+    // held position has to survive as long as the reload does — clearing it on
+    // the same 1.4s timer put the bar back to 0:00 partway through, which is
+    // the very thing it exists to prevent. `playing` clears it; this is only a
+    // backstop for a reload that never completes.
+    const badge = setTimeout(() => setHostSeeking(false), 1400);
+    const held = setTimeout(() => setRestartingTo(null), 20_000);
+    return () => { clearTimeout(badge); clearTimeout(held); };
   }, [syncState?.seekSeq, canControl]);
 
   // Viewer: periodic drift correction on heartbeats (larger threshold than explicit commands).
@@ -1719,14 +1722,22 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // an in-place seek would only stall for SEEK_STALL_TIMEOUT_MS before falling
     // back to a restart anyway. Restart at the target directly and skip the stall.
     //
-    // Only decidable when something is actually buffered. With an empty buffer
-    // we have no idea where the transcode head is, so the in-place attempt plus
-    // its stall timeout is the honest answer — it costs 6s in the worst case,
-    // versus a restart storm for guessing wrong.
-    if (!wasBuffered && bufEnd !== null && positionSeconds - bufEnd > FAR_SEEK_THRESHOLD_S) {
+    // With an empty buffer, fall back to the session's start offset as the head.
+    // Nothing has been transcoded past what has been buffered, so when nothing
+    // is buffered the head is still where the session began — an estimate, but a
+    // sound one, and far better than declining to classify.
+    //
+    // Declining is what made rapid seeking feel broken. A seek landing while the
+    // previous restart was still spinning up saw no buffer, skipped this check,
+    // set currentTime on media that wasn't there yet, and then sat out the full
+    // six-second stall before restarting. Every seek in a burst paid it, so the
+    // bar stopped tracking and the room watched a position that never loaded.
+    const head = bufEnd ?? sessionStartOffsetRef.current;
+    if (!wasBuffered && positionSeconds - head > FAR_SEEK_THRESHOLD_S) {
       logEvent("Seek", "far forward jump past transcode head → restart", {
         targetS: positionSeconds,
-        bufferedEndS: bufEnd,
+        headS: head,
+        headFrom: bufEnd !== null ? "buffer" : "session-start",
         thresholdS: FAR_SEEK_THRESHOLD_S,
       });
       handleSeekRestart(positionSeconds, broadcast);

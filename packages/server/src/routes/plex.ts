@@ -2219,7 +2219,14 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
       // PLEX_TOKEN gets 403'd, leaving the session (and its transcode) to linger.
       // Use PLEX_ACCOUNT_TOKEN when set (same one Discover/Seerr use).
       const termParams: Record<string, string> = { sessionId, reason: "Playback ended" };
-      const termRes = await plexFetch("/status/sessions/terminate", termParams, undefined, "POST");
+      // The comment above described this for a long time without it being true:
+      // plexFetch always sent PLEX_TOKEN, so the 403 it warns about happened on
+      // every setup — including the ones that had configured an account token
+      // precisely to avoid it — and orphaned transcodes piled up on Plex.
+      const termRes = await plexFetch(
+        "/status/sessions/terminate", termParams, undefined, "POST",
+        process.env.PLEX_ACCOUNT_TOKEN || process.env.PLEX_TOKEN,
+      );
       if (!termRes.ok) {
         console.warn("[HLS] Terminate returned", termRes.status,
           process.env.PLEX_ACCOUNT_TOKEN ? "" : "(no PLEX_ACCOUNT_TOKEN set)");
@@ -3072,8 +3079,12 @@ router.delete(
           // Always clear mappings and notify Plex — even on error the transcode
           // key should not be reused, and notifyPlexStopped prevents stale 400s
           activeTranscodeKeys.delete(plexKey);
-          plexTranscodeKeys.delete(sessionId);
-          sessionRatingKeys.delete(sessionId);
+          // Not just the maps: this also stops the prefetch poller and clears
+          // the transcode head and host-ping entries. Deleting by hand here
+          // left the poller hitting Plex every 2s with up to 100 segments
+          // pinned, and — because only two prefetch sessions may run at once —
+          // starved the *next* thing played of any prefetch at all.
+          markTranscodeStopped(sessionId);
           await notifyPlexStopped(ratingKey, sessionId);
           if (plexKey) await terminatePlexSession(plexKey);
         }

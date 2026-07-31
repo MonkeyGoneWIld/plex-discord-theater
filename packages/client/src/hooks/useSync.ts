@@ -272,6 +272,14 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               isCoHost:
                 ((msg.participants as Participant[]) || []).find((p) => p.userId === userId)
                   ?.isCoHost ?? false,
+              // Taken from the roster for the same reason isCoHost is. Without
+              // it a client that reconnects after being promoted — its socket
+              // blipped at the same moment the previous host's dropped — is
+              // told it is the host by the roster and ignores it, then sits
+              // there with no transport controls over a room it owns.
+              isHost:
+                ((msg.participants as Participant[]) || []).find((p) => p.userId === userId)
+                  ?.isHost ?? prev.isHost,
             }));
             break;
           case "participants": {

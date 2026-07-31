@@ -54,8 +54,16 @@ app.use(
         scriptSrc: ["'self'"],
         styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
         fontSrc: ["'self'", "https://fonts.gstatic.com"],
-        mediaSrc: ["'self'", ...(vpsRelayOrigin ? [vpsRelayOrigin] : [])],
-        imgSrc: ["'self'"],
+        // blob: — hls.js attaches its MediaSource via URL.createObjectURL, so
+        // without it the <video> src is refused.
+        mediaSrc: ["'self'", "blob:", ...(vpsRelayOrigin ? [vpsRelayOrigin] : [])],
+        // data: — Vite inlines any asset under 4 KB, which is five of the six
+        // ratings icons. Under 'self' alone they were blocked and rendered as
+        // broken images, while the one file over the limit loaded fine.
+        imgSrc: ["'self'", "data:"],
+        // hls.js builds its transmuxer worker from a blob. Refused, it falls
+        // back to demuxing on the main thread — silently, no error, just jank.
+        workerSrc: ["'self'", "blob:"],
         connectSrc: ["'self'", "https://discord.com", "https://*.discord.com", "https://*.discordsays.com", "wss://*.discord.gg", "wss://*.discordsays.com", "wss:", "ws:", ...(vpsRelayOrigin ? [vpsRelayOrigin] : [])],
         // Discord embeds Activities in an iframe from *.discordsays.com —
         // frame-ancestors must allow it or the browser blocks the embed
@@ -90,9 +98,19 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+/** Requests originating on this machine — the cache warmer, which calls our own
+ *  routes over loopback. A full pass is 600 requests against a 600-request
+ *  budget, so without this it rate-limits itself out halfway through. Not
+ *  spoofable: this is the socket's peer address, not a header. */
+function isLoopback(req: { ip?: string; socket: { remoteAddress?: string | null } }): boolean {
+  const addr = req.ip || req.socket.remoteAddress || "";
+  return addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1";
+}
+
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: isDev ? 5000 : 600,
+  skip: isLoopback,
   standardHeaders: true,
   legacyHeaders: false,
 });

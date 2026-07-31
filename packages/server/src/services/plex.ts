@@ -9,11 +9,20 @@ const PLEX_HEADERS = {
   "X-Plex-Version": "1.0.0",
 };
 
-export function plexUrl(path: string, params?: Record<string, string>): string {
+/**
+ * @param token Overrides the server token. A few endpoints — notably
+ *   /status/sessions/terminate — reject the server token with 403 and need the
+ *   plex.tv *account* token instead.
+ */
+export function plexUrl(
+  path: string,
+  params?: Record<string, string>,
+  token?: string,
+): string {
   const base = process.env.PLEX_URL!.replace(/\/$/, "");
   // Use string concatenation to avoid URL constructor mishandling colon-containing Plex paths
   const url = new URL(`${base}${path.startsWith("/") ? "" : "/"}${path}`);
-  url.searchParams.set("X-Plex-Token", process.env.PLEX_TOKEN!);
+  url.searchParams.set("X-Plex-Token", token || process.env.PLEX_TOKEN!);
   if (params) {
     for (const [key, value] of Object.entries(params)) {
       url.searchParams.set(key, value);
@@ -29,11 +38,13 @@ export async function plexFetch(
   params?: Record<string, string>,
   extraHeaders?: Record<string, string>,
   method?: string,
+  /** See plexUrl — for endpoints the server token can't reach. */
+  token?: string,
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PLEX_TIMEOUT_MS);
   try {
-    return await fetch(plexUrl(path, params), {
+    return await fetch(plexUrl(path, params, token), {
       method,
       headers: extraHeaders ? { ...PLEX_HEADERS, ...extraHeaders } : PLEX_HEADERS,
       signal: controller.signal,

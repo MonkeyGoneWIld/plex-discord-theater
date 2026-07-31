@@ -180,7 +180,10 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
         );
       })
       .finally(() => setHistoryLoading(false));
-  }, [isHistoryTab, retryNonce, historyNonce]);
+    // `visible` matters here exactly as it does for Continue Watching above:
+    // this component stays mounted behind detail and player views, so without
+    // it the tab still shows pre-playback positions on the way back.
+  }, [visible, isHistoryTab, retryNonce, historyNonce]);
 
   // Leave Continue Watching but stay in history. Only the row is affected, so
   // the History tab's copy of the item is deliberately left alone.

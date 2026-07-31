@@ -1,5 +1,6 @@
 import { plexJSON } from "./plex.js";
 import { buildMeta, getRelatedCached } from "../routes/plex.js";
+import { createSession } from "../middleware/auth.js";
 
 /**
  * Background cache warmer.
@@ -58,18 +59,37 @@ async function libraryRatingKeys(): Promise<string[]> {
 }
 
 /**
+ * Session the warmer authenticates with, minted once per process.
+ *
+ * /api/plex sits behind requireAuth, and these requests carried no credentials
+ * at all — so every one answered 401 while the pass counted it a success and
+ * reported "cached 600/600". None of the collections half was ever warmed.
+ */
+let warmerToken: string | null = null;
+function getWarmerToken(): string {
+  if (!warmerToken) warmerToken = createSession();
+  return warmerToken;
+}
+
+/**
  * Warm `/collections` by asking our own route for it.
  *
- * That endpoint's work isn't factored out the way buildMeta is — it has several
- * exit points and writes its own cache entry on each — so the cheapest correct
- * way to populate it is to make the same request a client would. Localhost, and
- * one at a time.
+ * That endpoint's work isn't factored out the way buildMeta is — several exit
+ * points, each writing its own cache entry — so the cheapest correct way to
+ * populate it is to make the request a client would. Localhost, one at a time,
+ * and exempt from the API rate limit (see the loopback skip in index.ts, which
+ * this pass would otherwise exhaust on its own: 600 items, 600 requests).
+ *
+ * Throws on a non-OK response so the caller doesn't count it as warmed.
  */
 async function warmRelated(port: number, ratingKey: string): Promise<void> {
   if (getRelatedCached(ratingKey)) return;
-  const res = await fetch(`http://127.0.0.1:${port}/api/plex/collections/${ratingKey}`);
+  const res = await fetch(`http://127.0.0.1:${port}/api/plex/collections/${ratingKey}`, {
+    headers: { Authorization: `Bearer ${getWarmerToken()}` },
+  });
   // Drain the body so the socket is released promptly.
   await res.arrayBuffer().catch(() => undefined);
+  if (!res.ok) throw new Error(`collections warm failed: ${res.status}`);
 }
 
 async function runPass(port: number): Promise<void> {

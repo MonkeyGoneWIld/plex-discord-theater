@@ -77,6 +77,31 @@ function isPositionBuffered(video: HTMLVideoElement, t: number): boolean {
  * the season in parentTitle and the show in showTitle, so collapsing them would
  * render "Season 2 — S2E1 · Title". See lib/format.ts.
  */
+/**
+ * Copy the frame currently on screen into an offscreen canvas.
+ *
+ * Every path that rebuilds the HLS pipeline detaches the media element, which
+ * paints black until the replacement has decoded its first frame. Holding the
+ * last frame over that gap is what makes a rebuild read as a pause rather than
+ * as the stream dying. Returns null when there is nothing to copy — before the
+ * first frame, or when the element has already been torn down.
+ */
+function captureFrame(video: HTMLVideoElement | null): HTMLCanvasElement | null {
+  if (!video || video.videoWidth === 0) return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  try {
+    ctx.drawImage(video, 0, 0);
+  } catch {
+    // Tainted or not yet renderable — no frame is better than a broken one.
+    return null;
+  }
+  return canvas;
+}
+
 function toQueueItem(ep: PlexItem | null, subtitles: boolean): QueueItem | null {
   if (!ep) return null;
   return {
@@ -280,6 +305,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // scrub bar reads this so it stays where the viewer aimed instead of snapping
   // to 0:00 while the replacement transcode spins up.
   const [restartingTo, setRestartingTo] = useState<number | null>(null);
+  // Whether the last frame is standing in for a stream that is being rebuilt.
+  // Cleared the moment real frames resume — see the `playing` handler.
+  const [holdingFrame, setHoldingFrame] = useState(false);
   const [showQueuePanel, setShowQueuePanel] = useState(false);
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
   const [showStats, setShowStats] = useState(false);
@@ -636,6 +664,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     const changed = prev
       ? (Object.keys(deps) as Array<keyof typeof deps>).filter((k) => deps[k] !== prev[k])
       : ["initial-mount"];
+    // A new title starts clean. Everything else — a seek restart, a subtitle
+    // change, a viewer following the host onto a new session — is the same
+    // picture continuing, so the held frame stays up over the rebuild.
+    if (prev && prev.ratingKey !== item.ratingKey) {
+      canvasRef.current = null;
+      setHoldingFrame(false);
+    }
     hlsDepsRef.current = deps;
 
     logEvent("HLS", "session effect running", {
@@ -1102,14 +1137,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
                 ? roomPos
                 : (video?.currentTime ?? 0);
 
-            // Capture freeze frame (reuse canvasRef from track switching)
-            if (video && video.videoWidth > 0) {
-              const canvas = document.createElement("canvas");
-              canvas.width = video.videoWidth;
-              canvas.height = video.videoHeight;
-              canvas.getContext("2d")!.drawImage(video, 0, 0);
-              canvasRef.current = canvas;
-            }
+            canvasRef.current = captureFrame(video) ?? canvasRef.current;
 
             if (mounted) {
               setRecovering(true);
@@ -1184,6 +1212,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // Frames are moving again, so the element's own clock is the truth
           // once more and the bar can stop holding the seek target.
           setRestartingTo(null);
+          setHoldingFrame(false);
         };
         const onSeeked = () => {
           logEvent("Video", "seeked", snapshot(video));
@@ -1383,6 +1412,16 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
     return () => {
       mounted = false;
+      // Grab the frame before the pipeline goes, so whatever comes next has
+      // something to show instead of black. This runs for every rebuild: the
+      // host's own seek restart, a subtitle change, and — the case that matters
+      // most — a viewer being pulled onto the host's new session, which they
+      // did not ask for and cannot anticipate.
+      const held = captureFrame(videoRef.current);
+      if (held) {
+        canvasRef.current = held;
+        setHoldingFrame(true);
+      }
       destroyLocal();
       if (restartTimerRef.current !== null) {
         clearTimeout(restartTimerRef.current);
@@ -1917,15 +1956,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const handleTrackChange = useCallback(async (partId: number, audioStreamID?: number, subtitleStreamID?: number) => {
     if (!sessionIdRef.current) return;
 
-    // Capture last video frame to canvas for seamless transition
     const video = videoRef.current;
-    if (video && video.videoWidth > 0) {
-      const canvas = document.createElement("canvas");
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      canvas.getContext("2d")!.drawImage(video, 0, 0);
-      canvasRef.current = canvas;
-    }
+    canvasRef.current = captureFrame(video) ?? canvasRef.current;
 
     // Show overlay
     setTrackSwitching(audioStreamID !== undefined ? "audio" : "subtitle");
@@ -2206,6 +2238,24 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         onClick={togglePlayPause}
       />
 
+      {/* The last frame, standing in while the pipeline is rebuilt. Sits above
+          the (currently blank) video and below every real overlay, so the
+          buffering spinner and the seeking badge still read on top of it.
+          Decorative only — clicks pass through to the video for play/pause. */}
+      {holdingFrame && canvasRef.current && (
+        <canvas
+          aria-hidden="true"
+          style={styles.heldFrame}
+          ref={(el) => {
+            const src = canvasRef.current;
+            if (!el || !src) return;
+            el.width = src.width;
+            el.height = src.height;
+            el.getContext("2d")?.drawImage(src, 0, 0);
+          }}
+        />
+      )}
+
       {/* Play/pause acknowledgement — purely decorative, so it never takes
           pointer events away from the picture underneath. */}
       {tapAck && (
@@ -2478,6 +2528,17 @@ const styles: Record<string, React.CSSProperties> = {
     width: "100%",
     height: "100%",
     objectFit: "contain",
+  },
+  heldFrame: {
+    position: "absolute",
+    inset: 0,
+    width: "100%",
+    height: "100%",
+    // `contain`, matching the video, so the standin sits exactly where the
+    // picture was rather than stretching to the letterbox.
+    objectFit: "contain",
+    pointerEvents: "none",
+    zIndex: 1,
   },
   tapAck: {
     position: "absolute",

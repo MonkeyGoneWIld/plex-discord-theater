@@ -866,7 +866,10 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     gap: "14px",
     overflowX: "auto" as const,
-    paddingBottom: "8px",
+    // Symmetric padding gives the card's hover halo room inside the scroller's
+    // clip box — overflowX:auto also clips the vertical axis, so without this the
+    // glow gets sheared off top/bottom and at the first/last card.
+    padding: "16px 16px 18px",
   },
   hubCard: {
     flexShrink: 0,

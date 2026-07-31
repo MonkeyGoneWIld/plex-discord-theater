@@ -62,7 +62,9 @@ export const shelfStyles: Record<string, React.CSSProperties> = {
     display: "flex",
     gap: "14px",
     overflowX: "auto" as const,
-    paddingBottom: "8px",
+    // See Library.tsx hubRow: symmetric padding keeps the card hover halo from
+    // being clipped by the scroller's overflow box.
+    padding: "16px 16px 18px",
   },
   card: {
     flexShrink: 0,

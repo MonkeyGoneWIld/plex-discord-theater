@@ -18,6 +18,7 @@ import historyRoutes from "./routes/history.js";
 import logRoutes from "./routes/logs.js";
 import { requireAuth, closeSessionDb } from "./middleware/auth.js";
 import * as thumbCache from "./services/thumb-cache.js";
+import { startCacheWarmer, stopCacheWarmer } from "./services/cache-warmer.js";
 import { closeHistoryDb } from "./services/watch-history.js";
 import { attachWebSocketServer, closeWebSocketServer } from "./services/sync.js";
 
@@ -163,12 +164,17 @@ app.get("*", (req, res) => {
 
 const server = app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
+  // Pre-fill the detail-page caches (metadata, cast, collections, related) in
+  // the background so opening a title doesn't wait on Plex and TMDB. Started
+  // from the listen callback because it calls back into our own HTTP port.
+  startCacheWarmer(Number(PORT));
 });
 
 attachWebSocketServer(server);
 
 async function shutdown(signal: string) {
   console.log(`${signal} received, shutting down gracefully`);
+  stopCacheWarmer();
   const { stopAllActiveSessions } = await import("./routes/plex.js");
   await Promise.race([
     stopAllActiveSessions(),

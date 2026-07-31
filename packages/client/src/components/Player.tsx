@@ -2267,6 +2267,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         onSyncSeek={canControl ? syncActions?.sendSeek : undefined}
         onSeekRestart={canControl ? handleSeekCommand : undefined}
         onOpenTrackSwitcher={canControl ? () => setShowTrackSwitcher(true) : undefined}
+        onSurfaceClick={canControl ? togglePlayPause : undefined}
         queueCount={syncState?.queue?.length}
         onOpenQueue={isHost ? () => setShowQueuePanel(true) : undefined}
         peopleCount={syncState?.participants?.length}

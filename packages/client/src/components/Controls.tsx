@@ -29,6 +29,9 @@ interface ControlsProps {
   onSeekRestart?: (position: number) => void;
   onToggleMute?: () => void;
   onOpenTrackSwitcher?: () => void;
+  /** Click on the empty picture area (not a control) — used for click-to-pause.
+   *  Omit for a viewer without transport control. */
+  onSurfaceClick?: () => void;
   onToggleStats?: () => void;
   statsActive?: boolean;
   showKeyboardHints?: boolean;
@@ -112,6 +115,7 @@ export function Controls({
   onSeekRestart,
   onToggleMute,
   onOpenTrackSwitcher,
+  onSurfaceClick,
   onToggleStats,
   statsActive,
   showKeyboardHints = true,
@@ -601,6 +605,12 @@ export function Controls({
           opacity: visible ? 1 : 0,
           pointerEvents: visible ? "auto" : "none",
         }}
+        // This overlay spans the whole picture, so while the controls are up it
+        // swallows every click aimed at the video beneath — including the
+        // click-to-pause one. Forward only clicks that landed on the overlay
+        // itself (its empty middle); anything on a button or bar is that
+        // control's own click and stops here.
+        onClick={(e) => { if (e.target === e.currentTarget) onSurfaceClick?.(); }}
       >
       {/* Top bar: back + title */}
       <div style={styles.topBar}>

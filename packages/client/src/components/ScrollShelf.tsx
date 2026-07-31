@@ -37,9 +37,8 @@ export function ScrollShelf({ children, rowStyle }: ScrollShelfProps) {
   const holdRef = useRef<{ raf: number; hold: boolean; timer: number } | null>(null);
 
   // Reconcile the chevrons and the custom scrollbar with the current scroll
-  // position: hide each chevron at its end, size/place the thumb, keep the
-  // chevrons centered on the poster art (a fixed 2:3 image, so its height is the
-  // card width x 1.5 — measured from the first card so it tracks the layout).
+  // position: hide each chevron at its end, size/place the thumb, and match the
+  // chevrons to the first card's real box so they span it and stay centred on it.
   const sync = useCallback(() => {
     const sc = scrollerRef.current;
     if (!sc) return;
@@ -47,11 +46,24 @@ export function ScrollShelf({ children, rowStyle }: ScrollShelfProps) {
     leftRef.current?.classList.toggle("shelf-chev-dis", sc.scrollLeft <= 1);
     rightRef.current?.classList.toggle("shelf-chev-dis", sc.scrollLeft >= max - 1);
 
+    // Size and place the chevrons against the first card as actually laid out,
+    // rather than deriving a height from the poster's 2:3 ratio. The row carries
+    // vertical padding (so hover glows aren't clipped) and not every shelf holds
+    // posters — the cast row's circular cards are a different shape entirely — so
+    // an assumed aspect left the arrows short and sitting too high.
     const first = sc.firstElementChild as HTMLElement | null;
     if (first) {
-      const posterH = `${first.getBoundingClientRect().width * 1.5}px`;
-      if (leftRef.current) leftRef.current.style.height = posterH;
-      if (rightRef.current) rightRef.current.style.height = posterH;
+      const card = first.getBoundingClientRect();
+      // Offsets are relative to .shelf — the chevrons' positioning context —
+      // not to the scroller, which sits inside it.
+      const shelf = sc.parentElement ?? sc;
+      const top = `${card.top - shelf.getBoundingClientRect().top}px`;
+      const height = `${card.height}px`;
+      for (const chev of [leftRef.current, rightRef.current]) {
+        if (!chev) continue;
+        chev.style.top = top;
+        chev.style.height = height;
+      }
     }
 
     const bar = barRef.current;

@@ -3,7 +3,7 @@ import { ScrollShelf } from "./ScrollShelf";
 import { authUrl, type Credit } from "../lib/api";
 
 /** Diameter of a headshot. Plex's own cast row uses a similar circular crop. */
-const AVATAR_PX = 110;
+const AVATAR_PX = 150;
 
 interface CastRowProps {
   cast?: Credit[];
@@ -53,16 +53,29 @@ function CastAvatar({ person }: { person: Credit }) {
  * which is the normal case for a library item Plex never matched.
  */
 export function CastRow({ cast, directors, writers }: CastRowProps) {
-  // Crew after cast, de-duplicated: a writer-director would otherwise appear
-  // twice in a row, adjacent, with two different job labels.
-  const seen = new Set<string>();
-  const people: Credit[] = [];
-  for (const p of [...(cast ?? []), ...(directors ?? []), ...(writers ?? [])]) {
-    const key = `${p.name}|${p.role ?? ""}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    people.push(p);
+  // Director and writers lead, then the billed cast. Appending them instead put
+  // them past thirty actors — off the end of a row nobody scrolls that far — so
+  // the director, the one crew credit people actually look for, was effectively
+  // missing. De-duplicated because a writer-director would otherwise appear
+  // twice, adjacent, under two different job labels.
+  // One entry per person, their credits merged into a single label
+  // ("Director, Writer") rather than one disc each.
+  const byName = new Map<string, Credit>();
+  for (const p of [...(directors ?? []), ...(writers ?? []), ...(cast ?? [])]) {
+    const existing = byName.get(p.name);
+    if (!existing) {
+      byName.set(p.name, { ...p });
+      continue;
+    }
+    if (p.role && existing.role && !existing.role.includes(p.role)) {
+      existing.role = `${existing.role}, ${p.role}`;
+    } else if (p.role && !existing.role) {
+      existing.role = p.role;
+    }
+    // Keep whichever source actually had a headshot.
+    if (!existing.thumb && p.thumb) existing.thumb = p.thumb;
   }
+  const people = [...byName.values()];
   if (people.length === 0) return null;
 
   return (
@@ -88,13 +101,14 @@ const styles: Record<string, React.CSSProperties> = {
     marginBottom: 0,
     letterSpacing: "-0.01em",
   },
-  // Matches the poster shelves: vertical-only padding, so the row's own overflow
-  // box doesn't clip hover states and the cards keep their intended width.
+  // Horizontal padding stays at zero for the same reason as the poster shelves,
+  // but the bottom is tight: these cards carry no hover glow to leave room for,
+  // so the poster rows' 22px just left a gap before the scrollbar.
   row: {
     display: "flex",
     gap: "18px",
     overflowX: "auto" as const,
-    padding: "20px 0 22px",
+    padding: "18px 0 2px",
   },
   person: {
     flexShrink: 0,

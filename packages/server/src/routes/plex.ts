@@ -460,8 +460,8 @@ router.get("/discover/meta", async (req: Request, res: Response) => {
       tmdbId: tmdbIdFromGuids(m.Guid),
       // Credits, when Plex's online catalog carries them for this title.
       cast: mapCredits(m.Role),
-      directors: mapCredits(m.Director, 10),
-      writers: mapCredits(m.Writer, 10),
+      directors: mapCredits(m.Director, 10, "Director"),
+      writers: mapCredits(m.Writer, 10, "Writer"),
     });
   } catch (err) {
     console.error("Discover meta error:", err);
@@ -695,10 +695,12 @@ const MAX_CAST = 30;
  * library paths, so they go through the same external-image proxy the Discover
  * posters use — the client never talks to that CDN directly.
  */
-function mapCredits(tags: PlexTag[] | undefined, limit = MAX_CAST) {
+function mapCredits(tags: PlexTag[] | undefined, limit = MAX_CAST, roleFallback?: string) {
   return (tags || []).slice(0, limit).map((t) => ({
     name: t.tag,
-    role: t.role ?? null,
+    // Plex sets `role` (the character) on cast only — a Director/Writer tag has
+    // none, so without the fallback those entries render with a blank subtitle.
+    role: t.role ?? roleFallback ?? null,
     thumb: t.thumb
       ? t.thumb.startsWith("http")
         ? externalThumbUrl(t.thumb)
@@ -719,6 +721,58 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
   }
 
   try {
+    const payload = await buildMeta(ratingKey);
+    if (!payload) {
+      res.status(404).json({ error: "Item not found" });
+      return;
+    }
+    res.json(payload);
+  } catch (err) {
+    console.error("Metadata error:", err);
+    res.status(502).json({ error: "Failed to fetch metadata" });
+  }
+});
+
+/**
+ * The /meta payload, memoised.
+ *
+ * Assembling it costs a Plex metadata call plus TMDB id resolution, and the
+ * detail page can't paint without it — so the result is cached and the cache is
+ * pre-warmed at startup (see services/cache-warmer.ts). Exported for the warmer.
+ *
+ * Returns null when Plex has no such item, which the route turns into a 404.
+ * Nulls are deliberately not cached: a 404 here usually means the library is
+ * mid-scan, and pinning that answer for an hour would outlast the cause.
+ */
+export async function buildMeta(ratingKey: string): Promise<Record<string, unknown> | null> {
+  const hit = metaCache.get(ratingKey);
+  if (hit && Date.now() - hit.at < META_CACHE_TTL_MS) return hit.payload;
+
+  const payload = await buildMetaUncached(ratingKey);
+  if (payload) metaCache.set(ratingKey, { payload, at: Date.now() });
+  return payload;
+}
+
+const metaCache = new Map<string, { payload: Record<string, unknown>; at: number }>();
+const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+/** The /collections response: the item's collections plus TMDB recommendations. */
+export interface RelatedPayload {
+  collections: unknown[];
+  recommendations: unknown[];
+}
+
+const relatedCache = new Map<string, { payload: RelatedPayload; at: number }>();
+const RELATED_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours — this rarely changes
+
+/** A fresh cached /collections payload, or null. Exported for the warmer, which
+ *  uses it to skip anything already warm. */
+export function getRelatedCached(ratingKey: string): RelatedPayload | null {
+  const hit = relatedCache.get(ratingKey);
+  return hit && Date.now() - hit.at < RELATED_CACHE_TTL_MS ? hit.payload : null;
+}
+
+async function buildMetaUncached(ratingKey: string): Promise<Record<string, unknown> | null> {
     const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
       `/library/metadata/${ratingKey}`,
       // includeGuids so the external-id list (tmdb://…) is present — needed to
@@ -726,10 +780,7 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       { includeMarkers: "1", includeGuids: "1" },
     );
     const metadata = data.MediaContainer.Metadata;
-    if (!metadata || metadata.length === 0) {
-      res.status(404).json({ error: "Item not found" });
-      return;
-    }
+    if (!metadata || metadata.length === 0) return null;
     const m = metadata[0];
     const part = m.Media?.[0]?.Part?.[0];
     const streams = part?.Stream || [];
@@ -763,7 +814,7 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
     // IMDb id (when Plex stored one) — the preferred key for external ratings.
     const imdbId = imdbIdFromGuids(m.Guid);
 
-    res.json({
+    return {
       ratingKey: m.ratingKey,
       title: m.title,
       year: m.year,
@@ -793,14 +844,10 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       // Credits for the detail page's Cast & Crew row. Episodes carry their own
       // guest cast; shows carry the series regulars.
       cast: mapCredits(m.Role),
-      directors: mapCredits(m.Director, 10),
-      writers: mapCredits(m.Writer, 10),
-    });
-  } catch (err) {
-    console.error("Metadata error:", err);
-    res.status(502).json({ error: "Failed to fetch metadata" });
-  }
-});
+      directors: mapCredits(m.Director, 10, "Director"),
+      writers: mapCredits(m.Writer, 10, "Writer"),
+    };
+}
 
 /**
  * GET /api/plex/children/:ratingKey
@@ -1055,6 +1102,19 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
     return;
   }
 
+  const cached = getRelatedCached(ratingKey);
+  if (cached) {
+    res.json(cached);
+    return;
+  }
+  // Every success path goes through here so the answer is cached once, wherever
+  // it was produced. Assembling it costs several Plex calls plus a TMDB
+  // recommendations lookup, which is why these rows lagged the rest of the page.
+  const send = (payload: RelatedPayload) => {
+    relatedCache.set(ratingKey, { payload, at: Date.now() });
+    res.json(payload);
+  };
+
   try {
     // Which collections does this item belong to? Plex only lists them on the
     // item's own metadata (as Collection tags), and only with includeCollections.
@@ -1073,7 +1133,7 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
     const sectionId = m.librarySectionID;
     // Not a local library item (online result) — nothing to show.
     if (sectionId == null) {
-      res.json({ collections: [] });
+      send({ collections: [], recommendations: [] });
       return;
     }
 
@@ -1211,7 +1271,7 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
     // ── "More Like This": TMDB recommendations, minus collection items ──
     const recommendations = await buildRecommendations(m, itemTmdbId, collections);
 
-    res.json({ collections, recommendations });
+    send({ collections, recommendations });
   } catch (err) {
     console.error("Collections error:", err);
     res.status(502).json({ error: "Failed to fetch collections" });
@@ -1471,6 +1531,12 @@ router.put("/streams/:partId", async (req: Request, res: Response) => {
       res.status(plexRes.status).json({ error: "Failed to set streams" });
       return;
     }
+    // Every cached /meta payload carries `selected` flags on its audio and
+    // subtitle tracks, which this call just changed. Only one item's entry is
+    // actually stale, but the mapping from partId back to ratingKey isn't
+    // tracked — and this fires once per playback start, so clearing the lot
+    // costs a single re-fetch rather than serving a wrong track list.
+    metaCache.clear();
     res.json({ ok: true });
   } catch (err) {
     console.error("Set streams error:", err);

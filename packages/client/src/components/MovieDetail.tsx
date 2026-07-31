@@ -33,14 +33,14 @@ interface MovieDetailProps {
 }
 
 /**
- * Backstop on the wait, not a target.
+ * Hard cap on the wait.
  *
- * The gate below holds the page until it is genuinely complete — including the
- * collection / related rows, which is the part that most often lags. This only
- * exists so a request that never answers can't strand the viewer on a spinner
- * forever, so it is set well past a normal load rather than near it.
+ * The gate below reveals as soon as the page's parts are in — poster, metadata,
+ * ratings, most of the cast, the related rows — and gives up waiting at this
+ * point regardless. Two seconds is enough for most of it to land on a warm
+ * cache, and past that an unfinished page beats a spinner.
  */
-const REVEAL_TIMEOUT_MS = 8000;
+const REVEAL_TIMEOUT_MS = 2000;
 
 function authUrl(url: string): string {
   const token = getSessionToken();

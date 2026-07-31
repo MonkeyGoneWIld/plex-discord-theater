@@ -677,7 +677,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               you'd have to request, and a worse one than a film already here. */}
           {showPeople && (
             <>
-              <div style={styles.sectionHeader}>Cast &amp; Crew</div>
+              <div style={styles.sectionHeader}>People</div>
               <div style={styles.peopleRow}>
                 {people.map((p) => (
                   <button
@@ -887,14 +887,16 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "inherit",
     transition: "all 0.2s ease",
   },
+  // The same grid the poster results use, so a person lines up in the same
+  // columns as the titles above and below rather than sitting in its own row.
   peopleRow: {
-    display: "flex",
-    flexWrap: "wrap" as const,
-    gap: "20px",
-    padding: "4px 0 8px",
+    display: "grid",
+    gridTemplateColumns: POSTER_GRID_COLUMNS,
+    gap: "14px",
+    padding: "16px 24px",
   },
   personCard: {
-    width: "120px",
+    width: "100%",
     background: "none",
     border: "none",
     padding: 0,
@@ -904,8 +906,10 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: "center" as const,
   },
   personPhoto: {
-    width: "120px",
-    height: "120px",
+    // Square box at the column width, cropped to a circle — as large as the
+    // posters beside it, which is what puts them on the same visual footing.
+    width: "100%",
+    aspectRatio: "1 / 1",
     borderRadius: "50%",
     objectFit: "cover" as const,
     display: "block",
@@ -917,12 +921,12 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     justifyContent: "center",
     color: "#777",
-    fontSize: "22px",
+    fontSize: "34px",
     fontWeight: 600,
   },
   personName: {
-    marginTop: "9px",
-    fontSize: "13px",
+    marginTop: "11px",
+    fontSize: "14px",
     fontWeight: 600,
     color: "#e8e8e8",
     overflow: "hidden",

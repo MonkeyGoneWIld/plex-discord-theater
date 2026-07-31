@@ -4,29 +4,18 @@ A Discord Activity that lets you browse your Plex library and watch movies and T
 
 ## Features
 
-- **Browse your Plex library** — movies and TV shows with search, genre filters, and sorting
-- **Discover titles beyond your library** — search also surfaces movies and shows you don't own (marked "Not in library" and non-playable), with full detail pages
-- **Request what's missing** — optional [Seerr](#requesting-titles-optional) (Overseerr / Jellyseerr) integration adds a Request button for movies and per-season TV requests, attributed to your own Seerr account
-- **Synchronized playback** — the host controls play/pause/seek and all viewers stay in sync
-- **Co-hosts & host transfer** — the host can grant transport control (play/pause/seek/subtitles) to others, or hand over the host role entirely, from a people panel
-- **Audio & subtitle selection** — switch tracks before playing or mid-episode; co-hosts can change subtitles
-- **Skip Intro / Skip Credits** — uses Plex's chapter markers, when the library has them
-- **Next & previous episode** — resolved automatically from the series (including season rollover), with a card at the end of an episode
-- **Queue & viewer suggestions** — the host can queue what's next, and viewers can suggest titles
-- **Playback status for viewers** — a badge shows when the host has paused or is seeking, so viewers know why playback stalled
-- **Seek-bar thumbnail previews** — hover the progress bar to preview that moment, when Plex has generated preview thumbnails
-- **Volume memory** — starts at 50% and remembers your level across sessions
-- **Stats for nerds** — press `i` for resolution, codecs, bitrate, buffer health, and P2P counters
-- **VPS relay** — optional nginx caching proxy offloads segment delivery to a VPS with 1 Gbps, so your home upload isn't the bottleneck
-- **Segment pre-fetching** — server proactively fetches segments from Plex ahead of playback, eliminating throttle-related buffering at cold start
-- **P2P segment sharing** — when no VPS is configured, viewers can share HLS segments with each other via WebRTC
-- **Automatic host promotion** — if the host leaves, a co-host is promoted where there is one, otherwise another viewer, so the session continues
-- **Thumbnail caching** — artwork is cached server-side in SQLite for fast browsing
-- **Persistent sessions** — sessions and host roles survive server restarts (SQLite-backed)
+- **Browse and search your library** — movies and TV shows with genre filters and sorting, plus cast and crew pages listing everything they appear in
+- **Discover titles you don't own** — search also surfaces them, marked "Not in library", with full detail pages. Optional [Seerr](#requesting-titles-optional) integration adds a Request button, per-season for TV
+- **Synchronized playback** — the host drives play/pause/seek and everyone stays in sync
+- **Co-hosts & host transfer** — hand out transport control, or the host role itself, from the people panel. If the host leaves, a co-host is promoted so the session continues
+- **Audio & subtitle tracks** — switch before playing or mid-episode. Your subtitle choice carries to the next episode, matched by language rather than by track number
+- **Skip intro / credits** and **seek-bar thumbnail previews** — both from Plex's own generated data (see the note below)
+- **Next episode** — resolved from the series including season rollover, offered on a card when one finishes. Nothing auto-plays
+- **Queue & suggestions** — the host queues what's next; viewers can suggest
+- **Stats for nerds** — press `i` for resolution, codecs, bitrate, buffer health and P2P counters
 - **Secure** — your Plex token never leaves the server; the backend proxies everything
 
-> **Two features depend on Plex-side generation**, both off by default on many servers, and both silently do nothing without it:
-> Skip Intro/Credits needs *Detect intros and credits*, and seek-bar previews need *Generate video preview thumbnails* — each under Library → Edit → Advanced.
+> **Two of these depend on Plex generating the data first**, and both silently do nothing without it: skip intro/credits needs *Detect intros and credits*, seek-bar previews need *Generate video preview thumbnails*. Each is under Library → Edit → Advanced, and both are off by default on many servers.
 
 ## How It Works
 
@@ -40,78 +29,45 @@ Discord Voice Channel
                  └─ Plex Media Server (HLS transcoding)
 ```
 
-The first user to join becomes the host and can browse the library and start playback. Everyone else watches in sync via WebSocket. The backend proxies all Plex API calls and HLS video segments so nothing is exposed directly to clients.
+The first user to join becomes the host and can start playback. Everyone else follows over WebSocket. The backend proxies every Plex API call and HLS segment, so nothing is exposed directly to clients. Sessions, host roles and artwork are cached in SQLite and survive restarts.
 
-### VPS Relay (Recommended)
+### Delivering segments
 
-When `VPS_RELAY_URL` is configured, HLS segments are served through a VPS with nginx caching instead of directly from your home server. Your Plex server transcodes once and uploads one stream to the VPS — the VPS then fans it out to all viewers from its 1 Gbps connection.
+Everything below is about one problem: your home upload. Plex transcodes once, but by default every viewer pulls that stream from your connection.
+
+**VPS relay — the answer for more than a few viewers.** With `VPS_RELAY_URL` set, your server uploads one stream to a VPS and the VPS fans it out from its own connection.
 
 ```
-Without VPS:  Home upload = N viewers × bitrate (bottleneck)
-With VPS:     Home upload = 1 stream to VPS (~8-12 Mbps), VPS handles the rest
+Without VPS:  home upload = N viewers × bitrate
+With VPS:     home upload = 1 stream (~8-12 Mbps), regardless of viewer count
 ```
 
-This is the recommended setup for watch parties with more than a few viewers. P2P is automatically disabled when VPS relay is active. See [VPS Relay Setup](#vps-relay-optional) below and [docs/vps-relay-setup.md](docs/vps-relay-setup.md) for the full guide.
+See [VPS Relay](#vps-relay-optional) below to set it up.
 
-### Segment Pre-Fetching
+**Segment pre-fetching** runs either way. Plex throttles HTTP segment delivery for roughly the first 30 seconds of a transcode, which is exactly when a viewer is waiting. So the server polls the sub-manifest every 2s, pulls discovered segments with 3 workers, and serves them from memory when asked. After a seek it fetches forward from the seek target rather than from the start. Bounded to 100 segments per session (~450 MB at 12 Mbps) across at most 2 concurrent sessions, evicting already-served segments first.
 
-The server proactively fetches HLS segments from Plex into an in-memory cache before viewers request them. This eliminates the ~30-second throttle gap that Plex imposes on HTTP segment delivery at the start of a new transcode session.
+**P2P sharing** is the fallback when no VPS is configured. Viewers form a WebRTC mesh via an embedded [bittorrent-tracker](https://github.com/webtorrent/bittorrent-tracker), sharing segments within a watch session and falling back to the server when a peer can't supply one in time.
 
-How it works:
-- After starting a transcode, the server polls the HLS sub-manifest every 2 seconds to discover available segments
-- 3 concurrent workers fetch discovered segments from Plex and cache them in memory
-- After a seek, fetching is ordered from the seek target forward (not from the start), so the segments actually being played are warmed first
-- When the VPS (or a viewer) requests a segment, Express serves it instantly from cache
-- Cache miss falls through to on-demand Plex fetch (existing behavior)
-- Supports up to 2 concurrent watch party sessions
-- Memory-bounded: max 100 segments per session (~450 MB at the default 12 Mbps), with eviction prioritizing already-served segments
+> P2P carries less than you might expect. The loader prefers HTTP for "high-demand" segments and that window spans the whole 120s buffer, so most segments come from the server and peers help at the margins. That was deliberate — with a narrower window, a viewer with no peers could only buffer ~15s ahead. **For anything beyond a few viewers, use the VPS relay.**
 
-Combined with timeline updates (which tell Plex the client's playback position), this ensures smooth playback from the very first second.
-
-### P2P Segment Sharing (Fallback)
-
-When no VPS is configured, viewers in the same watch session automatically form a peer-to-peer mesh using WebRTC. When one viewer downloads an HLS segment from the server, they share it directly with other viewers — so the same segment doesn't need to be fetched from Plex multiple times.
-
-- **BitTorrent tracker** — the server runs an embedded [bittorrent-tracker](https://github.com/webtorrent/bittorrent-tracker) over WebSocket for peer discovery and signaling
-- **Swarm per session** — viewers watching the same content share a swarm ID, so P2P only happens within a watch session
-- **Transparent fallback** — if a segment isn't available from peers in time, it falls back to fetching from the server normally
-- **Window tuning** — all three loader windows (high-demand, P2P, HTTP) are set to 120s to match the client's forward buffer, with 2 concurrent HTTP downloads
-- **NAT traversal** — uses a STUN server for WebRTC connections behind NAT
-
-**How much P2P actually carries.** Less than it used to. The loader fetches "high-demand" segments over HTTP in preference to P2P, and that window now spans the entire 120s buffer — so in practice most segments come from the server and peers contribute at the margins. That was a deliberate trade: before the windows were widened, a viewer with no peers could only ever buffer ~15 seconds ahead, because the high-demand window was the only thing driving HTTP fetches.
-
-P2P still helps when several people watch together, but it is not the answer to upload bandwidth and is capped by your home connection either way. **For anything beyond a few viewers, use the VPS relay.**
-
-### Transcode Configuration
-
-The server requests HLS transcoding from Plex with these settings:
+### Transcode settings
 
 | Setting | Value | Reason |
 |---------|-------|--------|
 | Video codec | H.264 | Universal browser compatibility |
-| Audio codec | AAC preferred, MP3 fallback | Plex direct-streams compatible audio; transcodes to MP3 for incompatible codecs like TrueHD |
+| Audio codec | AAC preferred, MP3 fallback | Compatible audio passes through; incompatible codecs like TrueHD are re-encoded |
 | Max resolution | 1920×1080 | Good quality without excessive bandwidth |
-| Target bitrate | 12 Mbps (peak 20 Mbps) | Balances quality and bandwidth — configurable via `VIDEO_BITRATE_KBPS` / `VIDEO_PEAK_BITRATE_KBPS` |
-| Segment duration | 3 seconds | Faster cold start — Plex only needs to transcode 3s before the first segment is ready |
-| Location | LAN | Treats the connection as local to avoid WAN throttling |
-| Direct stream audio | Enabled | Passes through compatible audio (e.g. AAC) without re-encoding; transcodes incompatible codecs (e.g. TrueHD) |
+| Target bitrate | 12 Mbps (peak 20) | Configurable via `VIDEO_BITRATE_KBPS` / `VIDEO_PEAK_BITRATE_KBPS` |
+| Segment duration | 3 seconds | Faster cold start — Plex transcodes only 3s before the first segment is ready |
+| Location | LAN | Avoids Plex's WAN throttling |
 
-### Requesting Titles (Optional)
+Video is always re-encoded rather than direct-streamed. Direct streaming hands the source's elementary stream to the browser untouched, including any keyframe or timestamp discontinuity in the file — which MSE cannot append across, wedging playback mid-episode with no recovery.
 
-Search surfaces Plex's online "Discover" catalog alongside your library, so results
-include movies and shows you don't own — flagged **Not in library** and non-playable.
-Opening one shows its detail page, and when a Seerr (Overseerr / Jellyseerr) instance
-is configured, a **Request** button.
+### Requesting titles (optional)
 
-- Set `SEERR_URL` to enable it; left unset, the Request button is hidden.
-- Requests are attributed to **your own Seerr account** — the server signs in with
-  `PLEX_ACCOUNT_TOKEN` (`POST /auth/plex`), not an admin API key.
-- Movies request in one click; TV shows offer **per-season** selection, showing which
-  seasons you already have, which are already requested/processing, and which are
-  available to request.
+Set `SEERR_URL` to enable the Request button; leave it unset and the button is hidden. Requests are attributed to **your own Seerr account** — the server signs in with `PLEX_ACCOUNT_TOKEN` rather than an admin API key. Movies request in one click; TV offers per-season selection showing what you already have, what's pending, and what's available.
 
-Because the Activity runs in a sandboxed cross-origin iframe, all Seerr calls go
-through the server — it can't reuse your browser's Overseerr session.
+All Seerr calls go through the server, because the Activity runs in a sandboxed cross-origin iframe and can't reuse your browser's Overseerr session.
 
 ## Tech Stack
 
@@ -122,33 +78,28 @@ through the server — it can't reuse your browser's Overseerr session.
 | Streaming | HLS via Plex transcoder, server-side segment pre-fetch cache, WebRTC P2P sharing |
 | Infrastructure | Docker, Node.js 24, optional nginx VPS relay |
 
-## Prerequisites
-
-- **Node.js 24+** (or Docker)
-- **A Plex Media Server** accessible from the machine running the backend
-- **A Discord application** with Activities enabled
-- **A public HTTPS URL** pointing to the backend (for Discord's iframe proxy)
-
 ## Setup
+
+You'll need Node.js 24+ (or Docker), a Plex Media Server reachable from the backend, a Discord application with Activities enabled, and a public HTTPS URL for Discord's iframe proxy.
 
 ### 1. Discord Developer Portal
 
-1. Go to [discord.com/developers/applications](https://discord.com/developers/applications) and create a new application
-2. Go to **Activities > Settings** and enable Activities
+1. Create an application at [discord.com/developers/applications](https://discord.com/developers/applications)
+2. Under **Activities → Settings**, enable Activities
 3. Add a URL mapping: `/` → your server's public URL
-4. Copy your **Client ID** and **Client Secret**
+4. Copy the **Client ID** and **Client Secret**
 
-### 2. Get Your Plex Token
+### 2. Plex token
 
-Find your token by opening Plex Web, playing any media, then checking the Network tab in DevTools for `X-Plex-Token=` in query parameters. Or follow the [official Plex guide](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/).
+Open Plex Web, play anything, and look for `X-Plex-Token=` in the Network tab — or follow the [official guide](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/).
 
-### 3. Environment Variables
+### 3. Environment
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` with your values:
+`.env.example` documents every variable, required and optional. The required ones:
 
 ```env
 DISCORD_CLIENT_ID=your_discord_client_id
@@ -158,30 +109,9 @@ PLEX_TOKEN=your_plex_token
 PORT=3000
 REDIRECT_URI=https://your-public-url.example.com
 ALLOWED_ORIGINS=https://your-public-url.example.com
-
-# Optional — plex.tv ACCOUNT token (not the server token above). Used for online
-# "Discover" search detail lookups, and to sign in to Seerr. Without it, Discover
-# results still appear but their detail pages have no description.
-# PLEX_ACCOUNT_TOKEN=your_plex_account_token
-
-# Optional — Seerr (Overseerr / Jellyseerr) URL, enables the Request button (see
-# "Requesting Titles" below). Requests use your own Seerr account via the account
-# token above — no API key needed.
-# SEERR_URL=https://requests.yourdomain.com
-
-# Optional — TMDB API key. Adds two detail-page rows: the "also in this
-# collection" row then shows a movie's whole TMDB franchise (titles you don't own
-# marked "Not in library", requestable when Seerr is set), and a "More Like This"
-# row shows TMDB's suggestions for a movie/show — owned titles first, then
-# requestable ones. Without a key, the collection row lists only owned films and
-# "More Like This" is hidden. Free v3 key from
-# https://www.themoviedb.org/settings/api
-# TMDB_API_KEY=your_tmdb_api_key
-
-# Optional — VPS relay (see "VPS Relay Setup" section below)
-# VPS_RELAY_URL=https://theater.yourdomain.com
-# VPS_RELAY_KEY=your-secret-key
 ```
+
+Optional integrations, all off unless set: `PLEX_ACCOUNT_TOKEN` (Discover detail pages and Seerr sign-in), `SEERR_URL` (requests), `TMDB_API_KEY` (franchise collections and "More Like This"), `VPS_RELAY_URL` + `VPS_RELAY_KEY` (relay).
 
 For local development, also create `packages/client/.env`:
 
@@ -191,123 +121,64 @@ VITE_DISCORD_CLIENT_ID=your_discord_client_id
 
 ### 4. Run
 
-#### Docker (recommended)
-
 ```bash
-docker compose up --build
+docker compose up --build     # Docker (recommended)
+npm install && npm run dev    # or local: server on :3000, client on :5173
 ```
 
-#### Local Development
+Discord Activities require a public HTTPS URL. For local dev:
 
 ```bash
-npm install
-npm run dev
-```
-
-This starts both services concurrently:
-
-| Service | URL | Description |
-|---------|-----|-------------|
-| Server  | `http://localhost:3000` | Express API + WebSocket |
-| Client  | `http://localhost:5173` | Vite dev server (proxies `/api` to server) |
-
-#### Tunnel for Discord
-
-Discord Activities require a public HTTPS URL. For local dev, use [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/):
-
-```bash
-brew install cloudflared
 cloudflared tunnel --url http://localhost:5173
 ```
 
-Set the resulting `https://xxxx.trycloudflare.com` URL as the URL mapping in your Discord app's Activities settings.
-
-> **Note:** The tunnel URL changes every restart. Use a [named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-local-tunnel/) for a stable URL.
+Set the resulting URL as your Discord URL mapping. It changes on every restart — use a [named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-local-tunnel/) for a stable one.
 
 ### 5. Deploy
 
-Build and push the Docker image:
-
 ```bash
-npm run deploy
-```
-
-Then on your server (e.g. Unraid):
-
-```bash
-docker compose pull && docker compose up -d
+npm run deploy                              # build and push the image
+docker compose pull && docker compose up -d # on your server
 ```
 
 ### 6. Launch
 
-1. Join a voice channel in Discord
-2. Click the **Activities** (rocket) icon
-3. Select your app — the Activity loads and you'll see the Plex library
+Join a voice channel, click the **Activities** (rocket) icon, and pick your app.
 
 ## VPS Relay (Optional)
 
-Route HLS segments through a VPS (~$7/mo) to offload upload bandwidth from your home server during watch parties. Your home uploads one stream to the VPS; the VPS fans it out to all viewers from its 1 Gbps connection.
+Routes HLS segments through a VPS (~$7/mo) so your home connection uploads one stream instead of one per viewer. At 10 viewers and 8 Mbps that's the difference between 80 Mb/s and ~8 Mb/s.
 
-### Why
-
-If your home upload is 100 Mb/s and you're running a watch party with 10 viewers at 8 Mbps, that's 80 Mb/s — leaving almost nothing for other Plex users. With the VPS relay, home upload drops to ~8 Mb/s regardless of viewer count.
-
-### Quick Setup Overview
-
-1. **Create a Hetzner VPS** (CAX11 or CX23) at [hetzner.com/cloud](https://www.hetzner.com/cloud) — Primary IPv4, Ubuntu 24.04
-2. **Install nginx + certbot** and set up SSL for `theater.yourdomain.com`
-3. **Add Discord URL Mapping** — `/theater` → `theater.yourdomain.com` in Discord Developer Portal → Activities → URL Mappings
-4. **Add Cloudflare IP Access Rule** (if your Express domain uses Cloudflare) — whitelist VPS IP to bypass Bot Fight Mode
-5. **Configure nginx** to proxy through Express (not directly to Plex — Plex throttles external delivery)
-6. **Add env vars** to `.env`:
+1. **Create a VPS** — e.g. Hetzner CAX11/CX23, Ubuntu 24.04, primary IPv4
+2. **Install nginx + certbot**, set up SSL for `theater.yourdomain.com`
+3. **Add a Discord URL mapping** — `/theater` → `theater.yourdomain.com`
+4. **Whitelist the VPS IP in Cloudflare** (IP Access Rule, not a WAF Skip rule) if your Express domain sits behind it
+5. **Configure nginx** to proxy through Express — *not* directly to Plex:32400, which throttles external delivery to 1× realtime and stutters
+6. **Set both env vars** (`VPS_RELAY_KEY` via `openssl rand -hex 32`):
    ```env
    VPS_RELAY_URL=https://theater.yourdomain.com
    VPS_RELAY_KEY=your-secret-key
    ```
-   Generate key: `openssl rand -hex 32`
 
-See **[docs/vps-relay-setup.md](docs/vps-relay-setup.md)** for the complete nginx config and step-by-step instructions.
+Full nginx config and step-by-step instructions: **[docs/vps-relay-setup.md](docs/vps-relay-setup.md)**.
 
-### How It Works
-
-When `VPS_RELAY_URL` and `VPS_RELAY_KEY` are set:
-- `.ts` segment URLs in HLS manifests are rewritten to `/theater/seg/...` (relative, via Discord's proxy to VPS)
-- VPS nginx validates `?key=`, rewrites to `/api/plex/hls/seg?p=...`, proxies to your Express server
-- Express checks the segment pre-fetch cache first — if the segment was already fetched ahead of time, it's served instantly
-- On cache miss, Express fetches the segment from Plex locally (unthrottled) and returns it
-- VPS caches the segment for 5 minutes — subsequent viewers get it instantly from cache
-- P2P is automatically disabled (VPS handles fan-out)
-
-Sub-manifests stay on Express for correct URL rewriting. Do NOT proxy directly to Plex:32400 — Plex throttles external HTTP delivery to 1x realtime, causing stuttering.
-
-When env vars are removed, everything reverts to Express proxying with P2P.
-
-### Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `VPS_RELAY_URL` | No | VPS relay URL (e.g. `https://theater.yourdomain.com`). Omit to disable. |
-| `VPS_RELAY_KEY` | No | Shared secret validated by nginx. Must match the key in the nginx config. |
-
-Both must be set to activate. If either is missing, falls back to direct Express proxying with P2P.
-
----
+Once both variables are set, segment URLs are rewritten to `/theater/seg/...`, nginx validates the key and proxies to Express, Express serves from the pre-fetch cache or fetches from Plex locally, and the VPS caches the result for 5 minutes. Sub-manifests stay on Express so URLs rewrite correctly. P2P turns itself off. Remove either variable and everything reverts to Express proxying with P2P.
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
-| "Failed to connect to Discord" | Make sure you're launching as a Discord Activity from a voice channel, not visiting the URL directly |
-| Library is empty | Check that `PLEX_URL` and `PLEX_TOKEN` are correct and the server can reach Plex |
-| Video won't play | Check browser console for HLS errors; ensure Plex can transcode |
-| "Session expired" banner | The server restarted and your session is stale — close and reopen the Activity |
-| Tunnel URL changed | Update the URL mapping in Discord Developer Portal |
-| Audio is MP3 instead of AAC | Normal for incompatible source codecs (TrueHD, DTS) — MP3 works fine in browsers and Discord |
-| VPS segments return 403 | Key mismatch — check `VPS_RELAY_KEY` in `.env` matches the key in nginx config |
-| VPS segments return 403 (Cloudflare) | Cloudflare blocking VPS — add IP Access Rule to whitelist VPS IP (not WAF Skip rule) |
-| VPS segments return 502 | VPS can't reach Express server — check Cloudflare IP Access Rule exists, Express domain DNS resolves |
-| VPS causes stuttering | Proxying directly to Plex:32400 — must proxy through Express instead (see docs) |
-| Segments blocked in Discord | Missing URL mapping — add `/theater → theater.yourdomain.com` in Discord Dev Portal |
+| "Failed to connect to Discord" | Launch it as an Activity from a voice channel, not by visiting the URL directly |
+| Library is empty | Check `PLEX_URL` / `PLEX_TOKEN`, and that the server can reach Plex |
+| Video won't play | Check the browser console for HLS errors; confirm Plex can transcode |
+| "Session expired" banner | The server restarted — close and reopen the Activity |
+| Tunnel URL changed | Update the URL mapping in the Discord Developer Portal |
+| Audio is MP3, not AAC | Expected for TrueHD/DTS sources. MP3 plays fine everywhere |
+| Skip intro / previews missing | Plex hasn't generated them — see the note under Features |
+| VPS segments 403 | Key mismatch between `.env` and the nginx config — or Cloudflare blocking the VPS, which needs an IP Access Rule |
+| VPS segments 502 | The VPS can't reach Express — check that Cloudflare rule and your Express domain's DNS |
+| VPS stutters | nginx is proxying straight to Plex:32400; it must go through Express |
+| Segments blocked in Discord | Missing `/theater` URL mapping in the Developer Portal |
 
 ## License
 

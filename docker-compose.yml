@@ -14,7 +14,6 @@ services:
       - PLEX_ACCOUNT_TOKEN=${PLEX_ACCOUNT_TOKEN}
       - DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}
       - DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}
-      - SESSION_SECRET=${SESSION_SECRET}
       - REDIRECT_URI=${REDIRECT_URI}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
       - ALLOWED_GUILD_IDS=${ALLOWED_GUILD_IDS}
@@ -22,6 +21,25 @@ services:
       - VPS_RELAY_KEY=${VPS_RELAY_KEY}
       - SEERR_URL=${SEERR_URL}
       - TMDB_API_KEY=${TMDB_API_KEY}
+      # Ratings row. Unset, /api/ratings answers configured:false and the row
+      # simply never appears — which looked like a bug when the key was set in
+      # .env but stopped here.
+      - MDBLIST_API_KEY=${MDBLIST_API_KEY}
+      - ADMIN_SECRET=${ADMIN_SECRET}
+      # The bandwidth levers. Documented in .env.example as the biggest one
+      # available, and unreachable from here until now.
+      - VIDEO_BITRATE_KBPS=${VIDEO_BITRATE_KBPS}
+      - VIDEO_PEAK_BITRATE_KBPS=${VIDEO_PEAK_BITRATE_KBPS}
+      - WARM_CACHE=${WARM_CACHE}
+      - WARM_CACHE_MAX_ITEMS=${WARM_CACHE_MAX_ITEMS}
+      - WARM_CACHE_DELAY_MS=${WARM_CACHE_DELAY_MS}
+      - WARM_CACHE_INTERVAL_MIN=${WARM_CACHE_INTERVAL_MIN}
+      - LOG_TO_FILE=${LOG_TO_FILE}
+      - LOG_DIR=${LOG_DIR}
+      - LOG_MAX_FILE_MB=${LOG_MAX_FILE_MB}
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS}
+      - THUMB_CACHE_TTL_MS=${THUMB_CACHE_TTL_MS}
+      - THUMB_CACHE_MAX_MB=${THUMB_CACHE_MAX_MB}
       - PORT=${PORT:-3000}
       - THUMB_CACHE_DIR=/data
       # Set DEBUG=1 to turn on verbose HLS segment/session logging.

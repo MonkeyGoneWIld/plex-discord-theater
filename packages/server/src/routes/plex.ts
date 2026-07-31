@@ -2124,6 +2124,9 @@ async function postTimeline(
  * accumulating zombie encoders (which eventually overloads it).
  */
 async function reapOrphanTranscodes(): Promise<void> {
+  // Nothing has ever been played, so there is nothing of ours to reap and no
+  // reason to ask Plex about it every minute for the life of the process.
+  if (plexTranscodeKeys.size === 0 && activeTranscodeKeys.size === 0) return;
   try {
     const data = await plexJSON<{
       MediaContainer: { TranscodeSession?: Array<{ key?: string; protocol?: string }> };

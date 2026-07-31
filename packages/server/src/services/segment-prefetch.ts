@@ -118,7 +118,10 @@ function evictIfNeeded(session: PrefetchSession): void {
     if (session.segmentCache.size <= EVICTION_THRESHOLD) return;
   }
 
-  if (session.segmentCache.size >= MAX_CACHE_SIZE) {
+  // `>` the threshold, not `>=` the cap: guarding on the cap meant the cache
+  // sat anywhere from 51 to 99 entries doing no eviction at all, then evicted
+  // only on hitting exactly 100.
+  if (session.segmentCache.size > EVICTION_THRESHOLD) {
     const all = [...session.segmentCache.entries()].sort(
       (a, b) => a[1].cachedAt - b[1].cachedAt,
     );

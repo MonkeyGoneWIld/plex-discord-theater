@@ -42,6 +42,10 @@ export function Search({ onSearch, onClear, placeholder = "Search your library..
         onClearRef.current();
         return;
       }
+      // One character is not a search: each one costs a Plex /hubs/search, a
+      // Discover cloud search and up to 15 parallel ownership lookups, so
+      // typing "the" fired three of those before this floor.
+      if (q.trim().length < 2) return;
       debounceRef.current = setTimeout(() => onSearchRef.current(q.trim()), 400);
     },
     [],

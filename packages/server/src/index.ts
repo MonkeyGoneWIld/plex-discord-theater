@@ -130,7 +130,8 @@ const hlsLimiter = rateLimit({
   max: isDev ? 50000 : 3000,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req) => req.ip || req.socket.remoteAddress || "unknown",
+  // No keyGenerator: the library's default already does exactly this, and a
+  // custom one trips its IPv6 validation warning (ERR_ERL_KEY_GEN_IPV6).
 });
 
 // Diagnostics ship on a timer from every connected client, so they'd eat most

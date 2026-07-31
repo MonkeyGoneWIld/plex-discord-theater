@@ -11,6 +11,15 @@ export interface ControlsHandle {
    * keeping a second, competing one.
    */
   queueSkip: (amount: number) => void;
+  /**
+   * True when the tap that just landed was the one that brought the controls
+   * back, and should therefore not also do anything else.
+   *
+   * Consuming, so it answers true once per reveal. Without it a tap on a phone
+   * both revealed the bar and toggled playback, because the reveal listener and
+   * the video's own click handler each see the same tap.
+   */
+  consumeRevealTap: () => boolean;
 }
 
 interface ControlsProps {
@@ -145,6 +154,11 @@ export function Controls({
   const [volume, setVolume] = useState(loadVolume);
   const [muted, setMuted] = useState(false);
   const [visible, setVisible] = useState(true);
+  // Mirrors `visible` for the listeners below, which are attached once and would
+  // otherwise close over its first value forever.
+  const visibleRef = useRef(true);
+  visibleRef.current = visible;
+  const revealTapRef = useRef(false);
   const [hoveringProgress, setHoveringProgress] = useState(false);
   // Fraction (0-1) of the bar under the cursor, null when not hovering —
   // drives the seek-preview timestamp tooltip and hover marker.
@@ -239,10 +253,26 @@ export function Controls({
     };
     parent.addEventListener("mousemove", onMove);
     parent.addEventListener("mouseleave", onLeave);
+    // Touch has no mousemove, so on a phone the bar hid after 3s and never came
+    // back: every tap fell through the hidden (pointer-events: none) overlay to
+    // the video's own handler and toggled playback instead of revealing it.
+    // Discord Activities run on phones, so this was the only way to control
+    // playback there — by accident, and destructively.
+    // Records whether the bar was hidden *before* this tap revealed it, which
+    // is the thing the video's click handler needs and can no longer observe by
+    // the time it runs.
+    const onReveal = () => {
+      if (!visibleRef.current) revealTapRef.current = true;
+      resetHideTimer();
+    };
+    parent.addEventListener("pointerdown", onReveal);
+    parent.addEventListener("touchstart", onReveal, { passive: true });
     resetHideTimer();
     return () => {
       parent.removeEventListener("mousemove", onMove);
       parent.removeEventListener("mouseleave", onLeave);
+      parent.removeEventListener("pointerdown", onReveal);
+      parent.removeEventListener("touchstart", onReveal);
       if (hideTimer.current) clearTimeout(hideTimer.current);
     };
   }, [videoRef, resetHideTimer]);
@@ -385,7 +415,14 @@ export function Controls({
   const skipBack = useCallback(() => queueSkip(-10), [queueSkip]);
   const skipForward = useCallback(() => queueSkip(10), [queueSkip]);
 
-  useImperativeHandle(handleRef, () => ({ queueSkip }), [queueSkip]);
+  const consumeRevealTap = useCallback(() => {
+    const was = revealTapRef.current;
+    revealTapRef.current = false;
+    return was;
+  }, []);
+
+  useImperativeHandle(handleRef, () => ({ queueSkip, consumeRevealTap }),
+    [queueSkip, consumeRevealTap]);
 
   // Drop pending timers on unmount so a queued seek can't fire into a torn-down
   // player (or a transcode the next item has already replaced).

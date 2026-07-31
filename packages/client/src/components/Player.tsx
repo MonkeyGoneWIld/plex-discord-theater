@@ -1857,6 +1857,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const togglePlayPause = useCallback(() => {
     const video = videoRef.current;
     if (!video || !canControlRef.current) return;
+    // On touch, the tap that brings the controls back shouldn't also pause. The
+    // pointerdown that revealed them fires before this click, so Controls
+    // records it and we ask rather than trying to observe it here.
+    if (controlsRef.current?.consumeRevealTap()) return;
     const resuming = video.paused;
     if (resuming) {
       video.play();

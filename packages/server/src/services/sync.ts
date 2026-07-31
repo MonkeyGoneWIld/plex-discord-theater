@@ -123,6 +123,10 @@ const roomPingIntervals = new Map<string, ReturnType<typeof setInterval>>();
  *  not one, so a single odd response can't silence a live session's keep-alive. */
 const PING_GONE_LIMIT = 2;
 
+/** Shape of the session ids this server mints — see crypto.randomUUID on the
+ *  client. Used to reject anything else before it reaches a Plex query param. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function startRoomPing(instanceId: string, hlsSessionId: string): void {
   stopRoomPing(instanceId);
   let gone = 0;
@@ -200,21 +204,35 @@ function getOrCreateRoom(instanceId: string): Room {
   return room;
 }
 
+/**
+ * Write to one socket, swallowing a failure.
+ *
+ * readyState is checked first, but it can change between that check and the
+ * write — the peer closing mid-loop is ordinary. An unhandled throw here
+ * escapes the ws emitter as an uncaughtException, and the logger deliberately
+ * rethrows those, so one dead socket would end the process and every watch
+ * party on it.
+ */
+function safeSend(ws: WebSocket, data: string): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(data);
+  } catch {
+    // The socket died underneath us; its close handler does the cleanup.
+  }
+}
+
 function broadcast(room: Room, sender: WebSocket, msg: object): void {
   const data = JSON.stringify(msg);
   for (const client of room.clients) {
-    if (client.ws !== sender && client.ws.readyState === WebSocket.OPEN) {
-      client.ws.send(data);
-    }
+    if (client.ws !== sender) safeSend(client.ws, data);
   }
 }
 
 /** Send to every client in the room, including the one that triggered it. */
 function sendToAll(room: Room, msg: object): void {
   const data = JSON.stringify(msg);
-  for (const client of room.clients) {
-    if (client.ws.readyState === WebSocket.OPEN) client.ws.send(data);
-  }
+  for (const client of room.clients) safeSend(client.ws, data);
 }
 
 function participantsOf(room: Room) {
@@ -232,9 +250,7 @@ function broadcastParticipants(room: Room): void {
 }
 
 function sendTo(ws: WebSocket, msg: object): void {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(msg));
-  }
+  safeSend(ws, JSON.stringify(msg));
 }
 
 /**
@@ -569,10 +585,19 @@ export function attachWebSocketServer(server: Server): void {
             typeof msg.position === "number" && Number.isFinite(msg.position) && msg.position > 0
               ? msg.position
               : 0;
-          room.state.ratingKey = (msg.ratingKey as string) || null;
-          room.state.title = (msg.title as string) || null;
+          // Validated like every other handler in this file. It's host-only
+          // so this isn't an escalation, but the title is echoed to the whole
+          // room and hlsSessionId ends up in a Plex query parameter, and this
+          // was the one place taking either on trust.
+          const rk = typeof msg.ratingKey === "string" && /^\d+$/.test(msg.ratingKey)
+            ? msg.ratingKey : null;
+          const sid = typeof msg.hlsSessionId === "string" && UUID_RE.test(msg.hlsSessionId)
+            ? msg.hlsSessionId : null;
+          room.state.ratingKey = rk;
+          room.state.title =
+            typeof msg.title === "string" ? msg.title.slice(0, 500) : null;
           room.state.subtitles = Boolean(msg.subtitles);
-          room.state.hlsSessionId = (msg.hlsSessionId as string) || null;
+          room.state.hlsSessionId = sid;
           room.state.playing = true;
           room.state.position = startPosition;
           room.state.updatedAt = Date.now();
@@ -853,6 +878,11 @@ export function attachWebSocketServer(server: Server): void {
       }
 
       if (room.clients.size === 0) {
+        // Paired with rooms.delete everywhere, not just on the host's exit: a
+        // duplicate-connection eviction clears isHost, so the last client out
+        // isn't always flagged as one, and the interval then pinged Plex every
+        // 30s for a room that no longer existed.
+        stopRoomPing(roomId);
         rooms.delete(roomId);
       } else {
         // Someone left — refresh everyone's roster
@@ -865,6 +895,9 @@ export function attachWebSocketServer(server: Server): void {
   cleanupInterval = setInterval(() => {
     for (const [instanceId, room] of rooms) {
       if (!instanceHosts.has(instanceId) && room.clients.size === 0) {
+        // Same reasoning as the close handler: the interval outlives the room
+        // otherwise, pinging Plex for something that is gone.
+        stopRoomPing(instanceId);
         rooms.delete(instanceId);
       }
     }

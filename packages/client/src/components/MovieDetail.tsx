@@ -8,7 +8,7 @@ import { RatingsRow } from "./RatingsRow";
 import { RelatedRows } from "./RelatedRows";
 import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
-import { DetailSkeleton } from "./DetailSkeleton";
+import { DetailLoading } from "./DetailLoading";
 import type { QueueItem, SuggestionItem } from "../hooks/useSync";
 
 interface MovieDetailProps {
@@ -33,14 +33,14 @@ interface MovieDetailProps {
 }
 
 /**
- * Hard cap on the placeholder.
+ * Backstop on the wait, not a target.
  *
- * The gate below waits for the page's parts, but never for longer than this —
- * a second is about the limit of what reads as "loading" rather than "stuck",
- * and past it an unfinished page beats a placeholder. In practice a warm cache
- * resolves well inside it and the skeleton is never seen.
+ * The gate below holds the page until it is genuinely complete — including the
+ * collection / related rows, which is the part that most often lags. This only
+ * exists so a request that never answers can't strand the viewer on a spinner
+ * forever, so it is set well past a normal load rather than near it.
  */
-const REVEAL_TIMEOUT_MS = 1000;
+const REVEAL_TIMEOUT_MS = 8000;
 
 function authUrl(url: string): string {
   const token = getSessionToken();
@@ -309,7 +309,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
 
   return (
     <div style={styles.page}>
-      {!pageReady && <DetailSkeleton wide={item.type === "episode"} />}
+      {!pageReady && <DetailLoading />}
       {/* Kept mounted behind the placeholder: the images and row requests the
           gate is waiting on only make progress once they're in the tree. */}
       <div style={pageReady ? styles.revealed : styles.prerender} aria-hidden={!pageReady}>

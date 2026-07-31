@@ -46,6 +46,11 @@ function crumbLabel(v: View): string {
 
 // A title opened from a related row — its breadcrumb collapses to Home › title.
 function isFlatView(v: View): boolean {
+  // A person page always collapses to Home › <name>. They're reached from a
+  // title, but they aren't part of one — drawing the film as a parent would
+  // misdescribe the trail. Back still pops the real stack, so the title that
+  // led here is one press away.
+  if (v.kind === "person") return true;
   return (v.kind === "show" || v.kind === "detail" || v.kind === "external-detail") && v.flat === true;
 }
 

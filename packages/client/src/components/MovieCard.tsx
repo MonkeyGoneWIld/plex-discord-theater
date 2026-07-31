@@ -35,6 +35,10 @@ const IDLE_BORDER = "rgba(255,255,255,0.06)";
 const EXTERNAL_BORDER = "rgba(255,255,255,0.14)";
 const ACCENT_BORDER = "rgba(229,160,13,0.85)";
 
+/** Hover lift for an owned poster. A filter repaints in place — unlike a scale,
+ *  which would push the card past the row's clip edge and shear the border. */
+const HOVER_POSTER_FILTER = "brightness(1.12)";
+
 export function MovieCard({ item, onClick, progress, watched, onRemove, removeLabel = "Remove" }: MovieCardProps) {
   const prefetchTimer = useRef<number | undefined>(undefined);
   // A card can unmount while its timer is pending (filtering, tab switch).
@@ -62,32 +66,29 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
         // in-flight promise, so a re-entry joins the existing request).
         prefetchTimer.current = window.setTimeout(() => prefetchDetail(item), HOVER_INTENT_MS);
         const el = e.currentTarget;
-        el.style.transform = "scale(1.03)";
-        // Amber edge rather than an outer halo.
+        // Everything here stays inside the card's own box.
         //
-        // A glow is drawn outside the element's box, and these cards live in a
-        // horizontally scrolling row — `overflow-x: auto` clips both axes, so
-        // the first and last card always lost part of it, and every card lost
-        // the top and bottom. Padding the row to make space only shrinks the
-        // cards, which lets an extra one show at the edge. A border is inside
-        // the card's own box, so there is nothing to clip and the row keeps the
-        // exact geometry it had.
+        // These cards sit in a scroller, and `overflow-x: auto` clips both axes
+        // hard at its content edge. Anything drawn outside the box is cut: an
+        // outer glow lost its top and bottom on every card and its outer side on
+        // the end ones, and `scale()` did the same to the border, since growing
+        // 3% puts ~2.5px of card above the row's top edge. Making room by
+        // padding the row only shrinks the cards until an extra one fits.
+        //
+        // So hover is an amber edge plus a brighter poster — a colour change and
+        // a filter, neither of which moves or grows anything.
         el.style.borderColor = ACCENT_BORDER;
-        // Reveal a dimmed not-in-library poster at full colour on hover.
-        if (external) {
-          const img = el.querySelector("img");
-          if (img) img.style.filter = "none";
-        }
+        const img = el.querySelector("img");
+        // A dimmed not-in-library poster comes up to full colour; an owned one
+        // just lifts slightly.
+        if (img) img.style.filter = external ? "none" : HOVER_POSTER_FILTER;
       }}
       onMouseLeave={(e) => {
         if (prefetchTimer.current) window.clearTimeout(prefetchTimer.current);
         const el = e.currentTarget;
-        el.style.transform = "scale(1)";
         el.style.borderColor = external ? EXTERNAL_BORDER : IDLE_BORDER;
-        if (external) {
-          const img = el.querySelector("img");
-          if (img) img.style.filter = EXTERNAL_POSTER_FILTER;
-        }
+        const img = el.querySelector("img");
+        if (img) img.style.filter = external ? EXTERNAL_POSTER_FILTER : "";
       }}
     >
       <div style={styles.posterWrap}>
@@ -169,7 +170,7 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(255,255,255,0.06)",
     color: "inherit",
     textAlign: "left",
-    transition: "transform 0.2s ease, border-color 0.2s ease",
+    transition: "border-color 0.18s ease",
     width: "100%",
     fontFamily: "inherit",
   },

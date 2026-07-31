@@ -37,19 +37,13 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
   const [loading, setLoading] = useState(true);
   // Seasons the library is missing, per Seerr (posters from TMDB).
   const [missingSeasons, setMissingSeasons] = useState<SeerrSeason[]>([]);
-  const [seerrDone, setSeerrDone] = useState(false);
   const [reloadNonce, setReloadNonce] = useState(0);
-  // Readiness of the page's independently-fetched parts (see `pageReady`).
-  const [ratingsReady, setRatingsReady] = useState(false);
-  const [relatedReady, setRelatedReady] = useState(false);
-  // Backstop: one slow side request must not hold the whole page.
+  // Backstop so a backdrop that never loads can't strand the page.
   const [revealTimedOut, setRevealTimedOut] = useState(false);
 
   useEffect(() => {
-    setRatingsReady(false);
-    setRelatedReady(false);
     setRevealTimedOut(false);
-    const timer = window.setTimeout(() => setRevealTimedOut(true), 5000);
+    const timer = window.setTimeout(() => setRevealTimedOut(true), 1500);
     return () => clearTimeout(timer);
   }, [item.ratingKey]);
   // Where this viewer left the show: the episode in progress, or the one after
@@ -83,11 +77,7 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
 
   // Once meta is in, ask Seerr which seasons exist that we don't have.
   useEffect(() => {
-    if (loading || !meta) return;
-    if (meta.tmdbId == null) {
-      setSeerrDone(true);
-      return;
-    }
+    if (loading || !meta || meta.tmdbId == null) return;
     let cancelled = false;
     const owned = new Set(seasons.map((s) => s.index).filter((n) => n != null));
     fetchSeerrTv(meta.tmdbId)
@@ -97,8 +87,7 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
           setMissingSeasons(tv.seasons.filter((s) => !owned.has(s.seasonNumber) && s.status !== 5));
         }
       })
-      .catch(() => {})
-      .finally(() => { if (!cancelled) setSeerrDone(true); });
+      .catch(() => {});
     return () => { cancelled = true; };
   }, [loading, meta, seasons, reloadNonce]);
 
@@ -109,20 +98,12 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
   // auto-navigate straight to its episode list, which skipped the synopsis,
   // ratings, cast and related rows this page carries.
   //
-  // Hold the skeleton until Seerr has answered too, so the request UI and the
-  // season grid appear together rather than the latter popping in afterwards.
-  const deciding = !loading && !seerrDone;
-
-  // The rest of the page's parts fetch independently, so — as in MovieDetail —
-  // hold the skeleton until they've all landed and reveal in one go.
-  // A metadata failure renders neither row, so nothing would ever report ready.
-  const wantsRatings = meta != null;
-  const wantsRelated = meta != null && !!onSelect;
+  // Wait for the show's own data and its backdrop, and nothing else — see the
+  // note in MovieDetail. In particular this no longer waits on Seerr: that
+  // answer only decides whether a "missing seasons" block appears below the
+  // season grid, which isn't worth holding the page for.
   const backdropReady = useImageReady(backdropUrl);
-  const pageReady =
-    (!loading && !deciding && backdropReady &&
-      (!wantsRatings || ratingsReady) && (!wantsRelated || relatedReady)) ||
-    revealTimedOut;
+  const pageReady = (!loading && backdropReady) || revealTimedOut;
 
   const skeleton = (
       <div>
@@ -149,6 +130,18 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
               <SkeletonBlock width="70%" height={14} style={{ marginTop: 8 }} />
             </div>
           ))}
+        </div>
+        {/* Cast row placeholder, so the page below the seasons isn't just blank. */}
+        <div style={shelfStyles.wrap}>
+          <SkeletonBlock width={160} height={20} />
+          <div style={{ display: "flex", gap: "18px", padding: "18px 0 2px" }}>
+            {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
+              <div key={i} style={{ flexShrink: 0, width: 150 }}>
+                <SkeletonBlock width={150} height={150} borderRadius="50%" />
+                <SkeletonBlock width="70%" height={13} style={{ marginTop: 10 }} />
+              </div>
+            ))}
+          </div>
         </div>
       </div>
   );
@@ -214,7 +207,6 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
                 tmdbId={meta.tmdbId}
                 mediaType="show"
                 style={styles.ratings}
-                onReady={() => setRatingsReady(true)}
               />
 
               {meta.summary && (
@@ -295,7 +287,6 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
             ratingKey={item.ratingKey}
             recommendationsTitle="More Like This"
             onSelect={onSelect}
-            onReady={() => setRelatedReady(true)}
           />
         )}
         </>

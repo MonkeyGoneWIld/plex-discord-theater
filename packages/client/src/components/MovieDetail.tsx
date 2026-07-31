@@ -175,10 +175,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   const [selectedAudio, setSelectedAudio] = useState<number | null>(null);
   const [selectedSubtitle, setSelectedSubtitle] = useState<number | null>(null);
   const [suggested, setSuggested] = useState(false);
-  // Readiness of the page's independently-fetched parts (see `pageReady`).
-  const [ratingsReady, setRatingsReady] = useState(false);
-  const [relatedReady, setRelatedReady] = useState(false);
-  // Backstop: one slow or wedged side request must not hold the page hostage.
+  // Backstop so a backdrop that never loads can't strand the page (see `pageReady`).
   const [revealTimedOut, setRevealTimedOut] = useState(false);
   // The host's own saved position for this item, or null if they've never
   // played it. Only the host can start playback, so only the host fetches it.
@@ -189,12 +186,11 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   const narrow = useMediaQuery(NARROW_QUERY);
 
   // Reset the reveal gate whenever a different title is opened, and start its
-  // backstop timer.
+  // backstop timer. Short, because the only thing it guards is the backdrop
+  // image — waiting longer than this for artwork is worse than going without it.
   useEffect(() => {
-    setRatingsReady(false);
-    setRelatedReady(false);
     setRevealTimedOut(false);
-    const timer = window.setTimeout(() => setRevealTimedOut(true), 5000);
+    const timer = window.setTimeout(() => setRevealTimedOut(true), 1500);
     return () => clearTimeout(timer);
   }, [item.ratingKey]);
 
@@ -262,20 +258,20 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   const backdropUrl = meta?.art ? authUrl(meta.art) : null;
   const posterUrl = meta?.thumb ? authUrl(meta.thumb) : (item.thumb ? authUrl(item.thumb) : null);
 
-  // ── Reveal the page in one go ────────────────────────────────
+  // ── Reveal the page ──────────────────────────────────────────
   //
-  // The backdrop, ratings and related rows each fetch on their own schedule, so
-  // rendering as soon as the metadata landed made the page assemble itself in
-  // stages. Instead the skeleton holds until every part is in hand.
+  // Wait for the metadata and the backdrop, and nothing else. An earlier version
+  // also waited on the ratings and the related rows, which meant every page paid
+  // for the slowest request on it — /collections is several Plex calls plus a
+  // TMDB recommendations lookup, so the reveal routinely hit its timeout and the
+  // skeleton sat there for seconds.
   //
-  // Only wait on the pieces this item will actually render: episodes show no
-  // ratings row and no related rows, and a metadata failure shows neither — in
-  // those cases nothing would ever report ready.
-  const wantsRatings = item.type === "movie" && meta != null;
-  const wantsRelated = item.type === "movie" && meta != null && !!onSelect;
+  // Those two parts are allowed to fill in on their own instead: the ratings row
+  // reserves its height up front, and the related rows sit below the fold. The
+  // things that would actually shift the page — the artwork, title, synopsis and
+  // buttons — all arrive together, which is what the staging looked wrong for.
   const backdropReady = useImageReady(backdropUrl);
-  const contentReady = (!wantsRatings || ratingsReady) && (!wantsRelated || relatedReady);
-  const pageReady = (!loading && backdropReady && contentReady) || revealTimedOut;
+  const pageReady = (!loading && backdropReady) || revealTimedOut;
 
   // Everything on this page is revealed together (see `pageReady` below), so the
   // skeleton is a value rather than an early return — the real content has to
@@ -306,6 +302,35 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
             <SkeletonBlock width="100%" height={14} />
             <SkeletonBlock width="90%" height={14} />
             <SkeletonBlock width="70%" height={14} />
+            {/* Play/queue buttons — without these the skeleton left a wide gap
+                exactly where the page's most prominent controls land. */}
+            <div style={{ display: "flex", gap: "10px", marginTop: "8px" }}>
+              <SkeletonBlock width={130} height={44} borderRadius={8} />
+              <SkeletonBlock width={44} height={44} borderRadius={8} />
+            </div>
+          </div>
+        </div>
+        {/* A cast row and one poster shelf, so the lower half of the page has
+            roughly the shape it will have — the previous skeleton stopped at the
+            synopsis and left everything below it blank. */}
+        <div style={shelfStyles.wrap}>
+          <SkeletonBlock width={160} height={20} />
+          <div style={{ display: "flex", gap: "18px", padding: "18px 0 2px" }}>
+            {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
+              <div key={i} style={{ flexShrink: 0, width: 150 }}>
+                <SkeletonBlock width={150} height={150} borderRadius="50%" />
+                <SkeletonBlock width="70%" height={13} style={{ marginTop: 10 }} />
+              </div>
+            ))}
+          </div>
+          <SkeletonBlock width={200} height={20} style={{ marginTop: 24 }} />
+          <div style={{ display: "flex", gap: "14px", padding: "20px 0 22px" }}>
+            {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
+              <div key={i} style={{ flexShrink: 0, width: 182 }}>
+                <SkeletonBlock width={182} height={273} borderRadius={10} />
+                <SkeletonBlock width="80%" height={13} style={{ marginTop: 8 }} />
+              </div>
+            ))}
           </div>
         </div>
       </div>
@@ -433,7 +458,6 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                   tmdbId={meta.tmdbId}
                   mediaType="movie"
                   style={styles.ratings}
-                  onReady={() => setRatingsReady(true)}
                 />
               )}
 
@@ -588,12 +612,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
             Movies only: episodes belong to a show, not a collection, and TMDB
             has no per-episode recommendations. */}
         {item.type === "movie" && onSelect && (
-          <RelatedRows
-            ratingKey={item.ratingKey}
-            recommendationsTitle="More Like This"
-            onSelect={onSelect}
-            onReady={() => setRelatedReady(true)}
-          />
+          <RelatedRows ratingKey={item.ratingKey} recommendationsTitle="More Like This" onSelect={onSelect} />
         )}
         </>
       ) : (

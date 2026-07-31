@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ScrollShelf } from "./ScrollShelf";
 import { authUrl, type Credit } from "../lib/api";
+import { ShelfSkeleton } from "./ShelfSkeleton";
 
 /** Diameter of a headshot. Plex's own cast row uses a similar circular crop. */
 const AVATAR_PX = 150;
@@ -8,7 +9,11 @@ const AVATAR_PX = 150;
 interface CastRowProps {
   cast?: Credit[];
   directors?: Credit[];
-  writers?: Credit[];
+  /** Open a person's page. Credits without a Plex tag id aren't clickable. */
+  onSelectPerson?: (person: Credit) => void;
+  /** True while the metadata carrying these credits is still in flight, so the
+   *  row holds its space instead of appearing from nothing. */
+  loading?: boolean;
 }
 
 /** Initials fallback for someone with no headshot — better than an empty disc. */
@@ -21,11 +26,34 @@ function initials(name: string): string {
     .join("");
 }
 
-function CastAvatar({ person }: { person: Credit }) {
+function CastAvatar({ person, onSelect }: { person: Credit; onSelect?: () => void }) {
   const [failed, setFailed] = useState(false);
   const show = person.thumb && !failed;
+  const clickable = !!onSelect;
   return (
-    <div style={styles.person}>
+    <div
+      style={clickable ? { ...styles.person, ...styles.personClickable } : styles.person}
+      {...(clickable
+        ? {
+            role: "button",
+            tabIndex: 0,
+            onClick: onSelect,
+            onKeyDown: (e: React.KeyboardEvent) => {
+              if (e.key !== "Enter" && e.key !== " ") return;
+              e.preventDefault();
+              onSelect();
+            },
+            onMouseEnter: (e: React.MouseEvent<HTMLDivElement>) => {
+              const img = e.currentTarget.firstElementChild as HTMLElement | null;
+              if (img) img.style.borderColor = "rgba(229,160,13,0.75)";
+            },
+            onMouseLeave: (e: React.MouseEvent<HTMLDivElement>) => {
+              const img = e.currentTarget.firstElementChild as HTMLElement | null;
+              if (img) img.style.borderColor = "rgba(255,255,255,0.08)";
+            },
+          }
+        : {})}
+    >
       {show ? (
         <img
           src={authUrl(person.thumb!)}
@@ -47,21 +75,20 @@ function CastAvatar({ person }: { person: Credit }) {
  * The detail pages' Cast & Crew row — circular headshots with the actor's name
  * and character beneath, laid out like Plex's own.
  *
- * Directors and writers are appended after the cast (labelled by job rather than
- * character) so the page carries the full credit block in one row instead of
- * three near-empty ones. Renders nothing at all when a title has no credits,
- * which is the normal case for a library item Plex never matched.
+ * Renders nothing at all when a title has no credits, which is the normal case
+ * for a library item Plex never matched against its metadata agent.
  */
-export function CastRow({ cast, directors, writers }: CastRowProps) {
-  // Director and writers lead, then the billed cast. Appending them instead put
-  // them past thirty actors — off the end of a row nobody scrolls that far — so
-  // the director, the one crew credit people actually look for, was effectively
-  // missing. De-duplicated because a writer-director would otherwise appear
-  // twice, adjacent, under two different job labels.
-  // One entry per person, their credits merged into a single label
-  // ("Director, Writer") rather than one disc each.
+export function CastRow({ cast, directors, onSelectPerson, loading }: CastRowProps) {
+  // The director leads, then the billed cast. Appending crew instead put them
+  // past thirty actors — off the end of a row nobody scrolls that far — so the
+  // one crew credit people actually look for was effectively missing. Writers
+  // are deliberately not listed: on most titles they outnumber the useful
+  // credits without being what anyone came to the row for.
+  //
+  // One entry per person, credits merged into a single label — someone who both
+  // directed and appears in the film gets one disc, not two.
   const byName = new Map<string, Credit>();
-  for (const p of [...(directors ?? []), ...(writers ?? []), ...(cast ?? [])]) {
+  for (const p of [...(directors ?? []), ...(cast ?? [])]) {
     const existing = byName.get(p.name);
     if (!existing) {
       byName.set(p.name, { ...p });
@@ -76,14 +103,22 @@ export function CastRow({ cast, directors, writers }: CastRowProps) {
     if (!existing.thumb && p.thumb) existing.thumb = p.thumb;
   }
   const people = [...byName.values()];
-  if (people.length === 0) return null;
+  // Holding the space while the credits are in flight is the point — returning
+  // null here and a full row a moment later is exactly the jolt this avoids.
+  if (people.length === 0) return loading ? <ShelfSkeleton variant="cast" labelWidth={140} /> : null;
 
   return (
     <div style={styles.section}>
       <h3 style={styles.label}>Cast &amp; Crew</h3>
-      <ScrollShelf rowStyle={styles.row}>
+      {/* No scrollbar here — the edge chevrons are enough for a row this short,
+          and the bar under the circles only added noise. */}
+      <ScrollShelf rowStyle={styles.row} scrollbar={false}>
         {people.map((p, i) => (
-          <CastAvatar key={`${p.name}-${p.role ?? i}`} person={p} />
+          <CastAvatar
+            key={`${p.name}-${p.role ?? i}`}
+            person={p}
+            onSelect={onSelectPerson && p.id != null ? () => onSelectPerson(p) : undefined}
+          />
         ))}
       </ScrollShelf>
     </div>
@@ -116,6 +151,9 @@ const styles: Record<string, React.CSSProperties> = {
     width: `${AVATAR_PX}px`,
     textAlign: "center" as const,
   },
+  personClickable: {
+    cursor: "pointer",
+  },
   avatar: {
     width: `${AVATAR_PX}px`,
     height: `${AVATAR_PX}px`,
@@ -124,6 +162,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: "block",
     background: "#1c1c1c",
     border: "1px solid rgba(255,255,255,0.08)",
+    transition: "border-color 0.15s ease",
   },
   avatarFallback: {
     display: "flex",

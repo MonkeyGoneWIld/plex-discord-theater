@@ -12,6 +12,9 @@ interface ScrollShelfProps {
   /** Inline style for the scroller itself (the flex row) — shared with the
    *  mobile branch so both look identical apart from the added controls. */
   rowStyle: CSSProperties;
+  /** Draw the thin hover scrollbar under the row. Off for the cast row, where
+   *  the chevrons alone are enough and the bar only added clutter. */
+  scrollbar?: boolean;
 }
 
 /**
@@ -26,7 +29,7 @@ interface ScrollShelfProps {
  * renders the standard scrollbar (with end-arrow buttons) and ignores every
  * `::-webkit-scrollbar` rule — so a native bar can't be made arrow-less here.
  */
-export function ScrollShelf({ children, rowStyle }: ScrollShelfProps) {
+export function ScrollShelf({ children, rowStyle, scrollbar = true }: ScrollShelfProps) {
   const isDesktop = useMediaQuery(DESKTOP_POINTER_QUERY);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const leftRef = useRef<HTMLDivElement>(null);
@@ -221,9 +224,11 @@ export function ScrollShelf({ children, rowStyle }: ScrollShelfProps) {
       >
         <span>&rsaquo;</span>
       </div>
-      <div className="shelf-bar" ref={barRef} onPointerDown={onBarDown}>
-        <div className="shelf-thumb" ref={thumbRef} onPointerDown={onThumbDown} />
-      </div>
+      {scrollbar && (
+        <div className="shelf-bar" ref={barRef} onPointerDown={onBarDown}>
+          <div className="shelf-thumb" ref={thumbRef} onPointerDown={onThumbDown} />
+        </div>
+      )}
     </div>
   );
 }

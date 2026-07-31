@@ -18,6 +18,7 @@ import {
   clearHistory,
   historyEntryToItem,
   type HistoryEntry,
+  type PersonResult,
   type PlexItem,
   type PlexSection,
   type Genre,
@@ -53,6 +54,8 @@ function describeError(err: unknown): string {
 interface LibraryProps {
   isHost: boolean;
   onSelect: (item: PlexItem) => void;
+  /** Open a cast/crew member's page from a search result. */
+  onSelectPerson?: (person: PersonResult) => void;
   activeSection: string | null;
   onActiveSectionChange: (id: string) => void;
   onBrowseContext?: (context: string) => void;
@@ -66,7 +69,7 @@ interface LibraryProps {
   visible?: boolean;
 }
 
-export function Library({ isHost, onSelect, activeSection, onActiveSectionChange, onBrowseContext, historyNonce = 0, visible = true }: LibraryProps) {
+export function Library({ isHost, onSelect, onSelectPerson, activeSection, onActiveSectionChange, onBrowseContext, historyNonce = 0, visible = true }: LibraryProps) {
   const [sections, setSections] = useState<PlexSection[]>([]);
   // "home" and "history" are virtual tab ids — one for the real Plex homepage
   // (hubs), one for this app's own watch history. Both are kept in the same
@@ -87,6 +90,10 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   const [items, setItems] = useState<PlexItem[]>([]);
   const [totalSize, setTotalSize] = useState(0);
   const [searchResults, setSearchResults] = useState<PlexItem[] | null>(null);
+  // Cast and crew matching the search. Only surfaced on Home (and on History
+  // when there's no history to filter) — the Movies and TV Shows tabs are
+  // filtered views of one library section, where a person isn't a valid result.
+  const [people, setPeople] = useState<PersonResult[]>([]);
   // Bumped to tell the Search box to clear itself when Back exits search.
   const [searchResetSignal, setSearchResetSignal] = useState(0);
   const rawSearchResults = useRef<PlexItem[] | null>(null);
@@ -317,11 +324,12 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
 
     setLoading(true);
     try {
-      const { items: results } = await searchPlex(query);
+      const { items: results, people: peopleResults } = await searchPlex(query);
       // A newer search started or the box was cleared while this was in
       // flight — this response is stale, discard it.
       if (reqId !== searchReqId.current) return;
       rawSearchResults.current = results;
+      setPeople(peopleResults ?? []);
       // Filter by active tab: Movies tab → only movies, TV Shows tab → only shows (no episodes/seasons)
       const filtered = activeSectionType
         ? results.filter((item) => item.type === activeSectionType)
@@ -388,6 +396,9 @@ export function Library({ isHost, onSelect, activeSection, onActiveSectionChange
   // While searching, online (Discover) results are shown in a separate section
   // below the library matches. When browsing, everything is a library item.
   const isSearching = searchResults !== null;
+  // People show only while searching, and only where a person is a sensible
+  // result: Home, or History once it has fallen through to a global search.
+  const showPeople = isSearching && !activeSectionType && people.length > 0;
   const libraryItems = isSearching ? displayItems.filter((i) => i.inLibrary !== false) : displayItems;
   const externalItems = isSearching ? displayItems.filter((i) => i.inLibrary === false) : [];
   const searchPlaceholder = isHomeTab
@@ -845,6 +856,48 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
     fontFamily: "inherit",
     transition: "all 0.2s ease",
+  },
+  peopleRow: {
+    display: "flex",
+    flexWrap: "wrap" as const,
+    gap: "20px",
+    padding: "4px 0 8px",
+  },
+  personCard: {
+    width: "120px",
+    background: "none",
+    border: "none",
+    padding: 0,
+    color: "inherit",
+    font: "inherit",
+    cursor: "pointer",
+    textAlign: "center" as const,
+  },
+  personPhoto: {
+    width: "120px",
+    height: "120px",
+    borderRadius: "50%",
+    objectFit: "cover" as const,
+    display: "block",
+    background: "#1c1c1c",
+    border: "1px solid rgba(255,255,255,0.08)",
+  },
+  personPhotoEmpty: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    color: "#777",
+    fontSize: "22px",
+    fontWeight: 600,
+  },
+  personName: {
+    marginTop: "9px",
+    fontSize: "13px",
+    fontWeight: 600,
+    color: "#e8e8e8",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap" as const,
   },
   hubsWrap: {
     display: "flex",

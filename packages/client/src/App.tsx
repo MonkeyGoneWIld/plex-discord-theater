@@ -7,6 +7,7 @@ import { ShowDetail } from "./components/ShowDetail";
 import { SeasonDetail } from "./components/SeasonDetail";
 import { Player } from "./components/Player";
 import { ExternalDetail } from "./components/ExternalDetail";
+import { PersonDetail } from "./components/PersonDetail";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PeoplePanel } from "./components/PeoplePanel";
 import { formatMediaTitle } from "./lib/format";
@@ -26,6 +27,9 @@ type View =
   | { kind: "season"; item: PlexItem; show: PlexItem }
   | { kind: "detail"; item: PlexItem; flat?: boolean }
   | { kind: "external-detail"; item: PlexItem; flat?: boolean }
+  // A cast/crew member's page, keyed by their Plex tag id. Name and photo come
+  // from the credit that was clicked so the page has a subject immediately.
+  | { kind: "person"; personId: number; name: string; thumb?: string | null }
   // resumePosition (seconds) is set only when the host chose "Resume" on the
   // detail view; every other route into the player starts from the beginning.
   | { kind: "player"; item: PlexItem; subtitles: boolean; resumePosition?: number };
@@ -35,6 +39,7 @@ function crumbLabel(v: View): string {
   switch (v.kind) {
     case "library": return "Home";
     case "season": return v.item.index != null ? `Season ${v.item.index}` : v.item.title;
+    case "person": return v.name;
     default: return v.item.title;
   }
 }
@@ -343,6 +348,15 @@ export function App() {
   const handleSelectRelated = useCallback(
     (item: PlexItem) => handleSelect(item, true),
     [handleSelect],
+  );
+
+  const handleSelectPerson = useCallback(
+    (person: { id?: number | null; name: string; thumb?: string | null }) => {
+      if (person.id == null) return;
+      pushView({ kind: "person", personId: person.id, name: person.name, thumb: person.thumb });
+      emitBrowse(`Looking at ${person.name}`);
+    },
+    [pushView, emitBrowse],
   );
 
   const handlePlay = useCallback((item: PlexItem, subtitles: boolean, resumePosition?: number) => {
@@ -705,6 +719,7 @@ export function App() {
           isHost={effectiveIsHost}
           onSelect={handleSelect}
           activeSection={librarySection}
+          onSelectPerson={handleSelectPerson}
           onActiveSectionChange={setLibrarySection}
           onBrowseContext={effectiveIsHost ? (ctx) => syncActions.sendBrowse(ctx) : undefined}
           historyNonce={historyNonce}
@@ -753,7 +768,17 @@ export function App() {
       )}
 
       {view.kind === "external-detail" && (
-        <ExternalDetail item={view.item} onBack={popView} />
+        <ExternalDetail item={view.item} onBack={popView} onSelectPerson={handleSelectPerson} />
+      )}
+
+      {view.kind === "person" && (
+        <PersonDetail
+          personId={view.personId}
+          name={view.name}
+          thumb={view.thumb}
+          onSelect={handleSelectRelated}
+          onBack={popView}
+        />
       )}
 
       {view.kind === "player" && (

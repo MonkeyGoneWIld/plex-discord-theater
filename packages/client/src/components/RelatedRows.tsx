@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { PosterShelf, shelfStyles } from "./PosterShelf";
 import { fetchRelated, type PlexCollection, type PlexItem } from "../lib/api";
+import { ShelfSkeleton } from "./ShelfSkeleton";
 
 interface RelatedRowsProps {
   /** The movie/show whose collections and recommendations to show. */
@@ -41,7 +42,8 @@ export function RelatedRows({ ratingKey, recommendationsTitle, onSelect }: Relat
         if (cancelled) return;
         setCollections([]);
         setRecommendations([]);
-      });
+      })
+;
     return () => { cancelled = true; };
   }, [ratingKey]);
 

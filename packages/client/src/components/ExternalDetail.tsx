@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import {
   authUrl, fetchDiscoverMeta, fetchTmdbMeta, fetchSeerrStatus, fetchSeerrTv, seerrRequest,
-  type PlexItem, type DiscoverMeta, type SeerrMediaType, type SeerrTv,
+  type Credit, type PlexItem, type DiscoverMeta, type SeerrMediaType, type SeerrTv,
 } from "../lib/api";
 import { SeasonRequestGrid } from "./SeasonRequestGrid";
 import { RatingsRow } from "./RatingsRow";
@@ -11,6 +11,8 @@ import { shelfStyles } from "./PosterShelf";
 
 interface ExternalDetailProps {
   item: PlexItem;
+  /** Open a cast/crew member's page. Omit to render the row unclickable. */
+  onSelectPerson?: (person: Credit) => void;
   onBack: () => void;
 }
 
@@ -35,7 +37,7 @@ const STATUS_LABEL: Record<number, string> = {
  * richer provider metadata (summary, genres, runtime) when available, falling
  * back to what search already gave us, plus a placeholder Request button.
  */
-export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
+export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailProps) {
   const [meta, setMeta] = useState<DiscoverMeta | null>(null);
   const [loading, setLoading] = useState(true);
   const mediaType: SeerrMediaType = item.type === "show" ? "tv" : "movie";
@@ -189,7 +191,12 @@ export function ExternalDetail({ item, onBack }: ExternalDetailProps) {
       </div>
       {/* Cast & Crew — from TMDB here rather than Plex, but the same row. */}
       <div style={shelfStyles.wrap}>
-        <CastRow cast={meta?.cast} directors={meta?.directors} writers={meta?.writers} />
+        <CastRow
+          cast={meta?.cast}
+          directors={meta?.directors}
+          onSelectPerson={onSelectPerson}
+          loading={loading}
+        />
       </div>
 
       {/* TV: same season request grid as the library show page. */}

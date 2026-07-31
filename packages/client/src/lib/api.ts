@@ -25,6 +25,22 @@ export function authUrl(url: string): string {
   return `${url}${sep}token=${encodeURIComponent(token)}`;
 }
 
+/**
+ * Poster URL at the one size the whole app requests.
+ *
+ * The size has to be shared, because the browser caches by exact URL: a card
+ * asking for w=320&h=480 and a detail page asking for the unsized original are
+ * two different images, so opening a title re-downloaded a poster that was
+ * already on screen a moment earlier — which is why detail posters didn't
+ * appear instantly. Everything that renders poster art goes through here.
+ */
+export function posterThumbUrl(thumb: string): string {
+  return `${authUrl(thumb)}&w=${POSTER_THUMB_W}&h=${POSTER_THUMB_H}`;
+}
+
+export const POSTER_THUMB_W = 400;
+export const POSTER_THUMB_H = 600;
+
 const BASE = "";
 
 async function throwApiError(res: Response, path: string): Promise<never> {
@@ -263,7 +279,9 @@ export function prefetchDetail(item: Pick<PlexItem, "ratingKey" | "type" | "inLi
   }
 }
 
-export function searchPlex(query: string): Promise<{ items: PlexItem[] }> {
+export function searchPlex(
+  query: string,
+): Promise<{ items: PlexItem[]; people?: PersonResult[] }> {
   return apiGet(`/api/plex/search?q=${encodeURIComponent(query)}`);
 }
 
@@ -327,11 +345,40 @@ export interface DiscoverMeta {
 /** One credited person on a title — an actor with their character, or a
  *  director/writer with their job. */
 export interface Credit {
+  /** Plex tag id — the key for this person's page. Null when Plex didn't
+   *  supply one (older servers), in which case the credit isn't clickable. */
+  id?: number | null;
   name: string;
   /** Character name for cast; job title for crew. Null when unknown. */
   role: string | null;
   /** Proxied headshot URL, or null when the provider has no photo. */
   thumb: string | null;
+}
+
+/** A person as returned by search — enough to render a row and open their page. */
+export interface PersonResult {
+  id: number;
+  name: string;
+  thumb: string | null;
+}
+
+/** A cast/crew member's page: their details, and what the library has of theirs. */
+export interface PersonDetail {
+  name: string;
+  thumb: string | null;
+  biography: string | null;
+  /** ISO date, e.g. "1996-02-22". Null when unknown. */
+  birthday: string | null;
+  deathday: string | null;
+  placeOfBirth: string | null;
+  /** TMDB's department, e.g. "Acting" or "Directing". */
+  knownFor: string | null;
+  movies: PlexItem[];
+  shows: PlexItem[];
+}
+
+export function fetchPerson(tagId: number, name: string): Promise<PersonDetail> {
+  return cachedGet(`/api/plex/person/${tagId}?name=${encodeURIComponent(name)}`);
 }
 
 export function fetchDiscoverMeta(guid: string): Promise<DiscoverMeta> {

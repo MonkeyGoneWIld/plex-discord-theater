@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchMeta, fetchProgress, invalidateMeta, setStreams, getSessionToken, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
+import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, setStreams, getSessionToken, type Credit, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
 import { formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { loadSubtitlePref, saveSubtitlePref, matchSubtitleTrack } from "../lib/subtitlePref";
@@ -26,6 +26,8 @@ interface MovieDetailProps {
   /** Open another title's detail page — used by the "also in this collection"
    *  rows. Omit to hide those rows. */
   onSelect?: (item: PlexItem) => void;
+  /** Open a cast/crew member's page. Omit to render the row unclickable. */
+  onSelectPerson?: (person: Credit) => void;
 }
 
 function authUrl(url: string): string {
@@ -166,7 +168,7 @@ const dropdownStyles: Record<string, React.CSSProperties> = {
   },
 };
 
-export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQueue, onSuggest, onShowClick, onSeasonClick, onSelect }: MovieDetailProps) {
+export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQueue, onSuggest, onShowClick, onSeasonClick, onSelect, onSelectPerson }: MovieDetailProps) {
   const [meta, setMeta] = useState<PlexMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedAudio, setSelectedAudio] = useState<number | null>(null);
@@ -253,7 +255,10 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
       : null;
 
   const backdropUrl = meta?.art ? authUrl(meta.art) : null;
-  const posterUrl = meta?.thumb ? authUrl(meta.thumb) : (item.thumb ? authUrl(item.thumb) : null);
+  // Same sized URL the card used, so the poster is already in the browser
+  // cache and paints on the first frame (see posterThumbUrl).
+  const posterSrc = meta?.thumb ?? item.thumb;
+  const posterUrl = posterSrc ? posterThumbUrl(posterSrc) : null;
 
   // ── Optimistic render ────────────────────────────────────────
   //
@@ -563,7 +568,12 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
             where those are about what to watch next. Shares the shelves' wrapper
             so every row on the page lines up on the same left edge. */}
         <div style={shelfStyles.wrap}>
-          <CastRow cast={meta?.cast} directors={meta?.directors} writers={meta?.writers} />
+          <CastRow
+            cast={meta?.cast}
+            directors={meta?.directors}
+            onSelectPerson={onSelectPerson}
+            loading={!meta && !metaFailed}
+          />
         </div>
 
         {/* Collections then "More Like This" — same rows as the Home tab,

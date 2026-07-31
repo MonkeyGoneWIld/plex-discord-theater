@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { PlexItem } from "../lib/api";
-import { getSessionToken, prefetchDetail } from "../lib/api";
+import { posterThumbUrl, prefetchDetail } from "../lib/api";
 
 interface MovieCardProps {
   item: PlexItem;
@@ -17,14 +17,6 @@ interface MovieCardProps {
   removeLabel?: string;
 }
 
-function authThumbUrl(thumb: string, w?: number, h?: number): string {
-  const token = getSessionToken();
-  if (!token) return thumb;
-  const sep = thumb.includes("?") ? "&" : "?";
-  let url = `${thumb}${sep}token=${encodeURIComponent(token)}`;
-  if (w && h) url += `&w=${w}&h=${h}`;
-  return url;
-}
 
 // Not-in-library posters are desaturated and dimmed so the tile reads as "not
 // owned" at a glance — the small badge alone is easy to miss. Lifted on hover to
@@ -88,7 +80,7 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
       <div style={styles.posterWrap}>
         {showImg ? (
           <img
-            src={authThumbUrl(posterSrc!, 320, 480)}
+            src={posterThumbUrl(posterSrc!)}
             alt={item.title}
             style={external ? { ...styles.poster, filter: EXTERNAL_POSTER_FILTER } : styles.poster}
             // Eager, not lazy: load every poster up front so nothing pops in as

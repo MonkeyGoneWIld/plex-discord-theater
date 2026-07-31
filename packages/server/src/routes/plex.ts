@@ -164,6 +164,10 @@ interface PlexMetadataItem {
 
 /** A credited person. `thumb` is a full remote URL (TMDB), not a Plex path. */
 interface PlexTag {
+  /** Plex's own tag id. Filtering a section by `?actor=<id>` / `?director=<id>`
+   *  gives exactly the library items this person appears in, which is what the
+   *  person page is built from. */
+  id?: number;
   tag: string;
   role?: string;
   thumb?: string;
@@ -368,7 +372,14 @@ router.get("/search", async (req: Request, res: Response) => {
     const [data, discover] = await Promise.all([
       plexJSON<{
         MediaContainer: {
-          Hub?: Array<{ hubIdentifier?: string; type?: string; Metadata?: PlexMetadataItem[] }>;
+          Hub?: Array<{
+            hubIdentifier?: string;
+            type?: string;
+            Metadata?: PlexMetadataItem[];
+            /** People hubs carry Directory entries (tag id + name + photo)
+             *  rather than Metadata. */
+            Directory?: Array<{ id?: number; tag?: string; thumb?: string; type?: string }>;
+          }>;
         };
       }>("/hubs/search", { query: q, limit: "30" }),
       searchDiscover(q),
@@ -377,7 +388,24 @@ router.get("/search", async (req: Request, res: Response) => {
     const hubs = data.MediaContainer.Hub || [];
     const items: Array<ReturnType<typeof mapItem> & { inLibrary: boolean; guid?: string }> = [];
     const localGuids = new Set<string>();
+    // Cast and crew whose names match. Plex returns these in their own hubs as
+    // Directory entries, so they're collected separately from the titles and
+    // returned alongside them for the client to render as its own row.
+    const people: Array<{ id: number; name: string; thumb: string | null }> = [];
+    const seenPeople = new Set<number>();
     for (const hub of hubs) {
+      for (const d of hub.Directory ?? []) {
+        if (!PERSON_HUBS.has(hub.hubIdentifier ?? "") || d.id == null || !d.tag) continue;
+        if (seenPeople.has(d.id)) continue;
+        seenPeople.add(d.id);
+        people.push({
+          id: d.id,
+          name: d.tag,
+          thumb: d.thumb
+            ? d.thumb.startsWith("http") ? externalThumbUrl(d.thumb) : `/api/plex/thumb${d.thumb}`
+            : null,
+        });
+      }
       if (!hub.Metadata) continue;
       for (const m of hub.Metadata) {
         if (m.guid) localGuids.add(m.guid);
@@ -417,12 +445,16 @@ router.get("/search", async (req: Request, res: Response) => {
       });
     });
 
-    res.json({ items });
+    res.json({ items, people });
   } catch (err) {
     console.error("Search error:", err);
     res.status(502).json({ error: "Failed to search Plex" });
   }
 });
+
+/** Search hubs that hold people rather than titles. Plex names them by role, and
+ *  only these map to a person page. */
+const PERSON_HUBS = new Set(["actor", "director", "writer", "producer"]);
 
 /**
  * GET /api/plex/discover/meta?guid=plex://movie/<id>
@@ -697,6 +729,7 @@ const MAX_CAST = 30;
  */
 function mapCredits(tags: PlexTag[] | undefined, limit = MAX_CAST, roleFallback?: string) {
   return (tags || []).slice(0, limit).map((t) => ({
+    id: t.id ?? null,
     name: t.tag,
     // Plex sets `role` (the character) on cast only — a Director/Writer tag has
     // none, so without the fallback those entries render with a blank subtitle.
@@ -1440,6 +1473,141 @@ router.get("/tmdb/meta", async (req: Request, res: Response) => {
     res.status(502).json({ error: "Failed to fetch details" });
   }
 });
+
+/**
+ * GET /api/plex/person/:tagId?name=<name>
+ *
+ * A cast/crew member's page: their biography and photo, plus everything in the
+ * library they worked on, split into movies and shows.
+ *
+ * The filmography comes from Plex rather than TMDB, by filtering each section on
+ * the person's tag id (`?actor=` / `?director=`). That is one request per
+ * section and, by construction, returns only titles that are actually in the
+ * library — which is what the page is meant to show. Asking TMDB for their
+ * credits and then testing each one for ownership would be both slower and
+ * wrong at the edges.
+ *
+ * The biography has no Plex equivalent, so it comes from TMDB, matched by name.
+ * It's optional: with no TMDB key, or no match, the page still lists the
+ * filmography and simply omits the prose.
+ */
+router.get("/person/:tagId", async (req: Request, res: Response) => {
+  const tagId = req.params.tagId as string;
+  if (!NUMERIC_RE.test(tagId)) {
+    res.status(400).json({ error: "Invalid person id" });
+    return;
+  }
+  const name = typeof req.query.name === "string" ? req.query.name.slice(0, 200) : "";
+
+  try {
+    const sections = await plexJSON<{ MediaContainer: { Directory?: PlexDirectory[] } }>(
+      "/library/sections",
+    );
+    const dirs = (sections.MediaContainer.Directory || []).filter((d) =>
+      ALLOWED_SECTION_TYPES.has(d.type),
+    );
+
+    // Both credit kinds, across every section. A person can be an actor in one
+    // title and the director of another, and the page shows the union.
+    const perSection = await Promise.all(
+      dirs.flatMap((d) =>
+        (["actor", "director"] as const).map(async (field) => {
+          try {
+            const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+              `/library/sections/${d.key}/all`,
+              { [field]: tagId },
+            );
+            return data.MediaContainer.Metadata || [];
+          } catch {
+            return [];
+          }
+        }),
+      ),
+    );
+
+    const seen = new Set<string>();
+    const movies: ReturnType<typeof mapItem>[] = [];
+    const shows: ReturnType<typeof mapItem>[] = [];
+    for (const m of perSection.flat()) {
+      if (seen.has(m.ratingKey)) continue;
+      seen.add(m.ratingKey);
+      if (m.type === "movie") movies.push(mapItem(m));
+      else if (m.type === "show") shows.push(mapItem(m));
+    }
+    const byYear = (a: { year?: number }, b: { year?: number }) => (b.year ?? 0) - (a.year ?? 0);
+    movies.sort(byYear);
+    shows.sort(byYear);
+
+    const bio = name ? await tmdbPerson(name) : null;
+
+    res.json({
+      name: bio?.name || name,
+      thumb: bio?.thumb ?? null,
+      // "Actor" unless they only ever appear here as a director.
+      biography: bio?.biography ?? null,
+      birthday: bio?.birthday ?? null,
+      deathday: bio?.deathday ?? null,
+      placeOfBirth: bio?.placeOfBirth ?? null,
+      knownFor: bio?.knownFor ?? null,
+      movies,
+      shows,
+    });
+  } catch (err) {
+    console.error("Person error:", err);
+    res.status(502).json({ error: "Failed to fetch person" });
+  }
+});
+
+/** TMDB person lookup by name, cached (misses included — a name TMDB doesn't
+ *  know won't start knowing it on the next page view). */
+const tmdbPersonCache = new Map<string, TmdbPerson | null>();
+
+interface TmdbPerson {
+  name: string;
+  thumb: string | null;
+  biography: string | null;
+  birthday: string | null;
+  deathday: string | null;
+  placeOfBirth: string | null;
+  knownFor: string | null;
+}
+
+async function tmdbPerson(name: string): Promise<TmdbPerson | null> {
+  const key = name.toLowerCase();
+  if (tmdbPersonCache.has(key)) return tmdbPersonCache.get(key)!;
+
+  const search = await tmdbGet<{ results?: Array<{ id: number }> }>("/search/person", {
+    query: name,
+  });
+  const id = search?.results?.[0]?.id;
+  let result: TmdbPerson | null = null;
+  if (id != null) {
+    const p = await tmdbGet<{
+      name?: string;
+      biography?: string;
+      birthday?: string | null;
+      deathday?: string | null;
+      place_of_birth?: string | null;
+      known_for_department?: string | null;
+      profile_path?: string | null;
+    }>(`/person/${id}`);
+    if (p) {
+      result = {
+        name: p.name ?? name,
+        thumb: p.profile_path
+          ? externalThumbUrl(`https://image.tmdb.org/t/p/w500${p.profile_path}`)
+          : null,
+        biography: p.biography || null,
+        birthday: p.birthday || null,
+        deathday: p.deathday || null,
+        placeOfBirth: p.place_of_birth || null,
+        knownFor: p.known_for_department || null,
+      };
+    }
+  }
+  tmdbPersonCache.set(key, result);
+  return result;
+}
 
 /**
  * GET /api/plex/siblings/:ratingKey

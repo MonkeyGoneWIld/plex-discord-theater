@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import {
-  fetchMeta, fetchChildren, fetchSeerrTv, fetchShowNextUp, historyEntryToItem,
-  getSessionToken, type HistoryEntry, type PlexItem, type PlexMeta, type SeerrSeason,
+  fetchMeta, fetchChildren, fetchSeerrTv, fetchShowNextUp, historyEntryToItem, posterThumbUrl,
+  getSessionToken, type Credit, type HistoryEntry, type PlexItem, type PlexMeta, type SeerrSeason,
 } from "../lib/api";
 import { formatTimecode } from "../lib/format";
 import { MovieCard } from "./MovieCard";
@@ -19,6 +19,8 @@ interface ShowDetailProps {
   /** Open another show's detail page — used by the "also in this collection"
    *  rows. Omit to hide those rows. */
   onSelect?: (item: PlexItem) => void;
+  /** Open a cast/crew member's page. Omit to render the row unclickable. */
+  onSelectPerson?: (person: Credit) => void;
   onBack: () => void;
 }
 
@@ -29,7 +31,7 @@ function authUrl(url: string): string {
   return `${url}${sep}token=${encodeURIComponent(token)}`;
 }
 
-export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, onBack }: ShowDetailProps) {
+export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, onSelectPerson, onBack }: ShowDetailProps) {
   const [meta, setMeta] = useState<PlexMeta | null>(null);
   const [seasons, setSeasons] = useState<PlexItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -53,19 +55,25 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
     return () => { cancelled = true; };
   }, [item.ratingKey]);
 
+  // Metadata and seasons are fetched independently rather than through a single
+  // Promise.all. They're separate requests to Plex and the header only needs the
+  // first, so waiting for both meant the title, artwork and synopsis were held
+  // back by the season list — the slower of the two on a long-running show.
+  useEffect(() => {
+    let cancelled = false;
+    fetchMeta(item.ratingKey)
+      .then((m) => { if (!cancelled) setMeta(m); })
+      .catch(console.error);
+    return () => { cancelled = true; };
+  }, [item.ratingKey]);
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-
-    Promise.all([fetchMeta(item.ratingKey), fetchChildren(item.ratingKey)])
-      .then(([m, c]) => {
-        if (cancelled) return;
-        setMeta(m);
-        setSeasons(c.items);
-      })
+    fetchChildren(item.ratingKey)
+      .then((c) => { if (!cancelled) setSeasons(c.items); })
       .catch(console.error)
       .finally(() => { if (!cancelled) setLoading(false); });
-
     return () => { cancelled = true; };
   }, [item.ratingKey]);
 
@@ -86,7 +94,9 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
   }, [loading, meta, seasons, reloadNonce]);
 
   const backdropUrl = meta?.art ? authUrl(meta.art) : null;
-  const posterUrl = meta?.thumb ? authUrl(meta.thumb) : (item.thumb ? authUrl(item.thumb) : null);
+  // Same sized URL the card used — see posterThumbUrl.
+  const posterSrc = meta?.thumb ?? item.thumb;
+  const posterUrl = posterSrc ? posterThumbUrl(posterSrc) : null;
 
   // Every show lands here, single-season included — a one-season show used to
   // auto-navigate straight to its episode list, which skipped the synopsis,
@@ -239,7 +249,12 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
 
         {/* Cast & Crew before the collection rows — see MovieDetail. */}
         <div style={shelfStyles.wrap}>
-          <CastRow cast={meta?.cast} directors={meta?.directors} writers={meta?.writers} />
+          <CastRow
+            cast={meta?.cast}
+            directors={meta?.directors}
+            onSelectPerson={onSelectPerson}
+            loading={!meta}
+          />
         </div>
 
         {/* Collections then "More Like This" — same rows as the Home tab,

@@ -136,6 +136,26 @@ function stopRoomPing(instanceId: string): void {
   }
 }
 
+/**
+ * The Discord user currently hosting whichever room is streaming `sessionId`,
+ * or null when no room is using it.
+ *
+ * Exists so the transcode-stop endpoint can refuse a teardown from someone who
+ * is no longer the host. Handing over the host role and closing the tab in the
+ * same breath used to kill the stream for everyone: the outgoing host's tab
+ * unmounted while it still believed it owned the session — the demotion message
+ * had not arrived yet — and its cleanup DELETEd a transcode the new host had
+ * just adopted.
+ */
+export function sessionHostUserId(sessionId: string): string | null {
+  for (const room of rooms.values()) {
+    if (room.state.hlsSessionId !== sessionId) continue;
+    for (const c of room.clients) if (c.isHost) return c.userId;
+    return null;
+  }
+  return null;
+}
+
 let wss: WebSocketServer | null = null;
 let trackerWss: WebSocketServer | null = null;
 let cleanupInterval: ReturnType<typeof setInterval> | null = null;
@@ -618,6 +638,13 @@ export function attachWebSocketServer(server: Server): void {
           const targetId = msg.userId as string;
           const target = [...room.clients].find((c) => c.userId === targetId);
           if (!target || target === client) break;
+
+          // Bank the outgoing host's position before the roles swap. Their
+          // close handler won't do it — by then `isHost` is false, so the
+          // branch that persists progress is skipped and the watch they were
+          // in the middle of would resume from wherever they last happened to
+          // be written, or not at all.
+          persistProgress(room, client.userId, true);
 
           // Hand over: the old host drops to a plain viewer, and the target
           // clears any co-host flag since host already supersedes it.

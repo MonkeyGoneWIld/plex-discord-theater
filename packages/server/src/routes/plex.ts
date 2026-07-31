@@ -3,8 +3,22 @@ import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex
 import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition } from "../services/segment-prefetch.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
+import { sessionHostUserId } from "../services/sync.js";
+import { getSessionUserId } from "../middleware/auth.js";
 
 const router = Router();
+
+/** The Discord user behind this request, from the session token requireAuth
+ *  already validated. Null for the VPS relay key, which carries no user. */
+function sessionUserId(req: Request): string | null {
+  const header = req.headers.authorization;
+  const token = header?.startsWith("Bearer ")
+    ? header.slice(7)
+    : typeof req.query.token === "string"
+      ? req.query.token
+      : undefined;
+  return token ? getSessionUserId(token) : null;
+}
 // Verbose HLS logging. On outside production, or force it in a production
 // container by setting DEBUG=1 (e.g. in docker-compose) without flipping
 // NODE_ENV and its other production behaviour.
@@ -2979,6 +2993,30 @@ router.delete(
     // mid-stream can be read without guessing: which code path, how far in, how
     // much buffer was left, and how long since the last ping.
     const reason = typeof req.query.reason === "string" ? req.query.reason.slice(0, 64) : "unspecified";
+
+    // Refuse a teardown from anyone who isn't the room's current host.
+    //
+    // Handing the host role over and then closing the tab immediately killed
+    // the stream for the whole room: the outgoing tab unmounted before the
+    // demotion message reached it, so it still believed it owned the session
+    // and its cleanup DELETEd the transcode the new host had just adopted.
+    // The client releases ownership optimistically now, but that is a race
+    // either way — this is the check that actually settles it.
+    const stopper = sessionUserId(req);
+    const owner = sessionHostUserId(sessionId);
+    if (owner && stopper && owner !== stopper) {
+      logEvent("HLS", "Stop refused — requester is not the host", {
+        session: sessionId.substring(0, 8),
+        reason,
+        stopper,
+        host: owner,
+      });
+      // 200, not an error: the caller is tearing down correctly by its own
+      // reckoning, and it has nothing useful to do with a failure here.
+      res.json({ ok: true, ignored: "not-host" });
+      return;
+    }
+
     const lastPing = hostPingInfo.get(sessionId);
     logEvent("HLS", "Stop requested", {
       session: sessionId.substring(0, 8),

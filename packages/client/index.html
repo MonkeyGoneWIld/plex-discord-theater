@@ -57,6 +57,14 @@
       @keyframes spin { to { transform: rotate(360deg); } }
       @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
       @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } }
+      /* Play/pause acknowledgement — the badge blooms outward and fades, so a
+         click on the picture reads as having done something even when the frame
+         under it hasn't changed yet. */
+      @keyframes tap-ack {
+        0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.7); }
+        22%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+        100% { opacity: 0; transform: translate(-50%, -50%) scale(1.5); }
+      }
 
       html {
         scrollbar-width: thin;

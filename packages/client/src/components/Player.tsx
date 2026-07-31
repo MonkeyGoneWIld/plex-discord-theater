@@ -272,6 +272,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const [hostSeeking, setHostSeeking] = useState(false);
   const [showTrackSwitcher, setShowTrackSwitcher] = useState(false);
   const [trackSwitching, setTrackSwitching] = useState<"audio" | "subtitle" | null>(null);
+  // Transient play/pause acknowledgement. `at` is part of the key so a rapid
+  // second toggle restarts the animation instead of being swallowed by React
+  // seeing the same value.
+  const [tapAck, setTapAck] = useState<{ kind: "play" | "pause"; at: number } | null>(null);
   const [showQueuePanel, setShowQueuePanel] = useState(false);
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
   const [showStats, setShowStats] = useState(false);
@@ -1758,13 +1762,18 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const togglePlayPause = useCallback(() => {
     const video = videoRef.current;
     if (!video || !canControlRef.current) return;
-    if (video.paused) {
+    const resuming = video.paused;
+    if (resuming) {
       video.play();
       syncActionsRef.current?.sendResume(video.currentTime);
     } else {
       video.pause();
       syncActionsRef.current?.sendPause(video.currentTime);
     }
+    // Acknowledge the input. Clicking the picture otherwise gives no feedback
+    // until the frame moves, which on a paused-to-playing transition can be
+    // long enough to leave you wondering whether the click registered.
+    setTapAck({ kind: resuming ? "play" : "pause", at: Date.now() });
   }, []);
 
   // Keyboard shortcuts
@@ -2160,6 +2169,24 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         onClick={togglePlayPause}
       />
 
+      {/* Play/pause acknowledgement — purely decorative, so it never takes
+          pointer events away from the picture underneath. */}
+      {tapAck && (
+        <div key={tapAck.at} style={styles.tapAck} aria-hidden="true"
+             onAnimationEnd={() => setTapAck(null)}>
+          {tapAck.kind === "play" ? (
+            <svg width="34" height="34" viewBox="0 0 22 22" fill="none">
+              <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor" />
+            </svg>
+          ) : (
+            <svg width="34" height="34" viewBox="0 0 22 22" fill="none">
+              <rect x="5" y="3.5" width="4.5" height="15" rx="1.2" fill="currentColor" />
+              <rect x="12.5" y="3.5" width="4.5" height="15" rx="1.2" fill="currentColor" />
+            </svg>
+          )}
+        </div>
+      )}
+
       {/* Track switching freeze-frame overlay */}
       {trackSwitching && (
         <div style={styles.trackSwitchOverlay}>
@@ -2307,6 +2334,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           selfUserId={selfUserId}
           isHost={isHost}
           onPromoteHost={(uid) => {
+            // Release the transcode the instant the handover is sent, rather
+            // than waiting for the demotion to come back from the server.
+            // Closing the tab in that window used to tear down the stream the
+            // new host had just adopted. The server refuses a stop from a
+            // non-host too; this just means the request is never made.
+            ownsSessionRef.current = false;
             syncActions?.sendPromoteHost(uid);
             setShowPeoplePanel(false);
           }}
@@ -2407,6 +2440,25 @@ const styles: Record<string, React.CSSProperties> = {
     width: "100%",
     height: "100%",
     objectFit: "contain",
+  },
+  tapAck: {
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    // The translate lives in the keyframes, which also drive the scale — setting
+    // transform here as well would be overwritten the moment it starts.
+    width: "82px",
+    height: "82px",
+    borderRadius: "50%",
+    background: "rgba(0,0,0,0.55)",
+    color: "#fff",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    pointerEvents: "none",
+    zIndex: 9,
+    opacity: 0,
+    animation: "tap-ack 0.5s ease-out forwards",
   },
   error: {
     position: "absolute",

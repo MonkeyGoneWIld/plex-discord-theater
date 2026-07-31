@@ -46,6 +46,23 @@ export function posterThumbUrl(thumb: string): string {
 export const POSTER_THUMB_W = 400;
 export const POSTER_THUMB_H = 600;
 
+/**
+ * Episode-still URL, at 16:9 rather than the poster's 2:3.
+ *
+ * Asking for the poster size here hands Plex's photo transcoder a portrait box
+ * for a landscape frame, so it comes back letterboxed or cropped and is then
+ * cropped again by the element. Sized generously enough to stay sharp on a
+ * high-DPI display at the largest the end card ever draws it.
+ */
+export function stillThumbUrl(thumb: string): string {
+  const withToken = authUrl(thumb);
+  const sep = withToken.includes("?") ? "&" : "?";
+  return `${withToken}${sep}w=${STILL_THUMB_W}&h=${STILL_THUMB_H}`;
+}
+
+export const STILL_THUMB_W = 880;
+export const STILL_THUMB_H = 495;
+
 const BASE = "";
 
 async function throwApiError(res: Response, path: string): Promise<never> {

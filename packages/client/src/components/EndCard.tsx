@@ -1,4 +1,4 @@
-import { posterThumbUrl } from "../lib/api";
+import { stillThumbUrl } from "../lib/api";
 
 /** Only what this card draws. Structural on purpose: what comes next is a
  *  QueueItem when the host queued it and a PlexItem when it was resolved from
@@ -40,7 +40,7 @@ interface EndCardProps {
  * sell it.
  */
 export function EndCard({ item, source, onPlay, onExit }: EndCardProps) {
-  const still = item.thumb ? posterThumbUrl(item.thumb) : null;
+  const still = item.thumb ? stillThumbUrl(item.thumb) : null;
   const show = item.showTitle ?? item.parentTitle ?? null;
   const numbering =
     item.parentIndex != null && item.index != null
@@ -71,7 +71,7 @@ export function EndCard({ item, source, onPlay, onExit }: EndCardProps) {
         <div style={styles.actions}>
           {onPlay && (
             <button type="button" onClick={onPlay} style={styles.playBtn}>
-              <svg width="18" height="18" viewBox="0 0 22 22" fill="none" style={{ marginRight: 8 }}>
+              <svg width="20" height="20" viewBox="0 0 22 22" fill="none" style={{ marginRight: 10 }}>
                 <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor" />
               </svg>
               {source === "series" ? "Play next episode" : "Play now"}
@@ -107,29 +107,34 @@ const styles: Record<string, React.CSSProperties> = {
   },
   panel: {
     width: "100%",
-    maxWidth: "620px",
+    maxWidth: "900px",
     display: "flex",
     flexDirection: "column",
-    gap: "18px",
+    gap: "24px",
   },
   eyebrow: {
     color: "#e5a00d",
-    fontSize: "11px",
+    fontSize: "13px",
     fontWeight: 700,
-    letterSpacing: "1.4px",
+    letterSpacing: "1.6px",
     textTransform: "uppercase",
   },
   body: {
     display: "flex",
-    gap: "20px",
+    gap: "28px",
     alignItems: "center",
+    // Wraps rather than crushing the still: the player can be a narrow pane in
+    // a Discord sidebar as easily as a full window.
+    flexWrap: "wrap",
   },
   still: {
-    width: "232px",
+    // Fluid between a floor that stays legible and a cap that stops it
+    // dominating a wide screen.
+    width: "clamp(280px, 42%, 440px)",
     flex: "none",
     aspectRatio: "16 / 9",
     objectFit: "cover",
-    borderRadius: "10px",
+    borderRadius: "12px",
     background: "#1a1a1a",
     border: "1px solid rgba(255,255,255,0.08)",
   },
@@ -137,58 +142,61 @@ const styles: Record<string, React.CSSProperties> = {
     display: "block",
   },
   meta: {
+    // Takes the rest of the row, and a floor low enough that it drops below the
+    // still instead of squeezing the title into single words.
+    flex: "1 1 260px",
     minWidth: 0,
     display: "flex",
     flexDirection: "column",
-    gap: "6px",
+    gap: "8px",
   },
   show: {
     color: "#9a9a9a",
-    fontSize: "13px",
+    fontSize: "16px",
     fontWeight: 600,
   },
   title: {
     color: "#f2f2f2",
-    fontSize: "24px",
+    fontSize: "clamp(26px, 3.4vw, 36px)",
     fontWeight: 700,
-    lineHeight: 1.2,
-    letterSpacing: "-0.01em",
+    lineHeight: 1.15,
+    letterSpacing: "-0.015em",
   },
   numbering: {
     color: "#8a8a8a",
-    fontSize: "14px",
+    fontSize: "17px",
   },
   actions: {
     display: "flex",
-    gap: "10px",
+    gap: "12px",
     flexWrap: "wrap",
   },
   playBtn: {
     display: "inline-flex",
     alignItems: "center",
-    padding: "12px 22px",
-    borderRadius: "8px",
+    padding: "15px 30px",
+    borderRadius: "9px",
     border: "none",
     background: "#e5a00d",
     color: "#241900",
-    fontSize: "15px",
+    fontSize: "17px",
     fontWeight: 700,
     fontFamily: "inherit",
     cursor: "pointer",
   },
   exitBtn: {
-    padding: "12px 22px",
-    borderRadius: "8px",
+    padding: "15px 30px",
+    borderRadius: "9px",
     border: "1px solid rgba(255,255,255,0.16)",
     background: "rgba(255,255,255,0.06)",
     color: "#ddd",
-    fontSize: "15px",
+    fontSize: "17px",
     fontWeight: 600,
     fontFamily: "inherit",
     cursor: "pointer",
   },
   viewerNote: {
     color: "#7d7d7d",
-    fontSize: "13px",
+    fontSize: "15px",
   },
 };

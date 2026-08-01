@@ -1,12 +1,132 @@
 # plex-discord-theater — audit
 
-Three passes. The first (at `677288e`) found 40 issues; most were fixed in
+Four passes. The first (at `677288e`) found 40 issues; most were fixed in
 `38a4653` / `94858fa`. The second (below, from "Round 2") re-verified those and
-covered the rest. **Round 3 is at the top** and is about the shared-session
-behaviour specifically: several people watching, co-hosts, seeking, changing
-host, changing subtitles, simultaneous commands, and playback going backwards.
+covered the rest. Round 3 is about the shared session specifically — several
+people watching, co-hosts, seeking, changing host, changing subtitles,
+simultaneous commands, and playback going backwards. **Round 4 is at the top**
+and is the first pass driven by production logs rather than by reading.
 
 Both packages typecheck clean and the production build succeeds.
+
+---
+
+## Round 4 — what the logs said
+
+Round 3 was reasoning plus a synthetic harness. This pass is a day of real
+traffic: the app's own log for 2026-08-01, and the Plex server's logs for the
+same window. Several things that looked fine in the code were not happening at
+all in production.
+
+### Every keep-alive and every stop was refused by Plex
+
+`GET /video/:/transcode/universal/ping?session=<our-uuid>` → **404**, 804 times
+in one day. Every `stop` too, 27 for 27. Both confirmed from Plex's side:
+
+```
+DEBUG - Completed: [192.168.80.2] 404 GET /video/:/transcode/universal/ping?session=6840d858-…
+DEBUG - Completed: [192.168.80.2] 404 GET /video/:/transcode/universal/stop?session=6840d858-…
+```
+
+Round 2 changed this call from Plex's transcode GUID to our session id and
+recorded the reasoning at length. The parameter name was right; the identifier
+still isn't the one Plex matches on. Nothing was keeping transcodes alive — the
+`/:/timeline` posts were doing that by accident — and nothing was ever stopping
+them, so abandoned encoders sat there until Plex timed them out.
+
+Rather than swap one guess for another, `transcodeControl` now tries our id,
+falls back to the mapped Plex key on a 404, remembers whichever answered, and
+logs which. If it turns out to be the key, one line in the log says so.
+
+### A scrubbing pair started thirteen transcodes in one minute
+
+The worst thing in the logs, and it was still present after round 3. Over 2m40s
+of two people scrubbing, the host's player started and destroyed a transcode
+every few seconds. Eleven of them were killed before Plex had answered the
+manifest request at all; the shortest lived **four milliseconds**. Across the
+day: 60 sessions started, 35 reached the point of being registered. The other 25
+were work Plex did and then threw away — and since `stop` doesn't reach them
+(above), each left an encoder running.
+
+The cause is one line in the HLS effect's cleanup:
+
+```js
+// Whatever happens next re-establishes this; leaving it set would make
+// every later seek take the restart path.
+restartPendingRef.current = false;
+```
+
+What comes next is *this effect re-running*, and cleanup fires first — so the
+flag was cleared by the very commit that set it. `restartPending` was true for
+about a millisecond in its entire life, which made the guard it exists for dead
+code. Every seek arriving during a rebuild therefore measured itself against a
+detached element reporting position 0, no buffer, and a session offset belonging
+to a transcode that had never existed, concluded it needed a restart, and killed
+the one still starting up. Visible in the log as `sessionStartOffsetS=5488.40`
+repeating across seek after seek to positions nowhere near it.
+
+Now: the flag is set when the effect starts a session and cleared where it stops
+being true (manifest parsed, fatal error, or a 20s age bound), and a newer seek
+target waits up to 5s for an in-flight restart to land instead of replacing it.
+A burst costs two transcodes — the one already running and the one at the final
+target — rather than a dozen.
+
+The buffer-starvation warnings track this exactly: 114 across the day, clustered
+in the same minutes as the restarts (04:32-04:34, 14:06-14:08, 03:41). That
+stutter *was* this.
+
+### The kill-everything endpoint was open
+
+`DELETE /api/plex/hls/sessions` stops every transcode this app has running. It
+was gated on `NODE_ENV !== "production" || matching ADMIN_SECRET` — and this
+deployment does not set `NODE_ENV`, which its own logs prove: 6,734 `[HLS seg]
+Fetching` lines that only exist under `DEBUG`. So the escape hatch was wide open
+to any authenticated viewer: one request, every stream in every room dead.
+
+Verified rather than argued — pre-fix build, no `NODE_ENV`, ordinary session
+token, request from a non-loopback address:
+
+```
+PRE-FIX : HTTP 502   ← passed the gate, went on to call Plex
+FIXED   : HTTP 403   ← refused, and logged
+```
+
+The gate is now positive: the request either comes from this machine or carries
+`ADMIN_SECRET`. Nothing about it depends on an environment variable being set
+correctly, because the deployment that forgets `NODE_ENV` is exactly the one
+that shouldn't be trusted with it.
+
+> `NODE_ENV=production` is still worth setting on that deployment — it also
+> selects the production rate limits (600/15min instead of 5,000) and stops the
+> per-segment logging. That is a deployment change, not a code one.
+
+### Rich Presence has never worked
+
+Round 2 added presence that follows what is playing. Every client, every
+session: `setActivity failed: {"code":4006,"message":"Not authenticated or
+invalid scope"}`. `setActivity` needs `rpc.activities.write`, and the scope list
+is `["identify", "guilds"]` — the same round removed `rpc.voice.read` for being
+unused and the remaining list never had the one this feature depends on. Discord
+showed "Browsing the library" for whole sessions, two hours into a film, exactly
+as before the feature was written.
+
+The scope is now requested, with a fallback to the old list if `authorize`
+refuses it — a broken launch would be a far worse outcome than a stale presence
+line, and that fallback is what makes asking safe. Failures also latch now, so a
+scope Discord won't grant produces one log line instead of one per title change.
+
+> This may need the app re-authorized before it takes effect: the request uses
+> `prompt: "none"`, so an existing grant without the new scope can fail and drop
+> to the fallback. If presence still doesn't update, that's the reason.
+
+### Smaller things the logs surfaced
+
+| # | Item | Fix |
+|---|---|---|
+| 1 | **"TIMELINE STALLED" fired every 10s for a merely paused stream** — 82 in one hour, all `playing=0`, all saying only that somebody had pressed pause. A diagnostic that fires constantly during normal use is what a real stall hides inside | The check requires `playing`. The freeze clock also resets on resume, so the first ping after one no longer looks like a multi-minute stall and report `buffering` to Plex for a stream that just started again |
+| 2 | `terminatePlexSession` returns **403 every time** (35 today) even though `PLEX_ACCOUNT_TOKEN` is configured — so the last-resort cleanup doesn't work either | Not changed: the body is a bare `<html>…403 Forbidden` page and Plex logged no `sessions/terminate` request in the window available, so this needs checking against the Plex account's own permissions rather than a code change. With `stop` fixed it should also matter far less |
+| 3 | 19 × `getaddrinfo EAI_AGAIN api.themoviedb.org` | Container DNS, not ours. Noted so the next reader doesn't chase it |
+| 4 | P2P delivered **17 MB against 3,994 MB over HTTP** in one two-viewer session | Expected and already documented (the high-demand window covers the whole buffer), but it is the number that makes the case for the VPS relay concrete |
 
 ---
 

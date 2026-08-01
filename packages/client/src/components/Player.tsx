@@ -76,6 +76,24 @@ const FAR_SEEK_THRESHOLD_S = 120;
 // still feels immediate. The room is told about the seek straight away — only
 // the local restart waits.
 const SEEK_RESTART_DEBOUNCE_MS = 350;
+/**
+ * How long a committed restart may go unanswered before we stop treating it as
+ * in flight. Past this the manifest isn't coming and a later seek must not be
+ * held back waiting for it.
+ */
+const RESTART_PENDING_MAX_MS = 20_000;
+/**
+ * Longest a newer seek target will wait for an in-flight restart to produce its
+ * manifest before tearing it down anyway.
+ *
+ * The whole point is not to kill a transcode Plex is still spinning up. In one
+ * captured minute two people scrubbed at roughly one seek every 400ms and the
+ * player started thirteen transcodes, eleven of which were destroyed before
+ * Plex had even answered the manifest request — the shortest lived four
+ * milliseconds. Plex still forks an encoder for each of those, and `stop`
+ * doesn't reach them (see the server's transcode control), so they linger.
+ */
+const RESTART_INFLIGHT_MAX_WAIT_MS = 5_000;
 // Cadence of the periodic player health sample. Matches the ping interval so
 // client and server lines interleave one-for-one in the merged log.
 const HEALTH_SAMPLE_MS = 10_000;
@@ -479,6 +497,30 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // is not describing a live transcode.
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartPendingRef = useRef(false);
+  // When the in-flight restart was committed, and when we first started holding
+  // a newer target back for it. Both exist so neither wait can last forever —
+  // see isRestartPending and the commit below.
+  const restartPendingSinceRef = useRef(0);
+  const restartDeferredSinceRef = useRef(0);
+  /**
+   * Is a restart committed and still waiting on its manifest?
+   *
+   * Time-bounded, because the alternative to a stuck `false` (a restart storm,
+   * below) is a stuck `true`, which would route every seek for the rest of the
+   * session through the restart path. A manifest that hasn't arrived in
+   * RESTART_PENDING_MAX_MS isn't coming.
+   */
+  const isRestartPending = useCallback(
+    () =>
+      restartPendingRef.current &&
+      Date.now() - restartPendingSinceRef.current < RESTART_PENDING_MAX_MS,
+    [],
+  );
+  /** Mark a restart as committed (or not) — keeps the timestamp honest. */
+  const setRestartPending = useCallback((pending: boolean) => {
+    restartPendingRef.current = pending;
+    if (pending) restartPendingSinceRef.current = Date.now();
+  }, []);
   // Set once the master manifest for the current session actually goes out, so
   // teardown can tell a real session from an id the server never heard about.
   const sessionRegisteredRef = useRef(false);
@@ -844,6 +886,14 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // Fresh id, not yet known to the server. Set again once the manifest request
     // actually goes out.
     sessionRegisteredRef.current = false;
+    // From here until MANIFEST_PARSED the element describes nothing: it has been
+    // detached, so its position is 0, its buffer is empty and its duration is
+    // NaN. Any seek that lands in this window has to be told that, or it will
+    // measure itself against those zeros and destroy the transcode currently
+    // being brought up. Set here rather than only at the commit site so it also
+    // covers the rebuilds nothing debounced — a subtitle change, a new item, a
+    // viewer following the host onto a new session.
+    setRestartPending(true);
 
     // The pending offset is one-shot: read it, spend it. That's correct for a
     // single restart, but this effect can run twice in the same burst — a
@@ -1126,7 +1176,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // session actually started at. Recording the requested offset earlier
           // meant a seek could be compared against a transcode that had been
           // asked for but never existed.
-          restartPendingRef.current = false;
+          setRestartPending(false);
           if (sessionOwner && !didAdoptRef.current) {
             sessionStartOffsetRef.current = startOffset;
           } else {
@@ -1228,7 +1278,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // A restart that dies before parsing a manifest would otherwise leave
           // this latched, and every later seek would skip the cheap in-place
           // path forever.
-          restartPendingRef.current = false;
+          setRestartPending(false);
           logError("HLS", "fatal error", {
             type: data.type,
             details: data.details,
@@ -1619,9 +1669,19 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         clearTimeout(restartTimerRef.current);
         restartTimerRef.current = null;
       }
-      // Whatever happens next re-establishes this; leaving it set would make
-      // every later seek take the restart path.
-      restartPendingRef.current = false;
+      // Deliberately does NOT clear restartPendingRef.
+      //
+      // It used to, on the reasoning that whatever came next would re-establish
+      // it. What comes next is *this effect re-running* — the cleanup fires
+      // first, so the flag was cleared by the very commit that set it, and
+      // "restart already pending" was true for about a millisecond in its
+      // entire life. Every seek arriving during a rebuild therefore classified
+      // itself against a detached element reporting position 0, no buffer and a
+      // session offset from a transcode that had never existed, concluded it
+      // needed a restart, and killed the one that was still starting up. That is
+      // the storm: thirteen transcodes in one minute, eleven of them destroyed
+      // before Plex answered. It is cleared where it actually stops being true —
+      // MANIFEST_PARSED, a fatal error, or the age bound in isRestartPending.
       // Only the session owner stops the Plex transcode, and only if the server
       // was ever told the session exists. Without the second condition a seek
       // landing inside start()'s wait sends a DELETE for an id that only ever
@@ -1645,7 +1705,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         });
       }
     };
-  }, [item.ratingKey, subtitles, destroyLocal, followSessionId, retryKey, vpsRelay]);
+    // setRestartPending is a stable useCallback with no deps; listing it keeps
+    // the lint rule honest without changing when this effect runs.
+  }, [item.ratingKey, subtitles, destroyLocal, followSessionId, retryKey, vpsRelay, setRestartPending]);
 
   // Viewer: respond to explicit host commands (play/pause/resume/seek)
   // Does NOT fire on heartbeats — both clients share the same HLS stream
@@ -2008,10 +2070,40 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         targetS: positionSeconds,
         debounceMs: SEEK_RESTART_DEBOUNCE_MS,
       });
+    } else {
+      restartDeferredSinceRef.current = 0;
     }
-    restartTimerRef.current = setTimeout(() => {
+
+    const commit = () => {
       restartTimerRef.current = null;
-      restartPendingRef.current = true;
+
+      // Never tear down a transcode that hasn't produced its manifest yet.
+      //
+      // The debounce alone doesn't cover this: seeks arriving 400ms apart each
+      // clear it and start their own, so a scrubbing pair produced a transcode
+      // per seek, each destroyed before Plex had answered. Waiting for the
+      // in-flight one to land means the burst costs two transcodes — the one
+      // already running and the one at the final target — instead of a dozen.
+      if (isRestartPending()) {
+        const since = restartDeferredSinceRef.current || Date.now();
+        restartDeferredSinceRef.current = since;
+        if (Date.now() - since < RESTART_INFLIGHT_MAX_WAIT_MS) {
+          logEvent("Seek", "holding restart while one is still starting up", {
+            targetS: seekOffsetRef.current,
+            waitedMs: Date.now() - since,
+            maxWaitMs: RESTART_INFLIGHT_MAX_WAIT_MS,
+          });
+          restartTimerRef.current = setTimeout(commit, SEEK_RESTART_DEBOUNCE_MS);
+          return;
+        }
+        logWarn("Seek", "in-flight restart never produced a manifest, replacing it", {
+          targetS: seekOffsetRef.current,
+          waitedMs: Date.now() - since,
+        });
+      }
+      restartDeferredSinceRef.current = 0;
+
+      setRestartPending(true);
       // The expensive path: this tears down a working transcode and waits out a
       // fresh one. Logged with where playback actually was, so a restart to a
       // position nowhere near the playhead is obvious at a glance.
@@ -2022,8 +2114,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         ...snapshot(videoRef.current),
       });
       setRetryKey((k) => k + 1);
-    }, SEEK_RESTART_DEBOUNCE_MS);
-  }, []);
+    };
+
+    restartTimerRef.current = setTimeout(commit, SEEK_RESTART_DEBOUNCE_MS);
+  }, [isRestartPending, setRestartPending]);
 
   // Host seek entry point. Prefers a cheap in-place seek — the restart path
   // tears down the HLS session and waits for a fresh Plex transcode (5-15s of
@@ -2057,7 +2151,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       buffered: isPositionBuffered(video, positionSeconds),
       sessionStartOffsetS: sessionStartOffsetRef.current,
       bufferedEndS: bufEnd ?? "none",
-      restartPending: restartPendingRef.current,
+      restartPending: isRestartPending(),
       ...snapshot(video),
     });
 
@@ -2066,7 +2160,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // describe nothing. Classifying against it is what made a second click on
     // the *same* position restart all over again. Hand straight to the restart
     // path, which coalesces.
-    if (restartPendingRef.current || restartTimerRef.current !== null) {
+    if (isRestartPending() || restartTimerRef.current !== null) {
       logEvent("Seek", "restart already pending → retarget", { targetS: positionSeconds });
       handleSeekRestart(positionSeconds, broadcast);
       return;

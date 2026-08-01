@@ -2000,7 +2000,10 @@ setInterval(() => {
 // Last host-reported playback position per session. `posChangedAt` is when the
 // position last actually advanced — used to detect a stalled (frozen but still
 // playing) timeline, distinct from the host merely going silent.
-const hostPingInfo = new Map<string, { timeMs: number; at: number; posChangedAt: number }>();
+const hostPingInfo = new Map<
+  string,
+  { timeMs: number; at: number; posChangedAt: number; playing: boolean }
+>();
 const HOST_SILENT_MS = 25_000;
 // How long the reported position may sit frozen (while still playing) before we
 // nudge Plex's timeline forward to keep the encoder from parking.
@@ -2041,6 +2044,7 @@ function noteHeadAdvance(key: string, segPath: string): void {
 /** Mark a Plex transcode key as stopped — segment requests will be rejected. */
 export function markTranscodeStopped(sessionId: string): void {
   stopPrefetch(sessionId);
+  transcodeControlKey.delete(sessionId);
   const plexKey = plexTranscodeKeys.get(sessionId);
   if (plexKey) {
     activeTranscodeKeys.delete(plexKey);
@@ -2093,6 +2097,74 @@ function plexTranscodeControl(
 }
 
 /**
+ * Which identifier a session's ping/stop calls should carry.
+ *
+ * Empty until one of them has been answered with something other than a 404,
+ * at which point it holds whichever identifier worked. Per session, because the
+ * answer could in principle differ between them, and cleared with the session.
+ */
+const transcodeControlKey = new Map<string, string>();
+
+/**
+ * `ping` / `stop` for one of our sessions, trying Plex's own transcode key when
+ * our session id is refused.
+ *
+ * The comment on plexTranscodeControl says `session` means the identifier we
+ * supplied, and that passing Plex's transcode GUID is a silent 400. Plex's own
+ * log says otherwise about the first half: every one of these keyed on our UUID
+ * comes back 404 — 804 rejected keep-alives and every single stop in one day's
+ * traffic, with matching `Completed: ... 404 GET /video/:/transcode/universal/
+ * ping?session=<our-uuid>` lines on the Plex side. Nothing was keeping the
+ * transcode alive (the timeline posts were doing that by accident) and nothing
+ * was ever cleanly stopped, so abandoned encoders piled up until Plex timed
+ * them out.
+ *
+ * Rather than swap one guess for another, this tries ours and falls back to the
+ * mapped Plex key on a 404, then remembers whichever answered. The log says
+ * which, so the next person reading it doesn't have to guess either.
+ */
+async function transcodeControl(
+  action: "ping" | "stop",
+  sessionId: string,
+  clientId: string = OUR_CLIENT_ID,
+): Promise<{ ok: boolean; status: number }> {
+  const remembered = transcodeControlKey.get(sessionId);
+  const plexKey = plexTranscodeKeys.get(sessionId);
+  const candidates = remembered
+    ? [remembered]
+    : plexKey && plexKey !== sessionId
+      ? [sessionId, plexKey]
+      : [sessionId];
+
+  let last = { ok: false, status: 0 };
+  for (const candidate of candidates) {
+    try {
+      const res = await plexTranscodeControl(action, candidate, clientId);
+      last = { ok: res.ok, status: res.status };
+      if (res.ok) {
+        if (!remembered) {
+          transcodeControlKey.set(sessionId, candidate);
+          logEvent("HLS", "transcode control identifier resolved", {
+            session: sessionId.substring(0, 8),
+            action,
+            using: candidate === sessionId ? "our-session-id" : "plex-transcode-key",
+          });
+        }
+        return last;
+      }
+      // Only a 404 is "wrong identifier". Anything else is a real failure and
+      // trying the other one just doubles it.
+      if (res.status !== 404) return last;
+    } catch (err) {
+      console.error("[HLS] transcode", action, "failed for",
+        sessionId.substring(0, 8), err);
+      return { ok: false, status: 0 };
+    }
+  }
+  return last;
+}
+
+/**
  * Our session id for a Plex transcode key, while we still hold the mapping.
  * Undefined once the session has been torn down, which is exactly when a
  * transcode shows up as an orphan — see the caller for what to do then.
@@ -2102,6 +2174,17 @@ function sessionIdForPlexKey(plexKey: string): string | undefined {
     if (key === plexKey) return sessionId;
   }
   return undefined;
+}
+
+/**
+ * Stop one of our sessions' transcodes, whichever identifier Plex accepts.
+ * Exported for sync.ts, which tears down on the WebSocket path.
+ */
+export async function stopTranscodeSession(
+  sessionId: string,
+  clientId?: string,
+): Promise<{ ok: boolean; status: number }> {
+  return transcodeControl("stop", sessionId, clientId);
 }
 
 /** Stop a single Plex HLS transcode, identified the way `stop` expects. */
@@ -2278,8 +2361,9 @@ export { terminatePlexSession };
 export async function pingPlexTranscode(hlsSessionId: string): Promise<boolean> {
   let alive = true;
   try {
-    // Our session id, not the mapped Plex key — see plexTranscodeControl.
-    const res = await plexTranscodeControl("ping", hlsSessionId);
+    // Tries our session id first and Plex's transcode key on a 404 — see
+    // transcodeControl for why neither can be assumed.
+    const res = await transcodeControl("ping", hlsSessionId);
     if (!res.ok) {
       // Loud, because a silently-rejected keep-alive is exactly the failure this
       // call site had for its entire life.
@@ -2923,9 +3007,9 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
       });
     }
 
-    // Ping to keep transcode alive. Identified by our session id — see
-    // plexTranscodeControl for why the obvious-looking plexKey is wrong here.
-    const pingRes = await plexTranscodeControl("ping", sessionId, clientId);
+    // Ping to keep the transcode alive — see transcodeControl for which
+    // identifier this ends up using.
+    const pingRes = await transcodeControl("ping", sessionId, clientId);
     if (!pingRes.ok) {
       logEvent("Ping", "Plex rejected keep-alive", {
         session: sessionId.substring(0, 8),
@@ -2944,7 +3028,13 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
       const now = Date.now();
       const prev = hostPingInfo.get(sessionId);
       const posAdvanced = !prev || Math.abs(timeMs - prev.timeMs) > 500;
-      const posChangedAt = posAdvanced ? now : prev!.posChangedAt;
+      // Coming back from a pause restarts the clock even if the position hasn't
+      // moved yet: the first ping after a resume arrives within milliseconds of
+      // it, so the position legitimately hasn't changed — and carrying the whole
+      // paused duration forward made that ping look like a multi-minute stall
+      // and reported `buffering` to Plex for a stream that had just resumed.
+      const resumed = !!prev && !prev.playing && playing;
+      const posChangedAt = posAdvanced || resumed ? now : prev!.posChangedAt;
       const frozenMs = now - posChangedAt;
 
       // DIAGNOSTIC: near-zero Δpos over several seconds of wall time = frozen
@@ -2953,7 +3043,14 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
       // visible right next to the position and (server-side) the transcode head.
       const wallMs = prev ? now - prev.at : 0;
       const posDeltaMs = prev ? timeMs - prev.timeMs : 0;
-      const stalled = !!prev && wallMs > 4000 && Math.abs(posDeltaMs) < 500;
+      // `playing` is the whole difference between a stall and a pause.
+      //
+      // Without it a paused stream reported "TIMELINE STALLED" every ten
+      // seconds for as long as it stayed paused — 82 of them in one hour, all
+      // saying nothing except that somebody had pressed pause. A diagnostic
+      // that fires constantly during normal use is worse than none, because it
+      // is what a real stall then hides inside.
+      const stalled = !!prev && playing && wallMs > 4000 && Math.abs(posDeltaMs) < 500;
       const bufS = typeof req.query.buffer === "string" ? req.query.buffer : "?";
       if (DEBUG) console.log("[Ping] %s pos=%ss Δpos=%ss buf=%ss / %ss wall%s playing=%s",
         sessionId.substring(0, 8), (timeMs / 1000).toFixed(1),
@@ -2990,7 +3087,7 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
         });
       }
 
-      hostPingInfo.set(sessionId, { timeMs, at: now, posChangedAt });
+      hostPingInfo.set(sessionId, { timeMs, at: now, posChangedAt, playing });
 
       // Anchor the prefetch ceiling to the viewer. Without this the prefetcher
       // hangs its window off the transcode head, which it advances itself, and
@@ -3092,7 +3189,7 @@ router.delete(
       // session id, which is what `stop` matches on.
       if (plexKey) {
         try {
-          const stopRes = await plexTranscodeControl("stop", sessionId, OUR_CLIENT_ID);
+          const stopRes = await transcodeControl("stop", sessionId, OUR_CLIENT_ID);
           console.log("[HLS] Stop session", sessionId.substring(0, 8),
             `(plex key: ${plexKey.substring(0, 8)})`, "→", stopRes.status);
         } catch (err) {
@@ -3131,10 +3228,27 @@ router.delete(
  * that weren't properly stopped (e.g. during development).
  */
 router.delete("/hls/sessions", async (req: Request, res: Response) => {
-  // Dev-only endpoint — refuse in production unless admin secret is provided
-  const isDev = process.env.NODE_ENV !== "production";
+  // Kills every watch party on this Plex server, so the gate must not depend on
+  // an environment variable being set correctly.
+  //
+  // It used to be `NODE_ENV !== "production" || matching ADMIN_SECRET`, and the
+  // deployment this was written for does not set NODE_ENV — which is visible in
+  // its own logs, since the DEBUG-only lines are all there. So the escape hatch
+  // was wide open to any authenticated user: one request, every stream in every
+  // room dead. The deployment that forgets NODE_ENV is exactly the one that
+  // shouldn't be trusted with this, so the check is now positive: either the
+  // request came from this machine, or it carries the secret.
   const adminSecret = process.env.ADMIN_SECRET;
-  if (!isDev && (!adminSecret || req.headers["x-admin-secret"] !== adminSecret)) {
+  const peer = req.socket.remoteAddress ?? "";
+  const fromLoopback =
+    peer === "127.0.0.1" || peer === "::1" || peer === "::ffff:127.0.0.1";
+  const hasSecret =
+    !!adminSecret && req.headers["x-admin-secret"] === adminSecret;
+  if (!fromLoopback && !hasSecret) {
+    logEvent("HLS", "kill-all refused", {
+      peer: peer || "unknown",
+      adminSecretConfigured: !!adminSecret,
+    });
     res.status(403).json({ error: "Forbidden" });
     return;
   }

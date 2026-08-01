@@ -81,10 +81,16 @@ export function useDiscord(): DiscordState {
   // into a stream of RPC calls.
   const presenceRef = useRef<string | null>(null);
   const presenceReadyRef = useRef(false);
+  /** Whether the authorize call that ran actually included the presence scope. */
+  const presenceAllowedRef = useRef(false);
+  /** Set after the first rejection, so a scope Discord won't grant produces one
+   *  line rather than one per title change for the rest of the session. */
+  const presenceDeadRef = useRef(false);
 
   const setPresence = useCallback((nowPlaying: string | null): void => {
     const sdk = sdkRef.current;
     if (!sdk || !presenceReadyRef.current) return;
+    if (!presenceAllowedRef.current || presenceDeadRef.current) return;
     const state = nowPlaying ? `Watching ${nowPlaying}` : "Browsing the library";
     if (presenceRef.current === state) return;
     presenceRef.current = state;
@@ -101,8 +107,17 @@ export function useDiscord(): DiscordState {
       })
       .catch((err: unknown) => {
         // Presence is decoration; a rejection must never surface to the user.
-        logEvent("Discord", "setActivity failed", {
-          reason: err instanceof Error ? err.message : String(err),
+        // Latched, because the realistic cause is a scope this app will never
+        // be granted, and repeating that on every title change buries the log
+        // in a line that says the same thing each time. `[object Object]` is
+        // what the old formatting produced for Discord's error shape, which
+        // meant the one useful detail — the code — never made it in.
+        presenceDeadRef.current = true;
+        logEvent("Discord", "presence disabled after rejection", {
+          reason:
+            err instanceof Error
+              ? err.message
+              : (() => { try { return JSON.stringify(err); } catch { return String(err); } })(),
         });
       });
   }, []);
@@ -136,19 +151,44 @@ export function useDiscord(): DiscordState {
 
         await sdk.ready();
 
-        const { code } = await sdk.commands.authorize({
-          client_id: CLIENT_ID,
-          response_type: "code",
-          state: "",
-          prompt: "none",
-          // identify — who the user is, bound to their session server-side.
-          // guilds  — which servers they are in, checked against
-          //           ALLOWED_GUILD_IDS at /register (see routes/discord.ts).
-          // Nothing else is asked for. "rpc.voice.read" used to be here and was
-          // never read by anything; every unused scope is one more line on the
-          // consent screen someone has to accept before they can watch.
-          scope: ["identify", "guilds"],
-        });
+        // identify — who the user is, bound to their session server-side.
+        // guilds  — which servers they are in, checked against
+        //           ALLOWED_GUILD_IDS at /register (see routes/discord.ts).
+        // rpc.activities.write — what setActivity needs. Without it every
+        //           presence update is rejected with 4006 "Not authenticated or
+        //           invalid scope", which is what was happening on every client
+        //           in production: the member list said "Browsing the library"
+        //           for the whole session, two hours into a film.
+        //
+        // Requested as an extra rather than assumed, because an app that hasn't
+        // been granted it would fail `authorize` outright — and a broken launch
+        // is a far worse outcome than a stale presence line. The fallback below
+        // is what makes asking safe.
+        const FULL_SCOPES = ["identify", "guilds", "rpc.activities.write"] as const;
+        const MINIMAL_SCOPES = ["identify", "guilds"] as const;
+        let code: string;
+        try {
+          ({ code } = await sdk.commands.authorize({
+            client_id: CLIENT_ID,
+            response_type: "code",
+            state: "",
+            prompt: "none",
+            scope: [...FULL_SCOPES],
+          }));
+          presenceAllowedRef.current = true;
+        } catch (err) {
+          logEvent("Discord", "authorize without presence scope", {
+            reason: err instanceof Error ? err.message : String(err),
+          });
+          ({ code } = await sdk.commands.authorize({
+            client_id: CLIENT_ID,
+            response_type: "code",
+            state: "",
+            prompt: "none",
+            scope: [...MINIMAL_SCOPES],
+          }));
+          presenceAllowedRef.current = false;
+        }
 
         const { access_token, session_token } = await apiPost<{
           access_token: string;

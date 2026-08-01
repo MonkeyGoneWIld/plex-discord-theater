@@ -3,7 +3,7 @@ import type { Server } from "http";
 import { isValidSession, getSessionUserId } from "../middleware/auth.js";
 import { instanceHosts, updateInstanceHost, touchInstance } from "../routes/discord.js";
 import { plexFetch } from "./plex.js";
-import { getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode } from "../routes/plex.js";
+import { getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode, stopTranscodeSession } from "../routes/plex.js";
 import { createTracker, handleTrackerSocket, destroyTracker } from "./tracker.js";
 import { recordProgress } from "./watch-history.js";
 import { logEvent } from "./logger.js";
@@ -37,19 +37,12 @@ async function killPlexTranscode(hlsSessionId: string | null): Promise<void> {
     const clientId = getSessionClientId(hlsSessionId);
     const ratingKey = getSessionRatingKey(hlsSessionId) || null;
     try {
-      // Always our session id: `stop` takes a `session` parameter and matches on
-      // the identifier we gave Plex at start, never on the transcode GUID it
-      // allocated. Passing the latter is a silent 400 (see plexTranscodeControl
-      // in routes/plex.ts). plexKey is still worth having — it gates the
-      // terminate call below — but it is not what identifies the session here.
-      const res = await plexFetch(
-        "/video/:/transcode/universal/stop",
-        { session: hlsSessionId },
-        {
-          "X-Plex-Session-Identifier": hlsSessionId,
-          "X-Plex-Client-Identifier": clientId,
-        },
-      );
+      // Which identifier `stop` wants is not a settled question — see
+      // transcodeControl in routes/plex.ts. This tries ours and falls back to
+      // the Plex transcode key, because keying it on ours alone was answered
+      // with a 404 every single time in a day of real traffic, which means
+      // nothing here was stopping anything.
+      const res = await stopTranscodeSession(hlsSessionId, clientId);
       console.log("[Sync] Stop transcode", hlsSessionId.substring(0, 8),
         plexKey ? "(plex key known)" : "(no plex key mapping)",
         "→", res.status);

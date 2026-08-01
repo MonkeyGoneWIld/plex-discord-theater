@@ -98,18 +98,35 @@ lookup retries once on a 429, honouring `Retry-After`.
 
 ### D. End-user improvements
 
-> **A change that was tried and reverted.** The Invite button was briefly
-> switched from `openInviteDialog` to `shareLink`, to get away from a picker
-> that lists text channels. It made things worse and was reverted. The two
-> commands are not interchangeable: `openInviteDialog` creates an invite *to
-> the voice channel*, so whoever accepts lands in the same activity instance —
-> the same room, in sync. `shareLink` shares a *URL*, which launches the
-> activity wherever it is opened, so an invited friend ends up alone in a
-> separate watch party. It also turned out not to be a people-only picker
-> anyway; it lists channels too. Discord decides what that dialog shows and
-> there is no SDK command that both restricts it to people and preserves the
-> instance. Correct beats prettier. Recorded here so it doesn't get "fixed"
-> again.
+> **The invite picker: two attempts, both reverted. Do not try a third.**
+>
+> The complaint is that Discord's invite dialog lists text channels and an
+> "Invite to Server" section alongside people. Two things were tried:
+>
+> 1. **`shareLink` instead of `openInviteDialog`.** Broke the feature.
+>    `openInviteDialog` creates an invite *to the channel*, so whoever accepts
+>    lands in **this** activity instance — same room, in sync. `shareLink`
+>    shares a *URL*, which launches the activity wherever it is opened, so the
+>    invited friend ends up alone in a separate watch party. It also lists
+>    channels itself, so it didn't even solve the cosmetic problem.
+>
+> 2. **A custom people-only panel**, built on SDK 2.x `getChannel` →
+>    `voice_states` (the call roster) plus `inviteUserEmbedded`. It worked, but
+>    the roster is empty whenever nobody else is in the voice channel — which is
+>    the common case when you are inviting *because* nobody is there yet. It
+>    replaced a working button with a panel that said "Nobody in the call to
+>    invite" and then made you press a second button to get the real dialog.
+>
+> **The dialog's contents are not ours to change.** It is rendered by the
+> Discord client, outside the activity's iframe. `openInviteDialog()` takes no
+> arguments. There is no SDK command that both filters that list to people and
+> preserves the activity instance. The only true people-only source is
+> `getRelationships`, whose `relationships.read` scope is part of Discord's
+> Social SDK and gated behind an approval application.
+>
+> Current state: the button calls `openInviteDialog` and nothing else. If the
+> channel clutter must go, the route is an application to Discord for
+> `relationships.read`, not another code change.
 
 **D1. The initial download is 61% smaller.** hls.js, p2p-media-loader,
 bittorrent-tracker and the Node polyfills are the bulk of this app's JavaScript

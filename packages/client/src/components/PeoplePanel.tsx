@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Participant } from "../hooks/useSync";
+import type { InviteResult } from "../hooks/useDiscord";
 import { InviteButton } from "./InviteButton";
 
 interface PeoplePanelProps {
@@ -10,9 +11,9 @@ interface PeoplePanelProps {
   isHost: boolean;
   onPromoteHost: (userId: string) => void;
   onSetCoHost: (userId: string, value: boolean) => void;
-  /** Opens the invite picker. Omit where there's nothing to invite to, or
-   *  where the surface already offers it elsewhere (the browsing header). */
-  onInvite?: () => void;
+  /** Opens Discord's invite dialog. Omit where there's nothing to invite to,
+   *  or where the surface already offers it elsewhere (the browsing header). */
+  onInvite?: () => Promise<InviteResult>;
   onClose: () => void;
 }
 

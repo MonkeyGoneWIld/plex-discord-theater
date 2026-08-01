@@ -6,8 +6,8 @@ A Discord Activity that lets you browse your Plex library and watch movies and T
 
 - **Browse and search your library** — movies and TV shows with genre filters and sorting, plus cast and crew pages listing everything they appear in
 - **Discover titles you don't own** — search also surfaces them, marked "Not in library", with full detail pages. Optional [Seerr](#requesting-titles-optional) integration adds a Request button, per-season for TV
-- **Synchronized playback** — the host drives play/pause/seek and everyone stays in sync
-- **Co-hosts & host transfer** — hand out transport control, or the host role itself, from the people panel. If the host leaves, a co-host is promoted so the session continues
+- **Synchronized playback** — the host drives play/pause/seek and everyone stays in sync. Small drifts are closed by nudging playback speed a few percent rather than by seeking, so staying together doesn't cost a rebuffer every time
+- **Co-hosts & host transfer** — hand out transport control, or the host role itself, from the people panel. Roles belong to the person, not the connection, so a dropped socket doesn't quietly demote anyone. If the host leaves, a co-host is promoted so the session continues
 - **Audio & subtitle tracks** — switch before playing or mid-episode. Your subtitle choice carries to the next episode, matched by language rather than by track number
 - **Skip intro / credits** and **seek-bar thumbnail previews** — both from Plex's own generated data (see the note below)
 - **Next episode** — resolved from the series including season rollover, offered on a card when one finishes. Nothing auto-plays
@@ -44,7 +44,9 @@ With VPS:     home upload = 1 stream (~8-12 Mbps), regardless of viewer count
 
 See [VPS Relay](#vps-relay-optional) below to set it up.
 
-**Segment pre-fetching** runs either way. Plex throttles HTTP segment delivery for roughly the first 30 seconds of a transcode, which is exactly when a viewer is waiting. So the server polls the sub-manifest every 2s, pulls discovered segments with 3 workers, and serves them from memory when asked. After a seek it fetches forward from the seek target rather than from the start. Bounded to 100 segments per session (~450 MB at 12 Mbps) across at most 2 concurrent sessions, evicting already-served segments first.
+**Segment pre-fetching** runs either way. Plex throttles HTTP segment delivery for roughly the first 30 seconds of a transcode, which is exactly when a viewer is waiting. So the server polls the sub-manifest every 2s, pulls discovered segments with 3 workers, and serves them from memory when asked. After a seek it fetches forward from the seek target rather than from the start, and it only ever fetches a fixed window ahead of the *playhead* — hanging it off the transcode head instead lets it run away to the end of the file while the buffer drains behind it.
+
+Memory is capped at 384 MB in total, shared evenly across up to four concurrent sessions, evicting already-served segments first. Total rather than per-session, so the ceiling doesn't move when a second party starts watching. At capacity the oldest session is displaced rather than the newest refused — the usual way to reach capacity is a seek-restart, whose outgoing session is still being torn down while its replacement asks for a manifest, and refusing that one starves the person actually waiting.
 
 **P2P sharing** is the fallback when no VPS is configured. Viewers form a WebRTC mesh via an embedded [bittorrent-tracker](https://github.com/webtorrent/bittorrent-tracker), sharing segments within a watch session and falling back to the server when a peer can't supply one in time.
 
@@ -172,6 +174,8 @@ Once both variables are set, segment URLs are rewritten to `/theater/seg/...`, n
 | Library is empty | Check `PLEX_URL` / `PLEX_TOKEN`, and that the server can reach Plex |
 | Video won't play | Check the browser console for HLS errors; confirm Plex can transcode |
 | "Session expired" banner | The server restarted — close and reopen the Activity |
+| "Reconnecting…" banner | The sync socket dropped and is retrying. Your own playback keeps going; the room just can't see you until it's back. It clears itself, or offers a Reconnect button once the automatic attempts run out |
+| "Unknown instance" on join | The activity instance was never registered, or its registration expired after 24h idle. Close and reopen the Activity |
 | Tunnel URL changed | Update the URL mapping in the Discord Developer Portal |
 | Audio is MP3, not AAC | Expected for TrueHD/DTS sources. MP3 plays fine everywhere |
 | Skip intro / previews missing | Plex hasn't generated them — see the note under Features |

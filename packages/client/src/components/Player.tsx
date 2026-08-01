@@ -30,6 +30,10 @@ const DRIFT_CORRECTION_COOLDOWN_MS = 8_000;
 const SEEK_STALL_REBUILD_MS = 15_000;
 const MAX_VIEWER_RETRIES = 3;
 const MAX_NETWORK_RETRIES = 5;
+/** Consecutive hls.js media-error recoveries before we stop nudging and rebuild. */
+const MAX_MEDIA_ERROR_RECOVERIES = 3;
+/** Clean playback for this long means the next media error starts a fresh budget. */
+const MEDIA_ERROR_RESET_MS = 60_000;
 // After an in-place seek to an unbuffered position, how long to wait for
 // segments before giving up and restarting the transcode at the target.
 const SEEK_STALL_TIMEOUT_MS = 6_000;
@@ -364,6 +368,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // Plex part id for hover-preview frames, or null when this item has none.
   const [previewPartId, setPreviewPartId] = useState<number | null>(null);
   const [recovering, setRecovering] = useState(false);
+  // Every automatic recovery has been spent and the session is torn down: the
+  // only ways forward are the manual Retry button or leaving.
+  const [playbackDead, setPlaybackDead] = useState(false);
   const recoveryAttemptRef = useRef(0);
   const recoveryPositionRef = useRef(0);
   const MAX_RECOVERY_ATTEMPTS = 2;
@@ -371,6 +378,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const retryCountRef = useRef(0);
   const hlsDeadRef = useRef(false);
   const networkRetryRef = useRef(0);
+  // Media-error recovery budget, and when the last one fired — see the
+  // MEDIA_ERROR branch of the fatal-error handler.
+  const mediaErrorCountRef = useRef(0);
+  const lastMediaErrorAtRef = useRef(0);
   const pendingStopRef = useRef<Promise<void> | null>(null);
   const bufferCleanupRef = useRef<(() => void) | null>(null);
   // Offset for the next transcode start. Seeded with the resume position so the
@@ -1020,6 +1031,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
           // Clear recovery overlay
           setRecovering(false);
+          // A manifest parsed means there is a live stream again, whatever got
+          // us here — clear the terminal state too.
+          setPlaybackDead(false);
 
           // Viewer joining mid-playback (or a host adopting a live session):
           // seek to the room's position immediately instead of waiting for the
@@ -1061,6 +1075,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             retryCountRef.current = 0;
             networkRetryRef.current = 0;
             recoveryAttemptRef.current = 0;
+            mediaErrorCountRef.current = 0;
             hlsDeadRef.current = false;
           }
         });
@@ -1097,11 +1112,39 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             ...snapshot(videoRef.current),
           });
 
-          // MEDIA_ERROR: try HLS.js built-in recovery first
+          // MEDIA_ERROR: hls.js's own recovery, escalating and then giving up.
+          //
+          // This used to call recoverMediaError() unconditionally and return,
+          // with no counter — the only error class here without one. A buffer
+          // that stays broken then recovers, fails, recovers, forever, logging
+          // each round and never reaching the teardown path below that would
+          // restart the transcode and actually fix it. The escalation (swap the
+          // audio codec on the second try) is hls.js's own documented sequence.
           if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-            logWarn("HLS", "recoverMediaError", { details: data.details });
-            hls.recoverMediaError();
-            return;
+            const sinceLast = Date.now() - lastMediaErrorAtRef.current;
+            // A fresh episode of trouble rather than the same one repeating —
+            // a stream that ran clean for a minute has earned a full budget.
+            if (sinceLast > MEDIA_ERROR_RESET_MS) mediaErrorCountRef.current = 0;
+            lastMediaErrorAtRef.current = Date.now();
+            mediaErrorCountRef.current++;
+
+            if (mediaErrorCountRef.current <= MAX_MEDIA_ERROR_RECOVERIES) {
+              logWarn("HLS", "recoverMediaError", {
+                details: data.details,
+                attempt: mediaErrorCountRef.current,
+                max: MAX_MEDIA_ERROR_RECOVERIES,
+                swapAudioCodec: mediaErrorCountRef.current > 1,
+              });
+              if (mediaErrorCountRef.current > 1) hls.swapAudioCodec();
+              hls.recoverMediaError();
+              return;
+            }
+            logError("HLS", "media error recovery exhausted, falling through to restart", {
+              details: data.details,
+              attempts: mediaErrorCountRef.current,
+            });
+            // Falls through to the viewer-retry / host-recovery paths below,
+            // which rebuild the pipeline instead of nudging the same broken one.
           }
 
           // NETWORK_ERROR: try hls.startLoad() first (transient failures)
@@ -1203,6 +1246,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             if (mounted) {
               setError(null);
               setRecovering(false);
+              // State, not a ref. The "Stream lost" panel used to be gated on
+              // recoveryAttemptRef/sessionIdRef read during render, and mutating
+              // a ref schedules nothing — whether the retry button ever appeared
+              // depended on some unrelated re-render happening to follow.
+              setPlaybackDead(true);
             }
             destroyLocal();
             if (sessionIdRef.current && sessionRegisteredRef.current) {
@@ -2266,7 +2314,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     });
     exitToShow();
   }, [playbackEnded, siblingsResolved, upNextItem, exitToShow, item.ratingKey, item.type]);
-  useEffect(() => { exitedOnEndRef.current = false; }, [item.ratingKey]);
+  useEffect(() => {
+    exitedOnEndRef.current = false;
+    setPlaybackDead(false);
+  }, [item.ratingKey]);
 
   // Viewer status pill: what the host is doing to shared playback. Seeking is a
   // brief flash (takes precedence); paused persists while the stream sits paused.
@@ -2282,7 +2333,16 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       {syncState?.authFailed ? (
         <div style={styles.error}>Session expired — please close and restart the activity</div>
       ) : syncState?.reconnectFailed ? (
-        <div style={styles.error}>Connection lost — please close and restart the activity</div>
+        // A retry, rather than only telling someone to leave the call and come
+        // back. Twenty automatic attempts can all fail to a thirty-second
+        // network blip, and the connection is usually fine by the time anyone
+        // reads this.
+        <div style={styles.error}>
+          Connection lost
+          <button style={styles.inlineRetryBtn} onClick={() => syncActions?.retryConnection()}>
+            Reconnect
+          </button>
+        </div>
       ) : error ? (
         <div style={styles.error}>{error}</div>
       ) : syncState?.hostDisconnected ? (
@@ -2418,15 +2478,17 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       )}
 
       {/* Recovery exhausted — manual retry */}
-      {!recovering && !error && recoveryAttemptRef.current >= MAX_RECOVERY_ATTEMPTS && !sessionIdRef.current && (
+      {playbackDead && !recovering && !error && (
         <div style={styles.trackSwitchOverlay}>
           <div style={styles.trackSwitchMessage}>
             <span style={{ color: "#e74c3c", fontSize: "16px", fontWeight: 600 }}>Stream lost</span>
             <button
               onClick={() => {
                 recoveryAttemptRef.current = 0;
+                mediaErrorCountRef.current = 0;
                 recoveryPositionRef.current = recoveryPositionRef.current || 0;
                 seekOffsetRef.current = recoveryPositionRef.current;
+                setPlaybackDead(false);
                 setRetryKey((k) => k + 1);
                 setRecovering(true);
               }}
@@ -2668,6 +2730,21 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: "center",
     fontSize: "14px",
     zIndex: 20,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "12px",
+  },
+  inlineRetryBtn: {
+    padding: "3px 12px",
+    borderRadius: "999px",
+    border: "1px solid rgba(255,255,255,0.55)",
+    background: "rgba(255,255,255,0.12)",
+    color: "#fff",
+    fontSize: "12px",
+    fontWeight: 700,
+    cursor: "pointer",
+    fontFamily: "inherit",
   },
   hostDisconnected: {
     position: "absolute",

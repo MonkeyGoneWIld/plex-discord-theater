@@ -85,6 +85,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   // narrows the History grid — the tabs, "Clear history" and layout all stay.
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [homeHubs, setHomeHubs] = useState<PlexHub[]>([]);
   const [homeLoading, setHomeLoading] = useState(true);
@@ -165,6 +166,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     if (!visible || !isHistoryTab) return;
     setHistoryLoading(true);
     setHistoryError(null);
+    setHistoryLoadingMore(false);
     fetchHistory({ limit: HISTORY_PAGE_SIZE })
       .then((res) => {
         setHistoryItems(res.items);
@@ -184,6 +186,30 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     // this component stays mounted behind detail and player views, so without
     // it the tab still shows pre-playback positions on the way back.
   }, [visible, isHistoryTab, retryNonce, historyNonce]);
+
+  /**
+   * Next page of history.
+   *
+   * The tab fetched exactly one page and never offered another, while the
+   * header above it counted the *full* total — so someone with 400 watched
+   * titles read "400 titles" over a grid that silently stopped at 100.
+   */
+  const handleLoadMoreHistory = useCallback(() => {
+    if (historyLoadingMore) return;
+    setHistoryLoadingMore(true);
+    fetchHistory({ limit: HISTORY_PAGE_SIZE, offset: historyItems.length })
+      .then((res) => {
+        // Concatenating pages can duplicate a row if something was watched
+        // between requests and reordered by updated_at, so dedupe on the way in.
+        setHistoryItems((prev) => {
+          const seen = new Set(prev.map((e) => e.ratingKey));
+          return [...prev, ...res.items.filter((e) => !seen.has(e.ratingKey))];
+        });
+        setHistoryTotal(res.total);
+      })
+      .catch(console.error)
+      .finally(() => setHistoryLoadingMore(false));
+  }, [historyItems.length, historyLoadingMore]);
 
   // Leave Continue Watching but stay in history. Only the row is affected, so
   // the History tab's copy of the item is deliberately left alone.
@@ -570,6 +596,27 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                     <div style={styles.historyWhen}>{formatWhen(entry.updatedAt)}</div>
                   </div>
                 ))}
+              </div>
+            )}
+            {/* Only without a filter: the filter narrows what has been loaded,
+                so paging under it would be answering a different question. */}
+            {!historyQ && historyItems.length < historyTotal && (
+              <div style={styles.loadMoreWrap}>
+                <button
+                  onClick={handleLoadMoreHistory}
+                  disabled={historyLoadingMore}
+                  style={styles.loadMoreBtn}
+                  onMouseEnter={(e) => {
+                    if (!historyLoadingMore) e.currentTarget.style.borderColor = "rgba(229,160,13,0.4)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)";
+                  }}
+                >
+                  {historyLoadingMore
+                    ? "Loading..."
+                    : `Load More (${historyItems.length} of ${historyTotal})`}
+                </button>
               </div>
             )}
           </>

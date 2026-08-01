@@ -2,6 +2,9 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { getSessionToken } from "../lib/api";
 
 const MAX_RECONNECT_ATTEMPTS = 20;
+/** Suggestions held for the host. Bounded so a viewer holding the button down
+ *  can't grow this without limit on someone else's machine. */
+const MAX_SUGGESTIONS = 20;
 
 export interface QueueItem {
   ratingKey: string;
@@ -58,7 +61,7 @@ export interface SyncState {
   lastCommandAt: number;
   /** True if the WebSocket closed due to authentication failure (code 1008) */
   authFailed: boolean;
-  /** True if max reconnect attempts exhausted */
+  /** True if max reconnect attempts exhausted. `retryConnection` clears it. */
   reconnectFailed: boolean;
   /** What the host is currently browsing, or null if playing/idle */
   browseContext: string | null;
@@ -121,6 +124,15 @@ export interface SyncActions {
   sendSetSubtitle: (partId: number, subtitleStreamID: number) => void;
   /** Co-host: ask the host to advance to the next item. */
   sendPlayItem: (ratingKey: string) => void;
+  /**
+   * Start reconnecting again after the automatic attempts were exhausted.
+   *
+   * Without this, twenty failed retries left the app permanently showing
+   * "please close and restart the activity" — which, in a Discord Activity,
+   * means leaving the call and coming back. A network that recovers a minute
+   * later had no way to be noticed.
+   */
+  retryConnection: () => void;
 }
 
 interface UseSyncOptions {
@@ -163,6 +175,10 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
   const wsRef = useRef<WebSocket | null>(null);
   const retryRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Bumped by retryConnection. It is a dependency of the connect effect, so a
+  // bump tears the old socket down and starts the whole sequence again from a
+  // clean attempt count — which is exactly what a manual retry should mean.
+  const [reconnectNonce, setReconnectNonce] = useState(0);
 
   const send = useCallback((msg: object) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -212,6 +228,11 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       sendSetSubtitle: (partId: number, subtitleStreamID: number) =>
         send({ type: "set-subtitle", partId, subtitleStreamID }),
       sendPlayItem: (ratingKey: string) => send({ type: "play-item", ratingKey }),
+      retryConnection: () => {
+        retryRef.current = 0;
+        setState((prev) => ({ ...prev, reconnectFailed: false }));
+        setReconnectNonce((n) => n + 1);
+      },
     }),
     [send],
   );
@@ -406,12 +427,21 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               queue: (msg.queue as QueueItem[]) || [],
             }));
             break;
-          case "suggestion":
+          case "suggestion": {
+            const suggestion = msg.item as SuggestionItem | undefined;
+            if (!suggestion?.ratingKey) break;
             setState((prev) => ({
               ...prev,
-              suggestions: [...prev.suggestions, msg.item as SuggestionItem],
+              // Oldest out once full, and never the same title twice — so a
+              // viewer pressing Suggest repeatedly moves their entry rather
+              // than stacking copies of it on the host's screen.
+              suggestions: [
+                ...prev.suggestions.filter((e) => e.ratingKey !== suggestion.ratingKey),
+                suggestion,
+              ].slice(-MAX_SUGGESTIONS),
             }));
             break;
+          }
           case "suggestion-dismissed":
             setState((prev) => ({
               ...prev,
@@ -498,7 +528,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         wsRef.current = null;
       }
     };
-  }, [enabled, instanceId, userId, username]);
+  }, [enabled, instanceId, userId, username, reconnectNonce]);
 
   return { state, actions };
 }

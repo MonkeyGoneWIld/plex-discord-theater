@@ -10,6 +10,7 @@ import { PersonDetail } from "./components/PersonDetail";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PeoplePanel } from "./components/PeoplePanel";
 import { InviteButton } from "./components/InviteButton";
+import { InvitePanel } from "./components/InvitePanel";
 import { formatMediaTitle } from "./lib/format";
 import { authUrl, fetchMeta, invalidateMeta, setStreams } from "./lib/api";
 import { loadSubtitlePref, matchSubtitleTrack } from "./lib/subtitlePref";
@@ -72,8 +73,8 @@ function isFlatView(v: View): boolean {
 }
 
 export function App() {
-  const { isReady, isHost, userId, username, instanceId, error, canInvite, openInvite, setPresence } =
-    useDiscord();
+  const { isReady, isHost, userId, username, instanceId, error, canInvite,
+          openInvite, listCallMembers, inviteUser, setPresence } = useDiscord();
   const [viewStack, setViewStack] = useState<View[]>([{ kind: "library" }]);
   const view = viewStack[viewStack.length - 1];
 
@@ -144,6 +145,9 @@ export function App() {
   // Roster/roles panel, reachable from the header while browsing. The player has
   // its own copy for use during playback (the header is hidden there).
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
+  // The invite picker. Owned here rather than inside InviteButton so both
+  // triggers — the header and the player's people panel — open the same one.
+  const [showInvitePanel, setShowInvitePanel] = useState(false);
 
   // Phone held sideways, where Discord overlays its own controls on the corners
   // of the Activity. See the header below.
@@ -642,7 +646,7 @@ export function App() {
             {/* Sits with the roster rather than inside it: inviting is about
                 who isn't here yet, which is the same question the people
                 button answers from the other side. */}
-            {canInvite && <InviteButton onInvite={openInvite} />}
+            {canInvite && <InviteButton onInvite={() => setShowInvitePanel(true)} />}
             <span style={styles.userName}>
               {username} {effectiveIsHost ? "(Host)" : "(Viewer)"}
               {!effectiveIsHost && syncState.connected && " • Synced"}
@@ -691,6 +695,19 @@ export function App() {
             </button>
           )}
         </div>
+      )}
+
+      {/* Invite picker. Above the player in the stacking order, so it works
+          from the player's people panel as well as the browsing header. */}
+      {showInvitePanel && (
+        <InvitePanel
+          listCallMembers={listCallMembers}
+          inviteUser={inviteUser}
+          openInvite={openInvite}
+          alreadyHere={syncState.participants.map((p) => p.userId)}
+          selfUserId={userId}
+          onClose={() => setShowInvitePanel(false)}
+        />
       )}
 
       {/* People & roles — role controls inside are host-gated */}
@@ -908,7 +925,7 @@ export function App() {
             // just ended. Same rebuild the in-page show breadcrumb uses, so the
             // trail reads Home › Show rather than keeping the player's ancestry.
             onFinished={handleEpisodeShowClick}
-            onInvite={canInvite ? openInvite : undefined}
+            onInvite={canInvite ? () => setShowInvitePanel(true) : undefined}
             syncState={syncState}
             syncActions={syncActions}
             onPlayNext={handlePlayNext}

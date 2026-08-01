@@ -10,8 +10,10 @@ interface DiscordState {
   username: string | null;
   instanceId: string | null;
   error: string | null;
-  /** Whether this launch context has a channel to invite into — false in a DM
-   *  call, where there is no channel invite to create. */
+  /** Whether this launch context can invite at all — false in a (G)DM call.
+   *  Both routes need a guild: the SDK documents openInviteDialog as throwing
+   *  INVALID_CHANNEL without one, and reading the call roster off a DM channel
+   *  needs `dm_channels.read`, which Discord gates behind approval. */
   canInvite: boolean;
   /**
    * Open Discord's invite dialog for the channel this activity is running in.
@@ -28,11 +30,36 @@ interface DiscordState {
    *   they end up alone in their own watch party wondering where everyone is.
    *
    * This was briefly changed to shareLink to get a nicer-looking picker, and
-   * that broke the only thing the button is for. Discord's dialog lists what
-   * Discord chooses to list; we don't control it, and it isn't worth the
-   * feature.
+   * that broke the only thing the button is for.
+   *
+   * Kept as the escape hatch behind our own picker (see listCallMembers), for
+   * reaching anyone who isn't already in the voice channel. Discord's dialog
+   * lists what Discord chooses to list — channels included — and we don't
+   * control it, which is exactly why it is no longer the first thing offered.
    */
   openInvite: () => Promise<InviteResult>;
+  /**
+   * Everyone in this activity's voice channel, so we can offer a people-only
+   * invite list instead of Discord's channel-invite dialog.
+   *
+   * Reads `voice_states` off getChannel, which needs only the `guilds` scope we
+   * already hold. The obvious alternative — getRelationships, i.e. the actual
+   * friend list — needs `relationships.read`, which is part of Discord's Social
+   * SDK and gated behind an approval process, so it isn't available to just
+   * anyone building an activity. The people already on the call are a better
+   * list for this purpose anyway: a watch party invites the room it is in.
+   *
+   * Empty on any failure (a DM context has no guild channel to read), which the
+   * caller renders as "nobody to list" and falls back to the dialog.
+   */
+  listCallMembers: () => Promise<CallMember[]>;
+  /**
+   * Invite one person straight into this activity instance.
+   *
+   * The same semantics as the channel invite — they land in this room, in sync
+   * — but addressed to a person rather than posted somewhere.
+   */
+  inviteUser: (userId: string) => Promise<boolean>;
   /**
    * Update what Discord shows this user as doing.
    *
@@ -52,6 +79,14 @@ interface DiscordState {
  * and nothing about what the user then did with it, so there is no "they sent
  * it" to report and nothing to say on the happy path.
  */
+/** A person in the activity's voice channel, trimmed to what the picker draws. */
+export interface CallMember {
+  id: string;
+  /** Display name — Discord's global_name when set, else the username. */
+  name: string;
+  username: string;
+}
+
 export type InviteResult =
   /** The dialog opened. Whether they actually invited anyone is Discord's business. */
   | "opened"
@@ -62,7 +97,8 @@ const CLIENT_ID = import.meta.env.VITE_DISCORD_CLIENT_ID as string;
 
 export function useDiscord(): DiscordState {
   const [state, setState] = useState<
-    Omit<DiscordState, "openInvite" | "setPresence" | "canInvite"> & { canInvite: boolean }
+    Omit<DiscordState, "openInvite" | "listCallMembers" | "inviteUser" | "setPresence" | "canInvite">
+      & { canInvite: boolean }
   >({
     isReady: false,
     isHost: false,
@@ -122,6 +158,45 @@ export function useDiscord(): DiscordState {
         reason: err instanceof Error ? err.message : String(err),
       });
       return "unavailable";
+    }
+  }, []);
+
+  const listCallMembers = useCallback(async (): Promise<CallMember[]> => {
+    const sdk = sdkRef.current;
+    if (!sdk?.channelId) return [];
+    try {
+      const channel = await sdk.commands.getChannel({ channel_id: sdk.channelId });
+      return (channel?.voice_states ?? [])
+        .map((v) => v.user)
+        .filter((u) => u && !u.bot)
+        .map((u) => ({
+          id: u.id,
+          name: u.global_name || u.username,
+          username: u.username,
+        }));
+    } catch (err) {
+      // A DM context, or a client that won't answer — the caller falls back to
+      // Discord's own dialog rather than showing an empty picker.
+      logEvent("Discord", "could not read the call roster", {
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  }, []);
+
+  const inviteUser = useCallback(async (userId: string): Promise<boolean> => {
+    const sdk = sdkRef.current;
+    if (!sdk) return false;
+    try {
+      await sdk.commands.inviteUserEmbedded({ user_id: userId });
+      logEvent("Discord", "invited a user to the activity", { userId });
+      return true;
+    } catch (err) {
+      logEvent("Discord", "user invite failed", {
+        userId,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      return false;
     }
   }, []);
 
@@ -204,9 +279,12 @@ export function useDiscord(): DiscordState {
           username: user.username,
           instanceId: sdk.instanceId,
           error: null,
-          // A DM or group-DM call has no channel to create an invite to, so the
-          // button is hidden rather than offered and then failing.
-          canInvite: sdk.channelId != null,
+          // guildId, not channelId. A (G)DM call *has* a channel id, so that
+          // test passed there and offered a button whose every route fails:
+          // openInviteDialog throws INVALID_CHANNEL without a guild, and
+          // getChannel on a DM needs an approval-gated scope. Hidden is better
+          // than present and broken.
+          canInvite: sdk.guildId != null,
         });
       } catch (err) {
         console.error("Discord SDK init failed:", JSON.stringify(err, null, 2), err);
@@ -221,5 +299,5 @@ export function useDiscord(): DiscordState {
     init();
   }, []);
 
-  return { ...state, openInvite, setPresence };
+  return { ...state, openInvite, listCallMembers, inviteUser, setPresence };
 }

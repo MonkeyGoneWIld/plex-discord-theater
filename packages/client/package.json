@@ -8,7 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@discord/embedded-app-sdk": "^1.4.0",
+    "@discord/embedded-app-sdk": "^2.5.0",
     "events": "^3.3.0",
     "hls.js": "^1.5.0",
     "p2p-media-loader-hlsjs": "^2.2.2",

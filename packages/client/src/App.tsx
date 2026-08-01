@@ -72,7 +72,7 @@ function isFlatView(v: View): boolean {
 }
 
 export function App() {
-  const { isReady, isHost, userId, username, instanceId, error, canInvite, openInvite, setPresence } =
+  const { isReady, isHost, userId, username, instanceId, error, canInvite, shareActivity, setPresence } =
     useDiscord();
   const [viewStack, setViewStack] = useState<View[]>([{ kind: "library" }]);
   const view = viewStack[viewStack.length - 1];
@@ -98,6 +98,21 @@ export function App() {
       return () => clearTimeout(timer);
     }
   }, [syncState.isHost]);
+
+  /**
+   * Share this activity with someone, saying what the room is up to.
+   *
+   * Discord shows this message next to the link, so it is the whole of what a
+   * friend sees before deciding whether to join — "come watch something" and
+   * "we are 20 minutes into Interstellar" are very different invitations.
+   * Sourced from room state so it says the same thing whoever sends it.
+   */
+  const handleInvite = useCallback(() => {
+    const playing = syncState.ratingKey ? syncState.title : null;
+    return shareActivity(
+      playing ? `Watching ${playing} — come join` : "Come watch something with me",
+    );
+  }, [shareActivity, syncState.ratingKey, syncState.title]);
 
   // Keep Discord's member list honest about what this person is doing.
   // Sourced from room state rather than the local view, so every participant
@@ -635,7 +650,7 @@ export function App() {
             {/* Sits with the roster rather than inside it: inviting is about
                 who isn't here yet, which is the same question the people
                 button answers from the other side. */}
-            {canInvite && <InviteButton onInvite={openInvite} />}
+            {canInvite && <InviteButton onInvite={handleInvite} />}
             <span style={styles.userName}>
               {username} {effectiveIsHost ? "(Host)" : "(Viewer)"}
               {!effectiveIsHost && syncState.connected && " • Synced"}
@@ -901,7 +916,7 @@ export function App() {
             // just ended. Same rebuild the in-page show breadcrumb uses, so the
             // trail reads Home › Show rather than keeping the player's ancestry.
             onFinished={handleEpisodeShowClick}
-            onInvite={canInvite ? openInvite : undefined}
+            onInvite={canInvite ? handleInvite : undefined}
             syncState={syncState}
             syncActions={syncActions}
             onPlayNext={handlePlayNext}

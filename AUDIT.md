@@ -137,7 +137,23 @@ fails silently when unconfigured, and each has been mistaken for a bug:
          · VPS relay (P2P mode)   · Guild allowlist (open to any Discord server)
 ```
 
-**D6. One less thing on the consent screen.** `rpc.voice.read` was requested at
+**D6. Invite opens the people picker, not a channel list.** The Invite button
+called `openInviteDialog`, which Discord documents as *"a modal dialog with
+Channel Invite UI"* — so it offered text channels and bots to post a link into,
+when the thing anyone wants from an Invite button in a watch party is to pick
+the person they want to watch with. `shareLink` is the command that opens the
+friends-and-DMs picker; it needs no extra scope, and it carries a message, so
+the invite now says what the room is actually watching.
+
+The two also fail differently, which the old boolean return collapsed:
+`openInviteDialog` throws when it can't open, while `shareLink` resolves
+`success: false` when the user simply *closes* the modal. Reported through one
+boolean, every dismissal would have shown "Can't invite here". The result is now
+a three-way union — shared / dismissed / unavailable — handled distinctly. The
+button is also no longer hidden in DM calls, where sharing a link works fine and
+the old channel-invite genuinely had nothing to offer.
+
+**D7. One less thing on the consent screen.** `rpc.voice.read` was requested at
 launch and never read by anything. Dropped; `identify` and `guilds` remain, and
 `guilds` now does real work.
 

@@ -10,15 +10,20 @@ interface DiscordState {
   username: string | null;
   instanceId: string | null;
   error: string | null;
-  /** Whether this launch context can invite anyone — false in a DM call, where
-   *  Discord has no invite to offer. */
+  /** Whether the SDK is up and the share command can be issued at all. */
   canInvite: boolean;
   /**
-   * Open Discord's own "invite to activity" dialog. Resolves false when the
-   * dialog couldn't be opened — no channel, missing permission, or the user
-   * dismissing it — so the caller can say so rather than appear to do nothing.
+   * Open Discord's share modal — the friends-and-DMs picker — with `message`
+   * alongside a link to this activity.
+   *
+   * This is `shareLink`, not `openInviteDialog`. The latter is documented as
+   * "Channel Invite UI", and that is exactly what it gave: a list of text
+   * channels and bots to post an invite into, when what anyone pressing an
+   * Invite button in a watch party wants is to pick the person they are
+   * watching with. shareLink is the one that opens the people picker, and it
+   * needs no extra OAuth scope to do it.
    */
-  openInvite: () => Promise<boolean>;
+  shareActivity: (message: string) => Promise<ShareResult>;
   /**
    * Update what Discord shows this user as doing.
    *
@@ -31,11 +36,26 @@ interface DiscordState {
   setPresence: (nowPlaying: string | null) => void;
 }
 
+/**
+ * What came of asking Discord to share.
+ *
+ * The three cases need different treatment and used to be collapsed into one
+ * boolean: `shareLink` resolves `{ success: false }` when the user simply
+ * closes the modal, which is not a failure and must not be reported as one.
+ */
+export type ShareResult =
+  /** The user picked someone and Discord sent the link. */
+  | "shared"
+  /** The modal opened and the user closed it. Nothing to say about this. */
+  | "dismissed"
+  /** The command isn't available here — worth telling the user, quietly. */
+  | "unavailable";
+
 const CLIENT_ID = import.meta.env.VITE_DISCORD_CLIENT_ID as string;
 
 export function useDiscord(): DiscordState {
   const [state, setState] = useState<
-    Omit<DiscordState, "openInvite" | "setPresence" | "canInvite"> & { canInvite: boolean }
+    Omit<DiscordState, "shareActivity" | "setPresence" | "canInvite"> & { canInvite: boolean }
   >({
     isReady: false,
     isHost: false,
@@ -80,21 +100,32 @@ export function useDiscord(): DiscordState {
       });
   }, []);
 
-  const openInvite = useCallback(async (): Promise<boolean> => {
+  const shareActivity = useCallback(async (message: string): Promise<ShareResult> => {
     const sdk = sdkRef.current;
-    if (!sdk) return false;
+    if (!sdk) return "unavailable";
     try {
-      await sdk.commands.openInviteDialog();
-      logEvent("Discord", "invite dialog opened", {});
-      return true;
+      // The people picker. Discord caps the message at 1000 characters and
+      // rejects the whole call over it.
+      const { success } = await sdk.commands.shareLink({ message: message.slice(0, 1000) });
+      logEvent("Discord", success ? "activity link shared" : "share modal dismissed", {});
+      return success ? "shared" : "dismissed";
     } catch (err) {
-      // Thrown for a context with nothing to invite to (a DM call) and when the
-      // user lacks Create Invite in the channel. Neither is our failure, and
-      // neither is worth an error banner — the caller shows a quiet note.
-      logEvent("Discord", "invite dialog unavailable", {
+      // Older Discord clients predate SHARE_LINK. Falling back to the channel
+      // invite dialog is not what anyone wants — it is the very thing this
+      // replaced — but a button that does nothing at all is worse, and this
+      // path only runs where the good one doesn't exist.
+      logEvent("Discord", "shareLink unavailable, falling back to invite dialog", {
         reason: err instanceof Error ? err.message : String(err),
       });
-      return false;
+      try {
+        await sdk.commands.openInviteDialog();
+        return "shared";
+      } catch (fallbackErr) {
+        logEvent("Discord", "invite dialog unavailable too", {
+          reason: fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr),
+        });
+        return "unavailable";
+      }
     }
   }, []);
 
@@ -177,9 +208,12 @@ export function useDiscord(): DiscordState {
           username: user.username,
           instanceId: sdk.instanceId,
           error: null,
-          // A DM or group-DM call has no channel to invite into, so the button
-          // is hidden rather than offered and then failing.
-          canInvite: sdk.channelId != null,
+          // Not gated on sdk.channelId any more. That test was right for the
+          // old channel-invite dialog, which genuinely had nothing to offer in
+          // a DM call — but sharing a link to friends works from anywhere, and
+          // hiding the button in a DM was hiding it from exactly the people
+          // most likely to want it.
+          canInvite: true,
         });
       } catch (err) {
         console.error("Discord SDK init failed:", JSON.stringify(err, null, 2), err);
@@ -194,5 +228,5 @@ export function useDiscord(): DiscordState {
     init();
   }, []);
 
-  return { ...state, openInvite, setPresence };
+  return { ...state, shareActivity, setPresence };
 }

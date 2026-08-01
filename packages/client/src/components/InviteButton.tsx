@@ -42,11 +42,18 @@ export function InviteButton({ onInvite }: InviteButtonProps) {
         style={styles.button}
         title="Invite people to this Activity"
         aria-label="Invite people to this Activity"
-        onMouseEnter={(e) => (e.currentTarget.style.borderColor = "rgba(229,160,13,0.75)")}
-        onMouseLeave={(e) => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.14)")}
+        // Comes forward on hover rather than sitting forward all the time.
+        onMouseEnter={(e) => {
+          e.currentTarget.style.borderColor = "rgba(229,160,13,0.55)";
+          e.currentTarget.style.color = "#e5a00d";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.borderColor = "rgba(255,255,255,0.10)";
+          e.currentTarget.style.color = "#9a9a9a";
+        }}
       >
         {/* Person with a plus — the same idea Discord uses for "invite". */}
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <circle cx="6" cy="5" r="2.6" stroke="currentColor" strokeWidth="1.5" />
           <path d="M1.6 13.2c0-2.4 2-4 4.4-4s4.4 1.6 4.4 4" stroke="currentColor"
             strokeWidth="1.5" strokeLinecap="round" />
@@ -63,24 +70,27 @@ export function InviteButton({ onInvite }: InviteButtonProps) {
 const base: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
-  gap: "7px",
-  borderRadius: "8px",
-  border: "1px solid rgba(255,255,255,0.14)",
-  color: "#e8e8e8",
+  gap: "5px",
+  // Pill, matching the roster count it sits beside in the header. As a rounded
+  // rectangle in a lighter tone it read as the loudest thing up there, which
+  // is not what a secondary action should be doing.
+  borderRadius: "999px",
+  border: "1px solid rgba(255,255,255,0.10)",
+  background: "transparent",
+  color: "#9a9a9a",
   fontFamily: "inherit",
   fontWeight: 600,
   cursor: "pointer",
   whiteSpace: "nowrap",
-  transition: "border-color 0.15s ease, background 0.15s ease",
+  transition: "border-color 0.15s ease, color 0.15s ease, background 0.15s ease",
 };
 
 const styles: Record<string, React.CSSProperties> = {
   wrap: { position: "relative", display: "inline-flex" },
   button: {
     ...base,
-    padding: "7px 13px",
-    fontSize: "13px",
-    background: "rgba(255,255,255,0.06)",
+    padding: "3px 9px",
+    fontSize: "12px",
   },
   note: {
     position: "absolute",

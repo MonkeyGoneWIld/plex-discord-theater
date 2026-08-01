@@ -188,16 +188,51 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
 
   const actions: SyncActions = useMemo(
     () => ({
+      // ── Transport: send, and apply to ourselves ─────────────────
+      //
+      // The server excludes the sender from its broadcasts, so a client never
+      // hears its own commands back. sendStop has always compensated for that
+      // (see its note below); the rest did not, and `playing` in particular
+      // stayed at its `false` initial value on whoever was hosting, for the
+      // whole session — the host announces "play" and is the one client not
+      // told about it.
+      //
+      // That was invisible until someone else sent a command. Player.tsx
+      // applies room state to the element on every command it receives:
+      //
+      //     if (syncState.playing && video.paused) video.play();
+      //     else if (!syncState.playing && !video.paused) video.pause();
+      //
+      // so the moment a co-host seeked, the host — believing the room to be
+      // paused, because nothing had ever told it otherwise — paused itself,
+      // while the co-host, who never paused anything, played on. Same for a
+      // co-host's pause and resume: every one of them stopped the host.
+      //
+      // Optimistically applying what we just sent is the fix, and it is the
+      // truthful thing to store: we know what we asked the room to do.
       sendPlay: (
         ratingKey: string,
         title: string,
         subtitles: boolean,
         hlsSessionId: string,
         position?: number,
-      ) => send({ type: "play", ratingKey, title, subtitles, hlsSessionId, position }),
-      sendPause: (position: number) => send({ type: "pause", position }),
-      sendResume: (position: number) => send({ type: "resume", position }),
-      sendSeek: (position: number) => send({ type: "seek", position }),
+      ) => {
+        send({ type: "play", ratingKey, title, subtitles, hlsSessionId, position });
+        setState((prev) => ({ ...prev, playing: true, position: position ?? 0 }));
+      },
+      sendPause: (position: number) => {
+        send({ type: "pause", position });
+        setState((prev) => ({ ...prev, playing: false, position }));
+      },
+      sendResume: (position: number) => {
+        send({ type: "resume", position });
+        setState((prev) => ({ ...prev, playing: true, position }));
+      },
+      // Deliberately does not touch `playing`: a seek says where, not whether.
+      sendSeek: (position: number) => {
+        send({ type: "seek", position });
+        setState((prev) => ({ ...prev, position }));
+      },
       sendStop: () => {
         send({ type: "stop" });
         // Optimistically clear local playback state. The server excludes the

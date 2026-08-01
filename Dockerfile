@@ -90,9 +90,11 @@ ENV NODE_ENV=production
 ENV PORT=3000
 EXPOSE ${PORT}
 
-# Health check — hit a lightweight endpoint
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:${PORT}/ || exit 1
+# Health check — /api/health probes Plex (cached server-side), so the container
+# goes unhealthy when the thing it proxies is unreachable. `/` was answered off
+# disk by express.static and stayed green through a total Plex outage.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -fsS http://localhost:${PORT}/api/health || exit 1
 
 ENTRYPOINT ["tini", "--", "entrypoint.sh"]
 CMD ["node", "packages/server/dist/index.js"]

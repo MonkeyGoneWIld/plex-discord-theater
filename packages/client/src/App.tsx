@@ -1,11 +1,10 @@
-import { useState, useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useLayoutEffect, useRef, lazy, Suspense } from "react";
 import { useDiscord } from "./hooks/useDiscord";
 import { useSync } from "./hooks/useSync";
 import { Library } from "./components/Library";
 import { MovieDetail } from "./components/MovieDetail";
 import { ShowDetail } from "./components/ShowDetail";
 import { SeasonDetail } from "./components/SeasonDetail";
-import { Player } from "./components/Player";
 import { ExternalDetail } from "./components/ExternalDetail";
 import { PersonDetail } from "./components/PersonDetail";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -17,6 +16,22 @@ import { loadSubtitlePref, matchSubtitleTrack } from "./lib/subtitlePref";
 import { useMediaQuery, MOBILE_LANDSCAPE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem } from "./hooks/useSync";
+
+/**
+ * The player, and everything only it needs, in a separate chunk.
+ *
+ * hls.js and the p2p-media-loader engine (with its bittorrent-tracker and Node
+ * polyfills) are the bulk of this app's JavaScript, and none of it is used
+ * until someone actually starts watching. Bundled together, the activity had to
+ * download and parse the whole video stack before it could paint a library —
+ * which is the first thing anyone sees and the moment their impression is
+ * formed. Split out, the library ships on its own and the player chunk is
+ * fetched in the background straight afterwards (see the preload below), so by
+ * the time anything is played it is already there.
+ */
+const Player = lazy(() =>
+  import("./components/Player").then((m) => ({ default: m.Player })),
+);
 
 type View =
   // `flat` marks a title opened from a collection / "More Like This" row. Such a
@@ -57,7 +72,7 @@ function isFlatView(v: View): boolean {
 }
 
 export function App() {
-  const { isReady, isHost, userId, username, instanceId, error, canInvite, openInvite } =
+  const { isReady, isHost, userId, username, instanceId, error, canInvite, openInvite, setPresence } =
     useDiscord();
   const [viewStack, setViewStack] = useState<View[]>([{ kind: "library" }]);
   const view = viewStack[viewStack.length - 1];
@@ -83,6 +98,33 @@ export function App() {
       return () => clearTimeout(timer);
     }
   }, [syncState.isHost]);
+
+  // Keep Discord's member list honest about what this person is doing.
+  // Sourced from room state rather than the local view, so every participant
+  // shows the same title — which is what makes it read as a shared session in
+  // the member list rather than one person watching something.
+  useEffect(() => {
+    setPresence(syncState.ratingKey ? syncState.title : null);
+  }, [syncState.ratingKey, syncState.title, setPresence]);
+
+  // Warm the player chunk in the background as soon as the app is idle. Nobody
+  // opens this activity without eventually playing something, so the only
+  // question is whether the download happens now, off the critical path, or at
+  // the moment they press play.
+  useEffect(() => {
+    if (!isReady) return;
+    const preload = () => void import("./components/Player");
+    // requestIdleCallback isn't in older Safari, which Discord's mobile webview
+    // has shipped; a short timer is close enough and always available.
+    const canIdle = typeof window.requestIdleCallback === "function";
+    const handle = canIdle
+      ? window.requestIdleCallback(preload, { timeout: 4000 })
+      : window.setTimeout(preload, 1500);
+    return () => {
+      if (canIdle) window.cancelIdleCallback(handle);
+      else window.clearTimeout(handle);
+    };
+  }, [isReady]);
 
   // Persist active library section across navigation
   const [librarySection, setLibrarySection] = useState<string | null>(null);
@@ -625,6 +667,25 @@ export function App() {
         <div style={styles.promotedToast}>You are now the host</div>
       )}
 
+      {/* Sync is down while browsing.
+          The player has always said so; out here there was nothing at all, so a
+          dropped socket looked exactly like a quiet room — you could browse,
+          pick something, and only then discover nobody had seen any of it. */}
+      {view.kind !== "player" && (syncState.authFailed || syncState.reconnectFailed) && (
+        <div style={styles.connectionBanner} role="status">
+          <span>
+            {syncState.authFailed
+              ? "Session expired — close and reopen the activity to continue"
+              : "Disconnected from the watch party"}
+          </span>
+          {!syncState.authFailed && (
+            <button style={styles.connectionRetryBtn} onClick={() => syncActions.retryConnection()}>
+              Reconnect
+            </button>
+          )}
+        </div>
+      )}
+
       {/* People & roles — role controls inside are host-gated */}
       {showPeoplePanel && (
         <PeoplePanel
@@ -825,6 +886,10 @@ export function App() {
           }
           onReset={popView}
         >
+          {/* Black with the same spinner playback itself uses, so a cold chunk
+              load is indistinguishable from the buffering that follows it —
+              and after the idle preload above, it is almost never seen. */}
+          <Suspense fallback={<div style={styles.playerLoading}><div style={styles.playerSpinner} /></div>}>
           <Player
             item={view.item}
             isHost={effectiveIsHost}
@@ -841,6 +906,7 @@ export function App() {
             syncActions={syncActions}
             onPlayNext={handlePlayNext}
           />
+          </Suspense>
         </ErrorBoundary>
       )}
     </div>
@@ -1085,6 +1151,48 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     zIndex: 1000,
     pointerEvents: "none",
+  },
+  playerLoading: {
+    position: "fixed",
+    inset: 0,
+    background: "#000",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 50,
+  },
+  playerSpinner: {
+    width: "48px",
+    height: "48px",
+    border: "3px solid rgba(229,160,13,0.3)",
+    borderTopColor: "#e5a00d",
+    borderRadius: "50%",
+    animation: "spin 1s linear infinite",
+  },
+  connectionBanner: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "12px",
+    // Amber rather than red: nothing is broken, and browsing still works — the
+    // room just can't see you yet.
+    background: "rgba(230, 126, 34, 0.16)",
+    borderBottom: "1px solid rgba(230,126,34,0.35)",
+    color: "#e8a765",
+    padding: "9px 16px",
+    fontSize: "13px",
+    fontWeight: 600,
+  },
+  connectionRetryBtn: {
+    padding: "3px 12px",
+    borderRadius: "999px",
+    border: "1px solid rgba(230,126,34,0.55)",
+    background: "transparent",
+    color: "#e8a765",
+    fontSize: "12px",
+    fontWeight: 700,
+    cursor: "pointer",
+    fontFamily: "inherit",
   },
   nowPlayingBanner: {
     display: "flex",

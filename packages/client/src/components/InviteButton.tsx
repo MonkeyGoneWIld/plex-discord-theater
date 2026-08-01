@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 interface InviteButtonProps {
   /** Opens Discord's invite dialog. Resolves false when it couldn't be shown. */
@@ -22,16 +22,26 @@ export function InviteButton({ onInvite }: InviteButtonProps) {
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const noteTimer = useRef<number | undefined>(undefined);
+  // The dialog can outlive this component (closing the people panel while it is
+  // open), and both timers below would then fire into an unmounted tree.
+  const aliveRef = useRef(true);
+  useEffect(() => () => {
+    aliveRef.current = false;
+    if (noteTimer.current) window.clearTimeout(noteTimer.current);
+  }, []);
 
   const handle = useCallback(async () => {
     if (busy) return;
     setBusy(true);
     const opened = await onInvite();
+    if (!aliveRef.current) return;
     setBusy(false);
     if (opened) return;
     setNote("Can't invite here");
     if (noteTimer.current) window.clearTimeout(noteTimer.current);
-    noteTimer.current = window.setTimeout(() => setNote(null), 2600);
+    noteTimer.current = window.setTimeout(() => {
+      if (aliveRef.current) setNote(null);
+    }, 2600);
   }, [busy, onInvite]);
 
   return (

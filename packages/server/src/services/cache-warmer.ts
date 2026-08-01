@@ -59,11 +59,17 @@ async function libraryRatingKeys(): Promise<string[]> {
 }
 
 /**
- * Session the warmer authenticates with, minted once per process.
+ * Session the warmer authenticates with.
  *
  * /api/plex sits behind requireAuth, and these requests carried no credentials
  * at all — so every one answered 401 while the pass counted it a success and
  * reported "cached 600/600". None of the collections half was ever warmed.
+ *
+ * Minted lazily and re-minted on a 401, because sessions expire after 24h
+ * (SESSION_TTL_MS in middleware/auth.ts) and this process outlives that. A
+ * token cached for the life of the process meant the warmer worked for one day
+ * and then quietly 401'd forever — the same failure it was just fixed for,
+ * arriving a day late.
  */
 let warmerToken: string | null = null;
 function getWarmerToken(): string {
@@ -84,9 +90,19 @@ function getWarmerToken(): string {
  */
 async function warmRelated(port: number, ratingKey: string): Promise<void> {
   if (getRelatedCached(ratingKey)) return;
-  const res = await fetch(`http://127.0.0.1:${port}/api/plex/collections/${ratingKey}`, {
-    headers: { Authorization: `Bearer ${getWarmerToken()}` },
-  });
+
+  const call = () =>
+    fetch(`http://127.0.0.1:${port}/api/plex/collections/${ratingKey}`, {
+      headers: { Authorization: `Bearer ${getWarmerToken()}` },
+    });
+
+  let res = await call();
+  // Expired (or evicted) session — mint a new one and try once more.
+  if (res.status === 401) {
+    await res.arrayBuffer().catch(() => undefined);
+    warmerToken = null;
+    res = await call();
+  }
   // Drain the body so the socket is released promptly.
   await res.arrayBuffer().catch(() => undefined);
   if (!res.ok) throw new Error(`collections warm failed: ${res.status}`);

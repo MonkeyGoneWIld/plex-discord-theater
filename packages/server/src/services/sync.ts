@@ -406,15 +406,22 @@ export function attachWebSocketServer(server: Server): void {
       alive = true;
     });
 
-    ws.on("message", (raw: RawData) => {
-      let msg: Record<string, unknown>;
+    const handleMessage = (raw: RawData) => {
+      let parsed: unknown;
       try {
-        msg = JSON.parse(raw.toString());
+        parsed = JSON.parse(raw.toString());
       } catch {
         return;
       }
+      // JSON.parse succeeds on `null`, `5` and `"hi"` as readily as on an
+      // object. Reading `.type` off the first of those throws a TypeError —
+      // which, before the wrapper below, meant any authenticated client could
+      // end the whole server (and every watch party on it) by sending the four
+      // characters `null`.
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+      const msg = parsed as Record<string, unknown>;
 
-      const type = msg.type as string;
+      const type = typeof msg.type === "string" ? msg.type : "";
 
       // First message must be join
       if (type === "join") {
@@ -589,10 +596,25 @@ export function attachWebSocketServer(server: Server): void {
           // so this isn't an escalation, but the title is echoed to the whole
           // room and hlsSessionId ends up in a Plex query parameter, and this
           // was the one place taking either on trust.
+          //
+          // A malformed message is DROPPED rather than applied with nulls.
+          // Writing null into room state here is indistinguishable from a stop:
+          // it clears what everyone is watching and broadcasts a "play" with
+          // nothing to play, which is a worse outcome than ignoring the message
+          // and leaving the room exactly as it was.
           const rk = typeof msg.ratingKey === "string" && /^\d+$/.test(msg.ratingKey)
             ? msg.ratingKey : null;
           const sid = typeof msg.hlsSessionId === "string" && UUID_RE.test(msg.hlsSessionId)
             ? msg.hlsSessionId : null;
+          if (!rk || !sid) {
+            logEvent("Sync", "ignoring malformed play", {
+              room: roomId.substring(0, 8),
+              from: client.username ?? client.userId,
+              badRatingKey: !rk,
+              badSessionId: !sid,
+            });
+            break;
+          }
           room.state.ratingKey = rk;
           room.state.title =
             typeof msg.title === "string" ? msg.title.slice(0, 500) : null;
@@ -602,7 +624,7 @@ export function attachWebSocketServer(server: Server): void {
           room.state.position = startPosition;
           room.state.updatedAt = Date.now();
           room.state.browseContext = null;
-          if (room.state.hlsSessionId) startRoomPing(roomId, room.state.hlsSessionId);
+          startRoomPing(roomId, sid);
           broadcast(room, ws, {
             type: "play",
             ratingKey: room.state.ratingKey,
@@ -814,6 +836,28 @@ export function attachWebSocketServer(server: Server): void {
           }
           break;
         }
+      }
+    };
+
+    /**
+     * Nothing thrown while handling one client's message may be allowed to
+     * reach the emitter.
+     *
+     * `ws` emits synchronously, so an exception in the handler above escapes as
+     * an uncaughtException — and services/logger.ts deliberately rethrows those
+     * to preserve Node's default crash behaviour. One malformed message, or one
+     * socket dying at an awkward moment, would therefore take down every room
+     * on the server rather than the one connection that caused it.
+     */
+    ws.on("message", (raw: RawData) => {
+      try {
+        handleMessage(raw);
+      } catch (err) {
+        logEvent("Sync", "message handler threw", {
+          room: roomId?.substring(0, 8) ?? "none",
+          user: client?.userId ?? "unauthenticated",
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     });
 

@@ -98,12 +98,19 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-/** Requests originating on this machine — the cache warmer, which calls our own
- *  routes over loopback. A full pass is 600 requests against a 600-request
- *  budget, so without this it rate-limits itself out halfway through. Not
- *  spoofable: this is the socket's peer address, not a header. */
-function isLoopback(req: { ip?: string; socket: { remoteAddress?: string | null } }): boolean {
-  const addr = req.ip || req.socket.remoteAddress || "";
+/**
+ * Requests originating on this machine — the cache warmer, which calls our own
+ * routes over loopback. A full pass is 600 requests against a 600-request
+ * budget, so without this it rate-limits itself out halfway through.
+ *
+ * Deliberately reads `req.socket.remoteAddress` and NOT `req.ip`. With
+ * `trust proxy` set, `req.ip` is derived from the X-Forwarded-For *header*, so
+ * an exposed deployment could be handed `X-Forwarded-For: 127.0.0.1` and skip
+ * the rate limiter entirely. The socket's peer address is the kernel's answer
+ * and cannot be set by a client.
+ */
+function isLoopback(req: { socket: { remoteAddress?: string | null } }): boolean {
+  const addr = req.socket.remoteAddress ?? "";
   return addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1";
 }
 
@@ -164,6 +171,42 @@ app.use("/api", (req, res, next) => {
   return apiLimiter(req, res, next);
 });
 
+/**
+ * GET /api/health
+ *
+ * Reports whether the thing this server exists to proxy is actually reachable.
+ * The container HEALTHCHECK used to hit `/`, which express.static answers from
+ * disk without involving Plex at all — so the container stayed green through a
+ * total Plex outage and the status meant nothing.
+ *
+ * Unauthenticated on purpose (Docker's health probe has no session) but it
+ * reveals nothing beyond up/down, and the result is cached so a probe every 30s
+ * can't turn into a Plex request every 30s per prober.
+ */
+let healthAt = 0;
+let healthOk = false;
+const HEALTH_TTL_MS = 20_000;
+
+app.get("/api/health", async (_req, res) => {
+  const now = Date.now();
+  if (now - healthAt > HEALTH_TTL_MS) {
+    try {
+      const { plexFetch } = await import("./services/plex.js");
+      const probe = await plexFetch("/identity");
+      probe.body?.cancel().catch(() => {});
+      healthOk = probe.ok;
+    } catch {
+      healthOk = false;
+    }
+    healthAt = now;
+  }
+  res.status(healthOk ? 200 : 503).json({
+    status: healthOk ? "ok" : "degraded",
+    plex: healthOk ? "reachable" : "unreachable",
+    uptimeS: Math.round(process.uptime()),
+  });
+});
+
 app.use("/api", discordRoutes);
 app.use("/api/plex", requireAuth, plexRoutes);
 app.use("/api/seerr", requireAuth, seerrRoutes);
@@ -181,8 +224,39 @@ app.get("*", (req, res) => {
   res.sendFile(path.join(clientDist, "index.html"));
 });
 
+/**
+ * Say which optional integrations are actually on.
+ *
+ * Every one of these fails *silently* when unconfigured — no ratings row, no
+ * collection or recommendation rows, no request button, Discover detail 401s —
+ * and each one has been mistaken for a bug at some point. One line at startup
+ * turns "why is this row empty" into something you can answer by reading the
+ * log you already have.
+ */
+function reportIntegrations(): void {
+  const on = (name: string, enabled: boolean, note = "") =>
+    `${enabled ? "✓" : "·"} ${name}${enabled || !note ? "" : ` (${note})`}`;
+  console.log(
+    "[Config]",
+    [
+      on("TMDB", !!process.env.TMDB_API_KEY, "no collections / recommendations / person pages"),
+      on("Ratings", !!process.env.MDBLIST_API_KEY?.trim(), "ratings row hidden"),
+      on("Requests", !!process.env.SEERR_URL, "Seerr request flow off"),
+      on("Discover", !!process.env.PLEX_ACCOUNT_TOKEN, "online search detail may 401"),
+      on("VPS relay", !!(process.env.VPS_RELAY_URL && process.env.VPS_RELAY_KEY), "P2P mode"),
+      on("Guild allowlist", allowedGuildCount > 0, "open to any Discord server"),
+    ].join("   "),
+  );
+}
+
+const allowedGuildCount = (process.env.ALLOWED_GUILD_IDS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean).length;
+
 const server = app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
+  reportIntegrations();
   // Pre-fill the detail-page caches (metadata, cast, collections, related) in
   // the background so opening a title doesn't wait on Plex and TMDB. Started
   // from the listen callback because it calls back into our own HTTP port.

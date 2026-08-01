@@ -78,13 +78,29 @@ stutter *was* this.
 ### The kill-everything endpoint was open
 
 `DELETE /api/plex/hls/sessions` stops every transcode this app has running. It
-was gated on `NODE_ENV !== "production" || matching ADMIN_SECRET` — and this
-deployment does not set `NODE_ENV`, which its own logs prove: 6,734 `[HLS seg]
-Fetching` lines that only exist under `DEBUG`. So the escape hatch was wide open
-to any authenticated viewer: one request, every stream in every room dead.
+was gated on `NODE_ENV !== "production" || matching ADMIN_SECRET`, which makes
+the escape hatch wide open to any authenticated viewer on any deployment that
+doesn't set `NODE_ENV`: one request, every stream in every room dead.
 
-Verified rather than argued — pre-fix build, no `NODE_ENV`, ordinary session
-token, request from a non-loopback address:
+**Correction to an earlier draft of this section.** It claimed the logs prove
+this deployment doesn't set `NODE_ENV`. They don't. What they show is 6,734
+`[HLS seg] Fetching` lines, and the flag behind those is
+
+```js
+const DEBUG = process.env.DEBUG === "1" || process.env.NODE_ENV !== "production";
+```
+
+— so they establish `DEBUG=1` **or** a missing `NODE_ENV`, and nothing
+distinguishes the two from outside. The shipped `Dockerfile` and
+`docker-compose.yml` both set `NODE_ENV=production`, which makes `DEBUG=1` the
+likelier of the two for anyone using them. `docker exec <container> env | grep
+-E 'NODE_ENV|DEBUG'` settles it.
+
+The fix below stands either way, and is worth having on a deployment that *is*
+configured correctly: it removes the dependency on that being true.
+
+Verified rather than argued — pre-fix build with `NODE_ENV` unset, ordinary
+session token, request from a non-loopback address:
 
 ```
 PRE-FIX : HTTP 502   ← passed the gate, went on to call Plex
@@ -93,12 +109,13 @@ FIXED   : HTTP 403   ← refused, and logged
 
 The gate is now positive: the request either comes from this machine or carries
 `ADMIN_SECRET`. Nothing about it depends on an environment variable being set
-correctly, because the deployment that forgets `NODE_ENV` is exactly the one
-that shouldn't be trusted with it.
+correctly, because a deployment that forgets `NODE_ENV` is exactly the one that
+shouldn't be trusted with it.
 
-> `NODE_ENV=production` is still worth setting on that deployment — it also
-> selects the production rate limits (600/15min instead of 5,000) and stops the
-> per-segment logging. That is a deployment change, not a code one.
+> Everything else `NODE_ENV=production` selects is worth having regardless: the
+> production rate limits (600 API requests per 15 minutes instead of 5,000, 20
+> auth attempts instead of 200), no per-segment logging, and Express keeping
+> stack traces out of error responses. All deployment configuration, not code.
 
 ### Rich Presence has never worked
 

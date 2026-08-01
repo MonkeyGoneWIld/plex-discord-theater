@@ -16,7 +16,7 @@ import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
 import type { PlexItem, SkipMarker } from "../lib/api";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
-import type { ShareResult } from "../hooks/useDiscord";
+import type { InviteResult } from "../hooks/useDiscord";
 
 const PING_INTERVAL_MS = 10_000; // 10s — matches Plex API recommendation for LAN timeline updates
 const HEARTBEAT_INTERVAL_MS = 5_000;
@@ -286,8 +286,8 @@ interface PlayerProps {
   /** Where an episode goes when it finishes, or when the end card is dismissed:
    *  the show's page. Omit to fall back to a plain back. */
   onFinished?: (item: PlexItem) => void;
-  /** Opens Discord's share modal (the people picker). Omit to hide the button. */
-  onInvite?: () => Promise<ShareResult>;
+  /** Opens Discord's invite dialog for this activity's channel. Omit to hide. */
+  onInvite?: () => Promise<InviteResult>;
   syncState?: SyncState;
   syncActions?: SyncActions;
   onPlayNext?: (item: QueueItem) => void;

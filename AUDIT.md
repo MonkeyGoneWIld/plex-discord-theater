@@ -98,6 +98,19 @@ lookup retries once on a 429, honouring `Retry-After`.
 
 ### D. End-user improvements
 
+> **A change that was tried and reverted.** The Invite button was briefly
+> switched from `openInviteDialog` to `shareLink`, to get away from a picker
+> that lists text channels. It made things worse and was reverted. The two
+> commands are not interchangeable: `openInviteDialog` creates an invite *to
+> the voice channel*, so whoever accepts lands in the same activity instance —
+> the same room, in sync. `shareLink` shares a *URL*, which launches the
+> activity wherever it is opened, so an invited friend ends up alone in a
+> separate watch party. It also turned out not to be a people-only picker
+> anyway; it lists channels too. Discord decides what that dialog shows and
+> there is no SDK command that both restricts it to people and preserves the
+> instance. Correct beats prettier. Recorded here so it doesn't get "fixed"
+> again.
+
 **D1. The initial download is 61% smaller.** hls.js, p2p-media-loader,
 bittorrent-tracker and the Node polyfills are the bulk of this app's JavaScript
 and none of it is needed until someone actually watches something — but it all
@@ -137,23 +150,7 @@ fails silently when unconfigured, and each has been mistaken for a bug:
          · VPS relay (P2P mode)   · Guild allowlist (open to any Discord server)
 ```
 
-**D6. Invite opens the people picker, not a channel list.** The Invite button
-called `openInviteDialog`, which Discord documents as *"a modal dialog with
-Channel Invite UI"* — so it offered text channels and bots to post a link into,
-when the thing anyone wants from an Invite button in a watch party is to pick
-the person they want to watch with. `shareLink` is the command that opens the
-friends-and-DMs picker; it needs no extra scope, and it carries a message, so
-the invite now says what the room is actually watching.
-
-The two also fail differently, which the old boolean return collapsed:
-`openInviteDialog` throws when it can't open, while `shareLink` resolves
-`success: false` when the user simply *closes* the modal. Reported through one
-boolean, every dismissal would have shown "Can't invite here". The result is now
-a three-way union — shared / dismissed / unavailable — handled distinctly. The
-button is also no longer hidden in DM calls, where sharing a link works fine and
-the old channel-invite genuinely had nothing to offer.
-
-**D7. One less thing on the consent screen.** `rpc.voice.read` was requested at
+**D6. One less thing on the consent screen.** `rpc.voice.read` was requested at
 launch and never read by anything. Dropped; `identify` and `guilds` remain, and
 `guilds` now does real work.
 

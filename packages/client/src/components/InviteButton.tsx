@@ -1,29 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ShareResult } from "../hooks/useDiscord";
+import type { InviteResult } from "../hooks/useDiscord";
 
 interface InviteButtonProps {
-  /** Opens Discord's share modal — the people picker — with a message
-   *  describing what the room is doing. See useDiscord.shareActivity. */
-  onInvite: () => Promise<ShareResult>;
+  /** Opens Discord's invite dialog for this activity's channel.
+   *  See useDiscord.openInvite for why it is that command and not shareLink. */
+  onInvite: () => Promise<InviteResult>;
 }
 
 /**
- * "Invite" — hands off to Discord's own share modal.
+ * "Invite" — hands off to Discord's own invite dialog.
  *
  * Two homes, one look: the browsing header, and the people panel during
  * playback. It isn't in the control bar — that sits over the film, where every
  * pixel competes with it, and "who else is here" is already this panel's job.
  *
- * Discord owns everything past the tap: who is listed, what the message looks
- * like, and whether anything is sent. So the three outcomes get three
- * different treatments, which is the point of ShareResult being a union rather
- * than a boolean:
- *
- *   shared      — say so briefly. The modal closes and, without a word here,
- *                 nothing on screen changes, which reads as "did that work?"
- *   dismissed   — say nothing. Closing a modal you opened is not a failure and
- *                 telling someone it was is worse than staying quiet.
- *   unavailable — a quiet note. Rare, and never the user's fault.
+ * Discord owns everything past the tap: who is listed, what the invite looks
+ * like, and whether it is sent. We only learn whether the dialog opened, so
+ * there is nothing to confirm on success — claiming "invite sent" would be
+ * asserting something we do not know. The failure note stays quiet too: the
+ * usual cause is lacking Create Invite in the channel, which is the server's
+ * decision and not worth alarming anyone about.
  */
 export function InviteButton({ onInvite }: InviteButtonProps) {
   const [note, setNote] = useState<string | null>(null);
@@ -51,9 +47,7 @@ export function InviteButton({ onInvite }: InviteButtonProps) {
     const result = await onInvite();
     if (!aliveRef.current) return;
     setBusy(false);
-    if (result === "shared") showNote("Invite sent");
-    else if (result === "unavailable") showNote("Can't invite from here");
-    // "dismissed" — they closed it themselves; nothing to report.
+    if (result === "unavailable") showNote("Can't invite from here");
   }, [busy, onInvite, showNote]);
 
   return (

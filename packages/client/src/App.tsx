@@ -72,7 +72,7 @@ function isFlatView(v: View): boolean {
 }
 
 export function App() {
-  const { isReady, isHost, userId, username, instanceId, error, canInvite, shareActivity, setPresence } =
+  const { isReady, isHost, userId, username, instanceId, error, canInvite, openInvite, setPresence } =
     useDiscord();
   const [viewStack, setViewStack] = useState<View[]>([{ kind: "library" }]);
   const view = viewStack[viewStack.length - 1];
@@ -86,33 +86,25 @@ export function App() {
 
   const effectiveIsHost = syncState.isHost ?? isHost;
 
-  // Toast when promoted to host
+  // Toast when promoted to host.
+  //
+  // Only on a genuine false → true handover. `null` is the third state and it
+  // means "we don't know our role yet", which is where every client starts:
+  // once the join reply began carrying isHost from the roster, null → true
+  // became the *normal* opening move for whoever launched the activity, and
+  // they were congratulated on becoming the host of a room they had just
+  // opened. Starting something is not being handed it.
   const [promotedToast, setPromotedToast] = useState(false);
   const prevSyncIsHost = useRef(syncState.isHost);
   useEffect(() => {
     const prev = prevSyncIsHost.current;
     prevSyncIsHost.current = syncState.isHost;
-    if (syncState.isHost === true && prev !== true) {
+    if (syncState.isHost === true && prev === false) {
       setPromotedToast(true);
       const timer = setTimeout(() => setPromotedToast(false), 2000);
       return () => clearTimeout(timer);
     }
   }, [syncState.isHost]);
-
-  /**
-   * Share this activity with someone, saying what the room is up to.
-   *
-   * Discord shows this message next to the link, so it is the whole of what a
-   * friend sees before deciding whether to join — "come watch something" and
-   * "we are 20 minutes into Interstellar" are very different invitations.
-   * Sourced from room state so it says the same thing whoever sends it.
-   */
-  const handleInvite = useCallback(() => {
-    const playing = syncState.ratingKey ? syncState.title : null;
-    return shareActivity(
-      playing ? `Watching ${playing} — come join` : "Come watch something with me",
-    );
-  }, [shareActivity, syncState.ratingKey, syncState.title]);
 
   // Keep Discord's member list honest about what this person is doing.
   // Sourced from room state rather than the local view, so every participant
@@ -650,7 +642,7 @@ export function App() {
             {/* Sits with the roster rather than inside it: inviting is about
                 who isn't here yet, which is the same question the people
                 button answers from the other side. */}
-            {canInvite && <InviteButton onInvite={handleInvite} />}
+            {canInvite && <InviteButton onInvite={openInvite} />}
             <span style={styles.userName}>
               {username} {effectiveIsHost ? "(Host)" : "(Viewer)"}
               {!effectiveIsHost && syncState.connected && " • Synced"}
@@ -916,7 +908,7 @@ export function App() {
             // just ended. Same rebuild the in-page show breadcrumb uses, so the
             // trail reads Home › Show rather than keeping the player's ancestry.
             onFinished={handleEpisodeShowClick}
-            onInvite={canInvite ? handleInvite : undefined}
+            onInvite={canInvite ? openInvite : undefined}
             syncState={syncState}
             syncActions={syncActions}
             onPlayNext={handlePlayNext}

@@ -3,16 +3,14 @@ import { useCallback, useRef, useState } from "react";
 interface InviteButtonProps {
   /** Opens Discord's invite dialog. Resolves false when it couldn't be shown. */
   onInvite: () => Promise<boolean>;
-  /** "header" sits in the browsing chrome; "player" sits over the video, where
-   *  the surrounding controls are darker and slightly larger. */
-  variant?: "header" | "player";
-  /** Hide the label and show the icon alone — for the player's crowded top bar
-   *  on a narrow window. */
-  compact?: boolean;
 }
 
 /**
  * "Invite to Activity" — hands off to Discord's own invite dialog.
+ *
+ * Two homes, one look: the browsing header, and the people panel during
+ * playback. It isn't in the control bar — that sits over the film, where every
+ * pixel competes with it, and "who else is here" is already this panel's job.
  *
  * Discord owns the whole flow once the dialog opens: who can be invited, what
  * the invite looks like, and whether the user has permission to create one.
@@ -20,7 +18,7 @@ interface InviteButtonProps {
  * common reason is simply lacking Create Invite in the channel, which is the
  * server's decision and not something to alarm anyone about.
  */
-export function InviteButton({ onInvite, variant = "header", compact = false }: InviteButtonProps) {
+export function InviteButton({ onInvite }: InviteButtonProps) {
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const noteTimer = useRef<number | undefined>(undefined);
@@ -36,14 +34,12 @@ export function InviteButton({ onInvite, variant = "header", compact = false }: 
     noteTimer.current = window.setTimeout(() => setNote(null), 2600);
   }, [busy, onInvite]);
 
-  const style = variant === "player" ? styles.player : styles.header;
-
   return (
     <div style={styles.wrap}>
       <button
         type="button"
         onClick={handle}
-        style={style}
+        style={styles.button}
         title="Invite people to this Activity"
         aria-label="Invite people to this Activity"
         onMouseEnter={(e) => (e.currentTarget.style.borderColor = "rgba(229,160,13,0.75)")}
@@ -57,7 +53,7 @@ export function InviteButton({ onInvite, variant = "header", compact = false }: 
           <path d="M12.6 5.4v4.2M14.7 7.5h-4.2" stroke="currentColor"
             strokeWidth="1.5" strokeLinecap="round" />
         </svg>
-        {!compact && <span>Invite</span>}
+        <span>Invite</span>
       </button>
       {note && <div style={styles.note}>{note}</div>}
     </div>
@@ -80,18 +76,11 @@ const base: React.CSSProperties = {
 
 const styles: Record<string, React.CSSProperties> = {
   wrap: { position: "relative", display: "inline-flex" },
-  header: {
+  button: {
     ...base,
     padding: "7px 13px",
     fontSize: "13px",
     background: "rgba(255,255,255,0.06)",
-  },
-  player: {
-    ...base,
-    padding: "8px 14px",
-    fontSize: "13px",
-    // Darker, because this sits over video rather than over the page.
-    background: "rgba(0,0,0,0.55)",
   },
   note: {
     position: "absolute",

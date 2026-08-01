@@ -2,7 +2,6 @@ import { useState, useCallback, useRef, useEffect, useImperativeHandle } from "r
 import { authUrl } from "../lib/api";
 import { loadVolume } from "../lib/volume";
 import { useMediaQuery, COMPACT_CONTROLS_QUERY } from "../lib/useMediaQuery";
-import { InviteButton } from "./InviteButton";
 
 export interface ControlsHandle {
   /**
@@ -42,8 +41,6 @@ interface ControlsProps {
   /** Click on the empty picture area (not a control) — used for click-to-pause.
    *  Omit for a viewer without transport control. */
   onSurfaceClick?: () => void;
-  /** Opens Discord's invite dialog. Omit where there's nothing to invite to. */
-  onInvite?: () => Promise<boolean>;
   /** Where a restart-in-progress is heading, in seconds, or null when playback
    *  is settled. A transcode restart detaches the media and the element reports
    *  0 until the replacement loads, which snapped the bar back to the start
@@ -133,7 +130,6 @@ export function Controls({
   onToggleMute,
   onOpenTrackSwitcher,
   onSurfaceClick,
-  onInvite,
   restartingTo = null,
   onToggleStats,
   statsActive,
@@ -682,13 +678,6 @@ export function Controls({
           Back
         </button>
         <span style={styles.title}>{title}</span>
-        {/* Pushed to the far end so it never crowds the title, and icon-only on
-            a narrow window where the title needs the room. */}
-        {onInvite && (
-          <div style={{ marginLeft: "auto", flexShrink: 0 }}>
-            <InviteButton onInvite={onInvite} variant="player" compact={compact} />
-          </div>
-        )}
       </div>
 
       {/* Bottom bar */}

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Participant } from "../hooks/useSync";
+import { InviteButton } from "./InviteButton";
 
 interface PeoplePanelProps {
   participants: Participant[];
@@ -9,6 +10,9 @@ interface PeoplePanelProps {
   isHost: boolean;
   onPromoteHost: (userId: string) => void;
   onSetCoHost: (userId: string, value: boolean) => void;
+  /** Opens Discord's invite dialog. Omit where there's nothing to invite to,
+   *  or where the surface already offers it elsewhere (the browsing header). */
+  onInvite?: () => Promise<boolean>;
   onClose: () => void;
 }
 
@@ -24,6 +28,7 @@ export function PeoplePanel({
   isHost,
   onPromoteHost,
   onSetCoHost,
+  onInvite,
   onClose,
 }: PeoplePanelProps) {
   // Handing over the host role loses you all control, so it takes two taps.
@@ -93,6 +98,15 @@ export function PeoplePanel({
           })}
         </div>
 
+        {/* Inviting lives here during playback rather than in the control bar:
+            this panel is already the "who's in the room" surface, and the bar
+            over the video is where every pixel competes with the film. */}
+        {onInvite && (
+          <div style={styles.inviteRow}>
+            <InviteButton onInvite={onInvite} />
+          </div>
+        )}
+
         {isHost && (
           <p style={styles.hint}>
             Co-hosts can play, pause and seek. Making someone host hands over full
@@ -122,5 +136,6 @@ const styles: Record<string, React.CSSProperties> = {
   revokeBtn: { padding: "4px 8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#888", fontSize: "11px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
   promoteBtn: { padding: "4px 8px", borderRadius: "6px", border: "1px solid rgba(229,160,13,0.4)", background: "transparent", color: "#e5a00d", fontSize: "11px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
   confirmBtn: { padding: "4px 8px", borderRadius: "6px", border: "none", background: "#e5a00d", color: "#000", fontSize: "11px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
+  inviteRow: { padding: "12px 16px", borderTop: "1px solid rgba(255,255,255,0.06)" },
   hint: { color: "#666", fontSize: "11px", lineHeight: 1.5, padding: "12px 16px 16px", borderTop: "1px solid rgba(255,255,255,0.06)" },
 };

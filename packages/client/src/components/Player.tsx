@@ -2478,7 +2478,6 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         onSeekRestart={canControl ? handleSeekCommand : undefined}
         onOpenTrackSwitcher={canControl ? () => setShowTrackSwitcher(true) : undefined}
         onSurfaceClick={canControl ? togglePlayPause : undefined}
-        onInvite={onInvite}
         restartingTo={restartingTo}
         queueCount={syncState?.queue?.length}
         onOpenQueue={isHost ? () => setShowQueuePanel(true) : undefined}
@@ -2530,6 +2529,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             setShowPeoplePanel(false);
           }}
           onSetCoHost={(uid, value) => syncActions?.sendSetCoHost(uid, value)}
+          onInvite={onInvite}
           onClose={() => setShowPeoplePanel(false)}
         />
       )}

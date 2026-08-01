@@ -19,13 +19,23 @@ interface DiscordState {
    * dismissing it — so the caller can say so rather than appear to do nothing.
    */
   openInvite: () => Promise<boolean>;
+  /**
+   * Update what Discord shows this user as doing.
+   *
+   * Pass the title while something is playing, or null while browsing. Discord
+   * renders it under the activity name in the member list and on the profile,
+   * which for a watch-together activity is most of the point — and it was set
+   * once at startup and then never again, so it said "Browsing the library" for
+   * the whole session including two hours into a film.
+   */
+  setPresence: (nowPlaying: string | null) => void;
 }
 
 const CLIENT_ID = import.meta.env.VITE_DISCORD_CLIENT_ID as string;
 
 export function useDiscord(): DiscordState {
   const [state, setState] = useState<
-    Omit<DiscordState, "openInvite" | "canInvite"> & { canInvite: boolean }
+    Omit<DiscordState, "openInvite" | "setPresence" | "canInvite"> & { canInvite: boolean }
   >({
     isReady: false,
     isHost: false,
@@ -39,6 +49,36 @@ export function useDiscord(): DiscordState {
   // Held so the invite command can be issued long after init — the SDK is
   // otherwise scoped to the effect below.
   const sdkRef = useRef<DiscordSDK | null>(null);
+
+  // Last presence we sent, so repeated renders with the same title don't turn
+  // into a stream of RPC calls.
+  const presenceRef = useRef<string | null>(null);
+  const presenceReadyRef = useRef(false);
+
+  const setPresence = useCallback((nowPlaying: string | null): void => {
+    const sdk = sdkRef.current;
+    if (!sdk || !presenceReadyRef.current) return;
+    const state = nowPlaying ? `Watching ${nowPlaying}` : "Browsing the library";
+    if (presenceRef.current === state) return;
+    presenceRef.current = state;
+    // type 3 = Watching (same enum as bot Gateway presences).
+    sdk.commands
+      .setActivity({
+        activity: {
+          type: 3,
+          details: "Watch Together",
+          // Discord caps this at 128 characters and rejects the whole payload
+          // over it, which a long "Show — S1E1 · Episode Title" can reach.
+          state: state.slice(0, 128),
+        },
+      })
+      .catch((err: unknown) => {
+        // Presence is decoration; a rejection must never surface to the user.
+        logEvent("Discord", "setActivity failed", {
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      });
+  }, []);
 
   const openInvite = useCallback(async (): Promise<boolean> => {
     const sdk = sdkRef.current;
@@ -74,7 +114,13 @@ export function useDiscord(): DiscordState {
           response_type: "code",
           state: "",
           prompt: "none",
-          scope: ["identify", "guilds", "rpc.voice.read"],
+          // identify — who the user is, bound to their session server-side.
+          // guilds  — which servers they are in, checked against
+          //           ALLOWED_GUILD_IDS at /register (see routes/discord.ts).
+          // Nothing else is asked for. "rpc.voice.read" used to be here and was
+          // never read by anything; every unused scope is one more line on the
+          // consent screen someone has to accept before they can watch.
+          scope: ["identify", "guilds"],
         });
 
         const { access_token, session_token } = await apiPost<{
@@ -120,18 +166,9 @@ export function useDiscord(): DiscordState {
         // Rich Presence: without this, Discord shows members as "Playing"
         // this Activity by default. type: 3 = Watching (same enum as bot
         // Gateway presences: 0 Playing, 1 Streaming, 2 Listening, 3 Watching).
-        try {
-          await sdk.commands.setActivity({
-            activity: {
-              type: 3,
-              details: "Watch Together",
-              state: "Browsing the library",
-            },
-          });
-        } catch (activityErr) {
-          // Non-fatal — app still works if Rich Presence can't be set
-          console.warn("setActivity failed:", activityErr);
-        }
+        // Kept current from here on by setPresence — see App.tsx.
+        presenceReadyRef.current = true;
+        setPresence(null);
 
         setState({
           isReady: true,
@@ -157,5 +194,5 @@ export function useDiscord(): DiscordState {
     init();
   }, []);
 
-  return { ...state, openInvite };
+  return { ...state, openInvite, setPresence };
 }

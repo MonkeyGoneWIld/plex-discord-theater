@@ -7,8 +7,25 @@ import fs from "node:fs";
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const MAX_SESSIONS = 10_000;
 
+/**
+ * How much of the TTL may elapse before a still-active session's clock is
+ * pushed forward. Renewing on literally every request would mean a SQLite write
+ * per request; renewing once an hour costs nothing and means a session only
+ * expires after 24h of genuine inactivity.
+ */
+const SESSION_RENEW_AFTER_MS = 60 * 60 * 1000; // 1 hour
+
+interface SessionEntry {
+  createdAt: number;
+  userId: string | null;
+  /** Guild ids Discord confirmed this user is a member of, from /users/@me/guilds
+   *  at token-exchange time. Null when the lookup failed or the scope was denied,
+   *  which callers must treat as "unverified", not as "no guilds". */
+  guildIds: string[] | null;
+}
+
 // Hot cache — avoids SQLite reads on every request
-const sessionCache = new Map<string, { createdAt: number; userId: string | null }>();
+const sessionCache = new Map<string, SessionEntry>();
 
 // SQLite persistence — survives server restarts
 const dbDir = process.env.THUMB_CACHE_DIR
@@ -28,28 +45,61 @@ db.exec(`
     created_at INTEGER NOT NULL
   )
 `);
+// Idempotent migration for databases created before guild verification existed.
+// Same pattern as routes/discord.ts and services/watch-history.ts: new installs
+// get the column from CREATE TABLE and this fails harmlessly on them.
+try {
+  db.exec(`ALTER TABLE sessions ADD COLUMN guild_ids TEXT`);
+} catch (err) {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!message.includes("duplicate column")) throw err;
+}
 
 // Prepared statements for performance
-const insertStmt = db.prepare("INSERT OR REPLACE INTO sessions (token, user_id, created_at) VALUES (?, ?, ?)");
-const selectStmt = db.prepare("SELECT user_id, created_at FROM sessions WHERE token = ?");
+const insertStmt = db.prepare(
+  "INSERT OR REPLACE INTO sessions (token, user_id, created_at, guild_ids) VALUES (?, ?, ?, ?)",
+);
+const selectStmt = db.prepare(
+  "SELECT user_id, created_at, guild_ids FROM sessions WHERE token = ?",
+);
+const touchStmt = db.prepare("UPDATE sessions SET created_at = ? WHERE token = ?");
 const deleteStmt = db.prepare("DELETE FROM sessions WHERE token = ?");
 const deleteExpiredStmt = db.prepare("DELETE FROM sessions WHERE created_at < ?");
 const countStmt = db.prepare("SELECT COUNT(*) as count FROM sessions");
 const deleteOldestStmt = db.prepare(
   "DELETE FROM sessions WHERE token IN (SELECT token FROM sessions ORDER BY created_at ASC LIMIT ?)"
 );
-const selectAllStmt = db.prepare("SELECT token, user_id, created_at FROM sessions");
+const selectAllStmt = db.prepare("SELECT token, user_id, created_at, guild_ids FROM sessions");
+
+interface SessionRow {
+  token: string;
+  user_id: string | null;
+  created_at: number;
+  guild_ids: string | null;
+}
+
+/** Stored as JSON so the "we never found out" case stays distinct from "in no
+ *  guilds" — the difference between unverified and verified-empty. */
+function parseGuildIds(raw: string | null): string[] | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((g): g is string => typeof g === "string") : null;
+  } catch {
+    return null;
+  }
+}
 
 // Load existing valid sessions into cache on startup
 const validCutoff = Date.now() - SESSION_TTL_MS;
 deleteExpiredStmt.run(validCutoff);
-const existingRows = db.prepare("SELECT token, user_id, created_at FROM sessions").all() as Array<{
-  token: string;
-  user_id: string | null;
-  created_at: number;
-}>;
+const existingRows = selectAllStmt.all() as SessionRow[];
 for (const row of existingRows) {
-  sessionCache.set(row.token, { createdAt: row.created_at, userId: row.user_id });
+  sessionCache.set(row.token, {
+    createdAt: row.created_at,
+    userId: row.user_id,
+    guildIds: parseGuildIds(row.guild_ids),
+  });
 }
 console.log(`[Auth] Loaded ${existingRows.length} sessions from SQLite`);
 
@@ -64,7 +114,12 @@ setInterval(() => {
   deleteExpiredStmt.run(cutoff);
 }, 5 * 60 * 1000).unref();
 
-export function createSession(userId?: string): string {
+/**
+ * @param guildIds Guild ids Discord confirmed the user belongs to. Omit (or pass
+ *   null) when the lookup failed — that records "unverified", which is not the
+ *   same as "member of nothing" and is treated differently at /register.
+ */
+export function createSession(userId?: string, guildIds?: string[] | null): string {
   const { count } = countStmt.get() as { count: number };
   if (count >= MAX_SESSIONS) {
     const toDelete = Math.floor(MAX_SESSIONS * 0.1);
@@ -72,52 +127,88 @@ export function createSession(userId?: string): string {
     // Also evict from cache — re-query to get the tokens that were deleted
     // Since SQLite already deleted them, just rebuild cache from DB
     sessionCache.clear();
-    const remaining = selectAllStmt.all() as Array<{
-      token: string;
-      user_id: string | null;
-      created_at: number;
-    }>;
-    for (const row of remaining) {
-      sessionCache.set(row.token, { createdAt: row.created_at, userId: row.user_id });
+    for (const row of selectAllStmt.all() as SessionRow[]) {
+      sessionCache.set(row.token, {
+        createdAt: row.created_at,
+        userId: row.user_id,
+        guildIds: parseGuildIds(row.guild_ids),
+      });
     }
   }
 
   const token = crypto.randomUUID();
   const now = Date.now();
-  insertStmt.run(token, userId ?? null, now);
-  sessionCache.set(token, { createdAt: now, userId: userId ?? null });
+  const guilds = guildIds ?? null;
+  insertStmt.run(token, userId ?? null, now, guilds ? JSON.stringify(guilds) : null);
+  sessionCache.set(token, { createdAt: now, userId: userId ?? null, guildIds: guilds });
   return token;
 }
 
-function getSession(token: string): { createdAt: number; userId: string | null } | null {
+/**
+ * Push a still-active session's expiry back.
+ *
+ * Without this the 24h TTL is absolute: a party that runs past the token's
+ * birthday is cut off mid-film with "Session expired — please close and restart
+ * the activity", which is a miserable thing to happen two hours into a movie.
+ * Rate-limited to one write per SESSION_RENEW_AFTER_MS so this stays off the
+ * per-request path.
+ */
+function renewIfStale(token: string, session: SessionEntry, now: number): void {
+  if (now - session.createdAt < SESSION_RENEW_AFTER_MS) return;
+  session.createdAt = now;
+  try {
+    touchStmt.run(now, token);
+  } catch {
+    // A failed renewal just means the session expires on its original schedule.
+  }
+}
+
+function getSession(token: string): SessionEntry | null {
+  const now = Date.now();
+
   // Check hot cache first
   const cached = sessionCache.get(token);
   if (cached) {
-    if (Date.now() - cached.createdAt > SESSION_TTL_MS) {
+    if (now - cached.createdAt > SESSION_TTL_MS) {
       sessionCache.delete(token);
       deleteStmt.run(token);
       return null;
     }
+    renewIfStale(token, cached, now);
     return cached;
   }
 
   // Fall back to SQLite (session created before this process, loaded lazily)
-  const row = selectStmt.get(token) as { user_id: string | null; created_at: number } | undefined;
+  const row = selectStmt.get(token) as Omit<SessionRow, "token"> | undefined;
   if (!row) return null;
-  if (Date.now() - row.created_at > SESSION_TTL_MS) {
+  if (now - row.created_at > SESSION_TTL_MS) {
     deleteStmt.run(token);
     return null;
   }
 
   // Promote to cache
-  const session = { createdAt: row.created_at, userId: row.user_id };
+  const session: SessionEntry = {
+    createdAt: row.created_at,
+    userId: row.user_id,
+    guildIds: parseGuildIds(row.guild_ids),
+  };
   sessionCache.set(token, session);
+  renewIfStale(token, session, now);
   return session;
 }
 
 export function getSessionUserId(token: string): string | null {
   const session = getSession(token);
   return session?.userId ?? null;
+}
+
+/**
+ * Guilds Discord confirmed this session's user is in, or null when we never
+ * found out (the /users/@me/guilds lookup failed, or the session predates
+ * verification). Null must not be read as "no guilds" — see /register.
+ */
+export function getSessionGuildIds(token: string): string[] | null {
+  return getSession(token)?.guildIds ?? null;
 }
 
 export function isValidSession(token: string): boolean {

@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from "express";
-import { createSession, isValidSession, getSessionUserId } from "../middleware/auth.js";
+import { createSession, isValidSession, getSessionUserId, getSessionGuildIds } from "../middleware/auth.js";
 import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
@@ -178,13 +178,75 @@ router.post("/token", async (req: Request, res: Response) => {
       // Non-fatal — session will work but userId won't be verified
     }
 
-    const sessionToken = createSession(discordUserId);
+    // Which guilds this user is actually in.
+    //
+    // /register takes guildId from the request body, and until this existed
+    // nothing checked it against reality — so ALLOWED_GUILD_IDS could be
+    // satisfied by any authenticated user simply claiming an allowed id, and a
+    // user in one server could name another server's channel to evict its
+    // registration. The `guilds` OAuth scope was already being requested and
+    // never used; this is what it's for.
+    //
+    // Left null (rather than []) on failure, which the allowlist treats as
+    // "couldn't verify" — see /register.
+    const verifiedGuildIds = await fetchUserGuildIds(data.access_token);
+
+    const sessionToken = createSession(discordUserId, verifiedGuildIds);
     res.json({ access_token: data.access_token, session_token: sessionToken });
   } catch (err) {
     console.error("Token exchange error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+/**
+ * Guild ids the bearer token's user belongs to, or null if we couldn't find out.
+ *
+ * Best-effort by design: Discord rate-limits this endpoint per user, and a
+ * transient failure should degrade to "unverified" rather than lock someone out
+ * of an activity they're legitimately in. The distinction between null and []
+ * is load-bearing — see the allowlist check in /register.
+ */
+async function fetchUserGuildIds(accessToken: string): Promise<string[] | null> {
+  // One retry, because a null answer is refused at /register when an allowlist
+  // is configured — and Discord rate-limits this endpoint per user, which a
+  // couple of quick relaunches is enough to trigger. Without the retry, the
+  // strictness that makes the allowlist real would occasionally lock out
+  // someone who belongs there.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch("https://discord.com/api/users/@me/guilds", {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (res.status === 429 && attempt === 0) {
+        // Discord reports the wait in seconds; cap it so a long one doesn't
+        // hold the token exchange open.
+        const retryAfter = Number(res.headers.get("retry-after"));
+        const waitMs = Math.min(
+          Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1000,
+          3000,
+        );
+        console.warn("[Discord] guild lookup rate limited, retrying in", waitMs, "ms");
+        await new Promise((r) => setTimeout(r, waitMs));
+        continue;
+      }
+      if (!res.ok) {
+        console.warn("[Discord] guild lookup failed:", res.status);
+        return null;
+      }
+      const guilds = (await res.json()) as unknown;
+      if (!Array.isArray(guilds)) return null;
+      return guilds
+        .map((g) => (g && typeof g === "object" ? (g as { id?: unknown }).id : undefined))
+        .filter((id): id is string => typeof id === "string");
+    } catch (err) {
+      console.warn("[Discord] guild lookup error:", err);
+      return null;
+    }
+  }
+  return null;
+}
 
 /**
  * POST /api/register
@@ -244,12 +306,40 @@ router.post("/register", (req: Request, res: Response) => {
   const normalizedGuildId = typeof guildId === "string" && guildId.length > 0 ? guildId : "";
   const normalizedChannelId = typeof channelId === "string" && channelId.length > 0 ? channelId : null;
 
+  // The guilds Discord itself says this user is in, captured at token exchange.
+  // null = we never found out (lookup failed, or an old session from before
+  // this existed); [] = verified, and they're in none.
+  const verifiedGuildIds = getSessionGuildIds(token);
+  const guildIsVerified =
+    verifiedGuildIds !== null && !!normalizedGuildId && verifiedGuildIds.includes(normalizedGuildId);
+
   // Reject guilds not in the allowlist. A DM (no guildId) can't be checked
   // against a guild allowlist, so it's only permitted when the allowlist
   // itself is disabled (ALLOWED_GUILD_IDS unset = open to everyone).
+  //
+  // The guildId arrives in the request body, so on its own it proves nothing —
+  // any authenticated user could name an allowed guild and be let in, which
+  // made the allowlist a convention rather than a control. It is now checked
+  // against the membership list Discord returned for this session. A session
+  // that predates verification, or one whose lookup failed, is refused here
+  // rather than waved through: re-launching the activity mints a fresh session
+  // and fixes it, whereas trusting the claim defeats the whole check.
   if (ALLOWED_GUILD_IDS.size > 0) {
     if (!normalizedGuildId || !ALLOWED_GUILD_IDS.has(normalizedGuildId)) {
       res.status(403).json({ error: "This server is not authorized to use this activity." });
+      return;
+    }
+    if (!guildIsVerified) {
+      console.warn("[Discord] register refused — guild membership unverified", {
+        userId,
+        guildId: normalizedGuildId,
+        lookupFailed: verifiedGuildIds === null,
+      });
+      res.status(403).json({
+        error: verifiedGuildIds === null
+          ? "Couldn't verify your Discord server membership. Please relaunch the activity."
+          : "This server is not authorized to use this activity.",
+      });
       return;
     }
   }
@@ -260,12 +350,35 @@ router.post("/register", (req: Request, res: Response) => {
   // instances in other channels (or other guilds) are left untouched.
   // Clients that don't send channelId (older builds) get no scoped eviction
   // at all here, rather than falling back to the old guild-wide behavior.
+  //
+  // Evicting is gated on the guild, because channelId is client-supplied too:
+  // without this, anyone could pass another server's channel id and delete a
+  // running party's registration, stranding it on "Unknown instance". The
+  // requester must be a verified member of the same guild the existing
+  // registration belongs to — which for the real case (rejoining your own
+  // channel) is always true.
   if (normalizedChannelId) {
     const existingInstanceId = channelInstances.get(normalizedChannelId);
-    if (existingInstanceId && existingInstanceId !== instanceId && instanceHosts.has(existingInstanceId)) {
-      deleteInstanceStmt.run(existingInstanceId);
-      instanceHosts.delete(existingInstanceId);
-      channelInstances.delete(normalizedChannelId);
+    const existing = existingInstanceId ? instanceHosts.get(existingInstanceId) : undefined;
+    if (existingInstanceId && existing && existingInstanceId !== instanceId) {
+      const sameGuild = (existing.guildId ?? "") === normalizedGuildId;
+      // A DM instance has no guild to check against, so fall back to identity:
+      // only its own host may displace it.
+      const mayEvict = existing.guildId
+        ? sameGuild && (guildIsVerified || verifiedGuildIds === null)
+        : existing.hostUserId === userId;
+      if (mayEvict) {
+        deleteInstanceStmt.run(existingInstanceId);
+        instanceHosts.delete(existingInstanceId);
+        channelInstances.delete(normalizedChannelId);
+      } else {
+        console.warn("[Discord] refused to evict another channel's instance", {
+          userId,
+          claimedChannelId: normalizedChannelId,
+          claimedGuildId: normalizedGuildId || "none",
+          existingGuildId: existing.guildId ?? "none",
+        });
+      }
     }
   }
 

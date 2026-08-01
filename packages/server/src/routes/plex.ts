@@ -5,6 +5,7 @@ import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
 import { sessionHostUserId } from "../services/sync.js";
 import { getSessionUserId } from "../middleware/auth.js";
+import { LruMap } from "../services/lru.js";
 
 const router = Router();
 
@@ -566,7 +567,14 @@ function providerToken(): string | undefined {
 
 // Cache of guid → in-library, so repeated ownership checks (search-as-you-type)
 // don't re-hit Plex for the same title.
-const ownedGuidCache = new Map<string, { owned: boolean; at: number }>();
+//
+// LruMap, like every other cache in this file. They were plain Maps that
+// checked a TTL when read and never removed anything, so they grew with the
+// number of distinct titles, searches, people and TMDB ids the process had ever
+// seen and only shrank on restart — a stale entry stopped being *returned* but
+// went on being *held*. The caps below are generous (a big library's worth) and
+// exist to bound the worst case, not to make anything miss.
+const ownedGuidCache = new LruMap<string, { owned: boolean; at: number }>(2_000);
 const OWNED_GUID_TTL_MS = 10 * 60 * 1000;
 
 /**
@@ -612,7 +620,7 @@ function tmdbIdFromGuids(guids?: Array<{ id?: string }>): number | null {
 // only store tvdb/imdb ids. When the direct lookup misses, resolve via Plex's
 // metadata provider using the item's plex:// guid (the same path Discover uses),
 // so Seerr season requests still work. Cached per ratingKey (incl. misses).
-const tmdbIdCache = new Map<string, number | null>();
+const tmdbIdCache = new LruMap<string, number | null>(2_000);
 
 async function resolveTmdbId(m: PlexMetadataItem): Promise<number | null> {
   const direct = tmdbIdFromGuids(m.Guid);
@@ -834,7 +842,7 @@ export async function buildMeta(ratingKey: string): Promise<Record<string, unkno
   return payload;
 }
 
-const metaCache = new Map<string, { payload: Record<string, unknown>; at: number }>();
+const metaCache = new LruMap<string, { payload: Record<string, unknown>; at: number }>(2_000);
 const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 /** The /collections response: the item's collections plus TMDB recommendations. */
@@ -843,7 +851,7 @@ export interface RelatedPayload {
   recommendations: unknown[];
 }
 
-const relatedCache = new Map<string, { payload: RelatedPayload; at: number }>();
+const relatedCache = new LruMap<string, { payload: RelatedPayload; at: number }>(2_000);
 const RELATED_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours — this rarely changes
 
 /** A fresh cached /collections payload, or null. Exported for the warmer, which
@@ -992,8 +1000,8 @@ interface TmdbPart {
 
 // Cache movie→collection and collection→parts (both including misses) so
 // browsing detail pages doesn't re-hit TMDB for the same title.
-const tmdbMovieCollectionCache = new Map<number, { id: number; name: string } | null>();
-const tmdbCollectionCache = new Map<number, { name: string; parts: TmdbPart[] } | null>();
+const tmdbMovieCollectionCache = new LruMap<number, { id: number; name: string } | null>(2_000);
+const tmdbCollectionCache = new LruMap<number, { name: string; parts: TmdbPart[] } | null>(1_000);
 
 async function tmdbGet<T>(path: string, params?: Record<string, string>): Promise<T | null> {
   if (!TMDB_API_KEY) return null;
@@ -1094,7 +1102,7 @@ function tmdbResultYear(part: TmdbPart): number | undefined {
 // Cache tmdbId → the library item that matches it (or null), so recommendation
 // rows don't re-resolve the same title on every visit. Keyed by type since a
 // movie and a show can share a tmdbId across their separate id spaces.
-const libraryMatchCache = new Map<string, PlexMetadataItem | null>();
+const libraryMatchCache = new LruMap<string, PlexMetadataItem | null>(5_000);
 
 /**
  * The library item matching a TMDB result, or null when it isn't owned. Resolved
@@ -1523,7 +1531,7 @@ router.get("/tmdb/meta", async (req: Request, res: Response) => {
 });
 
 /**
- * GET /api/plex/person/:tagId?name=<name>
+ * GET /api/plex/person?name=<name>
  *
  * A cast/crew member's page: their biography and photo, plus everything in the
  * library they worked on, split into movies and shows.
@@ -1633,7 +1641,7 @@ interface TmdbCredit extends TmdbPart {
 
 /** TMDB person lookup by name, cached (misses included — a name TMDB doesn't
  *  know won't start knowing it on the next page view). */
-const tmdbPersonCache = new Map<string, TmdbPerson | null>();
+const tmdbPersonCache = new LruMap<string, TmdbPerson | null>(2_000);
 
 interface TmdbPerson {
   tmdbId: number;
@@ -1907,7 +1915,7 @@ const plexTranscodeKeys = new Map<string, string>();
 /** Maps our session UUID → the ratingKey being played (needed for timeline stopped). */
 const sessionRatingKeys = new Map<string, string>();
 /** Maps ratingKey → duration in ms (cached from metadata endpoint for timeline stopped). */
-const mediaDurations = new Map<string, number>();
+const mediaDurations = new LruMap<string, number>(5_000);
 const PLEX_SESSION_KEY_RE = /session\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i;
 
 /** Look up the Plex internal transcode key for one of our session UUIDs. */

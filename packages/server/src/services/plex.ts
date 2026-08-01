@@ -72,6 +72,34 @@ export async function plexFetchSegment(
   }
 }
 
+/**
+ * Race a body read against a deadline.
+ *
+ * plexFetch clears its abort timer as soon as the *headers* land, which is
+ * deliberate — it also serves plexFetchSegment, where killing the timer is what
+ * lets a body stream for as long as it needs. The cost is that reading a JSON
+ * body had no deadline at all: a Plex that accepts the connection and then stops
+ * sending left the request hanging forever, holding a socket and whichever
+ * route awaited it. Callers see the same rejection they would from a timeout on
+ * the request itself.
+ */
+async function withBodyTimeout<T>(work: Promise<T>, path: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Plex body read timed out after ${PLEX_TIMEOUT_MS}ms: ${path}`)),
+          PLEX_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function plexJSON<T = unknown>(
   path: string,
   params?: Record<string, string>,
@@ -83,9 +111,9 @@ export async function plexJSON<T = unknown>(
     // distinguishes a permission problem from a degraded server-claim state.
     let detail = "";
     try {
-      detail = (await res.text()).replace(/\s+/g, " ").trim().slice(0, 300);
+      detail = (await withBodyTimeout(res.text(), path)).replace(/\s+/g, " ").trim().slice(0, 300);
     } catch { /* body unreadable — status alone */ }
     throw new Error(`Plex API error: ${res.status}${detail ? ` — ${detail}` : ""}`);
   }
-  return res.json() as Promise<T>;
+  return withBodyTimeout(res.json() as Promise<T>, path);
 }

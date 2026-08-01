@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from "express";
+import { LruMap } from "../services/lru.js";
 
 /**
  * External ratings for a title's detail page — IMDb, TMDB, and Rotten Tomatoes
@@ -44,7 +45,9 @@ interface MdblistRating {
   score?: number | null;
 }
 
-const cache = new Map<string, { at: number; ttl: number; ratings: Ratings }>();
+// Bounded: this is keyed by external id, so an unbounded Map grows with every
+// distinct title anyone has ever opened a detail page for and never shrinks.
+const cache = new LruMap<string, { at: number; ttl: number; ratings: Ratings }>(5_000);
 
 function cacheGet(key: string): Ratings | undefined {
   const hit = cache.get(key);

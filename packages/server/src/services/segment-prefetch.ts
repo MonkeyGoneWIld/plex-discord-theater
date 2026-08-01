@@ -38,14 +38,32 @@ interface PrefetchSession {
   /** Consecutive polls that produced nothing to queue, so a session that has
    *  quietly stopped making progress announces itself instead of going silent. */
   idlePolls: number;
+  /** Bytes currently held in segmentCache — the number the eviction budget is
+   *  actually about. Maintained incrementally; see CACHE_BUDGET_BYTES. */
+  cachedBytes: number;
 }
 
 // ─── Constants ──────────────────────────────────────────────────
 
 const POLL_INTERVAL_MS = 2_000;
 const MAX_CONCURRENT_FETCHES = 3;
-const MAX_CACHE_SIZE = 100;
+/** Entry-count bound, secondary to the byte budget below. */
 const EVICTION_THRESHOLD = 50;
+/**
+ * Memory ceiling for one session's segment cache.
+ *
+ * The count-based caps above are what this module used to bound itself with,
+ * and a count is the wrong unit: a 3-second segment is ~4.5 MB at the 12 Mbps
+ * target and ~7.5 MB at the 20 Mbps peak, so "100 segments" is anywhere from
+ * 450 MB to 750 MB — per session, times MAX_CONCURRENT_SESSIONS. Nothing in the
+ * module measured bytes, so the real footprint moved with the bitrate setting
+ * and nobody would connect the two.
+ *
+ * 192 MB holds ~25-40 segments, which is 75-120s of lead at 3s each — well past
+ * what the client can consume before the next poll refills it. EVICTION_THRESHOLD
+ * stays as a second bound for the (unlikely) case of very small segments.
+ */
+const CACHE_BUDGET_BYTES = 192 * 1024 * 1024;
 /**
  * How far past the *playhead* to keep requesting — ×3s ≈ 150s, comfortably over
  * the client's 120s buffer target.
@@ -100,12 +118,32 @@ function segmentIndex(path: string): number {
 
 // ─── Eviction ───────────────────────────────────────────────────
 
+/** Drop one entry and keep the byte counter honest. */
+function dropSegment(session: PrefetchSession, path: string): void {
+  const entry = session.segmentCache.get(path);
+  if (!entry) return;
+  session.segmentCache.delete(path);
+  session.cachedBytes -= entry.data.length;
+  if (session.cachedBytes < 0) session.cachedBytes = 0;
+}
+
+/** Whether the cache is over either bound — bytes or count. */
+function overBudget(session: PrefetchSession): boolean {
+  return (
+    session.cachedBytes > CACHE_BUDGET_BYTES ||
+    session.segmentCache.size > EVICTION_THRESHOLD
+  );
+}
+
 /**
- * Evict old segments to stay within memory budget.
- * Prioritizes evicting served segments (already in VPS nginx cache).
+ * Evict old segments to stay within the memory budget.
+ *
+ * Bytes are the real bound (see CACHE_BUDGET_BYTES); the entry count is a
+ * secondary one. Served segments go first — the client already has them, and
+ * with a VPS relay they are in nginx's cache too — then oldest-first regardless.
  */
 function evictIfNeeded(session: PrefetchSession): void {
-  if (session.segmentCache.size <= EVICTION_THRESHOLD) return;
+  if (!overBudget(session)) return;
 
   // First pass: evict served segments (oldest first)
   const served: [string, CachedSegment][] = [];
@@ -114,21 +152,19 @@ function evictIfNeeded(session: PrefetchSession): void {
   }
   served.sort((a, b) => a[1].cachedAt - b[1].cachedAt);
   for (const [path] of served) {
-    session.segmentCache.delete(path);
-    if (session.segmentCache.size <= EVICTION_THRESHOLD) return;
+    dropSegment(session, path);
+    if (!overBudget(session)) return;
   }
 
-  // `>` the threshold, not `>=` the cap: guarding on the cap meant the cache
-  // sat anywhere from 51 to 99 entries doing no eviction at all, then evicted
-  // only on hitting exactly 100.
-  if (session.segmentCache.size > EVICTION_THRESHOLD) {
-    const all = [...session.segmentCache.entries()].sort(
-      (a, b) => a[1].cachedAt - b[1].cachedAt,
-    );
-    for (const [path] of all) {
-      session.segmentCache.delete(path);
-      if (session.segmentCache.size <= EVICTION_THRESHOLD) return;
-    }
+  // Still over — take the oldest, served or not. `>` the threshold, not `>=`
+  // the cap: guarding on the cap meant the cache sat anywhere from 51 to 99
+  // entries doing no eviction at all, then evicted only on hitting exactly 100.
+  const all = [...session.segmentCache.entries()].sort(
+    (a, b) => a[1].cachedAt - b[1].cachedAt,
+  );
+  for (const [path] of all) {
+    dropSegment(session, path);
+    if (!overBudget(session)) return;
   }
 }
 
@@ -169,6 +205,7 @@ async function fetchWorker(session: PrefetchSession): Promise<void> {
           served: false,
           cachedAt: Date.now(),
         });
+        session.cachedBytes += data.length;
         // This segment exists, so the head is at least here — slide the window.
         const idx = segmentIndex(segPath);
         if (idx > session.maxFetchedIndex) session.maxFetchedIndex = idx;
@@ -257,7 +294,8 @@ async function pollSubManifest(session: PrefetchSession): Promise<void> {
         (IDLE_POLLS_BEFORE_WARN * POLL_INTERVAL_MS) / 1000, "s —",
         "plexKey", session.plexKey.substring(0, 8),
         "head", session.maxFetchedIndex, "playback", session.playbackIndex,
-        "cached", session.segmentCache.size);
+        "cached", session.segmentCache.size,
+      `(${(session.cachedBytes / 1e6).toFixed(0)}MB)`);
     }
   } catch {
     if (session.abortController.signal.aborted) return;
@@ -300,6 +338,7 @@ export function startPrefetch(sessionId: string, plexKey: string, startIndex = 0
     // first buffer before any ping has told us where playback really is.
     playbackIndex: start,
     idlePolls: 0,
+    cachedBytes: 0,
   };
 
   sessions.set(sessionId, session);
@@ -336,7 +375,8 @@ export function stopPrefetch(sessionId: string): void {
   if (!session) return;
 
   console.log("[Prefetch] Stopping for session", sessionId.substring(0, 8),
-    "(cached:", session.segmentCache.size, "segments)");
+    "(cached:", session.segmentCache.size, "segments,",
+    `${(session.cachedBytes / 1e6).toFixed(0)}MB)`);
 
   session.abortController.abort();
   if (session.pollTimer) {
@@ -344,6 +384,7 @@ export function stopPrefetch(sessionId: string): void {
     session.pollTimer = null;
   }
   session.segmentCache.clear();
+  session.cachedBytes = 0;
   session.knownSegments.clear();
   session.fetchQueue.length = 0;
   sessions.delete(sessionId);

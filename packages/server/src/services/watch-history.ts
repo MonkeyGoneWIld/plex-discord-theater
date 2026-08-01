@@ -16,6 +16,7 @@ import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
 import { plexJSON } from "./plex.js";
+import { LruMap } from "./lru.js";
 
 /** Watched past this fraction of the runtime counts as finished. */
 const COMPLETE_RATIO = 0.9;
@@ -419,8 +420,15 @@ async function resolveNextUp(
 
 // ─── Writes ─────────────────────────────────────────────────────
 
-/** Last DB write per `${userId}:${ratingKey}` — drives the heartbeat throttle. */
-const lastWriteAt = new Map<string, number>();
+/**
+ * Last DB write per `${userId}:${ratingKey}` — drives the heartbeat throttle.
+ *
+ * Bounded, because the key pairs a user with an item: it grew with every
+ * (viewer, title) combination the server had ever seen and was only ever pruned
+ * for a user who explicitly deleted history. Evicting an entry costs at most one
+ * extra write for an item nobody has touched in a very long time.
+ */
+const lastWriteAt = new LruMap<string, number>(10_000);
 
 /**
  * Record where a host has got to in an item.

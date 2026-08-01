@@ -160,11 +160,13 @@ router.get("/tv/:tmdbId", async (req: Request, res: Response) => {
     // overwrite a richer availability status already recorded above.
     // request.status: 1 = pending approval, 2 = approved, 3 = declined, 4 = failed.
     // Only pending/approved reserve a season — declined/failed leave it requestable.
-    for (const req of data.mediaInfo?.requests ?? []) {
-      if (req.status !== 1 && req.status !== 2) continue;
-      for (const rs of req.seasons ?? []) {
+    // Not named `req`: that is the Express request this handler was given, and
+    // shadowing it inside a route is a trap for whoever edits this next.
+    for (const request of data.mediaInfo?.requests ?? []) {
+      if (request.status !== 1 && request.status !== 2) continue;
+      for (const rs of request.seasons ?? []) {
         if (rs.seasonNumber == null || statusBySeason.has(rs.seasonNumber)) continue;
-        statusBySeason.set(rs.seasonNumber, req.status === 2 ? 3 : 2);
+        statusBySeason.set(rs.seasonNumber, request.status === 2 ? 3 : 2);
       }
     }
     const seasons = (data.seasons ?? [])

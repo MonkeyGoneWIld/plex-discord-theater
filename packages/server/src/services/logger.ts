@@ -44,6 +44,21 @@ let currentDay: string | null = null;
 let currentBytes = 0;
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 let installed = false;
+/**
+ * Held append descriptor for `currentFile`.
+ *
+ * Every batch used to go through `fs.appendFileSync`, which opens, writes and
+ * closes the file on each call — three syscalls, four times a second, forever,
+ * plus a path resolution each time. Holding the descriptor makes a flush a
+ * single `writeSync`.
+ *
+ * Deliberately still synchronous rather than a WriteStream. Ordering and
+ * durability are the whole point of this file: shutdown and the crash handler
+ * both write and then immediately end the process, and anything merely queued
+ * on a stream at that moment is lost — which is exactly the log you most want.
+ */
+let fd: number | null = null;
+let fdPath: string | null = null;
 
 /**
  * Strip anything that would turn a shared log file into a credential leak.
@@ -130,6 +145,30 @@ function pruneOldLogs(): void {
   }
 }
 
+/** The append descriptor for `file`, reopening it when rotation moved us. */
+function fdFor(file: string): number | null {
+  if (fd !== null && fdPath === file) return fd;
+  closeFd();
+  try {
+    fd = fs.openSync(file, "a");
+    fdPath = file;
+    return fd;
+  } catch {
+    return null; // read-only volume — stay console-only rather than crash
+  }
+}
+
+function closeFd(): void {
+  if (fd === null) return;
+  try {
+    fs.closeSync(fd);
+  } catch {
+    // Already gone; nothing to salvage.
+  }
+  fd = null;
+  fdPath = null;
+}
+
 function flush(): void {
   if (buffer.length === 0) return;
   const lines = buffer;
@@ -137,11 +176,16 @@ function flush(): void {
   const file = resolveFile();
   if (!file) return;
   const payload = lines.join("");
+  const target = fdFor(file);
+  if (target === null) return;
   try {
-    fs.appendFileSync(file, payload);
+    fs.writeSync(target, payload);
     currentBytes += Buffer.byteLength(payload);
   } catch {
-    // Disk full or permissions — dropping the batch beats crashing the stream.
+    // Disk full, or the file was rotated out from under us. Drop the descriptor
+    // so the next flush reopens, and drop the batch — losing a quarter second
+    // of log beats throwing from inside a console.log.
+    closeFd();
   }
 }
 
@@ -239,6 +283,7 @@ export function closeLogger(): void {
     flushTimer = null;
   }
   flush();
+  closeFd();
 }
 
 initLogger();

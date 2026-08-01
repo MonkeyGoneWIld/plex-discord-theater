@@ -5,7 +5,9 @@ A Discord Activity that lets you browse your Plex library and watch movies and T
 ## Features
 
 - **Browse and search your library** — movies and TV shows with genre filters and sorting, plus cast and crew pages listing everything they appear in
-- **Discover titles you don't own** — search also surfaces them, marked "Not in library", with full detail pages. Optional [Seerr](#requesting-titles-optional) integration adds a Request button, per-season for TV
+- **Discover titles you don't own** — search also surfaces them, marked "Not in library", with full detail pages. Optional [Seerr](#optional-integrations) integration adds a Request button, per-season for TV
+- **Collections and "More Like This"** — the rest of a franchise and TMDB's suggestions, on every detail page, with titles you don't own marked and requestable. Needs a [TMDB key](#optional-integrations)
+- **Ratings** — IMDb, Rotten Tomatoes (critic *and* audience) and TMDB scores on detail pages. Needs an [MDBList key](#optional-integrations)
 - **Synchronized playback** — the host drives play/pause/seek and everyone stays in sync. Small drifts are closed by nudging playback speed a few percent rather than by seeking, so staying together doesn't cost a rebuffer every time
 - **Co-hosts & host transfer** — hand out transport control, or the host role itself, from the people panel. Roles belong to the person, not the connection, so a dropped socket doesn't quietly demote anyone. If the host leaves, a co-host is promoted so the session continues
 - **Audio & subtitle tracks** — switch before playing or mid-episode. Your subtitle choice carries to the next episode, matched by language rather than by track number
@@ -65,9 +67,42 @@ Memory is capped at 384 MB in total, shared evenly across up to four concurrent 
 
 Video is always re-encoded rather than direct-streamed. Direct streaming hands the source's elementary stream to the browser untouched, including any keyframe or timestamp discontinuity in the file — which MSE cannot append across, wedging playback mid-episode with no recovery.
 
-### Requesting titles (optional)
+## Optional Integrations
 
-Set `SEERR_URL` to enable the Request button; leave it unset and the button is hidden. Requests are attributed to **your own Seerr account** — the server signs in with `PLEX_ACCOUNT_TOKEN` rather than an admin API key. Movies request in one click; TV offers per-season selection showing what you already have, what's pending, and what's available.
+Every one of these is off unless its variable is set, and every one **fails silently** when it isn't — the row or the button simply doesn't appear, which is easy to mistake for a bug. The server prints which are live at startup, so `docker compose logs | grep Config` will tell you where you stand:
+
+```
+[Config] ✓ TMDB   ✓ Ratings   ✓ Requests   ✓ Discover   · VPS relay (P2P mode)   · Guild allowlist (open to any Discord server)
+```
+
+`✓` is on, `·` is off with the consequence in brackets.
+
+| Variable | What it turns on | Where to get it |
+|---|---|---|
+| `TMDB_API_KEY` | Collections, "More Like This", and cast/crew pages | Free v3 key — [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api) |
+| `MDBLIST_API_KEY` | The ratings row: IMDb, Rotten Tomatoes, TMDB | Free — [mdblist.com/preferences](https://mdblist.com/preferences) → API Access |
+| `PLEX_ACCOUNT_TOKEN` | Detail pages for titles you don't own, and Seerr sign-in | Your **account** token from an app.plex.tv request (not the server token) |
+| `SEERR_URL` | The Request button on out-of-library titles | Your Overseerr / Jellyseerr URL |
+| `VPS_RELAY_URL` + `VPS_RELAY_KEY` | [Segment relay](#vps-relay-optional) — one upstream stream instead of one per viewer | Your own VPS |
+| `ALLOWED_GUILD_IDS` | Restricts the activity to named Discord servers | Comma-separated guild IDs. Unset = any server |
+
+### TMDB — collections, related titles, people
+
+Powers three things, all on detail pages:
+
+- **"Also in this collection"** — the whole franchise for a film (all eight *Harry Potter*, say), with anything you don't own marked "Not in library" and requestable if Seerr is configured. Without a key the row still appears but lists only what you already have, so a partial series looks complete.
+- **"More Like This"** — TMDB's suggestions, owned titles first. Hidden entirely without a key.
+- **Cast and crew pages** — everything a person appears in, including titles outside your library.
+
+The key is free and takes about a minute: sign up, then Settings → API → request a v3 key. It's a read-only key for public metadata.
+
+### MDBList — ratings
+
+Puts IMDb, Rotten Tomatoes and TMDB scores on movie and show pages. Rotten Tomatoes has no public API of its own, so [MDBList](https://mdblist.com) — a free aggregator — is how both the critic Tomatometer and the Audience score are obtained. Free key from [mdblist.com/preferences](https://mdblist.com/preferences) under API Access. Left unset, the ratings row is hidden and nothing else changes.
+
+### Seerr — requesting titles
+
+Set `SEERR_URL` to enable the Request button; leave it unset and the button is hidden. Requests are attributed to **your own Seerr account** — the server signs in with `PLEX_ACCOUNT_TOKEN` rather than an admin API key, so there is no `SEERR_API_KEY` to set. Movies request in one click; TV offers per-season selection showing what you already have, what's pending, and what's available.
 
 All Seerr calls go through the server, because the Activity runs in a sandboxed cross-origin iframe and can't reuse your browser's Overseerr session.
 
@@ -113,7 +148,7 @@ REDIRECT_URI=https://your-public-url.example.com
 ALLOWED_ORIGINS=https://your-public-url.example.com
 ```
 
-Optional integrations, all off unless set: `PLEX_ACCOUNT_TOKEN` (Discover detail pages and Seerr sign-in), `SEERR_URL` (requests), `TMDB_API_KEY` (franchise collections and "More Like This"), `VPS_RELAY_URL` + `VPS_RELAY_KEY` (relay).
+Everything else is optional — see [Optional Integrations](#optional-integrations) for what each one turns on and where to get the keys. `TMDB_API_KEY` and `MDBLIST_API_KEY` are the two worth setting first: both are free, and between them they fill in the collection rows, "More Like This", cast pages and the ratings row.
 
 For local development, also create `packages/client/.env`:
 
@@ -179,6 +214,9 @@ Once both variables are set, segment URLs are rewritten to `/theater/seg/...`, n
 | Tunnel URL changed | Update the URL mapping in the Discord Developer Portal |
 | Audio is MP3, not AAC | Expected for TrueHD/DTS sources. MP3 plays fine everywhere |
 | Skip intro / previews missing | Plex hasn't generated them — see the note under Features |
+| No ratings on detail pages | `MDBLIST_API_KEY` isn't set — see [Optional Integrations](#optional-integrations) |
+| No collections or "More Like This" | `TMDB_API_KEY` isn't set. A partial collection row (only titles you own) means the same thing |
+| Not sure which integrations are live | `docker compose logs \| grep Config` — the server prints them at startup |
 | VPS segments 403 | Key mismatch between `.env` and the nginx config — or Cloudflare blocking the VPS, which needs an IP Access Rule |
 | VPS segments 502 | The VPS can't reach Express — check that Cloudflare rule and your Express domain's DNS |
 | VPS stutters | nginx is proxying straight to Plex:32400; it must go through Express |

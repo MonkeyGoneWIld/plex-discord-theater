@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket, type RawData } from "ws";
 import type { Server } from "http";
 import { isValidSession, getSessionUserId } from "../middleware/auth.js";
-import { instanceHosts, updateInstanceHost } from "../routes/discord.js";
+import { instanceHosts, updateInstanceHost, touchInstance } from "../routes/discord.js";
 import { plexFetch } from "./plex.js";
 import { getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode } from "../routes/plex.js";
 import { createTracker, handleTrackerSocket, destroyTracker } from "./tracker.js";
@@ -10,6 +10,12 @@ import { logEvent } from "./logger.js";
 
 /** Interval between WebSocket pings to detect dead connections. */
 const WS_PING_INTERVAL_MS = 30_000;
+
+/** Messages one connection may send per MSG_WINDOW_MS before the rest are
+ *  dropped. Sized well above anything a person can produce — see the budget
+ *  check in the connection handler. */
+const MSG_BUDGET = 120;
+const MSG_WINDOW_MS = 10_000;
 
 /**
  * Stop a Plex transcode using the mapped Plex internal key.
@@ -105,6 +111,16 @@ interface RoomState {
   position: number;
   updatedAt: number;
   hlsSessionId: string | null;
+  /**
+   * The offset the current transcode was started at.
+   *
+   * Plex transcodes linearly from here, so nothing before it exists — which is
+   * what tells a client whether a backward seek can be served in place or needs
+   * a restart. The host knows this because it asked for the offset; anyone who
+   * joins mid-stream or inherits the session on a handover does not, and used to
+   * assume 0 and sit out a six-second stall on every backward seek.
+   */
+  sessionOffset: number;
   browseContext: string | null;
   queue: QueueItem[];
 }
@@ -112,7 +128,23 @@ interface RoomState {
 interface Room {
   clients: Set<RoomClient>;
   state: RoomState;
+  /**
+   * Co-host grants, by Discord user id.
+   *
+   * Deliberately not on RoomClient alone: that object dies with the socket, so
+   * a co-host who blinked — a dropped WebSocket, a tab reload, Discord
+   * backgrounding the activity — came back a plain viewer with their controls
+   * silently gone, and nothing on screen said why. The role belongs to the
+   * person, not to the connection.
+   */
+  coHostIds: Set<string>;
+  /** Last forced history write for this room — see persistProgress. */
+  lastForcedPersistAt: number;
 }
+
+/** Ceiling on remembered co-host grants, so a room can't accumulate them without
+ *  bound across a long session with many joiners. */
+const MAX_CO_HOSTS = 50;
 
 const rooms = new Map<string, Room>();
 
@@ -195,9 +227,12 @@ function getOrCreateRoom(instanceId: string): Room {
         position: 0,
         updatedAt: Date.now(),
         hlsSessionId: null,
+        sessionOffset: 0,
         browseContext: null,
         queue: [],
       },
+      coHostIds: new Set(),
+      lastForcedPersistAt: 0,
     };
     rooms.set(instanceId, room);
   }
@@ -324,6 +359,17 @@ function interpolatedPosition(state: RoomState): number {
 }
 
 /**
+ * Shortest gap between two *forced* history writes for the same room.
+ *
+ * Forcing bypasses the history service's own throttle, which is right for the
+ * final position of a watch and wrong as a response to every transport command:
+ * pause, seek and stop each force one, and a co-host holding the scrub bar (or a
+ * client sending seeks in a loop) turned that into a SQLite write per message.
+ * Teardown paths pass `always` so the last position is still never lost.
+ */
+const FORCED_PERSIST_MIN_INTERVAL_MS = 2_000;
+
+/**
  * Save the room's position to the host's watch history.
  *
  * The room position is the host's own playhead (they're the only one who sends
@@ -336,12 +382,48 @@ function interpolatedPosition(state: RoomState): number {
  * disconnect force a write so the final position always lands. Fire-and-forget:
  * a history failure must never interfere with playback.
  */
-function persistProgress(room: Room, hostUserId: string | undefined, force: boolean): void {
+function persistProgress(
+  room: Room,
+  hostUserId: string | undefined,
+  force: boolean | "always",
+): void {
   const ratingKey = room.state.ratingKey;
   if (!hostUserId || !ratingKey) return;
-  recordProgress(hostUserId, ratingKey, interpolatedPosition(room.state), { force }).catch(
+  let forced = force !== false;
+  if (force === true) {
+    const now = Date.now();
+    if (now - room.lastForcedPersistAt < FORCED_PERSIST_MIN_INTERVAL_MS) forced = false;
+    else room.lastForcedPersistAt = now;
+  } else if (force === "always") {
+    room.lastForcedPersistAt = Date.now();
+  }
+  recordProgress(hostUserId, ratingKey, interpolatedPosition(room.state), { force: forced }).catch(
     (err) => console.error("[History] Failed to record progress:", err),
   );
+}
+
+/**
+ * Where the room actually is, for a transport command that carries a position
+ * from someone who is not the host.
+ *
+ * A co-host's `position` is *their* playhead, which is not the room's. It lags
+ * by whatever their buffer is behind, and if their stream has stalled it can lag
+ * by minutes. Writing it into room state broadcast that number to everyone: a
+ * co-host pressing pause dragged every viewer backwards to wherever the co-host
+ * happened to be, and the host's next heartbeat then dragged them forward again.
+ * That is the "it jumped back in time" report, and the yo-yo after it.
+ *
+ * A *seek* is different and keeps the sender's number — it is a deliberate
+ * target, not an observation. Only pause and resume, which are about *whether*
+ * rather than *where*, fall back to the room's own interpolated position.
+ */
+function positionForCommand(
+  room: Room,
+  client: RoomClient,
+  raw: unknown,
+): number {
+  if (client.isHost) return safePosition(raw, room.state.position);
+  return interpolatedPosition(room.state);
 }
 
 export function attachWebSocketServer(server: Server): void {
@@ -391,6 +473,41 @@ export function attachWebSocketServer(server: Server): void {
 
     let alive = true;
 
+    // Per-connection message budget.
+    //
+    // Nothing bounded how fast one client could send, and the handlers behind
+    // this are not free: a seek writes to SQLite and broadcasts to the whole
+    // room, a queue-reorder rebuilds and re-broadcasts up to 100 items. One
+    // authenticated client in a loop was enough to saturate a room's traffic
+    // and the history database with it. Real use is nowhere near this — a
+    // heartbeat every 5s, and a burst of scrub commands at worst — so the
+    // budget is generous and only a machine will ever reach it.
+    let msgTokens = MSG_BUDGET;
+    let msgWindowAt = Date.now();
+    let throttleLoggedAt = 0;
+    const withinBudget = (): boolean => {
+      const now = Date.now();
+      const elapsed = now - msgWindowAt;
+      if (elapsed >= MSG_WINDOW_MS) {
+        msgWindowAt = now;
+        msgTokens = MSG_BUDGET;
+      }
+      if (msgTokens > 0) {
+        msgTokens--;
+        return true;
+      }
+      if (now - throttleLoggedAt > 10_000) {
+        throttleLoggedAt = now;
+        logEvent("Sync", "client exceeded message budget, dropping", {
+          user: client?.userId ?? "unauthenticated",
+          room: roomId?.substring(0, 8) ?? "none",
+          budget: MSG_BUDGET,
+          windowMs: MSG_WINDOW_MS,
+        });
+      }
+      return false;
+    };
+
     const pingTimer = setInterval(() => {
       if (!alive) {
         console.log("[Sync] Terminating unresponsive WebSocket",
@@ -407,6 +524,7 @@ export function attachWebSocketServer(server: Server): void {
     });
 
     const handleMessage = (raw: RawData) => {
+      if (!withinBudget()) return;
       let parsed: unknown;
       try {
         parsed = JSON.parse(raw.toString());
@@ -425,9 +543,13 @@ export function attachWebSocketServer(server: Server): void {
 
       // First message must be join
       if (type === "join") {
-        const token = msg.sessionToken as string;
-        const instanceId = msg.instanceId as string;
-        const userId = msg.userId as string;
+        // Typed rather than asserted: everything below indexes maps and slices
+        // strings with these, and a non-string that happened to survive the
+        // truthiness check would throw inside the handler rather than be
+        // refused here.
+        const token = typeof msg.sessionToken === "string" ? msg.sessionToken : "";
+        const instanceId = typeof msg.instanceId === "string" ? msg.instanceId : "";
+        const userId = typeof msg.userId === "string" ? msg.userId : "";
         const rawUsername = msg.username;
         const username =
           typeof rawUsername === "string" && rawUsername.length > 0 && rawUsername.length <= 100
@@ -461,6 +583,10 @@ export function attachWebSocketServer(server: Server): void {
           return;
         }
 
+        // Someone is using this instance, so it isn't stale. Without this the
+        // 24h TTL counted from first registration and reaped live parties.
+        touchInstance(instanceId);
+
         const isHost = instance.hostUserId === userId;
         const room = getOrCreateRoom(instanceId);
 
@@ -475,7 +601,15 @@ export function attachWebSocketServer(server: Server): void {
           }
         }
 
-        client = { ws, userId, username, isHost, isCoHost: false };
+        // Roles are restored from the room, not defaulted: see Room.coHostIds.
+        // Host supersedes co-host, so the two are never both set.
+        client = {
+          ws,
+          userId,
+          username,
+          isHost,
+          isCoHost: !isHost && room.coHostIds.has(userId),
+        };
         roomId = instanceId;
         room.clients.add(client);
 
@@ -497,6 +631,7 @@ export function attachWebSocketServer(server: Server): void {
           playing: room.state.playing,
           position: interpolatedPosition(room.state),
           hlsSessionId: room.state.hlsSessionId,
+          sessionOffset: room.state.sessionOffset,
           lastCommandAt: room.state.updatedAt,
           browseContext: room.state.browseContext,
           queue: room.state.queue,
@@ -622,6 +757,18 @@ export function attachWebSocketServer(server: Server): void {
           room.state.hlsSessionId = sid;
           room.state.playing = true;
           room.state.position = startPosition;
+          // Where Plex was asked to start transcoding. Usually the same as the
+          // position, and deliberately a separate field because it isn't when a
+          // host re-announces a session it has already played some of: the room
+          // should land on the playhead, but nothing below the *offset* exists
+          // to seek to. Everyone who joins or inherits this session needs the
+          // latter — see RoomState.sessionOffset.
+          room.state.sessionOffset =
+            typeof msg.sessionOffset === "number" &&
+            Number.isFinite(msg.sessionOffset) &&
+            msg.sessionOffset >= 0
+              ? msg.sessionOffset
+              : startPosition;
           room.state.updatedAt = Date.now();
           room.state.browseContext = null;
           startRoomPing(roomId, sid);
@@ -632,12 +779,13 @@ export function attachWebSocketServer(server: Server): void {
             subtitles: room.state.subtitles,
             hlsSessionId: room.state.hlsSessionId,
             position: startPosition,
+            sessionOffset: room.state.sessionOffset,
           });
           break;
         }
         case "pause": {
           room.state.playing = false;
-          room.state.position = safePosition(msg.position, room.state.position);
+          room.state.position = positionForCommand(room, client, msg.position);
           room.state.updatedAt = Date.now();
           persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
           broadcast(room, ws, { type: "pause", position: room.state.position });
@@ -645,12 +793,14 @@ export function attachWebSocketServer(server: Server): void {
         }
         case "resume": {
           room.state.playing = true;
-          room.state.position = safePosition(msg.position, room.state.position);
+          room.state.position = positionForCommand(room, client, msg.position);
           room.state.updatedAt = Date.now();
           broadcast(room, ws, { type: "resume", position: room.state.position });
           break;
         }
         case "seek": {
+          // The one command that keeps a non-host's number: a seek target is a
+          // decision, not an observation. See positionForCommand.
           room.state.position = safePosition(msg.position, room.state.position);
           room.state.updatedAt = Date.now();
           persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
@@ -683,17 +833,27 @@ export function attachWebSocketServer(server: Server): void {
         }
         case "stop": {
           // Save where we got to before the state is torn down — this is the
-          // moment most resumes are created from.
-          persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
+          // moment most resumes are created from. "always", because this is a
+          // teardown and the final position must not lose to the forced-write
+          // floor after a pause a moment earlier.
+          persistProgress(room, instanceHosts.get(roomId)?.hostUserId, "always");
           // Capture before clearing so we can kill the exact Plex transcode
           const stoppingSessionId = room.state.hlsSessionId;
           room.state.ratingKey = null;
           room.state.title = null;
           room.state.hlsSessionId = null;
+          room.state.sessionOffset = 0;
           room.state.playing = false;
           room.state.position = 0;
           room.state.updatedAt = Date.now();
-          room.state.queue = [];
+          // The queue deliberately survives.
+          //
+          // It used to be cleared here, which discarded everything the room had
+          // lined up the moment one title ended — and the host never saw it
+          // happen, because the server excludes the sender from its own
+          // broadcast: their panel still listed items the server had already
+          // thrown away. A queue is what to watch *next*; finishing the current
+          // thing is the moment it matters most.
           stopRoomPing(roomId);
           broadcast(room, ws, { type: "stop" });
           // Kill the Plex transcode server-side so it dies even if viewers
@@ -721,6 +881,7 @@ export function attachWebSocketServer(server: Server): void {
             title: room.state.title,
             subtitles: room.state.subtitles,
             hlsSessionId: room.state.hlsSessionId,
+            sessionOffset: room.state.sessionOffset,
           });
           break;
         }
@@ -732,6 +893,11 @@ export function attachWebSocketServer(server: Server): void {
           broadcast(room, ws, { type: "browse", context: room.state.browseContext });
           break;
         }
+        // Every queue mutation answers with the server's copy, to everyone
+        // including the sender — the sender most of all. A rejected item (bad
+        // shape, duplicate, queue full) used to produce no reply at all, so a
+        // client that had already drawn it optimistically kept showing an entry
+        // the server never accepted.
         case "queue-add": {
           const item = sanitizeQueueItem(msg.item);
           if (item) {
@@ -740,23 +906,20 @@ export function attachWebSocketServer(server: Server): void {
             if (!alreadyQueued && room.state.queue.length < MAX_QUEUE) {
               room.state.queue.push(item);
             }
-            broadcast(room, ws, { type: "queue-updated", queue: room.state.queue });
-            sendTo(ws, { type: "queue-updated", queue: room.state.queue });
           }
+          sendToAll(room, { type: "queue-updated", queue: room.state.queue });
           break;
         }
         case "queue-remove": {
           const ratingKey = typeof msg.ratingKey === "string" ? msg.ratingKey : "";
           if (!ratingKey) break;
           room.state.queue = room.state.queue.filter((q) => q.ratingKey !== ratingKey);
-          broadcast(room, ws, { type: "queue-updated", queue: room.state.queue });
-          sendTo(ws, { type: "queue-updated", queue: room.state.queue });
+          sendToAll(room, { type: "queue-updated", queue: room.state.queue });
           break;
         }
         case "queue-clear": {
           room.state.queue = [];
-          broadcast(room, ws, { type: "queue-updated", queue: room.state.queue });
-          sendTo(ws, { type: "queue-updated", queue: room.state.queue });
+          sendToAll(room, { type: "queue-updated", queue: room.state.queue });
           break;
         }
         case "queue-reorder": {
@@ -768,8 +931,7 @@ export function attachWebSocketServer(server: Server): void {
                 .map(sanitizeQueueItem)
                 .filter((q): q is QueueItem => q !== null)
             : [];
-          broadcast(room, ws, { type: "queue-updated", queue: room.state.queue });
-          sendTo(ws, { type: "queue-updated", queue: room.state.queue });
+          sendToAll(room, { type: "queue-updated", queue: room.state.queue });
           break;
         }
         case "promote-host": {
@@ -784,7 +946,7 @@ export function attachWebSocketServer(server: Server): void {
           // branch that persists progress is skipped and the watch they were
           // in the middle of would resume from wherever they last happened to
           // be written, or not at all.
-          persistProgress(room, client.userId, true);
+          persistProgress(room, client.userId, "always");
 
           // Hand over: the old host drops to a plain viewer, and the target
           // clears any co-host flag since host already supersedes it.
@@ -792,6 +954,9 @@ export function attachWebSocketServer(server: Server): void {
           client.isCoHost = false;
           target.isHost = true;
           target.isCoHost = false;
+          // Host outranks co-host, so the grant is spent rather than remembered
+          // — otherwise handing the role back would silently restore it.
+          room.coHostIds.delete(target.userId);
 
           const instance = instanceHosts.get(roomId);
           if (instance) instance.hostUserId = target.userId;
@@ -817,12 +982,21 @@ export function attachWebSocketServer(server: Server): void {
         }
         case "set-cohost": {
           if (!client.isHost) break;
-          const targetId = msg.userId as string;
+          const targetId = typeof msg.userId === "string" ? msg.userId : "";
           const target = [...room.clients].find((c) => c.userId === targetId);
           // The host is already above co-host, so toggling it on themself is a no-op.
           if (!target || target.isHost) break;
 
-          target.isCoHost = Boolean(msg.value);
+          const value = Boolean(msg.value);
+          // Recorded on the room as well as the connection, so the grant
+          // survives the socket — see Room.coHostIds.
+          if (value) {
+            if (room.coHostIds.size >= MAX_CO_HOSTS && !room.coHostIds.has(targetId)) break;
+            room.coHostIds.add(targetId);
+          } else {
+            room.coHostIds.delete(targetId);
+          }
+          target.isCoHost = value;
           sendTo(target.ws, { type: "cohost-changed", isCoHost: target.isCoHost });
           broadcastParticipants(room);
           break;
@@ -873,7 +1047,7 @@ export function attachWebSocketServer(server: Server): void {
         // Attribute the position to the host who is leaving, before a successor
         // takes over the instance record. Closing the tab is the other common
         // way a watch ends, so this is as important as the explicit stop path.
-        persistProgress(room, client.userId, true);
+        persistProgress(room, client.userId, "always");
 
         if (room.clients.size > 0) {
           // Prefer a co-host as successor — the host already trusted them with
@@ -882,6 +1056,7 @@ export function attachWebSocketServer(server: Server): void {
             [...room.clients].find((c) => c.isCoHost) ?? room.clients.values().next().value!;
           newHost.isHost = true;
           newHost.isCoHost = false;
+          room.coHostIds.delete(newHost.userId);
 
           const instance = instanceHosts.get(roomId);
           if (instance) {
@@ -916,6 +1091,7 @@ export function attachWebSocketServer(server: Server): void {
           });
           room.state.playing = false;
           room.state.hlsSessionId = null;
+          room.state.sessionOffset = 0;
           stopRoomPing(roomId);
           killPlexTranscode(disconnectedSessionId).catch(() => {});
         }

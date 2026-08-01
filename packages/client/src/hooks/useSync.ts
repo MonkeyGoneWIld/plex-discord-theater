@@ -54,6 +54,25 @@ export interface SyncState {
   hostUsername: string | null;
   /** Increments only on explicit commands (play/pause/resume/seek), not heartbeats */
   commandSeq: number;
+  /**
+   * Increments each time the server sends a full room snapshot — i.e. on every
+   * (re)join.
+   *
+   * A snapshot bumps `commandSeq` too, because a viewer has to act on it. The
+   * host must not: it *is* the authority for position and play state, and its
+   * own last report is what the snapshot echoes back. After a socket blip that
+   * echo is stale — up to a heartbeat old, or worse if the host paused while
+   * disconnected and the room never heard — and applying it un-paused the host
+   * or dragged its playhead backwards. This lets the player tell the two apart.
+   */
+  stateSeq: number;
+  /**
+   * Offset the current transcode was started at. Nothing before it exists, so a
+   * seek behind it needs a restart rather than an in-place jump — which a client
+   * that didn't start the session (a joiner, or a promoted host) has no other
+   * way to know.
+   */
+  sessionOffset: number;
   /** Increments each time the host issues a seek — lets viewers surface a
    *  transient "seeking" status without inferring it from position jumps. */
   seekSeq: number;
@@ -93,14 +112,24 @@ export interface Participant {
 }
 
 export interface SyncActions {
-  /** `position` is the offset the transcode was started at (resume or seek-restart),
-   *  so viewers land there rather than at 0:00. Omit for a plain start. */
+  /**
+   * `position` is where the room should be — normally the offset the transcode
+   * was started at (resume or seek-restart), so viewers land there rather than
+   * at 0:00. Omit for a plain start.
+   *
+   * `sessionOffset` is where the transcode itself begins, which is usually the
+   * same number and isn't when the host re-announces a running session it has
+   * already played some of. They are separated because the two mean different
+   * things to a client that didn't start the session: one is where to seek to,
+   * the other is the floor below which no segments exist.
+   */
   sendPlay: (
     ratingKey: string,
     title: string,
     subtitles: boolean,
     hlsSessionId: string,
     position?: number,
+    sessionOffset?: number,
   ) => void;
   sendPause: (position: number) => void;
   sendResume: (position: number) => void;
@@ -155,6 +184,8 @@ const INITIAL_STATE: SyncState = {
   hostUsername: null,
   suggestions: [],
   commandSeq: 0,
+  stateSeq: 0,
+  sessionOffset: 0,
   seekSeq: 0,
   lastCommandAt: 0,
   authFailed: false,
@@ -179,6 +210,12 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
   // bump tears the old socket down and starts the whole sequence again from a
   // clean attempt count — which is exactly what a manual retry should mean.
   const [reconnectNonce, setReconnectNonce] = useState(0);
+  // Read at join time rather than depended on. A change here is cosmetic — it is
+  // the display name in the roster — and having it in the effect's deps meant
+  // any change tore the socket down mid-party and rejoined, which evicts the old
+  // connection and re-broadcasts the roster for nothing.
+  const usernameRef = useRef(username);
+  usernameRef.current = username;
 
   const send = useCallback((msg: object) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -216,9 +253,15 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         subtitles: boolean,
         hlsSessionId: string,
         position?: number,
+        sessionOffset?: number,
       ) => {
-        send({ type: "play", ratingKey, title, subtitles, hlsSessionId, position });
-        setState((prev) => ({ ...prev, playing: true, position: position ?? 0 }));
+        send({ type: "play", ratingKey, title, subtitles, hlsSessionId, position, sessionOffset });
+        setState((prev) => ({
+          ...prev,
+          playing: true,
+          position: position ?? 0,
+          sessionOffset: sessionOffset ?? position ?? 0,
+        }));
       },
       sendPause: (position: number) => {
         send({ type: "pause", position });
@@ -294,7 +337,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             sessionToken: token,
             instanceId,
             userId,
-            username,
+            username: usernameRef.current,
           }),
         );
         setState((prev) => ({ ...prev, connected: true, hostDisconnected: false }));
@@ -319,7 +362,9 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               playing: Boolean(msg.playing),
               position: (msg.position as number) ?? 0,
               hlsSessionId: (msg.hlsSessionId as string) || null,
+              sessionOffset: (msg.sessionOffset as number) ?? 0,
               commandSeq: prev.commandSeq + 1,
+              stateSeq: prev.stateSeq + 1,
               lastCommandAt: (msg.lastCommandAt as number) ?? Date.now(),
               browseContext: (msg.browseContext as string) || null,
               queue: (msg.queue as QueueItem[]) || [],
@@ -378,6 +423,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               title: (msg.title as string) || null,
               subtitles: Boolean(msg.subtitles),
               hlsSessionId: (msg.hlsSessionId as string) || null,
+              sessionOffset: (msg.sessionOffset as number) ?? 0,
               playing: true,
               // Non-zero when the host resumed from history or restarted the
               // transcode at a seek target; 0 for a plain start.
@@ -417,11 +463,14 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               ratingKey: null,
               title: null,
               hlsSessionId: null,
+              sessionOffset: 0,
               playing: false,
               position: 0,
               commandSeq: prev.commandSeq + 1,
               browseContext: null,
-              queue: [],
+              // `queue` is deliberately left alone — the server keeps it across
+              // a stop now, and clearing it here would put this client out of
+              // step with the room the moment anything was queued.
             }));
             break;
           case "heartbeat":
@@ -440,8 +489,18 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
                     title: (msg.title as string) || null,
                     subtitles: Boolean(msg.subtitles),
                     hlsSessionId: (msg.hlsSessionId as string) || null,
+                    sessionOffset: (msg.sessionOffset as number) ?? 0,
                   }
-                : {}),
+                // The session id can go missing on its own — a stray stop, or a
+                // heartbeat that arrived before the "play" that announced the
+                // restart. Without it a viewer has nothing to attach hls.js to
+                // and sits on black with the room playing around them.
+                : prev.hlsSessionId == null && msg.hlsSessionId
+                  ? {
+                      hlsSessionId: msg.hlsSessionId as string,
+                      sessionOffset: (msg.sessionOffset as number) ?? prev.sessionOffset,
+                    }
+                  : {}),
             }));
             break;
           case "browse":
@@ -563,7 +622,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         wsRef.current = null;
       }
     };
-  }, [enabled, instanceId, userId, username, reconnectNonce]);
+  }, [enabled, instanceId, userId, reconnectNonce]);
 
   return { state, actions };
 }

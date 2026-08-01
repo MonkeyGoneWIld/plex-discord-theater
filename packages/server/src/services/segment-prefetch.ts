@@ -39,8 +39,11 @@ interface PrefetchSession {
    *  quietly stopped making progress announces itself instead of going silent. */
   idlePolls: number;
   /** Bytes currently held in segmentCache — the number the eviction budget is
-   *  actually about. Maintained incrementally; see CACHE_BUDGET_BYTES. */
+   *  actually about. Maintained incrementally; see GLOBAL_CACHE_BUDGET_BYTES. */
   cachedBytes: number;
+  /** When this session was started, so the oldest can be displaced when the
+   *  concurrency cap is reached rather than refusing the newcomer. */
+  startedAt: number;
 }
 
 // ─── Constants ──────────────────────────────────────────────────
@@ -50,20 +53,24 @@ const MAX_CONCURRENT_FETCHES = 3;
 /** Entry-count bound, secondary to the byte budget below. */
 const EVICTION_THRESHOLD = 50;
 /**
- * Memory ceiling for one session's segment cache.
+ * Memory ceiling for *all* prefetch caches together.
  *
  * The count-based caps above are what this module used to bound itself with,
  * and a count is the wrong unit: a 3-second segment is ~4.5 MB at the 12 Mbps
  * target and ~7.5 MB at the 20 Mbps peak, so "100 segments" is anywhere from
- * 450 MB to 750 MB — per session, times MAX_CONCURRENT_SESSIONS. Nothing in the
- * module measured bytes, so the real footprint moved with the bitrate setting
- * and nobody would connect the two.
+ * 450 MB to 750 MB — per session, times the session cap. Nothing in the module
+ * measured bytes, so the real footprint moved with the bitrate setting and
+ * nobody would connect the two.
  *
- * 192 MB holds ~25-40 segments, which is 75-120s of lead at 3s each — well past
- * what the client can consume before the next poll refills it. EVICTION_THRESHOLD
- * stays as a second bound for the (unlikely) case of very small segments.
+ * Global rather than per-session, so raising the session cap (see
+ * MAX_CONCURRENT_SESSIONS) cannot raise the memory ceiling with it. Each session
+ * gets an equal share of this: 384 MB alone, 192 MB each with two rooms running,
+ * 96 MB each with four. Even the smallest share holds ~13-21 segments — 40-60s
+ * of lead at 3s each — which is still more than a client consumes between polls.
+ * EVICTION_THRESHOLD stays as a second bound for the (unlikely) case of very
+ * small segments.
  */
-const CACHE_BUDGET_BYTES = 192 * 1024 * 1024;
+const GLOBAL_CACHE_BUDGET_BYTES = 384 * 1024 * 1024;
 /**
  * How far past the *playhead* to keep requesting — ×3s ≈ 150s, comfortably over
  * the client's 120s buffer target.
@@ -127,10 +134,15 @@ function dropSegment(session: PrefetchSession, path: string): void {
   if (session.cachedBytes < 0) session.cachedBytes = 0;
 }
 
+/** This session's share of the global byte budget — see GLOBAL_CACHE_BUDGET_BYTES. */
+function sessionBudgetBytes(): number {
+  return Math.floor(GLOBAL_CACHE_BUDGET_BYTES / Math.max(1, sessions.size));
+}
+
 /** Whether the cache is over either bound — bytes or count. */
 function overBudget(session: PrefetchSession): boolean {
   return (
-    session.cachedBytes > CACHE_BUDGET_BYTES ||
+    session.cachedBytes > sessionBudgetBytes() ||
     session.segmentCache.size > EVICTION_THRESHOLD
   );
 }
@@ -308,16 +320,36 @@ async function pollSubManifest(session: PrefetchSession): Promise<void> {
  * Start pre-fetching segments for a transcode session.
  * Call after manifest fetch once the plexKey is known.
  */
-const MAX_CONCURRENT_SESSIONS = 2;
+/**
+ * How many sessions may prefetch at once.
+ *
+ * Memory is bounded by GLOBAL_CACHE_BUDGET_BYTES rather than by this, so the cap
+ * is only about how thinly the budget is worth spreading. Four covers a couple
+ * of parties plus the transient overlap of a seek-restart, where the outgoing
+ * session's teardown races the incoming manifest.
+ */
+const MAX_CONCURRENT_SESSIONS = 4;
 
 export function startPrefetch(sessionId: string, plexKey: string, startIndex = 0): void {
   stopPrefetch(sessionId);
 
-  // Guard: one Express process serves up to 2 Discord servers
-  if (sessions.size >= MAX_CONCURRENT_SESSIONS) {
-    console.warn("[Prefetch] Max concurrent sessions reached (" + MAX_CONCURRENT_SESSIONS +
-      "), skipping prefetch for", sessionId.substring(0, 8));
-    return;
+  // At the cap, displace the oldest session rather than refusing the new one.
+  //
+  // This used to `return`, which meant the session someone was actually waiting
+  // on got no prefetch at all — and the common way to reach the cap is a
+  // seek-restart, whose outgoing session is still being torn down while the
+  // replacement asks for its manifest. So seeking during a second party's
+  // playback silently dropped the seeker back to unbuffered Plex throttling,
+  // which is exactly the case prefetch exists for.
+  while (sessions.size >= MAX_CONCURRENT_SESSIONS) {
+    let oldest: PrefetchSession | null = null;
+    for (const s of sessions.values()) {
+      if (!oldest || s.startedAt < oldest.startedAt) oldest = s;
+    }
+    if (!oldest) break;
+    console.warn("[Prefetch] At capacity — displacing oldest session",
+      oldest.sessionId.substring(0, 8), "for", sessionId.substring(0, 8));
+    stopPrefetch(oldest.sessionId);
   }
 
   const start = Math.max(0, startIndex);
@@ -339,9 +371,15 @@ export function startPrefetch(sessionId: string, plexKey: string, startIndex = 0
     playbackIndex: start,
     idlePolls: 0,
     cachedBytes: 0,
+    startedAt: Date.now(),
   };
 
   sessions.set(sessionId, session);
+  // A new session narrows everyone's share of the global budget, so the
+  // existing ones have to give ground before this one starts filling.
+  for (const other of sessions.values()) {
+    if (other !== session) evictIfNeeded(other);
+  }
 
   console.log("[Prefetch] Started for session", sessionId.substring(0, 8),
     "plexKey", plexKey.substring(0, 8));

@@ -64,9 +64,39 @@ const insertInstanceStmt = db.prepare(
   "INSERT OR REPLACE INTO instances (instance_id, host_user_id, guild_id, channel_id, created_at) VALUES (?, ?, ?, ?, ?)"
 );
 const updateHostStmt = db.prepare("UPDATE instances SET host_user_id = ? WHERE instance_id = ?");
+const touchInstanceStmt = db.prepare("UPDATE instances SET created_at = ? WHERE instance_id = ?");
 
 export function updateInstanceHost(instanceId: string, newHostUserId: string): void {
   updateHostStmt.run(newHostUserId, instanceId);
+}
+
+/**
+ * How much of the instance TTL may elapse before an active instance's clock is
+ * pushed forward. Mirrors the session renewal in middleware/auth.ts: one write
+ * per hour per instance rather than one per join.
+ */
+const INSTANCE_RENEW_AFTER_MS = 60 * 60 * 1000;
+
+/**
+ * Keep an instance alive because someone is still using it.
+ *
+ * `createdAt` was set once at registration and never moved, so the 24h TTL was
+ * absolute: a party still running the next day had its registration pruned out
+ * from under it, and every later join failed with "Unknown instance" — the
+ * activity looked broken with nothing wrong. Called from the WebSocket join, so
+ * the TTL now measures idleness rather than age.
+ */
+export function touchInstance(instanceId: string): void {
+  const entry = instanceHosts.get(instanceId);
+  if (!entry) return;
+  const now = Date.now();
+  if (now - entry.createdAt < INSTANCE_RENEW_AFTER_MS) return;
+  entry.createdAt = now;
+  try {
+    touchInstanceStmt.run(now, instanceId);
+  } catch {
+    // A failed renewal just means the instance expires on its original schedule.
+  }
 }
 const deleteInstanceStmt = db.prepare("DELETE FROM instances WHERE instance_id = ?");
 const deleteExpiredInstancesStmt = db.prepare("DELETE FROM instances WHERE created_at < ?");

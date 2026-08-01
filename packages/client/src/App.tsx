@@ -49,7 +49,17 @@ type View =
   | { kind: "person"; name: string; thumb?: string | null }
   // resumePosition (seconds) is set only when the host chose "Resume" on the
   // detail view; every other route into the player starts from the beginning.
-  | { kind: "player"; item: PlexItem; subtitles: boolean; resumePosition?: number };
+  //
+  // `synthesized` marks an item built from sync state alone — a ratingKey and a
+  // title, which is everything a client following the room has to go on. Real
+  // metadata replaces it as soon as the lookup lands (see the upgrade effect).
+  | {
+      kind: "player";
+      item: PlexItem;
+      subtitles: boolean;
+      resumePosition?: number;
+      synthesized?: boolean;
+    };
 
 // Breadcrumb label for a stack entry.
 function crumbLabel(v: View): string {
@@ -132,6 +142,18 @@ export function App() {
       else window.clearTimeout(handle);
     };
   }, [isReady]);
+
+  // Whether the socket has been down long enough to say so. Delayed, so an
+  // ordinary reconnect (well under a second) never shows a banner at all.
+  const [showReconnecting, setShowReconnecting] = useState(false);
+  useEffect(() => {
+    if (syncState.connected || syncState.authFailed || syncState.reconnectFailed) {
+      setShowReconnecting(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowReconnecting(true), 2500);
+    return () => clearTimeout(timer);
+  }, [syncState.connected, syncState.authFailed, syncState.reconnectFailed]);
 
   // Persist active library section across navigation
   const [librarySection, setLibrarySection] = useState<string | null>(null);
@@ -283,6 +305,7 @@ export function App() {
           thumb: null,
         },
         subtitles: syncState.subtitles,
+        synthesized: true,
       };
       setViewStack((s) => {
         const covering = s[s.length - 1]?.kind !== "player";
@@ -320,6 +343,7 @@ export function App() {
         thumb: null,
       },
       subtitles: syncState.subtitles,
+      synthesized: true,
     };
     setViewStack((s) => {
       const covering = s[s.length - 1]?.kind !== "player";
@@ -340,6 +364,7 @@ export function App() {
         thumb: null,
       },
       subtitles: syncState.subtitles,
+      synthesized: true,
     };
     // Replace a top player rather than appending: the rejoin banner has onClick
     // on both the wrapper and its inner button, so a button click fires this
@@ -358,26 +383,71 @@ export function App() {
   // promoted back to host after leaving — so they aren't stranded with no way in.
   const showNowPlaying = !!syncState.ratingKey && view.kind !== "player";
 
-  // Poster for the Now Playing banner. Sync state carries only ratingKey/title,
-  // not artwork, so resolve the thumb by ratingKey whenever something is playing.
-  const [nowPlayingThumb, setNowPlayingThumb] = useState<string | null>(null);
+  /**
+   * Real metadata for whatever the room is playing.
+   *
+   * Sync state carries a ratingKey and a display title and nothing else, which
+   * is all a viewer's player used to get: a stub typed "movie" with no artwork
+   * and no ancestry. That stub is what the player then reasons from, so for
+   * every viewer an episode wasn't an episode — reaching the end left them on
+   * the episode instead of the show, and the poster on the rejoin banner was
+   * the only thing anyone had bothered to look up separately.
+   *
+   * One fetch answers both. It is already cached client-side and served from the
+   * server's metadata cache, so this costs nothing beyond the request the banner
+   * was making anyway.
+   */
+  const [nowPlayingMeta, setNowPlayingMeta] = useState<PlexItem | null>(null);
+  const nowPlayingThumb = nowPlayingMeta
+    ? (nowPlayingMeta.type === "episode"
+        ? (nowPlayingMeta.showThumb ?? nowPlayingMeta.thumb)
+        : nowPlayingMeta.thumb)
+    : null;
   useEffect(() => {
     const rk = syncState.ratingKey;
     if (!rk) {
-      setNowPlayingThumb(null);
+      setNowPlayingMeta(null);
       return;
     }
     let cancelled = false;
     fetchMeta(rk)
       .then((meta) => {
         if (cancelled) return;
-        // Episodes: prefer the portrait show poster over the landscape still.
-        const poster = meta.type === "episode" ? (meta.showThumb ?? meta.thumb) : meta.thumb;
-        setNowPlayingThumb(poster);
+        setNowPlayingMeta({
+          ratingKey: rk,
+          title: meta.title,
+          type: meta.type,
+          thumb: meta.thumb,
+          showThumb: meta.showThumb,
+          showTitle: meta.showTitle,
+          parentTitle: meta.parentTitle,
+          parentIndex: meta.parentIndex,
+          index: meta.index,
+          year: meta.year,
+          parentRatingKey: meta.parentRatingKey,
+          grandparentRatingKey: meta.grandparentRatingKey,
+        });
       })
-      .catch(() => { if (!cancelled) setNowPlayingThumb(null); });
+      .catch(() => { if (!cancelled) setNowPlayingMeta(null); });
     return () => { cancelled = true; };
   }, [syncState.ratingKey]);
+
+  /**
+   * Swap the synthesized item for the real one once metadata arrives.
+   *
+   * Nothing waits on this: the player needs only a ratingKey to start, and the
+   * upgrade lands a beat later without disturbing playback — `item.ratingKey` is
+   * unchanged, so no effect keyed on it re-runs and the transcode is untouched.
+   */
+  useEffect(() => {
+    if (!nowPlayingMeta) return;
+    setViewStack((s) => {
+      const top = s[s.length - 1];
+      if (top?.kind !== "player" || !top.synthesized) return s;
+      if (top.item.ratingKey !== nowPlayingMeta.ratingKey) return s;
+      return [...s.slice(0, -1), { ...top, item: nowPlayingMeta, synthesized: false }];
+    });
+  }, [nowPlayingMeta]);
 
   const handleSelect = useCallback((item: PlexItem, flat = false) => {
     // Online (Discover) results aren't in the library — open a detail view with
@@ -678,14 +748,21 @@ export function App() {
           The player has always said so; out here there was nothing at all, so a
           dropped socket looked exactly like a quiet room — you could browse,
           pick something, and only then discover nobody had seen any of it. */}
-      {view.kind !== "player" && (syncState.authFailed || syncState.reconnectFailed) && (
+      {view.kind !== "player" &&
+        (syncState.authFailed || syncState.reconnectFailed || showReconnecting) && (
         <div style={styles.connectionBanner} role="status">
           <span>
             {syncState.authFailed
               ? "Session expired — close and reopen the activity to continue"
-              : "Disconnected from the watch party"}
+              : syncState.reconnectFailed
+                ? "Disconnected from the watch party"
+                // Between the drop and the twentieth failed retry there was
+                // nothing at all, which is over a minute of browsing, queueing
+                // and suggesting into a void that looked exactly like a quiet
+                // room.
+                : "Reconnecting to the watch party…"}
           </span>
-          {!syncState.authFailed && (
+          {syncState.reconnectFailed && (
             <button style={styles.connectionRetryBtn} onClick={() => syncActions.retryConnection()}>
               Reconnect
             </button>

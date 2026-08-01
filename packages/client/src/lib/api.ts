@@ -229,6 +229,14 @@ export interface PlexMeta {
   art: string | null;
   genres: string[];
   type: string;
+  /** Episode ancestry, present only for episodes. Lets a client that only has a
+   *  ratingKey (a viewer following the room) build a complete PlexItem. */
+  index?: number;
+  parentIndex?: number;
+  parentTitle?: string;
+  parentRatingKey?: string;
+  grandparentRatingKey?: string;
+  showTitle?: string;
   partId: number | null;
   /** Whether BIF hover-preview frames exist for this item. Optional so a newer
    *  client served by an older server degrades to "no previews". */

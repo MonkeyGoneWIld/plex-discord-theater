@@ -1,13 +1,153 @@
 # plex-discord-theater — audit
 
-Two passes. The first (at `677288e`) found 40 issues; most were fixed in
-`38a4653` / `94858fa`. This document is the **second pass**: it re-verifies those
-fixes, records what the fixes themselves introduced, and covers the remaining
-items plus the end-user improvements applied on top.
+Three passes. The first (at `677288e`) found 40 issues; most were fixed in
+`38a4653` / `94858fa`. The second (below, from "Round 2") re-verified those and
+covered the rest. **Round 3 is at the top** and is about the shared-session
+behaviour specifically: several people watching, co-hosts, seeking, changing
+host, changing subtitles, simultaneous commands, and playback going backwards.
 
-Both packages typecheck clean and the production build succeeds. The server was
-smoke-tested (boot, health, auth, and hostile WebSocket payloads) against a
-running instance.
+Both packages typecheck clean and the production build succeeds.
+
+---
+
+## Round 3 — the shared session
+
+Everything here was reproduced before it was fixed. A 44-check multi-client
+WebSocket harness drives real sockets through join, roles, transport, handover,
+teardown, hostile payloads and a message flood, asserting on what the server
+actually broadcasts. **The pre-fix build fails 13 of the 44; the fixed build
+passes all 44.** Each item below names the check that pins it.
+
+### The room's position had two authorities
+
+`pause` and `resume` wrote `msg.position` — the *sender's* playhead — into room
+state, and room state is broadcast to everyone. For the host that is correct. For
+a co-host it is not: their playhead trails the host's by whatever their buffer is
+behind, and if their stream has stalled it can trail by minutes.
+
+So a co-host pressing pause dragged every viewer back to wherever the co-host
+happened to be, and the host's next heartbeat dragged them forward again. That is
+the "it jumped back in time" report, with a yo-yo behind it. Reproduced: host
+heartbeats at 1800s, co-host pauses reporting 42s, room broadcasts 42s.
+
+Pause and resume are about *whether*, not *where*, so a non-host's number is now
+discarded in favour of the room's own interpolated position. A **seek** still
+keeps the sender's number — that one is a decision, not an observation.
+
+> `a co-host's pause does not drag the room back to its own playhead` ·
+> `a co-host's resume keeps the room position` · `a co-host's seek IS authoritative`
+
+### A co-host lost their role every time their socket blinked
+
+`isCoHost` lived only on the connection object, which dies with the socket. A
+dropped WebSocket, a tab reload, Discord backgrounding the activity — any of them
+brought the co-host back as a plain viewer with their controls silently gone and
+nothing on screen saying why. Grants now live on the room, keyed by Discord user
+id, so the role belongs to the person rather than to the connection. Handing over
+the host role spends the grant rather than remembering it, so passing the role
+back doesn't quietly restore a co-host badge nobody re-issued.
+
+> `co-host role is restored on rejoin` · `reconnected co-host can still drive
+> transport` · `handing the role back does not restore a stale co-host grant`
+
+### Handing over the host role stranded the outgoing host on black
+
+The player picked which HLS session to follow from a *mount-time* flag. That
+stopped promotion tearing a working stream down, and missed the opposite
+direction entirely: a host who hands the role over keeps that flag forever, so it
+went on requesting segments from a session the new host had already replaced.
+Those 410, the retry budget runs out, and the rebuild asks for
+`owner ? newSession : viewerSession` — which for a demoted host is `null`. "No
+session id yet, waiting for sync", permanently. The only way out was leaving the
+activity and coming back.
+
+It now latches on "the room has moved to a session we are not on", which says the
+same thing about promotion (a host follows nothing) and is also true after a
+handover: nothing happens at the moment of demotion, and when the new host does
+restart, the ex-host follows like any other viewer.
+
+### Joining a paused room played the film to one person alone
+
+The manifest handler called `video.play()` unconditionally. If the room was
+already paused, no command was coming — the pause had happened before the join —
+and heartbeats deliberately don't drive transport, so nothing ever corrected it.
+One person watched ahead while everyone else sat on a still, until a later pause
+or seek pulled them back.
+
+Two halves: the manifest handler holds instead of playing when the room it is
+joining is paused, and a new effect keeps every non-host's element matching the
+room's play state on any change, not just on explicit commands.
+
+### A reconnecting host was corrected by its own stale echo
+
+The room's copy of what is playing comes entirely from the host, so whatever the
+server holds while the host's socket is down is whatever the host last managed to
+send. On reconnect the snapshot is therefore stale *by construction* — and the
+player applied it: a host that had paused during the outage was un-paused by its
+own echo, and one that had played on was dragged back to its last check-in and
+then broadcast that as the room's truth.
+
+Snapshots are now distinguishable from commands (`stateSeq`). A host with a live
+session ignores them and pushes the correction the other way instead —
+re-announcing the session if the room lost track of it, then its real position
+and play state.
+
+### Drift correction was itself the stutter
+
+There was one threshold: under 3s nothing happened, over it a seek fired. A seek
+throws away the fragment hls.js has in flight and reloads from the target, so the
+correction rebuffers — and a room settles just under the threshold and stays
+permanently out of step. Several viewers hovering around 3s produced a visible
+hitch each, every few seconds, for the whole film.
+
+Now two tiers. Inside 4s, playback rate is nudged by at most 8% to close the gap —
+inaudible, invisible, and it converges to under half a second instead of parking
+at three. Outside 4s the old seek path takes over. Speeding up is refused when the
+forward buffer is under 6s, because catching up is exactly what empties it. The
+rate is reset on pause, on a hard seek, on promotion to host, and on every
+pipeline rebuild.
+
+### Everything else
+
+| # | Item | Fix |
+|---|---|---|
+| 1 | **Nothing bounded WebSocket message rate.** A seek writes to SQLite and broadcasts to the room; a `queue-reorder` rebuilds and re-broadcasts up to 100 items. One authenticated client in a loop saturated both. Measured: 400 seeks sent, 400 relayed | 120 messages per 10s per connection, dropped past that, logged once per 10s. Real use is a heartbeat every 5s |
+| 2 | **Forced history writes had no floor.** `pause`, `seek` and `stop` each bypass the history service's throttle, so a scrub burst was a SQLite write per message | 2s floor for command-driven forced writes; teardown paths still always write, so the final position is never lost |
+| 3 | **A stop wiped the queue** — and the host never saw it, because the server excludes the sender from its own broadcast, so their panel still listed items the server had thrown away | The queue survives a stop. It is what to watch *next*; finishing the current thing is when it matters most |
+| 4 | **A rejected queue item got no answer at all**, leaving an optimistic client showing an entry the server never accepted | Every queue mutation answers with the server's copy, to everyone including the sender |
+| 5 | **Instances expired 24h after registration, live or not.** A party still running the next day had its registration pruned out from under it and every later join failed with "Unknown instance" | The TTL slides on join (one write per hour per instance), so it measures idleness rather than age |
+| 6 | **Prefetch silently gave up past two sessions** — and the usual way to reach two is a seek-restart, whose outgoing session is still being torn down while the replacement asks for its manifest. So seeking while a second party watched dropped the seeker back to unbuffered Plex throttling, which is the exact case prefetch exists for | One global 384 MB budget shared across up to four sessions, and at capacity the *oldest* is displaced rather than the newcomer refused. Memory ceiling is now independent of the session count |
+| 7 | **A joiner or promoted host assumed the transcode started at 0:00**, so every backward seek took the in-place path and sat out the full six-second stall before restarting | The session's start offset is part of room state, carried on `state` and `play`, and separate from the position (they differ when a host re-announces a session it has already played some of) |
+| 8 | **Re-picking the subtitle track already playing restarted the transcode** — several seconds of rebuffering for the whole room, changing nothing. Easy to hit by reopening the switcher and tapping the ticked row, or by two co-hosts choosing the same track a moment apart (two restarts, back to back) | The current audio/subtitle stream is tracked, seeded from Plex's own answer, and claimed before the request so an in-flight duplicate is recognised too |
+| 9 | **A dropped socket was completely silent** until all twenty automatic retries had failed — over a minute of pressing pause and browsing into a void that looked exactly like a quiet room | A "Reconnecting…" state in the player and while browsing, held back 2.5s so an ordinary blip shows nothing |
+| 10 | **A co-host's own seek dropped their scrub bar to 0:00.** The host holds its bar at the target through a restart; viewers get the same via the seek broadcast; the co-host who *asked* was the one person watching it crawl back | Same hold, locally, when the target isn't already buffered |
+| 11 | **A viewer's player item was a stub typed "movie" with no artwork or ancestry** — sync state carries a ratingKey and a title and nothing else. So for every viewer an episode wasn't an episode: it rendered as a bare episode name, and reaching the end left them on the episode instead of the show | `/meta` carries episode ancestry (it already had it), and the stub is replaced by the real item as soon as the lookup lands — without disturbing playback, since the ratingKey doesn't change |
+| 12 | **`join` read `sessionToken` / `instanceId` / `userId` off the message with a cast.** A non-string that survived the truthiness check would have thrown inside the handler rather than been refused | Typed at the boundary |
+| 13 | Reconnect churn: `username` was a dependency of the socket effect, so a change tore the socket down mid-party and rejoined | Read at join time from a ref |
+| 14 | A heartbeat could self-heal a missing `ratingKey` but not a missing `hlsSessionId`, leaving a viewer with nothing to attach hls.js to | Both are healed |
+
+### Verified against the pre-fix build
+
+Not argued from reading the code. The same harness was run against the build from
+before this pass, and it fails exactly the checks these fixes target:
+
+```
+FAIL  co-host role is restored on rejoin
+FAIL  reconnected co-host can still drive transport
+FAIL  a co-host's pause does not drag the room back to its own playhead
+FAIL  a co-host's resume keeps the room position
+FAIL  a co-host's seek IS authoritative
+FAIL  the queue survives a stop
+FAIL  a rejected queue item still gets an answer
+FAIL  createdAt was pushed forward (was 23h old)
+FAIL  a flood is throttled rather than relayed in full — {"delivered":400}
+...
+31/44 checks passed
+```
+
+The fixed build passes 44/44, and its log over the run contains no uncaught
+exception — only the expected "Plex unreachable" errors from the test
+environment, each caught at its call site.
 
 ---
 

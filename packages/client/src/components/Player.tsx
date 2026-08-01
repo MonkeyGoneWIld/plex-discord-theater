@@ -21,7 +21,33 @@ import type { InviteResult } from "../hooks/useDiscord";
 const PING_INTERVAL_MS = 10_000; // 10s — matches Plex API recommendation for LAN timeline updates
 const HEARTBEAT_INTERVAL_MS = 5_000;
 const DRIFT_THRESHOLD_S = 2;
-const HEARTBEAT_DRIFT_THRESHOLD_S = 3;
+/**
+ * Drift past which a viewer is yanked into place with a seek rather than eased
+ * there — see the soft-sync constants below.
+ *
+ * This used to be 3s and it was the *only* correction: under it nothing
+ * happened, so a room settled at whatever offset it had drifted to and stayed
+ * there, and over it every heartbeat could fire a seek, which throws away the
+ * fragment in flight and rebuffers. Two or three viewers hovering around the
+ * threshold produced a stutter each, every few seconds, for the whole film.
+ */
+const HARD_SYNC_DRIFT_S = 4;
+/** Inside this, we're in sync — don't touch the rate at all. */
+const SOFT_SYNC_DEAD_ZONE_S = 0.35;
+/**
+ * Drift at which the rate nudge reaches its maximum. Matches HARD_SYNC_DRIFT_S,
+ * so the adjustment ramps smoothly right up to the point where a seek takes over.
+ */
+const SOFT_SYNC_FULL_SCALE_S = HARD_SYNC_DRIFT_S;
+/**
+ * Largest speed change used to converge. 8% closes 4s of drift in under a
+ * minute and is below the threshold where the pitch-corrected audio reads as
+ * anything but normal — the point being that nobody should be able to tell this
+ * is happening.
+ */
+const MAX_RATE_ADJUST = 0.08;
+/** Never speed up into a buffer thinner than this: catching up is what drains it. */
+const SOFT_SYNC_MIN_BUFFER_S = 6;
 // Minimum spacing between viewer drift corrections. Heartbeats land every 5s,
 // and a correction that fires faster than the media can service it cancels the
 // fragment load that would have satisfied the previous one.
@@ -66,6 +92,11 @@ const FORWARD_BUFFER_FLUSH_S = 120;
 // Don't bother flushing slivers — avoids issuing a remove on every tick for a
 // second or two of overshoot.
 const BUFFER_TRIM_SLACK_S = 10;
+
+/** Put playback back to normal speed. Safe to call on anything, including null. */
+function resetPlaybackRate(video: HTMLVideoElement | null): void {
+  if (video && video.playbackRate !== 1) video.playbackRate = 1;
+}
 
 /** Whether the video has enough buffered data at `t` to play from there. */
 function isPositionBuffered(video: HTMLVideoElement, t: number): boolean {
@@ -178,6 +209,9 @@ function snapshot(video: HTMLVideoElement | null): Record<string, unknown> {
     seeking: video.seeking,
     readyState: video.readyState,
     networkState: video.networkState,
+    // Only when it isn't 1, so the ordinary case stays quiet and a line with
+    // rateX in it means soft drift correction was actively pulling.
+    ...(video.playbackRate !== 1 ? { rateX: video.playbackRate } : {}),
     ...(video.error ? { mediaError: `${video.error.code}: ${video.error.message}` } : {}),
   };
 }
@@ -425,7 +459,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // room's current value so a seek that happened before we joined isn't replayed
   // against us on the first command we see.
   const appliedSeekSeqRef = useRef(syncState?.seekSeq ?? 0);
+  // Same idea for room snapshots — see the command effect and the host re-assert.
+  const appliedStateSeqRef = useRef(syncState?.stateSeq ?? 0);
   const seekStallTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Backstop that releases the scrub bar after a co-host's own seek — see
+  // handleSeekCommand.
+  const coHostSeekHoldRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Previous value of the HLS effect's dependency array, so a restart can name
   // the dep that triggered it rather than just appearing in the log.
   const hlsDepsRef = useRef<Record<string, unknown> | null>(null);
@@ -448,6 +487,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const controlsRef = useRef<ControlsHandle>(null);
 
   // Stable refs so the HLS effect doesn't re-run when these change
+  const itemRef = useRef(item);
+  itemRef.current = item;
   const syncActionsRef = useRef(syncActions);
   syncActionsRef.current = syncActions;
   const syncStateRef = useRef(syncState);
@@ -471,9 +512,17 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // render rather than in an effect so the value is correct before the HLS
   // effect reads it, without an extra render or a second transcode start.
   const subtitlesItemRef = useRef(item.ratingKey);
+  // Which streams this room is actually on, so a request for the one already
+  // playing doesn't cost everyone a transcode restart. Null means "not known
+  // yet" — the first selection of a session always applies. Reset with the item,
+  // alongside the burn-in flag, for the same reason.
+  const currentAudioStreamRef = useRef<number | null>(null);
+  const currentSubtitleStreamRef = useRef<number | null>(null);
   if (subtitlesItemRef.current !== item.ratingKey) {
     subtitlesItemRef.current = item.ratingKey;
     subtitlesOnRef.current = subtitles;
+    currentAudioStreamRef.current = null;
+    currentSubtitleStreamRef.current = null;
   }
 
   // Transport rights: the host, plus anyone the host has granted co-host.
@@ -484,15 +533,44 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const canControlRef = useRef(canControl);
   canControlRef.current = canControl;
 
-  // Whether this Player mounted as host — controls viewerHlsSessionId computation.
-  // Using a mount-time ref prevents promotion from flipping the value to null
-  // (which would trigger a full HLS teardown/rebuild and reset to 0:00).
+  // Whether this Player mounted as host. Still used for the decisions that are
+  // genuinely about how this client started — which session it adopts, and
+  // whether a recovery restart should trust room position over its own playhead.
   const mountedAsHostRef = useRef(isHost);
 
-  // For the viewer, tracks the host's HLS session ID from sync state.
-  // For the host, always null — prevents spurious effect re-runs that would
-  // generate a new UUID and orphan the running Plex transcode.
-  const viewerHlsSessionId = mountedAsHostRef.current ? null : (syncState?.hlsSessionId ?? null);
+  const roomSessionId = syncState?.hlsSessionId ?? null;
+
+  /**
+   * The session this client should be playing when it doesn't own one.
+   *
+   * This used to be `mountedAsHost ? null : room.hlsSessionId`, so that
+   * promotion couldn't flip it to null and tear a working stream down. That
+   * covered promotion and missed the opposite case entirely: a host who hands
+   * the role over keeps `mountedAsHost` forever, so it went on requesting
+   * segments from a session the new host had already replaced. Those 410, the
+   * viewer-retry path exhausts itself, and the rebuild picks
+   * `sessionOwner ? newUuid : viewerHlsSessionId` — which for a demoted host is
+   * null. "No session id yet, waiting for sync", forever. Whoever gave up the
+   * host role was left on black with no way back short of leaving and rejoining.
+   *
+   * Latching on "the room has moved to a session we are not on" says the same
+   * thing about promotion (a host follows nothing, so this never moves) while
+   * also being true after a handover: nothing changes at the moment of
+   * demotion — the ex-host is already on the right session — and when the new
+   * host does restart, the ex-host follows it like any other viewer.
+   */
+  const [followSessionId, setFollowSessionId] = useState<string | null>(
+    isHost ? null : roomSessionId,
+  );
+  useEffect(() => {
+    if (isHostRef.current) return;
+    if (!roomSessionId || roomSessionId === sessionIdRef.current) return;
+    logEvent("HLS", "following the room onto a new session", {
+      from: sessionIdRef.current?.substring(0, 8) ?? "none",
+      to: roomSessionId.substring(0, 8),
+    });
+    setFollowSessionId((prev) => (prev === roomSessionId ? prev : roomSessionId));
+  }, [roomSessionId, isHost]);
 
   // A host who mounts into an already-live stream (e.g. promoted while not in
   // the player) adopts that running session instead of starting a second
@@ -509,6 +587,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
     // Promoted to host — take over session ownership
     ownsSessionRef.current = true;
+    // A host defines the room's position rather than chasing it, so whatever
+    // the drift corrector was holding stops here.
+    resetPlaybackRate(videoRef.current);
 
     // Promotion changes who is allowed to stop the transcode and where a
     // recovery restart takes its position from, so it's a turning point for
@@ -564,6 +645,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   }, [isHost]);
 
   const destroyLocal = useCallback(() => {
+    // The element outlives every HLS rebuild, so a rate the drift corrector was
+    // holding would carry into the replacement stream and quietly desync it in
+    // the opposite direction.
+    resetPlaybackRate(videoRef.current);
     if (seekStallTimerRef.current !== null) {
       clearTimeout(seekStallTimerRef.current);
       seekStallTimerRef.current = null;
@@ -592,6 +677,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       hlsRef.current.destroy();
       hlsRef.current = null;
     }
+  }, []);
+
+  // Deliberately not folded into destroyLocal: that runs on every HLS rebuild,
+  // and this timer has to survive one — the rebuild is the thing it's covering.
+  useEffect(() => () => {
+    if (coHostSeekHoldRef.current !== null) clearTimeout(coHostSeekHoldRef.current);
   }, []);
 
   // Apply the remembered volume, and persist any later change. One listener on
@@ -634,6 +725,18 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         // Null unless Plex actually has preview frames, so Controls renders a
         // plain timestamp rather than chasing images that don't exist.
         setPreviewPartId(meta.previewThumbs ? meta.partId : null);
+        // Seed what's currently selected from Plex's own answer, so re-picking
+        // the track already playing is recognised as a no-op the *first* time
+        // as well as afterwards. Guarded on null so a selection made while this
+        // was in flight wins. Subtitles fall back to 0, the switcher's "None".
+        if (currentAudioStreamRef.current === null) {
+          currentAudioStreamRef.current =
+            meta.audioTracks?.find((t) => t.selected)?.id ?? null;
+        }
+        if (currentSubtitleStreamRef.current === null) {
+          currentSubtitleStreamRef.current =
+            meta.subtitleTracks?.find((t) => t.selected)?.id ?? 0;
+        }
       })
       .catch(() => { /* both are optional — never surface an error over a working stream */ });
     return () => { cancelled = true; };
@@ -690,7 +793,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // Which dependency moved. This effect owns the whole HLS lifecycle, so
     // every restart in the log traces back to one of these — and "which one"
     // is otherwise unknowable from the outside.
-    const deps = { ratingKey: item.ratingKey, subtitles, viewerHlsSessionId, retryKey, vpsRelay };
+    const deps = { ratingKey: item.ratingKey, subtitles, followSessionId, retryKey, vpsRelay };
     const prev = hlsDepsRef.current;
     const changed = prev
       ? (Object.keys(deps) as Array<keyof typeof deps>).filter((k) => deps[k] !== prev[k])
@@ -728,7 +831,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       didAdoptRef.current = true;
     } else {
       didAdoptRef.current = false;
-      sessionId = sessionOwner ? crypto.randomUUID() : viewerHlsSessionId;
+      sessionId = sessionOwner ? crypto.randomUUID() : followSessionId;
     }
 
     if (!sessionId) {
@@ -1024,7 +1127,16 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // meant a seek could be compared against a transcode that had been
           // asked for but never existed.
           restartPendingRef.current = false;
-          if (sessionOwner) sessionStartOffsetRef.current = startOffset;
+          if (sessionOwner && !didAdoptRef.current) {
+            sessionStartOffsetRef.current = startOffset;
+          } else {
+            // We didn't start this transcode, so `startOffset` describes nothing
+            // — the room does. Without this a joiner (and every promoted host,
+            // which is worse, because it owns the seeking) assumed the session
+            // began at 0:00, took the in-place path for every backward seek, and
+            // sat out the full stall timeout before restarting.
+            sessionStartOffsetRef.current = syncStateRef.current?.sessionOffset ?? 0;
+          }
 
           // Clear track switching overlay
           setTrackSwitching(null);
@@ -1039,15 +1151,30 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // Viewer joining mid-playback (or a host adopting a live session):
           // seek to the room's position immediately instead of waiting for the
           // 5s heartbeat drift threshold.
-          if ((!isHostRef.current || didAdoptRef.current) && syncActionsRef.current) {
+          const followingRoom = !isHostRef.current || didAdoptRef.current;
+          if (followingRoom && syncActionsRef.current) {
             const syncPos = syncStateRef.current?.position;
             if (syncPos && syncPos > DRIFT_THRESHOLD_S) {
               video.currentTime = syncPos;
             }
           }
 
-          // Pre-fetch cache ensures segments arrive instantly — play as soon as manifest is parsed
-          video.play().catch((err) => console.warn("Autoplay prevented:", err));
+          // Pre-fetch cache ensures segments arrive instantly — play as soon as
+          // the manifest is parsed, unless we're following a room that is
+          // *paused*. That case used to autoplay anyway and then never correct
+          // itself: the pause had already happened, so no command was coming,
+          // and heartbeats deliberately don't drive transport. Joining a paused
+          // film meant watching it alone while everyone else sat on a still.
+          const roomPaused = followingRoom && syncStateRef.current?.playing === false;
+          if (roomPaused) {
+            logEvent("HLS", "manifest ready but room is paused — holding", {
+              session: sessionId?.substring(0, 8),
+              roomPosS: syncStateRef.current?.position ?? "none",
+            });
+            setBuffering(false);
+          } else {
+            video.play().catch((err) => console.warn("Autoplay prevented:", err));
+          }
 
           // Host: broadcast play with sessionId when manifest is ready. Skip it
           // when adopting an already-live session — the room is already on it,
@@ -1301,7 +1428,6 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         const onAbort = () => logWarn("Video", "abort", snapshot(video));
         const onEnded = () => logEvent("Video", "ended", snapshot(video));
         const onError = () => logError("Video", "element error", snapshot(video));
-        const onRateChange = () => logEvent("Video", "ratechange", { rate: video.playbackRate });
         const onPause = () => logEvent("Video", "pause", snapshot(video));
 
         video.addEventListener("waiting", onWaiting);
@@ -1314,7 +1440,6 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         video.addEventListener("abort", onAbort);
         video.addEventListener("ended", onEnded);
         video.addEventListener("error", onError);
-        video.addEventListener("ratechange", onRateChange);
         video.addEventListener("pause", onPause);
         bufferCleanupRef.current = () => {
           video.removeEventListener("waiting", onWaiting);
@@ -1327,7 +1452,6 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           video.removeEventListener("abort", onAbort);
           video.removeEventListener("ended", onEnded);
           video.removeEventListener("error", onError);
-          video.removeEventListener("ratechange", onRateChange);
           video.removeEventListener("pause", onPause);
         };
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
@@ -1521,7 +1645,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         });
       }
     };
-  }, [item.ratingKey, subtitles, destroyLocal, viewerHlsSessionId, retryKey, vpsRelay]);
+  }, [item.ratingKey, subtitles, destroyLocal, followSessionId, retryKey, vpsRelay]);
 
   // Viewer: respond to explicit host commands (play/pause/resume/seek)
   // Does NOT fire on heartbeats — both clients share the same HLS stream
@@ -1544,6 +1668,30 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
     const video = videoRef.current;
     if (!video) return;
+
+    // Was this a full room snapshot (a join / reconnect) rather than someone's
+    // command? Consumed here so it's answered exactly once.
+    const isSnapshot = syncState.stateSeq !== appliedStateSeqRef.current;
+    appliedStateSeqRef.current = syncState.stateSeq;
+
+    // A host does not take playback instructions from a snapshot of its own
+    // last report. After a socket blip that report is stale by up to a
+    // heartbeat, and if the host paused while the socket was down the room
+    // never heard about it at all — so applying the snapshot un-paused the
+    // host, or dragged its playhead back to wherever it had last checked in,
+    // and then broadcast that as the room's truth. The re-assert effect below
+    // pushes the correction the other way, which is the right direction.
+    if (amHost && isSnapshot && sessionIdRef.current) {
+      logEvent("Sync", "host ignoring room snapshot (we are the authority)", {
+        stateSeq: syncState.stateSeq,
+        roomPosS: syncState.position,
+        roomPlaying: syncState.playing,
+        ownPosS: video.currentTime,
+        ownPaused: video.paused,
+      });
+      appliedSeekSeqRef.current = syncState.seekSeq;
+      return;
+    }
 
     // Did this command carry a seek we haven't acted on, or is it a play/pause/
     // resume that merely came with a position attached? Consumed here so the
@@ -1613,11 +1761,87 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             driftS: drift,
           });
           lastDriftCorrectionRef.current = Date.now();
+          resetPlaybackRate(video);
           video.currentTime = syncState.position;
         }
       }
     }
   }, [syncState?.commandSeq]);
+
+  /**
+   * Host: re-assert the room's playback state after a (re)join.
+   *
+   * The room's copy of "what's playing, where, and whether" comes entirely from
+   * this client, so anything the server holds while our socket is down is
+   * whatever we last managed to send. On reconnect the snapshot is therefore
+   * stale by construction — the command effect above refuses to act on it, and
+   * this pushes the truth back out instead. Without both halves the room and
+   * the host disagreed until the next heartbeat, and viewers spent that window
+   * being corrected towards a position the host had already left.
+   */
+  useEffect(() => {
+    const s = syncStateRef.current;
+    if (!s || s.stateSeq === 0 || !isHostRef.current) return;
+    const video = videoRef.current;
+    const sid = sessionIdRef.current;
+    const currentItem = itemRef.current;
+    if (!video || !sid || !sessionRegisteredRef.current) return;
+    if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+
+    // The room lost track of what we're playing (a stray stop, or it never heard
+    // the restart) — re-announce it before correcting the position, or viewers
+    // have nothing to attach to.
+    if (s.hlsSessionId !== sid || s.ratingKey !== currentItem.ratingKey) {
+      logEvent("Sync", "host re-announcing session after reconnect", {
+        roomSession: s.hlsSessionId?.substring(0, 8) ?? "none",
+        ownSession: sid.substring(0, 8),
+        roomRatingKey: s.ratingKey ?? "none",
+      });
+      syncActionsRef.current?.sendPlay(
+        currentItem.ratingKey, formatMediaTitle(currentItem), subtitlesOnRef.current, sid,
+        video.currentTime > 0 ? video.currentTime : undefined,
+        // The transcode's own start, not the playhead — a viewer told the wrong
+        // floor treats every reachable backward seek as needing a restart.
+        sessionStartOffsetRef.current,
+      );
+    }
+    // Then the position and play state. A pause goes out as a real pause rather
+    // than a heartbeat, because "play" above optimistically marks us playing and
+    // because it is the pause the room most likely missed — it is the one that
+    // happened while the socket was down.
+    if (video.paused) syncActionsRef.current?.sendPause(video.currentTime);
+    else syncActionsRef.current?.sendHeartbeat(video.currentTime, true);
+  }, [syncState?.stateSeq]);
+
+  /**
+   * Everyone but the host: keep the element's play state matching the room's.
+   *
+   * The command effect only fires on explicit commands, and heartbeats
+   * deliberately don't bump `commandSeq` — so any path that changes the room's
+   * play state without a command reaching this client left it playing on its
+   * own. Joining a paused room did exactly that: the manifest handler pressed
+   * play, no command was coming (the pause had already happened), and the
+   * heartbeats that said "paused" were ignored by design. One person watched
+   * ahead while the room sat still, and only a later pause or seek pulled them
+   * back.
+   *
+   * The host is excluded because it *is* the play state; a co-host is not, so it
+   * follows the room like anyone else — its own presses are already reflected
+   * optimistically, which makes this a no-op for them rather than a fight.
+   */
+  useEffect(() => {
+    if (isHostRef.current || !syncState) return;
+    const video = videoRef.current;
+    if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+    if (syncState.playing && video.paused) {
+      logEvent("Sync", "following room into play", snapshot(video));
+      video.play().catch(() => {});
+    } else if (!syncState.playing && !video.paused) {
+      logEvent("Sync", "following room into pause", snapshot(video));
+      resetPlaybackRate(video);
+      video.pause();
+    }
+  }, [syncState?.playing, syncState?.commandSeq, isHost]);
 
   // Viewer status: flash "Host is seeking…" for a moment after each seek command.
   // seekSeq bumps once per host seek; the flag auto-clears so it reads as a brief
@@ -1655,17 +1879,50 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // never advanced between corrections. Rejoining didn't help, since the new
   // mount fell straight back into the same loop.
   useEffect(() => {
-    if (isHostRef.current || !syncState) return;
     const video = videoRef.current;
-    if (!video || !syncState.playing || video.paused) return;
-    if (syncState.position <= 0) return;
-
-    const drift = Math.abs(video.currentTime - syncState.position);
-    if (drift <= HEARTBEAT_DRIFT_THRESHOLD_S) {
-      // Back in sync — clear the stall watch.
-      stalledSeekSinceRef.current = null;
+    if (isHostRef.current || !syncState) {
+      resetPlaybackRate(video);
       return;
     }
+    if (!video) return;
+    if (!syncState.playing || video.paused || syncState.position <= 0) {
+      resetPlaybackRate(video);
+      return;
+    }
+
+    // Signed, because the direction decides whether we speed up or slow down.
+    // Positive means this client is ahead of the room.
+    const signedDrift = video.currentTime - syncState.position;
+    const drift = Math.abs(signedDrift);
+
+    if (drift <= HARD_SYNC_DRIFT_S) {
+      // Close enough to close the gap by playing at a slightly different speed,
+      // which nobody can see, instead of seeking, which everybody can. A seek
+      // discards the fragment hls.js has in flight and reloads from the target,
+      // so the "correction" is itself a stutter — and at a fixed threshold the
+      // room settles just under it and stays permanently out of step.
+      stalledSeekSinceRef.current = null;
+      if (drift <= SOFT_SYNC_DEAD_ZONE_S) {
+        resetPlaybackRate(video);
+        return;
+      }
+      // Speeding up spends forward buffer. If there isn't any to spend, staying
+      // behind is better than starving — the room will wait for us via the
+      // host's own stall handling long before this matters.
+      if (signedDrift < 0 && bufferAheadSeconds(video) < SOFT_SYNC_MIN_BUFFER_S) {
+        resetPlaybackRate(video);
+        return;
+      }
+      const scale = Math.min(1, drift / SOFT_SYNC_FULL_SCALE_S);
+      const target = Math.round((1 + (signedDrift > 0 ? -1 : 1) * MAX_RATE_ADJUST * scale) * 1000) / 1000;
+      if (Math.abs(video.playbackRate - target) < 0.005) return;
+      video.playbackRate = target;
+      return;
+    }
+
+    // Past the soft band: a real correction is coming, so stop nudging first —
+    // otherwise the rate survives the seek and keeps pulling afterwards.
+    resetPlaybackRate(video);
 
     // A seek already in flight is heading to the right place. Re-issuing it only
     // throws away the fragment that would have satisfied it.
@@ -1891,7 +2148,27 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       return;
     }
     const video = videoRef.current;
-    if (video) video.currentTime = positionSeconds;
+    if (video) {
+      resetPlaybackRate(video);
+      video.currentTime = positionSeconds;
+      // A co-host's seek usually makes the host restart the transcode, which
+      // tears this client's stream down and rebuilds it — and until it does,
+      // the element reports 0. The host holds its scrub bar at the target
+      // through that; the co-host who *asked* for the seek was the one person
+      // watching their own bar drop to 0:00 and crawl back.
+      if (!isPositionBuffered(video, positionSeconds)) {
+        setBuffering(true);
+        setRestartingTo(positionSeconds);
+        // Frames resuming clears this (see the `playing` handler); the timer is
+        // only a backstop for a rebuild that never completes, so the bar can't
+        // be left pinned to a target nothing is heading for.
+        if (coHostSeekHoldRef.current !== null) clearTimeout(coHostSeekHoldRef.current);
+        coHostSeekHoldRef.current = setTimeout(() => {
+          coHostSeekHoldRef.current = null;
+          setRestartingTo(null);
+        }, 20_000);
+      }
+    }
     syncActionsRef.current?.sendSeek(positionSeconds);
   }, [handleHostSeek]);
 
@@ -2053,6 +2330,33 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const handleTrackChange = useCallback(async (partId: number, audioStreamID?: number, subtitleStreamID?: number) => {
     if (!sessionIdRef.current) return;
 
+    // Selecting the track that is already playing costs the whole room a
+    // transcode restart — several seconds of rebuffering for everyone — and
+    // changes nothing when it comes back. Easy to hit: reopening the switcher
+    // and tapping the ticked row, or two co-hosts choosing the same subtitles a
+    // moment apart, which used to be two restarts back to back.
+    const audioUnchanged =
+      audioStreamID === undefined || currentAudioStreamRef.current === audioStreamID;
+    const subtitleUnchanged =
+      subtitleStreamID === undefined || currentSubtitleStreamRef.current === subtitleStreamID;
+    if (audioUnchanged && subtitleUnchanged) {
+      logEvent("Player", "track change skipped (already selected)", {
+        partId,
+        audioStreamID: audioStreamID ?? "unchanged",
+        subtitleStreamID: subtitleStreamID ?? "unchanged",
+      });
+      setShowTrackSwitcher(false);
+      return;
+    }
+
+    // Claimed before the await, so a second identical request arriving while
+    // this one is in flight is recognised as a duplicate rather than starting a
+    // second restart. Rolled back if Plex refuses.
+    const prevAudio = currentAudioStreamRef.current;
+    const prevSubtitle = currentSubtitleStreamRef.current;
+    if (audioStreamID !== undefined) currentAudioStreamRef.current = audioStreamID;
+    if (subtitleStreamID !== undefined) currentSubtitleStreamRef.current = subtitleStreamID;
+
     const video = videoRef.current;
     canvasRef.current = captureFrame(video) ?? canvasRef.current;
 
@@ -2068,6 +2372,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         subtitleStreamID,
         error: err instanceof Error ? err.message : String(err),
       });
+      currentAudioStreamRef.current = prevAudio;
+      currentSubtitleStreamRef.current = prevSubtitle;
       setTrackSwitching(null);
       canvasRef.current = null;
       return;
@@ -2320,6 +2626,20 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     setPlaybackDead(false);
   }, [item.ratingKey]);
 
+  // Whether the socket has been down long enough to be worth saying so. The
+  // delay is what keeps an ordinary reconnect — which takes well under a
+  // second — from flashing a banner across the picture.
+  const [showReconnecting, setShowReconnecting] = useState(false);
+  const socketDown = syncState ? !syncState.connected : false;
+  useEffect(() => {
+    if (!socketDown) {
+      setShowReconnecting(false);
+      return;
+    }
+    const timer = setTimeout(() => setShowReconnecting(true), 2500);
+    return () => clearTimeout(timer);
+  }, [socketDown]);
+
   // Viewer status pill: what the host is doing to shared playback. Seeking is a
   // brief flash (takes precedence); paused persists while the stream sits paused.
   // Only for pure viewers, and never over an error/disconnect/recovery banner.
@@ -2346,6 +2666,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         </div>
       ) : error ? (
         <div style={styles.error}>{error}</div>
+      ) : showReconnecting ? (
+        // A dropped socket used to be completely silent here until all twenty
+        // automatic attempts had failed — over a minute of pressing pause and
+        // watching nothing happen to anyone else, with no way to tell that from
+        // the room simply ignoring you. Held back a couple of seconds so an
+        // ordinary blip doesn't flash a banner over the film.
+        <div style={styles.hostDisconnected}>
+          Reconnecting to the watch party… (playback continues locally)
+        </div>
       ) : syncState?.hostDisconnected ? (
         <div style={styles.hostDisconnected}>Host disconnected — waiting for reconnection...</div>
       ) : null}

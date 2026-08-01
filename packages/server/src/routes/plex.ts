@@ -919,6 +919,19 @@ async function buildMetaUncached(ratingKey: string): Promise<Record<string, unkn
       art: m.art ? `/api/plex/thumb${m.art}` : null,
       genres: (m.Genre || []).map((g) => g.tag),
       type: m.type,
+      // Episode ancestry, carried the same way mapItem does it.
+      //
+      // A viewer's player is built entirely from a ratingKey and a title — sync
+      // state has nothing else — so without these an episode arrives typed as a
+      // film with no show behind it: it renders as a bare episode name, and
+      // reaching the end drops the viewer back on the episode rather than on the
+      // show. Absent for movies, so nothing else changes.
+      ...(m.index != null && { index: m.index }),
+      ...(m.parentIndex != null && { parentIndex: m.parentIndex }),
+      ...(m.parentTitle != null && { parentTitle: m.parentTitle }),
+      ...(m.parentRatingKey != null && { parentRatingKey: m.parentRatingKey }),
+      ...(m.grandparentRatingKey != null && { grandparentRatingKey: m.grandparentRatingKey }),
+      ...(m.grandparentTitle != null && { showTitle: m.grandparentTitle }),
       partId: part?.id ?? null,
       /** Whether hover-preview frames exist for this part (see PlexPart.indexes). */
       previewThumbs: part?.indexes === "sd",

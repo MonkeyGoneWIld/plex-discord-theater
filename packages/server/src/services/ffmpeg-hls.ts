@@ -17,7 +17,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, renameSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -80,6 +80,22 @@ const RESTART_GRACE_MS = 6_000;
 interface StreamRef {
   id: number;
   selected: boolean;
+  /** Plex codec name, e.g. "srt", "ass", "pgs", "vobsub". */
+  codec?: string;
+}
+
+/**
+ * Image-based subtitle codecs. These can't be extracted to text (.ass) — they're
+ * burned in by overlaying the decoded subtitle stream onto the video directly.
+ * Text codecs (srt/ass/…) are extracted to a file and drawn by the subtitles filter.
+ */
+const BITMAP_SUB_CODECS = new Set([
+  "pgs", "pgssub", "hdmv_pgs_subtitle",
+  "vobsub", "dvdsub", "dvd_subtitle",
+  "dvbsub", "dvb_subtitle", "xsub",
+]);
+function isBitmapSub(codec?: string): boolean {
+  return !!codec && BITMAP_SUB_CODECS.has(codec.toLowerCase());
 }
 
 interface SourceInfo {
@@ -119,6 +135,10 @@ interface Session {
   subOrdinal: number;
   /** The in-flight subtitle-extraction process, or null. */
   subExtractProc: ChildProcess | null;
+  /** Set when subtitle burn keeps failing — playback then continues without it. */
+  subsDisabled: boolean;
+  /** Consecutive encoder failures on a subtitle-burning run. */
+  subFailCount: number;
   lastAccess: number;
   /** The in-flight restart (spawn), so requests wait on it rather than racing. */
   restarting: Promise<void> | null;
@@ -151,7 +171,7 @@ async function resolveSource(ratingKey: string): Promise<SourceInfo> {
           Part?: Array<{
             key?: string;
             duration?: number;
-            Stream?: Array<{ id: number; streamType: number; selected?: boolean }>;
+            Stream?: Array<{ id: number; streamType: number; selected?: boolean; codec?: string }>;
           }>;
         }>;
       }>;
@@ -171,8 +191,8 @@ async function resolveSource(ratingKey: string): Promise<SourceInfo> {
     // file and honours HTTP Range, which is what lets ffmpeg -ss seek into it.
     inputUrl: plexUrl(part.key),
     durationSec: durationMs / 1000,
-    audioStreams: streams.filter((s) => s.streamType === 2).map((s) => ({ id: s.id, selected: !!s.selected })),
-    subStreams: streams.filter((s) => s.streamType === 3).map((s) => ({ id: s.id, selected: !!s.selected })),
+    audioStreams: streams.filter((s) => s.streamType === 2).map((s) => ({ id: s.id, selected: !!s.selected, codec: s.codec })),
+    subStreams: streams.filter((s) => s.streamType === 3).map((s) => ({ id: s.id, selected: !!s.selected, codec: s.codec })),
   };
 }
 
@@ -241,6 +261,8 @@ export async function ensureSession(
     subMode: "none",
     subOrdinal: defaultOrdinal(source.subStreams),
     subExtractProc: null,
+    subsDisabled: false,
+    subFailCount: 0,
     lastAccess: Date.now(),
     restarting: null,
     pendingRestartMin: Infinity,
@@ -296,6 +318,9 @@ async function resetEncode(s: Session): Promise<void> {
   // Cancel any in-flight extraction: the selection changed, so its output would
   // be for the wrong track (and would clash on the same file as the re-extract).
   killSubExtraction(s);
+  // A newly-selected subtitle track deserves a fresh attempt.
+  s.subsDisabled = false;
+  s.subFailCount = 0;
   s.windowStartSeg = 0;
   s.procExited = false;
   s.pendingRestartMin = Infinity;
@@ -416,6 +441,7 @@ async function restartAt(s: Session, startSeg: number): Promise<void> {
   }
 
   const args = buildFfmpegArgs(s, startSeg, startT);
+  const wasBurning = burnKind(s) !== "none";
   if (DEBUG) console.log("[FFmpeg] start", s.sessionId.substring(0, 8), "seg", startSeg, "@", startT + "s");
 
   const proc = spawn(FFMPEG_PATH, args, { cwd: s.tmpDir, stdio: ["ignore", "ignore", "pipe"] });
@@ -433,13 +459,22 @@ async function restartAt(s: Session, startSeg: number): Promise<void> {
     if (s.proc !== proc) return;
     s.procExited = true;
     s.proc = null;
-    // A non-zero exit that we didn't signal is a real encode failure worth surfacing.
     if (code && code !== 0 && signal == null) {
       logEvent("FFmpeg", "encoder exited non-zero", {
         session: s.sessionId.substring(0, 8),
         code,
         startSeg,
       });
+      // Safety net: a burning run that keeps failing (a subtitle libav can't
+      // draw) must not thrash forever. After a couple of strikes, drop the burn
+      // and restart so playback continues without subtitles.
+      if (wasBurning && !s.subsDisabled && ++s.subFailCount >= 2) {
+        s.subsDisabled = true;
+        logEvent("FFmpeg", "disabling subtitle burn after repeated encoder failures", {
+          session: s.sessionId.substring(0, 8),
+        });
+        void requestRestart(s, s.windowStartSeg);
+      }
     }
   });
   proc.on("error", (err) => {
@@ -461,30 +496,56 @@ async function restartAt(s: Session, startSeg: number): Promise<void> {
  * extracted with its original absolute timestamps, which -copyts on the encoder
  * makes line up at any seek position — so it's extracted just once, not per seek.
  */
+const SUBS_PARTIAL = "subs.partial.ass";
+
 function kickSubExtraction(s: Session): void {
   const subPath = path.join(s.tmpDir, SUBS_FILE);
-  if (s.subExtractProc || existsSync(subPath)) return;
+  const partialPath = path.join(s.tmpDir, SUBS_PARTIAL);
+  // Nothing to do if already extracting, already done, or burn is off/disabled.
+  if (s.subExtractProc || existsSync(subPath) || s.subsDisabled) return;
+  const sub = s.source.subStreams[s.subOrdinal];
+  if (!sub || isBitmapSub(sub.codec)) return; // bitmap subs are overlaid, not extracted
+
+  // Extract to a temp file and rename on success, so the encoder never sees a
+  // half-written .ass — libass fails to open a partial file and kills the whole
+  // encode, which previously thrashed.
   const args = [
     "-nostdin", "-loglevel", "error", "-y",
     "-i", s.source.inputUrl,
     "-map", `0:s:${s.subOrdinal}`,
     "-c:s", "ass",
-    SUBS_FILE,
+    SUBS_PARTIAL,
   ];
-  if (DEBUG) console.log("[FFmpeg] extracting subtitles", s.sessionId.substring(0, 8), "sub ordinal", s.subOrdinal);
+  if (DEBUG) console.log("[FFmpeg] extracting subtitles", s.sessionId.substring(0, 8), "ordinal", s.subOrdinal, "codec", sub.codec);
   const proc = spawn(FFMPEG_PATH, args, { cwd: s.tmpDir, stdio: "ignore" });
   s.subExtractProc = proc;
-  const done = () => {
-    // A reset (track change) or stop may have superseded this extraction.
-    if (s.subExtractProc !== proc) return;
+  const done = (code: number | null) => {
+    if (s.subExtractProc !== proc) return; // superseded by a reset/stop
     s.subExtractProc = null;
-    if (!sessions.has(s.sessionId) || s.subMode !== "burn" || !existsSync(subPath)) return;
+    if (!sessions.has(s.sessionId) || s.subMode !== "burn") return;
+
+    const ok = code === 0 && existsSync(partialPath);
+    if (!ok) {
+      // Couldn't extract this track (unsupported/corrupt) — give up on the burn
+      // for this session rather than retrying forever, and play without it.
+      s.subsDisabled = true;
+      logEvent("FFmpeg", "subtitle extraction failed — disabling burn", {
+        session: s.sessionId.substring(0, 8), codec: sub.codec, code,
+      });
+      rm(partialPath, { force: true }).catch(() => {});
+      return;
+    }
+    try {
+      renameSync(partialPath, subPath);
+    } catch {
+      s.subsDisabled = true;
+      return;
+    }
     if (DEBUG) console.log("[FFmpeg] subtitles ready, restarting to burn", s.sessionId.substring(0, 8));
-    // Re-encode from the current window so forward segments carry the burn.
     void requestRestart(s, s.windowStartSeg);
   };
-  proc.on("exit", done);
-  proc.on("error", done);
+  proc.on("exit", (code) => done(code));
+  proc.on("error", () => done(-1));
 }
 
 /** Kill any in-flight subtitle extraction for a session. */
@@ -499,18 +560,43 @@ function killSubExtraction(s: Session): void {
   }
 }
 
+/** Whether a burn should be attempted right now, and how. */
+function burnKind(s: Session): "none" | "text" | "bitmap" {
+  if (s.subMode !== "burn" || s.subsDisabled) return "none";
+  const sub = s.source.subStreams[s.subOrdinal];
+  if (!sub) return "none";
+  if (isBitmapSub(sub.codec)) return "bitmap";
+  // Text subtitles are only burned once extraction has produced the file.
+  return existsSync(path.join(s.tmpDir, SUBS_FILE)) ? "text" : "none";
+}
+
+/**
+ * Build the video filter + stream-map args. Scaling is always applied (1080p cap);
+ * subtitles are either drawn from the extracted text file (subtitles filter) or,
+ * for image subs, overlaid straight from the decoded subtitle stream — which needs
+ * a filter_complex and mapping its labelled output instead of `0:v`.
+ */
+function videoFilterArgs(s: Session): string[] {
+  const scale = "scale=min(1920\\,iw):-2"; // escape the min() comma
+  switch (burnKind(s)) {
+    case "bitmap":
+      // Overlay the decoded image-subtitle stream onto the video, THEN scale — so
+      // a full-res (e.g. 1080p) PGS/VobSub bitmap lines up even when we downscale.
+      // No extraction: the sub comes from the same (already-seeked) input demux.
+      return [
+        "-filter_complex",
+        `[0:v][0:s:${s.subOrdinal}]overlay,${scale}[vout]`,
+        "-map", "[vout]",
+      ];
+    case "text":
+      return ["-map", "0:v:0", "-vf", `${scale},subtitles=${SUBS_FILE}`];
+    default:
+      return ["-map", "0:v:0", "-vf", scale];
+  }
+}
+
 /** Assemble the ffmpeg argv for one run starting at segment `startSeg` (time `startT`). */
 function buildFfmpegArgs(s: Session, startSeg: number, startT: number): string[] {
-  // Cap at 1080p; -2 keeps aspect and an even height. Escape the min() comma so
-  // it isn't read as a filter separator.
-  let vf = "scale=min(1920\\,iw):-2";
-  // Burn subtitles only once the track has been extracted (see kickSubExtraction).
-  // Extraction is slow over HTTP and runs in the background, so early segments
-  // play without subtitles rather than blocking the whole stream on it.
-  if (s.subMode === "burn" && existsSync(path.join(s.tmpDir, SUBS_FILE))) {
-    vf += `,subtitles=${SUBS_FILE}`; // resolved relative to cwd (the session tmp dir)
-  }
-
   return [
     "-nostdin", "-loglevel", "warning", "-y",
     // Input-side seek: fast. -copyts keeps the source timestamps, so each segment
@@ -522,7 +608,7 @@ function buildFfmpegArgs(s: Session, startSeg: number, startT: number): string[]
     "-ss", String(startT),
     "-i", s.source.inputUrl,
     "-copyts",
-    "-map", "0:v:0",
+    ...videoFilterArgs(s),
     "-map", `0:a:${s.audioOrdinal}`,
     "-c:v", "libx264", "-preset", FFMPEG_PRESET, "-profile:v", "high", "-level", "4.1",
     "-pix_fmt", "yuv420p",
@@ -532,7 +618,6 @@ function buildFfmpegArgs(s: Session, startSeg: number, startT: number): string[]
     // A keyframe on every segment boundary → each segment is independently
     // decodable, so MSE appends cleanly across a seek.
     "-force_key_frames", `expr:gte(t,n_forced*${SEG_SECONDS})`,
-    "-vf", vf,
     "-c:a", "aac", "-b:a", "256k", "-ac", "2",
     "-f", "hls",
     "-hls_time", String(SEG_SECONDS),

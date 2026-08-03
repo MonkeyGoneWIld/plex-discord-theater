@@ -17,11 +17,11 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readdirSync, renameSync } from "node:fs";
+import { existsSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { plexUrl, plexJSON } from "./plex.js";
+import { plexUrl, plexJSON, plexFetch } from "./plex.js";
 import { logEvent } from "./logger.js";
 
 const DEBUG = process.env.DEBUG === "1" || process.env.NODE_ENV !== "production";
@@ -46,8 +46,9 @@ const VIDEO_PEAK_BITRATE_KBPS = envInt(
 );
 /** Where per-session segment dirs live. Under /data in the container. */
 const HLS_TMP_DIR = process.env.HLS_TMP_DIR || path.join(tmpdir(), "pdt-hls");
-/** Extracted subtitle file (relative to a session's tmp dir) for burn-in. */
-const SUBS_FILE = "subs.ass";
+/** Subtitle file (relative to a session's tmp dir) burned in by the subtitles filter. */
+const SUBS_FILE = "subs.srt";
+const SUBS_PARTIAL = "subs.partial.srt";
 
 /** Reap a session with no segment/ping access for this long. */
 const IDLE_TIMEOUT_MS = 90_000;
@@ -135,6 +136,8 @@ interface Session {
   subOrdinal: number;
   /** The in-flight subtitle-extraction process, or null. */
   subExtractProc: ChildProcess | null;
+  /** Whether we've already tried the fast Plex subtitle fetch for this track. */
+  subFetchAttempted: boolean;
   /** Set when subtitle burn keeps failing — playback then continues without it. */
   subsDisabled: boolean;
   /**
@@ -267,6 +270,7 @@ export async function ensureSession(
     subMode: "none",
     subOrdinal: defaultOrdinal(source.subStreams),
     subExtractProc: null,
+    subFetchAttempted: false,
     subsDisabled: false,
     subForceOverlay: false,
     subFailCount: 0,
@@ -328,6 +332,7 @@ async function resetEncode(s: Session): Promise<void> {
   // A newly-selected subtitle track deserves a fresh attempt.
   s.subsDisabled = false;
   s.subForceOverlay = false;
+  s.subFetchAttempted = false;
   s.subFailCount = 0;
   s.windowStartSeg = 0;
   s.procExited = false;
@@ -442,10 +447,24 @@ async function restartAt(s: Session, startSeg: number): Promise<void> {
   s.lastRestartAt = Date.now();
   const startT = startSeg * SEG_SECONDS;
 
-  // Kick subtitle extraction if needed, but never block the encoder on it — the
-  // stream starts (subtitle-less) immediately and picks the burn up once ready.
-  if (s.subMode === "burn" && s.source.subStreams.length > 0) {
-    kickSubExtraction(s);
+  // Make sure a text subtitle is in hand before we encode, so every segment is
+  // consistently burned (an on-disk segment must not change from unsubtitled to
+  // subtitled later — the browser caches it immutable and the client would keep
+  // the old one). The fast path fetches the subtitle straight from Plex (~1-2s);
+  // only if that fails do we fall back to the slow whole-file ffmpeg extraction,
+  // which stays non-blocking. Bitmap subs are overlaid live and need neither.
+  if (s.subMode === "burn" && !s.subsDisabled) {
+    const sub = s.source.subStreams[s.subOrdinal];
+    const wantsText = sub && !isBitmapSub(sub.codec) && !s.subForceOverlay;
+    if (wantsText && !existsSync(path.join(s.tmpDir, SUBS_FILE))) {
+      if (!s.subFetchAttempted) {
+        s.subFetchAttempted = true;
+        const ok = await fetchPlexSubtitle(s);
+        if (!ok) kickSubExtraction(s); // fall back to slow extraction (async)
+      } else {
+        kickSubExtraction(s); // fetch already failed; ensure extraction is running
+      }
+    }
   }
 
   const args = buildFfmpegArgs(s, startSeg, startT);
@@ -494,18 +513,37 @@ async function restartAt(s: Session, startSeg: number): Promise<void> {
 }
 
 /**
- * Extract the selected subtitle track to a local file, once, in the background.
- *
- * Reading an embedded subtitle stream out of the source is slow over HTTP (ffmpeg
- * has to demux the whole file for the sparse subtitle packets), so this must NOT
- * block the encoder — doing that made a burn-in stream "load forever" before the
- * first frame. Instead the encode starts without subtitles and, when extraction
- * finishes, we restart the current run so the burn picks up. The track is
- * extracted with its original absolute timestamps, which -copyts on the encoder
- * makes line up at any seek position — so it's extracted just once, not per seek.
+ * Fetch the selected text subtitle straight from Plex (fast — Plex serves just
+ * the subtitle, no whole-file demux), writing it atomically to SUBS_FILE. Returns
+ * whether it produced a usable subtitle. Blocking, but only ~1-2s and only once.
  */
-const SUBS_PARTIAL = "subs.partial.ass";
+async function fetchPlexSubtitle(s: Session): Promise<boolean> {
+  const sub = s.source.subStreams[s.subOrdinal];
+  if (!sub) return false;
+  try {
+    const res = await plexFetch(`/library/streams/${sub.id}.srt`);
+    if (!res.ok) return false;
+    const text = await res.text();
+    if (!text || text.trim().length < 10) return false; // empty/not a real sub
+    const partial = path.join(s.tmpDir, SUBS_PARTIAL);
+    writeFileSync(partial, text);
+    renameSync(partial, path.join(s.tmpDir, SUBS_FILE));
+    if (DEBUG) console.log("[FFmpeg] fetched subtitle from Plex", s.sessionId.substring(0, 8),
+      "stream", sub.id, "codec", sub.codec, `${text.length}b`);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
+/**
+ * Fallback: extract the subtitle track out of the source with ffmpeg (slow over
+ * HTTP — a whole-file demux — so it stays in the background). Used only when the
+ * fast Plex fetch above didn't yield a subtitle. Extracts to a temp file and
+ * renames on success so the encoder never opens a half-written file (a partial
+ * subtitle fails filter init and kills the encode). Absolute timestamps line up
+ * at any seek thanks to -copyts, so it's done once, not per seek.
+ */
 function kickSubExtraction(s: Session): void {
   const subPath = path.join(s.tmpDir, SUBS_FILE);
   const partialPath = path.join(s.tmpDir, SUBS_PARTIAL);
@@ -515,14 +553,11 @@ function kickSubExtraction(s: Session): void {
   const sub = s.source.subStreams[s.subOrdinal];
   if (!sub || isBitmapSub(sub.codec)) return; // bitmap subs are overlaid, not extracted
 
-  // Extract to a temp file and rename on success, so the encoder never sees a
-  // half-written .ass — libass fails to open a partial file and kills the whole
-  // encode, which previously thrashed.
   const args = [
     "-nostdin", "-loglevel", "error", "-y",
     "-i", s.source.inputUrl,
     "-map", `0:s:${s.subOrdinal}`,
-    "-c:s", "ass",
+    "-c:s", "srt",
     SUBS_PARTIAL,
   ];
   if (DEBUG) console.log("[FFmpeg] extracting subtitles", s.sessionId.substring(0, 8), "ordinal", s.subOrdinal, "codec", sub.codec);

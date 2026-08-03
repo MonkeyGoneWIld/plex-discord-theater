@@ -35,6 +35,21 @@ function envInt(name: string, fallback: number): number {
 
 const FFMPEG_PATH = process.env.FFMPEG_PATH || "ffmpeg";
 const FFMPEG_PRESET = process.env.FFMPEG_PRESET || "veryfast";
+
+/**
+ * Hardware-accelerated H.264 encoding. "none" = software libx264 (the portable
+ * default). "vaapi" and "qsv" both offload the encode to an Intel QuickSync (or
+ * other VAAPI) GPU — on Linux QuickSync is reached through VAAPI, so "vaapi" is
+ * the recommended Intel path and "qsv" the Intel-native oneVPL/MediaSDK one.
+ * Decoding stays in software so the subtitle-burn filter has frames it can draw
+ * on; only the CPU-heavy encode moves to the GPU.
+ */
+type HwAccel = "none" | "vaapi" | "qsv";
+const HWACCEL: HwAccel = ((): HwAccel => {
+  const v = (process.env.HWACCEL || "none").toLowerCase();
+  return v === "vaapi" || v === "qsv" ? v : "none";
+})();
+const HWACCEL_DEVICE = process.env.HWACCEL_DEVICE || "/dev/dri/renderD128";
 /** Segment length in seconds — the unit of the whole-timeline playlist. */
 const SEG_SECONDS = envInt("SEG_SECONDS", 4);
 /** One full 1080p encode per session; cap how many run at once. */
@@ -219,6 +234,7 @@ export async function ensureSession(
     ratingKey,
     durationS: Math.round(source.durationSec),
     segments: s.segmentCount,
+    encoder: HWACCEL === "none" ? "libx264" : `h264_${HWACCEL}`,
   });
   return { durationSec: source.durationSec, segSeconds: SEG_SECONDS, segmentCount: s.segmentCount };
 }
@@ -384,28 +400,77 @@ async function extractSubs(s: Session, startT: number): Promise<void> {
   });
 }
 
+/**
+ * Video-codec args for the current HWACCEL mode: the device-init flags that go
+ * *before* the input, the filter-chain suffix that lands the frames where the
+ * encoder wants them, and the `-c:v …` encoder args. Software decode is kept in
+ * every mode so the (software) subtitle-burn filter has frames to draw on.
+ */
+function videoEncodeParts(): { preInput: string[]; vfSuffix: string; encoder: string[] } {
+  const bv = `${VIDEO_BITRATE_KBPS}k`;
+  const peak = `${VIDEO_PEAK_BITRATE_KBPS}k`;
+  const bufsize = `${VIDEO_PEAK_BITRATE_KBPS * 2}k`;
+
+  switch (HWACCEL) {
+    case "vaapi":
+      return {
+        preInput: ["-vaapi_device", HWACCEL_DEVICE],
+        // Upload the (software-filtered) frames to the GPU as NV12 surfaces.
+        vfSuffix: ",format=nv12,hwupload",
+        // No forced_idr option here — h264_vaapi has none; it already emits an
+        // IDR at each -force_key_frames point, which keeps segments independent.
+        encoder: [
+          "-c:v", "h264_vaapi", "-profile:v", "high",
+          "-b:v", bv, "-maxrate", peak, "-bufsize", bufsize,
+        ],
+      };
+    case "qsv":
+      return {
+        preInput: ["-init_hw_device", `qsv=hw:${HWACCEL_DEVICE}`, "-filter_hw_device", "hw"],
+        vfSuffix: ",hwupload=extra_hw_frames=64,format=qsv",
+        encoder: [
+          "-c:v", "h264_qsv", "-preset", FFMPEG_PRESET, "-profile:v", "high",
+          // qsv honours -force_key_frames only when it's allowed to force IDRs.
+          "-forced_idr", "1",
+          "-b:v", bv, "-maxrate", peak, "-bufsize", bufsize,
+        ],
+      };
+    default:
+      return {
+        preInput: [],
+        vfSuffix: "",
+        encoder: [
+          "-c:v", "libx264", "-preset", FFMPEG_PRESET, "-profile:v", "high", "-level", "4.1",
+          "-pix_fmt", "yuv420p",
+          "-b:v", bv, "-maxrate", peak, "-bufsize", bufsize,
+        ],
+      };
+  }
+}
+
 /** Assemble the ffmpeg argv for one run starting at segment `startSeg` (time `startT`). */
 function buildFfmpegArgs(s: Session, startSeg: number, startT: number): string[] {
+  const { preInput, vfSuffix, encoder } = videoEncodeParts();
+
   // Cap at 1080p; -2 keeps aspect and an even height. Escape the min() comma so
-  // it isn't read as a filter separator.
+  // it isn't read as a filter separator. Software filters (scale, subtitle burn)
+  // run first, then vfSuffix hands the result to the GPU when hardware encoding.
   let vf = "scale=min(1920\\,iw):-2";
   if (s.subMode === "burn" && s.source.subStreams.length > 0) {
     vf += ",subtitles=subs.ass"; // resolved relative to cwd (the session tmp dir)
   }
+  vf += vfSuffix;
 
   return [
     "-nostdin", "-loglevel", "warning", "-y",
+    ...preInput,
     // Input-side seek: fast, and (without -copyts) output PTS restart at 0 so the
     // per-segment force_key_frames grid lands on the global segment boundaries.
     "-ss", String(startT),
     "-i", s.source.inputUrl,
     "-map", "0:v:0",
     "-map", `0:a:${s.audioOrdinal}`,
-    "-c:v", "libx264", "-preset", FFMPEG_PRESET, "-profile:v", "high", "-level", "4.1",
-    "-pix_fmt", "yuv420p",
-    "-b:v", `${VIDEO_BITRATE_KBPS}k`,
-    "-maxrate", `${VIDEO_PEAK_BITRATE_KBPS}k`,
-    "-bufsize", `${VIDEO_PEAK_BITRATE_KBPS * 2}k`,
+    ...encoder,
     // A keyframe on every segment boundary → each segment is independently
     // decodable, so MSE appends cleanly across a seek.
     "-force_key_frames", `expr:gte(t,n_forced*${SEG_SECONDS})`,

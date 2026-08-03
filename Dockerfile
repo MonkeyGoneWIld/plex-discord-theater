@@ -49,7 +49,13 @@ RUN apk upgrade --no-cache
 # Tini for proper PID 1 signal handling; ffmpeg for HLS transcoding (we produce
 # the video stream ourselves now rather than proxying Plex's transcoder); curl
 # for the healthcheck.
-RUN apk add --no-cache tini curl ffmpeg
+#
+# libva + intel-media-driver provide the VAAPI runtime for Intel QuickSync
+# (HWACCEL=vaapi|qsv). They only do anything when the host maps /dev/dri into the
+# container (see docker-compose.yml); with the default HWACCEL=none they sit
+# unused. intel-media-driver (iHD) covers Gen8+ Intel — for older iGPUs set
+# LIBVA_DRIVER_NAME=i965 and add libva-intel-driver.
+RUN apk add --no-cache tini curl ffmpeg libva intel-media-driver
 
 # Non-root user
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup

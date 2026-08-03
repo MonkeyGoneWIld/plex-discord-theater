@@ -30,6 +30,14 @@ services:
       # available, and unreachable from here until now.
       - VIDEO_BITRATE_KBPS=${VIDEO_BITRATE_KBPS}
       - VIDEO_PEAK_BITRATE_KBPS=${VIDEO_PEAK_BITRATE_KBPS}
+      # ffmpeg transcode tuning. HWACCEL=vaapi (or qsv) offloads the H.264 encode
+      # to an Intel QuickSync GPU — see the devices/group_add below, which must be
+      # uncommented for the container to reach /dev/dri.
+      - HWACCEL=${HWACCEL:-none}
+      - HWACCEL_DEVICE=${HWACCEL_DEVICE:-/dev/dri/renderD128}
+      - FFMPEG_PRESET=${FFMPEG_PRESET}
+      - SEG_SECONDS=${SEG_SECONDS}
+      - MAX_TRANSCODE_SESSIONS=${MAX_TRANSCODE_SESSIONS}
       - WARM_CACHE=${WARM_CACHE}
       - WARM_CACHE_MAX_ITEMS=${WARM_CACHE_MAX_ITEMS}
       - WARM_CACHE_DELAY_MS=${WARM_CACHE_DELAY_MS}
@@ -46,6 +54,14 @@ services:
       - DEBUG=${DEBUG:-}
     volumes:
       - app-data:/data
+    # ── Intel QuickSync (HWACCEL=vaapi|qsv) ──────────────────────────────
+    # Uncomment to give the container the Intel GPU. `group_add` must include the
+    # GID that owns /dev/dri/renderD128 on the host — find it with:
+    #   getent group render   (or:  stat -c '%g' /dev/dri/renderD128)
+    # devices:
+    #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - "989"   # ← replace with your host's render group GID
     restart: unless-stopped
     logging:
       driver: json-file

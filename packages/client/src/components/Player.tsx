@@ -945,6 +945,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     const url = hlsMasterUrl(item.ratingKey, sessionId, {
       subtitles: subtitlesOnRef.current,
       offset: startOffset > 0 ? startOffset : undefined,
+      // Carry the current track selection so a rebuild after a track change
+      // re-encodes with it; omitted on a fresh session, where the server falls
+      // back to the file's Plex-selected default tracks.
+      audioStreamId: currentAudioStreamRef.current ?? undefined,
+      subtitleStreamId: currentSubtitleStreamRef.current ?? undefined,
     });
 
     async function start() {
@@ -1179,6 +1184,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           setRestartPending(false);
           if (sessionOwner && !didAdoptRef.current) {
             sessionStartOffsetRef.current = startOffset;
+            // The playlist covers the whole runtime and always starts at 0, so a
+            // resume or a post-rebuild restart (subtitle/track change, error
+            // recovery) has to seek to where playback should be — the server no
+            // longer bakes the offset into the stream.
+            if (startOffset > 0) video.currentTime = startOffset;
           } else {
             // We didn't start this transcode, so `startOffset` describes nothing
             // — the room does. Without this a joiner (and every promoted host,
@@ -2041,187 +2051,49 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     video.currentTime = syncState.position;
   }, [syncState?.position]);
 
-  // Full seek recovery: restart the Plex transcode with an offset so segments
-  // exist at the target position. Used when the target can't be reached in-place.
-  // `broadcast` is false when we're applying a seek that came *from* someone else
-  // (a co-host) — re-sending it would echo the command back around the room.
+  // Seek, whole-timeline JIT edition. Every segment index is producible on
+  // demand by our ffmpeg (a seek is just a fetch of a different segment), so
+  // seeking is a plain playhead move — no transcode teardown, no restart. The
+  // heavy coalescing/restart machinery the Plex transcode needed is gone.
+  // `broadcast` is false when we're applying a seek that came *from* someone
+  // else (a co-host) — re-sending it would echo the command around the room.
   const handleSeekRestart = useCallback((positionSeconds: number, broadcast = true) => {
-    if (seekStallTimerRef.current !== null) {
-      clearTimeout(seekStallTimerRef.current);
-      seekStallTimerRef.current = null;
+    const video = videoRef.current;
+    if (video) {
+      resetPlaybackRate(video);
+      if (!isPositionBuffered(video, positionSeconds)) setBuffering(true);
+      video.currentTime = positionSeconds;
     }
-
-    // Tell the room straight away — viewers should follow the scrub without
-    // waiting out the debounce below. Only the local teardown is delayed.
-    seekOffsetRef.current = positionSeconds;
-    setBuffering(true);
-    setRestartingTo(positionSeconds);
     if (broadcast) syncActionsRef.current?.sendSeek(positionSeconds);
+  }, []);
 
-    // Coalesce. Each restart kills a Plex transcode and waits out a new one, so
-    // a burst of scrub clicks used to cost one transcode per click — and since
-    // the next click landed before the previous transcode produced a segment,
-    // almost none of them ever played. A stress test managed seven restarts in
-    // 2.3 seconds and 25 sessions that never rendered a frame. Only the last
-    // target in a burst is worth acting on.
-    if (restartTimerRef.current !== null) {
-      clearTimeout(restartTimerRef.current);
-      logEvent("Seek", "restart coalesced into pending one", {
-        targetS: positionSeconds,
-        debounceMs: SEEK_RESTART_DEBOUNCE_MS,
-      });
-    } else {
-      restartDeferredSinceRef.current = 0;
-    }
-
-    const commit = () => {
-      restartTimerRef.current = null;
-
-      // Never tear down a transcode that hasn't produced its manifest yet.
-      //
-      // The debounce alone doesn't cover this: seeks arriving 400ms apart each
-      // clear it and start their own, so a scrubbing pair produced a transcode
-      // per seek, each destroyed before Plex had answered. Waiting for the
-      // in-flight one to land means the burst costs two transcodes — the one
-      // already running and the one at the final target — instead of a dozen.
-      if (isRestartPending()) {
-        const since = restartDeferredSinceRef.current || Date.now();
-        restartDeferredSinceRef.current = since;
-        if (Date.now() - since < RESTART_INFLIGHT_MAX_WAIT_MS) {
-          logEvent("Seek", "holding restart while one is still starting up", {
-            targetS: seekOffsetRef.current,
-            waitedMs: Date.now() - since,
-            maxWaitMs: RESTART_INFLIGHT_MAX_WAIT_MS,
-          });
-          restartTimerRef.current = setTimeout(commit, SEEK_RESTART_DEBOUNCE_MS);
-          return;
-        }
-        logWarn("Seek", "in-flight restart never produced a manifest, replacing it", {
-          targetS: seekOffsetRef.current,
-          waitedMs: Date.now() - since,
-        });
-      }
-      restartDeferredSinceRef.current = 0;
-
-      setRestartPending(true);
-      // The expensive path: this tears down a working transcode and waits out a
-      // fresh one. Logged with where playback actually was, so a restart to a
-      // position nowhere near the playhead is obvious at a glance.
-      logWarn("Seek", "restarting transcode", {
-        targetS: seekOffsetRef.current,
-        broadcast,
-        sessionStartOffsetS: sessionStartOffsetRef.current,
-        ...snapshot(videoRef.current),
-      });
-      setRetryKey((k) => k + 1);
-    };
-
-    restartTimerRef.current = setTimeout(commit, SEEK_RESTART_DEBOUNCE_MS);
-  }, [isRestartPending, setRestartPending]);
-
-  // Host seek entry point. Prefers a cheap in-place seek — the restart path
-  // tears down the HLS session and waits for a fresh Plex transcode (5-15s of
-  // buffering), which is only necessary when the target segments don't exist.
-  //  - Target buffered: instant in-place seek.
-  //  - Target unbuffered but at/after the session's start offset: in-place seek
-  //    (Plex has usually already transcoded well past what hls.js buffers, and
-  //    back-seeks hit segments already on disk). If segments don't arrive
-  //    within SEEK_STALL_TIMEOUT_MS, fall back to a transcode restart.
-  //  - Target before the session's start offset: segments can't exist — restart.
+  // Host seek entry point. With JIT HLS this is always an in-place seek: hls.js
+  // requests the target segment and the server produces it, so backward and
+  // far-forward jumps are as cheap as a buffered one.
   const handleHostSeek = useCallback((positionSeconds: number, broadcast = true) => {
     const video = videoRef.current;
     if (!video) {
-      logWarn("Seek", "no video element, going straight to restart", { targetS: positionSeconds });
-      handleSeekRestart(positionSeconds, broadcast);
+      if (broadcast) syncActionsRef.current?.sendSeek(positionSeconds);
       return;
     }
     if (seekStallTimerRef.current !== null) {
       clearTimeout(seekStallTimerRef.current);
       seekStallTimerRef.current = null;
     }
-
-    const bufEnd = bufferedEnd(video);
-
-    // Which of the branches below was taken, and the numbers that decided it. A
-    // seek turning into a restart is the difference between a half-second jump
-    // and ten seconds of rebuffering, so the reason needs to be on record.
+    resetPlaybackRate(video);
+    const wasBuffered = isPositionBuffered(video, positionSeconds);
     logEvent("Seek", "host seek", {
       targetS: positionSeconds,
       broadcast,
-      buffered: isPositionBuffered(video, positionSeconds),
-      sessionStartOffsetS: sessionStartOffsetRef.current,
-      bufferedEndS: bufEnd ?? "none",
-      restartPending: isRestartPending(),
+      buffered: wasBuffered,
       ...snapshot(video),
     });
-
-    // A restart is already in flight, so the element in front of us belongs to
-    // a transcode that no longer exists — its empty buffer and zeroed playhead
-    // describe nothing. Classifying against it is what made a second click on
-    // the *same* position restart all over again. Hand straight to the restart
-    // path, which coalesces.
-    if (isRestartPending() || restartTimerRef.current !== null) {
-      logEvent("Seek", "restart already pending → retarget", { targetS: positionSeconds });
-      handleSeekRestart(positionSeconds, broadcast);
-      return;
-    }
-
-    if (positionSeconds < sessionStartOffsetRef.current) {
-      logEvent("Seek", "target precedes session start offset → restart", {
-        targetS: positionSeconds,
-        sessionStartOffsetS: sessionStartOffsetRef.current,
-      });
-      handleSeekRestart(positionSeconds, broadcast);
-      return;
-    }
-
-    const wasBuffered = isPositionBuffered(video, positionSeconds);
-    // Large forward jump past the transcode head — segments can't exist yet, so
-    // an in-place seek would only stall for SEEK_STALL_TIMEOUT_MS before falling
-    // back to a restart anyway. Restart at the target directly and skip the stall.
-    //
-    // With an empty buffer, fall back to the session's start offset as the head.
-    // Nothing has been transcoded past what has been buffered, so when nothing
-    // is buffered the head is still where the session began — an estimate, but a
-    // sound one, and far better than declining to classify.
-    //
-    // Declining is what made rapid seeking feel broken. A seek landing while the
-    // previous restart was still spinning up saw no buffer, skipped this check,
-    // set currentTime on media that wasn't there yet, and then sat out the full
-    // six-second stall before restarting. Every seek in a burst paid it, so the
-    // bar stopped tracking and the room watched a position that never loaded.
-    const head = bufEnd ?? sessionStartOffsetRef.current;
-    if (!wasBuffered && positionSeconds - head > FAR_SEEK_THRESHOLD_S) {
-      logEvent("Seek", "far forward jump past transcode head → restart", {
-        targetS: positionSeconds,
-        headS: head,
-        headFrom: bufEnd !== null ? "buffer" : "session-start",
-        thresholdS: FAR_SEEK_THRESHOLD_S,
-      });
-      handleSeekRestart(positionSeconds, broadcast);
-      return;
-    }
-
     video.currentTime = positionSeconds;
     if (broadcast) syncActionsRef.current?.sendSeek(positionSeconds);
-    if (wasBuffered) return;
-
-    setBuffering(true);
-    seekStallTimerRef.current = setTimeout(() => {
-      seekStallTimerRef.current = null;
-      const v = videoRef.current;
-      if (!v) return;
-      if (!isPositionBuffered(v, v.currentTime)) {
-        logWarn("Seek", "in-place seek starved, falling back to restart", {
-          waitedMs: SEEK_STALL_TIMEOUT_MS,
-          ...snapshot(v),
-        });
-        handleSeekRestart(v.currentTime);
-      } else {
-        logEvent("Seek", "in-place seek satisfied", snapshot(v));
-      }
-    }, SEEK_STALL_TIMEOUT_MS);
-  }, [handleSeekRestart]);
+    // Not buffered → hls.js is fetching (possibly a fresh encode after a big
+    // jump); show the spinner until frames resume (the `playing` handler clears it).
+    if (!wasBuffered) setBuffering(true);
+  }, []);
 
   // Live ref so the command-handling effect (declared above) can reach the
   // current handleHostSeek without listing it as a dep — naming it directly in a

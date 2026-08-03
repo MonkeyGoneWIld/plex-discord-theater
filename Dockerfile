@@ -46,8 +46,10 @@ WORKDIR /app
 # by anything we install, so upgrading in place is the whole fix.
 RUN apk upgrade --no-cache
 
-# Tini for proper PID 1 signal handling
-RUN apk add --no-cache tini curl
+# Tini for proper PID 1 signal handling; ffmpeg for HLS transcoding (we produce
+# the video stream ourselves now rather than proxying Plex's transcoder); curl
+# for the healthcheck.
+RUN apk add --no-cache tini curl ffmpeg
 
 # Non-root user
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
@@ -88,6 +90,9 @@ RUN apk add --no-cache su-exec
 
 ENV NODE_ENV=production
 ENV PORT=3000
+# Per-session HLS segments live here — under /data so they land on the same
+# volume the entrypoint chowns to appuser (and can be a tmpfs mount for speed).
+ENV HLS_TMP_DIR=/data/hls
 EXPOSE ${PORT}
 
 # Health check — /api/health probes Plex (cached server-side), so the container

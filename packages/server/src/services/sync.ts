@@ -2,8 +2,7 @@ import { WebSocketServer, WebSocket, type RawData } from "ws";
 import type { Server } from "http";
 import { isValidSession, getSessionUserId } from "../middleware/auth.js";
 import { instanceHosts, updateInstanceHost, touchInstance } from "../routes/discord.js";
-import { plexFetch } from "./plex.js";
-import { getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode, stopTranscodeSession } from "../routes/plex.js";
+import { pingSession, stopSession } from "./ffmpeg-hls.js";
 import { createTracker, handleTrackerSocket, destroyTracker } from "./tracker.js";
 import { recordProgress } from "./watch-history.js";
 import { logEvent } from "./logger.js";
@@ -18,46 +17,13 @@ const MSG_BUDGET = 120;
 const MSG_WINDOW_MS = 10_000;
 
 /**
- * Stop a Plex transcode using the mapped Plex internal key.
- * Our session UUID differs from Plex's internal transcode key, so we use
- * the mapping populated when the manifest was first fetched.
+ * Tear down the ffmpeg session behind a room's stream. Idempotent — stopSession
+ * no-ops if the session is already gone — so the HTTP DELETE path and this
+ * WebSocket path can both fire without racing.
  */
 async function killPlexTranscode(hlsSessionId: string | null): Promise<void> {
   if (!hlsSessionId) return;
-
-  if (isSessionStopping(hlsSessionId)) {
-    console.log("[Sync] Stop skipped for", hlsSessionId.substring(0, 8), "(already stopping via HTTP)");
-    return;
-  }
-
-  markSessionStopping(hlsSessionId);
-
-  try {
-    const plexKey = getPlexTranscodeKey(hlsSessionId);
-    const clientId = getSessionClientId(hlsSessionId);
-    const ratingKey = getSessionRatingKey(hlsSessionId) || null;
-    try {
-      // Which identifier `stop` wants is not a settled question — see
-      // transcodeControl in routes/plex.ts. This tries ours and falls back to
-      // the Plex transcode key, because keying it on ours alone was answered
-      // with a 404 every single time in a day of real traffic, which means
-      // nothing here was stopping anything.
-      const res = await stopTranscodeSession(hlsSessionId, clientId);
-      console.log("[Sync] Stop transcode", hlsSessionId.substring(0, 8),
-        plexKey ? "(plex key known)" : "(no plex key mapping)",
-        "→", res.status);
-    } catch (err) {
-      console.error("[Sync] Stop transcode error:", err);
-    }
-
-    markTranscodeStopped(hlsSessionId);
-    await notifyPlexStopped(ratingKey, hlsSessionId);
-    if (plexKey) {
-      await terminatePlexSession(plexKey);
-    }
-  } finally {
-    clearSessionStopping(hlsSessionId);
-  }
+  await stopSession(hlsSessionId);
 }
 
 interface QueueItem {
@@ -156,20 +122,18 @@ function startRoomPing(instanceId: string, hlsSessionId: string): void {
   stopRoomPing(instanceId);
   let gone = 0;
   const interval = setInterval(() => {
-    pingPlexTranscode(hlsSessionId)
-      .then((alive) => {
-        // Plex has discarded this transcode. Nothing will bring it back, so the
-        // timer is only generating rejected round trips and misleading warnings
-        // — one evening's log had 36 of them across four dead sessions.
-        gone = alive ? 0 : gone + 1;
-        if (gone < PING_GONE_LIMIT) return;
-        logEvent("Sync", "stopping keep-alive for a session Plex has dropped", {
-          room: instanceId.substring(0, 8),
-          session: hlsSessionId.substring(0, 8),
-        });
-        stopRoomPing(instanceId);
-      })
-      .catch(() => {});
+    // Refresh the session's idle timer so an actively-watched stream survives
+    // quiet stretches when no client is fetching segments (paused, buffered
+    // ahead). pingSession returns false once the session is gone; nothing will
+    // bring it back, so stop the timer rather than tick against nothing.
+    const alive = pingSession(hlsSessionId);
+    gone = alive ? 0 : gone + 1;
+    if (gone < PING_GONE_LIMIT) return;
+    logEvent("Sync", "stopping keep-alive for a session that has ended", {
+      room: instanceId.substring(0, 8),
+      session: hlsSessionId.substring(0, 8),
+    });
+    stopRoomPing(instanceId);
   }, 30_000);
   interval.unref();
   roomPingIntervals.set(instanceId, interval);

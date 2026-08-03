@@ -508,11 +508,24 @@ export function fetchSiblingEpisodes(
 export function hlsMasterUrl(
   ratingKey: string,
   sessionId: string,
-  options?: { offset?: number; subtitles?: boolean },
+  options?: {
+    offset?: number;
+    subtitles?: boolean;
+    /** Plex audio stream id to use; omit for the file's default. */
+    audioStreamId?: number;
+    /** Plex subtitle stream id to burn in (only when subtitles is true). */
+    subtitleStreamId?: number;
+  },
 ): string {
   const params = new URLSearchParams();
+  // offset is a resume hint only — the playlist covers the whole runtime, so the
+  // client applies it via video.currentTime; the server ignores it for seeking.
   if (options?.offset != null && options.offset > 0) params.set("offset", String(options.offset));
   params.set("subtitles", options?.subtitles ? "burn" : "none");
+  if (options?.audioStreamId != null) params.set("audioStreamId", String(options.audioStreamId));
+  if (options?.subtitles && options?.subtitleStreamId != null && options.subtitleStreamId > 0) {
+    params.set("subtitleStreamId", String(options.subtitleStreamId));
+  }
   const qs = params.toString();
   return `/api/plex/hls/${encodeURIComponent(ratingKey)}/${encodeURIComponent(sessionId)}/master.m3u8${qs ? `?${qs}` : ""}`;
 }

@@ -72,6 +72,23 @@ const PRODUCE_TIMEOUT_MS = 20_000;
  * behind the current window — we restart at the requested index instead. ~48s.
  */
 const FORWARD_TOLERANCE_SEGS = 12;
+/**
+ * Debounce window for coalescing restarts. A seek makes hls.js request several
+ * adjacent segments within a few ms; collecting them before starting one encoder
+ * (at the lowest index) stops the requests from each spawning a competing ffmpeg
+ * that kills the others.
+ */
+const RESTART_COALESCE_MS = 150;
+/** How often the wait loop re-checks for a produced segment. */
+const POLL_INTERVAL_MS = 120;
+/**
+ * After a restart, forward requests (idx at/after the new run's start) wait for
+ * the fresh encoder to advance rather than triggering another restart — even if
+ * its head hasn't caught up to them yet. Without this, a request that lands while
+ * the run is still spinning up sees a low head, restarts again, and kills the run
+ * the sibling requests are waiting on; that ping-pong is what stalled seeks.
+ */
+const RESTART_GRACE_MS = 6_000;
 
 interface StreamRef {
   id: number;
@@ -105,6 +122,8 @@ interface Session {
   procExited: boolean;
   /** `-start_number` of the current run; nothing below this is being produced. */
   windowStartSeg: number;
+  /** When the current run was (re)started — used for the post-restart grace. */
+  lastRestartAt: number;
   /** Selected audio ordinal among audioStreams. */
   audioOrdinal: number;
   /** "burn" burns subOrdinal into the video; "none" omits subtitles. */
@@ -112,8 +131,16 @@ interface Session {
   /** Selected subtitle ordinal among subStreams (for burn). */
   subOrdinal: number;
   lastAccess: number;
-  /** Serializes restarts so a scrub burst coalesces instead of thrashing. */
+  /** The in-flight restart (spawn), so requests wait on it rather than racing. */
   restarting: Promise<void> | null;
+  /**
+   * Coalescing state for restarts. When a seek makes hls.js request a cluster of
+   * segments at once, each one that needs a restart records its index here; after
+   * a short debounce ONE restart fires at the minimum, so the requests share a
+   * single encoder instead of each spawning one that kills the others.
+   */
+  pendingRestartMin: number;
+  pendingRestart: Promise<void> | null;
 }
 
 const sessions = new Map<string, Session>();
@@ -220,11 +247,14 @@ export async function ensureSession(
     proc: null,
     procExited: false,
     windowStartSeg: 0,
+    lastRestartAt: 0,
     audioOrdinal: defaultOrdinal(source.audioStreams),
     subMode: "none",
     subOrdinal: defaultOrdinal(source.subStreams),
     lastAccess: Date.now(),
     restarting: null,
+    pendingRestartMin: Infinity,
+    pendingRestart: null,
   };
   applySelection(s, sel);
   sessions.set(sessionId, s);
@@ -276,6 +306,7 @@ async function resetEncode(s: Session): Promise<void> {
   killProc(s);
   s.windowStartSeg = 0;
   s.procExited = false;
+  s.pendingRestartMin = Infinity;
   try {
     for (const name of readdirSync(s.tmpDir)) {
       if (/\.(ts|m3u8|ass)$/.test(name)) await rm(path.join(s.tmpDir, name), { force: true });
@@ -302,8 +333,38 @@ function currentHead(s: Session): number {
 }
 
 /**
+ * Coalesced restart. Records `idx` as a candidate start point and, after a short
+ * debounce, fires a single restart at the lowest index requested in that window.
+ * Concurrent callers all await the same promise, so a seek's burst of segment
+ * requests produces exactly one encoder run — no competing spawns killing each
+ * other (which stranded playback in an endless "encoder ended" loop).
+ */
+function requestRestart(s: Session, idx: number): Promise<void> {
+  s.pendingRestartMin = Math.min(s.pendingRestartMin, idx);
+  if (!s.pendingRestart) {
+    s.pendingRestart = (async () => {
+      await sleep(RESTART_COALESCE_MS);
+      const target = s.pendingRestartMin;
+      s.pendingRestartMin = Infinity;
+      s.pendingRestart = null;
+      const run = restartAt(s, target);
+      s.restarting = run;
+      try {
+        await run;
+      } finally {
+        if (s.restarting === run) s.restarting = null;
+      }
+    })();
+  }
+  return s.pendingRestart;
+}
+
+/**
  * Return the on-disk path to segment `idx`, starting or restarting ffmpeg as
- * needed. Rejects if the encoder can't produce it in time.
+ * needed. A single loop unifies "wait for the running encoder to reach it" and
+ * "move the encoder here": it never spawns a restart while one is already in
+ * flight, so overlapping requests after a seek converge on one run instead of
+ * thrashing. Rejects if the segment can't be produced within the time budget.
  */
 export async function ensureSegment(sessionId: string, idx: number): Promise<string> {
   const s = sessions.get(sessionId);
@@ -311,37 +372,49 @@ export async function ensureSegment(sessionId: string, idx: number): Promise<str
   s.lastAccess = Date.now();
 
   const p = segPath(s, idx);
-  if (existsSync(p)) return p; // already produced (this or a previous run)
+  const deadline = Date.now() + PRODUCE_TIMEOUT_MS;
 
-  // Wait for any in-flight restart to settle, then decide against fresh state.
-  if (s.restarting) await s.restarting.catch(() => {});
-  if (existsSync(p)) return p;
+  while (Date.now() < deadline) {
+    if (existsSync(p)) return p; // produced by this run or a previous one
 
-  const head = currentHead(s);
-  const needRestart =
-    s.proc === null ||
-    s.procExited ||
-    idx < s.windowStartSeg ||
-    idx > head + FORWARD_TOLERANCE_SEGS;
+    // A restart is actively spawning — its target is fixed now, so just wait it out.
+    if (s.restarting) {
+      await s.restarting.catch(() => {});
+      continue;
+    }
 
-  if (needRestart) {
-    // Coalesce concurrent seek-driven restarts onto one promise.
-    const run = restartAt(s, idx);
-    s.restarting = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    await run;
+    const running = s.proc !== null && !s.procExited;
+    const head = currentHead(s);
+    // The running encoder will reach idx soon when: idx is within tolerance of its
+    // advancing head, or — right after a restart, before the head has caught up —
+    // idx is within tolerance of the run's start (the run was started for idx's
+    // neighbourhood). A far seek satisfies neither and must restart.
+    const forwardOfRun = idx >= s.windowStartSeg;
+    const nearHead = idx <= head + FORWARD_TOLERANCE_SEGS;
+    const nearRunStart =
+      idx <= s.windowStartSeg + FORWARD_TOLERANCE_SEGS &&
+      Date.now() - s.lastRestartAt < RESTART_GRACE_MS;
+    const canWait = running && forwardOfRun && (nearHead || nearRunStart);
+
+    // Wait only when we can AND no sibling has scheduled a restart — otherwise the
+    // encoder we'd wait on is about to be killed, so join the restart instead. All
+    // restart-or-join goes through requestRestart, which tracks the cluster minimum
+    // so the shared run starts at the lowest requested index.
+    if (canWait && !s.pendingRestart) {
+      await sleep(POLL_INTERVAL_MS);
+      continue;
+    }
+    await requestRestart(s, idx).catch(() => {});
   }
 
-  await waitForFile(s, p);
-  return p;
+  throw new Error("timed out producing segment");
 }
 
 /** Kill the current encoder (if any) and start a fresh run at `startSeg`. */
 async function restartAt(s: Session, startSeg: number): Promise<void> {
   killProc(s);
   s.windowStartSeg = startSeg;
+  s.lastRestartAt = Date.now();
   const startT = startSeg * SEG_SECONDS;
 
   if (s.subMode === "burn" && s.source.subStreams.length > 0) {
@@ -360,8 +433,12 @@ async function restartAt(s: Session, startSeg: number): Promise<void> {
     if (line && DEBUG) console.log("[FFmpeg:%s] %s", s.sessionId.substring(0, 8), line.slice(0, 300));
   });
   proc.on("exit", (code, signal) => {
+    // A restart may have already replaced us; a killed run's exit fires
+    // asynchronously and must NOT stamp procExited onto the new encoder — doing
+    // so made the session read as "not running" and thrash into more restarts.
+    if (s.proc !== proc) return;
     s.procExited = true;
-    if (s.proc === proc) s.proc = null;
+    s.proc = null;
     // A non-zero exit that we didn't signal is a real encode failure worth surfacing.
     if (code && code !== 0 && signal == null) {
       logEvent("FFmpeg", "encoder exited non-zero", {
@@ -372,8 +449,9 @@ async function restartAt(s: Session, startSeg: number): Promise<void> {
     }
   });
   proc.on("error", (err) => {
+    if (s.proc !== proc) return;
     s.procExited = true;
-    if (s.proc === proc) s.proc = null;
+    s.proc = null;
     logEvent("FFmpeg", "spawn error", { session: s.sessionId.substring(0, 8), err: String(err) });
   });
 }
@@ -487,23 +565,6 @@ function buildFfmpegArgs(s: Session, startSeg: number, startT: number): string[]
     "-hls_segment_filename", "%d.ts",
     "internal.m3u8",
   ];
-}
-
-/** Poll until segment file `p` exists, or the encoder dies / we time out. */
-async function waitForFile(s: Session, p: string): Promise<void> {
-  const deadline = Date.now() + PRODUCE_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (existsSync(p)) return;
-    if (s.procExited || s.proc === null) {
-      // Encoder ended. If it flushed the file on the way out, great; otherwise the
-      // index is unreachable (past EOF, or a failed run).
-      await sleep(150);
-      if (existsSync(p)) return;
-      throw new Error("encoder ended before producing segment");
-    }
-    await sleep(120);
-  }
-  throw new Error("timed out waiting for segment");
 }
 
 /** SIGKILL the current encoder and detach it. */

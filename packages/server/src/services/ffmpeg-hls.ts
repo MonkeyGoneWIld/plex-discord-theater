@@ -46,6 +46,8 @@ const VIDEO_PEAK_BITRATE_KBPS = envInt(
 );
 /** Where per-session segment dirs live. Under /data in the container. */
 const HLS_TMP_DIR = process.env.HLS_TMP_DIR || path.join(tmpdir(), "pdt-hls");
+/** Extracted subtitle file (relative to a session's tmp dir) for burn-in. */
+const SUBS_FILE = "subs.ass";
 
 /** Reap a session with no segment/ping access for this long. */
 const IDLE_TIMEOUT_MS = 90_000;
@@ -115,6 +117,8 @@ interface Session {
   subMode: "burn" | "none";
   /** Selected subtitle ordinal among subStreams (for burn). */
   subOrdinal: number;
+  /** The in-flight subtitle-extraction process, or null. */
+  subExtractProc: ChildProcess | null;
   lastAccess: number;
   /** The in-flight restart (spawn), so requests wait on it rather than racing. */
   restarting: Promise<void> | null;
@@ -236,6 +240,7 @@ export async function ensureSession(
     audioOrdinal: defaultOrdinal(source.audioStreams),
     subMode: "none",
     subOrdinal: defaultOrdinal(source.subStreams),
+    subExtractProc: null,
     lastAccess: Date.now(),
     restarting: null,
     pendingRestartMin: Infinity,
@@ -288,6 +293,9 @@ function applySelection(s: Session, sel: TrackSelection): boolean {
 async function resetEncode(s: Session): Promise<void> {
   if (s.restarting) await s.restarting.catch(() => {});
   killProc(s);
+  // Cancel any in-flight extraction: the selection changed, so its output would
+  // be for the wrong track (and would clash on the same file as the re-extract).
+  killSubExtraction(s);
   s.windowStartSeg = 0;
   s.procExited = false;
   s.pendingRestartMin = Infinity;
@@ -401,8 +409,10 @@ async function restartAt(s: Session, startSeg: number): Promise<void> {
   s.lastRestartAt = Date.now();
   const startT = startSeg * SEG_SECONDS;
 
+  // Kick subtitle extraction if needed, but never block the encoder on it — the
+  // stream starts (subtitle-less) immediately and picks the burn up once ready.
   if (s.subMode === "burn" && s.source.subStreams.length > 0) {
-    await extractSubs(s, startT);
+    kickSubExtraction(s);
   }
 
   const args = buildFfmpegArgs(s, startSeg, startT);
@@ -441,25 +451,52 @@ async function restartAt(s: Session, startSeg: number): Promise<void> {
 }
 
 /**
- * Extract the selected subtitle track, rebased to the run's start, so its event
- * times line up with the (0-based) output timestamps of an `-ss` input seek.
- * Runs synchronously before the encode so `subtitles=subs.ass` resolves.
+ * Extract the selected subtitle track to a local file, once, in the background.
+ *
+ * Reading an embedded subtitle stream out of the source is slow over HTTP (ffmpeg
+ * has to demux the whole file for the sparse subtitle packets), so this must NOT
+ * block the encoder — doing that made a burn-in stream "load forever" before the
+ * first frame. Instead the encode starts without subtitles and, when extraction
+ * finishes, we restart the current run so the burn picks up. The track is
+ * extracted with its original absolute timestamps, which -copyts on the encoder
+ * makes line up at any seek position — so it's extracted just once, not per seek.
  */
-async function extractSubs(s: Session, startT: number): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const args = [
-      "-nostdin", "-loglevel", "error", "-y",
-      "-ss", String(startT),
-      "-i", s.source.inputUrl,
-      "-map", `0:s:${s.subOrdinal}`,
-      "-c:s", "ass",
-      "subs.ass",
-    ];
-    const proc = spawn(FFMPEG_PATH, args, { cwd: s.tmpDir, stdio: "ignore" });
-    // Never let a subtitle-extraction failure block playback — resolve either way.
-    proc.on("exit", () => resolve());
-    proc.on("error", () => resolve());
-  });
+function kickSubExtraction(s: Session): void {
+  const subPath = path.join(s.tmpDir, SUBS_FILE);
+  if (s.subExtractProc || existsSync(subPath)) return;
+  const args = [
+    "-nostdin", "-loglevel", "error", "-y",
+    "-i", s.source.inputUrl,
+    "-map", `0:s:${s.subOrdinal}`,
+    "-c:s", "ass",
+    SUBS_FILE,
+  ];
+  if (DEBUG) console.log("[FFmpeg] extracting subtitles", s.sessionId.substring(0, 8), "sub ordinal", s.subOrdinal);
+  const proc = spawn(FFMPEG_PATH, args, { cwd: s.tmpDir, stdio: "ignore" });
+  s.subExtractProc = proc;
+  const done = () => {
+    // A reset (track change) or stop may have superseded this extraction.
+    if (s.subExtractProc !== proc) return;
+    s.subExtractProc = null;
+    if (!sessions.has(s.sessionId) || s.subMode !== "burn" || !existsSync(subPath)) return;
+    if (DEBUG) console.log("[FFmpeg] subtitles ready, restarting to burn", s.sessionId.substring(0, 8));
+    // Re-encode from the current window so forward segments carry the burn.
+    void requestRestart(s, s.windowStartSeg);
+  };
+  proc.on("exit", done);
+  proc.on("error", done);
+}
+
+/** Kill any in-flight subtitle extraction for a session. */
+function killSubExtraction(s: Session): void {
+  const proc = s.subExtractProc;
+  if (!proc) return;
+  s.subExtractProc = null;
+  try {
+    proc.kill("SIGKILL");
+  } catch {
+    /* already gone */
+  }
 }
 
 /** Assemble the ffmpeg argv for one run starting at segment `startSeg` (time `startT`). */
@@ -467,16 +504,24 @@ function buildFfmpegArgs(s: Session, startSeg: number, startT: number): string[]
   // Cap at 1080p; -2 keeps aspect and an even height. Escape the min() comma so
   // it isn't read as a filter separator.
   let vf = "scale=min(1920\\,iw):-2";
-  if (s.subMode === "burn" && s.source.subStreams.length > 0) {
-    vf += ",subtitles=subs.ass"; // resolved relative to cwd (the session tmp dir)
+  // Burn subtitles only once the track has been extracted (see kickSubExtraction).
+  // Extraction is slow over HTTP and runs in the background, so early segments
+  // play without subtitles rather than blocking the whole stream on it.
+  if (s.subMode === "burn" && existsSync(path.join(s.tmpDir, SUBS_FILE))) {
+    vf += `,subtitles=${SUBS_FILE}`; // resolved relative to cwd (the session tmp dir)
   }
 
   return [
     "-nostdin", "-loglevel", "warning", "-y",
-    // Input-side seek: fast, and (without -copyts) output PTS restart at 0 so the
-    // per-segment force_key_frames grid lands on the global segment boundaries.
+    // Input-side seek: fast. -copyts keeps the source timestamps, so each segment
+    // carries its true, absolute movie-time PTS. That is what lets a post-seek
+    // segment slot into the whole-timeline playlist at the right place — without
+    // it every run restarts PTS at 0 and the player can't position anything past
+    // the first run, so seeks "load forever" and never play. It also makes the
+    // absolute-time burned subtitles line up at any seek.
     "-ss", String(startT),
     "-i", s.source.inputUrl,
+    "-copyts",
     "-map", "0:v:0",
     "-map", `0:a:${s.audioOrdinal}`,
     "-c:v", "libx264", "-preset", FFMPEG_PRESET, "-profile:v", "high", "-level", "4.1",
@@ -544,6 +589,7 @@ export async function stopSession(sessionId: string): Promise<void> {
   if (!s) return;
   sessions.delete(sessionId);
   killProc(s);
+  killSubExtraction(s);
   logEvent("FFmpeg", "session stopped", { session: sessionId.substring(0, 8) });
   try {
     await rm(s.tmpDir, { recursive: true, force: true });

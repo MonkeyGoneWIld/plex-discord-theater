@@ -53,8 +53,9 @@ RUN apk upgrade --no-cache
 # fontconfig + a font are required for burned-in subtitles: libass renders the
 # subtitle text through fontconfig, and with no fonts installed it logs "Failed
 # to load fontconfig fonts" and draws nothing. font-dejavu covers Latin/Cyrillic/
-# Greek; add more font-* packages for other scripts (e.g. font-noto-cjk).
-RUN apk add --no-cache tini curl ffmpeg fontconfig font-dejavu
+# Greek; add more font-* packages for other scripts (e.g. font-noto-cjk). Build
+# the font cache now so libass doesn't stall doing it on the first burn.
+RUN apk add --no-cache tini curl ffmpeg fontconfig font-dejavu && fc-cache -f
 
 # Non-root user
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup

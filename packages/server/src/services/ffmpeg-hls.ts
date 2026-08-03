@@ -152,6 +152,12 @@ interface Session {
   subExtractProc: ChildProcess | null;
   /** Set when subtitle burn keeps failing — playback then continues without it. */
   subsDisabled: boolean;
+  /**
+   * Force the bitmap `overlay` burn path even if the codec looked like text.
+   * Set when text extraction fails, so a mislabeled or unrecognised image
+   * subtitle still gets a chance before we give up on the burn entirely.
+   */
+  subForceOverlay: boolean;
   /** Consecutive encoder failures on a subtitle-burning run. */
   subFailCount: number;
   lastAccess: number;
@@ -277,6 +283,7 @@ export async function ensureSession(
     subOrdinal: defaultOrdinal(source.subStreams),
     subExtractProc: null,
     subsDisabled: false,
+    subForceOverlay: false,
     subFailCount: 0,
     lastAccess: Date.now(),
     restarting: null,
@@ -336,6 +343,7 @@ async function resetEncode(s: Session): Promise<void> {
   killSubExtraction(s);
   // A newly-selected subtitle track deserves a fresh attempt.
   s.subsDisabled = false;
+  s.subForceOverlay = false;
   s.subFailCount = 0;
   s.windowStartSeg = 0;
   s.procExited = false;
@@ -517,8 +525,9 @@ const SUBS_PARTIAL = "subs.partial.ass";
 function kickSubExtraction(s: Session): void {
   const subPath = path.join(s.tmpDir, SUBS_FILE);
   const partialPath = path.join(s.tmpDir, SUBS_PARTIAL);
-  // Nothing to do if already extracting, already done, or burn is off/disabled.
-  if (s.subExtractProc || existsSync(subPath) || s.subsDisabled) return;
+  // Nothing to do if already extracting, already done, burn off/disabled, or we've
+  // already decided to overlay this track (bitmap, or a text extraction that failed).
+  if (s.subExtractProc || existsSync(subPath) || s.subsDisabled || s.subForceOverlay) return;
   const sub = s.source.subStreams[s.subOrdinal];
   if (!sub || isBitmapSub(sub.codec)) return; // bitmap subs are overlaid, not extracted
 
@@ -542,13 +551,15 @@ function kickSubExtraction(s: Session): void {
 
     const ok = code === 0 && existsSync(partialPath);
     if (!ok) {
-      // Couldn't extract this track (unsupported/corrupt) — give up on the burn
-      // for this session rather than retrying forever, and play without it.
-      s.subsDisabled = true;
-      logEvent("FFmpeg", "subtitle extraction failed — disabling burn", {
+      // Extraction to text failed — the track is probably an image subtitle whose
+      // codec we didn't recognise. Fall back to the overlay path before giving up;
+      // if that also fails, the encoder-failure safety net disables the burn.
+      s.subForceOverlay = true;
+      logEvent("FFmpeg", "subtitle extraction failed — trying overlay burn", {
         session: s.sessionId.substring(0, 8), codec: sub.codec, code,
       });
       rm(partialPath, { force: true }).catch(() => {});
+      void requestRestart(s, s.windowStartSeg);
       return;
     }
     try {
@@ -629,7 +640,7 @@ function burnKind(s: Session): "none" | "text" | "bitmap" {
   if (s.subMode !== "burn" || s.subsDisabled) return "none";
   const sub = s.source.subStreams[s.subOrdinal];
   if (!sub) return "none";
-  if (isBitmapSub(sub.codec)) return "bitmap";
+  if (isBitmapSub(sub.codec) || s.subForceOverlay) return "bitmap";
   // Text subtitles are only burned once extraction has produced the file.
   return existsSync(path.join(s.tmpDir, SUBS_FILE)) ? "text" : "none";
 }

@@ -2025,9 +2025,11 @@ router.get("/hls/seg/:sessionId/:seg", async (req: Request, res: Response) => {
   try {
     const file = await ensureSegment(sessionId, idx);
     res.setHeader("Content-Type", "video/MP2T");
-    // Immutable for the session's life — a segment index maps to fixed content,
-    // so recovery refetches and multi-viewer fan-out can reuse it.
-    res.setHeader("Cache-Control", "public, max-age=300, immutable");
+    // Short cache, and NOT immutable: a segment's bytes can change when a burned
+    // subtitle becomes ready and the run is re-encoded, so the client must be able
+    // to re-fetch the subtitled version instead of pinning the first one it saw.
+    // A few seconds still covers hls.js recovery refetches and multi-viewer fan-out.
+    res.setHeader("Cache-Control", "public, max-age=5");
     res.sendFile(file, (err) => {
       if (err && !res.headersSent) res.status(404).end();
     });

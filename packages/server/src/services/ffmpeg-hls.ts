@@ -117,6 +117,18 @@ function isBitmapSub(codec?: string): boolean {
   return !!codec && BITMAP_SUB_CODECS.has(codec.toLowerCase());
 }
 
+/**
+ * Text subtitle codecs. Known-text tracks are drawn by the subtitles filter; if we
+ * can't obtain the text we must NOT fall back to the bitmap overlay (which can't
+ * render text — it just fails and thrashes) — we drop the burn instead.
+ */
+const TEXT_SUB_CODECS = new Set([
+  "srt", "subrip", "ass", "ssa", "mov_text", "text", "webvtt", "vtt", "eia_608", "subviewer",
+]);
+function isTextSub(codec?: string): boolean {
+  return !!codec && TEXT_SUB_CODECS.has(codec.toLowerCase());
+}
+
 interface SourceInfo {
   inputUrl: string;
   durationSec: number;
@@ -156,6 +168,8 @@ interface Session {
   subExtractProc: ChildProcess | null;
   /** Whether we've already tried the fast Plex subtitle fetch for this track. */
   subFetchAttempted: boolean;
+  /** Whether the current encoder run is burning subtitles (for thrash detection). */
+  runBurning: boolean;
   /** Set when subtitle burn keeps failing — playback then continues without it. */
   subsDisabled: boolean;
   /**
@@ -289,6 +303,7 @@ export async function ensureSession(
     subOrdinal: defaultOrdinal(source.subStreams),
     subExtractProc: null,
     subFetchAttempted: false,
+    runBurning: false,
     subsDisabled: false,
     subForceOverlay: false,
     subFailCount: 0,
@@ -460,22 +475,40 @@ export async function ensureSegment(sessionId: string, idx: number): Promise<str
 
 /** Kill the current encoder (if any) and start a fresh run at `startSeg`. */
 async function restartAt(s: Session, startSeg: number): Promise<void> {
+  // Thrash guard: if the run we're about to replace was burning subtitles and
+  // produced nothing, count it. A subtitle ffmpeg can't draw (bad overlay, a
+  // codec VAAPI won't take) dies instantly and gets restarted on the next segment
+  // request, and because the restart SIGKILLs it the exit-handler never sees a
+  // non-zero code — so without this the burn thrashes forever. After a few empty
+  // burning runs, drop the burn and let playback continue without it.
+  if (s.proc && s.runBurning) {
+    if (currentHead(s) < s.windowStartSeg) {
+      if (!s.subsDisabled && ++s.subFailCount >= 3) {
+        s.subsDisabled = true;
+        s.subForceOverlay = false;
+        logEvent("FFmpeg", "disabling subtitle burn after repeated empty runs", {
+          session: s.sessionId.substring(0, 8),
+        });
+      }
+    } else {
+      s.subFailCount = 0; // a burning run that produced output — healthy
+    }
+  }
+
   killProc(s);
   s.windowStartSeg = startSeg;
   s.lastRestartAt = Date.now();
   const startT = startSeg * SEG_SECONDS;
 
-  // Make sure the subtitle is in hand BEFORE we encode, so every produced segment
-  // is consistently burned. An on-disk segment must never change from unsubtitled
-  // to subtitled later: the browser caches it immutable and hls.js keeps it
-  // buffered, so a late-arriving subtitle would never actually reach the viewer
-  // (only external SRTs — the fast Plex fetch — worked before, because only they
-  // were ready in time). We block here instead. Bitmap subs are overlaid live from
-  // the input, so they need no preparation.
+  // Prepare the subtitle. This blocks only on the fast Plex fetch (~1-2s); the
+  // slow whole-file extraction runs in the BACKGROUND so a burn never freezes
+  // playback. Until the text is ready the run encodes without subtitles and picks
+  // them up on a later restart. Bitmap subs are overlaid live and need nothing.
   await prepareSubtitle(s);
 
   const args = buildFfmpegArgs(s, startSeg, startT);
   const wasBurning = burnKind(s) !== "none";
+  s.runBurning = wasBurning;
   if (DEBUG) console.log("[FFmpeg] start", s.sessionId.substring(0, 8), "seg", startSeg, "@", startT + "s");
 
   const proc = spawn(FFMPEG_PATH, args, { cwd: s.tmpDir, stdio: ["ignore", "ignore", "pipe"] });
@@ -550,16 +583,17 @@ async function fetchPlexSubtitle(s: Session): Promise<boolean> {
 }
 
 /** Bound on the slow whole-file extraction fallback (a big HTTP demux). */
-const SUB_EXTRACT_TIMEOUT_MS = 60_000;
+const SUB_EXTRACT_TIMEOUT_MS = 90_000;
 
 /**
- * Get the selected text subtitle ready to burn, BLOCKING until it is. Tries the
- * fast Plex fetch first, then a whole-file ffmpeg extraction. Blocking is the
- * point: it guarantees the first segment we encode is already subtitled, so the
- * viewer never gets served an unsubtitled segment that later can't be replaced
- * (immutable browser cache + hls.js buffer). Bitmap / forced-overlay subs return
- * immediately — they're overlaid live in the encode. On total failure the burn is
- * dropped so playback still proceeds.
+ * Prepare the selected text subtitle for burning. Blocks ONLY on the fast Plex
+ * fetch (~1-2s, and only once) — Plex serves the subtitle directly, so external
+ * and Plex-servable tracks are ready before the first segment. If that misses, it
+ * kicks a whole-file ffmpeg extraction in the BACKGROUND and returns immediately:
+ * the run encodes without subtitles until extraction finishes, then a restart
+ * picks them up (segments aren't served immutable, so the client re-fetches the
+ * burned versions). This never freezes playback. Bitmap / forced-overlay subs are
+ * overlaid live and need nothing here.
  */
 async function prepareSubtitle(s: Session): Promise<void> {
   if (s.subMode !== "burn" || s.subsDisabled) return;
@@ -568,32 +602,32 @@ async function prepareSubtitle(s: Session): Promise<void> {
   if (isBitmapSub(sub.codec) || s.subForceOverlay) return; // overlaid live
   if (existsSync(path.join(s.tmpDir, subFileName(s)))) return; // already have it
 
-  // 1) Fast path: Plex serves the subtitle directly (sidecar or converted).
+  // Fast path: Plex serves the subtitle directly (sidecar or converted).
   if (!s.subFetchAttempted) {
     s.subFetchAttempted = true;
     if (await fetchPlexSubtitle(s)) return;
   }
   if (existsSync(path.join(s.tmpDir, subFileName(s)))) return;
 
-  // 2) Slow path: demux it out of the file. Blocking, but bounded, and one-off
-  //    per session (the result is cached for every later segment and seek).
-  const ok = await extractSubtitleBlocking(s);
-  if (ok) return;
-
-  // 3) Couldn't get text — try the bitmap overlay path (handles a mislabeled or
-  //    unrecognised image subtitle). If that fails too, the encoder-failure
-  //    safety net disables the burn and playback continues without it.
-  logEvent("FFmpeg", "text subtitle unavailable — trying overlay burn", {
-    session: s.sessionId.substring(0, 8), codec: sub.codec,
-  });
-  s.subForceOverlay = true;
+  // Slow path: demux it out of the file — in the background, never blocking.
+  kickSubExtraction(s);
 }
 
-/** Run the whole-file subtitle extraction and await it (atomic, timeout-bounded). */
-function extractSubtitleBlocking(s: Session): Promise<boolean> {
-  const fmt = subFmtOf(s);
+/**
+ * Kick the whole-file subtitle extraction (non-blocking). On success it renames
+ * the file in and restarts so forward segments carry the burn. On failure: a
+ * KNOWN-text codec that couldn't be extracted has no image to overlay, so the
+ * burn is dropped (playback continues without it); an unknown codec might be a
+ * mislabeled image sub, so we try the overlay path once.
+ */
+function kickSubExtraction(s: Session): void {
   const subPath = path.join(s.tmpDir, subFileName(s));
   const partialPath = path.join(s.tmpDir, subPartialName(s));
+  if (s.subExtractProc || existsSync(subPath) || s.subsDisabled || s.subForceOverlay) return;
+  const sub = s.source.subStreams[s.subOrdinal];
+  if (!sub || isBitmapSub(sub.codec)) return;
+
+  const fmt = subFmtOf(s);
   const args = [
     "-nostdin", "-loglevel", "error", "-y",
     "-i", s.source.inputUrl,
@@ -603,30 +637,42 @@ function extractSubtitleBlocking(s: Session): Promise<boolean> {
     subPartialName(s),
   ];
   if (DEBUG) console.log("[FFmpeg] extracting subtitles", s.sessionId.substring(0, 8),
-    "ordinal", s.subOrdinal, "codec", s.source.subStreams[s.subOrdinal]?.codec);
-  return new Promise<boolean>((resolve) => {
-    const proc = spawn(FFMPEG_PATH, args, { cwd: s.tmpDir, stdio: "ignore" });
-    s.subExtractProc = proc;
-    const timer = setTimeout(() => {
-      try { proc.kill("SIGKILL"); } catch { /* gone */ }
-    }, SUB_EXTRACT_TIMEOUT_MS);
-    const finish = (okCode: number | null) => {
-      clearTimeout(timer);
-      if (s.subExtractProc === proc) s.subExtractProc = null;
-      if (okCode === 0 && existsSync(partialPath)) {
-        try {
-          renameSync(partialPath, subPath);
-          if (DEBUG) console.log("[FFmpeg] subtitles extracted", s.sessionId.substring(0, 8));
-          resolve(true);
-          return;
-        } catch { /* fall through */ }
-      }
-      rm(partialPath, { force: true }).catch(() => {});
-      resolve(false);
-    };
-    proc.on("exit", (code) => finish(code));
-    proc.on("error", () => finish(-1));
-  });
+    "ordinal", s.subOrdinal, "codec", sub.codec);
+  const proc = spawn(FFMPEG_PATH, args, { cwd: s.tmpDir, stdio: "ignore" });
+  s.subExtractProc = proc;
+  const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* gone */ } }, SUB_EXTRACT_TIMEOUT_MS);
+  const done = (code: number | null) => {
+    clearTimeout(timer);
+    if (s.subExtractProc !== proc) return; // superseded by reset/stop
+    s.subExtractProc = null;
+    if (!sessions.has(s.sessionId) || s.subMode !== "burn") return;
+
+    if (code === 0 && existsSync(partialPath)) {
+      try {
+        renameSync(partialPath, subPath);
+        if (DEBUG) console.log("[FFmpeg] subtitles ready, restarting to burn", s.sessionId.substring(0, 8));
+        void requestRestart(s, s.windowStartSeg);
+        return;
+      } catch { /* fall through to failure */ }
+    }
+    rm(partialPath, { force: true }).catch(() => {});
+    if (isTextSub(sub.codec)) {
+      // Genuinely text but unreadable — don't overlay (that can't draw text), drop it.
+      s.subsDisabled = true;
+      logEvent("FFmpeg", "text subtitle unavailable — disabling burn", {
+        session: s.sessionId.substring(0, 8), codec: sub.codec, code,
+      });
+    } else {
+      // Unknown codec: maybe a mislabeled image sub — try the overlay path once.
+      s.subForceOverlay = true;
+      logEvent("FFmpeg", "subtitle extraction failed — trying overlay burn", {
+        session: s.sessionId.substring(0, 8), codec: sub.codec, code,
+      });
+    }
+    void requestRestart(s, s.windowStartSeg);
+  };
+  proc.on("exit", (code) => done(code));
+  proc.on("error", () => done(-1));
 }
 
 /** Kill any in-flight subtitle extraction for a session. */

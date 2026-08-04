@@ -46,6 +46,39 @@ const VIDEO_PEAK_BITRATE_KBPS = envInt(
 );
 /** Where per-session segment dirs live. Under /data in the container. */
 const HLS_TMP_DIR = process.env.HLS_TMP_DIR || path.join(tmpdir(), "pdt-hls");
+
+/**
+ * Optional prefix rewrites from Plex's on-disk paths to this container's mount.
+ * Plex reports each part's path (Part.file) as *Plex* sees it; when the media
+ * library is mounted here at a different location, MEDIA_PATH_MAP rewrites the
+ * prefix so ffmpeg can read the file straight off disk (far faster than pulling
+ * it over HTTP, especially for subtitle extraction). Format: comma-separated
+ * `plexPrefix=>localPrefix` pairs, e.g. "/media=>/mnt/media,/data=>/library".
+ * Empty when the mount matches Plex's path (or no mount is used).
+ */
+const MEDIA_PATH_MAP: Array<[from: string, to: string]> = (process.env.MEDIA_PATH_MAP || "")
+  .split(",")
+  .map((pair) => pair.split("=>"))
+  .filter((parts): parts is [string, string] => parts.length === 2 && parts[0].trim() !== "")
+  .map(([from, to]) => [from.trim(), to.trim()]);
+
+/**
+ * Resolve a Plex part path to a readable local file, or null when it isn't mounted
+ * here. Applies the first matching MEDIA_PATH_MAP prefix (or uses the path as-is)
+ * and only returns it if the file actually exists — so a missing/mis-mapped path
+ * silently falls back to the HTTP URL rather than failing.
+ */
+function localMediaPath(partFile?: string): string | null {
+  if (!partFile) return null;
+  let candidate = partFile;
+  for (const [from, to] of MEDIA_PATH_MAP) {
+    if (partFile.startsWith(from)) {
+      candidate = to + partFile.slice(from.length);
+      break;
+    }
+  }
+  return existsSync(candidate) ? candidate : null;
+}
 /**
  * Format we keep a text subtitle in. ASS/SSA are kept as ASS so their styling and
  * on-screen positioning (PlayResX/Y, fonts, alignment) survive — converting them
@@ -131,6 +164,8 @@ function isTextSub(codec?: string): boolean {
 
 interface SourceInfo {
   inputUrl: string;
+  /** Whether inputUrl is a local file (mounted media) rather than the Plex HTTP URL. */
+  local: boolean;
   durationSec: number;
   /** Audio streams, in file order; ordinal is the `-map 0:a:<n>` index. */
   audioStreams: StreamRef[];
@@ -214,6 +249,8 @@ async function resolveSource(ratingKey: string): Promise<SourceInfo> {
         Media?: Array<{
           Part?: Array<{
             key?: string;
+            /** Path to the file as Plex sees it — used to read the mounted media directly. */
+            file?: string;
             duration?: number;
             Stream?: Array<{ id: number; streamType: number; selected?: boolean; codec?: string }>;
           }>;
@@ -230,10 +267,14 @@ async function resolveSource(ratingKey: string): Promise<SourceInfo> {
   if (!durationMs) throw new Error(`No duration for ratingKey ${ratingKey}`);
 
   const streams = part.Stream ?? [];
+  // Prefer the file on a local mount when we can reach it — ffmpeg reading off disk
+  // is far faster (especially subtitle extraction) than pulling it over HTTP. Fall
+  // back to Plex's direct-file URL: plexUrl appends the server token, and the
+  // Part.key endpoint streams the raw file honouring HTTP Range so -ss can seek.
+  const localPath = localMediaPath(part.file);
   return {
-    // plexUrl appends the server token; the Part.key endpoint streams the raw
-    // file and honours HTTP Range, which is what lets ffmpeg -ss seek into it.
-    inputUrl: plexUrl(part.key),
+    inputUrl: localPath ?? plexUrl(part.key),
+    local: localPath !== null,
     durationSec: durationMs / 1000,
     audioStreams: streams.filter((s) => s.streamType === 2).map((s) => ({ id: s.id, selected: !!s.selected, codec: s.codec })),
     subStreams: streams.filter((s) => s.streamType === 3).map((s) => ({ id: s.id, selected: !!s.selected, codec: s.codec })),
@@ -324,6 +365,7 @@ export async function ensureSession(
     ratingKey,
     durationS: Math.round(source.durationSec),
     segments: s.segmentCount,
+    source: source.local ? "local" : "http",
   });
   return { durationSec: source.durationSec, segSeconds: SEG_SECONDS, segmentCount: s.segmentCount };
 }

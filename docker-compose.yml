@@ -30,6 +30,9 @@ services:
       # available, and unreachable from here until now.
       - VIDEO_BITRATE_KBPS=${VIDEO_BITRATE_KBPS}
       - VIDEO_PEAK_BITRATE_KBPS=${VIDEO_PEAK_BITRATE_KBPS}
+      # Local media mount (optional): if you mount the library below at a different
+      # path than Plex uses, map Plex's prefix → the mount. Unset if paths match.
+      - MEDIA_PATH_MAP=${MEDIA_PATH_MAP}
       - WARM_CACHE=${WARM_CACHE}
       - WARM_CACHE_MAX_ITEMS=${WARM_CACHE_MAX_ITEMS}
       - WARM_CACHE_DELAY_MS=${WARM_CACHE_DELAY_MS}
@@ -46,6 +49,13 @@ services:
       - DEBUG=${DEBUG:-}
     volumes:
       - app-data:/data
+      # ── Local media (optional, read-only) ────────────────────────────────
+      # Mount your library so ffmpeg reads files off disk instead of over Plex's
+      # HTTP URL — much faster, especially subtitle extraction. Auto-detected: if
+      # the file isn't found here it falls back to HTTP. Mount at the SAME path
+      # Plex reports (Part.file) and no MEDIA_PATH_MAP is needed; otherwise set
+      # MEDIA_PATH_MAP above to rewrite Plex's prefix → this mount point.
+      # - /path/to/media:/media:ro
     restart: unless-stopped
     logging:
       driver: json-file

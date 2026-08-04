@@ -130,6 +130,11 @@ function subFileName(s: Session): string {
 function subPartialName(s: Session): string {
   return `subs.partial.${subFmtOf(s)}`;
 }
+/** Separate partial for the Plex fetch, so it can run alongside extraction without
+ *  clobbering the extractor's partial (they race for the same final subs file). */
+function subPlexPartialName(s: Session): string {
+  return `subs.plex.partial.${subFmtOf(s)}`;
+}
 
 /** Reap a session with no segment/ping access for this long. */
 const IDLE_TIMEOUT_MS = 90_000;
@@ -236,6 +241,8 @@ interface Session {
   subReadyPromise: Promise<void> | null;
   /** Whether we've already tried the fast Plex subtitle fetch for this track. */
   subFetchAttempted: boolean;
+  /** Whether we've already logged a fast-fetch miss (so the poll loop stays quiet). */
+  subFetchMissLogged: boolean;
   /** Whether the current encoder run is burning subtitles (for thrash detection). */
   runBurning: boolean;
   /** Set when subtitle burn keeps failing — playback then continues without it. */
@@ -378,6 +385,7 @@ export async function ensureSession(
     subExtractProc: null,
     subReadyPromise: null,
     subFetchAttempted: false,
+    subFetchMissLogged: false,
     runBurning: false,
     subsDisabled: false,
     subForceOverlay: false,
@@ -654,23 +662,37 @@ async function fetchPlexSubtitle(s: Session): Promise<boolean> {
   const sub = s.source.subStreams[s.subOrdinal];
   if (!sub) return false;
   const fmt = subFmtOf(s);
+  const sid = s.sessionId.substring(0, 8);
+  // Log why the fast path missed only once per session so a poll loop doesn't spam:
+  // the first miss is the diagnostic (404 = Plex hasn't extracted the embedded sub
+  // yet; empty/not-srt = it handed back something unusable). Later polls stay quiet.
+  const bail = (reason: string, extra?: Record<string, unknown>) => {
+    if (!s.subFetchMissLogged) {
+      s.subFetchMissLogged = true;
+      logEvent("FFmpeg", "Plex subtitle fetch missed — will extract", {
+        session: sid, stream: sub.id, codec: sub.codec, fmt, reason, ...extra,
+      });
+    }
+    return false;
+  };
   try {
     const res = await plexFetch(`/library/streams/${sub.id}.${fmt}`);
-    if (!res.ok) return false;
+    if (!res.ok) return bail("http-status", { status: res.status });
     const text = await res.text();
-    if (!text || text.trim().length < 10) return false; // empty/not a real sub
+    if (!text || text.trim().length < 10) return bail("empty-body", { bytes: text.length });
     // Make sure we actually got the format we asked for — an ASS body must carry
     // its script header, or its styling isn't there and we'd rather extract.
-    if (fmt === "ass" && !/\[Script Info\]|\bDialogue:/i.test(text)) return false;
-    if (fmt === "srt" && !text.includes("-->")) return false;
-    const partial = path.join(s.tmpDir, subPartialName(s));
+    if (fmt === "ass" && !/\[Script Info\]|\bDialogue:/i.test(text)) return bail("not-ass", { bytes: text.length });
+    if (fmt === "srt" && !text.includes("-->")) return bail("not-srt", { bytes: text.length });
+    const partial = path.join(s.tmpDir, subPlexPartialName(s));
     writeFileSync(partial, text);
     renameSync(partial, path.join(s.tmpDir, subFileName(s)));
-    if (DEBUG) console.log("[FFmpeg] fetched subtitle from Plex", s.sessionId.substring(0, 8),
-      "stream", sub.id, "codec", sub.codec, "fmt", fmt, `${text.length}b`);
+    logEvent("FFmpeg", "fetched subtitle from Plex", {
+      session: sid, stream: sub.id, codec: sub.codec, fmt, bytes: text.length,
+    });
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    return bail("exception", { err: String(err) });
   }
 }
 
@@ -712,8 +734,13 @@ async function prepareSubtitle(s: Session): Promise<void> {
   }
   if (existsSync(path.join(s.tmpDir, subFileName(s)))) return;
 
-  // Slow path: demux it out of the file (a big HTTP read) — awaited, bounded.
-  const ok = await extractSubtitle(s);
+  // Fallback: demux the sub out of the file ourselves. On a large 4K remux that
+  // whole-file read can exceed the timeout — but Plex extracts embedded subs on
+  // demand and then caches them, so our first request may have just kicked that off.
+  // Run our extraction and keep re-asking Plex in parallel; take whichever produces
+  // the file first. Normal files finish extraction in a few seconds; pathological
+  // ones get rescued by Plex's cache instead of dying at the extraction timeout.
+  const ok = await extractWithPlexRace(s);
   if (ok) return;
 
   // Couldn't get the text.
@@ -731,6 +758,39 @@ async function prepareSubtitle(s: Session): Promise<void> {
       session: s.sessionId.substring(0, 8), codec: sub.codec,
     });
   }
+}
+
+/** How often to re-ask Plex for the subtitle while our own extraction runs. */
+const SUB_PLEX_POLL_MS = 2_500;
+
+/**
+ * Run the whole-file extraction and re-poll Plex concurrently, resolving true as soon
+ * as either produces the subtitle file. Whoever wins, the other is stopped: if Plex
+ * serves it we SIGKILL the extractor; if the extractor wins we wake the poll so it
+ * exits without another request. They write through separate partials (subs.partial
+ * vs subs.plex.partial) and only the final `subs.<fmt>` is shared via atomic rename,
+ * so there's no clobber. Returns whether the file now exists.
+ */
+async function extractWithPlexRace(s: Session): Promise<boolean> {
+  const subPath = path.join(s.tmpDir, subFileName(s));
+  let stop = false;
+  let wake: () => void = () => {};
+  const stopped = new Promise<void>((r) => { wake = r; });
+
+  const poll = (async () => {
+    while (!stop) {
+      await Promise.race([sleep(SUB_PLEX_POLL_MS), stopped]);
+      if (stop || sessions.get(s.sessionId) !== s) return;
+      if (existsSync(subPath)) return; // the extractor produced it — done
+      if (await fetchPlexSubtitle(s)) { killSubExtraction(s); return; } // Plex won
+    }
+  })();
+
+  await extractSubtitle(s);
+  stop = true;
+  wake(); // cut the poll's current sleep short so it exits promptly
+  await poll;
+  return existsSync(subPath);
 }
 
 /** Run the whole-file subtitle extraction and await it (atomic, timeout-bounded). */

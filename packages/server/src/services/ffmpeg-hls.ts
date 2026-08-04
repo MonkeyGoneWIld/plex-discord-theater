@@ -50,6 +50,21 @@ const HWACCEL: HwAccel = ((): HwAccel => {
   return v === "vaapi" || v === "qsv" ? v : "none";
 })();
 const HWACCEL_DEVICE = process.env.HWACCEL_DEVICE || "/dev/dri/renderD128";
+
+/**
+ * Hardware DECODE (VAAPI only, opt-in via HWACCEL_DECODE=1). Off by default so the
+ * proven software-decode path is untouched unless explicitly enabled. When on and
+ * HWACCEL=vaapi, the source is decoded on the GPU too — not just encoded — which is
+ * what gives a heavy 4K/HEVC source (e.g. Dolby Vision) the headroom to burn
+ * subtitles in realtime instead of stuttering. Subtitle drawing (libass / overlay)
+ * is a software filter, so a burn round-trips the frames GPU→CPU→GPU
+ * (hwdownload → draw → hwupload); with no burn they never leave the GPU. Only vaapi
+ * is wired up (the Intel path in use); qsv keeps software decode. Trade-off: if the
+ * GPU can't decode a given input codec, ffmpeg errors instead of falling back to
+ * software — hence opt-in, so it's flipped and tested per deployment.
+ */
+const HWDECODE = HWACCEL === "vaapi" &&
+  ["1", "true", "yes"].includes((process.env.HWACCEL_DECODE || "").toLowerCase());
 /** Segment length in seconds — the unit of the whole-timeline playlist. */
 const SEG_SECONDS = envInt("SEG_SECONDS", 4);
 /** One full 1080p encode per session; cap how many run at once. */
@@ -381,6 +396,7 @@ export async function ensureSession(
     durationS: Math.round(source.durationSec),
     segments: s.segmentCount,
     encoder: HWACCEL === "none" ? "libx264" : `h264_${HWACCEL}`,
+    decode: HWDECODE ? "hw" : "sw",
     source: source.local ? "local" : "http",
   });
   return { durationSec: source.durationSec, segSeconds: SEG_SECONDS, segmentCount: s.segmentCount };
@@ -786,7 +802,17 @@ function videoEncodeParts(): { preInput: string[]; vfSuffix: string; encoder: st
   switch (HWACCEL) {
     case "vaapi":
       return {
-        preInput: ["-vaapi_device", HWACCEL_DEVICE],
+        // With hw decode the device is set up as a named hwaccel device (`va`) that
+        // the decoder, filters and encoder all share; without it we only need the
+        // encoder's vaapi device. hwDecodeFilterArgs handles the filter chain in the
+        // hw-decode case, so vfSuffix is only consumed by the software-decode path.
+        preInput: HWDECODE
+          ? [
+              "-init_hw_device", `vaapi=va:${HWACCEL_DEVICE}`,
+              "-hwaccel", "vaapi", "-hwaccel_device", "va",
+              "-hwaccel_output_format", "vaapi", "-filter_hw_device", "va",
+            ]
+          : ["-vaapi_device", HWACCEL_DEVICE],
         // Upload the (software-filtered) frames to the GPU as NV12 surfaces.
         vfSuffix: ",format=nv12,hwupload",
         // No forced_idr option here — h264_vaapi has none; it already emits an
@@ -838,6 +864,7 @@ function burnKind(s: Session): "none" | "text" | "bitmap" {
  * the hardware-upload tail (empty for software) appended to whichever chain runs.
  */
 function videoFilterArgs(s: Session, vfSuffix: string): string[] {
+  if (HWDECODE) return hwDecodeFilterArgs(s);
   const scale = "scale=min(1920\\,iw):-2"; // escape the min() comma
   switch (burnKind(s)) {
     case "bitmap":
@@ -853,6 +880,39 @@ function videoFilterArgs(s: Session, vfSuffix: string): string[] {
       return ["-map", "0:v:0", "-vf", `${scale},subtitles=${subFileName(s)}${vfSuffix}`];
     default:
       return ["-map", "0:v:0", "-vf", `${scale}${vfSuffix}`];
+  }
+}
+
+/**
+ * Filter chain when the source is decoded on the GPU (HWDECODE). Frames arrive as
+ * VAAPI surfaces. Without a burn they stay on the GPU (scale_vaapi → encoder). For a
+ * burn the sub filter is software, so we normalise/downscale on the GPU, hwdownload,
+ * draw, then hwupload back for the encoder. scale_vaapi's `format=nv12` also folds
+ * 10-bit HDR (p010) down to 8-bit on the GPU so the download is a clean nv12 frame.
+ */
+function hwDecodeFilterArgs(s: Session): string[] {
+  // GPU downscale (aspect kept via -2) + convert to nv12.
+  const scaleVaapi = "scale_vaapi=w=min(1920\\,iw):h=-2:format=nv12";
+  switch (burnKind(s)) {
+    case "bitmap":
+      // Convert to nv12 on the GPU at native res (no resize), download, overlay the
+      // decoded image sub so it lines up full-size, THEN downscale in software and
+      // re-upload for the encoder — mirrors the software path's overlay-before-scale.
+      return [
+        "-filter_complex",
+        `[0:v]scale_vaapi=format=nv12,hwdownload,format=nv12[v];` +
+          `[v][0:s:${s.subOrdinal}]overlay,scale=min(1920\\,iw):-2,format=nv12,hwupload[vout]`,
+        "-map", "[vout]",
+      ];
+    case "text":
+      // Downscale on the GPU, download, let libass draw at 1080p (cheap), re-upload.
+      return [
+        "-map", "0:v:0", "-vf",
+        `${scaleVaapi},hwdownload,format=nv12,subtitles=${subFileName(s)},format=nv12,hwupload`,
+      ];
+    default:
+      // No burn: never leave the GPU.
+      return ["-map", "0:v:0", "-vf", scaleVaapi];
   }
 }
 

@@ -35,6 +35,10 @@ services:
       # uncommented for the container to reach /dev/dri.
       - HWACCEL=${HWACCEL:-none}
       - HWACCEL_DEVICE=${HWACCEL_DEVICE:-/dev/dri/renderD128}
+      # Also decode on the GPU (VAAPI only). Off by default — enable for heavy
+      # 4K/HEVC (e.g. Dolby Vision) sources that stutter when burning subtitles.
+      # Opt-in: if the GPU can't decode a codec, ffmpeg errors (no software fallback).
+      - HWACCEL_DECODE=${HWACCEL_DECODE:-}
       - FFMPEG_PRESET=${FFMPEG_PRESET}
       - SEG_SECONDS=${SEG_SECONDS}
       - MAX_TRANSCODE_SESSIONS=${MAX_TRANSCODE_SESSIONS}

@@ -4,6 +4,7 @@ import {
   ensureSession,
   ensureSegment,
   pingSession,
+  subtitlePending,
   stopSession,
   stopAllSessions,
 } from "../services/ffmpeg-hls.js";
@@ -2052,7 +2053,9 @@ router.get("/hls/ping/:sessionId", (req: Request, res: Response) => {
     return;
   }
   const alive = pingSession(sessionId);
-  res.json({ ok: true, alive });
+  // subsPending lets the client auto-reload once a background subtitle extraction
+  // finishes, so embedded subtitles appear without the viewer having to seek.
+  res.json({ ok: true, alive, subsPending: subtitlePending(sessionId) });
 });
 
 /**

@@ -353,6 +353,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const sessionIdRef = useRef<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
+  // Auto-reload when a background subtitle extraction finishes: an embedded burn
+  // isn't ready at the first segment, so the server reports subsPending on ping;
+  // when it clears we reload once (like a seek) to fetch the now-subtitled
+  // segments, instead of the viewer having to skip to reveal them.
+  const subsWerePendingRef = useRef(false);
+  const subsReloadedRef = useRef(false);
   const [vpsRelay, setVpsRelay] = useState<boolean | null>(null); // null = not yet loaded
   const [buffering, setBuffering] = useState(true);
   // Viewers-only: transient "host is seeking" flag, raised on each seek command
@@ -654,7 +660,23 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // still "playing" (paused === false), which is exactly what lets the
           // server distinguish a stall from a pause.
           pingSession(sessionIdRef.current, timeMs, v ? !v.paused : undefined,
-            v ? bufferAheadSeconds(v) : undefined).catch(console.error);
+            v ? bufferAheadSeconds(v) : undefined)
+            .then((res) => {
+              // A burned subtitle just became ready (was pending, now isn't):
+              // reload once so the buffered unsubtitled segments are replaced with
+              // the subtitled ones. Without this the subs only appear on a seek.
+              if (!res || typeof res.subsPending !== "boolean") return;
+              const wasPending = subsWerePendingRef.current;
+              subsWerePendingRef.current = res.subsPending;
+              if (wasPending && !res.subsPending && subtitlesOnRef.current && !subsReloadedRef.current) {
+                subsReloadedRef.current = true;
+                logEvent("HLS", "subtitles ready — reloading to show burn", {
+                  session: sessionIdRef.current?.substring(0, 8) ?? "none",
+                });
+                setRetryKey((k) => k + 1);
+              }
+            })
+            .catch(console.error);
         }
       }, PING_INTERVAL_MS);
     }
@@ -2372,6 +2394,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     if (video && video.currentTime > 0) {
       seekOffsetRef.current = video.currentTime;
     }
+    // A new subtitle selection is a fresh burn to wait on — let it auto-reload
+    // once when its extraction finishes.
+    subsReloadedRef.current = false;
+    subsWerePendingRef.current = false;
     setShowTrackSwitcher(false);
     setRetryKey((k) => k + 1);
     // ratingKey is a real dependency now that the meta cache is invalidated by

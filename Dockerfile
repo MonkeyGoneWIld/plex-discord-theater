@@ -49,18 +49,22 @@ RUN apk upgrade --no-cache
 # Tini for proper PID 1 signal handling; ffmpeg for HLS transcoding (we produce
 # the video stream ourselves now rather than proxying Plex's transcoder); curl
 # for the healthcheck.
-# fontconfig + a font are required for burned-in subtitles: libass renders the
-# subtitle text through fontconfig, and with no fonts installed it logs "Failed
-# to load fontconfig fonts" and draws nothing. font-dejavu covers Latin/Cyrillic/
-# Greek; add more font-* packages for other scripts (e.g. font-noto-cjk). fc-cache
-# builds the font cache now so libass doesn't stall doing it on the first burn.
 #
-# libva + intel-media-driver provide the VAAPI runtime for Intel QuickSync
-# (HWACCEL=vaapi|qsv). They only do anything when the host maps /dev/dri into the
-# container (see docker-compose.yml); with the default HWACCEL=none they sit
-# unused. intel-media-driver (iHD) covers Gen8+ Intel — for older iGPUs set
-# LIBVA_DRIVER_NAME=i965 and add libva-intel-driver.
-RUN apk add --no-cache tini curl ffmpeg fontconfig font-dejavu libva intel-media-driver && fc-cache -f
+# Subtitle fonts (see the backend-overhaul notes): libass needs fonts to draw
+# burned-in subtitles. This set covers what subtitles ask for — Liberation
+# (Arial/Times/Courier metric-compatible), DejaVu (Latin/Cyrillic/Greek), Noto +
+# Noto CJK (Japanese/Chinese/Korean, i.e. anime) + Noto emoji. fc-cache prebuilds
+# the cache so the first burn doesn't stall.
+#
+# VAAPI runtime for Intel QuickSync (HWACCEL=vaapi|qsv): libva is the API,
+# intel-media-driver (iHD) is the driver for Gen8+ Intel, and libva-utils gives
+# `vainfo` for diagnosing GPU access. They only matter when the host maps
+# /dev/dri into the container; with HWACCEL=none they sit unused. For older Intel
+# iGPUs (≤ Gen7) set LIBVA_DRIVER_NAME=i965 and add libva-intel-driver instead.
+RUN apk add --no-cache tini curl ffmpeg fontconfig \
+      font-liberation font-dejavu font-noto font-noto-cjk font-noto-emoji \
+      libva libva-utils intel-media-driver \
+    && fc-cache -f
 
 # Non-root user
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup

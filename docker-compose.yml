@@ -65,13 +65,13 @@ services:
       # MEDIA_PATH_MAP above to rewrite Plex's prefix → this mount point.
       # - /path/to/media:/media:ro
     # ── Intel QuickSync (HWACCEL=vaapi|qsv) ──────────────────────────────
-    # Uncomment to give the container the Intel GPU. `group_add` must include the
-    # GID that owns /dev/dri/renderD128 on the host — find it with:
-    #   getent group render   (or:  stat -c '%g' /dev/dri/renderD128)
+    # Uncomment to give the container the Intel GPU. The entrypoint auto-detects the
+    # render node's group and runs the app in it, so NO group_add (or entrypoint
+    # override) is needed — just map the device and set, in the environment above,
+    # HWACCEL=vaapi, HWACCEL_DEVICE=/dev/dri/renderD128, and (Intel Gen8+)
+    # LIBVA_DRIVER_NAME=iHD.
     # devices:
     #   - /dev/dri:/dev/dri
-    # group_add:
-    #   - "989"   # ← replace with your host's render group GID
     restart: unless-stopped
     logging:
       driver: json-file

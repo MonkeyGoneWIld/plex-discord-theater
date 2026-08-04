@@ -98,8 +98,22 @@ COPY --from=build /app/packages/client/dist packages/client/dist
 # Persistent data directory (thumb cache SQLite) — mountable via THUMB_CACHE_DIR
 RUN mkdir -p /data
 
-# Entrypoint script: fix /data ownership then drop to appuser
-RUN printf '#!/bin/sh\nchown -R appuser:appgroup /data\nexec su-exec appuser "$@"\n' > /usr/local/bin/entrypoint.sh && \
+# Entrypoint script: fix /data ownership, then drop to appuser.
+#
+# When a GPU render node is mapped in for Intel QuickSync (HWACCEL=vaapi|qsv), the
+# encode process must belong to the GROUP that owns that device or VAAPI can't open
+# it ("No VA display" / permission denied). su-exec only sets appuser's own group,
+# and compose `group_add` doesn't survive the drop — so we detect the device's GID
+# here and hand it to su-exec (`appuser:<gid>`). No group_add / entrypoint override
+# needed. With no GPU mapped, it falls back to appgroup (unchanged behaviour).
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      'chown -R appuser:appgroup /data' \
+      'dev="${HWACCEL_DEVICE:-/dev/dri/renderD128}"' \
+      'grp=appgroup' \
+      '[ -e "$dev" ] && grp="$(stat -c %g "$dev")"' \
+      'exec su-exec "appuser:$grp" "$@"' \
+      > /usr/local/bin/entrypoint.sh && \
     chmod +x /usr/local/bin/entrypoint.sh
 RUN apk add --no-cache su-exec
 

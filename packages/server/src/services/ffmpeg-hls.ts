@@ -845,6 +845,20 @@ export function pingSession(sessionId: string): boolean {
   return true;
 }
 
+/**
+ * Whether a burn is still waiting on its subtitle to be prepared (a text track
+ * being fetched/extracted). Once this flips false the burned segments exist, so
+ * the client can reload to pick them up without a manual seek. False for non-burn,
+ * disabled, bitmap/overlay (ready immediately), or once the text file is in hand.
+ */
+export function subtitlePending(sessionId: string): boolean {
+  const s = sessions.get(sessionId);
+  if (!s || s.subMode !== "burn" || s.subsDisabled) return false;
+  const sub = s.source.subStreams[s.subOrdinal];
+  if (!sub || isBitmapSub(sub.codec) || s.subForceOverlay) return false;
+  return !existsSync(path.join(s.tmpDir, subFileName(s)));
+}
+
 /** Change audio/subtitle selection and drop stale segments so it re-encodes. */
 export async function setTracks(sessionId: string, sel: TrackSelection): Promise<void> {
   const s = sessions.get(sessionId);

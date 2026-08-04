@@ -537,12 +537,20 @@ export function setStreams(
   return apiPut(`/api/plex/streams/${partId}`, options);
 }
 
+export interface PingResult {
+  ok: boolean;
+  alive: boolean;
+  /** True while a burned subtitle is still being prepared server-side. When it
+   *  flips false the burned segments exist, so the player can reload to show them. */
+  subsPending?: boolean;
+}
+
 export async function pingSession(
   sessionId: string,
   timeMs?: number,
   playing?: boolean,
   bufferAheadS?: number,
-): Promise<void> {
+): Promise<PingResult | void> {
   const params = new URLSearchParams();
   if (timeMs != null && Number.isFinite(timeMs)) params.set("time", String(Math.round(timeMs)));
   // The server uses this to tell an intentional pause (frozen position, expected)
@@ -555,7 +563,7 @@ export async function pingSession(
     params.set("buffer", bufferAheadS.toFixed(1));
   }
   const qs = params.toString();
-  await apiGet(`/api/plex/hls/ping/${encodeURIComponent(sessionId)}${qs ? `?${qs}` : ""}`);
+  return apiGet<PingResult>(`/api/plex/hls/ping/${encodeURIComponent(sessionId)}${qs ? `?${qs}` : ""}`);
 }
 
 /**

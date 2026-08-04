@@ -38,6 +38,9 @@ services:
       - FFMPEG_PRESET=${FFMPEG_PRESET}
       - SEG_SECONDS=${SEG_SECONDS}
       - MAX_TRANSCODE_SESSIONS=${MAX_TRANSCODE_SESSIONS}
+      # Local media mount (optional): if you mount the library below at a different
+      # path than Plex uses, map Plex's prefix → the mount. Unset if paths match.
+      - MEDIA_PATH_MAP=${MEDIA_PATH_MAP}
       - WARM_CACHE=${WARM_CACHE}
       - WARM_CACHE_MAX_ITEMS=${WARM_CACHE_MAX_ITEMS}
       - WARM_CACHE_DELAY_MS=${WARM_CACHE_DELAY_MS}
@@ -54,6 +57,13 @@ services:
       - DEBUG=${DEBUG:-}
     volumes:
       - app-data:/data
+      # ── Local media (optional, read-only) ────────────────────────────────
+      # Mount your library so ffmpeg reads files off disk instead of over Plex's
+      # HTTP URL — much faster, especially subtitle extraction. Auto-detected: if
+      # the file isn't found here it falls back to HTTP. Mount at the SAME path
+      # Plex reports (Part.file) and no MEDIA_PATH_MAP is needed; otherwise set
+      # MEDIA_PATH_MAP above to rewrite Plex's prefix → this mount point.
+      # - /path/to/media:/media:ro
     # ── Intel QuickSync (HWACCEL=vaapi|qsv) ──────────────────────────────
     # Uncomment to give the container the Intel GPU. `group_add` must include the
     # GID that owns /dev/dri/renderD128 on the host — find it with:

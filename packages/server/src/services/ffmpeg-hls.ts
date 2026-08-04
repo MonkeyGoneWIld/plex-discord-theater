@@ -414,6 +414,8 @@ function requestRestart(s: Session, idx: number): Promise<void> {
       const target = s.pendingRestartMin;
       s.pendingRestartMin = Infinity;
       s.pendingRestart = null;
+      // The session may have been stopped during the debounce — don't restart it.
+      if (sessions.get(s.sessionId) !== s) return;
       const run = restartAt(s, target);
       s.restarting = run;
       try {
@@ -450,6 +452,10 @@ export async function ensureSegment(sessionId: string, idx: number): Promise<str
   const deadline = Date.now() + PRODUCE_TIMEOUT_MS;
 
   while (Date.now() < deadline) {
+    // Bail if the session was stopped mid-loop (its tmp dir is deleted, so any
+    // restart would spawn ffmpeg in a missing cwd → ENOENT and thrash). Without
+    // this, in-flight loops keep restarting a dead session until their deadline.
+    if (sessions.get(sessionId) !== s) throw new Error(`Session ${sessionId} stopped`);
     if (existsSync(p)) return p; // produced by this run or a previous one
 
     // A restart is actively spawning — its target is fixed now, so just wait it out.
@@ -487,6 +493,10 @@ export async function ensureSegment(sessionId: string, idx: number): Promise<str
 
 /** Kill the current encoder (if any) and start a fresh run at `startSeg`. */
 async function restartAt(s: Session, startSeg: number): Promise<void> {
+  // Never act on a stopped session — stopSession deletes its tmp dir, and spawning
+  // ffmpeg with a now-missing cwd throws ENOENT (the loop then retries forever).
+  if (sessions.get(s.sessionId) !== s) return;
+
   // Thrash guard: if the run we're about to replace was burning subtitles and
   // produced nothing, count it. A subtitle ffmpeg can't draw (bad overlay, a
   // codec VAAPI won't take) dies instantly and gets restarted on the next segment

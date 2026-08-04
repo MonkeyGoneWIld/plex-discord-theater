@@ -108,6 +108,11 @@ ENV PORT=3000
 # Per-session HLS segments live here — under /data so they land on the same
 # volume the entrypoint chowns to appuser (and can be a tmpfs mount for speed).
 ENV HLS_TMP_DIR=/data/hls
+# Default the libva driver to Intel's iHD (matches the intel-media-driver we ship).
+# Without this, libva can't auto-pick a driver for the mapped GPU and VAAPI fails
+# with "No VA display found". Only used when HWACCEL=vaapi|qsv; harmless otherwise.
+# Override (e.g. LIBVA_DRIVER_NAME=i965 for old Intel, or radeonsi for AMD) via env.
+ENV LIBVA_DRIVER_NAME=iHD
 EXPOSE ${PORT}
 
 # Health check — /api/health probes Plex (cached server-side), so the container

@@ -50,12 +50,21 @@ RUN apk upgrade --no-cache
 # the video stream ourselves now rather than proxying Plex's transcoder); curl
 # for the healthcheck.
 #
-# fontconfig + a font are required for burned-in subtitles: libass renders the
-# subtitle text through fontconfig, and with no fonts installed it logs "Failed
-# to load fontconfig fonts" and draws nothing. font-dejavu covers Latin/Cyrillic/
-# Greek; add more font-* packages for other scripts (e.g. font-noto-cjk). Build
-# the font cache now so libass doesn't stall doing it on the first burn.
-RUN apk add --no-cache tini curl ffmpeg fontconfig font-dejavu && fc-cache -f
+# fontconfig + fonts are required for burned-in subtitles: libass renders the
+# subtitle text through fontconfig, and with no fonts it logs "Failed to load
+# fontconfig fonts" and draws nothing. The set below covers what subtitles
+# actually ask for:
+#   font-liberation   metric-compatible Arial/Times/Courier — the fonts ASS
+#                     tracks name most often, so text lands at the intended size
+#   font-dejavu       broad Latin / Cyrillic / Greek fallback
+#   font-noto         wide Unicode coverage (accents, symbols, many scripts)
+#   font-noto-cjk     Japanese / Chinese / Korean (anime & CJK subs)
+#   font-noto-emoji   emoji glyphs some subs use
+# libass substitutes the nearest of these when a subtitle names a font that isn't
+# installed. fc-cache builds the cache now so the first burn doesn't stall.
+RUN apk add --no-cache tini curl ffmpeg fontconfig \
+      font-liberation font-dejavu font-noto font-noto-cjk font-noto-emoji \
+    && fc-cache -f
 
 # Non-root user
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup

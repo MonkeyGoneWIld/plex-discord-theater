@@ -35,3 +35,6 @@ bun.lock
 docs/plans/
 docs/superpowers/
 /.superpowers
+
+# Claude Code local state
+.claude/

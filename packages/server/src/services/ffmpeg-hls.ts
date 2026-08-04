@@ -730,8 +730,13 @@ function extractSubtitle(s: Session): Promise<boolean> {
     "-c:s", fmt,
     subPartialName(s),
   ];
-  if (DEBUG) console.log("[FFmpeg] extracting subtitles", s.sessionId.substring(0, 8),
-    "ordinal", s.subOrdinal, "codec", s.source.subStreams[s.subOrdinal]?.codec);
+  logEvent("FFmpeg", "extracting subtitle", {
+    session: s.sessionId.substring(0, 8),
+    ordinal: s.subOrdinal,
+    codec: s.source.subStreams[s.subOrdinal]?.codec,
+    // Whether the demux reads off the local mount (~1s) or over Plex HTTP (~20s).
+    source: s.source.local ? "local" : "http",
+  });
   return new Promise<boolean>((resolve) => {
     const proc = spawn(FFMPEG_PATH, args, { cwd: s.tmpDir, stdio: "ignore" });
     s.subExtractProc = proc;

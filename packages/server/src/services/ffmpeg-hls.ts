@@ -61,9 +61,27 @@ const VIDEO_PEAK_BITRATE_KBPS = envInt(
 );
 /** Where per-session segment dirs live. Under /data in the container. */
 const HLS_TMP_DIR = process.env.HLS_TMP_DIR || path.join(tmpdir(), "pdt-hls");
-/** Subtitle file (relative to a session's tmp dir) burned in by the subtitles filter. */
-const SUBS_FILE = "subs.srt";
-const SUBS_PARTIAL = "subs.partial.srt";
+/**
+ * Format we keep a text subtitle in. ASS/SSA are kept as ASS so their styling and
+ * on-screen positioning (PlayResX/Y, fonts, alignment) survive — converting them
+ * to SRT drops all of that and libass then renders huge, mispositioned text.
+ * Everything else becomes SRT.
+ */
+function subFormat(codec?: string): "ass" | "srt" {
+  const c = (codec ?? "").toLowerCase();
+  return c === "ass" || c === "ssa" ? "ass" : "srt";
+}
+/** The current track's subtitle format for a session. */
+function subFmtOf(s: Session): "ass" | "srt" {
+  return subFormat(s.source.subStreams[s.subOrdinal]?.codec);
+}
+/** Subtitle filename (relative to the session tmp dir, which is ffmpeg's cwd). */
+function subFileName(s: Session): string {
+  return `subs.${subFmtOf(s)}`;
+}
+function subPartialName(s: Session): string {
+  return `subs.partial.${subFmtOf(s)}`;
+}
 
 /** Reap a session with no segment/ping access for this long. */
 const IDLE_TIMEOUT_MS = 90_000;
@@ -355,7 +373,7 @@ async function resetEncode(s: Session): Promise<void> {
   s.pendingRestartMin = Infinity;
   try {
     for (const name of readdirSync(s.tmpDir)) {
-      if (/\.(ts|m3u8|ass)$/.test(name)) await rm(path.join(s.tmpDir, name), { force: true });
+      if (/\.(ts|m3u8|ass|srt)$/.test(name)) await rm(path.join(s.tmpDir, name), { force: true });
     }
   } catch {
     /* dir gone — nothing to clear */
@@ -519,22 +537,28 @@ async function restartAt(s: Session, startSeg: number): Promise<void> {
 
 /**
  * Fetch the selected text subtitle straight from Plex (fast — Plex serves just
- * the subtitle, no whole-file demux), writing it atomically to SUBS_FILE. Returns
- * whether it produced a usable subtitle. Blocking, but only ~1-2s and only once.
+ * the subtitle, no whole-file demux), in its native format so ASS styling is
+ * kept. Validates that the payload really is that format (Plex sometimes hands
+ * back a converted or empty body); returns whether it produced a usable file.
  */
 async function fetchPlexSubtitle(s: Session): Promise<boolean> {
   const sub = s.source.subStreams[s.subOrdinal];
   if (!sub) return false;
+  const fmt = subFmtOf(s);
   try {
-    const res = await plexFetch(`/library/streams/${sub.id}.srt`);
+    const res = await plexFetch(`/library/streams/${sub.id}.${fmt}`);
     if (!res.ok) return false;
     const text = await res.text();
     if (!text || text.trim().length < 10) return false; // empty/not a real sub
-    const partial = path.join(s.tmpDir, SUBS_PARTIAL);
+    // Make sure we actually got the format we asked for — an ASS body must carry
+    // its script header, or its styling isn't there and we'd rather extract.
+    if (fmt === "ass" && !/\[Script Info\]|\bDialogue:/i.test(text)) return false;
+    if (fmt === "srt" && !text.includes("-->")) return false;
+    const partial = path.join(s.tmpDir, subPartialName(s));
     writeFileSync(partial, text);
-    renameSync(partial, path.join(s.tmpDir, SUBS_FILE));
+    renameSync(partial, path.join(s.tmpDir, subFileName(s)));
     if (DEBUG) console.log("[FFmpeg] fetched subtitle from Plex", s.sessionId.substring(0, 8),
-      "stream", sub.id, "codec", sub.codec, `${text.length}b`);
+      "stream", sub.id, "codec", sub.codec, "fmt", fmt, `${text.length}b`);
     return true;
   } catch {
     return false;
@@ -558,14 +582,14 @@ async function prepareSubtitle(s: Session): Promise<void> {
   const sub = s.source.subStreams[s.subOrdinal];
   if (!sub) return;
   if (isBitmapSub(sub.codec) || s.subForceOverlay) return; // overlaid live
-  if (existsSync(path.join(s.tmpDir, SUBS_FILE))) return; // already have it
+  if (existsSync(path.join(s.tmpDir, subFileName(s)))) return; // already have it
 
   // 1) Fast path: Plex serves the subtitle directly (sidecar or converted).
   if (!s.subFetchAttempted) {
     s.subFetchAttempted = true;
     if (await fetchPlexSubtitle(s)) return;
   }
-  if (existsSync(path.join(s.tmpDir, SUBS_FILE))) return;
+  if (existsSync(path.join(s.tmpDir, subFileName(s)))) return;
 
   // 2) Slow path: demux it out of the file. Blocking, but bounded, and one-off
   //    per session (the result is cached for every later segment and seek).
@@ -583,14 +607,16 @@ async function prepareSubtitle(s: Session): Promise<void> {
 
 /** Run the whole-file subtitle extraction and await it (atomic, timeout-bounded). */
 function extractSubtitleBlocking(s: Session): Promise<boolean> {
-  const subPath = path.join(s.tmpDir, SUBS_FILE);
-  const partialPath = path.join(s.tmpDir, SUBS_PARTIAL);
+  const fmt = subFmtOf(s);
+  const subPath = path.join(s.tmpDir, subFileName(s));
+  const partialPath = path.join(s.tmpDir, subPartialName(s));
   const args = [
     "-nostdin", "-loglevel", "error", "-y",
     "-i", s.source.inputUrl,
     "-map", `0:s:${s.subOrdinal}`,
-    "-c:s", "srt",
-    SUBS_PARTIAL,
+    // Keep ASS/SSA as ASS so styling & positioning survive; others → SRT.
+    "-c:s", fmt,
+    subPartialName(s),
   ];
   if (DEBUG) console.log("[FFmpeg] extracting subtitles", s.sessionId.substring(0, 8),
     "ordinal", s.subOrdinal, "codec", s.source.subStreams[s.subOrdinal]?.codec);
@@ -686,7 +712,7 @@ function burnKind(s: Session): "none" | "text" | "bitmap" {
   if (!sub) return "none";
   if (isBitmapSub(sub.codec) || s.subForceOverlay) return "bitmap";
   // Text subtitles are only burned once extraction has produced the file.
-  return existsSync(path.join(s.tmpDir, SUBS_FILE)) ? "text" : "none";
+  return existsSync(path.join(s.tmpDir, subFileName(s))) ? "text" : "none";
 }
 
 /**
@@ -709,7 +735,7 @@ function videoFilterArgs(s: Session, vfSuffix: string): string[] {
         "-map", "[vout]",
       ];
     case "text":
-      return ["-map", "0:v:0", "-vf", `${scale},subtitles=${SUBS_FILE}${vfSuffix}`];
+      return ["-map", "0:v:0", "-vf", `${scale},subtitles=${subFileName(s)}${vfSuffix}`];
     default:
       return ["-map", "0:v:0", "-vf", `${scale}${vfSuffix}`];
   }

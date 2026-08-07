@@ -135,14 +135,6 @@ function subPartialName(s: Session): string {
 function subPlexPartialName(s: Session): string {
   return `subs.plex.partial.${subFmtOf(s)}`;
 }
-/** The background whole-track extraction writes here, then swaps onto the live subs
- *  file once complete — so it never clobbers a head window still being burned. */
-function subFullName(s: Session): string {
-  return `subs.full.${subFmtOf(s)}`;
-}
-function subFullPartialName(s: Session): string {
-  return `subs.full.partial.${subFmtOf(s)}`;
-}
 
 /** Reap a session with no segment/ping access for this long. */
 const IDLE_TIMEOUT_MS = 90_000;
@@ -242,26 +234,11 @@ interface Session {
   subMode: "burn" | "none";
   /** Selected subtitle ordinal among subStreams (for burn). */
   subOrdinal: number;
-  /** The in-flight head/one-shot subtitle-extraction process, or null. */
+  /** The in-flight subtitle-extraction process, or null. */
   subExtractProc: ChildProcess | null;
-  /** The in-flight background whole-track extraction process, or null. */
-  subFullProc: ChildProcess | null;
   /** Shared promise for preparing the subtitle, so concurrent first-segment
    *  requests block on ONE fetch/extraction rather than each starting their own. */
   subReadyPromise: Promise<void> | null;
-  /** The background whole-track extraction, started once and shared. */
-  subFullPromise: Promise<boolean> | null;
-  /**
-   * True once the whole subtitle track is extracted and in place. Until then the
-   * burn may be running off a short leading *window* (subCover*), so a huge remux
-   * that Plex won't serve and can't be fully demuxed in time still starts subtitled
-   * fast; the full track swaps in (and the encoder reloads) when it's ready.
-   */
-  subFullReady: boolean;
-  /** Movie-time span (seconds) the current subs file covers: [start, end). When
-   *  subFullReady it's the whole runtime; while windowed it's the head window. */
-  subCoverStartSec: number;
-  subCoverEndSec: number;
   /** Whether we've already tried the fast Plex subtitle fetch for this track. */
   subFetchAttempted: boolean;
   /** Whether we've already logged a fast-fetch miss (so the poll loop stays quiet). */
@@ -406,12 +383,7 @@ export async function ensureSession(
     subMode: "none",
     subOrdinal: defaultOrdinal(source.subStreams),
     subExtractProc: null,
-    subFullProc: null,
     subReadyPromise: null,
-    subFullPromise: null,
-    subFullReady: false,
-    subCoverStartSec: 0,
-    subCoverEndSec: 0,
     subFetchAttempted: false,
     subFetchMissLogged: false,
     runBurning: false,
@@ -480,11 +452,6 @@ async function resetEncode(s: Session): Promise<void> {
   s.subsDisabled = false;
   s.subForceOverlay = false;
   s.subFetchAttempted = false;
-  s.subFetchMissLogged = false;
-  s.subFullPromise = null;
-  s.subFullReady = false;
-  s.subCoverStartSec = 0;
-  s.subCoverEndSec = 0;
   s.subFailCount = 0;
   s.windowStartSeg = 0;
   s.procExited = false;
@@ -560,9 +527,8 @@ export async function ensureSegment(sessionId: string, idx: number): Promise<str
   // blocks the first requests (the client shows its buffering spinner) but is a
   // one-off per session — the result is cached for every later segment and seek.
   // It sits outside the produce-timeout loop below so the wait doesn't count
-  // against a segment's own deadline. Passing idx lets a huge file that can't be
-  // fully extracted in time start on a short window at the play position.
-  await ensureSubtitleReady(s, idx);
+  // against a segment's own deadline.
+  await ensureSubtitleReady(s);
 
   const p = segPath(s, idx);
   const deadline = Date.now() + PRODUCE_TIMEOUT_MS;
@@ -734,152 +700,50 @@ async function fetchPlexSubtitle(s: Session): Promise<boolean> {
 const SUB_EXTRACT_TIMEOUT_MS = 90_000;
 
 /**
- * Length of the leading window we extract for a fast subtitled start when the whole
- * track can't be obtained quickly. Generous so playback stays inside it until the
- * background whole-track extraction finishes and swaps in.
+ * Make the selected text subtitle ready to burn, BLOCKING until it is, so the
+ * first segment we encode is already subtitled (playback waits on its buffering
+ * spinner rather than starting unsubtitled). Tries the fast Plex fetch first, then
+ * a whole-file ffmpeg extraction. One-off per session — the file is cached for all
+ * later segments and seeks — and shared, so a burst of first-segment requests wait
+ * on ONE preparation. Bitmap / forced-overlay subs are overlaid live and return
+ * immediately. If the text can't be obtained the burn is dropped so playback still
+ * proceeds (never a permanent freeze).
  */
-const SUB_HEAD_WINDOW_SEC = envInt("SUB_HEAD_WINDOW_SEC", 300);
-/**
- * How long to wait for the whole-track extraction before falling back to a head
- * window. Normal files finish within this, so they never window or reload — behaviour
- * is unchanged for them.
- */
-const SUB_QUICK_BUDGET_MS = envInt("SUB_QUICK_BUDGET_MS", 12_000);
-
-/** Whether the live subs file already covers movie-time `t` (seconds). */
-function subCovers(s: Session, t: number): boolean {
-  if (!existsSync(path.join(s.tmpDir, subFileName(s)))) return false;
-  return s.subFullReady || (t >= s.subCoverStartSec && t < s.subCoverEndSec);
-}
-
-/** Mark the whole track in place (covers the entire runtime). */
-function markSubFullReady(s: Session): void {
-  s.subFullReady = true;
-  s.subCoverStartSec = 0;
-  s.subCoverEndSec = s.source.durationSec;
-}
-
-/**
- * Make the selected text subtitle ready to burn for a run starting at `startSeg`,
- * BLOCKING until the subs covering that point exist, so the first segment we encode
- * is already subtitled. Shared per position so a burst of first-segment requests wait
- * on ONE preparation; loops so a seek that lands outside the current window prepares
- * for its own position. Bitmap / forced-overlay subs are overlaid live and return
- * immediately. If the text can't be obtained the burn is dropped so playback proceeds.
- */
-async function ensureSubtitleReady(s: Session, startSeg: number): Promise<void> {
+async function ensureSubtitleReady(s: Session): Promise<void> {
   if (s.subMode !== "burn" || s.subsDisabled) return;
   const sub = s.source.subStreams[s.subOrdinal];
   if (!sub) return;
   if (isBitmapSub(sub.codec) || s.subForceOverlay) return; // overlaid live
-  const startT = startSeg * SEG_SECONDS;
+  if (existsSync(path.join(s.tmpDir, subFileName(s)))) return; // already have it
 
-  while (!subCovers(s, startT)) {
-    if (sessions.get(s.sessionId) !== s) return;
-    if (!s.subReadyPromise) {
-      s.subReadyPromise = prepareSubtitle(s, startSeg).finally(() => { s.subReadyPromise = null; });
-    }
-    await s.subReadyPromise.catch(() => {});
-    // Prep may have decided the burn can't happen (disabled / handed to overlay).
-    if (s.subMode !== "burn" || s.subsDisabled || s.subForceOverlay) return;
-    // Nothing usable was produced at all — don't spin; let playback proceed.
-    if (!existsSync(path.join(s.tmpDir, subFileName(s))) && !s.subFullReady) return;
+  if (!s.subReadyPromise) {
+    s.subReadyPromise = prepareSubtitle(s).finally(() => { s.subReadyPromise = null; });
   }
+  await s.subReadyPromise.catch(() => {});
 }
 
-/** The actual fetch/extract work for a start position, awaited by ensureSubtitleReady. */
-async function prepareSubtitle(s: Session, startSeg: number): Promise<void> {
+/** The actual fetch-then-extract work, awaited by ensureSubtitleReady. */
+async function prepareSubtitle(s: Session): Promise<void> {
   const sub = s.source.subStreams[s.subOrdinal];
   if (!sub) return;
-  const startT = startSeg * SEG_SECONDS;
 
-  // Fast path: Plex serves the whole subtitle directly (sidecar or already-extracted).
+  // Fast path: Plex serves the subtitle directly (sidecar or converted) — quick.
   if (!s.subFetchAttempted) {
     s.subFetchAttempted = true;
-    if (await fetchPlexSubtitle(s)) { markSubFullReady(s); return; }
+    if (await fetchPlexSubtitle(s)) return;
   }
-  if (subCovers(s, startT)) return;
+  if (existsSync(path.join(s.tmpDir, subFileName(s)))) return;
 
-  // Kick off (once) the background whole-track extraction; it swaps onto the live
-  // file and reloads the encoder when done.
-  const full = startFullExtraction(s);
+  // Fallback: demux the sub out of the file ourselves. On a large 4K remux that
+  // whole-file read can exceed the timeout — but Plex extracts embedded subs on
+  // demand and then caches them, so our first request may have just kicked that off.
+  // Run our extraction and keep re-asking Plex in parallel; take whichever produces
+  // the file first. Normal files finish extraction in a few seconds; pathological
+  // ones get rescued by Plex's cache instead of dying at the extraction timeout.
+  const ok = await extractWithPlexRace(s);
+  if (ok) return;
 
-  // Give the whole-track extraction a short budget. Normal files land here — done,
-  // with no window and no reload.
-  const quick = await Promise.race([
-    full.then((ok) => (ok ? "ok" : "fail")),
-    sleep(SUB_QUICK_BUDGET_MS).then(() => "pending" as const),
-  ]);
-  if (quick === "ok") return;
-  if (quick === "fail") { handleSubUnavailable(s, sub); return; }
-
-  // Slow/huge file (e.g. a 4K remux Plex won't serve): extract a short leading window
-  // now for an immediate subtitled start; the background full swaps in + reloads soon.
-  if (await extractHeadWindow(s, startT)) return;
-
-  // Couldn't even window it — wait the full extraction out as a last resort.
-  if (await full) return;
-  handleSubUnavailable(s, sub);
-}
-
-/**
- * Start (once, shared) the background whole-track extraction. On success it swaps the
- * complete track onto the live subs file atomically and reloads the running encoder so
- * it burns the full track from here on — replacing any head window that got us started.
- */
-function startFullExtraction(s: Session): Promise<boolean> {
-  if (s.subFullPromise) return s.subFullPromise;
-  s.subFullPromise = (async () => {
-    const ok = await runSubtitleExtract(s, {
-      out: subFullName(s), partial: subFullPartialName(s), procField: "subFullProc",
-    });
-    if (sessions.get(s.sessionId) !== s || !ok) return false;
-    try {
-      renameSync(path.join(s.tmpDir, subFullName(s)), path.join(s.tmpDir, subFileName(s)));
-    } catch {
-      return false;
-    }
-    markSubFullReady(s);
-    logEvent("FFmpeg", "whole subtitle track ready", { session: s.sessionId.substring(0, 8) });
-    requestSubtitleReload(s);
-    return true;
-  })();
-  return s.subFullPromise;
-}
-
-/** Extract just the leading window [startT, startT+HEAD) onto the live subs file. */
-async function extractHeadWindow(s: Session, startT: number): Promise<boolean> {
-  if (s.subFullReady) return true; // full already in place
-  const endT = Math.min(startT + SUB_HEAD_WINDOW_SEC, s.source.durationSec);
-  const ok = await runSubtitleExtract(s, {
-    out: subFileName(s), partial: subPartialName(s), procField: "subExtractProc",
-    window: { startT, endT }, guardFullReady: true,
-  });
-  if (!ok) return false;
-  if (!s.subFullReady) {
-    s.subCoverStartSec = startT;
-    s.subCoverEndSec = endT;
-  }
-  logEvent("FFmpeg", "subtitle head window ready", {
-    session: s.sessionId.substring(0, 8), fromS: Math.round(startT), toS: Math.round(endT),
-  });
-  return true;
-}
-
-/** Restart the running encoder so it picks up the freshly-swapped full subtitle track. */
-function requestSubtitleReload(s: Session): void {
-  if (s.subMode !== "burn" || s.subsDisabled) return;
-  if (!s.proc || s.procExited) return; // nothing running to reload
-  if (burnKind(s) === "none") return;
-  const target = Math.max(s.windowStartSeg, currentHead(s));
-  logEvent("FFmpeg", "reloading encoder for full subtitle track", {
-    session: s.sessionId.substring(0, 8), target,
-  });
-  void requestRestart(s, target);
-}
-
-/** Drop the burn (or hand off to the image overlay) when the text can't be obtained. */
-function handleSubUnavailable(s: Session, sub: StreamRef): void {
+  // Couldn't get the text.
   if (isTextSub(sub.codec)) {
     // Genuinely text but unreadable — the bitmap overlay can't draw text, so drop
     // the burn rather than thrash; playback continues without subtitles.
@@ -896,59 +760,70 @@ function handleSubUnavailable(s: Session, sub: StreamRef): void {
   }
 }
 
-interface SubExtractOpts {
-  /** Final subs file to produce (relative to tmp dir). */
-  out: string;
-  /** Partial written first, then atomically renamed to `out`. */
-  partial: string;
-  /** Which session field tracks this process (so it can be killed / not clobbered). */
-  procField: "subExtractProc" | "subFullProc";
-  /** When set, extract only [startT, endT) with absolute (copyts) timestamps. */
-  window?: { startT: number; endT: number };
-  /** Skip the rename if the whole track landed meanwhile (head must not clobber full). */
-  guardFullReady?: boolean;
+/** How often to re-ask Plex for the subtitle while our own extraction runs. */
+const SUB_PLEX_POLL_MS = 2_500;
+
+/**
+ * Run the whole-file extraction and re-poll Plex concurrently, resolving true as soon
+ * as either produces the subtitle file. Whoever wins, the other is stopped: if Plex
+ * serves it we SIGKILL the extractor; if the extractor wins we wake the poll so it
+ * exits without another request. They write through separate partials (subs.partial
+ * vs subs.plex.partial) and only the final `subs.<fmt>` is shared via atomic rename,
+ * so there's no clobber. Returns whether the file now exists.
+ */
+async function extractWithPlexRace(s: Session): Promise<boolean> {
+  const subPath = path.join(s.tmpDir, subFileName(s));
+  let stop = false;
+  let wake: () => void = () => {};
+  const stopped = new Promise<void>((r) => { wake = r; });
+
+  const poll = (async () => {
+    while (!stop) {
+      await Promise.race([sleep(SUB_PLEX_POLL_MS), stopped]);
+      if (stop || sessions.get(s.sessionId) !== s) return;
+      if (existsSync(subPath)) return; // the extractor produced it — done
+      if (await fetchPlexSubtitle(s)) { killSubExtraction(s); return; } // Plex won
+    }
+  })();
+
+  await extractSubtitle(s);
+  stop = true;
+  wake(); // cut the poll's current sleep short so it exits promptly
+  await poll;
+  return existsSync(subPath);
 }
 
-/** Run one ffmpeg subtitle extraction (atomic, timeout-bounded). */
-function runSubtitleExtract(s: Session, opts: SubExtractOpts): Promise<boolean> {
-  const outPath = path.join(s.tmpDir, opts.out);
-  const partialPath = path.join(s.tmpDir, opts.partial);
+/** Run the whole-file subtitle extraction and await it (atomic, timeout-bounded). */
+function extractSubtitle(s: Session): Promise<boolean> {
+  const subPath = path.join(s.tmpDir, subFileName(s));
+  const partialPath = path.join(s.tmpDir, subPartialName(s));
   const fmt = subFmtOf(s);
-  const args = ["-nostdin", "-loglevel", "error", "-y"];
-  // Windowed: input-seek + -copyts keeps absolute movie-time stamps (so burned subs
-  // still line up under the encode's -copyts) and -to bounds the read to the window,
-  // so a huge file is read proportionally instead of end-to-end.
-  if (opts.window) args.push("-ss", String(opts.window.startT), "-copyts");
-  args.push("-i", s.source.inputUrl, "-map", `0:s:${s.subOrdinal}`, "-c:s", fmt);
-  if (opts.window) args.push("-to", String(opts.window.endT));
-  args.push(opts.partial);
+  const args = [
+    "-nostdin", "-loglevel", "error", "-y",
+    "-i", s.source.inputUrl,
+    "-map", `0:s:${s.subOrdinal}`,
+    // Keep ASS/SSA as ASS so styling & positioning survive; others → SRT.
+    "-c:s", fmt,
+    subPartialName(s),
+  ];
   logEvent("FFmpeg", "extracting subtitle", {
     session: s.sessionId.substring(0, 8),
     ordinal: s.subOrdinal,
     codec: s.source.subStreams[s.subOrdinal]?.codec,
     // Whether the demux reads off the local mount (~1s) or over Plex HTTP (~20s).
     source: s.source.local ? "local" : "http",
-    window: opts.window
-      ? `${Math.round(opts.window.startT)}-${Math.round(opts.window.endT)}s`
-      : "full",
   });
   return new Promise<boolean>((resolve) => {
     const proc = spawn(FFMPEG_PATH, args, { cwd: s.tmpDir, stdio: "ignore" });
-    s[opts.procField] = proc;
+    s.subExtractProc = proc;
     const timer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* gone */ } }, SUB_EXTRACT_TIMEOUT_MS);
     const finish = (code: number | null) => {
       clearTimeout(timer);
-      if (s[opts.procField] === proc) s[opts.procField] = null;
+      if (s.subExtractProc === proc) s.subExtractProc = null;
       if (code === 0 && existsSync(partialPath)) {
-        // A concurrent whole-track commit may have already put the full subs in
-        // place — don't overwrite it with a head window.
-        if (opts.guardFullReady && s.subFullReady) {
-          rm(partialPath, { force: true }).catch(() => {});
-          resolve(true);
-          return;
-        }
         try {
-          renameSync(partialPath, outPath);
+          renameSync(partialPath, subPath);
+          if (DEBUG) console.log("[FFmpeg] subtitles extracted", s.sessionId.substring(0, 8));
           resolve(true);
           return;
         } catch { /* fall through */ }
@@ -961,17 +836,15 @@ function runSubtitleExtract(s: Session, opts: SubExtractOpts): Promise<boolean> 
   });
 }
 
-/** Kill any in-flight subtitle extraction (head and background full) for a session. */
+/** Kill any in-flight subtitle extraction for a session. */
 function killSubExtraction(s: Session): void {
-  for (const field of ["subExtractProc", "subFullProc"] as const) {
-    const proc = s[field];
-    if (!proc) continue;
-    s[field] = null;
-    try {
-      proc.kill("SIGKILL");
-    } catch {
-      /* already gone */
-    }
+  const proc = s.subExtractProc;
+  if (!proc) return;
+  s.subExtractProc = null;
+  try {
+    proc.kill("SIGKILL");
+  } catch {
+    /* already gone */
   }
 }
 

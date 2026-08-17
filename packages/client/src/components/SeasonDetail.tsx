@@ -1,5 +1,11 @@
-import { useState, useEffect } from "react";
-import { fetchChildren, fetchProgressMany, getSessionToken, type HistoryEntry, type PlexItem } from "../lib/api";
+import { useState, useEffect, useMemo } from "react";
+import {
+  fetchChildren, fetchMeta, fetchProgressMany, fetchTmdbSeason, getSessionToken,
+  seerrStillUrl, type HistoryEntry, type PlexItem, type TmdbEpisode,
+} from "../lib/api";
+import {
+  describeGaps, findSeasonGaps, formatAirDate, type GapEpisode,
+} from "../lib/seasonGaps";
 import { formatTimecode } from "../lib/format";
 import { SkeletonBlock } from "./SkeletonBlock";
 import type { QueueItem } from "../hooks/useSync";
@@ -67,6 +73,65 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
     return () => { cancelled = true; };
   }, [episodes]);
 
+  // What TMDB says this season contains, so the gaps can be worked out. Its own
+  // request, deliberately after the Plex one and never blocking it: the episodes
+  // that are actually here are what the page is for, and this is an annotation.
+  const [tmdbEpisodes, setTmdbEpisodes] = useState<TmdbEpisode[] | null>(null);
+  const [showGaps, setShowGaps] = useState(false);
+
+  useEffect(() => {
+    setTmdbEpisodes(null);
+    setShowGaps(false);
+    if (season.index == null) return;
+    let cancelled = false;
+    // The show's TMDB id, not the season's — Plex only stores the guid on the
+    // series. fetchMeta is cached, and ShowDetail has usually already asked for
+    // this, so it's normally free.
+    fetchMeta(show.ratingKey)
+      .then((meta) => {
+        if (cancelled || meta.tmdbId == null) return null;
+        return fetchTmdbSeason(meta.tmdbId, season.index!);
+      })
+      .then((res) => { if (!cancelled && res) setTmdbEpisodes(res.episodes); })
+      .catch(() => { /* optional annotation — never surface an error over a real list */ });
+    return () => { cancelled = true; };
+  }, [show.ratingKey, season.index]);
+
+  /**
+   * Episodes TMDB knows about that Plex doesn't have.
+   *
+   * Empty when Plex has none of the season at all: that is a *wholly* missing
+   * season, which the show page already represents as a single request card, and
+   * listing twenty absent episodes inside it would be a worse answer to the same
+   * question. It's only reachable at all when Plex has a season row with no
+   * children, which is rare, but the guard costs nothing.
+   */
+  const gaps = useMemo(() => findSeasonGaps(episodes, tmdbEpisodes), [tmdbEpisodes, episodes]);
+
+  /**
+   * The list as rendered: what Plex has, plus the gaps when they're shown,
+   * interleaved by episode number.
+   *
+   * Interleaved rather than appended, because a gap only reads as a gap where it
+   * falls — a block of absent episodes at the bottom looks like a separate list
+   * of something else, and you can't see at a glance that it's episode 4 that
+   * never downloaded.
+   */
+  type Row =
+    | { kind: "have"; ep: PlexItem }
+    | { kind: "gap"; ep: GapEpisode };
+
+  const rows = useMemo<Row[]>(() => {
+    const have: Row[] = episodes.map((ep) => ({ kind: "have", ep }));
+    if (!showGaps || gaps.length === 0) return have;
+    const num = (r: Row) =>
+      r.kind === "have" ? (r.ep.index ?? Number.MAX_SAFE_INTEGER) : r.ep.episodeNumber;
+    return [...have, ...gaps.map((ep) => ({ kind: "gap" as const, ep }))]
+      .sort((a, b) => num(a) - num(b));
+  }, [episodes, gaps, showGaps]);
+
+  const gapLabel = describeGaps(gaps);
+
   const seasonLabel = season.index != null ? `Season ${season.index}` : season.title;
 
   const addToQueue = (ep: PlexItem) => {
@@ -133,7 +198,84 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
         </div>
       ) : (
         <div style={styles.list}>
-          {episodes.map((ep) => {
+          {/* Only when this season actually has gaps, and hidden until asked
+              for: a complete season should look complete, and a currently
+              airing one shouldn't open with a list of episodes that don't
+              exist yet. */}
+          {gaps.length > 0 && (
+            <div style={styles.gapToggleRow}>
+              <button
+                type="button"
+                onClick={() => setShowGaps((v) => !v)}
+                style={styles.gapToggle}
+                aria-expanded={showGaps}
+              >
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+                  <path
+                    d={showGaps ? "M3 6.5L8 11L13 6.5" : "M6.5 3L11 8L6.5 13"}
+                    stroke="currentColor" strokeWidth="1.8"
+                    strokeLinecap="round" strokeLinejoin="round"
+                  />
+                </svg>
+                {showGaps ? "Hide" : "Show"} {gapLabel}
+              </button>
+            </div>
+          )}
+          {rows.map((row) => {
+            if (row.kind === "gap") {
+              const g = row.ep;
+              const still = seerrStillUrl(g.stillPath);
+              const aired = formatAirDate(g.airDate);
+              const isMissing = g.kind === "missing";
+              return (
+                // A div, not a button: these aren't selectable. Requests are
+                // per-season — Sonarr monitors a season, and offering a
+                // single-episode request would promise something the request
+                // flow can't deliver.
+                <div
+                  key={`gap-${g.episodeNumber}`}
+                  style={{ ...styles.episodeCard, ...styles.gapCard }}
+                  aria-label={`Episode ${g.episodeNumber}, ${isMissing ? "not in library" : "not yet aired"}`}
+                >
+                  <div style={styles.thumbWrap}>
+                    {still ? (
+                      <img src={still} alt="" style={{ ...styles.episodeThumb, ...styles.gapThumb }} loading="lazy" />
+                    ) : (
+                      <div style={styles.episodePlaceholder}>No Image</div>
+                    )}
+                    {/* Same badge, same corner as a real episode's duration —
+                        the row is meant to read as one of the list, just
+                        greyed. TMDB doesn't always have a runtime. */}
+                    {g.runtime != null && g.runtime > 0 && (
+                      <div style={{ ...styles.durationBadge, ...styles.gapDurationBadge }}>
+                        {fmtDuration(g.runtime * 60_000)}
+                      </div>
+                    )}
+                  </div>
+                  <div style={styles.episodeInfo}>
+                    <div style={styles.episodeMeta}>
+                      <span style={styles.gapEpisodeNumber}>E{g.episodeNumber}</span>
+                      <span style={styles.gapEpisodeTitle}>{g.name}</span>
+                      <span style={isMissing ? styles.missingTag : styles.unairedTag}>
+                        {isMissing ? "Missing" : "Not aired"}
+                      </span>
+                    </div>
+                    {(aired || g.overview) && (
+                      <p style={styles.gapSummary}>
+                        {aired && (
+                          <span style={styles.airDate}>
+                            {isMissing ? "Aired" : "Airs"} {aired}
+                          </span>
+                        )}
+                        {aired && g.overview ? " · " : ""}
+                        {g.overview}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              );
+            }
+            const ep = row.ep;
             const isHovered = hoveredKey === ep.ratingKey;
             const seen = progress[ep.ratingKey];
             const watched = seen?.watched === true;
@@ -357,4 +499,44 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#888", fontSize: "12px", lineHeight: "1.4", margin: 0,
     display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
   },
+  // ─── Missing / unaired episodes ────────────────────────────────
+  // Same card, turned down. The shape stays identical to a real episode so the
+  // list reads as one season rather than two lists; everything that says "you
+  // can't play this" is a matter of contrast, not of layout.
+  gapToggleRow: {
+    display: "flex", justifyContent: "flex-end", marginBottom: "2px",
+  },
+  gapToggle: {
+    display: "inline-flex", alignItems: "center", gap: "6px",
+    padding: "5px 12px", borderRadius: "999px",
+    border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.04)",
+    color: "#999", fontSize: "12px", fontWeight: 600,
+    cursor: "pointer", fontFamily: "inherit",
+  },
+  gapCard: {
+    // No hover, no pointer: nothing here responds to a click.
+    cursor: "default",
+    background: "rgba(255,255,255,0.015)",
+    border: "1px dashed rgba(255,255,255,0.09)",
+  },
+  gapThumb: { opacity: 0.35, filter: "grayscale(0.6)" },
+  gapDurationBadge: { background: "rgba(0,0,0,0.5)", color: "#777" },
+  gapEpisodeNumber: { color: "rgba(229,160,13,0.45)", fontSize: "12px", fontWeight: 700 },
+  gapEpisodeTitle: {
+    color: "#8a8a8a", fontSize: "14px", fontWeight: 500,
+    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+  },
+  missingTag: {
+    flexShrink: 0, color: "#c98a3e", fontSize: "11px", fontWeight: 600,
+    letterSpacing: "0.3px", textTransform: "uppercase" as const,
+  },
+  unairedTag: {
+    flexShrink: 0, color: "#6c7a89", fontSize: "11px", fontWeight: 600,
+    letterSpacing: "0.3px", textTransform: "uppercase" as const,
+  },
+  gapSummary: {
+    color: "#666", fontSize: "12px", lineHeight: "1.4", margin: 0,
+    display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
+  },
+  airDate: { color: "#7d7d7d", fontWeight: 600 },
 };

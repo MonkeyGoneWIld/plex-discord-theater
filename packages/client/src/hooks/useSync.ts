@@ -154,6 +154,15 @@ export interface SyncActions {
   /** Co-host: ask the host to advance to the next item. */
   sendPlayItem: (ratingKey: string) => void;
   /**
+   * Tell the room whether this client has the player open.
+   *
+   * Only used to order host succession — someone watching inherits before
+   * someone browsing, because a host who isn't in the player can't pause, seek
+   * or answer a stall, and their next move usually ends the stream for
+   * everyone. Not reflected in the roster.
+   */
+  sendWatching: (value: boolean) => void;
+  /**
    * Start reconnecting again after the automatic attempts were exhausted.
    *
    * Without this, twenty failed retries left the app permanently showing
@@ -306,6 +315,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       sendSetSubtitle: (partId: number, subtitleStreamID: number) =>
         send({ type: "set-subtitle", partId, subtitleStreamID }),
       sendPlayItem: (ratingKey: string) => send({ type: "play-item", ratingKey }),
+      sendWatching: (value: boolean) => send({ type: "watching", value }),
       retryConnection: () => {
         retryRef.current = 0;
         setState((prev) => ({ ...prev, reconnectFailed: false }));

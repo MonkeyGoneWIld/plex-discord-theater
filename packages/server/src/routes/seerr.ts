@@ -139,7 +139,10 @@ router.get("/tv/:tmdbId", async (req: Request, res: Response) => {
       return;
     }
     const data = (await r.json()) as {
-      seasons?: Array<{ seasonNumber?: number; name?: string; episodeCount?: number; posterPath?: string | null }>;
+      seasons?: Array<{
+        seasonNumber?: number; name?: string; episodeCount?: number;
+        posterPath?: string | null; airDate?: string | null;
+      }>;
       mediaInfo?: {
         status?: number;
         seasons?: Array<{ seasonNumber?: number; status?: number }>;
@@ -171,14 +174,36 @@ router.get("/tv/:tmdbId", async (req: Request, res: Response) => {
     }
     const seasons = (data.seasons ?? [])
       .filter((s) => (s.seasonNumber ?? 0) >= 1)
-      .map((s) => ({
-        seasonNumber: s.seasonNumber!,
-        name: s.name || `Season ${s.seasonNumber}`,
-        episodeCount: s.episodeCount ?? 0,
-        status: statusBySeason.get(s.seasonNumber!) ?? null,
-        // TMDB poster path (e.g. "/abc.jpg") — served via GET /poster below.
-        posterPath: s.posterPath ?? null,
-      }));
+      .map((s) => {
+        const episodeCount = s.episodeCount ?? 0;
+        const airDate = s.airDate || null;
+        const status = statusBySeason.get(s.seasonNumber!) ?? null;
+        return {
+          seasonNumber: s.seasonNumber!,
+          name: s.name || `Season ${s.seasonNumber}`,
+          episodeCount,
+          status,
+          // TMDB poster path (e.g. "/abc.jpg") — served via GET /poster below.
+          posterPath: s.posterPath ?? null,
+          airDate,
+          /**
+           * Whether asking Seerr for this season would actually do anything.
+           *
+           * TMDB lists announced-but-unscheduled seasons — no air date, usually
+           * no episodes — and Seerr passes them straight through. They were
+           * offered as request cards like any other, the request was accepted,
+           * and then nothing ever happened: Sonarr has no episodes to monitor
+           * and TVDB doesn't have the season at all, so it sat in the queue
+           * forever with no way to tell it apart from one that was simply slow.
+           *
+           * An air date plus at least one episode is what separates "not here
+           * yet" from "doesn't exist yet". A future-dated season keeps its
+           * request card on purpose — Sonarr will pick those up as they air,
+           * which is a normal thing to want.
+           */
+          requestable: status == null && episodeCount > 0 && airDate != null,
+        };
+      });
     res.json({ configured: true, status: data.mediaInfo?.status ?? null, seasons });
   } catch (err) {
     console.error("[Seerr] tv error:", err);
@@ -241,14 +266,24 @@ router.post("/request", async (req: Request, res: Response) => {
  */
 const TMDB_POSTER_RE = /^\/[A-Za-z0-9]+\.(?:jpg|png)$/;
 
+/** Widths this proxy will ask TMDB for. Whitelisted rather than passed through,
+ *  so the size can't be used to point the request somewhere else. Season posters
+ *  are portrait (w342); episode stills are 16:9 and want w300. */
+const TMDB_WIDTHS = new Set(["w300", "w342"]);
+
 router.get("/poster", async (req: Request, res: Response) => {
   const path = String(req.query.path ?? "");
   if (!TMDB_POSTER_RE.test(path)) {
     res.status(400).json({ error: "Invalid poster path" });
     return;
   }
+  const width = String(req.query.w ?? "w342");
+  if (!TMDB_WIDTHS.has(width)) {
+    res.status(400).json({ error: "Invalid width" });
+    return;
+  }
   try {
-    const r = await fetch(`https://image.tmdb.org/t/p/w342${path}`, {
+    const r = await fetch(`https://image.tmdb.org/t/p/${width}${path}`, {
       signal: AbortSignal.timeout(SEERR_TIMEOUT_MS),
     });
     if (!r.ok) {

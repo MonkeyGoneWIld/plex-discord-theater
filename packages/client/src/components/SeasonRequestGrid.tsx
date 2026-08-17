@@ -42,7 +42,19 @@ export function SeasonRequestGrid({
       return next;
     });
 
-  const requestable = tmdbId != null ? seasons.filter((s) => s.status == null) : [];
+  /**
+   * Whether this season can actually be requested.
+   *
+   * "Has no status yet" is not the same question, and answering it that way is
+   * what made unscheduled seasons requestable: TMDB lists announced seasons with
+   * no air date and no episodes, Seerr passes them through, and the request was
+   * accepted and then sat there forever because Sonarr had nothing to monitor.
+   * The server now says so directly. `?? s.status == null` keeps a newer client
+   * working against an older server, where the field simply isn't there.
+   */
+  const canRequest = (s: SeerrSeason) => s.requestable ?? s.status == null;
+
+  const requestable = tmdbId != null ? seasons.filter(canRequest) : [];
 
   const submit = () => {
     if (tmdbId == null || selected.size === 0 || requesting) return;
@@ -94,7 +106,12 @@ export function SeasonRequestGrid({
         {children}
         {seasons.map((s) => {
           const badge = s.status != null ? SEASON_STATUS[s.status] : null;
-          const selectable = tmdbId != null && s.status == null;
+          const selectable = tmdbId != null && canRequest(s);
+          // Listed by TMDB but not orderable: announced without a date, or with
+          // no episodes yet. Saying so is better than either hiding the season
+          // (it exists, and people look for it) or offering a button that
+          // silently does nothing.
+          const unannounced = !badge && !selectable;
           const isSel = selected.has(s.seasonNumber);
           const poster = seerrPosterUrl(s.posterPath);
           return (
@@ -124,15 +141,21 @@ export function SeasonRequestGrid({
                     {badge.label}
                   </div>
                 )}
-                {!badge && !isSel && <div style={styles.missingLabel}>Not in library</div>}
+                {!badge && !isSel && (
+                  <div style={styles.missingLabel}>
+                    {unannounced ? "Not announced" : "Not in library"}
+                  </div>
+                )}
               </div>
               <div style={styles.info}>
                 <div style={styles.cardTitle}>{s.name}</div>
-                {s.episodeCount > 0 && (
+                {s.episodeCount > 0 ? (
                   <div style={styles.episodes}>
                     {s.episodeCount} {s.episodeCount === 1 ? "episode" : "episodes"}
                   </div>
-                )}
+                ) : unannounced ? (
+                  <div style={styles.episodes}>No release date yet</div>
+                ) : null}
               </div>
             </button>
           );

@@ -1723,6 +1723,69 @@ async function tmdbPerson(name: string): Promise<TmdbPerson | null> {
  * the last special rolls into S1E1. Rare, and filtering would need a rule about
  * whether the current episode is itself a special.
  */
+/** How many episodes of one season we'll describe. Long-running soaps aside, no
+ *  real season approaches this; it bounds a hostile or broken tmdbId. */
+const MAX_SEASON_EPISODES = 200;
+
+/** A TMDB episode, reduced to what the season list renders. */
+interface TmdbEpisode {
+  episode_number?: number;
+  name?: string;
+  overview?: string;
+  air_date?: string | null;
+  still_path?: string | null;
+  runtime?: number | null;
+}
+
+/**
+ * GET /api/plex/tmdb/season?tmdbId=1399&season=2
+ *
+ * Every episode TMDB knows about for one season, aired or not. The client
+ * subtracts what Plex actually holds to show the gaps — episodes that were never
+ * downloaded, and ones that haven't aired yet.
+ *
+ * TMDB rather than Seerr on purpose: this is public metadata about what exists,
+ * not about what can be requested, and asking TMDB directly means the feature
+ * works for anyone with a TMDB key rather than only for people running Seerr.
+ * Whether a *season* can be requested is a separate question, and Seerr answers
+ * that one — see routes/seerr.ts.
+ */
+router.get("/tmdb/season", async (req: Request, res: Response) => {
+  const tmdbId = String(req.query.tmdbId ?? "");
+  const season = String(req.query.season ?? "");
+  if (!NUMERIC_RE.test(tmdbId) || !NUMERIC_RE.test(season)) {
+    res.status(400).json({ error: "Invalid tmdbId or season" });
+    return;
+  }
+  if (!TMDB_API_KEY) {
+    // Not an error: the whole feature is optional, and the client renders
+    // nothing rather than an empty state when the list is unavailable.
+    res.json({ configured: false, episodes: [] });
+    return;
+  }
+  try {
+    const data = await tmdbGet<{ episodes?: TmdbEpisode[] }>(`/tv/${tmdbId}/season/${season}`);
+    const episodes = (data?.episodes ?? [])
+      .filter((e) => typeof e.episode_number === "number")
+      .slice(0, MAX_SEASON_EPISODES)
+      .map((e) => ({
+        episodeNumber: e.episode_number!,
+        name: e.name || `Episode ${e.episode_number}`,
+        overview: e.overview || null,
+        // ISO date, or null when TMDB has the episode listed but unscheduled.
+        airDate: e.air_date || null,
+        // Proxied through /api/seerr/poster, same as the season posters — the
+        // CSP is img-src 'self', so nothing talks to TMDB's CDN directly.
+        stillPath: e.still_path || null,
+        runtime: typeof e.runtime === "number" ? e.runtime : null,
+      }));
+    res.json({ configured: true, episodes });
+  } catch (err) {
+    console.error("[TMDB] season error:", err);
+    res.status(502).json({ error: "Failed to fetch season" });
+  }
+});
+
 router.get("/siblings/:ratingKey", async (req: Request, res: Response) => {
   const ratingKey = req.params.ratingKey as string;
   if (!NUMERIC_RE.test(ratingKey)) {

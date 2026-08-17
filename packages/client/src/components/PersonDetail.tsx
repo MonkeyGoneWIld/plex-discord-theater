@@ -73,13 +73,14 @@ export function PersonDetail({ name, thumb, onSelect, onBack }: PersonDetailProp
   const [person, setPerson] = useState<Person | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
-  const [imgFailed, setImgFailed] = useState(false);
+  // Sources that failed to load, so the fallback below can step past them.
+  const [imgFailed, setImgFailed] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setFailed(false);
-    setImgFailed(false);
+    setImgFailed(new Set());
     fetchPerson(name)
       .then((p) => { if (!cancelled) setPerson(p); })
       .catch(() => { if (!cancelled) setFailed(true); })
@@ -90,7 +91,19 @@ export function PersonDetail({ name, thumb, onSelect, onBack }: PersonDetailProp
   // Name and photo come from the credit that was clicked, so the page has a
   // subject from the first frame — same reasoning as the title pages.
   const dName = person?.name ?? name;
-  const photo = person?.thumb ?? thumb ?? null;
+  // The credit's photo wins, and it is Plex's.
+  //
+  // This read `person?.thumb ?? thumb`, so the picture you clicked was replaced
+  // by TMDB's the moment the fetch returned — a visible swap to a different
+  // photo of the same person, on nearly every visit, because Plex's metadata
+  // agent and TMDB rarely pick the same headshot. Preferring the credit keeps
+  // the cast row and the page it opens showing one face. TMDB stays as the
+  // fallback for what the credit can't cover: a person reached without one, or
+  // a Plex thumb that fails to load — hence a set rather than one flag, so
+  // falling back doesn't mean falling straight through to the placeholder.
+  const photo = [thumb, person?.thumb].find(
+    (src): src is string => !!src && !imgFailed.has(src),
+  ) ?? null;
   const age = ageFrom(person?.birthday ?? null, person?.deathday ?? null);
   const born = formatDate(person?.birthday ?? null);
   const died = formatDate(person?.deathday ?? null);
@@ -106,8 +119,13 @@ export function PersonDetail({ name, thumb, onSelect, onBack }: PersonDetailProp
 
       <div style={styles.content}>
       <div style={styles.header}>
-        {photo && !imgFailed ? (
-          <img src={authUrl(photo)} alt={dName} style={styles.photo} onError={() => setImgFailed(true)} />
+        {photo ? (
+          <img
+            src={authUrl(photo)}
+            alt={dName}
+            style={styles.photo}
+            onError={() => setImgFailed((prev) => new Set(prev).add(photo))}
+          />
         ) : (
           <div style={{ ...styles.photo, ...styles.photoPlaceholder }}>No photo</div>
         )}

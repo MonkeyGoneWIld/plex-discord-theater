@@ -82,6 +82,18 @@ interface RoomClient {
   isHost: boolean;
   /** Granted by the host; allows transport control (pause/resume/seek) only. */
   isCoHost: boolean;
+  /**
+   * Whether this client currently has the player open.
+   *
+   * Reported by the client on entering and leaving playback — the room's
+   * `ratingKey` says something is playing, not who is actually watching it.
+   * Used to order host succession: handing the room to someone sitting on the
+   * library, while people are mid-film, stops the film for all of them.
+   */
+  isWatching: boolean;
+  /** When this connection joined — the last tie-break in succession, so the
+   *  successor is at least predictable rather than whatever the Set yields. */
+  joinedAt: number;
 }
 
 /**
@@ -95,6 +107,34 @@ interface RoomClient {
  * host-only entirely.
  */
 const CO_HOST_ALLOWED_TYPES = new Set(["pause", "resume", "seek", "set-subtitle", "play-item"]);
+
+/**
+ * Who inherits the room when the host goes, best first.
+ *
+ * The order is co-host → someone watching → everyone else, and within each band
+ * whoever joined earliest. It used to be "any co-host, otherwise
+ * `clients.values().next().value`" — the first entry of a Set, which is
+ * insertion order and therefore effectively arbitrary from the room's point of
+ * view: the successor could be the person who joined thirty seconds ago and is
+ * still browsing the library, while three people sat watching the film. A host
+ * who isn't in the player is a host who can't pause, seek or answer a stall, and
+ * whose next action is likely to end the stream for everyone.
+ */
+function successionRank(c: RoomClient): number {
+  if (c.isCoHost) return 0;
+  if (c.isWatching) return 1;
+  return 2;
+}
+
+function pickSuccessor(clients: Iterable<RoomClient>): RoomClient | null {
+  let best: RoomClient | null = null;
+  for (const c of clients) {
+    if (!best) { best = c; continue; }
+    const d = successionRank(c) - successionRank(best);
+    if (d < 0 || (d === 0 && c.joinedAt < best.joinedAt)) best = c;
+  }
+  return best;
+}
 
 interface RoomState {
   ratingKey: string | null;
@@ -602,6 +642,11 @@ export function attachWebSocketServer(server: Server): void {
           username,
           isHost,
           isCoHost: !isHost && room.coHostIds.has(userId),
+          // Assume not watching until the client says otherwise. It sends
+          // "watching" as soon as the player mounts, which for someone joining
+          // a live room is immediately after this.
+          isWatching: false,
+          joinedAt: Date.now(),
         };
         roomId = instanceId;
         room.clients.add(client);
@@ -646,6 +691,15 @@ export function attachWebSocketServer(server: Server): void {
 
       const room = rooms.get(roomId);
       if (!room) return;
+
+      // Am I in the player? Allowed for anyone, and deliberately not part of
+      // the roster broadcast — it exists to order host succession, and pushing
+      // a roster update every time somebody opened or closed the player would
+      // be a lot of traffic for something nobody sees.
+      if (type === "watching") {
+        client.isWatching = msg.value !== false;
+        return;
+      }
 
       // Viewer → host: suggest a title. Allowed for any joined client (host
       // or viewer), unlike the rest of the control messages below.
@@ -1043,10 +1097,9 @@ export function attachWebSocketServer(server: Server): void {
         persistProgress(room, client.userId, "always");
 
         if (room.clients.size > 0) {
-          // Prefer a co-host as successor — the host already trusted them with
-          // control, so it's a less surprising handover than picking arbitrarily.
-          const newHost =
-            [...room.clients].find((c) => c.isCoHost) ?? room.clients.values().next().value!;
+          // Co-host, then whoever is actually watching, then anyone — see
+          // pickSuccessor.
+          const newHost = pickSuccessor(room.clients)!;
           newHost.isHost = true;
           newHost.isCoHost = false;
           room.coHostIds.delete(newHost.userId);
@@ -1061,6 +1114,9 @@ export function attachWebSocketServer(server: Server): void {
             room: roomId.substring(0, 8),
             left: client.username ?? client.userId,
             promoted: newHost.username ?? newHost.userId,
+            // Which band they came from, so a surprising successor can be
+            // explained rather than guessed at.
+            because: newHost.isCoHost ? "co-host" : newHost.isWatching ? "watching" : "only-candidate",
             remaining: room.clients.size,
             roomPosS: room.state.position,
             session: room.state.hlsSessionId?.substring(0, 8) ?? "none",

@@ -727,6 +727,16 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     if (coHostSeekHoldRef.current !== null) clearTimeout(coHostSeekHoldRef.current);
   }, []);
 
+  // Tell the room this client is in the player, and that it has left on the way
+  // out. Only used to order host succession — see sendWatching. Re-sent when the
+  // socket comes back, since the server tracks this per connection and a
+  // reconnect is a new one.
+  useEffect(() => {
+    if (!syncState?.connected) return;
+    syncActionsRef.current?.sendWatching(true);
+    return () => { syncActionsRef.current?.sendWatching(false); };
+  }, [syncState?.connected]);
+
   // Apply the remembered volume, and persist any later change. One listener on
   // the element covers every source — the Controls slider, the mute button and
   // the keyboard shortcuts all write video.volume — so nothing else needs to

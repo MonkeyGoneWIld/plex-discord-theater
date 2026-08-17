@@ -468,11 +468,50 @@ export interface SeerrSeason {
   status: number | null;
   /** TMDB poster file path (e.g. "/abc.jpg"), served via seerrPosterUrl. */
   posterPath?: string | null;
+  /** ISO date the season started, or null when TMDB has it listed but
+   *  unscheduled — which is the thing `requestable` exists to catch. */
+  airDate?: string | null;
+  /**
+   * Whether requesting this season would actually reach Sonarr.
+   *
+   * Optional so a newer client served by an older server degrades to the old
+   * behaviour (offer anything without a status) rather than offering nothing.
+   */
+  requestable?: boolean;
 }
 
 /** Same-origin proxied URL for a TMDB season poster, or null. */
 export function seerrPosterUrl(posterPath: string | null | undefined): string | null {
   return posterPath ? `/api/seerr/poster?path=${encodeURIComponent(posterPath)}` : null;
+}
+
+/** Same-origin proxied URL for a TMDB episode still (16:9), or null. */
+export function seerrStillUrl(stillPath: string | null | undefined): string | null {
+  return stillPath ? `/api/seerr/poster?w=w300&path=${encodeURIComponent(stillPath)}` : null;
+}
+
+/** One episode as TMDB knows it — used to find what a season is missing. */
+export interface TmdbEpisode {
+  episodeNumber: number;
+  name: string;
+  overview: string | null;
+  /** ISO date, or null when TMDB lists the episode but hasn't dated it. */
+  airDate: string | null;
+  stillPath: string | null;
+  /** Minutes, when TMDB has it. */
+  runtime: number | null;
+}
+
+/**
+ * Every episode of a season, aired or not, from TMDB. `configured: false` when
+ * no TMDB key is set — the caller renders nothing rather than an empty state.
+ * Cached: this is stable metadata and the season page is revisited often.
+ */
+export function fetchTmdbSeason(
+  tmdbId: number,
+  season: number,
+): Promise<{ configured: boolean; episodes: TmdbEpisode[] }> {
+  return cachedGet(`/api/plex/tmdb/season?tmdbId=${tmdbId}&season=${season}`);
 }
 
 export interface SeerrTv {

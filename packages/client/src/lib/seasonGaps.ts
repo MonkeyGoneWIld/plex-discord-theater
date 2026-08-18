@@ -95,12 +95,22 @@ export function formatAirDate(iso: string | null): string | null {
   return d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
 }
 
-/** "3 missing, 2 unaired" — the toggle's label, and empty when there are none. */
+/**
+ * What the toggle is hiding, named but never counted: "missing episodes",
+ * "unaired episodes", or "missing and unaired episodes". Empty when there is
+ * nothing to reveal.
+ *
+ * Deliberately no numbers. It used to read "Show 3 missing, 2 unaired", which
+ * told anyone who hadn't finished the season exactly how much of it was left —
+ * on the season page, above the episode list, before they had chosen to look.
+ * How many episodes remain is the thing the collapsed list exists to keep back,
+ * and a label that leaks it makes collapsing the list pointless.
+ */
 export function describeGaps(gaps: GapEpisode[]): string {
-  const missing = gaps.filter((g) => g.kind === "missing").length;
-  const unaired = gaps.length - missing;
-  return [
-    missing > 0 ? `${missing} missing` : null,
-    unaired > 0 ? `${unaired} unaired` : null,
-  ].filter(Boolean).join(", ");
+  const missing = gaps.some((g) => g.kind === "missing");
+  const unaired = gaps.some((g) => g.kind === "unaired");
+  if (missing && unaired) return "missing and unaired episodes";
+  if (missing) return "missing episodes";
+  if (unaired) return "unaired episodes";
+  return "";
 }

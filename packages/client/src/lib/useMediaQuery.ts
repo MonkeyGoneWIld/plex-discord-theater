@@ -43,6 +43,15 @@ export const MOBILE_LANDSCAPE_QUERY = "(orientation: landscape) and (max-height:
  */
 export const COMPACT_CONTROLS_QUERY = "(max-width: 820px), (max-height: 600px)";
 
+/**
+ * A phone, held either way.
+ *
+ * The union of the two above, for the decisions that don't care about
+ * orientation — chiefly whether Discord's own mobile chrome is already offering
+ * something, in which case this app shouldn't offer it a second time. Comma is OR.
+ */
+export const PHONE_QUERY = `${NARROW_QUERY}, ${MOBILE_LANDSCAPE_QUERY}`;
+
 // Note: keeping clear of Discord's own chrome is NOT done with a media query.
 // Discord publishes the space it occupies as --discord-safe-area-inset-*, which
 // index.html folds into --sait/--saib/--sail/--sair; the bars add those to their

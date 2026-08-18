@@ -4,7 +4,7 @@ import { FilterBar } from "./FilterBar";
 import { ScrollShelf } from "./ScrollShelf";
 import { MovieCard } from "./MovieCard";
 import { SkeletonGrid } from "./SkeletonGrid";
-import { POSTER_GRID_COLUMNS, POSTER_ROW_CARD_WIDTH } from "../lib/grid";
+import { usePosterLayout } from "../lib/grid";
 import {
   authUrl,
   fetchHome,
@@ -71,6 +71,9 @@ interface LibraryProps {
 }
 
 export function Library({ isHost, onSelect, onSelectPerson, activeSection, onActiveSectionChange, onBrowseContext, historyNonce = 0, visible = true }: LibraryProps) {
+  // How many posters fit across, and how wide each is — three on a phone,
+  // as many as the window allows anywhere else. See lib/grid.
+  const poster = usePosterLayout();
   const [sections, setSections] = useState<PlexSection[]>([]);
   // "home" and "history" are virtual tab ids — one for the real Plex homepage
   // (hubs), one for this app's own watch history. Both are kept in the same
@@ -525,13 +528,24 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
           ? "Search TV shows..."
           : "Search your library...";
 
+  // Poster surfaces, resized for the screen. Every one of these has to use the
+  // same card width: the grid, the Home shelves and the people row sit directly
+  // above and below each other, and a row on its own scale reads as a mistake.
+  const gridStyle = { ...styles.grid, gridTemplateColumns: poster.gridColumns };
+  const peopleRowStyle = { ...styles.peopleRow, gridTemplateColumns: poster.gridColumns };
+  const hubCardStyle = { ...styles.hubCard, width: poster.rowCardWidth };
+
   return (
     <div style={styles.container}>
       {/* Back sits at the view's top-left, at the same 16/24 offset as the
           detail pages. Absolutely positioned so it never affects the centered
-          search bar's position. */}
+          search bar's position — except on a phone, where there is no space
+          beside the box to be absolute over. See backBtnPhone. */}
       {isSearching && (
-        <button onClick={handleBackFromSearch} style={styles.backBtn}>
+        <button
+          onClick={handleBackFromSearch}
+          style={{ ...styles.backBtn, ...(poster.phone ? styles.backBtnPhone : {}) }}
+        >
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
@@ -684,7 +698,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 </p>
               </div>
             ) : (
-              <div style={styles.grid}>
+              <div style={gridStyle}>
                 {filteredHistoryItems.map((entry) => (
                   <div key={entry.ratingKey}>
                     <MovieCard
@@ -760,7 +774,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 <h3 style={styles.hubLabel}>Continue Watching</h3>
                 <ScrollShelf rowStyle={styles.hubRow}>
                   {continueItems.map((entry) => (
-                    <div key={entry.ratingKey} style={styles.hubCard}>
+                    <div key={entry.ratingKey} style={hubCardStyle}>
                       <MovieCard
                         item={historyEntryToItem(entry)}
                         onClick={handleClick}
@@ -779,7 +793,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 <h3 style={styles.hubLabel}>{hub.title}</h3>
                 <ScrollShelf rowStyle={styles.hubRow}>
                   {hub.items.map((hubItem) => (
-                    <div key={hubItem.ratingKey} style={styles.hubCard}>
+                    <div key={hubItem.ratingKey} style={hubCardStyle}>
                       <MovieCard
                         item={hubItem}
                         onClick={handleClick}
@@ -855,7 +869,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                   group.length === 0 ? null : (
                     <div key={label ?? "other"}>
                       {label && <div style={styles.sectionHeader}>{label}</div>}
-                      <div style={styles.grid}>
+                      <div style={gridStyle}>
                         {group.map((item) => (
                           <MovieCard
                             key={item.ratingKey}
@@ -870,7 +884,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 )}
               </>
             ) : (
-              <div style={styles.grid}>
+              <div style={gridStyle}>
                 {libraryItems.map((item) => (
                   <MovieCard
                     key={item.ratingKey}
@@ -888,7 +902,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
           {showPeople && (
             <>
               <div style={styles.sectionHeader}>People</div>
-              <div style={styles.peopleRow}>
+              <div style={peopleRowStyle}>
                 {people.map((p) => (
                   <button
                     key={p.name}
@@ -932,7 +946,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 group.length === 0 ? null : (
                   <div key={label ?? "other"}>
                     {label && <div style={styles.subSectionHeader}>{label}</div>}
-                    <div style={styles.grid}>
+                    <div style={gridStyle}>
                       {group.map((item) => (
                         <MovieCard key={item.ratingKey} item={item} onClick={handleClick} />
                       ))}
@@ -993,6 +1007,16 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "inherit",
     backdropFilter: "blur(12px)",
   },
+  // On a phone that same absolute placement lands the button on top of the
+  // search field, which is the full width of the screen there and has its own
+  // clear button in the opposite corner. Back goes back into the flow, above the
+  // box rather than across it; `fit-content` is needed because a display:flex
+  // button is block-level and would otherwise stretch the whole row.
+  backBtnPhone: {
+    position: "static",
+    width: "fit-content",
+    margin: "16px 24px 0",
+  },
   narrowWrap: {
     maxWidth: "1200px",
     margin: "0 auto",
@@ -1032,7 +1056,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   grid: {
     display: "grid",
-    gridTemplateColumns: POSTER_GRID_COLUMNS,
+    // gridTemplateColumns is set per-render from usePosterLayout.
     gap: "14px",
     padding: "16px 24px",
   },
@@ -1173,7 +1197,7 @@ const styles: Record<string, React.CSSProperties> = {
   // columns as the titles above and below rather than sitting in its own row.
   peopleRow: {
     display: "grid",
-    gridTemplateColumns: POSTER_GRID_COLUMNS,
+    // gridTemplateColumns is set per-render from usePosterLayout.
     gap: "14px",
     padding: "16px 24px",
   },
@@ -1241,8 +1265,8 @@ const styles: Record<string, React.CSSProperties> = {
   hubCard: {
     flexShrink: 0,
     flexGrow: 0,
-    // Shares its width formula with the poster grid (see lib/grid.ts), so a Home
-    // card is never a different size from a Movies/TV Shows card.
-    width: POSTER_ROW_CARD_WIDTH,
+    // `width` is set per-render from usePosterLayout, which shares its formula
+    // with the poster grid — so a Home card is never a different size from a
+    // Movies/TV Shows card.
   },
 };

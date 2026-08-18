@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import {
   fetchMeta, fetchChildren, fetchSeerrTv, fetchShowNextUp, historyEntryToItem, posterThumbUrl,
   getSessionToken, type Credit, type HistoryEntry, type PlexItem, type PlexMeta, type SeerrSeason,
@@ -58,6 +59,12 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
   // Where this viewer left the show: the episode in progress, or the one after
   // the last they finished. Null when never started or watched to the end.
   const [nextUp, setNextUp] = useState<HistoryEntry | null>(null);
+  // Phone portrait: the poster and the detail column can't sit side by side.
+  // The poster is a fixed 240px, so on a 390px screen the text beside it got
+  // roughly 90px — the title broke a word per line, the genre pills stacked one
+  // to a row, and "3 Seasons" wrapped. Same treatment as MovieDetail: the
+  // poster goes above the text and the text gets the whole width.
+  const narrow = useMediaQuery(NARROW_QUERY);
 
   useEffect(() => {
     setNextUp(null);
@@ -156,11 +163,11 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
       </button>
 
       <>
-        <div style={styles.content}>
-          {/* Poster + Info layout */}
-          <div style={styles.layout}>
+        <div style={{ ...styles.content, ...(narrow ? styles.contentNarrow : {}) }}>
+          {/* Poster + Info layout — stacks on phone portrait */}
+          <div style={{ ...styles.layout, ...(narrow ? styles.layoutNarrow : {}) }}>
             {posterUrl && (
-              <div style={styles.posterWrap}>
+              <div style={{ ...styles.posterWrap, ...(narrow ? styles.posterWrapNarrow : {}) }}>
                 <img
                   src={posterUrl}
                   alt={dTitle}
@@ -176,7 +183,7 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
             )}
 
             <div style={styles.info}>
-              <h1 style={styles.title}>{dTitle}</h1>
+              <h1 style={{ ...styles.title, ...(narrow ? styles.titleNarrow : {}) }}>{dTitle}</h1>
 
               <div style={styles.metaRow}>
                 {dYear && <span style={styles.metaItem}>{dYear}</span>}
@@ -386,6 +393,26 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     gap: "36px",
     alignItems: "flex-start",
+  },
+  // ─── Phone portrait overrides ──────────────────────────────────
+  // The same panel with the poster stacked above the text instead of beside it,
+  // matching MovieDetail so a show and a film read identically on a phone.
+  contentNarrow: {
+    padding: "0 16px 40px",
+  },
+  layoutNarrow: {
+    flexDirection: "column",
+    gap: "20px",
+    alignItems: "stretch",
+  },
+  posterWrapNarrow: {
+    // Centred and capped rather than full-bleed: a 2:3 poster at full phone
+    // width is taller than the screen and buries the seasons below it.
+    width: "min(180px, 45%)",
+    alignSelf: "center",
+  },
+  titleNarrow: {
+    fontSize: "24px",
   },
   posterWrap: {
     flexShrink: 0,

@@ -10,6 +10,7 @@ import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
 import { DetailLoading } from "./DetailLoading";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
+import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 
 interface ExternalDetailProps {
   item: PlexItem;
@@ -67,6 +68,12 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
   // Reveal gate — see `pageReady`.
   const [posterLoaded, setPosterLoaded] = useState(false);
   const [ratingsReady, setRatingsReady] = useState(false);
+  // Phone portrait. This page wraps rather than stacks without it: the poster is
+  // a fixed 220px and the text column asks for 260px, so on a phone the text
+  // dropped below the poster and the poster stayed pinned to the left edge —
+  // near enough to the library pages to look like a bug, since a title you *do*
+  // own centres its poster on the same screen. Same treatment as MovieDetail.
+  const narrow = useMediaQuery(NARROW_QUERY);
 
 
   useEffect(() => {
@@ -165,21 +172,25 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
         </svg>
         Back
       </button>
-      <div style={styles.body}>
+      <div style={{ ...styles.body, ...(narrow ? styles.bodyNarrow : {}) }}>
         {poster ? (
           <img
             src={authUrl(poster)}
             alt={title}
-            style={styles.poster}
+            style={{ ...styles.poster, ...(narrow ? styles.posterNarrow : {}) }}
             onLoad={() => setPosterLoaded(true)}
             onError={() => setPosterLoaded(true)}
           />
         ) : (
-          <div style={{ ...styles.poster, ...styles.posterPlaceholder }}>No Poster</div>
+          <div style={{
+            ...styles.poster,
+            ...styles.posterPlaceholder,
+            ...(narrow ? styles.posterNarrow : {}),
+          }}>No Poster</div>
         )}
-        <div style={styles.info}>
+        <div style={{ ...styles.info, ...(narrow ? styles.infoNarrow : {}) }}>
           <div style={styles.badge}>Not in your library</div>
-          <h1 style={styles.title}>{title}</h1>
+          <h1 style={{ ...styles.title, ...(narrow ? styles.titleNarrow : {}) }}>{title}</h1>
           {facts && <div style={styles.facts}>{facts}</div>}
           {genres.length > 0 && (
             <div style={styles.genres}>
@@ -231,7 +242,7 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
           the credits — requesting the show is what this page is for, and the
           cast is context for that decision rather than the point of it. */}
       {tmdbId != null && mediaType === "tv" && seerrTv?.configured !== false && (
-        <div style={styles.seasonsWrap}>
+        <div style={{ ...styles.seasonsWrap, ...(narrow ? styles.seasonsWrapNarrow : {}) }}>
           {seerrTv == null ? (
             <div style={styles.summaryMuted}>Loading seasons…</div>
           ) : seerrTv.seasons.length > 0 ? (
@@ -320,6 +331,31 @@ const styles: Record<string, React.CSSProperties> = {
   info: {
     flex: 1,
     minWidth: "260px",
+  },
+  // ─── Phone portrait overrides ──────────────────────────────────
+  // Poster centred above the text, text across the full width. Deliberately the
+  // same numbers as MovieDetail's, so an owned title and one you'd have to
+  // request are laid out identically.
+  bodyNarrow: {
+    flexDirection: "column",
+    flexWrap: "nowrap",
+    alignItems: "stretch",
+    gap: "20px",
+    padding: "8px 16px 40px",
+  },
+  posterNarrow: {
+    width: "min(180px, 45%)",
+    alignSelf: "center",
+  },
+  infoNarrow: {
+    // Releases the 260px floor, which is what forced the wrap in the first place.
+    minWidth: 0,
+  },
+  titleNarrow: {
+    fontSize: "24px",
+  },
+  seasonsWrapNarrow: {
+    padding: "0 16px 40px",
   },
   badge: {
     display: "inline-block",

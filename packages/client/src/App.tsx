@@ -13,7 +13,7 @@ import { InviteButton } from "./components/InviteButton";
 import { formatMediaTitle } from "./lib/format";
 import { authUrl, fetchMeta, invalidateMeta, setStreams } from "./lib/api";
 import { loadSubtitlePref, matchSubtitleTrack } from "./lib/subtitlePref";
-import { useMediaQuery, MOBILE_LANDSCAPE_QUERY } from "./lib/useMediaQuery";
+import { useMediaQuery, MOBILE_LANDSCAPE_QUERY, NARROW_QUERY, PHONE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem } from "./hooks/useSync";
 
@@ -170,6 +170,13 @@ export function App() {
   // Phone held sideways, where Discord overlays its own controls on the corners
   // of the Activity. See the header below.
   const mobileLandscape = useMediaQuery(MOBILE_LANDSCAPE_QUERY);
+  // A phone either way up. Discord's mobile client draws its own bar across the
+  // top of the Activity with "Invite To Activity" already in it, so anything
+  // this header offers on that subject is the second copy on the screen.
+  const phone = useMediaQuery(PHONE_QUERY);
+  // Upright, where the header has one screen-width of room to fit a trail that
+  // can run Home > Show > Season > Episode. Sideways there is width to spare.
+  const phonePortrait = useMediaQuery(NARROW_QUERY) && !mobileLandscape;
 
   // Saved window scroll per stack depth: slot i holds where view i was when
   // something was pushed on top of it. Restored when the stack shrinks back.
@@ -648,6 +655,22 @@ export function App() {
   });
   }
 
+  /**
+   * The trail as drawn.
+   *
+   * On an upright phone that is the Home crumb and nothing else. A full trail
+   * needs room the header doesn't have there: Home > Silo > Season 3 > Episode 7
+   * against roughly 200px, with the username and roster count taking the rest of
+   * the row, ellipsised every crumb down to two or three characters — so it read
+   * as a row of stubs and none of them told you where you were. Home is the one
+   * that still does a job at that width. Turned sideways the width is back and
+   * so is the trail.
+   *
+   * crumbs[0] is always the library, and always clickable here: the header shows
+   * the logo instead of any trail when the library is the view on screen.
+   */
+  const shownCrumbs = phonePortrait ? crumbs.slice(0, 1) : crumbs;
+
   if (error) {
     return (
       <div style={styles.center}>
@@ -676,7 +699,7 @@ export function App() {
                reset (goHome); other crumbs jump back within the stack, keeping
                the library and any saved scroll positions intact. */
             <nav style={styles.breadcrumbs}>
-              {crumbs.map((c, i) => (
+              {shownCrumbs.map((c, i) => (
                 <span key={i} style={styles.crumbWrap}>
                   {i > 0 && <span style={styles.crumbSep}>&rsaquo;</span>}
                   {c.onClick ? (
@@ -711,8 +734,10 @@ export function App() {
           <span style={styles.user}>
             {/* Sits with the roster rather than inside it: inviting is about
                 who isn't here yet, which is the same question the people
-                button answers from the other side. */}
-            {canInvite && <InviteButton onInvite={openInvite} />}
+                button answers from the other side. Not on a phone, where
+                Discord's own bar is already showing an invite button a
+                centimetre above this one. */}
+            {canInvite && !phone && <InviteButton onInvite={openInvite} />}
             <span style={styles.userName}>
               {username} {effectiveIsHost ? "(Host)" : "(Viewer)"}
               {!effectiveIsHost && syncState.connected && " • Synced"}

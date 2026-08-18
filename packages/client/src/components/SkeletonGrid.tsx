@@ -1,10 +1,14 @@
-import { POSTER_GRID_COLUMNS } from "../lib/grid";
+import { usePosterLayout } from "../lib/grid";
 
 const SKELETON_COUNT = 10;
 
 export function SkeletonGrid() {
+  // Same source as the real grid, so the placeholder reserves the columns the
+  // posters will actually land in — three across on a phone, not two that then
+  // reflow into three the moment they arrive.
+  const { gridColumns } = usePosterLayout();
   return (
-    <div style={styles.grid}>
+    <div style={{ ...styles.grid, gridTemplateColumns: gridColumns }}>
       {Array.from({ length: SKELETON_COUNT }, (_, i) => (
         <div key={i} style={styles.card}>
           <div style={{ ...styles.poster, animationDelay: `${i * 0.05}s` }} />
@@ -21,9 +25,7 @@ const shimmer = "shimmer 1.5s ease-in-out infinite";
 const styles: Record<string, React.CSSProperties> = {
   grid: {
     display: "grid",
-    // Same columns as the real grid, so loading doesn't jump to a different
-    // layout when the posters arrive.
-    gridTemplateColumns: POSTER_GRID_COLUMNS,
+    // gridTemplateColumns comes from usePosterLayout above — see the note there.
     gap: "14px",
     padding: "16px 24px",
   },

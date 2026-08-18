@@ -1,3 +1,5 @@
+import { useMediaQuery, NARROW_QUERY, MOBILE_LANDSCAPE_QUERY } from "./useMediaQuery";
+
 /** Most columns the poster grid will ever show. */
 const MAX_COLUMNS = 10;
 /** Gap between cards, matching the grid's `gap`. */
@@ -86,3 +88,85 @@ const HOME_FULL_STRETCH_CARD_PX =
 export const COLLECTION_ROW_MAX_WIDTH_PX = Math.round(
   COLLECTION_MAX_COLUMNS * HOME_FULL_STRETCH_CARD_PX + COLLECTION_TOTAL_GAP_PX + ROW_GUTTERS_PX,
 );
+
+// ─── Phones ─────────────────────────────────────────────────────
+//
+// A phone gets three posters across, and the same poster size whichever way the
+// phone is held. Two across — what the formula above lands on at phone widths,
+// since its 140px floor is most of a 390px screen — made every row a pair of
+// billboards: a shelf showed two titles, and getting through the grid was most
+// of a minute of scrolling.
+//
+// Landscape deliberately does NOT re-divide the (now much wider) screen into
+// three, which would make the posters enormous. It keeps the portrait size and
+// simply fits more of them, which is what turning a phone sideways should do.
+
+/** Posters across a phone screen. */
+const PHONE_COLUMNS = 3;
+
+/** Page gutter, unchanged from the desktop grid — the phone column count comes
+ *  from dividing the row rather than from taking space off its edges, so the
+ *  search box, tabs and posters all stay on the same left margin. */
+const GUTTER_PX = 24;
+
+/** Everything in a phone row that isn't a card: two gutters and two gaps. */
+const PHONE_NON_CARD_PX = GUTTER_PX * 2 + (PHONE_COLUMNS - 1) * GAP_PX;
+
+/**
+ * A phone card sized against the screen's short edge.
+ *
+ * `100vh` is the short edge exactly when the phone is sideways, which is the
+ * only place this value is used — so a landscape card comes out the size of a
+ * portrait one rather than a third of the long way across.
+ *
+ * Portrait doesn't need it: `1fr` columns and a percentage width divide the
+ * real container, which is both simpler and immune to the gap between `100vw`
+ * and the usable width (a classic scrollbar occupies the difference, and eight
+ * stray pixels there is what separates three columns from two).
+ */
+const PHONE_SHORT_EDGE_CARD = `calc((100vh - ${PHONE_NON_CARD_PX}px) / ${PHONE_COLUMNS})`;
+
+/** What a surface needs to lay posters out at the current screen size. */
+export interface PosterLayout {
+  /** A phone, either orientation — the flag the rest of the phone styling hangs off. */
+  phone: boolean;
+  /** `grid-template-columns` for a poster grid. */
+  gridColumns: string;
+  /** Card width for the horizontally-scrolling shelves, which are flex rows. */
+  rowCardWidth: string;
+}
+
+/**
+ * Poster geometry for the screen this is running on.
+ *
+ * One hook rather than a flag threaded down, because the grid, the shelves and
+ * the loading skeleton all have to agree: a skeleton that reserves two columns
+ * and then fills with three is a visible jump on every load.
+ */
+export function usePosterLayout(): PosterLayout {
+  const landscape = useMediaQuery(MOBILE_LANDSCAPE_QUERY);
+  const narrow = useMediaQuery(NARROW_QUERY);
+  // A small phone sideways matches both queries — 667×375 is inside the 720px
+  // width cap — and landscape is the right answer there, so it is asked first.
+  if (landscape) {
+    return {
+      phone: true,
+      gridColumns: `repeat(auto-fill, ${PHONE_SHORT_EDGE_CARD})`,
+      rowCardWidth: PHONE_SHORT_EDGE_CARD,
+    };
+  }
+  if (narrow) {
+    return {
+      phone: true,
+      // Exactly three, whatever the screen turns out to be — see the note on
+      // PHONE_SHORT_EDGE_CARD for why this isn't a vw calculation.
+      gridColumns: `repeat(${PHONE_COLUMNS}, minmax(0, 1fr))`,
+      rowCardWidth: `calc((100% - ${(PHONE_COLUMNS - 1) * GAP_PX}px) / ${PHONE_COLUMNS})`,
+    };
+  }
+  return {
+    phone: false,
+    gridColumns: POSTER_GRID_COLUMNS,
+    rowCardWidth: POSTER_ROW_CARD_WIDTH,
+  };
+}

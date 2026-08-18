@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { Participant } from "../hooks/useSync";
 import type { InviteResult } from "../hooks/useDiscord";
 import { InviteButton } from "./InviteButton";
+import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
 
 interface PeoplePanelProps {
   participants: Participant[];
@@ -12,7 +13,8 @@ interface PeoplePanelProps {
   onPromoteHost: (userId: string) => void;
   onSetCoHost: (userId: string, value: boolean) => void;
   /** Opens Discord's invite dialog. Omit where there's nothing to invite to,
-   *  or where the surface already offers it elsewhere (the browsing header). */
+   *  or where the surface already offers it elsewhere (the browsing header).
+   *  Ignored on a phone — see the invite row below. */
   onInvite?: () => Promise<InviteResult>;
   onClose: () => void;
 }
@@ -34,6 +36,10 @@ export function PeoplePanel({
 }: PeoplePanelProps) {
   // Handing over the host role loses you all control, so it takes two taps.
   const [confirmingPromote, setConfirmingPromote] = useState<string | null>(null);
+  // Discord's mobile client keeps its own bar pinned over the top of the
+  // Activity, with "Invite To Activity" in the middle of it. See the invite row
+  // and the panel's padding below, both of which exist because of that bar.
+  const phone = useMediaQuery(PHONE_QUERY);
 
   // Host first, then co-hosts, then everyone else — the list reads as a hierarchy.
   const ordered = [...participants].sort((a, b) => {
@@ -53,8 +59,11 @@ export function PeoplePanel({
             this panel is already the "who's in the room" surface, and the bar
             over the video is where every pixel competes with the film. Above
             the roster, not below it — bringing someone in is the reason to open
-            this panel when the list is short, which is most of the time. */}
-        {onInvite && (
+            this panel when the list is short, which is most of the time.
+
+            Never on a phone: Discord's own bar is on screen the whole time
+            there, invite button included, so this would be the second one. */}
+        {onInvite && !phone && (
           <div style={styles.inviteRow}>
             <InviteButton onInvite={onInvite} />
           </div>
@@ -123,7 +132,18 @@ export function PeoplePanel({
 
 const styles: Record<string, React.CSSProperties> = {
   backdrop: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", justifyContent: "flex-end" },
-  panel: { width: "320px", maxWidth: "80vw", height: "100%", background: "#1a1a1a", borderLeft: "1px solid rgba(255,255,255,0.1)", display: "flex", flexDirection: "column", overflow: "hidden" },
+  // The insets keep the panel's own header clear of Discord's overlaid chrome.
+  // Without them the title and close button sat underneath the mobile bar and
+  // the roster began behind it — the panel is fixed to the viewport, so it gets
+  // no benefit from the padding the app header carries. Defined in index.html.
+  panel: {
+    width: "320px", maxWidth: "80vw", height: "100%",
+    background: "#1a1a1a", borderLeft: "1px solid rgba(255,255,255,0.1)",
+    display: "flex", flexDirection: "column", overflow: "hidden",
+    paddingTop: "var(--sait, 0px)",
+    paddingRight: "var(--sair, 0px)",
+    paddingBottom: "var(--saib, 0px)",
+  },
   header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px", borderBottom: "1px solid rgba(255,255,255,0.06)" },
   title: { color: "#f0f0f0", fontSize: "16px", fontWeight: 600 },
   closeBtn: { background: "none", border: "none", color: "#888", fontSize: "20px", cursor: "pointer", fontFamily: "inherit" },

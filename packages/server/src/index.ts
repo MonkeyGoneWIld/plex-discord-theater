@@ -240,6 +240,7 @@ function reportIntegrations(): void {
     "[Config]",
     [
       on("TMDB", !!process.env.TMDB_API_KEY, "no collections / recommendations / person pages"),
+      on("TVDB", !!process.env.TVDB_API_KEY?.trim(), "missing-episode lists fall back to TMDB numbering"),
       on("Ratings", !!process.env.MDBLIST_API_KEY?.trim(), "ratings row hidden"),
       on("Requests", !!process.env.SEERR_URL, "Seerr request flow off"),
       on("Discover", !!process.env.PLEX_ACCOUNT_TOKEN, "online search detail may 401"),

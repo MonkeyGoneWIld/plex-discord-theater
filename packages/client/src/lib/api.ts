@@ -485,33 +485,33 @@ export function seerrPosterUrl(posterPath: string | null | undefined): string | 
   return posterPath ? `/api/seerr/poster?path=${encodeURIComponent(posterPath)}` : null;
 }
 
-/** Same-origin proxied URL for a TMDB episode still (16:9), or null. */
-export function seerrStillUrl(stillPath: string | null | undefined): string | null {
-  return stillPath ? `/api/seerr/poster?w=w300&path=${encodeURIComponent(stillPath)}` : null;
-}
-
-/** One episode as TMDB knows it — used to find what a season is missing. */
-export interface TmdbEpisode {
+/** One episode of a season as the metadata source lists it, aired or not. */
+export interface SeasonEpisode {
   episodeNumber: number;
   name: string;
   overview: string | null;
-  /** ISO date, or null when TMDB lists the episode but hasn't dated it. */
+  /** ISO date, or null when the source lists the episode but hasn't dated it. */
   airDate: string | null;
-  stillPath: string | null;
-  /** Minutes, when TMDB has it. */
+  /** A URL this server serves — already proxied, whichever source it came from. */
+  still: string | null;
+  /** Minutes, when the source has it. */
   runtime: number | null;
 }
 
 /**
- * Every episode of a season, aired or not, from TMDB. `configured: false` when
- * no TMDB key is set — the caller renders nothing rather than an empty state.
- * Cached: this is stable metadata and the season page is revisited often.
+ * Every episode a season is supposed to contain, for working out what's missing.
+ *
+ * `source` names where the list came from: "tvdb" is preferred because it is
+ * what Sonarr monitors, "tmdb" is the fallback, and null means no source could
+ * be trusted for this season — in which case `episodes` is empty and the caller
+ * shows nothing, which is the right answer rather than a guessed one.
+ *
+ * Cached: the answer is stable metadata and season pages get revisited.
  */
-export function fetchTmdbSeason(
-  tmdbId: number,
-  season: number,
-): Promise<{ configured: boolean; episodes: TmdbEpisode[] }> {
-  return cachedGet(`/api/plex/tmdb/season?tmdbId=${tmdbId}&season=${season}`);
+export function fetchSeasonEpisodes(
+  seasonRatingKey: string,
+): Promise<{ source: "tvdb" | "tmdb" | null; episodes: SeasonEpisode[] }> {
+  return cachedGet(`/api/plex/season-episodes/${seasonRatingKey}`);
 }
 
 export interface SeerrTv {

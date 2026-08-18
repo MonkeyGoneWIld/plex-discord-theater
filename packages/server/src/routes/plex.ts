@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
 import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition } from "../services/segment-prefetch.js";
+import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
 import { sessionHostUserId } from "../services/sync.js";
@@ -609,6 +610,13 @@ function imdbIdFromGuids(guids?: Array<{ id?: string }>): string | null {
 }
 
 /** Pull the TMDB id out of a metadata item's external id list (e.g. "tmdb://550"). */
+function tvdbIdFromGuids(guids?: Array<{ id?: string }>): number | null {
+  const hit = guids?.find((g) => g.id?.startsWith("tvdb://"));
+  if (!hit?.id) return null;
+  const n = parseInt(hit.id.slice("tvdb://".length), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
 function tmdbIdFromGuids(guids?: Array<{ id?: string }>): number | null {
   const hit = guids?.find((g) => g.id?.startsWith("tmdb://"));
   if (!hit?.id) return null;
@@ -1724,11 +1732,11 @@ async function tmdbPerson(name: string): Promise<TmdbPerson | null> {
  * whether the current episode is itself a special.
  */
 /** How many episodes of one season we'll describe. Long-running soaps aside, no
- *  real season approaches this; it bounds a hostile or broken tmdbId. */
+ *  real season approaches this; it bounds a hostile or broken id. */
 const MAX_SEASON_EPISODES = 200;
 
-/** A TMDB episode, reduced to what the season list renders. */
-interface TmdbEpisode {
+/** A TMDB episode, as TMDB returns it. */
+interface TmdbRawEpisode {
   episode_number?: number;
   name?: string;
   overview?: string;
@@ -1738,51 +1746,155 @@ interface TmdbEpisode {
 }
 
 /**
- * GET /api/plex/tmdb/season?tmdbId=1399&season=2
+ * The shape both sources are normalised into.
  *
- * Every episode TMDB knows about for one season, aired or not. The client
- * subtracts what Plex actually holds to show the gaps — episodes that were never
- * downloaded, and ones that haven't aired yet.
- *
- * TMDB rather than Seerr on purpose: this is public metadata about what exists,
- * not about what can be requested, and asking TMDB directly means the feature
- * works for anyone with a TMDB key rather than only for people running Seerr.
- * Whether a *season* can be requested is a separate question, and Seerr answers
- * that one — see routes/seerr.ts.
+ * `still` is already a URL this server will serve — TMDB paths through the
+ * poster proxy, TVDB artwork through the external-image route — so the client
+ * never has to know which source it got.
  */
-router.get("/tmdb/season", async (req: Request, res: Response) => {
-  const tmdbId = String(req.query.tmdbId ?? "");
-  const season = String(req.query.season ?? "");
-  if (!NUMERIC_RE.test(tmdbId) || !NUMERIC_RE.test(season)) {
-    res.status(400).json({ error: "Invalid tmdbId or season" });
-    return;
-  }
-  if (!TMDB_API_KEY) {
-    // Not an error: the whole feature is optional, and the client renders
-    // nothing rather than an empty state when the list is unavailable.
-    res.json({ configured: false, episodes: [] });
+interface SeasonEpisode {
+  episodeNumber: number;
+  name: string;
+  overview: string | null;
+  airDate: string | null;
+  still: string | null;
+  runtime: number | null;
+}
+
+async function tmdbSeasonEpisodes(tmdbId: number, season: number): Promise<SeasonEpisode[] | null> {
+  if (!TMDB_API_KEY) return null;
+  const data = await tmdbGet<{ episodes?: TmdbRawEpisode[] }>(`/tv/${tmdbId}/season/${season}`);
+  if (!data?.episodes) return null;
+  return data.episodes
+    .filter((e) => typeof e.episode_number === "number")
+    .slice(0, MAX_SEASON_EPISODES)
+    .map((e) => ({
+      episodeNumber: e.episode_number!,
+      name: e.name || `Episode ${e.episode_number}`,
+      overview: e.overview || null,
+      airDate: e.air_date || null,
+      still: e.still_path
+        ? `/api/seerr/poster?w=w300&path=${encodeURIComponent(e.still_path)}`
+        : null,
+      runtime: typeof e.runtime === "number" ? e.runtime : null,
+    }));
+}
+
+/**
+ * Does this list agree with Plex about which episodes are in this season?
+ *
+ * The check that stops the wrong source being used. If Plex holds episode 9 and
+ * the source's season 3 stops at 8, the two are not numbering the season the
+ * same way — and the visible symptom is exactly the one that prompted this:
+ * episodes reported missing that actually belong to a different season. Extra
+ * episodes in the source are the normal case (that is what a gap *is*);
+ * episodes Plex has and the source doesn't are the tell.
+ */
+function agreesWithPlex(episodes: SeasonEpisode[], plexNumbers: number[]): boolean {
+  if (plexNumbers.length === 0) return true;
+  const have = new Set(episodes.map((e) => e.episodeNumber));
+  return plexNumbers.every((n) => have.has(n));
+}
+
+/**
+ * GET /api/plex/season-episodes/:seasonRatingKey
+ *
+ * Every episode this season is supposed to contain, aired or not, so the client
+ * can subtract what Plex holds and show the gaps.
+ *
+ * TVDB first when it is configured and the show carries a tvdb guid, because
+ * that is the numbering Sonarr monitors — an episode called missing here is
+ * only actionable if the thing that would fetch it agrees the episode belongs
+ * to this season. TMDB is the fallback, and also wins when TVDB's numbering
+ * disagrees with Plex's own: a source that can't account for episodes already
+ * on disk is describing a different season.
+ */
+router.get("/season-episodes/:seasonRatingKey", async (req: Request, res: Response) => {
+  const seasonRatingKey = req.params.seasonRatingKey as string;
+  if (!NUMERIC_RE.test(seasonRatingKey)) {
+    res.status(400).json({ error: "Invalid rating key" });
     return;
   }
   try {
-    const data = await tmdbGet<{ episodes?: TmdbEpisode[] }>(`/tv/${tmdbId}/season/${season}`);
-    const episodes = (data?.episodes ?? [])
-      .filter((e) => typeof e.episode_number === "number")
-      .slice(0, MAX_SEASON_EPISODES)
-      .map((e) => ({
-        episodeNumber: e.episode_number!,
-        name: e.name || `Episode ${e.episode_number}`,
-        overview: e.overview || null,
-        // ISO date, or null when TMDB has the episode listed but unscheduled.
-        airDate: e.air_date || null,
-        // Proxied through /api/seerr/poster, same as the season posters — the
-        // CSP is img-src 'self', so nothing talks to TMDB's CDN directly.
-        stillPath: e.still_path || null,
-        runtime: typeof e.runtime === "number" ? e.runtime : null,
-      }));
-    res.json({ configured: true, episodes });
+    const seasonData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+      `/library/metadata/${seasonRatingKey}`,
+    );
+    const season = seasonData.MediaContainer.Metadata?.[0];
+    const seasonNumber = season?.index;
+    const showKey = season?.parentRatingKey;
+    if (seasonNumber == null || !showKey) {
+      res.json({ source: null, episodes: [] });
+      return;
+    }
+
+    // Guids live on the series, not on the season.
+    const showData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+      `/library/metadata/${showKey}`,
+      { includeGuids: "1" },
+    );
+    const show = showData.MediaContainer.Metadata?.[0];
+    const tvdbId = tvdbIdFromGuids(show?.Guid);
+    const tmdbId = show ? await resolveTmdbId(show) : null;
+
+    // What Plex actually holds, so the source can be checked against it.
+    const childData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+      `/library/metadata/${seasonRatingKey}/children`,
+    );
+    const plexNumbers = (childData.MediaContainer.Metadata ?? [])
+      .map((e) => e.index)
+      .filter((n): n is number => typeof n === "number");
+
+    let fromTvdb: SeasonEpisode[] | null = null;
+    if (tvdbId != null && isTvdbConfigured()) {
+      const raw = await tvdbSeasonEpisodes(tvdbId, seasonNumber);
+      fromTvdb = raw
+        ? raw.map((e) => ({
+            episodeNumber: e.episodeNumber,
+            name: e.name,
+            overview: e.overview,
+            airDate: e.airDate,
+            // TVDB artwork is an absolute URL; the thumb route proxies any
+            // https source through images.plex.tv, so this reaches nothing new.
+            still: e.image ? externalThumbUrl(e.image) : null,
+            runtime: e.runtime,
+          }))
+        : null;
+    }
+    const fromTmdb = tmdbId != null ? await tmdbSeasonEpisodes(tmdbId, seasonNumber) : null;
+
+    let source: "tvdb" | "tmdb" | null = null;
+    let episodes: SeasonEpisode[] = [];
+    if (fromTvdb && agreesWithPlex(fromTvdb, plexNumbers)) {
+      source = "tvdb";
+      episodes = fromTvdb;
+    } else if (fromTmdb && agreesWithPlex(fromTmdb, plexNumbers)) {
+      source = "tmdb";
+      episodes = fromTmdb;
+      if (fromTvdb) {
+        logEvent("Season", "TVDB disagrees with Plex numbering, using TMDB", {
+          season: seasonRatingKey,
+          seasonNumber,
+          plexEpisodes: plexNumbers.length,
+          tvdbEpisodes: fromTvdb.length,
+        });
+      }
+    } else if (fromTvdb || fromTmdb) {
+      // Neither accounts for everything on disk. Report nothing rather than
+      // invent gaps: a wrong list is worse than no list, because it asks people
+      // to request episodes they already have under a different number.
+      logEvent("Season", "no source agrees with Plex numbering, reporting no gaps", {
+        season: seasonRatingKey,
+        seasonNumber,
+        plexEpisodes: plexNumbers.length,
+        tvdb: fromTvdb?.length ?? "none",
+        tmdb: fromTmdb?.length ?? "none",
+      });
+    }
+
+    res.json({ source, episodes: episodes.slice(0, MAX_SEASON_EPISODES) });
   } catch (err) {
-    console.error("[TMDB] season error:", err);
-    res.status(502).json({ error: "Failed to fetch season" });
+    console.error("[Season] episode list error:", err);
+    res.status(502).json({ error: "Failed to fetch season episodes" });
   }
 });
 

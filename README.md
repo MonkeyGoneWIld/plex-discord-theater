@@ -81,6 +81,7 @@ Every one of these is off unless its variable is set, and every one **fails sile
 |---|---|---|
 | `TMDB_API_KEY` | Collections, "More Like This", and cast/crew pages | Free v3 key — [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api) |
 | `MDBLIST_API_KEY` | The ratings row: IMDb, Rotten Tomatoes, TMDB | Free — [mdblist.com/preferences](https://mdblist.com/preferences) → API Access |
+| `TVDB_API_KEY` | Correct season numbering for the missing-episode list | Free — [thetvdb.com/api-information](https://thetvdb.com/api-information) |
 | `PLEX_ACCOUNT_TOKEN` | Detail pages for titles you don't own, and Seerr sign-in | Your **account** token from an app.plex.tv request (not the server token) |
 | `SEERR_URL` | The Request button on out-of-library titles | Your Overseerr / Jellyseerr URL |
 | `VPS_RELAY_URL` + `VPS_RELAY_KEY` | [Segment relay](#vps-relay-optional) — one upstream stream instead of one per viewer | Your own VPS |
@@ -95,6 +96,24 @@ Powers three things, all on detail pages:
 - **Cast and crew pages** — everything a person appears in, including titles outside your library.
 
 The key is free and takes about a minute: sign up, then Settings → API → request a v3 key. It's a read-only key for public metadata.
+
+### TVDB — which episodes a season actually has
+
+The missing / not-yet-aired rows inside a season need a list of what the season
+is supposed to contain. TMDB can provide it, and mostly does fine — but Sonarr
+monitors **TVDB**, and the two do not always agree about which season an episode
+belongs to. On a show where they differ, a TMDB-derived list names episodes that
+really sit in a neighbouring season, and requesting them achieves nothing
+because Sonarr has them numbered the other way.
+
+With `TVDB_API_KEY` set, TVDB is used whenever the show carries a tvdb id.
+Either way the list is checked against Plex's own episode numbers first: a
+source that can't account for episodes already on disk is describing a different
+season, and is discarded rather than shown. Without the key everything still
+works, on TMDB numbering.
+
+A free "project" key needs no PIN; a user-supported subscriber key does, and
+goes in `TVDB_PIN`.
 
 ### MDBList — ratings
 

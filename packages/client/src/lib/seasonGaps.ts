@@ -1,4 +1,4 @@
-import type { PlexItem, TmdbEpisode } from "./api";
+import type { PlexItem, SeasonEpisode } from "./api";
 
 /**
  * Working out what a season is missing.
@@ -19,7 +19,7 @@ import type { PlexItem, TmdbEpisode } from "./api";
  * and worth requesting. Conflating them would make every currently airing show
  * look broken.
  */
-export interface GapEpisode extends TmdbEpisode {
+export interface GapEpisode extends SeasonEpisode {
   kind: "missing" | "unaired";
 }
 
@@ -45,7 +45,7 @@ export const AIR_DATE_GRACE_MS = 48 * 60 * 60 * 1000;
  * announced seasons long before scheduling them, and calling those missing is
  * wrong in the one direction that prompts a pointless request.
  */
-export function classifyGap(ep: TmdbEpisode, now: number): GapEpisode["kind"] {
+export function classifyGap(ep: SeasonEpisode, now: number): GapEpisode["kind"] {
   if (!ep.airDate) return "unaired";
   const t = new Date(ep.airDate).getTime();
   if (Number.isNaN(t)) return "unaired";
@@ -63,15 +63,15 @@ export function classifyGap(ep: TmdbEpisode, now: number): GapEpisode["kind"] {
  */
 export function findSeasonGaps(
   plexEpisodes: Pick<PlexItem, "index">[],
-  tmdbEpisodes: TmdbEpisode[] | null,
+  sourceEpisodes: SeasonEpisode[] | null,
   now: number = Date.now(),
 ): GapEpisode[] {
-  if (!tmdbEpisodes || tmdbEpisodes.length === 0) return [];
+  if (!sourceEpisodes || sourceEpisodes.length === 0) return [];
   if (plexEpisodes.length === 0) return [];
   const have = new Set(
     plexEpisodes.map((e) => e.index).filter((i): i is number => i != null),
   );
-  return tmdbEpisodes
+  return sourceEpisodes
     .filter((e) => !have.has(e.episodeNumber))
     .map((e) => ({ ...e, kind: classifyGap(e, now) }))
     .sort((a, b) => a.episodeNumber - b.episodeNumber);

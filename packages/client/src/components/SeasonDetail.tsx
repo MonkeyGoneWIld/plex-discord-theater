@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import {
-  fetchChildren, fetchMeta, fetchProgressMany, fetchTmdbSeason, getSessionToken,
-  seerrStillUrl, type HistoryEntry, type PlexItem, type TmdbEpisode,
+  fetchChildren, fetchProgressMany, fetchSeasonEpisodes, getSessionToken,
+  type HistoryEntry, type PlexItem, type SeasonEpisode,
 } from "../lib/api";
 import {
   describeGaps, findSeasonGaps, formatAirDate, type GapEpisode,
@@ -73,33 +73,28 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
     return () => { cancelled = true; };
   }, [episodes]);
 
-  // What TMDB says this season contains, so the gaps can be worked out. Its own
-  // request, deliberately after the Plex one and never blocking it: the episodes
-  // that are actually here are what the page is for, and this is an annotation.
-  const [tmdbEpisodes, setTmdbEpisodes] = useState<TmdbEpisode[] | null>(null);
+  // What this season is supposed to contain, so the gaps can be worked out. Its
+  // own request, deliberately after the Plex one and never blocking it: the
+  // episodes that are actually here are what the page is for, and this is an
+  // annotation on top. The server picks the source — TVDB where it can, since
+  // that is what Sonarr monitors — and hands back a list already checked against
+  // Plex's own numbering.
+  const [sourceEpisodes, setSourceEpisodes] = useState<SeasonEpisode[] | null>(null);
   const [showGaps, setShowGaps] = useState(false);
   const [gapToggleHover, setGapToggleHover] = useState(false);
 
   useEffect(() => {
-    setTmdbEpisodes(null);
+    setSourceEpisodes(null);
     setShowGaps(false);
-    if (season.index == null) return;
     let cancelled = false;
-    // The show's TMDB id, not the season's — Plex only stores the guid on the
-    // series. fetchMeta is cached, and ShowDetail has usually already asked for
-    // this, so it's normally free.
-    fetchMeta(show.ratingKey)
-      .then((meta) => {
-        if (cancelled || meta.tmdbId == null) return null;
-        return fetchTmdbSeason(meta.tmdbId, season.index!);
-      })
-      .then((res) => { if (!cancelled && res) setTmdbEpisodes(res.episodes); })
+    fetchSeasonEpisodes(season.ratingKey)
+      .then((res) => { if (!cancelled) setSourceEpisodes(res.episodes); })
       .catch(() => { /* optional annotation — never surface an error over a real list */ });
     return () => { cancelled = true; };
-  }, [show.ratingKey, season.index]);
+  }, [season.ratingKey]);
 
   /**
-   * Episodes TMDB knows about that Plex doesn't have.
+   * Episodes the source knows about that Plex doesn't have.
    *
    * Empty when Plex has none of the season at all: that is a *wholly* missing
    * season, which the show page already represents as a single request card, and
@@ -107,7 +102,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
    * question. It's only reachable at all when Plex has a season row with no
    * children, which is rare, but the guard costs nothing.
    */
-  const gaps = useMemo(() => findSeasonGaps(episodes, tmdbEpisodes), [tmdbEpisodes, episodes]);
+  const gaps = useMemo(() => findSeasonGaps(episodes, sourceEpisodes), [sourceEpisodes, episodes]);
 
   /**
    * The list as rendered: what Plex has, plus the gaps when they're shown,
@@ -202,7 +197,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
           {rows.map((row) => {
             if (row.kind === "gap") {
               const g = row.ep;
-              const still = seerrStillUrl(g.stillPath);
+              const still = g.still;
               const aired = formatAirDate(g.airDate);
               const isMissing = g.kind === "missing";
               return (

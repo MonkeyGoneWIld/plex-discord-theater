@@ -173,7 +173,14 @@ router.get("/tv/:tmdbId", async (req: Request, res: Response) => {
       }
     }
     const seasons = (data.seasons ?? [])
-      .filter((s) => (s.seasonNumber ?? 0) >= 1)
+      // Season 0 is specials. Zero-episode seasons are announcements: TMDB
+      // creates the row as soon as a renewal is reported, long before TVDB has
+      // an episode list, and neither Sonarr nor Seerr can do anything with one.
+      // Seerr's own UI drops them for exactly this reason — Silo's season 4 is
+      // listed by TMDB with 0 episodes and simply does not appear on the Seerr
+      // page — so a season offered here that isn't offered there was always a
+      // request that would sit in the queue forever.
+      .filter((s) => (s.seasonNumber ?? 0) >= 1 && (s.episodeCount ?? 0) > 0)
       .map((s) => {
         const episodeCount = s.episodeCount ?? 0;
         const airDate = s.airDate || null;
@@ -189,17 +196,10 @@ router.get("/tv/:tmdbId", async (req: Request, res: Response) => {
           /**
            * Whether asking Seerr for this season would actually do anything.
            *
-           * TMDB lists announced-but-unscheduled seasons — no air date, usually
-           * no episodes — and Seerr passes them straight through. They were
-           * offered as request cards like any other, the request was accepted,
-           * and then nothing ever happened: Sonarr has no episodes to monitor
-           * and TVDB doesn't have the season at all, so it sat in the queue
-           * forever with no way to tell it apart from one that was simply slow.
-           *
-           * An air date plus at least one episode is what separates "not here
-           * yet" from "doesn't exist yet". A future-dated season keeps its
-           * request card on purpose — Sonarr will pick those up as they air,
-           * which is a normal thing to want.
+           * The zero-episode case is filtered out above; this catches the rest:
+           * a season TMDB has listed with episodes but never dated. A
+           * future-dated season stays requestable on purpose — Sonarr picks
+           * those up as they air, which is a normal thing to want.
            */
           requestable: status == null && episodeCount > 0 && airDate != null,
         };

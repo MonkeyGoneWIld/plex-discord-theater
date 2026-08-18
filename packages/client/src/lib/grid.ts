@@ -112,6 +112,13 @@ const GUTTER_PX = 24;
 /** Everything in a phone row that isn't a card: two gutters and two gaps. */
 const PHONE_NON_CARD_PX = GUTTER_PX * 2 + (PHONE_COLUMNS - 1) * GAP_PX;
 
+/** Gap between cast headshots, which is wider than the poster gap (CastRow). */
+const CAST_GAP_PX = 18;
+/** A headshot's diameter on a desktop. */
+const CAST_AVATAR_PX = 150;
+/** The same three-across arithmetic, with the cast row's own gap. */
+const PHONE_CAST_NON_CARD_PX = GUTTER_PX * 2 + (PHONE_COLUMNS - 1) * CAST_GAP_PX;
+
 /**
  * A phone card sized against the screen's short edge.
  *
@@ -134,6 +141,9 @@ export interface PosterLayout {
   gridColumns: string;
   /** Card width for the horizontally-scrolling shelves, which are flex rows. */
   rowCardWidth: string;
+  /** Diameter of a Cast & Crew headshot. Its own value because that row uses a
+   *  wider gap than the poster rows, so three-across is a different number. */
+  castAvatarWidth: string;
 }
 
 /**
@@ -153,6 +163,7 @@ export function usePosterLayout(): PosterLayout {
       phone: true,
       gridColumns: `repeat(auto-fill, ${PHONE_SHORT_EDGE_CARD})`,
       rowCardWidth: PHONE_SHORT_EDGE_CARD,
+      castAvatarWidth: `calc((100vh - ${PHONE_CAST_NON_CARD_PX}px) / ${PHONE_COLUMNS})`,
     };
   }
   if (narrow) {
@@ -162,11 +173,13 @@ export function usePosterLayout(): PosterLayout {
       // PHONE_SHORT_EDGE_CARD for why this isn't a vw calculation.
       gridColumns: `repeat(${PHONE_COLUMNS}, minmax(0, 1fr))`,
       rowCardWidth: `calc((100% - ${(PHONE_COLUMNS - 1) * GAP_PX}px) / ${PHONE_COLUMNS})`,
+      castAvatarWidth: `calc((100% - ${(PHONE_COLUMNS - 1) * CAST_GAP_PX}px) / ${PHONE_COLUMNS})`,
     };
   }
   return {
     phone: false,
     gridColumns: POSTER_GRID_COLUMNS,
     rowCardWidth: POSTER_ROW_CARD_WIDTH,
+    castAvatarWidth: `${CAST_AVATAR_PX}px`,
   };
 }

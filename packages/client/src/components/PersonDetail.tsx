@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { authUrl, fetchPerson, type PersonDetail as Person, type PlexItem } from "../lib/api";
+import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { PosterShelf, shelfStyles } from "./PosterShelf";
 import { SkeletonBlock } from "./SkeletonBlock";
 
@@ -75,6 +76,11 @@ export function PersonDetail({ name, thumb, onSelect, onBack }: PersonDetailProp
   const [failed, setFailed] = useState(false);
   // Sources that failed to load, so the fallback below can step past them.
   const [imgFailed, setImgFailed] = useState<Set<string>>(new Set());
+  // Phone portrait. The header is a 240px photo and a text column with a 280px
+  // floor, which don't fit side by side on a phone — so the text wrapped under a
+  // photo still pinned to the left edge, while every title page on the same
+  // screen centres its poster. Same stacking as MovieDetail and the rest.
+  const narrow = useMediaQuery(NARROW_QUERY);
 
   useEffect(() => {
     let cancelled = false;
@@ -117,21 +123,25 @@ export function PersonDetail({ name, thumb, onSelect, onBack }: PersonDetailProp
         Back
       </button>
 
-      <div style={styles.content}>
-      <div style={styles.header}>
+      <div style={{ ...styles.content, ...(narrow ? styles.contentNarrow : {}) }}>
+      <div style={{ ...styles.header, ...(narrow ? styles.headerNarrow : {}) }}>
         {photo ? (
           <img
             src={authUrl(photo)}
             alt={dName}
-            style={styles.photo}
+            style={{ ...styles.photo, ...(narrow ? styles.photoNarrow : {}) }}
             onError={() => setImgFailed((prev) => new Set(prev).add(photo))}
           />
         ) : (
-          <div style={{ ...styles.photo, ...styles.photoPlaceholder }}>No photo</div>
+          <div style={{
+            ...styles.photo,
+            ...styles.photoPlaceholder,
+            ...(narrow ? styles.photoNarrow : {}),
+          }}>No photo</div>
         )}
 
-        <div style={styles.info}>
-          <h1 style={styles.name}>{dName}</h1>
+        <div style={{ ...styles.info, ...(narrow ? styles.infoNarrow : {}) }}>
+          <h1 style={{ ...styles.name, ...(narrow ? styles.nameNarrow : {}) }}>{dName}</h1>
           {person?.knownFor && <div style={styles.role}>{person.knownFor}</div>}
 
           <div style={styles.facts}>
@@ -260,6 +270,29 @@ const styles: Record<string, React.CSSProperties> = {
     flexShrink: 0,
     background: "#1a1a1a",
     boxShadow: "0 8px 32px rgba(0,0,0,0.6)",
+  },
+  // ─── Phone portrait overrides ──────────────────────────────────
+  // Photo centred above the text, text across the full width — the same numbers
+  // the title pages use, so a person and a film sit identically on a phone.
+  contentNarrow: {
+    padding: "16px 16px 8px",
+  },
+  headerNarrow: {
+    flexDirection: "column",
+    flexWrap: "nowrap",
+    alignItems: "stretch",
+    gap: "20px",
+  },
+  photoNarrow: {
+    width: "min(180px, 45%)",
+    alignSelf: "center",
+  },
+  infoNarrow: {
+    // Releases the 280px floor, which is what forced the wrap.
+    minWidth: 0,
+  },
+  nameNarrow: {
+    fontSize: "28px",
   },
   photoPlaceholder: {
     display: "flex",

@@ -2,9 +2,7 @@ import { useState } from "react";
 import { ScrollShelf } from "./ScrollShelf";
 import { authUrl, type Credit } from "../lib/api";
 import { ShelfSkeleton } from "./ShelfSkeleton";
-
-/** Diameter of a headshot. Plex's own cast row uses a similar circular crop. */
-const AVATAR_PX = 150;
+import { usePosterLayout } from "../lib/grid";
 
 interface CastRowProps {
   cast?: Credit[];
@@ -26,13 +24,17 @@ function initials(name: string): string {
     .join("");
 }
 
-function CastAvatar({ person, onSelect }: { person: Credit; onSelect?: () => void }) {
+function CastAvatar({
+  person,
+  width,
+  onSelect,
+}: { person: Credit; width: string; onSelect?: () => void }) {
   const [failed, setFailed] = useState(false);
   const show = person.thumb && !failed;
   const clickable = !!onSelect;
   return (
     <div
-      style={clickable ? { ...styles.person, ...styles.personClickable } : styles.person}
+      style={clickable ? { ...styles.person, width, ...styles.personClickable } : { ...styles.person, width }}
       {...(clickable
         ? {
             role: "button",
@@ -79,6 +81,10 @@ function CastAvatar({ person, onSelect }: { person: Credit; onSelect?: () => voi
  * for a library item Plex never matched against its metadata agent.
  */
 export function CastRow({ cast, directors, onSelectPerson, loading }: CastRowProps) {
+  // Three faces across a phone screen, the same as everything else on the page.
+  // At the desktop 150px a phone showed two and a sliver of a third, which reads
+  // as the row having been cut off rather than as something to swipe.
+  const { castAvatarWidth } = usePosterLayout();
   // The director leads, then the billed cast. Appending crew instead put them
   // past thirty actors — off the end of a row nobody scrolls that far — so the
   // one crew credit people actually look for was effectively missing. Writers
@@ -118,6 +124,7 @@ export function CastRow({ cast, directors, onSelectPerson, loading }: CastRowPro
           <CastAvatar
             key={`${p.name}-${p.role ?? i}`}
             person={p}
+            width={castAvatarWidth}
             onSelect={onSelectPerson ? () => onSelectPerson(p) : undefined}
           />
         ))}
@@ -142,6 +149,8 @@ const styles: Record<string, React.CSSProperties> = {
   // Side gutter matches the poster shelves so the first face lines up with the
   // first poster. The bottom stays tight: these cards have no hover glow to
   // leave room for, and this row draws no scrollbar under it.
+  // Keep this gap in step with CAST_GAP_PX in lib/grid, which the phone
+  // three-across width is derived from.
   row: {
     display: "flex",
     gap: "18px",
@@ -151,15 +160,18 @@ const styles: Record<string, React.CSSProperties> = {
   person: {
     flexShrink: 0,
     flexGrow: 0,
-    width: `${AVATAR_PX}px`,
+    // `width` comes from usePosterLayout — see the note in the component.
     textAlign: "center" as const,
   },
   personClickable: {
     cursor: "pointer",
   },
   avatar: {
-    width: `${AVATAR_PX}px`,
-    height: `${AVATAR_PX}px`,
+    // Square at whatever width the card is, rather than a fixed pixel box, so
+    // one number sizes the headshot on every screen.
+    width: "100%",
+    height: "auto",
+    aspectRatio: "1 / 1",
     borderRadius: "50%",
     objectFit: "cover" as const,
     display: "block",

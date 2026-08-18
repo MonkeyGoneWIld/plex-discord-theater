@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useImperativeHandle } from "react";
 import { authUrl } from "../lib/api";
 import { loadVolume } from "../lib/volume";
-import { useMediaQuery, COMPACT_CONTROLS_QUERY } from "../lib/useMediaQuery";
+import { useMediaQuery, COMPACT_CONTROLS_QUERY, PHONE_QUERY } from "../lib/useMediaQuery";
 
 export interface ControlsHandle {
   /**
@@ -116,6 +116,23 @@ const SKIP_STACK_MS = 700;
 /** How long the accumulated total lingers after the seek lands. */
 const SKIP_INDICATOR_LINGER_MS = 400;
 
+/**
+ * Phone gestures.
+ *
+ * Two taps inside this window, on the same side of the picture, are a skip.
+ * Long enough for a deliberate double-tap on a small screen, short enough that
+ * two separate taps to show and hide the bar aren't read as one.
+ */
+const DOUBLE_TAP_MS = 320;
+/** Seconds a double-tap moves, matching the ±10s buttons on a desktop bar. */
+const TAP_SKIP_SECONDS = 10;
+/**
+ * Fraction of the picture each side zone occupies. The middle third is left
+ * alone: the play/pause button lives there, and a skip zone under it would fire
+ * on every near-miss of the thing people are actually aiming at.
+ */
+const TAP_SIDE_ZONE = 0.35;
+
 export function Controls({
   videoRef,
   handleRef,
@@ -155,6 +172,8 @@ export function Controls({
   const visibleRef = useRef(true);
   visibleRef.current = visible;
   const revealTapRef = useRef(false);
+  // When and where the last picture tap landed, for the double-tap test below.
+  const lastTapRef = useRef<{ at: number; zone: "back" | "forward" | null }>({ at: 0, zone: null });
   const [hoveringProgress, setHoveringProgress] = useState(false);
   // Fraction (0-1) of the bar under the cursor, null when not hovering —
   // drives the seek-preview timestamp tooltip and hover marker.
@@ -197,6 +216,10 @@ export function Controls({
   // Phone-sized: the volume slider moves into a vertical popover rather than
   // eating the width of a row that has nowhere to put it.
   const compact = useMediaQuery(COMPACT_CONTROLS_QUERY);
+  // A phone, where the picture itself is the control surface: play/pause is a
+  // button in the middle of it, skipping is a double-tap to one side, and a
+  // single tap only shows or hides the bar. See the gesture layer below.
+  const phone = useMediaQuery(PHONE_QUERY);
   // Discord's own chrome is kept clear by the safe-area insets baked into the
   // bar paddings, so nothing here needs to know the orientation.
   const [volumeOpen, setVolumeOpen] = useState(false);
@@ -420,6 +443,56 @@ export function Controls({
   useImperativeHandle(handleRef, () => ({ queueSkip, consumeRevealTap }),
     [queueSkip, consumeRevealTap]);
 
+  /**
+   * A tap on the picture, on a phone. Never plays or pauses.
+   *
+   * That is the point of it. A tap used to mean "pause" when the bar was up and
+   * "show the bar" when it wasn't, so the same gesture in the same place did two
+   * different things depending on a state you can't see until after you've
+   * tapped — which is why pausing took two taps and looked like the first one
+   * had been ignored. Playback is now a button you can see, in the middle of the
+   * screen, and this handles only the two things that have nowhere else to live:
+   *
+   *   single tap  — show the bar, or dismiss it if it was already up
+   *   double tap  — ±10s, on whichever side of the picture it landed
+   *
+   * The first tap of a double still shows the bar, and is left to. Suppressing
+   * it would mean delaying every single tap by the double-tap window to find out
+   * whether a second one is coming, and a bar that appears a third of a second
+   * after you touch the screen feels broken in a way a brief flash does not.
+   */
+  const handlePictureTap = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const x = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5;
+      const zone: "back" | "forward" | null =
+        x < TAP_SIDE_ZONE ? "back" : x > 1 - TAP_SIDE_ZONE ? "forward" : null;
+      const now = Date.now();
+      const prev = lastTapRef.current;
+      lastTapRef.current = { at: now, zone };
+      // Consumed either way: the reveal flag is set on every pointerdown that
+      // brings the bar back, and leaving it set would make the player's own
+      // click handler swallow an unrelated tap later.
+      const revealedTheBar = consumeRevealTap();
+
+      // Second (or third, or fourth) tap of a burst on one side — skip, and
+      // leave the bar alone. queueSkip stacks them into a single seek.
+      if (canControl && zone !== null && zone === prev.zone && now - prev.at < DOUBLE_TAP_MS) {
+        queueSkip(zone === "back" ? -TAP_SKIP_SECONDS : TAP_SKIP_SECONDS);
+        return;
+      }
+
+      // An ordinary tap. It has already been revealed by the pointerdown
+      // listener if it was hidden, so the only thing left to do is the other
+      // half of the toggle.
+      if (!revealedTheBar) {
+        if (hideTimer.current) clearTimeout(hideTimer.current);
+        setVisible(false);
+      }
+    },
+    [canControl, consumeRevealTap, queueSkip],
+  );
+
   // Drop pending timers on unmount so a queued seek can't fire into a torn-down
   // player (or a transcode the next item has already replaced).
   useEffect(() => () => {
@@ -633,6 +706,85 @@ export function Controls({
   const buffered = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
   const barHeight = hoveringProgress || scrubPct != null ? 8 : 5;
 
+  // Hoisted out of the tree below because a phone wraps it in a row with the
+  // elapsed and remaining times either side, and a desktop doesn't.
+  const progressBar = (
+    <div
+      ref={progressRef}
+      onPointerDown={handleProgressPointerDown}
+      onPointerMove={handleProgressPointerMove}
+      onPointerUp={handleProgressPointerUp}
+      // Losing the pointer (a system gesture, a phone call) should still land
+      // the scrub where the user left it rather than silently dropping it.
+      onPointerCancel={handleProgressPointerUp}
+      onPointerEnter={(e) => { if (e.pointerType === "mouse") setHoveringProgress(true); }}
+      onPointerLeave={(e) => {
+        if (e.pointerType !== "mouse" || draggingRef.current) return;
+        setHoveringProgress(false);
+        setHoverPct(null);
+      }}
+      style={{
+        ...styles.progressHit,
+        // In the phone row it is the flexible middle between the two times.
+        ...(phone ? styles.progressHitPhone : {}),
+        cursor: canControl ? (scrubPct != null ? "grabbing" : "pointer") : "default",
+        // Without this the browser claims the gesture for scrolling and the
+        // drag dies after a few pixels of vertical wobble.
+        touchAction: "none",
+      }}
+    >
+      {/* Seek preview: timestamp under the cursor. clamp() keeps the
+          bubble from overflowing the bar edges. */}
+      {hoverPct != null && duration > 0 && isFinite(duration) && (
+        <div
+          style={{
+            ...styles.seekTooltip,
+            ...(loadedPreviewSrc ? styles.seekTooltipWithPreview : null),
+            // A bare M:SS bubble only needs 30px of edge margin; a 160px
+            // preview needs half its width to avoid overflowing the bar.
+            left: loadedPreviewSrc
+              ? `clamp(84px, ${hoverPct * 100}%, calc(100% - 84px))`
+              : `clamp(30px, ${hoverPct * 100}%, calc(100% - 30px))`,
+          }}
+        >
+          {loadedPreviewSrc && (
+            <img src={loadedPreviewSrc} alt="" style={styles.seekPreviewImg} />
+          )}
+          {fmt(hoverPct * duration)}
+        </div>
+      )}
+      <div style={{ ...styles.progressTrack, height: barHeight, transition: "height 0.15s ease" }}>
+        <div style={{ ...styles.progressBuffer, width: `${buffered}%` }} />
+        <div style={{ ...styles.progressFill, width: `${fillPct}%` }} />
+        {/* Redundant with the handle while dragging — the handle is already
+            sitting exactly here, and two markers on one spot reads as a bug. */}
+        {hoverPct != null && scrubPct == null && (
+          <div style={{ ...styles.hoverMarker, left: `${hoverPct * 100}%` }} />
+        )}
+        <div
+          style={{
+            position: "absolute",
+            left: `${fillPct}%`,
+            top: "50%",
+            transform: "translate(-50%, -50%)",
+            // Grows under the finger/cursor while dragging, so it reads as
+            // grabbed rather than merely hovered.
+            width: scrubPct != null ? 18 : 14,
+            height: scrubPct != null ? 18 : 14,
+            borderRadius: "50%",
+            background: "#e5a00d",
+            boxShadow: scrubPct != null
+              ? "0 0 0 5px rgba(229,160,13,0.25), 0 0 10px rgba(229,160,13,0.6)"
+              : "0 0 8px rgba(229,160,13,0.5)",
+            opacity: canControl && (hoveringProgress || scrubPct != null) ? 1 : 0,
+            transition: "opacity 0.15s ease, width 0.12s ease, height 0.12s ease",
+            pointerEvents: "none",
+          }}
+        />
+      </div>
+    </div>
+  );
+
   return (
     <>
       {/* Accumulated skip, on the side it's heading. Deliberately outside the
@@ -669,6 +821,38 @@ export function Controls({
         // control's own click and stops here.
         onClick={(e) => { if (e.target === e.currentTarget) onSurfaceClick?.(); }}
       >
+      {/* Phone gesture layer.
+          Covers the whole picture and keeps its own pointer events while the
+          overlay above has them switched off, so a tap lands here whether the
+          bar is up or not. It sits at z-index 0 and the bars at 1, so it never
+          steals a press aimed at a control. On a desktop it isn't rendered at
+          all and the click-to-pause path below is untouched. */}
+      {phone && (
+        <div style={styles.gestureLayer} onClick={handlePictureTap} aria-hidden="true" />
+      )}
+
+      {/* Play/pause, in the middle of the picture where it can be seen and
+          aimed at. Phone only: a desktop has a pointer, a keyboard and a bar
+          that doesn't hide itself after three seconds. */}
+      {phone && canControl && (
+        <button
+          onClick={togglePlay}
+          style={styles.centerPlayBtn}
+          aria-label={playing ? "Pause" : "Play"}
+        >
+          {playing ? (
+            <svg width="30" height="30" viewBox="0 0 22 22" fill="currentColor">
+              <rect x="5" y="3.5" width="4.5" height="15" rx="1.2" />
+              <rect x="12.5" y="3.5" width="4.5" height="15" rx="1.2" />
+            </svg>
+          ) : (
+            <svg width="30" height="30" viewBox="0 0 22 22" fill="currentColor">
+              <path d="M6 3.5L18.5 11L6 18.5V3.5Z" />
+            </svg>
+          )}
+        </button>
+      )}
+
       {/* Top bar: back + title */}
       <div style={styles.topBar}>
         <button onClick={onBack} style={styles.backBtn}>
@@ -681,84 +865,33 @@ export function Controls({
       </div>
 
       {/* Bottom bar */}
-      <div style={{ ...styles.bottomBar, ...(compact ? styles.bottomBarCompact : {}) }}>
-        {/* Chunky progress bar */}
-        <div
-          ref={progressRef}
-          onPointerDown={handleProgressPointerDown}
-          onPointerMove={handleProgressPointerMove}
-          onPointerUp={handleProgressPointerUp}
-          // Losing the pointer (a system gesture, a phone call) should still land
-          // the scrub where the user left it rather than silently dropping it.
-          onPointerCancel={handleProgressPointerUp}
-          onPointerEnter={(e) => { if (e.pointerType === "mouse") setHoveringProgress(true); }}
-          onPointerLeave={(e) => {
-            if (e.pointerType !== "mouse" || draggingRef.current) return;
-            setHoveringProgress(false);
-            setHoverPct(null);
-          }}
-          style={{
-            ...styles.progressHit,
-            cursor: canControl ? (scrubPct != null ? "grabbing" : "pointer") : "default",
-            // Without this the browser claims the gesture for scrolling and the
-            // drag dies after a few pixels of vertical wobble.
-            touchAction: "none",
-          }}
-        >
-          {/* Seek preview: timestamp under the cursor. clamp() keeps the
-              bubble from overflowing the bar edges. */}
-          {hoverPct != null && duration > 0 && isFinite(duration) && (
-            <div
-              style={{
-                ...styles.seekTooltip,
-                ...(loadedPreviewSrc ? styles.seekTooltipWithPreview : null),
-                // A bare M:SS bubble only needs 30px of edge margin; a 160px
-                // preview needs half its width to avoid overflowing the bar.
-                left: loadedPreviewSrc
-                  ? `clamp(84px, ${hoverPct * 100}%, calc(100% - 84px))`
-                  : `clamp(30px, ${hoverPct * 100}%, calc(100% - 30px))`,
-              }}
-            >
-              {loadedPreviewSrc && (
-                <img src={loadedPreviewSrc} alt="" style={styles.seekPreviewImg} />
-              )}
-              {fmt(hoverPct * duration)}
-            </div>
-          )}
-          <div style={{ ...styles.progressTrack, height: barHeight, transition: "height 0.15s ease" }}>
-            <div style={{ ...styles.progressBuffer, width: `${buffered}%` }} />
-            <div style={{ ...styles.progressFill, width: `${fillPct}%` }} />
-            {/* Redundant with the handle while dragging — the handle is already
-                sitting exactly here, and two markers on one spot reads as a bug. */}
-            {hoverPct != null && scrubPct == null && (
-              <div style={{ ...styles.hoverMarker, left: `${hoverPct * 100}%` }} />
-            )}
-            <div
-              style={{
-                position: "absolute",
-                left: `${fillPct}%`,
-                top: "50%",
-                transform: "translate(-50%, -50%)",
-                // Grows under the finger/cursor while dragging, so it reads as
-                // grabbed rather than merely hovered.
-                width: scrubPct != null ? 18 : 14,
-                height: scrubPct != null ? 18 : 14,
-                borderRadius: "50%",
-                background: "#e5a00d",
-                boxShadow: scrubPct != null
-                  ? "0 0 0 5px rgba(229,160,13,0.25), 0 0 10px rgba(229,160,13,0.6)"
-                  : "0 0 8px rgba(229,160,13,0.5)",
-                opacity: canControl && (hoveringProgress || scrubPct != null) ? 1 : 0,
-                transition: "opacity 0.15s ease, width 0.12s ease, height 0.12s ease",
-                pointerEvents: "none",
-              }}
-            />
+      <div style={{
+        ...styles.bottomBar,
+        ...(compact ? styles.bottomBarCompact : {}),
+        ...(phone ? styles.bottomBarPhone : {}),
+      }}>
+        {/* The scrub bar. On a phone it is the bottom row, with elapsed and
+            remaining either side of it — see progressRowPhone. */}
+        {phone ? (
+          <div style={styles.progressRowPhone}>
+            <span style={styles.phoneTime}>{fmt(pendingTime ?? currentTime)}</span>
+            {progressBar}
+            <span style={styles.phoneTime}>
+              {duration > 0 && isFinite(duration)
+                ? `-${fmt(Math.max(0, duration - (pendingTime ?? currentTime)))}`
+                : fmt(duration)}
+            </span>
           </div>
-        </div>
+        ) : (
+          progressBar
+        )}
 
-        <div style={styles.controls}>
+        <div style={{ ...styles.controls, ...(phone ? styles.controlsPhone : {}) }}>
           <div style={{ ...styles.left, ...(compact ? styles.groupCompact : {}) }}>
-            {canControl && (
+            {/* Play and ±10s are absent on a phone: playback is the button in
+                the middle of the picture, and skipping is a double-tap to one
+                side. Episode navigation stays — there is no gesture for it. */}
+            {canControl && !phone && (
               <>
                 <button onClick={togglePlay} style={{ ...styles.playBtn, ...(compact ? styles.playBtnCompact : {}) }}>
                   {playing ? (
@@ -780,33 +913,37 @@ export function Controls({
                   <span style={{ fontSize: 16 }}>{"\u21BB"}</span>
                   <span style={{ fontSize: 11 }}>10</span>
                 </button>
-                {/* Episode nav sits together after the ±10s seek pair. Each is
-                    rendered only when that sibling exists, so there's never a
-                    dead control — the player omits the handler at series edges. */}
-                {onPrevEpisode && (
-                  <button onClick={onPrevEpisode} style={styles.skipBtn} title="Previous episode">
-                    <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
-                      <rect x="2" y="2.5" width="2" height="11" rx="0.75"/>
-                      <path d="M13.5 3.2v9.6a.6.6 0 0 1-.93.5L5.6 8.5a.6.6 0 0 1 0-1l6.97-4.8a.6.6 0 0 1 .93.5Z"/>
-                    </svg>
-                  </button>
-                )}
-                {onNextEpisode && (
-                  <button onClick={onNextEpisode} style={styles.skipBtn} title="Next episode">
-                    <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
-                      <path d="M2.5 3.2v9.6a.6.6 0 0 0 .93.5L10.4 8.5a.6.6 0 0 0 0-1L3.43 2.7a.6.6 0 0 0-.93.5Z"/>
-                      <rect x="12" y="2.5" width="2" height="11" rx="0.75"/>
-                    </svg>
-                  </button>
-                )}
               </>
             )}
-            <span style={{ ...styles.time, ...(compact ? styles.timeCompact : {}) }}>
-              {/* Reads out the pending destination — a drag in progress, or a
-                  stack of ±10s presses — so the number agrees with where the
-                  handle is rather than with playback behind it. */}
-              {fmt(pendingTime ?? currentTime)} / {fmt(duration)}
-            </span>
+            {/* Episode nav sits together after the ±10s seek pair. Each is
+                rendered only when that sibling exists, so there's never a
+                dead control — the player omits the handler at series edges. */}
+            {canControl && onPrevEpisode && (
+              <button onClick={onPrevEpisode} style={styles.skipBtn} title="Previous episode">
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
+                  <rect x="2" y="2.5" width="2" height="11" rx="0.75"/>
+                  <path d="M13.5 3.2v9.6a.6.6 0 0 1-.93.5L5.6 8.5a.6.6 0 0 1 0-1l6.97-4.8a.6.6 0 0 1 .93.5Z"/>
+                </svg>
+              </button>
+            )}
+            {canControl && onNextEpisode && (
+              <button onClick={onNextEpisode} style={styles.skipBtn} title="Next episode">
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M2.5 3.2v9.6a.6.6 0 0 0 .93.5L10.4 8.5a.6.6 0 0 0 0-1L3.43 2.7a.6.6 0 0 0-.93.5Z"/>
+                  <rect x="12" y="2.5" width="2" height="11" rx="0.75"/>
+                </svg>
+              </button>
+            )}
+            {/* The phone bar carries the time either side of the scrub row
+                instead, where there is room for it. */}
+            {!phone && (
+              <span style={{ ...styles.time, ...(compact ? styles.timeCompact : {}) }}>
+                {/* Reads out the pending destination — a drag in progress, or a
+                    stack of ±10s presses — so the number agrees with where the
+                    handle is rather than with playback behind it. */}
+                {fmt(pendingTime ?? currentTime)} / {fmt(duration)}
+              </span>
+            )}
           </div>
           <div style={{ ...styles.right, ...(compact ? styles.rightCompact : {}) }}>
             {/* Not host-gated: the roster is read-only, and PeoplePanel decides
@@ -965,7 +1102,40 @@ const styles: Record<string, React.CSSProperties> = {
     transition: "opacity 0.3s ease",
     zIndex: 10,
   },
+  // Phone only. `pointerEvents` is set explicitly because the overlay above
+  // turns its own off while hidden, and this layer has to keep receiving the
+  // tap that brings it back. z-index 0 puts it under the two bars, which claim
+  // 1, so it only ever sees a press that missed every control.
+  gestureLayer: {
+    position: "absolute",
+    inset: 0,
+    zIndex: 0,
+    pointerEvents: "auto",
+  },
+  centerPlayBtn: {
+    position: "absolute",
+    left: "50%",
+    top: "50%",
+    transform: "translate(-50%, -50%)",
+    zIndex: 1,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "68px",
+    height: "68px",
+    borderRadius: "50%",
+    border: "none",
+    background: "rgba(0,0,0,0.45)",
+    backdropFilter: "blur(4px)",
+    color: "#fff",
+    cursor: "pointer",
+    fontFamily: "inherit",
+    padding: 0,
+  },
   topBar: {
+    // Above the gesture layer, so the Back button is still a button.
+    position: "relative",
+    zIndex: 1,
     display: "flex",
     alignItems: "center",
     gap: "12px",
@@ -1000,6 +1170,9 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#f0f0f0",
   },
   bottomBar: {
+    // Above the gesture layer — see topBar.
+    position: "relative",
+    zIndex: 1,
     // Insets on three sides — see the note on topBar. The bottom one clears
     // Discord's collapse chevron in landscape and the home indicator on iOS.
     paddingTop: "48px",
@@ -1013,6 +1186,41 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "8px 0",
     cursor: "pointer",
     marginBottom: "4px",
+  },
+  // ─── Phone bar ─────────────────────────────────────────────────
+  // Buttons on top, the scrub bar across the bottom with the times either side
+  // of it — the shape every phone video player has, and the one worth matching
+  // because it is the one people already know.
+  bottomBarPhone: {
+    display: "flex",
+    flexDirection: "column",
+  },
+  // Visual order only; the DOM keeps the bar first. Reordering the markup would
+  // mean maintaining two copies of it.
+  controlsPhone: {
+    order: 1,
+    marginBottom: "8px",
+  },
+  progressRowPhone: {
+    order: 2,
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
+  },
+  progressHitPhone: {
+    // Without a flex basis the hit area collapses: nothing inside it has an
+    // intrinsic width, so it would shrink to nothing between the two times.
+    flex: 1,
+    minWidth: 0,
+    marginBottom: 0,
+  },
+  phoneTime: {
+    fontSize: "12px",
+    fontWeight: 600,
+    color: "#e0e0e0",
+    fontVariantNumeric: "tabular-nums",
+    whiteSpace: "nowrap",
+    flexShrink: 0,
   },
   seekTooltip: {
     position: "absolute",

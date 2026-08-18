@@ -1,5 +1,5 @@
 import { SkeletonBlock } from "./SkeletonBlock";
-import { COLLECTION_ROW_CARD_WIDTH } from "../lib/grid";
+import { COLLECTION_ROW_CARD_WIDTH, usePosterLayout } from "../lib/grid";
 
 /**
  * Placeholder for a shelf that hasn't loaded yet, in the shape of the shelf it
@@ -26,6 +26,9 @@ export function ShelfSkeleton({
   count?: number;
 }) {
   const cast = variant === "cast";
+  // Headshots are three-across on a phone, so the placeholder has to be too —
+  // see CastRow.
+  const { castAvatarWidth } = usePosterLayout();
   return (
     <div style={{ paddingBottom: "8px" }} aria-hidden="true">
       <SkeletonBlock width={labelWidth} height={20} />
@@ -41,13 +44,12 @@ export function ShelfSkeleton({
         {Array.from({ length: count }, (_, i) => (
           <div
             key={i}
-            style={{ flexShrink: 0, width: cast ? "150px" : COLLECTION_ROW_CARD_WIDTH }}
+            style={{ flexShrink: 0, width: cast ? castAvatarWidth : COLLECTION_ROW_CARD_WIDTH }}
           >
             <SkeletonBlock
-              width={cast ? 150 : "100%"}
-              height={cast ? 150 : undefined}
+              width="100%"
               // Posters are a fixed 2:3; a headshot is a circle.
-              style={cast ? undefined : { aspectRatio: "2 / 3", height: "auto" }}
+              style={{ aspectRatio: cast ? "1 / 1" : "2 / 3", height: "auto" }}
               borderRadius={cast ? "50%" : 10}
             />
             <SkeletonBlock

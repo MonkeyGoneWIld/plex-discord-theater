@@ -539,13 +539,15 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     <div style={styles.container}>
       {/* Back sits at the view's top-left, at the same 16/24 offset as the
           detail pages. Absolutely positioned so it never affects the centered
-          search bar's position — except on a phone, where there is no space
-          beside the box to be absolute over. See backBtnPhone. */}
-      {isSearching && (
-        <button
-          onClick={handleBackFromSearch}
-          style={{ ...styles.backBtn, ...(poster.phone ? styles.backBtnPhone : {}) }}
-        >
+          search bar's position.
+
+          Not on a phone. There is no room beside the box for it there, and
+          every way of making room was worse than not having it: over the field
+          it covered the text, above the field it pushed the whole page down the
+          moment you typed. The box's own X clears the query, which is what ends
+          a search — the button was never the only way out, just the widest. */}
+      {isSearching && !poster.phone && (
+        <button onClick={handleBackFromSearch} style={styles.backBtn}>
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
@@ -1006,16 +1008,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
     fontFamily: "inherit",
     backdropFilter: "blur(12px)",
-  },
-  // On a phone that same absolute placement lands the button on top of the
-  // search field, which is the full width of the screen there and has its own
-  // clear button in the opposite corner. Back goes back into the flow, above the
-  // box rather than across it; `fit-content` is needed because a display:flex
-  // button is block-level and would otherwise stretch the whole row.
-  backBtnPhone: {
-    position: "static",
-    width: "fit-content",
-    margin: "16px 24px 0",
   },
   narrowWrap: {
     maxWidth: "1200px",

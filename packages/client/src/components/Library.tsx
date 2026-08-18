@@ -504,6 +504,11 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   });
   const libraryGroups = splitByKind(libraryItems);
   const externalGroups = splitByKind(externalItems);
+  // The search ran and found nothing. The empty state below takes over the job
+  // of describing the scope in that case, so the bar under the box stands down
+  // — otherwise the same sentence and the same button appear twice on one
+  // screen, a few centimetres apart.
+  const searchFoundNothing = isSearching && !loading && displayItems.length === 0;
   // The kind the active tab narrows results to, in the words the UI uses for
   // it. Null on Home and History, where nothing is filtered out.
   const scopeLabel =
@@ -548,7 +553,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
             and nothing said so once the placeholder had been typed over. People
             read a short result list as "it isn't there" rather than "you are
             looking at half of what was found". */}
-        {isSearching && scopeLabel && (
+        {isSearching && scopeLabel && !searchFoundNothing && (
           <div style={styles.scopeBar}>
             <span style={styles.scopeText}>Showing {scopeLabel} only</span>
             <button type="button" onClick={handleWidenSearch} style={styles.scopeBtn}>
@@ -818,22 +823,20 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 : "This library is empty"}
           </p>
           {/* "No results" is only half the story when a tab is filtering the
-              answer: there may well be results, of the other kind. Say which
-              was searched, and make widening one click rather than a guess. */}
+              answer: there may well be results, of the other kind. Say what was
+              covered, and make widening one click rather than a guess. */}
           {searchResults !== null && (
             scopeLabel ? (
               <>
                 <p style={styles.emptyHint}>
-                  Only {scopeLabel} were searched — there may be results of another kind.
+                  Results on this tab are limited to {scopeLabel}.
                 </p>
                 <button onClick={handleWidenSearch} style={styles.retryBtn}>
                   Search everything
                 </button>
               </>
             ) : (
-              <p style={styles.emptyHint}>
-                Searched your whole library, and online for titles you don't have.
-              </p>
+              <p style={styles.emptyHint}>Searched your full library and online.</p>
             )
           )}
         </div>

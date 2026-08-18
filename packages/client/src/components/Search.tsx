@@ -92,12 +92,20 @@ export function Search({ onSearch, onClear, placeholder = "Search your library..
             the screen the user is already looking at, which matters because the
             results area behind it may still be showing the previous view. */}
         {pending || busy ? (
-          <span style={styles.searchSpinner} role="status" aria-label="Searching" />
+          // Wrapped in a box with the icon's exact footprint and margin rather
+          // than styled to match it: the spinner is smaller than the magnifier,
+          // so sharing the layout box is what keeps the two centred on the same
+          // point instead of one sitting flush against the edge.
+          <span style={styles.searchIconSlot} role="status" aria-label="Searching">
+            <span style={styles.searchSpinner} />
+          </span>
         ) : (
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" style={styles.searchIcon}>
-            <circle cx="7.5" cy="7.5" r="5.5" stroke="#666" strokeWidth="1.5"/>
-            <path d="M12 12L16 16" stroke="#666" strokeWidth="1.5" strokeLinecap="round"/>
-          </svg>
+          <span style={styles.searchIconSlot}>
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <circle cx="7.5" cy="7.5" r="5.5" stroke="#666" strokeWidth="1.5"/>
+              <path d="M12 12L16 16" stroke="#666" strokeWidth="1.5" strokeLinecap="round"/>
+            </svg>
+          </span>
         )}
         <input
           ref={inputRef}
@@ -127,11 +135,20 @@ export function Search({ onSearch, onClear, placeholder = "Search your library..
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  searchSpinner: {
-    // Sized and positioned to sit exactly where the magnifier does.
-    width: "16px",
-    height: "16px",
+  // The one slot both the magnifier and the spinner sit in, so swapping them
+  // moves nothing. Carries the margin the icon used to hold itself.
+  searchIconSlot: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "18px",
+    height: "18px",
+    marginLeft: "14px",
     flexShrink: 0,
+  },
+  searchSpinner: {
+    width: "15px",
+    height: "15px",
     border: "2px solid rgba(229,160,13,0.25)",
     borderTopColor: "#e5a00d",
     borderRadius: "50%",
@@ -154,10 +171,6 @@ const styles: Record<string, React.CSSProperties> = {
     // borderColor-only override leaves the box white-bordered after blur.
     border: "1px solid rgba(229,160,13,0.3)",
     boxShadow: "0 0 0 3px rgba(229,160,13,0.08), inset 0 1px 4px rgba(0,0,0,0.2)",
-  },
-  searchIcon: {
-    marginLeft: "14px",
-    flexShrink: 0,
   },
   input: {
     flex: 1,

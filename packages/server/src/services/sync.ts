@@ -121,9 +121,13 @@ const CO_HOST_ALLOWED_TYPES = new Set(["pause", "resume", "seek", "set-subtitle"
  * whose next action is likely to end the stream for everyone.
  */
 function successionRank(c: RoomClient): number {
-  if (c.isCoHost) return 0;
-  if (c.isWatching) return 1;
-  return 2;
+  // Two independent bits, co-host first, so the four bands come out in the
+  // order the room wants:
+  //   0 co-host, watching   1 co-host, browsing
+  //   2 viewer,  watching   3 viewer,  browsing
+  // Ranking on co-host alone left join time to separate two co-hosts, which
+  // could hand the room to the one who had closed the player.
+  return (c.isCoHost ? 0 : 2) + (c.isWatching ? 0 : 1);
 }
 
 function pickSuccessor(clients: Iterable<RoomClient>): RoomClient | null {

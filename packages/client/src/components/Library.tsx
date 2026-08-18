@@ -415,6 +415,26 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     [onSelect],
   );
 
+  /**
+   * Open the show behind an episode card.
+   *
+   * Built from the fields the episode already carries rather than fetched — the
+   * detail view resolves the rest by ratingKey, which is the same stub the
+   * in-page breadcrumbs hand it.
+   */
+  const handleShowClick = useCallback(
+    (item: PlexItem) => {
+      if (!item.grandparentRatingKey) return;
+      onSelect({
+        ratingKey: item.grandparentRatingKey,
+        title: item.showTitle ?? "Show",
+        type: "show",
+        thumb: item.showThumb ?? null,
+      });
+    },
+    [onSelect],
+  );
+
   const searchQuery = searchQueryRef.current;
   // History tab in-place filter (see handleSearch). Matches title or, for
   // episodes, the show title. Empty query => the full history grid.
@@ -432,6 +452,29 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   const showPeople = isSearching && !activeSectionType && people.length > 0;
   const libraryItems = isSearching ? displayItems.filter((i) => i.inLibrary !== false) : displayItems;
   const externalItems = isSearching ? displayItems.filter((i) => i.inLibrary === false) : [];
+
+  /**
+   * Split a set of results into films and television.
+   *
+   * A search returns both mixed together, and nothing on a poster said which
+   * was which — you had to open a title to find out whether it was a film or a
+   * series, which is the one thing you already know you want. Order within each
+   * group is untouched, so the best match is still the first card under its
+   * heading.
+   *
+   * Seasons and episodes count as television. Anything else — a collection,
+   * say — keeps its place at the end under no heading rather than being
+   * mislabelled as one or the other.
+   */
+  const splitByKind = (list: PlexItem[]) => ({
+    movies: list.filter((i) => i.type === "movie"),
+    tv: list.filter((i) => i.type === "show" || i.type === "season" || i.type === "episode"),
+    other: list.filter(
+      (i) => i.type !== "movie" && i.type !== "show" && i.type !== "season" && i.type !== "episode",
+    ),
+  });
+  const libraryGroups = splitByKind(libraryItems);
+  const externalGroups = splitByKind(externalItems);
   const searchPlaceholder = isHomeTab
     ? "Search everything..."
     : isHistoryTab
@@ -591,6 +634,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                       progress={progressOf(entry)}
                       watched={entry.watched}
                       onRemove={handleForgetFromHistory}
+                      onSelectShow={handleShowClick}
                       removeLabel="Remove from watch history"
                     />
                     <div style={styles.historyWhen}>{formatWhen(entry.updatedAt)}</div>
@@ -663,6 +707,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                         onClick={handleClick}
                         progress={progressOf(entry)}
                         onRemove={handleDismissFromContinue}
+                        onSelectShow={handleShowClick}
                         removeLabel="Remove from Continue Watching"
                       />
                     </div>
@@ -676,7 +721,11 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 <ScrollShelf rowStyle={styles.hubRow}>
                   {hub.items.map((hubItem) => (
                     <div key={hubItem.ratingKey} style={styles.hubCard}>
-                      <MovieCard item={hubItem} onClick={handleClick} />
+                      <MovieCard
+                        item={hubItem}
+                        onClick={handleClick}
+                        onSelectShow={handleShowClick}
+                      />
                     </div>
                   ))}
                 </ScrollShelf>
@@ -716,11 +765,44 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
       ) : (
         <>
           {libraryItems.length > 0 && (
-            <div style={styles.grid}>
-              {libraryItems.map((item) => (
-                <MovieCard key={item.ratingKey} item={item} onClick={handleClick} />
-              ))}
-            </div>
+            // Grouped only while searching. Browsing a section is already one
+            // kind of thing, so headings there would label the obvious.
+            isSearching ? (
+              <>
+                {([
+                  ["Movies", libraryGroups.movies],
+                  ["TV shows", libraryGroups.tv],
+                  [null, libraryGroups.other],
+                ] as Array<[string | null, PlexItem[]]>).map(([label, group]) =>
+                  group.length === 0 ? null : (
+                    <div key={label ?? "other"}>
+                      {label && <div style={styles.sectionHeader}>{label}</div>}
+                      <div style={styles.grid}>
+                        {group.map((item) => (
+                          <MovieCard
+                            key={item.ratingKey}
+                            item={item}
+                            onClick={handleClick}
+                            onSelectShow={handleShowClick}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ),
+                )}
+              </>
+            ) : (
+              <div style={styles.grid}>
+                {libraryItems.map((item) => (
+                  <MovieCard
+                    key={item.ratingKey}
+                    item={item}
+                    onClick={handleClick}
+                    onSelectShow={handleShowClick}
+                  />
+                ))}
+              </div>
+            )
           )}
           {/* Cast and crew sit between what the library has and what it
               doesn't: a person you own films by is a better answer than a film
@@ -764,11 +846,22 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
           {externalItems.length > 0 && (
             <>
               <div style={styles.sectionHeader}>Not in your library</div>
-              <div style={styles.grid}>
-                {externalItems.map((item) => (
-                  <MovieCard key={item.ratingKey} item={item} onClick={handleClick} />
-                ))}
-              </div>
+              {([
+                ["Movies", externalGroups.movies],
+                ["TV shows", externalGroups.tv],
+                [null, externalGroups.other],
+              ] as Array<[string | null, PlexItem[]]>).map(([label, group]) =>
+                group.length === 0 ? null : (
+                  <div key={label ?? "other"}>
+                    {label && <div style={styles.subSectionHeader}>{label}</div>}
+                    <div style={styles.grid}>
+                      {group.map((item) => (
+                        <MovieCard key={item.ratingKey} item={item} onClick={handleClick} />
+                      ))}
+                    </div>
+                  </div>
+                ),
+              )}
             </>
           )}
           {hasMore && (
@@ -871,6 +964,16 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     letterSpacing: "0.3px",
     color: "rgba(255,255,255,0.45)",
+    textTransform: "uppercase" as const,
+  },
+  // Sits under "Not in your library", so it is quieter than the heading above
+  // it — two headings at the same weight read as two unrelated sections.
+  subSectionHeader: {
+    padding: "10px 24px 0",
+    fontSize: "12px",
+    fontWeight: 600,
+    letterSpacing: "0.3px",
+    color: "rgba(255,255,255,0.3)",
     textTransform: "uppercase" as const,
   },
   historyHeader: {

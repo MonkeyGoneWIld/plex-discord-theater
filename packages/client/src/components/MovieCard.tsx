@@ -15,6 +15,15 @@ interface MovieCardProps {
    *  it do different things (leave Continue Watching vs. forget entirely), so
    *  the wording has to come from the caller. */
   removeLabel?: string;
+  /**
+   * Open the show an episode belongs to, from the show name in the subtitle.
+   *
+   * Continue Watching is full of episodes, and the name of the show was the one
+   * piece of text on the card that named something you'd want to go to and
+   * couldn't. Omit to leave the subtitle as plain text — the card still opens
+   * the episode itself.
+   */
+  onSelectShow?: (item: PlexItem) => void;
 }
 
 
@@ -39,7 +48,7 @@ const ACCENT_BORDER = "rgba(229,160,13,0.85)";
  *  which would push the card past the row's clip edge and shear the border. */
 const HOVER_POSTER_FILTER = "brightness(1.12)";
 
-export function MovieCard({ item, onClick, progress, watched, onRemove, removeLabel = "Remove" }: MovieCardProps) {
+export function MovieCard({ item, onClick, progress, watched, onRemove, removeLabel = "Remove", onSelectShow }: MovieCardProps) {
   const prefetchTimer = useRef<number | undefined>(undefined);
   // A card can unmount while its timer is pending (filtering, tab switch).
   useEffect(() => () => { if (prefetchTimer.current) window.clearTimeout(prefetchTimer.current); }, []);
@@ -146,7 +155,36 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
         <div style={styles.title}>{item.title}</div>
         {item.type === "episode" ? (
           <div style={styles.year}>
-            {item.showTitle}
+            {/* A span with a role, not a button: this sits inside the card's own
+                button, and nesting one is invalid HTML that browsers handle
+                inconsistently. Same treatment as the dismiss control above. */}
+            {item.showTitle && onSelectShow && item.grandparentRatingKey ? (
+              <span
+                role="link"
+                tabIndex={0}
+                title={`Go to ${item.showTitle}`}
+                onClick={(e) => { e.stopPropagation(); onSelectShow(item); }}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter" && e.key !== " ") return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onSelectShow(item);
+                }}
+                style={styles.showLink}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.color = "#e5a00d";
+                  e.currentTarget.style.textDecoration = "underline";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.color = "";
+                  e.currentTarget.style.textDecoration = "none";
+                }}
+              >
+                {item.showTitle}
+              </span>
+            ) : (
+              item.showTitle
+            )}
             {item.parentIndex != null && item.index != null
               ? `${item.showTitle ? " \u00b7 " : ""}S${item.parentIndex}E${item.index}`
               : ""}
@@ -162,6 +200,11 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  showLink: {
+    // Inherits the subtitle's colour until hovered, so the card doesn't gain a
+    // second accent-coloured element competing with the title above it.
+    cursor: "pointer",
+  },
   card: {
     background: "#141414",
     borderRadius: "10px",

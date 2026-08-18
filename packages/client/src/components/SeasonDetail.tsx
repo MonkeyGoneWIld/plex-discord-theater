@@ -78,6 +78,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
   // that are actually here are what the page is for, and this is an annotation.
   const [tmdbEpisodes, setTmdbEpisodes] = useState<TmdbEpisode[] | null>(null);
   const [showGaps, setShowGaps] = useState(false);
+  const [gapToggleHover, setGapToggleHover] = useState(false);
 
   useEffect(() => {
     setTmdbEpisodes(null);
@@ -198,29 +199,6 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
         </div>
       ) : (
         <div style={styles.list}>
-          {/* Only when this season actually has gaps, and hidden until asked
-              for: a complete season should look complete, and a currently
-              airing one shouldn't open with a list of episodes that don't
-              exist yet. */}
-          {gaps.length > 0 && (
-            <div style={styles.gapToggleRow}>
-              <button
-                type="button"
-                onClick={() => setShowGaps((v) => !v)}
-                style={styles.gapToggle}
-                aria-expanded={showGaps}
-              >
-                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
-                  <path
-                    d={showGaps ? "M3 6.5L8 11L13 6.5" : "M6.5 3L11 8L6.5 13"}
-                    stroke="currentColor" strokeWidth="1.8"
-                    strokeLinecap="round" strokeLinejoin="round"
-                  />
-                </svg>
-                {showGaps ? "Hide" : "Show"} {gapLabel}
-              </button>
-            </div>
-          )}
           {rows.map((row) => {
             if (row.kind === "gap") {
               const g = row.ep;
@@ -380,6 +358,36 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
               </button>
             );
           })}
+          {/* Below the list, not above it.
+              Above, it displaced every episode by its own height the moment a
+              season turned out to be incomplete — the page shifted down for a
+              control most people never press. Here it can only grow downward,
+              so nothing already on screen moves. Rendered at all only when the
+              season has gaps, and collapsed until asked: a complete season
+              should look complete, and one still airing shouldn't open with a
+              list of episodes that don't exist yet. */}
+          {gaps.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowGaps((v) => !v)}
+              onMouseEnter={() => setGapToggleHover(true)}
+              onMouseLeave={() => setGapToggleHover(false)}
+              style={{
+                ...styles.gapToggle,
+                ...(gapToggleHover ? styles.gapToggleHover : {}),
+              }}
+              aria-expanded={showGaps}
+            >
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+                <path
+                  d={showGaps ? "M3 10.5L8 5.5L13 10.5" : "M3 5.5L8 10.5L13 5.5"}
+                  stroke="currentColor" strokeWidth="1.8"
+                  strokeLinecap="round" strokeLinejoin="round"
+                />
+              </svg>
+              {showGaps ? "Hide" : "Show"} {gapLabel}
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -503,15 +511,19 @@ const styles: Record<string, React.CSSProperties> = {
   // Same card, turned down. The shape stays identical to a real episode so the
   // list reads as one season rather than two lists; everything that says "you
   // can't play this" is a matter of contrast, not of layout.
-  gapToggleRow: {
-    display: "flex", justifyContent: "flex-end", marginBottom: "2px",
-  },
   gapToggle: {
-    display: "inline-flex", alignItems: "center", gap: "6px",
-    padding: "5px 12px", borderRadius: "999px",
-    border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.04)",
-    color: "#999", fontSize: "12px", fontWeight: 600,
-    cursor: "pointer", fontFamily: "inherit",
+    // Full width and dashed, matching the cards it reveals — it reads as the
+    // end of the list rather than a control bolted underneath it.
+    display: "flex", alignItems: "center", justifyContent: "center", gap: "7px",
+    width: "100%", padding: "11px", borderRadius: "8px",
+    // Full shorthand, as everywhere else in this file — see episodeCard.
+    border: "1px dashed rgba(255,255,255,0.12)", background: "transparent",
+    color: "#8a8a8a", fontSize: "12px", fontWeight: 600,
+    cursor: "pointer", fontFamily: "inherit", transition: "all 0.2s ease",
+  },
+  gapToggleHover: {
+    border: "1px dashed rgba(255,255,255,0.22)", background: "rgba(255,255,255,0.03)",
+    color: "#bbb",
   },
   gapCard: {
     // No hover, no pointer: nothing here responds to a click.

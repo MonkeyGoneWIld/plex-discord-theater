@@ -1069,7 +1069,9 @@ const styles: Record<string, React.CSSProperties> = {
   },
   emptyHint: {
     fontSize: "13px",
-    color: "rgba(255,255,255,0.35)",
+    fontWeight: 400,
+    lineHeight: 1.5,
+    color: "#6b6b6b",
     marginTop: "-4px",
     textAlign: "center",
     maxWidth: "420px",
@@ -1125,9 +1127,17 @@ const styles: Record<string, React.CSSProperties> = {
   emptyIcon: {
     color: "#555",
   },
+  // The headline of an empty state, with emptyHint below it. The two were
+  // 14px/#666 and 13px/rgba(255,255,255,0.35) — one pixel and two greys apart,
+  // where the translucent one composites to roughly rgb(97,97,97) against the
+  // page. Near-identical size at near-identical weight doesn't read as a
+  // hierarchy; it reads as two fonts. Both are opaque now, and the step between
+  // them is deliberate.
   emptyText: {
-    color: "#666",
-    fontSize: "14px",
+    color: "#9a9a9a",
+    fontSize: "15px",
+    fontWeight: 500,
+    lineHeight: 1.4,
     textAlign: "center" as const,
   },
   loadMoreWrap: {

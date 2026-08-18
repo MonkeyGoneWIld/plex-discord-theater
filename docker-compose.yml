@@ -7,44 +7,82 @@ services:
         VITE_DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID}
     ports:
       - "${PORT:-3000}:${PORT:-3000}"
+
+    # Everything below is read from your .env file. Copy .env.example to .env
+    # and fill in the required block; the rest can stay empty, and each one
+    # simply turns its feature off. See .env.example for what each does.
     environment:
+      # ── Required ────────────────────────────────────────────────
       - NODE_ENV=production
       - PLEX_URL=${PLEX_URL}
       - PLEX_TOKEN=${PLEX_TOKEN}
-      - PLEX_ACCOUNT_TOKEN=${PLEX_ACCOUNT_TOKEN}
       - DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}
       - DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}
       - REDIRECT_URI=${REDIRECT_URI}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+      - PORT=${PORT:-3000}
+      # Where the SQLite databases and logs live — matches the volume below.
+      - THUMB_CACHE_DIR=/data
+
+      # ── Optional integrations ───────────────────────────────────
+      # All off unless set. The server prints which are live at startup:
+      #   docker compose logs | grep Config
+      #
+      # Your plex.tv ACCOUNT token (not the server token above). Enables detail
+      # pages for titles you don't own, and signs in to Seerr as you.
+      - PLEX_ACCOUNT_TOKEN=${PLEX_ACCOUNT_TOKEN}
+      # Collections, "More Like This", and cast/crew pages.
+      - TMDB_API_KEY=${TMDB_API_KEY}
+      # IMDb / Rotten Tomatoes / TMDB scores on detail pages.
+      - MDBLIST_API_KEY=${MDBLIST_API_KEY}
+      # Correct season numbering for the missing-episode list. TVDB is what
+      # Sonarr monitors, so without this the list falls back to TMDB, which
+      # sometimes disagrees about which season an episode belongs to.
+      # TVDB_PIN is only needed for a user-supported subscriber key.
+      - TVDB_API_KEY=${TVDB_API_KEY}
+      - TVDB_PIN=${TVDB_PIN}
+      # Overseerr / Jellyseerr URL — enables the Request button.
+      - SEERR_URL=${SEERR_URL}
+      # Restrict the activity to named Discord servers. Empty = any server.
       - ALLOWED_GUILD_IDS=${ALLOWED_GUILD_IDS}
+      # Route HLS segments through a VPS so your home connection uploads one
+      # stream instead of one per viewer. See docs/vps-relay-setup.md.
       - VPS_RELAY_URL=${VPS_RELAY_URL}
       - VPS_RELAY_KEY=${VPS_RELAY_KEY}
-      - SEERR_URL=${SEERR_URL}
-      - TMDB_API_KEY=${TMDB_API_KEY}
-      # Ratings row. Unset, /api/ratings answers configured:false and the row
-      # simply never appears — which looked like a bug when the key was set in
-      # .env but stopped here.
-      - MDBLIST_API_KEY=${MDBLIST_API_KEY}
-      - ADMIN_SECRET=${ADMIN_SECRET}
-      # The bandwidth levers. Documented in .env.example as the biggest one
-      # available, and unreachable from here until now.
+
+      # ── Tuning ──────────────────────────────────────────────────
+      # Per-viewer bandwidth scales with the bitrate — the biggest lever there
+      # is if your upload is tight.
       - VIDEO_BITRATE_KBPS=${VIDEO_BITRATE_KBPS}
       - VIDEO_PEAK_BITRATE_KBPS=${VIDEO_PEAK_BITRATE_KBPS}
+      - THUMB_CACHE_TTL_MS=${THUMB_CACHE_TTL_MS}
+      - THUMB_CACHE_MAX_MB=${THUMB_CACHE_MAX_MB}
+      # Background pre-fetch of detail-page data, so opening a title is a cache
+      # hit instead of several round trips. WARM_CACHE=0 turns it off.
       - WARM_CACHE=${WARM_CACHE}
       - WARM_CACHE_MAX_ITEMS=${WARM_CACHE_MAX_ITEMS}
       - WARM_CACHE_DELAY_MS=${WARM_CACHE_DELAY_MS}
       - WARM_CACHE_INTERVAL_MIN=${WARM_CACHE_INTERVAL_MIN}
+
+      # ── Diagnostics ─────────────────────────────────────────────
+      # Server and client events are written to /data/logs, so a stream that
+      # died can be read back after the container logs have rolled away.
       - LOG_TO_FILE=${LOG_TO_FILE}
       - LOG_DIR=${LOG_DIR}
       - LOG_MAX_FILE_MB=${LOG_MAX_FILE_MB}
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS}
-      - THUMB_CACHE_TTL_MS=${THUMB_CACHE_TTL_MS}
-      - THUMB_CACHE_MAX_MB=${THUMB_CACHE_MAX_MB}
-      - PORT=${PORT:-3000}
-      - THUMB_CACHE_DIR=/data
-      # Set DEBUG=1 to turn on verbose HLS segment/session logging.
+      # DEBUG=1 adds a line per HLS segment, keep-alive and prefetch poll —
+      # useful while chasing a specific stream, and roughly five times the log
+      # volume the rest of the time.
       - DEBUG=${DEBUG:-}
+      # Guards the "stop every transcode" endpoint. Without it that endpoint
+      # only answers requests originating on this machine.
+      - ADMIN_SECRET=${ADMIN_SECRET}
+
     volumes:
+      # SQLite (sessions, watch history, thumbnail cache) and logs. A named
+      # volume keeps them across rebuilds; swap for a host path (e.g.
+      # ./data:/data) if you'd rather have them somewhere you can browse.
       - app-data:/data
     restart: unless-stopped
     logging:

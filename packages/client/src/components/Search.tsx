@@ -6,10 +6,22 @@ interface SearchProps {
   placeholder?: string;
   // Bumped by the parent (e.g. its Back button) to clear the field from outside.
   clearSignal?: number;
+  /**
+   * Whether the parent's search request is still in flight.
+   *
+   * Combined with this component's own debounce window, which is the other half
+   * of the wait — and the half the parent can't see. Between them they cover
+   * the whole gap between the last keystroke and results appearing, which is
+   * otherwise a second or more of the screen doing nothing.
+   */
+  busy?: boolean;
 }
 
-export function Search({ onSearch, onClear, placeholder = "Search your library...", clearSignal = 0 }: SearchProps) {
+export function Search({ onSearch, onClear, placeholder = "Search your library...", clearSignal = 0, busy = false }: SearchProps) {
   const [value, setValue] = useState("");
+  // A keystroke has landed and the debounce hasn't fired yet. Tracked here
+  // because the timer lives here — the parent has no way to know about it.
+  const [pending, setPending] = useState(false);
   const [focused, setFocused] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -29,6 +41,7 @@ export function Search({ onSearch, onClear, placeholder = "Search your library..
   useEffect(() => {
     if (clearSignal === firstSignal.current) return;
     clearTimeout(debounceRef.current);
+    setPending(false);
     setValue("");
   }, [clearSignal]);
 
@@ -39,14 +52,22 @@ export function Search({ onSearch, onClear, placeholder = "Search your library..
 
       clearTimeout(debounceRef.current);
       if (q.trim().length === 0) {
+        setPending(false);
         onClearRef.current();
         return;
       }
       // One character is not a search: each one costs a Plex /hubs/search, a
       // Discover cloud search and up to 15 parallel ownership lookups, so
       // typing "the" fired three of those before this floor.
-      if (q.trim().length < 2) return;
-      debounceRef.current = setTimeout(() => onSearchRef.current(q.trim()), 400);
+      if (q.trim().length < 2) {
+        setPending(false);
+        return;
+      }
+      setPending(true);
+      debounceRef.current = setTimeout(() => {
+        setPending(false);
+        onSearchRef.current(q.trim());
+      }, 400);
     },
     [],
   );
@@ -54,6 +75,7 @@ export function Search({ onSearch, onClear, placeholder = "Search your library..
   // Clear the box and keep the cursor in the field, so the user can keep typing.
   const clearInput = useCallback(() => {
     clearTimeout(debounceRef.current);
+    setPending(false);
     setValue("");
     onClearRef.current();
     inputRef.current?.focus();
@@ -65,10 +87,18 @@ export function Search({ onSearch, onClear, placeholder = "Search your library..
         ...styles.inputWrap,
         ...(focused ? styles.inputWrapFocused : {}),
       }}>
-        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" style={styles.searchIcon}>
-          <circle cx="7.5" cy="7.5" r="5.5" stroke="#666" strokeWidth="1.5"/>
-          <path d="M12 12L16 16" stroke="#666" strokeWidth="1.5" strokeLinecap="round"/>
-        </svg>
+        {/* The magnifier becomes a spinner while a search is on its way. Same
+            place, same size, so nothing shifts — and it is in the one part of
+            the screen the user is already looking at, which matters because the
+            results area behind it may still be showing the previous view. */}
+        {pending || busy ? (
+          <span style={styles.searchSpinner} role="status" aria-label="Searching" />
+        ) : (
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" style={styles.searchIcon}>
+            <circle cx="7.5" cy="7.5" r="5.5" stroke="#666" strokeWidth="1.5"/>
+            <path d="M12 12L16 16" stroke="#666" strokeWidth="1.5" strokeLinecap="round"/>
+          </svg>
+        )}
         <input
           ref={inputRef}
           type="text"
@@ -97,6 +127,16 @@ export function Search({ onSearch, onClear, placeholder = "Search your library..
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  searchSpinner: {
+    // Sized and positioned to sit exactly where the magnifier does.
+    width: "16px",
+    height: "16px",
+    flexShrink: 0,
+    border: "2px solid rgba(229,160,13,0.25)",
+    borderTopColor: "#e5a00d",
+    borderRadius: "50%",
+    animation: "spin 0.7s linear infinite",
+  },
   container: {
     padding: "16px 24px",
   },

@@ -92,6 +92,10 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   const [items, setItems] = useState<PlexItem[]>([]);
   const [totalSize, setTotalSize] = useState(0);
   const [searchResults, setSearchResults] = useState<PlexItem[] | null>(null);
+  // A search request is in flight. Separate from `loading`, which also covers
+  // library page loads and — on the Home tab — never reaches the screen during
+  // a search, because the hubs branch renders ahead of it.
+  const [searchBusy, setSearchBusy] = useState(false);
   // Cast and crew matching the search. Only surfaced on Home (and on History
   // when there's no history to filter) — the Movies and TV Shows tabs are
   // filtered views of one library section, where a person isn't a valid result.
@@ -353,6 +357,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     }
 
     setLoading(true);
+    setSearchBusy(true);
     try {
       const { items: results, people: peopleResults } = await searchPlex(query);
       // A newer search started or the box was cleared while this was in
@@ -369,7 +374,10 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
       if (reqId !== searchReqId.current) return;
       console.error("Search failed:", err);
     }
-    if (reqId === searchReqId.current) setLoading(false);
+    if (reqId === searchReqId.current) {
+      setLoading(false);
+      setSearchBusy(false);
+    }
   }, [activeSectionType, isHistoryTab, historyItems.length]);
 
   // Re-filter search results when switching tabs during an active search
@@ -384,10 +392,31 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   // Switching tabs drops the in-place History filter and empties the search
   // box, so a query typed on History doesn't linger when you leave and return.
   // (The Search box ignores the initial signal, so mount is unaffected.)
+  // Set when the tab change is us widening a search on the user's behalf, so
+  // the reset below doesn't throw away the query they are mid-way through.
+  const preserveQueryRef = useRef(false);
   useEffect(() => {
     setHistoryQuery("");
+    if (preserveQueryRef.current) {
+      preserveQueryRef.current = false;
+      return;
+    }
     setSearchResetSignal((n) => n + 1);
   }, [activeSection]);
+
+  /**
+   * Drop the kind filter and show everything the search found.
+   *
+   * No refetch: the search itself was never scoped — the request goes to the
+   * whole library and to Discover, and the active tab only filters the answer
+   * by kind afterwards. Moving to Home re-runs that filter with nothing to
+   * filter on, which is why the results appear instantly.
+   */
+  const handleWidenSearch = useCallback(() => {
+    preserveQueryRef.current = true;
+    onActiveSectionChange("home");
+    onBrowseContext?.("Browsing Home");
+  }, [onActiveSectionChange, onBrowseContext]);
 
   const handleClearSearch = useCallback(() => {
     // Invalidate any in-flight search so its response can't land after clear
@@ -475,6 +504,10 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   });
   const libraryGroups = splitByKind(libraryItems);
   const externalGroups = splitByKind(externalItems);
+  // The kind the active tab narrows results to, in the words the UI uses for
+  // it. Null on Home and History, where nothing is filtered out.
+  const scopeLabel =
+    activeSectionType === "movie" ? "movies" : activeSectionType === "show" ? "TV shows" : null;
   const searchPlaceholder = isHomeTab
     ? "Search everything..."
     : isHistoryTab
@@ -501,7 +534,28 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
         </button>
       )}
       <div style={styles.narrowWrap}>
-        <Search onSearch={handleSearch} onClear={handleClearSearch} placeholder={searchPlaceholder} clearSignal={searchResetSignal} />
+        <Search
+          onSearch={handleSearch}
+          onClear={handleClearSearch}
+          placeholder={searchPlaceholder}
+          clearSignal={searchResetSignal}
+          busy={searchBusy}
+        />
+
+        {/* What this search is actually showing.
+            The request is never scoped — it always covers the whole library and
+            Discover — but an active tab filters the answer down to one kind,
+            and nothing said so once the placeholder had been typed over. People
+            read a short result list as "it isn't there" rather than "you are
+            looking at half of what was found". */}
+        {isSearching && scopeLabel && (
+          <div style={styles.scopeBar}>
+            <span style={styles.scopeText}>Showing {scopeLabel} only</span>
+            <button type="button" onClick={handleWidenSearch} style={styles.scopeBtn}>
+              Search everything
+            </button>
+          </div>
+        )}
 
         {/* Section tabs — visible during search so user can switch result type.
             These sit directly under the search bar and keep a fixed position: the
@@ -756,11 +810,32 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
           </div>
           <p style={styles.emptyText}>
             {searchResults !== null
-              ? `No results for \u201c${searchQuery}\u201d`
+              ? scopeLabel
+                ? `No ${scopeLabel} match \u201c${searchQuery}\u201d`
+                : `Nothing matches \u201c${searchQuery}\u201d`
               : selectedGenres.length > 0
                 ? `No ${activeSectionType === "show" ? "shows" : "movies"} match these filters`
                 : "This library is empty"}
           </p>
+          {/* "No results" is only half the story when a tab is filtering the
+              answer: there may well be results, of the other kind. Say which
+              was searched, and make widening one click rather than a guess. */}
+          {searchResults !== null && (
+            scopeLabel ? (
+              <>
+                <p style={styles.emptyHint}>
+                  Only {scopeLabel} were searched — there may be results of another kind.
+                </p>
+                <button onClick={handleWidenSearch} style={styles.retryBtn}>
+                  Search everything
+                </button>
+              </>
+            ) : (
+              <p style={styles.emptyHint}>
+                Searched your whole library, and online for titles you don't have.
+              </p>
+            )
+          )}
         </div>
       ) : (
         <>
@@ -965,6 +1040,36 @@ const styles: Record<string, React.CSSProperties> = {
     letterSpacing: "0.3px",
     color: "rgba(255,255,255,0.45)",
     textTransform: "uppercase" as const,
+  },
+  scopeBar: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "10px",
+    padding: "10px 24px 0",
+    flexWrap: "wrap",
+  },
+  scopeText: {
+    fontSize: "13px",
+    color: "rgba(255,255,255,0.45)",
+  },
+  scopeBtn: {
+    background: "none",
+    border: "none",
+    padding: 0,
+    color: "#e5a00d",
+    fontSize: "13px",
+    fontWeight: 600,
+    cursor: "pointer",
+    fontFamily: "inherit",
+    textDecoration: "underline",
+  },
+  emptyHint: {
+    fontSize: "13px",
+    color: "rgba(255,255,255,0.35)",
+    marginTop: "-4px",
+    textAlign: "center",
+    maxWidth: "420px",
   },
   // Sits under "Not in your library", so it is quieter than the heading above
   // it — two headings at the same weight read as two unrelated sections.

@@ -647,6 +647,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const [followSessionId, setFollowSessionId] = useState<string | null>(
     isHost ? null : roomSessionId,
   );
+  // Read inside the stream-assignment effect, which must not re-run when this
+  // changes — it is the thing doing the changing.
+  const followSessionIdRef = useRef(followSessionId);
+  followSessionIdRef.current = followSessionId;
   useEffect(() => {
     // Owners lead; everyone else follows. This used to be "hosts lead", which is
     // the same thing while a room has one stream and wrong the moment it has
@@ -746,8 +750,16 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       logEvent("HLS", "moving onto this stream's transcode", {
         variant: v.variantKey,
         to: v.hlsSessionId.substring(0, 8),
+        alreadyFollowed: followSessionIdRef.current === v.hlsSessionId,
       });
       setFollowSessionId(v.hlsSessionId);
+      // `followSessionId` may already hold this id — leaving a stream and coming
+      // back to it is the ordinary case, and nothing ever cleared it on the way
+      // out. Setting state to the value it already has is not a change, so the
+      // HLS effect never re-ran and the player sat on the transcode it had
+      // abandoned, buffering forever. Bumping the retry key is what actually
+      // asks for the rebuild; the assignment above only records where to point it.
+      setRetryKey((k) => k + 1);
       return;
     }
     // Neither branch fired, so nothing is being rebuilt and the freeze-frame
@@ -3119,7 +3131,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         onSyncResume={canControl ? syncActions?.sendResume : undefined}
         onSyncSeek={canControl ? syncActions?.sendSeek : undefined}
         onSeekRestart={canControl ? handleSeekCommand : undefined}
-        onOpenTrackSwitcher={canControl ? () => setShowTrackSwitcher(true) : undefined}
+        // Everyone, not just whoever can drive the room. Choosing tracks puts
+        // you on a stream that has them; it is a preference, not a control.
+        onOpenTrackSwitcher={() => setShowTrackSwitcher(true)}
         onSurfaceClick={canControl ? togglePlayPause : undefined}
         restartingTo={restartingTo}
         queueCount={syncState?.queue?.length}
@@ -3151,6 +3165,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // Audio is everyone's now: a viewer choosing a different track moves
           // onto a stream that has it rather than changing what the room hears.
           scope={isHost ? "room" : "self"}
+          // This client's own tracks, so the tick marks what *it* is watching
+          // rather than whatever the item was last pointed at.
+          currentAudioId={variant?.audioStreamId ?? currentAudioStreamRef.current}
+          currentSubtitleId={variant?.subtitleStreamId ?? currentSubtitleStreamRef.current}
         />
       )}
       {showQueuePanel && syncState && (

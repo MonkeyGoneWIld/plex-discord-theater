@@ -21,9 +21,28 @@ interface TrackSwitcherProps {
    * is what they are doing.
    */
   scope?: "room" | "self";
+  /**
+   * The tracks this client is actually watching.
+   *
+   * Not read from the metadata's `selected` flags any more. Those describe the
+   * *item*, which is now pointed at whichever stream started most recently — so
+   * a viewer who turned subtitles off saw English still ticked the moment
+   * anybody else started an English stream. The room has several answers to
+   * "which track is playing" and only one of them is yours.
+   */
+  currentAudioId?: number | null;
+  currentSubtitleId?: number | null;
 }
 
-export function TrackSwitcher({ ratingKey, mediaIndex, onClose, onTrackChange, scope = "self" }: TrackSwitcherProps) {
+export function TrackSwitcher({
+  ratingKey,
+  mediaIndex,
+  onClose,
+  onTrackChange,
+  scope = "self",
+  currentAudioId,
+  currentSubtitleId,
+}: TrackSwitcherProps) {
   const [tab, setTab] = useState<"audio" | "subtitles">("audio");
   const [audioTracks, setAudioTracks] = useState<StreamTrack[]>([]);
   const [subtitleTracks, setSubtitleTracks] = useState<StreamTrack[]>([]);
@@ -41,6 +60,12 @@ export function TrackSwitcher({ ratingKey, mediaIndex, onClose, onTrackChange, s
       .catch(console.error)
       .finally(() => setLoading(false));
   }, [ratingKey, mediaIndex]);
+
+  // What this client is on. Falls back to the item's own flags only when the
+  // player didn't say — an older caller, or before the first assignment lands.
+  const activeAudio = currentAudioId ?? audioTracks.find((t) => t.selected)?.id ?? null;
+  const activeSubtitle =
+    currentSubtitleId ?? subtitleTracks.find((t) => t.selected)?.id ?? 0;
 
   const handleSelect = (type: "audio" | "subtitle", streamId: number) => {
     if (partId == null) return;
@@ -86,43 +111,49 @@ export function TrackSwitcher({ ratingKey, mediaIndex, onClose, onTrackChange, s
           <div style={styles.loading}>Loading tracks...</div>
         ) : tab === "audio" ? (
           <div style={styles.trackList}>
-            {audioTracks.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => handleSelect("audio", t.id)}
-                style={t.selected ? styles.trackSelected : styles.track}
-              >
-                <div>
-                  <div style={{ color: t.selected ? "#f0f0f0" : "#ccc", fontSize: 13 }}>{t.title}</div>
-                  {t.codec && (
-                    <div style={{ color: t.selected ? "#888" : "#666", fontSize: 11 }}>
-                      {t.codec}{t.channels ? ` ${t.channels}ch` : ""}
-                    </div>
-                  )}
-                </div>
-                {t.selected && <span style={styles.checkmark}>{"\u2713"}</span>}
-              </button>
-            ))}
+            {audioTracks.map((t) => {
+              const on = t.id === activeAudio;
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => handleSelect("audio", t.id)}
+                  style={on ? styles.trackSelected : styles.track}
+                >
+                  <div>
+                    <div style={{ color: on ? "#f0f0f0" : "#ccc", fontSize: 13 }}>{t.title}</div>
+                    {t.codec && (
+                      <div style={{ color: on ? "#888" : "#666", fontSize: 11 }}>
+                        {t.codec}{t.channels ? ` ${t.channels}ch` : ""}
+                      </div>
+                    )}
+                  </div>
+                  {on && <span style={styles.checkmark}>{"\u2713"}</span>}
+                </button>
+              );
+            })}
           </div>
         ) : (
           <div style={styles.trackList}>
             <button
               onClick={() => handleSelect("subtitle", 0)}
-              style={!subtitleTracks.some((t) => t.selected) ? styles.trackSelected : styles.track}
+              style={!activeSubtitle ? styles.trackSelected : styles.track}
             >
-              <div style={{ color: !subtitleTracks.some((t) => t.selected) ? "#f0f0f0" : "#ccc", fontSize: 13 }}>None</div>
-              {!subtitleTracks.some((t) => t.selected) && <span style={styles.checkmark}>{"\u2713"}</span>}
+              <div style={{ color: !activeSubtitle ? "#f0f0f0" : "#ccc", fontSize: 13 }}>None</div>
+              {!activeSubtitle && <span style={styles.checkmark}>{"\u2713"}</span>}
             </button>
-            {subtitleTracks.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => handleSelect("subtitle", t.id)}
-                style={t.selected ? styles.trackSelected : styles.track}
-              >
-                <div style={{ color: t.selected ? "#f0f0f0" : "#ccc", fontSize: 13 }}>{t.title}</div>
-                {t.selected && <span style={styles.checkmark}>{"\u2713"}</span>}
-              </button>
-            ))}
+            {subtitleTracks.map((t) => {
+              const on = t.id === activeSubtitle;
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => handleSelect("subtitle", t.id)}
+                  style={on ? styles.trackSelected : styles.track}
+                >
+                  <div style={{ color: on ? "#f0f0f0" : "#ccc", fontSize: 13 }}>{t.title}</div>
+                  {on && <span style={styles.checkmark}>{"\u2713"}</span>}
+                </button>
+              );
+            })}
           </div>
         )}
 

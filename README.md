@@ -31,9 +31,14 @@ Out of the player, it opens on the same hub rows your Plex server arranges.
 
 ![The Home tab, with Trending, Popular and Top Rated poster rows](docs/screenshots/home.jpg)
 
-| ![Search results, split into titles in the library and titles that are not](docs/screenshots/search.jpg) | ![A film's detail page, with ratings, synopsis, cast, and audio and subtitle pickers](docs/screenshots/title.jpg) |
-| :-- | :-- |
-| Search reaches past your own library, so something nobody has is still findable — and marked clearly as something you don't own. | Ratings, cast and the track pickers, all settled before anyone presses Play. |
+Search reaches past your own library, so something nobody has is still findable —
+and marked clearly as something you don't own.
+
+![Search results, split into titles in the library and titles that are not](docs/screenshots/search.jpg)
+
+A title page settles ratings, cast and the track pickers before anyone presses Play.
+
+![A film's detail page, with ratings, synopsis, cast, and audio and subtitle pickers](docs/screenshots/title.jpg)
 
 Every face in that cast row opens, onto everything in your library that person
 worked on — pulled from Plex by tag, so it only ever lists titles you actually have.

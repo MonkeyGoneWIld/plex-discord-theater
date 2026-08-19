@@ -338,12 +338,37 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           type: "play", ratingKey, title, subtitles, hlsSessionId, position, sessionOffset,
           audioStreamId, subtitleStreamId,
         });
-        setState((prev) => ({
-          ...prev,
-          playing: true,
-          position: position ?? 0,
-          sessionOffset: sessionOffset ?? position ?? 0,
-        }));
+        setState((prev) => {
+          // Restarting what is already running — a track change, or a seek that
+          // needed a new transcode — rather than starting something.
+          const restart = prev.playing && prev.ratingKey === ratingKey;
+          return {
+            ...prev,
+            // What we have just told the room is playing. Leaving these out made
+            // the host the one client that didn't know: the server excludes a
+            // sender from its own broadcast, so nothing else was ever going to
+            // tell it. With `ratingKey` null, every "is the room already running
+            // this?" test on the host answered no — including the one that lands
+            // a rebuild on the room's clock. So the host alone never landed, and
+            // came back from each of its own track changes exactly as far behind
+            // the room as that change had taken to load. It never caught up, and
+            // the gaps added together over an evening.
+            ratingKey,
+            title,
+            subtitles,
+            hlsSessionId,
+            playing: true,
+            // A restart does not move the room, so it must not move our copy of
+            // it either. `position` here is where this transcode was asked to
+            // begin, which is behind the clock by the length of the load.
+            position: restart ? prev.position : (position ?? 0),
+            // A genuine start is a request, not an observation: no frame of it
+            // exists yet, so there is nothing to carry forward from and 0 says
+            // "don't extrapolate". Mirrors the server's positionConfirmed.
+            positionAt: restart ? prev.positionAt : 0,
+            sessionOffset: sessionOffset ?? position ?? 0,
+          };
+        });
       },
       sendPause: (position: number) => {
         send({ type: "pause", position });
@@ -537,7 +562,16 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               // Non-zero when the host resumed from history or restarted the
               // transcode at a seek target; 0 for a plain start.
               position: (msg.position as number) ?? 0,
-              positionAt: Date.now(),
+              // A restart carries the room's live clock, so it keeps running
+              // from here. A genuine start carries the offset a transcode was
+              // asked for, which nothing is playing yet — carrying that forward
+              // means chasing a position the host hasn't reached, into a
+              // transcode that hasn't produced it. Same rule as the server's
+              // positionConfirmed; 0 means "don't extrapolate this".
+              positionAt:
+                prev.playing && prev.ratingKey === ((msg.ratingKey as string) || null)
+                  ? Date.now()
+                  : 0,
               hostDisconnected: false,
               commandSeq: prev.commandSeq + 1,
               browseContext: null,

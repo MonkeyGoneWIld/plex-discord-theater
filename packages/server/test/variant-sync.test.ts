@@ -71,6 +71,23 @@ async function room(id: string, names: string[]) {
   return cs;
 }
 
+/**
+ * The room's position as a joiner would be told it — the only honest way to
+ * read the clock from outside, since the server excludes a sender from its own
+ * broadcasts and a probe has no history to colour what it is told.
+ */
+async function clockOf(instanceId: string): Promise<number> {
+  const probe = new Client("u-probe-" + Math.random().toString(36).slice(2, 8), "probe");
+  await probe.connect(instanceId);
+  const pos = probe.last("state")?.position as number;
+  probe.close();
+  await sleep(30);
+  return pos;
+}
+
+const near = (actual: number, expected: number, tol = 1.5) =>
+  Math.abs(actual - expected) <= tol ? "ok" : `${actual} (wanted ~${expected})`;
+
 /** Host starts a title on audio A(1) / subtitle none(0). */
 async function startPlayback(host: Client, ratingKey = "100") {
   const sid = uuid();
@@ -310,7 +327,7 @@ console.log("\n— the scenario end to end —");
   [v1, v2, v3, odd].forEach((c) => c.close());
 }
 
-console.log("\n— the room clock is a clock, not a mirror of the host —");
+console.log("\n— the room follows the host's playhead, both ways —");
 {
   const [host, a] = await room("inst-10", ["host", "a"]);
   await startPlayback(host);
@@ -318,40 +335,75 @@ console.log("\n— the room clock is a clock, not a mirror of the host —");
   host.send({ type: "seek", position: 1000 });
   await sleep(60);
 
-  /** Read the room's clock the way a joiner does. */
-  const clock = async () => {
-    const probe = new Client("u-probe-" + Math.random().toString(36).slice(2, 8), "probe");
-    await probe.connect("inst-10");
-    const pos = probe.last("state")?.position as number;
-    probe.close();
-    await sleep(30);
-    return pos;
-  };
-
-  const near = (actual: number, expected: number, tol = 1.5) =>
-    Math.abs(actual - expected) <= tol ? "ok" : `${actual} (wanted ~${expected})`;
+  const clock = () => clockOf("inst-10");
 
   check("a seek sets the clock", near(await clock(), 1000), "ok");
 
-  // A host mid-restart reports a frozen playhead. The room must not follow it.
+  // The room's position is the host's playhead. A stalling host reports the
+  // same number twice, and the room waits with it rather than walking off —
+  // which is what it did when reports behind the clock were discarded, leaving
+  // the room permanently ahead of the one person everyone is watching.
   host.send({ type: "heartbeat", position: 1000, playing: true });
   await sleep(60);
-  await sleep(1200);
+  await sleep(2500);
   host.send({ type: "heartbeat", position: 1000, playing: true });
   await sleep(60);
-  const held = await clock();
-  check("a client stuck at its old position does not rewind the room",
-    held >= 1001 ? "ok" : `clock went to ${held}`, "ok");
+  check("a stalled host holds the room with it", near(await clock(), 1000, 0.8), "ok");
 
-  // Forward reports are trusted — that is ordinary progress.
+  // Forward reports are ordinary progress.
   host.send({ type: "heartbeat", position: 1400, playing: true });
   await sleep(60);
   check("a forward report moves the clock", near(await clock(), 1400), "ok");
 
-  // Far enough behind and the reporter is gone, not late: sit with them.
+  // Backward ones are followed too, and the small ones are the point: a host
+  // half a second down on the clock is still the timeline. Discarding those was
+  // the whole bug, and it hid behind a threshold big enough to look harmless.
+  await sleep(1200);
+  host.send({ type: "heartbeat", position: 1400.5, playing: true });
+  await sleep(60);
+  check("a small backward report moves it as readily",
+    near(await clock(), 1400.5, 0.5), "ok");
+
+  // Large ones too — a host that restarted somewhere else entirely.
   host.send({ type: "heartbeat", position: 1300, playing: true });
   await sleep(60);
-  check("a client 100s behind re-anchors the room", near(await clock(), 1300), "ok");
+  check("and a large one", near(await clock(), 1300), "ok");
+
+  // Between reports it still runs, so a joiner lands where the host is now
+  // rather than where it was up to five seconds ago.
+  await sleep(1500);
+  const ran = await clock();
+  check("the clock runs on between reports",
+    ran >= 1301 ? "ok" : `clock sat at ${ran}`, "ok");
+
+  [host, a].forEach((c) => c.close());
+}
+
+console.log("\n— the clock waits for the host to really start —");
+{
+  const [host, a] = await room("inst-10b", ["host", "a"]);
+  const clock = () => clockOf("inst-10b");
+
+  // "play" says where a transcode was asked to begin. No frame of it exists
+  // yet, and on a loaded server the host can be a dozen seconds from its first
+  // one. Running the clock through that gap is how the room ends up ahead of
+  // its own host for the rest of the film.
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: uuid(), position: 3000, sessionOffset: 3000,
+    audioStreamId: 1, subtitleStreamId: 0,
+  });
+  await sleep(60);
+  await sleep(1500);
+  check("an announced start does not run on its own", near(await clock(), 3000), "ok");
+
+  // The first heartbeat is the moment a playhead really exists there.
+  host.send({ type: "heartbeat", position: 3001, playing: true });
+  await sleep(60);
+  await sleep(1500);
+  const after = await clock();
+  check("the host's first report starts the clock",
+    after >= 3002 ? "ok" : `clock sat at ${after}`, "ok");
 
   [host, a].forEach((c) => c.close());
 }
@@ -386,6 +438,90 @@ console.log("\n— a restart does not move the room —");
   });
   await sleep(60);
   check("a new title starts its own clock", a.last("play")?.position, 0);
+  [host, a].forEach((c) => c.close());
+}
+
+console.log("\n— a host that comes back behind takes the room with it —");
+{
+  const [host, a] = await room("inst-11b", ["host", "a"]);
+  await startPlayback(host);
+  host.send({ type: "seek", position: 4000 });
+  await sleep(60);
+  const clock = () => clockOf("inst-11b");
+
+  // A track change: the host tears its transcode down, and while it has no
+  // media it sends nothing. The clock free-runs across the gap so that everyone
+  // still playing carries on undisturbed.
+  await sleep(1500);
+  check("the clock free-runs while the host rebuilds",
+    (await clock()) >= 4001 ? "ok" : "clock stopped", "ok");
+
+  // It comes back, and lands wherever the room got to — normally on the clock,
+  // and here deliberately short of it, as a host whose new transcode could not
+  // reach the target would be. Whatever it reports is where the room is: the
+  // alternative is a room that sits ahead of the only playhead in it, which is
+  // exactly what put a viewer twelve seconds clear of the host.
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: uuid(), position: 4001, sessionOffset: 4001,
+    audioStreamId: 2, subtitleStreamId: 0,
+  });
+  await sleep(60);
+  host.send({ type: "heartbeat", position: 4001, playing: true });
+  await sleep(60);
+  check("the room re-anchors on the host that came back", near(await clock(), 4001), "ok");
+
+  // And it stays there: no residue of the free-run survives to be added to the
+  // next one.
+  host.send({ type: "heartbeat", position: 4002, playing: true });
+  await sleep(60);
+  check("no lead is carried over from the rebuild", near(await clock(), 4002), "ok");
+
+  [host, a].forEach((c) => c.close());
+}
+
+console.log("\n— the evening that broke —");
+{
+  const [host, a] = await room("inst-13", ["host", "a"]);
+  const clock = () => clockOf("inst-13");
+
+  // Replays a real session, compressed. The host announced 5737.8 and then
+  // took 12.7 seconds to produce a frame, because Plex was transcoding two HDR
+  // streams and scanning the library at the same time. The room ran through
+  // that load, never came back, and sat exactly 12.73s ahead of its own host
+  // for the rest of the film — with anyone who switched subtitles landing
+  // neatly on the clock and therefore that far ahead of what the host was
+  // watching. A pause was the only thing that ever fixed it.
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: true,
+    hlsSessionId: uuid(), position: 5737.8, sessionOffset: 5737.8,
+    audioStreamId: 1, subtitleStreamId: 5,
+  });
+  await sleep(60);
+  await sleep(1500);
+  check("the room waits out the host's load", near(await clock(), 5737.8), "ok");
+
+  // Frames at last, and from here the host reports as it plays.
+  let pos = 5737.8;
+  for (let i = 0; i < 3; i++) {
+    host.send({ type: "heartbeat", position: pos, playing: true });
+    await sleep(60);
+    const lead = (await clock()) - pos;
+    check(`the room stays with the host, report ${i + 1}`,
+      lead < 1 ? "ok" : `room is ${lead.toFixed(2)}s ahead`, "ok");
+    await sleep(500);
+    pos += 0.5;
+  }
+
+  // The viewer drops subtitles, which forks them onto a stream of their own.
+  // They start it at whatever the room says the position is, so that number
+  // has to be the host's.
+  a.send({ type: "watching", value: true });
+  a.send({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 0 });
+  await sleep(60);
+  check("a fork inherits the host's position, not a runaway clock",
+    near(await clock(), pos, 1.2), "ok");
+
   [host, a].forEach((c) => c.close());
 }
 

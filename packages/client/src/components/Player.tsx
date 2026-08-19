@@ -797,8 +797,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     currentSubtitleStreamRef.current = v.subtitleStreamId;
     subtitlesOnRef.current = v.subtitleStreamId !== 0;
     // Whether this is the room's own stream. Only used to decide whether
-    // "switch back to the host's tracks" is advice worth giving.
-    ownsHostStreamRef.current = v.hlsSessionId === (syncStateRef.current?.hlsSessionId ?? null);
+    // "switch back to the host's tracks" is advice worth giving — so the host
+    // is always on it by construction, and must never be offered its own
+    // stream as an escape from itself. Said outright rather than inferred from
+    // the session id, which the host may not have echoed to itself yet.
+    ownsHostStreamRef.current =
+      isHostRef.current || v.hlsSessionId === (syncStateRef.current?.hlsSessionId ?? null);
     // A stream that has just been rebuilt is not starving yet.
     starvedSinceRef.current = null;
     setError(null);
@@ -1477,13 +1481,25 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
         hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
           if (!mounted) return;
+          // The room as it stands at the instant the manifest lands, which is
+          // what every decision below is made from — worth recording verbatim,
+          // because "did this client land on the clock, and if not why not" is
+          // the first question of any sync post-mortem. This used to report a
+          // condition the code no longer used, and reading a night of logs on
+          // that basis hid a host that never landed at all.
+          const atParse = syncStateRef.current;
           logEvent("HLS", "manifest parsed", {
             session: sessionId?.substring(0, 8),
             levels: data?.levels?.length,
             startOffsetS: offset,
-            roomPosS: syncStateRef.current?.position ?? "none",
-            willSeekToRoom: (!isHostRef.current || didAdoptRef.current)
-              && (syncStateRef.current?.position ?? 0) > DRIFT_THRESHOLD_S,
+            roomPosS: atParse?.position ?? "none",
+            roomPlaying: atParse?.playing ?? false,
+            roomItemMatches: atParse?.ratingKey === itemRef.current.ratingKey,
+            willSeekToRoom:
+              !!atParse &&
+              atParse.playing &&
+              atParse.ratingKey === itemRef.current.ratingKey &&
+              atParse.position > DRIFT_THRESHOLD_S,
           });
 
           // The transcode is real from here on, so seek classification can trust

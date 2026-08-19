@@ -209,6 +209,22 @@ interface RoomState {
   subtitles: boolean;
   playing: boolean;
   position: number;
+  /**
+   * Whether a real playhead has confirmed `position` since it was last set.
+   *
+   * `play` announces where a transcode was *asked* to begin, seconds before any
+   * frame of it exists. Treating that as a running clock and extrapolating from
+   * it means the room advances through a load the host hasn't finished — and if
+   * nothing ever reconciles the two, the room stays ahead of the host by
+   * however long that load took, for the rest of the film. Measured at 12.7s in
+   * one session, with viewers glued to the clock and the host alone behind it.
+   *
+   * So an announced position is provisional: the room sits on it until the
+   * host's first heartbeat says a playhead is really there. Everything that
+   * carries an observed or chosen position — a heartbeat, a seek, the host's
+   * own pause — confirms it.
+   */
+  positionConfirmed: boolean;
   updatedAt: number;
   hlsSessionId: string | null;
   /**
@@ -369,6 +385,7 @@ function getOrCreateRoom(instanceId: string): Room {
         subtitles: false,
         playing: false,
         position: 0,
+        positionConfirmed: false,
         updatedAt: Date.now(),
         hlsSessionId: null,
         sessionOffset: 0,
@@ -577,26 +594,6 @@ function assignVariant(
 const MAX_EXTRAPOLATION_S = 30;
 
 /**
- * How far behind the room's clock a client may report before the room follows
- * it down.
- *
- * The room's position is a clock, not a mirror of anyone's video element. A
- * client that is loading, buffering or restarting reports a position that has
- * stopped moving, and adopting it drags everybody else back by however long it
- * was stuck — which is precisely what made one person changing audio cost the
- * whole room five seconds, permanently, every time.
- *
- * So a report that is behind is normally ignored: that client is late and will
- * catch up. Past this bound it isn't late, it is gone — a dead transcode, a
- * network that isn't coming back — and at that point everybody sitting together
- * matters more than the clock being right, so the room re-anchors to it.
- *
- * Well above any restart (five to fifteen seconds) and well below the point
- * where a viewer would rather the film waited for them.
- */
-const CLOCK_FOLLOW_BEHIND_S = 20;
-
-/**
  * How long a stream is held for someone who has stepped out of the player.
  *
  * Leaving the player is not leaving the room: people come out to browse the
@@ -664,6 +661,10 @@ function sanitizeQueueItem(raw: unknown): QueueItem | null {
 
 function interpolatedPosition(state: RoomState): number {
   if (!state.playing) return state.position;
+  // Nothing is known to be playing at `position` yet — see positionConfirmed.
+  // Running the clock through a load the host hasn't finished is how the room
+  // ends up permanently ahead of the person it is supposed to be following.
+  if (!state.positionConfirmed) return state.position;
   const elapsed = (Date.now() - state.updatedAt) / 1000;
   if (elapsed > MAX_EXTRAPOLATION_S) return state.position;
   return state.position + Math.max(0, elapsed);
@@ -1226,10 +1227,15 @@ export function attachWebSocketServer(server: Server): void {
           //
           // A different title, or a room that wasn't playing, is a real start
           // and does set the clock.
-          const restartOfLiveItem = !itemChanged && room.state.playing && wasPlaying;
+          const restartOfLiveItem = !itemChanged && wasPlaying;
           room.state.position = restartOfLiveItem
             ? interpolatedPosition(room.state)
             : startPosition;
+          // A restart carries the clock forward, so whatever confirmed it still
+          // does. A genuine start is only a request: `startPosition` is where a
+          // transcode was asked to begin, and no frame of it exists yet. The
+          // host's first heartbeat confirms it, within five seconds.
+          room.state.positionConfirmed = restartOfLiveItem && room.state.positionConfirmed;
           // Where Plex was asked to start transcoding. Usually the same as the
           // position, and deliberately a separate field because it isn't when a
           // host re-announces a session it has already played some of: the room
@@ -1295,6 +1301,9 @@ export function attachWebSocketServer(server: Server): void {
         case "pause": {
           room.state.playing = false;
           room.state.position = positionForCommand(room, client, msg.position);
+          // Only the host's pause carries an observed playhead; a co-host's is
+          // served from the room's own clock and so confirms nothing.
+          if (client.isHost) room.state.positionConfirmed = true;
           room.state.updatedAt = Date.now();
           persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
           broadcast(room, ws, { type: "pause", position: room.state.position });
@@ -1303,6 +1312,7 @@ export function attachWebSocketServer(server: Server): void {
         case "resume": {
           room.state.playing = true;
           room.state.position = positionForCommand(room, client, msg.position);
+          if (client.isHost) room.state.positionConfirmed = true;
           room.state.updatedAt = Date.now();
           broadcast(room, ws, { type: "resume", position: room.state.position });
           break;
@@ -1311,6 +1321,9 @@ export function attachWebSocketServer(server: Server): void {
           // The one command that keeps a non-host's number: a seek target is a
           // decision, not an observation. See positionForCommand.
           room.state.position = safePosition(msg.position, room.state.position);
+          // A seek target is a decision about where the room is, so it is the
+          // truth by construction — nothing has to observe it first.
+          room.state.positionConfirmed = true;
           room.state.updatedAt = Date.now();
           persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
           broadcast(room, ws, { type: "seek", position: room.state.position });
@@ -1366,32 +1379,48 @@ export function attachWebSocketServer(server: Server): void {
         }
         case "heartbeat": {
           if (!room.state.ratingKey) break;
+          /**
+           * The room's position is the host's playhead, in both directions.
+           *
+           * Only the host heartbeats, and the host is not a client the room is
+           * checking up on — it is the thing everyone else is watching. So a
+           * report that is *behind* is not a client falling behind the room, it
+           * is the room being wrong.
+           *
+           * This was once second-guessed: reports more than a few seconds
+           * behind were discarded, on the theory that a client mid-load
+           * shouldn't drag everybody back. The theory was right and the subject
+           * was wrong — the client mid-load is never the one heartbeating,
+           * because the heartbeat is gated on the element having media. What it
+           * discarded instead was the host having stalled, and every stall then
+           * became a permanent gap between the host and the room. One session
+           * logged the room sitting exactly 12.73s ahead of its own host for
+           * the length of a film, with a viewer who switched subtitles landing
+           * neatly on the clock and therefore 12.73s ahead of the host too.
+           *
+           * A host mid-restart doesn't reach here at all: it has no media, so it
+           * sends nothing, and the clock free-runs across the gap — which is the
+           * case that rule was reaching for, and it is handled where it belongs,
+           * by the restarting client landing on the clock once its manifest is
+           * ready.
+           */
           const reported = safePosition(msg.position, room.state.position);
-          const reporterPlaying = msg.playing !== false;
-          // Where the room should be by its own clock, before this report.
-          const clock = interpolatedPosition(room.state);
-          const behind = clock - reported;
-          // Forward is always trusted — ordinary progress, or a jump the room
-          // needs to hear about. Behind is trusted only once the reporter has
-          // clearly stopped rather than merely fallen behind. See
-          // CLOCK_FOLLOW_BEHIND_S.
-          const followReporter =
-            !reporterPlaying ||
-            !room.state.playing ||
-            behind <= 0 ||
-            behind > CLOCK_FOLLOW_BEHIND_S;
-          if (!followReporter && behind > 2) {
-            // Worth a line: this is the room refusing to rewind, and it is the
-            // difference between a smooth track change and everyone jumping.
-            logEvent("Sync", "holding the clock while a client catches up", {
+          // Silent while playback is ordinary — the room and the host agree to
+          // within the half-second of network between them. A gap this size is
+          // the host having restarted, stalled or seeked, and it is the first
+          // thing worth knowing when the evening goes wrong.
+          const gap = reported - interpolatedPosition(room.state);
+          if (Math.abs(gap) > 5) {
+            logEvent("Sync", "room moving to meet the host", {
               room: roomId.substring(0, 8),
               from: client.username ?? client.userId,
-              behindS: Number(behind.toFixed(2)),
-              clockS: Number(clock.toFixed(2)),
+              byS: Number(gap.toFixed(2)),
+              toS: Number(reported.toFixed(2)),
             });
           }
-          room.state.position = followReporter ? reported : clock;
-          room.state.playing = reporterPlaying;
+          room.state.position = reported;
+          room.state.positionConfirmed = true;
+          room.state.playing = msg.playing !== false;
           room.state.updatedAt = Date.now();
           // Throttled inside the history service — this fires every 5s per room.
           persistProgress(room, instanceHosts.get(roomId)?.hostUserId, false);

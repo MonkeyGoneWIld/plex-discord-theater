@@ -2680,6 +2680,29 @@ export async function pingPlexTranscode(hlsSessionId: string): Promise<boolean> 
  * When ratingKey is provided, only stops sessions for that specific media item
  * to avoid killing unrelated watch parties in other guilds.
  */
+/**
+ * Sessions a room is currently streaming, which nothing may flush.
+ *
+ * One item can now have several transcodes running at once — one per audio and
+ * subtitle combination someone in the room has chosen — and the stale-transcode
+ * flush below stops *every* transcode of an item it recognises as ours. That was
+ * safe when a room had exactly one stream and anything else was by definition an
+ * orphan. It is now the difference between clearing a leak and killing the
+ * stream of everyone watching in another language, so the rooms register their
+ * live sessions here and the flush steps over them.
+ */
+const protectedSessions = new Set<string>();
+
+/** Mark a session as live. Called by the sync layer when a variant starts. */
+export function protectSession(sessionId: string): void {
+  protectedSessions.add(sessionId);
+}
+
+/** Drop the protection when the variant is torn down. */
+export function releaseSession(sessionId: string): void {
+  protectedSessions.delete(sessionId);
+}
+
 async function flushStaleTranscodes(ratingKey?: string, exceptKey?: string): Promise<number> {
   let stopped = 0;
 
@@ -2717,6 +2740,9 @@ async function flushStaleTranscodes(ratingKey?: string, exceptKey?: string): Pro
       // GUID and gets a 400. Prefer the former for the call, keep the latter for
       // the exceptKey check, which really is comparing transcode GUIDs.
       const sessionKey = s.Session?.id;
+      // Live for someone else in the room — a different audio or subtitle
+      // track of the same title. See protectedSessions.
+      if (sessionKey && protectedSessions.has(sessionKey)) continue;
       if (key) {
         // Never stop the transcode we're currently bringing up.
         if (exceptKey && key.split("/").pop() === exceptKey) continue;
@@ -2823,6 +2849,73 @@ async function defaultMediaIndex(ratingKey: string): Promise<number> {
   }
 }
 
+/**
+ * Serialises "choose the tracks, then start the transcode" per item.
+ *
+ * Track selection in Plex is a property of the *item*, not of a session: it is a
+ * PUT to /library/parts with allParts=1, and the transcode that follows reads
+ * whatever the item is set to at that moment. Two people starting different
+ * audio tracks of the same film at the same time would otherwise interleave
+ * their PUT and their decision call, and both would get whichever selection
+ * happened to land second.
+ *
+ * Holding a per-item lock across the pair makes each start atomic. Once a
+ * transcode is running it has already captured its decision and is unaffected by
+ * later changes to the item — which is precisely what allows several tracks of
+ * one film to play at once.
+ */
+const itemStartLocks = new Map<string, Promise<void>>();
+
+function withItemLock<T>(ratingKey: string, fn: () => Promise<T>): Promise<T> {
+  const prev = itemStartLocks.get(ratingKey) ?? Promise.resolve();
+  // Runs whether the previous holder resolved or threw — a failed start must
+  // not wedge the queue for the item.
+  const run = prev.then(fn, fn);
+  const tail = run.then(() => {}, () => {});
+  itemStartLocks.set(ratingKey, tail);
+  void tail.then(() => {
+    if (itemStartLocks.get(ratingKey) === tail) itemStartLocks.delete(ratingKey);
+  });
+  return run;
+}
+
+/**
+ * Point the item at one variant's tracks, immediately before its transcode
+ * starts. Only meaningful inside withItemLock.
+ *
+ * Deliberately does NOT clear the metadata cache, unlike the standalone
+ * /streams route. The `selected` flags on a track list describe whichever
+ * variant started most recently, which is no longer a useful answer to "what am
+ * I listening to" — each client tracks its own choice instead. Clearing the
+ * cache here would also mean a metadata refetch per variant start.
+ */
+async function selectTracksForStart(
+  ratingKey: string,
+  mediaIndex: number,
+  audioStreamID: number | null,
+  subtitleStreamID: number | null,
+): Promise<void> {
+  if (audioStreamID == null && subtitleStreamID == null) return;
+  try {
+    const meta = await buildMeta(ratingKey);
+    const versions = meta?.versions as Array<{ mediaIndex?: number; partId?: number | null }> | undefined;
+    const partId =
+      versions?.find((v) => v.mediaIndex === mediaIndex)?.partId ??
+      (meta?.partId as number | null | undefined) ??
+      null;
+    if (partId == null) return;
+    const params: Record<string, string> = { allParts: "1" };
+    if (audioStreamID != null) params.audioStreamID = String(audioStreamID);
+    if (subtitleStreamID != null) params.subtitleStreamID = String(subtitleStreamID);
+    await plexFetch(`/library/parts/${partId}`, params, undefined, "PUT");
+    if (DEBUG) console.log("[HLS] Tracks set for part", partId, params);
+  } catch (err) {
+    // A failed selection means the transcode comes up on the item's previous
+    // tracks, which is wrong but playable. Failing the whole start would be worse.
+    console.warn("[HLS] Couldn't set tracks before start:", err);
+  }
+}
+
 // ─── HLS streaming ──────────────────────────────────────────────
 
 /**
@@ -2900,6 +2993,19 @@ router.get(
 
     // Subtitle mode — "none" when user explicitly disabled subtitles, otherwise "burn"
     const subtitleMode = req.query.subtitles === "burn" ? "burn" : "none";
+
+    // The tracks this session wants. Present once a room can hold more than one
+    // combination at a time: the caller owns a variant and names the audio and
+    // subtitle streams it is for, and the pair is applied to the item under a
+    // lock immediately before the decision call — see selectTracksForStart.
+    // Absent from an older client, which then gets whatever the item is already
+    // set to, exactly as before.
+    const trackNum = (v: unknown): number | null => {
+      const n = Number(v);
+      return Number.isInteger(n) && n >= 0 ? n : null;
+    };
+    const audioStreamID = trackNum(req.query.audioStreamID);
+    const subtitleStreamID = trackNum(req.query.subtitleStreamID);
 
     console.log("[HLS] Master manifest requested for ratingKey:", ratingKey, "session:", sessionId.substring(0, 8), offset ? `offset:${offset}s` : "");
 
@@ -3082,8 +3188,13 @@ router.get(
       return rewritten;
     };
 
-    // Store promise in in-flight map so concurrent requests wait on it
-    const promise = fetchManifest();
+    // Store promise in in-flight map so concurrent requests wait on it.
+    // The item lock wraps the pair below it: the track selection this variant
+    // needs, and the decision + start that captures it.
+    const promise = withItemLock(ratingKey, async () => {
+      await selectTracksForStart(ratingKey, mediaIndex, audioStreamID, subtitleStreamID);
+      return fetchManifest();
+    });
     manifestInFlight.set(sessionId, promise);
 
     try {

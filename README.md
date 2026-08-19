@@ -40,10 +40,19 @@ the subtitles — the room follows.
   aired yet", with air dates.
 - **Audio and subtitle tracks**, switchable mid-episode. Your subtitle choice
   carries to the next episode, matched by language rather than track number.
+- **Pick which file plays** when Plex holds more than one copy of a title. A 4K
+  copy is hidden whenever a lower-resolution one exists: every stream is
+  transcoded down to 1080p anyway, so playing the 4K file buys the room nothing
+  and costs the server a 4K decode per viewer. A title that only exists in 4K
+  still plays.
 - **Skip intro / credits**, seek-bar thumbnail previews, next-episode cards, a
   shared queue, and viewer suggestions.
 - **Stats for nerds** — press `i` during playback for resolution, codecs,
   bitrate, buffer health and peer counters.
+- **A real phone layout**, not a squeezed desktop one. Three posters to a row,
+  detail pages that stack, play/pause as a button in the middle of the picture,
+  and a double-tap either side to skip. Discord's own mobile bar already offers
+  an invite button, so this doesn't draw a second one over it.
 
 > [!NOTE]
 > Skip intro/credits and seek-bar previews come from data **Plex** generates,

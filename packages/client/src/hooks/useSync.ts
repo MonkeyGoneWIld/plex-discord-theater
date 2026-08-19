@@ -370,8 +370,15 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           position: 0,
         }));
       },
-      sendHeartbeat: (position: number, playing: boolean) =>
-        send({ type: "heartbeat", position, playing }),
+      sendHeartbeat: (position: number, playing: boolean) => {
+        send({ type: "heartbeat", position, playing });
+        // Kept locally too. The server excludes a sender from its own
+        // broadcast, and the host is the only client that heartbeats — so the
+        // host's copy of the room's position stopped updating the moment it
+        // took the role, and anything reading it got a number frozen minutes
+        // ago. It is reporting the room's clock, so it may as well hold it.
+        setState((prev) => ({ ...prev, position, playing, positionAt: Date.now() }));
+      },
       sendBrowse: (context: string) => send({ type: "browse", context }),
       sendQueueAdd: (item: QueueItem) => send({ type: "queue-add", item }),
       sendQueueRemove: (ratingKey: string) => send({ type: "queue-remove", ratingKey }),

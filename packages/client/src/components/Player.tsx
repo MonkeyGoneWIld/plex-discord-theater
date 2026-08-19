@@ -1448,18 +1448,42 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // Viewer joining mid-playback (or a host adopting a live session):
           // seek to the room's position immediately instead of waiting for the
           // 5s heartbeat drift threshold.
-          const followingRoom = !isHostRef.current || didAdoptRef.current;
-          if (followingRoom && syncActionsRef.current) {
-            const sync = syncStateRef.current;
-            // Carried forward to now. `position` is a snapshot from the last
-            // heartbeat, so seeking straight to it lands up to five seconds
-            // behind before the stream has even started — see roomPositionNow.
-            const syncPos = sync ? roomPositionNow(sync) : 0;
-            if (syncPos && syncPos > DRIFT_THRESHOLD_S) {
+          /**
+           * Land on the room's clock, wherever it has got to.
+           *
+           * This applies to every rebuild into a timeline that is already
+           * running — a viewer joining, a fork onto different tracks, a track
+           * change, a seek restart — and not just to joiners. The room's clock
+           * kept running through the load; the position this client captured
+           * before starting it is behind by exactly however long the load took.
+           * Resuming there is what made a track change look like the film
+           * jumping backwards, and it was wrong for the person who changed the
+           * track too: they came back five seconds into their own past.
+           *
+           * The exception is a genuine start — a different title, or a room that
+           * isn't playing — where this client's own offset is the truth and the
+           * room has no clock yet.
+           */
+          const sync = syncStateRef.current;
+          const rejoiningLiveRoom =
+            !!sync &&
+            sync.playing &&
+            sync.ratingKey === itemRef.current.ratingKey &&
+            sync.position > DRIFT_THRESHOLD_S;
+          if (rejoiningLiveRoom) {
+            const syncPos = roomPositionNow(sync);
+            if (syncPos > DRIFT_THRESHOLD_S) {
+              logEvent("Sync", "landing on the room clock after a rebuild", {
+                fromS: video.currentTime,
+                toS: syncPos,
+                startedTranscodeAtS: startOffset,
+                loadCostS: Number((syncPos - startOffset).toFixed(2)),
+                role: isHostRef.current ? "host" : "viewer",
+              });
               video.currentTime = syncPos;
-              // The rest of the gap is startup: the seconds between here and the
-              // first frame, which nothing can predict. Measured and closed once
-              // when frames actually arrive.
+              // Whatever is left is startup between here and the first frame,
+              // which nothing can predict. Measured and closed once when frames
+              // actually arrive.
               joinSettleRef.current = true;
             }
           }
@@ -1470,7 +1494,14 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // itself: the pause had already happened, so no command was coming,
           // and heartbeats deliberately don't drive transport. Joining a paused
           // film meant watching it alone while everyone else sat on a still.
-          const roomPaused = followingRoom && syncStateRef.current?.playing === false;
+          // Same question as before, asked of whoever is following rather than
+          // leading: a host starting a title decides the play state, anyone
+          // rebuilding into an existing room inherits it.
+          const followingRoom = !isHostRef.current || didAdoptRef.current;
+          const roomPaused =
+            followingRoom &&
+            sync?.playing === false &&
+            sync?.ratingKey === itemRef.current.ratingKey;
           if (roomPaused) {
             logEvent("HLS", "manifest ready but room is paused — holding", {
               session: sessionId?.substring(0, 8),
@@ -1703,9 +1734,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           if (joinSettleRef.current) {
             joinSettleRef.current = false;
             const sync = syncStateRef.current;
-            // A host that adopted a running session is following the room too,
-            // and wants to land on it for the same reason a viewer does.
-            if (sync && sync.playing && (!isHostRef.current || didAdoptRef.current)) {
+            // Anyone who just rebuilt into a running timeline, host included —
+            // the seek above aimed at the clock, this closes whatever the
+            // startup cost on top of it.
+            if (sync && sync.playing) {
               const target = roomPositionNow(sync);
               const behind = target - video.currentTime;
               if (target > DRIFT_THRESHOLD_S && Math.abs(behind) > JOIN_SETTLE_TOLERANCE_S) {

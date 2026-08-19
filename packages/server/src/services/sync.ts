@@ -571,6 +571,26 @@ function assignVariant(
 const MAX_EXTRAPOLATION_S = 30;
 
 /**
+ * How far behind the room's clock a client may report before the room follows
+ * it down.
+ *
+ * The room's position is a clock, not a mirror of anyone's video element. A
+ * client that is loading, buffering or restarting reports a position that has
+ * stopped moving, and adopting it drags everybody else back by however long it
+ * was stuck — which is precisely what made one person changing audio cost the
+ * whole room five seconds, permanently, every time.
+ *
+ * So a report that is behind is normally ignored: that client is late and will
+ * catch up. Past this bound it isn't late, it is gone — a dead transcode, a
+ * network that isn't coming back — and at that point everybody sitting together
+ * matters more than the clock being right, so the room re-anchors to it.
+ *
+ * Well above any restart (five to fifteen seconds) and well below the point
+ * where a viewer would rather the film waited for them.
+ */
+const CLOCK_FOLLOW_BEHIND_S = 20;
+
+/**
  * A playback position from a client message, or the fallback if it is unusable.
  *
  * `msg.position ?? state.position` was not enough: `??` only rejects null and
@@ -1122,6 +1142,9 @@ export function attachWebSocketServer(server: Server): void {
           const rk = typeof msg.ratingKey === "string" && /^\d+$/.test(msg.ratingKey)
             ? msg.ratingKey : null;
           const itemChanged = rk !== room.state.ratingKey;
+          // Captured before `playing` is overwritten below — a restart is only a
+          // restart if the room was already running this title.
+          const wasPlaying = room.state.playing;
           const sid = typeof msg.hlsSessionId === "string" && UUID_RE.test(msg.hlsSessionId)
             ? msg.hlsSessionId : null;
           if (!rk || !sid) {
@@ -1139,7 +1162,19 @@ export function attachWebSocketServer(server: Server): void {
           room.state.subtitles = Boolean(msg.subtitles);
           room.state.hlsSessionId = sid;
           room.state.playing = true;
-          room.state.position = startPosition;
+          // A restart of something the room is already watching must not move
+          // the clock. `startPosition` is where the restarting client was when
+          // it *began* loading, seconds ago — writing it back rewinds everyone
+          // else by the length of that load, which is the whole reason a track
+          // change used to cost the room five seconds. Re-anchoring on the
+          // clock's own current value keeps it running across the gap.
+          //
+          // A different title, or a room that wasn't playing, is a real start
+          // and does set the clock.
+          const restartOfLiveItem = !itemChanged && room.state.playing && wasPlaying;
+          room.state.position = restartOfLiveItem
+            ? interpolatedPosition(room.state)
+            : startPosition;
           // Where Plex was asked to start transcoding. Usually the same as the
           // position, and deliberately a separate field because it isn't when a
           // host re-announces a session it has already played some of: the room
@@ -1191,7 +1226,9 @@ export function attachWebSocketServer(server: Server): void {
             title: room.state.title,
             subtitles: room.state.subtitles,
             hlsSessionId: room.state.hlsSessionId,
-            position: startPosition,
+            // The room's clock, which for a restart is unchanged — so nobody
+            // acts on this beyond picking up the new session id.
+            position: room.state.position,
             sessionOffset: room.state.sessionOffset,
           });
           // Everyone on the host's stream — which for a new title is everyone —
@@ -1273,8 +1310,32 @@ export function attachWebSocketServer(server: Server): void {
         }
         case "heartbeat": {
           if (!room.state.ratingKey) break;
-          room.state.position = safePosition(msg.position, room.state.position);
-          room.state.playing = msg.playing !== false;
+          const reported = safePosition(msg.position, room.state.position);
+          const reporterPlaying = msg.playing !== false;
+          // Where the room should be by its own clock, before this report.
+          const clock = interpolatedPosition(room.state);
+          const behind = clock - reported;
+          // Forward is always trusted — ordinary progress, or a jump the room
+          // needs to hear about. Behind is trusted only once the reporter has
+          // clearly stopped rather than merely fallen behind. See
+          // CLOCK_FOLLOW_BEHIND_S.
+          const followReporter =
+            !reporterPlaying ||
+            !room.state.playing ||
+            behind <= 0 ||
+            behind > CLOCK_FOLLOW_BEHIND_S;
+          if (!followReporter && behind > 2) {
+            // Worth a line: this is the room refusing to rewind, and it is the
+            // difference between a smooth track change and everyone jumping.
+            logEvent("Sync", "holding the clock while a client catches up", {
+              room: roomId.substring(0, 8),
+              from: client.username ?? client.userId,
+              behindS: Number(behind.toFixed(2)),
+              clockS: Number(clock.toFixed(2)),
+            });
+          }
+          room.state.position = followReporter ? reported : clock;
+          room.state.playing = reporterPlaying;
           room.state.updatedAt = Date.now();
           // Throttled inside the history service — this fires every 5s per room.
           persistProgress(room, instanceHosts.get(roomId)?.hostUserId, false);

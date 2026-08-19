@@ -310,6 +310,85 @@ console.log("\n— the scenario end to end —");
   [v1, v2, v3, odd].forEach((c) => c.close());
 }
 
+console.log("\n— the room clock is a clock, not a mirror of the host —");
+{
+  const [host, a] = await room("inst-10", ["host", "a"]);
+  await startPlayback(host);
+  // Put the room at a known point and let it run.
+  host.send({ type: "seek", position: 1000 });
+  await sleep(60);
+
+  /** Read the room's clock the way a joiner does. */
+  const clock = async () => {
+    const probe = new Client("u-probe-" + Math.random().toString(36).slice(2, 8), "probe");
+    await probe.connect("inst-10");
+    const pos = probe.last("state")?.position as number;
+    probe.close();
+    await sleep(30);
+    return pos;
+  };
+
+  const near = (actual: number, expected: number, tol = 1.5) =>
+    Math.abs(actual - expected) <= tol ? "ok" : `${actual} (wanted ~${expected})`;
+
+  check("a seek sets the clock", near(await clock(), 1000), "ok");
+
+  // A host mid-restart reports a frozen playhead. The room must not follow it.
+  host.send({ type: "heartbeat", position: 1000, playing: true });
+  await sleep(60);
+  await sleep(1200);
+  host.send({ type: "heartbeat", position: 1000, playing: true });
+  await sleep(60);
+  const held = await clock();
+  check("a client stuck at its old position does not rewind the room",
+    held >= 1001 ? "ok" : `clock went to ${held}`, "ok");
+
+  // Forward reports are trusted — that is ordinary progress.
+  host.send({ type: "heartbeat", position: 1400, playing: true });
+  await sleep(60);
+  check("a forward report moves the clock", near(await clock(), 1400), "ok");
+
+  // Far enough behind and the reporter is gone, not late: sit with them.
+  host.send({ type: "heartbeat", position: 1300, playing: true });
+  await sleep(60);
+  check("a client 100s behind re-anchors the room", near(await clock(), 1300), "ok");
+
+  [host, a].forEach((c) => c.close());
+}
+
+console.log("\n— a restart does not move the room —");
+{
+  const [host, a] = await room("inst-11", ["host", "a"]);
+  await startPlayback(host);
+  host.send({ type: "seek", position: 2000 });
+  await sleep(60);
+  a.clear();
+
+  // Five seconds pass while the host reloads its transcode, then it re-announces
+  // with the position it had *before* the load — which is what used to rewind
+  // everybody by exactly that long.
+  await sleep(1500);
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: uuid(), position: 2000, sessionOffset: 2000,
+    audioStreamId: 1, subtitleStreamId: 0,
+  });
+  await sleep(60);
+  const told = a.last("play")?.position as number;
+  check("the re-announce carries the clock, not the stale snapshot",
+    told >= 2001 ? "ok" : `told ${told}, clock had moved past 2001`, "ok");
+
+  // A different title is a real start and does set the clock.
+  host.send({
+    type: "play", ratingKey: "200", title: "Another", subtitles: false,
+    hlsSessionId: uuid(), position: 0, sessionOffset: 0,
+    audioStreamId: 1, subtitleStreamId: 0,
+  });
+  await sleep(60);
+  check("a new title starts its own clock", a.last("play")?.position, 0);
+  [host, a].forEach((c) => c.close());
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 closeWebSocketServer();
 server.close();

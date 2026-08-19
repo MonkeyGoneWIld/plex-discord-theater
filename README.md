@@ -45,10 +45,15 @@ worked on — pulled from Plex by tag, so it only ever lists titles you actually
 
 ![Hugh Jackman's page: biography and dates, then his films and shows from the library](docs/screenshots/person.jpg)
 
-With Overseerr or Jellyseerr connected, the seasons you're missing are selectable
-right on the show's page, and only the ones a request would actually fill.
+With Overseerr or Jellyseerr connected, anything you don't own can be requested
+from the page you found it on.
 
-![A show's page with its missing seasons selectable for request](docs/screenshots/requests.jpg)
+![Primetime, a film that isn't in the library, with a Request button](docs/screenshots/request-movie.jpg)
+
+For a show it's per season — and only the seasons a request would actually fill,
+so nothing sits in the queue forever waiting on episodes that don't exist yet.
+
+![A show's page with its missing seasons selectable for request](docs/screenshots/request-seasons.jpg)
 
 On a phone it's a different layout rather than a squeezed version of this one —
 three posters to a row, and detail pages that stack instead of sitting side by side.

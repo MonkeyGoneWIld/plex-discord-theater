@@ -10,7 +10,7 @@ import { NextUpButton } from "./NextUpButton";
 import { EndCard } from "./EndCard";
 import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
-import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
+import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
@@ -344,12 +344,16 @@ interface PlayerProps {
    *  Set only by the host's detail view; a viewer leaves it undefined and the
    *  server plays whichever file the session was started on. */
   mediaIndex?: number;
+  /** Tracks chosen on the detail page, naming the stream this client opens on.
+   *  Only the client that starts the room has them. */
+  audioStreamId?: number;
+  subtitleStreamId?: number;
   syncState?: SyncState;
   syncActions?: SyncActions;
   onPlayNext?: (item: QueueItem) => void;
 }
 
-export function Player({ item, isHost, selfUserId = null, subtitles, resumePosition, mediaIndex, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext }: PlayerProps) {
+export function Player({ item, isHost, selfUserId = null, subtitles, resumePosition, mediaIndex, audioStreamId, subtitleStreamId, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext }: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -601,7 +605,25 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // whether a recovery restart should trust room position over its own playhead.
   const mountedAsHostRef = useRef(isHost);
 
-  const roomSessionId = syncState?.hlsSessionId ?? null;
+  /**
+   * The stream this client is on — which tracks, which transcode, and whether
+   * this client is the one driving it.
+   *
+   * A room is one timeline with a transcode per set of tracks anyone chose.
+   * Everything below that used to ask "am I the host?" to decide whether it owns
+   * a transcode now asks this instead: a viewer watching in another language
+   * drives their own stream and must restart it for a seek that can't be served
+   * in place, exactly as the host does for theirs. Room control is a separate
+   * question and still belongs to isHost / canControl.
+   */
+  const variant = syncState?.variant ?? null;
+  const variantRef = useRef(variant);
+  variantRef.current = variant;
+
+  // The room's stream, which is the host's. Still the fallback for a client that
+  // has not been assigned a variant — an older server, or the moment before the
+  // first assignment lands.
+  const roomSessionId = variant?.hlsSessionId ?? syncState?.hlsSessionId ?? null;
 
   /**
    * The session this client should be playing when it doesn't own one.
@@ -626,7 +648,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     isHost ? null : roomSessionId,
   );
   useEffect(() => {
-    if (isHostRef.current) return;
+    // Owners lead; everyone else follows. This used to be "hosts lead", which is
+    // the same thing while a room has one stream and wrong the moment it has
+    // two: a viewer driving their own transcode would have chased the host's.
+    if (ownsSessionRef.current) return;
     if (!roomSessionId || roomSessionId === sessionIdRef.current) return;
     logEvent("HLS", "following the room onto a new session", {
       from: sessionIdRef.current?.substring(0, 8) ?? "none",
@@ -644,12 +669,97 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // broadcast, and seek to the room's current position on load like a viewer.
   const didAdoptRef = useRef(false);
 
-  // Handle promotion: start ping + heartbeat when viewer becomes host mid-playback
+  /**
+   * Take up or hand back the driving of a stream, as the server assigns it.
+   *
+   * Ownership is no longer implied by hosting: forking onto your own tracks
+   * makes you the driver of that stream, joining somebody else's makes you a
+   * follower on it, and a host who ends up on a stream someone else already
+   * drives is a follower too. The ping below keeps whatever this client drives
+   * alive; the heartbeat stays host-only, because the room has one timeline and
+   * the host is the one who reports it.
+   */
   useEffect(() => {
-    if (!isHost || ownsSessionRef.current) return;
+    if (!variant) return;
+    const wasOwner = ownsSessionRef.current;
+    ownsSessionRef.current = variant.isOwner;
+    if (variant.isOwner && !wasOwner) {
+      logEvent("Player", "now driving this stream", {
+        variant: variant.variantKey,
+        session: variant.hlsSessionId?.substring(0, 8) ?? "none",
+      });
+      if (pingIntervalRef.current === null) {
+        pingIntervalRef.current = setInterval(() => {
+          if (!sessionIdRef.current) return;
+          const v = videoRef.current;
+          pingSession(
+            sessionIdRef.current,
+            v ? v.currentTime * 1000 : undefined,
+            v ? !v.paused : undefined,
+            v ? bufferAheadSeconds(v) : undefined,
+          ).catch(() => {});
+        }, PING_INTERVAL_MS);
+      }
+    } else if (!variant.isOwner && wasOwner) {
+      logEvent("Player", "no longer driving this stream", { variant: variant.variantKey });
+      if (pingIntervalRef.current !== null) {
+        clearInterval(pingIntervalRef.current);
+        pingIntervalRef.current = null;
+      }
+    }
+  }, [variant?.seq, variant?.isOwner, variant?.variantKey]);
 
-    // Promoted to host — take over session ownership
-    ownsSessionRef.current = true;
+  /**
+   * Act on a stream assignment.
+   *
+   * Two cases: the stream has no transcode yet, which means this client was made
+   * its driver and has to bring one up; or it has one this client isn't playing,
+   * which means following it. Both go through the same rebuild the rest of the
+   * player uses, so a fork behaves exactly like any other restart.
+   *
+   * The tracks are recorded either way, because they are what the switcher
+   * checkmarks and the duplicate-selection guard compare against — and after a
+   * host-scoped change they moved without this client asking.
+   */
+  useEffect(() => {
+    const v = variantRef.current;
+    if (!v) return;
+    currentAudioStreamRef.current = v.audioStreamId || null;
+    currentSubtitleStreamRef.current = v.subtitleStreamId;
+    subtitlesOnRef.current = v.subtitleStreamId !== 0;
+
+    if (v.isOwner && !v.hlsSessionId) {
+      // A fork inherits the room's clock and nothing else — see the server's
+      // assignVariant. Start the new transcode where playback actually is.
+      const video = videoRef.current;
+      const at = video && video.currentTime > 0
+        ? video.currentTime
+        : syncStateRef.current?.position ?? 0;
+      seekOffsetRef.current = at;
+      logEvent("HLS", "starting a stream for these tracks", {
+        variant: v.variantKey, atS: at,
+      });
+      setRetryKey((k) => k + 1);
+      return;
+    }
+    if (v.hlsSessionId && v.hlsSessionId !== sessionIdRef.current) {
+      logEvent("HLS", "moving onto this stream's transcode", {
+        variant: v.variantKey,
+        to: v.hlsSessionId.substring(0, 8),
+      });
+      setFollowSessionId(v.hlsSessionId);
+      return;
+    }
+    // Neither branch fired, so nothing is being rebuilt and the freeze-frame
+    // over the switch has nothing left to cover. Lifting it here rather than on
+    // every assignment keeps it up for the whole of a real swap — the rebuild
+    // clears it when frames actually resume.
+    setTrackSwitching(null);
+  }, [variant?.seq]);
+
+  // Handle promotion: start heartbeat when a viewer becomes host mid-playback.
+  useEffect(() => {
+    if (!isHost || heartbeatIntervalRef.current !== null) return;
     // A host defines the room's position rather than chasing it, so whatever
     // the drift corrector was holding stops here.
     resetPlaybackRate(videoRef.current);
@@ -665,20 +775,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       ...snapshot(videoRef.current),
     });
 
-    // Start pinging to keep transcode alive (the old host was doing this)
-    if (pingIntervalRef.current === null) {
-      pingIntervalRef.current = setInterval(() => {
-        if (sessionIdRef.current) {
-          const v = videoRef.current;
-          const timeMs = v ? v.currentTime * 1000 : undefined;
-          // playing=false only for a real pause; a stalled/buffering video is
-          // still "playing" (paused === false), which is exactly what lets the
-          // server distinguish a stall from a pause.
-          pingSession(sessionIdRef.current, timeMs, v ? !v.paused : undefined,
-            v ? bufferAheadSeconds(v) : undefined).catch(console.error);
-        }
-      }, PING_INTERVAL_MS);
-    }
+    // Keeping the transcode alive belongs to whoever drives it, which is a
+    // separate question from hosting now — see the stream-assignment effect.
 
     // Start heartbeating to sync remaining viewers
     if (heartbeatIntervalRef.current === null) {
@@ -691,19 +789,18 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     }
   }, [isHost]);
 
-  // Mirror of the promotion effect: a host who hands control to someone else
-  // must relinquish session ownership. Without this, ownsSessionRef stays true
-  // after demotion, so backing out (endPlayback) or hitting an HLS error would
-  // stop or restart the Plex transcode the *new* host is still using — killing
-  // their stream and forcing a fresh transcode (a phantom second stream).
+  // Losing the host role no longer means losing your stream: whoever drives a
+  // transcode is decided per stream by the server, and a demoted host who is
+  // still the only one on their tracks goes on driving it. The stream-assignment
+  // effect above is the single place that changes, and the server hands the role
+  // to somebody else in the same breath as the handover — so nothing here has to
+  // guess. Only the heartbeat, which belongs to the room rather than to a
+  // stream, stops on demotion.
   useEffect(() => {
-    if (!isHost) {
-      if (ownsSessionRef.current) {
-        logEvent("Player", "demoted, releasing session ownership", {
-          session: sessionIdRef.current?.substring(0, 8) ?? "none",
-        });
-      }
-      ownsSessionRef.current = false;
+    if (isHost) return;
+    if (heartbeatIntervalRef.current !== null) {
+      clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
     }
   }, [isHost]);
 
@@ -1026,6 +1123,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     const url = hlsMasterUrl(item.ratingKey, sessionId, {
       subtitles: subtitlesOnRef.current,
       offset: startOffset > 0 ? startOffset : undefined,
+      // The tracks this transcode is for. The server applies them to the item
+      // under a lock immediately before starting, so two streams of the same
+      // film can be brought up at once without stealing each other's selection.
+      audioStreamId: currentAudioStreamRef.current ?? audioStreamId ?? undefined,
+      subtitleStreamId: currentSubtitleStreamRef.current ?? subtitleStreamId ?? undefined,
       // Only the client that owns the session chose a file; a viewer sending its
       // own idea of one would restart the host's transcode on a different track.
       mediaIndex: sessionOwner ? mediaIndexRef.current : undefined,
@@ -1313,20 +1415,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // Host: broadcast play with sessionId when manifest is ready. Skip it
           // when adopting an already-live session — the room is already on it,
           // and "play" would reset everyone's position to 0.
-          if (isHostRef.current && !didAdoptRef.current) {
-            // Send the formatted title, not the bare episode name — viewers
-            // reconstruct their item from sync state alone (no show/season
-            // fields), so this string is all they have to display.
-            //
-            // The offset goes with it so the room's position starts where this
-            // transcode does — a resume from history, or a seek that needed a
-            // restart. Without it "play" resets everyone to 0:00 until the next
-            // heartbeat drags them back.
-            syncActionsRef.current?.sendPlay(
-              item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId!,
-              startOffset > 0 ? startOffset : undefined,
-            );
-          }
+          announceStream(sessionId!, startOffset);
         });
 
         // Clear error banner and reset retry count when recovery succeeds
@@ -1597,15 +1686,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         const onLoaded = () => {
           if (!mounted) return;
           video.play().catch((err) => console.warn("Autoplay prevented:", err));
-          if (isHostRef.current && !didAdoptRef.current) {
-            // Send the formatted title, not the bare episode name — viewers
-            // reconstruct their item from sync state alone (no show/season
-            // fields), so this string is all they have to display.
-            syncActionsRef.current?.sendPlay(
-              item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId!,
-              startOffset > 0 ? startOffset : undefined,
-            );
-          }
+          announceStream(sessionId!, startOffset);
         };
         video.addEventListener("loadedmetadata", onLoaded, { once: true });
       } else {
@@ -1870,10 +1951,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     if (syncState.position > 0) {
       const drift = Math.abs(video.currentTime - syncState.position);
       if (drift > DRIFT_THRESHOLD_S) {
-        if (amHost) {
-          // The host owns the transcode, so a co-host's seek has to go through
-          // the smart path — a far jump needs a restart at the new offset, not a
-          // bare currentTime write. broadcast=false stops it echoing back out.
+        if (ownsSessionRef.current) {
+          // Whoever drives this stream has to take the smart path — a far jump
+          // needs a restart at the new offset, not a bare currentTime write.
+          // broadcast=false stops it echoing back out.
+          //
+          // Every stream in the room does this independently for its own
+          // transcode, which is what keeps several of them landing on the same
+          // frame: the seek is a room command, and each driver serves it from
+          // whatever its own transcode can reach.
           //
           // Gated on an actual seek, because that restart is expensive and the
           // host is the authority on position: pause/resume are rebroadcast with
@@ -1884,7 +1970,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           if (isNewSeek) {
             handleHostSeekRef.current(syncState.position, false);
           } else {
-            logWarn("Sync", "host ignoring drifting position on non-seek command", {
+            logWarn("Sync", "driver ignoring drifting position on non-seek command", {
               commandSeq: syncState.commandSeq,
               roomPosS: syncState.position,
               ownPosS: video.currentTime,
@@ -2129,6 +2215,41 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // exist at the target position. Used when the target can't be reached in-place.
   // `broadcast` is false when we're applying a seek that came *from* someone else
   // (a co-host) — re-sending it would echo the command back around the room.
+  /**
+   * Report a transcode that has just been brought up.
+   *
+   * Two different announcements, because they mean different things to the room:
+   * the host opening a title is telling everyone *what is playing*, and anybody
+   * else — a viewer who forked onto their own tracks, or the host restarting
+   * after a seek — is only repointing one stream at a new transcode. Sending
+   * "play" for the latter would reset the room's position and drag every other
+   * stream along with it.
+   *
+   * Only a driver announces. A follower's job is to play what it is given.
+   */
+  const announceStream = useCallback((sessionId: string, startOffset: number) => {
+    if (!ownsSessionRef.current) return;
+    const offset = startOffset > 0 ? startOffset : undefined;
+    if (isHostRef.current && !didAdoptRef.current) {
+      // Send the formatted title, not the bare episode name — viewers
+      // reconstruct their item from sync state alone (no show/season fields),
+      // so this string is all they have to display.
+      //
+      // The offset goes with it so the room's position starts where this
+      // transcode does — a resume from history, or a seek that needed a
+      // restart. Without it "play" resets everyone to 0:00 until the next
+      // heartbeat drags them back.
+      syncActionsRef.current?.sendPlay(
+        item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId,
+        offset, undefined,
+        currentAudioStreamRef.current ?? audioStreamId ?? 0,
+        currentSubtitleStreamRef.current ?? subtitleStreamId ?? 0,
+      );
+      return;
+    }
+    syncActionsRef.current?.sendVariantSession(sessionId, startOffset);
+  }, [item, audioStreamId, subtitleStreamId]);
+
   const handleSeekRestart = useCallback((positionSeconds: number, broadcast = true) => {
     if (seekStallTimerRef.current !== null) {
       clearTimeout(seekStallTimerRef.current);
@@ -2321,7 +2442,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
    * session id via sendPlay on MANIFEST_PARSED.
    */
   const handleSeekCommand = useCallback((positionSeconds: number) => {
-    if (isHostRef.current) {
+    // Anyone driving a stream takes the smart path for it — not just the host.
+    // A co-host who forked onto their own tracks owns that transcode, and the
+    // server excludes a sender from its own broadcast, so nothing would come
+    // back to restart it: they would ask the room to jump an hour and sit on a
+    // stream that had never been told.
+    if (ownsSessionRef.current) {
       handleHostSeek(positionSeconds);
       return;
     }
@@ -2505,129 +2631,76 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     endPlayback();
   }, [endPlayback, selfUserId]);
 
-  const handleTrackChange = useCallback(async (partId: number, audioStreamID?: number, subtitleStreamID?: number) => {
-    if (!sessionIdRef.current) return;
+  /**
+   * Choose tracks.
+   *
+   * This no longer restarts anything by itself. It asks the room, and the server
+   * decides what that means: it puts this client on the stream serving those
+   * tracks — joining one that already exists, or creating one and making this
+   * client its driver — and the assignment comes back as a `variant`, which the
+   * effect above acts on. The rebuild, if there is one, happens there.
+   *
+   * The scope is the server's call too, and it depends on who is asking. A host
+   * takes everyone watching the host's stream with them; anybody else moves
+   * alone. That is the whole feature: the host still sets what the room hears by
+   * default, and nobody is stuck with it.
+   */
+  const handleTrackChange = useCallback((
+    partId: number,
+    audioStreamID?: number,
+    subtitleStreamID?: number,
+  ) => {
+    const audio = audioStreamID ?? currentAudioStreamRef.current ?? 0;
+    const subtitle = subtitleStreamID ?? currentSubtitleStreamRef.current ?? 0;
 
-    // Selecting the track that is already playing costs the whole room a
-    // transcode restart — several seconds of rebuffering for everyone — and
-    // changes nothing when it comes back. Easy to hit: reopening the switcher
-    // and tapping the ticked row, or two co-hosts choosing the same subtitles a
-    // moment apart, which used to be two restarts back to back.
-    const audioUnchanged =
-      audioStreamID === undefined || currentAudioStreamRef.current === audioStreamID;
-    const subtitleUnchanged =
-      subtitleStreamID === undefined || currentSubtitleStreamRef.current === subtitleStreamID;
-    if (audioUnchanged && subtitleUnchanged) {
+    // Selecting what is already playing would cost this client — and, for a
+    // host, everyone on their stream — a rebuild that changes nothing. Easy to
+    // hit: reopening the switcher and tapping the ticked row.
+    if (audio === (currentAudioStreamRef.current ?? 0) &&
+        subtitle === (currentSubtitleStreamRef.current ?? 0)) {
       logEvent("Player", "track change skipped (already selected)", {
-        partId,
-        audioStreamID: audioStreamID ?? "unchanged",
+        partId, audioStreamID: audioStreamID ?? "unchanged",
         subtitleStreamID: subtitleStreamID ?? "unchanged",
       });
       setShowTrackSwitcher(false);
       return;
     }
 
-    // Claimed before the await, so a second identical request arriving while
-    // this one is in flight is recognised as a duplicate rather than starting a
-    // second restart. Rolled back if Plex refuses.
-    const prevAudio = currentAudioStreamRef.current;
-    const prevSubtitle = currentSubtitleStreamRef.current;
-    if (audioStreamID !== undefined) currentAudioStreamRef.current = audioStreamID;
-    if (subtitleStreamID !== undefined) currentSubtitleStreamRef.current = subtitleStreamID;
-
-    const video = videoRef.current;
-    canvasRef.current = captureFrame(video) ?? canvasRef.current;
-
-    // Show overlay
+    // Hold the last frame over the swap, as before — a fork tears this client's
+    // transcode down and waits out a new one.
+    canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
     setTrackSwitching(audioStreamID !== undefined ? "audio" : "subtitle");
+    setShowTrackSwitcher(false);
 
-    try {
-      await setStreams(partId, { audioStreamID, subtitleStreamID });
-    } catch (err) {
-      logError("Player", "failed to set streams", {
-        partId,
-        audioStreamID,
-        subtitleStreamID,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      currentAudioStreamRef.current = prevAudio;
-      currentSubtitleStreamRef.current = prevSubtitle;
-      setTrackSwitching(null);
-      canvasRef.current = null;
-      return;
-    }
-
-    // fetchMeta is cached for five minutes and carries the per-track `selected`
-    // flags the switcher renders its checkmark from. Without dropping it, the
-    // burn-in changes but reopening the switcher still shows the old choice —
-    // "None" ticked while subtitles are plainly on screen. MovieDetail already
-    // does this after its own setStreams; the in-playback path was missing it.
+    // The cached track list carries `selected` flags, which describe whichever
+    // stream last started rather than this client's choice. Drop it so the
+    // switcher re-reads instead of ticking a stale row.
     invalidateMeta(item.ratingKey);
 
-    logEvent("Player", "track changed", {
-      partId,
-      audioStreamID: audioStreamID ?? "unchanged",
-      subtitleStreamID: subtitleStreamID ?? "unchanged",
-      subtitlesOn: subtitleStreamID !== undefined ? subtitleStreamID !== 0 : subtitlesOnRef.current,
+    logEvent("Player", "asking for tracks", {
+      partId, audio, subtitle,
+      from: variantRef.current?.variantKey ?? "none",
+      role: isHostRef.current ? "host" : canControlRef.current ? "cohost" : "viewer",
     });
-
-    // Follow the new selection, so the restart below asks Plex to burn in
-    // subtitles when a track is chosen (0 = None) rather than reusing whatever
-    // the episode happened to start with. Without this, selecting a track after
-    // starting with subtitles off restarts with subtitles=none and nothing
-    // appears. Untouched for an audio-only change.
-    if (subtitleStreamID !== undefined) {
-      subtitlesOnRef.current = subtitleStreamID !== 0;
-    }
-
-    // Restart HLS session to apply new tracks, preserving current position
-    if (video && video.currentTime > 0) {
-      seekOffsetRef.current = video.currentTime;
-    }
-    setShowTrackSwitcher(false);
-    setRetryKey((k) => k + 1);
-    // ratingKey is a real dependency now that the meta cache is invalidated by
-    // key — this Player is reused across a queue advance, so a captured initial
-    // value would clear the wrong episode's entry.
+    syncActionsRef.current?.sendSetTracks(audio, subtitle);
   }, [item.ratingKey]);
 
-  // Live ref so the host can apply a co-host's subtitle request from an effect
-  // without listing handleTrackChange as a dep (it's declared above, but keeping
-  // the pattern consistent with handleHostSeekRef).
-  const handleTrackChangeRef = useRef(handleTrackChange);
-  handleTrackChangeRef.current = handleTrackChange;
+
 
   /**
    * Track selection from the switcher. The host applies it directly — it owns
    * the transcode, and burned-in subtitles only change by restarting it. A
    * co-host can't do that, so it sends the request and the host performs it.
    */
-  const handleTrackSelect = useCallback(
-    (partId: number, audioStreamID?: number, subtitleStreamID?: number) => {
-      if (isHostRef.current) {
-        handleTrackChange(partId, audioStreamID, subtitleStreamID);
-        return;
-      }
-      // Co-hosts are limited to subtitles; audio never reaches here because the
-      // switcher renders in subtitlesOnly mode for them.
-      if (subtitleStreamID !== undefined) {
-        syncActionsRef.current?.sendSetSubtitle(partId, subtitleStreamID);
-        // The host does the actual setStreams, so this client would otherwise
-        // keep serving its own five-minute-old meta and show the pre-change
-        // selection next time the switcher opens — same stale checkmark the
-        // host used to get, reached by a different route.
-        invalidateMeta(item.ratingKey);
-      }
-    },
-    [handleTrackChange, item.ratingKey],
-  );
-
-  // Host: apply a subtitle change requested by a co-host.
-  useEffect(() => {
-    const req = syncState?.subtitleRequest;
-    if (!req || !isHostRef.current) return;
-    handleTrackChangeRef.current(req.partId, undefined, req.subtitleStreamID);
-  }, [syncState?.subtitleRequest?.seq]);
+  /**
+   * Everyone changes their own tracks now, so there is nothing to relay.
+   *
+   * A co-host used to be unable to apply one — subtitles are burned into the
+   * transcode, so their request had to be performed by the host, which changed
+   * it for the entire room. Forking made that unnecessary: the request goes to
+   * the server, which moves the sender onto a stream that has those tracks.
+   */
+  const handleTrackSelect = handleTrackChange;
 
   // Skip to the end of the active marker. Uses handleHostSeek (not
   // handleSeekRestart) so a typical 60-100s intro takes the cheap in-place path —
@@ -3075,7 +3148,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           mediaIndex={effectiveMediaIndex}
           onClose={() => setShowTrackSwitcher(false)}
           onTrackChange={handleTrackSelect}
-          subtitlesOnly={!isHost}
+          // Audio is everyone's now: a viewer choosing a different track moves
+          // onto a stream that has it rather than changing what the room hears.
+          scope={isHost ? "room" : "self"}
         />
       )}
       {showQueuePanel && syncState && (
@@ -3093,12 +3168,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           selfUserId={selfUserId}
           isHost={isHost}
           onPromoteHost={(uid) => {
-            // Release the transcode the instant the handover is sent, rather
-            // than waiting for the demotion to come back from the server.
-            // Closing the tab in that window used to tear down the stream the
-            // new host had just adopted. The server refuses a stop from a
-            // non-host too; this just means the request is never made.
-            ownsSessionRef.current = false;
+            // Ownership of a *stream* is no longer tied to the host role, so a
+            // handover doesn't release one — the outgoing host may well be the
+            // only person on their tracks and go on driving it. The race this
+            // used to guard against (hand over, close the tab, kill the stream
+            // the new host had just adopted) is settled on the server now, which
+            // refuses to stop a stream anyone else is still watching.
             syncActions?.sendPromoteHost(uid);
             setShowPeoplePanel(false);
           }}

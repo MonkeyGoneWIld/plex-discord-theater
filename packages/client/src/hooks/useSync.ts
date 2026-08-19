@@ -37,6 +37,28 @@ export interface SuggestionItem {
   fromUsername?: string;
 }
 
+/**
+ * The stream this client is on, and the tracks it is for.
+ *
+ * A room is one timeline with a transcode per set of tracks anyone has chosen.
+ * Everyone starts on the host's; picking different audio or subtitles moves you
+ * onto the stream that serves them, or starts one if nobody has it.
+ *
+ * `isOwner` means this client drives that transcode — starts it, restarts it for
+ * a seek it can't serve in place, and keeps it alive. It says nothing about
+ * control of the room.
+ */
+export interface StreamVariant {
+  variantKey: string;
+  audioStreamId: number;
+  subtitleStreamId: number;
+  /** Null when the stream has no transcode yet, which is the owner's cue to
+   *  start one and report it back with sendVariantSession. */
+  hlsSessionId: string | null;
+  sessionOffset: number;
+  isOwner: boolean;
+}
+
 export interface SyncState {
   connected: boolean;
   ratingKey: string | null;
@@ -95,10 +117,14 @@ export interface SyncState {
   /** Whether *this* client is a co-host (transport control, granted by the host).
    *  Always false for the host, whose rights already supersede it. */
   isCoHost: boolean;
-  /** A co-host asked for a subtitle change. Only the host acts on it, since
-   *  subtitles are burned in and applying one restarts the transcode. `seq`
-   *  makes repeat requests for the same track fire the effect again. */
-  subtitleRequest: { partId: number; subtitleStreamID: number; seq: number } | null;
+  /**
+   * Which stream this client should be playing. Null before playback starts.
+   *
+   * `seq` increments on every assignment, including one that repoints the same
+   * variant at a new session after its owner restarted the transcode — the
+   * player has to act on that even though nothing else about it changed.
+   */
+  variant: (StreamVariant & { seq: number }) | null;
   /** A co-host asked to advance to the next item. Only the host acts on it,
    *  since starting a title is host-only. `seq` re-fires the effect on repeats. */
   playItemRequest: { ratingKey: string; seq: number } | null;
@@ -130,6 +156,10 @@ export interface SyncActions {
     hlsSessionId: string,
     position?: number,
     sessionOffset?: number,
+    /** The tracks this stream is for — it becomes the room's default variant,
+     *  and the one everybody who hasn't chosen otherwise watches. */
+    audioStreamId?: number,
+    subtitleStreamId?: number,
   ) => void;
   sendPause: (position: number) => void;
   sendResume: (position: number) => void;
@@ -150,7 +180,16 @@ export interface SyncActions {
   /** Host: grant or revoke transport control for a viewer. */
   sendSetCoHost: (userId: string, value: boolean) => void;
   /** Host or co-host: request a subtitle track. The host applies it. */
-  sendSetSubtitle: (partId: number, subtitleStreamID: number) => void;
+  /**
+   * "Put me on these tracks."
+   *
+   * Anyone may call it. The server decides the scope: the host's choice carries
+   * to everyone watching the host's stream, anyone else's moves only them. The
+   * answer comes back as a `variant`.
+   */
+  sendSetTracks: (audioStreamId: number, subtitleStreamId: number) => void;
+  /** Stream owner → room: the transcode I just brought up for my variant. */
+  sendVariantSession: (hlsSessionId: string, sessionOffset: number) => void;
   /** Co-host: ask the host to advance to the next item. */
   sendPlayItem: (ratingKey: string) => void;
   /**
@@ -203,7 +242,7 @@ const INITIAL_STATE: SyncState = {
   queue: [],
   participants: [],
   isCoHost: false,
-  subtitleRequest: null,
+  variant: null,
   playItemRequest: null,
 };
 
@@ -263,8 +302,13 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         hlsSessionId: string,
         position?: number,
         sessionOffset?: number,
+        audioStreamId?: number,
+        subtitleStreamId?: number,
       ) => {
-        send({ type: "play", ratingKey, title, subtitles, hlsSessionId, position, sessionOffset });
+        send({
+          type: "play", ratingKey, title, subtitles, hlsSessionId, position, sessionOffset,
+          audioStreamId, subtitleStreamId,
+        });
         setState((prev) => ({
           ...prev,
           playing: true,
@@ -312,8 +356,10 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       sendPromoteHost: (targetUserId: string) => send({ type: "promote-host", userId: targetUserId }),
       sendSetCoHost: (targetUserId: string, value: boolean) =>
         send({ type: "set-cohost", userId: targetUserId, value }),
-      sendSetSubtitle: (partId: number, subtitleStreamID: number) =>
-        send({ type: "set-subtitle", partId, subtitleStreamID }),
+      sendSetTracks: (audioStreamId: number, subtitleStreamId: number) =>
+        send({ type: "set-tracks", audioStreamId, subtitleStreamId }),
+      sendVariantSession: (hlsSessionId: string, sessionOffset: number) =>
+        send({ type: "variant-session", hlsSessionId, sessionOffset }),
       sendPlayItem: (ratingKey: string) => send({ type: "play-item", ratingKey }),
       sendWatching: (value: boolean) => send({ type: "watching", value }),
       retryConnection: () => {
@@ -378,6 +424,14 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               lastCommandAt: (msg.lastCommandAt as number) ?? Date.now(),
               browseContext: (msg.browseContext as string) || null,
               queue: (msg.queue as QueueItem[]) || [],
+              // The stream a joiner lands on — the host's. Absent from an older
+              // server, in which case the player falls back to hlsSessionId.
+              variant: msg.variant
+                ? {
+                    ...(msg.variant as Omit<StreamVariant, "isOwner"> & { isOwner: boolean }),
+                    seq: (prev.variant?.seq ?? 0) + 1,
+                  }
+                : prev.variant,
               hostUsername: (msg.hostUsername as string) || prev.hostUsername,
               participants: (msg.participants as Participant[]) || [],
               isCoHost:
@@ -407,13 +461,20 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           case "cohost-changed":
             setState((prev) => ({ ...prev, isCoHost: Boolean(msg.isCoHost) }));
             break;
-          case "set-subtitle":
+          case "variant":
+            // Which stream to play. Arrives on assignment and again whenever
+            // its owner repoints it at a new transcode, so `seq` moves even
+            // when nothing but the session id has.
             setState((prev) => ({
               ...prev,
-              subtitleRequest: {
-                partId: msg.partId as number,
-                subtitleStreamID: msg.subtitleStreamID as number,
-                seq: (prev.subtitleRequest?.seq ?? 0) + 1,
+              variant: {
+                variantKey: msg.variantKey as string,
+                audioStreamId: (msg.audioStreamId as number) ?? 0,
+                subtitleStreamId: (msg.subtitleStreamId as number) ?? 0,
+                hlsSessionId: (msg.hlsSessionId as string) || null,
+                sessionOffset: (msg.sessionOffset as number) ?? 0,
+                isOwner: Boolean(msg.isOwner),
+                seq: (prev.variant?.seq ?? 0) + 1,
               },
             }));
             break;

@@ -11,12 +11,20 @@ interface TrackSwitcherProps {
   mediaIndex?: number;
   onClose: () => void;
   onTrackChange: (partId: number, audioStreamID?: number, subtitleStreamID?: number) => void;
-  /** Co-hosts may change subtitles but not audio — hides the Audio tab. */
-  subtitlesOnly?: boolean;
+  /**
+   * Who a change here affects.
+   *
+   * "room" for the host, whose choice carries to everyone watching their stream;
+   * "self" for everybody else, who forks onto a stream of their own. Both get
+   * the full choice of tracks — the difference is only in the reach, and saying
+   * so is the point: a host changing the audio for six people should know that
+   * is what they are doing.
+   */
+  scope?: "room" | "self";
 }
 
-export function TrackSwitcher({ ratingKey, mediaIndex, onClose, onTrackChange, subtitlesOnly = false }: TrackSwitcherProps) {
-  const [tab, setTab] = useState<"audio" | "subtitles">(subtitlesOnly ? "subtitles" : "audio");
+export function TrackSwitcher({ ratingKey, mediaIndex, onClose, onTrackChange, scope = "self" }: TrackSwitcherProps) {
+  const [tab, setTab] = useState<"audio" | "subtitles">("audio");
   const [audioTracks, setAudioTracks] = useState<StreamTrack[]>([]);
   const [subtitleTracks, setSubtitleTracks] = useState<StreamTrack[]>([]);
   const [partId, setPartId] = useState<number | null>(null);
@@ -51,12 +59,11 @@ export function TrackSwitcher({ ratingKey, mediaIndex, onClose, onTrackChange, s
     <div style={styles.backdrop} onClick={onClose}>
       <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
-          <span style={styles.headerTitle}>{subtitlesOnly ? "Subtitles" : "Track Settings"}</span>
+          <span style={styles.headerTitle}>Audio &amp; Subtitles</span>
           <button onClick={onClose} style={styles.closeBtn}>{"\u2715"}</button>
         </div>
 
-        {!subtitlesOnly && (
-          <div style={styles.tabs}>
+        <div style={styles.tabs}>
             <button
               onClick={() => setTab("audio")}
               style={{ ...styles.tab, ...(tab === "audio" ? styles.tabActive : {}) }}
@@ -65,8 +72,15 @@ export function TrackSwitcher({ ratingKey, mediaIndex, onClose, onTrackChange, s
               onClick={() => setTab("subtitles")}
               style={{ ...styles.tab, ...(tab === "subtitles" ? styles.tabActive : {}) }}
             >Subtitles</button>
-          </div>
-        )}
+        </div>
+
+        {/* What a change here reaches. The host's carries; everyone else's
+            forks onto a stream of their own, which nobody else sees. */}
+        <p style={styles.scopeNote}>
+          {scope === "room"
+            ? "Changes apply to everyone watching your stream."
+            : "Changes apply to you only."}
+        </p>
 
         {loading ? (
           <div style={styles.loading}>Loading tracks...</div>
@@ -181,6 +195,13 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer", textAlign: "left", fontFamily: "inherit", color: "inherit",
   },
   checkmark: { color: "#e5a00d", fontSize: 12 },
+  scopeNote: {
+    margin: 0,
+    padding: "0 16px 10px",
+    color: "#7d7d7d",
+    fontSize: "12px",
+    lineHeight: 1.4,
+  },
   loading: { color: "#888", fontSize: 13, textAlign: "center", padding: 20 },
   disclaimer: {
     color: "#666", fontSize: 11, lineHeight: "1.4",

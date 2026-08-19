@@ -5,7 +5,7 @@ import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition }
 import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
-import { sessionHostUserId } from "../services/sync.js";
+import { sessionHostUserId, sessionHasOtherWatchers } from "../services/sync.js";
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
 
@@ -3597,6 +3597,20 @@ router.delete(
       // 200, not an error: the caller is tearing down correctly by its own
       // reckoning, and it has nothing useful to do with a failure here.
       res.json({ ok: true, ignored: "not-host" });
+      return;
+    }
+
+    // Still someone's picture. The requester may well be entitled to stop it —
+    // they are the one driving it — but a stream is shared by everyone on the
+    // same tracks, and leaving the player is not a decision on their behalf.
+    // The stream dies when the last of them goes, which the sync layer handles.
+    if (sessionHasOtherWatchers(sessionId, stopper)) {
+      logEvent("HLS", "Stop refused — others are still on this stream", {
+        session: sessionId.substring(0, 8),
+        reason,
+        stopper,
+      });
+      res.json({ ok: true, ignored: "still-watched" });
       return;
     }
 

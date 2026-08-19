@@ -7,9 +7,9 @@
 import http from "node:http";
 import { WebSocket } from "ws";
 import type { AddressInfo } from "node:net";
-import { attachWebSocketServer, closeWebSocketServer } from "./services/sync.js";
-import { createSession } from "./middleware/auth.js";
-import { instanceHosts } from "./routes/discord.js";
+import { attachWebSocketServer, closeWebSocketServer, sessionHasOtherWatchers } from "../src/services/sync.js";
+import { createSession } from "../src/middleware/auth.js";
+import { instanceHosts } from "../src/routes/discord.js";
 
 let pass = 0;
 let fail = 0;
@@ -244,13 +244,70 @@ console.log("\n— a driver leaving hands the stream on —");
   b.send({ type: "set-tracks", audioStreamId: 2, subtitleStreamId: 0 });
   await sleep(60);
   check("b joined a's stream", b.stream()?.session, aSid);
+  // The guard that stops a departing driver taking everyone else's picture
+  // with them — see sessionHasOtherWatchers and the stop route.
+  check("the stream is shared, so a may not stop it",
+    sessionHasOtherWatchers(aSid, "u-a"), true);
+  check("b is not blocked by their own presence",
+    sessionHasOtherWatchers(aSid, "u-b"), true);
   b.clear();
 
   a.close();
   await sleep(120);
   check("b inherits the stream rather than losing it", b.stream()?.owner, true);
   check("and stays on the same session", b.stream()?.session, aSid);
+  check("with a gone, b is alone and may stop it",
+    sessionHasOtherWatchers(aSid, "u-b"), false);
   [host, b].forEach((x) => x.close());
+}
+
+console.log("\n— the scenario end to end —");
+{
+  // Host + 3 viewers on audio A; one viewer on audio C. Host moves to B.
+  const [host, v1, v2, v3, odd] = await room("inst-9", ["host", "v1", "v2", "v3", "odd"]);
+  const hostSid = await startPlayback(host);          // audio A = 1
+  odd.send({ type: "set-tracks", audioStreamId: 3, subtitleStreamId: 0 });   // audio C
+  await sleep(50);
+  const oddSid = uuid();
+  odd.send({ type: "variant-session", hlsSessionId: oddSid, sessionOffset: 300 });
+  await sleep(50);
+
+  const live = () => new Set(
+    [host, v1, v2, v3, odd].map((c) => c.stream()?.session).filter(Boolean));
+  check("two streams for five people", live().size, 2);
+  check("four of them share the host's",
+    [host, v1, v2, v3].every((c) => c.stream()?.session === hostSid), true);
+
+  [host, v1, v2, v3, odd].forEach((c) => c.clear());
+  host.send({ type: "set-tracks", audioStreamId: 2, subtitleStreamId: 0 });  // audio B
+  await sleep(60);
+  check("the host's three came along to B",
+    [v1, v2, v3].map((c) => c.stream()?.key), ["2:0", "2:0", "2:0"]);
+  check("the one on C was not touched", odd.last("variant"), undefined);
+  check("the host drives the new stream", host.stream()?.owner, true);
+
+  const bSid = uuid();
+  host.send({ type: "variant-session", hlsSessionId: bSid, sessionOffset: 300 });
+  await sleep(60);
+  check("its followers are moved onto it",
+    [v1, v2, v3].every((c) => c.stream()?.session === bSid), true);
+  check("still two streams, not five",
+    new Set([host, v1, v2, v3].map((c) => c.stream()?.session).concat([oddSid])).size, 2);
+
+  v3.clear();
+  v3.send({ type: "set-tracks", audioStreamId: 3, subtitleStreamId: 0 });
+  await sleep(60);
+  check("v3 reuses the existing C stream", v3.stream()?.session, oddSid);
+  check("and does not become its driver", v3.stream()?.owner, false);
+
+  [v1, v2, v3, odd].forEach((c) => c.clear());
+  host.close();
+  await sleep(140);
+  const promoted = [v1, v2, v3, odd].filter((c) => c.last("host-promoted"));
+  check("exactly one successor", promoted.length, 1);
+  check("and they were on the host's stream",
+    promoted[0] === v1 || promoted[0] === v2, true);
+  [v1, v2, v3, odd].forEach((c) => c.close());
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

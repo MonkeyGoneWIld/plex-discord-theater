@@ -314,6 +314,25 @@ function stopSessionPing(hlsSessionId: string): void {
  * had not arrived yet — and its cleanup DELETEd a transcode the new host had
  * just adopted.
  */
+/**
+ * Is anyone else still watching this stream?
+ *
+ * A stream can now have an audience of its own, so "the person who started it is
+ * leaving" is no longer a reason to stop it. Someone who forks onto the dub and
+ * then closes the player would otherwise take every other viewer of that dub
+ * down with them — and so would a host handing over the role and closing the tab,
+ * with the new host still on the stream they were both watching.
+ */
+export function sessionHasOtherWatchers(sessionId: string, userId: string | null): boolean {
+  for (const room of rooms.values()) {
+    for (const v of room.state.variants.values()) {
+      if (v.hlsSessionId !== sessionId) continue;
+      return membersOf(room, v.key).some((c) => c.userId !== userId);
+    }
+  }
+  return false;
+}
+
 export function sessionHostUserId(sessionId: string): string | null {
   for (const room of rooms.values()) {
     // Whoever drives this particular stream. With one transcode per set of

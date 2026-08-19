@@ -732,18 +732,42 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     currentSubtitleStreamRef.current = v.subtitleStreamId;
     subtitlesOnRef.current = v.subtitleStreamId !== 0;
 
-    if (v.isOwner && !v.hlsSessionId) {
-      // A fork inherits the room's clock and nothing else — see the server's
-      // assignVariant. Start the new transcode where playback actually is.
-      const video = videoRef.current;
-      const at = video && video.currentTime > 0
-        ? video.currentTime
-        : syncStateRef.current?.position ?? 0;
-      seekOffsetRef.current = at;
-      logEvent("HLS", "starting a stream for these tracks", {
-        variant: v.variantKey, atS: at,
-      });
-      setRetryKey((k) => k + 1);
+    if (v.isOwner) {
+      if (!v.hlsSessionId) {
+        // A fork inherits the room's clock and nothing else — see the server's
+        // assignVariant. Start the new transcode where playback actually is.
+        const video = videoRef.current;
+        const at = video && video.currentTime > 0
+          ? video.currentTime
+          : syncStateRef.current?.position ?? 0;
+        seekOffsetRef.current = at;
+        logEvent("HLS", "starting a stream for these tracks", {
+          variant: v.variantKey, atS: at,
+        });
+        setRetryKey((k) => k + 1);
+        return;
+      }
+      if (!sessionIdRef.current) {
+        // Handed a running stream while not playing anything — the driver left
+        // and this client inherited it. Adopt the transcode the rest of its
+        // audience is already watching instead of minting a second one.
+        logEvent("HLS", "adopting the stream this client now drives", {
+          variant: v.variantKey, session: v.hlsSessionId.substring(0, 8),
+        });
+        adoptSessionIdRef.current = v.hlsSessionId;
+        setRetryKey((k) => k + 1);
+        return;
+      }
+      // A stream this client drives, which already has a transcode. Whatever
+      // session the server names here came *from* this client, so following it
+      // is following an echo — and a stale one whenever a restart has been
+      // coalesced, because the announcement of the transcode being replaced
+      // arrives after the replacement was minted. That was a loop: adopt the old
+      // session, rebuild, announce the new one, adopt the older one again. One
+      // client got through sixteen transcodes in forty-five seconds.
+      //
+      // The owner's own sessionIdRef is the truth. Nothing to do.
+      setTrackSwitching(null);
       return;
     }
     if (v.hlsSessionId && v.hlsSessionId !== sessionIdRef.current) {
@@ -1022,7 +1046,14 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // Which dependency moved. This effect owns the whole HLS lifecycle, so
     // every restart in the log traces back to one of these — and "which one"
     // is otherwise unknowable from the outside.
-    const deps = { ratingKey: item.ratingKey, subtitles, followSessionId, retryKey, vpsRelay };
+    // `subtitles` is deliberately NOT here. It was the room's single burn-in
+    // flag, which each client now has its own answer to — the variant's subtitle
+    // track. Leaving it in meant a handover between two people on different
+    // tracks flipped the room flag, and the outgoing host tore down a perfectly
+    // good transcode and rebuffered for five seconds over a value it no longer
+    // reads. subtitlesOnRef carries the real answer, and a genuine track change
+    // rebuilds through the stream assignment.
+    const deps = { ratingKey: item.ratingKey, followSessionId, retryKey, vpsRelay };
     const prev = hlsDepsRef.current;
     const changed = prev
       ? (Object.keys(deps) as Array<keyof typeof deps>).filter((k) => deps[k] !== prev[k])

@@ -21,46 +21,47 @@ sees the same thing at the same time — one person drives, everyone else follow
 
 ## What it looks like
 
-The whole thing runs inside Discord, in the voice channel. Here it is playing
-something — everyone in the room is at this frame, and the scrub bar shows the
-frame you'd land on before you let go.
+The Activity runs right inside the voice channel. Everyone in the room is on the
+same frame, and hovering the seek bar gives you Plex's thumbnail previews.
 
-![The player, with the control bar and a hover preview of the frame at the cursor](docs/screenshots/player.jpg)
+![The player, with the control bar and a thumbnail preview on the seek bar](docs/screenshots/player.jpg)
 
-Out of the player, it opens on the same hub rows your Plex server arranges.
+Back out of the player and you land on your Plex home screen — the same hubs your
+server already builds.
 
 ![The Home tab, with Trending, Popular and Top Rated poster rows](docs/screenshots/home.jpg)
 
-Search reaches past your own library, so something nobody has is still findable —
-and marked clearly as something you don't own.
+Search covers your library and Plex Discover together, so titles you haven't got
+yet still turn up — badged **Not in library** so you can tell them apart.
 
 ![Search results, split into titles in the library and titles that are not](docs/screenshots/search.jpg)
 
-A title page settles ratings, cast and the track pickers before anyone presses Play.
+Every title gets a detail page: ratings, synopsis, cast, and the audio and
+subtitle tracks to pick before you hit Play.
 
 ![A film's detail page, with ratings, synopsis, cast, and audio and subtitle pickers](docs/screenshots/title.jpg)
 
-Every face in that cast row opens, onto everything in your library that person
-worked on — pulled from Plex by tag, so it only ever lists titles you actually have.
+Click anyone in **Cast & Crew** for their filmography — everything of theirs in
+your library, matched on Plex's own tags.
 
 ![Hugh Jackman's page: biography and dates, then his films and shows from the library](docs/screenshots/person.jpg)
 
-With Overseerr or Jellyseerr connected, anything you don't own can be requested
-from the page you found it on.
+With Overseerr or Jellyseerr connected, you can request anything you don't have
+without leaving the Activity.
 
 ![Primetime, a film that isn't in the library, with a Request button](docs/screenshots/request-movie.jpg)
 
-For a show it's per season — and only the seasons a request would actually fill,
-so nothing sits in the queue forever waiting on episodes that don't exist yet.
+Shows request by season, and only the seasons Sonarr could actually fill — so
+nothing sits in Overseerr forever waiting on episodes that haven't aired.
 
 ![A show's page with its missing seasons selectable for request](docs/screenshots/request-seasons.jpg)
 
-On a phone it's a different layout rather than a squeezed version of this one —
-three posters to a row, and detail pages that stack instead of sitting side by side.
+Mobile gets its own layout rather than a shrunk-down desktop one: three posters
+per row, and detail pages that stack the poster above everything else.
 
 | ![The TV Shows tab on a phone, three posters across](docs/screenshots/phone-browse.jpg) | ![A film's detail page on a phone, poster centred above the text](docs/screenshots/phone-title.jpg) |
 | :-- | :-- |
-| **On mobile** — browsing, three posters across. | **On mobile** — a title, poster centred with everything stacked under it. |
+| **On mobile** — browsing, three posters per row. | **On mobile** — a detail page, poster centred with everything stacked below. |
 
 ---
 
@@ -70,40 +71,41 @@ Everyone in the voice channel opens the Activity and lands in the same room.
 The host picks something; it starts for everybody at once. Pause, seek, change
 the subtitles — the room follows.
 
-- **Synchronised playback.** Small drifts are corrected by nudging playback
-  speed a fraction rather than by seeking, so keeping everyone together doesn't
-  cost a rebuffer every few minutes.
+- **Synchronised playback.** Small drifts are pulled back by nudging playback
+  speed a fraction instead of seeking, so keeping the room together doesn't cost
+  everyone a buffer every few minutes.
 - **Co-hosts and host handover.** Hand out playback control, or the host role
   itself, from the people panel. Roles belong to the person, not the connection,
   so a dropped WiFi signal doesn't silently demote anyone. If the host leaves, a
   co-host takes over and the film keeps going.
-- **Browse and search your whole library** — filters, sorting, cast and crew
-  pages. Search covers titles you *don't* own too, marked clearly, with a
-  request button if you run Overseerr or Jellyseerr.
-- **See what's missing from a season.** Inside a season, a toggle reveals the
-  episodes you don't have — separating "aired but never downloaded" from "hasn't
-  aired yet", with air dates.
+- **Browse and search your whole library** — filters, sorting, Cast & Crew
+  pages. Search takes in Plex Discover too, so titles you don't own show up
+  badged **Not in library**, with a Request button if you run Overseerr or
+  Jellyseerr.
+- **See what's missing from a season.** A toggle on the season page reveals the
+  episodes you don't have, keeping *missing* (aired, never downloaded) apart from
+  *unaired*, with air dates.
 - **Audio and subtitle tracks**, switchable mid-episode. Your subtitle choice
   carries to the next episode, matched by language rather than track number.
-- **Pick which file plays** when Plex holds more than one copy of a title. A 4K
-  copy is hidden whenever a lower-resolution one exists: every stream is
-  transcoded down to 1080p anyway, so playing the 4K file buys the room nothing
-  and costs the server a 4K decode per viewer. A title that only exists in 4K
-  still plays.
-- **Skip intro / credits**, seek-bar thumbnail previews, next-episode cards, a
-  shared queue, and viewer suggestions.
+- **Play Version.** When a title has more than one version in Plex, pick which
+  one plays. The 4K version is hidden whenever there's a 1080p or lower one
+  alongside it — everything is transcoded to 1080p anyway, so streaming the 4K
+  file gains the room nothing and costs your server a 4K decode for every
+  viewer. A title that only exists in 4K still plays.
+- **Skip Intro and Skip Credits**, thumbnail previews on the seek bar, up-next
+  cards, a shared queue, and viewer suggestions.
 - **Stats for nerds** — press `i` during playback for resolution, codecs,
   bitrate, buffer health and peer counters.
-- **A real phone layout**, not a squeezed desktop one. Three posters to a row,
-  detail pages that stack, play/pause as a button in the middle of the picture,
-  and a double-tap either side to skip. Discord's own mobile bar already offers
-  an invite button, so this doesn't draw a second one over it.
+- **A proper mobile layout**, not a shrunk-down desktop one. Three posters per
+  row, detail pages that stack, play/pause in the middle of the picture, and
+  double-tap either side to skip 10 seconds. Discord's mobile bar already has an
+  invite button, so this doesn't stack a second one on top of it.
 
 > [!NOTE]
-> Skip intro/credits and seek-bar previews come from data **Plex** generates,
-> and both silently do nothing without it. Turn on *Detect intros and credits*
-> and *Generate video preview thumbnails* under Library → Edit → Advanced. Both
-> are off by default on many servers.
+> Skip Intro/Credits and thumbnail previews both rely on data **Plex** has to
+> generate first, and neither says anything when it's missing. Turn on *Detect
+> intros and credits* and *Generate video preview thumbnails* under Library →
+> Edit → Advanced. Both are off by default on many servers.
 
 ---
 
@@ -230,9 +232,9 @@ TMDB-derived list names episodes that really sit in a neighbouring season, and
 requesting them achieves nothing.
 
 With a key set, TVDB is used whenever the show has a TVDB id. Either way the
-list is checked against your own episode numbers first: a source that can't
-account for episodes already on disk is describing a different season, and gets
-discarded rather than shown.
+list is checked against your own episode numbers first — if a source can't
+account for the episodes you already have, it's describing a different season,
+so it's dropped rather than shown.
 
 A free *project* key needs no PIN. A user-supported subscriber key does — put it
 in `TVDB_PIN`.
@@ -240,8 +242,8 @@ in `TVDB_PIN`.
 ### MDBList — ratings
 
 IMDb, Rotten Tomatoes (critic **and** audience) and TMDB scores on detail pages.
-Rotten Tomatoes has no public API, so [MDBList](https://mdblist.com) — a free
-aggregator — is how those scores are obtained.
+Rotten Tomatoes has no public API, so the scores come via
+[MDBList](https://mdblist.com), a free aggregator.
 
 ### Seerr — requesting titles
 

@@ -46,7 +46,7 @@ your library, matched on Plex's own tags.
 
 ![Hugh Jackman's page: biography and dates, then his films and shows from the library](docs/screenshots/person.jpg)
 
-With Overseerr or Jellyseerr connected, you can request anything you don't have
+With Seerr connected, you can request anything you don't have
 without leaving the Activity.
 
 ![Primetime, a film that isn't in the library, with a Request button](docs/screenshots/request-movie.jpg)

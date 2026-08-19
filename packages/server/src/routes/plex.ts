@@ -2552,6 +2552,27 @@ export async function notifyPlexStopped(ratingKey: string | null, sessionId: str
 }
 
 /**
+ * Token for reading and ending Plex sessions.
+ *
+ * Both are account-level calls on some setups, where the local server token
+ * gets a bare 403. That took out the orphan reaper and the terminate path
+ * together, silently — the account token configured to avoid exactly this was
+ * only ever passed to the second of them, which the first never reached.
+ */
+function sessionsToken(): string | undefined {
+  return process.env.PLEX_ACCOUNT_TOKEN || process.env.PLEX_TOKEN;
+}
+
+/**
+ * Whether the "can't read /status/sessions" warning has already been given.
+ *
+ * It is a configuration problem, not an event: it stays true for every teardown
+ * for as long as the process lives, and repeating it buries the one teardown
+ * that matters. Said once, with what to do about it.
+ */
+let sessionListForbidden = false;
+
+/**
  * Safely terminate a specific Plex session using the official API.
  * Triple safety:
  * 1. Matches TranscodeSession.key against our exact plexKey
@@ -2574,7 +2595,7 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
           Session?: { id?: string };
         }>;
       };
-    }>("/status/sessions");
+    }>("/status/sessions", undefined, sessionsToken());
 
     const sessions = data.MediaContainer.Metadata || [];
     for (const s of sessions) {
@@ -2588,17 +2609,10 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
       if (!sessionId) continue;
 
       console.log("[HLS] Terminating Plex session:", sessionId, "for transcode key:", plexKey.substring(0, 8));
-      // /status/sessions/terminate needs an account-privileged token — the server
-      // PLEX_TOKEN gets 403'd, leaving the session (and its transcode) to linger.
-      // Use PLEX_ACCOUNT_TOKEN when set (same one Discover/Seerr use).
       const termParams: Record<string, string> = { sessionId, reason: "Playback ended" };
-      // The comment above described this for a long time without it being true:
-      // plexFetch always sent PLEX_TOKEN, so the 403 it warns about happened on
-      // every setup — including the ones that had configured an account token
-      // precisely to avoid it — and orphaned transcodes piled up on Plex.
+      // Account-privileged, like the listing above — see sessionsToken.
       const termRes = await plexFetch(
-        "/status/sessions/terminate", termParams, undefined, "POST",
-        process.env.PLEX_ACCOUNT_TOKEN || process.env.PLEX_TOKEN,
+        "/status/sessions/terminate", termParams, undefined, "POST", sessionsToken(),
       );
       if (!termRes.ok) {
         console.warn("[HLS] Terminate returned", termRes.status,
@@ -2609,7 +2623,26 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
 
     if (DEBUG) console.log("[HLS] No matching Plex session found for terminate:", plexKey.substring(0, 8));
   } catch (err) {
-    console.log("[HLS] Terminate session failed (non-fatal):", err);
+    const message = err instanceof Error ? err.message : String(err);
+    // A 403 is Plex saying this token may not list sessions, which no amount of
+    // retrying changes. The transcode itself is stopped by its own endpoint
+    // before this runs — all that lingers is Plex's "now playing" entry — so it
+    // stays non-fatal, but it should read as one line of advice rather than a
+    // page of HTML on every teardown.
+    if (message.includes("403")) {
+      if (!sessionListForbidden) {
+        sessionListForbidden = true;
+        console.warn(
+          "[HLS] Plex refused to list sessions (403), so finished ones linger in Now Playing.",
+          process.env.PLEX_ACCOUNT_TOKEN
+            ? "PLEX_ACCOUNT_TOKEN is set but was refused — check it is the server owner's plex.tv token."
+            : "Set PLEX_ACCOUNT_TOKEN to your plex.tv account token.",
+          "Transcodes still stop normally; only the session entry is left behind.",
+        );
+      }
+      return;
+    }
+    console.warn("[HLS] Terminate session failed (non-fatal):", message);
   }
 }
 
@@ -2717,7 +2750,7 @@ async function flushStaleTranscodes(ratingKey?: string, exceptKey?: string): Pro
           key?: string;
         }>;
       };
-    }>("/status/sessions");
+    }>("/status/sessions", undefined, sessionsToken());
 
     const sessions = data.MediaContainer.Metadata || [];
     console.log("[HLS] /status/sessions:", sessions.length);
@@ -3716,7 +3749,7 @@ router.delete("/hls/sessions", async (req: Request, res: Response) => {
           Player?: { machineIdentifier?: string };
         }>;
       };
-    }>("/status/sessions");
+    }>("/status/sessions", undefined, sessionsToken());
 
     const sessions = data.MediaContainer.Metadata || [];
     if (DEBUG) console.log("[HLS] Active sessions:", sessions.length);

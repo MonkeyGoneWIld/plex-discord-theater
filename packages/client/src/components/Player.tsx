@@ -1560,15 +1560,18 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
               logEvent("Sync", "landing on the room clock after a rebuild", {
                 fromS: video.currentTime,
                 toS: syncPos,
-                // Only meaningful for whoever asked Plex for this transcode. A
-                // follower joins one already running and never sets an offset,
-                // so reporting `syncPos - 0` there read as a two-hour load.
-                ...(sessionOwner
+                // Only whoever asked Plex for this transcode knows what it cost
+                // to bring up. A follower joins one already running — and so
+                // does a client adopting a stream it has just been handed,
+                // even though it drives it from here. Neither set an offset, so
+                // `syncPos - 0` reported the whole film as load time: 4393.89s
+                // for a reattach that actually took 1.2 seconds.
+                ...(sessionOwner && !didAdoptRef.current
                   ? {
                       startedTranscodeAtS: startOffset,
                       loadCostS: Number((syncPos - startOffset).toFixed(2)),
                     }
-                  : { following: true }),
+                  : { joined: didAdoptRef.current ? "adopted" : "following" }),
                 role: isHostRef.current ? "host" : "viewer",
               });
               video.currentTime = syncPos;
@@ -1924,15 +1927,38 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           });
         }
         if (sessionIdRef.current) {
-          pingSession(sessionIdRef.current, 0).catch(console.error);
+          // Immediately, to get Plex's keep-alive clock running — but with no
+          // position. Nothing is attached yet, and the 0 this used to send
+          // became the anchor every later ping was compared against, so the
+          // first real one read as a jump of the whole film.
+          pingSession(sessionIdRef.current).catch(console.error);
         }
         pingIntervalRef.current = setInterval(() => {
-          if (sessionIdRef.current) {
-            const v = videoRef.current;
-            const timeMs = v ? v.currentTime * 1000 : undefined;
-            pingSession(sessionIdRef.current, timeMs, v ? !v.paused : undefined,
-              v ? bufferAheadSeconds(v) : undefined).catch(console.error);
-          }
+          if (!sessionIdRef.current) return;
+          const v = videoRef.current;
+          /**
+           * Report a playhead only when there is one.
+           *
+           * Plex throttles how far ahead it transcodes to what the client says
+           * it has reached, so this is not a diagnostic — it steers the
+           * encoder. A client between rebuilds has an element with no media and
+           * a currentTime of 0, and sending that told Plex the viewer had gone
+           * back to the start of the film. Seen twice in one three-minute
+           * session, as `position jumped without restart … toS=0`.
+           *
+           * The keep-alive still goes out: that is what stops Plex reaping the
+           * transcode while somebody is walking back into the player. Omitting
+           * the time leaves the server's timeline update alone rather than
+           * writing a wrong one.
+           */
+          const playhead =
+            v && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA ? v : null;
+          pingSession(
+            sessionIdRef.current,
+            playhead ? playhead.currentTime * 1000 : undefined,
+            playhead ? !playhead.paused : undefined,
+            playhead ? bufferAheadSeconds(playhead) : undefined,
+          ).catch(console.error);
         }, PING_INTERVAL_MS);
       }
 
@@ -1972,7 +1998,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
         const stats = p2pStatsRef.current;
         const amHost = isHostRef.current;
-        const roomPos = syncStateRef.current?.position;
+        // Where the room is *now*. `position` alone is the last heartbeat, up to
+        // five seconds old, so measuring against it made a client in perfect
+        // sync read as anything from 0 to 5s adrift — in the one field you go to
+        // when you want to know whether sync is working.
+        const sync = syncStateRef.current;
+        const roomPos = sync ? roomPositionNow(sync) : null;
         logEvent("Health", "sample", {
           session: sessionIdRef.current?.substring(0, 8) ?? "none",
           role: amHost ? "host" : "viewer",

@@ -537,31 +537,42 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
 
   return (
     <div style={styles.container}>
-      {/* Back sits at the view's top-left, at the same 16/24 offset as the
-          detail pages. Absolutely positioned so it never affects the centered
-          search bar's position.
-
-          Not on a phone. There is no room beside the box for it there, and
-          every way of making room was worse than not having it: over the field
-          it covered the text, above the field it pushed the whole page down the
-          moment you typed. The box's own X clears the query, which is what ends
-          a search — the button was never the only way out, just the widest. */}
-      {isSearching && !poster.phone && (
-        <button onClick={handleBackFromSearch} style={styles.backBtn}>
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-          Back
-        </button>
-      )}
       <div style={styles.narrowWrap}>
-        <Search
-          onSearch={handleSearch}
-          onClear={handleClearSearch}
-          placeholder={searchPlaceholder}
-          clearSignal={searchResetSignal}
-          busy={searchBusy}
-        />
+        {/* Back and the search box share a row, so the box gets whatever the
+            button leaves and the two can never sit on top of each other.
+
+            The button used to float over the whole view, pinned to its top-left
+            like the detail pages'. That works only while the window is wide
+            enough for the centred 1200px column to leave a margin the button can
+            live in — below about 1400px the margin runs out, the box slides
+            under the button, and the two overlap. Narrower still and the button
+            covered the text being typed.
+
+            Not on a phone: there is no room beside the box for it at all there,
+            and every way of making room was worse than not having it. Over the
+            field it covered the text; above the field it pushed the whole page
+            down the moment you typed. The box's own X clears the query, which is
+            what ends a search — the button was never the only way out, just the
+            widest. */}
+        <div style={styles.searchRow}>
+          {isSearching && !poster.phone && (
+            <button onClick={handleBackFromSearch} style={styles.backBtn}>
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+                <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+              Back
+            </button>
+          )}
+          <div style={styles.searchFill}>
+            <Search
+              onSearch={handleSearch}
+              onClear={handleClearSearch}
+              placeholder={searchPlaceholder}
+              clearSignal={searchResetSignal}
+              busy={searchBusy}
+            />
+          </div>
+        </div>
 
         {/* What this search is actually showing.
             The request is never scoped — it always covers the whole library and
@@ -987,14 +998,26 @@ const styles: Record<string, React.CSSProperties> = {
     width: "100%",
     position: "relative",
   },
-  // Identical to MovieDetail.backBtn (same 16/24 offset, same look), but pinned
-  // absolutely to the view's top-left so it lands in the exact same spot as the
-  // detail-page Back and never shifts the centered search bar.
+  // The row Back and the search box share. Centred vertically on each other,
+  // so the button lands level with the box rather than at a fixed offset from
+  // the top of the view — the box carries 16px of padding above and below, and
+  // matching that by hand was how the two drifted apart.
+  searchRow: {
+    display: "flex",
+    alignItems: "center",
+  },
+  // The box takes everything Back leaves. `minWidth: 0` because a flex child
+  // defaults to its content's width, and an input's is wide enough to push the
+  // button back off the edge — the overlap in a different form.
+  searchFill: {
+    flex: 1,
+    minWidth: 0,
+  },
+  // The same look as MovieDetail.backBtn at the same 24px gutter, but in the
+  // row's flow rather than floating over it. See the note at the call site.
   backBtn: {
-    position: "absolute",
-    top: "16px",
-    left: "24px",
-    zIndex: 10,
+    marginLeft: "24px",
+    flexShrink: 0,
     display: "flex",
     alignItems: "center",
     gap: "6px",

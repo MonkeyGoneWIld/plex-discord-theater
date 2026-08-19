@@ -1517,8 +1517,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
               logEvent("Sync", "landing on the room clock after a rebuild", {
                 fromS: video.currentTime,
                 toS: syncPos,
-                startedTranscodeAtS: startOffset,
-                loadCostS: Number((syncPos - startOffset).toFixed(2)),
+                // Only meaningful for whoever asked Plex for this transcode. A
+                // follower joins one already running and never sets an offset,
+                // so reporting `syncPos - 0` there read as a two-hour load.
+                ...(sessionOwner
+                  ? {
+                      startedTranscodeAtS: startOffset,
+                      loadCostS: Number((syncPos - startOffset).toFixed(2)),
+                    }
+                  : { following: true }),
                 role: isHostRef.current ? "host" : "viewer",
               });
               video.currentTime = syncPos;

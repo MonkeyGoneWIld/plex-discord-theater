@@ -100,6 +100,16 @@ export interface SyncState {
   seekSeq: number;
   /** Timestamp of the last host command — used to detect stale state on reconnect */
   lastCommandAt: number;
+  /**
+   * When `position` was last reported, by this client's clock.
+   *
+   * `position` is a snapshot, not a live value: heartbeats carry it every five
+   * seconds, so by the time anyone reads it it is up to five seconds old and on
+   * average half that. Anything that wants to know where the room *is* — as
+   * opposed to where it was last seen — has to carry it forward, which needs
+   * this. See roomPositionNow.
+   */
+  positionAt: number;
   /** True if the WebSocket closed due to authentication failure (code 1008) */
   authFailed: boolean;
   /** True if max reconnect attempts exhausted. `retryConnection` clears it. */
@@ -128,6 +138,21 @@ export interface SyncState {
   /** A co-host asked to advance to the next item. Only the host acts on it,
    *  since starting a title is host-only. `seq` re-fires the effect on repeats. */
   playItemRequest: { ratingKey: string; seq: number } | null;
+}
+
+/**
+ * How far into the film the room is *now*, rather than at its last report.
+ *
+ * Mirrors the server's own interpolation, including the cap: past thirty
+ * seconds without a report the room isn't playing in any useful sense — stalled,
+ * buffering, or gone — and elapsed wall time stops describing it, so the last
+ * confirmed position is the more honest answer.
+ */
+export function roomPositionNow(state: Pick<SyncState, "position" | "playing" | "positionAt">): number {
+  if (!state.playing || !state.positionAt) return state.position;
+  const elapsed = (Date.now() - state.positionAt) / 1000;
+  if (elapsed < 0 || elapsed > 30) return state.position;
+  return state.position + elapsed;
 }
 
 export interface Participant {
@@ -236,6 +261,7 @@ const INITIAL_STATE: SyncState = {
   sessionOffset: 0,
   seekSeq: 0,
   lastCommandAt: 0,
+  positionAt: 0,
   authFailed: false,
   reconnectFailed: false,
   browseContext: null,
@@ -318,16 +344,16 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       },
       sendPause: (position: number) => {
         send({ type: "pause", position });
-        setState((prev) => ({ ...prev, playing: false, position }));
+        setState((prev) => ({ ...prev, playing: false, position, positionAt: Date.now() }));
       },
       sendResume: (position: number) => {
         send({ type: "resume", position });
-        setState((prev) => ({ ...prev, playing: true, position }));
+        setState((prev) => ({ ...prev, playing: true, position, positionAt: Date.now() }));
       },
       // Deliberately does not touch `playing`: a seek says where, not whether.
       sendSeek: (position: number) => {
         send({ type: "seek", position });
-        setState((prev) => ({ ...prev, position }));
+        setState((prev) => ({ ...prev, position, positionAt: Date.now() }));
       },
       sendStop: () => {
         send({ type: "stop" });
@@ -417,6 +443,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               subtitles: Boolean(msg.subtitles),
               playing: Boolean(msg.playing),
               position: (msg.position as number) ?? 0,
+              positionAt: Date.now(),
               hlsSessionId: (msg.hlsSessionId as string) || null,
               sessionOffset: (msg.sessionOffset as number) ?? 0,
               commandSeq: prev.commandSeq + 1,
@@ -499,6 +526,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               // Non-zero when the host resumed from history or restarted the
               // transcode at a seek target; 0 for a plain start.
               position: (msg.position as number) ?? 0,
+              positionAt: Date.now(),
               hostDisconnected: false,
               commandSeq: prev.commandSeq + 1,
               browseContext: null,
@@ -509,6 +537,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               ...prev,
               playing: false,
               position: (msg.position as number) ?? prev.position,
+              positionAt: Date.now(),
               commandSeq: prev.commandSeq + 1,
             }));
             break;
@@ -517,6 +546,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               ...prev,
               playing: true,
               position: (msg.position as number) ?? prev.position,
+              positionAt: Date.now(),
               commandSeq: prev.commandSeq + 1,
             }));
             break;
@@ -524,6 +554,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             setState((prev) => ({
               ...prev,
               position: (msg.position as number) ?? prev.position,
+              positionAt: Date.now(),
               commandSeq: prev.commandSeq + 1,
               seekSeq: prev.seekSeq + 1,
             }));
@@ -549,6 +580,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             setState((prev) => ({
               ...prev,
               position: (msg.position as number) ?? prev.position,
+              positionAt: Date.now(),
               playing: msg.playing !== false,
               // Self-heal: if our "what's playing" state was cleared (e.g. a stray
               // stop during a host handoff), recover it from the heartbeat so the

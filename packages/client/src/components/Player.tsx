@@ -15,12 +15,27 @@ import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
+import { roomPositionNow } from "../hooks/useSync";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
 import type { InviteResult } from "../hooks/useDiscord";
 
 const PING_INTERVAL_MS = 10_000; // 10s — matches Plex API recommendation for LAN timeline updates
 const HEARTBEAT_INTERVAL_MS = 5_000;
 const DRIFT_THRESHOLD_S = 2;
+/**
+ * How far off a freshly joined stream may settle before it is corrected once.
+ *
+ * Landing behind is the normal outcome of joining: the room's position has to be
+ * carried forward to now, and however well that is done, several seconds pass
+ * between asking for the manifest and the first frame — during which the room
+ * moves on. Nothing afterwards fixed it, because a couple of seconds is under
+ * the hard-sync threshold and the room only re-corrects on an explicit command,
+ * so a joiner sat permanently behind until somebody happened to seek.
+ *
+ * Tight enough that nobody notices the offset, loose enough not to fire on the
+ * ordinary jitter between a heartbeat and the element's own clock.
+ */
+const JOIN_SETTLE_TOLERANCE_S = 0.75;
 /**
  * Drift past which a viewer is yanked into place with a seek rather than eased
  * there — see the soft-sync constants below.
@@ -428,6 +443,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const [activeMarker, setActiveMarker] = useState<SkipMarker | null>(null);
   // Plex part id for hover-preview frames, or null when this item has none.
   const [previewPartId, setPreviewPartId] = useState<number | null>(null);
+  // A join seek has happened and its startup cost hasn't been measured yet.
+  // One-shot: cleared by the first frames that follow it.
+  const joinSettleRef = useRef(false);
   // This item's metadata, kept so the version-dependent parts of it can be
   // re-resolved without refetching (and without blanking the skip markers)
   // when the session's file turns out to be a different one.
@@ -1432,9 +1450,17 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // 5s heartbeat drift threshold.
           const followingRoom = !isHostRef.current || didAdoptRef.current;
           if (followingRoom && syncActionsRef.current) {
-            const syncPos = syncStateRef.current?.position;
+            const sync = syncStateRef.current;
+            // Carried forward to now. `position` is a snapshot from the last
+            // heartbeat, so seeking straight to it lands up to five seconds
+            // behind before the stream has even started — see roomPositionNow.
+            const syncPos = sync ? roomPositionNow(sync) : 0;
             if (syncPos && syncPos > DRIFT_THRESHOLD_S) {
               video.currentTime = syncPos;
+              // The rest of the gap is startup: the seconds between here and the
+              // first frame, which nothing can predict. Measured and closed once
+              // when frames actually arrive.
+              joinSettleRef.current = true;
             }
           }
 
@@ -1670,6 +1696,29 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           logEvent("Video", "playing", snapshot(video));
           noteGoodPosition(video);
           setBuffering(false);
+          // First frames after joining a stream in progress. Everything between
+          // the seek above and this moment — manifest, segments, decode — the
+          // room spent playing, and this client spent buffering. One correction,
+          // then the ordinary drift handling takes over.
+          if (joinSettleRef.current) {
+            joinSettleRef.current = false;
+            const sync = syncStateRef.current;
+            // A host that adopted a running session is following the room too,
+            // and wants to land on it for the same reason a viewer does.
+            if (sync && sync.playing && (!isHostRef.current || didAdoptRef.current)) {
+              const target = roomPositionNow(sync);
+              const behind = target - video.currentTime;
+              if (target > DRIFT_THRESHOLD_S && Math.abs(behind) > JOIN_SETTLE_TOLERANCE_S) {
+                logEvent("Sync", "settling onto the room after joining", {
+                  fromS: video.currentTime,
+                  toS: target,
+                  behindS: behind,
+                });
+                resetPlaybackRate(video);
+                video.currentTime = target;
+              }
+            }
+          }
           // Frames are moving again, so the element's own clock is the truth
           // once more and the bar can stop holding the seek target.
           setRestartingTo(null);

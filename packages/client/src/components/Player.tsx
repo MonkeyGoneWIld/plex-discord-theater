@@ -36,6 +36,10 @@ const DRIFT_THRESHOLD_S = 2;
  * ordinary jitter between a heartbeat and the element's own clock.
  */
 const JOIN_SETTLE_TOLERANCE_S = 0.75;
+/** Buffer below which a stream is starving rather than merely behind. */
+const STARVED_BUFFER_S = 1.5;
+/** How long a stream may starve before the viewer is told why. */
+const STARVED_REPORT_MS = 25_000;
 /**
  * Drift past which a viewer is yanked into place with a seek rather than eased
  * there — see the soft-sync constants below.
@@ -458,6 +462,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // A join seek has happened and its startup cost hasn't been measured yet.
   // One-shot: cleared by the first frames that follow it.
   const joinSettleRef = useRef(false);
+  // When this client's stream started running dry, or null while it is healthy.
+  const starvedSinceRef = useRef<number | null>(null);
+  // Whether this client is on the host's stream — the one that is by definition
+  // already running, and so the thing to suggest falling back to.
+  const ownsHostStreamRef = useRef(true);
   // The variant this client has already acted on, so an assignment that moves it
   // somewhere new can be told from a re-announcement of the same stream.
   const appliedVariantKeyRef = useRef<string | null>(null);
@@ -775,6 +784,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     currentAudioStreamRef.current = v.audioStreamId || null;
     currentSubtitleStreamRef.current = v.subtitleStreamId;
     subtitlesOnRef.current = v.subtitleStreamId !== 0;
+    // Whether this is the room's own stream. Only used to decide whether
+    // "switch back to the host's tracks" is advice worth giving.
+    ownsHostStreamRef.current = v.hlsSessionId === (syncStateRef.current?.hlsSessionId ?? null);
+    // A stream that has just been rebuilt is not starving yet.
+    starvedSinceRef.current = null;
+    setError(null);
 
     // The host changed tracks and took this client with them. Without this the
     // rebuild that follows is a bare loading spinner with no explanation — the
@@ -2343,6 +2358,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       return;
     }
 
+    // Where the room is now, not where it was last reported.
+    const target = roomPositionNow(syncState);
+
     // Past the soft band: a real correction is coming, so stop nudging first —
     // otherwise the rate survives the seek and keeps pulling afterwards.
     resetPlaybackRate(video);
@@ -2391,15 +2409,52 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       return;
     }
 
+    /**
+     * A stream that cannot keep up cannot be corrected by asking it for
+     * something further ahead.
+     *
+     * Seeking forward into territory the transcode hasn't produced yet throws
+     * away the buffer that was painfully accumulated behind the playhead and
+     * lands on an immediate stall — which widens the drift, which triggers a
+     * bigger correction, which discards more buffer. Caught in a real session
+     * as a seek forward of nine seconds issued with 0.08s of buffer ahead,
+     * repeating until the picture went black.
+     *
+     * Starvation is a capacity problem, not a sync problem. The soft rate
+     * correction above still applies, and the transcode is given the chance to
+     * get ahead rather than being asked to jump again.
+     */
+    const ahead = bufferAheadSeconds(video);
+    if (ahead < STARVED_BUFFER_S && !isPositionBuffered(video, target)) {
+      const since = starvedSinceRef.current ?? Date.now();
+      starvedSinceRef.current = since;
+      logWarn("Viewer", "correction skipped — stream is starving, not drifting", {
+        driftS: drift,
+        targetS: target,
+        bufAheadS: ahead,
+        starvedForMs: Date.now() - since,
+      });
+      // Long enough that it plainly isn't recovering. Say so, rather than
+      // leaving someone watching a black rectangle wondering what they broke.
+      if (Date.now() - since > STARVED_REPORT_MS && !ownsHostStreamRef.current) {
+        setError(
+          "This stream can't keep up — the server is transcoding more than it can manage. " +
+          "Switching back to the host's audio and subtitles will put you on a stream that is already running.",
+        );
+      }
+      return;
+    }
+    starvedSinceRef.current = null;
+
     lastDriftCorrectionRef.current = Date.now();
     stalledSeekSinceRef.current = null;
     logWarn("Viewer", "heartbeat drift correction", {
       driftS: drift,
       fromS: video.currentTime,
-      toS: syncState.position,
+      toS: target,
       ...snapshot(video),
     });
-    video.currentTime = syncState.position;
+    video.currentTime = target;
   }, [syncState?.position]);
 
   // Full seek recovery: restart the Plex transcode with an offset so segments

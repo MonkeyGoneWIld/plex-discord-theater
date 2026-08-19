@@ -2624,20 +2624,24 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
     if (DEBUG) console.log("[HLS] No matching Plex session found for terminate:", plexKey.substring(0, 8));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // A 403 is Plex saying this token may not list sessions, which no amount of
-    // retrying changes. The transcode itself is stopped by its own endpoint
-    // before this runs — all that lingers is Plex's "now playing" entry — so it
-    // stays non-fatal, but it should read as one line of advice rather than a
-    // page of HTML on every teardown.
-    if (message.includes("403")) {
+    // Plex refusing the token, which no amount of retrying changes. 403 is the
+    // server token being told it may not list sessions; 401 is an account token
+    // this server doesn't accept — a plex.tv token is not automatically a token
+    // for the local server. The two read nothing alike and mean the same thing
+    // here. Non-fatal either way: the transcode is stopped by its own endpoint
+    // before this runs, so only Plex's "now playing" entry lingers. Worth one
+    // line of advice rather than a page of HTML on every teardown — there were
+    // sixteen of those in one ten-minute session.
+    if (message.includes("401") || message.includes("403")) {
       if (!sessionListForbidden) {
         sessionListForbidden = true;
         console.warn(
-          "[HLS] Plex refused to list sessions (403), so finished ones linger in Now Playing.",
+          `[HLS] Plex refused to list sessions (${message.includes("401") ? "401" : "403"}),`,
+          "so finished ones linger in Now Playing and the orphan reaper cannot run.",
           process.env.PLEX_ACCOUNT_TOKEN
-            ? "PLEX_ACCOUNT_TOKEN is set but was refused — check it is the server owner's plex.tv token."
+            ? "PLEX_ACCOUNT_TOKEN is set but was refused — it has to be a token this server accepts, not only a plex.tv one."
             : "Set PLEX_ACCOUNT_TOKEN to your plex.tv account token.",
-          "Transcodes still stop normally; only the session entry is left behind.",
+          "Playback is unaffected; transcodes still stop normally.",
         );
       }
       return;
@@ -3534,16 +3538,27 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
       // precede a stream dying and neither is obvious in the ping stream:
       //  - a gap far longer than the 10s cadence (client backgrounded, network
       //    dropped, or a second ping loop was killed off)
-      //  - the position jumping, which means a seek happened without the
-      //    transcode restarting
+      //  - the position jumping by more than the time that passed, which means a
+      //    seek happened without the transcode restarting
+      //
+      // Neither is about the transcode's survival. The room keeps every stream
+      // it holds alive on its own thirty-second timer whether anyone is in the
+      // player or not — see startSessionPing in sync.ts — so what these measure
+      // is a *client* going quiet, which is a different and much smaller thing
+      // than it used to sound like.
       if (prev && wallMs > 25_000) {
-        logEvent("Ping", "gap in keep-alive", {
+        logEvent("Ping", "client stopped reporting its position", {
           session: sessionId.substring(0, 8),
           gapS: wallMs / 1000,
           posS: timeMs / 1000,
         });
       }
-      if (prev && Math.abs(posDeltaMs) > 30_000) {
+      // Against the time that passed, not against zero. Somebody who steps out
+      // of the player for a minute comes back a minute further into the film,
+      // because the room went on without them: the position moved exactly as
+      // much as the clock did, which is the opposite of a seek. Comparing to
+      // zero called that a jump — and called it one twice per walk back.
+      if (prev && Math.abs(posDeltaMs - wallMs) > 30_000) {
         logEvent("Ping", "position jumped without restart", {
           session: sessionId.substring(0, 8),
           fromS: prev.timeMs / 1000,

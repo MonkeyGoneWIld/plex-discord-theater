@@ -1050,6 +1050,34 @@ export function attachWebSocketServer(server: Server): void {
       }
 
       /**
+       * "Put me back on whatever the host is watching."
+       *
+       * The tracks are the host's, and only the server knows what they are — a
+       * client is told its own stream and nobody else's. Offered when someone's
+       * own stream can't keep up: the host's is, by definition, already running,
+       * so joining it costs nothing and starts nothing.
+       */
+      if (type === "rejoin-host") {
+        const hostKey = room.state.hostVariantKey;
+        if (!hostKey || client.variantKey === hostKey) return;
+        const hostVariant = room.state.variants.get(hostKey);
+        if (!hostVariant) return;
+        const from = client.variantKey;
+        assignVariant(room, client, hostVariant.audioStreamId, hostVariant.subtitleStreamId);
+        logEvent("Sync", "client rejoined the host's stream", {
+          room: roomId.substring(0, 8),
+          who: client.username ?? client.userId,
+          from: from ?? "none",
+          to: hostKey,
+        });
+        // Only the client that moved. Nothing changed for the people already on
+        // this stream, and a re-announcement of a stream they are already
+        // playing is noise they have to reason about.
+        sendTo(client.ws, variantMessage(hostVariant, hostVariant.ownerUserId === client.userId));
+        return;
+      }
+
+      /**
        * A stream's driver reporting the transcode it just brought up.
        *
        * Sent on every start and restart of a stream that isn't the host's

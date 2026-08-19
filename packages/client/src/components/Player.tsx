@@ -38,8 +38,18 @@ const DRIFT_THRESHOLD_S = 2;
 const JOIN_SETTLE_TOLERANCE_S = 0.75;
 /** Buffer below which a stream is starving rather than merely behind. */
 const STARVED_BUFFER_S = 1.5;
-/** How long a stream may starve before the viewer is told why. */
-const STARVED_REPORT_MS = 25_000;
+/**
+ * How long a stream may fail to keep up before its viewer is offered a way out.
+ *
+ * Ten seconds is long enough to ride out a stall that resolves itself and short
+ * enough that nobody sits watching a frozen frame wondering whether it is
+ * coming back. The offer is only ever an offer: switching would discard a
+ * deliberate choice of subtitles or audio, which is not a decision to make on
+ * somebody's behalf.
+ */
+const STARVED_OFFER_MS = 10_000;
+/** How often the check below runs. */
+const STARVED_POLL_MS = 1_000;
 /**
  * Drift past which a viewer is yanked into place with a seek rather than eased
  * there — see the soft-sync constants below.
@@ -464,6 +474,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const joinSettleRef = useRef(false);
   // When this client's stream started running dry, or null while it is healthy.
   const starvedSinceRef = useRef<number | null>(null);
+  // Whether to offer the way back to the host's stream.
+  const [offerHostStream, setOfferHostStream] = useState(false);
   // Whether this client is on the host's stream — the one that is by definition
   // already running, and so the thing to suggest falling back to.
   const ownsHostStreamRef = useRef(true);
@@ -2436,12 +2448,6 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       });
       // Long enough that it plainly isn't recovering. Say so, rather than
       // leaving someone watching a black rectangle wondering what they broke.
-      if (Date.now() - since > STARVED_REPORT_MS && !ownsHostStreamRef.current) {
-        setError(
-          "This stream can't keep up — the server is transcoding more than it can manage. " +
-          "Switching back to the host's audio and subtitles will put you on a stream that is already running.",
-        );
-      }
       return;
     }
     starvedSinceRef.current = null;
@@ -2456,6 +2462,43 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     });
     video.currentTime = target;
   }, [syncState?.position]);
+
+  /**
+   * Watch for a stream that cannot keep up, and offer the way out.
+   *
+   * Starvation is a capacity problem — the server is being asked to transcode
+   * more than it can manage, which on a real evening was two HDR streams plus a
+   * library scan. Nothing this client does to its own playhead will fix that, so
+   * the only useful answer is the host's stream: it is already running, so
+   * joining it starts no new work at all.
+   *
+   * Polled rather than driven by heartbeats, which arrive every five seconds and
+   * would make a ten-second threshold mean anything between ten and fifteen.
+   */
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const video = videoRef.current;
+      const sync = syncStateRef.current;
+      // Only worth offering to somebody who is on a stream of their own, while
+      // the room is actually playing. The host's own stream failing is a
+      // different problem with no better stream to point at.
+      if (!video || !sync?.playing || ownsHostStreamRef.current || video.paused) {
+        starvedSinceRef.current = null;
+        setOfferHostStream(false);
+        return;
+      }
+      const healthy = bufferAheadSeconds(video) >= STARVED_BUFFER_S;
+      if (healthy) {
+        starvedSinceRef.current = null;
+        setOfferHostStream(false);
+        return;
+      }
+      const since = starvedSinceRef.current ?? Date.now();
+      starvedSinceRef.current = since;
+      if (Date.now() - since >= STARVED_OFFER_MS) setOfferHostStream(true);
+    }, STARVED_POLL_MS);
+    return () => clearInterval(timer);
+  }, []);
 
   // Full seek recovery: restart the Plex transcode with an offset so segments
   // exist at the target position. Used when the target can't be reached in-place.
@@ -3443,6 +3486,46 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           onClose={() => setShowPeoplePanel(false)}
         />
       )}
+      {/* This client's stream has been unable to keep up for long enough that it
+          plainly isn't recovering on its own. The host's stream is already
+          running, so moving onto it costs the server nothing — but it means
+          giving up the tracks that were chosen, so it stays a choice. */}
+      {offerHostStream && (
+        <div style={styles.confirmBackdrop} onClick={() => setOfferHostStream(false)}>
+          <div style={styles.confirmDialog} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.confirmTitle}>Your stream can't keep up</div>
+            <p style={styles.confirmText}>
+              Your audio and subtitles need their own stream, and the server is
+              struggling to produce it. Switching to the host's puts you on one
+              that is already running — you'll lose the tracks you picked.
+            </p>
+            <div style={styles.confirmActions}>
+              <button
+                style={styles.confirmCancelBtn}
+                onClick={() => setOfferHostStream(false)}
+              >
+                Keep waiting
+              </button>
+              <button
+                style={styles.confirmEndBtn}
+                onClick={() => {
+                  logEvent("Player", "viewer took the offer to rejoin the host's stream", {
+                    starvedForMs: starvedSinceRef.current
+                      ? Date.now() - starvedSinceRef.current
+                      : 0,
+                  });
+                  setOfferHostStream(false);
+                  starvedSinceRef.current = null;
+                  syncActionsRef.current?.sendRejoinHost();
+                }}
+              >
+                Switch to the host's
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {confirmingEnd && (() => {
         const otherCount = (syncState?.participants ?? []).filter(
           (p) => p.userId !== selfUserId,

@@ -215,6 +215,9 @@ export interface SyncActions {
   sendSetTracks: (audioStreamId: number, subtitleStreamId: number) => void;
   /** Stream owner → room: the transcode I just brought up for my variant. */
   sendVariantSession: (hlsSessionId: string, sessionOffset: number) => void;
+  /** Move onto whatever the host is watching, whatever its tracks are. Used by
+   *  the offer shown when this client's own stream can't keep up. */
+  sendRejoinHost: () => void;
   /** Co-host: ask the host to advance to the next item. */
   sendPlayItem: (ratingKey: string) => void;
   /**
@@ -393,6 +396,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         send({ type: "set-tracks", audioStreamId, subtitleStreamId }),
       sendVariantSession: (hlsSessionId: string, sessionOffset: number) =>
         send({ type: "variant-session", hlsSessionId, sessionOffset }),
+      sendRejoinHost: () => send({ type: "rejoin-host" }),
       sendPlayItem: (ratingKey: string) => send({ type: "play-item", ratingKey }),
       sendWatching: (value: boolean) => send({ type: "watching", value }),
       retryConnection: () => {

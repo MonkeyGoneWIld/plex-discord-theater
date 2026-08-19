@@ -420,6 +420,34 @@ console.log("\n— stepping out of the player keeps your stream —");
   host.close();
 }
 
+console.log("\n— rejoining the host's stream on request —");
+{
+  const [host, a, b] = await room("inst-12", ["host", "a", "b"]);
+  const hostSid = await startPlayback(host);
+  // a forks onto its own tracks and brings a transcode up.
+  a.send({ type: "set-tracks", audioStreamId: 4, subtitleStreamId: 0 });
+  await sleep(50);
+  a.send({ type: "variant-session", hlsSessionId: uuid(), sessionOffset: 100 });
+  await sleep(50);
+  check("a is on a stream of its own", a.stream()?.key, "4:0");
+  [host, a, b].forEach((c) => c.clear());
+
+  // Its stream can't keep up, so it asks to go back to whatever the host has.
+  a.send({ type: "rejoin-host" });
+  await sleep(60);
+  check("a lands on the host's tracks", a.stream()?.key, "1:0");
+  check("and on the host's existing transcode", a.stream()?.session, hostSid);
+  check("without becoming its driver", a.stream()?.owner, false);
+  check("nobody else was disturbed", b.last("variant"), undefined);
+
+  // Asking again from the host's own stream is a no-op.
+  a.clear();
+  a.send({ type: "rejoin-host" });
+  await sleep(60);
+  check("asking twice changes nothing", a.last("variant"), undefined);
+  [host, a, b].forEach((c) => c.close());
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 closeWebSocketServer();
 server.close();

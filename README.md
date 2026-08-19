@@ -52,16 +52,15 @@ without leaving the Activity.
 ![Primetime, a film that isn't in the library, with a Request button](docs/screenshots/request-movie.jpg)
 
 Shows request by season, and only the seasons Sonarr could actually fill — so
-nothing sits in Overseerr forever waiting on episodes that haven't aired.
+nothing sits in Seerr forever waiting on episodes that haven't aired.
 
 ![A show's page with its missing seasons selectable for request](docs/screenshots/request-seasons.jpg)
 
-Mobile gets its own layout rather than a shrunk-down desktop one: three posters
-per row, and detail pages that stack the poster above everything else.
+Mobile gets its own layout rather than a shrunk-down desktop one
 
 | ![The TV Shows tab on a phone, three posters across](docs/screenshots/phone-browse.jpg) | ![A film's detail page on a phone, poster centred above the text](docs/screenshots/phone-title.jpg) |
 | :-- | :-- |
-| **On mobile** — browsing, three posters per row. | **On mobile** — a detail page, poster centred with everything stacked below. |
+| **On mobile** — browsing. | **On mobile** — a detail page |
 
 ---
 

@@ -35,6 +35,11 @@ Out of the player, it opens on the same hub rows your Plex server arranges.
 | :-- | :-- |
 | Search reaches past your own library, so something nobody has is still findable — and marked clearly as something you don't own. | Ratings, cast and the track pickers, all settled before anyone presses Play. |
 
+Every face in that cast row opens, onto everything in your library that person
+worked on — pulled from Plex by tag, so it only ever lists titles you actually have.
+
+![Hugh Jackman's page: biography and dates, then his films and shows from the library](docs/screenshots/person.jpg)
+
 With Overseerr or Jellyseerr connected, the seasons you're missing are selectable
 right on the show's page, and only the ones a request would actually fill.
 

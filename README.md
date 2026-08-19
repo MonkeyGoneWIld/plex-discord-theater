@@ -19,6 +19,21 @@ sees the same thing at the same time — one person drives, everyone else follow
 
 ---
 
+## What it looks like
+
+It runs inside Discord, in the voice channel. This is the Home tab, showing the
+same hub rows your Plex server does.
+
+![The Home tab, with Trending, Popular and Top Rated poster rows](docs/screenshots/home.jpg)
+
+| ![Search results, split into titles in the library and titles that are not](docs/screenshots/search.jpg) | ![The Movies tab sorted by rating, with 4K and edition badges on the cards](docs/screenshots/library.jpg) |
+| :-- | :-- |
+| Search reaches past your own library, so something nobody has is still findable — and requestable, if you run Seerr. | A library you can filter and sort, with resolution and edition marked on the card. |
+| ![A film's detail page, with ratings, synopsis, cast, and audio and subtitle pickers](docs/screenshots/movie.jpg) | ![A show's page, listing its seasons](docs/screenshots/show.jpg) |
+| Ratings, cast and the track pickers, all before anyone presses Play. | Seasons, including the ones you don't have yet. |
+
+---
+
 ## What you get
 
 Everyone in the voice channel opens the Activity and lands in the same room.

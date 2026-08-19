@@ -3085,8 +3085,25 @@ router.get(
       // The decision + timeline stopped flow properly clears per-client state between sessions.
       const hlsHeaders = {
         "X-Plex-Session-Identifier": sessionId,
-        "X-Plex-Client-Profile-Extra":
+        /**
+         * What we can play, in Plex's profile language.
+         *
+         * The first directive is the transcode target: deliver HLS as h264 in
+         * MPEG-TS. The second says which audio codecs that target supports, and
+         * it has to be said separately — the `audioCodec` in the first names the
+         * target's default, not the profile's capability, so without the second
+         * Plex fell back to mp3 for anything it had to re-encode. Every stream
+         * in a session came out as 151 kbps stereo mp3 from an 8-channel Atmos
+         * source, which is the worst audio Plex knows how to make.
+         *
+         * AAC in MPEG-TS is the ordinary case for HLS and what hls.js expects;
+         * mp3 was the unusual choice here. Audio that is already playable is
+         * still copied untouched — see directStreamAudio.
+         */
+        "X-Plex-Client-Profile-Extra": [
           "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=h264&audioCodec=aac)",
+          "add-transcode-target-audio-codec(type=videoProfile&context=streaming&protocol=hls&audioCodec=aac)",
+        ].join("+"),
         "X-Plex-Client-Identifier": OUR_CLIENT_ID,
         "X-Plex-Product": "Plex Discord Theater",
         "X-Plex-Platform": "Chrome",
@@ -3104,8 +3121,18 @@ router.get(
         try {
           const decBody = await decisionRes.json() as Record<string, unknown>;
           const mc = decBody.MediaContainer as Record<string, unknown> | undefined;
+          // What Plex settled on. Worth a place on this line because it is the
+          // only cheap way to see whether the client profile above was
+          // understood: the alternative is digging a codec out of the
+          // transcoder statistics XML after the fact, which is where the mp3
+          // audio hid for as long as it did.
+          const media = (
+            (mc?.Metadata as Array<Record<string, unknown>> | undefined)?.[0]
+              ?.Media as Array<Record<string, unknown>> | undefined
+          )?.[0];
           console.log("[HLS] Decision:", decisionRes.status,
-            "code:", mc?.generalDecisionCode, mc?.generalDecisionText);
+            "code:", mc?.generalDecisionCode, mc?.generalDecisionText,
+            "→", media?.videoCodec ?? "?", "+", media?.audioCodec ?? "?");
         } catch {
           console.log("[HLS] Decision:", decisionRes.status, "(no body)");
         }

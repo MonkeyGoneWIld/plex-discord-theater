@@ -1,16 +1,21 @@
 import { useState, useEffect } from "react";
-import { fetchMeta, type StreamTrack } from "../lib/api";
+import { fetchMeta, versionOf, type StreamTrack } from "../lib/api";
 import { saveSubtitlePref } from "../lib/subtitlePref";
 
 interface TrackSwitcherProps {
   ratingKey: string;
+  /** Which of the title's files is playing, for the few Plex holds more than one
+   *  of. Stream ids belong to a file, so listing the default copy's tracks while
+   *  a different one plays offers choices that quietly do nothing. Undefined
+   *  resolves to the default, which is what a single-file title has. */
+  mediaIndex?: number;
   onClose: () => void;
   onTrackChange: (partId: number, audioStreamID?: number, subtitleStreamID?: number) => void;
   /** Co-hosts may change subtitles but not audio — hides the Audio tab. */
   subtitlesOnly?: boolean;
 }
 
-export function TrackSwitcher({ ratingKey, onClose, onTrackChange, subtitlesOnly = false }: TrackSwitcherProps) {
+export function TrackSwitcher({ ratingKey, mediaIndex, onClose, onTrackChange, subtitlesOnly = false }: TrackSwitcherProps) {
   const [tab, setTab] = useState<"audio" | "subtitles">(subtitlesOnly ? "subtitles" : "audio");
   const [audioTracks, setAudioTracks] = useState<StreamTrack[]>([]);
   const [subtitleTracks, setSubtitleTracks] = useState<StreamTrack[]>([]);
@@ -20,13 +25,14 @@ export function TrackSwitcher({ ratingKey, onClose, onTrackChange, subtitlesOnly
   useEffect(() => {
     fetchMeta(ratingKey)
       .then((meta) => {
-        setAudioTracks(meta.audioTracks);
-        setSubtitleTracks(meta.subtitleTracks);
-        setPartId(meta.partId);
+        const version = versionOf(meta, mediaIndex);
+        setAudioTracks(version.audioTracks);
+        setSubtitleTracks(version.subtitleTracks);
+        setPartId(version.partId);
       })
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [ratingKey]);
+  }, [ratingKey, mediaIndex]);
 
   const handleSelect = (type: "audio" | "subtitle", streamId: number) => {
     if (partId == null) return;

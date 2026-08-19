@@ -50,6 +50,11 @@ type View =
   // resumePosition (seconds) is set only when the host chose "Resume" on the
   // detail view; every other route into the player starts from the beginning.
   //
+  // mediaIndex names the file to play for a title Plex holds more than one of.
+  // Only the detail view ever sets it — every other route in (a viewer following
+  // the room, a rejoin, the queue) leaves it undefined and takes the server's
+  // default, which is the same file the detail view would have started on.
+  //
   // `synthesized` marks an item built from sync state alone — a ratingKey and a
   // title, which is everything a client following the room has to go on. Real
   // metadata replaces it as soon as the lookup lands (see the upgrade effect).
@@ -58,6 +63,7 @@ type View =
       item: PlexItem;
       subtitles: boolean;
       resumePosition?: number;
+      mediaIndex?: number;
       synthesized?: boolean;
     };
 
@@ -491,8 +497,13 @@ export function App() {
     [pushView, emitBrowse],
   );
 
-  const handlePlay = useCallback((item: PlexItem, subtitles: boolean, resumePosition?: number) => {
-    pushView({ kind: "player", item, subtitles, resumePosition });
+  const handlePlay = useCallback((
+    item: PlexItem,
+    subtitles: boolean,
+    resumePosition?: number,
+    mediaIndex?: number,
+  ) => {
+    pushView({ kind: "player", item, subtitles, resumePosition, mediaIndex });
   }, [pushView]);
 
   const handleShowSeason = useCallback((season: PlexItem, show: PlexItem) => {
@@ -1005,6 +1016,7 @@ export function App() {
             selfUserId={userId}
             subtitles={view.subtitles}
             resumePosition={view.resumePosition}
+            mediaIndex={view.mediaIndex}
             onBack={popView}
             // Finishing an episode lands on the show, not on the episode that
             // just ended. Same rebuild the in-page show breadcrumb uses, so the

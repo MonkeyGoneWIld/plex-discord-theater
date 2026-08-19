@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
+import { playableVersionOrder, resolutionLabel, channelLabel } from "../services/media-versions.js";
 import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition } from "../services/segment-prefetch.js";
 import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
@@ -111,7 +112,68 @@ interface PlexPart {
 }
 
 interface PlexMedia {
+  id?: number;
+  /** Plex's own bucket: "4k", "1080", "720", "480", "sd". Coarser than `height`
+   *  and occasionally absent, so it is only the fallback. */
+  videoResolution?: string;
+  height?: number;
+  width?: number;
+  /** kbps. */
+  bitrate?: number;
+  videoCodec?: string;
+  audioCodec?: string;
+  audioChannels?: number;
+  container?: string;
+  /** The label set in Plex when the file was added as a named version. */
+  title?: string;
   Part?: PlexPart[];
+}
+
+/**
+ * The playable versions of an item, best first.
+ *
+ * Which files are worth offering, and in what order, is decided by
+ * playableVersionOrder — including the rule that hides a 4K copy whenever a
+ * lower-resolution one exists, since every stream is transcoded to 1080p
+ * anyway. Everything here is the Plex-shaped mapping around that answer.
+ *
+ * `mediaIndex` is the position in Plex's own Media array: it is what the
+ * transcode decision takes, so it stays tied to the original list rather than
+ * to this one.
+ */
+interface MediaVersion {
+  mediaIndex: number;
+  partId: number | null;
+  label: string;
+  resolution: string;
+  previewThumbs: boolean;
+  audioTracks: ReturnType<typeof mapAudioTracks>;
+  subtitleTracks: ReturnType<typeof mapSubtitleTracks>;
+}
+
+function mapVersions(media: PlexMedia[] | undefined): MediaVersion[] {
+  if (!media || media.length === 0) return [];
+  return playableVersionOrder(media).map((mediaIndex) => {
+    const m = media[mediaIndex];
+    const part = m.Part?.[0];
+    const streams = part?.Stream ?? [];
+    // A version Plex has a name for uses it; otherwise it is described by what
+    // it is, which is what anyone choosing between two files wants to know.
+    const described = [
+      resolutionLabel(m),
+      m.videoCodec ? m.videoCodec.toUpperCase() : null,
+      channelLabel(m.audioChannels),
+    ].filter(Boolean).join(" \u00b7 ");
+    return {
+      mediaIndex,
+      partId: part?.id ?? null,
+      label: m.title?.trim() || described,
+      resolution: resolutionLabel(m),
+      previewThumbs: part?.indexes === "sd",
+      audioTracks: mapAudioTracks(streams),
+      subtitleTracks: mapSubtitleTracks(streams),
+    };
+  });
 }
 
 /**
@@ -869,6 +931,32 @@ export function getRelatedCached(ratingKey: string): RelatedPayload | null {
   return hit && Date.now() - hit.at < RELATED_CACHE_TTL_MS ? hit.payload : null;
 }
 
+function mapAudioTracks(streams: PlexStream[]) {
+  return streams
+    .filter((s) => s.streamType === 2)
+    .map((s) => ({
+      id: s.id,
+      title: s.extendedDisplayTitle || s.displayTitle || s.title || "Unknown",
+      codec: s.codec ?? null,
+      channels: s.channels ?? null,
+      language: s.language ?? null,
+      languageCode: s.languageCode ?? null,
+      selected: !!s.selected,
+    }));
+}
+
+function mapSubtitleTracks(streams: PlexStream[]) {
+  return streams
+    .filter((s) => s.streamType === 3)
+    .map((s) => ({
+      id: s.id,
+      title: s.extendedDisplayTitle || s.displayTitle || s.title || "Unknown",
+      language: s.language ?? null,
+      languageCode: s.languageCode ?? null,
+      selected: !!s.selected,
+    }));
+}
+
 async function buildMetaUncached(ratingKey: string): Promise<Record<string, unknown> | null> {
     const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
       `/library/metadata/${ratingKey}`,
@@ -879,28 +967,14 @@ async function buildMetaUncached(ratingKey: string): Promise<Record<string, unkn
     const metadata = data.MediaContainer.Metadata;
     if (!metadata || metadata.length === 0) return null;
     const m = metadata[0];
-    const part = m.Media?.[0]?.Part?.[0];
-    const streams = part?.Stream || [];
-    const audioTracks = streams
-      .filter((s) => s.streamType === 2)
-      .map((s) => ({
-        id: s.id,
-        title: s.extendedDisplayTitle || s.displayTitle || s.title || "Unknown",
-        codec: s.codec ?? null,
-        channels: s.channels ?? null,
-        language: s.language ?? null,
-        languageCode: s.languageCode ?? null,
-        selected: !!s.selected,
-      }));
-    const subtitleTracks = streams
-      .filter((s) => s.streamType === 3)
-      .map((s) => ({
-        id: s.id,
-        title: s.extendedDisplayTitle || s.displayTitle || s.title || "Unknown",
-        language: s.language ?? null,
-        languageCode: s.languageCode ?? null,
-        selected: !!s.selected,
-      }));
+    // The versions worth offering, best first — see mapVersions. Everything the
+    // player needs (part id, tracks, preview frames) is per-version, because a
+    // second file of the same film is a different set of audio and subtitle
+    // streams, not the same ones again.
+    const versions = mapVersions(m.Media);
+    const defaultVersion = versions[0] ?? null;
+    const audioTracks = defaultVersion?.audioTracks ?? [];
+    const subtitleTracks = defaultVersion?.subtitleTracks ?? [];
 
     // Cache duration for timeline stopped notifications
     if (m.duration && m.ratingKey) {
@@ -940,11 +1014,17 @@ async function buildMetaUncached(ratingKey: string): Promise<Record<string, unkn
       ...(m.parentRatingKey != null && { parentRatingKey: m.parentRatingKey }),
       ...(m.grandparentRatingKey != null && { grandparentRatingKey: m.grandparentRatingKey }),
       ...(m.grandparentTitle != null && { showTitle: m.grandparentTitle }),
-      partId: part?.id ?? null,
+      partId: defaultVersion?.partId ?? null,
       /** Whether hover-preview frames exist for this part (see PlexPart.indexes). */
-      previewThumbs: part?.indexes === "sd",
+      previewThumbs: defaultVersion?.previewThumbs ?? false,
       audioTracks,
       subtitleTracks,
+      // Always sent, even for the single-file case that is nearly everything.
+      // The client draws a picker only when there is more than one, but it needs
+      // versions[0] regardless: that is the file the transcode has to be told to
+      // play, and for a title with both a 4K and a 1080p copy it is emphatically
+      // not Plex's index 0.
+      versions,
       markers: mapMarkers(m.Marker),
       // TMDB id — lets the client offer Seerr season requests for library shows.
       tmdbId,
@@ -2102,6 +2182,16 @@ const OUR_CLIENT_ID = "plex-discord-theater";
 const plexTranscodeKeys = new Map<string, string>();
 /** Maps our session UUID → the ratingKey being played (needed for timeline stopped). */
 const sessionRatingKeys = new Map<string, string>();
+/**
+ * Maps our session UUID → which of the item's files it is playing.
+ *
+ * The host chooses a version and its index rides on the manifest request. Every
+ * later request for that session — a viewer joining, a seek, a reconnect — omits
+ * it, because only the host's detail page ever knew about it, so it is
+ * remembered here instead of being threaded through the sync protocol. A session
+ * plays one file for its whole life, which makes this a safe thing to cache.
+ */
+const sessionMediaIndex = new Map<string, number>();
 /** Maps ratingKey → duration in ms (cached from metadata endpoint for timeline stopped). */
 const mediaDurations = new LruMap<string, number>(5_000);
 const PLEX_SESSION_KEY_RE = /session\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i;
@@ -2227,6 +2317,7 @@ export function markTranscodeStopped(sessionId: string): void {
   }
   plexTranscodeKeys.delete(sessionId);
   sessionRatingKeys.delete(sessionId);
+  sessionMediaIndex.delete(sessionId);
   manifestCache.delete(sessionId);
   hostPingInfo.delete(sessionId);
   // DIAGNOSTIC: should trend back toward 0 between watch sessions.
@@ -2712,6 +2803,26 @@ setInterval(() => {
   }
 }, 2 * 60 * 1000).unref();
 
+/**
+ * The file this item plays when nobody has said otherwise — the first entry of
+ * the same list the picker is built from, so the two can't disagree.
+ *
+ * Reads through the metadata cache, which the detail page has almost always
+ * filled by the time anything is played; the cold path costs one Plex lookup on
+ * a request that is about to make two more. Falls back to Plex's own first file
+ * if the lookup fails, which is the behaviour from before versions existed.
+ */
+async function defaultMediaIndex(ratingKey: string): Promise<number> {
+  try {
+    const meta = await buildMeta(ratingKey);
+    const versions = meta?.versions as Array<{ mediaIndex?: number }> | undefined;
+    return versions?.[0]?.mediaIndex ?? 0;
+  } catch (err) {
+    console.warn("[HLS] Couldn't resolve default version for", ratingKey, err);
+    return 0;
+  }
+}
+
 // ─── HLS streaming ──────────────────────────────────────────────
 
 /**
@@ -2739,6 +2850,22 @@ router.get(
     // one WITHOUT should reuse the session's existing transcode if it's alive.
     const offsetSec = Math.round(parseFloat(req.query.offset as string));
     const offset = Number.isFinite(offsetSec) && offsetSec > 0 ? String(offsetSec) : undefined;
+
+    // Which of the item's files to play, in order of who knows best: the client
+    // that chose it (the host's detail page, on its first request), then this
+    // session's remembered answer, then the item's own default.
+    //
+    // That last fallback is not a formality. Every route into playback except
+    // the detail page — the queue, auto-advance to the next episode, a viewer
+    // following the room — sends nothing, and Plex's own index 0 is the *4K*
+    // copy on exactly the titles this feature exists for. Defaulting to 0 there
+    // would transcode 4K for a room that can only be shown 1080p, which is the
+    // one outcome the whole rule is meant to prevent.
+    const requestedMedia = Number(req.query.mediaIndex);
+    const mediaIndex = Number.isInteger(requestedMedia) && requestedMedia >= 0
+      ? requestedMedia
+      : sessionMediaIndex.get(sessionId) ?? (await defaultMediaIndex(ratingKey));
+    sessionMediaIndex.set(sessionId, mediaIndex);
 
     // Reuse the running transcode for this session rather than starting a new one.
     // A viewer joining, a reconnect, a promoted host, or a re-focus all re-request
@@ -2781,7 +2908,7 @@ router.get(
       const params: Record<string, string> = {
         hasMDE: "1",
         path: `/library/metadata/${ratingKey}`,
-        mediaIndex: "0",
+        mediaIndex: String(mediaIndex),
         partIndex: "0",
         protocol: "hls",
         fastSeek: "1",

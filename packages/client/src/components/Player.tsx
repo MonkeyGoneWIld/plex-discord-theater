@@ -10,7 +10,7 @@ import { NextUpButton } from "./NextUpButton";
 import { EndCard } from "./EndCard";
 import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
-import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, fetchMeta, fetchSiblingEpisodes, invalidateMeta } from "../lib/api";
+import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
@@ -340,12 +340,16 @@ interface PlayerProps {
   onFinished?: (item: PlexItem) => void;
   /** Opens Discord's invite dialog for this activity's channel. Omit to hide. */
   onInvite?: () => Promise<InviteResult>;
+  /** Which of the item's files to play, for a title Plex holds more than one of.
+   *  Set only by the host's detail view; a viewer leaves it undefined and the
+   *  server plays whichever file the session was started on. */
+  mediaIndex?: number;
   syncState?: SyncState;
   syncActions?: SyncActions;
   onPlayNext?: (item: QueueItem) => void;
 }
 
-export function Player({ item, isHost, selfUserId = null, subtitles, resumePosition, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext }: PlayerProps) {
+export function Player({ item, isHost, selfUserId = null, subtitles, resumePosition, mediaIndex, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext }: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -550,6 +554,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // asked for subtitles=none anyway — so nothing was burned in and none
   // appeared. This follows the live selection instead.
   const subtitlesOnRef = useRef(subtitles);
+  // The chosen file, for the same reason: the HLS effect reads it, and it must
+  // not be a dependency — it never changes for a mounted player, and adding it
+  // to the deps would only give a restart another way to fire.
+  const mediaIndexRef = useRef(mediaIndex);
+  mediaIndexRef.current = mediaIndex;
   // A new item resets to whatever that item was launched with. Done during
   // render rather than in an effect so the value is correct before the HLS
   // effect reads it, without an extra render or a second transcode start.
@@ -774,20 +783,24 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       .then((meta) => {
         if (cancelled) return;
         if (canControl) setMarkers(meta.markers ?? []);
+        // Resolved against the file this session is playing: preview frames and
+        // stream ids both belong to a part, and on a title with two copies the
+        // top-level fields describe whichever one is the default.
+        const version = versionOf(meta, mediaIndexRef.current);
         // Null unless Plex actually has preview frames, so Controls renders a
         // plain timestamp rather than chasing images that don't exist.
-        setPreviewPartId(meta.previewThumbs ? meta.partId : null);
+        setPreviewPartId(version.previewThumbs ? version.partId : null);
         // Seed what's currently selected from Plex's own answer, so re-picking
         // the track already playing is recognised as a no-op the *first* time
         // as well as afterwards. Guarded on null so a selection made while this
         // was in flight wins. Subtitles fall back to 0, the switcher's "None".
         if (currentAudioStreamRef.current === null) {
           currentAudioStreamRef.current =
-            meta.audioTracks?.find((t) => t.selected)?.id ?? null;
+            version.audioTracks?.find((t) => t.selected)?.id ?? null;
         }
         if (currentSubtitleStreamRef.current === null) {
           currentSubtitleStreamRef.current =
-            meta.subtitleTracks?.find((t) => t.selected)?.id ?? 0;
+            version.subtitleTracks?.find((t) => t.selected)?.id ?? 0;
         }
       })
       .catch(() => { /* both are optional — never surface an error over a working stream */ });
@@ -955,6 +968,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     const url = hlsMasterUrl(item.ratingKey, sessionId, {
       subtitles: subtitlesOnRef.current,
       offset: startOffset > 0 ? startOffset : undefined,
+      // Only the client that owns the session chose a file; a viewer sending its
+      // own idea of one would restart the host's transcode on a different track.
+      mediaIndex: sessionOwner ? mediaIndexRef.current : undefined,
     });
 
     async function start() {
@@ -2995,6 +3011,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       {showTrackSwitcher && (
         <TrackSwitcher
           ratingKey={item.ratingKey}
+          // So the switcher lists — and sets — streams belonging to the file
+          // actually playing, rather than the title's default copy.
+          mediaIndex={mediaIndex}
           onClose={() => setShowTrackSwitcher(false)}
           onTrackChange={handleTrackSelect}
           subtitlesOnly={!isHost}

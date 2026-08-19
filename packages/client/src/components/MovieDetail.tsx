@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, setStreams, getSessionToken, type Credit, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
+import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, setStreams, getSessionToken, versionOf, type Credit, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
 import { formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
@@ -14,8 +14,15 @@ import type { QueueItem, SuggestionItem } from "../hooks/useSync";
 interface MovieDetailProps {
   item: PlexItem;
   isHost: boolean;
-  /** `resumePosition` (seconds) is set only when the host picked Resume. */
-  onPlay: (item: PlexItem, subtitles: boolean, resumePosition?: number) => void;
+  /** `resumePosition` (seconds) is set only when the host picked Resume.
+   *  `mediaIndex` names the chosen file for a title Plex holds more than one of;
+   *  omitted when there is only one, which lets the server pick. */
+  onPlay: (
+    item: PlexItem,
+    subtitles: boolean,
+    resumePosition?: number,
+    mediaIndex?: number,
+  ) => void;
   onBack: () => void;
   isPlaying?: boolean;
   onAddToQueue?: (item: QueueItem) => void;
@@ -184,6 +191,9 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   const [error, setError] = useState<string | null>(null);
   const [selectedAudio, setSelectedAudio] = useState<number | null>(null);
   const [selectedSubtitle, setSelectedSubtitle] = useState<number | null>(null);
+  // Which file to play, for the handful of titles Plex holds more than one of.
+  // Null until the metadata arrives, and for everything with a single file.
+  const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
   const [suggested, setSuggested] = useState(false);
   // Distinguishes "metadata hasn't arrived yet" from "metadata failed". The page
   // renders either way now, so a failure is a note beside real content rather
@@ -207,17 +217,16 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
     let cancelled = false;
     setMetaFailed(false);
     setBackdropLoaded(false);
+    setSelectedVersion(null);
     fetchMeta(item.ratingKey)
       .then((m) => {
         if (cancelled) return;
         setMeta(m);
-        const defaultAudio = m.audioTracks.find((t) => t.selected) ?? m.audioTracks[0];
-        if (defaultAudio) setSelectedAudio(defaultAudio.id);
-        // Re-apply the viewer's remembered subtitle choice — matched by language
-        // and flavour, since stream ids differ from episode to episode. With no
-        // stored preference this resolves to null, the previous "off" default.
-        const match = matchSubtitleTrack(m.subtitleTracks, loadSubtitlePref());
-        setSelectedSubtitle(match ? match.id : null);
+        // versions[0] is the server's pick — the best copy worth streaming, with
+        // any 4K duplicate already dropped. The track defaults follow from it in
+        // the effect below rather than here, because they have to be redone
+        // whenever the choice changes and there is no reason to write that twice.
+        setSelectedVersion(m.versions?.[0]?.mediaIndex ?? null);
       })
       .catch((err) => {
         console.error(err);
@@ -226,6 +235,33 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
 ;
     return () => { cancelled = true; };
   }, [item.ratingKey]);
+
+  // Tracks and part id follow the chosen file — see versionOf.
+  const resolved = meta ? versionOf(meta, selectedVersion ?? undefined) : null;
+  const audioTracks = resolved?.audioTracks ?? [];
+  const subtitleTracks = resolved?.subtitleTracks ?? [];
+  const partId = resolved?.partId ?? null;
+
+  /**
+   * Default the audio and subtitle pickers to this version's own streams.
+   *
+   * Re-run on a version change and not only on arrival, because stream ids
+   * belong to a file rather than to a title: keeping the previous selection
+   * across a switch would send Plex an id from the file we are no longer
+   * playing, which it accepts and silently ignores.
+   */
+  useEffect(() => {
+    if (!meta) return;
+    const defaultAudio = audioTracks.find((t) => t.selected) ?? audioTracks[0];
+    setSelectedAudio(defaultAudio ? defaultAudio.id : null);
+    // Re-apply the viewer's remembered subtitle choice — matched by language
+    // and flavour, since stream ids differ from episode to episode. With no
+    // stored preference this resolves to null, the previous "off" default.
+    const match = matchSubtitleTrack(subtitleTracks, loadSubtitlePref());
+    setSelectedSubtitle(match ? match.id : null);
+    // audioTracks/subtitleTracks are derived from exactly these two.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meta, selectedVersion]);
 
   // Deliberately not cached (unlike fetchMeta): this changes every time the item
   // is watched, and a stale resume point is worse than an extra request.
@@ -240,11 +276,11 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   }, [item.ratingKey, isHost]);
 
   const handlePlay = useCallback(async (resumeFromMs?: number) => {
-    if (!meta?.partId) return;
+    if (!partId) return;
     try {
       setError(null);
       if (selectedAudio != null) {
-        await setStreams(meta.partId, {
+        await setStreams(partId, {
           audioStreamID: selectedAudio,
           subtitleStreamID: selectedSubtitle ?? 0,
         });
@@ -252,12 +288,17 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
         invalidateMeta(item.ratingKey);
       }
       // The player works in seconds; history stores milliseconds.
-      onPlay(item, selectedSubtitle != null, resumeFromMs != null ? resumeFromMs / 1000 : undefined);
+      onPlay(
+        item,
+        selectedSubtitle != null,
+        resumeFromMs != null ? resumeFromMs / 1000 : undefined,
+        selectedVersion ?? undefined,
+      );
     } catch (err) {
       console.error("Failed to set streams:", err);
       setError("Failed to configure playback. Please try again.");
     }
-  }, [meta, selectedAudio, selectedSubtitle, item, onPlay]);
+  }, [partId, selectedAudio, selectedSubtitle, item, onPlay, selectedVersion]);
 
   // Offer a resume only for a genuine part-watch: far enough in to matter, and
   // not already finished (the server flags that, so a rewatch starts clean).
@@ -456,32 +497,50 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                   can't be drawn from the card. The row holds its height while
                   the metadata is in flight so the Play button doesn't move. */}
               <div style={{ ...styles.trackRow, ...(narrow ? styles.trackRowNarrow : {}), ...styles.trackSlot }}>
-                {meta && meta.audioTracks.length > 1 && (
+                {/* Which file, for the few titles Plex holds more than one of.
+                    First, because it decides what the other two can offer. A 4K
+                    copy is missing from this list whenever a lower-resolution one
+                    exists — see the note on PlexVersion. */}
+                {meta && (meta.versions?.length ?? 0) > 1 && (
+                  <div style={styles.trackField}>
+                    <label style={styles.trackLabel}>Version</label>
+                    <TrackDropdown
+                      value={selectedVersion != null ? String(selectedVersion) : ""}
+                      options={meta.versions!.map((v) => ({
+                        value: String(v.mediaIndex),
+                        label: v.label,
+                      }))}
+                      onChange={(v) => setSelectedVersion(Number(v))}
+                    />
+                  </div>
+                )}
+
+                {meta && audioTracks.length > 1 && (
                   <div style={styles.trackField}>
                     <label style={styles.trackLabel}>Audio</label>
                     <TrackDropdown
                       value={selectedAudio != null ? String(selectedAudio) : ""}
-                      options={meta.audioTracks.map((t) => ({ value: String(t.id), label: t.title }))}
+                      options={audioTracks.map((t) => ({ value: String(t.id), label: t.title }))}
                       onChange={(v) => setSelectedAudio(Number(v))}
                     />
                   </div>
                 )}
 
-                {meta && meta.subtitleTracks.length > 0 && (
+                {meta && subtitleTracks.length > 0 && (
                   <div style={styles.trackField}>
                     <label style={styles.trackLabel}>Subtitles</label>
                     <TrackDropdown
                       value={selectedSubtitle != null ? String(selectedSubtitle) : ""}
                       options={[
                         { value: "", label: "None" },
-                        ...meta.subtitleTracks.map((t) => ({ value: String(t.id), label: t.title })),
+                        ...subtitleTracks.map((t) => ({ value: String(t.id), label: t.title })),
                       ]}
                       onChange={(v) => {
                         const id = v === "" ? null : Number(v);
                         setSelectedSubtitle(id);
                         // Remember it so the next episode starts with the same
                         // kind of track already selected.
-                        saveSubtitlePref(meta.subtitleTracks.find((t) => t.id === id) ?? null);
+                        saveSubtitlePref(subtitleTracks.find((t) => t.id === id) ?? null);
                       }}
                     />
                   </div>

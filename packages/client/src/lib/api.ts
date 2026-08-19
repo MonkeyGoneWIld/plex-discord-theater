@@ -203,6 +203,65 @@ export interface StreamTrack {
   selected: boolean;
 }
 
+/**
+ * One of the files Plex holds for a title.
+ *
+ * Only sent when there is more than one, and only for the ones worth offering:
+ * the server drops a 4K file whenever a lower-resolution copy of the same title
+ * exists, because every stream is transcoded to 1080p anyway. Best first, so
+ * versions[0] is the default.
+ *
+ * Tracks and part id are per-version: a second file is a different set of audio
+ * and subtitle streams with different ids, not the same ones again.
+ */
+export interface PlexVersion {
+  /** Index into Plex's own Media array — what the transcode decision takes. */
+  mediaIndex: number;
+  partId: number | null;
+  /** "4K \u00b7 HEVC \u00b7 5.1", or the name set in Plex if the file has one. */
+  label: string;
+  resolution: string;
+  previewThumbs: boolean;
+  audioTracks: StreamTrack[];
+  subtitleTracks: StreamTrack[];
+}
+
+/**
+ * What playing one particular file of a title actually involves.
+ *
+ * Part id and stream ids belong to a *file*, not to a title: a second copy of
+ * the same film has its own audio and subtitle streams with their own ids.
+ * Anything that sets a track, or asks for preview frames, has to go through
+ * here rather than through the top-level fields, or it addresses whichever file
+ * happens to be first.
+ */
+export interface ResolvedVersion {
+  partId: number | null;
+  previewThumbs: boolean;
+  audioTracks: StreamTrack[];
+  subtitleTracks: StreamTrack[];
+}
+
+/**
+ * The chosen file's view of a title, or the default when nothing was chosen.
+ *
+ * Falls back to the top-level fields, which is what an older server sends and
+ * what the server itself derives from versions[0] — so an unspecified
+ * mediaIndex resolves to exactly the file the server will play.
+ */
+export function versionOf(meta: PlexMeta, mediaIndex?: number): ResolvedVersion {
+  const chosen =
+    (mediaIndex != null ? meta.versions?.find((v) => v.mediaIndex === mediaIndex) : null) ??
+    meta.versions?.[0] ??
+    null;
+  return {
+    partId: chosen?.partId ?? meta.partId,
+    previewThumbs: chosen?.previewThumbs ?? meta.previewThumbs ?? false,
+    audioTracks: chosen?.audioTracks ?? meta.audioTracks,
+    subtitleTracks: chosen?.subtitleTracks ?? meta.subtitleTracks,
+  };
+}
+
 /** A skippable intro/credits range detected by Plex. */
 export interface SkipMarker {
   type: "intro" | "credits";
@@ -243,6 +302,9 @@ export interface PlexMeta {
   previewThumbs?: boolean;
   audioTracks: StreamTrack[];
   subtitleTracks: StreamTrack[];
+  /** The files to choose between, best first. Empty (or absent, from an older
+   *  server) when there is only one, which is when no picker is drawn. */
+  versions?: PlexVersion[];
   /** Optional so a newer client served by an older server degrades to "no button". */
   markers?: SkipMarker[];
   /** TMDB id — for Seerr season requests on library shows. Optional/nullable. */
@@ -547,10 +609,17 @@ export function fetchSiblingEpisodes(
 export function hlsMasterUrl(
   ratingKey: string,
   sessionId: string,
-  options?: { offset?: number; subtitles?: boolean },
+  options?: { offset?: number; subtitles?: boolean; mediaIndex?: number },
 ): string {
   const params = new URLSearchParams();
   if (options?.offset != null && options.offset > 0) params.set("offset", String(options.offset));
+  // Which file to play, for a title that has more than one. Sent only by the
+  // client that chose it — the server remembers it against the session, so a
+  // viewer following the room and a later seek both land on the same file
+  // without needing to know which one it is.
+  if (options?.mediaIndex != null && options.mediaIndex > 0) {
+    params.set("mediaIndex", String(options.mediaIndex));
+  }
   params.set("subtitles", options?.subtitles ? "burn" : "none");
   const qs = params.toString();
   return `/api/plex/hls/${encodeURIComponent(ratingKey)}/${encodeURIComponent(sessionId)}/master.m3u8${qs ? `?${qs}` : ""}`;

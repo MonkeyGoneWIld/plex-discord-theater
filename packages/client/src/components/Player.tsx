@@ -10,11 +10,11 @@ import { NextUpButton } from "./NextUpButton";
 import { EndCard } from "./EndCard";
 import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
-import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf } from "../lib/api";
+import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, setStreams, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
-import type { PlexItem, SkipMarker } from "../lib/api";
+import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
 import type { InviteResult } from "../hooks/useDiscord";
 
@@ -424,6 +424,18 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const [activeMarker, setActiveMarker] = useState<SkipMarker | null>(null);
   // Plex part id for hover-preview frames, or null when this item has none.
   const [previewPartId, setPreviewPartId] = useState<number | null>(null);
+  // This item's metadata, kept so the version-dependent parts of it can be
+  // re-resolved without refetching (and without blanking the skip markers)
+  // when the session's file turns out to be a different one.
+  const [itemMeta, setItemMeta] = useState<PlexMeta | null>(null);
+  // The live session, in state as well as in a ref — the ref is for the
+  // listeners, this is what the version lookup below keys on.
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  // The file the session is actually playing, per the server. Only consulted
+  // when this client wasn't the one that chose it, which is everyone except the
+  // host who pressed Play — a co-host, a viewer, and a host who was promoted
+  // into a stream already running.
+  const [sessionMediaIndex, setSessionMediaIndex] = useState<number | null>(null);
   const [recovering, setRecovering] = useState(false);
   // Every automatic recovery has been spent and the session is torn down: the
   // only ways forward are the manual Retry button or leaving.
@@ -778,34 +790,77 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     setMarkers([]);
     setActiveMarker(null);
     setPreviewPartId(null);
+    setItemMeta(null);
     let cancelled = false;
     fetchMeta(item.ratingKey)
       .then((meta) => {
         if (cancelled) return;
         if (canControl) setMarkers(meta.markers ?? []);
-        // Resolved against the file this session is playing: preview frames and
-        // stream ids both belong to a part, and on a title with two copies the
-        // top-level fields describe whichever one is the default.
-        const version = versionOf(meta, mediaIndexRef.current);
-        // Null unless Plex actually has preview frames, so Controls renders a
-        // plain timestamp rather than chasing images that don't exist.
-        setPreviewPartId(version.previewThumbs ? version.partId : null);
-        // Seed what's currently selected from Plex's own answer, so re-picking
-        // the track already playing is recognised as a no-op the *first* time
-        // as well as afterwards. Guarded on null so a selection made while this
-        // was in flight wins. Subtitles fall back to 0, the switcher's "None".
-        if (currentAudioStreamRef.current === null) {
-          currentAudioStreamRef.current =
-            version.audioTracks?.find((t) => t.selected)?.id ?? null;
-        }
-        if (currentSubtitleStreamRef.current === null) {
-          currentSubtitleStreamRef.current =
-            version.subtitleTracks?.find((t) => t.selected)?.id ?? 0;
-        }
+        // Everything that depends on *which file* is playing is resolved in the
+        // effect below instead, so it can be redone when that answer changes
+        // without refetching this or blanking the markers.
+        setItemMeta(meta);
       })
       .catch(() => { /* both are optional — never surface an error over a working stream */ });
     return () => { cancelled = true; };
   }, [item.ratingKey, canControl]);
+
+  /**
+   * Ask the server which file this session is playing.
+   *
+   * Only the host's detail page chooses one, and only that client is told;
+   * everyone else — co-hosts, viewers, and a host promoted into a stream
+   * already running — arrives with nothing. Part ids and stream ids belong to a
+   * file, so without this a co-host's track switcher lists the default copy's
+   * subtitles while a different copy plays, and picking one addresses a file
+   * nobody is watching.
+   *
+   * Safe to ask as soon as there is a session id: the host registers the index
+   * by requesting the manifest and only announces the session to the room once
+   * that manifest has parsed, so the answer is always already there.
+   */
+  useEffect(() => {
+    setSessionMediaIndex(null);
+    if (!activeSessionId) return;
+    let cancelled = false;
+    fetchSessionVersion(activeSessionId)
+      .then((r) => { if (!cancelled) setSessionMediaIndex(r.mediaIndex); })
+      .catch(() => { /* falls back to the item's default, which is usually right */ });
+    return () => { cancelled = true; };
+  }, [activeSessionId]);
+
+  // What this client believes is playing: its own choice if it made one,
+  // otherwise the session's. Undefined resolves to the item's default, which is
+  // the same file the server starts when nobody has said otherwise.
+  const effectiveMediaIndex = mediaIndex ?? sessionMediaIndex ?? undefined;
+
+  /**
+   * The parts of the metadata that belong to a file rather than to a title:
+   * preview frames, and the stream ids the track switcher compares against.
+   *
+   * Its own effect so it re-runs when the session's file resolves a moment
+   * after the metadata does, which is the ordinary order of events for anyone
+   * who didn't press Play.
+   */
+  useEffect(() => {
+    if (!itemMeta) return;
+    const version = versionOf(itemMeta, effectiveMediaIndex);
+    // Null unless Plex actually has preview frames, so Controls renders a
+    // plain timestamp rather than chasing images that don't exist.
+    setPreviewPartId(version.previewThumbs ? version.partId : null);
+    // Seed what's currently selected from Plex's own answer, so re-picking
+    // the track already playing is recognised as a no-op the *first* time
+    // as well as afterwards. Guarded on null so a selection made while this
+    // was in flight wins. Subtitles fall back to 0, the switcher's "None".
+    if (currentAudioStreamRef.current === null) {
+      currentAudioStreamRef.current =
+        version.audioTracks?.find((t) => t.selected)?.id ?? null;
+    }
+    if (currentSubtitleStreamRef.current === null) {
+      currentSubtitleStreamRef.current =
+        version.subtitleTracks?.find((t) => t.selected)?.id ?? 0;
+    }
+  }, [itemMeta, effectiveMediaIndex]);
 
   // Resolve the next episode in the series. Same effect discipline as markers
   // above: its own effect (so retryKey restarts don't blank it) keyed on
@@ -906,6 +961,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     }
 
     sessionIdRef.current = sessionId;
+    // Mirrored into state so the version lookup above can key on it. Not a
+    // dependency of this effect, so it can't restart the stream.
+    setActiveSessionId(sessionId);
     // Fresh id, not yet known to the server. Set again once the manifest request
     // actually goes out.
     sessionRegisteredRef.current = false;
@@ -3012,8 +3070,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         <TrackSwitcher
           ratingKey={item.ratingKey}
           // So the switcher lists — and sets — streams belonging to the file
-          // actually playing, rather than the title's default copy.
-          mediaIndex={mediaIndex}
+          // actually playing, rather than the title's default copy. A co-host
+          // has no choice of its own; effectiveMediaIndex is the session's.
+          mediaIndex={effectiveMediaIndex}
           onClose={() => setShowTrackSwitcher(false)}
           onTrackChange={handleTrackSelect}
           subtitlesOnly={!isHost}

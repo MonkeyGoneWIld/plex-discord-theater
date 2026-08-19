@@ -3420,6 +3420,34 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/plex/hls/session/:sessionId/version
+ *
+ * Which of the item's files this session is playing, as an index into Plex's
+ * Media array. Null when the session isn't running one — it hasn't started, or
+ * it has already been torn down.
+ *
+ * Exists because only the host's detail page ever chooses a version, and part
+ * ids and stream ids belong to a file: a co-host listing the default copy's
+ * subtitles while a different copy plays offers choices that quietly do
+ * nothing. Everyone already knows the session id, so this is the cheapest way
+ * to let everyone resolve the same file — cheaper than carrying it in room
+ * state, which is a protocol change for one field.
+ *
+ * No race to worry about: the host registers the index by requesting the
+ * manifest, and only announces the session id to the room once that manifest
+ * has parsed. A client that has a session id to ask about is therefore asking
+ * after the answer exists.
+ */
+router.get("/hls/session/:sessionId/version", (req: Request, res: Response) => {
+  const sessionId = req.params.sessionId as string;
+  if (!UUID_RE.test(sessionId)) {
+    res.status(400).json({ error: "Invalid session ID" });
+    return;
+  }
+  res.json({ mediaIndex: sessionMediaIndex.get(sessionId) ?? null });
+});
+
+/**
  * DELETE /api/plex/hls/session/:sessionId
  * Stop a transcode session.
  */

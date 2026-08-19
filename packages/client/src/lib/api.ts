@@ -625,6 +625,18 @@ export function hlsMasterUrl(
   return `/api/plex/hls/${encodeURIComponent(ratingKey)}/${encodeURIComponent(sessionId)}/master.m3u8${qs ? `?${qs}` : ""}`;
 }
 
+/**
+ * Which file a running session is playing — see the route for why this exists.
+ *
+ * Deliberately not cached: it is per-session rather than per-title, and it is
+ * asked once per session.
+ */
+export function fetchSessionVersion(
+  sessionId: string,
+): Promise<{ mediaIndex: number | null }> {
+  return apiGet(`/api/plex/hls/session/${encodeURIComponent(sessionId)}/version`);
+}
+
 export function setStreams(
   partId: number,
   options: { audioStreamID?: number; subtitleStreamID?: number },

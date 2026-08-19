@@ -861,19 +861,42 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       return;
     }
     if (v.hlsSessionId && v.hlsSessionId !== sessionIdRef.current) {
+      /**
+       * Ask for the rebuild once, whichever way it has to be asked.
+       *
+       * Two things can make the HLS effect run: pointing `followSessionId` at a
+       * different session, or bumping `retryKey`. Doing both is not belt and
+       * braces, it is two rebuilds — the effect consumes the first, then the
+       * second render arrives with a new retry key and it tears the stream down
+       * and builds it again twenty milliseconds later. Every host track change
+       * cost each follower two teardowns and a round of abandoned segment
+       * fetches.
+       *
+       * The retry key is still needed, though, for the case it was added for:
+       * `followSessionId` is never cleared, so a client that leaves a stream and
+       * is later put back on it is already pointed there. Assigning a value that
+       * is already set changes nothing, the effect never re-runs, and the player
+       * sits on a transcode it abandoned.
+       *
+       * Which of the two applies is not a question about the state — it is a
+       * question about what the effect has already *done*, and the effect
+       * records that: `hlsDepsRef` holds the dependencies of its last run. If it
+       * has already built for this session then no assignment will move it and
+       * the retry key is the only lever left. If it hasn't, it is either about
+       * to run or will as soon as the assignment lands, and forcing it as well
+       * only makes it do the work twice.
+       */
+      const alreadyBuiltForThis = hlsDepsRef.current?.followSessionId === v.hlsSessionId;
       logEvent("HLS", "moving onto this stream's transcode", {
         variant: v.variantKey,
         to: v.hlsSessionId.substring(0, 8),
         alreadyFollowed: followSessionIdRef.current === v.hlsSessionId,
+        // Which lever this took. "state" is the ordinary path; "forced" is the
+        // return to an abandoned stream. Never both.
+        asking: alreadyBuiltForThis ? "forced" : "state",
       });
       setFollowSessionId(v.hlsSessionId);
-      // `followSessionId` may already hold this id — leaving a stream and coming
-      // back to it is the ordinary case, and nothing ever cleared it on the way
-      // out. Setting state to the value it already has is not a change, so the
-      // HLS effect never re-ran and the player sat on the transcode it had
-      // abandoned, buffering forever. Bumping the retry key is what actually
-      // asks for the rebuild; the assignment above only records where to point it.
-      setRetryKey((k) => k + 1);
+      if (alreadyBuiltForThis) setRetryKey((k) => k + 1);
       return;
     }
     // Neither branch fired, so nothing is being rebuilt and the freeze-frame

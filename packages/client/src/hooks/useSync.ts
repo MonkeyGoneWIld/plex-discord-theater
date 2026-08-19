@@ -141,6 +141,26 @@ export interface SyncState {
 }
 
 /**
+ * A report that shows the room standing still rather than playing.
+ *
+ * Carrying a position forward by wall time assumes the host is playing at 1x
+ * between reports. A host whose transcode has starved reports the same number
+ * every five seconds, and adding wall time to it invents progress nobody made:
+ * viewers run on past a host that is frozen, then get pulled back when it
+ * recovers. It has not paused — it reports `playing: true` throughout — so only
+ * the numbers say so.
+ *
+ * Deliberately a narrow test rather than a ratio. Extrapolation can only ever
+ * be one report's worth wrong and re-anchors on the next one, so there is
+ * nothing to be gained by catching partial stalls and something to lose by
+ * misreading a late heartbeat — which still carries real progress — as a
+ * frozen one. Advancing by almost nothing over a whole interval is unambiguous.
+ */
+function looksStalled(advancedS: number, elapsedS: number): boolean {
+  return elapsedS > 2 && advancedS < 0.5;
+}
+
+/**
  * How far into the film the room is *now*, rather than at its last report.
  *
  * Mirrors the server's own interpolation, including the cap: past thirty
@@ -405,7 +425,16 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         // host's copy of the room's position stopped updating the moment it
         // took the role, and anything reading it got a number frozen minutes
         // ago. It is reporting the room's clock, so it may as well hold it.
-        setState((prev) => ({ ...prev, position, playing, positionAt: Date.now() }));
+        setState((prev) => {
+          // The same test viewers apply to the heartbeats they receive. It
+          // matters here too: this is the number the host's own next rebuild
+          // lands on, and a stalled host should come back where it stopped
+          // rather than somewhere it never reached.
+          const now = Date.now();
+          const elapsed = prev.positionAt ? (now - prev.positionAt) / 1000 : 0;
+          const stalled = looksStalled(position - prev.position, elapsed);
+          return { ...prev, position, playing, positionAt: stalled ? 0 : now };
+        });
       },
       sendBrowse: (context: string) => send({ type: "browse", context }),
       sendQueueAdd: (item: QueueItem) => send({ type: "queue-add", item }),
@@ -622,34 +651,43 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             break;
           case "heartbeat":
             // Only update position — no commandSeq bump, so drift correction won't fire
-            setState((prev) => ({
-              ...prev,
-              position: (msg.position as number) ?? prev.position,
-              positionAt: Date.now(),
-              playing: msg.playing !== false,
-              // Self-heal: if our "what's playing" state was cleared (e.g. a stray
-              // stop during a host handoff), recover it from the heartbeat so the
-              // rejoin path works again. Only fill when missing, to avoid churn
-              // and spurious re-navigation while already watching.
-              ...(prev.ratingKey == null && msg.ratingKey
-                ? {
-                    ratingKey: msg.ratingKey as string,
-                    title: (msg.title as string) || null,
-                    subtitles: Boolean(msg.subtitles),
-                    hlsSessionId: (msg.hlsSessionId as string) || null,
-                    sessionOffset: (msg.sessionOffset as number) ?? 0,
-                  }
-                // The session id can go missing on its own — a stray stop, or a
-                // heartbeat that arrived before the "play" that announced the
-                // restart. Without it a viewer has nothing to attach hls.js to
-                // and sits on black with the room playing around them.
-                : prev.hlsSessionId == null && msg.hlsSessionId
+            setState((prev) => {
+              const now = Date.now();
+              const reported = (msg.position as number) ?? prev.position;
+              const elapsed = prev.positionAt ? (now - prev.positionAt) / 1000 : 0;
+              const stalled = looksStalled(reported - prev.position, elapsed);
+              return {
+                ...prev,
+                position: reported,
+                // 0 means "don't carry this forward" — see roomPositionNow and
+                // looksStalled. Every heartbeat decides again, so a stall costs
+                // the extrapolation only for as long as it lasts.
+                positionAt: stalled ? 0 : now,
+                playing: msg.playing !== false,
+                // Self-heal: if our "what's playing" state was cleared (e.g. a stray
+                // stop during a host handoff), recover it from the heartbeat so the
+                // rejoin path works again. Only fill when missing, to avoid churn
+                // and spurious re-navigation while already watching.
+                ...(prev.ratingKey == null && msg.ratingKey
                   ? {
-                      hlsSessionId: msg.hlsSessionId as string,
-                      sessionOffset: (msg.sessionOffset as number) ?? prev.sessionOffset,
+                      ratingKey: msg.ratingKey as string,
+                      title: (msg.title as string) || null,
+                      subtitles: Boolean(msg.subtitles),
+                      hlsSessionId: (msg.hlsSessionId as string) || null,
+                      sessionOffset: (msg.sessionOffset as number) ?? 0,
                     }
-                  : {}),
-            }));
+                  // The session id can go missing on its own — a stray stop, or a
+                  // heartbeat that arrived before the "play" that announced the
+                  // restart. Without it a viewer has nothing to attach hls.js to
+                  // and sits on black with the room playing around them.
+                  : prev.hlsSessionId == null && msg.hlsSessionId
+                    ? {
+                        hlsSessionId: msg.hlsSessionId as string,
+                        sessionOffset: (msg.sessionOffset as number) ?? prev.sessionOffset,
+                      }
+                    : {}),
+              };
+            });
             break;
           case "browse":
             setState((prev) => ({

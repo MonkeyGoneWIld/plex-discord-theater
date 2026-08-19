@@ -56,7 +56,7 @@ nothing sits in Seerr forever waiting on episodes that haven't aired.
 
 ![A show's page with its missing seasons selectable for request](docs/screenshots/request-seasons.jpg)
 
-Mobile gets its own layout rather than a shrunk-down desktop one
+Mobile gets its own layout rather than a shrunk-down desktop one.
 
 | ![The TV Shows tab on a phone, three posters across](docs/screenshots/phone-browse.jpg) | ![A film's detail page on a phone, poster centred above the text](docs/screenshots/phone-title.jpg) |
 | :-- | :-- |

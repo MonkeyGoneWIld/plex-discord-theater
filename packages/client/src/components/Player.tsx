@@ -443,9 +443,27 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const [activeMarker, setActiveMarker] = useState<SkipMarker | null>(null);
   // Plex part id for hover-preview frames, or null when this item has none.
   const [previewPartId, setPreviewPartId] = useState<number | null>(null);
+  /**
+   * The player is going away, as opposed to rebuilding.
+   *
+   * React runs cleanups in the order the effects were declared, so this one —
+   * declared above the HLS effect — has already run by the time that effect's
+   * cleanup asks. It is the difference between "replace this transcode" and
+   * "this person walked out of the room", which look identical from inside the
+   * cleanup and want opposite things.
+   */
+  const unmountingRef = useRef(false);
+  useEffect(() => () => { unmountingRef.current = true; }, []);
+
   // A join seek has happened and its startup cost hasn't been measured yet.
   // One-shot: cleared by the first frames that follow it.
   const joinSettleRef = useRef(false);
+  // The variant this client has already acted on, so an assignment that moves it
+  // somewhere new can be told from a re-announcement of the same stream.
+  const appliedVariantKeyRef = useRef<string | null>(null);
+  // Set when this client asked for the change itself — it already has its own
+  // overlay up, and shouldn't be told it was moved.
+  const askedForTracksRef = useRef(false);
   // This item's metadata, kept so the version-dependent parts of it can be
   // re-resolved without refetching (and without blanking the skip markers)
   // when the session's file turns out to be a different one.
@@ -746,9 +764,32 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   useEffect(() => {
     const v = variantRef.current;
     if (!v) return;
+    const prevAudio = currentAudioStreamRef.current;
+    const prevSubtitle = currentSubtitleStreamRef.current;
+    const hadTracks = appliedVariantKeyRef.current !== null;
+    const movedBysomeoneElse =
+      hadTracks && appliedVariantKeyRef.current !== v.variantKey && !askedForTracksRef.current;
+    appliedVariantKeyRef.current = v.variantKey;
+    askedForTracksRef.current = false;
+
     currentAudioStreamRef.current = v.audioStreamId || null;
     currentSubtitleStreamRef.current = v.subtitleStreamId;
     subtitlesOnRef.current = v.subtitleStreamId !== 0;
+
+    // The host changed tracks and took this client with them. Without this the
+    // rebuild that follows is a bare loading spinner with no explanation — the
+    // film simply stops for five seconds. Say which of the two it was, the same
+    // way it reads for whoever asked.
+    if (movedBysomeoneElse) {
+      const audioChanged = prevAudio !== (v.audioStreamId || null);
+      logEvent("Player", "host moved this client onto other tracks", {
+        to: v.variantKey,
+        audioChanged,
+        subtitleChanged: prevSubtitle !== v.subtitleStreamId,
+      });
+      canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
+      setTrackSwitching(audioChanged ? "audio" : "subtitle");
+    }
 
     if (v.isOwner) {
       if (!v.hlsSessionId) {
@@ -1975,7 +2016,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       // was ever told the session exists. Without the second condition a seek
       // landing inside start()'s wait sends a DELETE for an id that only ever
       // lived in this tab — 25 of 30 teardowns in one stress-test run.
-      if (ownsSessionRef.current && sessionIdRef.current && sessionRegisteredRef.current) {
+      // Walking out of the player keeps the stream. Only a rebuild replaces it.
+      const leavingPlayer = unmountingRef.current && !isHostRef.current;
+      if (leavingPlayer && sessionIdRef.current) {
+        logEvent("HLS", "effect cleanup, leaving stream running for the walk back", {
+          session: sessionIdRef.current.substring(0, 8),
+          owner: ownsSessionRef.current,
+        });
+      }
+      if (!leavingPlayer && ownsSessionRef.current && sessionIdRef.current && sessionRegisteredRef.current) {
         logEvent("HLS", "effect cleanup stopping session", {
           session: sessionIdRef.current.substring(0, 8),
           ...snapshot(videoRef.current),
@@ -2071,32 +2120,25 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       ...snapshot(video),
     });
 
-    // Seek correction — only on explicit commands, with generous threshold
-    if (syncState.position > 0) {
-      const drift = Math.abs(video.currentTime - syncState.position);
+    // Correction against where the room is *now*. `position` is the last
+    // report, up to a heartbeat old; correcting to it is how a client ends up
+    // permanently a couple of seconds behind.
+    const roomNow = roomPositionNow(syncState);
+    if (roomNow > 0) {
+      const drift = Math.abs(video.currentTime - roomNow);
       if (drift > DRIFT_THRESHOLD_S) {
-        if (ownsSessionRef.current) {
-          // Whoever drives this stream has to take the smart path — a far jump
-          // needs a restart at the new offset, not a bare currentTime write.
-          // broadcast=false stops it echoing back out.
-          //
-          // Every stream in the room does this independently for its own
-          // transcode, which is what keeps several of them landing on the same
-          // frame: the seek is a room command, and each driver serves it from
-          // whatever its own transcode can reach.
-          //
-          // Gated on an actual seek, because that restart is expensive and the
-          // host is the authority on position: pause/resume are rebroadcast with
-          // the room's *cached* position (server sync.ts), which lags behind the
-          // host's own playhead and can be minutes stale. Acting on those let a
-          // co-host's pause drag the running transcode backwards and restart it
-          // mid-episode. A real seek still lands; a stale position no longer does.
+        if (amHost) {
+          // The host is the authority on position rather than a follower of it,
+          // so it acts only on a real seek. pause/resume are rebroadcast with the
+          // room's cached position, which can lag its own playhead badly — acting
+          // on those let a co-host's pause drag the running transcode backwards
+          // and restart it mid-episode.
           if (isNewSeek) {
-            handleHostSeekRef.current(syncState.position, false);
+            handleHostSeekRef.current(roomNow, false);
           } else {
-            logWarn("Sync", "driver ignoring drifting position on non-seek command", {
+            logWarn("Sync", "host ignoring drifting position on non-seek command", {
               commandSeq: syncState.commandSeq,
-              roomPosS: syncState.position,
+              roomPosS: roomNow,
               ownPosS: video.currentTime,
               driftS: drift,
             });
@@ -2107,18 +2149,36 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // currentTime here does nothing except leave a bogus playhead for the
           // manifest handler to trip over; MANIFEST_PARSED positions us instead.
           logEvent("Sync", "viewer skipping correction (no media yet)", {
-            toS: syncState.position,
+            toS: roomNow,
             driftS: drift,
           });
+        } else if (ownsSessionRef.current) {
+          // Follows the room like any other viewer, but owns its transcode — so
+          // a correction has to go through the smart path, which restarts that
+          // transcode when the target isn't reachable inside it. A bare
+          // currentTime write would seek into nothing and stall.
+          //
+          // This used to be lumped in with the host above, on the reasoning that
+          // both "own a session". They do, but only one of them *defines* the
+          // room's position — so a viewer who forked onto their own tracks
+          // stopped correcting entirely and stayed out of sync until somebody
+          // paused, which re-anchors everyone by another route.
+          logEvent("Sync", "driver correcting its own stream to the room", {
+            fromS: video.currentTime,
+            toS: roomNow,
+            driftS: drift,
+          });
+          lastDriftCorrectionRef.current = Date.now();
+          handleHostSeekRef.current(roomNow, false);
         } else {
           logEvent("Sync", "viewer correcting to room position", {
             fromS: video.currentTime,
-            toS: syncState.position,
+            toS: roomNow,
             driftS: drift,
           });
           lastDriftCorrectionRef.current = Date.now();
           resetPlaybackRate(video);
-          video.currentTime = syncState.position;
+          video.currentTime = roomNow;
         }
       }
     }
@@ -2707,14 +2767,22 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       clearTimeout(restartTimerRef.current);
       restartTimerRef.current = null;
     }
-    // Only the session owner stops the Plex transcode, and only one the server
-    // knows about.
-    if (ownsSessionRef.current && sessionIdRef.current && sessionRegisteredRef.current) {
-      pendingStopRef.current = stopSession(sessionIdRef.current, "end-playback").catch(() => {});
-    }
-    if (ownsSessionRef.current) sessionIdRef.current = null;
+    // Leaving the player is not leaving the room, and the stream is kept for
+    // the walk back: coming out to browse and going straight back in used to
+    // cost a whole fresh transcode, which is ten to fifteen seconds of loading
+    // for something that was running a moment ago. The server keeps it alive
+    // while this client is still connected and tears it down on disconnect, or
+    // when nobody has been watching it for a while.
+    //
+    // The host still ends the room's playback, which stops every stream — that
+    // is a decision about the room rather than about this client's tab.
     if (isHostRef.current) {
       syncActionsRef.current?.sendStop();
+    } else {
+      logEvent("Player", "leaving the player, stream left running", {
+        session: sessionIdRef.current?.substring(0, 8) ?? "none",
+        owner: ownsSessionRef.current,
+      });
     }
   }, [destroyLocal]);
 
@@ -2801,6 +2869,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // switcher re-reads instead of ticking a stale row.
     invalidateMeta(item.ratingKey);
 
+    askedForTracksRef.current = true;
     logEvent("Player", "asking for tracks", {
       partId, audio, subtitle,
       from: variantRef.current?.variantKey ?? "none",

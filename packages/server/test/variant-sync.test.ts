@@ -389,6 +389,37 @@ console.log("\n— a restart does not move the room —");
   [host, a].forEach((c) => c.close());
 }
 
+console.log("\n— stepping out of the player keeps your stream —");
+{
+  const [host, a] = await room("inst-12", ["host", "a"]);
+  await startPlayback(host);
+  a.send({ type: "watching", value: true });
+  a.send({ type: "set-tracks", audioStreamId: 4, subtitleStreamId: 0 });
+  await sleep(60);
+  const aSid = uuid();
+  a.send({ type: "variant-session", hlsSessionId: aSid, sessionOffset: 100 });
+  await sleep(60);
+  check("a is driving its own stream", a.stream()?.session, aSid);
+
+  // Back out of the player, still in the room.
+  a.send({ type: "watching", value: false });
+  await sleep(80);
+  check("the stream is held for the walk back",
+    sessionHasOtherWatchers(aSid, "nobody"), true);
+
+  // Straight back in — same session, no new transcode.
+  a.clear();
+  a.send({ type: "watching", value: true });
+  await sleep(60);
+  check("and is still theirs on return", sessionHasOtherWatchers(aSid, "nobody"), true);
+
+  // Leaving the room for real does release it.
+  a.close();
+  await sleep(120);
+  check("leaving the room releases it", sessionHasOtherWatchers(aSid, "nobody"), false);
+  host.close();
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 closeWebSocketServer();
 server.close();

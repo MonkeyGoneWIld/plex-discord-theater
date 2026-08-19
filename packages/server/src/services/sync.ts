@@ -108,6 +108,11 @@ interface Variant {
    * else — it grants no control over the room.
    */
   ownerUserId: string | null;
+  /**
+   * When everyone watching this stream stepped out of the player, or null while
+   * somebody still has it open. See IDLE_STREAM_GRACE_MS.
+   */
+  idleSince: number | null;
 }
 
 /** Tracks identify a stream, so they are its key. */
@@ -533,6 +538,7 @@ function assignVariant(
       // starts where playback is, not where the stream it forked from began.
       sessionOffset: room.state.position,
       ownerUserId: client.userId,
+      idleSince: null,
     };
     room.state.variants.set(key, v);
   }
@@ -589,6 +595,21 @@ const MAX_EXTRAPOLATION_S = 30;
  * where a viewer would rather the film waited for them.
  */
 const CLOCK_FOLLOW_BEHIND_S = 20;
+
+/**
+ * How long a stream is held for someone who has stepped out of the player.
+ *
+ * Leaving the player is not leaving the room: people come out to browse the
+ * queue or check what else is on, and going back in used to cost a whole fresh
+ * transcode — ten to fifteen seconds of loading for something that had been
+ * running seconds earlier. The stream is kept so the walk back is instant.
+ *
+ * Bounded, because "kept" would otherwise mean "forever": somebody who wanders
+ * off leaves a transcode running on the server for the rest of the evening. Long
+ * enough to cover any real detour, short enough that a forgotten tab costs a few
+ * minutes of CPU rather than a night of it.
+ */
+const IDLE_STREAM_GRACE_MS = 5 * 60 * 1000;
 
 /**
  * A playback position from a client message, or the fallback if it is unusable.
@@ -967,6 +988,12 @@ export function attachWebSocketServer(server: Server): void {
       // be a lot of traffic for something nobody sees.
       if (type === "watching") {
         client.isWatching = msg.value !== false;
+        // Back in the player: whatever countdown was running on their stream
+        // stops. See IDLE_STREAM_GRACE_MS.
+        if (client.isWatching && client.variantKey) {
+          const v = room.state.variants.get(client.variantKey);
+          if (v) v.idleSince = null;
+        }
         return;
       }
 
@@ -1207,6 +1234,7 @@ export function attachWebSocketServer(server: Server): void {
               hlsSessionId: null,
               sessionOffset: room.state.sessionOffset,
               ownerUserId: client.userId,
+              idleSince: null,
             };
             room.state.variants.set(hostKey, hostVariant);
           }
@@ -1663,6 +1691,32 @@ export function attachWebSocketServer(server: Server): void {
 
   // Cleanup rooms whose instance has expired every 5 minutes
   cleanupInterval = setInterval(() => {
+    // Streams nobody has had open for a while. A variant survives its watchers
+    // stepping out of the player on purpose — see IDLE_STREAM_GRACE_MS — but not
+    // indefinitely.
+    const now = Date.now();
+    for (const [instanceId, room] of rooms) {
+      for (const [key, variant] of [...room.state.variants]) {
+        const members = membersOf(room, key);
+        const watching = members.some((c) => c.isWatching);
+        if (members.length === 0 || watching) {
+          variant.idleSince = null;
+          continue;
+        }
+        if (variant.idleSince === null) {
+          variant.idleSince = now;
+          continue;
+        }
+        if (now - variant.idleSince < IDLE_STREAM_GRACE_MS) continue;
+        logEvent("Sync", "dropping a stream nobody came back to", {
+          room: instanceId.substring(0, 8),
+          variant: key,
+          idleMinutes: Math.round((now - variant.idleSince) / 60000),
+        });
+        for (const c of members) c.variantKey = null;
+        destroyVariant(room, key);
+      }
+    }
     for (const [instanceId, room] of rooms) {
       if (!instanceHosts.has(instanceId) && room.clients.size === 0) {
         // Same reasoning as the close handler: the intervals outlive the room

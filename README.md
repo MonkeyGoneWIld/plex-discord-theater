@@ -21,16 +21,31 @@ sees the same thing at the same time — one person drives, everyone else follow
 
 ## What it looks like
 
-It runs inside Discord, in the voice channel. This is the Home tab, showing the
-same hub rows your Plex server does.
+The whole thing runs inside Discord, in the voice channel. Here it is playing
+something — everyone in the room is at this frame, and the scrub bar shows the
+frame you'd land on before you let go.
+
+![The player, with the control bar and a hover preview of the frame at the cursor](docs/screenshots/player.jpg)
+
+Out of the player, it opens on the same hub rows your Plex server arranges.
 
 ![The Home tab, with Trending, Popular and Top Rated poster rows](docs/screenshots/home.jpg)
 
-| ![Search results, split into titles in the library and titles that are not](docs/screenshots/search.jpg) | ![The Movies tab sorted by rating, with 4K and edition badges on the cards](docs/screenshots/library.jpg) |
+| ![Search results, split into titles in the library and titles that are not](docs/screenshots/search.jpg) | ![A film's detail page, with ratings, synopsis, cast, and audio and subtitle pickers](docs/screenshots/title.jpg) |
 | :-- | :-- |
-| Search reaches past your own library, so something nobody has is still findable — and requestable, if you run Seerr. | A library you can filter and sort, with resolution and edition marked on the card. |
-| ![A film's detail page, with ratings, synopsis, cast, and audio and subtitle pickers](docs/screenshots/movie.jpg) | ![A show's page, listing its seasons](docs/screenshots/show.jpg) |
-| Ratings, cast and the track pickers, all before anyone presses Play. | Seasons, including the ones you don't have yet. |
+| Search reaches past your own library, so something nobody has is still findable — and marked clearly as something you don't own. | Ratings, cast and the track pickers, all settled before anyone presses Play. |
+
+With Overseerr or Jellyseerr connected, the seasons you're missing are selectable
+right on the show's page, and only the ones a request would actually fill.
+
+![A show's page with its missing seasons selectable for request](docs/screenshots/requests.jpg)
+
+On a phone it's a different layout rather than a squeezed version of this one —
+three posters to a row, and detail pages that stack instead of sitting side by side.
+
+| ![The TV Shows tab on a phone, three posters across](docs/screenshots/phone-browse.jpg) | ![A film's detail page on a phone, poster centred above the text](docs/screenshots/phone-title.jpg) |
+| :-- | :-- |
+| Browsing, three across. | A title, stacked. |
 
 ---
 

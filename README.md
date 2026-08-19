@@ -50,7 +50,7 @@ three posters to a row, and detail pages that stack instead of sitting side by s
 
 | ![The TV Shows tab on a phone, three posters across](docs/screenshots/phone-browse.jpg) | ![A film's detail page on a phone, poster centred above the text](docs/screenshots/phone-title.jpg) |
 | :-- | :-- |
-| Browsing, three across. | A title, stacked. |
+| **On mobile** — browsing, three posters across. | **On mobile** — a title, poster centred with everything stacked under it. |
 
 ---
 

@@ -168,10 +168,7 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
         }}>
           <section style={styles.modal} role="dialog" aria-modal="true" aria-labelledby="plex-account-title">
             <div style={styles.headingRow}>
-              <div>
-                <div style={styles.eyebrow}>OPTIONAL ACCOUNT SYNC</div>
-                <h2 id="plex-account-title" style={styles.title}>Plex watch history</h2>
-              </div>
+              <h2 id="plex-account-title" style={styles.title}>Account sync</h2>
               <button type="button" onClick={closeModal} style={styles.close} aria-label="Close">&times;</button>
             </div>
 
@@ -274,23 +271,26 @@ const styles: Record<string, React.CSSProperties> = {
   plexMarkImage: { display: "block", width: "78%", height: "78%" },
   overlay: {
     position: "fixed", inset: 0, zIndex: 10000, display: "flex", alignItems: "center",
-    justifyContent: "center", padding: "20px", background: "rgba(0,0,0,0.72)",
-    backdropFilter: "blur(8px)",
+    justifyContent: "center", padding: "20px", background: "rgba(0,0,0,0.6)",
   },
   modal: {
     width: "min(480px, 100%)", maxHeight: "calc(100vh - 32px)", overflowY: "auto",
-    padding: "24px", borderRadius: "16px", border: "1px solid rgba(255,255,255,0.12)",
-    background: "#171717", boxShadow: "0 24px 80px rgba(0,0,0,0.55)", color: "#f2f2f2",
+    padding: "20px", borderRadius: "12px", border: "1px solid rgba(255,255,255,0.1)",
+    background: "rgba(13,13,13,0.95)", backdropFilter: "blur(20px)",
+    boxShadow: "0 20px 64px rgba(0,0,0,0.5)", color: "#f0f0f0",
   },
-  headingRow: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: "16px" },
-  eyebrow: { color: "#e5a00d", fontSize: "10px", fontWeight: 800, letterSpacing: "1.2px" },
-  title: { margin: "5px 0 0", fontSize: "22px", lineHeight: 1.2 },
-  close: { border: 0, background: "none", color: "#888", fontSize: "28px", lineHeight: 1, cursor: "pointer" },
-  copy: { color: "#c4c4c4", fontSize: "14px", lineHeight: 1.55, margin: "20px 0 14px" },
+  headingRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px" },
+  title: { margin: 0, color: "#f0f0f0", fontSize: "15px", fontWeight: 600, lineHeight: 1.2 },
+  close: {
+    width: "28px", height: "28px", borderRadius: "50%", border: 0,
+    background: "rgba(255,255,255,0.08)", color: "#aaa", fontSize: "18px", lineHeight: 1,
+    cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "inherit",
+  },
+  copy: { color: "#c4c4c4", fontSize: "14px", lineHeight: 1.55, margin: "18px 0 14px" },
   privacy: { color: "#888", fontSize: "12px", lineHeight: 1.5, margin: "0 0 20px" },
   accountCard: {
     display: "flex", alignItems: "center", gap: "12px", marginTop: "20px", padding: "14px",
-    borderRadius: "12px", background: "rgba(229,160,13,0.08)", border: "1px solid rgba(229,160,13,0.2)",
+    borderRadius: "8px", background: "rgba(229,160,13,0.08)", border: "1px solid rgba(229,160,13,0.2)",
   },
   largeMark: { width: "34px", height: "34px", borderRadius: "8px", fontSize: "19px" },
   accountName: { fontSize: "15px", fontWeight: 700 },
@@ -299,12 +299,12 @@ const styles: Record<string, React.CSSProperties> = {
   error: { color: "#ef9a9a" },
   actions: { display: "flex", gap: "10px", flexWrap: "wrap" },
   primary: {
-    padding: "10px 16px", borderRadius: "9px", border: 0, background: "#e5a00d",
-    color: "#171717", fontFamily: "inherit", fontSize: "13px", fontWeight: 800, cursor: "pointer",
+    padding: "9px 14px", borderRadius: "8px", border: 0, background: "#e5a00d",
+    color: "#171717", fontFamily: "inherit", fontSize: "12px", fontWeight: 700, cursor: "pointer",
   },
   danger: {
-    padding: "10px 16px", borderRadius: "9px", border: "1px solid rgba(255,110,110,0.35)",
-    background: "transparent", color: "#ef9a9a", fontFamily: "inherit", fontSize: "13px", fontWeight: 700, cursor: "pointer",
+    padding: "9px 14px", borderRadius: "8px", border: "1px solid rgba(255,110,110,0.35)",
+    background: "transparent", color: "#ef9a9a", fontFamily: "inherit", fontSize: "12px", fontWeight: 600, cursor: "pointer",
   },
   disconnectConfirm: {
     marginTop: "14px", padding: "14px", borderRadius: "10px",

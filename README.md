@@ -10,8 +10,10 @@ sees the same thing at the same time — one person drives, everyone else follow
 > than typed out and reviewed line by line by a person. It does run real watch
 > parties, and the awkward parts — playback sync, transcode teardown, host
 > handover — have been debugged against production logs rather than guessed at.
-> There is no test suite in CI, no external security review, and no human has
-> read every line.
+> The sync protocol and the person page have harnesses that run against a real
+> WebSocket server and a stubbed Plex (`npm test`, 116 checks), but nothing runs
+> them automatically, there is no external security review, and no human has read
+> every line.
 >
 > Treat it accordingly: great for watching films with friends on a server you
 > control, not something to put in front of the open internet or trust with
@@ -41,8 +43,10 @@ subtitle tracks to pick before you hit Play.
 
 ![A film's detail page, with ratings, synopsis, cast, and audio and subtitle pickers](docs/screenshots/title.jpg)
 
-Click anyone in **Cast & Crew** for their filmography — everything of theirs in
-your library, matched on Plex's own tags.
+Click anyone in **Cast & Crew** for their filmography. What you have comes
+first, straight out of Plex's own cast index; the rest of their career follows
+behind it, requestable like anything else. Newest first in both halves, and
+appearances as themselves — chat shows, talking-head documentaries — left out.
 
 ![Hugh Jackman's page: biography and dates, then his films and shows from the library](docs/screenshots/person.jpg)
 
@@ -67,12 +71,15 @@ Mobile gets its own layout rather than a shrunk-down desktop one.
 ## What you get
 
 Everyone in the voice channel opens the Activity and lands in the same room.
-The host picks something; it starts for everybody at once. Pause, seek, change
-the subtitles — the room follows.
+The host picks something; it starts for everybody at once. Pause and seek carry
+to everyone; audio and subtitles are each person's own.
 
-- **Synchronised playback.** Small drifts are pulled back by nudging playback
-  speed a fraction instead of seeking, so keeping the room together doesn't cost
-  everyone a buffer every few minutes.
+- **Synchronised playback.** The room's position is the host's playhead, so a
+  host who stalls is waited for rather than left behind. Small drifts are pulled
+  back by nudging playback speed a fraction instead of seeking, so keeping the
+  room together doesn't cost everyone a buffer every few minutes. Anything that
+  has to rebuild its stream — a track change, a seek, walking back into the
+  player — rejoins at where the room has got to, not where it left.
 - **Co-hosts and host handover.** Hand out playback control, or the host role
   itself, from the people panel. Roles belong to the person, not the connection,
   so a dropped WiFi signal doesn't silently demote anyone. If the host leaves, a
@@ -84,8 +91,13 @@ the subtitles — the room follows.
 - **See what's missing from a season.** A toggle on the season page reveals the
   episodes you don't have, keeping *missing* (aired, never downloaded) apart from
   *unaired*, with air dates.
-- **Audio and subtitle tracks**, switchable mid-episode. Your subtitle choice
-  carries to the next episode, matched by language rather than track number.
+- **Your own audio and subtitles.** Everyone starts on the host's, and anyone
+  can change theirs without changing anybody else's. The room stays one
+  timeline: pause, seek and skip still land on the same frame for everybody,
+  whatever they are listening to. Two people who pick the same thing share one
+  transcode rather than starting two, and the host's own choice still carries
+  the room's default with it. Your subtitle choice follows you into the next
+  episode, matched by language rather than track number.
 - **Play Version.** When a title has more than one version in Plex, pick which
   one plays. The 4K version is hidden whenever there's a 1080p or lower one
   alongside it — everything is transcoded to 1080p anyway, so streaming the 4K
@@ -273,7 +285,8 @@ and artwork live in SQLite and survive restarts.
 
 ### Getting video to everyone
 
-This is all about one problem: your home upload. Plex transcodes once, but by
+This is all about one problem: your home upload. Plex transcodes once per set
+of tracks — everyone listening to the same thing shares a stream — but by
 default every viewer pulls that stream from your connection.
 
 **A VPS relay is the answer beyond a few viewers.** With `VPS_RELAY_URL` set,
@@ -305,7 +318,7 @@ supply one in time.
 | Setting | Value | Why |
 |---|---|---|
 | Video codec | H.264 | Plays everywhere |
-| Audio | AAC preferred, MP3 fallback | Compatible audio passes through; TrueHD and similar are re-encoded |
+| Audio | MP3, 2 channels | AAC is what the client profile asks for, and Plex has not honoured it on the servers this has been run against — worth checking your own decision log before assuming otherwise. Audio the browser can already play is passed through untouched |
 | Max resolution | 1920×1080 | Good quality without silly bandwidth |
 | Target bitrate | 12 Mbps (peak 20) | Tune with `VIDEO_BITRATE_KBPS` / `VIDEO_PEAK_BITRATE_KBPS` |
 | Segment length | 3 seconds | Faster cold start — Plex only transcodes 3s before the first segment is ready |
@@ -358,7 +371,7 @@ itself off. Remove either variable and everything reverts.
 | "Reconnecting…" | The sync socket dropped and is retrying. Your own playback keeps going; the room just can't see you until it's back. Clears itself, or offers a Reconnect button once the automatic attempts run out |
 | "Unknown instance" on join | The activity registration expired after 24h idle. Close and reopen the Activity |
 | Tunnel URL changed | Update the URL mapping in the Discord Developer Portal |
-| Audio is MP3, not AAC | Expected for TrueHD/DTS sources. MP3 plays fine everywhere |
+| Audio is MP3, not AAC | Expected. The client profile asks for AAC and Plex has ignored it on every server this has been run against. MP3 plays fine everywhere; it is the bitrate, not the compatibility, that suffers |
 | No skip intro / previews | Plex hasn't generated them — see the note under [What you get](#what-you-get) |
 | No ratings | `MDBLIST_API_KEY` isn't set |
 | No collections or "More Like This" | `TMDB_API_KEY` isn't set. A collection row showing only titles you own means the same thing |

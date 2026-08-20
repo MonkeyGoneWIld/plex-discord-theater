@@ -50,6 +50,7 @@ router.get("/link", async (req, res) => {
     const status = await pollPlexAccountLink(userId);
     res.json(status);
   } catch (err) {
+    console.error("[Plex Account] Link poll failed for", userId.substring(0, 8), err);
     res.status(502).json({ error: err instanceof Error ? err.message : "Could not finish Plex sign-in" });
   }
 });

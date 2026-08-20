@@ -40,6 +40,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS plex_accounts (
     user_id TEXT PRIMARY KEY,
     token_encrypted TEXT NOT NULL,
+    server_token_encrypted TEXT,
     plex_user_id TEXT NOT NULL,
     username TEXT NOT NULL,
     email TEXT,
@@ -56,10 +57,19 @@ db.exec(`
     expires_at INTEGER NOT NULL
   );
 `);
+// Accounts created by the first implementation stored only the plex.tv token.
+// Legacy Plex auth requires a second, server-specific token from /resources.
+try {
+  db.exec("ALTER TABLE plex_accounts ADD COLUMN server_token_encrypted TEXT");
+} catch (err) {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!message.includes("duplicate column")) throw err;
+}
 
 interface AccountRow {
   user_id: string;
   token_encrypted: string;
+  server_token_encrypted: string | null;
   plex_user_id: string;
   username: string;
   email: string | null;
@@ -138,6 +148,12 @@ function plexTvHeaders(): Record<string, string> {
   };
 }
 
+const PLEX_CLOUD_TIMEOUT_MS = 15_000;
+
+function plexCloudFetch(url: string | URL, init: RequestInit = {}): Promise<Response> {
+  return fetch(url, { ...init, signal: AbortSignal.timeout(PLEX_CLOUD_TIMEOUT_MS) });
+}
+
 export interface PlexAccountStatus {
   linked: boolean;
   account?: {
@@ -153,9 +169,10 @@ export interface PlexAccountStatus {
 }
 
 function accountStatus(row: AccountRow | undefined, pin?: PinRow): PlexAccountStatus {
+  const linked = !!row?.server_token_encrypted;
   return {
-    linked: !!row,
-    ...(row && {
+    linked,
+    ...(row && linked && {
       account: {
         id: row.plex_user_id,
         username: row.username,
@@ -180,14 +197,11 @@ export function getPlexAccountStatus(userId: string): PlexAccountStatus {
 }
 
 export async function startPlexAccountLink(userId: string): Promise<PlexAccountStatus> {
-  const body = new URLSearchParams({ strong: "true" });
-  const response = await fetch("https://clients.plex.tv/api/v2/pins", {
+  // This is the traditional token flow. The clients.plex.tv PIN endpoint is
+  // for the newer JWK/JWT exchange and requires a signed deviceJWT when polled.
+  const response = await plexCloudFetch("https://plex.tv/api/v2/pins?strong=true", {
     method: "POST",
-    headers: {
-      ...plexTvHeaders(),
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body,
+    headers: plexTvHeaders(),
   });
   if (!response.ok) throw new Error(`Plex sign-in unavailable (${response.status})`);
   const pin = await response.json() as { id?: number; code?: string; expiresAt?: string };
@@ -217,6 +231,39 @@ interface PlexUser {
   thumb?: string;
 }
 
+interface PlexResource {
+  name?: string;
+  provides?: string;
+  clientIdentifier?: string;
+  accessToken?: string;
+}
+
+async function serverTokenForAccount(accountToken: string): Promise<string> {
+  const identity = await plexJSON<{
+    MediaContainer: { machineIdentifier?: string };
+  }>("/identity");
+  const machineIdentifier = identity.MediaContainer.machineIdentifier;
+  if (!machineIdentifier) throw new Error("The configured Plex server did not report its identity");
+
+  const resourcesUrl = new URL("https://clients.plex.tv/api/v2/resources");
+  resourcesUrl.searchParams.set("includeHttps", "1");
+  resourcesUrl.searchParams.set("includeRelay", "1");
+  resourcesUrl.searchParams.set("includeIPv6", "1");
+  const response = await plexCloudFetch(resourcesUrl, {
+    headers: { ...plexTvHeaders(), "X-Plex-Token": accountToken },
+  });
+  if (!response.ok) throw new Error(`Could not read this account's Plex servers (${response.status})`);
+  const resources = await response.json() as PlexResource[];
+  const server = resources.find((resource) =>
+    resource.clientIdentifier === machineIdentifier
+    && resource.provides?.split(",").includes("server"),
+  );
+  if (!server?.accessToken) {
+    throw new Error("This Plex account does not have access to the configured server");
+  }
+  return server.accessToken;
+}
+
 export async function pollPlexAccountLink(userId: string): Promise<PlexAccountStatus> {
   const pin = selectPin.get(userId) as PinRow | undefined;
   if (!pin) return getPlexAccountStatus(userId);
@@ -225,35 +272,40 @@ export async function pollPlexAccountLink(userId: string): Promise<PlexAccountSt
     throw new Error("Plex sign-in expired. Start again.");
   }
 
-  const url = new URL(`https://clients.plex.tv/api/v2/pins/${pin.pin_id}`);
-  url.searchParams.set("code", pin.code);
-  const response = await fetch(url, { headers: plexTvHeaders() });
+  const url = new URL(`https://plex.tv/api/v2/pins/${pin.pin_id}`);
+  const response = await plexCloudFetch(url, { headers: plexTvHeaders() });
   if (!response.ok) throw new Error(`Could not check Plex sign-in (${response.status})`);
   const result = await response.json() as { authToken?: string | null };
   if (!result.authToken) return getPlexAccountStatus(userId);
 
-  const userResponse = await fetch("https://plex.tv/api/v2/user", {
+  const userResponse = await plexCloudFetch("https://plex.tv/api/v2/user", {
     headers: { ...plexTvHeaders(), "X-Plex-Token": result.authToken },
   });
   if (!userResponse.ok) throw new Error("Plex did not accept the linked account");
   const plexUser = await userResponse.json() as PlexUser;
   if (plexUser.id == null) throw new Error("Plex account identity is missing");
 
+  let serverToken: string;
   try {
-    await plexJSON("/library/sections", undefined, result.authToken);
-  } catch {
-    throw new Error("This Plex account does not have access to the configured server");
+    serverToken = await serverTokenForAccount(result.authToken);
+    await plexJSON("/library/sections", undefined, serverToken);
+  } catch (err) {
+    // The PIN has already been claimed and cannot be usefully polled again.
+    // Remove it so the UI stops looping on the same permanent failure.
+    deletePin.run(userId);
+    throw err;
   }
 
   const username = plexUser.username || plexUser.title || plexUser.email || "Plex user";
   db.prepare(`
     INSERT OR REPLACE INTO plex_accounts (
-      user_id, token_encrypted, plex_user_id, username, email, thumb,
+      user_id, token_encrypted, server_token_encrypted, plex_user_id, username, email, thumb,
       linked_at, last_sync_at, last_sync_error
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
   `).run(
     userId,
     encryptToken(result.authToken),
+    encryptToken(serverToken),
     String(plexUser.id),
     username,
     plexUser.email ?? null,
@@ -272,11 +324,23 @@ export function unlinkPlexAccount(userId: string): void {
   }
 }
 
-function accessToken(userId: string): { token: string; row: AccountRow } | null {
+function accessToken(userId: string): {
+  accountToken: string;
+  serverToken: string;
+  row: AccountRow;
+} | null {
   const row = selectAccount.get(userId) as AccountRow | undefined;
   if (!row) return null;
   try {
-    return { token: decryptToken(row.token_encrypted), row };
+    if (!row.server_token_encrypted) {
+      updateSync.run(row.last_sync_at, "Plex authentication changed; relink this account", userId);
+      return null;
+    }
+    return {
+      accountToken: decryptToken(row.token_encrypted),
+      serverToken: decryptToken(row.server_token_encrypted),
+      row,
+    };
   } catch {
     updateSync.run(row.last_sync_at, "Stored Plex credentials can no longer be decrypted; relink the account", userId);
     return null;
@@ -393,7 +457,7 @@ export async function pushProgressToPlex(
         "X-Plex-Session-Identifier": sessionIdentifier(userId),
       },
       "POST",
-      linked.token,
+      linked.serverToken,
     );
     if (!timeline.ok) throw new Error(`Plex timeline update failed (${timeline.status})`);
   }
@@ -404,7 +468,7 @@ export async function pushProgressToPlex(
       { key: entry.ratingKey, identifier: "com.plexapp.plugins.library" },
       { "X-Plex-Client-Identifier": CLIENT_ID },
       "PUT",
-      linked.token,
+      linked.serverToken,
     );
     if (!response.ok) throw new Error(`Plex watched-state update failed (${response.status})`);
     return true;
@@ -425,7 +489,7 @@ export async function pushProgressToPlex(
       "X-Plex-Session-Identifier": sessionIdentifier(userId),
     },
     "POST",
-    linked.token,
+    linked.serverToken,
   );
   if (!response.ok) throw new Error(`Plex progress update failed (${response.status})`);
   return true;
@@ -452,7 +516,7 @@ export function syncPlexAccount(userId: string): Promise<{ imported: number; exp
     const linked = accessToken(userId);
     if (!linked) throw new Error("No Plex account is linked");
     try {
-      const remote = await readRemoteState(linked.token, linked.row.plex_user_id);
+      const remote = await readRemoteState(linked.serverToken, linked.row.plex_user_id);
       let imported = 0;
       for (const [ratingKey, state] of remote) {
         const merged = await mergeExternalProgress(userId, ratingKey, state);

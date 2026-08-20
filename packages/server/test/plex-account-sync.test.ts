@@ -27,12 +27,12 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
   const method = (init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
   const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
 
-  if (url.hostname === "clients.plex.tv" && url.pathname === "/api/v2/pins" && method === "POST") {
+  if (url.hostname === "plex.tv" && url.pathname === "/api/v2/pins" && method === "POST") {
     const id = nextPin++;
     pinTokens.set(id, `personal-token-${id}`);
     return Response.json({ id, code: `code-${id}`, expiresAt: new Date(Date.now() + 600_000).toISOString() });
   }
-  if (url.hostname === "clients.plex.tv" && url.pathname.startsWith("/api/v2/pins/")) {
+  if (url.hostname === "plex.tv" && url.pathname.startsWith("/api/v2/pins/")) {
     const id = Number(url.pathname.split("/").pop());
     return Response.json({ authToken: pinTokens.get(id) ?? null });
   }
@@ -41,9 +41,22 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
     const suffix = token.split("-").pop();
     return Response.json({ id: suffix, username: `plex-user-${suffix}`, email: `user-${suffix}@example.test` });
   }
+  if (url.hostname === "clients.plex.tv" && url.pathname === "/api/v2/resources") {
+    const accountToken = headers.get("X-Plex-Token") || "";
+    const suffix = accountToken.split("-").pop();
+    return Response.json([{
+      name: "Test server",
+      provides: "server",
+      clientIdentifier: "test-machine",
+      accessToken: `server-token-${suffix}`,
+    }]);
+  }
 
   if (url.hostname === "plex.test") {
     plexCalls.push({ method, url, token: url.searchParams.get("X-Plex-Token") });
+    if (url.pathname === "/identity") {
+      return Response.json({ MediaContainer: { machineIdentifier: "test-machine" } });
+    }
     if (url.pathname === "/library/sections") {
       return Response.json({ MediaContainer: { Directory: [{ key: "1", title: "Movies", type: "movie" }] } });
     }
@@ -107,6 +120,7 @@ const dbBytes = fs.readdirSync(dataDir)
   .map((name) => fs.readFileSync(path.join(dataDir, name)))
   .reduce((all, part) => Buffer.concat([all, part]), Buffer.alloc(0));
 check("personal tokens are not stored as plaintext", dbBytes.includes(Buffer.from("personal-token-10")), false);
+check("server tokens are not stored as plaintext", dbBytes.includes(Buffer.from("server-token-10")), false);
 
 console.log("\n— history moves in both directions —");
 const imported = await accounts.syncPlexAccount("discord-a");
@@ -119,8 +133,8 @@ await history.recordProgress("discord-b", "303", 70, { force: true });
 const exported = await accounts.syncPlexAccount("discord-b");
 check("new local progress is exported", exported.exported, 1);
 check(
-  "the export uses b's personal token",
-  plexCalls.some((call) => call.url.pathname === "/:/timeline" && call.token === "personal-token-11"),
+  "the export uses b's server-specific token",
+  plexCalls.some((call) => call.url.pathname === "/:/timeline" && call.token === "server-token-11"),
   true,
 );
 

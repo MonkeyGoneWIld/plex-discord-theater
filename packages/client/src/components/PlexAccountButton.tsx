@@ -68,7 +68,10 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
   useEffect(() => {
     if (!status?.pending || status.linked) return;
     let cancelled = false;
+    let checking = false;
     const check = async () => {
+      if (checking) return;
+      checking = true;
       try {
         const next = await pollPlexAccountLink();
         if (cancelled) return;
@@ -78,7 +81,18 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
           await runSync();
         }
       } catch (err) {
-        if (!cancelled) setMessage(err instanceof Error ? err.message : "Could not finish Plex sign-in");
+        if (!cancelled) {
+          setMessage(err instanceof Error ? err.message : "Could not finish Plex sign-in");
+          // The server may have completed the link before a proxy/network error
+          // reached this poll, or removed a consumed PIN after a permanent
+          // validation failure. Re-read authoritative state so the modal never
+          // leaves the user guessing whether the account linked.
+          fetchPlexAccountStatus().then((next) => {
+            if (!cancelled) setStatus(next);
+          }).catch(() => {});
+        }
+      } finally {
+        checking = false;
       }
     };
     const timer = window.setInterval(() => void check(), 2000);

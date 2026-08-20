@@ -11,6 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { plexFetch, plexJSON } from "./plex.js";
 import {
+  clearHistory,
   getHistory,
   mergeExternalProgress,
   type HistoryEntry,
@@ -77,6 +78,13 @@ try {
   if (!message.includes("duplicate column")) throw err;
 }
 db.prepare("DELETE FROM plex_link_pins WHERE flow_version != ?").run(PIN_FLOW_VERSION);
+// Remember the account that owns each Discord user's current Activity history.
+// Existing linked installations are seeded during upgrade; unlinking deliberately
+// leaves this marker behind so a later different account can be detected.
+db.exec(`
+  INSERT OR IGNORE INTO settings (key, value)
+  SELECT 'last_plex_account:' || user_id, plex_user_id FROM plex_accounts
+`);
 
 interface AccountRow {
   user_id: string;
@@ -107,6 +115,15 @@ const deleteAccount = db.prepare("DELETE FROM plex_accounts WHERE user_id = ?");
 const updateSync = db.prepare(
   "UPDATE plex_accounts SET last_sync_at = ?, last_sync_error = ? WHERE user_id = ?",
 );
+const selectSetting = db.prepare("SELECT value FROM settings WHERE key = ?");
+const upsertSetting = db.prepare(`
+  INSERT INTO settings (key, value) VALUES (?, ?)
+  ON CONFLICT(key) DO UPDATE SET value = excluded.value
+`);
+
+function lastAccountKey(userId: string): string {
+  return `last_plex_account:${userId}`;
+}
 
 function instanceClientId(): string {
   const found = db.prepare("SELECT value FROM settings WHERE key = 'client_id'").get() as
@@ -317,6 +334,12 @@ export async function pollPlexAccountLink(userId: string): Promise<PlexAccountSt
   }
 
   const username = plexUser.username || plexUser.title || plexUser.email || "Plex user";
+  const plexUserId = String(plexUser.id);
+  const previous = selectSetting.get(lastAccountKey(userId)) as { value: string } | undefined;
+  // Activity history belongs to the Plex identity that produced it. A different
+  // account starts from a clean slate so old rows cannot be exported into it.
+  // A first-ever link and a re-link of the same account keep their local state.
+  if (previous && previous.value !== plexUserId) clearHistory(userId);
   db.prepare(`
     INSERT OR REPLACE INTO plex_accounts (
       user_id, token_encrypted, server_token_encrypted, plex_user_id, username, email, thumb,
@@ -326,12 +349,13 @@ export async function pollPlexAccountLink(userId: string): Promise<PlexAccountSt
     userId,
     encryptToken(result.authToken),
     encryptToken(serverToken),
-    String(plexUser.id),
+    plexUserId,
     username,
     plexUser.email ?? null,
     plexUser.thumb ?? null,
     Date.now(),
   );
+  upsertSetting.run(lastAccountKey(userId), plexUserId);
   deletePin.run(userId);
   return getPlexAccountStatus(userId);
 }

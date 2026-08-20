@@ -201,7 +201,9 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
                 {confirmDisconnect && (
                   <div style={styles.disconnectConfirm} role="alert">
                     <div style={styles.confirmTitle}>Disconnect this Plex account?</div>
-                    <div style={styles.secondary}>Local Activity history will be kept.</div>
+                    <div style={styles.secondary}>
+                      Local Activity history is kept for this account, but will reset if you link a different Plex account.
+                    </div>
                     <div style={styles.confirmActions}>
                       <button
                         type="button"

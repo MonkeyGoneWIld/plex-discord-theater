@@ -38,6 +38,7 @@ function check(name: string, actual: unknown, expected: unknown) {
 
 let nextPin = 10;
 const pinTokens = new Map<number, string>();
+const pinAccountIds = new Map<number, string>();
 const invalidPinIds = new Set<number>();
 const plexCalls: Array<{ method: string; url: URL; token: string | null }> = [];
 
@@ -59,7 +60,8 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
   if (url.hostname === "plex.tv" && url.pathname === "/api/v2/user") {
     const token = headers.get("X-Plex-Token") || "";
     const suffix = token.split("-").pop();
-    return Response.json({ id: suffix, username: `plex-user-${suffix}`, email: `user-${suffix}@example.test` });
+    const accountId = pinAccountIds.get(Number(suffix)) ?? suffix;
+    return Response.json({ id: accountId, username: `plex-user-${accountId}`, email: `user-${accountId}@example.test` });
   }
   if (url.hostname === "clients.plex.tv" && url.pathname === "/api/v2/resources") {
     const accountToken = headers.get("X-Plex-Token") || "";
@@ -172,6 +174,35 @@ check(
   plexCalls.some((call) => call.url.pathname === "/:/timeline" && call.token === "server-token-11"),
   true,
 );
+
+console.log("\n— changing Plex accounts starts with clean history —");
+await history.recordProgress("discord-a", "303", 70, { force: true });
+accounts.unlinkPlexAccount("discord-a");
+await accounts.startPlexAccountLink("discord-a");
+const replacementPin = nextPin - 1;
+pinAccountIds.set(replacementPin, "99");
+const replacement = await accounts.pollPlexAccountLink("discord-a");
+check("the different Plex identity is linked", replacement.account?.username, "plex-user-99");
+check("old Activity history is cleared before syncing", history.getHistory("discord-a").total, 0);
+const callsBeforeReplacementSync = plexCalls.length;
+await accounts.syncPlexAccount("discord-a");
+check("new account history becomes the new local history", history.getHistory("discord-a").total, 2);
+check(
+  "old local history is never exported to the replacement account",
+  plexCalls.slice(callsBeforeReplacementSync).some((call) =>
+    call.token === `server-token-${replacementPin}`
+    && call.url.searchParams.get("ratingKey") === "303"
+  ),
+  false,
+);
+
+await history.recordProgress("discord-a", "404", 70, { force: true });
+accounts.unlinkPlexAccount("discord-a");
+await accounts.startPlexAccountLink("discord-a");
+const sameAccountPin = nextPin - 1;
+pinAccountIds.set(sameAccountPin, "99");
+await accounts.pollPlexAccountLink("discord-a");
+check("re-linking the same account preserves local history", !!history.getProgress("discord-a", "404"), true);
 
 accounts.unlinkPlexAccount("discord-a");
 check("disconnect removes only a", accounts.getPlexAccountStatus("discord-a").linked, false);

@@ -259,7 +259,7 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
 const styles: Record<string, React.CSSProperties> = {
   trigger: {
     display: "inline-flex", alignItems: "center", gap: "6px", padding: "5px 9px",
-    borderRadius: "8px", border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: "999px", border: "1px solid rgba(255,255,255,0.12)",
     background: "rgba(255,255,255,0.05)", color: "#b6b6b6", cursor: "pointer",
     fontFamily: "inherit", fontSize: "12px", fontWeight: 600, whiteSpace: "nowrap",
   },

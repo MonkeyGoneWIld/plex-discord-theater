@@ -882,6 +882,7 @@ export async function pushProgressToPlex(
   userId: string,
   entry: HistoryEntry,
   force = false,
+  clearWatchedState = entry.becameUnwatched === true,
 ): Promise<boolean> {
   const linked = accessToken(userId);
   if (!linked) return false;
@@ -901,6 +902,20 @@ export async function pushProgressToPlex(
     );
     if (!response.ok) throw new Error(`Plex watched-state update failed (${response.status})`);
     return true;
+  }
+
+  // Plex stores the played flag independently of the resume position. When a
+  // completed title is replayed from the middle, clear that flag before sending
+  // the new partial position so Plex also changes it back to unwatched.
+  if (clearWatchedState) {
+    const unscrobble = await plexFetch(
+      "/:/unscrobble",
+      { key: entry.ratingKey, identifier: "com.plexapp.plugins.library" },
+      undefined,
+      "GET",
+      linked.serverToken,
+    );
+    if (!unscrobble.ok) throw new Error(`Plex watched-state update failed (${unscrobble.status})`);
   }
 
   // /:/timeline represents an active Plex player. Sending it with a linked
@@ -968,7 +983,9 @@ export function syncPlexAccount(userId: string): Promise<{ imported: number; exp
       });
       let exported = 0;
       await runWithConcurrency(toExport, 4, async (entry) => {
-        if (await pushProgressToPlex(userId, entry, true)) exported++;
+        const there = remote.get(entry.ratingKey);
+        const clearWatchedState = !entry.watched && there?.watched === true;
+        if (await pushProgressToPlex(userId, entry, true, clearWatchedState)) exported++;
       });
       markSyncSuccess.run(Date.now(), HISTORY_SYNC_VERSION, userId);
       return { imported, exported };

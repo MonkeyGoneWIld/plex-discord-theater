@@ -308,6 +308,23 @@ check("History removal clears linked Plex resume position", plexCalls.some((call
   && call.token === "server-token-11"
 ), true);
 
+console.log("\n— replaying a watched title makes it unwatched —");
+await accounts.setPlexItemWatched("discord-b", "305", true);
+const replayed = await history.recordProgress("discord-b", "305", 50, { force: true });
+check("scrubbing into the middle clears local watched state", replayed?.watched, false);
+await accounts.pushProgressToPlex("discord-b", replayed!, true);
+check("scrubbing into the middle explicitly unscrobbles Plex", plexCalls.some((call) =>
+  call.url.pathname === "/:/unscrobble"
+  && call.url.searchParams.get("key") === "305"
+  && call.token === "server-token-11"
+), true);
+check("the middle position is sent after clearing watched state", plexCalls.some((call) =>
+  call.url.pathname === "/:/progress"
+  && call.url.searchParams.get("key") === "305"
+  && call.url.searchParams.get("time") === "50000"
+  && call.token === "server-token-11"
+), true);
+
 console.log("\n— seasons and shows update every episode —");
 const showUpdate = await accounts.setPlexItemWatched("discord-b", "700", true);
 check("mark show watched reports every affected episode", showUpdate.affected, 2);

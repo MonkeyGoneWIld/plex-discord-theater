@@ -93,7 +93,7 @@ function isFlatView(v: View): boolean {
 }
 
 export function App() {
-  const { isReady, isHost, userId, username, instanceId, error, canInvite, openInvite, setPresence } =
+  const { isReady, isHost, userId, username, instanceId, error, canInvite, openInvite, openExternalLink, setPresence } =
     useDiscord();
   const [viewStack, setViewStack] = useState<View[]>([{ kind: "library" }]);
   const view = viewStack[viewStack.length - 1];
@@ -759,6 +759,7 @@ export function App() {
             <PlexAccountButton
               compact={phone}
               onHistoryChanged={handlePlexHistoryChanged}
+              onOpenExternalLink={openExternalLink}
             />
             {/* Sits with the roster rather than inside it: inviting is about
                 who isn't here yet, which is the same question the people

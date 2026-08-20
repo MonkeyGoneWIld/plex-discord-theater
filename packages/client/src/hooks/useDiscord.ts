@@ -33,6 +33,8 @@ interface DiscordState {
    * feature.
    */
   openInvite: () => Promise<InviteResult>;
+  /** Open a URL outside Discord's embedded Activity webview. */
+  openExternalLink: (url: string) => Promise<boolean>;
   /**
    * Update what Discord shows this user as doing.
    *
@@ -62,7 +64,7 @@ const CLIENT_ID = import.meta.env.VITE_DISCORD_CLIENT_ID as string;
 
 export function useDiscord(): DiscordState {
   const [state, setState] = useState<
-    Omit<DiscordState, "openInvite" | "setPresence" | "canInvite"> & { canInvite: boolean }
+    Omit<DiscordState, "openInvite" | "openExternalLink" | "setPresence" | "canInvite"> & { canInvite: boolean }
   >({
     isReady: false,
     isHost: false,
@@ -137,6 +139,22 @@ export function useDiscord(): DiscordState {
         reason: err instanceof Error ? err.message : String(err),
       });
       return "unavailable";
+    }
+  }, []);
+
+  const openExternalLink = useCallback(async (url: string): Promise<boolean> => {
+    const sdk = sdkRef.current;
+    if (!sdk) return false;
+    try {
+      const result = await sdk.commands.openExternalLink({ url });
+      const opened = result?.opened !== false;
+      logEvent("Discord", "external link requested", { opened, host: new URL(url).host });
+      return opened;
+    } catch (err) {
+      logEvent("Discord", "external link unavailable", {
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      return false;
     }
   }, []);
 
@@ -263,5 +281,5 @@ export function useDiscord(): DiscordState {
     init();
   }, []);
 
-  return { ...state, openInvite, setPresence };
+  return { ...state, openInvite, openExternalLink, setPresence };
 }

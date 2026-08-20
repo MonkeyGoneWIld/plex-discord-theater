@@ -11,6 +11,7 @@ import {
 interface PlexAccountButtonProps {
   compact?: boolean;
   onHistoryChanged?: () => void;
+  onOpenExternalLink: (url: string) => Promise<boolean>;
 }
 
 const AUTO_SYNC_AFTER_MS = 15 * 60 * 1000;
@@ -20,7 +21,7 @@ function when(value: number | null): string {
   return `Last synced ${new Date(value).toLocaleString()}`;
 }
 
-export function PlexAccountButton({ compact = false, onHistoryChanged }: PlexAccountButtonProps) {
+export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExternalLink }: PlexAccountButtonProps) {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<PlexAccountStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -88,23 +89,24 @@ export function PlexAccountButton({ compact = false, onHistoryChanged }: PlexAcc
     };
   }, [status?.pending?.authUrl, status?.linked, runSync]);
 
+  const openPlex = useCallback(async (url: string): Promise<boolean> => {
+    if (await onOpenExternalLink(url)) return true;
+    return window.open(url, "_blank", "noopener,noreferrer") !== null;
+  }, [onOpenExternalLink]);
+
   const beginLink = async () => {
     setBusy(true);
     setMessage(null);
-    // Reserve the window during the click event; opening it after the network
-    // response is commonly blocked as an unsolicited popup.
-    const popup = window.open("about:blank", "plex-account-link");
-    if (popup) popup.opener = null;
     try {
       const next = await startPlexAccountLink();
       setStatus(next);
       if (next.pending?.authUrl) {
-        if (popup) popup.location.href = next.pending.authUrl;
-        else window.open(next.pending.authUrl, "_blank", "noopener,noreferrer");
-        setMessage("Finish signing in on Plex. This window will update automatically.");
+        const opened = await openPlex(next.pending.authUrl);
+        setMessage(opened
+          ? "Finish signing in on Plex. This window will update automatically."
+          : "Discord couldn't open Plex. Use Open Plex sign-in below to try again.");
       }
     } catch (err) {
-      popup?.close();
       setMessage(err instanceof Error ? err.message : "Could not start Plex sign-in");
     } finally {
       setBusy(false);
@@ -188,7 +190,13 @@ export function PlexAccountButton({ compact = false, onHistoryChanged }: PlexAcc
                 {status?.pending ? (
                   <div style={styles.pending}>
                     <div>Waiting for Plex authorization...</div>
-                    <a href={status.pending.authUrl} target="_blank" rel="noreferrer" style={styles.link}>Open Plex sign-in again</a>
+                    <button
+                      type="button"
+                      onClick={() => void openPlex(status.pending!.authUrl)}
+                      style={styles.linkButton}
+                    >
+                      Open Plex sign-in again
+                    </button>
                   </div>
                 ) : (
                   <button type="button" disabled={busy} onClick={() => void beginLink()} style={styles.primary}>
@@ -254,6 +262,10 @@ const styles: Record<string, React.CSSProperties> = {
     background: "transparent", color: "#ef9a9a", fontFamily: "inherit", fontSize: "13px", fontWeight: 700, cursor: "pointer",
   },
   pending: { padding: "14px", borderRadius: "10px", background: "rgba(255,255,255,0.05)", color: "#bbb", fontSize: "13px" },
-  link: { display: "inline-block", marginTop: "8px", color: "#e5a00d", fontWeight: 700 },
+  linkButton: {
+    display: "block", marginTop: "8px", padding: 0, border: 0, background: "none",
+    color: "#e5a00d", fontFamily: "inherit", fontSize: "13px", fontWeight: 700,
+    textDecoration: "underline", cursor: "pointer",
+  },
   message: { marginTop: "16px", color: "#cfcfcf", fontSize: "12px", lineHeight: 1.45 },
 };

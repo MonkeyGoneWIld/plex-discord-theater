@@ -159,7 +159,13 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
         style={{ ...styles.trigger, ...(status?.linked ? styles.triggerLinked : {}) }}
         title={status?.linked ? `Plex linked as ${status.account?.username}` : "Link Plex account"}
       >
-        <span style={styles.plexMark}><img src={plexMark} alt="" style={styles.plexMarkImage} /></span>
+        <span style={{ ...styles.plexMark, ...(!status?.linked ? styles.plexMarkUnlinked : {}) }}>
+          <img
+            src={plexMark}
+            alt=""
+            style={{ ...styles.plexMarkImage, ...(!status?.linked ? styles.plexMarkImageUnlinked : {}) }}
+          />
+        </span>
         {!compact && <span>{status?.linked ? "Plex linked" : "Link Plex"}</span>}
       </button>
 
@@ -259,17 +265,23 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
 const styles: Record<string, React.CSSProperties> = {
   trigger: {
     display: "inline-flex", alignItems: "center", gap: "6px", padding: "5px 9px",
-    borderRadius: "999px", border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(255,255,255,0.05)", color: "#b6b6b6", cursor: "pointer",
+    borderRadius: "999px", border: "1px solid rgba(255,255,255,0.10)",
+    background: "transparent", color: "#9a9a9a", cursor: "pointer",
     fontFamily: "inherit", fontSize: "12px", fontWeight: 600, whiteSpace: "nowrap",
+    transition: "border-color 0.15s ease, color 0.15s ease, background 0.15s ease",
   },
-  triggerLinked: { color: "#e5a00d", border: "1px solid rgba(229,160,13,0.3)" },
+  triggerLinked: {
+    color: "#e5a00d", border: "1px solid rgba(229,160,13,0.3)",
+    background: "rgba(255,255,255,0.05)",
+  },
   plexMark: {
     display: "inline-flex", alignItems: "center", justifyContent: "center",
     width: "17px", height: "17px", borderRadius: "4px", background: "#111",
     border: "1px solid rgba(229,160,13,0.38)", boxSizing: "border-box", overflow: "hidden",
   },
+  plexMarkUnlinked: { borderColor: "rgba(255,255,255,0.16)" },
   plexMarkImage: { display: "block", width: "100%", height: "100%" },
+  plexMarkImageUnlinked: { filter: "grayscale(1)", opacity: 0.72 },
   overlay: {
     position: "fixed", inset: 0, zIndex: 10000, display: "flex", alignItems: "center",
     justifyContent: "center", padding: "20px", background: "rgba(0,0,0,0.6)",

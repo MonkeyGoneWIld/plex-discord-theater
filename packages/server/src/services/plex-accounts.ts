@@ -707,12 +707,97 @@ export async function setPlexItemWatched(
 
 interface RemoteMetadata {
   ratingKey?: string;
+  historyKey?: string;
   viewOffset?: number;
   duration?: number;
   viewCount?: number;
   viewedAt?: number;
   lastViewedAt?: number;
   updatedAt?: number;
+}
+
+/**
+ * Remove one Activity item from the linked Plex account as well as SQLite.
+ *
+ * Plex keeps playback-history events separately from watched state and resume
+ * position. Clearing all three prevents a later Sync now from restoring the
+ * row that the user explicitly removed.
+ */
+export async function removePlexHistoryEntry(
+  userId: string,
+  ratingKey: string,
+): Promise<{ syncedToPlex: boolean; deletedRemoteEvents: number }> {
+  if (!/^\d+$/.test(ratingKey)) throw new Error("Invalid rating key");
+  const linked = accessToken(userId);
+  if (!linked) {
+    deleteHistoryEntry(userId, ratingKey);
+    return { syncedToPlex: false, deletedRemoteEvents: 0 };
+  }
+
+  const historyPaths = new Set<string>();
+  let start = 0;
+  while (true) {
+    const data = await plexJSON<{
+      MediaContainer: { Metadata?: RemoteMetadata[]; totalSize?: number };
+    }>(
+      "/status/sessions/history/all",
+      {
+        accountID: linked.row.plex_user_id,
+        metadataItemID: ratingKey,
+        sort: "viewedAt:desc",
+        "X-Plex-Container-Start": String(start),
+        "X-Plex-Container-Size": String(HISTORY_PAGE_SIZE),
+      },
+      linked.serverToken,
+    );
+    const items = data.MediaContainer.Metadata || [];
+    for (const item of items) {
+      if (item.ratingKey === ratingKey && /^\/status\/sessions\/history\/\d+$/.test(item.historyKey || "")) {
+        historyPaths.add(item.historyKey!);
+      }
+    }
+    start += items.length;
+    const totalSize = data.MediaContainer.totalSize;
+    if (
+      items.length === 0
+      || (typeof totalSize === "number" && start >= totalSize)
+      || (totalSize == null && items.length < HISTORY_PAGE_SIZE)
+    ) break;
+  }
+
+  await runWithConcurrency([...historyPaths], 4, async (historyPath) => {
+    const response = await plexFetch(historyPath, undefined, undefined, "DELETE", linked.serverToken);
+    if (!response.ok && response.status !== 404) {
+      throw new Error(`Plex history removal failed (${response.status})`);
+    }
+  });
+
+  const unscrobble = await plexFetch(
+    "/:/unscrobble",
+    { key: ratingKey, identifier: "com.plexapp.plugins.library" },
+    undefined,
+    "GET",
+    linked.serverToken,
+  );
+  if (!unscrobble.ok) throw new Error(`Plex watched-state update failed (${unscrobble.status})`);
+
+  const progress = await plexFetch(
+    "/:/progress",
+    {
+      key: ratingKey,
+      identifier: "com.plexapp.plugins.library",
+      time: "0",
+      state: "stopped",
+    },
+    undefined,
+    "GET",
+    linked.serverToken,
+  );
+  if (!progress.ok) throw new Error(`Plex progress removal failed (${progress.status})`);
+
+  lastLivePush.delete(`${userId}:${ratingKey}`);
+  deleteHistoryEntry(userId, ratingKey);
+  return { syncedToPlex: true, deletedRemoteEvents: historyPaths.size };
 }
 
 interface RemoteState {

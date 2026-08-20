@@ -15,10 +15,10 @@ import {
   getProgress,
   getProgressMany,
   getShowNextUp,
-  deleteHistoryEntry,
   dismissFromContinueWatching,
   clearHistory,
 } from "../services/watch-history.js";
+import { removePlexHistoryEntry } from "../services/plex-accounts.js";
 
 const router = Router();
 
@@ -166,7 +166,7 @@ router.get("/progress/:ratingKey", (req: Request, res: Response) => {
  * DELETE /api/history/entry/:ratingKey
  * Forget one item. Nested under /entry so it can't collide with /continue.
  */
-router.delete("/entry/:ratingKey", (req: Request, res: Response) => {
+router.delete("/entry/:ratingKey", async (req: Request, res: Response) => {
   const userId = requireUserId(req, res);
   if (!userId) return;
   const ratingKey = req.params.ratingKey as string;
@@ -174,8 +174,13 @@ router.delete("/entry/:ratingKey", (req: Request, res: Response) => {
     res.status(400).json({ error: "Invalid rating key" });
     return;
   }
-  deleteHistoryEntry(userId, ratingKey);
-  res.json({ ok: true });
+  try {
+    const result = await removePlexHistoryEntry(userId, ratingKey);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error("History removal error:", err);
+    res.status(502).json({ error: err instanceof Error ? err.message : "Failed to remove watch history" });
+  }
 });
 
 /**

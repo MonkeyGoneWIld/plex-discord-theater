@@ -41,11 +41,18 @@ const pinTokens = new Map<number, string>();
 const pinAccountIds = new Map<number, string>();
 const invalidPinIds = new Set<number>();
 const plexCalls: Array<{ method: string; url: URL; token: string | null }> = [];
-const defaultRemoteHistory = [
+interface TestRemoteHistoryItem {
+  ratingKey: string;
+  duration: number;
+  viewedAt: number;
+  historyKey?: string;
+}
+const defaultRemoteHistory: TestRemoteHistoryItem[] = [
   { ratingKey: "101", duration: 100_000, viewedAt: 1_700_000_000 },
 ];
-const remoteHistoryByAccount = new Map<string, typeof defaultRemoteHistory>();
+const remoteHistoryByAccount = new Map<string, TestRemoteHistoryItem[]>();
 const historyPageStarts: Array<{ accountId: string; start: number }> = [];
+const deletedRemoteHistory = new Set<string>();
 
 globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
   const url = new URL(typeof input === "string" || input instanceof URL ? input.toString() : input.url);
@@ -111,7 +118,14 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
       const accountId = url.searchParams.get("accountID") || "default";
       const start = Number(url.searchParams.get("X-Plex-Container-Start") || 0);
       const size = Number(url.searchParams.get("X-Plex-Container-Size") || 100);
-      const remoteHistory = remoteHistoryByAccount.get(accountId) ?? defaultRemoteHistory;
+      const metadataItemId = url.searchParams.get("metadataItemID");
+      const remoteHistory = (remoteHistoryByAccount.get(accountId) ?? defaultRemoteHistory)
+        .map((item, index) => ({
+          ...item,
+          historyKey: item.historyKey || `/status/sessions/history/${Number(item.ratingKey) * 1000 + index}`,
+        }))
+        .filter((item) => !deletedRemoteHistory.has(item.historyKey))
+        .filter((item) => !metadataItemId || item.ratingKey === metadataItemId);
       historyPageStarts.push({ accountId, start });
       return Response.json({
         MediaContainer: {
@@ -119,6 +133,10 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
           Metadata: remoteHistory.slice(start, start + size),
         },
       });
+    }
+    if (/^\/status\/sessions\/history\/\d+$/.test(url.pathname) && method === "DELETE") {
+      deletedRemoteHistory.add(url.pathname);
+      return Response.json({ MediaContainer: { size: 0 } });
     }
     if (url.pathname === "/hubs") {
       return Response.json({
@@ -269,6 +287,26 @@ check("mark unwatched uses b's server-specific token", plexCalls.some((call) =>
 check("personal actions still never create a playback timeline", plexCalls.some((call) =>
   call.url.pathname === "/:/timeline"
 ), false);
+
+remoteHistoryByAccount.set("11", [{
+  ratingKey: "303", duration: 100_000, viewedAt: 1_700_000_200,
+  historyKey: "/status/sessions/history/9303",
+}]);
+await history.recordProgress("discord-b", "303", 70, { force: true });
+const removed = await accounts.removePlexHistoryEntry("discord-b", "303");
+check("History removal clears the local Activity row", history.getProgress("discord-b", "303"), null);
+check("History removal reports linked Plex sync", removed.syncedToPlex, true);
+check("History removal deletes the linked user's Plex history event", plexCalls.some((call) =>
+  call.method === "DELETE"
+  && call.url.pathname === "/status/sessions/history/9303"
+  && call.token === "server-token-11"
+), true);
+check("History removal clears linked Plex resume position", plexCalls.some((call) =>
+  call.url.pathname === "/:/progress"
+  && call.url.searchParams.get("key") === "303"
+  && call.url.searchParams.get("time") === "0"
+  && call.token === "server-token-11"
+), true);
 
 console.log("\n— seasons and shows update every episode —");
 const showUpdate = await accounts.setPlexItemWatched("discord-b", "700", true);

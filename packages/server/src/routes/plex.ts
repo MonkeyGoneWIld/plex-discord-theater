@@ -1723,6 +1723,10 @@ async function personTagId(name: string): Promise<number | null> {
 async function libraryCreditsFor(tagId: number) {
   const sections = await browsableSections();
   const byKey = new Map<string, { item: ReturnType<typeof mapItem>; type: string }>();
+  // What was found, in the two shapes a TMDB credit can be recognised by, so the
+  // out-of-library half below can leave out what is already on the shelf.
+  const ownedTmdbIds = new Set<number>();
+  const ownedTitleKeys = new Set<string>();
 
   await Promise.all(
     sections.flatMap((section) =>
@@ -1730,13 +1734,20 @@ async function libraryCreditsFor(tagId: number) {
         try {
           const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
             `/library/sections/${section.id}/all`,
-            { [filter]: String(tagId) },
+            // The guids come back in the same response, which is what makes
+            // matching against TMDB exact instead of a title comparison.
+            { [filter]: String(tagId), includeGuids: "1" },
           );
           for (const m of data.MediaContainer.Metadata || []) {
             const item = mapItem(m);
             // Someone can be both actor and director on the same title; the
             // page lists it once either way.
             if (!byKey.has(item.ratingKey)) byKey.set(item.ratingKey, { item, type: section.type });
+            const tmdbId = tmdbIdFromGuids(m.Guid);
+            if (tmdbId != null) ownedTmdbIds.add(tmdbId);
+            // Belt and braces: not every Plex agent files a tmdb:// guid, and a
+            // title match is better than showing the same film twice.
+            if (m.title) ownedTitleKeys.add(collectionTitleKey(m.title));
           }
         } catch {
           // One filter failing (an older server that doesn't index directors,
@@ -1746,10 +1757,82 @@ async function libraryCreditsFor(tagId: number) {
     ),
   );
 
-  const byYear = (a: { year?: number }, b: { year?: number }) => (b.year ?? 0) - (a.year ?? 0);
   const of = (type: string) =>
-    [...byKey.values()].filter((e) => e.type === type).map((e) => e.item).sort(byYear);
-  return { movies: of("movie"), shows: of("show") };
+    [...byKey.values()].filter((e) => e.type === type).map((e) => e.item).sort(byReleaseDate);
+  return { movies: of("movie"), shows: of("show"), ownedTmdbIds, ownedTitleKeys };
+}
+
+/** Newest first, which is the order both halves of a person page are shown in. */
+const byReleaseDate = (a: { year?: number }, b: { year?: number }) => (b.year ?? 0) - (a.year ?? 0);
+
+/**
+ * A ceiling on the out-of-library half, which is otherwise unbounded.
+ *
+ * Every card loads its poster eagerly and the rows aren't virtualised, so "all
+ * of them" for someone with four hundred credits is four hundred images. High
+ * enough to be "all of them" for anybody with a real career.
+ */
+const MAX_EXTERNAL_CREDITS = 200;
+
+/**
+ * The rest of someone's filmography: what they are credited on that the library
+ * doesn't have, as requestable cards.
+ *
+ * Same shape and same treatment as the out-of-library half of "More Like This",
+ * so a card behaves identically wherever it is met.
+ */
+function externalCreditsFor(
+  credits: TmdbCredit[],
+  mediaType: string,
+  type: string,
+  ownedTmdbIds: Set<number>,
+  ownedTitleKeys: Set<string>,
+): CollectionItem[] {
+  const seen = new Set<number>();
+  const out: CollectionItem[] = [];
+  for (const c of credits) {
+    if (c.media_type !== mediaType || c.id == null) continue;
+    // A poster is what makes a card; an entry without one is a stub.
+    if (!c.poster_path) continue;
+    if (seen.has(c.id) || ownedTmdbIds.has(c.id)) continue;
+    const title = c.title ?? c.name ?? "";
+    if (!title || ownedTitleKeys.has(collectionTitleKey(title))) continue;
+    seen.add(c.id);
+    out.push({
+      ratingKey: `tmdb:${c.id}`,
+      title,
+      year: tmdbResultYear(c),
+      type,
+      thumb: externalThumbUrl(`https://image.tmdb.org/t/p/w500${c.poster_path}`),
+      inLibrary: false,
+      tmdbId: c.id,
+    });
+  }
+  return out.sort(byReleaseDate).slice(0, MAX_EXTERNAL_CREDITS);
+}
+
+/**
+ * Who someone is and everything they are credited on, from TMDB.
+ *
+ * Two round trips — the id has to be looked up before the credits can be asked
+ * for — and both are optional. With no TMDB key, or a name it doesn't know, the
+ * page falls back to the library half alone, which is the part that matters.
+ */
+async function tmdbPersonAndCredits(name: string) {
+  const person = await tmdbPerson(name).catch(() => null);
+  if (!person) return { person: null, credits: [] as TmdbCredit[] };
+  const credits = await tmdbGet<{ cast?: TmdbCredit[]; crew?: TmdbCredit[] }>(
+    `/person/${person.tmdbId}/combined_credits`,
+  ).catch(() => null);
+  return {
+    person,
+    // Acting roles plus directing credits — the two the cast row links from,
+    // and the same pair the library half is filtered on.
+    credits: [
+      ...(credits?.cast ?? []),
+      ...(credits?.crew ?? []).filter((c) => c.job === "Director"),
+    ],
+  };
 }
 
 /**
@@ -1782,29 +1865,35 @@ router.get("/person", async (req: Request, res: Response) => {
 
   if (tagId !== null) {
     try {
-      // Side by side: the filmography is local and quick, the biography is two
-      // round trips to TMDB, and the page needs both. Waiting for them in turn
-      // made the page as slow as the sum of the two for no reason.
-      const [credits, person] = await Promise.all([
+      // Side by side: the library half is local and quick, the TMDB half is two
+      // round trips, and the page wants both. Waiting for them in turn made the
+      // page as slow as the sum of the two for no reason.
+      const [owned, extra] = await Promise.all([
         libraryCreditsFor(tagId),
-        tmdbPerson(name).catch(() => null),
+        tmdbPersonAndCredits(name),
       ]);
+      const rest = (mediaType: string, type: string) =>
+        externalCreditsFor(extra.credits, mediaType, type, owned.ownedTmdbIds, owned.ownedTitleKeys);
+      // What's on the shelf first, then the rest of the career behind it — the
+      // same order, and the same requestable cards, as "More Like This".
+      const movies = [...owned.movies, ...rest("movie", "movie")];
+      const shows = [...owned.shows, ...rest("tv", "show")];
       logEvent("Person", "filmography from Plex", {
         name,
         tagId,
-        movies: credits.movies.length,
-        shows: credits.shows.length,
+        movies: `${owned.movies.length}+${movies.length - owned.movies.length}`,
+        shows: `${owned.shows.length}+${shows.length - owned.shows.length}`,
       });
       res.json({
-        name: person?.name ?? name,
-        thumb: person?.thumb ?? null,
-        biography: person?.biography ?? null,
-        birthday: person?.birthday ?? null,
-        deathday: person?.deathday ?? null,
-        placeOfBirth: person?.placeOfBirth ?? null,
-        knownFor: person?.knownFor ?? null,
-        movies: credits.movies,
-        shows: credits.shows,
+        name: extra.person?.name ?? name,
+        thumb: extra.person?.thumb ?? null,
+        biography: extra.person?.biography ?? null,
+        birthday: extra.person?.birthday ?? null,
+        deathday: extra.person?.deathday ?? null,
+        placeOfBirth: extra.person?.placeOfBirth ?? null,
+        knownFor: extra.person?.knownFor ?? null,
+        movies,
+        shows,
       });
       return;
     } catch (err) {

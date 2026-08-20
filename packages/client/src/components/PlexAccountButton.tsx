@@ -26,6 +26,7 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
   const [status, setStatus] = useState<PlexAccountStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const autoSyncStarted = useRef(false);
 
   const runSync = useCallback(async (quiet = false) => {
@@ -128,12 +129,12 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
   };
 
   const disconnect = async () => {
-    if (!window.confirm("Disconnect your Plex account? Local Activity history will be kept.")) return;
     setBusy(true);
     setMessage(null);
     try {
       await unlinkPlexAccount();
       setStatus({ linked: false, lastSyncAt: null, lastSyncError: null });
+      setConfirmDisconnect(false);
       autoSyncStarted.current = false;
       setMessage("Plex account disconnected. Local history was kept.");
     } catch (err) {
@@ -141,6 +142,11 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
     } finally {
       setBusy(false);
     }
+  };
+
+  const closeModal = () => {
+    setOpen(false);
+    setConfirmDisconnect(false);
   };
 
   return (
@@ -157,7 +163,7 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
 
       {open && (
         <div style={styles.overlay} role="presentation" onMouseDown={(e) => {
-          if (e.target === e.currentTarget) setOpen(false);
+          if (e.target === e.currentTarget) closeModal();
         }}>
           <section style={styles.modal} role="dialog" aria-modal="true" aria-labelledby="plex-account-title">
             <div style={styles.headingRow}>
@@ -165,7 +171,7 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
                 <div style={styles.eyebrow}>OPTIONAL ACCOUNT SYNC</div>
                 <h2 id="plex-account-title" style={styles.title}>Plex watch history</h2>
               </div>
-              <button type="button" onClick={() => setOpen(false)} style={styles.close} aria-label="Close">&times;</button>
+              <button type="button" onClick={closeModal} style={styles.close} aria-label="Close">&times;</button>
             </div>
 
             {status?.linked ? (
@@ -185,13 +191,32 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
                   {status.lastSyncError && <span style={styles.error}>{status.lastSyncError}</span>}
                 </div>
                 <div style={styles.actions}>
-                  <button type="button" disabled={busy} onClick={() => void runSync()} style={styles.primary}>
+                  <button type="button" disabled={busy || confirmDisconnect} onClick={() => void runSync()} style={styles.primary}>
                     {busy ? "Syncing..." : "Sync now"}
                   </button>
-                  <button type="button" disabled={busy} onClick={() => void disconnect()} style={styles.danger}>
+                  <button type="button" disabled={busy} onClick={() => setConfirmDisconnect(true)} style={styles.danger}>
                     Disconnect
                   </button>
                 </div>
+                {confirmDisconnect && (
+                  <div style={styles.disconnectConfirm} role="alert">
+                    <div style={styles.confirmTitle}>Disconnect this Plex account?</div>
+                    <div style={styles.secondary}>Local Activity history will be kept.</div>
+                    <div style={styles.confirmActions}>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setConfirmDisconnect(false)}
+                        style={styles.secondaryButton}
+                      >
+                        Keep linked
+                      </button>
+                      <button type="button" disabled={busy} onClick={() => void disconnect()} style={styles.dangerFilled}>
+                        {busy ? "Disconnecting..." : "Yes, disconnect"}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </>
             ) : (
               <>
@@ -274,6 +299,20 @@ const styles: Record<string, React.CSSProperties> = {
   danger: {
     padding: "10px 16px", borderRadius: "9px", border: "1px solid rgba(255,110,110,0.35)",
     background: "transparent", color: "#ef9a9a", fontFamily: "inherit", fontSize: "13px", fontWeight: 700, cursor: "pointer",
+  },
+  disconnectConfirm: {
+    marginTop: "14px", padding: "14px", borderRadius: "10px",
+    border: "1px solid rgba(255,110,110,0.28)", background: "rgba(255,110,110,0.07)",
+  },
+  confirmTitle: { marginBottom: "4px", color: "#f4d0d0", fontSize: "13px", fontWeight: 700 },
+  confirmActions: { display: "flex", gap: "8px", marginTop: "12px", flexWrap: "wrap" },
+  secondaryButton: {
+    padding: "9px 13px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.15)",
+    background: "rgba(255,255,255,0.05)", color: "#ccc", fontFamily: "inherit", fontSize: "12px", fontWeight: 700, cursor: "pointer",
+  },
+  dangerFilled: {
+    padding: "9px 13px", borderRadius: "8px", border: 0, background: "#c94f4f",
+    color: "#fff", fontFamily: "inherit", fontSize: "12px", fontWeight: 800, cursor: "pointer",
   },
   pending: { padding: "14px", borderRadius: "10px", background: "rgba(255,255,255,0.05)", color: "#bbb", fontSize: "13px" },
   linkButton: {

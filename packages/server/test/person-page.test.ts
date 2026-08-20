@@ -55,6 +55,20 @@ globalThis.fetch = (async (input: any, init?: any) => {
         { id: 204, media_type: "tv", name: "Murder, She Wrote", first_air_date: "1990-01-01", poster_path: "/m.jpg" },
         // A duplicate id, which TMDB does return when someone is credited twice.
         { id: 201, media_type: "movie", title: "Bronco Billy", release_date: "1980-06-11", poster_path: "/b.jpg" },
+
+        // Appearances rather than parts. TMDB files all of these as cast.
+        { id: 301, media_type: "tv", name: "The Tonight Show", character: "Self - Guest",
+          genre_ids: [10767], first_air_date: "1992-01-01", poster_path: "/t.jpg" },
+        { id: 302, media_type: "movie", title: "A Documentary", character: "Himself",
+          release_date: "2005-01-01", poster_path: "/doc.jpg" },
+        { id: 303, media_type: "movie", title: "Old Clips", character: "Cowboy (archive footage)",
+          release_date: "2010-01-01", poster_path: "/o.jpg" },
+        // No character at all — the genre is what gives this one away.
+        { id: 304, media_type: "tv", name: "Some Reality Thing", character: "",
+          genre_ids: [10764], first_air_date: "2001-01-01", poster_path: "/r.jpg" },
+        // A real part whose name merely starts with the same letters.
+        { id: 305, media_type: "movie", title: "Selfish Man", character: "Selfish Man",
+          release_date: "1995-03-01", poster_path: "/s.jpg" },
       ],
       crew: [
         { id: 205, media_type: "movie", title: "Directed This", release_date: "1985-01-01", poster_path: "/d.jpg", job: "Director" },
@@ -177,7 +191,8 @@ console.log("\n— a person page is built from Plex, not rebuilt from TMDB —")
   // The rest of the career, behind it, in the same order.
   const rest = body.movies.slice(2);
   check("then the rest of their films, newest first",
-    rest.map((m: any) => m.title), ["Directed This", "Bronco Billy", "Class of '44"]);
+    rest.map((m: any) => m.title),
+    ["Selfish Man", "Directed This", "Bronco Billy", "Class of '44"]);
   check("all of them requestable", rest.every((m: any) => m.inLibrary === false), true);
   check("carrying the id the request flow needs", rest.every((m: any) => typeof m.tmdbId === "number"), true);
   check("a credit with no poster is not a card",
@@ -193,6 +208,17 @@ console.log("\n— a person page is built from Plex, not rebuilt from TMDB —")
     body.shows.map((m: any) => [m.title, m.inLibrary !== false]),
     [["East of Eden", true], ["Murder, She Wrote", false]]);
   check("the biography still arrives", body.biography, "An actor.");
+
+  // Appearing as yourself is not a part. TMDB files a talk show sofa, a
+  // documentary interview and a clip of old footage all as cast credits.
+  const titles = [...body.movies, ...body.shows].map((m: any) => m.title);
+  check("a talk show sofa is not a role", titles.includes("The Tonight Show"), false);
+  check("nor is being interviewed in a documentary", titles.includes("A Documentary"), false);
+  check("nor is old footage of you", titles.includes("Old Clips"), false);
+  check("a reality format with no character is caught by its genre",
+    titles.includes("Some Reality Thing"), false);
+  check("but a part whose name starts the same way is kept",
+    titles.includes("Selfish Man"), true);
 
   // One search to find the person, one section list, then one filter per
   // section per role. Nothing per credit, and nothing off-server.

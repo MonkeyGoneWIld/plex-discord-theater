@@ -1826,10 +1826,11 @@ async function tmdbPersonAndCredits(name: string) {
   ).catch(() => null);
   return {
     person,
-    // Acting roles plus directing credits — the two the cast row links from,
-    // and the same pair the library half is filtered on.
+    // Parts they played plus films they directed — the two the cast row links
+    // from, and the same pair the library half is filtered on. Appearances as
+    // themselves are dropped: see isPerformance.
     credits: [
-      ...(credits?.cast ?? []),
+      ...(credits?.cast ?? []).filter(isPerformance),
       ...(credits?.crew ?? []).filter((c) => c.job === "Director"),
     ],
   };
@@ -1922,11 +1923,11 @@ router.get("/person", async (req: Request, res: Response) => {
       crew?: TmdbCredit[];
     }>(`/person/${person.tmdbId}/combined_credits`);
 
-    // Acting roles plus directing credits — the two kinds the cast row links
-    // from. Other crew jobs would pad the page with titles nobody associates
-    // with the person.
+    // Same rule as the fast path above: parts played and films directed. Other
+    // crew jobs would pad the page with titles nobody associates with the
+    // person, and appearances as themselves are not parts at all.
     const all = [
-      ...(credits?.cast ?? []),
+      ...(credits?.cast ?? []).filter(isPerformance),
       ...(credits?.crew ?? []).filter((c) => c.job === "Director"),
     ];
 
@@ -1990,6 +1991,34 @@ interface TmdbCredit extends TmdbPart {
   media_type?: string;
   job?: string;
   popularity?: number;
+  /** The part played. "Self", "Himself" and friends mean they turned up as
+   *  themselves, which is not a part — see isPerformance. */
+  character?: string;
+  genre_ids?: number[];
+}
+
+/**
+ * Characters that mean somebody appeared rather than acted.
+ *
+ * TMDB files a talk show sofa, a documentary interview and a clip of old
+ * footage as cast credits, all with the person's own name in the character
+ * field. On a page meant to answer "what have they been in", those are noise —
+ * a working actor's list is otherwise half chat shows.
+ */
+const APPEARANCE_CHARACTER_RE =
+  /^\s*(self|him\s*self|her\s*self|them\s*selves)\b|\(?\barchive footage\b/i;
+
+/**
+ * TMDB genre ids for formats nobody is cast in: talk (10767), news (10763),
+ * reality (10764). The character field usually gives these away on its own;
+ * this catches the ones filed with no character at all.
+ */
+const APPEARANCE_GENRE_IDS = new Set([10763, 10764, 10767]);
+
+/** Whether a cast credit is a part they played, rather than an appearance. */
+function isPerformance(credit: TmdbCredit): boolean {
+  if (APPEARANCE_CHARACTER_RE.test(credit.character ?? "")) return false;
+  return !(credit.genre_ids ?? []).some((g) => APPEARANCE_GENRE_IDS.has(g));
 }
 
 /** TMDB person lookup by name, cached (misses included — a name TMDB doesn't

@@ -5,6 +5,7 @@ import { ScrollShelf } from "./ScrollShelf";
 import { MovieCard } from "./MovieCard";
 import { SkeletonGrid } from "./SkeletonGrid";
 import { usePosterLayout } from "../lib/grid";
+import { useMediaQuery, ROOM_BESIDE_SEARCH_QUERY } from "../lib/useMediaQuery";
 import {
   authUrl,
   fetchHome,
@@ -74,6 +75,8 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   // How many posters fit across, and how wide each is — three on a phone,
   // as many as the window allows anywhere else. See lib/grid.
   const poster = usePosterLayout();
+  // Whether there is margin beside the centred search column for Back to sit in.
+  const roomForBack = useMediaQuery(ROOM_BESIDE_SEARCH_QUERY);
   const [sections, setSections] = useState<PlexSection[]>([]);
   // "home" and "history" are virtual tab ids — one for the real Plex homepage
   // (hubs), one for this app's own watch history. Both are kept in the same
@@ -537,42 +540,37 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
 
   return (
     <div style={styles.container}>
+      {/* Back sits at the view's top-left, at the same 16/24 offset as every
+          other page's. Absolutely positioned, so it neither shifts the centred
+          search bar nor moves itself — landing in the same place everywhere is
+          the whole point of it.
+
+          Which means it needs the margin beside the column to be there, and
+          below ROOM_BESIDE_SEARCH_QUERY it isn't: the column reaches the edges
+          and the box slides under the button. So the button goes, rather than
+          moving somewhere else or sitting on the text. The box's own X clears
+          the query, which is what actually ends a search — the button was never
+          the only way out, just the widest.
+
+          Never on a phone, at any width, for the same reason it was removed
+          there before: over the field it covered the text, above the field it
+          pushed the whole page down the moment you typed. */}
+      {isSearching && !poster.phone && roomForBack && (
+        <button onClick={handleBackFromSearch} style={styles.backBtn}>
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          Back
+        </button>
+      )}
       <div style={styles.narrowWrap}>
-        {/* Back and the search box share a row, so the box gets whatever the
-            button leaves and the two can never sit on top of each other.
-
-            The button used to float over the whole view, pinned to its top-left
-            like the detail pages'. That works only while the window is wide
-            enough for the centred 1200px column to leave a margin the button can
-            live in — below about 1400px the margin runs out, the box slides
-            under the button, and the two overlap. Narrower still and the button
-            covered the text being typed.
-
-            Not on a phone: there is no room beside the box for it at all there,
-            and every way of making room was worse than not having it. Over the
-            field it covered the text; above the field it pushed the whole page
-            down the moment you typed. The box's own X clears the query, which is
-            what ends a search — the button was never the only way out, just the
-            widest. */}
-        <div style={styles.searchRow}>
-          {isSearching && !poster.phone && (
-            <button onClick={handleBackFromSearch} style={styles.backBtn}>
-              <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-                <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-              Back
-            </button>
-          )}
-          <div style={styles.searchFill}>
-            <Search
-              onSearch={handleSearch}
-              onClear={handleClearSearch}
-              placeholder={searchPlaceholder}
-              clearSignal={searchResetSignal}
-              busy={searchBusy}
-            />
-          </div>
-        </div>
+        <Search
+          onSearch={handleSearch}
+          onClear={handleClearSearch}
+          placeholder={searchPlaceholder}
+          clearSignal={searchResetSignal}
+          busy={searchBusy}
+        />
 
         {/* What this search is actually showing.
             The request is never scoped — it always covers the whole library and
@@ -998,26 +996,14 @@ const styles: Record<string, React.CSSProperties> = {
     width: "100%",
     position: "relative",
   },
-  // The row Back and the search box share. Centred vertically on each other,
-  // so the button lands level with the box rather than at a fixed offset from
-  // the top of the view — the box carries 16px of padding above and below, and
-  // matching that by hand was how the two drifted apart.
-  searchRow: {
-    display: "flex",
-    alignItems: "center",
-  },
-  // The box takes everything Back leaves. `minWidth: 0` because a flex child
-  // defaults to its content's width, and an input's is wide enough to push the
-  // button back off the edge — the overlap in a different form.
-  searchFill: {
-    flex: 1,
-    minWidth: 0,
-  },
-  // The same look as MovieDetail.backBtn at the same 24px gutter, but in the
-  // row's flow rather than floating over it. See the note at the call site.
+  // Identical to MovieDetail.backBtn (same 16/24 offset, same look), but pinned
+  // absolutely to the view's top-left so it lands in the exact same spot as the
+  // detail-page Back and never shifts the centered search bar.
   backBtn: {
-    marginLeft: "24px",
-    flexShrink: 0,
+    position: "absolute",
+    top: "16px",
+    left: "24px",
+    zIndex: 10,
     display: "flex",
     alignItems: "center",
     gap: "6px",

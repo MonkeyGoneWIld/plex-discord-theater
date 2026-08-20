@@ -11,7 +11,7 @@ sees the same thing at the same time — one person drives, everyone else follow
 > parties, and the awkward parts — playback sync, transcode teardown, host
 > handover — have been debugged against production logs rather than guessed at.
 > The sync protocol, person page and personal Plex account flow have harnesses
-> that run against a real WebSocket server and a stubbed Plex (`npm test`, 140
+> that run against a real WebSocket server and a stubbed Plex (`npm test`, 146
 > checks), but nothing runs them automatically, there is no external security
 > review, and no human has read
 > every line.
@@ -100,11 +100,14 @@ to everyone; audio and subtitles are each person's own.
   the room's default with it. Your subtitle choice follows you into the next
   episode, matched by language rather than track number.
 - **Optional personal Plex history sync.** Each Discord user can link their own
-  Plex account from the Activity. Watched titles and resume positions sync in
-  both directions, and every linked participant who actually has the player
-  open receives credit — not only the host. Plex passwords never enter this
-  app; personal tokens stay encrypted on the server and separate from the
-  shared token used to stream the library.
+  Plex account from the Activity. The first sync imports the complete,
+  deduplicated Plex history; later syncs fetch only the changes since the last
+  successful run, while current resume positions are always refreshed. History
+  is not capped or pruned. Linking a different Plex identity starts that Discord
+  user with clean Activity history so state never crosses accounts. Every linked
+  participant who actually has the player open receives credit — not only the
+  host. Plex passwords never enter this app; personal tokens stay encrypted on
+  the server and separate from the shared token used to stream the library.
 - **Play Version.** When a title has more than one version in Plex, pick which
   one plays. The 4K version is hidden whenever there's a 1080p or lower one
   alongside it — everything is transcoded to 1080p anyway, so streaming the 4K

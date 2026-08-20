@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import plexMark from "../assets/plex-mark.svg";
 import {
   fetchPlexAccountStatus,
   pollPlexAccountLink,
@@ -157,7 +158,7 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
         style={{ ...styles.trigger, ...(status?.linked ? styles.triggerLinked : {}) }}
         title={status?.linked ? `Plex linked as ${status.account?.username}` : "Link Plex account"}
       >
-        <span style={styles.plexMark}>P</span>
+        <span style={styles.plexMark}><img src={plexMark} alt="" style={styles.plexMarkImage} /></span>
         {!compact && <span>{status?.linked ? "Plex linked" : "Link Plex"}</span>}
       </button>
 
@@ -177,14 +178,16 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
             {status?.linked ? (
               <>
                 <div style={styles.accountCard}>
-                  <span style={{ ...styles.plexMark, ...styles.largeMark }}>P</span>
+                  <span style={{ ...styles.plexMark, ...styles.largeMark }}>
+                    <img src={plexMark} alt="" style={styles.plexMarkImage} />
+                  </span>
                   <div>
                     <div style={styles.accountName}>{status.account?.username}</div>
                     <div style={styles.secondary}>{status.account?.email || "Plex account connected"}</div>
                   </div>
                 </div>
                 <p style={styles.copy}>
-                  Progress from this Activity is sent to your Plex account. Plex watch history and resume positions are also imported here. Every participant links and syncs independently.
+                  Progress from this Activity is sent to your Plex account. Your complete Plex watch history and current resume positions are imported here. Every participant links and syncs independently.
                 </p>
                 <div style={styles.syncStatus}>
                   <span>{when(status.lastSyncAt)}</span>
@@ -223,7 +226,7 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
             ) : (
               <>
                 <p style={styles.copy}>
-                  Link your own Plex account to sync watched titles and resume positions in both directions. During a watch party, every linked participant who has the player open receives credit on their own account.
+                  Link your own Plex account to sync your complete watch history and resume positions in both directions. During a watch party, every linked participant who has the player open receives credit on their own account.
                 </p>
                 <p style={styles.privacy}>
                   You sign in directly on plex.tv. Your password never reaches this app, and the resulting account token is encrypted and stored only on the server.
@@ -265,9 +268,10 @@ const styles: Record<string, React.CSSProperties> = {
   triggerLinked: { color: "#e5a00d", border: "1px solid rgba(229,160,13,0.3)" },
   plexMark: {
     display: "inline-flex", alignItems: "center", justifyContent: "center",
-    width: "17px", height: "17px", borderRadius: "4px", background: "#e5a00d",
-    color: "#161616", fontSize: "11px", fontWeight: 900,
+    width: "17px", height: "17px", borderRadius: "4px", background: "#111",
+    border: "1px solid rgba(229,160,13,0.38)", boxSizing: "border-box", overflow: "hidden",
   },
+  plexMarkImage: { display: "block", width: "78%", height: "78%" },
   overlay: {
     position: "fixed", inset: 0, zIndex: 10000, display: "flex", alignItems: "center",
     justifyContent: "center", padding: "20px", background: "rgba(0,0,0,0.72)",

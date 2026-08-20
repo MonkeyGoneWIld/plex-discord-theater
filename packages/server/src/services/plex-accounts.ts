@@ -12,14 +12,16 @@ import path from "node:path";
 import { plexFetch, plexJSON } from "./plex.js";
 import {
   clearHistory,
-  getHistory,
+  getAllHistory,
   mergeExternalProgress,
   type HistoryEntry,
 } from "./watch-history.js";
 
 const PRODUCT = "Plex Discord Theater";
 const VERSION = "1.0.0";
-const MAX_SYNC_ITEMS = 500;
+const HISTORY_PAGE_SIZE = 100;
+const HISTORY_SYNC_VERSION = 1;
+const INCREMENTAL_SYNC_OVERLAP_MS = 5 * 60 * 1000;
 const LINK_TTL_MS = 10 * 60 * 1000;
 const LIVE_PUSH_INTERVAL_MS = 15_000;
 const PIN_FLOW_VERSION = 1;
@@ -49,7 +51,8 @@ db.exec(`
     thumb TEXT,
     linked_at INTEGER NOT NULL,
     last_sync_at INTEGER,
-    last_sync_error TEXT
+    last_sync_error TEXT,
+    history_sync_version INTEGER NOT NULL DEFAULT 1
   );
   CREATE TABLE IF NOT EXISTS plex_link_pins (
     user_id TEXT PRIMARY KEY,
@@ -64,6 +67,14 @@ db.exec(`
 // Legacy Plex auth requires a second, server-specific token from /resources.
 try {
   db.exec("ALTER TABLE plex_accounts ADD COLUMN server_token_encrypted TEXT");
+} catch (err) {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!message.includes("duplicate column")) throw err;
+}
+// Accounts linked before full-history sync existed need one uncapped backfill.
+// New rows already default to the current version from CREATE TABLE.
+try {
+  db.exec("ALTER TABLE plex_accounts ADD COLUMN history_sync_version INTEGER NOT NULL DEFAULT 0");
 } catch (err) {
   const message = err instanceof Error ? err.message : String(err);
   if (!message.includes("duplicate column")) throw err;
@@ -97,6 +108,7 @@ interface AccountRow {
   linked_at: number;
   last_sync_at: number | null;
   last_sync_error: string | null;
+  history_sync_version: number;
 }
 
 interface PinRow {
@@ -115,6 +127,11 @@ const deleteAccount = db.prepare("DELETE FROM plex_accounts WHERE user_id = ?");
 const updateSync = db.prepare(
   "UPDATE plex_accounts SET last_sync_at = ?, last_sync_error = ? WHERE user_id = ?",
 );
+const markSyncSuccess = db.prepare(`
+  UPDATE plex_accounts
+  SET last_sync_at = ?, last_sync_error = NULL, history_sync_version = ?
+  WHERE user_id = ?
+`);
 const selectSetting = db.prepare("SELECT value FROM settings WHERE key = ?");
 const upsertSetting = db.prepare(`
   INSERT INTO settings (key, value) VALUES (?, ?)
@@ -423,10 +440,14 @@ function putRemote(map: Map<string, RemoteState>, item: RemoteMetadata, watched:
   }
 }
 
-async function readRemoteState(token: string, accountId: string): Promise<Map<string, RemoteState>> {
+async function readRemoteState(
+  token: string,
+  accountId: string,
+  sinceMs: number | null,
+): Promise<Map<string, RemoteState>> {
   const remote = new Map<string, RemoteState>();
   let start = 0;
-  while (start < MAX_SYNC_ITEMS) {
+  while (true) {
     const data = await plexJSON<{
       MediaContainer: { Metadata?: RemoteMetadata[]; totalSize?: number };
     }>(
@@ -435,14 +456,27 @@ async function readRemoteState(token: string, accountId: string): Promise<Map<st
         accountID: accountId,
         sort: "viewedAt:desc",
         "X-Plex-Container-Start": String(start),
-        "X-Plex-Container-Size": "100",
+        "X-Plex-Container-Size": String(HISTORY_PAGE_SIZE),
       },
       token,
     );
     const items = data.MediaContainer.Metadata || [];
+    let reachedPreviousSync = false;
     for (const item of items) putRemote(remote, item, true);
+    if (sinceMs != null) {
+      reachedPreviousSync = items.some((item) => {
+        const seconds = item.viewedAt || item.lastViewedAt || item.updatedAt || 0;
+        return seconds > 0 && seconds * 1000 < sinceMs;
+      });
+    }
     start += items.length;
-    if (items.length === 0 || start >= (data.MediaContainer.totalSize ?? start)) break;
+    const totalSize = data.MediaContainer.totalSize;
+    if (
+      items.length === 0
+      || reachedPreviousSync
+      || (typeof totalSize === "number" && start >= totalSize)
+      || (totalSize == null && items.length < HISTORY_PAGE_SIZE)
+    ) break;
   }
 
   // Plex history contains completed plays. Its home hubs carry the user's
@@ -560,15 +594,24 @@ export function syncPlexAccount(userId: string): Promise<{ imported: number; exp
     const linked = accessToken(userId);
     if (!linked) throw new Error("No Plex account is linked");
     try {
-      const remote = await readRemoteState(linked.serverToken, linked.row.plex_user_id);
+      const needsFullHistory = !linked.row.last_sync_at
+        || linked.row.history_sync_version < HISTORY_SYNC_VERSION;
+      const sinceMs = needsFullHistory
+        ? null
+        : Math.max(0, linked.row.last_sync_at! - INCREMENTAL_SYNC_OVERLAP_MS);
+      const remote = await readRemoteState(linked.serverToken, linked.row.plex_user_id, sinceMs);
       let imported = 0;
-      for (const [ratingKey, state] of remote) {
+      await runWithConcurrency([...remote.entries()], 8, async ([ratingKey, state]) => {
         const merged = await mergeExternalProgress(userId, ratingKey, state);
         if (merged.changed) imported++;
-      }
+      });
 
-      const local = getHistory(userId, MAX_SYNC_ITEMS, 0).items;
+      // Initial sync reconciles every local row against the complete Plex map.
+      // Later syncs only reconsider rows changed in the overlap window, avoiding
+      // an all-history export every fifteen minutes while still covering races.
+      const local = getAllHistory(userId);
       const toExport = local.filter((entry) => {
+        if (sinceMs != null && entry.updatedAt < sinceMs) return false;
         const there = remote.get(entry.ratingKey);
         return !there || entry.updatedAt > there.updatedAt;
       });
@@ -576,7 +619,7 @@ export function syncPlexAccount(userId: string): Promise<{ imported: number; exp
       await runWithConcurrency(toExport, 4, async (entry) => {
         if (await pushProgressToPlex(userId, entry, "paused", true, false)) exported++;
       });
-      updateSync.run(Date.now(), null, userId);
+      markSyncSuccess.run(Date.now(), HISTORY_SYNC_VERSION, userId);
       return { imported, exported };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

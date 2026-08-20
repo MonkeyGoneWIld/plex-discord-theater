@@ -25,8 +25,6 @@ const MIN_RESUME_MS = 60_000;
 const MIN_NEW_ENTRY_MS = 10_000;
 /** Heartbeat writes coalesce to at most one per item per this interval. */
 const PROGRESS_WRITE_INTERVAL_MS = 15_000;
-/** Rows kept per user; the oldest beyond this are pruned after each insert. */
-const MAX_ROWS_PER_USER = 500;
 const META_CACHE_TTL_MS = 60 * 60 * 1000;
 /** Shorter than the metadata TTL: an airing show gains episodes, and a stale
  *  list is what would stop a newly available episode becoming "next up". */
@@ -192,6 +190,11 @@ const selectHistoryStmt = db.prepare(`
   WHERE user_id = ? AND ${NOT_A_DISMISSAL_MARKER}
   ORDER BY updated_at DESC LIMIT ? OFFSET ?
 `);
+const selectAllHistoryStmt = db.prepare(`
+  SELECT ${SELECT_COLUMNS} FROM watch_history
+  WHERE user_id = ? AND ${NOT_A_DISMISSAL_MARKER}
+  ORDER BY updated_at DESC
+`);
 const countStmt = db.prepare(
   `SELECT COUNT(*) AS count FROM watch_history WHERE user_id = ? AND ${NOT_A_DISMISSAL_MARKER}`,
 );
@@ -213,13 +216,6 @@ const insertDismissalMarkerStmt = db.prepare(`
   )
 `);
 const deleteAllStmt = db.prepare("DELETE FROM watch_history WHERE user_id = ?");
-const pruneStmt = db.prepare(`
-  DELETE FROM watch_history
-  WHERE user_id = ? AND rating_key NOT IN (
-    SELECT rating_key FROM watch_history WHERE user_id = ?
-    ORDER BY updated_at DESC LIMIT ?
-  )
-`);
 
 function toEntry(row: HistoryRow): HistoryEntry {
   return {
@@ -493,7 +489,6 @@ export async function recordProgress(
     updated_at: now,
   });
 
-  if (!existing) pruneStmt.run(userId, userId, MAX_ROWS_PER_USER);
   return getProgress(userId, ratingKey);
 }
 
@@ -556,7 +551,6 @@ export async function mergeExternalProgress(
       summary?.grandparentRatingKey ?? existing?.grandparent_rating_key ?? null,
     updated_at: sourceAt,
   });
-  if (!existing) pruneStmt.run(userId, userId, MAX_ROWS_PER_USER);
   return { entry: getProgress(userId, ratingKey), changed: true };
 }
 
@@ -631,6 +625,11 @@ export function getHistory(
   const rows = selectHistoryStmt.all(userId, limit, offset) as HistoryRow[];
   const { count } = countStmt.get(userId) as { count: number };
   return { items: rows.map(toEntry), total: count };
+}
+
+/** Every retained row for internal account reconciliation; HTTP reads stay paginated. */
+export function getAllHistory(userId: string): HistoryEntry[] {
+  return (selectAllHistoryStmt.all(userId) as HistoryRow[]).map(toEntry);
 }
 
 const selectLatestForShowStmt = db.prepare(`

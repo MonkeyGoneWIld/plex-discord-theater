@@ -41,6 +41,11 @@ const pinTokens = new Map<number, string>();
 const pinAccountIds = new Map<number, string>();
 const invalidPinIds = new Set<number>();
 const plexCalls: Array<{ method: string; url: URL; token: string | null }> = [];
+const defaultRemoteHistory = [
+  { ratingKey: "101", duration: 100_000, viewedAt: 1_700_000_000 },
+];
+const remoteHistoryByAccount = new Map<string, typeof defaultRemoteHistory>();
+const historyPageStarts: Array<{ accountId: string; start: number }> = [];
 
 globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
   const url = new URL(typeof input === "string" || input instanceof URL ? input.toString() : input.url);
@@ -83,10 +88,15 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
       return Response.json({ MediaContainer: { Directory: [{ key: "1", title: "Movies", type: "movie" }] } });
     }
     if (url.pathname === "/status/sessions/history/all") {
+      const accountId = url.searchParams.get("accountID") || "default";
+      const start = Number(url.searchParams.get("X-Plex-Container-Start") || 0);
+      const size = Number(url.searchParams.get("X-Plex-Container-Size") || 100);
+      const remoteHistory = remoteHistoryByAccount.get(accountId) ?? defaultRemoteHistory;
+      historyPageStarts.push({ accountId, start });
       return Response.json({
         MediaContainer: {
-          totalSize: 1,
-          Metadata: [{ ratingKey: "101", duration: 100_000, viewedAt: 1_700_000_000 }],
+          totalSize: remoteHistory.length,
+          Metadata: remoteHistory.slice(start, start + size),
         },
       });
     }
@@ -203,6 +213,50 @@ const sameAccountPin = nextPin - 1;
 pinAccountIds.set(sameAccountPin, "99");
 await accounts.pollPlexAccountLink("discord-a");
 check("re-linking the same account preserves local history", !!history.getProgress("discord-a", "404"), true);
+
+console.log("\n— full history is backfilled once, then synced incrementally —");
+const fullHistory = Array.from({ length: 650 }, (_, index) => ({
+  ratingKey: String(1_000 + index),
+  duration: 100_000,
+  viewedAt: 1_700_000_000 - index,
+}));
+remoteHistoryByAccount.set("5000", fullHistory);
+await accounts.startPlexAccountLink("discord-full");
+const fullPin = nextPin - 1;
+pinAccountIds.set(fullPin, "5000");
+await accounts.pollPlexAccountLink("discord-full");
+const firstFullPage = historyPageStarts.length;
+const fullResult = await accounts.syncPlexAccount("discord-full");
+check("initial sync imports every unique Plex title", fullResult.imported, 651);
+check("Activity storage keeps more than 500 rows", history.getHistory("discord-full", 1, 0).total, 651);
+check(
+  "initial sync paginates until Plex history is exhausted",
+  historyPageStarts.slice(firstFullPage).filter((page) => page.accountId === "5000").map((page) => page.start),
+  [0, 100, 200, 300, 400, 500, 600],
+);
+
+remoteHistoryByAccount.set("5000", [{
+  ratingKey: "9999",
+  duration: 100_000,
+  viewedAt: Math.ceil(Date.now() / 1000),
+}, ...fullHistory]);
+const incrementalPage = historyPageStarts.length;
+const callsBeforeIncremental = plexCalls.length;
+const incremental = await accounts.syncPlexAccount("discord-full");
+check("later sync imports newly watched Plex titles", incremental.imported, 1);
+check(
+  "later sync stops after crossing the previous-sync window",
+  historyPageStarts.slice(incrementalPage).filter((page) => page.accountId === "5000").map((page) => page.start),
+  [0],
+);
+check(
+  "incremental sync does not re-export old local history",
+  plexCalls.slice(callsBeforeIncremental).some((call) =>
+    call.token === `server-token-${fullPin}`
+    && (call.url.pathname === "/:/timeline" || call.url.pathname === "/:/scrobble")
+  ),
+  false,
+);
 
 accounts.unlinkPlexAccount("discord-a");
 check("disconnect removes only a", accounts.getPlexAccountStatus("discord-a").linked, false);

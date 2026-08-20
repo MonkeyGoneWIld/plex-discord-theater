@@ -218,26 +218,28 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
           {/* Requesting — movies get a single button here; TV shows the season
               grid below. Both hidden when Seerr isn't set up or there's no
               TMDB id. */}
-          {tmdbId != null && mediaType === "movie" && seerrConfigured !== false && (
-            !statusLoaded ? (
-              // Same footprint as the real button, so nothing shifts when it lands.
-              <SkeletonBlock width={140} height={40} borderRadius={8} />
-            ) : statusLabel ? (
-              <button disabled style={{ ...styles.requestBtn, ...styles.requestBtnDone }}>
-                {statusLabel}
-              </button>
-            ) : (
-              <button
-                onClick={handleRequest}
-                disabled={requesting}
-                style={styles.requestBtn}
-              >
-                {requesting ? "Requesting…" : "Request"}
-              </button>
-            )
-          )}
+          <div style={styles.titleActions}>
+            {tmdbId != null && mediaType === "movie" && seerrConfigured !== false && (
+              !statusLoaded ? (
+                // Same footprint as the real button, so nothing shifts when it lands.
+                <SkeletonBlock width={140} height={40} borderRadius={8} />
+              ) : statusLabel ? (
+                <button disabled style={{ ...styles.requestBtn, ...styles.requestBtnDone }}>
+                  {statusLabel}
+                </button>
+              ) : (
+                <button
+                  onClick={handleRequest}
+                  disabled={requesting}
+                  style={styles.requestBtn}
+                >
+                  {requesting ? "Requesting…" : "Request"}
+                </button>
+              )
+            )}
+            <PlexMediaActions item={item} inline />
+          </div>
           {requestError && <div style={styles.requestError}>{requestError}</div>}
-          <PlexMediaActions item={item} />
         </div>
       </div>
       {/* TV: same season request grid as the library show page. It comes before
@@ -421,6 +423,9 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     cursor: "pointer",
     fontFamily: "inherit",
+  },
+  titleActions: {
+    display: "flex", alignItems: "center", flexWrap: "wrap", gap: "10px",
   },
   requestBtnDone: {
     background: "rgba(255,255,255,0.06)",

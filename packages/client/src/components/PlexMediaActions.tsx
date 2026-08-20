@@ -13,10 +13,12 @@ interface PlexMediaActionsProps {
   item: PlexItem;
   progress?: HistoryEntry | null;
   onProgressChange?: (progress: HistoryEntry | null) => void;
+  /** Sit alongside the page's primary Play/Resume/Request action. */
+  inline?: boolean;
 }
 
 /** Personal Plex actions. These never participate in room playback. */
-export function PlexMediaActions({ item, progress, onProgressChange }: PlexMediaActionsProps) {
+export function PlexMediaActions({ item, progress, onProgressChange, inline = false }: PlexMediaActionsProps) {
   const [linked, setLinked] = useState(false);
   const [watchlisted, setWatchlisted] = useState(false);
   const [watchlistBusy, setWatchlistBusy] = useState(false);
@@ -84,7 +86,7 @@ export function PlexMediaActions({ item, progress, onProgressChange }: PlexMedia
   };
 
   return (
-    <div style={styles.wrap}>
+    <div style={{ ...styles.wrap, ...(inline ? styles.wrapInline : {}) }}>
       <div style={styles.buttons}>
         {supportsWatchlist && (
           <button type="button" onClick={() => void toggleWatchlist()} disabled={watchlistBusy} style={styles.button}>
@@ -123,6 +125,7 @@ function Check({ filled }: { filled: boolean }) {
 
 const styles: Record<string, React.CSSProperties> = {
   wrap: { display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "8px", marginTop: "14px" },
+  wrapInline: { marginTop: 0 },
   buttons: { display: "flex", flexWrap: "wrap", gap: "8px" },
   button: {
     display: "inline-flex", alignItems: "center", gap: "8px", padding: "9px 13px",

@@ -664,8 +664,13 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                     )}
                   </div>
                 )}
+                <PlexMediaActions
+                  item={item}
+                  progress={progress}
+                  onProgressChange={setProgress}
+                  inline
+                />
               </div>
-              <PlexMediaActions item={item} progress={progress} onProgressChange={setProgress} />
             </div>
           </div>
         </div>

@@ -268,7 +268,7 @@ const styles: Record<string, React.CSSProperties> = {
     width: "17px", height: "17px", borderRadius: "4px", background: "#111",
     border: "1px solid rgba(229,160,13,0.38)", boxSizing: "border-box", overflow: "hidden",
   },
-  plexMarkImage: { display: "block", width: "78%", height: "78%" },
+  plexMarkImage: { display: "block", width: "100%", height: "100%" },
   overlay: {
     position: "fixed", inset: 0, zIndex: 10000, display: "flex", alignItems: "center",
     justifyContent: "center", padding: "20px", background: "rgba(0,0,0,0.6)",

@@ -14,6 +14,7 @@ import {
   clearHistory,
   deleteHistoryEntry,
   getAllHistory,
+  getProgress,
   mergeExternalProgress,
   type HistoryEntry,
 } from "./watch-history.js";
@@ -620,18 +621,63 @@ export async function setPlexWatchlistState(
   if (!response.ok) throw new Error(`Could not update your Plex Watchlist (${response.status})`);
 }
 
+async function watchedMembers(
+  item: AccountMediaMetadata,
+  ratingKey: string,
+  serverToken: string,
+): Promise<AccountMediaMetadata[]> {
+  if (item.type !== "show" && item.type !== "season") return [item];
+  const suffix = item.type === "show" ? "allLeaves" : "children";
+  const data = await plexJSON<{ MediaContainer: { Metadata?: AccountMediaMetadata[] } }>(
+    `/library/metadata/${ratingKey}/${suffix}`,
+    undefined,
+    serverToken,
+  );
+  return (data.MediaContainer.Metadata || []).filter(
+    (entry) => entry.type === "episode" && !!entry.ratingKey && /^\d+$/.test(entry.ratingKey),
+  );
+}
+
+export async function getPlexItemWatchedState(
+  userId: string,
+  ratingKey: string,
+): Promise<{ watched: boolean; watchedCount: number; total: number }> {
+  if (!/^\d+$/.test(ratingKey)) throw new Error("Invalid rating key");
+  const linked = requireAccessToken(userId);
+  const item = await localAccountMetadata(ratingKey, linked.serverToken);
+  if (!["movie", "episode", "season", "show"].includes(item.type || "")) {
+    throw new Error("This Plex item does not support watched state");
+  }
+  const members = await watchedMembers(item, ratingKey, linked.serverToken);
+  const watchedCount = members.reduce(
+    (count, member) => count + (getProgress(userId, member.ratingKey!)?.watched ? 1 : 0),
+    0,
+  );
+  return {
+    watched: members.length > 0 && watchedCount === members.length,
+    watchedCount,
+    total: members.length,
+  };
+}
+
 /** Explicit user action: update local Activity and only that user's linked Plex account. */
 export async function setPlexItemWatched(
   userId: string,
   ratingKey: string,
   watched: boolean,
-): Promise<HistoryEntry | null> {
+): Promise<{ progress: HistoryEntry | null; affected: number }> {
   if (!/^\d+$/.test(ratingKey)) throw new Error("Invalid rating key");
   const linked = requireAccessToken(userId);
   const item = await localAccountMetadata(ratingKey, linked.serverToken);
-  if (item.type !== "movie" && item.type !== "episode") {
-    throw new Error("Only movies and episodes can be marked watched here");
+  if (!["movie", "episode", "season", "show"].includes(item.type || "")) {
+    throw new Error("This Plex item does not support watched state");
   }
+  const members = await watchedMembers(item, ratingKey, linked.serverToken);
+  if (members.length === 0) throw new Error("This title has no episodes to update");
+
+  // Plex applies scrobble/unscrobble recursively to season and show containers.
+  // One parent action avoids hundreds of account requests for a long-running
+  // series; local Activity is expanded per episode below so its UI stays exact.
   const response = await plexFetch(
     watched ? "/:/scrobble" : "/:/unscrobble",
     { key: ratingKey, identifier: "com.plexapp.plugins.library" },
@@ -641,15 +687,22 @@ export async function setPlexItemWatched(
   );
   if (!response.ok) throw new Error(`Plex watched-state update failed (${response.status})`);
   if (!watched) {
-    deleteHistoryEntry(userId, ratingKey);
-    return null;
+    for (const member of members) deleteHistoryEntry(userId, member.ratingKey!);
+    return { progress: null, affected: members.length };
   }
-  return (await mergeExternalProgress(userId, ratingKey, {
-    positionMs: item.duration || 0,
-    durationMs: item.duration || 0,
-    watched: true,
-    updatedAt: Date.now(),
-  })).entry;
+  const updatedAt = Date.now();
+  await runWithConcurrency(members, 12, async (member) => {
+    await mergeExternalProgress(userId, member.ratingKey!, {
+      positionMs: member.duration || 0,
+      durationMs: member.duration || 0,
+      watched: true,
+      updatedAt,
+    }, member);
+  });
+  return {
+    progress: members.length === 1 ? getProgress(userId, members[0].ratingKey!) : null,
+    affected: members.length,
+  };
 }
 
 interface RemoteMetadata {

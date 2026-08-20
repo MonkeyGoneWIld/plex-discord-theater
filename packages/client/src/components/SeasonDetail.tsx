@@ -9,6 +9,7 @@ import {
 } from "../lib/seasonGaps";
 import { formatTimecode } from "../lib/format";
 import { SkeletonBlock } from "./SkeletonBlock";
+import { PlexMediaActions } from "./PlexMediaActions";
 import type { QueueItem } from "../hooks/useSync";
 
 interface SeasonDetailProps {
@@ -184,23 +185,39 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
         Back
       </button>
 
-      <div style={styles.breadcrumb}>
-        {onShowClick ? (
-          <button
-            type="button"
-            onClick={onShowClick}
-            style={{ ...styles.buttonReset, ...styles.breadcrumbShow }}
-            onMouseEnter={(e) => (e.currentTarget.style.textDecoration = "underline")}
-            onMouseLeave={(e) => (e.currentTarget.style.textDecoration = "none")}
-          >
-            {show.title}
-          </button>
-        ) : (
-          <span style={styles.breadcrumbShow}>{show.title}</span>
-        )}
-        <span style={styles.breadcrumbSep}>&rsaquo;</span>
-        {/* The season is the current page, so it stays static (not a link). */}
-        <span style={styles.breadcrumbSeason}>{seasonLabel}</span>
+      <div style={styles.breadcrumbRow}>
+        <div style={{ ...styles.breadcrumb, padding: 0, margin: 0 }}>
+          {onShowClick ? (
+            <button
+              type="button"
+              onClick={onShowClick}
+              style={{ ...styles.buttonReset, ...styles.breadcrumbShow }}
+              onMouseEnter={(e) => (e.currentTarget.style.textDecoration = "underline")}
+              onMouseLeave={(e) => (e.currentTarget.style.textDecoration = "none")}
+            >
+              {show.title}
+            </button>
+          ) : (
+            <span style={styles.breadcrumbShow}>{show.title}</span>
+          )}
+          <span style={styles.breadcrumbSep}>&rsaquo;</span>
+          {/* The season is the current page, so it stays static (not a link). */}
+          <span style={styles.breadcrumbSeason}>{seasonLabel}</span>
+        </div>
+        <PlexMediaActions
+          item={season}
+          inline
+          watched={episodes.length > 0 && episodes.every((episode) => progress[episode.ratingKey]?.watched)}
+          onWatchedChange={(nextWatched) => {
+            if (!nextWatched) {
+              setProgress({});
+              return;
+            }
+            fetchProgressMany(episodes.map((episode) => episode.ratingKey))
+              .then((res) => setProgress(res.entries))
+              .catch(() => {});
+          }}
+        />
       </div>
 
       {loading ? (
@@ -508,6 +525,10 @@ const styles: Record<string, React.CSSProperties> = {
   episodeInfo: {
     display: "flex", flexDirection: "column", justifyContent: "center",
     gap: "4px", flex: 1, minWidth: 0,
+  },
+  breadcrumbRow: {
+    display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px",
+    padding: "0 24px 16px", maxWidth: "1100px", margin: "0 auto",
   },
   watchedError: {
     padding: "9px 12px", borderRadius: "7px", border: "1px solid rgba(212,119,119,0.25)",

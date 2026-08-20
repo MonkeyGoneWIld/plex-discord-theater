@@ -4,6 +4,7 @@ import { getSessionUserId } from "../middleware/auth.js";
 import {
   getPlexWatchlist,
   getPlexWatchlistState,
+  getPlexItemWatchedState,
   getPlexAccountStatus,
   pollPlexAccountLink,
   setPlexItemWatched,
@@ -125,11 +126,27 @@ router.put("/watched/:ratingKey", async (req, res) => {
     return;
   }
   try {
-    const progress = await setPlexItemWatched(userId, ratingKey, req.body.watched);
-    res.json({ watched: req.body.watched, progress });
+    const result = await setPlexItemWatched(userId, ratingKey, req.body.watched);
+    res.json({ watched: req.body.watched, ...result });
   } catch (err) {
     console.error("[Plex Account] Watched update failed for", userId.substring(0, 8), err);
     res.status(502).json({ error: err instanceof Error ? err.message : "Could not update watched state" });
+  }
+});
+
+router.get("/watched/:ratingKey", async (req, res) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+  const ratingKey = req.params.ratingKey as string;
+  if (!/^\d+$/.test(ratingKey)) {
+    res.status(400).json({ error: "Invalid rating key" });
+    return;
+  }
+  try {
+    res.json(await getPlexItemWatchedState(userId, ratingKey));
+  } catch (err) {
+    console.error("[Plex Account] Watched state failed for", userId.substring(0, 8), err);
+    res.status(502).json({ error: err instanceof Error ? err.message : "Could not read watched state" });
   }
 });
 

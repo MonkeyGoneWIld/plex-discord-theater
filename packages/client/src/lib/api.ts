@@ -848,6 +848,14 @@ export function setPlexWatchlistState(
 export function setPlexItemWatched(
   ratingKey: string,
   watched: boolean,
-): Promise<{ watched: boolean; progress: HistoryEntry | null }> {
+): Promise<{ watched: boolean; progress: HistoryEntry | null; affected: number }> {
   return apiPut(`/api/plex-account/watched/${encodeURIComponent(ratingKey)}`, { watched });
+}
+
+export function fetchPlexItemWatchedState(ratingKey: string): Promise<{
+  watched: boolean;
+  watchedCount: number;
+  total: number;
+}> {
+  return apiGet(`/api/plex-account/watched/${encodeURIComponent(ratingKey)}`);
 }

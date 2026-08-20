@@ -258,7 +258,7 @@ interface ItemSummary {
 
 const metaCache = new Map<string, { at: number; summary: ItemSummary }>();
 
-interface PlexHistoryMetadata {
+export interface PlexHistoryMetadata {
   ratingKey?: string;
   title?: string;
   type?: string;
@@ -502,6 +502,7 @@ export async function mergeExternalProgress(
     watched: boolean;
     updatedAt: number;
   },
+  metadata?: PlexHistoryMetadata,
 ): Promise<{ entry: HistoryEntry | null; changed: boolean }> {
   if (!userId || !/^\d+$/.test(ratingKey)) return { entry: null, changed: false };
   if (!Number.isFinite(progress.positionMs) || progress.positionMs < 0) {
@@ -520,7 +521,9 @@ export async function mergeExternalProgress(
     return { entry: toEntry(existing), changed: false };
   }
 
-  const summary = await fetchItemSummary(ratingKey);
+  // Bulk season/show actions already receive every episode's metadata from
+  // Plex. Reuse it instead of turning one click into another request per leaf.
+  const summary = metadata ? toSummary(metadata) : await fetchItemSummary(ratingKey);
   if (!summary && !existing) return { entry: null, changed: false };
   const durationMs = Math.max(
     0,

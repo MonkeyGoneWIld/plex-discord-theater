@@ -149,12 +149,31 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
       }
       return Response.json({ MediaContainer: { size: 0, Metadata: [] } });
     }
+    if (url.pathname === "/library/metadata/700/allLeaves" || url.pathname === "/library/metadata/701/children") {
+      return Response.json({
+        MediaContainer: {
+          Metadata: [
+            {
+              ratingKey: "702", title: "Episode 1", type: "episode", duration: 100_000,
+              parentRatingKey: "701", grandparentRatingKey: "700", grandparentTitle: "Test Show",
+              parentIndex: 1, index: 1,
+            },
+            {
+              ratingKey: "703", title: "Episode 2", type: "episode", duration: 100_000,
+              parentRatingKey: "701", grandparentRatingKey: "700", grandparentTitle: "Test Show",
+              parentIndex: 1, index: 2,
+            },
+          ],
+        },
+      });
+    }
     if (url.pathname.startsWith("/library/metadata/")) {
       const ratingKey = url.pathname.split("/").pop()!;
+      const type = ratingKey === "700" ? "show" : ratingKey === "701" ? "season" : "movie";
       return Response.json({
         MediaContainer: {
           Metadata: [{
-            ratingKey, title: `Title ${ratingKey}`, type: "movie", duration: 100_000,
+            ratingKey, title: `Title ${ratingKey}`, type, duration: 100_000,
             thumb: `/library/metadata/${ratingKey}/thumb/1`,
             guid: `plex://movie/provider-${ratingKey}`,
           }],
@@ -250,6 +269,24 @@ check("mark unwatched uses b's server-specific token", plexCalls.some((call) =>
 check("personal actions still never create a playback timeline", plexCalls.some((call) =>
   call.url.pathname === "/:/timeline"
 ), false);
+
+console.log("\n— seasons and shows update every episode —");
+const showUpdate = await accounts.setPlexItemWatched("discord-b", "700", true);
+check("mark show watched reports every affected episode", showUpdate.affected, 2);
+check("show episode one is watched locally", history.getProgress("discord-b", "702")?.watched, true);
+check("show episode two is watched locally", history.getProgress("discord-b", "703")?.watched, true);
+check("show watched state is complete", (await accounts.getPlexItemWatchedState("discord-b", "700")).watched, true);
+check("the recursive Plex action targets the show once", plexCalls.filter((call) =>
+  call.url.pathname === "/:/scrobble" && call.url.searchParams.get("key") === "700"
+).length, 1);
+const seasonUpdate = await accounts.setPlexItemWatched("discord-b", "701", false);
+check("mark season unwatched reports every affected episode", seasonUpdate.affected, 2);
+check("season episode one is cleared locally", history.getProgress("discord-b", "702"), null);
+check("season episode two is cleared locally", history.getProgress("discord-b", "703"), null);
+check("season watched state is now incomplete", (await accounts.getPlexItemWatchedState("discord-b", "701")).watched, false);
+check("the recursive Plex action targets the season once", plexCalls.filter((call) =>
+  call.url.pathname === "/:/unscrobble" && call.url.searchParams.get("key") === "701"
+).length, 1);
 
 console.log("\n— changing Plex accounts starts with clean history —");
 await history.recordProgress("discord-a", "303", 70, { force: true });

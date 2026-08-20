@@ -414,6 +414,11 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           ratingKey: null,
           title: null,
           hlsSessionId: null,
+          // And the stream it named. The server tears every variant down on a
+          // stop; a client that kept one held a session id for a transcode that
+          // no longer exists, and the next thing it played adopted that id
+          // instead of announcing itself. See announceStream.
+          variant: null,
           playing: false,
           position: 0,
         }));
@@ -518,12 +523,20 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               queue: (msg.queue as QueueItem[]) || [],
               // The stream a joiner lands on — the host's. Absent from an older
               // server, in which case the player falls back to hlsSessionId.
-              variant: msg.variant
-                ? {
-                    ...(msg.variant as Omit<StreamVariant, "isOwner"> & { isOwner: boolean }),
-                    seq: (prev.variant?.seq ?? 0) + 1,
-                  }
-                : prev.variant,
+              // An explicit null means nothing is playing, and has to be taken
+              // as such: keeping the last one left a reconnecting client holding
+              // a stream id the room had already torn down. Only a server that
+              // doesn't send the field at all — which this one always does —
+              // falls back to what we had.
+              variant:
+                msg.variant === undefined
+                  ? prev.variant
+                  : msg.variant === null
+                    ? null
+                    : {
+                        ...(msg.variant as Omit<StreamVariant, "isOwner"> & { isOwner: boolean }),
+                        seq: (prev.variant?.seq ?? 0) + 1,
+                      },
               hostUsername: (msg.hostUsername as string) || prev.hostUsername,
               participants: (msg.participants as Participant[]) || [],
               isCoHost:
@@ -639,6 +652,9 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               ratingKey: null,
               title: null,
               hlsSessionId: null,
+              // Same reasoning as sendStop above: the stream is gone, so the
+              // variant naming it has to go too.
+              variant: null,
               sessionOffset: 0,
               playing: false,
               position: 0,

@@ -2589,7 +2589,26 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const announceStream = useCallback((sessionId: string, startOffset: number) => {
     if (!ownsSessionRef.current) return;
     const offset = startOffset > 0 ? startOffset : undefined;
-    if (isHostRef.current && !didAdoptRef.current) {
+    /**
+     * Adopting means the room is already on this stream and knows what it is,
+     * so re-announcing it would only reset everyone's position.
+     *
+     * That holds while the room really is on it — and stops holding the moment
+     * anything hands this client a session id the room has finished with. A
+     * host who ended one title and opened another adopted the dead id off a
+     * stale variant, said nothing to the room, and watched the new title alone
+     * while everybody else sat on the stopped one. Nothing was broadcast at
+     * all: no play, no rating key, no stream.
+     *
+     * So the suppression is conditional on the room agreeing, rather than on
+     * this client having adopted something.
+     */
+    const sync = syncStateRef.current;
+    const roomIsAlreadyOnThis =
+      didAdoptRef.current &&
+      sync?.playing === true &&
+      sync?.ratingKey === item.ratingKey;
+    if (isHostRef.current && !roomIsAlreadyOnThis) {
       // Send the formatted title, not the bare episode name — viewers
       // reconstruct their item from sync state alone (no show/season fields),
       // so this string is all they have to display.

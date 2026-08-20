@@ -525,6 +525,49 @@ console.log("\n— the evening that broke —");
   [host, a].forEach((c) => c.close());
 }
 
+console.log("\n— ending one title and starting another takes the room with you —");
+{
+  const [host, a, b] = await room("inst-14", ["host", "a", "b"]);
+  const sid1 = await startPlayback(host);
+  check("everyone starts together", [a.stream()?.session, b.stream()?.session], [sid1, sid1]);
+
+  a.clear(); b.clear();
+  host.send({ type: "stop" });
+  await sleep(60);
+  check("the stop reaches everyone", [!!a.last("stop"), !!b.last("stop")], [true, true]);
+
+  // Nothing is playing, so nothing should be handed a stream — including
+  // somebody who arrives now. A client that keeps the stream it was last told
+  // about is holding a session id for a transcode that has been killed, and the
+  // next thing it plays adopts that id instead of announcing itself: the host
+  // ends up watching the new title alone while the room sits on the old one.
+  const probe = new Client("u-probe-stop", "probe");
+  await probe.connect("inst-14");
+  check("and a joiner is told there is no stream", probe.last("state")?.variant, null);
+  probe.close();
+  await sleep(30);
+
+  // Now a different title.
+  a.clear(); b.clear();
+  const sid2 = uuid();
+  host.send({
+    type: "play", ratingKey: "200", title: "Another", subtitles: false,
+    hlsSessionId: sid2, position: 0, sessionOffset: 0,
+    audioStreamId: 1, subtitleStreamId: 0,
+  });
+  await sleep(60);
+
+  check("the viewers are told what is playing now",
+    [a.last("play")?.ratingKey, b.last("play")?.ratingKey], ["200", "200"]);
+  check("and which stream to play it from",
+    [a.stream()?.session, b.stream()?.session], [sid2, sid2]);
+  check("on the host's tracks", [a.stream()?.key, b.stream()?.key], ["1:0", "1:0"]);
+  check("with the host driving", host.stream()?.owner, true);
+  check("and neither of them", [a.stream()?.owner, b.stream()?.owner], [false, false]);
+
+  [host, a, b].forEach((c) => c.close());
+}
+
 console.log("\n— stepping out of the player keeps your stream —");
 {
   const [host, a] = await room("inst-12", ["host", "a"]);

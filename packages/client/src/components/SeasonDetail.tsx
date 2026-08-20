@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import {
-  fetchChildren, fetchProgressMany, fetchSeasonEpisodes, getSessionToken,
+  fetchChildren, fetchPlexAccountStatus, fetchProgressMany, fetchSeasonEpisodes, getSessionToken,
+  setPlexItemWatched,
   type HistoryEntry, type PlexItem, type SeasonEpisode,
 } from "../lib/api";
 import {
@@ -49,6 +50,17 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
   // Not host-gated: it's their history either way, and it's information rather
   // than a control, so there's nothing here a viewer shouldn't see.
   const [progress, setProgress] = useState<Record<string, HistoryEntry>>({});
+  const [plexLinked, setPlexLinked] = useState(false);
+  const [watchedBusy, setWatchedBusy] = useState<string | null>(null);
+  const [watchedError, setWatchedError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPlexAccountStatus()
+      .then((status) => { if (!cancelled) setPlexLinked(status.linked); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -143,6 +155,26 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
     });
   };
 
+  const toggleWatched = async (ep: PlexItem, watched: boolean) => {
+    if (watchedBusy) return;
+    setWatchedBusy(ep.ratingKey);
+    setWatchedError(null);
+    try {
+      const result = await setPlexItemWatched(ep.ratingKey, !watched);
+      setProgress((old) => {
+        const next = { ...old };
+        if (result.progress) next[ep.ratingKey] = result.progress;
+        else delete next[ep.ratingKey];
+        return next;
+      });
+    } catch (err) {
+      console.error("Could not update watched state:", err);
+      setWatchedError(err instanceof Error ? err.message : "Could not update watched state");
+    } finally {
+      setWatchedBusy(null);
+    }
+  };
+
   return (
     <div style={styles.page}>
       <button onClick={onBack} style={styles.backBtn}>
@@ -194,6 +226,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
         </div>
       ) : (
         <div style={styles.list}>
+          {watchedError && <div style={styles.watchedError}>{watchedError}</div>}
           {rows.map((row) => {
             if (row.kind === "gap") {
               const g = row.ep;
@@ -348,6 +381,26 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                     <p style={styles.episodeSummary}>{ep.summary}</p>
                   )}
                 </div>
+                {plexLinked && (
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    aria-label={watched ? `Mark ${ep.title} unwatched` : `Mark ${ep.title} as watched`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void toggleWatched(ep, watched);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter" && e.key !== " ") return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      void toggleWatched(ep, watched);
+                    }}
+                    style={{ ...styles.markWatchedBtn, ...(watched ? styles.markWatchedBtnActive : {}) }}
+                  >
+                    {watchedBusy === ep.ratingKey ? "Updating..." : watched ? "Mark unwatched" : "Mark watched"}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -455,6 +508,18 @@ const styles: Record<string, React.CSSProperties> = {
   episodeInfo: {
     display: "flex", flexDirection: "column", justifyContent: "center",
     gap: "4px", flex: 1, minWidth: 0,
+  },
+  watchedError: {
+    padding: "9px 12px", borderRadius: "7px", border: "1px solid rgba(212,119,119,0.25)",
+    background: "rgba(212,119,119,0.07)", color: "#d47777", fontSize: "12px",
+  },
+  markWatchedBtn: {
+    alignSelf: "center", flexShrink: 0, padding: "7px 10px", borderRadius: "7px",
+    border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.04)",
+    color: "#aaa", fontSize: "11px", fontWeight: 600, cursor: "pointer",
+  },
+  markWatchedBtnActive: {
+    border: "1px solid rgba(106,153,85,0.3)", color: "#82ad70",
   },
   episodeMeta: { display: "flex", alignItems: "center", gap: "8px" },
   episodeNumber: { color: "#e5a00d", fontSize: "12px", fontWeight: 700 },

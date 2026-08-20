@@ -13,6 +13,7 @@ import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
 import { SeasonRequestGrid } from "./SeasonRequestGrid";
 import { DetailLoading } from "./DetailLoading";
+import { PlexMediaActions } from "./PlexMediaActions";
 
 interface ShowDetailProps {
   item: PlexItem;
@@ -257,6 +258,7 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
                   </span>
                 </button>
               )}
+              <PlexMediaActions item={item} />
             </div>
           </div>
 

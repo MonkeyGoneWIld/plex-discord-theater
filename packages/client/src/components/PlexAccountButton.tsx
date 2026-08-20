@@ -138,6 +138,7 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
       setConfirmDisconnect(false);
       autoSyncStarted.current = false;
       setMessage("Plex account disconnected. Local history was kept.");
+      onHistoryChanged?.();
     } catch (err) {
       setMessage(err instanceof Error ? err.message : "Could not disconnect Plex");
     } finally {

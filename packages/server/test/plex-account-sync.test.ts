@@ -78,6 +78,26 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
       accessToken: `server-token-${suffix}`,
     }]);
   }
+  if (url.hostname === "discover.provider.plex.tv") {
+    const token = headers.get("X-Plex-Token");
+    plexCalls.push({ method, url, token });
+    if (url.pathname === "/library/sections/watchlist/all") {
+      return Response.json({
+        MediaContainer: {
+          totalSize: 1,
+          Metadata: [{
+            ratingKey: "provider-303",
+            guid: "plex://movie/provider-303",
+            title: "Title 303",
+            type: "movie",
+            thumb: "https://metadata-static.plex.tv/poster.jpg",
+            Guid: [{ id: "tmdb://303" }],
+          }],
+        },
+      });
+    }
+    if (url.pathname.startsWith("/actions/")) return new Response("", { status: 200 });
+  }
 
   if (url.hostname === "plex.test") {
     plexCalls.push({ method, url, token: url.searchParams.get("X-Plex-Token") });
@@ -114,6 +134,21 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
         },
       });
     }
+    if (url.pathname === "/library/all") {
+      const guid = url.searchParams.get("guid");
+      if (guid === "plex://movie/provider-303") {
+        return Response.json({
+          MediaContainer: {
+            size: 1,
+            Metadata: [{
+              ratingKey: "303", title: "Title 303", type: "movie", duration: 100_000,
+              thumb: "/library/metadata/303/thumb/1", guid,
+            }],
+          },
+        });
+      }
+      return Response.json({ MediaContainer: { size: 0, Metadata: [] } });
+    }
     if (url.pathname.startsWith("/library/metadata/")) {
       const ratingKey = url.pathname.split("/").pop()!;
       return Response.json({
@@ -121,11 +156,12 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
           Metadata: [{
             ratingKey, title: `Title ${ratingKey}`, type: "movie", duration: 100_000,
             thumb: `/library/metadata/${ratingKey}/thumb/1`,
+            guid: `plex://movie/provider-${ratingKey}`,
           }],
         },
       });
     }
-    if (url.pathname === "/:/progress" || url.pathname === "/:/scrobble") {
+    if (url.pathname === "/:/progress" || url.pathname === "/:/scrobble" || url.pathname === "/:/unscrobble") {
       return new Response("", { status: 200 });
     }
   }
@@ -188,6 +224,32 @@ check(
   plexCalls.some((call) => call.url.pathname === "/:/timeline"),
   false,
 );
+
+console.log("\n— Watchlist and explicit watched actions stay personal —");
+const watchlist = await accounts.getPlexWatchlist("discord-b");
+check("Plex Watchlist titles resolve to the playable local copy", watchlist[0]?.ratingKey, "303");
+check("Watchlist reads use the linked account token", plexCalls.some((call) =>
+  call.url.hostname === "discover.provider.plex.tv" && call.token === "personal-token-11"
+), true);
+check("a title reports its current Plex Watchlist state", await accounts.getPlexWatchlistState("discord-b", "303"), true);
+await accounts.setPlexWatchlistState("discord-b", { ratingKey: "303" }, false);
+check("Watchlist updates use the linked account token", plexCalls.some((call) =>
+  call.url.pathname === "/actions/removeFromWatchlist" && call.token === "personal-token-11"
+), true);
+
+await accounts.setPlexItemWatched("discord-b", "303", true);
+check("mark watched updates local Activity", history.getProgress("discord-b", "303")?.watched, true);
+check("mark watched uses b's server-specific token", plexCalls.some((call) =>
+  call.url.pathname === "/:/scrobble" && call.token === "server-token-11"
+), true);
+await accounts.setPlexItemWatched("discord-b", "303", false);
+check("mark unwatched clears the local Activity row", history.getProgress("discord-b", "303"), null);
+check("mark unwatched uses b's server-specific token", plexCalls.some((call) =>
+  call.url.pathname === "/:/unscrobble" && call.token === "server-token-11"
+), true);
+check("personal actions still never create a playback timeline", plexCalls.some((call) =>
+  call.url.pathname === "/:/timeline"
+), false);
 
 console.log("\n— changing Plex accounts starts with clean history —");
 await history.recordProgress("discord-a", "303", 70, { force: true });

@@ -18,6 +18,9 @@ import {
   deleteHistoryEntry,
   dismissFromContinueWatching,
   clearHistory,
+  fetchPlexAccountStatus,
+  fetchPlexWatchlist,
+  setPlexWatchlistState,
   historyEntryToItem,
   type HistoryEntry,
   type PersonResult,
@@ -83,6 +86,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   // activeSection state so tab switching logic is shared with real sections.
   const isHomeTab = activeSection === "home";
   const isHistoryTab = activeSection === "history";
+  const isWatchlistTab = activeSection === "watchlist";
   const [continueItems, setContinueItems] = useState<HistoryEntry[]>([]);
   const [historyItems, setHistoryItems] = useState<HistoryEntry[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
@@ -93,6 +97,10 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [plexLinked, setPlexLinked] = useState(false);
+  const [watchlistItems, setWatchlistItems] = useState<PlexItem[]>([]);
+  const [watchlistLoading, setWatchlistLoading] = useState(false);
+  const [watchlistError, setWatchlistError] = useState<string | null>(null);
   const [homeHubs, setHomeHubs] = useState<PlexHub[]>([]);
   const [homeLoading, setHomeLoading] = useState(true);
   const [items, setItems] = useState<PlexItem[]>([]);
@@ -197,6 +205,35 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     // it the tab still shows pre-playback positions on the way back.
   }, [visible, isHistoryTab, retryNonce, historyNonce]);
 
+  // Watchlist is an opt-in account surface, so the tab itself only exists for
+  // a linked user. Re-check after an account sync/link and when the Library
+  // returns to screen so connecting in the header is reflected immediately.
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    fetchPlexAccountStatus()
+      .then((status) => {
+        if (cancelled) return;
+        setPlexLinked(status.linked);
+        if (!status.linked && isWatchlistTab) onActiveSectionChange("home");
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [visible, historyNonce, isWatchlistTab, onActiveSectionChange]);
+
+  useEffect(() => {
+    if (!visible || !isWatchlistTab || !plexLinked) return;
+    setWatchlistLoading(true);
+    setWatchlistError(null);
+    fetchPlexWatchlist()
+      .then((res) => setWatchlistItems(res.items))
+      .catch((err) => {
+        console.error(err);
+        setWatchlistError(err instanceof Error ? err.message : "Could not load your Plex Watchlist");
+      })
+      .finally(() => setWatchlistLoading(false));
+  }, [visible, isWatchlistTab, plexLinked, retryNonce, historyNonce]);
+
   /**
    * Next page of history.
    *
@@ -269,7 +306,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
 
   // Fetch genres when section changes
   useEffect(() => {
-    if (!activeSection || isHomeTab || isHistoryTab) return;
+    if (!activeSection || isHomeTab || isHistoryTab || isWatchlistTab) return;
     setGenres([]);
     // Keep the existing values when they're already at their defaults. A fresh
     // [] or an identical string still counts as a change and would re-trigger
@@ -280,11 +317,11 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     fetchGenres(activeSection)
       .then((res) => setGenres(res.genres))
       .catch(console.error);
-  }, [activeSection]);
+  }, [activeSection, isHomeTab, isHistoryTab, isWatchlistTab]);
 
   // Load items when section, genres, or sort changes
   useEffect(() => {
-    if (!activeSection || isHomeTab || isHistoryTab) return;
+    if (!activeSection || isHomeTab || isHistoryTab || isWatchlistTab) return;
     // Cancel any in-flight load-more request
     loadMoreAbort.current?.abort();
     loadMoreAbort.current = null;
@@ -319,7 +356,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [activeSection, selectedGenres, sort, retryNonce]);
+  }, [activeSection, isHomeTab, isHistoryTab, isWatchlistTab, selectedGenres, sort, retryNonce]);
 
   const handleLoadMore = useCallback(() => {
     if (!activeSection || loadingMore) return;
@@ -450,6 +487,15 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     [onSelect],
   );
 
+  const handleRemoveFromWatchlist = useCallback((item: PlexItem) => {
+    setWatchlistItems((old) => old.filter((entry) => entry.ratingKey !== item.ratingKey));
+    setPlexWatchlistState(item, false).catch((err) => {
+      console.error(err);
+      // Re-read on failure so an optimistic removal cannot lie about Plex.
+      fetchPlexWatchlist().then((res) => setWatchlistItems(res.items)).catch(() => {});
+    });
+  }, []);
+
   /**
    * Open the show behind an episode card.
    *
@@ -525,6 +571,8 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
       ? historyItems.length > 0
         ? "Search your history..."
         : "Search everything..."
+      : isWatchlistTab
+        ? "Search everything..."
       : activeSectionType === "movie"
         ? "Search movies..."
         : activeSectionType === "show"
@@ -620,6 +668,20 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 {s.title}
               </button>
             ))}
+            {plexLinked && (
+              <button
+                onClick={() => {
+                  onActiveSectionChange("watchlist");
+                  if (onBrowseContext) onBrowseContext("Browsing Watchlist");
+                }}
+                style={{
+                  ...styles.tab,
+                  ...(isWatchlistTab ? styles.tabActive : {}),
+                }}
+              >
+                Watchlist
+              </button>
+            )}
             <button
               onClick={() => {
                 onActiveSectionChange("history");
@@ -639,7 +701,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
             (never Home or History, and never during search). Keeping it here
             rather than above the tabs means the tab row stays put when it
             appears/disappears. */}
-        {!searchResults && !isHomeTab && !isHistoryTab && genres.length > 0 && (
+        {!searchResults && !isHomeTab && !isHistoryTab && !isWatchlistTab && genres.length > 0 && (
           <FilterBar
             genres={genres}
             selectedGenres={selectedGenres}
@@ -652,7 +714,49 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
 
       <div style={styles.wideWrap}>
 
-      {isHistoryTab && !searchResults ? (
+      {isWatchlistTab && !searchResults ? (
+        watchlistLoading ? (
+          <SkeletonGrid />
+        ) : watchlistError ? (
+          <div style={styles.emptyState}>
+            <div style={styles.emptyIcon}>
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" />
+              </svg>
+            </div>
+            <p style={styles.emptyText}>{watchlistError}</p>
+            <button onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>Retry</button>
+          </div>
+        ) : watchlistItems.length === 0 ? (
+          <div style={styles.emptyState}>
+            <div style={styles.emptyIcon}>
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M6 3.5h12v17l-6-3.5-6 3.5v-17Z" />
+              </svg>
+            </div>
+            <p style={styles.emptyText}>Your Plex Watchlist is empty.</p>
+          </div>
+        ) : (
+          <>
+            <div style={styles.historyHeader}>
+              <span style={styles.historyCount}>
+                {watchlistItems.length} {watchlistItems.length === 1 ? "title" : "titles"}
+              </span>
+            </div>
+            <div style={gridStyle}>
+              {watchlistItems.map((item) => (
+                <MovieCard
+                  key={`${item.inLibrary === false ? "online" : "local"}-${item.ratingKey}`}
+                  item={item}
+                  onClick={handleClick}
+                  onRemove={handleRemoveFromWatchlist}
+                  removeLabel="Remove from Plex Watchlist"
+                />
+              ))}
+            </div>
+          </>
+        )
+      ) : isHistoryTab && !searchResults ? (
         historyLoading ? (
           <SkeletonGrid />
         ) : historyError ? (

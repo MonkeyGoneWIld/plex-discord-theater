@@ -9,6 +9,7 @@ import { RelatedRows } from "./RelatedRows";
 import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
 import { DetailLoading } from "./DetailLoading";
+import { PlexMediaActions } from "./PlexMediaActions";
 import type { QueueItem, SuggestionItem } from "../hooks/useSync";
 
 interface MovieDetailProps {
@@ -209,8 +210,8 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   // Reveal gate — see `pageReady`.
   const [posterLoaded, setPosterLoaded] = useState(false);
   const [ratingsReady, setRatingsReady] = useState(false);
-  // The host's own saved position for this item, or null if they've never
-  // played it. Only the host can start playback, so only the host fetches it.
+  // This viewer's saved position for the item, or null if they've never played
+  // it. Playback controls remain host-only; linked-account actions do not.
   const [progress, setProgress] = useState<HistoryEntry | null>(null);
   // Phone portrait: the poster and the detail column can't sit side by side.
   // At 390px the fixed 240px poster leaves the text roughly 66px, which wraps
@@ -271,13 +272,12 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   // is watched, and a stale resume point is worse than an extra request.
   useEffect(() => {
     setProgress(null);
-    if (!isHost) return;
     let cancelled = false;
     fetchProgress(item.ratingKey)
       .then((r) => { if (!cancelled) setProgress(r.progress); })
       .catch(() => { /* resume is a convenience — never block playback on it */ });
     return () => { cancelled = true; };
-  }, [item.ratingKey, isHost]);
+  }, [item.ratingKey]);
 
   const handlePlay = useCallback(async (resumeFromMs?: number) => {
     if (!partId) return;
@@ -665,6 +665,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                   </div>
                 )}
               </div>
+              <PlexMediaActions item={item} progress={progress} onProgressChange={setProgress} />
             </div>
           </div>
         </div>

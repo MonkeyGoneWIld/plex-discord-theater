@@ -12,6 +12,7 @@ import path from "node:path";
 import { plexFetch, plexJSON } from "./plex.js";
 import {
   clearHistory,
+  deleteHistoryEntry,
   getAllHistory,
   mergeExternalProgress,
   type HistoryEntry,
@@ -25,6 +26,8 @@ const INCREMENTAL_SYNC_OVERLAP_MS = 5 * 60 * 1000;
 const LINK_TTL_MS = 10 * 60 * 1000;
 const LIVE_PUSH_INTERVAL_MS = 15_000;
 const PIN_FLOW_VERSION = 1;
+const WATCHLIST_PAGE_SIZE = 100;
+const PLEX_DISCOVER = "https://discover.provider.plex.tv";
 
 const dbDir = process.env.THUMB_CACHE_DIR
   ? path.resolve(process.env.THUMB_CACHE_DIR)
@@ -406,6 +409,247 @@ function accessToken(userId: string): {
     updateSync.run(row.last_sync_at, "Stored Plex credentials can no longer be decrypted; relink the account", userId);
     return null;
   }
+}
+
+function requireAccessToken(userId: string): NonNullable<ReturnType<typeof accessToken>> {
+  const linked = accessToken(userId);
+  if (!linked) throw new Error("No Plex account is linked");
+  return linked;
+}
+
+interface AccountMediaMetadata {
+  ratingKey?: string;
+  title?: string;
+  year?: number;
+  type?: string;
+  thumb?: string;
+  summary?: string;
+  duration?: number;
+  guid?: string;
+  Guid?: Array<{ id?: string }>;
+  index?: number;
+  parentIndex?: number;
+  parentTitle?: string;
+  parentRatingKey?: string;
+  grandparentRatingKey?: string;
+  grandparentTitle?: string;
+  grandparentThumb?: string;
+  leafCount?: number;
+  childCount?: number;
+}
+
+export interface PlexWatchlistItem {
+  ratingKey: string;
+  title: string;
+  year?: number;
+  type: string;
+  thumb: string | null;
+  summary?: string;
+  duration?: number;
+  guid?: string;
+  tmdbId?: number;
+  inLibrary: boolean;
+  index?: number;
+  parentIndex?: number;
+  parentTitle?: string;
+  parentRatingKey?: string;
+  grandparentRatingKey?: string;
+  showTitle?: string;
+  showThumb?: string | null;
+  leafCount?: number;
+  childCount?: number;
+}
+
+function providerId(guid: string | undefined): string | null {
+  const match = /^plex:\/\/(?:movie|show)\/([^/?#]+)$/.exec(guid ?? "");
+  return match?.[1] ?? null;
+}
+
+function tmdbId(guids: Array<{ id?: string }> | undefined): number | undefined {
+  const value = guids?.find((entry) => entry.id?.startsWith("tmdb://"))?.id?.slice(7);
+  if (!value || !/^\d+$/.test(value)) return undefined;
+  return Number(value);
+}
+
+function externalThumb(thumb: string | undefined): string | null {
+  return thumb ? `/api/plex/thumb/photo/:/transcode?url=${encodeURIComponent(thumb)}` : null;
+}
+
+function mapLocalWatchlistItem(item: AccountMediaMetadata): PlexWatchlistItem {
+  return {
+    ratingKey: item.ratingKey!,
+    title: item.title || "Untitled",
+    ...(item.year != null && { year: item.year }),
+    type: item.type || "movie",
+    thumb: item.thumb ? `/api/plex/thumb${item.thumb}` : null,
+    ...(item.summary != null && { summary: item.summary }),
+    ...(item.duration != null && { duration: item.duration }),
+    ...(item.index != null && { index: item.index }),
+    ...(item.parentIndex != null && { parentIndex: item.parentIndex }),
+    ...(item.parentTitle != null && { parentTitle: item.parentTitle }),
+    ...(item.parentRatingKey != null && { parentRatingKey: item.parentRatingKey }),
+    ...(item.grandparentRatingKey != null && { grandparentRatingKey: item.grandparentRatingKey }),
+    ...(item.grandparentTitle != null && { showTitle: item.grandparentTitle }),
+    ...(item.grandparentThumb != null && { showThumb: `/api/plex/thumb${item.grandparentThumb}` }),
+    ...(item.leafCount != null && { leafCount: item.leafCount }),
+    ...(item.childCount != null && { childCount: item.childCount }),
+    inLibrary: true,
+  };
+}
+
+function mapOnlineWatchlistItem(item: AccountMediaMetadata): PlexWatchlistItem | null {
+  if (!item.guid || !providerId(item.guid) || !item.title || (item.type !== "movie" && item.type !== "show")) {
+    return null;
+  }
+  const externalId = tmdbId(item.Guid);
+  return {
+    ratingKey: item.ratingKey || item.guid,
+    title: item.title,
+    ...(item.year != null && { year: item.year }),
+    type: item.type,
+    thumb: externalThumb(item.thumb),
+    ...(item.summary != null && { summary: item.summary }),
+    ...(item.duration != null && { duration: item.duration }),
+    guid: item.guid,
+    ...(externalId != null && { tmdbId: externalId }),
+    inLibrary: false,
+  };
+}
+
+async function readWatchlist(accountToken: string): Promise<AccountMediaMetadata[]> {
+  const items: AccountMediaMetadata[] = [];
+  let start = 0;
+  while (true) {
+    const url = new URL(`${PLEX_DISCOVER}/library/sections/watchlist/all`);
+    url.searchParams.set("includeCollections", "1");
+    url.searchParams.set("includeExternalMedia", "1");
+    url.searchParams.set("includeGuids", "1");
+    url.searchParams.set("sort", "watchlistedAt:desc");
+    url.searchParams.set("X-Plex-Container-Start", String(start));
+    url.searchParams.set("X-Plex-Container-Size", String(WATCHLIST_PAGE_SIZE));
+    const response = await plexCloudFetch(url, {
+      headers: { ...plexTvHeaders(), "X-Plex-Token": accountToken },
+    });
+    if (!response.ok) throw new Error(`Could not read your Plex Watchlist (${response.status})`);
+    const data = await response.json() as {
+      MediaContainer?: { Metadata?: AccountMediaMetadata[]; totalSize?: number };
+    };
+    const page = data.MediaContainer?.Metadata || [];
+    items.push(...page);
+    start += page.length;
+    const total = data.MediaContainer?.totalSize;
+    if (page.length === 0 || page.length < WATCHLIST_PAGE_SIZE || (total != null && start >= total)) break;
+  }
+  return items;
+}
+
+async function localMatchForGuid(guid: string, serverToken: string): Promise<AccountMediaMetadata | null> {
+  try {
+    const data = await plexJSON<{ MediaContainer: { Metadata?: AccountMediaMetadata[] } }>(
+      "/library/all",
+      { guid },
+      serverToken,
+    );
+    return data.MediaContainer.Metadata?.find((item) => item.type === "movie" || item.type === "show") ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** The linked account's Universal Watchlist, mapped back to playable local items where possible. */
+export async function getPlexWatchlist(userId: string): Promise<PlexWatchlistItem[]> {
+  const linked = requireAccessToken(userId);
+  const online = await readWatchlist(linked.accountToken);
+  const resolved: Array<PlexWatchlistItem | null> = new Array(online.length).fill(null);
+  await runWithConcurrency(online.map((item, index) => ({ item, index })), 8, async ({ item, index }) => {
+    const id = providerId(item.guid);
+    if (!id || !item.guid) return;
+    const local = await localMatchForGuid(item.guid, linked.serverToken);
+    resolved[index] = local ? mapLocalWatchlistItem(local) : mapOnlineWatchlistItem(item);
+  });
+  return resolved.filter((item): item is PlexWatchlistItem => item != null);
+}
+
+async function localAccountMetadata(ratingKey: string, serverToken: string): Promise<AccountMediaMetadata> {
+  const data = await plexJSON<{ MediaContainer: { Metadata?: AccountMediaMetadata[] } }>(
+    `/library/metadata/${ratingKey}`,
+    { includeGuids: "1" },
+    serverToken,
+  );
+  const item = data.MediaContainer.Metadata?.[0];
+  if (!item) throw new Error("That title is no longer available in the Plex library");
+  return item;
+}
+
+async function watchlistGuid(
+  linked: NonNullable<ReturnType<typeof accessToken>>,
+  input: { ratingKey?: string; guid?: string },
+): Promise<string> {
+  if (input.guid && providerId(input.guid)) return input.guid;
+  if (!input.ratingKey || !/^\d+$/.test(input.ratingKey)) throw new Error("Invalid Plex title");
+  const item = await localAccountMetadata(input.ratingKey, linked.serverToken);
+  if ((item.type !== "movie" && item.type !== "show") || !providerId(item.guid)) {
+    throw new Error("Plex Watchlist is available only for movies and shows using a current Plex metadata agent");
+  }
+  return item.guid!;
+}
+
+export async function getPlexWatchlistState(userId: string, ratingKey: string): Promise<boolean> {
+  const linked = requireAccessToken(userId);
+  const guid = await watchlistGuid(linked, { ratingKey });
+  const id = providerId(guid)!;
+  const watchlist = await readWatchlist(linked.accountToken);
+  return watchlist.some((item) => providerId(item.guid) === id);
+}
+
+export async function setPlexWatchlistState(
+  userId: string,
+  input: { ratingKey?: string; guid?: string },
+  watchlisted: boolean,
+): Promise<void> {
+  const linked = requireAccessToken(userId);
+  const guid = await watchlistGuid(linked, input);
+  const id = providerId(guid)!;
+  const action = watchlisted ? "addToWatchlist" : "removeFromWatchlist";
+  const url = new URL(`${PLEX_DISCOVER}/actions/${action}`);
+  url.searchParams.set("ratingKey", id);
+  const response = await plexCloudFetch(url, {
+    method: "PUT",
+    headers: { ...plexTvHeaders(), "X-Plex-Token": linked.accountToken },
+  });
+  if (!response.ok) throw new Error(`Could not update your Plex Watchlist (${response.status})`);
+}
+
+/** Explicit user action: update local Activity and only that user's linked Plex account. */
+export async function setPlexItemWatched(
+  userId: string,
+  ratingKey: string,
+  watched: boolean,
+): Promise<HistoryEntry | null> {
+  if (!/^\d+$/.test(ratingKey)) throw new Error("Invalid rating key");
+  const linked = requireAccessToken(userId);
+  const item = await localAccountMetadata(ratingKey, linked.serverToken);
+  if (item.type !== "movie" && item.type !== "episode") {
+    throw new Error("Only movies and episodes can be marked watched here");
+  }
+  const response = await plexFetch(
+    watched ? "/:/scrobble" : "/:/unscrobble",
+    { key: ratingKey, identifier: "com.plexapp.plugins.library" },
+    undefined,
+    "GET",
+    linked.serverToken,
+  );
+  if (!response.ok) throw new Error(`Plex watched-state update failed (${response.status})`);
+  if (!watched) {
+    deleteHistoryEntry(userId, ratingKey);
+    return null;
+  }
+  return (await mergeExternalProgress(userId, ratingKey, {
+    positionMs: item.duration || 0,
+    durationMs: item.duration || 0,
+    watched: true,
+    updatedAt: Date.now(),
+  })).entry;
 }
 
 interface RemoteMetadata {

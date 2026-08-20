@@ -9,6 +9,7 @@ import { SkeletonBlock } from "./SkeletonBlock";
 import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
 import { DetailLoading } from "./DetailLoading";
+import { PlexMediaActions } from "./PlexMediaActions";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 
@@ -236,6 +237,7 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
             )
           )}
           {requestError && <div style={styles.requestError}>{requestError}</div>}
+          <PlexMediaActions item={item} />
         </div>
       </div>
       {/* TV: same season request grid as the library show page. It comes before

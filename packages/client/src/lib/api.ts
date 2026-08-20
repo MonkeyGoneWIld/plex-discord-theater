@@ -825,3 +825,29 @@ export function syncPlexAccount(): Promise<{
 export function unlinkPlexAccount(): Promise<void> {
   return apiDelete("/api/plex-account/link");
 }
+
+export function fetchPlexWatchlist(): Promise<{ items: PlexItem[] }> {
+  return apiGet("/api/plex-account/watchlist");
+}
+
+export function fetchPlexWatchlistState(ratingKey: string): Promise<{ watchlisted: boolean }> {
+  return apiGet(`/api/plex-account/watchlist/${encodeURIComponent(ratingKey)}`);
+}
+
+export function setPlexWatchlistState(
+  item: Pick<PlexItem, "ratingKey" | "guid">,
+  watchlisted: boolean,
+): Promise<{ watchlisted: boolean }> {
+  return apiPut("/api/plex-account/watchlist", {
+    ratingKey: item.ratingKey,
+    ...(item.guid ? { guid: item.guid } : {}),
+    watchlisted,
+  });
+}
+
+export function setPlexItemWatched(
+  ratingKey: string,
+  watched: boolean,
+): Promise<{ watched: boolean; progress: HistoryEntry | null }> {
+  return apiPut(`/api/plex-account/watched/${encodeURIComponent(ratingKey)}`, { watched });
+}

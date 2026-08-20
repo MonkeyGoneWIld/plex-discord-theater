@@ -123,8 +123,6 @@ export interface HistoryEntry {
   durationMs: number;
   watched: boolean;
   updatedAt: number;
-  /** Internal live-sync hint; never stored in SQLite. */
-  becameUnwatched?: boolean;
 }
 
 const upsertStmt = db.prepare(`
@@ -491,9 +489,7 @@ export async function recordProgress(
     updated_at: now,
   });
 
-  const entry = getProgress(userId, ratingKey);
-  if (entry && existing?.watched === 1 && watched === 0) entry.becameUnwatched = true;
-  return entry;
+  return getProgress(userId, ratingKey);
 }
 
 /** Merge newer progress imported from a linked Plex account. */

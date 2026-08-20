@@ -21,6 +21,7 @@ const VERSION = "1.0.0";
 const MAX_SYNC_ITEMS = 500;
 const LINK_TTL_MS = 10 * 60 * 1000;
 const LIVE_PUSH_INTERVAL_MS = 15_000;
+const PIN_FLOW_VERSION = 1;
 
 const dbDir = process.env.THUMB_CACHE_DIR
   ? path.resolve(process.env.THUMB_CACHE_DIR)
@@ -54,7 +55,8 @@ db.exec(`
     pin_id INTEGER NOT NULL,
     code TEXT NOT NULL,
     auth_url TEXT NOT NULL,
-    expires_at INTEGER NOT NULL
+    expires_at INTEGER NOT NULL,
+    flow_version INTEGER NOT NULL DEFAULT 1
   );
 `);
 // Accounts created by the first implementation stored only the plex.tv token.
@@ -65,6 +67,16 @@ try {
   const message = err instanceof Error ? err.message : String(err);
   if (!message.includes("duplicate column")) throw err;
 }
+// Pending PINs from the original clients.plex.tv/JWT implementation cannot be
+// polled through the legacy plex.tv flow. Existing rows receive version 0 and
+// are discarded below; fresh databases already have version 1 from CREATE.
+try {
+  db.exec("ALTER TABLE plex_link_pins ADD COLUMN flow_version INTEGER NOT NULL DEFAULT 0");
+} catch (err) {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!message.includes("duplicate column")) throw err;
+}
+db.prepare("DELETE FROM plex_link_pins WHERE flow_version != ?").run(PIN_FLOW_VERSION);
 
 interface AccountRow {
   user_id: string;
@@ -85,6 +97,7 @@ interface PinRow {
   code: string;
   auth_url: string;
   expires_at: number;
+  flow_version: number;
 }
 
 const selectAccount = db.prepare("SELECT * FROM plex_accounts WHERE user_id = ?");
@@ -217,9 +230,10 @@ export async function startPlexAccountLink(userId: string): Promise<PlexAccountS
   const parsedExpiry = pin.expiresAt ? Date.parse(pin.expiresAt) : NaN;
   const expiresAt = Number.isFinite(parsedExpiry) ? parsedExpiry : Date.now() + LINK_TTL_MS;
   db.prepare(`
-    INSERT OR REPLACE INTO plex_link_pins (user_id, pin_id, code, auth_url, expires_at)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(userId, pin.id, pin.code, authUrl, expiresAt);
+    INSERT OR REPLACE INTO plex_link_pins (
+      user_id, pin_id, code, auth_url, expires_at, flow_version
+    ) VALUES (?, ?, ?, ?, ?, ?)
+  `).run(userId, pin.id, pin.code, authUrl, expiresAt, PIN_FLOW_VERSION);
   return getPlexAccountStatus(userId);
 }
 
@@ -274,7 +288,13 @@ export async function pollPlexAccountLink(userId: string): Promise<PlexAccountSt
 
   const url = new URL(`https://plex.tv/api/v2/pins/${pin.pin_id}`);
   const response = await plexCloudFetch(url, { headers: plexTvHeaders() });
-  if (!response.ok) throw new Error(`Could not check Plex sign-in (${response.status})`);
+  if (!response.ok) {
+    if (response.status === 404 || response.status === 410) {
+      deletePin.run(userId);
+      throw new Error("That Plex sign-in is no longer valid. Start again.");
+    }
+    throw new Error(`Could not check Plex sign-in (${response.status})`);
+  }
   const result = await response.json() as { authToken?: string | null };
   if (!result.authToken) return getPlexAccountStatus(userId);
 

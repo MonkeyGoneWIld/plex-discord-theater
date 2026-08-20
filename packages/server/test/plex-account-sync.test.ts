@@ -2,12 +2,30 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import Database from "better-sqlite3";
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "plex-account-sync-"));
 process.env.THUMB_CACHE_DIR = dataDir;
 process.env.PLEX_URL = "http://plex.test";
 process.env.PLEX_TOKEN = "shared-server-token";
 process.env.DISCORD_CLIENT_SECRET = "test-discord-secret";
+
+// Reproduce an installation upgraded from the original incompatible PIN flow.
+const legacyDb = new Database(path.join(dataDir, "plex-accounts.sqlite"));
+legacyDb.exec(`
+  CREATE TABLE plex_link_pins (
+    user_id TEXT PRIMARY KEY,
+    pin_id INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    auth_url TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+  )
+`);
+legacyDb.prepare(`
+  INSERT INTO plex_link_pins (user_id, pin_id, code, auth_url, expires_at)
+  VALUES (?, ?, ?, ?, ?)
+`).run("discord-legacy", 1, "old-code", "https://app.plex.tv/auth#?old", Date.now() + 600_000);
+legacyDb.close();
 
 let pass = 0;
 let fail = 0;
@@ -20,6 +38,7 @@ function check(name: string, actual: unknown, expected: unknown) {
 
 let nextPin = 10;
 const pinTokens = new Map<number, string>();
+const invalidPinIds = new Set<number>();
 const plexCalls: Array<{ method: string; url: URL; token: string | null }> = [];
 
 globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -34,6 +53,7 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
   }
   if (url.hostname === "plex.tv" && url.pathname.startsWith("/api/v2/pins/")) {
     const id = Number(url.pathname.split("/").pop());
+    if (invalidPinIds.has(id)) return new Response("gone", { status: 404 });
     return Response.json({ authToken: pinTokens.get(id) ?? null });
   }
   if (url.hostname === "plex.tv" && url.pathname === "/api/v2/user") {
@@ -103,6 +123,8 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
 const accounts = await import("../src/services/plex-accounts.js");
 const history = await import("../src/services/watch-history.js");
 
+check("upgrade clears pending PINs from the incompatible flow", accounts.getPlexAccountStatus("discord-legacy").pending, undefined);
+
 console.log("\n— Plex links are isolated by Discord identity —");
 const startedA = await accounts.startPlexAccountLink("discord-a");
 check("a receives only a temporary authorization URL", !!startedA.pending?.authUrl, true);
@@ -114,6 +136,19 @@ await accounts.startPlexAccountLink("discord-b");
 const linkedB = await accounts.pollPlexAccountLink("discord-b");
 check("b has a different Plex identity", linkedB.account?.username, "plex-user-11");
 check("a is still linked independently", accounts.getPlexAccountStatus("discord-a").account?.username, "plex-user-10");
+
+console.log("\n— invalid PINs recover without trapping the user —");
+const stale = await accounts.startPlexAccountLink("discord-stale");
+check("stale user initially has a pending link", !!stale.pending, true);
+invalidPinIds.add(12);
+let staleMessage = "";
+try {
+  await accounts.pollPlexAccountLink("discord-stale");
+} catch (err) {
+  staleMessage = err instanceof Error ? err.message : String(err);
+}
+check("invalid PIN gets an actionable error", staleMessage, "That Plex sign-in is no longer valid. Start again.");
+check("invalid PIN is removed", accounts.getPlexAccountStatus("discord-stale").pending, undefined);
 
 const dbBytes = fs.readdirSync(dataDir)
   .filter((name) => name.startsWith("plex-accounts.sqlite"))

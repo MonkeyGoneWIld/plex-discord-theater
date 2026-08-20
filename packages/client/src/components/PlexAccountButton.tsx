@@ -22,6 +22,10 @@ function when(value: number | null): string {
   return `Last synced ${new Date(value).toLocaleString()}`;
 }
 
+function historyItems(count: number): string {
+  return `${count} history ${count === 1 ? "item" : "items"}`;
+}
+
 export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExternalLink }: PlexAccountButtonProps) {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<PlexAccountStatus | null>(null);
@@ -36,7 +40,10 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
     try {
       const result = await syncPlexAccount();
       setStatus(result.status);
-      setMessage(`Synced ${result.imported} from Plex and ${result.exported} to Plex.`);
+      setMessage(
+        `Imported ${historyItems(result.imported)} from your Plex account into this Discord Activity. `
+        + `Sent ${historyItems(result.exported)} from this Discord Activity to your Plex account.`,
+      );
       onHistoryChanged?.();
     } catch (err) {
       setMessage(err instanceof Error ? err.message : "Plex history sync failed");

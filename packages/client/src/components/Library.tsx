@@ -145,7 +145,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
 
   // Load Plex homepage hubs (Recently Added, Collections, etc.). Plex's own
   // Continue Watching hub is filtered out server-side — it tracks the shared
-  // Plex account, not the Discord host, so this app keeps its own (below).
+  // server account, not this Discord user's local/linked history.
   useEffect(() => {
     setHomeLoading(true);
     setHomeError(null);
@@ -623,7 +623,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
             <button
               onClick={() => {
                 onActiveSectionChange("history");
-                if (onBrowseContext) onBrowseContext("Browsing their watch history");
+                if (onBrowseContext) onBrowseContext("Browsing History");
               }}
               style={{
                 ...styles.tab,
@@ -675,7 +675,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               </svg>
             </div>
             <p style={styles.emptyText}>
-              Nothing watched yet. Anything you play while hosting shows up here.
+              Nothing watched yet. Anything you watch in the player shows up here.
             </p>
           </div>
         ) : (
@@ -778,8 +778,8 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
           </div>
         ) : (
           <div style={styles.hubsWrap}>
-            {/* Ours, not Plex's — the server drops Plex's own Continue Watching
-                hub, since this app tracks progress per Discord host instead. */}
+            {/* Ours, not the shared server account's — history is per verified
+                Discord user and can optionally sync with that user's Plex account. */}
             {continueItems.length > 0 && (
               <div style={styles.hubSection}>
                 <h3 style={styles.hubLabel}>Continue Watching</h3>

@@ -360,7 +360,7 @@ interface PlayerProps {
   /** Our own Discord user id — lets the people panel label and skip ourselves. */
   selfUserId?: string | null;
   subtitles: boolean;
-  /** Seconds to start at, from the host's watch history. Consumed once, on mount:
+  /** Seconds to start at, from the initiating host's personal history. Consumed once, on mount:
    *  a later item (queue advance, next episode) starts from the beginning. */
   resumePosition?: number;
   onBack: () => void;

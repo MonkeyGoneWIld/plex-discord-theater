@@ -10,6 +10,7 @@ import { PersonDetail } from "./components/PersonDetail";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PeoplePanel } from "./components/PeoplePanel";
 import { InviteButton } from "./components/InviteButton";
+import { PlexAccountButton } from "./components/PlexAccountButton";
 import { formatMediaTitle } from "./lib/format";
 import { authUrl, fetchMeta, invalidateMeta, setStreams } from "./lib/api";
 import { loadSubtitlePref, matchSubtitleTrack } from "./lib/subtitlePref";
@@ -291,6 +292,9 @@ export function App() {
   // History. The Library stays mounted behind detail views, so without a nudge
   // it would still show the progress from before the film was played.
   const [historyNonce, setHistoryNonce] = useState(0);
+  const handlePlexHistoryChanged = useCallback(() => {
+    setHistoryNonce((n) => n + 1);
+  }, []);
   const prevPlayingKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const prev = prevPlayingKeyRef.current;
@@ -752,6 +756,10 @@ export function App() {
               it to the left of the name puts it back in reach \u2014 the label is
               what gets clipped there instead, which costs nothing. */}
           <span style={styles.user}>
+            <PlexAccountButton
+              compact={phone}
+              onHistoryChanged={handlePlexHistoryChanged}
+            />
             {/* Sits with the roster rather than inside it: inviting is about
                 who isn't here yet, which is the same question the people
                 button answers from the other side. Not on a phone, where

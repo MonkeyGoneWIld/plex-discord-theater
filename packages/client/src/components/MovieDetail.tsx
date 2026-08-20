@@ -562,8 +562,8 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                 </p>
               )}
 
-              {/* Progress from a previous sitting — host only, since only the
-                  host's history is tracked and only the host can resume it. */}
+              {/* Progress belongs to the current user. Only the host can turn
+                  their resume choice into the room's shared playback. */}
               {isHost && progressRatio != null && resumeMs != null && (
                 <div style={styles.progressWrap}>
                   <div style={styles.progressTrack}>

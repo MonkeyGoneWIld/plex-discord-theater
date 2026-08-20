@@ -697,7 +697,7 @@ export function fetchConfig(): Promise<AppConfig> {
 }
 
 /**
- * A watched (or part-watched) item from the host's history. Shares its item
+ * A watched (or part-watched) item from the current Discord user's history. Shares its item
  * fields with PlexItem so history entries render through MovieCard unchanged;
  * the progress fields are the addition.
  */
@@ -786,4 +786,42 @@ export function dismissFromContinueWatching(ratingKey: string): Promise<void> {
 
 export function clearHistory(): Promise<void> {
   return apiDelete("/api/history");
+}
+
+export interface PlexAccountStatus {
+  linked: boolean;
+  account?: {
+    id: string;
+    username: string;
+    email: string | null;
+    thumb: string | null;
+    linkedAt: number;
+  };
+  lastSyncAt: number | null;
+  lastSyncError: string | null;
+  pending?: { authUrl: string; expiresAt: number };
+}
+
+export function fetchPlexAccountStatus(): Promise<PlexAccountStatus> {
+  return apiGet("/api/plex-account/status");
+}
+
+export function startPlexAccountLink(): Promise<PlexAccountStatus> {
+  return apiPost("/api/plex-account/link", {});
+}
+
+export function pollPlexAccountLink(): Promise<PlexAccountStatus> {
+  return apiGet("/api/plex-account/link");
+}
+
+export function syncPlexAccount(): Promise<{
+  imported: number;
+  exported: number;
+  status: PlexAccountStatus;
+}> {
+  return apiPost("/api/plex-account/sync", {});
+}
+
+export function unlinkPlexAccount(): Promise<void> {
+  return apiDelete("/api/plex-account/link");
 }

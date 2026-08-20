@@ -6,6 +6,7 @@ import { plexFetch } from "./plex.js";
 import { getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode, stopTranscodeSession, protectSession, releaseSession } from "../routes/plex.js";
 import { createTracker, handleTrackerSocket, destroyTracker } from "./tracker.js";
 import { recordProgress } from "./watch-history.js";
+import { pushProgressToPlex } from "./plex-accounts.js";
 import { logEvent } from "./logger.js";
 
 /** Interval between WebSocket pings to detect dead connections. */
@@ -682,13 +683,12 @@ function interpolatedPosition(state: RoomState): number {
 const FORCED_PERSIST_MIN_INTERVAL_MS = 2_000;
 
 /**
- * Save the room's position to the host's watch history.
+ * Save the room's position for everyone who is actually watching.
  *
- * The room position is the host's own playhead (they're the only one who sends
- * heartbeats), so recording it against the host user id needs nothing from the
- * client. `hostUserId` is passed explicitly rather than looked up, because the
- * one caller that matters most — a host disconnecting — has to attribute the
- * progress to the *departing* host, before the successor is installed.
+ * The host's playhead is still the single room timeline, but every unique
+ * Discord user with the player open gets that progress in their own history.
+ * `extraUserId` preserves the departing host's final position after their
+ * socket has already been removed from room.clients.
  *
  * Unforced calls are throttled inside the history service; pause, seek, stop and
  * disconnect force a write so the final position always lands. Fire-and-forget:
@@ -696,11 +696,11 @@ const FORCED_PERSIST_MIN_INTERVAL_MS = 2_000;
  */
 function persistProgress(
   room: Room,
-  hostUserId: string | undefined,
+  extraUserId: string | undefined,
   force: boolean | "always",
 ): void {
   const ratingKey = room.state.ratingKey;
-  if (!hostUserId || !ratingKey) return;
+  if (!ratingKey) return;
   let forced = force !== false;
   if (force === true) {
     const now = Date.now();
@@ -709,9 +709,21 @@ function persistProgress(
   } else if (force === "always") {
     room.lastForcedPersistAt = Date.now();
   }
-  recordProgress(hostUserId, ratingKey, interpolatedPosition(room.state), { force: forced }).catch(
-    (err) => console.error("[History] Failed to record progress:", err),
+  const userIds = new Set(
+    [...room.clients].filter((c) => c.isWatching).map((c) => c.userId),
   );
+  if (extraUserId) userIds.add(extraUserId);
+  const state = room.state.playing ? "playing" : "paused";
+  for (const userId of userIds) {
+    recordProgress(userId, ratingKey, interpolatedPosition(room.state), { force: forced })
+      .then((entry) => {
+        if (!entry) return;
+        return pushProgressToPlex(userId, entry, state, forced).catch((err) => {
+          console.warn("[Plex Account] Live progress sync failed for", userId.substring(0, 8), err);
+        });
+      })
+      .catch((err) => console.error("[History] Failed to record progress:", err));
+  }
 }
 
 /**
@@ -1305,7 +1317,7 @@ export function attachWebSocketServer(server: Server): void {
           // served from the room's own clock and so confirms nothing.
           if (client.isHost) room.state.positionConfirmed = true;
           room.state.updatedAt = Date.now();
-          persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
+          persistProgress(room, undefined, true);
           broadcast(room, ws, { type: "pause", position: room.state.position });
           break;
         }
@@ -1325,7 +1337,7 @@ export function attachWebSocketServer(server: Server): void {
           // truth by construction — nothing has to observe it first.
           room.state.positionConfirmed = true;
           room.state.updatedAt = Date.now();
-          persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
+          persistProgress(room, undefined, true);
           broadcast(room, ws, { type: "seek", position: room.state.position });
           break;
         }
@@ -1347,7 +1359,7 @@ export function attachWebSocketServer(server: Server): void {
           // moment most resumes are created from. "always", because this is a
           // teardown and the final position must not lose to the forced-write
           // floor after a pause a moment earlier.
-          persistProgress(room, instanceHosts.get(roomId)?.hostUserId, "always");
+          persistProgress(room, undefined, "always");
           // Capture before clearing so we can kill the exact Plex transcode.
           // Every other stream the room was running goes with it — see
           // destroyAllVariants below.
@@ -1423,7 +1435,7 @@ export function attachWebSocketServer(server: Server): void {
           room.state.playing = msg.playing !== false;
           room.state.updatedAt = Date.now();
           // Throttled inside the history service — this fires every 5s per room.
-          persistProgress(room, instanceHosts.get(roomId)?.hostUserId, false);
+          persistProgress(room, undefined, false);
           broadcast(room, ws, {
             type: "heartbeat",
             position: room.state.position,
@@ -1500,7 +1512,7 @@ export function attachWebSocketServer(server: Server): void {
           // branch that persists progress is skipped and the watch they were
           // in the middle of would resume from wherever they last happened to
           // be written, or not at all.
-          persistProgress(room, client.userId, "always");
+          persistProgress(room, undefined, "always");
 
           // Hand over: the old host drops to a plain viewer, and the target
           // clears any co-host flag since host already supersedes it.
@@ -1644,7 +1656,7 @@ export function attachWebSocketServer(server: Server): void {
         // Attribute the position to the host who is leaving, before a successor
         // takes over the instance record. Closing the tab is the other common
         // way a watch ends, so this is as important as the explicit stop path.
-        persistProgress(room, client.userId, "always");
+        persistProgress(room, client.isWatching ? client.userId : undefined, "always");
 
         if (room.clients.size > 0) {
           // Co-host, then whoever is actually watching, then anyone — see

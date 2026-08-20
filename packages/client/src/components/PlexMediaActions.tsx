@@ -145,7 +145,7 @@ export function PlexMediaActions({
             onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.08)"; }}
             onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
           >
-            <Check />
+            <WatchedCheckIcon />
           </button>
         )}
       </div>
@@ -162,7 +162,8 @@ function Bookmark({ filled }: { filled: boolean }) {
   );
 }
 
-function Check() {
+/** The watched-state glyph shared by media actions and episode rows. */
+export function WatchedCheckIcon() {
   return (
     <svg width="28" height="28" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <circle cx="12" cy="12" r="8.5" stroke="currentColor" strokeWidth="1.7" />

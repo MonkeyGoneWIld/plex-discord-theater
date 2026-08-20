@@ -9,7 +9,7 @@ import {
 } from "../lib/seasonGaps";
 import { formatTimecode } from "../lib/format";
 import { SkeletonBlock } from "./SkeletonBlock";
-import { PlexMediaActions } from "./PlexMediaActions";
+import { PlexMediaActions, WatchedCheckIcon } from "./PlexMediaActions";
 import type { QueueItem } from "../hooks/useSync";
 
 interface SeasonDetailProps {
@@ -400,9 +400,18 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                 </div>
                 {plexLinked && (
                   <span
-                    role="button"
+                    role="checkbox"
                     tabIndex={0}
+                    aria-checked={watched}
+                    aria-disabled={watchedBusy === ep.ratingKey}
                     aria-label={watched ? `Mark ${ep.title} unwatched` : `Mark ${ep.title} as watched`}
+                    title={watchedBusy === ep.ratingKey
+                      ? "Updating watched state..."
+                      : watched ? "Watched — mark unwatched" : "Mark as watched"}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = "rgba(255,255,255,0.08)";
+                    }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
                     onClick={(e) => {
                       e.stopPropagation();
                       void toggleWatched(ep, watched);
@@ -413,9 +422,13 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                       e.stopPropagation();
                       void toggleWatched(ep, watched);
                     }}
-                    style={{ ...styles.markWatchedBtn, ...(watched ? styles.markWatchedBtnActive : {}) }}
+                    style={{
+                      ...styles.watchedCheckbox,
+                      ...(watched ? styles.watchedCheckboxActive : {}),
+                      ...(watchedBusy === ep.ratingKey ? styles.watchedCheckboxBusy : {}),
+                    }}
                   >
-                    {watchedBusy === ep.ratingKey ? "Updating..." : watched ? "Mark unwatched" : "Mark watched"}
+                    <WatchedCheckIcon />
                   </span>
                 )}
               </button>
@@ -534,14 +547,15 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "9px 12px", borderRadius: "7px", border: "1px solid rgba(212,119,119,0.25)",
     background: "rgba(212,119,119,0.07)", color: "#d47777", fontSize: "12px",
   },
-  markWatchedBtn: {
-    alignSelf: "center", flexShrink: 0, padding: "7px 10px", borderRadius: "7px",
-    border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.04)",
-    color: "#aaa", fontSize: "11px", fontWeight: 600, cursor: "pointer",
+  watchedCheckbox: {
+    alignSelf: "center", flexShrink: 0, width: "46px", height: "46px",
+    display: "inline-flex", alignItems: "center", justifyContent: "center",
+    padding: 0, borderRadius: "50%", border: "none", background: "transparent",
+    color: "#d6d6d6", cursor: "pointer",
+    transition: "background 0.15s ease, color 0.15s ease, opacity 0.15s ease",
   },
-  markWatchedBtnActive: {
-    border: "1px solid rgba(106,153,85,0.3)", color: "#82ad70",
-  },
+  watchedCheckboxActive: { color: "#6a9955" },
+  watchedCheckboxBusy: { opacity: 0.5, cursor: "wait" },
   episodeMeta: { display: "flex", alignItems: "center", gap: "8px" },
   episodeNumber: { color: "#e5a00d", fontSize: "12px", fontWeight: 700 },
   episodeTitle: {

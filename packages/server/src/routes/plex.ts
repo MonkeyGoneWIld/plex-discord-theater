@@ -5,7 +5,7 @@ import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition }
 import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
-import { sessionHostUserId } from "../services/sync.js";
+import { sessionHostUserId, sessionHasOtherWatchers } from "../services/sync.js";
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
 
@@ -457,6 +457,9 @@ router.get("/search", async (req: Request, res: Response) => {
             /** People hubs carry Directory entries rather than Metadata — the
              *  name is `tag` here, not `title`. */
             Directory?: Array<{
+              /** The tag id. Filtering a section by it is how Plex's own UI
+               *  turns an actor into their filmography — see libraryCreditsFor. */
+              id?: number;
               tag?: string;
               title?: string;
               thumb?: string;
@@ -1632,20 +1635,246 @@ router.get("/tmdb/meta", async (req: Request, res: Response) => {
 });
 
 /**
+ * The library's movie and TV sections, cached.
+ *
+ * The list changes about never and the person page wants it every time it
+ * opens. Short-lived rather than permanent so a library added mid-session still
+ * turns up without a restart.
+ */
+let sectionListCache: { at: number; sections: Array<{ id: string; type: string }> } | null = null;
+const SECTION_LIST_TTL_MS = 5 * 60 * 1000;
+
+async function browsableSections(): Promise<Array<{ id: string; type: string }>> {
+  const now = Date.now();
+  if (sectionListCache && now - sectionListCache.at < SECTION_LIST_TTL_MS) {
+    return sectionListCache.sections;
+  }
+  const data = await plexJSON<{ MediaContainer: { Directory?: PlexDirectory[] } }>("/library/sections");
+  const sections = (data.MediaContainer.Directory || [])
+    .filter((d) => ALLOWED_SECTION_TYPES.has(d.type))
+    .map((d) => ({ id: d.key, type: d.type }));
+  sectionListCache = { at: now, sections };
+  return sections;
+}
+
+/**
+ * The roles a person page asks Plex about, and the filter each is spelled with.
+ *
+ * Writers and producers are here as well as the two the cast row links from,
+ * because the question the page answers is "what have they made" and a
+ * director-writer's writing credits are not a footnote. Plex ignores a filter a
+ * section doesn't index, which costs one empty answer.
+ */
+const PERSON_FILTERS = ["actor", "director", "writer", "producer"] as const;
+type PersonFilter = (typeof PERSON_FILTERS)[number];
+
+/** name → the tag id per role, misses included. A name Plex doesn't index won't
+ *  start being indexed on the next page view. */
+const personTagIdCache = new LruMap<string, Map<PersonFilter, number>>(2_000);
+
+/**
+ * The ids Plex files a person's credits under — one per role, not one per person.
+ *
+ * This is the part that isn't obvious. Plex tags are typed: the same human is a
+ * different row in the tags table as an actor and as a director, with a
+ * different id in each. Filtering `?director=` with the id from the actor hub
+ * matches nothing, silently — which is how a director's own films came back as
+ * "not in library" on their own page while their two acting credits came back
+ * fine.
+ *
+ * The search hubs are already split by role, so the id for each comes from the
+ * hub named after it.
+ *
+ * Asked of Plex rather than passed down from whichever credit was clicked:
+ * every surface that can open a person page would otherwise have to carry it,
+ * and a previous attempt at that shipped a version where no credit carried one
+ * and every cast member was silently unclickable.
+ */
+async function personTagIds(name: string): Promise<Map<PersonFilter, number>> {
+  const key = name.toLowerCase();
+  const cached = personTagIdCache.get(key);
+  if (cached) return cached;
+  const ids = new Map<PersonFilter, number>();
+  try {
+    const data = await plexJSON<{
+      MediaContainer: {
+        Hub?: Array<{
+          hubIdentifier?: string;
+          Directory?: Array<{ id?: number; tag?: string; title?: string; ratingKey?: string }>;
+        }>;
+      };
+    }>("/hubs/search", { query: name, limit: "10" });
+    for (const hub of data.MediaContainer.Hub || []) {
+      // Same test the search route uses: only the hub identifier tells a person
+      // apart from a genre or a collection, which share the "tag" type. The
+      // captured word is the role, which is also the filter's name.
+      const role = PERSON_HUB_RE.exec(hub.hubIdentifier ?? "")?.[2]?.toLowerCase();
+      if (!role) continue;
+      const filter = PERSON_FILTERS.find((f) => f === role);
+      if (!filter || ids.has(filter)) continue;
+      for (const d of hub.Directory || []) {
+        // A ratingKey means a library object, not a tag.
+        if (d.ratingKey != null || d.id == null) continue;
+        if ((d.tag ?? d.title ?? "").toLowerCase() !== key) continue;
+        ids.set(filter, d.id);
+        break;
+      }
+    }
+  } catch {
+    // Leaves the map empty, which sends the caller down the TMDB path.
+  }
+  personTagIdCache.set(key, ids);
+  return ids;
+}
+
+/**
+ * Everything in the library credited to one person, asked of Plex directly.
+ *
+ * Plex indexes its own cast and crew: filtering a section by the person's tag
+ * id returns exactly the titles they are credited on, already scoped to what is
+ * actually on the shelf. A handful of requests to a server on the LAN, and
+ * every one of them is the answer.
+ *
+ * One id per role, because Plex's tags are typed and the same human has a
+ * different id as an actor than as a director — see personTagIds.
+ *
+ * The alternative — and what this used to do, despite the comment above it
+ * saying otherwise for months — was to ask TMDB who they are, ask TMDB for
+ * their complete filmography, and then test up to eighty of those credits for
+ * ownership one by one. Three internet round trips and eighty lookups to
+ * produce a list Plex already had, which is where the five to ten seconds went.
+ */
+async function libraryCreditsFor(tagIds: Map<PersonFilter, number>) {
+  const sections = await browsableSections();
+  const byKey = new Map<string, { item: ReturnType<typeof mapItem>; type: string }>();
+  // What was found, in the two shapes a TMDB credit can be recognised by, so the
+  // out-of-library half below can leave out what is already on the shelf.
+  const ownedTmdbIds = new Set<number>();
+  const ownedTitleKeys = new Set<string>();
+
+  await Promise.all(
+    sections.flatMap((section) =>
+      [...tagIds].map(async ([filter, tagId]) => {
+        try {
+          const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+            `/library/sections/${section.id}/all`,
+            // The guids come back in the same response, which is what makes
+            // matching against TMDB exact instead of a title comparison.
+            { [filter]: String(tagId), includeGuids: "1" },
+          );
+          for (const m of data.MediaContainer.Metadata || []) {
+            const item = mapItem(m);
+            // Someone can be both actor and director on the same title; the
+            // page lists it once either way.
+            if (!byKey.has(item.ratingKey)) byKey.set(item.ratingKey, { item, type: section.type });
+            const tmdbId = tmdbIdFromGuids(m.Guid);
+            if (tmdbId != null) ownedTmdbIds.add(tmdbId);
+            // Belt and braces: not every Plex agent files a tmdb:// guid, and a
+            // title match is better than showing the same film twice.
+            if (m.title) ownedTitleKeys.add(collectionTitleKey(m.title));
+          }
+        } catch {
+          // One filter failing (an older server that doesn't index directors,
+          // say) must not cost the rest of the page.
+        }
+      }),
+    ),
+  );
+
+  const of = (type: string) =>
+    [...byKey.values()].filter((e) => e.type === type).map((e) => e.item).sort(byReleaseDate);
+  return { movies: of("movie"), shows: of("show"), ownedTmdbIds, ownedTitleKeys };
+}
+
+/** Newest first, which is the order both halves of a person page are shown in. */
+const byReleaseDate = (a: { year?: number }, b: { year?: number }) => (b.year ?? 0) - (a.year ?? 0);
+
+/**
+ * A ceiling on the out-of-library half, which is otherwise unbounded.
+ *
+ * Every card loads its poster eagerly and the rows aren't virtualised, so "all
+ * of them" for someone with four hundred credits is four hundred images. High
+ * enough to be "all of them" for anybody with a real career.
+ */
+const MAX_EXTERNAL_CREDITS = 200;
+
+/**
+ * The rest of someone's filmography: what they are credited on that the library
+ * doesn't have, as requestable cards.
+ *
+ * Same shape and same treatment as the out-of-library half of "More Like This",
+ * so a card behaves identically wherever it is met.
+ */
+function externalCreditsFor(
+  credits: TmdbCredit[],
+  mediaType: string,
+  type: string,
+  ownedTmdbIds: Set<number>,
+  ownedTitleKeys: Set<string>,
+): CollectionItem[] {
+  const seen = new Set<number>();
+  const out: CollectionItem[] = [];
+  for (const c of credits) {
+    if (c.media_type !== mediaType || c.id == null) continue;
+    // A poster is what makes a card; an entry without one is a stub.
+    if (!c.poster_path) continue;
+    if (seen.has(c.id) || ownedTmdbIds.has(c.id)) continue;
+    const title = c.title ?? c.name ?? "";
+    if (!title || ownedTitleKeys.has(collectionTitleKey(title))) continue;
+    seen.add(c.id);
+    out.push({
+      ratingKey: `tmdb:${c.id}`,
+      title,
+      year: tmdbResultYear(c),
+      type,
+      thumb: externalThumbUrl(`https://image.tmdb.org/t/p/w500${c.poster_path}`),
+      inLibrary: false,
+      tmdbId: c.id,
+    });
+  }
+  return out.sort(byReleaseDate).slice(0, MAX_EXTERNAL_CREDITS);
+}
+
+/**
+ * Who someone is and everything they are credited on, from TMDB.
+ *
+ * Two round trips — the id has to be looked up before the credits can be asked
+ * for — and both are optional. With no TMDB key, or a name it doesn't know, the
+ * page falls back to the library half alone, which is the part that matters.
+ */
+async function tmdbPersonAndCredits(name: string) {
+  const person = await tmdbPerson(name).catch(() => null);
+  if (!person) return { person: null, credits: [] as TmdbCredit[] };
+  const credits = await tmdbGet<{ cast?: TmdbCredit[]; crew?: TmdbCredit[] }>(
+    `/person/${person.tmdbId}/combined_credits`,
+  ).catch(() => null);
+  return {
+    person,
+    // Parts they played plus films they directed — the two the cast row links
+    // from, and the same pair the library half is filtered on. Appearances as
+    // themselves are dropped: see isPerformance.
+    credits: [
+      ...(credits?.cast ?? []).filter(isPerformance),
+      ...(credits?.crew ?? []).filter((c) => c.job === "Director"),
+    ],
+  };
+}
+
+/**
  * GET /api/plex/person?name=<name>
  *
- * A cast/crew member's page: their biography and photo, plus everything in the
- * library they worked on, split into movies and shows.
+ * A cast/crew member's page: their biography and photo, everything in the
+ * library they worked on, and the rest of their career behind it as requestable
+ * cards. Split into movies and shows.
  *
- * The filmography comes from Plex rather than TMDB, by filtering each section on
- * the person's tag id (`?actor=` / `?director=`). That is one request per
- * section and, by construction, returns only titles that are actually in the
- * library — which is what the page is meant to show. Asking TMDB for their
- * credits and then testing each one for ownership would be both slower and
- * wrong at the edges.
+ * When Plex indexes the person the filmography comes straight from it, and the
+ * only thing left to wait on is TMDB. When it doesn't — somebody credited on
+ * nothing you own — it falls back to reconstructing the filmography out of TMDB
+ * credits and ownership checks, which is slow and says so in the log.
  *
- * The biography has no Plex equivalent, so it comes from TMDB, matched by name.
- * It's optional: with no TMDB key, or no match, the page still lists the
+ * The biography has no Plex equivalent either way, so it comes from TMDB,
+ * matched by name, and is fetched alongside the filmography rather than before
+ * it. It's optional: with no TMDB key, or no match, the page still lists the
  * filmography and simply omits the prose.
  */
 router.get("/person", async (req: Request, res: Response) => {
@@ -1654,6 +1883,55 @@ router.get("/person", async (req: Request, res: Response) => {
     res.status(400).json({ error: "Missing name" });
     return;
   }
+  // One id per role Plex knows this person in. Empty means Plex has never
+  // heard of them, which is the only case the slow path is for.
+  const tagIds = await personTagIds(name);
+
+  if (tagIds.size > 0) {
+    try {
+      // Side by side: the library half is local and quick, the TMDB half is two
+      // round trips, and the page wants both. Waiting for them in turn made the
+      // page as slow as the sum of the two for no reason.
+      const [owned, extra] = await Promise.all([
+        libraryCreditsFor(tagIds),
+        tmdbPersonAndCredits(name),
+      ]);
+      const rest = (mediaType: string, type: string) =>
+        externalCreditsFor(extra.credits, mediaType, type, owned.ownedTmdbIds, owned.ownedTitleKeys);
+      // What's on the shelf first, then the rest of the career behind it — the
+      // same order, and the same requestable cards, as "More Like This".
+      const movies = [...owned.movies, ...rest("movie", "movie")];
+      const shows = [...owned.shows, ...rest("tv", "show")];
+      logEvent("Person", "filmography from Plex", {
+        name,
+        // Which roles Plex knows them in, and under which id. A page missing
+        // half a career is usually a role missing from this list.
+        tags: [...tagIds].map(([role, id]) => `${role}=${id}`).join(" "),
+        movies: `${owned.movies.length}+${movies.length - owned.movies.length}`,
+        shows: `${owned.shows.length}+${shows.length - owned.shows.length}`,
+      });
+      res.json({
+        name: extra.person?.name ?? name,
+        thumb: extra.person?.thumb ?? null,
+        biography: extra.person?.biography ?? null,
+        birthday: extra.person?.birthday ?? null,
+        deathday: extra.person?.deathday ?? null,
+        placeOfBirth: extra.person?.placeOfBirth ?? null,
+        knownFor: extra.person?.knownFor ?? null,
+        movies,
+        shows,
+      });
+      return;
+    } catch (err) {
+      // Plex couldn't answer — fall through to the TMDB reconstruction below
+      // rather than showing an empty page.
+      console.error("Person credits error (falling back to TMDB):", err);
+    }
+  }
+
+  // Plex doesn't index this person, so their filmography has to be rebuilt out
+  // of TMDB credits and one ownership check per credit. Slow and worth saying so.
+  logEvent("Person", "no Plex tag, rebuilding from TMDB", { name });
 
   try {
     const person = await tmdbPerson(name);
@@ -1670,11 +1948,11 @@ router.get("/person", async (req: Request, res: Response) => {
       crew?: TmdbCredit[];
     }>(`/person/${person.tmdbId}/combined_credits`);
 
-    // Acting roles plus directing credits — the two kinds the cast row links
-    // from. Other crew jobs would pad the page with titles nobody associates
-    // with the person.
+    // Same rule as the fast path above: parts played and films directed. Other
+    // crew jobs would pad the page with titles nobody associates with the
+    // person, and appearances as themselves are not parts at all.
     const all = [
-      ...(credits?.cast ?? []),
+      ...(credits?.cast ?? []).filter(isPerformance),
       ...(credits?.crew ?? []).filter((c) => c.job === "Director"),
     ];
 
@@ -1738,6 +2016,34 @@ interface TmdbCredit extends TmdbPart {
   media_type?: string;
   job?: string;
   popularity?: number;
+  /** The part played. "Self", "Himself" and friends mean they turned up as
+   *  themselves, which is not a part — see isPerformance. */
+  character?: string;
+  genre_ids?: number[];
+}
+
+/**
+ * Characters that mean somebody appeared rather than acted.
+ *
+ * TMDB files a talk show sofa, a documentary interview and a clip of old
+ * footage as cast credits, all with the person's own name in the character
+ * field. On a page meant to answer "what have they been in", those are noise —
+ * a working actor's list is otherwise half chat shows.
+ */
+const APPEARANCE_CHARACTER_RE =
+  /^\s*(self|him\s*self|her\s*self|them\s*selves)\b|\(?\barchive footage\b/i;
+
+/**
+ * TMDB genre ids for formats nobody is cast in: talk (10767), news (10763),
+ * reality (10764). The character field usually gives these away on its own;
+ * this catches the ones filed with no character at all.
+ */
+const APPEARANCE_GENRE_IDS = new Set([10763, 10764, 10767]);
+
+/** Whether a cast credit is a part they played, rather than an appearance. */
+function isPerformance(credit: TmdbCredit): boolean {
+  if (APPEARANCE_CHARACTER_RE.test(credit.character ?? "")) return false;
+  return !(credit.genre_ids ?? []).some((g) => APPEARANCE_GENRE_IDS.has(g));
 }
 
 /** TMDB person lookup by name, cached (misses included — a name TMDB doesn't
@@ -2552,6 +2858,27 @@ export async function notifyPlexStopped(ratingKey: string | null, sessionId: str
 }
 
 /**
+ * Token for reading and ending Plex sessions.
+ *
+ * Both are account-level calls on some setups, where the local server token
+ * gets a bare 403. That took out the orphan reaper and the terminate path
+ * together, silently — the account token configured to avoid exactly this was
+ * only ever passed to the second of them, which the first never reached.
+ */
+function sessionsToken(): string | undefined {
+  return process.env.PLEX_ACCOUNT_TOKEN || process.env.PLEX_TOKEN;
+}
+
+/**
+ * Whether the "can't read /status/sessions" warning has already been given.
+ *
+ * It is a configuration problem, not an event: it stays true for every teardown
+ * for as long as the process lives, and repeating it buries the one teardown
+ * that matters. Said once, with what to do about it.
+ */
+let sessionListForbidden = false;
+
+/**
  * Safely terminate a specific Plex session using the official API.
  * Triple safety:
  * 1. Matches TranscodeSession.key against our exact plexKey
@@ -2574,7 +2901,7 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
           Session?: { id?: string };
         }>;
       };
-    }>("/status/sessions");
+    }>("/status/sessions", undefined, sessionsToken());
 
     const sessions = data.MediaContainer.Metadata || [];
     for (const s of sessions) {
@@ -2588,17 +2915,10 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
       if (!sessionId) continue;
 
       console.log("[HLS] Terminating Plex session:", sessionId, "for transcode key:", plexKey.substring(0, 8));
-      // /status/sessions/terminate needs an account-privileged token — the server
-      // PLEX_TOKEN gets 403'd, leaving the session (and its transcode) to linger.
-      // Use PLEX_ACCOUNT_TOKEN when set (same one Discover/Seerr use).
       const termParams: Record<string, string> = { sessionId, reason: "Playback ended" };
-      // The comment above described this for a long time without it being true:
-      // plexFetch always sent PLEX_TOKEN, so the 403 it warns about happened on
-      // every setup — including the ones that had configured an account token
-      // precisely to avoid it — and orphaned transcodes piled up on Plex.
+      // Account-privileged, like the listing above — see sessionsToken.
       const termRes = await plexFetch(
-        "/status/sessions/terminate", termParams, undefined, "POST",
-        process.env.PLEX_ACCOUNT_TOKEN || process.env.PLEX_TOKEN,
+        "/status/sessions/terminate", termParams, undefined, "POST", sessionsToken(),
       );
       if (!termRes.ok) {
         console.warn("[HLS] Terminate returned", termRes.status,
@@ -2609,7 +2929,30 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
 
     if (DEBUG) console.log("[HLS] No matching Plex session found for terminate:", plexKey.substring(0, 8));
   } catch (err) {
-    console.log("[HLS] Terminate session failed (non-fatal):", err);
+    const message = err instanceof Error ? err.message : String(err);
+    // Plex refusing the token, which no amount of retrying changes. 403 is the
+    // server token being told it may not list sessions; 401 is an account token
+    // this server doesn't accept — a plex.tv token is not automatically a token
+    // for the local server. The two read nothing alike and mean the same thing
+    // here. Non-fatal either way: the transcode is stopped by its own endpoint
+    // before this runs, so only Plex's "now playing" entry lingers. Worth one
+    // line of advice rather than a page of HTML on every teardown — there were
+    // sixteen of those in one ten-minute session.
+    if (message.includes("401") || message.includes("403")) {
+      if (!sessionListForbidden) {
+        sessionListForbidden = true;
+        console.warn(
+          `[HLS] Plex refused to list sessions (${message.includes("401") ? "401" : "403"}),`,
+          "so finished ones linger in Now Playing and the orphan reaper cannot run.",
+          process.env.PLEX_ACCOUNT_TOKEN
+            ? "PLEX_ACCOUNT_TOKEN is set but was refused — it has to be a token this server accepts, not only a plex.tv one."
+            : "Set PLEX_ACCOUNT_TOKEN to your plex.tv account token.",
+          "Playback is unaffected; transcodes still stop normally.",
+        );
+      }
+      return;
+    }
+    console.warn("[HLS] Terminate session failed (non-fatal):", message);
   }
 }
 
@@ -2680,6 +3023,29 @@ export async function pingPlexTranscode(hlsSessionId: string): Promise<boolean> 
  * When ratingKey is provided, only stops sessions for that specific media item
  * to avoid killing unrelated watch parties in other guilds.
  */
+/**
+ * Sessions a room is currently streaming, which nothing may flush.
+ *
+ * One item can now have several transcodes running at once — one per audio and
+ * subtitle combination someone in the room has chosen — and the stale-transcode
+ * flush below stops *every* transcode of an item it recognises as ours. That was
+ * safe when a room had exactly one stream and anything else was by definition an
+ * orphan. It is now the difference between clearing a leak and killing the
+ * stream of everyone watching in another language, so the rooms register their
+ * live sessions here and the flush steps over them.
+ */
+const protectedSessions = new Set<string>();
+
+/** Mark a session as live. Called by the sync layer when a variant starts. */
+export function protectSession(sessionId: string): void {
+  protectedSessions.add(sessionId);
+}
+
+/** Drop the protection when the variant is torn down. */
+export function releaseSession(sessionId: string): void {
+  protectedSessions.delete(sessionId);
+}
+
 async function flushStaleTranscodes(ratingKey?: string, exceptKey?: string): Promise<number> {
   let stopped = 0;
 
@@ -2694,7 +3060,7 @@ async function flushStaleTranscodes(ratingKey?: string, exceptKey?: string): Pro
           key?: string;
         }>;
       };
-    }>("/status/sessions");
+    }>("/status/sessions", undefined, sessionsToken());
 
     const sessions = data.MediaContainer.Metadata || [];
     console.log("[HLS] /status/sessions:", sessions.length);
@@ -2717,6 +3083,9 @@ async function flushStaleTranscodes(ratingKey?: string, exceptKey?: string): Pro
       // GUID and gets a 400. Prefer the former for the call, keep the latter for
       // the exceptKey check, which really is comparing transcode GUIDs.
       const sessionKey = s.Session?.id;
+      // Live for someone else in the room — a different audio or subtitle
+      // track of the same title. See protectedSessions.
+      if (sessionKey && protectedSessions.has(sessionKey)) continue;
       if (key) {
         // Never stop the transcode we're currently bringing up.
         if (exceptKey && key.split("/").pop() === exceptKey) continue;
@@ -2823,6 +3192,73 @@ async function defaultMediaIndex(ratingKey: string): Promise<number> {
   }
 }
 
+/**
+ * Serialises "choose the tracks, then start the transcode" per item.
+ *
+ * Track selection in Plex is a property of the *item*, not of a session: it is a
+ * PUT to /library/parts with allParts=1, and the transcode that follows reads
+ * whatever the item is set to at that moment. Two people starting different
+ * audio tracks of the same film at the same time would otherwise interleave
+ * their PUT and their decision call, and both would get whichever selection
+ * happened to land second.
+ *
+ * Holding a per-item lock across the pair makes each start atomic. Once a
+ * transcode is running it has already captured its decision and is unaffected by
+ * later changes to the item — which is precisely what allows several tracks of
+ * one film to play at once.
+ */
+const itemStartLocks = new Map<string, Promise<void>>();
+
+function withItemLock<T>(ratingKey: string, fn: () => Promise<T>): Promise<T> {
+  const prev = itemStartLocks.get(ratingKey) ?? Promise.resolve();
+  // Runs whether the previous holder resolved or threw — a failed start must
+  // not wedge the queue for the item.
+  const run = prev.then(fn, fn);
+  const tail = run.then(() => {}, () => {});
+  itemStartLocks.set(ratingKey, tail);
+  void tail.then(() => {
+    if (itemStartLocks.get(ratingKey) === tail) itemStartLocks.delete(ratingKey);
+  });
+  return run;
+}
+
+/**
+ * Point the item at one variant's tracks, immediately before its transcode
+ * starts. Only meaningful inside withItemLock.
+ *
+ * Deliberately does NOT clear the metadata cache, unlike the standalone
+ * /streams route. The `selected` flags on a track list describe whichever
+ * variant started most recently, which is no longer a useful answer to "what am
+ * I listening to" — each client tracks its own choice instead. Clearing the
+ * cache here would also mean a metadata refetch per variant start.
+ */
+async function selectTracksForStart(
+  ratingKey: string,
+  mediaIndex: number,
+  audioStreamID: number | null,
+  subtitleStreamID: number | null,
+): Promise<void> {
+  if (audioStreamID == null && subtitleStreamID == null) return;
+  try {
+    const meta = await buildMeta(ratingKey);
+    const versions = meta?.versions as Array<{ mediaIndex?: number; partId?: number | null }> | undefined;
+    const partId =
+      versions?.find((v) => v.mediaIndex === mediaIndex)?.partId ??
+      (meta?.partId as number | null | undefined) ??
+      null;
+    if (partId == null) return;
+    const params: Record<string, string> = { allParts: "1" };
+    if (audioStreamID != null) params.audioStreamID = String(audioStreamID);
+    if (subtitleStreamID != null) params.subtitleStreamID = String(subtitleStreamID);
+    await plexFetch(`/library/parts/${partId}`, params, undefined, "PUT");
+    if (DEBUG) console.log("[HLS] Tracks set for part", partId, params);
+  } catch (err) {
+    // A failed selection means the transcode comes up on the item's previous
+    // tracks, which is wrong but playable. Failing the whole start would be worse.
+    console.warn("[HLS] Couldn't set tracks before start:", err);
+  }
+}
+
 // ─── HLS streaming ──────────────────────────────────────────────
 
 /**
@@ -2901,6 +3337,19 @@ router.get(
     // Subtitle mode — "none" when user explicitly disabled subtitles, otherwise "burn"
     const subtitleMode = req.query.subtitles === "burn" ? "burn" : "none";
 
+    // The tracks this session wants. Present once a room can hold more than one
+    // combination at a time: the caller owns a variant and names the audio and
+    // subtitle streams it is for, and the pair is applied to the item under a
+    // lock immediately before the decision call — see selectTracksForStart.
+    // Absent from an older client, which then gets whatever the item is already
+    // set to, exactly as before.
+    const trackNum = (v: unknown): number | null => {
+      const n = Number(v);
+      return Number.isInteger(n) && n >= 0 ? n : null;
+    };
+    const audioStreamID = trackNum(req.query.audioStreamID);
+    const subtitleStreamID = trackNum(req.query.subtitleStreamID);
+
     console.log("[HLS] Master manifest requested for ratingKey:", ratingKey, "session:", sessionId.substring(0, 8), offset ? `offset:${offset}s` : "");
 
     // Core manifest fetch logic — wrapped in a promise for in-flight deduplication
@@ -2946,8 +3395,25 @@ router.get(
       // The decision + timeline stopped flow properly clears per-client state between sessions.
       const hlsHeaders = {
         "X-Plex-Session-Identifier": sessionId,
-        "X-Plex-Client-Profile-Extra":
+        /**
+         * What we can play, in Plex's profile language.
+         *
+         * The first directive is the transcode target: deliver HLS as h264 in
+         * MPEG-TS. The second says which audio codecs that target supports, and
+         * it has to be said separately — the `audioCodec` in the first names the
+         * target's default, not the profile's capability, so without the second
+         * Plex fell back to mp3 for anything it had to re-encode. Every stream
+         * in a session came out as 151 kbps stereo mp3 from an 8-channel Atmos
+         * source, which is the worst audio Plex knows how to make.
+         *
+         * AAC in MPEG-TS is the ordinary case for HLS and what hls.js expects;
+         * mp3 was the unusual choice here. Audio that is already playable is
+         * still copied untouched — see directStreamAudio.
+         */
+        "X-Plex-Client-Profile-Extra": [
           "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=h264&audioCodec=aac)",
+          "add-transcode-target-audio-codec(type=videoProfile&context=streaming&protocol=hls&audioCodec=aac)",
+        ].join("+"),
         "X-Plex-Client-Identifier": OUR_CLIENT_ID,
         "X-Plex-Product": "Plex Discord Theater",
         "X-Plex-Platform": "Chrome",
@@ -2965,8 +3431,18 @@ router.get(
         try {
           const decBody = await decisionRes.json() as Record<string, unknown>;
           const mc = decBody.MediaContainer as Record<string, unknown> | undefined;
+          // What Plex settled on. Worth a place on this line because it is the
+          // only cheap way to see whether the client profile above was
+          // understood: the alternative is digging a codec out of the
+          // transcoder statistics XML after the fact, which is where the mp3
+          // audio hid for as long as it did.
+          const media = (
+            (mc?.Metadata as Array<Record<string, unknown>> | undefined)?.[0]
+              ?.Media as Array<Record<string, unknown>> | undefined
+          )?.[0];
           console.log("[HLS] Decision:", decisionRes.status,
-            "code:", mc?.generalDecisionCode, mc?.generalDecisionText);
+            "code:", mc?.generalDecisionCode, mc?.generalDecisionText,
+            "→", media?.videoCodec ?? "?", "+", media?.audioCodec ?? "?");
         } catch {
           console.log("[HLS] Decision:", decisionRes.status, "(no body)");
         }
@@ -3082,8 +3558,13 @@ router.get(
       return rewritten;
     };
 
-    // Store promise in in-flight map so concurrent requests wait on it
-    const promise = fetchManifest();
+    // Store promise in in-flight map so concurrent requests wait on it.
+    // The item lock wraps the pair below it: the track selection this variant
+    // needs, and the decision + start that captures it.
+    const promise = withItemLock(ratingKey, async () => {
+      await selectTracksForStart(ratingKey, mediaIndex, audioStreamID, subtitleStreamID);
+      return fetchManifest();
+    });
     manifestInFlight.set(sessionId, promise);
 
     try {
@@ -3363,16 +3844,27 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
       // precede a stream dying and neither is obvious in the ping stream:
       //  - a gap far longer than the 10s cadence (client backgrounded, network
       //    dropped, or a second ping loop was killed off)
-      //  - the position jumping, which means a seek happened without the
-      //    transcode restarting
+      //  - the position jumping by more than the time that passed, which means a
+      //    seek happened without the transcode restarting
+      //
+      // Neither is about the transcode's survival. The room keeps every stream
+      // it holds alive on its own thirty-second timer whether anyone is in the
+      // player or not — see startSessionPing in sync.ts — so what these measure
+      // is a *client* going quiet, which is a different and much smaller thing
+      // than it used to sound like.
       if (prev && wallMs > 25_000) {
-        logEvent("Ping", "gap in keep-alive", {
+        logEvent("Ping", "client stopped reporting its position", {
           session: sessionId.substring(0, 8),
           gapS: wallMs / 1000,
           posS: timeMs / 1000,
         });
       }
-      if (prev && Math.abs(posDeltaMs) > 30_000) {
+      // Against the time that passed, not against zero. Somebody who steps out
+      // of the player for a minute comes back a minute further into the film,
+      // because the room went on without them: the position moved exactly as
+      // much as the clock did, which is the opposite of a seek. Comparing to
+      // zero called that a jump — and called it one twice per walk back.
+      if (prev && Math.abs(posDeltaMs - wallMs) > 30_000) {
         logEvent("Ping", "position jumped without restart", {
           session: sessionId.substring(0, 8),
           fromS: prev.timeMs / 1000,
@@ -3489,6 +3981,20 @@ router.delete(
       return;
     }
 
+    // Still someone's picture. The requester may well be entitled to stop it —
+    // they are the one driving it — but a stream is shared by everyone on the
+    // same tracks, and leaving the player is not a decision on their behalf.
+    // The stream dies when the last of them goes, which the sync layer handles.
+    if (sessionHasOtherWatchers(sessionId, stopper)) {
+      logEvent("HLS", "Stop refused — others are still on this stream", {
+        session: sessionId.substring(0, 8),
+        reason,
+        stopper,
+      });
+      res.json({ ok: true, ignored: "still-watched" });
+      return;
+    }
+
     const lastPing = hostPingInfo.get(sessionId);
     logEvent("HLS", "Stop requested", {
       session: sessionId.substring(0, 8),
@@ -3591,7 +4097,7 @@ router.delete("/hls/sessions", async (req: Request, res: Response) => {
           Player?: { machineIdentifier?: string };
         }>;
       };
-    }>("/status/sessions");
+    }>("/status/sessions", undefined, sessionsToken());
 
     const sessions = data.MediaContainer.Metadata || [];
     if (DEBUG) console.log("[HLS] Active sessions:", sessions.length);

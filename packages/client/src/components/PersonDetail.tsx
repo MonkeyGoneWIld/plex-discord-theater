@@ -212,9 +212,12 @@ export function PersonDetail({ name, thumb, onSelect, onBack }: PersonDetailProp
             {person && person.shows.length > 0 && (
               <PosterShelf title="TV Shows" items={person.shows} onSelect={onSelect} />
             )}
+            {/* The shelves now carry what the library doesn't have as well, so
+                reaching here means nothing was found at all — not merely that
+                the library has none of it, which is what this used to say. */}
             {person && person.movies.length === 0 && person.shows.length === 0 && (
               <p style={{ ...styles.muted, padding: "0 24px" }}>
-                Nothing in your library credits this person.
+                No films or shows found for this person.
               </p>
             )}
           </>

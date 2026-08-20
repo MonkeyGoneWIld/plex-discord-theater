@@ -609,7 +609,16 @@ export function fetchSiblingEpisodes(
 export function hlsMasterUrl(
   ratingKey: string,
   sessionId: string,
-  options?: { offset?: number; subtitles?: boolean; mediaIndex?: number },
+  options?: {
+    offset?: number;
+    subtitles?: boolean;
+    mediaIndex?: number;
+    /** The tracks this stream is for. The server applies them to the item under
+     *  a lock immediately before starting the transcode, which is what lets
+     *  several sets of tracks play at once — see selectTracksForStart. */
+    audioStreamId?: number;
+    subtitleStreamId?: number;
+  },
 ): string {
   const params = new URLSearchParams();
   if (options?.offset != null && options.offset > 0) params.set("offset", String(options.offset));
@@ -619,6 +628,10 @@ export function hlsMasterUrl(
   // without needing to know which one it is.
   if (options?.mediaIndex != null && options.mediaIndex > 0) {
     params.set("mediaIndex", String(options.mediaIndex));
+  }
+  if (options?.audioStreamId != null) params.set("audioStreamID", String(options.audioStreamId));
+  if (options?.subtitleStreamId != null) {
+    params.set("subtitleStreamID", String(options.subtitleStreamId));
   }
   params.set("subtitles", options?.subtitles ? "burn" : "none");
   const qs = params.toString();

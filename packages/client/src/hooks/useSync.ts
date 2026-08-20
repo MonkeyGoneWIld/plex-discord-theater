@@ -37,6 +37,28 @@ export interface SuggestionItem {
   fromUsername?: string;
 }
 
+/**
+ * The stream this client is on, and the tracks it is for.
+ *
+ * A room is one timeline with a transcode per set of tracks anyone has chosen.
+ * Everyone starts on the host's; picking different audio or subtitles moves you
+ * onto the stream that serves them, or starts one if nobody has it.
+ *
+ * `isOwner` means this client drives that transcode — starts it, restarts it for
+ * a seek it can't serve in place, and keeps it alive. It says nothing about
+ * control of the room.
+ */
+export interface StreamVariant {
+  variantKey: string;
+  audioStreamId: number;
+  subtitleStreamId: number;
+  /** Null when the stream has no transcode yet, which is the owner's cue to
+   *  start one and report it back with sendVariantSession. */
+  hlsSessionId: string | null;
+  sessionOffset: number;
+  isOwner: boolean;
+}
+
 export interface SyncState {
   connected: boolean;
   ratingKey: string | null;
@@ -78,6 +100,16 @@ export interface SyncState {
   seekSeq: number;
   /** Timestamp of the last host command — used to detect stale state on reconnect */
   lastCommandAt: number;
+  /**
+   * When `position` was last reported, by this client's clock.
+   *
+   * `position` is a snapshot, not a live value: heartbeats carry it every five
+   * seconds, so by the time anyone reads it it is up to five seconds old and on
+   * average half that. Anything that wants to know where the room *is* — as
+   * opposed to where it was last seen — has to carry it forward, which needs
+   * this. See roomPositionNow.
+   */
+  positionAt: number;
   /** True if the WebSocket closed due to authentication failure (code 1008) */
   authFailed: boolean;
   /** True if max reconnect attempts exhausted. `retryConnection` clears it. */
@@ -95,13 +127,52 @@ export interface SyncState {
   /** Whether *this* client is a co-host (transport control, granted by the host).
    *  Always false for the host, whose rights already supersede it. */
   isCoHost: boolean;
-  /** A co-host asked for a subtitle change. Only the host acts on it, since
-   *  subtitles are burned in and applying one restarts the transcode. `seq`
-   *  makes repeat requests for the same track fire the effect again. */
-  subtitleRequest: { partId: number; subtitleStreamID: number; seq: number } | null;
+  /**
+   * Which stream this client should be playing. Null before playback starts.
+   *
+   * `seq` increments on every assignment, including one that repoints the same
+   * variant at a new session after its owner restarted the transcode — the
+   * player has to act on that even though nothing else about it changed.
+   */
+  variant: (StreamVariant & { seq: number }) | null;
   /** A co-host asked to advance to the next item. Only the host acts on it,
    *  since starting a title is host-only. `seq` re-fires the effect on repeats. */
   playItemRequest: { ratingKey: string; seq: number } | null;
+}
+
+/**
+ * A report that shows the room standing still rather than playing.
+ *
+ * Carrying a position forward by wall time assumes the host is playing at 1x
+ * between reports. A host whose transcode has starved reports the same number
+ * every five seconds, and adding wall time to it invents progress nobody made:
+ * viewers run on past a host that is frozen, then get pulled back when it
+ * recovers. It has not paused — it reports `playing: true` throughout — so only
+ * the numbers say so.
+ *
+ * Deliberately a narrow test rather than a ratio. Extrapolation can only ever
+ * be one report's worth wrong and re-anchors on the next one, so there is
+ * nothing to be gained by catching partial stalls and something to lose by
+ * misreading a late heartbeat — which still carries real progress — as a
+ * frozen one. Advancing by almost nothing over a whole interval is unambiguous.
+ */
+function looksStalled(advancedS: number, elapsedS: number): boolean {
+  return elapsedS > 2 && advancedS < 0.5;
+}
+
+/**
+ * How far into the film the room is *now*, rather than at its last report.
+ *
+ * Mirrors the server's own interpolation, including the cap: past thirty
+ * seconds without a report the room isn't playing in any useful sense — stalled,
+ * buffering, or gone — and elapsed wall time stops describing it, so the last
+ * confirmed position is the more honest answer.
+ */
+export function roomPositionNow(state: Pick<SyncState, "position" | "playing" | "positionAt">): number {
+  if (!state.playing || !state.positionAt) return state.position;
+  const elapsed = (Date.now() - state.positionAt) / 1000;
+  if (elapsed < 0 || elapsed > 30) return state.position;
+  return state.position + elapsed;
 }
 
 export interface Participant {
@@ -130,6 +201,10 @@ export interface SyncActions {
     hlsSessionId: string,
     position?: number,
     sessionOffset?: number,
+    /** The tracks this stream is for — it becomes the room's default variant,
+     *  and the one everybody who hasn't chosen otherwise watches. */
+    audioStreamId?: number,
+    subtitleStreamId?: number,
   ) => void;
   sendPause: (position: number) => void;
   sendResume: (position: number) => void;
@@ -150,7 +225,19 @@ export interface SyncActions {
   /** Host: grant or revoke transport control for a viewer. */
   sendSetCoHost: (userId: string, value: boolean) => void;
   /** Host or co-host: request a subtitle track. The host applies it. */
-  sendSetSubtitle: (partId: number, subtitleStreamID: number) => void;
+  /**
+   * "Put me on these tracks."
+   *
+   * Anyone may call it. The server decides the scope: the host's choice carries
+   * to everyone watching the host's stream, anyone else's moves only them. The
+   * answer comes back as a `variant`.
+   */
+  sendSetTracks: (audioStreamId: number, subtitleStreamId: number) => void;
+  /** Stream owner → room: the transcode I just brought up for my variant. */
+  sendVariantSession: (hlsSessionId: string, sessionOffset: number) => void;
+  /** Move onto whatever the host is watching, whatever its tracks are. Used by
+   *  the offer shown when this client's own stream can't keep up. */
+  sendRejoinHost: () => void;
   /** Co-host: ask the host to advance to the next item. */
   sendPlayItem: (ratingKey: string) => void;
   /**
@@ -197,13 +284,14 @@ const INITIAL_STATE: SyncState = {
   sessionOffset: 0,
   seekSeq: 0,
   lastCommandAt: 0,
+  positionAt: 0,
   authFailed: false,
   reconnectFailed: false,
   browseContext: null,
   queue: [],
   participants: [],
   isCoHost: false,
-  subtitleRequest: null,
+  variant: null,
   playItemRequest: null,
 };
 
@@ -263,27 +351,57 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         hlsSessionId: string,
         position?: number,
         sessionOffset?: number,
+        audioStreamId?: number,
+        subtitleStreamId?: number,
       ) => {
-        send({ type: "play", ratingKey, title, subtitles, hlsSessionId, position, sessionOffset });
-        setState((prev) => ({
-          ...prev,
-          playing: true,
-          position: position ?? 0,
-          sessionOffset: sessionOffset ?? position ?? 0,
-        }));
+        send({
+          type: "play", ratingKey, title, subtitles, hlsSessionId, position, sessionOffset,
+          audioStreamId, subtitleStreamId,
+        });
+        setState((prev) => {
+          // Restarting what is already running — a track change, or a seek that
+          // needed a new transcode — rather than starting something.
+          const restart = prev.playing && prev.ratingKey === ratingKey;
+          return {
+            ...prev,
+            // What we have just told the room is playing. Leaving these out made
+            // the host the one client that didn't know: the server excludes a
+            // sender from its own broadcast, so nothing else was ever going to
+            // tell it. With `ratingKey` null, every "is the room already running
+            // this?" test on the host answered no — including the one that lands
+            // a rebuild on the room's clock. So the host alone never landed, and
+            // came back from each of its own track changes exactly as far behind
+            // the room as that change had taken to load. It never caught up, and
+            // the gaps added together over an evening.
+            ratingKey,
+            title,
+            subtitles,
+            hlsSessionId,
+            playing: true,
+            // A restart does not move the room, so it must not move our copy of
+            // it either. `position` here is where this transcode was asked to
+            // begin, which is behind the clock by the length of the load.
+            position: restart ? prev.position : (position ?? 0),
+            // A genuine start is a request, not an observation: no frame of it
+            // exists yet, so there is nothing to carry forward from and 0 says
+            // "don't extrapolate". Mirrors the server's positionConfirmed.
+            positionAt: restart ? prev.positionAt : 0,
+            sessionOffset: sessionOffset ?? position ?? 0,
+          };
+        });
       },
       sendPause: (position: number) => {
         send({ type: "pause", position });
-        setState((prev) => ({ ...prev, playing: false, position }));
+        setState((prev) => ({ ...prev, playing: false, position, positionAt: Date.now() }));
       },
       sendResume: (position: number) => {
         send({ type: "resume", position });
-        setState((prev) => ({ ...prev, playing: true, position }));
+        setState((prev) => ({ ...prev, playing: true, position, positionAt: Date.now() }));
       },
       // Deliberately does not touch `playing`: a seek says where, not whether.
       sendSeek: (position: number) => {
         send({ type: "seek", position });
-        setState((prev) => ({ ...prev, position }));
+        setState((prev) => ({ ...prev, position, positionAt: Date.now() }));
       },
       sendStop: () => {
         send({ type: "stop" });
@@ -296,12 +414,33 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           ratingKey: null,
           title: null,
           hlsSessionId: null,
+          // And the stream it named. The server tears every variant down on a
+          // stop; a client that kept one held a session id for a transcode that
+          // no longer exists, and the next thing it played adopted that id
+          // instead of announcing itself. See announceStream.
+          variant: null,
           playing: false,
           position: 0,
         }));
       },
-      sendHeartbeat: (position: number, playing: boolean) =>
-        send({ type: "heartbeat", position, playing }),
+      sendHeartbeat: (position: number, playing: boolean) => {
+        send({ type: "heartbeat", position, playing });
+        // Kept locally too. The server excludes a sender from its own
+        // broadcast, and the host is the only client that heartbeats — so the
+        // host's copy of the room's position stopped updating the moment it
+        // took the role, and anything reading it got a number frozen minutes
+        // ago. It is reporting the room's clock, so it may as well hold it.
+        setState((prev) => {
+          // The same test viewers apply to the heartbeats they receive. It
+          // matters here too: this is the number the host's own next rebuild
+          // lands on, and a stalled host should come back where it stopped
+          // rather than somewhere it never reached.
+          const now = Date.now();
+          const elapsed = prev.positionAt ? (now - prev.positionAt) / 1000 : 0;
+          const stalled = looksStalled(position - prev.position, elapsed);
+          return { ...prev, position, playing, positionAt: stalled ? 0 : now };
+        });
+      },
       sendBrowse: (context: string) => send({ type: "browse", context }),
       sendQueueAdd: (item: QueueItem) => send({ type: "queue-add", item }),
       sendQueueRemove: (ratingKey: string) => send({ type: "queue-remove", ratingKey }),
@@ -312,8 +451,11 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       sendPromoteHost: (targetUserId: string) => send({ type: "promote-host", userId: targetUserId }),
       sendSetCoHost: (targetUserId: string, value: boolean) =>
         send({ type: "set-cohost", userId: targetUserId, value }),
-      sendSetSubtitle: (partId: number, subtitleStreamID: number) =>
-        send({ type: "set-subtitle", partId, subtitleStreamID }),
+      sendSetTracks: (audioStreamId: number, subtitleStreamId: number) =>
+        send({ type: "set-tracks", audioStreamId, subtitleStreamId }),
+      sendVariantSession: (hlsSessionId: string, sessionOffset: number) =>
+        send({ type: "variant-session", hlsSessionId, sessionOffset }),
+      sendRejoinHost: () => send({ type: "rejoin-host" }),
       sendPlayItem: (ratingKey: string) => send({ type: "play-item", ratingKey }),
       sendWatching: (value: boolean) => send({ type: "watching", value }),
       retryConnection: () => {
@@ -371,6 +513,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               subtitles: Boolean(msg.subtitles),
               playing: Boolean(msg.playing),
               position: (msg.position as number) ?? 0,
+              positionAt: Date.now(),
               hlsSessionId: (msg.hlsSessionId as string) || null,
               sessionOffset: (msg.sessionOffset as number) ?? 0,
               commandSeq: prev.commandSeq + 1,
@@ -378,6 +521,22 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               lastCommandAt: (msg.lastCommandAt as number) ?? Date.now(),
               browseContext: (msg.browseContext as string) || null,
               queue: (msg.queue as QueueItem[]) || [],
+              // The stream a joiner lands on — the host's. Absent from an older
+              // server, in which case the player falls back to hlsSessionId.
+              // An explicit null means nothing is playing, and has to be taken
+              // as such: keeping the last one left a reconnecting client holding
+              // a stream id the room had already torn down. Only a server that
+              // doesn't send the field at all — which this one always does —
+              // falls back to what we had.
+              variant:
+                msg.variant === undefined
+                  ? prev.variant
+                  : msg.variant === null
+                    ? null
+                    : {
+                        ...(msg.variant as Omit<StreamVariant, "isOwner"> & { isOwner: boolean }),
+                        seq: (prev.variant?.seq ?? 0) + 1,
+                      },
               hostUsername: (msg.hostUsername as string) || prev.hostUsername,
               participants: (msg.participants as Participant[]) || [],
               isCoHost:
@@ -407,13 +566,20 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           case "cohost-changed":
             setState((prev) => ({ ...prev, isCoHost: Boolean(msg.isCoHost) }));
             break;
-          case "set-subtitle":
+          case "variant":
+            // Which stream to play. Arrives on assignment and again whenever
+            // its owner repoints it at a new transcode, so `seq` moves even
+            // when nothing but the session id has.
             setState((prev) => ({
               ...prev,
-              subtitleRequest: {
-                partId: msg.partId as number,
-                subtitleStreamID: msg.subtitleStreamID as number,
-                seq: (prev.subtitleRequest?.seq ?? 0) + 1,
+              variant: {
+                variantKey: msg.variantKey as string,
+                audioStreamId: (msg.audioStreamId as number) ?? 0,
+                subtitleStreamId: (msg.subtitleStreamId as number) ?? 0,
+                hlsSessionId: (msg.hlsSessionId as string) || null,
+                sessionOffset: (msg.sessionOffset as number) ?? 0,
+                isOwner: Boolean(msg.isOwner),
+                seq: (prev.variant?.seq ?? 0) + 1,
               },
             }));
             break;
@@ -438,6 +604,16 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               // Non-zero when the host resumed from history or restarted the
               // transcode at a seek target; 0 for a plain start.
               position: (msg.position as number) ?? 0,
+              // A restart carries the room's live clock, so it keeps running
+              // from here. A genuine start carries the offset a transcode was
+              // asked for, which nothing is playing yet — carrying that forward
+              // means chasing a position the host hasn't reached, into a
+              // transcode that hasn't produced it. Same rule as the server's
+              // positionConfirmed; 0 means "don't extrapolate this".
+              positionAt:
+                prev.playing && prev.ratingKey === ((msg.ratingKey as string) || null)
+                  ? Date.now()
+                  : 0,
               hostDisconnected: false,
               commandSeq: prev.commandSeq + 1,
               browseContext: null,
@@ -448,6 +624,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               ...prev,
               playing: false,
               position: (msg.position as number) ?? prev.position,
+              positionAt: Date.now(),
               commandSeq: prev.commandSeq + 1,
             }));
             break;
@@ -456,6 +633,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               ...prev,
               playing: true,
               position: (msg.position as number) ?? prev.position,
+              positionAt: Date.now(),
               commandSeq: prev.commandSeq + 1,
             }));
             break;
@@ -463,6 +641,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             setState((prev) => ({
               ...prev,
               position: (msg.position as number) ?? prev.position,
+              positionAt: Date.now(),
               commandSeq: prev.commandSeq + 1,
               seekSeq: prev.seekSeq + 1,
             }));
@@ -473,6 +652,9 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               ratingKey: null,
               title: null,
               hlsSessionId: null,
+              // Same reasoning as sendStop above: the stream is gone, so the
+              // variant naming it has to go too.
+              variant: null,
               sessionOffset: 0,
               playing: false,
               position: 0,
@@ -485,33 +667,43 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             break;
           case "heartbeat":
             // Only update position — no commandSeq bump, so drift correction won't fire
-            setState((prev) => ({
-              ...prev,
-              position: (msg.position as number) ?? prev.position,
-              playing: msg.playing !== false,
-              // Self-heal: if our "what's playing" state was cleared (e.g. a stray
-              // stop during a host handoff), recover it from the heartbeat so the
-              // rejoin path works again. Only fill when missing, to avoid churn
-              // and spurious re-navigation while already watching.
-              ...(prev.ratingKey == null && msg.ratingKey
-                ? {
-                    ratingKey: msg.ratingKey as string,
-                    title: (msg.title as string) || null,
-                    subtitles: Boolean(msg.subtitles),
-                    hlsSessionId: (msg.hlsSessionId as string) || null,
-                    sessionOffset: (msg.sessionOffset as number) ?? 0,
-                  }
-                // The session id can go missing on its own — a stray stop, or a
-                // heartbeat that arrived before the "play" that announced the
-                // restart. Without it a viewer has nothing to attach hls.js to
-                // and sits on black with the room playing around them.
-                : prev.hlsSessionId == null && msg.hlsSessionId
+            setState((prev) => {
+              const now = Date.now();
+              const reported = (msg.position as number) ?? prev.position;
+              const elapsed = prev.positionAt ? (now - prev.positionAt) / 1000 : 0;
+              const stalled = looksStalled(reported - prev.position, elapsed);
+              return {
+                ...prev,
+                position: reported,
+                // 0 means "don't carry this forward" — see roomPositionNow and
+                // looksStalled. Every heartbeat decides again, so a stall costs
+                // the extrapolation only for as long as it lasts.
+                positionAt: stalled ? 0 : now,
+                playing: msg.playing !== false,
+                // Self-heal: if our "what's playing" state was cleared (e.g. a stray
+                // stop during a host handoff), recover it from the heartbeat so the
+                // rejoin path works again. Only fill when missing, to avoid churn
+                // and spurious re-navigation while already watching.
+                ...(prev.ratingKey == null && msg.ratingKey
                   ? {
-                      hlsSessionId: msg.hlsSessionId as string,
-                      sessionOffset: (msg.sessionOffset as number) ?? prev.sessionOffset,
+                      ratingKey: msg.ratingKey as string,
+                      title: (msg.title as string) || null,
+                      subtitles: Boolean(msg.subtitles),
+                      hlsSessionId: (msg.hlsSessionId as string) || null,
+                      sessionOffset: (msg.sessionOffset as number) ?? 0,
                     }
-                  : {}),
-            }));
+                  // The session id can go missing on its own — a stray stop, or a
+                  // heartbeat that arrived before the "play" that announced the
+                  // restart. Without it a viewer has nothing to attach hls.js to
+                  // and sits on black with the room playing around them.
+                  : prev.hlsSessionId == null && msg.hlsSessionId
+                    ? {
+                        hlsSessionId: msg.hlsSessionId as string,
+                        sessionOffset: (msg.sessionOffset as number) ?? prev.sessionOffset,
+                      }
+                    : {}),
+              };
+            });
             break;
           case "browse":
             setState((prev) => ({

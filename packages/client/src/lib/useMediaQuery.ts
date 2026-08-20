@@ -32,6 +32,26 @@ export function useMediaQuery(query: string): boolean {
 export const NARROW_QUERY = "(max-width: 720px)";
 
 /**
+ * Wide enough for the search view's Back button to sit beside the box.
+ *
+ * Back is pinned to the top-left of the view, the same place it sits on every
+ * other page — that consistency is the point of it, so it does not move to make
+ * room. The room comes from the margin either side of the centred 1200px
+ * column, and below a certain width there isn't any: the column reaches the
+ * edges, the box's left edge arrives at 24px, and the button is on top of it.
+ *
+ * The arithmetic, so it can be re-derived if either number changes: the button
+ * is ~90px wide at a 24px gutter, so it ends at 114px. The box's left edge is
+ * at (viewport - 1200) / 2 + 24. They touch at 1380px. 1440 is the next round
+ * number up and leaves a 30px gap at the boundary.
+ *
+ * Under it the button is not shown at all. The box's own X clears the query,
+ * which is what actually ends a search — the button was never the only way out,
+ * and half a button under the text is worse than none.
+ */
+export const ROOM_BESIDE_SEARCH_QUERY = "(min-width: 1440px)";
+
+/**
  * Phone held sideways. Landscape alone would also match every desktop window,
  * so the height cap is what keeps this to devices that are actually short.
  */

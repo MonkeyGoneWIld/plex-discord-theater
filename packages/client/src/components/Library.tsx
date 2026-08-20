@@ -5,6 +5,7 @@ import { ScrollShelf } from "./ScrollShelf";
 import { MovieCard } from "./MovieCard";
 import { SkeletonGrid } from "./SkeletonGrid";
 import { usePosterLayout } from "../lib/grid";
+import { useMediaQuery, ROOM_BESIDE_SEARCH_QUERY } from "../lib/useMediaQuery";
 import {
   authUrl,
   fetchHome,
@@ -74,6 +75,8 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   // How many posters fit across, and how wide each is — three on a phone,
   // as many as the window allows anywhere else. See lib/grid.
   const poster = usePosterLayout();
+  // Whether there is margin beside the centred search column for Back to sit in.
+  const roomForBack = useMediaQuery(ROOM_BESIDE_SEARCH_QUERY);
   const [sections, setSections] = useState<PlexSection[]>([]);
   // "home" and "history" are virtual tab ids — one for the real Plex homepage
   // (hubs), one for this app's own watch history. Both are kept in the same
@@ -537,16 +540,22 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
 
   return (
     <div style={styles.container}>
-      {/* Back sits at the view's top-left, at the same 16/24 offset as the
-          detail pages. Absolutely positioned so it never affects the centered
-          search bar's position.
+      {/* Back sits at the view's top-left, at the same 16/24 offset as every
+          other page's. Absolutely positioned, so it neither shifts the centred
+          search bar nor moves itself — landing in the same place everywhere is
+          the whole point of it.
 
-          Not on a phone. There is no room beside the box for it there, and
-          every way of making room was worse than not having it: over the field
-          it covered the text, above the field it pushed the whole page down the
-          moment you typed. The box's own X clears the query, which is what ends
-          a search — the button was never the only way out, just the widest. */}
-      {isSearching && !poster.phone && (
+          Which means it needs the margin beside the column to be there, and
+          below ROOM_BESIDE_SEARCH_QUERY it isn't: the column reaches the edges
+          and the box slides under the button. So the button goes, rather than
+          moving somewhere else or sitting on the text. The box's own X clears
+          the query, which is what actually ends a search — the button was never
+          the only way out, just the widest.
+
+          Never on a phone, at any width, for the same reason it was removed
+          there before: over the field it covered the text, above the field it
+          pushed the whole page down the moment you typed. */}
+      {isSearching && !poster.phone && roomForBack && (
         <button onClick={handleBackFromSearch} style={styles.backBtn}>
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>

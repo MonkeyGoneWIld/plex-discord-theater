@@ -103,8 +103,10 @@ async function withBodyTimeout<T>(work: Promise<T>, path: string): Promise<T> {
 export async function plexJSON<T = unknown>(
   path: string,
   params?: Record<string, string>,
+  /** See plexUrl — for endpoints the server token can't reach. */
+  token?: string,
 ): Promise<T> {
-  const res = await plexFetch(path, params);
+  const res = await plexFetch(path, params, undefined, undefined, token);
   if (!res.ok) {
     // Include Plex's error body — its 403s carry a code/message (e.g. an XML
     // <Response code="1080" status="A valid server token is required."/>) that

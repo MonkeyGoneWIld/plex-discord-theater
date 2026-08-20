@@ -3,7 +3,7 @@ import type { Server } from "http";
 import { isValidSession, getSessionUserId } from "../middleware/auth.js";
 import { instanceHosts, updateInstanceHost, touchInstance } from "../routes/discord.js";
 import { plexFetch } from "./plex.js";
-import { getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode, stopTranscodeSession } from "../routes/plex.js";
+import { getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode, stopTranscodeSession, protectSession, releaseSession } from "../routes/plex.js";
 import { createTracker, handleTrackerSocket, destroyTracker } from "./tracker.js";
 import { recordProgress } from "./watch-history.js";
 import { logEvent } from "./logger.js";
@@ -75,6 +75,56 @@ interface QueueItem {
   year?: number;
 }
 
+/**
+ * One stream, and the audio + subtitle pair it exists for.
+ *
+ * A room used to be one Plex transcode that everybody watched. It is now one
+ * *timeline* — position, playing, seeks, all still room-wide — with a transcode
+ * per combination of tracks anyone has chosen. Everyone starts on the host's;
+ * choosing different subtitles forks you onto another; choosing a combination
+ * somebody already has puts you on theirs rather than starting a third.
+ *
+ * Only the tracks vary. Position never does, which is what keeps a room in sync
+ * across several streams: a seek is a room command, and each variant's owner
+ * applies it to its own transcode.
+ */
+interface Variant {
+  /** `audio:subtitle` — see variantKeyOf. */
+  key: string;
+  /** Plex stream ids. 0 means "whatever the file defaults to" for audio, and
+   *  "none" for subtitles, which is what the client sends before it knows. */
+  audioStreamId: number;
+  subtitleStreamId: number;
+  hlsSessionId: string | null;
+  /** Where this transcode was started — per stream, since two variants forked at
+   *  different moments have transcoded from different points. */
+  sessionOffset: number;
+  /**
+   * Whoever drives this stream: starts the transcode, restarts it for a seek it
+   * can't serve in place, and keeps it alive.
+   *
+   * The host owns the host's variant, which is the old arrangement exactly. A
+   * viewer who forks owns theirs. Ownership is about the transcode and nothing
+   * else — it grants no control over the room.
+   */
+  ownerUserId: string | null;
+  /**
+   * When everyone watching this stream stepped out of the player, or null while
+   * somebody still has it open. See IDLE_STREAM_GRACE_MS.
+   */
+  idleSince: number | null;
+}
+
+/** Tracks identify a stream, so they are its key. */
+function variantKeyOf(audioStreamId: number, subtitleStreamId: number): string {
+  return `${audioStreamId}:${subtitleStreamId}`;
+}
+
+/** A stream id from a client message, or null when it isn't one. */
+function trackId(v: unknown): number | null {
+  return typeof v === "number" && Number.isInteger(v) && v >= 0 && v < 1e9 ? v : null;
+}
+
 interface RoomClient {
   ws: WebSocket;
   userId: string;
@@ -94,6 +144,8 @@ interface RoomClient {
   /** When this connection joined — the last tie-break in succession, so the
    *  successor is at least predictable rather than whatever the Set yields. */
   joinedAt: number;
+  /** Which stream this client is watching. Null before playback starts. */
+  variantKey: string | null;
 }
 
 /**
@@ -101,12 +153,16 @@ interface RoomClient {
  * queue changes, role changes — stays host-only. Deliberately narrow: a co-host
  * can steer playback but never change what is playing or who controls the room.
  *
- * "set-subtitle" and "play-item" are requests, not actions: subtitles are burned
- * into the transcode and starting a title is host-only, so in both cases the
- * host is the one that actually performs the work. Audio selection stays
- * host-only entirely.
+ * "play-item" is a request, not an action: starting a title is host-only, so the
+ * host is the one that performs the work.
+ *
+ * Track selection is deliberately absent, and is not host-only either — it is
+ * handled before this check, as something anyone may do, because it now changes
+ * only the sender's own stream. A co-host used to be able to change the
+ * subtitles for the entire room; they can change their own, and the host's
+ * change carries only to the people actually watching the host's stream.
  */
-const CO_HOST_ALLOWED_TYPES = new Set(["pause", "resume", "seek", "set-subtitle", "play-item"]);
+const CO_HOST_ALLOWED_TYPES = new Set(["pause", "resume", "seek", "play-item"]);
 
 /**
  * Who inherits the room when the host goes, best first.
@@ -120,21 +176,28 @@ const CO_HOST_ALLOWED_TYPES = new Set(["pause", "resume", "seek", "set-subtitle"
  * who isn't in the player is a host who can't pause, seek or answer a stall, and
  * whose next action is likely to end the stream for everyone.
  */
-function successionRank(c: RoomClient): number {
-  // Two independent bits, co-host first, so the four bands come out in the
-  // order the room wants:
-  //   0 co-host, watching   1 co-host, browsing
-  //   2 viewer,  watching   3 viewer,  browsing
-  // Ranking on co-host alone left join time to separate two co-hosts, which
-  // could hand the room to the one who had closed the player.
-  return (c.isCoHost ? 0 : 2) + (c.isWatching ? 0 : 1);
+function successionRank(c: RoomClient, hostVariantKey: string | null): number {
+  // Three independent bits, most significant first, so the bands come out in
+  // the order the room wants:
+  //   same stream as the outgoing host  >  co-host  >  watching  >  joined first
+  //
+  // Same stream outranks co-host deliberately. Whoever inherits the room keeps
+  // watching what they were already watching, and a host whose stream is the
+  // one most of the room is on can change tracks for that group — a host parked
+  // on a stream of their own can only ever change their own. Handing the role to
+  // a co-host in another language would quietly strand everybody else.
+  const sameStream = hostVariantKey != null && c.variantKey === hostVariantKey ? 0 : 4;
+  return sameStream + (c.isCoHost ? 0 : 2) + (c.isWatching ? 0 : 1);
 }
 
-function pickSuccessor(clients: Iterable<RoomClient>): RoomClient | null {
+function pickSuccessor(
+  clients: Iterable<RoomClient>,
+  hostVariantKey: string | null,
+): RoomClient | null {
   let best: RoomClient | null = null;
   for (const c of clients) {
     if (!best) { best = c; continue; }
-    const d = successionRank(c) - successionRank(best);
+    const d = successionRank(c, hostVariantKey) - successionRank(best, hostVariantKey);
     if (d < 0 || (d === 0 && c.joinedAt < best.joinedAt)) best = c;
   }
   return best;
@@ -146,6 +209,22 @@ interface RoomState {
   subtitles: boolean;
   playing: boolean;
   position: number;
+  /**
+   * Whether a real playhead has confirmed `position` since it was last set.
+   *
+   * `play` announces where a transcode was *asked* to begin, seconds before any
+   * frame of it exists. Treating that as a running clock and extrapolating from
+   * it means the room advances through a load the host hasn't finished — and if
+   * nothing ever reconciles the two, the room stays ahead of the host by
+   * however long that load took, for the rest of the film. Measured at 12.7s in
+   * one session, with viewers glued to the clock and the host alone behind it.
+   *
+   * So an announced position is provisional: the room sits on it until the
+   * host's first heartbeat says a playhead is really there. Everything that
+   * carries an observed or chosen position — a heartbeat, a seek, the host's
+   * own pause — confirms it.
+   */
+  positionConfirmed: boolean;
   updatedAt: number;
   hlsSessionId: string | null;
   /**
@@ -160,6 +239,17 @@ interface RoomState {
   sessionOffset: number;
   browseContext: string | null;
   queue: QueueItem[];
+  /**
+   * Every stream the room is running, by track pair. Empty when nothing plays.
+   *
+   * `hlsSessionId` and `sessionOffset` above stay the *host's* stream: they are
+   * what a fresh joiner starts on and what the room announces, and keeping them
+   * meaningful means nothing that only cares about "the room's stream" had to
+   * learn about variants.
+   */
+  variants: Map<string, Variant>;
+  /** The stream the host is watching — the one their track changes carry to. */
+  hostVariantKey: string | null;
 }
 
 interface Room {
@@ -185,8 +275,15 @@ const MAX_CO_HOSTS = 50;
 
 const rooms = new Map<string, Room>();
 
-/** Server-side ping intervals per room — keeps transcode alive independent of client connectivity. */
-const roomPingIntervals = new Map<string, ReturnType<typeof setInterval>>();
+/**
+ * Keep-alive timers, one per *stream* rather than one per room.
+ *
+ * A room can be running several transcodes at once — one per set of tracks
+ * somebody chose — and Plex reaps any of them that stops being pinged. Keying
+ * this by room kept exactly one alive and let the rest die under whoever was
+ * watching them.
+ */
+const sessionPingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 
 /** Consecutive "no such session" answers before the room stops pinging. Two,
  *  not one, so a single odd response can't silence a live session's keep-alive. */
@@ -196,8 +293,8 @@ const PING_GONE_LIMIT = 2;
  *  client. Used to reject anything else before it reaches a Plex query param. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function startRoomPing(instanceId: string, hlsSessionId: string): void {
-  stopRoomPing(instanceId);
+function startSessionPing(instanceId: string, hlsSessionId: string): void {
+  stopSessionPing(hlsSessionId);
   let gone = 0;
   const interval = setInterval(() => {
     pingPlexTranscode(hlsSessionId)
@@ -211,19 +308,19 @@ function startRoomPing(instanceId: string, hlsSessionId: string): void {
           room: instanceId.substring(0, 8),
           session: hlsSessionId.substring(0, 8),
         });
-        stopRoomPing(instanceId);
+        stopSessionPing(hlsSessionId);
       })
       .catch(() => {});
   }, 30_000);
   interval.unref();
-  roomPingIntervals.set(instanceId, interval);
+  sessionPingIntervals.set(hlsSessionId, interval);
 }
 
-function stopRoomPing(instanceId: string): void {
-  const interval = roomPingIntervals.get(instanceId);
+function stopSessionPing(hlsSessionId: string): void {
+  const interval = sessionPingIntervals.get(hlsSessionId);
   if (interval) {
     clearInterval(interval);
-    roomPingIntervals.delete(instanceId);
+    sessionPingIntervals.delete(hlsSessionId);
   }
 }
 
@@ -238,8 +335,34 @@ function stopRoomPing(instanceId: string): void {
  * had not arrived yet — and its cleanup DELETEd a transcode the new host had
  * just adopted.
  */
+/**
+ * Is anyone else still watching this stream?
+ *
+ * A stream can now have an audience of its own, so "the person who started it is
+ * leaving" is no longer a reason to stop it. Someone who forks onto the dub and
+ * then closes the player would otherwise take every other viewer of that dub
+ * down with them — and so would a host handing over the role and closing the tab,
+ * with the new host still on the stream they were both watching.
+ */
+export function sessionHasOtherWatchers(sessionId: string, userId: string | null): boolean {
+  for (const room of rooms.values()) {
+    for (const v of room.state.variants.values()) {
+      if (v.hlsSessionId !== sessionId) continue;
+      return membersOf(room, v.key).some((c) => c.userId !== userId);
+    }
+  }
+  return false;
+}
+
 export function sessionHostUserId(sessionId: string): string | null {
   for (const room of rooms.values()) {
+    // Whoever drives this particular stream. With one transcode per set of
+    // tracks, "the host" is no longer the answer: a viewer watching in another
+    // language owns their own stream and is the only client entitled to tear it
+    // down — while having no claim at all on the host's.
+    for (const v of room.state.variants.values()) {
+      if (v.hlsSessionId === sessionId) return v.ownerUserId;
+    }
     if (room.state.hlsSessionId !== sessionId) continue;
     for (const c of room.clients) if (c.isHost) return c.userId;
     return null;
@@ -262,11 +385,14 @@ function getOrCreateRoom(instanceId: string): Room {
         subtitles: false,
         playing: false,
         position: 0,
+        positionConfirmed: false,
         updatedAt: Date.now(),
         hlsSessionId: null,
         sessionOffset: 0,
         browseContext: null,
         queue: [],
+        variants: new Map(),
+        hostVariantKey: null,
       },
       coHostIds: new Set(),
       lastForcedPersistAt: 0,
@@ -325,6 +451,136 @@ function sendTo(ws: WebSocket, msg: object): void {
   safeSend(ws, JSON.stringify(msg));
 }
 
+/** Everyone currently watching one stream. */
+function membersOf(room: Room, key: string): RoomClient[] {
+  return [...room.clients].filter((c) => c.variantKey === key);
+}
+
+/** What a client needs to play a stream: which one, and whether they drive it. */
+function variantMessage(v: Variant, isOwner: boolean) {
+  return {
+    type: "variant",
+    variantKey: v.key,
+    audioStreamId: v.audioStreamId,
+    subtitleStreamId: v.subtitleStreamId,
+    hlsSessionId: v.hlsSessionId,
+    sessionOffset: v.sessionOffset,
+    isOwner,
+  };
+}
+
+/** Tell each member of a stream what it is now — including who drives it. */
+function announceVariant(room: Room, v: Variant): void {
+  for (const c of membersOf(room, v.key)) {
+    sendTo(c.ws, variantMessage(v, c.userId === v.ownerUserId));
+  }
+}
+
+/**
+ * Make sure a stream still has someone driving it.
+ *
+ * Ownership is not a role anyone asked for, so it goes to whoever has been in
+ * the room longest — the same tie-break succession uses, and for the same
+ * reason: it has to be predictable rather than whatever the Set happens to yield.
+ */
+function ensureVariantOwner(room: Room, v: Variant): void {
+  const members = membersOf(room, v.key);
+  if (v.ownerUserId && members.some((c) => c.userId === v.ownerUserId)) return;
+  let next: RoomClient | null = null;
+  for (const c of members) if (!next || c.joinedAt < next.joinedAt) next = c;
+  v.ownerUserId = next?.userId ?? null;
+}
+
+/** Tear a stream down: stop pinging it, stop protecting it, kill the transcode. */
+function destroyVariant(room: Room, key: string): void {
+  const v = room.state.variants.get(key);
+  if (!v) return;
+  room.state.variants.delete(key);
+  if (room.state.hostVariantKey === key) room.state.hostVariantKey = null;
+  if (!v.hlsSessionId) return;
+  stopSessionPing(v.hlsSessionId);
+  releaseSession(v.hlsSessionId);
+  killPlexTranscode(v.hlsSessionId).catch(() => {});
+}
+
+function destroyAllVariants(room: Room): void {
+  for (const key of [...room.state.variants.keys()]) destroyVariant(room, key);
+  room.state.hostVariantKey = null;
+}
+
+/** Adopt a session as a stream's live transcode, replacing any previous one. */
+function attachSession(room: Room, v: Variant, sessionId: string, offset: number, instanceId: string): void {
+  const previous = v.hlsSessionId;
+  if (previous && previous !== sessionId) {
+    stopSessionPing(previous);
+    releaseSession(previous);
+    killPlexTranscode(previous).catch(() => {});
+  }
+  v.hlsSessionId = sessionId;
+  v.sessionOffset = offset;
+  protectSession(sessionId);
+  startSessionPing(instanceId, sessionId);
+  if (v.key === room.state.hostVariantKey) {
+    // The room's own session stays the host's, so a fresh joiner and anything
+    // that only knows about "the room's stream" still get the right answer.
+    room.state.hlsSessionId = sessionId;
+    room.state.sessionOffset = offset;
+  }
+}
+
+/**
+ * Put a client on a set of tracks, joining the stream that already serves them
+ * or creating one if nobody has it.
+ *
+ * Joining rather than starting is the whole point of keying streams by their
+ * tracks: a second person choosing the dub watches the first person's transcode
+ * instead of asking Plex for an identical one.
+ */
+function assignVariant(
+  room: Room,
+  client: RoomClient,
+  audioStreamId: number,
+  subtitleStreamId: number,
+): Variant {
+  const key = variantKeyOf(audioStreamId, subtitleStreamId);
+  const previousKey = client.variantKey;
+  let v = room.state.variants.get(key);
+  if (!v) {
+    v = {
+      key,
+      audioStreamId,
+      subtitleStreamId,
+      hlsSessionId: null,
+      // A fork inherits the room's clock and nothing else: the new transcode
+      // starts where playback is, not where the stream it forked from began.
+      sessionOffset: room.state.position,
+      ownerUserId: client.userId,
+      idleSince: null,
+    };
+    room.state.variants.set(key, v);
+  }
+  client.variantKey = key;
+  ensureVariantOwner(room, v);
+
+  if (previousKey && previousKey !== key) {
+    const old = room.state.variants.get(previousKey);
+    if (old) {
+      if (membersOf(room, previousKey).length === 0) {
+        destroyVariant(room, previousKey);
+      } else {
+        // The leaver may have been the one driving it. Only worth telling the
+        // people still on it when that is what happened — their stream is
+        // otherwise exactly as it was, and a re-announcement of it reads on the
+        // client as a reason to rebuild.
+        const before = old.ownerUserId;
+        ensureVariantOwner(room, old);
+        if (old.ownerUserId !== before) announceVariant(room, old);
+      }
+    }
+  }
+  return v;
+}
+
 /**
  * How far the room position may be advanced past its last report.
  *
@@ -336,6 +592,21 @@ function sendTo(ws: WebSocket, msg: object): void {
  * the more honest answer, and the next heartbeat corrects it within seconds.
  */
 const MAX_EXTRAPOLATION_S = 30;
+
+/**
+ * How long a stream is held for someone who has stepped out of the player.
+ *
+ * Leaving the player is not leaving the room: people come out to browse the
+ * queue or check what else is on, and going back in used to cost a whole fresh
+ * transcode — ten to fifteen seconds of loading for something that had been
+ * running seconds earlier. The stream is kept so the walk back is instant.
+ *
+ * Bounded, because "kept" would otherwise mean "forever": somebody who wanders
+ * off leaves a transcode running on the server for the rest of the evening. Long
+ * enough to cover any real detour, short enough that a forgotten tab costs a few
+ * minutes of CPU rather than a night of it.
+ */
+const IDLE_STREAM_GRACE_MS = 5 * 60 * 1000;
 
 /**
  * A playback position from a client message, or the fallback if it is unusable.
@@ -390,6 +661,10 @@ function sanitizeQueueItem(raw: unknown): QueueItem | null {
 
 function interpolatedPosition(state: RoomState): number {
   if (!state.playing) return state.position;
+  // Nothing is known to be playing at `position` yet — see positionConfirmed.
+  // Running the clock through a load the host hasn't finished is how the room
+  // ends up permanently ahead of the person it is supposed to be following.
+  if (!state.positionConfirmed) return state.position;
   const elapsed = (Date.now() - state.updatedAt) / 1000;
   if (elapsed > MAX_EXTRAPOLATION_S) return state.position;
   return state.position + Math.max(0, elapsed);
@@ -651,6 +926,9 @@ export function attachWebSocketServer(server: Server): void {
           // a live room is immediately after this.
           isWatching: false,
           joinedAt: Date.now(),
+          // A joiner watches what the host watches. Choosing otherwise is a
+          // deliberate act ("set-tracks"), never the starting position.
+          variantKey: room.state.hostVariantKey,
         };
         roomId = instanceId;
         room.clients.add(client);
@@ -679,6 +957,15 @@ export function attachWebSocketServer(server: Server): void {
           queue: room.state.queue,
           hostUsername: hostClient?.username ?? null,
           participants: participantsOf(room),
+          // Which stream to play and which tracks it is for. Null when nothing
+          // is playing; an older client ignores it and behaves exactly as before.
+          variant: room.state.hostVariantKey
+            ? variantMessage(
+                room.state.variants.get(room.state.hostVariantKey)!,
+                // A joiner never drives the host's stream — the host does.
+                false,
+              )
+            : null,
         });
 
         // Everyone else needs to see the new arrival in their roster
@@ -702,6 +989,126 @@ export function attachWebSocketServer(server: Server): void {
       // be a lot of traffic for something nobody sees.
       if (type === "watching") {
         client.isWatching = msg.value !== false;
+        // Back in the player: whatever countdown was running on their stream
+        // stops. See IDLE_STREAM_GRACE_MS.
+        if (client.isWatching && client.variantKey) {
+          const v = room.state.variants.get(client.variantKey);
+          if (v) v.idleSince = null;
+        }
+        return;
+      }
+
+      /**
+       * "I want these tracks."
+       *
+       * Allowed for anyone, because it no longer speaks for the room: it moves
+       * the sender onto the stream that serves those tracks, starting one only
+       * if nobody has it. The host is the exception, and only in scope — their
+       * change carries to everyone watching *their* stream, which is what makes
+       * the host's choice the room's default without making it a decree. A
+       * co-host's change moves the co-host and nobody else.
+       */
+      if (type === "set-tracks") {
+        const audioStreamId = trackId(msg.audioStreamId);
+        const subtitleStreamId = trackId(msg.subtitleStreamId);
+        if (audioStreamId === null || subtitleStreamId === null) return;
+        if (!room.state.ratingKey) return;
+
+        const targetKey = variantKeyOf(audioStreamId, subtitleStreamId);
+        const hostKey = room.state.hostVariantKey;
+        // The host takes their audience with them; everyone else moves alone.
+        const movers =
+          client.isHost && hostKey ? membersOf(room, hostKey) : [client];
+        if (!movers.includes(client)) movers.push(client);
+        if (movers.every((m) => m.variantKey === targetKey)) return;
+
+        const fromKey = client.variantKey;
+        for (const m of movers) assignVariant(room, m, audioStreamId, subtitleStreamId);
+        const target = room.state.variants.get(targetKey)!;
+
+        if (client.isHost) {
+          room.state.hostVariantKey = targetKey;
+          room.state.subtitles = subtitleStreamId !== 0;
+          if (target.hlsSessionId) {
+            room.state.hlsSessionId = target.hlsSessionId;
+            room.state.sessionOffset = target.sessionOffset;
+          }
+        }
+
+        logEvent("Sync", "tracks changed", {
+          room: roomId.substring(0, 8),
+          by: client.username ?? client.userId,
+          role: client.isHost ? "host" : client.isCoHost ? "cohost" : "viewer",
+          from: fromKey ?? "none",
+          to: targetKey,
+          moved: movers.length,
+          joinedExisting: target.hlsSessionId !== null,
+          streams: room.state.variants.size,
+        });
+
+        announceVariant(room, target);
+        return;
+      }
+
+      /**
+       * "Put me back on whatever the host is watching."
+       *
+       * The tracks are the host's, and only the server knows what they are — a
+       * client is told its own stream and nobody else's. Offered when someone's
+       * own stream can't keep up: the host's is, by definition, already running,
+       * so joining it costs nothing and starts nothing.
+       */
+      if (type === "rejoin-host") {
+        const hostKey = room.state.hostVariantKey;
+        if (!hostKey || client.variantKey === hostKey) return;
+        const hostVariant = room.state.variants.get(hostKey);
+        if (!hostVariant) return;
+        const from = client.variantKey;
+        assignVariant(room, client, hostVariant.audioStreamId, hostVariant.subtitleStreamId);
+        logEvent("Sync", "client rejoined the host's stream", {
+          room: roomId.substring(0, 8),
+          who: client.username ?? client.userId,
+          from: from ?? "none",
+          to: hostKey,
+        });
+        // Only the client that moved. Nothing changed for the people already on
+        // this stream, and a re-announcement of a stream they are already
+        // playing is noise they have to reason about.
+        sendTo(client.ws, variantMessage(hostVariant, hostVariant.ownerUserId === client.userId));
+        return;
+      }
+
+      /**
+       * A stream's driver reporting the transcode it just brought up.
+       *
+       * Sent on every start and restart of a stream that isn't the host's
+       * opening one (which arrives as "play"), so the people following it can
+       * move onto the new session rather than fetching segments from a
+       * transcode that no longer exists.
+       */
+      if (type === "variant-session") {
+        const key = client.variantKey;
+        if (!key) return;
+        const v = room.state.variants.get(key);
+        // Only the driver may repoint a stream. Anyone else claiming to have
+        // started one is either confused or malicious, and the cost of
+        // believing them is everybody on that stream losing their picture.
+        if (!v || v.ownerUserId !== client.userId) return;
+        const sid =
+          typeof msg.hlsSessionId === "string" && UUID_RE.test(msg.hlsSessionId)
+            ? msg.hlsSessionId
+            : null;
+        if (!sid) return;
+        const offset = safePosition(msg.sessionOffset, room.state.position);
+        attachSession(room, v, sid, offset, roomId);
+        logEvent("Sync", "stream restarted", {
+          room: roomId.substring(0, 8),
+          by: client.username ?? client.userId,
+          variant: key,
+          session: sid.substring(0, 8),
+          offsetS: offset,
+        });
+        announceVariant(room, v);
         return;
       }
 
@@ -790,6 +1197,10 @@ export function attachWebSocketServer(server: Server): void {
           // and leaving the room exactly as it was.
           const rk = typeof msg.ratingKey === "string" && /^\d+$/.test(msg.ratingKey)
             ? msg.ratingKey : null;
+          const itemChanged = rk !== room.state.ratingKey;
+          // Captured before `playing` is overwritten below — a restart is only a
+          // restart if the room was already running this title.
+          const wasPlaying = room.state.playing;
           const sid = typeof msg.hlsSessionId === "string" && UUID_RE.test(msg.hlsSessionId)
             ? msg.hlsSessionId : null;
           if (!rk || !sid) {
@@ -807,7 +1218,24 @@ export function attachWebSocketServer(server: Server): void {
           room.state.subtitles = Boolean(msg.subtitles);
           room.state.hlsSessionId = sid;
           room.state.playing = true;
-          room.state.position = startPosition;
+          // A restart of something the room is already watching must not move
+          // the clock. `startPosition` is where the restarting client was when
+          // it *began* loading, seconds ago — writing it back rewinds everyone
+          // else by the length of that load, which is the whole reason a track
+          // change used to cost the room five seconds. Re-anchoring on the
+          // clock's own current value keeps it running across the gap.
+          //
+          // A different title, or a room that wasn't playing, is a real start
+          // and does set the clock.
+          const restartOfLiveItem = !itemChanged && wasPlaying;
+          room.state.position = restartOfLiveItem
+            ? interpolatedPosition(room.state)
+            : startPosition;
+          // A restart carries the clock forward, so whatever confirmed it still
+          // does. A genuine start is only a request: `startPosition` is where a
+          // transcode was asked to begin, and no frame of it exists yet. The
+          // host's first heartbeat confirms it, within five seconds.
+          room.state.positionConfirmed = restartOfLiveItem && room.state.positionConfirmed;
           // Where Plex was asked to start transcoding. Usually the same as the
           // position, and deliberately a separate field because it isn't when a
           // host re-announces a session it has already played some of: the room
@@ -822,21 +1250,60 @@ export function attachWebSocketServer(server: Server): void {
               : startPosition;
           room.state.updatedAt = Date.now();
           room.state.browseContext = null;
-          startRoomPing(roomId, sid);
+
+          // A different title replaces every stream the room was running; the
+          // same title is the host restarting its own (a seek that needed a new
+          // transcode), and must leave everyone else's alone.
+          if (itemChanged) destroyAllVariants(room);
+
+          const audioStreamId = trackId(msg.audioStreamId) ?? 0;
+          const subtitleStreamId = trackId(msg.subtitleStreamId) ?? 0;
+          const hostKey = variantKeyOf(audioStreamId, subtitleStreamId);
+          let hostVariant = room.state.variants.get(hostKey);
+          if (!hostVariant) {
+            hostVariant = {
+              key: hostKey,
+              audioStreamId,
+              subtitleStreamId,
+              hlsSessionId: null,
+              sessionOffset: room.state.sessionOffset,
+              ownerUserId: client.userId,
+              idleSince: null,
+            };
+            room.state.variants.set(hostKey, hostVariant);
+          }
+          hostVariant.ownerUserId = client.userId;
+          client.variantKey = hostKey;
+          room.state.hostVariantKey = hostKey;
+          if (itemChanged) {
+            // Everyone lands on the host's stream for a new title, whatever
+            // they were listening to during the last one.
+            for (const c of room.clients) c.variantKey = hostKey;
+          }
+          attachSession(room, hostVariant, sid, room.state.sessionOffset, roomId);
+
           broadcast(room, ws, {
             type: "play",
             ratingKey: room.state.ratingKey,
             title: room.state.title,
             subtitles: room.state.subtitles,
             hlsSessionId: room.state.hlsSessionId,
-            position: startPosition,
+            // The room's clock, which for a restart is unchanged — so nobody
+            // acts on this beyond picking up the new session id.
+            position: room.state.position,
             sessionOffset: room.state.sessionOffset,
           });
+          // Everyone on the host's stream — which for a new title is everyone —
+          // needs the session as well as the announcement.
+          announceVariant(room, hostVariant);
           break;
         }
         case "pause": {
           room.state.playing = false;
           room.state.position = positionForCommand(room, client, msg.position);
+          // Only the host's pause carries an observed playhead; a co-host's is
+          // served from the room's own clock and so confirms nothing.
+          if (client.isHost) room.state.positionConfirmed = true;
           room.state.updatedAt = Date.now();
           persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
           broadcast(room, ws, { type: "pause", position: room.state.position });
@@ -845,6 +1312,7 @@ export function attachWebSocketServer(server: Server): void {
         case "resume": {
           room.state.playing = true;
           room.state.position = positionForCommand(room, client, msg.position);
+          if (client.isHost) room.state.positionConfirmed = true;
           room.state.updatedAt = Date.now();
           broadcast(room, ws, { type: "resume", position: room.state.position });
           break;
@@ -853,20 +1321,12 @@ export function attachWebSocketServer(server: Server): void {
           // The one command that keeps a non-host's number: a seek target is a
           // decision, not an observation. See positionForCommand.
           room.state.position = safePosition(msg.position, room.state.position);
+          // A seek target is a decision about where the room is, so it is the
+          // truth by construction — nothing has to observe it first.
+          room.state.positionConfirmed = true;
           room.state.updatedAt = Date.now();
           persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
           broadcast(room, ws, { type: "seek", position: room.state.position });
-          break;
-        }
-        case "set-subtitle": {
-          // Relay only — the host's client applies it by restarting the
-          // transcode with the new burn-in, then re-announces the session via
-          // "play". Nothing to persist here: room.state.subtitles tracks whether
-          // burn-in is on at all, not which track was picked.
-          const partId = msg.partId;
-          const subtitleStreamID = msg.subtitleStreamID;
-          if (typeof partId !== "number" || typeof subtitleStreamID !== "number") break;
-          broadcast(room, ws, { type: "set-subtitle", partId, subtitleStreamID });
           break;
         }
         case "play-item": {
@@ -888,8 +1348,12 @@ export function attachWebSocketServer(server: Server): void {
           // teardown and the final position must not lose to the forced-write
           // floor after a pause a moment earlier.
           persistProgress(room, instanceHosts.get(roomId)?.hostUserId, "always");
-          // Capture before clearing so we can kill the exact Plex transcode
+          // Capture before clearing so we can kill the exact Plex transcode.
+          // Every other stream the room was running goes with it — see
+          // destroyAllVariants below.
           const stoppingSessionId = room.state.hlsSessionId;
+          for (const c of room.clients) c.variantKey = null;
+          destroyAllVariants(room);
           room.state.ratingKey = null;
           room.state.title = null;
           room.state.hlsSessionId = null;
@@ -905,7 +1369,6 @@ export function attachWebSocketServer(server: Server): void {
           // broadcast: their panel still listed items the server had already
           // thrown away. A queue is what to watch *next*; finishing the current
           // thing is the moment it matters most.
-          stopRoomPing(roomId);
           broadcast(room, ws, { type: "stop" });
           // Kill the Plex transcode server-side so it dies even if viewers
           // are still fetching segments (their hls.js takes a moment to tear down)
@@ -916,7 +1379,47 @@ export function attachWebSocketServer(server: Server): void {
         }
         case "heartbeat": {
           if (!room.state.ratingKey) break;
-          room.state.position = safePosition(msg.position, room.state.position);
+          /**
+           * The room's position is the host's playhead, in both directions.
+           *
+           * Only the host heartbeats, and the host is not a client the room is
+           * checking up on — it is the thing everyone else is watching. So a
+           * report that is *behind* is not a client falling behind the room, it
+           * is the room being wrong.
+           *
+           * This was once second-guessed: reports more than a few seconds
+           * behind were discarded, on the theory that a client mid-load
+           * shouldn't drag everybody back. The theory was right and the subject
+           * was wrong — the client mid-load is never the one heartbeating,
+           * because the heartbeat is gated on the element having media. What it
+           * discarded instead was the host having stalled, and every stall then
+           * became a permanent gap between the host and the room. One session
+           * logged the room sitting exactly 12.73s ahead of its own host for
+           * the length of a film, with a viewer who switched subtitles landing
+           * neatly on the clock and therefore 12.73s ahead of the host too.
+           *
+           * A host mid-restart doesn't reach here at all: it has no media, so it
+           * sends nothing, and the clock free-runs across the gap — which is the
+           * case that rule was reaching for, and it is handled where it belongs,
+           * by the restarting client landing on the clock once its manifest is
+           * ready.
+           */
+          const reported = safePosition(msg.position, room.state.position);
+          // Silent while playback is ordinary — the room and the host agree to
+          // within the half-second of network between them. A gap this size is
+          // the host having restarted, stalled or seeked, and it is the first
+          // thing worth knowing when the evening goes wrong.
+          const gap = reported - interpolatedPosition(room.state);
+          if (Math.abs(gap) > 5) {
+            logEvent("Sync", "room moving to meet the host", {
+              room: roomId.substring(0, 8),
+              from: client.username ?? client.userId,
+              byS: Number(gap.toFixed(2)),
+              toS: Number(reported.toFixed(2)),
+            });
+          }
+          room.state.position = reported;
+          room.state.positionConfirmed = true;
           room.state.playing = msg.playing !== false;
           room.state.updatedAt = Date.now();
           // Throttled inside the history service — this fires every 5s per room.
@@ -1009,6 +1512,23 @@ export function attachWebSocketServer(server: Server): void {
           // — otherwise handing the role back would silently restore it.
           room.coHostIds.delete(target.userId);
 
+          // "The host's stream" follows the host. Without this the room went on
+          // treating the *previous* host's stream as the one a host track change
+          // carries to, so the new host's next change reached straight into an
+          // audience they had nothing to do with — while leaving the people
+          // actually watching with them untouched.
+          if (target.variantKey) {
+            room.state.hostVariantKey = target.variantKey;
+            const hv = room.state.variants.get(target.variantKey);
+            if (hv) {
+              room.state.subtitles = hv.subtitleStreamId !== 0;
+              if (hv.hlsSessionId) {
+                room.state.hlsSessionId = hv.hlsSessionId;
+                room.state.sessionOffset = hv.sessionOffset;
+              }
+            }
+          }
+
           const instance = instanceHosts.get(roomId);
           if (instance) instance.hostUserId = target.userId;
           updateInstanceHost(roomId, target.userId);
@@ -1094,6 +1614,32 @@ export function attachWebSocketServer(server: Server): void {
 
       room.clients.delete(client);
 
+      // The stream they were watching may now be empty, or may have just lost
+      // the client that was driving it. Done before succession so the successor
+      // is chosen against an accurate picture of who is on what.
+      const leftVariantKey = client.variantKey;
+      client.variantKey = null;
+      if (leftVariantKey && room.clients.size > 0) {
+        const left = room.state.variants.get(leftVariantKey);
+        if (left) {
+          if (membersOf(room, leftVariantKey).length === 0) {
+            // Nobody is left watching it. Never the host's own stream while the
+            // room lives on — a successor inherits that below.
+            if (leftVariantKey !== room.state.hostVariantKey || !client.isHost) {
+              destroyVariant(room, leftVariantKey);
+            }
+          } else if (left.ownerUserId === client.userId) {
+            ensureVariantOwner(room, left);
+            announceVariant(room, left);
+            logEvent("Sync", "stream driver left, promoting a watcher", {
+              room: roomId.substring(0, 8),
+              variant: leftVariantKey,
+              to: left.ownerUserId ?? "none",
+            });
+          }
+        }
+      }
+
       if (client.isHost) {
         // Attribute the position to the host who is leaving, before a successor
         // takes over the instance record. Closing the tab is the other common
@@ -1103,10 +1649,39 @@ export function attachWebSocketServer(server: Server): void {
         if (room.clients.size > 0) {
           // Co-host, then whoever is actually watching, then anyone — see
           // pickSuccessor.
-          const newHost = pickSuccessor(room.clients)!;
+          // Same stream first, then co-host, then whoever is watching — see
+          // pickSuccessor. The outgoing host's stream is the one to match,
+          // since that is what the room is mostly on.
+          const newHost = pickSuccessor(room.clients, leftVariantKey)!;
           newHost.isHost = true;
           newHost.isCoHost = false;
           room.coHostIds.delete(newHost.userId);
+
+          // "The host's stream" is by definition the one the host is watching.
+          // A successor who was on another stream keeps it, and nobody is moved
+          // to join them: their tracks are their own choice, and reaching for
+          // everyone else's picture on the way in would be the opposite of
+          // inheriting the room.
+          const inheritedKey = newHost.variantKey ?? leftVariantKey;
+          if (inheritedKey) {
+            room.state.hostVariantKey = inheritedKey;
+            const hv = room.state.variants.get(inheritedKey);
+            if (hv) {
+              ensureVariantOwner(room, hv);
+              if (hv.hlsSessionId) {
+                room.state.hlsSessionId = hv.hlsSessionId;
+                room.state.sessionOffset = hv.sessionOffset;
+              }
+              room.state.subtitles = hv.subtitleStreamId !== 0;
+              announceVariant(room, hv);
+            }
+          }
+          // The stream the outgoing host was driving, if they were the only one
+          // on it and it isn't the one inherited above, has nobody left.
+          if (leftVariantKey && leftVariantKey !== inheritedKey &&
+              membersOf(room, leftVariantKey).length === 0) {
+            destroyVariant(room, leftVariantKey);
+          }
 
           const instance = instanceHosts.get(roomId);
           if (instance) {
@@ -1120,7 +1695,11 @@ export function attachWebSocketServer(server: Server): void {
             promoted: newHost.username ?? newHost.userId,
             // Which band they came from, so a surprising successor can be
             // explained rather than guessed at.
-            because: newHost.isCoHost ? "co-host" : newHost.isWatching ? "watching" : "only-candidate",
+            because: newHost.variantKey === leftVariantKey ? "same-stream"
+              : newHost.isCoHost ? "co-host"
+              : newHost.isWatching ? "watching" : "only-candidate",
+            variant: newHost.variantKey ?? "none",
+            streams: room.state.variants.size,
             remaining: room.clients.size,
             roomPosS: room.state.position,
             session: room.state.hlsSessionId?.substring(0, 8) ?? "none",
@@ -1145,7 +1724,10 @@ export function attachWebSocketServer(server: Server): void {
           room.state.playing = false;
           room.state.hlsSessionId = null;
           room.state.sessionOffset = 0;
-          stopRoomPing(roomId);
+          // Every stream, not only the host's — anyone watching in another
+          // language had a transcode of their own, and it outlives them
+          // otherwise.
+          destroyAllVariants(room);
           killPlexTranscode(disconnectedSessionId).catch(() => {});
         }
       }
@@ -1155,7 +1737,7 @@ export function attachWebSocketServer(server: Server): void {
         // duplicate-connection eviction clears isHost, so the last client out
         // isn't always flagged as one, and the interval then pinged Plex every
         // 30s for a room that no longer existed.
-        stopRoomPing(roomId);
+        destroyAllVariants(room);
         rooms.delete(roomId);
       } else {
         // Someone left — refresh everyone's roster
@@ -1166,11 +1748,37 @@ export function attachWebSocketServer(server: Server): void {
 
   // Cleanup rooms whose instance has expired every 5 minutes
   cleanupInterval = setInterval(() => {
+    // Streams nobody has had open for a while. A variant survives its watchers
+    // stepping out of the player on purpose — see IDLE_STREAM_GRACE_MS — but not
+    // indefinitely.
+    const now = Date.now();
+    for (const [instanceId, room] of rooms) {
+      for (const [key, variant] of [...room.state.variants]) {
+        const members = membersOf(room, key);
+        const watching = members.some((c) => c.isWatching);
+        if (members.length === 0 || watching) {
+          variant.idleSince = null;
+          continue;
+        }
+        if (variant.idleSince === null) {
+          variant.idleSince = now;
+          continue;
+        }
+        if (now - variant.idleSince < IDLE_STREAM_GRACE_MS) continue;
+        logEvent("Sync", "dropping a stream nobody came back to", {
+          room: instanceId.substring(0, 8),
+          variant: key,
+          idleMinutes: Math.round((now - variant.idleSince) / 60000),
+        });
+        for (const c of members) c.variantKey = null;
+        destroyVariant(room, key);
+      }
+    }
     for (const [instanceId, room] of rooms) {
       if (!instanceHosts.has(instanceId) && room.clients.size === 0) {
-        // Same reasoning as the close handler: the interval outlives the room
+        // Same reasoning as the close handler: the intervals outlive the room
         // otherwise, pinging Plex for something that is gone.
-        stopRoomPing(instanceId);
+        destroyAllVariants(room);
         rooms.delete(instanceId);
       }
     }
@@ -1198,8 +1806,8 @@ export function closeWebSocketServer(): void {
     trackerWss = null;
   }
   destroyTracker();
-  for (const instanceId of roomPingIntervals.keys()) {
-    stopRoomPing(instanceId);
+  for (const sessionId of [...sessionPingIntervals.keys()]) {
+    stopSessionPing(sessionId);
   }
   rooms.clear();
 }

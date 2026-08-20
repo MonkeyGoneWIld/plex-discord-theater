@@ -11,12 +11,39 @@ interface TrackSwitcherProps {
   mediaIndex?: number;
   onClose: () => void;
   onTrackChange: (partId: number, audioStreamID?: number, subtitleStreamID?: number) => void;
-  /** Co-hosts may change subtitles but not audio — hides the Audio tab. */
-  subtitlesOnly?: boolean;
+  /**
+   * Who a change here affects.
+   *
+   * "room" for the host, whose choice carries to everyone watching their stream;
+   * "self" for everybody else, who forks onto a stream of their own. Both get
+   * the full choice of tracks — the difference is only in the reach, and saying
+   * so is the point: a host changing the audio for six people should know that
+   * is what they are doing.
+   */
+  scope?: "room" | "self";
+  /**
+   * The tracks this client is actually watching.
+   *
+   * Not read from the metadata's `selected` flags any more. Those describe the
+   * *item*, which is now pointed at whichever stream started most recently — so
+   * a viewer who turned subtitles off saw English still ticked the moment
+   * anybody else started an English stream. The room has several answers to
+   * "which track is playing" and only one of them is yours.
+   */
+  currentAudioId?: number | null;
+  currentSubtitleId?: number | null;
 }
 
-export function TrackSwitcher({ ratingKey, mediaIndex, onClose, onTrackChange, subtitlesOnly = false }: TrackSwitcherProps) {
-  const [tab, setTab] = useState<"audio" | "subtitles">(subtitlesOnly ? "subtitles" : "audio");
+export function TrackSwitcher({
+  ratingKey,
+  mediaIndex,
+  onClose,
+  onTrackChange,
+  scope = "self",
+  currentAudioId,
+  currentSubtitleId,
+}: TrackSwitcherProps) {
+  const [tab, setTab] = useState<"audio" | "subtitles">("audio");
   const [audioTracks, setAudioTracks] = useState<StreamTrack[]>([]);
   const [subtitleTracks, setSubtitleTracks] = useState<StreamTrack[]>([]);
   const [partId, setPartId] = useState<number | null>(null);
@@ -33,6 +60,12 @@ export function TrackSwitcher({ ratingKey, mediaIndex, onClose, onTrackChange, s
       .catch(console.error)
       .finally(() => setLoading(false));
   }, [ratingKey, mediaIndex]);
+
+  // What this client is on. Falls back to the item's own flags only when the
+  // player didn't say — an older caller, or before the first assignment lands.
+  const activeAudio = currentAudioId ?? audioTracks.find((t) => t.selected)?.id ?? null;
+  const activeSubtitle =
+    currentSubtitleId ?? subtitleTracks.find((t) => t.selected)?.id ?? 0;
 
   const handleSelect = (type: "audio" | "subtitle", streamId: number) => {
     if (partId == null) return;
@@ -51,12 +84,11 @@ export function TrackSwitcher({ ratingKey, mediaIndex, onClose, onTrackChange, s
     <div style={styles.backdrop} onClick={onClose}>
       <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
-          <span style={styles.headerTitle}>{subtitlesOnly ? "Subtitles" : "Track Settings"}</span>
+          <span style={styles.headerTitle}>Audio &amp; Subtitles</span>
           <button onClick={onClose} style={styles.closeBtn}>{"\u2715"}</button>
         </div>
 
-        {!subtitlesOnly && (
-          <div style={styles.tabs}>
+        <div style={styles.tabs}>
             <button
               onClick={() => setTab("audio")}
               style={{ ...styles.tab, ...(tab === "audio" ? styles.tabActive : {}) }}
@@ -65,50 +97,63 @@ export function TrackSwitcher({ ratingKey, mediaIndex, onClose, onTrackChange, s
               onClick={() => setTab("subtitles")}
               style={{ ...styles.tab, ...(tab === "subtitles" ? styles.tabActive : {}) }}
             >Subtitles</button>
-          </div>
-        )}
+        </div>
+
+        {/* What a change here reaches. The host's carries; everyone else's
+            forks onto a stream of their own, which nobody else sees. */}
+        <p style={styles.scopeNote}>
+          {scope === "room"
+            ? "Changes apply to everyone watching your stream."
+            : "Changes apply to you only."}
+        </p>
 
         {loading ? (
           <div style={styles.loading}>Loading tracks...</div>
         ) : tab === "audio" ? (
           <div style={styles.trackList}>
-            {audioTracks.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => handleSelect("audio", t.id)}
-                style={t.selected ? styles.trackSelected : styles.track}
-              >
-                <div>
-                  <div style={{ color: t.selected ? "#f0f0f0" : "#ccc", fontSize: 13 }}>{t.title}</div>
-                  {t.codec && (
-                    <div style={{ color: t.selected ? "#888" : "#666", fontSize: 11 }}>
-                      {t.codec}{t.channels ? ` ${t.channels}ch` : ""}
-                    </div>
-                  )}
-                </div>
-                {t.selected && <span style={styles.checkmark}>{"\u2713"}</span>}
-              </button>
-            ))}
+            {audioTracks.map((t) => {
+              const on = t.id === activeAudio;
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => handleSelect("audio", t.id)}
+                  style={on ? styles.trackSelected : styles.track}
+                >
+                  <div>
+                    <div style={{ color: on ? "#f0f0f0" : "#ccc", fontSize: 13 }}>{t.title}</div>
+                    {t.codec && (
+                      <div style={{ color: on ? "#888" : "#666", fontSize: 11 }}>
+                        {t.codec}{t.channels ? ` ${t.channels}ch` : ""}
+                      </div>
+                    )}
+                  </div>
+                  {on && <span style={styles.checkmark}>{"\u2713"}</span>}
+                </button>
+              );
+            })}
           </div>
         ) : (
           <div style={styles.trackList}>
             <button
               onClick={() => handleSelect("subtitle", 0)}
-              style={!subtitleTracks.some((t) => t.selected) ? styles.trackSelected : styles.track}
+              style={!activeSubtitle ? styles.trackSelected : styles.track}
             >
-              <div style={{ color: !subtitleTracks.some((t) => t.selected) ? "#f0f0f0" : "#ccc", fontSize: 13 }}>None</div>
-              {!subtitleTracks.some((t) => t.selected) && <span style={styles.checkmark}>{"\u2713"}</span>}
+              <div style={{ color: !activeSubtitle ? "#f0f0f0" : "#ccc", fontSize: 13 }}>None</div>
+              {!activeSubtitle && <span style={styles.checkmark}>{"\u2713"}</span>}
             </button>
-            {subtitleTracks.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => handleSelect("subtitle", t.id)}
-                style={t.selected ? styles.trackSelected : styles.track}
-              >
-                <div style={{ color: t.selected ? "#f0f0f0" : "#ccc", fontSize: 13 }}>{t.title}</div>
-                {t.selected && <span style={styles.checkmark}>{"\u2713"}</span>}
-              </button>
-            ))}
+            {subtitleTracks.map((t) => {
+              const on = t.id === activeSubtitle;
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => handleSelect("subtitle", t.id)}
+                  style={on ? styles.trackSelected : styles.track}
+                >
+                  <div style={{ color: on ? "#f0f0f0" : "#ccc", fontSize: 13 }}>{t.title}</div>
+                  {on && <span style={styles.checkmark}>{"\u2713"}</span>}
+                </button>
+              );
+            })}
           </div>
         )}
 
@@ -181,6 +226,13 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer", textAlign: "left", fontFamily: "inherit", color: "inherit",
   },
   checkmark: { color: "#e5a00d", fontSize: 12 },
+  scopeNote: {
+    margin: 0,
+    padding: "0 16px 10px",
+    color: "#7d7d7d",
+    fontSize: "12px",
+    lineHeight: 1.4,
+  },
   loading: { color: "#888", fontSize: 13, textAlign: "center", padding: 20 },
   disclaimer: {
     color: "#666", fontSize: 11, lineHeight: "1.4",

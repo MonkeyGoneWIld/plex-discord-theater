@@ -986,8 +986,11 @@ export function Controls({
                 </svg>
               </button>
             )}
-            {canControl && onOpenTrackSwitcher && (
-              <button onClick={onOpenTrackSwitcher} style={{ ...styles.gearBtn, ...(compact ? styles.gearBtnCompact : {}) }} title={isHost ? "Audio & Subtitles" : "Subtitles"}>
+            {/* Not gated on transport rights any more: choosing tracks moves you
+                onto a stream that has them rather than changing what the room
+                hears, so it is no more a control than the volume slider. */}
+            {onOpenTrackSwitcher && (
+              <button onClick={onOpenTrackSwitcher} style={{ ...styles.gearBtn, ...(compact ? styles.gearBtnCompact : {}) }} title="Audio & Subtitles">
                 {"\u2699"}
               </button>
             )}

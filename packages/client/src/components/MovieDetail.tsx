@@ -22,6 +22,10 @@ interface MovieDetailProps {
     subtitles: boolean,
     resumePosition?: number,
     mediaIndex?: number,
+    /** The tracks chosen here. They name the room's opening stream, so a viewer
+     *  who later picks the same ones joins it instead of starting a duplicate. */
+    audioStreamId?: number,
+    subtitleStreamId?: number,
   ) => void;
   onBack: () => void;
   isPlaying?: boolean;
@@ -293,6 +297,8 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
         selectedSubtitle != null,
         resumeFromMs != null ? resumeFromMs / 1000 : undefined,
         selectedVersion ?? undefined,
+        selectedAudio ?? 0,
+        selectedSubtitle ?? 0,
       );
     } catch (err) {
       console.error("Failed to set streams:", err);

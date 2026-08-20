@@ -64,6 +64,10 @@ type View =
       subtitles: boolean;
       resumePosition?: number;
       mediaIndex?: number;
+      /** Tracks chosen on the detail page. Only the client that starts the room
+       *  has them; everyone else is told which stream to play by the server. */
+      audioStreamId?: number;
+      subtitleStreamId?: number;
       synthesized?: boolean;
     };
 
@@ -502,8 +506,13 @@ export function App() {
     subtitles: boolean,
     resumePosition?: number,
     mediaIndex?: number,
+    audioStreamId?: number,
+    subtitleStreamId?: number,
   ) => {
-    pushView({ kind: "player", item, subtitles, resumePosition, mediaIndex });
+    pushView({
+      kind: "player", item, subtitles, resumePosition, mediaIndex,
+      audioStreamId, subtitleStreamId,
+    });
   }, [pushView]);
 
   const handleShowSeason = useCallback((season: PlexItem, show: PlexItem) => {
@@ -1017,6 +1026,8 @@ export function App() {
             subtitles={view.subtitles}
             resumePosition={view.resumePosition}
             mediaIndex={view.mediaIndex}
+            audioStreamId={view.audioStreamId}
+            subtitleStreamId={view.subtitleStreamId}
             onBack={popView}
             // Finishing an episode lands on the show, not on the episode that
             // just ended. Same rebuild the in-page show breadcrumb uses, so the

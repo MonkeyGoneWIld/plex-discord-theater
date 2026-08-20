@@ -28,6 +28,7 @@
   "scripts": {
     "dev": "concurrently -n server,client -c blue,green \"npm run dev -w packages/server\" \"npm run dev -w packages/client\"",
     "build": "npm run build -w packages/client && npm run build -w packages/server",
+    "test": "tsx packages/server/test/variant-sync.test.ts && tsx packages/server/test/person-page.test.ts",
     "start": "npm run start -w packages/server",
     "docker:build": "source .env && docker buildx build --platform linux/amd64 --build-arg VITE_DISCORD_CLIENT_ID=$DISCORD_CLIENT_ID -t zubywastaken/plex-discord-theater:latest --load .",
     "docker:push": "docker push zubywastaken/plex-discord-theater:latest",
@@ -45,11 +46,11 @@
     "Transitive pins for advisories that our direct dependencies haven't picked",
     "up yet. Each is the patched release on the same major line the dependent",
     "already asks for, so nothing changes but the fix:",
-    "  path-to-regexp 0.1.13 — ReDoS via 3+ params in one route segment (express 4)",
-    "  qs 6.15.3       — stringify crash, and arrayLimit bypass in comma parsing",
-    "  body-parser 1.20.6 — an invalid limit silently disabled the size cap",
-    "  ip-address 10.4.0  — XSS in the HTML-emitting Address6 helpers (via socks)",
-    "  ws 8.21.1       — memory-exhaustion DoS, and uninitialized memory disclosure",
+    "  path-to-regexp 0.1.13 \u2014 ReDoS via 3+ params in one route segment (express 4)",
+    "  qs 6.15.3       \u2014 stringify crash, and arrayLimit bypass in comma parsing",
+    "  body-parser 1.20.6 \u2014 an invalid limit silently disabled the size cap",
+    "  ip-address 10.4.0  \u2014 XSS in the HTML-emitting Address6 helpers (via socks)",
+    "  ws 8.21.1       \u2014 memory-exhaustion DoS, and uninitialized memory disclosure",
     "Revisit whenever express / bittorrent-tracker ship their own bumps."
   ],
   "overrides": {

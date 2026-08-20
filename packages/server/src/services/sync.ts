@@ -713,12 +713,11 @@ function persistProgress(
     [...room.clients].filter((c) => c.isWatching).map((c) => c.userId),
   );
   if (extraUserId) userIds.add(extraUserId);
-  const state = room.state.playing ? "playing" : "paused";
   for (const userId of userIds) {
     recordProgress(userId, ratingKey, interpolatedPosition(room.state), { force: forced })
       .then((entry) => {
         if (!entry) return;
-        return pushProgressToPlex(userId, entry, state, forced).catch((err) => {
+        return pushProgressToPlex(userId, entry, forced).catch((err) => {
           console.warn("[Plex Account] Live progress sync failed for", userId.substring(0, 8), err);
         });
       })

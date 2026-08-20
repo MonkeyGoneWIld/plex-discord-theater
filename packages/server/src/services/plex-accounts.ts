@@ -496,16 +496,10 @@ async function readRemoteState(
   return remote;
 }
 
-function sessionIdentifier(userId: string): string {
-  return crypto.createHmac("sha256", encryptionKey).update(userId).digest("hex").slice(0, 32);
-}
-
 export async function pushProgressToPlex(
   userId: string,
   entry: HistoryEntry,
-  state: "playing" | "paused" = "playing",
   force = false,
-  recordPlayback = true,
 ): Promise<boolean> {
   const linked = accessToken(userId);
   if (!linked) return false;
@@ -514,31 +508,6 @@ export async function pushProgressToPlex(
   const last = lastLivePush.get(key) ?? 0;
   if (!force && now - last < LIVE_PUSH_INTERVAL_MS) return false;
   lastLivePush.set(key, now);
-
-  // A live linked viewer gets a real timeline event before the watched-state
-  // scrobble. That lets Plex treat the activity as playback rather than only a
-  // manual "mark watched" action. Bulk reconciliation skips this step so a
-  // relink cannot manufacture a fresh play event for every old local row.
-  if (entry.watched && recordPlayback) {
-    const timeline = await plexFetch(
-      "/:/timeline",
-      {
-        ratingKey: entry.ratingKey,
-        key: `/library/metadata/${entry.ratingKey}`,
-        identifier: "com.plexapp.plugins.library",
-        state,
-        time: String(entry.positionMs),
-        duration: String(entry.durationMs),
-      },
-      {
-        "X-Plex-Client-Identifier": CLIENT_ID,
-        "X-Plex-Session-Identifier": sessionIdentifier(userId),
-      },
-      "POST",
-      linked.serverToken,
-    );
-    if (!timeline.ok) throw new Error(`Plex timeline update failed (${timeline.status})`);
-  }
 
   if (entry.watched) {
     const response = await plexFetch(
@@ -552,21 +521,21 @@ export async function pushProgressToPlex(
     return true;
   }
 
+  // /:/timeline represents an active Plex player. Sending it with a linked
+  // user's token creates a synthetic Now Playing session in Plex/Tautulli even
+  // though the shared server account is delivering the video. /:/progress is
+  // the lighter resume-position endpoint: it updates Continue Watching without
+  // claiming that the linked account is playing or consuming another stream.
   const response = await plexFetch(
-    "/:/timeline",
+    "/:/progress",
     {
-      ratingKey: entry.ratingKey,
-      key: `/library/metadata/${entry.ratingKey}`,
+      key: entry.ratingKey,
       identifier: "com.plexapp.plugins.library",
-      state,
       time: String(entry.positionMs),
-      duration: String(entry.durationMs),
+      state: "stopped",
     },
-    {
-      "X-Plex-Client-Identifier": CLIENT_ID,
-      "X-Plex-Session-Identifier": sessionIdentifier(userId),
-    },
-    "POST",
+    undefined,
+    "GET",
     linked.serverToken,
   );
   if (!response.ok) throw new Error(`Plex progress update failed (${response.status})`);
@@ -617,7 +586,7 @@ export function syncPlexAccount(userId: string): Promise<{ imported: number; exp
       });
       let exported = 0;
       await runWithConcurrency(toExport, 4, async (entry) => {
-        if (await pushProgressToPlex(userId, entry, "paused", true, false)) exported++;
+        if (await pushProgressToPlex(userId, entry, true)) exported++;
       });
       markSyncSuccess.run(Date.now(), HISTORY_SYNC_VERSION, userId);
       return { imported, exported };

@@ -126,7 +126,7 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
         },
       });
     }
-    if (url.pathname === "/:/timeline" || url.pathname === "/:/scrobble") {
+    if (url.pathname === "/:/progress" || url.pathname === "/:/scrobble") {
       return new Response("", { status: 200 });
     }
   }
@@ -188,8 +188,13 @@ const exported = await accounts.syncPlexAccount("discord-b");
 check("new local progress is exported", exported.exported, 1);
 check(
   "the export uses b's server-specific token",
-  plexCalls.some((call) => call.url.pathname === "/:/timeline" && call.token === "server-token-11"),
+  plexCalls.some((call) => call.url.pathname === "/:/progress" && call.token === "server-token-11"),
   true,
+);
+check(
+  "linked-account progress never creates a Plex playback timeline",
+  plexCalls.some((call) => call.url.pathname === "/:/timeline"),
+  false,
 );
 
 console.log("\n— changing Plex accounts starts with clean history —");
@@ -260,7 +265,7 @@ check(
   "incremental sync does not re-export old local history",
   plexCalls.slice(callsBeforeIncremental).some((call) =>
     call.token === `server-token-${fullPin}`
-    && (call.url.pathname === "/:/timeline" || call.url.pathname === "/:/scrobble")
+    && (call.url.pathname === "/:/progress" || call.url.pathname === "/:/scrobble")
   ),
   false,
 );

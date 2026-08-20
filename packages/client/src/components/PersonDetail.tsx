@@ -65,10 +65,11 @@ function formatDate(iso: string | null): string | null {
  * A cast or crew member's page: their photo and biography, then everything the
  * library holds that they worked on, movies and shows kept apart.
  *
- * The filmography is drawn from Plex by tag, so it only ever lists titles that
- * are actually here — there's no "not in library" state to handle. The prose and
- * dates come from TMDB and are optional; without them the page is still a useful
- * index of their work.
+ * The filmography leads with what the library holds, drawn from Plex by tag, and
+ * carries the rest of the career behind it as requestable cards — so both states
+ * appear in the same shelf, newest first within each. The prose and dates come
+ * from TMDB and are optional; without them the page is still a useful index of
+ * their work.
  */
 export function PersonDetail({ name, thumb, onSelect, onBack }: PersonDetailProps) {
   const [person, setPerson] = useState<Person | null>(null);

@@ -53,6 +53,7 @@ const defaultRemoteHistory: TestRemoteHistoryItem[] = [
 const remoteHistoryByAccount = new Map<string, TestRemoteHistoryItem[]>();
 const historyPageStarts: Array<{ accountId: string; start: number }> = [];
 const deletedRemoteHistory = new Set<string>();
+const refusedHistoryDeletes = new Set<string>();
 
 globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
   const url = new URL(typeof input === "string" || input instanceof URL ? input.toString() : input.url);
@@ -135,6 +136,7 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
       });
     }
     if (/^\/status\/sessions\/history\/\d+$/.test(url.pathname) && method === "DELETE") {
+      if (refusedHistoryDeletes.has(url.pathname)) return new Response("forbidden", { status: 403 });
       deletedRemoteHistory.add(url.pathname);
       return Response.json({ MediaContainer: { size: 0 } });
     }
@@ -305,6 +307,36 @@ check("History removal clears linked Plex resume position", plexCalls.some((call
   call.url.pathname === "/:/progress"
   && call.url.searchParams.get("key") === "303"
   && call.url.searchParams.get("time") === "0"
+  && call.token === "server-token-11"
+), true);
+
+console.log("\n— removals survive older Plex history APIs —");
+remoteHistoryByAccount.set("11", [{
+  ratingKey: "304", duration: 100_000, viewedAt: 1_700_000_300,
+  historyKey: "/status/sessions/history/9304",
+}]);
+refusedHistoryDeletes.add("/status/sessions/history/9304");
+await history.recordProgress("discord-b", "304", 70, { force: true });
+const compatRemoved = await accounts.removePlexHistoryEntry("discord-b", "304");
+check("an unavailable raw-delete endpoint does not fail the removal", compatRemoved.syncedToPlex, true);
+check("an unavailable raw-delete endpoint is reported as not deleted", compatRemoved.deletedRemoteEvents, 0);
+await accounts.syncPlexAccount("discord-b");
+check("an old Plex event cannot resurrect a removed Activity row", history.getProgress("discord-b", "304"), null);
+
+console.log("\n— replaying a watched title makes it unwatched —");
+await accounts.setPlexItemWatched("discord-b", "305", true);
+const replayed = await history.recordProgress("discord-b", "305", 50, { force: true });
+check("scrubbing into the middle clears local watched state", replayed?.watched, false);
+await accounts.pushProgressToPlex("discord-b", replayed!, true);
+check("scrubbing into the middle explicitly unscrobbles Plex", plexCalls.some((call) =>
+  call.url.pathname === "/:/unscrobble"
+  && call.url.searchParams.get("key") === "305"
+  && call.token === "server-token-11"
+), true);
+check("the middle position is sent after clearing watched state", plexCalls.some((call) =>
+  call.url.pathname === "/:/progress"
+  && call.url.searchParams.get("key") === "305"
+  && call.url.searchParams.get("time") === "50000"
   && call.token === "server-token-11"
 ), true);
 

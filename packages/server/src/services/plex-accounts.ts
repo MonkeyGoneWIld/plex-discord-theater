@@ -66,6 +66,13 @@ db.exec(`
     expires_at INTEGER NOT NULL,
     flow_version INTEGER NOT NULL DEFAULT 1
   );
+  CREATE TABLE IF NOT EXISTS plex_history_tombstones (
+    user_id TEXT NOT NULL,
+    plex_user_id TEXT NOT NULL,
+    rating_key TEXT NOT NULL,
+    deleted_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, plex_user_id, rating_key)
+  );
 `);
 // Accounts created by the first implementation stored only the plex.tv token.
 // Legacy Plex auth requires a second, server-specific token from /resources.
@@ -140,6 +147,19 @@ const selectSetting = db.prepare("SELECT value FROM settings WHERE key = ?");
 const upsertSetting = db.prepare(`
   INSERT INTO settings (key, value) VALUES (?, ?)
   ON CONFLICT(key) DO UPDATE SET value = excluded.value
+`);
+const upsertHistoryTombstone = db.prepare(`
+  INSERT INTO plex_history_tombstones (user_id, plex_user_id, rating_key, deleted_at)
+  VALUES (?, ?, ?, ?)
+  ON CONFLICT(user_id, plex_user_id, rating_key) DO UPDATE SET deleted_at = excluded.deleted_at
+`);
+const deleteHistoryTombstone = db.prepare(`
+  DELETE FROM plex_history_tombstones
+  WHERE user_id = ? AND plex_user_id = ? AND rating_key = ?
+`);
+const selectHistoryTombstones = db.prepare(`
+  SELECT rating_key, deleted_at FROM plex_history_tombstones
+  WHERE user_id = ? AND plex_user_id = ?
 `);
 
 function lastAccountKey(userId: string): string {
@@ -687,11 +707,16 @@ export async function setPlexItemWatched(
   );
   if (!response.ok) throw new Error(`Plex watched-state update failed (${response.status})`);
   if (!watched) {
-    for (const member of members) deleteHistoryEntry(userId, member.ratingKey!);
+    const deletedAt = Date.now();
+    for (const member of members) {
+      upsertHistoryTombstone.run(userId, linked.row.plex_user_id, member.ratingKey!, deletedAt);
+      deleteHistoryEntry(userId, member.ratingKey!);
+    }
     return { progress: null, affected: members.length };
   }
   const updatedAt = Date.now();
   await runWithConcurrency(members, 12, async (member) => {
+    deleteHistoryTombstone.run(userId, linked.row.plex_user_id, member.ratingKey!);
     await mergeExternalProgress(userId, member.ratingKey!, {
       positionMs: member.duration || 0,
       durationMs: member.duration || 0,
@@ -734,44 +759,9 @@ export async function removePlexHistoryEntry(
     return { syncedToPlex: false, deletedRemoteEvents: 0 };
   }
 
-  const historyPaths = new Set<string>();
-  let start = 0;
-  while (true) {
-    const data = await plexJSON<{
-      MediaContainer: { Metadata?: RemoteMetadata[]; totalSize?: number };
-    }>(
-      "/status/sessions/history/all",
-      {
-        accountID: linked.row.plex_user_id,
-        metadataItemID: ratingKey,
-        sort: "viewedAt:desc",
-        "X-Plex-Container-Start": String(start),
-        "X-Plex-Container-Size": String(HISTORY_PAGE_SIZE),
-      },
-      linked.serverToken,
-    );
-    const items = data.MediaContainer.Metadata || [];
-    for (const item of items) {
-      if (item.ratingKey === ratingKey && /^\/status\/sessions\/history\/\d+$/.test(item.historyKey || "")) {
-        historyPaths.add(item.historyKey!);
-      }
-    }
-    start += items.length;
-    const totalSize = data.MediaContainer.totalSize;
-    if (
-      items.length === 0
-      || (typeof totalSize === "number" && start >= totalSize)
-      || (totalSize == null && items.length < HISTORY_PAGE_SIZE)
-    ) break;
-  }
-
-  await runWithConcurrency([...historyPaths], 4, async (historyPath) => {
-    const response = await plexFetch(historyPath, undefined, undefined, "DELETE", linked.serverToken);
-    if (!response.ok && response.status !== 404) {
-      throw new Error(`Plex history removal failed (${response.status})`);
-    }
-  });
-
+  // These are the account-visible state changes. Do them before attempting to
+  // delete raw history events because older PMS versions may not expose that
+  // newer endpoint to a managed-user token.
   const unscrobble = await plexFetch(
     "/:/unscrobble",
     { key: ratingKey, identifier: "com.plexapp.plugins.library" },
@@ -795,9 +785,58 @@ export async function removePlexHistoryEntry(
   );
   if (!progress.ok) throw new Error(`Plex progress removal failed (${progress.status})`);
 
+  const deletedAt = Date.now();
+  upsertHistoryTombstone.run(userId, linked.row.plex_user_id, ratingKey, deletedAt);
   lastLivePush.delete(`${userId}:${ratingKey}`);
   deleteHistoryEntry(userId, ratingKey);
-  return { syncedToPlex: true, deletedRemoteEvents: historyPaths.size };
+
+  // Raw event deletion is best-effort for compatibility. The tombstone above
+  // prevents an undeletable old event from being imported again; a genuinely
+  // newer Plex play automatically supersedes it during the next sync.
+  let deletedRemoteEvents = 0;
+  try {
+    const historyPaths = new Set<string>();
+    let start = 0;
+    while (true) {
+      const data = await plexJSON<{
+        MediaContainer: { Metadata?: RemoteMetadata[]; totalSize?: number };
+      }>(
+        "/status/sessions/history/all",
+        {
+          accountID: linked.row.plex_user_id,
+          metadataItemID: ratingKey,
+          sort: "viewedAt:desc",
+          "X-Plex-Container-Start": String(start),
+          "X-Plex-Container-Size": String(HISTORY_PAGE_SIZE),
+        },
+        linked.serverToken,
+      );
+      const items = data.MediaContainer.Metadata || [];
+      for (const item of items) {
+        if (item.ratingKey === ratingKey && /^\/status\/sessions\/history\/\d+$/.test(item.historyKey || "")) {
+          historyPaths.add(item.historyKey!);
+        }
+      }
+      start += items.length;
+      const totalSize = data.MediaContainer.totalSize;
+      if (
+        items.length === 0
+        || (typeof totalSize === "number" && start >= totalSize)
+        || (totalSize == null && items.length < HISTORY_PAGE_SIZE)
+      ) break;
+    }
+
+    await runWithConcurrency([...historyPaths], 4, async (historyPath) => {
+      const response = await plexFetch(historyPath, undefined, undefined, "DELETE", linked.serverToken);
+      if (!response.ok && response.status !== 404) {
+        throw new Error(`Plex history removal failed (${response.status})`);
+      }
+      if (response.ok) deletedRemoteEvents++;
+    });
+  } catch (err) {
+    console.warn("[Plex Account] Raw history event removal unavailable; keeping local tombstone:", err);
+  }
+  return { syncedToPlex: true, deletedRemoteEvents };
 }
 
 interface RemoteState {
@@ -882,6 +921,7 @@ export async function pushProgressToPlex(
   userId: string,
   entry: HistoryEntry,
   force = false,
+  clearWatchedState = entry.becameUnwatched === true,
 ): Promise<boolean> {
   const linked = accessToken(userId);
   if (!linked) return false;
@@ -890,6 +930,7 @@ export async function pushProgressToPlex(
   const last = lastLivePush.get(key) ?? 0;
   if (!force && now - last < LIVE_PUSH_INTERVAL_MS) return false;
   lastLivePush.set(key, now);
+  deleteHistoryTombstone.run(userId, linked.row.plex_user_id, entry.ratingKey);
 
   if (entry.watched) {
     const response = await plexFetch(
@@ -901,6 +942,20 @@ export async function pushProgressToPlex(
     );
     if (!response.ok) throw new Error(`Plex watched-state update failed (${response.status})`);
     return true;
+  }
+
+  // Plex keeps the played flag independently of resume position. A seek back
+  // into an already-completed title must explicitly clear that flag before the
+  // partial position is sent or Plex continues to display it as watched.
+  if (clearWatchedState) {
+    const unscrobble = await plexFetch(
+      "/:/unscrobble",
+      { key: entry.ratingKey, identifier: "com.plexapp.plugins.library" },
+      undefined,
+      "GET",
+      linked.serverToken,
+    );
+    if (!unscrobble.ok) throw new Error(`Plex watched-state update failed (${unscrobble.status})`);
   }
 
   // /:/timeline represents an active Plex player. Sending it with a linked
@@ -951,8 +1006,21 @@ export function syncPlexAccount(userId: string): Promise<{ imported: number; exp
         ? null
         : Math.max(0, linked.row.last_sync_at! - INCREMENTAL_SYNC_OVERLAP_MS);
       const remote = await readRemoteState(linked.serverToken, linked.row.plex_user_id, sinceMs);
+      const tombstones = new Map(
+        (selectHistoryTombstones.all(userId, linked.row.plex_user_id) as Array<{
+          rating_key: string;
+          deleted_at: number;
+        }>).map((row) => [row.rating_key, row.deleted_at]),
+      );
       let imported = 0;
       await runWithConcurrency([...remote.entries()], 8, async ([ratingKey, state]) => {
+        const deletedAt = tombstones.get(ratingKey);
+        if (deletedAt != null) {
+          if (state.updatedAt <= deletedAt) return;
+          // A newer play made directly in Plex is intentional and supersedes
+          // the old removal rather than being hidden forever.
+          deleteHistoryTombstone.run(userId, linked.row.plex_user_id, ratingKey);
+        }
         const merged = await mergeExternalProgress(userId, ratingKey, state);
         if (merged.changed) imported++;
       });
@@ -968,7 +1036,9 @@ export function syncPlexAccount(userId: string): Promise<{ imported: number; exp
       });
       let exported = 0;
       await runWithConcurrency(toExport, 4, async (entry) => {
-        if (await pushProgressToPlex(userId, entry, true)) exported++;
+        const there = remote.get(entry.ratingKey);
+        const clearWatchedState = !entry.watched && there?.watched === true;
+        if (await pushProgressToPlex(userId, entry, true, clearWatchedState)) exported++;
       });
       markSyncSuccess.run(Date.now(), HISTORY_SYNC_VERSION, userId);
       return { imported, exported };

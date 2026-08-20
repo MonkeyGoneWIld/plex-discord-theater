@@ -282,13 +282,11 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                   ) : (
                     <div style={styles.episodePlaceholder}>No Image</div>
                   )}
-                  <div style={{ ...styles.playOverlay, opacity: isHovered ? 1 : 0 }}>
-                    <div style={styles.playCircle}>
-                      <svg width="14" height="14" viewBox="0 0 16 16" fill="#fff">
-                        <path d="M4 2.5L13 8L4 13.5V2.5Z"/>
-                      </svg>
-                    </div>
-                  </div>
+                  {/* No play button on hover. This card opens the episode's
+                      page — where the play, resume and queue controls actually
+                      are — so a play symbol over the thumbnail was promising
+                      something the click doesn't do. The card's own hover state
+                      says it is clickable without saying what it will do. */}
                   {watched && (
                     <div style={styles.watchedBadge} title="Watched">
                       <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
@@ -448,14 +446,6 @@ const styles: Record<string, React.CSSProperties> = {
   episodePlaceholder: {
     width: "100%", height: "100%", display: "flex", alignItems: "center",
     justifyContent: "center", color: "#555", fontSize: "12px", fontWeight: 500,
-  },
-  playOverlay: {
-    position: "absolute", inset: 0, display: "flex", alignItems: "center",
-    justifyContent: "center", transition: "opacity 0.2s ease", background: "rgba(0,0,0,0.3)",
-  },
-  playCircle: {
-    width: "36px", height: "36px", borderRadius: "50%", background: "rgba(0,0,0,0.6)",
-    display: "flex", alignItems: "center", justifyContent: "center",
   },
   durationBadge: {
     position: "absolute", bottom: "4px", right: "6px",

@@ -2857,16 +2857,12 @@ export async function notifyPlexStopped(ratingKey: string | null, sessionId: str
   }
 }
 
-/**
- * Token for reading and ending Plex sessions.
- *
- * Both are account-level calls on some setups, where the local server token
- * gets a bare 403. That took out the orphan reaper and the terminate path
- * together, silently — the account token configured to avoid exactly this was
- * only ever passed to the second of them, which the first never reached.
- */
+/** Token for playback-session lifecycle calls. Playback has one credential
+ * boundary: library reads, transcodes, segments, pings, session cleanup and
+ * shutdown all use the configured PLEX_TOKEN. PLEX_ACCOUNT_TOKEN is cloud-only,
+ * and per-user linked credentials are watch-state-only. */
 function sessionsToken(): string | undefined {
-  return process.env.PLEX_ACCOUNT_TOKEN || process.env.PLEX_TOKEN;
+  return process.env.PLEX_TOKEN;
 }
 
 /**
@@ -2916,13 +2912,13 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
 
       console.log("[HLS] Terminating Plex session:", sessionId, "for transcode key:", plexKey.substring(0, 8));
       const termParams: Record<string, string> = { sessionId, reason: "Playback ended" };
-      // Account-privileged, like the listing above — see sessionsToken.
+      // Same configured playback credential as the listing and transcode.
       const termRes = await plexFetch(
         "/status/sessions/terminate", termParams, undefined, "POST", sessionsToken(),
       );
       if (!termRes.ok) {
         console.warn("[HLS] Terminate returned", termRes.status,
-          process.env.PLEX_ACCOUNT_TOKEN ? "" : "(no PLEX_ACCOUNT_TOKEN set)");
+          "(configured PLEX_TOKEN was refused)");
       }
       return;
     }
@@ -2930,11 +2926,8 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
     if (DEBUG) console.log("[HLS] No matching Plex session found for terminate:", plexKey.substring(0, 8));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // Plex refusing the token, which no amount of retrying changes. 403 is the
-    // server token being told it may not list sessions; 401 is an account token
-    // this server doesn't accept — a plex.tv token is not automatically a token
-    // for the local server. The two read nothing alike and mean the same thing
-    // here. Non-fatal either way: the transcode is stopped by its own endpoint
+    // Plex refusing the configured playback token, which no amount of retrying
+    // changes. Non-fatal either way: the transcode is stopped by its own endpoint
     // before this runs, so only Plex's "now playing" entry lingers. Worth one
     // line of advice rather than a page of HTML on every teardown — there were
     // sixteen of those in one ten-minute session.
@@ -2944,9 +2937,7 @@ async function terminatePlexSession(plexKey: string): Promise<void> {
         console.warn(
           `[HLS] Plex refused to list sessions (${message.includes("401") ? "401" : "403"}),`,
           "so finished ones linger in Now Playing and the orphan reaper cannot run.",
-          process.env.PLEX_ACCOUNT_TOKEN
-            ? "PLEX_ACCOUNT_TOKEN is set but was refused — it has to be a token this server accepts, not only a plex.tv one."
-            : "Set PLEX_ACCOUNT_TOKEN to your plex.tv account token.",
+          "The configured PLEX_TOKEN cannot read this server's session list.",
           "Playback is unaffected; transcodes still stop normally.",
         );
       }

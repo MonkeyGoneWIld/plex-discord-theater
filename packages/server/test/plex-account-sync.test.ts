@@ -8,6 +8,7 @@ const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "plex-account-sync-"));
 process.env.THUMB_CACHE_DIR = dataDir;
 process.env.PLEX_URL = "http://plex.test";
 process.env.PLEX_TOKEN = "shared-server-token";
+process.env.PLEX_ACCOUNT_TOKEN = "cloud-discover-token";
 process.env.DISCORD_CLIENT_SECRET = "test-discord-secret";
 
 // Reproduce an installation upgraded from the original incompatible PIN flow.
@@ -133,9 +134,15 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
 };
 
 const accounts = await import("../src/services/plex-accounts.js");
+const plexService = await import("../src/services/plex.js");
 const history = await import("../src/services/watch-history.js");
 
 check("upgrade clears pending PINs from the incompatible flow", accounts.getPlexAccountStatus("discord-legacy").pending, undefined);
+check(
+  "playback URLs always use PLEX_TOKEN, never the cloud account token",
+  new URL(plexService.plexUrl("/video/:/transcode/universal/start.m3u8")).searchParams.get("X-Plex-Token"),
+  "shared-server-token",
+);
 
 console.log("\n— Plex links are isolated by Discord identity —");
 const startedA = await accounts.startPlexAccountLink("discord-a");

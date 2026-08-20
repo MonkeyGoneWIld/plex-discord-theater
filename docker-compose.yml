@@ -15,6 +15,7 @@ services:
       # ── Required ────────────────────────────────────────────────
       - NODE_ENV=production
       - PLEX_URL=${PLEX_URL}
+      # Sole credential for library access and the complete playback lifecycle.
       - PLEX_TOKEN=${PLEX_TOKEN}
       - DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}
       - DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}
@@ -28,8 +29,8 @@ services:
       # All off unless set. The server prints which are live at startup:
       #   docker compose logs | grep Config
       #
-      # Your plex.tv ACCOUNT token (not the server token above). Enables detail
-      # pages for titles you don't own, and signs in to Seerr as you.
+      # Cloud-only plex.tv token. Enables detail pages for titles you don't own
+      # and signs in to Seerr; never used for video or playback sessions.
       - PLEX_ACCOUNT_TOKEN=${PLEX_ACCOUNT_TOKEN}
       # Stable encryption key for per-user Plex account links. Falls back to
       # DISCORD_CLIENT_SECRET when unset.

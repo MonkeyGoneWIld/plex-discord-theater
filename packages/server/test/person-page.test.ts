@@ -106,8 +106,11 @@ function show(ratingKey: string, title: string, year: number, tmdbId?: number) {
 
 const plex = http.createServer((req, res) => {
   const url = new URL(req.url!, "http://plex");
-  asked.push(url.pathname + (url.searchParams.get("actor") ? "?actor" : "")
-                          + (url.searchParams.get("director") ? "?director" : ""));
+  const filter = ["actor", "director", "writer", "producer"]
+    .filter((f) => url.searchParams.get(f))
+    .map((f) => `?${f}=${url.searchParams.get(f)}`)
+    .join("");
+  asked.push(url.pathname + filter);
   const send = (body: unknown) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(body));
@@ -129,6 +132,10 @@ const plex = http.createServer((req, res) => {
         // first tag we see" — this one shares the tag shape.
         { hubIdentifier: "search.collection", Directory: [{ id: 77, tag: "Sam Bottoms Collection", ratingKey: "900" }] },
         { hubIdentifier: "search.actor", Directory: [{ id: 42, tag: "Sam Bottoms" }] },
+        // Same person, different row in Plex's tags table, different id. Using
+        // 42 here matches nothing, which is the whole bug.
+        { hubIdentifier: "search.director", Directory: [{ id: 43, tag: "Sam Bottoms" }] },
+        { hubIdentifier: "search.writer", Directory: [{ id: 44, tag: "Sam Bottoms" }] },
       ] } });
     }
     return send({ MediaContainer: { Hub: [] } });
@@ -142,10 +149,17 @@ const plex = http.createServer((req, res) => {
         movie("11", "The Last Picture Show", 1971),
       ] } });
     }
-    if (url.searchParams.get("director") === "42") {
-      // Also credited as director on one he acted in — the page lists it once.
-      return send({ MediaContainer: { Metadata: [movie("10", "Apocalypse Now", 1979, 101)] } });
+    if (url.searchParams.get("director") === "43") {
+      return send({ MediaContainer: { Metadata: [
+        // Also credited as director on one he acted in — listed once either way.
+        movie("10", "Apocalypse Now", 1979, 101),
+        // Only reachable through the director id. Asking with the actor's
+        // matches nothing, and this film then came back as "not in library"
+        // on the page of the person who directed it.
+        movie("12", "Directed This", 1985, 205),
+      ] } });
     }
+    // Deliberately silent for every other id, including ?director=42.
     return send({ MediaContainer: { Metadata: [] } });
   }
 
@@ -183,16 +197,26 @@ console.log("\n— a person page is built from Plex, not rebuilt from TMDB —")
 
   check("the request succeeds", status, 200);
   check("what the library has comes first, newest first",
-    body.movies.slice(0, 2).map((m: any) => m.title), ["Apocalypse Now", "The Last Picture Show"]);
-  check("and is marked as playable", body.movies.slice(0, 2).every((m: any) => m.inLibrary !== false), true);
+    body.movies.slice(0, 3).map((m: any) => m.title),
+    ["Directed This", "Apocalypse Now", "The Last Picture Show"]);
+  check("and is marked as playable", body.movies.slice(0, 3).every((m: any) => m.inLibrary !== false), true);
   check("a title they both acted in and directed is listed once",
     body.movies.filter((m: any) => m.title === "Apocalypse Now").length, 1);
 
+  // Plex tags are typed. Asking ?director= with the actor id matches nothing,
+  // and the film comes back as "not in library" on its own director's page.
+  check("a film they only directed is found, under the director's own id",
+    body.movies.find((m: any) => m.title === "Directed This")?.inLibrary !== false, true);
+  check("each role is asked with its own id",
+    asked.filter((p) => p.includes("?director=")).every((p) => p.includes("=43")), true);
+  check("and the wrong one is never used",
+    asked.some((p) => p.includes("?director=42")), false);
+
   // The rest of the career, behind it, in the same order.
-  const rest = body.movies.slice(2);
+  const rest = body.movies.slice(3);
   check("then the rest of their films, newest first",
     rest.map((m: any) => m.title),
-    ["Selfish Man", "Directed This", "Bronco Billy", "Class of '44"]);
+    ["Selfish Man", "Bronco Billy", "Class of '44"]);
   check("all of them requestable", rest.every((m: any) => m.inLibrary === false), true);
   check("carrying the id the request flow needs", rest.every((m: any) => typeof m.tmdbId === "number"), true);
   check("a credit with no poster is not a card",
@@ -226,7 +250,7 @@ console.log("\n— a person page is built from Plex, not rebuilt from TMDB —")
   check("the section list is fetched once", asked.filter((p) => p === "/library/sections").length, 1);
   check("music is not searched for actors",
     asked.some((p) => p.startsWith("/library/sections/3/")), false);
-  check("the whole page costs a handful of Plex requests", asked.length <= 7, true);
+  check("the whole page costs a handful of Plex requests", asked.length <= 10, true);
   check("and three TMDB calls, not one per credit",
     tmdbAsked.length, 3);
 

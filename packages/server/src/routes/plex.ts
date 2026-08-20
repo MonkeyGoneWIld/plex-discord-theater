@@ -1657,27 +1657,44 @@ async function browsableSections(): Promise<Array<{ id: string; type: string }>>
   return sections;
 }
 
-/** Roles the cast row links from, and so the ones a person page is asked about. */
-const PERSON_FILTERS = ["actor", "director"] as const;
+/**
+ * The roles a person page asks Plex about, and the filter each is spelled with.
+ *
+ * Writers and producers are here as well as the two the cast row links from,
+ * because the question the page answers is "what have they made" and a
+ * director-writer's writing credits are not a footnote. Plex ignores a filter a
+ * section doesn't index, which costs one empty answer.
+ */
+const PERSON_FILTERS = ["actor", "director", "writer", "producer"] as const;
+type PersonFilter = (typeof PERSON_FILTERS)[number];
 
-/** name → Plex tag id, misses included. A name Plex doesn't index won't start
- *  being indexed on the next page view. */
-const personTagIdCache = new LruMap<string, number | null>(2_000);
+/** name → the tag id per role, misses included. A name Plex doesn't index won't
+ *  start being indexed on the next page view. */
+const personTagIdCache = new LruMap<string, Map<PersonFilter, number>>(2_000);
 
 /**
- * The id Plex files a person's credits under, found by asking Plex.
+ * The ids Plex files a person's credits under — one per role, not one per person.
  *
- * The alternative was to have the client pass the id down from whichever credit
- * was clicked, which means every surface that can open a person page has to
- * carry it — and a previous attempt at exactly that shipped a version where no
- * credit carried one and every cast member was silently unclickable. One search
- * against the local server needs nothing from anybody, works from every surface,
- * and is cached per name.
+ * This is the part that isn't obvious. Plex tags are typed: the same human is a
+ * different row in the tags table as an actor and as a director, with a
+ * different id in each. Filtering `?director=` with the id from the actor hub
+ * matches nothing, silently — which is how a director's own films came back as
+ * "not in library" on their own page while their two acting credits came back
+ * fine.
+ *
+ * The search hubs are already split by role, so the id for each comes from the
+ * hub named after it.
+ *
+ * Asked of Plex rather than passed down from whichever credit was clicked:
+ * every surface that can open a person page would otherwise have to carry it,
+ * and a previous attempt at that shipped a version where no credit carried one
+ * and every cast member was silently unclickable.
  */
-async function personTagId(name: string): Promise<number | null> {
+async function personTagIds(name: string): Promise<Map<PersonFilter, number>> {
   const key = name.toLowerCase();
-  if (personTagIdCache.has(key)) return personTagIdCache.get(key)!;
-  let id: number | null = null;
+  const cached = personTagIdCache.get(key);
+  if (cached) return cached;
+  const ids = new Map<PersonFilter, number>();
   try {
     const data = await plexJSON<{
       MediaContainer: {
@@ -1689,30 +1706,37 @@ async function personTagId(name: string): Promise<number | null> {
     }>("/hubs/search", { query: name, limit: "10" });
     for (const hub of data.MediaContainer.Hub || []) {
       // Same test the search route uses: only the hub identifier tells a person
-      // apart from a genre or a collection, which share the "tag" type.
-      if (!PERSON_HUB_RE.test(hub.hubIdentifier ?? "")) continue;
+      // apart from a genre or a collection, which share the "tag" type. The
+      // captured word is the role, which is also the filter's name.
+      const role = PERSON_HUB_RE.exec(hub.hubIdentifier ?? "")?.[2]?.toLowerCase();
+      if (!role) continue;
+      const filter = PERSON_FILTERS.find((f) => f === role);
+      if (!filter || ids.has(filter)) continue;
       for (const d of hub.Directory || []) {
+        // A ratingKey means a library object, not a tag.
         if (d.ratingKey != null || d.id == null) continue;
         if ((d.tag ?? d.title ?? "").toLowerCase() !== key) continue;
-        id = d.id;
+        ids.set(filter, d.id);
         break;
       }
-      if (id !== null) break;
     }
   } catch {
-    // Leaves id null, which sends the caller down the TMDB path.
+    // Leaves the map empty, which sends the caller down the TMDB path.
   }
-  personTagIdCache.set(key, id);
-  return id;
+  personTagIdCache.set(key, ids);
+  return ids;
 }
 
 /**
  * Everything in the library credited to one person, asked of Plex directly.
  *
  * Plex indexes its own cast and crew: filtering a section by the person's tag
- * id returns exactly the titles they appear in, already scoped to what is
- * actually on the shelf. Two or three requests to a server on the LAN, and
+ * id returns exactly the titles they are credited on, already scoped to what is
+ * actually on the shelf. A handful of requests to a server on the LAN, and
  * every one of them is the answer.
+ *
+ * One id per role, because Plex's tags are typed and the same human has a
+ * different id as an actor than as a director — see personTagIds.
  *
  * The alternative — and what this used to do, despite the comment above it
  * saying otherwise for months — was to ask TMDB who they are, ask TMDB for
@@ -1720,7 +1744,7 @@ async function personTagId(name: string): Promise<number | null> {
  * ownership one by one. Three internet round trips and eighty lookups to
  * produce a list Plex already had, which is where the five to ten seconds went.
  */
-async function libraryCreditsFor(tagId: number) {
+async function libraryCreditsFor(tagIds: Map<PersonFilter, number>) {
   const sections = await browsableSections();
   const byKey = new Map<string, { item: ReturnType<typeof mapItem>; type: string }>();
   // What was found, in the two shapes a TMDB credit can be recognised by, so the
@@ -1730,7 +1754,7 @@ async function libraryCreditsFor(tagId: number) {
 
   await Promise.all(
     sections.flatMap((section) =>
-      PERSON_FILTERS.map(async (filter) => {
+      [...tagIds].map(async ([filter, tagId]) => {
         try {
           const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
             `/library/sections/${section.id}/all`,
@@ -1837,16 +1861,16 @@ async function tmdbPersonAndCredits(name: string) {
 }
 
 /**
- * GET /api/plex/person?name=<name>[&id=<plex tag id>]
+ * GET /api/plex/person?name=<name>
  *
- * A cast/crew member's page: their biography and photo, plus everything in the
- * library they worked on, split into movies and shows.
+ * A cast/crew member's page: their biography and photo, everything in the
+ * library they worked on, and the rest of their career behind it as requestable
+ * cards. Split into movies and shows.
  *
- * With a tag id — which every credit from a Plex cast row carries — the
- * filmography comes straight from Plex, and the only thing left to wait on is
- * the biography. Without one, which is the case for a person reached from a
- * source that never had an id, it falls back to reconstructing the filmography
- * out of TMDB credits and ownership checks.
+ * When Plex indexes the person the filmography comes straight from it, and the
+ * only thing left to wait on is TMDB. When it doesn't — somebody credited on
+ * nothing you own — it falls back to reconstructing the filmography out of TMDB
+ * credits and ownership checks, which is slow and says so in the log.
  *
  * The biography has no Plex equivalent either way, so it comes from TMDB,
  * matched by name, and is fetched alongside the filmography rather than before
@@ -1859,18 +1883,17 @@ router.get("/person", async (req: Request, res: Response) => {
     res.status(400).json({ error: "Missing name" });
     return;
   }
-  const rawId = typeof req.query.id === "string" ? req.query.id : "";
-  // The caller's id when it has one, otherwise ask Plex. Either way this is the
-  // whole difference between two local requests and eighty.
-  const tagId = NUMERIC_RE.test(rawId) ? Number(rawId) : await personTagId(name);
+  // One id per role Plex knows this person in. Empty means Plex has never
+  // heard of them, which is the only case the slow path is for.
+  const tagIds = await personTagIds(name);
 
-  if (tagId !== null) {
+  if (tagIds.size > 0) {
     try {
       // Side by side: the library half is local and quick, the TMDB half is two
       // round trips, and the page wants both. Waiting for them in turn made the
       // page as slow as the sum of the two for no reason.
       const [owned, extra] = await Promise.all([
-        libraryCreditsFor(tagId),
+        libraryCreditsFor(tagIds),
         tmdbPersonAndCredits(name),
       ]);
       const rest = (mediaType: string, type: string) =>
@@ -1881,7 +1904,9 @@ router.get("/person", async (req: Request, res: Response) => {
       const shows = [...owned.shows, ...rest("tv", "show")];
       logEvent("Person", "filmography from Plex", {
         name,
-        tagId,
+        // Which roles Plex knows them in, and under which id. A page missing
+        // half a career is usually a role missing from this list.
+        tags: [...tagIds].map(([role, id]) => `${role}=${id}`).join(" "),
         movies: `${owned.movies.length}+${movies.length - owned.movies.length}`,
         shows: `${owned.shows.length}+${shows.length - owned.shows.length}`,
       });

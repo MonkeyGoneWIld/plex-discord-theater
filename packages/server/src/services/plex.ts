@@ -10,9 +10,9 @@ const PLEX_HEADERS = {
 };
 
 /**
- * @param token Explicit override for account-scoped watch-state calls. Playback
- *   and transcode callers must omit it so PLEX_TOKEN remains the sole playback
- *   credential.
+ * @param token Overrides the server token. A few endpoints — notably
+ *   /status/sessions/terminate — reject the server token with 403 and need the
+ *   plex.tv *account* token instead.
  */
 export function plexUrl(
   path: string,
@@ -38,7 +38,7 @@ export async function plexFetch(
   params?: Record<string, string>,
   extraHeaders?: Record<string, string>,
   method?: string,
-  /** See plexUrl — only for an explicitly account-scoped call. */
+  /** See plexUrl — for endpoints the server token can't reach. */
   token?: string,
 ): Promise<Response> {
   const controller = new AbortController();
@@ -103,7 +103,7 @@ async function withBodyTimeout<T>(work: Promise<T>, path: string): Promise<T> {
 export async function plexJSON<T = unknown>(
   path: string,
   params?: Record<string, string>,
-  /** See plexUrl — only for an explicitly account-scoped call. */
+  /** See plexUrl — for endpoints the server token can't reach. */
   token?: string,
 ): Promise<T> {
   const res = await plexFetch(path, params, undefined, undefined, token);

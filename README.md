@@ -11,7 +11,7 @@ sees the same thing at the same time — one person drives, everyone else follow
 > parties, and the awkward parts — playback sync, transcode teardown, host
 > handover — have been debugged against production logs rather than guessed at.
 > The sync protocol, person page and personal Plex account flow have harnesses
-> that run against a real WebSocket server and a stubbed Plex (`npm test`, 148
+> that run against a real WebSocket server and a stubbed Plex (`npm test`, 147
 > checks), but nothing runs them automatically, there is no external security
 > review, and no human has read
 > every line.
@@ -230,7 +230,7 @@ a bug. The server prints which are live at startup:
 | `TMDB_API_KEY` | Collections, "More Like This", cast/crew pages | Free — [themoviedb.org](https://www.themoviedb.org/settings/api) |
 | `TVDB_API_KEY` | Accurate season numbering for the missing-episode list | Free — [thetvdb.com](https://thetvdb.com/api-information) |
 | `MDBLIST_API_KEY` | IMDb, Rotten Tomatoes and TMDB scores | Free — [mdblist.com](https://mdblist.com/preferences) → API Access |
-| `PLEX_ACCOUNT_TOKEN` | Cloud-only: detail pages for titles you don't own and Seerr sign-in; never playback | Your **account** token (not the server one) from an app.plex.tv request |
+| `PLEX_ACCOUNT_TOKEN` | Detail pages for titles you don't own; signs in to Seerr as you | Your **account** token (not the server one) from an app.plex.tv request |
 | `PLEX_LINK_SECRET` | Stable encryption key for users' linked Plex tokens | A long random value; falls back to `DISCORD_CLIENT_SECRET` |
 | `SEERR_URL` | Request button on titles you don't have | Your Overseerr / Jellyseerr URL |
 | `VPS_RELAY_URL` + `VPS_RELAY_KEY` | [Relay](#vps-relay) — one upstream stream instead of one per viewer | Your own VPS |
@@ -293,10 +293,9 @@ The first person to join becomes the host. Everyone else follows over a
 WebSocket. The backend proxies every Plex API call and every video segment, so
 **Plex tokens never reach a browser**. Sessions, host roles, watch history and
 artwork live in SQLite and survive restarts. The shared `PLEX_TOKEN` browses and
-streams the server and owns the full playback-session lifecycle. The optional
-`PLEX_ACCOUNT_TOKEN` is cloud-only. Personal linked-account tokens are encrypted
-separately, keyed by verified Discord user ID, and used only for that person's
-watch-state sync.
+streams the server; optional personal account tokens are encrypted separately,
+keyed by verified Discord user ID, and used only for that person's watch-state
+sync.
 
 ### Getting video to everyone
 

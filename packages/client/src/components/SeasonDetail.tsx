@@ -204,20 +204,22 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
           {/* The season is the current page, so it stays static (not a link). */}
           <span style={styles.breadcrumbSeason}>{seasonLabel}</span>
         </div>
-        <PlexMediaActions
-          item={season}
-          inline
-          watched={episodes.length > 0 && episodes.every((episode) => progress[episode.ratingKey]?.watched)}
-          onWatchedChange={(nextWatched) => {
-            if (!nextWatched) {
-              setProgress({});
-              return;
-            }
-            fetchProgressMany(episodes.map((episode) => episode.ratingKey))
-              .then((res) => setProgress(res.entries))
-              .catch(() => {});
-          }}
-        />
+        <div style={styles.seasonWatchedAction}>
+          <PlexMediaActions
+            item={season}
+            inline
+            watched={episodes.length > 0 && episodes.every((episode) => progress[episode.ratingKey]?.watched)}
+            onWatchedChange={(nextWatched) => {
+              if (!nextWatched) {
+                setProgress({});
+                return;
+              }
+              fetchProgressMany(episodes.map((episode) => episode.ratingKey))
+                .then((res) => setProgress(res.entries))
+                .catch(() => {});
+            }}
+          />
+        </div>
       </div>
 
       {loading ? (
@@ -543,6 +545,10 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px",
     padding: "0 24px 16px", maxWidth: "1100px", margin: "0 auto",
   },
+  // Episode cards have 10px of inner padding before their 46px checkbox. Give
+  // the season-wide checkbox the same inset so every watched control occupies
+  // one clean column instead of the header control sitting farther right.
+  seasonWatchedAction: { flexShrink: 0, marginRight: "10px" },
   watchedError: {
     padding: "9px 12px", borderRadius: "7px", border: "1px solid rgba(212,119,119,0.25)",
     background: "rgba(212,119,119,0.07)", color: "#d47777", fontSize: "12px",

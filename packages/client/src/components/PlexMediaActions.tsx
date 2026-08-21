@@ -33,6 +33,11 @@ export function PlexMediaActions({
   const supportsWatchlist = item.type === "movie" || item.type === "show";
   const supportsWatched = item.inLibrary !== false
     && (item.type === "movie" || item.type === "episode" || item.type === "season" || item.type === "show");
+  const watchedAction = item.type === "season"
+    ? watchedState ? "Mark all episodes in this season unwatched" : "Mark all episodes in this season as watched"
+    : item.type === "show"
+      ? watchedState ? "Mark all episodes in this show unwatched" : "Mark all episodes in this show as watched"
+      : watchedState ? "Mark unwatched" : "Mark as watched";
 
   useEffect(() => {
     if (watched != null) setWatchedState(watched);
@@ -134,9 +139,9 @@ export function PlexMediaActions({
             type="button"
             onClick={() => void toggleWatched()}
             disabled={watchedBusy}
-            aria-label={watchedState ? "Mark Unwatched" : "Mark as Watched"}
+            aria-label={watchedAction}
             aria-pressed={watchedState}
-            title={watchedBusy ? "Updating watched state..." : watchedState ? "Watched — mark unwatched" : "Mark as Watched"}
+            title={watchedBusy ? "Updating watched state..." : watchedAction}
             style={{
               ...styles.iconButton,
               ...(watchedState ? styles.watchedActive : {}),

@@ -277,13 +277,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     setContinueItems((prev) => prev.filter((e) => e.ratingKey !== item.ratingKey));
     setHistoryItems((prev) => prev.filter((e) => e.ratingKey !== item.ratingKey));
     setHistoryTotal((n) => Math.max(0, n - 1));
-    deleteHistoryEntry(item.ratingKey).catch((err) => {
-      console.error(err);
-      // The server keeps the local row until Plex confirms the matching delete.
-      // Restore the authoritative list if that remote operation fails instead
-      // of leaving an optimistic removal on screen that never really happened.
-      setRetryNonce((n) => n + 1);
-    });
+    deleteHistoryEntry(item.ratingKey).catch(console.error);
   }, []);
 
   const handleClearHistory = useCallback(() => {
@@ -299,10 +293,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
       setContinueItems((prev) => prev.filter((e) => !keys.has(e.ratingKey)));
       setHistoryItems((prev) => prev.filter((e) => !keys.has(e.ratingKey)));
       setHistoryTotal((n) => Math.max(0, n - keys.size));
-      Promise.all([...keys].map((key) => deleteHistoryEntry(key))).catch((err) => {
-        console.error(err);
-        setRetryNonce((n) => n + 1);
-      });
+      for (const key of keys) deleteHistoryEntry(key).catch(console.error);
       // Drop the filter and empty the search box, returning to the full history
       // (now minus what was just cleared).
       setHistoryQuery("");
@@ -313,10 +304,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     setContinueItems([]);
     setHistoryItems([]);
     setHistoryTotal(0);
-    clearHistory().catch((err) => {
-      console.error(err);
-      setRetryNonce((n) => n + 1);
-    });
+    clearHistory().catch(console.error);
   }, [historyItems, historyQuery]);
 
   // Fetch genres when section changes

@@ -32,7 +32,7 @@ same frame, and hovering the seek bar gives you Plex's thumbnail previews.
 Back out of the player and you land on your Plex home screen — the same hubs your
 server already builds.
 
-![The Home tab, with Trending, Popular and Top Rated poster rows](docs/screenshots/home.jpg)
+![The Home tab, with Continue Watching, Trending Movies and Popular Movies poster rows](docs/screenshots/home.jpg)
 
 Search covers your library and Plex Discover together, so titles you haven't got
 yet still turn up — badged **Not in library** so you can tell them apart.
@@ -49,7 +49,7 @@ first, straight out of Plex's own cast index; the rest of their career follows
 behind it, requestable like anything else. Newest first in both halves, and
 appearances as themselves — chat shows, talking-head documentaries — left out.
 
-![Hugh Jackman's page: biography and dates, then his films and shows from the library](docs/screenshots/person.jpg)
+![Hugh Jackman's page: biography and dates, then his films and shows — the ones in the library first, the rest badged Not in library](docs/screenshots/person.jpg)
 
 With Seerr connected, you can request anything you don't have
 without leaving the Activity.

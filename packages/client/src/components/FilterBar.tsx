@@ -77,7 +77,7 @@ export function FilterBar({
     <div style={styles.bar}>
       {/* Genre dropdown */}
       <div ref={genreRef} style={styles.dropdownWrap}>
-        <button
+        <button className="btn"
           onClick={() => { setGenreOpen((o) => !o); setSortOpen(false); }}
           style={{
             ...styles.dropdownBtn,
@@ -129,7 +129,7 @@ export function FilterBar({
 
       {/* Sort dropdown */}
       <div ref={sortRef} style={styles.dropdownWrap}>
-        <button
+        <button className="btn"
           onClick={() => { setSortOpen((o) => !o); setGenreOpen(false); }}
           style={{
             ...styles.dropdownBtn,
@@ -142,7 +142,7 @@ export function FilterBar({
         {sortOpen && (
           <div style={styles.panel}>
             {SORT_OPTIONS.map((o) => (
-              <button
+              <button className="btn"
                 key={o.value}
                 onClick={() => { onSortChange(o.value); setSortOpen(false); }}
                 style={{
@@ -159,7 +159,7 @@ export function FilterBar({
 
       {/* Clear filters */}
       {hasFilters && (
-        <button onClick={handleClear} style={styles.clearBtn}>
+        <button className="btn-icon" onClick={handleClear} style={styles.clearBtn}>
           Clear
         </button>
       )}

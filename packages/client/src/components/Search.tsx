@@ -118,7 +118,7 @@ export function Search({ onSearch, onClear, placeholder = "Search your library..
           style={styles.input}
         />
         {value.length > 0 && (
-          <button
+          <button className="btn-icon"
             type="button"
             onClick={clearInput}
             style={styles.clearBtn}

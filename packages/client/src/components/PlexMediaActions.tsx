@@ -119,7 +119,7 @@ export function PlexMediaActions({
     <div style={{ ...styles.wrap, ...(inline ? styles.wrapInline : {}) }}>
       <div style={styles.buttons}>
         {linked && supportsWatchlist && (
-          <button
+          <button className="btn-icon"
             type="button"
             onClick={() => void toggleWatchlist()}
             disabled={watchlistBusy}
@@ -131,14 +131,12 @@ export function PlexMediaActions({
               ...(watchlisted ? styles.watchlistActive : {}),
               ...(watchlistBusy ? styles.busy : {}),
             }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.08)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
           >
             <Bookmark filled={watchlisted} />
           </button>
         )}
         {supportsWatched && (
-          <button
+          <button className="btn-icon"
             type="button"
             onClick={() => void toggleWatched()}
             disabled={watchedBusy}
@@ -150,8 +148,6 @@ export function PlexMediaActions({
               ...(watchedState ? styles.watchedActive : {}),
               ...(watchedBusy ? styles.busy : {}),
             }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.08)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
           >
             <WatchedCheckIcon />
           </button>

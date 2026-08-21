@@ -3405,7 +3405,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         // reads this.
         <div style={styles.error}>
           Connection lost
-          <button style={styles.inlineRetryBtn} onClick={() => syncActions?.retryConnection()}>
+          <button className="btn" style={styles.inlineRetryBtn} onClick={() => syncActions?.retryConnection()}>
             Reconnect
           </button>
         </div>
@@ -3557,7 +3557,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         <div style={styles.trackSwitchOverlay}>
           <div style={styles.trackSwitchMessage}>
             <span style={{ color: "#e74c3c", fontSize: "16px", fontWeight: 600 }}>Stream lost</span>
-            <button
+            <button className="btn"
               onClick={() => {
                 recoveryAttemptRef.current = 0;
                 mediaErrorCountRef.current = 0;
@@ -3575,7 +3575,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             >
               Retry
             </button>
-            <button
+            <button className="btn"
               onClick={handleBack}
               style={{
                 padding: "8px 20px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.2)",
@@ -3700,13 +3700,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
               that is already running — you'll lose the tracks you picked.
             </p>
             <div style={styles.confirmActions}>
-              <button
+              <button className="btn"
                 style={styles.confirmCancelBtn}
                 onClick={() => setOfferHostStream(false)}
               >
                 Keep waiting
               </button>
-              <button
+              <button className="btn"
                 style={styles.confirmEndBtn}
                 onClick={() => {
                   logEvent("Player", "viewer took the offer to rejoin the host's stream", {
@@ -3741,13 +3741,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
                 {" — going back stops playback for everyone."}
               </p>
               <div style={styles.confirmActions}>
-                <button
+                <button className="btn"
                   style={styles.confirmCancelBtn}
                   onClick={() => setConfirmingEnd(false)}
                 >
                   Cancel
                 </button>
-                <button
+                <button className="btn"
                   style={styles.confirmEndBtn}
                   onClick={() => {
                     setConfirmingEnd(false);

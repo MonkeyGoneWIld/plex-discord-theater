@@ -837,7 +837,7 @@ export function Controls({
       {phone && canControl && (
         <button
           onClick={togglePlay}
-          className="tap"
+          className="btn"
           style={styles.centerPlayBtn}
           aria-label={playing ? "Pause" : "Play"}
         >
@@ -856,7 +856,7 @@ export function Controls({
 
       {/* Top bar: back + title */}
       <div style={styles.topBar}>
-        <button onClick={onBack} className="tap" style={styles.backBtn}>
+        <button onClick={onBack} className="btn-icon" style={styles.backBtn}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style={{ marginRight: 4 }}>
             <path d="M10 12L6 8L10 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
@@ -894,7 +894,7 @@ export function Controls({
                 side. Episode navigation stays — there is no gesture for it. */}
             {canControl && !phone && (
               <>
-                <button onClick={togglePlay} className="tap" style={{ ...styles.playBtn, ...(compact ? styles.playBtnCompact : {}) }}>
+                <button onClick={togglePlay} className="btn" style={{ ...styles.playBtn, ...(compact ? styles.playBtnCompact : {}) }}>
                   {playing ? (
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
                       <rect x="3" y="2" width="4" height="12" rx="1"/>
@@ -906,11 +906,11 @@ export function Controls({
                     </svg>
                   )}
                 </button>
-                <button onClick={skipBack} className="tap" style={styles.skipBtn} title="Back 10s">
+                <button onClick={skipBack} className="btn-icon" style={styles.skipBtn} title="Back 10s">
                   <span style={{ fontSize: 16 }}>{"\u21BA"}</span>
                   <span style={{ fontSize: 11 }}>10</span>
                 </button>
-                <button onClick={skipForward} className="tap" style={styles.skipBtn} title="Forward 10s">
+                <button onClick={skipForward} className="btn-icon" style={styles.skipBtn} title="Forward 10s">
                   <span style={{ fontSize: 16 }}>{"\u21BB"}</span>
                   <span style={{ fontSize: 11 }}>10</span>
                 </button>
@@ -920,7 +920,7 @@ export function Controls({
                 rendered only when that sibling exists, so there's never a
                 dead control — the player omits the handler at series edges. */}
             {canControl && onPrevEpisode && (
-              <button onClick={onPrevEpisode} className="tap" style={styles.skipBtn} title="Previous episode">
+              <button onClick={onPrevEpisode} className="btn-icon" style={styles.skipBtn} title="Previous episode">
                 <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
                   <rect x="2" y="2.5" width="2" height="11" rx="0.75"/>
                   <path d="M13.5 3.2v9.6a.6.6 0 0 1-.93.5L5.6 8.5a.6.6 0 0 1 0-1l6.97-4.8a.6.6 0 0 1 .93.5Z"/>
@@ -928,7 +928,7 @@ export function Controls({
               </button>
             )}
             {canControl && onNextEpisode && (
-              <button onClick={onNextEpisode} className="tap" style={styles.skipBtn} title="Next episode">
+              <button onClick={onNextEpisode} className="btn-icon" style={styles.skipBtn} title="Next episode">
                 <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M2.5 3.2v9.6a.6.6 0 0 0 .93.5L10.4 8.5a.6.6 0 0 0 0-1L3.43 2.7a.6.6 0 0 0-.93.5Z"/>
                   <rect x="12" y="2.5" width="2" height="11" rx="0.75"/>
@@ -953,7 +953,7 @@ export function Controls({
             {onOpenPeople && (
               <button
                 onClick={onOpenPeople}
-                className="tap"
+                className="btn-icon"
                 style={styles.queueBtn}
                 title={isHost ? "People & roles" : "Who's here"}
               >
@@ -968,7 +968,7 @@ export function Controls({
               </button>
             )}
             {isHost && queueCount != null && queueCount > 0 && onOpenQueue && (
-              <button onClick={onOpenQueue} className="tap" style={styles.queueBtn} title="Queue">
+              <button onClick={onOpenQueue} className="btn-icon" style={styles.queueBtn} title="Queue">
                 <span style={{ fontSize: 14 }}>{"\u25B6"}</span>
                 <span style={styles.queueBadge}>{queueCount}</span>
               </button>
@@ -976,7 +976,7 @@ export function Controls({
             {onToggleStats && (
               <button
                 onClick={onToggleStats}
-                className="tap"
+                className="btn-icon"
                 style={{
                   ...styles.gearBtn,
                   ...(compact ? styles.gearBtnCompact : {}),
@@ -993,7 +993,7 @@ export function Controls({
                 onto a stream that has them rather than changing what the room
                 hears, so it is no more a control than the volume slider. */}
             {onOpenTrackSwitcher && (
-              <button onClick={onOpenTrackSwitcher} className="tap" style={{ ...styles.gearBtn, ...(compact ? styles.gearBtnCompact : {}) }} title="Audio & Subtitles">
+              <button onClick={onOpenTrackSwitcher} className="btn-icon" style={{ ...styles.gearBtn, ...(compact ? styles.gearBtnCompact : {}) }} title="Audio & Subtitles">
                 {"\u2699"}
               </button>
             )}
@@ -1021,7 +1021,7 @@ export function Controls({
                     </div>
                     <button
                       onClick={toggleMute}
-                      className="tap"
+                      className="btn-icon"
                       style={styles.muteBtn}
                       title={muted ? "Unmute" : "Mute"}
                     >
@@ -1031,7 +1031,7 @@ export function Controls({
                 )}
                 <button
                   onClick={() => setVolumeOpen((o) => !o)}
-                  className="tap"
+                  className="btn-icon"
                   style={styles.muteBtn}
                   title="Volume"
                   aria-expanded={volumeOpen}
@@ -1041,7 +1041,7 @@ export function Controls({
               </div>
             ) : (
               <>
-                <button onClick={toggleMute} className="tap" style={styles.muteBtn} title={muted ? "Unmute" : "Mute"}>
+                <button onClick={toggleMute} className="btn-icon" style={styles.muteBtn} title={muted ? "Unmute" : "Mute"}>
                   {muted ? "\u{1F507}" : "\u{1F50A}"}
                 </button>
                 <input

@@ -156,7 +156,7 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
       )}
 
       {/* Back button */}
-      <button onClick={onBack} style={styles.backBtn}>
+      <button className="btn-icon" onClick={onBack} style={styles.backBtn}>
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
           <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
@@ -233,11 +233,9 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
                   route every other play in the app takes. */}
               <div style={styles.titleActions}>
                 {nextUp && onSelectEpisode && (
-                  <button
+                  <button className="btn"
                     onClick={() => onSelectEpisode(historyEntryToItem(nextUp))}
                     style={styles.resumeBtn}
-                    onMouseEnter={(e) => { e.currentTarget.style.background = "#f0ad1a"; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = "#e5a00d"; }}
                   >
                     <svg width="20" height="20" viewBox="0 0 22 22" fill="none" style={{ flexShrink: 0 }}>
                       <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor"/>

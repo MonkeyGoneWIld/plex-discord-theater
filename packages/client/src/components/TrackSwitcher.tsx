@@ -88,15 +88,15 @@ export function TrackSwitcher({
       <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
           <span style={styles.headerTitle}>Audio &amp; Subtitles</span>
-          <button onClick={onClose} style={styles.closeBtn}>{"\u2715"}</button>
+          <button className="btn-icon" onClick={onClose} style={styles.closeBtn}>{"\u2715"}</button>
         </div>
 
         <div style={styles.tabs}>
-            <button
+            <button className="btn"
               onClick={() => setTab("audio")}
               style={{ ...styles.tab, ...(tab === "audio" ? styles.tabActive : {}) }}
             >Audio</button>
-            <button
+            <button className="btn"
               onClick={() => setTab("subtitles")}
               style={{ ...styles.tab, ...(tab === "subtitles" ? styles.tabActive : {}) }}
             >Subtitles</button>
@@ -117,7 +117,7 @@ export function TrackSwitcher({
             {audioTracks.map((t) => {
               const on = t.id === activeAudio;
               return (
-                <button
+                <button className="btn"
                   key={t.id}
                   onClick={() => handleSelect("audio", t.id)}
                   style={on ? styles.trackSelected : styles.track}
@@ -137,7 +137,7 @@ export function TrackSwitcher({
           </div>
         ) : (
           <div style={styles.trackList}>
-            <button
+            <button className="btn"
               onClick={() => handleSelect("subtitle", 0)}
               style={!activeSubtitle ? styles.trackSelected : styles.track}
             >
@@ -147,7 +147,7 @@ export function TrackSwitcher({
             {subtitleTracks.map((t) => {
               const on = t.id === activeSubtitle;
               return (
-                <button
+                <button className="btn"
                   key={t.id}
                   onClick={() => handleSelect("subtitle", t.id)}
                   style={on ? styles.trackSelected : styles.track}

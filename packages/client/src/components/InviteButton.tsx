@@ -52,7 +52,7 @@ export function InviteButton({ onInvite }: InviteButtonProps) {
 
   return (
     <div style={styles.wrap}>
-      <button
+      <button className="btn"
         type="button"
         onClick={handle}
         style={styles.button}

@@ -169,7 +169,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
 
   return (
     <div style={styles.page}>
-      <button onClick={onBack} style={styles.backBtn}>
+      <button className="btn-icon" onClick={onBack} style={styles.backBtn}>
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
           <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
@@ -179,7 +179,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
       <div style={styles.breadcrumbRow}>
         <div style={{ ...styles.breadcrumb, padding: 0, margin: 0 }}>
           {onShowClick ? (
-            <button
+            <button className="btn"
               type="button"
               onClick={onShowClick}
               style={{ ...styles.buttonReset, ...styles.breadcrumbShow }}
@@ -302,7 +302,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                 ? Math.min(1, seen.positionMs / seen.durationMs)
                 : null;
             return (
-              <button
+              <button className="btn"
                 key={ep.ratingKey}
                 onClick={() => onSelectEpisode(ep)}
                 onMouseEnter={() => setHoveredKey(ep.ratingKey)}
@@ -350,7 +350,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                     </div>
                   )}
                   {isHost && isPlaying && onAddToQueue && (
-                    // A <button> here would be nested inside the card's own
+                    // A <button className="btn"> here would be nested inside the card's own
                     // button — invalid HTML, and browsers handle the nesting
                     // inconsistently. React builds it via the DOM API so it
                     // renders anyway, which is what made it easy to miss.
@@ -400,10 +400,6 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                   title={watchedBusy === ep.ratingKey
                     ? "Updating watched state..."
                     : watched ? "Watched — mark unwatched" : "Mark as watched"}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.background = "rgba(255,255,255,0.08)";
-                  }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
                   onClick={(e) => {
                     e.stopPropagation();
                     void toggleWatched(ep, watched);
@@ -434,7 +430,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
               should look complete, and one still airing shouldn't open with a
               list of episodes that don't exist yet. */}
           {gaps.length > 0 && (
-            <button
+            <button className="btn"
               type="button"
               onClick={() => setShowGaps((v) => !v)}
               onMouseEnter={() => setGapToggleHover(true)}

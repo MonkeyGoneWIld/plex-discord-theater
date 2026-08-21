@@ -612,7 +612,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
           there before: over the field it covered the text, above the field it
           pushed the whole page down the moment you typed. */}
       {isSearching && !poster.phone && roomForBack && (
-        <button onClick={handleBackFromSearch} style={styles.backBtn}>
+        <button className="btn-icon" onClick={handleBackFromSearch} style={styles.backBtn}>
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
@@ -637,7 +637,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
         {isSearching && scopeLabel && !searchFoundNothing && (
           <div style={styles.scopeBar}>
             <span style={styles.scopeText}>Showing {scopeLabel} only</span>
-            <button type="button" onClick={handleWidenSearch} style={styles.scopeBtn}>
+            <button className="btn" type="button" onClick={handleWidenSearch} style={styles.scopeBtn}>
               Search everything
             </button>
           </div>
@@ -649,7 +649,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
             to a Movies/TV Shows tab never shoves the tab row down. */}
         {!searchResults && (
           <div style={{ ...styles.tabs, ...(poster.phone ? styles.tabsPhone : {}) }}>
-            <button
+            <button className="btn"
               onClick={() => {
                 onActiveSectionChange("home");
                 if (onBrowseContext) onBrowseContext("Browsing Home");
@@ -663,7 +663,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               Home
             </button>
             {sections.map((s) => (
-              <button
+              <button className="btn"
                 key={s.id}
                 onClick={() => {
                   onActiveSectionChange(s.id);
@@ -679,7 +679,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               </button>
             ))}
             {plexLinked && (
-              <button
+              <button className="btn"
                 onClick={() => {
                   onActiveSectionChange("watchlist");
                   if (onBrowseContext) onBrowseContext("Browsing Watchlist");
@@ -694,7 +694,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               </button>
             )}
             {plexLinked === false && (
-              <button
+              <button className="btn"
                 onClick={() => {
                   onActiveSectionChange("history");
                   if (onBrowseContext) onBrowseContext("Browsing History");
@@ -739,7 +739,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               </svg>
             </div>
             <p style={styles.emptyText}>{watchlistError}</p>
-            <button onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>Retry</button>
+            <button className="btn" onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>Retry</button>
           </div>
         ) : watchlistItems.length === 0 ? (
           <div style={styles.emptyState}>
@@ -781,7 +781,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               </svg>
             </div>
             <p style={styles.emptyText}>{historyError}</p>
-            <button onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>
+            <button className="btn" onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>
               Retry
             </button>
           </div>
@@ -810,7 +810,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                   clear. When a filter matches, it only clears those visible
                   matches, so the label says so rather than implying a full wipe. */}
               {plexLinked === false && (!historyQ || filteredHistoryItems.length > 0) && (
-                <button onClick={handleClearHistory} style={styles.clearBtn}>
+                <button className="btn-icon" onClick={handleClearHistory} style={styles.clearBtn}>
                   {historyQ ? "Forget Filtered History" : "Clear History"}
                 </button>
               )}
@@ -848,7 +848,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 so paging under it would be answering a different question. */}
             {!historyQ && historyItems.length < historyTotal && (
               <div style={styles.loadMoreWrap}>
-                <button
+                <button className="btn"
                   onClick={handleLoadMoreHistory}
                   disabled={historyLoadingMore}
                   style={styles.loadMoreBtn}
@@ -878,7 +878,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               </svg>
             </div>
             <p style={styles.emptyText}>{homeError}</p>
-            <button onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>
+            <button className="btn" onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>
               Retry
             </button>
           </div>
@@ -945,7 +945,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
             </svg>
           </div>
           <p style={styles.emptyText}>{itemsError}</p>
-          <button onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>
+          <button className="btn" onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>
             Retry
           </button>
         </div>
@@ -974,7 +974,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 <p style={styles.emptyHint}>
                   Results on this tab are limited to {scopeLabel}.
                 </p>
-                <button onClick={handleWidenSearch} style={styles.retryBtn}>
+                <button className="btn" onClick={handleWidenSearch} style={styles.retryBtn}>
                   Search everything
                 </button>
               </>
@@ -1033,7 +1033,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               <div style={styles.sectionHeader}>People</div>
               <div style={peopleRowStyle}>
                 {people.map((p) => (
-                  <button
+                  <button className="btn"
                     key={p.name}
                     type="button"
                     style={styles.personCard}
@@ -1087,7 +1087,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
           )}
           {hasMore && (
             <div style={styles.loadMoreWrap}>
-              <button
+              <button className="btn"
                 onClick={handleLoadMore}
                 disabled={loadingMore}
                 style={styles.loadMoreBtn}

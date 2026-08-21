@@ -110,7 +110,7 @@ function TrackDropdown({
 
   return (
     <div ref={ref} style={dropdownStyles.wrap}>
-      <button type="button" onClick={() => setOpen((o) => !o)} style={dropdownStyles.trigger}>
+      <button className="btn" type="button" onClick={() => setOpen((o) => !o)} style={dropdownStyles.trigger}>
         <span style={dropdownStyles.triggerLabel}>{selected?.label ?? ""}</span>
         <svg width="10" height="6" viewBox="0 0 10 6" fill="none" style={{ flexShrink: 0, marginLeft: 8 }}>
           <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
@@ -119,7 +119,7 @@ function TrackDropdown({
       {open && (
         <div style={dropdownStyles.menu}>
           {options.map((o) => (
-            <button
+            <button className="btn"
               key={o.value}
               type="button"
               onClick={() => { onChange(o.value); setOpen(false); }}
@@ -397,7 +397,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
       )}
 
       {/* Back button */}
-      <button onClick={onBack} style={styles.backBtn}>
+      <button className="btn-icon" onClick={onBack} style={styles.backBtn}>
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
           <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
@@ -440,7 +440,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                 <>
                   {item.showTitle &&
                     (onShowClick ? (
-                      <button
+                      <button className="btn"
                         type="button"
                         onClick={onShowClick}
                         style={{ ...styles.buttonReset, ...styles.episodeShowTitle }}
@@ -454,7 +454,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                     ))}
                   <div style={styles.episodeLabel}>
                     {onSeasonClick ? (
-                      <button
+                      <button className="btn"
                         type="button"
                         onClick={onSeasonClick}
                         style={{ ...styles.buttonReset, ...styles.episodeLabelLink }}
@@ -619,7 +619,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                   <>
                     {resumeMs != null ? (
                       <>
-                        <button
+                        <button className="btn"
                           onClick={() => handlePlay(resumeMs)}
                           disabled={!meta}
                           style={{ ...styles.playBtn, ...(narrow ? styles.playBtnNarrow : {}), ...(meta ? {} : styles.btnPending) }}
@@ -629,7 +629,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                           </svg>
                           Resume from {formatTimecode(resumeMs)}
                         </button>
-                        <button
+                        <button className="btn"
                           onClick={() => handlePlay()}
                           disabled={!meta}
                           style={{ ...styles.startOverBtn, ...(narrow ? styles.startOverBtnNarrow : {}), ...(meta ? {} : styles.btnPending) }}
@@ -638,7 +638,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                         </button>
                       </>
                     ) : (
-                      <button
+                      <button className="btn"
                         onClick={() => handlePlay()}
                         disabled={!meta}
                         style={{ ...styles.playBtn, ...(narrow ? styles.playBtnNarrow : {}), ...(meta ? {} : styles.btnPending) }}
@@ -650,7 +650,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                       </button>
                     )}
                     {isPlaying && onAddToQueue && (
-                      <button
+                      <button className="btn-icon"
                         onClick={() => {
                           if (!meta) return;
                           onAddToQueue({
@@ -674,7 +674,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                 ) : (
                   <>
                     {onSuggest && (
-                      <button
+                      <button className="btn"
                         onClick={() => {
                           onSuggest({
                             ratingKey: item.ratingKey,

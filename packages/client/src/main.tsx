@@ -13,7 +13,7 @@ createRoot(document.getElementById("root")!).render(
           background: "#0d0d0d", color: "#f0f0f0", fontFamily: "DM Sans, sans-serif",
         }}>
           <p style={{ fontSize: "16px", color: "#e74c3c" }}>Something went wrong</p>
-          <button
+          <button className="btn"
             onClick={() => window.location.reload()}
             style={{
               padding: "10px 24px", borderRadius: "8px", border: "none",

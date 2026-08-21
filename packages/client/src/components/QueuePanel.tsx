@@ -30,7 +30,7 @@ export function QueuePanel({ queue, onRemove, onClear, onReorder, onClose }: Que
       <div style={styles.panel} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
           <h3 style={styles.title}>Queue ({queue.length})</h3>
-          <button onClick={onClose} style={styles.closeBtn}>&times;</button>
+          <button className="btn-icon" onClick={onClose} style={styles.closeBtn}>&times;</button>
         </div>
         {queue.length === 0 ? (
           <p style={styles.empty}>Queue is empty</p>
@@ -51,19 +51,19 @@ export function QueuePanel({ queue, onRemove, onClear, onReorder, onClose }: Que
                 </div>
                 <div style={styles.actions}>
                   {i > 0 && (
-                    <button onClick={() => onReorder(moveItem(queue, i, i - 1))} style={styles.moveBtn} title="Move up">&uarr;</button>
+                    <button className="btn" onClick={() => onReorder(moveItem(queue, i, i - 1))} style={styles.moveBtn} title="Move up">&uarr;</button>
                   )}
                   {i < queue.length - 1 && (
-                    <button onClick={() => onReorder(moveItem(queue, i, i + 1))} style={styles.moveBtn} title="Move down">&darr;</button>
+                    <button className="btn" onClick={() => onReorder(moveItem(queue, i, i + 1))} style={styles.moveBtn} title="Move down">&darr;</button>
                   )}
-                  <button onClick={() => onRemove(item.ratingKey)} style={styles.removeBtn} title="Remove">&times;</button>
+                  <button className="btn" onClick={() => onRemove(item.ratingKey)} style={styles.removeBtn} title="Remove">&times;</button>
                 </div>
               </div>
             ))}
           </div>
         )}
         {queue.length > 0 && (
-          <button onClick={onClear} style={styles.clearBtn}>Clear Queue</button>
+          <button className="btn-icon" onClick={onClear} style={styles.clearBtn}>Clear Queue</button>
         )}
       </div>
     </div>

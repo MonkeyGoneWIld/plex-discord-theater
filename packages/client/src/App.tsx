@@ -769,7 +769,7 @@ export function App() {
                 <span key={i} style={styles.crumbWrap}>
                   {i > 0 && <span style={styles.crumbSep}>&rsaquo;</span>}
                   {c.onClick ? (
-                    <button
+                    <button className="btn"
                       onClick={c.onClick}
                       style={{ ...styles.crumb, ...styles.crumbLink }}
                       title={c.label}
@@ -814,7 +814,7 @@ export function App() {
               {!effectiveIsHost && syncState.connected && " • Synced"}
             </span>
             {syncState.connected && (
-              <button
+              <button className="btn"
                 onClick={() => setShowPeoplePanel(true)}
                 // Visual order only — the DOM order stays name-then-button, so
                 // reading order and focus order are unchanged either way.
@@ -859,7 +859,7 @@ export function App() {
                 : "Reconnecting to the watch party…"}
           </span>
           {syncState.reconnectFailed && (
-            <button style={styles.connectionRetryBtn} onClick={() => syncActions.retryConnection()}>
+            <button className="btn" style={styles.connectionRetryBtn} onClick={() => syncActions.retryConnection()}>
               Reconnect
             </button>
           )}
@@ -893,7 +893,7 @@ export function App() {
                 <strong>{formatMediaTitle(s)}</strong>
               </span>
               <div style={styles.suggestionActions}>
-                <button
+                <button className="btn"
                   onClick={() => {
                     // Carry the episode fields through, or the detail view and
                     // the browse label lose the show name all over again.
@@ -914,7 +914,7 @@ export function App() {
                 >
                   View
                 </button>
-                <button
+                <button className="btn"
                   onClick={() => syncActions.sendDismissSuggestion(s.ratingKey)}
                   style={styles.suggestionDismissBtn}
                 >
@@ -942,7 +942,7 @@ export function App() {
             <div style={styles.nowPlayingLabel}>NOW PLAYING</div>
             <div style={styles.nowPlayingTitle}>{syncState.title || "Untitled"}</div>
           </div>
-          <button onClick={handleRejoin} style={styles.nowPlayingBtn}>
+          <button className="btn" onClick={handleRejoin} style={styles.nowPlayingBtn}>
             Watch
           </button>
         </div>
@@ -1052,7 +1052,7 @@ export function App() {
               background: "#000", color: "#f0f0f0", fontFamily: "DM Sans, sans-serif",
             }}>
               <p style={{ fontSize: "16px", color: "#e74c3c" }}>Playback error</p>
-              <button
+              <button className="btn"
                 onClick={popView}
                 style={{
                   padding: "10px 24px", borderRadius: "8px", border: "none",

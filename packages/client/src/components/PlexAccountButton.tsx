@@ -160,7 +160,7 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
 
   return (
     <>
-      <button
+      <button className="btn"
         type="button"
         onClick={() => setOpen(true)}
         style={{ ...styles.trigger, ...(status?.linked ? styles.triggerLinked : {}) }}
@@ -183,7 +183,7 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
           <section style={styles.modal} role="dialog" aria-modal="true" aria-labelledby="plex-account-title">
             <div style={styles.headingRow}>
               <h2 id="plex-account-title" style={styles.title}>Account sync</h2>
-              <button type="button" onClick={closeModal} style={styles.close} aria-label="Close">&times;</button>
+              <button className="btn" type="button" onClick={closeModal} style={styles.close} aria-label="Close">&times;</button>
             </div>
 
             {status?.linked ? (
@@ -205,10 +205,10 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
                   {status.lastSyncError && <span style={styles.error}>{status.lastSyncError}</span>}
                 </div>
                 <div style={styles.actions}>
-                  <button type="button" disabled={busy || confirmDisconnect} onClick={() => void runSync()} style={styles.primary}>
+                  <button className="btn" type="button" disabled={busy || confirmDisconnect} onClick={() => void runSync()} style={styles.primary}>
                     {busy ? "Syncing..." : "Sync now"}
                   </button>
-                  <button type="button" disabled={busy} onClick={() => setConfirmDisconnect(true)} style={styles.danger}>
+                  <button className="btn" type="button" disabled={busy} onClick={() => setConfirmDisconnect(true)} style={styles.danger}>
                     Disconnect
                   </button>
                 </div>
@@ -219,7 +219,7 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
                       Local Activity history is kept for this account, but will reset if you link a different Plex account.
                     </div>
                     <div style={styles.confirmActions}>
-                      <button
+                      <button className="btn"
                         type="button"
                         disabled={busy}
                         onClick={() => setConfirmDisconnect(false)}
@@ -227,7 +227,7 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
                       >
                         Keep linked
                       </button>
-                      <button type="button" disabled={busy} onClick={() => void disconnect()} style={styles.dangerFilled}>
+                      <button className="btn" type="button" disabled={busy} onClick={() => void disconnect()} style={styles.dangerFilled}>
                         {busy ? "Disconnecting..." : "Yes, disconnect"}
                       </button>
                     </div>
@@ -245,7 +245,7 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
                 {status?.pending ? (
                   <div style={styles.pending}>
                     <div>Waiting for Plex authorization...</div>
-                    <button
+                    <button className="btn"
                       type="button"
                       onClick={() => void openPlex(status.pending!.authUrl)}
                       style={styles.linkButton}
@@ -254,7 +254,7 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
                     </button>
                   </div>
                 ) : (
-                  <button type="button" disabled={busy} onClick={() => void beginLink()} style={styles.primary}>
+                  <button className="btn" type="button" disabled={busy} onClick={() => void beginLink()} style={styles.primary}>
                     {busy ? "Starting..." : "Continue with Plex"}
                   </button>
                 )}

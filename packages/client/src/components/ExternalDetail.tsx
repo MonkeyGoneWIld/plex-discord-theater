@@ -167,7 +167,7 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
     <div style={styles.container}>
       {!pageReady && <DetailLoading />}
       <div style={pageReady ? styles.revealed : styles.prerender} aria-hidden={!pageReady}>
-      <button onClick={onBack} style={styles.backBtn}>
+      <button className="btn-icon" onClick={onBack} style={styles.backBtn}>
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
           <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
@@ -224,11 +224,11 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
                 // Same footprint as the real button, so nothing shifts when it lands.
                 <SkeletonBlock width={140} height={40} borderRadius={8} />
               ) : statusLabel ? (
-                <button disabled style={{ ...styles.requestBtn, ...styles.requestBtnDone }}>
+                <button className="btn" disabled style={{ ...styles.requestBtn, ...styles.requestBtnDone }}>
                   {statusLabel}
                 </button>
               ) : (
-                <button
+                <button className="btn"
                   onClick={handleRequest}
                   disabled={requesting}
                   style={styles.requestBtn}

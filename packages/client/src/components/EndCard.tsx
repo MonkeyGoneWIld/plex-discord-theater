@@ -70,14 +70,14 @@ export function EndCard({ item, source, onPlay, onExit }: EndCardProps) {
 
         <div style={styles.actions}>
           {onPlay && (
-            <button type="button" onClick={onPlay} className="tap" style={styles.playBtn}>
+            <button type="button" onClick={onPlay} className="btn" style={styles.playBtn}>
               <svg width="20" height="20" viewBox="0 0 22 22" fill="none" style={{ marginRight: 10 }}>
                 <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor" />
               </svg>
               {source === "series" ? "Play next episode" : "Play now"}
             </button>
           )}
-          <button type="button" onClick={onExit} className="tap" style={styles.exitBtn}>
+          <button type="button" onClick={onExit} className="btn" style={styles.exitBtn}>
             {/* Keyed to where it goes, not to who is pressing it: this leaves
                 for the show whenever there is one, host or viewer alike. */}
             {show ? "Back to show" : "Back"}

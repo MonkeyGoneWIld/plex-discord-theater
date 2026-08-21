@@ -604,6 +604,15 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                   </span>
                 </div>
               )}
+              {/* Above the row rather than inside it. The row is what you can
+                  press, and it lines its children up in one horizontal band —
+                  so a paragraph in there is a very wide sibling, and everything
+                  after it starts where the *text* ends. That is what pushed a
+                  viewer's watched tick out past the end of a sentence while the
+                  host's sat neatly beside Play. */}
+              {!isHost && (
+                <p style={styles.waitingText}>Waiting for the host to start playback...</p>
+              )}
               {/* Play / Waiting */}
               <div style={{ ...styles.actions, ...(narrow ? styles.actionsNarrow : {}) }}>
                 {isHost ? (
@@ -663,8 +672,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                     )}
                   </>
                 ) : (
-                  <div style={styles.viewerActions}>
-                    <p style={styles.waitingText}>Waiting for the host to start playback...</p>
+                  <>
                     {onSuggest && (
                       <button
                         onClick={() => {
@@ -688,7 +696,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                         {suggested ? "Suggested to host \u2713" : "Suggest to Host"}
                       </button>
                     )}
-                  </div>
+                  </>
                 )}
                 <PlexMediaActions
                   item={item}
@@ -1038,12 +1046,10 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#888",
     fontSize: "15px",
     fontStyle: "italic",
-  },
-  viewerActions: {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: "12px",
-    alignItems: "flex-start",
+    // Its own line above the actions row, with the same gap the row's own
+    // margin gives — see the note where it is rendered.
+    marginTop: "28px",
+    marginBottom: "-16px",
   },
   suggestBtn: {
     padding: "10px 22px",

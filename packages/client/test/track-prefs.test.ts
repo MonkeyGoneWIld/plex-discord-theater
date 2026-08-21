@@ -173,6 +173,37 @@ console.log("\n— subtitles still behave —");
       track({ id: 56, title: "English (PGS)", language: "English", languageCode: "eng", codec: "pgs" }),
       plain,
     ], pref)?.id, 50);
+
+  const signs = track({
+    id: 57,
+    title: "Signs/Song for Dub (English ASS)",
+    language: "English",
+    languageCode: "eng",
+    codec: "ass",
+  });
+  const dialogue = track({
+    id: 58,
+    title: "Subtitles (English ASS)",
+    language: "English",
+    languageCode: "eng",
+    codec: "ass",
+  });
+  check("full dialogue does not fall back to the first English ASS track",
+    matchSubtitleTrack([signs, dialogue], {
+      off: false,
+      title: "Subtitles (English ASS)",
+      language: "English",
+      languageCode: "eng",
+      codec: "ass",
+    })?.id, 58);
+  check("Signs/Song still carries when that is what was selected",
+    matchSubtitleTrack([dialogue, signs], {
+      off: false,
+      title: "Signs/Song for Dub (English ASS)",
+      language: "English",
+      languageCode: "eng",
+      codec: "ass",
+    })?.id, 57);
 }
 
 console.log("\n— carrying a viewer's own tracks into the next episode —");

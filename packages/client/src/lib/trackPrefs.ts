@@ -88,6 +88,22 @@ function titleLanguageHint(value?: string | null): string {
     .trim();
 }
 
+/**
+ * The human label before Plex's parenthesized language/codec decoration.
+ *
+ * Subtitle files commonly contain several English ASS tracks whose only useful
+ * distinction is this label: "Signs/Song for Dub" versus "Subtitles", for
+ * example. Comparing the full extended title would make the technical suffix
+ * part of the identity and fail as soon as the next episode used another codec.
+ */
+function titleIdentity(value?: string | null): string {
+  return normalizedText(value)
+    .replace(/\[[^\]]*\]|\([^)]*\)/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function sameLanguage(track: StreamTrack, pref: TrackPref): boolean {
   const trackCode = canonicalLanguageCode(track.languageCode);
   const prefCode = canonicalLanguageCode(pref.languageCode);
@@ -188,13 +204,17 @@ export function matchSubtitleTrack(
   if (!pref || pref.off || tracks.length === 0) return null;
 
   const wantFlavour = flavour(pref.title);
+  const wantedTitle = titleIdentity(pref.title);
   const sameLang = tracks.filter((t) => sameLanguage(t, pref));
   if (sameLang.length === 0) return null;
 
-  // Rank within the language: flavour (forced/SDH) matters most, then codec.
+  // Rank within the language: the explicit label identifies tracks like
+  // Signs/Song versus full dialogue; flavour and codec remain fallbacks for
+  // files whose titles are generic or change between episodes.
   const scored = sameLang.map((t) => {
     const f = flavour(t.title);
     let score = 0;
+    if (wantedTitle && titleIdentity(t.title) === wantedTitle) score += 16;
     if (f.forced === wantFlavour.forced) score += 4;
     if (f.sdh === wantFlavour.sdh) score += 2;
     if (pref.codec && t.codec === pref.codec) score += 1;

@@ -46,7 +46,7 @@ function Biography({ text }: { text: string }) {
         {text}
       </p>
       {longEnough && (
-        <button className="btn" type="button" style={styles.moreBtn} onClick={() => setExpanded((e) => !e)}>
+        <button type="button" style={styles.moreBtn} onClick={() => setExpanded((e) => !e)}>
           {expanded ? "Show less" : "Show more"}
         </button>
       )}

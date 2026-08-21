@@ -179,7 +179,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
       <div style={styles.breadcrumbRow}>
         <div style={{ ...styles.breadcrumb, padding: 0, margin: 0 }}>
           {onShowClick ? (
-            <button className="btn"
+            <button
               type="button"
               onClick={onShowClick}
               style={{ ...styles.buttonReset, ...styles.breadcrumbShow }}
@@ -302,7 +302,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                 ? Math.min(1, seen.positionMs / seen.durationMs)
                 : null;
             return (
-              <button className="btn"
+              <button
                 key={ep.ratingKey}
                 onClick={() => onSelectEpisode(ep)}
                 onMouseEnter={() => setHoveredKey(ep.ratingKey)}
@@ -350,7 +350,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                     </div>
                   )}
                   {isHost && isPlaying && onAddToQueue && (
-                    // A <button className="btn"> here would be nested inside the card's own
+                    // A <button> here would be nested inside the card's own
                     // button — invalid HTML, and browsers handle the nesting
                     // inconsistently. React builds it via the DOM API so it
                     // renders anyway, which is what made it easy to miss.

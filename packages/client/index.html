@@ -164,6 +164,17 @@
          differently depending on which screen it is on reads as a different
          kind of thing, and most of them were responding not at all.
 
+         `.btn` goes on things that *look* like buttons: a fill, a border, a
+         shape you could press. Not on everything that happens to be a <button>
+         element — that also covers poster cards, episode rows, breadcrumbs and
+         "Show more", and it is wrong for all of them. Brightening a poster on
+         hover washes out the picture you are trying to look at, and the cards
+         already light their own edge amber, which is this app's way of saying
+         "clickable". Bare text has no box to move: a dip lifts a word out of
+         the line it sits in, and brightening coloured text only changes its
+         colour. Adding it to those was a mechanical pass that stopped reading
+         what it was labelling.
+
          Two rules, and deliberately only two:
 
            hover   brightens

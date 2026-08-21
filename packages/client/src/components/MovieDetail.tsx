@@ -440,7 +440,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                 <>
                   {item.showTitle &&
                     (onShowClick ? (
-                      <button className="btn"
+                      <button
                         type="button"
                         onClick={onShowClick}
                         style={{ ...styles.buttonReset, ...styles.episodeShowTitle }}
@@ -454,7 +454,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                     ))}
                   <div style={styles.episodeLabel}>
                     {onSeasonClick ? (
-                      <button className="btn"
+                      <button
                         type="button"
                         onClick={onSeasonClick}
                         style={{ ...styles.buttonReset, ...styles.episodeLabelLink }}

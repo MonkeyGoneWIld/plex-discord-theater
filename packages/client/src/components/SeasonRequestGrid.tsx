@@ -115,7 +115,7 @@ export function SeasonRequestGrid({
           const isSel = selected.has(s.seasonNumber);
           const poster = seerrPosterUrl(s.posterPath);
           return (
-            <button className="btn"
+            <button
               key={`request-${s.seasonNumber}`}
               onClick={selectable ? () => toggle(s.seasonNumber) : undefined}
               disabled={!selectable}

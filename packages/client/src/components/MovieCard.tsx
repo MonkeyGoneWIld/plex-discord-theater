@@ -62,7 +62,7 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
   const posterSrc = item.type === "episode" ? (item.showThumb ?? item.thumb) : item.thumb;
   const showImg = !!posterSrc && !imgError;
   return (
-    <button className="btn"
+    <button
       onClick={() => onClick(item)}
       // Native tooltip on the whole card, so the full title shows on hover
       // anywhere over it (poster included), not only over the ellipsized text.
@@ -123,7 +123,7 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
             </svg>
           </div>
         )}
-        {/* A nested <button className="btn"> would be invalid inside the card button, so the
+        {/* A nested <button> would be invalid inside the card button, so the
             dismiss control is a span with an explicit role and key handling. */}
         {onRemove && (
           <span

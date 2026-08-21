@@ -769,7 +769,7 @@ export function App() {
                 <span key={i} style={styles.crumbWrap}>
                   {i > 0 && <span style={styles.crumbSep}>&rsaquo;</span>}
                   {c.onClick ? (
-                    <button className="btn"
+                    <button
                       onClick={c.onClick}
                       style={{ ...styles.crumb, ...styles.crumbLink }}
                       title={c.label}

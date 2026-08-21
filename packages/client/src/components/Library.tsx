@@ -1033,7 +1033,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               <div style={styles.sectionHeader}>People</div>
               <div style={peopleRowStyle}>
                 {people.map((p) => (
-                  <button className="btn"
+                  <button
                     key={p.name}
                     type="button"
                     style={styles.personCard}

@@ -287,9 +287,18 @@ export function matchAudioTrack(
   const wantCommentary = isCommentary(pref.title);
   const sameLang = tracks.filter((t) => sameLanguage(t, pref));
   if (sameLang.length === 0) return null;
+  // Some anime files tag *both* the Japanese and English streams as English,
+  // leaving the real distinction only in the title: e.g. Plex reports
+  // `languageCode="eng"` for both "Japanese (English AC3 Stereo)" and
+  // "English (AC3 Stereo)". Language, channels and codec consequently tie and
+  // the old stable sort always chose the first stream (usually Japanese, and
+  // usually the file default). Treat a matching title prefix as stronger than
+  // every technical tie-breaker so the user's actual choice carries over.
+  const wantedTitleHint = titleLanguageHint(pref.title);
 
   const scored = sameLang.map((t) => {
     let score = 0;
+    if (wantedTitleHint && titleLanguageHint(t.title) === wantedTitleHint) score += 16;
     if (isCommentary(t.title) === wantCommentary) score += 8;
     if (pref.channels != null && t.channels === pref.channels) score += 4;
     if (pref.codec && t.codec === pref.codec) score += 1;

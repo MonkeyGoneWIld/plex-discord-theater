@@ -95,6 +95,58 @@ console.log("\n— language names when there are no codes —");
     matchAudioTrack([eng, jpn], audioPref({ languageCode: null, codec: null, channels: null }))?.id, 40);
 }
 
+console.log("\n— misleading Plex language tags —");
+{
+  // Real shape from Your Lie in April: Plex tags both streams as English. The
+  // only indication that the first one is Japanese is its title.
+  const japanese = track({
+    id: 116749,
+    title: "Japanese (English AC3 Stereo)",
+    language: "English",
+    languageCode: "eng",
+    codec: "ac3",
+    channels: 2,
+    selected: true,
+  });
+  const english = track({
+    id: 116750,
+    title: "English (AC3 Stereo)",
+    language: "English",
+    languageCode: "eng",
+    codec: "ac3",
+    channels: 2,
+  });
+
+  check("English does not fall back to the first, Japanese stream",
+    matchAudioTrack([japanese, english], {
+      title: "English (AC3 Stereo)", language: "English", languageCode: "eng",
+      codec: "ac3", channels: 2,
+    })?.id, 116750);
+  check("Japanese still carries when its language tag incorrectly says English",
+    matchAudioTrack([japanese, english], {
+      title: "Japanese (English AC3 Stereo)", language: "English", languageCode: "eng",
+      codec: "ac3", channels: 2,
+    })?.id, 116749);
+
+  const previousEpisode = {
+    audioTracks: [
+      { ...japanese, id: 116744 },
+      { ...english, id: 116745 },
+    ],
+    subtitleTracks: [],
+  };
+  const nextEpisode = { audioTracks: [japanese, english], subtitleTracks: [] };
+  const watchedEnglish = describeWatched(previousEpisode, {
+    audioStreamId: 116745,
+    subtitleStreamId: 0,
+  });
+  check("English carries between the supplied episode metadata",
+    tracksForNewItem(nextEpisode, watchedEnglish, {
+      audioStreamId: 116749,
+      subtitleStreamId: 0,
+    }).audioStreamId, 116750);
+}
+
 console.log("\n— subtitles still behave —");
 {
   const pref: SubtitlePref = { off: false, languageCode: "eng", language: "English", codec: "srt", title: "English (SRT)" };

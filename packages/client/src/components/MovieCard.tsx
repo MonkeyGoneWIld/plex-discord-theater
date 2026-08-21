@@ -46,7 +46,6 @@ const ACCENT_BORDER = "rgba(229,160,13,0.85)";
 
 /** Hover lift for an owned poster. A filter repaints in place — unlike a scale,
  *  which would push the card past the row's clip edge and shear the border. */
-const HOVER_POSTER_FILTER = "brightness(1.12)";
 
 export function MovieCard({ item, onClick, progress, watched, onRemove, removeLabel = "Remove", onSelectShow }: MovieCardProps) {
   const prefetchTimer = useRef<number | undefined>(undefined);
@@ -84,20 +83,19 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
         // 3% puts ~2.5px of card above the row's top edge. Making room by
         // padding the row only shrinks the cards until an extra one fits.
         //
-        // So hover is an amber edge plus a brighter poster — a colour change and
-        // a filter, neither of which moves or grows anything.
+        // So hover is an amber edge, and nothing else.
+        //
+        // It used to lift the poster's brightness as well. Artwork is the thing
+        // you are looking at, and washing it out is a poor way to say "you could
+        // click this" — the edge already says it, in the same amber the cast row
+        // and the people row use. A not-in-library poster stays dimmed too: that
+        // dimming is what tells you it is not here, and it should not flicker
+        // off every time the pointer crosses it.
         el.style.borderColor = ACCENT_BORDER;
-        const img = el.querySelector("img");
-        // A dimmed not-in-library poster comes up to full colour; an owned one
-        // just lifts slightly.
-        if (img) img.style.filter = external ? "none" : HOVER_POSTER_FILTER;
       }}
       onMouseLeave={(e) => {
         if (prefetchTimer.current) window.clearTimeout(prefetchTimer.current);
-        const el = e.currentTarget;
-        el.style.borderColor = external ? EXTERNAL_BORDER : IDLE_BORDER;
-        const img = el.querySelector("img");
-        if (img) img.style.filter = external ? EXTERNAL_POSTER_FILTER : "";
+        e.currentTarget.style.borderColor = external ? EXTERNAL_BORDER : IDLE_BORDER;
       }}
     >
       <div style={styles.posterWrap}>

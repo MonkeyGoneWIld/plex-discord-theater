@@ -1544,10 +1544,22 @@ export function attachWebSocketServer(server: Server): void {
           // carries to, so the new host's next change reached straight into an
           // audience they had nothing to do with — while leaving the people
           // actually watching with them untouched.
+          let transferredVariant: Variant | null = null;
           if (target.variantKey) {
             room.state.hostVariantKey = target.variantKey;
             const hv = room.state.variants.get(target.variantKey);
             if (hv) {
+              // Hosting and driving the host stream have to move together.
+              // Leaving the old driver here produced an impossible client
+              // state after a manual handoff: `isHost=true` but
+              // `variant.isOwner=false`. The promoted host could change its
+              // local item with Next, but only a stream owner creates and
+              // announces the new transcode, so the room stayed on the old
+              // episode while their UI walked through later ones. Its track
+              // ids consequently belonged to another episode too, leaving no
+              // audio or subtitle row selected in the switcher.
+              hv.ownerUserId = target.userId;
+              transferredVariant = hv;
               room.state.subtitles = hv.subtitleStreamId !== 0;
               if (hv.hlsSessionId) {
                 room.state.hlsSessionId = hv.hlsSessionId;
@@ -1575,6 +1587,9 @@ export function attachWebSocketServer(server: Server): void {
           for (const c of room.clients) {
             if (c !== target) sendTo(c.ws, { type: "host-changed", hostUsername: target.username });
           }
+          // Tell every watcher who drives this still-running stream now. The
+          // new host adopts it in place; the old driver stops acting as owner.
+          if (transferredVariant) announceVariant(room, transferredVariant);
           broadcastParticipants(room);
           break;
         }

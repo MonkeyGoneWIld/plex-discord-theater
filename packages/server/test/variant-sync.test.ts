@@ -221,6 +221,10 @@ console.log("\n— handing the role over leaves you a co-host —");
   // Passing the role is usually "you drive for a bit", not "I am done here".
   check("the outgoing host keeps transport control", role("u-host"), [false, true]);
   check("nobody else gained anything", role("u-b"), [false, false]);
+  // The role and the stream must transfer as one operation. A host that still
+  // follows somebody else's stream cannot start/announce the next episode.
+  check("the new host drives the inherited stream", a.stream()?.owner, true);
+  check("the outgoing host no longer drives it", host.stream()?.owner, false);
 
   // And it is a real grant, not a label: a co-host may pause the room.
   b.clear();

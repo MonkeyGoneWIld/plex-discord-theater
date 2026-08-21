@@ -1369,10 +1369,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     const changed = prev
       ? (Object.keys(deps) as Array<keyof typeof deps>).filter((k) => deps[k] !== prev[k])
       : ["initial-mount"];
+    const titleChanged = !!prev && prev.ratingKey !== item.ratingKey;
     // A new title starts clean. Everything else — a seek restart, a subtitle
     // change, a viewer following the host onto a new session — is the same
     // picture continuing, so the held frame stays up over the rebuild.
-    if (prev && prev.ratingKey !== item.ratingKey) {
+    if (titleChanged) {
       canvasRef.current = null;
       setHoldingFrame(false);
     }
@@ -1391,8 +1392,22 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
     destroyLocal();
 
-    // Host creates a new session; viewer reuses the host's session
-    const sessionOwner = ownsSessionRef.current;
+    // A stream's current driver normally decides who creates a session. A new
+    // title is the exception: only the host can change what the room is
+    // watching, so the host must lead that new transcode even if it happened to
+    // be following somebody else's track variant on the preceding episode.
+    // Without this, Next changed only the host's local item while it kept
+    // replaying the old driver's session; successive clicks walked the UI
+    // through several episodes without moving the room.
+    const takingNewTitleAsHost = titleChanged && isHostRef.current;
+    const sessionOwner = ownsSessionRef.current || takingNewTitleAsHost;
+    if (takingNewTitleAsHost && !ownsSessionRef.current) {
+      ownsSessionRef.current = true;
+      logEvent("Player", "host taking ownership for a new title", {
+        from: prev?.ratingKey ?? "none",
+        to: item.ratingKey,
+      });
+    }
     let sessionId: string | null;
     if (adoptSessionIdRef.current) {
       // Adopt the live stream we were promoted into — reuse its transcode and
@@ -1830,7 +1845,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // Host: broadcast play with sessionId when manifest is ready. Skip it
           // when adopting an already-live session — the room is already on it,
           // and "play" would reset everyone's position to 0.
-          announceStream(sessionId!, startOffset);
+          announceStream(sessionId!, startOffset, sessionOwner);
         });
 
         // Clear error banner and reset retry count when recovery succeeds
@@ -2125,7 +2140,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         const onLoaded = () => {
           if (!mounted) return;
           video.play().catch((err) => console.warn("Autoplay prevented:", err));
-          announceStream(sessionId!, startOffset);
+          announceStream(sessionId!, startOffset, sessionOwner);
         };
         video.addEventListener("loadedmetadata", onLoaded, { once: true });
       } else {
@@ -2784,8 +2799,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
    *
    * Only a driver announces. A follower's job is to play what it is given.
    */
-  const announceStream = useCallback((sessionId: string, startOffset: number) => {
-    if (!ownsSessionRef.current) return;
+  const announceStream = useCallback((
+    sessionId: string,
+    startOffset: number,
+    startedAsOwner = ownsSessionRef.current,
+  ) => {
+    // `startedAsOwner` is captured by the HLS start. It stays authoritative if
+    // a late assignment for the preceding title lands while the new manifest
+    // is loading and briefly writes the old `isOwner=false` back into the ref.
+    if (!ownsSessionRef.current && !startedAsOwner) return;
     const offset = startOffset > 0 ? startOffset : undefined;
     /**
      * Adopting means the room is already on this stream and knows what it is,

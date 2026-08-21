@@ -777,7 +777,12 @@ async function deletePlexHistoryPaths(linked: LinkedAccount, paths: ReadonlySet<
 }
 
 /** Clear the independent Plex watched flag and resume position for one title. */
-async function clearPlexItemState(linked: LinkedAccount, ratingKey: string): Promise<void> {
+async function clearPlexItemState(
+  linked: LinkedAccount,
+  ratingKey: string,
+  title?: string,
+): Promise<void> {
+  const item = title ? `“${title}”` : `item ${ratingKey}`;
   const unscrobble = await plexFetch(
     "/:/unscrobble",
     { key: ratingKey, identifier: "com.plexapp.plugins.library" },
@@ -785,7 +790,12 @@ async function clearPlexItemState(linked: LinkedAccount, ratingKey: string): Pro
     "GET",
     linked.serverToken,
   );
-  if (!unscrobble.ok) throw new Error(`Plex watched-state update failed (${unscrobble.status})`);
+  // A stale Activity row can outlive the Plex library item it referred to.
+  // Clearing is idempotent: if Plex says the state is already absent, that is
+  // the result we wanted and must not hold the entire history clear hostage.
+  if (!unscrobble.ok && unscrobble.status !== 404) {
+    throw new Error(`Plex could not clear the watched state for ${item} (${unscrobble.status})`);
+  }
 
   const progress = await plexFetch(
     "/:/progress",
@@ -799,7 +809,28 @@ async function clearPlexItemState(linked: LinkedAccount, ratingKey: string): Pro
     "GET",
     linked.serverToken,
   );
-  if (!progress.ok) throw new Error(`Plex progress removal failed (${progress.status})`);
+  if (progress.ok || progress.status === 404) return;
+
+  // Some PMS releases accept /:/progress for ordinary updates but reject a
+  // zero-position reset. Plex's supported fallback removes the item from the
+  // Continue Watching hub, which prevents the next account sync from importing
+  // the deleted resume row straight back into MonkeyPlex.
+  if (progress.status === 400 || progress.status === 405 || progress.status === 501) {
+    const dismissed = await plexFetch(
+      "/actions/removeFromContinueWatching",
+      { ratingKey },
+      undefined,
+      "PUT",
+      linked.serverToken,
+    );
+    if (dismissed.ok || dismissed.status === 404) return;
+    throw new Error(
+      `Plex could not clear progress for ${item} `
+      + `(progress ${progress.status}, Continue Watching ${dismissed.status})`,
+    );
+  }
+
+  throw new Error(`Plex could not clear progress for ${item} (${progress.status})`);
 }
 
 /**
@@ -844,7 +875,7 @@ export async function clearPlexHistory(
   const historyPaths = await plexHistoryPaths(linked, ratingKeys);
   await deletePlexHistoryPaths(linked, historyPaths);
   await runWithConcurrency(entries, 4, async (entry) => {
-    await clearPlexItemState(linked, entry.ratingKey);
+    await clearPlexItemState(linked, entry.ratingKey, entry.title);
   });
 
   for (const ratingKey of ratingKeys) lastLivePush.delete(`${userId}:${ratingKey}`);

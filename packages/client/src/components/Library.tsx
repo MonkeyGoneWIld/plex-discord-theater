@@ -326,8 +326,9 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
       }
     } catch (err) {
       console.error(err);
+      const detail = err instanceof Error ? err.message : String(err);
       setHistoryClearError(
-        "Couldn't finish deleting watch history. The list was refreshed; try again for anything left.",
+        `${detail}. The list was refreshed; try again for anything left.`,
       );
       // A filtered clear can partially succeed remotely. Reload the server's
       // authoritative rows once all requests have settled so the grid agrees.

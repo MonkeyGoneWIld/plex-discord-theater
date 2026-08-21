@@ -54,6 +54,7 @@ const remoteHistoryByAccount = new Map<string, TestRemoteHistoryItem[]>();
 const historyPageStarts: Array<{ accountId: string; start: number }> = [];
 const deletedRemoteHistory = new Set<string>();
 const adminOnlyHistory = new Set<string>();
+const rejectedProgressResets = new Map<string, number>();
 
 globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
   const url = new URL(typeof input === "string" || input instanceof URL ? input.toString() : input.url);
@@ -202,7 +203,18 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
         },
       });
     }
-    if (url.pathname === "/:/progress" || url.pathname === "/:/scrobble" || url.pathname === "/:/unscrobble") {
+    if (url.pathname === "/:/progress") {
+      const ratingKey = url.searchParams.get("key") || "";
+      const rejected = url.searchParams.get("time") === "0"
+        ? rejectedProgressResets.get(ratingKey)
+        : undefined;
+      if (rejected) return new Response("reset rejected", { status: rejected });
+      return new Response("", { status: 200 });
+    }
+    if (url.pathname === "/actions/removeFromContinueWatching" && method === "PUT") {
+      return new Response("", { status: 200 });
+    }
+    if (url.pathname === "/:/scrobble" || url.pathname === "/:/unscrobble") {
       return new Response("", { status: 200 });
     }
   }
@@ -343,6 +355,22 @@ check("bulk clear resets every linked Plex resume position", ["306", "307"].ever
     && call.url.searchParams.get("time") === "0"
     && call.token === `server-token-${clearPin}`
   )
+), true);
+
+console.log("\n— clearing tolerates Plex servers that reject zero-position resets —");
+remoteHistoryByAccount.set("88", [
+  { ratingKey: "308", duration: 100_000, viewedAt: 1_700_000_400, historyKey: "/status/sessions/history/9308" },
+]);
+rejectedProgressResets.set("308", 400);
+await history.recordProgress("discord-clear", "308", 70, { force: true });
+const fallbackRemoved = await accounts.clearPlexHistory("discord-clear");
+check("fallback clear still removes the local row", history.getProgress("discord-clear", "308"), null);
+check("fallback clear reports the removed row", fallbackRemoved.removed, 1);
+check("rejected progress reset falls back to removing Continue Watching", plexCalls.some((call) =>
+  call.method === "PUT"
+  && call.url.pathname === "/actions/removeFromContinueWatching"
+  && call.url.searchParams.get("ratingKey") === "308"
+  && call.token === `server-token-${clearPin}`
 ), true);
 
 console.log("\n— replaying a watched title makes it unwatched —");

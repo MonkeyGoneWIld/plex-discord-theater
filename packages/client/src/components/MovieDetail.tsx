@@ -290,6 +290,23 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
     if (!partId) return;
     try {
       setError(null);
+      /**
+       * What you pressed play on is what you want to keep watching.
+       *
+       * The pickers already saved on *change*, which quietly missed the most
+       * ordinary case of all: accepting what was preselected. Somebody who
+       * started a season on its default Japanese audio had no stored preference
+       * at all, so when they handed the host role over and the new host moved to
+       * the next episode, there was nothing to carry and they were pulled onto
+       * the new host's tracks. Changing a picker — to anything, even back again
+       * — fixed it, which is how it was found.
+       *
+       * Recording the choice here covers both, and reads the same either way:
+       * this is the pair the viewer chose to watch, whether they went looking
+       * for it or simply left it alone.
+       */
+      saveAudioPref(audioTracks.find((t) => t.id === selectedAudio) ?? null);
+      saveSubtitlePref(subtitleTracks.find((t) => t.id === selectedSubtitle) ?? null);
       if (selectedAudio != null) {
         await setStreams(partId, {
           audioStreamID: selectedAudio,
@@ -311,7 +328,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
       console.error("Failed to set streams:", err);
       setError("Failed to configure playback. Please try again.");
     }
-  }, [partId, selectedAudio, selectedSubtitle, item, onPlay, selectedVersion]);
+  }, [partId, selectedAudio, selectedSubtitle, audioTracks, subtitleTracks, item, onPlay, selectedVersion]);
 
   // Offer a resume only for a genuine part-watch: far enough in to matter, and
   // not already finished (the server flags that, so a rewatch starts clean).

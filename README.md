@@ -11,10 +11,9 @@ sees the same thing at the same time — one person drives, everyone else follow
 > parties, and the awkward parts — playback sync, transcode teardown, host
 > handover — have been debugged against production logs rather than guessed at.
 > The sync protocol, person page and personal Plex account flow have harnesses
-> that run against a real WebSocket server and a stubbed Plex (`npm test`, 147
+> that run against a real WebSocket server and a stubbed Plex (`npm test`, 192
 > checks), but nothing runs them automatically, there is no external security
-> review, and no human has read
-> every line.
+> review, and no human has read every line.
 >
 > Treat it accordingly: great for watching films with friends on a server you
 > control, not something to put in front of the open internet or trust with

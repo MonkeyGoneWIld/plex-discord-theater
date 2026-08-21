@@ -642,6 +642,34 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // alongside the burn-in flag, for the same reason.
   const currentAudioStreamRef = useRef<number | null>(null);
   const currentSubtitleStreamRef = useRef<number | null>(null);
+
+  /**
+   * A new title is a new set of stream ids. Forget the last one's.
+   *
+   * Plex numbers audio and subtitle streams per media part, so an id from the
+   * episode that just finished names nothing in the one starting. This player
+   * is not remounted between episodes — the view stack swaps the item underneath
+   * it — so without this the refs below survive the change, and everything
+   * downstream of them inherits ids belonging to the previous file: the manifest
+   * request sends them to Plex, which quietly falls back to the part's defaults;
+   * the announcement puts them in the room's variant; and the switcher ticks a
+   * row that has nothing to do with what is playing. That is the "shows Japanese
+   * while English plays, and changing it does nothing" report.
+   *
+   * Resetting to the props leaves an episode change in exactly the state a fresh
+   * mount would be: whatever the incoming item resolved (see handlePlayNext), or
+   * nothing, in which case the manifest request omits them and Plex chooses.
+   *
+   * Declared above the stream-assignment and HLS effects so it runs before
+   * either reads these — effects fire in source order within a commit.
+   */
+  useEffect(() => {
+    currentAudioStreamRef.current = audioStreamId ?? null;
+    currentSubtitleStreamRef.current = subtitleStreamId ?? null;
+    subtitlesOnRef.current = subtitles;
+    appliedVariantKeyRef.current = null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item.ratingKey]);
   if (subtitlesItemRef.current !== item.ratingKey) {
     subtitlesItemRef.current = item.ratingKey;
     subtitlesOnRef.current = subtitles;
@@ -3542,7 +3570,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           scope={isHost ? "room" : "self"}
           // This client's own tracks, so the tick marks what *it* is watching
           // rather than whatever the item was last pointed at.
-          currentAudioId={variant?.audioStreamId ?? currentAudioStreamRef.current}
+          // 0 is "nothing chosen" for audio — there is no such thing as no
+          // audio track — so it reads as absent and the switcher falls back to
+          // whichever track Plex reports as selected. For subtitles 0 is a real
+          // answer ("None"), so it is passed through as one.
+          currentAudioId={(variant?.audioStreamId ?? currentAudioStreamRef.current) || null}
           currentSubtitleId={variant?.subtitleStreamId ?? currentSubtitleStreamRef.current}
         />
       )}

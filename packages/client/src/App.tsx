@@ -12,7 +12,7 @@ import { PeoplePanel } from "./components/PeoplePanel";
 import { InviteButton } from "./components/InviteButton";
 import { PlexAccountButton } from "./components/PlexAccountButton";
 import { formatMediaTitle } from "./lib/format";
-import { authUrl, fetchMeta, invalidateMeta, setStreams } from "./lib/api";
+import { authUrl, fetchMeta, invalidateMeta, setStreams, versionOf } from "./lib/api";
 import { loadSubtitlePref, matchSubtitleTrack } from "./lib/subtitlePref";
 import { useMediaQuery, MOBILE_LANDSCAPE_QUERY, NARROW_QUERY, PHONE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
@@ -570,24 +570,51 @@ export function App() {
   }, [goToShow]);
 
   const handlePlayNext = useCallback(async (queueItem: QueueItem) => {
-    // Re-apply the viewer's remembered subtitle choice to the incoming item.
-    //
-    // Nothing else does this on the auto-advance path: MovieDetail is where
-    // tracks normally get chosen, and moving to the next episode skips it
-    // entirely, so Plex would fall back to the part's own default. The stream
-    // has to be selected *before* the player mounts — once the transcode has
-    // started, changing it costs a restart. A failure here is non-fatal: the
-    // episode still plays, just with whatever Plex defaults to.
+    /**
+     * Re-apply the remembered subtitle choice, and find out which streams the
+     * incoming episode is actually going to play.
+     *
+     * Both halves matter, for the same underlying reason: **Plex stream ids
+     * belong to a media part, not to a title.** The id of "Japanese (AAC)" on
+     * S1E4 names some unrelated stream on S1E5, or nothing at all. So the
+     * subtitle preference is re-matched by language rather than carried by id,
+     * and the ids handed to the player are read from the new episode's own
+     * track list.
+     *
+     * Without the second half the player kept the previous episode's ids, sent
+     * them to Plex with the manifest request, and Plex — asked for streams that
+     * are not part of this file — fell back to the defaults. The switcher went
+     * on displaying the ids it had asked for, so it showed Japanese while
+     * English played, and the ticked row belonged to another episode entirely.
+     *
+     * A failure here is non-fatal: the episode still plays, on whatever Plex
+     * defaults to, and the player falls back to reading the selection from the
+     * track list.
+     */
     let subtitles = queueItem.subtitles;
+    let audioStreamId: number | undefined;
+    let subtitleStreamId: number | undefined;
     try {
       const meta = await fetchMeta(queueItem.ratingKey);
+      // The version, not the title: a second file has its own part and its own
+      // stream ids, and `meta`'s top-level fields describe only the first.
+      const version = versionOf(meta);
       const pref = loadSubtitlePref();
-      if (pref && meta.partId != null) {
-        const match = matchSubtitleTrack(meta.subtitleTracks, pref);
-        await setStreams(meta.partId, { subtitleStreamID: match?.id ?? 0 });
+      if (pref && version.partId != null) {
+        const match = matchSubtitleTrack(version.subtitleTracks, pref);
+        // Selected before the player mounts: once the transcode has started,
+        // changing it costs a restart.
+        await setStreams(version.partId, { subtitleStreamID: match?.id ?? 0 });
         invalidateMeta(queueItem.ratingKey);
         subtitles = match != null;
+        subtitleStreamId = match?.id ?? 0;
+      } else {
+        subtitleStreamId = version.subtitleTracks.find((t) => t.selected)?.id ?? 0;
+        subtitles = subtitleStreamId !== 0;
       }
+      // Audio is left as Plex has it; this only records *which* that is, so the
+      // switcher can tick it and a later change starts from the truth.
+      audioStreamId = version.audioTracks.find((t) => t.selected)?.id;
     } catch (err) {
       console.error("Failed to carry subtitle preference to next item:", err);
     }
@@ -605,6 +632,8 @@ export function App() {
         index: queueItem.index,
       },
       subtitles,
+      audioStreamId,
+      subtitleStreamId,
     };
     setViewStack((s) => {
       const covering = s[s.length - 1]?.kind !== "player";

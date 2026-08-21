@@ -25,10 +25,10 @@ export function NextUpButton({ item, source, onPlay, onDismiss }: NextUpButtonPr
       <div style={styles.label}>{source === "series" ? "Next Episode" : "Up Next"}</div>
       <div style={styles.title}>{formatMediaTitle(item)}</div>
       <div style={styles.buttons}>
-        <button onClick={onPlay} style={styles.playBtn}>
+        <button onClick={onPlay} className="tap" style={styles.playBtn}>
           {source === "series" ? "Play Next" : "Play Now"}
         </button>
-        <button onClick={onDismiss} style={styles.dismissBtn}>Dismiss</button>
+        <button onClick={onDismiss} className="tap" style={styles.dismissBtn}>Dismiss</button>
       </div>
     </div>
   );

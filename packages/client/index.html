@@ -158,6 +158,30 @@
       }
       .shelf-chev:hover > span { transform: scale(1.28); }
       .shelf:hover .shelf-chev:not(.shelf-chev-dis) { opacity: 1; pointer-events: auto; }
+
+      /* Press and hover feedback for the controls drawn over the picture.
+         Those buttons are styled inline, and an inline style cannot express
+         :hover or :active, so the feedback lives here and each button opts in
+         by class. Lifting on hover and sinking on press is the whole of it —
+         enough to tell you the thing under the pointer is a button and that the
+         click landed, without anything moving that shouldn't.
+
+         Deliberately the standalone `scale` property rather than a transform.
+         Half of these buttons are positioned with an inline transform of their
+         own, and an inline style beats a class for the same property — so a
+         transform here would be ignored on exactly the buttons that need it
+         most, and would replace the centring on the one where it did apply.
+         `scale` composes with whatever transform is already there and can't
+         collide with it. */
+      .tap { transition: scale 0.12s ease, filter 0.12s ease; }
+      .tap:hover:not(:disabled) { scale: 1.08; filter: brightness(1.15); }
+      .tap:active:not(:disabled) { scale: 0.94; filter: brightness(0.95); }
+      @media (prefers-reduced-motion: reduce) {
+        /* Keep the brightness — it is the part that says "this is a button" —
+           and drop the movement. */
+        .tap { transition: filter 0.12s ease; }
+        .tap:hover:not(:disabled), .tap:active:not(:disabled) { scale: 1; }
+      }
       .shelf-chev-dis { opacity: 0 !important; pointer-events: none !important; }
       .shelf-chev-l {
         left: 0; justify-content: flex-start; padding-left: 12px;

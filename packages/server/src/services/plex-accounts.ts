@@ -716,44 +716,38 @@ interface RemoteMetadata {
   updatedAt?: number;
 }
 
-/**
- * Remove one Activity item from the linked Plex account as well as SQLite.
- *
- * Plex keeps playback-history events separately from watched state and resume
- * position. Clearing all three prevents a later Sync now from restoring the
- * row that the user explicitly removed.
- */
-export async function removePlexHistoryEntry(
-  userId: string,
-  ratingKey: string,
-): Promise<{ syncedToPlex: boolean; deletedRemoteEvents: number }> {
-  if (!/^\d+$/.test(ratingKey)) throw new Error("Invalid rating key");
-  const linked = accessToken(userId);
-  if (!linked) {
-    deleteHistoryEntry(userId, ratingKey);
-    return { syncedToPlex: false, deletedRemoteEvents: 0 };
-  }
+type LinkedAccount = NonNullable<ReturnType<typeof accessToken>>;
 
-  const historyPaths = new Set<string>();
+/** Find raw Plex playback events belonging to the requested Activity titles. */
+async function plexHistoryPaths(
+  linked: LinkedAccount,
+  ratingKeys: ReadonlySet<string>,
+): Promise<Set<string>> {
+  const paths = new Set<string>();
+  if (ratingKeys.size === 0) return paths;
+  const onlyRatingKey = ratingKeys.size === 1 ? ratingKeys.values().next().value : undefined;
   let start = 0;
   while (true) {
+    const params: Record<string, string> = {
+      accountID: linked.row.plex_user_id,
+      sort: "viewedAt:desc",
+      "X-Plex-Container-Start": String(start),
+      "X-Plex-Container-Size": String(HISTORY_PAGE_SIZE),
+    };
+    // One removal can be filtered by Plex. A bulk clear reads the account
+    // history once and filters locally instead of repeating it for every row.
+    if (onlyRatingKey) params.metadataItemID = onlyRatingKey;
     const data = await plexJSON<{
       MediaContainer: { Metadata?: RemoteMetadata[]; totalSize?: number };
-    }>(
-      "/status/sessions/history/all",
-      {
-        accountID: linked.row.plex_user_id,
-        metadataItemID: ratingKey,
-        sort: "viewedAt:desc",
-        "X-Plex-Container-Start": String(start),
-        "X-Plex-Container-Size": String(HISTORY_PAGE_SIZE),
-      },
-      linked.serverToken,
-    );
+    }>("/status/sessions/history/all", params, linked.serverToken);
     const items = data.MediaContainer.Metadata || [];
     for (const item of items) {
-      if (item.ratingKey === ratingKey && /^\/status\/sessions\/history\/\d+$/.test(item.historyKey || "")) {
-        historyPaths.add(item.historyKey!);
+      if (
+        item.ratingKey
+        && ratingKeys.has(item.ratingKey)
+        && /^\/status\/sessions\/history\/\d+$/.test(item.historyKey || "")
+      ) {
+        paths.add(item.historyKey!);
       }
     }
     start += items.length;
@@ -764,14 +758,26 @@ export async function removePlexHistoryEntry(
       || (totalSize == null && items.length < HISTORY_PAGE_SIZE)
     ) break;
   }
+  return paths;
+}
 
-  await runWithConcurrency([...historyPaths], 4, async (historyPath) => {
-    const response = await plexFetch(historyPath, undefined, undefined, "DELETE", linked.serverToken);
+async function deletePlexHistoryPaths(linked: LinkedAccount, paths: ReadonlySet<string>): Promise<void> {
+  await runWithConcurrency([...paths], 8, async (historyPath) => {
+    let response = await plexFetch(historyPath, undefined, undefined, "DELETE", linked.serverToken);
+    // Plex documents raw playback-history deletion as an admin operation.
+    // Managed users can read their event but some PMS versions reject deleting
+    // it, so retry through the configured server-owner token.
+    if (response.status === 401 || response.status === 403) {
+      response = await plexFetch(historyPath, undefined, undefined, "DELETE");
+    }
     if (!response.ok && response.status !== 404) {
       throw new Error(`Plex history removal failed (${response.status})`);
     }
   });
+}
 
+/** Clear the independent Plex watched flag and resume position for one title. */
+async function clearPlexItemState(linked: LinkedAccount, ratingKey: string): Promise<void> {
   const unscrobble = await plexFetch(
     "/:/unscrobble",
     { key: ratingKey, identifier: "com.plexapp.plugins.library" },
@@ -794,10 +800,62 @@ export async function removePlexHistoryEntry(
     linked.serverToken,
   );
   if (!progress.ok) throw new Error(`Plex progress removal failed (${progress.status})`);
+}
+
+/**
+ * Remove one Activity item from the linked Plex account as well as SQLite.
+ *
+ * Plex keeps playback-history events separately from watched state and resume
+ * position. Clearing all three prevents a later Sync now from restoring the
+ * row that the user explicitly removed.
+ */
+export async function removePlexHistoryEntry(
+  userId: string,
+  ratingKey: string,
+): Promise<{ syncedToPlex: boolean; deletedRemoteEvents: number }> {
+  if (!/^\d+$/.test(ratingKey)) throw new Error("Invalid rating key");
+  const linked = accessToken(userId);
+  if (!linked) {
+    deleteHistoryEntry(userId, ratingKey);
+    return { syncedToPlex: false, deletedRemoteEvents: 0 };
+  }
+
+  const historyPaths = await plexHistoryPaths(linked, new Set([ratingKey]));
+  await deletePlexHistoryPaths(linked, historyPaths);
+  await clearPlexItemState(linked, ratingKey);
 
   lastLivePush.delete(`${userId}:${ratingKey}`);
   deleteHistoryEntry(userId, ratingKey);
   return { syncedToPlex: true, deletedRemoteEvents: historyPaths.size };
+}
+
+/** Clear every visible Activity history row from the linked Plex account too. */
+export async function clearPlexHistory(
+  userId: string,
+): Promise<{ syncedToPlex: boolean; removed: number; deletedRemoteEvents: number }> {
+  const entries = getAllHistory(userId);
+  const linked = accessToken(userId);
+  if (!linked) {
+    clearHistory(userId);
+    return { syncedToPlex: false, removed: entries.length, deletedRemoteEvents: 0 };
+  }
+
+  const ratingKeys = new Set(entries.map((entry) => entry.ratingKey));
+  const historyPaths = await plexHistoryPaths(linked, ratingKeys);
+  await deletePlexHistoryPaths(linked, historyPaths);
+  await runWithConcurrency(entries, 4, async (entry) => {
+    await clearPlexItemState(linked, entry.ratingKey);
+  });
+
+  for (const ratingKey of ratingKeys) lastLivePush.delete(`${userId}:${ratingKey}`);
+  // This also removes hidden Continue Watching dismissal markers, which are
+  // local UI state and deliberately absent from getAllHistory().
+  clearHistory(userId);
+  return {
+    syncedToPlex: true,
+    removed: entries.length,
+    deletedRemoteEvents: historyPaths.size,
+  };
 }
 
 interface RemoteState {

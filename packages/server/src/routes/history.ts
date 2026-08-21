@@ -16,9 +16,8 @@ import {
   getProgressMany,
   getShowNextUp,
   dismissFromContinueWatching,
-  clearHistory,
 } from "../services/watch-history.js";
-import { removePlexHistoryEntry } from "../services/plex-accounts.js";
+import { clearPlexHistory, removePlexHistoryEntry } from "../services/plex-accounts.js";
 
 const router = Router();
 
@@ -200,11 +199,16 @@ router.get("/", (req: Request, res: Response) => {
  * DELETE /api/history
  * Clear the caller's history entirely.
  */
-router.delete("/", (req: Request, res: Response) => {
+router.delete("/", async (req: Request, res: Response) => {
   const userId = requireUserId(req, res);
   if (!userId) return;
-  clearHistory(userId);
-  res.json({ ok: true });
+  try {
+    const result = await clearPlexHistory(userId);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error("History clear error:", err);
+    res.status(502).json({ error: err instanceof Error ? err.message : "Failed to clear watch history" });
+  }
 });
 
 export default router;

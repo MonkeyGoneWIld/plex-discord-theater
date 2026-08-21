@@ -53,6 +53,7 @@ const defaultRemoteHistory: TestRemoteHistoryItem[] = [
 const remoteHistoryByAccount = new Map<string, TestRemoteHistoryItem[]>();
 const historyPageStarts: Array<{ accountId: string; start: number }> = [];
 const deletedRemoteHistory = new Set<string>();
+const adminOnlyHistory = new Set<string>();
 
 globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
   const url = new URL(typeof input === "string" || input instanceof URL ? input.toString() : input.url);
@@ -135,6 +136,9 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
       });
     }
     if (/^\/status\/sessions\/history\/\d+$/.test(url.pathname) && method === "DELETE") {
+      if (adminOnlyHistory.has(url.pathname) && url.searchParams.get("X-Plex-Token") !== "shared-server-token") {
+        return new Response("admin required", { status: 403 });
+      }
       deletedRemoteHistory.add(url.pathname);
       return Response.json({ MediaContainer: { size: 0 } });
     }
@@ -306,6 +310,39 @@ check("History removal clears linked Plex resume position", plexCalls.some((call
   && call.url.searchParams.get("key") === "303"
   && call.url.searchParams.get("time") === "0"
   && call.token === "server-token-11"
+), true);
+
+console.log("\n— clearing Activity history clears the matching Plex history —");
+remoteHistoryByAccount.set("88", [
+  { ratingKey: "306", duration: 100_000, viewedAt: 1_700_000_300, historyKey: "/status/sessions/history/9306" },
+  { ratingKey: "306", duration: 100_000, viewedAt: 1_700_000_200, historyKey: "/status/sessions/history/8306" },
+  { ratingKey: "307", duration: 100_000, viewedAt: 1_700_000_100, historyKey: "/status/sessions/history/9307" },
+]);
+adminOnlyHistory.add("/status/sessions/history/9307");
+await accounts.startPlexAccountLink("discord-clear");
+const clearPin = nextPin - 1;
+pinAccountIds.set(clearPin, "88");
+await accounts.pollPlexAccountLink("discord-clear");
+await history.recordProgress("discord-clear", "306", 70, { force: true });
+await history.recordProgress("discord-clear", "307", 80, { force: true });
+const bulkRemoved = await accounts.clearPlexHistory("discord-clear");
+check("bulk clear removes every local row", history.getHistory("discord-clear").total, 0);
+check("bulk clear reports its local rows", bulkRemoved.removed, 2);
+check("bulk clear deletes every matching playback event", bulkRemoved.deletedRemoteEvents, 3);
+check("bulk clear deletes repeated plays of one title", deletedRemoteHistory.has("/status/sessions/history/8306"), true);
+check("bulk clear deletes the second title's event", deletedRemoteHistory.has("/status/sessions/history/9307"), true);
+check("admin-only history deletion falls back to the configured server token", plexCalls.some((call) =>
+  call.method === "DELETE"
+  && call.url.pathname === "/status/sessions/history/9307"
+  && call.token === "shared-server-token"
+), true);
+check("bulk clear resets every linked Plex resume position", ["306", "307"].every((ratingKey) =>
+  plexCalls.some((call) =>
+    call.url.pathname === "/:/progress"
+    && call.url.searchParams.get("key") === ratingKey
+    && call.url.searchParams.get("time") === "0"
+    && call.token === `server-token-${clearPin}`
+  )
 ), true);
 
 console.log("\n— replaying a watched title makes it unwatched —");

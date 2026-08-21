@@ -140,6 +140,33 @@ export function matchSubtitleTrack(
 }
 
 /**
+ * Which streams a viewer should be on for a title they have just been moved to.
+ *
+ * `fallback` is what the room put them on — in practice the host's tracks, which
+ * are the only pair known to exist in this file. Each side falls back to it
+ * independently, so a viewer whose audio language is present but whose subtitle
+ * language isn't keeps the half that carried.
+ *
+ * The one case that isn't a fallback is a remembered "None" for subtitles. That
+ * is an answer, not a failed match, and it survives into the next episode
+ * however many subtitle tracks the new file happens to have.
+ */
+export function tracksForNewItem(
+  available: { audioTracks: StreamTrack[]; subtitleTracks: StreamTrack[] },
+  prefs: { audio: AudioPref | null; subtitle: SubtitlePref | null },
+  fallback: { audioStreamId: number; subtitleStreamId: number },
+): { audioStreamId: number; subtitleStreamId: number } {
+  return {
+    audioStreamId:
+      matchAudioTrack(available.audioTracks, prefs.audio)?.id ?? fallback.audioStreamId,
+    subtitleStreamId: prefs.subtitle?.off
+      ? 0
+      : matchSubtitleTrack(available.subtitleTracks, prefs.subtitle)?.id
+        ?? fallback.subtitleStreamId,
+  };
+}
+
+/**
  * Best match for the stored audio preference among a new episode's tracks.
  *
  * Returns `null` when the preference names a language this file doesn't carry,

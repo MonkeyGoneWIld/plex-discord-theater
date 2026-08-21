@@ -14,6 +14,7 @@ import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, f
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
+import { loadAudioPref, loadSubtitlePref, tracksForNewItem } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { roomPositionNow } from "../hooks/useSync";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
@@ -482,6 +483,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // The variant this client has already acted on, so an assignment that moves it
   // somewhere new can be told from a re-announcement of the same stream.
   const appliedVariantKeyRef = useRef<string | null>(null);
+  // The title this player opened on, and the last one whose tracks were restored
+  // — see the track-restore effect. Both are per-mount, and the player is not
+  // remounted between episodes, so "opened on" really does mean the episode this
+  // viewer walked in during.
+  const openedOnRatingKeyRef = useRef(item.ratingKey);
+  const restoredTracksForRef = useRef<string | null>(null);
   // Set when this client asked for the change itself — it already has its own
   // overlay up, and shouldn't be told it was moved.
   const askedForTracksRef = useRef(false);
@@ -933,6 +940,78 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // clears it when frames actually resume.
     setTrackSwitching(null);
   }, [variant?.seq]);
+
+  /**
+   * Take your own audio and subtitles into the next episode.
+   *
+   * A new title puts the whole room back on the host's stream — it has to, since
+   * every stream the room was running belonged to a file that is no longer
+   * playing. For the host that is the end of it: their choice travels with the
+   * item (see handlePlayNext). For everybody else it meant losing theirs at the
+   * end of every episode and picking it again, which is not a preference so much
+   * as a chore.
+   *
+   * So each viewer re-establishes its own, the same way the choice was carried
+   * in the first place: by language, against whatever the new file actually
+   * holds. Ids cannot be reused — they belong to the part — and a language can
+   * simply be absent from one episode of a season and present in the next.
+   *
+   * Where the new file has nothing matching, the host's track stands. That is
+   * the one sensible fallback: it is what the room is on, it certainly exists,
+   * and the alternative is silence or a language nobody asked for. A deliberate
+   * "None" for subtitles is honoured as a choice rather than read as a failure
+   * to match.
+   *
+   * Only on a *change* of title. A viewer joining mid-film is a different
+   * situation — they asked for this stream by walking into it — and forking
+   * everyone the moment they arrive would cost the server a transcode per
+   * person for something nobody asked for.
+   */
+  useEffect(() => {
+    const v = variantRef.current;
+    if (!v || isHost) return;
+    // The title this player opened on. Not an advance, so nothing to restore.
+    if (item.ratingKey === openedOnRatingKeyRef.current) return;
+    if (restoredTracksForRef.current === item.ratingKey) return;
+    // Claimed before the fetch, so a second variant landing mid-flight doesn't
+    // start a duplicate lookup and a duplicate fork.
+    restoredTracksForRef.current = item.ratingKey;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const meta = await fetchMeta(item.ratingKey);
+        // No media index: the host's tracks for this episode were resolved from
+        // the same default version, so matching against any other file would be
+        // comparing against streams nobody is playing.
+        const version = versionOf(meta);
+        const want = tracksForNewItem(
+          version,
+          { audio: loadAudioPref(), subtitle: loadSubtitlePref() },
+          v,
+        );
+        if (cancelled) return;
+        // Already what the room put us on — the host's choice and ours agree, or
+        // this episode carries neither. Forking would buy a second transcode of
+        // the same two tracks.
+        if (want.audioStreamId === v.audioStreamId
+            && want.subtitleStreamId === v.subtitleStreamId) return;
+        logEvent("Player", "restoring own tracks on the new episode", {
+          ratingKey: item.ratingKey,
+          from: v.variantKey,
+          to: `${want.audioStreamId}:${want.subtitleStreamId}`,
+        });
+        // Ours, not something the host did to us — so the "moved onto other
+        // tracks" overlay stays out of it.
+        askedForTracksRef.current = true;
+        syncActionsRef.current?.sendSetTracks(want.audioStreamId, want.subtitleStreamId);
+      } catch {
+        // Metadata unavailable: the host's tracks are already playing, which is
+        // the fallback this would have chosen anyway.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [item.ratingKey, variant?.seq, isHost]);
 
   // Handle promotion: start heartbeat when a viewer becomes host mid-playback.
   useEffect(() => {

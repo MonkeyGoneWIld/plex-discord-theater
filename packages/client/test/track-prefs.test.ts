@@ -6,7 +6,7 @@
  * file happens to hold. These are the cases where "same language" is not enough
  * to identify the right track.
  */
-import { matchAudioTrack, matchSubtitleTrack, type AudioPref, type SubtitlePref } from "../src/lib/trackPrefs";
+import { matchAudioTrack, matchSubtitleTrack, tracksForNewItem, type AudioPref, type SubtitlePref } from "../src/lib/trackPrefs";
 import type { StreamTrack } from "../src/lib/api";
 
 let pass = 0;
@@ -107,6 +107,51 @@ console.log("\n— subtitles still behave —");
     matchSubtitleTrack([plain], { off: true }), null);
   check("a language this episode lacks turns subtitles off rather than guessing",
     matchSubtitleTrack([track({ id: 52, title: "French", language: "French", languageCode: "fra" })], pref), null);
+}
+
+console.log("\n— carrying a viewer's own tracks into the next episode —");
+{
+  // What the room put everyone on when the episode changed: the host's pair.
+  const hostTracks = { audioStreamId: 70, subtitleStreamId: 71 };
+  const audioTracks = [
+    track({ id: 70, title: "English (AC3 5.1)", language: "English", languageCode: "eng", channels: 6 }),
+    track({ id: 72, title: "Japanese (AAC Stereo)", language: "Japanese", languageCode: "jpn", channels: 2 }),
+  ];
+  const subtitleTracks = [
+    track({ id: 71, title: "English (SRT)", language: "English", languageCode: "eng", codec: "srt" }),
+  ];
+  const file = { audioTracks, subtitleTracks };
+  const jpnAudio = audioPref({ channels: 2 });
+  const engSubs: SubtitlePref = { off: false, languageCode: "eng", language: "English", codec: "srt", title: "English (SRT)" };
+
+  check("a viewer with no preferences at all stays on the host's",
+    tracksForNewItem(file, { audio: null, subtitle: null }, hostTracks), hostTracks);
+
+  check("their own language is picked up when the episode has it",
+    tracksForNewItem(file, { audio: jpnAudio, subtitle: engSubs }, hostTracks),
+    { audioStreamId: 72, subtitleStreamId: 71 });
+
+  check("and the host's stands where it doesn't",
+    tracksForNewItem(
+      { audioTracks: [audioTracks[0]], subtitleTracks },
+      { audio: jpnAudio, subtitle: engSubs },
+      hostTracks,
+    ),
+    hostTracks);
+
+  check("each side falls back on its own — audio carries, subtitles don't",
+    tracksForNewItem(
+      { audioTracks, subtitleTracks: [] },
+      { audio: jpnAudio, subtitle: engSubs },
+      hostTracks,
+    ),
+    { audioStreamId: 72, subtitleStreamId: 71 });
+
+  // "None" is an answer, not a failed match, so a host with subtitles on does
+  // not override it.
+  check("a deliberate None survives into the next episode",
+    tracksForNewItem(file, { audio: null, subtitle: { off: true } }, hostTracks),
+    { audioStreamId: 70, subtitleStreamId: 0 });
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

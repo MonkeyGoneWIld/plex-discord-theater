@@ -173,12 +173,26 @@
          most, and would replace the centring on the one where it did apply.
          `scale` composes with whatever transform is already there and can't
          collide with it. */
-      .tap { transition: scale 0.12s ease, filter 0.12s ease; }
-      .tap:hover:not(:disabled) { scale: 1.08; filter: brightness(1.15); }
-      .tap:active:not(:disabled) { scale: 0.94; filter: brightness(0.95); }
+      .tap { transition: scale 0.16s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.16s ease; }
+      .tap:hover:not(:disabled) {
+        scale: 1.14;
+        /* The glow is a drop-shadow rather than a box-shadow so it follows the
+           glyph, not the button's box: a bare icon blooms around its own shape
+           instead of gaining a rectangle nobody drew. White rather than the
+           app's amber, because these buttons are not all one colour — the amber
+           play button would have glowed into itself. */
+        filter: brightness(1.3) drop-shadow(0 0 9px rgba(255, 255, 255, 0.5));
+      }
+      .tap:active:not(:disabled) {
+        scale: 0.92;
+        filter: brightness(1.1) drop-shadow(0 0 4px rgba(255, 255, 255, 0.35));
+        /* Faster than the hover it interrupts, so the press lands immediately
+           instead of easing in behind the finger. */
+        transition-duration: 0.06s;
+      }
       @media (prefers-reduced-motion: reduce) {
-        /* Keep the brightness — it is the part that says "this is a button" —
-           and drop the movement. */
+        /* Keep the brightness and the glow — they are the part that says "this
+           is a button" — and drop the movement. */
         .tap { transition: filter 0.12s ease; }
         .tap:hover:not(:disabled), .tap:active:not(:disabled) { scale: 1; }
       }

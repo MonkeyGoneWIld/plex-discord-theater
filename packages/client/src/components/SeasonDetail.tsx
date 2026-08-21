@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import {
-  fetchChildren, fetchPlexAccountStatus, fetchProgressMany, fetchSeasonEpisodes, getSessionToken,
+  fetchChildren, fetchProgressMany, fetchSeasonEpisodes, getSessionToken,
   setPlexItemWatched,
   type HistoryEntry, type PlexItem, type SeasonEpisode,
 } from "../lib/api";
@@ -51,17 +51,8 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
   // Not host-gated: it's their history either way, and it's information rather
   // than a control, so there's nothing here a viewer shouldn't see.
   const [progress, setProgress] = useState<Record<string, HistoryEntry>>({});
-  const [plexLinked, setPlexLinked] = useState(false);
   const [watchedBusy, setWatchedBusy] = useState<string | null>(null);
   const [watchedError, setWatchedError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetchPlexAccountStatus()
-      .then((status) => { if (!cancelled) setPlexLinked(status.linked); })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -400,39 +391,37 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                     <p style={styles.episodeSummary}>{ep.summary}</p>
                   )}
                 </div>
-                {plexLinked && (
-                  <span
-                    role="checkbox"
-                    tabIndex={0}
-                    aria-checked={watched}
-                    aria-disabled={watchedBusy === ep.ratingKey}
-                    aria-label={watched ? `Mark ${ep.title} unwatched` : `Mark ${ep.title} as watched`}
-                    title={watchedBusy === ep.ratingKey
-                      ? "Updating watched state..."
-                      : watched ? "Watched — mark unwatched" : "Mark as watched"}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.background = "rgba(255,255,255,0.08)";
-                    }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void toggleWatched(ep, watched);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key !== "Enter" && e.key !== " ") return;
-                      e.preventDefault();
-                      e.stopPropagation();
-                      void toggleWatched(ep, watched);
-                    }}
-                    style={{
-                      ...styles.watchedCheckbox,
-                      ...(watched ? styles.watchedCheckboxActive : {}),
-                      ...(watchedBusy === ep.ratingKey ? styles.watchedCheckboxBusy : {}),
-                    }}
-                  >
-                    <WatchedCheckIcon />
-                  </span>
-                )}
+                <span
+                  role="checkbox"
+                  tabIndex={0}
+                  aria-checked={watched}
+                  aria-disabled={watchedBusy === ep.ratingKey}
+                  aria-label={watched ? `Mark ${ep.title} unwatched` : `Mark ${ep.title} as watched`}
+                  title={watchedBusy === ep.ratingKey
+                    ? "Updating watched state..."
+                    : watched ? "Watched — mark unwatched" : "Mark as watched"}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = "rgba(255,255,255,0.08)";
+                  }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void toggleWatched(ep, watched);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter" && e.key !== " ") return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void toggleWatched(ep, watched);
+                  }}
+                  style={{
+                    ...styles.watchedCheckbox,
+                    ...(watched ? styles.watchedCheckboxActive : {}),
+                    ...(watchedBusy === ep.ratingKey ? styles.watchedCheckboxBusy : {}),
+                  }}
+                >
+                  <WatchedCheckIcon />
+                </span>
               </button>
             );
           })}

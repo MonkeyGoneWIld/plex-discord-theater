@@ -257,6 +257,27 @@ const dbBytes = fs.readdirSync(dataDir)
 check("personal tokens are not stored as plaintext", dbBytes.includes(Buffer.from("personal-token-10")), false);
 check("server tokens are not stored as plaintext", dbBytes.includes(Buffer.from("server-token-10")), false);
 
+console.log("\n— explicit watched actions also work without a linked account —");
+const callsBeforeLocalWatched = plexCalls.length;
+await accounts.setPlexItemWatched("discord-local", "304", true);
+check("unlinked mark watched updates local Activity", history.getProgress("discord-local", "304")?.watched, true);
+check("unlinked watched state reads from local Activity", (await accounts.getPlexItemWatchedState("discord-local", "304")).watched, true);
+check("unlinked mark watched does not scrobble the shared Plex account", plexCalls.slice(callsBeforeLocalWatched).some((call) =>
+  call.url.pathname === "/:/scrobble"
+), false);
+await accounts.setPlexItemWatched("discord-local", "304", false);
+check("unlinked mark unwatched clears local Activity", history.getProgress("discord-local", "304"), null);
+check("unlinked mark unwatched does not unscrobble the shared Plex account", plexCalls.slice(callsBeforeLocalWatched).some((call) =>
+  call.url.pathname === "/:/unscrobble"
+), false);
+const localSeason = await accounts.setPlexItemWatched("discord-local", "701", true);
+check("unlinked season action updates every episode", localSeason.affected, 2);
+check("unlinked season episode one is watched locally", history.getProgress("discord-local", "702")?.watched, true);
+check("unlinked season episode two is watched locally", history.getProgress("discord-local", "703")?.watched, true);
+check("unlinked season action still does not scrobble the shared Plex account", plexCalls.slice(callsBeforeLocalWatched).some((call) =>
+  call.url.pathname === "/:/scrobble"
+), false);
+
 console.log("\n— history moves in both directions —");
 const imported = await accounts.syncPlexAccount("discord-a");
 check("completed and partial Plex state are imported", imported.imported, 2);

@@ -571,7 +571,7 @@ export async function getPlexWatchlist(userId: string): Promise<PlexWatchlistIte
   return resolved.filter((item): item is PlexWatchlistItem => item != null);
 }
 
-async function localAccountMetadata(ratingKey: string, serverToken: string): Promise<AccountMediaMetadata> {
+async function localAccountMetadata(ratingKey: string, serverToken?: string): Promise<AccountMediaMetadata> {
   const data = await plexJSON<{ MediaContainer: { Metadata?: AccountMediaMetadata[] } }>(
     `/library/metadata/${ratingKey}`,
     { includeGuids: "1" },
@@ -624,7 +624,7 @@ export async function setPlexWatchlistState(
 async function watchedMembers(
   item: AccountMediaMetadata,
   ratingKey: string,
-  serverToken: string,
+  serverToken?: string,
 ): Promise<AccountMediaMetadata[]> {
   if (item.type !== "show" && item.type !== "season") return [item];
   const suffix = item.type === "show" ? "allLeaves" : "children";
@@ -643,12 +643,12 @@ export async function getPlexItemWatchedState(
   ratingKey: string,
 ): Promise<{ watched: boolean; watchedCount: number; total: number }> {
   if (!/^\d+$/.test(ratingKey)) throw new Error("Invalid rating key");
-  const linked = requireAccessToken(userId);
-  const item = await localAccountMetadata(ratingKey, linked.serverToken);
+  const linked = accessToken(userId);
+  const item = await localAccountMetadata(ratingKey, linked?.serverToken);
   if (!["movie", "episode", "season", "show"].includes(item.type || "")) {
     throw new Error("This Plex item does not support watched state");
   }
-  const members = await watchedMembers(item, ratingKey, linked.serverToken);
+  const members = await watchedMembers(item, ratingKey, linked?.serverToken);
   const watchedCount = members.reduce(
     (count, member) => count + (getProgress(userId, member.ratingKey!)?.watched ? 1 : 0),
     0,
@@ -660,32 +660,38 @@ export async function getPlexItemWatchedState(
   };
 }
 
-/** Explicit user action: update local Activity and only that user's linked Plex account. */
+/**
+ * Explicit user action: always update local Activity and, when present, only
+ * that Discord user's linked Plex account.
+ */
 export async function setPlexItemWatched(
   userId: string,
   ratingKey: string,
   watched: boolean,
 ): Promise<{ progress: HistoryEntry | null; affected: number }> {
   if (!/^\d+$/.test(ratingKey)) throw new Error("Invalid rating key");
-  const linked = requireAccessToken(userId);
-  const item = await localAccountMetadata(ratingKey, linked.serverToken);
+  const linked = accessToken(userId);
+  const item = await localAccountMetadata(ratingKey, linked?.serverToken);
   if (!["movie", "episode", "season", "show"].includes(item.type || "")) {
     throw new Error("This Plex item does not support watched state");
   }
-  const members = await watchedMembers(item, ratingKey, linked.serverToken);
+  const members = await watchedMembers(item, ratingKey, linked?.serverToken);
   if (members.length === 0) throw new Error("This title has no episodes to update");
 
-  // Plex applies scrobble/unscrobble recursively to season and show containers.
-  // One parent action avoids hundreds of account requests for a long-running
-  // series; local Activity is expanded per episode below so its UI stays exact.
-  const response = await plexFetch(
-    watched ? "/:/scrobble" : "/:/unscrobble",
-    { key: ratingKey, identifier: "com.plexapp.plugins.library" },
-    undefined,
-    "GET",
-    linked.serverToken,
-  );
-  if (!response.ok) throw new Error(`Plex watched-state update failed (${response.status})`);
+  if (linked) {
+    // Plex applies scrobble/unscrobble recursively to season and show
+    // containers. One parent action avoids hundreds of account requests for a
+    // long-running series; local Activity is expanded per episode below so its
+    // UI stays exact.
+    const response = await plexFetch(
+      watched ? "/:/scrobble" : "/:/unscrobble",
+      { key: ratingKey, identifier: "com.plexapp.plugins.library" },
+      undefined,
+      "GET",
+      linked.serverToken,
+    );
+    if (!response.ok) throw new Error(`Plex watched-state update failed (${response.status})`);
+  }
   if (!watched) {
     for (const member of members) deleteHistoryEntry(userId, member.ratingKey!);
     return { progress: null, affected: members.length };

@@ -20,11 +20,11 @@ interface PlexMediaActionsProps {
   inline?: boolean;
 }
 
-/** Personal Plex actions. These never participate in room playback. */
+/** Personal media actions. These never participate in room playback. */
 export function PlexMediaActions({
   item, progress, onProgressChange, watched, onWatchedChange, inline = false,
 }: PlexMediaActionsProps) {
-  const [linked, setLinked] = useState(false);
+  const [linked, setLinked] = useState<boolean | null>(null);
   const [watchlisted, setWatchlisted] = useState(false);
   const [watchlistBusy, setWatchlistBusy] = useState(false);
   const [watchedBusy, setWatchedBusy] = useState(false);
@@ -46,18 +46,21 @@ export function PlexMediaActions({
 
   useEffect(() => {
     let cancelled = false;
+    if (!supportsWatched) return;
+    fetchPlexItemWatchedState(item.ratingKey)
+      .then((state) => { if (!cancelled) setWatchedState(state.watched); })
+      .catch(() => {
+        // Keep the local state already supplied by the page.
+      });
+    return () => { cancelled = true; };
+  }, [item.ratingKey, supportsWatched]);
+
+  useEffect(() => {
+    let cancelled = false;
     fetchPlexAccountStatus()
       .then(async (status) => {
         if (cancelled) return;
         setLinked(status.linked);
-        if (status.linked && supportsWatched) {
-          try {
-            const state = await fetchPlexItemWatchedState(item.ratingKey);
-            if (!cancelled) setWatchedState(state.watched);
-          } catch {
-            // Keep the local state already supplied by the page.
-          }
-        }
         if (!status.linked || !supportsWatchlist) return;
         try {
           if (item.inLibrary === false) {
@@ -76,9 +79,9 @@ export function PlexMediaActions({
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [item.guid, item.inLibrary, item.ratingKey, supportsWatchlist, supportsWatched]);
+  }, [item.guid, item.inLibrary, item.ratingKey, supportsWatchlist]);
 
-  if (!linked || (!supportsWatchlist && !supportsWatched)) return null;
+  if (!supportsWatched && !(linked && supportsWatchlist)) return null;
 
   const toggleWatchlist = async () => {
     if (watchlistBusy) return;
@@ -115,7 +118,7 @@ export function PlexMediaActions({
   return (
     <div style={{ ...styles.wrap, ...(inline ? styles.wrapInline : {}) }}>
       <div style={styles.buttons}>
-        {supportsWatchlist && (
+        {linked && supportsWatchlist && (
           <button
             type="button"
             onClick={() => void toggleWatchlist()}

@@ -140,6 +140,32 @@ export function matchSubtitleTrack(
 }
 
 /**
+ * Turn the streams somebody is watching into something portable.
+ *
+ * The ids belong to one media part and mean nothing in the next episode, but
+ * the tracks they name have a language and a flavour, and those do carry. This
+ * is the same description `saveAudioPref` stores — built from what a viewer is
+ * demonstrably watching rather than from what they last clicked, which is the
+ * more reliable of the two: a stored preference is one global slot, shared by
+ * every show and overwritten by whoever touched a picker last.
+ *
+ * A subtitle id of 0 is "none", and is described as a deliberate opt-out.
+ */
+export function describeWatched(
+  available: { audioTracks: StreamTrack[]; subtitleTracks: StreamTrack[] },
+  watching: { audioStreamId: number; subtitleStreamId: number },
+): { audio: AudioPref | null; subtitle: SubtitlePref | null } {
+  const audio = available.audioTracks.find((t) => t.id === watching.audioStreamId);
+  const subtitle = available.subtitleTracks.find((t) => t.id === watching.subtitleStreamId);
+  return {
+    audio: audio ? { ...describe(audio), channels: audio.channels ?? null } : null,
+    subtitle: watching.subtitleStreamId === 0
+      ? { off: true }
+      : subtitle ? { off: false, ...describe(subtitle) } : null,
+  };
+}
+
+/**
  * Which streams a viewer should be on for a title they have just been moved to.
  *
  * `fallback` is what the room put them on — in practice the host's tracks, which

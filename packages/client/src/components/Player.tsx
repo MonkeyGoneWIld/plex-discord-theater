@@ -14,7 +14,7 @@ import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, f
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
-import { loadAudioPref, loadSubtitlePref, tracksForNewItem } from "../lib/trackPrefs";
+import { describeWatched, loadAudioPref, loadSubtitlePref, tracksForNewItem } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { roomPositionNow } from "../hooks/useSync";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
@@ -489,6 +489,16 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // viewer walked in during.
   const openedOnRatingKeyRef = useRef(item.ratingKey);
   const restoredTracksForRef = useRef<string | null>(null);
+  /**
+   * The streams this client is on, and the ones it was on for the title before.
+   *
+   * The second is what a new episode is matched against. It is a better source
+   * than the stored preference: it is per room and per client, it cannot be
+   * overwritten by another show, and it is true of somebody who never opened a
+   * picker at all — the preference only knows about people who did.
+   */
+  const watchingRef = useRef<{ ratingKey: string; audioStreamId: number; subtitleStreamId: number } | null>(null);
+  const wasWatchingRef = useRef<{ ratingKey: string; audioStreamId: number; subtitleStreamId: number } | null>(null);
   // Set when this client asked for the change itself — it already has its own
   // overlay up, and shouldn't be told it was moved.
   const askedForTracksRef = useRef(false);
@@ -820,6 +830,19 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   useEffect(() => {
     const v = variantRef.current;
     if (!v) return;
+    // Bank what this client is on, per title. Rolled over rather than
+    // overwritten, because the moment a new title arrives the previous pair is
+    // the only record of what the person was actually watching.
+    if (v.ratingKey) {
+      const now = {
+        ratingKey: v.ratingKey,
+        audioStreamId: v.audioStreamId,
+        subtitleStreamId: v.subtitleStreamId,
+      };
+      const held = watchingRef.current;
+      if (held && held.ratingKey !== v.ratingKey) wasWatchingRef.current = held;
+      watchingRef.current = now;
+    }
     const prevAudio = currentAudioStreamRef.current;
     const prevSubtitle = currentSubtitleStreamRef.current;
     const hadTracks = appliedVariantKeyRef.current !== null;
@@ -985,38 +1008,66 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // start a duplicate lookup and a duplicate fork.
     restoredTracksForRef.current = item.ratingKey;
 
+    const was = wasWatchingRef.current;
     let cancelled = false;
     (async () => {
+      let outcome = "no source";
+      let want = { audioStreamId: v.audioStreamId, subtitleStreamId: v.subtitleStreamId };
       try {
-        const meta = await fetchMeta(item.ratingKey);
         // No media index: the host's tracks for this episode were resolved from
         // the same default version, so matching against any other file would be
         // comparing against streams nobody is playing.
-        const version = versionOf(meta);
-        const want = tracksForNewItem(
-          version,
-          { audio: loadAudioPref(), subtitle: loadSubtitlePref() },
-          v,
-        );
-        if (cancelled) return;
-        // Already what the room put us on — the host's choice and ours agree, or
-        // this episode carries neither. Forking would buy a second transcode of
-        // the same two tracks.
-        if (want.audioStreamId === v.audioStreamId
-            && want.subtitleStreamId === v.subtitleStreamId) return;
-        logEvent("Player", "restoring own tracks on the new episode", {
-          ratingKey: item.ratingKey,
-          from: v.variantKey,
-          to: `${want.audioStreamId}:${want.subtitleStreamId}`,
-        });
-        // Ours, not something the host did to us — so the "moved onto other
-        // tracks" overlay stays out of it.
-        askedForTracksRef.current = true;
-        syncActionsRef.current?.sendSetTracks(want.audioStreamId, want.subtitleStreamId);
+        const version = versionOf(await fetchMeta(item.ratingKey));
+
+        /**
+         * What this client was watching, described so it can be looked for here.
+         *
+         * The previous episode's own track list turns the pair of ids into a
+         * language and a flavour. That is a better source than the stored
+         * preference, which is one global slot shared by every show and
+         * overwritten by whoever last opened a picker — and which knows nothing
+         * at all about somebody who never opened one. The preference stays as
+         * the fallback for the first episode of a sitting, where there is no
+         * previous one to read.
+         */
+        let source: Parameters<typeof tracksForNewItem>[1] | null = null;
+        if (was) {
+          const before = versionOf(await fetchMeta(was.ratingKey));
+          source = describeWatched(before, was);
+          outcome = "from last episode";
+        }
+        if (!source?.audio && !source?.subtitle) {
+          source = { audio: loadAudioPref(), subtitle: loadSubtitlePref() };
+          outcome = "from saved preference";
+        }
+
+        want = tracksForNewItem(version, source, v);
       } catch {
-        // Metadata unavailable: the host's tracks are already playing, which is
-        // the fallback this would have chosen anyway.
+        outcome = "lookup failed";
       }
+      if (cancelled) return;
+
+      // Already what the room put us on — our tracks and the host's agree, or
+      // this episode carries neither. Forking would buy a second transcode of
+      // the same two tracks.
+      const same = want.audioStreamId === v.audioStreamId
+        && want.subtitleStreamId === v.subtitleStreamId;
+      // Logged either way. Silence here is what made the last round of this
+      // guesswork rather than diagnosis: "nothing happened" and "nothing needed
+      // to happen" looked identical from the outside.
+      logEvent("Player", same ? "keeping the room's tracks" : "restoring own tracks on the new episode", {
+        ratingKey: item.ratingKey,
+        was: was ? `${was.audioStreamId}:${was.subtitleStreamId}@${was.ratingKey}` : "none",
+        from: v.variantKey,
+        to: `${want.audioStreamId}:${want.subtitleStreamId}`,
+        source: outcome,
+      });
+      if (same) return;
+
+      // Ours, not something the host did to us — so the "moved onto other
+      // tracks" overlay stays out of it.
+      askedForTracksRef.current = true;
+      syncActionsRef.current?.sendSetTracks(want.audioStreamId, want.subtitleStreamId);
     })();
     return () => { cancelled = true; };
   }, [item.ratingKey, variant?.seq, isHost]);

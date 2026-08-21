@@ -162,6 +162,15 @@ export function saveAudioPref(track: StreamTrack | null): void {
 }
 
 /**
+ * Persist a pair already described from tracks that were actually playing.
+ * Missing sides are left alone; `{ off: true }` is not missing and is saved.
+ */
+export function saveTrackPrefs(prefs: TrackPrefs): void {
+  if (prefs.audio) write(AUDIO_KEY, prefs.audio);
+  if (prefs.subtitle) write(SUBTITLE_KEY, prefs.subtitle);
+}
+
+/**
  * Best match for the stored preference among a new episode's subtitle tracks.
  *
  * Returns the track to select, or `null` for "no subtitles" — which covers both

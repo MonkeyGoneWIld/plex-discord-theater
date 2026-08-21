@@ -14,7 +14,7 @@ import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, f
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
-import { describeWatched, loadAudioPref, loadSubtitlePref, mergeTrackPrefs, tracksForNewItem } from "../lib/trackPrefs";
+import { describeWatched, loadAudioPref, loadSubtitlePref, mergeTrackPrefs, saveTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { roomPositionNow } from "../hooks/useSync";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
@@ -499,6 +499,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
    */
   const watchingRef = useRef<{ ratingKey: string; audioStreamId: number; subtitleStreamId: number } | null>(null);
   const wasWatchingRef = useRef<{ ratingKey: string; audioStreamId: number; subtitleStreamId: number } | null>(null);
+  // Portable descriptions captured against the file this client is actually
+  // playing. Unlike a later metadata lookup, this cannot decode an old stream
+  // id against the wrong media version.
+  const watchedTrackPrefsRef = useRef<{ ratingKey: string; prefs: TrackPrefs } | null>(null);
   // Set when this client asked for the change itself — it already has its own
   // overlay up, and shouldn't be told it was moved.
   const askedForTracksRef = useRef(false);
@@ -1009,6 +1013,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     restoredTracksForRef.current = item.ratingKey;
 
     const was = wasWatchingRef.current;
+    // Snapshot before awaiting the new episode's metadata. Its own metadata
+    // effect may finish during that wait and replace the ref with the new pair.
+    const observedBeforeAdvance = watchedTrackPrefsRef.current;
     let cancelled = false;
     (async () => {
       let outcome = "no source";
@@ -1033,7 +1040,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         const saved = { audio: loadAudioPref(), subtitle: loadSubtitlePref() };
         let source = saved;
         if (was) {
-          try {
+          if (observedBeforeAdvance?.ratingKey === was.ratingKey) {
+            source = mergeTrackPrefs(observedBeforeAdvance.prefs, saved);
+            outcome = "from tracks observed on last episode, with saved fallback";
+          } else try {
             const before = versionOf(await fetchMeta(was.ratingKey));
             source = mergeTrackPrefs(describeWatched(before, was), saved);
             outcome = "from last episode, with saved fallback";
@@ -1250,6 +1260,23 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // otherwise the session's. Undefined resolves to the item's default, which is
   // the same file the server starts when nobody has said otherwise.
   const effectiveMediaIndex = mediaIndex ?? sessionMediaIndex ?? undefined;
+
+  /**
+   * Describe this client's live pair while its media version is still known.
+   * Episode changes replace stream ids and metadata independently, so all three
+   * rating-key guards are required before banking the answer for the next one.
+   */
+  useEffect(() => {
+    const v = variantRef.current;
+    if (
+      !itemMeta
+      || itemMeta.ratingKey !== item.ratingKey
+      || v?.ratingKey !== item.ratingKey
+    ) return;
+    const prefs = describeWatched(versionOf(itemMeta, effectiveMediaIndex), v);
+    if (!prefs.audio && !prefs.subtitle) return;
+    watchedTrackPrefsRef.current = { ratingKey: item.ratingKey, prefs };
+  }, [item.ratingKey, itemMeta, effectiveMediaIndex, variant?.seq]);
 
   /**
    * The parts of the metadata that belong to a file rather than to a title:
@@ -3284,6 +3311,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     if (!isHostRef.current) {
       syncActionsRef.current?.sendPlayItem(target.ratingKey);
       return;
+    }
+    // handlePlayNext resolves the new file from saved portable preferences.
+    // Refresh those from what the host is demonstrably playing now, rather
+    // than trusting the last picker interaction from this or another show.
+    const observed = watchedTrackPrefsRef.current;
+    if (observed?.ratingKey === itemRef.current.ratingKey) {
+      saveTrackPrefs(observed.prefs);
     }
     if (fromQueue) syncActionsRef.current?.sendQueueRemove(target.ratingKey);
     onPlayNext?.(target);

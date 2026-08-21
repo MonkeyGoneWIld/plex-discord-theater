@@ -215,8 +215,11 @@ console.log("\n— what you were watching describes what to look for —");
   const savedEnglishSubs: SubtitlePref = {
     off: false, languageCode: "eng", language: "English", codec: "srt", title: "English (SRT)",
   };
-  const filled = mergeTrackPrefs(partial, { audio: null, subtitle: savedEnglishSubs });
-  check("a missing watched subtitle falls back independently of resolved audio",
+  const staleEnglishAudio = audioPref({
+    languageCode: "eng", language: "English", codec: "ac3", channels: 6,
+  });
+  const filled = mergeTrackPrefs(partial, { audio: staleEnglishAudio, subtitle: savedEnglishSubs });
+  check("observed audio wins while a missing subtitle falls back independently",
     tracksForNewItem(now, filled, hostTracks),
     { audioStreamId: 91, subtitleStreamId: 92 });
 }

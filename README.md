@@ -11,7 +11,7 @@ sees the same thing at the same time — one person drives, everyone else follow
 > parties, and the awkward parts — playback sync, transcode teardown, host
 > handover — have been debugged against production logs rather than guessed at.
 > The sync protocol, person page and personal Plex account flow have harnesses
-> that run against a real WebSocket server and a stubbed Plex (`npm test`, 192
+> that run against a real WebSocket server and a stubbed Plex (`npm test`, 206
 > checks), but nothing runs them automatically, there is no external security
 > review, and no human has read every line.
 >
@@ -96,8 +96,10 @@ to everyone; audio and subtitles are each person's own.
   timeline: pause, seek and skip still land on the same frame for everybody,
   whatever they are listening to. Two people who pick the same thing share one
   transcode rather than starting two, and the host's own choice still carries
-  the room's default with it. Your subtitle choice follows you into the next
-  episode, matched by language rather than track number.
+  the room's default with it. Both choices follow you into the next episode,
+  matched by language rather than track number — so a dub stays a dub without
+  being re-picked every time, and a commentary track is never mistaken for the
+  film.
 - **Optional personal Plex history sync.** Each Discord user can link their own
   Plex account from the Activity. The first sync imports the complete,
   deduplicated Plex history; later syncs fetch only the changes since the last

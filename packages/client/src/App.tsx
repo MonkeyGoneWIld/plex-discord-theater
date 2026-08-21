@@ -13,7 +13,7 @@ import { InviteButton } from "./components/InviteButton";
 import { PlexAccountButton } from "./components/PlexAccountButton";
 import { formatMediaTitle } from "./lib/format";
 import { authUrl, fetchMeta, invalidateMeta, setStreams, versionOf } from "./lib/api";
-import { loadSubtitlePref, matchSubtitleTrack } from "./lib/subtitlePref";
+import { loadAudioPref, loadSubtitlePref, matchAudioTrack, matchSubtitleTrack } from "./lib/trackPrefs";
 import { useMediaQuery, MOBILE_LANDSCAPE_QUERY, NARROW_QUERY, PHONE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem } from "./hooks/useSync";
@@ -599,22 +599,35 @@ export function App() {
       // The version, not the title: a second file has its own part and its own
       // stream ids, and `meta`'s top-level fields describe only the first.
       const version = versionOf(meta);
-      const pref = loadSubtitlePref();
-      if (pref && version.partId != null) {
-        const match = matchSubtitleTrack(version.subtitleTracks, pref);
+      const subtitlePref = loadSubtitlePref();
+      const audioMatch = matchAudioTrack(version.audioTracks, loadAudioPref());
+      // Null means this episode doesn't carry the language they were listening
+      // to, and there is no sensible substitute — leave Plex's own choice.
+      audioStreamId = audioMatch?.id ?? version.audioTracks.find((t) => t.selected)?.id;
+
+      if (version.partId != null && (subtitlePref || audioMatch)) {
+        const subtitleMatch = subtitlePref
+          ? matchSubtitleTrack(version.subtitleTracks, subtitlePref)
+          : null;
+        if (subtitlePref) {
+          subtitles = subtitleMatch != null;
+          subtitleStreamId = subtitleMatch?.id ?? 0;
+        } else {
+          subtitleStreamId = version.subtitleTracks.find((t) => t.selected)?.id ?? 0;
+          subtitles = subtitleStreamId !== 0;
+        }
         // Selected before the player mounts: once the transcode has started,
-        // changing it costs a restart.
-        await setStreams(version.partId, { subtitleStreamID: match?.id ?? 0 });
+        // changing it costs a restart. One call, so an episode that needs both
+        // doesn't pay for two round trips before it can start.
+        await setStreams(version.partId, {
+          ...(subtitlePref ? { subtitleStreamID: subtitleMatch?.id ?? 0 } : {}),
+          ...(audioMatch ? { audioStreamID: audioMatch.id } : {}),
+        });
         invalidateMeta(queueItem.ratingKey);
-        subtitles = match != null;
-        subtitleStreamId = match?.id ?? 0;
       } else {
         subtitleStreamId = version.subtitleTracks.find((t) => t.selected)?.id ?? 0;
         subtitles = subtitleStreamId !== 0;
       }
-      // Audio is left as Plex has it; this only records *which* that is, so the
-      // switcher can tick it and a later change starts from the truth.
-      audioStreamId = version.audioTracks.find((t) => t.selected)?.id;
     } catch (err) {
       console.error("Failed to carry subtitle preference to next item:", err);
     }

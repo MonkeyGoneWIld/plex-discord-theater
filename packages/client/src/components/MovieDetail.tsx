@@ -3,7 +3,7 @@ import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, setStreams, g
 import { formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
-import { loadSubtitlePref, saveSubtitlePref, matchSubtitleTrack } from "../lib/subtitlePref";
+import { loadAudioPref, loadSubtitlePref, saveAudioPref, saveSubtitlePref, matchAudioTrack, matchSubtitleTrack } from "../lib/trackPrefs";
 import { RatingsRow } from "./RatingsRow";
 import { RelatedRows } from "./RelatedRows";
 import { CastRow } from "./CastRow";
@@ -257,7 +257,14 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
    */
   useEffect(() => {
     if (!meta) return;
-    const defaultAudio = audioTracks.find((t) => t.selected) ?? audioTracks[0];
+    // The remembered language wins over the file's own default, matched the
+    // same way subtitles are — a viewer who watches everything in Japanese
+    // should not have to say so on every episode. Falls back to the file's
+    // choice when it doesn't carry that language at all.
+    const defaultAudio =
+      matchAudioTrack(audioTracks, loadAudioPref())
+      ?? audioTracks.find((t) => t.selected)
+      ?? audioTracks[0];
     setSelectedAudio(defaultAudio ? defaultAudio.id : null);
     // Re-apply the viewer's remembered subtitle choice — matched by language
     // and flavour, since stream ids differ from episode to episode. With no
@@ -527,7 +534,13 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                     <TrackDropdown
                       value={selectedAudio != null ? String(selectedAudio) : ""}
                       options={audioTracks.map((t) => ({ value: String(t.id), label: t.title }))}
-                      onChange={(v) => setSelectedAudio(Number(v))}
+                      onChange={(v) => {
+                        const id = Number(v);
+                        setSelectedAudio(id);
+                        // Remembered by language, so the next episode comes up
+                        // on the same one.
+                        saveAudioPref(audioTracks.find((t) => t.id === id) ?? null);
+                      }}
                     />
                   </div>
                 )}

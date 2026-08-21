@@ -1,0 +1,176 @@
+import type { StreamTrack } from "./api";
+
+const SUBTITLE_KEY = "pdt:subtitlePref";
+const AUDIO_KEY = "pdt:audioPref";
+
+/**
+ * A remembered track choice, stored by *description* rather than by stream id.
+ *
+ * Plex assigns stream ids per media part, so the id of "English (SRT)" on S1E4
+ * says nothing about the same track on S1E5. What carries across episodes is the
+ * language and the flavour of the track, so that is what gets persisted and
+ * re-matched against the next episode's stream list.
+ */
+interface TrackPref {
+  languageCode?: string | null;
+  language?: string | null;
+  codec?: string | null;
+  /** Plex spells forced/SDH/commentary variants into the title, which is the
+   *  only place they appear — kept so "English Forced" doesn't match plain
+   *  "English", and so a commentary track isn't mistaken for the feature. */
+  title?: string | null;
+}
+
+export interface SubtitlePref extends TrackPref {
+  /** `true` means the user explicitly chose "None" — remembered, so an opt-out
+   *  isn't undone by a later episode that happens to have a default track. */
+  off: boolean;
+}
+
+export interface AudioPref extends TrackPref {
+  /** 2 for stereo, 6 for 5.1, and so on. A dub often ships in fewer channels
+   *  than the original, so this separates "the Japanese 5.1" from "the Japanese
+   *  stereo" when a file carries both. */
+  channels?: number | null;
+}
+
+/** Forced/SDH/CC flavour flags parsed out of a track title. */
+function flavour(title?: string | null): { forced: boolean; sdh: boolean } {
+  const t = (title ?? "").toLowerCase();
+  return { forced: t.includes("forced"), sdh: t.includes("sdh") || t.includes("cc") };
+}
+
+/**
+ * Whether an audio track is a commentary or description rather than the film.
+ *
+ * These sit in the same language as the feature, so language matching alone
+ * will happily land on one — and a viewer who asked for Japanese audio does not
+ * mean the director talking over it.
+ */
+function isCommentary(title?: string | null): boolean {
+  return /\b(commentary|descriptive|audio description)\b/i.test(title ?? "");
+}
+
+function sameLanguage(track: StreamTrack, pref: TrackPref): boolean {
+  return pref.languageCode && track.languageCode
+    ? track.languageCode === pref.languageCode
+    : (track.language ?? "").toLowerCase() === (pref.language ?? "").toLowerCase();
+}
+
+function describe(track: StreamTrack): TrackPref {
+  return {
+    languageCode: track.languageCode ?? null,
+    language: track.language ?? null,
+    codec: track.codec ?? null,
+    title: track.title ?? null,
+  };
+}
+
+function read<T>(key: string, valid: (parsed: unknown) => boolean): T | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return valid(parsed) ? (parsed as T) : null;
+  } catch {
+    // Storage unavailable or corrupt — fall back to "no preference".
+    return null;
+  }
+}
+
+function write(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Storage unavailable — the choice just won't outlive this episode.
+  }
+}
+
+export function loadSubtitlePref(): SubtitlePref | null {
+  return read<SubtitlePref>(SUBTITLE_KEY, (p) => typeof (p as SubtitlePref)?.off === "boolean");
+}
+
+/** Remember the subtitle just chosen. Pass `null` for the "None" option. */
+export function saveSubtitlePref(track: StreamTrack | null): void {
+  write(SUBTITLE_KEY, track ? { off: false, ...describe(track) } : { off: true });
+}
+
+export function loadAudioPref(): AudioPref | null {
+  return read<AudioPref>(AUDIO_KEY, (p) => !!p && typeof p === "object");
+}
+
+/** Remember the audio track just chosen. There is no "off" — every file has audio. */
+export function saveAudioPref(track: StreamTrack | null): void {
+  if (!track) return;
+  write(AUDIO_KEY, { ...describe(track), channels: track.channels ?? null });
+}
+
+/**
+ * Best match for the stored preference among a new episode's subtitle tracks.
+ *
+ * Returns the track to select, or `null` for "no subtitles" — which covers both
+ * a remembered opt-out and a preference nothing in this episode satisfies.
+ *
+ * Matching is deliberately graded rather than exact: an episode may carry the
+ * same language in a different container (SRT vs PGS) or without the forced
+ * flag, and falling back to "English anything" is far closer to what the viewer
+ * asked for than silently turning subtitles off.
+ */
+export function matchSubtitleTrack(
+  tracks: StreamTrack[],
+  pref: SubtitlePref | null,
+): StreamTrack | null {
+  if (!pref || pref.off || tracks.length === 0) return null;
+
+  const wantFlavour = flavour(pref.title);
+  const sameLang = tracks.filter((t) => sameLanguage(t, pref));
+  if (sameLang.length === 0) return null;
+
+  // Rank within the language: flavour (forced/SDH) matters most, then codec.
+  const scored = sameLang.map((t) => {
+    const f = flavour(t.title);
+    let score = 0;
+    if (f.forced === wantFlavour.forced) score += 4;
+    if (f.sdh === wantFlavour.sdh) score += 2;
+    if (pref.codec && t.codec === pref.codec) score += 1;
+    return { t, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0].t;
+}
+
+/**
+ * Best match for the stored audio preference among a new episode's tracks.
+ *
+ * Returns `null` when the preference names a language this file doesn't carry,
+ * which the caller should read as "leave Plex's own choice alone" — unlike
+ * subtitles, there is no sensible way to turn audio off, and picking some other
+ * language because the wanted one is missing would be worse than the default.
+ *
+ * Ranks commentary above everything else it considers, in the sense that a
+ * commentary track is only ever chosen for somebody who was listening to one:
+ * a dub and its director's commentary share a language, and landing on the
+ * wrong one is the difference between watching the film and not.
+ */
+export function matchAudioTrack(
+  tracks: StreamTrack[],
+  pref: AudioPref | null,
+): StreamTrack | null {
+  if (!pref || tracks.length === 0) return null;
+
+  const wantCommentary = isCommentary(pref.title);
+  const sameLang = tracks.filter((t) => sameLanguage(t, pref));
+  if (sameLang.length === 0) return null;
+
+  const scored = sameLang.map((t) => {
+    let score = 0;
+    if (isCommentary(t.title) === wantCommentary) score += 8;
+    if (pref.channels != null && t.channels === pref.channels) score += 4;
+    if (pref.codec && t.codec === pref.codec) score += 1;
+    return { t, score };
+  });
+  // Stable, so an equal score keeps Plex's own ordering — which is the file's
+  // track order, and the closest thing to a default it has.
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0].t;
+}

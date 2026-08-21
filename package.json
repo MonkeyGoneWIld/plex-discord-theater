@@ -28,7 +28,7 @@
   "scripts": {
     "dev": "concurrently -n server,client -c blue,green \"npm run dev -w packages/server\" \"npm run dev -w packages/client\"",
     "build": "npm run build -w packages/client && npm run build -w packages/server",
-    "test": "tsx packages/server/test/variant-sync.test.ts && tsx packages/server/test/person-page.test.ts && tsx packages/server/test/plex-account-sync.test.ts",
+    "test": "tsx packages/server/test/variant-sync.test.ts && tsx packages/server/test/person-page.test.ts && tsx packages/server/test/plex-account-sync.test.ts && tsx packages/client/test/track-prefs.test.ts",
     "start": "npm run start -w packages/server",
     "docker:build": "source .env && docker buildx build --platform linux/amd64 --build-arg VITE_DISCORD_CLIENT_ID=$DISCORD_CLIENT_ID -t zubywastaken/plex-discord-theater:latest --load .",
     "docker:push": "docker push zubywastaken/plex-discord-theater:latest",

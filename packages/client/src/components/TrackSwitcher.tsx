@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { fetchMeta, versionOf, type StreamTrack } from "../lib/api";
-import { saveSubtitlePref } from "../lib/subtitlePref";
+import { saveAudioPref, saveSubtitlePref } from "../lib/trackPrefs";
 
 interface TrackSwitcherProps {
   ratingKey: string;
@@ -70,6 +70,9 @@ export function TrackSwitcher({
   const handleSelect = (type: "audio" | "subtitle", streamId: number) => {
     if (partId == null) return;
     if (type === "audio") {
+      // Remembered by language, like the subtitle below, so the next episode
+      // starts on the same one rather than the file's default.
+      saveAudioPref(audioTracks.find((t) => t.id === streamId) ?? null);
       onTrackChange(partId, streamId, undefined);
     } else {
       // Remember the choice (streamId 0 is the "None" row) so the next episode

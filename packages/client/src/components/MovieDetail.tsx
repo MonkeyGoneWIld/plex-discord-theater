@@ -587,10 +587,6 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                   </span>
                 </div>
               )}
-              {isHost && progress?.watched && (
-                <div style={styles.watchedNote}>You've finished this</div>
-              )}
-
               {/* Play / Waiting */}
               <div style={{ ...styles.actions, ...(narrow ? styles.actionsNarrow : {}) }}>
                 {isHost ? (
@@ -1091,12 +1087,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "13px",
     fontWeight: 500,
     whiteSpace: "nowrap" as const,
-  },
-  watchedNote: {
-    marginTop: "24px",
-    color: "#6a9955",
-    fontSize: "13px",
-    fontWeight: 600,
   },
   errorText: {
     color: "#e74c3c",

@@ -461,6 +461,12 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
   );
 }
 
+/** What holds an episode's watched checkbox off the edge of its column: the
+ *  card's own padding, and the border outside that. The season header has no
+ *  card and reproduces both — see seasonWatchedAction. */
+const EPISODE_CARD_PADDING_PX = 10;
+const EPISODE_CARD_BORDER_PX = 1;
+
 const styles: Record<string, React.CSSProperties> = {
   page: { minHeight: "100vh", background: "#0d0d0d" },
   backBtn: {
@@ -500,8 +506,9 @@ const styles: Record<string, React.CSSProperties> = {
     // borderColor override doesn't fall back to this line — it falls back to
     // the CSS initial value, currentColor, i.e. the near-white text colour. That
     // left every hovered card wearing a solid white border afterwards.
-    display: "flex", gap: "14px", padding: "10px", borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.03)",
+    display: "flex", gap: "14px", padding: `${EPISODE_CARD_PADDING_PX}px`, borderRadius: "8px",
+    border: `${EPISODE_CARD_BORDER_PX}px solid rgba(255,255,255,0.06)`,
+    background: "rgba(255,255,255,0.03)",
     cursor: "pointer", color: "inherit", textAlign: "left", fontFamily: "inherit",
     transition: "all 0.2s ease", width: "100%",
   },
@@ -534,10 +541,21 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px",
     padding: "0 24px 16px", maxWidth: "1100px", margin: "0 auto",
   },
-  // Episode cards have 10px of inner padding before their 46px checkbox. Give
-  // the season-wide checkbox the same inset so every watched control occupies
-  // one clean column instead of the header control sitting farther right.
-  seasonWatchedAction: { flexShrink: 0, marginRight: "10px" },
+  /**
+   * The season-wide checkbox, inset to land in the same column as the episode
+   * ones below it.
+   *
+   * An episode's checkbox sits inside a card, so it is held off the column edge
+   * by the card's padding *and* its border. The header control has no card, so
+   * it has to reproduce both — matching only the padding, as this did, left it
+   * exactly one pixel to the right of every tick it heads, which is visible the
+   * moment they are stacked in a column. Spelled out as an expression so the
+   * two cannot drift apart again.
+   */
+  seasonWatchedAction: {
+    flexShrink: 0,
+    marginRight: `${EPISODE_CARD_PADDING_PX + EPISODE_CARD_BORDER_PX}px`,
+  },
   watchedError: {
     padding: "9px 12px", borderRadius: "7px", border: "1px solid rgba(212,119,119,0.25)",
     background: "rgba(212,119,119,0.07)", color: "#d47777", fontSize: "12px",

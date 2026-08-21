@@ -52,7 +52,7 @@ export function PeoplePanel({
       <div style={styles.panel} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
           <h3 style={styles.title}>People ({participants.length})</h3>
-          <button onClick={onClose} style={styles.closeBtn}>&times;</button>
+          <button className="btn" onClick={onClose} style={styles.closeBtn}>&times;</button>
         </div>
 
         {/* Inviting lives here during playback rather than in the control bar:
@@ -88,14 +88,14 @@ export function PeoplePanel({
                 {/* Only the host manages roles, and never on themselves. */}
                 {isHost && !p.isHost && (
                   <div style={styles.actions}>
-                    <button
+                    <button className="btn"
                       onClick={() => onSetCoHost(p.userId, !p.isCoHost)}
                       style={p.isCoHost ? styles.revokeBtn : styles.grantBtn}
                     >
                       {p.isCoHost ? "Revoke" : "Co-host"}
                     </button>
                     {confirmingPromote === p.userId ? (
-                      <button
+                      <button className="btn"
                         onClick={() => {
                           setConfirmingPromote(null);
                           onPromoteHost(p.userId);
@@ -105,7 +105,7 @@ export function PeoplePanel({
                         Confirm
                       </button>
                     ) : (
-                      <button
+                      <button className="btn"
                         onClick={() => setConfirmingPromote(p.userId)}
                         style={styles.promoteBtn}
                       >

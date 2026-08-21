@@ -10,10 +10,10 @@ sees the same thing at the same time — one person drives, everyone else follow
 > than typed out and reviewed line by line by a person. It does run real watch
 > parties, and the awkward parts — playback sync, transcode teardown, host
 > handover — have been debugged against production logs rather than guessed at.
-> The sync protocol and the person page have harnesses that run against a real
-> WebSocket server and a stubbed Plex (`npm test`, 116 checks), but nothing runs
-> them automatically, there is no external security review, and no human has read
-> every line.
+> The sync protocol, person page and personal Plex account flow have harnesses
+> that run against a real WebSocket server and a stubbed Plex (`npm test`, 221
+> checks), but nothing runs them automatically, there is no external security
+> review, and no human has read every line.
 >
 > Treat it accordingly: great for watching films with friends on a server you
 > control, not something to put in front of the open internet or trust with
@@ -81,9 +81,10 @@ to everyone; audio and subtitles are each person's own.
   has to rebuild its stream — a track change, a seek, walking back into the
   player — rejoins at where the room has got to, not where it left.
 - **Co-hosts and host handover.** Hand out playback control, or the host role
-  itself, from the people panel. Roles belong to the person, not the connection,
-  so a dropped WiFi signal doesn't silently demote anyone. If the host leaves, a
-  co-host takes over and the film keeps going.
+  itself, from the people panel. Passing the role leaves you a co-host, so you
+  still have the pause button a second after giving it away. Roles belong to the
+  person, not the connection, so a dropped WiFi signal doesn't silently demote
+  anyone. If the host leaves, a co-host takes over and the film keeps going.
 - **Browse and search your whole library** — filters, sorting, Cast & Crew
   pages. Search takes in Plex Discover too, so titles you don't own show up
   badged **Not in library**, with a Request button if you run Overseerr or
@@ -96,8 +97,20 @@ to everyone; audio and subtitles are each person's own.
   timeline: pause, seek and skip still land on the same frame for everybody,
   whatever they are listening to. Two people who pick the same thing share one
   transcode rather than starting two, and the host's own choice still carries
-  the room's default with it. Your subtitle choice follows you into the next
-  episode, matched by language rather than track number.
+  the room's default with it. Both choices follow you into the next episode,
+  matched by language rather than track number — yours as well as the host's, so
+  a dub stays a dub without being re-picked every time, and a commentary track is
+  never mistaken for the film. Where an episode doesn't carry the language you
+  were on, you get the host's rather than silence.
+- **Optional personal Plex history sync.** Each Discord user can link their own
+  Plex account from the Activity. The first sync imports the complete,
+  deduplicated Plex history; later syncs fetch only the changes since the last
+  successful run, while current resume positions are always refreshed. History
+  is not capped or pruned. Linking a different Plex identity starts that Discord
+  user with clean Activity history so state never crosses accounts. Every linked
+  participant who actually has the player open receives credit — not only the
+  host. Plex passwords never enter this app; personal tokens stay encrypted on
+  the server and separate from the shared token used to stream the library.
 - **Play Version.** When a title has more than one version in Plex, pick which
   one plays. The 4K version is hidden whenever there's a 1080p or lower one
   alongside it — everything is transcoded to 1080p anyway, so streaming the 4K
@@ -221,6 +234,7 @@ a bug. The server prints which are live at startup:
 | `TVDB_API_KEY` | Accurate season numbering for the missing-episode list | Free — [thetvdb.com](https://thetvdb.com/api-information) |
 | `MDBLIST_API_KEY` | IMDb, Rotten Tomatoes and TMDB scores | Free — [mdblist.com](https://mdblist.com/preferences) → API Access |
 | `PLEX_ACCOUNT_TOKEN` | Detail pages for titles you don't own; signs in to Seerr as you | Your **account** token (not the server one) from an app.plex.tv request |
+| `PLEX_LINK_SECRET` | Stable encryption key for users' linked Plex tokens | A long random value; falls back to `DISCORD_CLIENT_SECRET` |
 | `SEERR_URL` | Request button on titles you don't have | Your Overseerr / Jellyseerr URL |
 | `VPS_RELAY_URL` + `VPS_RELAY_KEY` | [Relay](#vps-relay) — one upstream stream instead of one per viewer | Your own VPS |
 | `ALLOWED_GUILD_IDS` | Restricts the activity to named Discord servers | Comma-separated guild IDs. Unset = any server |
@@ -280,8 +294,11 @@ Discord voice channel
 
 The first person to join becomes the host. Everyone else follows over a
 WebSocket. The backend proxies every Plex API call and every video segment, so
-**your Plex token never reaches a browser**. Sessions, host roles, watch history
-and artwork live in SQLite and survive restarts.
+**Plex tokens never reach a browser**. Sessions, host roles, watch history and
+artwork live in SQLite and survive restarts. The shared `PLEX_TOKEN` browses and
+streams the server; optional personal account tokens are encrypted separately,
+keyed by verified Discord user ID, and used only for that person's watch-state
+sync.
 
 ### Getting video to everyone
 

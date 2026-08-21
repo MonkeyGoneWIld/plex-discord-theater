@@ -72,7 +72,7 @@ export function SeasonRequestGrid({
         <h2 style={styles.title}>{title}</h2>
         {requestable.length > 0 && (
           <div style={styles.controls}>
-            <button
+            <button className="btn"
               onClick={() =>
                 setSelected(
                   selected.size === requestable.length
@@ -84,7 +84,7 @@ export function SeasonRequestGrid({
             >
               {selected.size === requestable.length ? "Clear" : "Select all missing"}
             </button>
-            <button
+            <button className="btn"
               onClick={submit}
               disabled={selected.size === 0 || requesting}
               style={{

@@ -3,12 +3,13 @@ import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, setStreams, g
 import { formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
-import { loadSubtitlePref, saveSubtitlePref, matchSubtitleTrack } from "../lib/subtitlePref";
+import { loadAudioPref, loadSubtitlePref, saveAudioPref, saveSubtitlePref, matchAudioTrack, matchSubtitleTrack } from "../lib/trackPrefs";
 import { RatingsRow } from "./RatingsRow";
 import { RelatedRows } from "./RelatedRows";
 import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
 import { DetailLoading } from "./DetailLoading";
+import { PlexMediaActions } from "./PlexMediaActions";
 import type { QueueItem, SuggestionItem } from "../hooks/useSync";
 
 interface MovieDetailProps {
@@ -109,7 +110,7 @@ function TrackDropdown({
 
   return (
     <div ref={ref} style={dropdownStyles.wrap}>
-      <button type="button" onClick={() => setOpen((o) => !o)} style={dropdownStyles.trigger}>
+      <button className="btn" type="button" onClick={() => setOpen((o) => !o)} style={dropdownStyles.trigger}>
         <span style={dropdownStyles.triggerLabel}>{selected?.label ?? ""}</span>
         <svg width="10" height="6" viewBox="0 0 10 6" fill="none" style={{ flexShrink: 0, marginLeft: 8 }}>
           <path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
@@ -118,7 +119,7 @@ function TrackDropdown({
       {open && (
         <div style={dropdownStyles.menu}>
           {options.map((o) => (
-            <button
+            <button className="btn"
               key={o.value}
               type="button"
               onClick={() => { onChange(o.value); setOpen(false); }}
@@ -209,8 +210,8 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   // Reveal gate — see `pageReady`.
   const [posterLoaded, setPosterLoaded] = useState(false);
   const [ratingsReady, setRatingsReady] = useState(false);
-  // The host's own saved position for this item, or null if they've never
-  // played it. Only the host can start playback, so only the host fetches it.
+  // This viewer's saved position for the item, or null if they've never played
+  // it. Playback controls remain host-only; linked-account actions do not.
   const [progress, setProgress] = useState<HistoryEntry | null>(null);
   // Phone portrait: the poster and the detail column can't sit side by side.
   // At 390px the fixed 240px poster leaves the text roughly 66px, which wraps
@@ -256,7 +257,14 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
    */
   useEffect(() => {
     if (!meta) return;
-    const defaultAudio = audioTracks.find((t) => t.selected) ?? audioTracks[0];
+    // The remembered language wins over the file's own default, matched the
+    // same way subtitles are — a viewer who watches everything in Japanese
+    // should not have to say so on every episode. Falls back to the file's
+    // choice when it doesn't carry that language at all.
+    const defaultAudio =
+      matchAudioTrack(audioTracks, loadAudioPref())
+      ?? audioTracks.find((t) => t.selected)
+      ?? audioTracks[0];
     setSelectedAudio(defaultAudio ? defaultAudio.id : null);
     // Re-apply the viewer's remembered subtitle choice — matched by language
     // and flavour, since stream ids differ from episode to episode. With no
@@ -271,18 +279,34 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   // is watched, and a stale resume point is worse than an extra request.
   useEffect(() => {
     setProgress(null);
-    if (!isHost) return;
     let cancelled = false;
     fetchProgress(item.ratingKey)
       .then((r) => { if (!cancelled) setProgress(r.progress); })
       .catch(() => { /* resume is a convenience — never block playback on it */ });
     return () => { cancelled = true; };
-  }, [item.ratingKey, isHost]);
+  }, [item.ratingKey]);
 
   const handlePlay = useCallback(async (resumeFromMs?: number) => {
     if (!partId) return;
     try {
       setError(null);
+      /**
+       * What you pressed play on is what you want to keep watching.
+       *
+       * The pickers already saved on *change*, which quietly missed the most
+       * ordinary case of all: accepting what was preselected. Somebody who
+       * started a season on its default Japanese audio had no stored preference
+       * at all, so when they handed the host role over and the new host moved to
+       * the next episode, there was nothing to carry and they were pulled onto
+       * the new host's tracks. Changing a picker — to anything, even back again
+       * — fixed it, which is how it was found.
+       *
+       * Recording the choice here covers both, and reads the same either way:
+       * this is the pair the viewer chose to watch, whether they went looking
+       * for it or simply left it alone.
+       */
+      saveAudioPref(audioTracks.find((t) => t.id === selectedAudio) ?? null);
+      saveSubtitlePref(subtitleTracks.find((t) => t.id === selectedSubtitle) ?? null);
       if (selectedAudio != null) {
         await setStreams(partId, {
           audioStreamID: selectedAudio,
@@ -304,7 +328,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
       console.error("Failed to set streams:", err);
       setError("Failed to configure playback. Please try again.");
     }
-  }, [partId, selectedAudio, selectedSubtitle, item, onPlay, selectedVersion]);
+  }, [partId, selectedAudio, selectedSubtitle, audioTracks, subtitleTracks, item, onPlay, selectedVersion]);
 
   // Offer a resume only for a genuine part-watch: far enough in to matter, and
   // not already finished (the server flags that, so a rewatch starts clean).
@@ -373,7 +397,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
       )}
 
       {/* Back button */}
-      <button onClick={onBack} style={styles.backBtn}>
+      <button className="btn" onClick={onBack} style={styles.backBtn}>
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
           <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
@@ -527,7 +551,13 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                     <TrackDropdown
                       value={selectedAudio != null ? String(selectedAudio) : ""}
                       options={audioTracks.map((t) => ({ value: String(t.id), label: t.title }))}
-                      onChange={(v) => setSelectedAudio(Number(v))}
+                      onChange={(v) => {
+                        const id = Number(v);
+                        setSelectedAudio(id);
+                        // Remembered by language, so the next episode comes up
+                        // on the same one.
+                        saveAudioPref(audioTracks.find((t) => t.id === id) ?? null);
+                      }}
                     />
                   </div>
                 )}
@@ -562,8 +592,8 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                 </p>
               )}
 
-              {/* Progress from a previous sitting — host only, since only the
-                  host's history is tracked and only the host can resume it. */}
+              {/* Progress belongs to the current user. Only the host can turn
+                  their resume choice into the room's shared playback. */}
               {isHost && progressRatio != null && resumeMs != null && (
                 <div style={styles.progressWrap}>
                   <div style={styles.progressTrack}>
@@ -574,17 +604,22 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                   </span>
                 </div>
               )}
-              {isHost && progress?.watched && (
-                <div style={styles.watchedNote}>You've finished this</div>
+              {/* Above the row rather than inside it. The row is what you can
+                  press, and it lines its children up in one horizontal band —
+                  so a paragraph in there is a very wide sibling, and everything
+                  after it starts where the *text* ends. That is what pushed a
+                  viewer's watched tick out past the end of a sentence while the
+                  host's sat neatly beside Play. */}
+              {!isHost && (
+                <p style={styles.waitingText}>Waiting for the host to start playback...</p>
               )}
-
               {/* Play / Waiting */}
               <div style={{ ...styles.actions, ...(narrow ? styles.actionsNarrow : {}) }}>
                 {isHost ? (
                   <>
                     {resumeMs != null ? (
                       <>
-                        <button
+                        <button className="btn"
                           onClick={() => handlePlay(resumeMs)}
                           disabled={!meta}
                           style={{ ...styles.playBtn, ...(narrow ? styles.playBtnNarrow : {}), ...(meta ? {} : styles.btnPending) }}
@@ -594,7 +629,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                           </svg>
                           Resume from {formatTimecode(resumeMs)}
                         </button>
-                        <button
+                        <button className="btn"
                           onClick={() => handlePlay()}
                           disabled={!meta}
                           style={{ ...styles.startOverBtn, ...(narrow ? styles.startOverBtnNarrow : {}), ...(meta ? {} : styles.btnPending) }}
@@ -603,7 +638,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                         </button>
                       </>
                     ) : (
-                      <button
+                      <button className="btn"
                         onClick={() => handlePlay()}
                         disabled={!meta}
                         style={{ ...styles.playBtn, ...(narrow ? styles.playBtnNarrow : {}), ...(meta ? {} : styles.btnPending) }}
@@ -615,7 +650,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                       </button>
                     )}
                     {isPlaying && onAddToQueue && (
-                      <button
+                      <button className="btn"
                         onClick={() => {
                           if (!meta) return;
                           onAddToQueue({
@@ -637,10 +672,9 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                     )}
                   </>
                 ) : (
-                  <div style={styles.viewerActions}>
-                    <p style={styles.waitingText}>Waiting for the host to start playback...</p>
+                  <>
                     {onSuggest && (
-                      <button
+                      <button className="btn"
                         onClick={() => {
                           onSuggest({
                             ratingKey: item.ratingKey,
@@ -662,8 +696,14 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                         {suggested ? "Suggested to host \u2713" : "Suggest to Host"}
                       </button>
                     )}
-                  </div>
+                  </>
                 )}
+                <PlexMediaActions
+                  item={item}
+                  progress={progress}
+                  onProgressChange={setProgress}
+                  inline
+                />
               </div>
             </div>
           </div>
@@ -1006,12 +1046,10 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#888",
     fontSize: "15px",
     fontStyle: "italic",
-  },
-  viewerActions: {
-    display: "flex",
-    flexDirection: "column" as const,
-    gap: "12px",
-    alignItems: "flex-start",
+    // Its own line above the actions row, with the same gap the row's own
+    // margin gives — see the note where it is rendered.
+    marginTop: "28px",
+    marginBottom: "-16px",
   },
   suggestBtn: {
     padding: "10px 22px",
@@ -1072,12 +1110,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "13px",
     fontWeight: 500,
     whiteSpace: "nowrap" as const,
-  },
-  watchedNote: {
-    marginTop: "24px",
-    color: "#6a9955",
-    fontSize: "13px",
-    fontWeight: 600,
   },
   errorText: {
     color: "#e74c3c",

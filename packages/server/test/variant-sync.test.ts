@@ -105,6 +105,10 @@ console.log("\n— everyone starts on the host's stream —");
   const [host, a, b] = await room("inst-1", ["host", "a", "b"]);
   const sid = await startPlayback(host);
   check("host is on its own stream", host.stream()?.key, "1:0");
+  // Which title the assignment is for. A client is told about the item and the
+  // stream in two messages that do not always land together, so anything acting
+  // on a change of title needs to tell a fresh assignment from a leftover one.
+  check("and it names the title it is for", a.last("variant")?.ratingKey, "100");
   check("viewer a shares it", a.stream()?.key, "1:0");
   check("viewer b shares it", b.stream()?.key, "1:0");
   check("one Plex session between them", new Set([a.stream()?.session, b.stream()?.session]).size, 1);
@@ -196,6 +200,46 @@ console.log("\n— succession prefers someone on the host's stream —");
     a.last("host-promoted") !== undefined, true);
   check("the co-host is told, not promoted", b.last("host-promoted"), undefined);
   [a, b, c].forEach((x) => x.close());
+}
+
+console.log("\n— handing the role over leaves you a co-host —");
+{
+  const [host, a, b] = await room("inst-9b", ["host", "a", "b"]);
+  await startPlayback(host);
+  [host, a, b].forEach((c) => c.clear());
+
+  host.send({ type: "promote-host", userId: "u-a" });
+  await sleep(80);
+
+  const roster = (b.last("participants")?.participants ?? []) as Array<any>;
+  const role = (id: string) => {
+    const p = roster.find((x) => x.userId === id);
+    return p ? [p.isHost === true, p.isCoHost === true] : "missing";
+  };
+
+  check("the target is host", role("u-a"), [true, false]);
+  // Passing the role is usually "you drive for a bit", not "I am done here".
+  check("the outgoing host keeps transport control", role("u-host"), [false, true]);
+  check("nobody else gained anything", role("u-b"), [false, false]);
+  // The role and the stream must transfer as one operation. A host that still
+  // follows somebody else's stream cannot start/announce the next episode.
+  check("the new host drives the inherited stream", a.stream()?.owner, true);
+  check("the outgoing host no longer drives it", host.stream()?.owner, false);
+
+  // And it is a real grant, not a label: a co-host may pause the room.
+  b.clear();
+  host.send({ type: "pause", position: 120 });
+  await sleep(60);
+  check("and can actually use it", !!b.last("pause"), true);
+
+  // The new host outranks it and can take it away again.
+  a.send({ type: "set-cohost", userId: "u-host", value: false });
+  await sleep(60);
+  const after = (b.last("participants")?.participants ?? []) as Array<any>;
+  check("the new host can withdraw it",
+    after.find((x) => x.userId === "u-host")?.isCoHost === true, false);
+
+  [host, a, b].forEach((c) => c.close());
 }
 
 console.log("\n— a successor on another stream strands nobody —");

@@ -13,6 +13,7 @@ import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
 import { SeasonRequestGrid } from "./SeasonRequestGrid";
 import { DetailLoading } from "./DetailLoading";
+import { PlexMediaActions } from "./PlexMediaActions";
 
 interface ShowDetailProps {
   item: PlexItem;
@@ -155,7 +156,7 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
       )}
 
       {/* Back button */}
-      <button onClick={onBack} style={styles.backBtn}>
+      <button className="btn" onClick={onBack} style={styles.backBtn}>
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
           <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
@@ -230,33 +231,34 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
                   view rather than playing outright, so the audio/subtitle choice
                   and the Resume/Start Over decision still happen there — the same
                   route every other play in the app takes. */}
-              {nextUp && onSelectEpisode && (
-                <button
-                  onClick={() => onSelectEpisode(historyEntryToItem(nextUp))}
-                  style={styles.resumeBtn}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = "#f0ad1a"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = "#e5a00d"; }}
-                >
-                  <svg width="20" height="20" viewBox="0 0 22 22" fill="none" style={{ flexShrink: 0 }}>
-                    <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor"/>
-                  </svg>
-                  <span style={styles.resumeText}>
-                    <span style={styles.resumeLabel}>
-                      {/* Mid-episode reads as resuming; a fresh episode as
-                          continuing the show. */}
-                      {nextUp.positionMs > 0 ? "Resume Watching" : "Continue Watching"}
+              <div style={styles.titleActions}>
+                {nextUp && onSelectEpisode && (
+                  <button className="btn"
+                    onClick={() => onSelectEpisode(historyEntryToItem(nextUp))}
+                    style={styles.resumeBtn}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 22 22" fill="none" style={{ flexShrink: 0 }}>
+                      <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor"/>
+                    </svg>
+                    <span style={styles.resumeText}>
+                      <span style={styles.resumeLabel}>
+                        {/* Mid-episode reads as resuming; a fresh episode as
+                            continuing the show. */}
+                        {nextUp.positionMs > 0 ? "Resume Watching" : "Continue Watching"}
+                      </span>
+                      <span style={styles.resumeEpisode}>
+                        {nextUp.parentIndex != null && nextUp.index != null
+                          ? `Season ${nextUp.parentIndex} · Episode ${nextUp.index}`
+                          : nextUp.title}
+                        {nextUp.parentIndex != null && nextUp.index != null && ` — ${nextUp.title}`}
+                        {nextUp.positionMs > 0 && nextUp.durationMs > 0 &&
+                          ` · ${formatTimecode(nextUp.durationMs - nextUp.positionMs)} left`}
+                      </span>
                     </span>
-                    <span style={styles.resumeEpisode}>
-                      {nextUp.parentIndex != null && nextUp.index != null
-                        ? `Season ${nextUp.parentIndex} · Episode ${nextUp.index}`
-                        : nextUp.title}
-                      {nextUp.parentIndex != null && nextUp.index != null && ` — ${nextUp.title}`}
-                      {nextUp.positionMs > 0 && nextUp.durationMs > 0 &&
-                        ` · ${formatTimecode(nextUp.durationMs - nextUp.positionMs)} left`}
-                    </span>
-                  </span>
-                </button>
-              )}
+                  </button>
+                )}
+                <PlexMediaActions item={item} inline />
+              </div>
             </div>
           </div>
 
@@ -489,6 +491,9 @@ const styles: Record<string, React.CSSProperties> = {
     transition: "background 0.15s ease",
     boxShadow: "0 4px 20px rgba(229,160,13,0.3)",
     maxWidth: "100%",
+  },
+  titleActions: {
+    display: "flex", alignItems: "center", flexWrap: "wrap", gap: "10px",
   },
   resumeText: {
     display: "flex",

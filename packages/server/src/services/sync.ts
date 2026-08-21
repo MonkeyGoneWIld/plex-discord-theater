@@ -6,6 +6,7 @@ import { plexFetch } from "./plex.js";
 import { getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode, stopTranscodeSession, protectSession, releaseSession } from "../routes/plex.js";
 import { createTracker, handleTrackerSocket, destroyTracker } from "./tracker.js";
 import { recordProgress } from "./watch-history.js";
+import { pushProgressToPlex } from "./plex-accounts.js";
 import { logEvent } from "./logger.js";
 
 /** Interval between WebSocket pings to detect dead connections. */
@@ -457,9 +458,19 @@ function membersOf(room: Room, key: string): RoomClient[] {
 }
 
 /** What a client needs to play a stream: which one, and whether they drive it. */
-function variantMessage(v: Variant, isOwner: boolean) {
+/**
+ * A stream assignment, stamped with the title it is for.
+ *
+ * The title matters because a client is told about the item and about the
+ * stream in two separate messages, and they do not always land in the same
+ * frame. Without it, anything reacting to "I have been moved to a new title"
+ * could read the assignment left over from the previous one and take it for the
+ * new one's.
+ */
+function variantMessage(v: Variant, isOwner: boolean, ratingKey: string | null) {
   return {
     type: "variant",
+    ratingKey,
     variantKey: v.key,
     audioStreamId: v.audioStreamId,
     subtitleStreamId: v.subtitleStreamId,
@@ -472,7 +483,7 @@ function variantMessage(v: Variant, isOwner: boolean) {
 /** Tell each member of a stream what it is now — including who drives it. */
 function announceVariant(room: Room, v: Variant): void {
   for (const c of membersOf(room, v.key)) {
-    sendTo(c.ws, variantMessage(v, c.userId === v.ownerUserId));
+    sendTo(c.ws, variantMessage(v, c.userId === v.ownerUserId, room.state.ratingKey));
   }
 }
 
@@ -682,13 +693,12 @@ function interpolatedPosition(state: RoomState): number {
 const FORCED_PERSIST_MIN_INTERVAL_MS = 2_000;
 
 /**
- * Save the room's position to the host's watch history.
+ * Save the room's position for everyone who is actually watching.
  *
- * The room position is the host's own playhead (they're the only one who sends
- * heartbeats), so recording it against the host user id needs nothing from the
- * client. `hostUserId` is passed explicitly rather than looked up, because the
- * one caller that matters most — a host disconnecting — has to attribute the
- * progress to the *departing* host, before the successor is installed.
+ * The host's playhead is still the single room timeline, but every unique
+ * Discord user with the player open gets that progress in their own history.
+ * `extraUserId` preserves the departing host's final position after their
+ * socket has already been removed from room.clients.
  *
  * Unforced calls are throttled inside the history service; pause, seek, stop and
  * disconnect force a write so the final position always lands. Fire-and-forget:
@@ -696,11 +706,11 @@ const FORCED_PERSIST_MIN_INTERVAL_MS = 2_000;
  */
 function persistProgress(
   room: Room,
-  hostUserId: string | undefined,
+  extraUserId: string | undefined,
   force: boolean | "always",
 ): void {
   const ratingKey = room.state.ratingKey;
-  if (!hostUserId || !ratingKey) return;
+  if (!ratingKey) return;
   let forced = force !== false;
   if (force === true) {
     const now = Date.now();
@@ -709,9 +719,20 @@ function persistProgress(
   } else if (force === "always") {
     room.lastForcedPersistAt = Date.now();
   }
-  recordProgress(hostUserId, ratingKey, interpolatedPosition(room.state), { force: forced }).catch(
-    (err) => console.error("[History] Failed to record progress:", err),
+  const userIds = new Set(
+    [...room.clients].filter((c) => c.isWatching).map((c) => c.userId),
   );
+  if (extraUserId) userIds.add(extraUserId);
+  for (const userId of userIds) {
+    recordProgress(userId, ratingKey, interpolatedPosition(room.state), { force: forced })
+      .then((entry) => {
+        if (!entry) return;
+        return pushProgressToPlex(userId, entry, forced).catch((err) => {
+          console.warn("[Plex Account] Live progress sync failed for", userId.substring(0, 8), err);
+        });
+      })
+      .catch((err) => console.error("[History] Failed to record progress:", err));
+  }
 }
 
 /**
@@ -964,6 +985,7 @@ export function attachWebSocketServer(server: Server): void {
                 room.state.variants.get(room.state.hostVariantKey)!,
                 // A joiner never drives the host's stream — the host does.
                 false,
+                room.state.ratingKey,
               )
             : null,
         });
@@ -1074,7 +1096,7 @@ export function attachWebSocketServer(server: Server): void {
         // Only the client that moved. Nothing changed for the people already on
         // this stream, and a re-announcement of a stream they are already
         // playing is noise they have to reason about.
-        sendTo(client.ws, variantMessage(hostVariant, hostVariant.ownerUserId === client.userId));
+        sendTo(client.ws, variantMessage(hostVariant, hostVariant.ownerUserId === client.userId, room.state.ratingKey));
         return;
       }
 
@@ -1305,7 +1327,7 @@ export function attachWebSocketServer(server: Server): void {
           // served from the room's own clock and so confirms nothing.
           if (client.isHost) room.state.positionConfirmed = true;
           room.state.updatedAt = Date.now();
-          persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
+          persistProgress(room, undefined, true);
           broadcast(room, ws, { type: "pause", position: room.state.position });
           break;
         }
@@ -1325,7 +1347,7 @@ export function attachWebSocketServer(server: Server): void {
           // truth by construction — nothing has to observe it first.
           room.state.positionConfirmed = true;
           room.state.updatedAt = Date.now();
-          persistProgress(room, instanceHosts.get(roomId)?.hostUserId, true);
+          persistProgress(room, undefined, true);
           broadcast(room, ws, { type: "seek", position: room.state.position });
           break;
         }
@@ -1347,7 +1369,7 @@ export function attachWebSocketServer(server: Server): void {
           // moment most resumes are created from. "always", because this is a
           // teardown and the final position must not lose to the forced-write
           // floor after a pause a moment earlier.
-          persistProgress(room, instanceHosts.get(roomId)?.hostUserId, "always");
+          persistProgress(room, undefined, "always");
           // Capture before clearing so we can kill the exact Plex transcode.
           // Every other stream the room was running goes with it — see
           // destroyAllVariants below.
@@ -1423,7 +1445,7 @@ export function attachWebSocketServer(server: Server): void {
           room.state.playing = msg.playing !== false;
           room.state.updatedAt = Date.now();
           // Throttled inside the history service — this fires every 5s per room.
-          persistProgress(room, instanceHosts.get(roomId)?.hostUserId, false);
+          persistProgress(room, undefined, false);
           broadcast(room, ws, {
             type: "heartbeat",
             position: room.state.position,
@@ -1500,12 +1522,17 @@ export function attachWebSocketServer(server: Server): void {
           // branch that persists progress is skipped and the watch they were
           // in the middle of would resume from wherever they last happened to
           // be written, or not at all.
-          persistProgress(room, client.userId, "always");
+          persistProgress(room, undefined, "always");
 
-          // Hand over: the old host drops to a plain viewer, and the target
-          // clears any co-host flag since host already supersedes it.
+          // Hand over. The outgoing host keeps transport control as a co-host:
+          // passing the role is usually "you drive for a bit", not "I am done
+          // here", and dropping straight to a plain viewer took the pause button
+          // off the person who had been running the room a second earlier. The
+          // new host can still remove it from the people panel like any other
+          // grant.
           client.isHost = false;
-          client.isCoHost = false;
+          client.isCoHost = true;
+          room.coHostIds.add(client.userId);
           target.isHost = true;
           target.isCoHost = false;
           // Host outranks co-host, so the grant is spent rather than remembered
@@ -1517,10 +1544,22 @@ export function attachWebSocketServer(server: Server): void {
           // carries to, so the new host's next change reached straight into an
           // audience they had nothing to do with — while leaving the people
           // actually watching with them untouched.
+          let transferredVariant: Variant | null = null;
           if (target.variantKey) {
             room.state.hostVariantKey = target.variantKey;
             const hv = room.state.variants.get(target.variantKey);
             if (hv) {
+              // Hosting and driving the host stream have to move together.
+              // Leaving the old driver here produced an impossible client
+              // state after a manual handoff: `isHost=true` but
+              // `variant.isOwner=false`. The promoted host could change its
+              // local item with Next, but only a stream owner creates and
+              // announces the new transcode, so the room stayed on the old
+              // episode while their UI walked through later ones. Its track
+              // ids consequently belonged to another episode too, leaving no
+              // audio or subtitle row selected in the switcher.
+              hv.ownerUserId = target.userId;
+              transferredVariant = hv;
               room.state.subtitles = hv.subtitleStreamId !== 0;
               if (hv.hlsSessionId) {
                 room.state.hlsSessionId = hv.hlsSessionId;
@@ -1548,6 +1587,9 @@ export function attachWebSocketServer(server: Server): void {
           for (const c of room.clients) {
             if (c !== target) sendTo(c.ws, { type: "host-changed", hostUsername: target.username });
           }
+          // Tell every watcher who drives this still-running stream now. The
+          // new host adopts it in place; the old driver stops acting as owner.
+          if (transferredVariant) announceVariant(room, transferredVariant);
           broadcastParticipants(room);
           break;
         }
@@ -1644,7 +1686,7 @@ export function attachWebSocketServer(server: Server): void {
         // Attribute the position to the host who is leaving, before a successor
         // takes over the instance record. Closing the tab is the other common
         // way a watch ends, so this is as important as the explicit stop path.
-        persistProgress(room, client.userId, "always");
+        persistProgress(room, client.isWatching ? client.userId : undefined, "always");
 
         if (room.clients.size > 0) {
           // Co-host, then whoever is actually watching, then anyone — see

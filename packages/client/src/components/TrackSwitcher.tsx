@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { fetchMeta, versionOf, type StreamTrack } from "../lib/api";
-import { saveSubtitlePref } from "../lib/subtitlePref";
+import { saveAudioPref, saveSubtitlePref } from "../lib/trackPrefs";
 
 interface TrackSwitcherProps {
   ratingKey: string;
@@ -70,6 +70,9 @@ export function TrackSwitcher({
   const handleSelect = (type: "audio" | "subtitle", streamId: number) => {
     if (partId == null) return;
     if (type === "audio") {
+      // Remembered by language, like the subtitle below, so the next episode
+      // starts on the same one rather than the file's default.
+      saveAudioPref(audioTracks.find((t) => t.id === streamId) ?? null);
       onTrackChange(partId, streamId, undefined);
     } else {
       // Remember the choice (streamId 0 is the "None" row) so the next episode
@@ -85,15 +88,15 @@ export function TrackSwitcher({
       <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
           <span style={styles.headerTitle}>Audio &amp; Subtitles</span>
-          <button onClick={onClose} style={styles.closeBtn}>{"\u2715"}</button>
+          <button className="btn" onClick={onClose} style={styles.closeBtn}>{"\u2715"}</button>
         </div>
 
         <div style={styles.tabs}>
-            <button
+            <button className="btn"
               onClick={() => setTab("audio")}
               style={{ ...styles.tab, ...(tab === "audio" ? styles.tabActive : {}) }}
             >Audio</button>
-            <button
+            <button className="btn"
               onClick={() => setTab("subtitles")}
               style={{ ...styles.tab, ...(tab === "subtitles" ? styles.tabActive : {}) }}
             >Subtitles</button>
@@ -114,7 +117,7 @@ export function TrackSwitcher({
             {audioTracks.map((t) => {
               const on = t.id === activeAudio;
               return (
-                <button
+                <button className="btn"
                   key={t.id}
                   onClick={() => handleSelect("audio", t.id)}
                   style={on ? styles.trackSelected : styles.track}
@@ -134,7 +137,7 @@ export function TrackSwitcher({
           </div>
         ) : (
           <div style={styles.trackList}>
-            <button
+            <button className="btn"
               onClick={() => handleSelect("subtitle", 0)}
               style={!activeSubtitle ? styles.trackSelected : styles.track}
             >
@@ -144,7 +147,7 @@ export function TrackSwitcher({
             {subtitleTracks.map((t) => {
               const on = t.id === activeSubtitle;
               return (
-                <button
+                <button className="btn"
                   key={t.id}
                   onClick={() => handleSelect("subtitle", t.id)}
                   style={on ? styles.trackSelected : styles.track}

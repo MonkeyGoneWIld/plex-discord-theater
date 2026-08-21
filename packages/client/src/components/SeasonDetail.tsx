@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import {
   fetchChildren, fetchProgressMany, fetchSeasonEpisodes, getSessionToken,
+  setPlexItemWatched,
   type HistoryEntry, type PlexItem, type SeasonEpisode,
 } from "../lib/api";
 import {
@@ -8,6 +9,7 @@ import {
 } from "../lib/seasonGaps";
 import { formatTimecode } from "../lib/format";
 import { SkeletonBlock } from "./SkeletonBlock";
+import { PlexMediaActions, WatchedCheckIcon } from "./PlexMediaActions";
 import type { QueueItem } from "../hooks/useSync";
 
 interface SeasonDetailProps {
@@ -49,6 +51,8 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
   // Not host-gated: it's their history either way, and it's information rather
   // than a control, so there's nothing here a viewer shouldn't see.
   const [progress, setProgress] = useState<Record<string, HistoryEntry>>({});
+  const [watchedBusy, setWatchedBusy] = useState<string | null>(null);
+  const [watchedError, setWatchedError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -143,32 +147,70 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
     });
   };
 
+  const toggleWatched = async (ep: PlexItem, watched: boolean) => {
+    if (watchedBusy) return;
+    setWatchedBusy(ep.ratingKey);
+    setWatchedError(null);
+    try {
+      const result = await setPlexItemWatched(ep.ratingKey, !watched);
+      setProgress((old) => {
+        const next = { ...old };
+        if (result.progress) next[ep.ratingKey] = result.progress;
+        else delete next[ep.ratingKey];
+        return next;
+      });
+    } catch (err) {
+      console.error("Could not update watched state:", err);
+      setWatchedError(err instanceof Error ? err.message : "Could not update watched state");
+    } finally {
+      setWatchedBusy(null);
+    }
+  };
+
   return (
     <div style={styles.page}>
-      <button onClick={onBack} style={styles.backBtn}>
+      <button className="btn" onClick={onBack} style={styles.backBtn}>
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
           <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
         Back
       </button>
 
-      <div style={styles.breadcrumb}>
-        {onShowClick ? (
-          <button
-            type="button"
-            onClick={onShowClick}
-            style={{ ...styles.buttonReset, ...styles.breadcrumbShow }}
-            onMouseEnter={(e) => (e.currentTarget.style.textDecoration = "underline")}
-            onMouseLeave={(e) => (e.currentTarget.style.textDecoration = "none")}
-          >
-            {show.title}
-          </button>
-        ) : (
-          <span style={styles.breadcrumbShow}>{show.title}</span>
-        )}
-        <span style={styles.breadcrumbSep}>&rsaquo;</span>
-        {/* The season is the current page, so it stays static (not a link). */}
-        <span style={styles.breadcrumbSeason}>{seasonLabel}</span>
+      <div style={styles.breadcrumbRow}>
+        <div style={{ ...styles.breadcrumb, padding: 0, margin: 0 }}>
+          {onShowClick ? (
+            <button
+              type="button"
+              onClick={onShowClick}
+              style={{ ...styles.buttonReset, ...styles.breadcrumbShow }}
+              onMouseEnter={(e) => (e.currentTarget.style.textDecoration = "underline")}
+              onMouseLeave={(e) => (e.currentTarget.style.textDecoration = "none")}
+            >
+              {show.title}
+            </button>
+          ) : (
+            <span style={styles.breadcrumbShow}>{show.title}</span>
+          )}
+          <span style={styles.breadcrumbSep}>&rsaquo;</span>
+          {/* The season is the current page, so it stays static (not a link). */}
+          <span style={styles.breadcrumbSeason}>{seasonLabel}</span>
+        </div>
+        <div style={styles.seasonWatchedAction}>
+          <PlexMediaActions
+            item={season}
+            inline
+            watched={episodes.length > 0 && episodes.every((episode) => progress[episode.ratingKey]?.watched)}
+            onWatchedChange={(nextWatched) => {
+              if (!nextWatched) {
+                setProgress({});
+                return;
+              }
+              fetchProgressMany(episodes.map((episode) => episode.ratingKey))
+                .then((res) => setProgress(res.entries))
+                .catch(() => {});
+            }}
+          />
+        </div>
       </div>
 
       {loading ? (
@@ -194,6 +236,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
         </div>
       ) : (
         <div style={styles.list}>
+          {watchedError && <div style={styles.watchedError}>{watchedError}</div>}
           {rows.map((row) => {
             if (row.kind === "gap") {
               const g = row.ep;
@@ -348,6 +391,33 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                     <p style={styles.episodeSummary}>{ep.summary}</p>
                   )}
                 </div>
+                <span
+                  role="checkbox"
+                  tabIndex={0}
+                  aria-checked={watched}
+                  aria-disabled={watchedBusy === ep.ratingKey}
+                  aria-label={watched ? `Mark ${ep.title} unwatched` : `Mark ${ep.title} as watched`}
+                  title={watchedBusy === ep.ratingKey
+                    ? "Updating watched state..."
+                    : watched ? "Watched — mark unwatched" : "Mark as watched"}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void toggleWatched(ep, watched);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter" && e.key !== " ") return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void toggleWatched(ep, watched);
+                  }}
+                  style={{
+                    ...styles.watchedCheckbox,
+                    ...(watched ? styles.watchedCheckboxActive : {}),
+                    ...(watchedBusy === ep.ratingKey ? styles.watchedCheckboxBusy : {}),
+                  }}
+                >
+                  <WatchedCheckIcon />
+                </span>
               </button>
             );
           })}
@@ -360,7 +430,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
               should look complete, and one still airing shouldn't open with a
               list of episodes that don't exist yet. */}
           {gaps.length > 0 && (
-            <button
+            <button className="btn"
               type="button"
               onClick={() => setShowGaps((v) => !v)}
               onMouseEnter={() => setGapToggleHover(true)}
@@ -386,6 +456,12 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
     </div>
   );
 }
+
+/** What holds an episode's watched checkbox off the edge of its column: the
+ *  card's own padding, and the border outside that. The season header has no
+ *  card and reproduces both — see seasonWatchedAction. */
+const EPISODE_CARD_PADDING_PX = 10;
+const EPISODE_CARD_BORDER_PX = 1;
 
 const styles: Record<string, React.CSSProperties> = {
   page: { minHeight: "100vh", background: "#0d0d0d" },
@@ -426,8 +502,9 @@ const styles: Record<string, React.CSSProperties> = {
     // borderColor override doesn't fall back to this line — it falls back to
     // the CSS initial value, currentColor, i.e. the near-white text colour. That
     // left every hovered card wearing a solid white border afterwards.
-    display: "flex", gap: "14px", padding: "10px", borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.03)",
+    display: "flex", gap: "14px", padding: `${EPISODE_CARD_PADDING_PX}px`, borderRadius: "8px",
+    border: `${EPISODE_CARD_BORDER_PX}px solid rgba(255,255,255,0.06)`,
+    background: "rgba(255,255,255,0.03)",
     cursor: "pointer", color: "inherit", textAlign: "left", fontFamily: "inherit",
     transition: "all 0.2s ease", width: "100%",
   },
@@ -456,6 +533,38 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex", flexDirection: "column", justifyContent: "center",
     gap: "4px", flex: 1, minWidth: 0,
   },
+  breadcrumbRow: {
+    display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px",
+    padding: "0 24px 16px", maxWidth: "1100px", margin: "0 auto",
+  },
+  /**
+   * The season-wide checkbox, inset to land in the same column as the episode
+   * ones below it.
+   *
+   * An episode's checkbox sits inside a card, so it is held off the column edge
+   * by the card's padding *and* its border. The header control has no card, so
+   * it has to reproduce both — matching only the padding, as this did, left it
+   * exactly one pixel to the right of every tick it heads, which is visible the
+   * moment they are stacked in a column. Spelled out as an expression so the
+   * two cannot drift apart again.
+   */
+  seasonWatchedAction: {
+    flexShrink: 0,
+    marginRight: `${EPISODE_CARD_PADDING_PX + EPISODE_CARD_BORDER_PX}px`,
+  },
+  watchedError: {
+    padding: "9px 12px", borderRadius: "7px", border: "1px solid rgba(212,119,119,0.25)",
+    background: "rgba(212,119,119,0.07)", color: "#d47777", fontSize: "12px",
+  },
+  watchedCheckbox: {
+    alignSelf: "center", flexShrink: 0, width: "46px", height: "46px",
+    display: "inline-flex", alignItems: "center", justifyContent: "center",
+    padding: 0, borderRadius: "50%", border: "none", background: "transparent",
+    color: "#d6d6d6", cursor: "pointer",
+    transition: "background 0.15s ease, color 0.15s ease, opacity 0.15s ease",
+  },
+  watchedCheckboxActive: { color: "#6a9955" },
+  watchedCheckboxBusy: { opacity: 0.5, cursor: "wait" },
   episodeMeta: { display: "flex", alignItems: "center", gap: "8px" },
   episodeNumber: { color: "#e5a00d", fontSize: "12px", fontWeight: 700 },
   episodeTitle: {

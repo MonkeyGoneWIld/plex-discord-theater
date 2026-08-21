@@ -15,11 +15,13 @@ import plexRoutes from "./routes/plex.js";
 import seerrRoutes from "./routes/seerr.js";
 import ratingsRoutes from "./routes/ratings.js";
 import historyRoutes from "./routes/history.js";
+import plexAccountRoutes from "./routes/plex-account.js";
 import logRoutes from "./routes/logs.js";
 import { requireAuth, closeSessionDb } from "./middleware/auth.js";
 import * as thumbCache from "./services/thumb-cache.js";
 import { startCacheWarmer, stopCacheWarmer } from "./services/cache-warmer.js";
 import { closeHistoryDb } from "./services/watch-history.js";
+import { closePlexAccountsDb } from "./services/plex-accounts.js";
 import { attachWebSocketServer, closeWebSocketServer } from "./services/sync.js";
 
 const required = ["DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET", "PLEX_URL", "PLEX_TOKEN", "REDIRECT_URI"] as const;
@@ -212,6 +214,7 @@ app.use("/api/plex", requireAuth, plexRoutes);
 app.use("/api/seerr", requireAuth, seerrRoutes);
 app.use("/api/ratings", requireAuth, ratingsRoutes);
 app.use("/api/history", requireAuth, historyRoutes);
+app.use("/api/plex-account", requireAuth, plexAccountRoutes);
 app.use("/api/logs", requireAuth, logRoutes);
 
 const clientDist = path.resolve(__dirname, "../../client/dist");
@@ -282,6 +285,7 @@ async function shutdown(signal: string) {
     closeSessionDb();
     closeInstanceDb();
     closeHistoryDb();
+    closePlexAccountsDb();
     closeLogger(); // last — everything above may still log on the way out
     process.exit(0);
   });

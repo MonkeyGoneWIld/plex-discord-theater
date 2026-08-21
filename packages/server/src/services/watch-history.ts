@@ -1,11 +1,10 @@
 /**
  * Per-user watch history and resume positions, persisted in SQLite.
  *
- * History is attributed to the room's HOST, not to every participant. The host
- * is the one who chose the title and whose playback session the room is watching,
- * so theirs is the only history that means anything — a viewer who dropped in for
- * the last ten minutes shouldn't end up with a half-watched film in Continue
- * Watching. The sync service passes the host's Discord user id on every write.
+ * History is attributed to every unique participant who currently has the
+ * player open. The room still has one host-authoritative timeline, but each
+ * active viewer owns an independent history row and (when opted in) an
+ * independent linked Plex account.
  *
  * Positions arrive from the host's 5-second sync heartbeat, so throttling lives
  * here rather than at the call site: heartbeat writes coalesce to one row update
@@ -26,8 +25,6 @@ const MIN_RESUME_MS = 60_000;
 const MIN_NEW_ENTRY_MS = 10_000;
 /** Heartbeat writes coalesce to at most one per item per this interval. */
 const PROGRESS_WRITE_INTERVAL_MS = 15_000;
-/** Rows kept per user; the oldest beyond this are pruned after each insert. */
-const MAX_ROWS_PER_USER = 500;
 const META_CACHE_TTL_MS = 60 * 60 * 1000;
 /** Shorter than the metadata TTL: an airing show gains episodes, and a stale
  *  list is what would stop a newly available episode becoming "next up". */
@@ -126,6 +123,8 @@ export interface HistoryEntry {
   durationMs: number;
   watched: boolean;
   updatedAt: number;
+  /** Internal live-sync hint; never stored in SQLite. */
+  becameUnwatched?: boolean;
 }
 
 const upsertStmt = db.prepare(`
@@ -193,6 +192,11 @@ const selectHistoryStmt = db.prepare(`
   WHERE user_id = ? AND ${NOT_A_DISMISSAL_MARKER}
   ORDER BY updated_at DESC LIMIT ? OFFSET ?
 `);
+const selectAllHistoryStmt = db.prepare(`
+  SELECT ${SELECT_COLUMNS} FROM watch_history
+  WHERE user_id = ? AND ${NOT_A_DISMISSAL_MARKER}
+  ORDER BY updated_at DESC
+`);
 const countStmt = db.prepare(
   `SELECT COUNT(*) AS count FROM watch_history WHERE user_id = ? AND ${NOT_A_DISMISSAL_MARKER}`,
 );
@@ -214,13 +218,6 @@ const insertDismissalMarkerStmt = db.prepare(`
   )
 `);
 const deleteAllStmt = db.prepare("DELETE FROM watch_history WHERE user_id = ?");
-const pruneStmt = db.prepare(`
-  DELETE FROM watch_history
-  WHERE user_id = ? AND rating_key NOT IN (
-    SELECT rating_key FROM watch_history WHERE user_id = ?
-    ORDER BY updated_at DESC LIMIT ?
-  )
-`);
 
 function toEntry(row: HistoryRow): HistoryEntry {
   return {
@@ -263,7 +260,7 @@ interface ItemSummary {
 
 const metaCache = new Map<string, { at: number; summary: ItemSummary }>();
 
-interface PlexHistoryMetadata {
+export interface PlexHistoryMetadata {
   ratingKey?: string;
   title?: string;
   type?: string;
@@ -431,7 +428,7 @@ async function resolveNextUp(
 const lastWriteAt = new LruMap<string, number>(10_000);
 
 /**
- * Record where a host has got to in an item.
+ * Record where a participant has got to in an item.
  *
  * Unforced calls (heartbeats) are throttled; pause, seek, stop and host
  * disconnect pass `force` so the final position is never lost to the throttle.
@@ -442,15 +439,15 @@ export async function recordProgress(
   ratingKey: string,
   positionSeconds: number,
   options: { force?: boolean } = {},
-): Promise<void> {
-  if (!userId || !ratingKey) return;
-  if (!Number.isFinite(positionSeconds) || positionSeconds < 0) return;
+): Promise<HistoryEntry | null> {
+  if (!userId || !ratingKey) return null;
+  if (!Number.isFinite(positionSeconds) || positionSeconds < 0) return null;
 
   const throttleKey = `${userId}:${ratingKey}`;
   const now = Date.now();
   if (!options.force) {
     const last = lastWriteAt.get(throttleKey) ?? 0;
-    if (now - last < PROGRESS_WRITE_INTERVAL_MS) return;
+    if (now - last < PROGRESS_WRITE_INTERVAL_MS) return null;
   }
   const positionMs = Math.round(positionSeconds * 1000);
   const existing = selectOneStmt.get(userId, ratingKey) as HistoryRow | undefined;
@@ -458,7 +455,7 @@ export async function recordProgress(
   // misclick. Existing entries still update, so a rewind to 0:00 is recorded.
   // Checked before the throttle is claimed, so an early heartbeat that declines
   // to create a row doesn't cost the next one its slot.
-  if (!existing && positionMs < MIN_NEW_ENTRY_MS) return;
+  if (!existing && positionMs < MIN_NEW_ENTRY_MS) return null;
 
   // Claimed before the metadata await, not after it: two heartbeats arriving
   // while the first is still resolving metadata would otherwise both pass the
@@ -466,7 +463,7 @@ export async function recordProgress(
   lastWriteAt.set(throttleKey, now);
 
   const summary = await fetchItemSummary(ratingKey);
-  if (!summary && !existing) return;
+  if (!summary && !existing) return null;
 
   const durationMs = summary?.durationMs || existing?.duration_ms || 0;
   // Recomputed on every write rather than latched, so restarting a finished
@@ -494,7 +491,74 @@ export async function recordProgress(
     updated_at: now,
   });
 
-  if (!existing) pruneStmt.run(userId, userId, MAX_ROWS_PER_USER);
+  const entry = getProgress(userId, ratingKey);
+  if (entry && existing?.watched === 1 && watched === 0) entry.becameUnwatched = true;
+  return entry;
+}
+
+/** Merge newer progress imported from a linked Plex account. */
+export async function mergeExternalProgress(
+  userId: string,
+  ratingKey: string,
+  progress: {
+    positionMs: number;
+    durationMs?: number;
+    watched: boolean;
+    updatedAt: number;
+  },
+  metadata?: PlexHistoryMetadata,
+): Promise<{ entry: HistoryEntry | null; changed: boolean }> {
+  if (!userId || !/^\d+$/.test(ratingKey)) return { entry: null, changed: false };
+  if (!Number.isFinite(progress.positionMs) || progress.positionMs < 0) {
+    return { entry: null, changed: false };
+  }
+
+  const existing = selectOneStmt.get(userId, ratingKey) as HistoryRow | undefined;
+  const sourceAt = Number.isFinite(progress.updatedAt) && progress.updatedAt > 0
+    ? Math.round(progress.updatedAt)
+    : Date.now();
+  if (
+    existing &&
+    (existing.updated_at > sourceAt ||
+      (existing.updated_at === sourceAt && (existing.watched === 1 || !progress.watched)))
+  ) {
+    return { entry: toEntry(existing), changed: false };
+  }
+
+  // Bulk season/show actions already receive every episode's metadata from
+  // Plex. Reuse it instead of turning one click into another request per leaf.
+  const summary = metadata ? toSummary(metadata) : await fetchItemSummary(ratingKey);
+  if (!summary && !existing) return { entry: null, changed: false };
+  const durationMs = Math.max(
+    0,
+    Math.round(progress.durationMs || summary?.durationMs || existing?.duration_ms || 0),
+  );
+  const watched = progress.watched ? 1 : 0;
+  const positionMs = watched && durationMs > 0
+    ? durationMs
+    : Math.max(0, Math.round(progress.positionMs));
+
+  upsertStmt.run({
+    user_id: userId,
+    rating_key: ratingKey,
+    position_ms: positionMs,
+    duration_ms: durationMs,
+    watched,
+    title: summary?.title ?? existing!.title,
+    type: summary?.type ?? existing!.type,
+    thumb: summary?.thumb ?? existing?.thumb ?? null,
+    show_thumb: summary?.showThumb ?? existing?.show_thumb ?? null,
+    show_title: summary?.showTitle ?? existing?.show_title ?? null,
+    parent_title: summary?.parentTitle ?? existing?.parent_title ?? null,
+    parent_index: summary?.parentIndex ?? existing?.parent_index ?? null,
+    item_index: summary?.index ?? existing?.item_index ?? null,
+    year: summary?.year ?? existing?.year ?? null,
+    parent_rating_key: summary?.parentRatingKey ?? existing?.parent_rating_key ?? null,
+    grandparent_rating_key:
+      summary?.grandparentRatingKey ?? existing?.grandparent_rating_key ?? null,
+    updated_at: sourceAt,
+  });
+  return { entry: getProgress(userId, ratingKey), changed: true };
 }
 
 // ─── Reads ──────────────────────────────────────────────────────
@@ -568,6 +632,11 @@ export function getHistory(
   const rows = selectHistoryStmt.all(userId, limit, offset) as HistoryRow[];
   const { count } = countStmt.get(userId) as { count: number };
   return { items: rows.map(toEntry), total: count };
+}
+
+/** Every retained row for internal account reconciliation; HTTP reads stay paginated. */
+export function getAllHistory(userId: string): HistoryEntry[] {
+  return (selectAllHistoryStmt.all(userId) as HistoryRow[]).map(toEntry);
 }
 
 const selectLatestForShowStmt = db.prepare(`

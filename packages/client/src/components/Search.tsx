@@ -118,7 +118,7 @@ export function Search({ onSearch, onClear, placeholder = "Search your library..
           style={styles.input}
         />
         {value.length > 0 && (
-          <button
+          <button className="btn"
             type="button"
             onClick={clearInput}
             style={styles.clearBtn}
@@ -156,6 +156,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   container: {
     padding: "16px 24px",
+    width: "100%",
+    minWidth: 0,
   },
   inputWrap: {
     display: "flex",

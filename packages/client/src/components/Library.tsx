@@ -18,6 +18,9 @@ import {
   deleteHistoryEntry,
   dismissFromContinueWatching,
   clearHistory,
+  fetchPlexAccountStatus,
+  fetchPlexWatchlist,
+  setPlexWatchlistState,
   historyEntryToItem,
   type HistoryEntry,
   type PersonResult,
@@ -83,6 +86,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   // activeSection state so tab switching logic is shared with real sections.
   const isHomeTab = activeSection === "home";
   const isHistoryTab = activeSection === "history";
+  const isWatchlistTab = activeSection === "watchlist";
   const [continueItems, setContinueItems] = useState<HistoryEntry[]>([]);
   const [historyItems, setHistoryItems] = useState<HistoryEntry[]>([]);
   const [historyTotal, setHistoryTotal] = useState(0);
@@ -93,6 +97,13 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  // null while the account check is unresolved. Local-history navigation and
+  // destructive controls stay hidden in that state so a linked account never
+  // sees them flash briefly before its status request finishes.
+  const [plexLinked, setPlexLinked] = useState<boolean | null>(null);
+  const [watchlistItems, setWatchlistItems] = useState<PlexItem[]>([]);
+  const [watchlistLoading, setWatchlistLoading] = useState(false);
+  const [watchlistError, setWatchlistError] = useState<string | null>(null);
   const [homeHubs, setHomeHubs] = useState<PlexHub[]>([]);
   const [homeLoading, setHomeLoading] = useState(true);
   const [items, setItems] = useState<PlexItem[]>([]);
@@ -145,7 +156,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
 
   // Load Plex homepage hubs (Recently Added, Collections, etc.). Plex's own
   // Continue Watching hub is filtered out server-side — it tracks the shared
-  // Plex account, not the Discord host, so this app keeps its own (below).
+  // server account, not this Discord user's local/linked history.
   useEffect(() => {
     setHomeLoading(true);
     setHomeError(null);
@@ -196,6 +207,40 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     // this component stays mounted behind detail and player views, so without
     // it the tab still shows pre-playback positions on the way back.
   }, [visible, isHistoryTab, retryNonce, historyNonce]);
+
+  // Watchlist is an opt-in account surface, so the tab itself only exists for
+  // a linked user. Re-check after an account sync/link and when the Library
+  // returns to screen so connecting in the header is reflected immediately.
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    fetchPlexAccountStatus()
+      .then((status) => {
+        if (cancelled) return;
+        setPlexLinked(status.linked);
+        if (
+          (status.linked && isHistoryTab)
+          || (!status.linked && isWatchlistTab)
+        ) {
+          onActiveSectionChange("home");
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [visible, historyNonce, isHistoryTab, isWatchlistTab, onActiveSectionChange]);
+
+  useEffect(() => {
+    if (!visible || !isWatchlistTab || !plexLinked) return;
+    setWatchlistLoading(true);
+    setWatchlistError(null);
+    fetchPlexWatchlist()
+      .then((res) => setWatchlistItems(res.items))
+      .catch((err) => {
+        console.error(err);
+        setWatchlistError(err instanceof Error ? err.message : "Could not load your Plex Watchlist");
+      })
+      .finally(() => setWatchlistLoading(false));
+  }, [visible, isWatchlistTab, plexLinked, retryNonce, historyNonce]);
 
   /**
    * Next page of history.
@@ -260,7 +305,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
       setSearchResetSignal((n) => n + 1);
       return;
     }
-    // No filter: clear the whole history.
+    // Only reachable for a confirmed unlinked account (see the render gate).
     setContinueItems([]);
     setHistoryItems([]);
     setHistoryTotal(0);
@@ -269,7 +314,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
 
   // Fetch genres when section changes
   useEffect(() => {
-    if (!activeSection || isHomeTab || isHistoryTab) return;
+    if (!activeSection || isHomeTab || isHistoryTab || isWatchlistTab) return;
     setGenres([]);
     // Keep the existing values when they're already at their defaults. A fresh
     // [] or an identical string still counts as a change and would re-trigger
@@ -280,11 +325,11 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     fetchGenres(activeSection)
       .then((res) => setGenres(res.genres))
       .catch(console.error);
-  }, [activeSection]);
+  }, [activeSection, isHomeTab, isHistoryTab, isWatchlistTab]);
 
   // Load items when section, genres, or sort changes
   useEffect(() => {
-    if (!activeSection || isHomeTab || isHistoryTab) return;
+    if (!activeSection || isHomeTab || isHistoryTab || isWatchlistTab) return;
     // Cancel any in-flight load-more request
     loadMoreAbort.current?.abort();
     loadMoreAbort.current = null;
@@ -319,7 +364,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [activeSection, selectedGenres, sort, retryNonce]);
+  }, [activeSection, isHomeTab, isHistoryTab, isWatchlistTab, selectedGenres, sort, retryNonce]);
 
   const handleLoadMore = useCallback(() => {
     if (!activeSection || loadingMore) return;
@@ -450,6 +495,15 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     [onSelect],
   );
 
+  const handleRemoveFromWatchlist = useCallback((item: PlexItem) => {
+    setWatchlistItems((old) => old.filter((entry) => entry.ratingKey !== item.ratingKey));
+    setPlexWatchlistState(item, false).catch((err) => {
+      console.error(err);
+      // Re-read on failure so an optimistic removal cannot lie about Plex.
+      fetchPlexWatchlist().then((res) => setWatchlistItems(res.items)).catch(() => {});
+    });
+  }, []);
+
   /**
    * Open the show behind an episode card.
    *
@@ -525,6 +579,8 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
       ? historyItems.length > 0
         ? "Search your history..."
         : "Search everything..."
+      : isWatchlistTab
+        ? "Search everything..."
       : activeSectionType === "movie"
         ? "Search movies..."
         : activeSectionType === "show"
@@ -556,14 +612,14 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
           there before: over the field it covered the text, above the field it
           pushed the whole page down the moment you typed. */}
       {isSearching && !poster.phone && roomForBack && (
-        <button onClick={handleBackFromSearch} style={styles.backBtn}>
+        <button className="btn" onClick={handleBackFromSearch} style={styles.backBtn}>
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
           Back
         </button>
       )}
-      <div style={styles.narrowWrap}>
+      <div style={{ ...styles.narrowWrap, ...(poster.phone ? styles.narrowWrapPhone : {}) }}>
         <Search
           onSearch={handleSearch}
           onClear={handleClearSearch}
@@ -581,7 +637,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
         {isSearching && scopeLabel && !searchFoundNothing && (
           <div style={styles.scopeBar}>
             <span style={styles.scopeText}>Showing {scopeLabel} only</span>
-            <button type="button" onClick={handleWidenSearch} style={styles.scopeBtn}>
+            <button className="btn" type="button" onClick={handleWidenSearch} style={styles.scopeBtn}>
               Search everything
             </button>
           </div>
@@ -592,21 +648,22 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
             Genre/Sort filter bar renders BELOW them (see next block) so switching
             to a Movies/TV Shows tab never shoves the tab row down. */}
         {!searchResults && (
-          <div style={styles.tabs}>
-            <button
+          <div style={{ ...styles.tabs, ...(poster.phone ? styles.tabsPhone : {}) }}>
+            <button className="btn"
               onClick={() => {
                 onActiveSectionChange("home");
                 if (onBrowseContext) onBrowseContext("Browsing Home");
               }}
               style={{
                 ...styles.tab,
+                ...(poster.phone ? styles.tabPhone : {}),
                 ...(isHomeTab ? styles.tabActive : {}),
               }}
             >
               Home
             </button>
             {sections.map((s) => (
-              <button
+              <button className="btn"
                 key={s.id}
                 onClick={() => {
                   onActiveSectionChange(s.id);
@@ -614,24 +671,43 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 }}
                 style={{
                   ...styles.tab,
+                  ...(poster.phone ? styles.tabPhone : {}),
                   ...(s.id === activeSection ? styles.tabActive : {}),
                 }}
               >
                 {s.title}
               </button>
             ))}
-            <button
-              onClick={() => {
-                onActiveSectionChange("history");
-                if (onBrowseContext) onBrowseContext("Browsing their watch history");
-              }}
-              style={{
-                ...styles.tab,
-                ...(isHistoryTab ? styles.tabActive : {}),
-              }}
-            >
-              History
-            </button>
+            {plexLinked && (
+              <button className="btn"
+                onClick={() => {
+                  onActiveSectionChange("watchlist");
+                  if (onBrowseContext) onBrowseContext("Browsing Watchlist");
+                }}
+                style={{
+                  ...styles.tab,
+                  ...(poster.phone ? styles.tabPhone : {}),
+                  ...(isWatchlistTab ? styles.tabActive : {}),
+                }}
+              >
+                Watchlist
+              </button>
+            )}
+            {plexLinked === false && (
+              <button className="btn"
+                onClick={() => {
+                  onActiveSectionChange("history");
+                  if (onBrowseContext) onBrowseContext("Browsing History");
+                }}
+                style={{
+                  ...styles.tab,
+                  ...(poster.phone ? styles.tabPhone : {}),
+                  ...(isHistoryTab ? styles.tabActive : {}),
+                }}
+              >
+                History
+              </button>
+            )}
           </div>
         )}
 
@@ -639,7 +715,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
             (never Home or History, and never during search). Keeping it here
             rather than above the tabs means the tab row stays put when it
             appears/disappears. */}
-        {!searchResults && !isHomeTab && !isHistoryTab && genres.length > 0 && (
+        {!searchResults && !isHomeTab && !isHistoryTab && !isWatchlistTab && genres.length > 0 && (
           <FilterBar
             genres={genres}
             selectedGenres={selectedGenres}
@@ -652,7 +728,49 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
 
       <div style={styles.wideWrap}>
 
-      {isHistoryTab && !searchResults ? (
+      {isWatchlistTab && !searchResults ? (
+        watchlistLoading ? (
+          <SkeletonGrid />
+        ) : watchlistError ? (
+          <div style={styles.emptyState}>
+            <div style={styles.emptyIcon}>
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" />
+              </svg>
+            </div>
+            <p style={styles.emptyText}>{watchlistError}</p>
+            <button className="btn" onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>Retry</button>
+          </div>
+        ) : watchlistItems.length === 0 ? (
+          <div style={styles.emptyState}>
+            <div style={styles.emptyIcon}>
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M6 3.5h12v17l-6-3.5-6 3.5v-17Z" />
+              </svg>
+            </div>
+            <p style={styles.emptyText}>Your Plex Watchlist is empty.</p>
+          </div>
+        ) : (
+          <>
+            <div style={styles.historyHeader}>
+              <span style={styles.historyCount}>
+                {watchlistItems.length} {watchlistItems.length === 1 ? "title" : "titles"}
+              </span>
+            </div>
+            <div style={gridStyle}>
+              {watchlistItems.map((item) => (
+                <MovieCard
+                  key={`${item.inLibrary === false ? "online" : "local"}-${item.ratingKey}`}
+                  item={item}
+                  onClick={handleClick}
+                  onRemove={handleRemoveFromWatchlist}
+                  removeLabel="Remove from Plex Watchlist"
+                />
+              ))}
+            </div>
+          </>
+        )
+      ) : isHistoryTab && !searchResults ? (
         historyLoading ? (
           <SkeletonGrid />
         ) : historyError ? (
@@ -663,7 +781,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               </svg>
             </div>
             <p style={styles.emptyText}>{historyError}</p>
-            <button onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>
+            <button className="btn" onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>
               Retry
             </button>
           </div>
@@ -675,7 +793,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               </svg>
             </div>
             <p style={styles.emptyText}>
-              Nothing watched yet. Anything you play while hosting shows up here.
+              Nothing watched yet. Anything you watch in the player shows up here.
             </p>
           </div>
         ) : (
@@ -691,8 +809,8 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               {/* Hidden while a filter matches nothing — there's nothing to
                   clear. When a filter matches, it only clears those visible
                   matches, so the label says so rather than implying a full wipe. */}
-              {(!historyQ || filteredHistoryItems.length > 0) && (
-                <button onClick={handleClearHistory} style={styles.clearBtn}>
+              {plexLinked === false && (!historyQ || filteredHistoryItems.length > 0) && (
+                <button className="btn" onClick={handleClearHistory} style={styles.clearBtn}>
                   {historyQ ? "Forget Filtered History" : "Clear History"}
                 </button>
               )}
@@ -717,7 +835,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                       onClick={handleClick}
                       progress={progressOf(entry)}
                       watched={entry.watched}
-                      onRemove={handleForgetFromHistory}
+                      onRemove={plexLinked === false ? handleForgetFromHistory : undefined}
                       onSelectShow={handleShowClick}
                       removeLabel="Remove from watch history"
                     />
@@ -730,7 +848,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 so paging under it would be answering a different question. */}
             {!historyQ && historyItems.length < historyTotal && (
               <div style={styles.loadMoreWrap}>
-                <button
+                <button className="btn"
                   onClick={handleLoadMoreHistory}
                   disabled={historyLoadingMore}
                   style={styles.loadMoreBtn}
@@ -760,7 +878,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               </svg>
             </div>
             <p style={styles.emptyText}>{homeError}</p>
-            <button onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>
+            <button className="btn" onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>
               Retry
             </button>
           </div>
@@ -778,8 +896,8 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
           </div>
         ) : (
           <div style={styles.hubsWrap}>
-            {/* Ours, not Plex's — the server drops Plex's own Continue Watching
-                hub, since this app tracks progress per Discord host instead. */}
+            {/* Ours, not the shared server account's — history is per verified
+                Discord user and can optionally sync with that user's Plex account. */}
             {continueItems.length > 0 && (
               <div style={styles.hubSection}>
                 <h3 style={styles.hubLabel}>Continue Watching</h3>
@@ -827,7 +945,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
             </svg>
           </div>
           <p style={styles.emptyText}>{itemsError}</p>
-          <button onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>
+          <button className="btn" onClick={() => setRetryNonce((n) => n + 1)} style={styles.retryBtn}>
             Retry
           </button>
         </div>
@@ -856,7 +974,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 <p style={styles.emptyHint}>
                   Results on this tab are limited to {scopeLabel}.
                 </p>
-                <button onClick={handleWidenSearch} style={styles.retryBtn}>
+                <button className="btn" onClick={handleWidenSearch} style={styles.retryBtn}>
                   Search everything
                 </button>
               </>
@@ -969,7 +1087,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
           )}
           {hasMore && (
             <div style={styles.loadMoreWrap}>
-              <button
+              <button className="btn"
                 onClick={handleLoadMore}
                 disabled={loadingMore}
                 style={styles.loadMoreBtn}
@@ -1022,6 +1140,11 @@ const styles: Record<string, React.CSSProperties> = {
     maxWidth: "1200px",
     margin: "0 auto",
   },
+  narrowWrapPhone: {
+    width: "100%",
+    minWidth: 0,
+    maxWidth: "100%",
+  },
   wideWrap: {
     // Wider than the search/tabs column on purpose — this is what actually
     // lets 10 panels render at a real size instead of squeezing into the
@@ -1034,6 +1157,13 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "8px",
     padding: "0 24px 16px",
   },
+  tabsPhone: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(64px, 1fr))",
+    gap: "6px",
+    width: "100%",
+    minWidth: 0,
+  },
   tab: {
     padding: "8px 20px",
     borderRadius: "20px",
@@ -1045,6 +1175,15 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
     fontFamily: "inherit",
     transition: "all 0.2s ease",
+  },
+  tabPhone: {
+    width: "100%",
+    minWidth: 0,
+    padding: "8px 6px",
+    fontSize: "12px",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
   tabActive: {
     background: "rgba(229,160,13,0.15)",

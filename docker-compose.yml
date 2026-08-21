@@ -31,6 +31,9 @@ services:
       # Your plex.tv ACCOUNT token (not the server token above). Enables detail
       # pages for titles you don't own, and signs in to Seerr as you.
       - PLEX_ACCOUNT_TOKEN=${PLEX_ACCOUNT_TOKEN}
+      # Stable encryption key for per-user Plex account links. Falls back to
+      # DISCORD_CLIENT_SECRET when unset.
+      - PLEX_LINK_SECRET=${PLEX_LINK_SECRET}
       # Collections, "More Like This", and cast/crew pages.
       - TMDB_API_KEY=${TMDB_API_KEY}
       # IMDb / Rotten Tomatoes / TMDB scores on detail pages.
@@ -80,7 +83,8 @@ services:
       - ADMIN_SECRET=${ADMIN_SECRET}
 
     volumes:
-      # SQLite (sessions, watch history, thumbnail cache) and logs. A named
+      # SQLite (sessions, watch history, linked Plex accounts, thumbnail cache)
+      # and logs. A named
       # volume keeps them across rebuilds; swap for a host path (e.g.
       # ./data:/data) if you'd rather have them somewhere you can browse.
       - app-data:/data

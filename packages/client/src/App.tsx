@@ -10,9 +10,10 @@ import { PersonDetail } from "./components/PersonDetail";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PeoplePanel } from "./components/PeoplePanel";
 import { InviteButton } from "./components/InviteButton";
+import { PlexAccountButton } from "./components/PlexAccountButton";
 import { formatMediaTitle } from "./lib/format";
-import { authUrl, fetchMeta, invalidateMeta, setStreams } from "./lib/api";
-import { loadSubtitlePref, matchSubtitleTrack } from "./lib/subtitlePref";
+import { authUrl, fetchMeta, invalidateMeta, setStreams, versionOf } from "./lib/api";
+import { loadAudioPref, loadSubtitlePref, matchAudioTrack, matchSubtitleTrack } from "./lib/trackPrefs";
 import { useMediaQuery, MOBILE_LANDSCAPE_QUERY, NARROW_QUERY, PHONE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem } from "./hooks/useSync";
@@ -92,7 +93,7 @@ function isFlatView(v: View): boolean {
 }
 
 export function App() {
-  const { isReady, isHost, userId, username, instanceId, error, canInvite, openInvite, setPresence } =
+  const { isReady, isHost, userId, username, instanceId, error, canInvite, openInvite, openExternalLink, setPresence } =
     useDiscord();
   const [viewStack, setViewStack] = useState<View[]>([{ kind: "library" }]);
   const view = viewStack[viewStack.length - 1];
@@ -291,6 +292,9 @@ export function App() {
   // History. The Library stays mounted behind detail views, so without a nudge
   // it would still show the progress from before the film was played.
   const [historyNonce, setHistoryNonce] = useState(0);
+  const handlePlexHistoryChanged = useCallback(() => {
+    setHistoryNonce((n) => n + 1);
+  }, []);
   const prevPlayingKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const prev = prevPlayingKeyRef.current;
@@ -302,6 +306,40 @@ export function App() {
 
   // Track previous ratingKey to detect changes
   const prevRatingKeyRef = useRef<string | null>(null);
+  // Read inside callbacks that must not be rebuilt when the role changes.
+  const effectiveIsHostRef = useRef(effectiveIsHost);
+  effectiveIsHostRef.current = effectiveIsHost;
+
+  /**
+   * Put a player on top of the stack, replacing one already there.
+   *
+   * Also drops the page underneath when it is the episode being left behind.
+   * Back means "where I came from", and where you came from was that episode's
+   * page — but three episodes later it is a page about something nobody is
+   * watching, and Back from the middle of a season landed on episode 1. The
+   * entry goes only when it names the outgoing episode, so a season list, a
+   * show or the home screen underneath is left exactly where it was and Back
+   * still goes there.
+   */
+  const showPlayer = useCallback((playerView: View) => {
+    setViewStack((s) => {
+      const top = s[s.length - 1];
+      const covering = top?.kind !== "player";
+      if (covering) scrollPosRef.current[s.length - 1] = window.scrollY;
+      let base = covering ? s : s.slice(0, -1);
+      const leaving = top?.kind === "player" ? top.item.ratingKey : null;
+      const under = base[base.length - 1];
+      if (
+        leaving &&
+        under?.kind === "detail" &&
+        under.item.type === "episode" &&
+        under.item.ratingKey === leaving
+      ) {
+        base = base.slice(0, -1);
+      }
+      return [...base, playerView];
+    });
+  }, []);
 
   // Viewer: auto-navigate when host starts or stops playback
   useEffect(() => {
@@ -324,12 +362,7 @@ export function App() {
         subtitles: syncState.subtitles,
         synthesized: true,
       };
-      setViewStack((s) => {
-        const covering = s[s.length - 1]?.kind !== "player";
-        if (covering) scrollPosRef.current[s.length - 1] = window.scrollY;
-        const base = covering ? s : s.slice(0, -1);
-        return [...base, playerView];
-      });
+      showPlayer(playerView);
     }
 
     // Host stopped — pop back from player if we're on one
@@ -566,23 +599,71 @@ export function App() {
   }, [goToShow]);
 
   const handlePlayNext = useCallback(async (queueItem: QueueItem) => {
-    // Re-apply the viewer's remembered subtitle choice to the incoming item.
-    //
-    // Nothing else does this on the auto-advance path: MovieDetail is where
-    // tracks normally get chosen, and moving to the next episode skips it
-    // entirely, so Plex would fall back to the part's own default. The stream
-    // has to be selected *before* the player mounts — once the transcode has
-    // started, changing it costs a restart. A failure here is non-fatal: the
-    // episode still plays, just with whatever Plex defaults to.
+    /**
+     * Re-apply the remembered subtitle choice, and find out which streams the
+     * incoming episode is actually going to play.
+     *
+     * Both halves matter, for the same underlying reason: **Plex stream ids
+     * belong to a media part, not to a title.** The id of "Japanese (AAC)" on
+     * S1E4 names some unrelated stream on S1E5, or nothing at all. So the
+     * subtitle preference is re-matched by language rather than carried by id,
+     * and the ids handed to the player are read from the new episode's own
+     * track list.
+     *
+     * Without the second half the player kept the previous episode's ids, sent
+     * them to Plex with the manifest request, and Plex — asked for streams that
+     * are not part of this file — fell back to the defaults. The switcher went
+     * on displaying the ids it had asked for, so it showed Japanese while
+     * English played, and the ticked row belonged to another episode entirely.
+     *
+     * A failure here is non-fatal: the episode still plays, on whatever Plex
+     * defaults to, and the player falls back to reading the selection from the
+     * track list.
+     */
     let subtitles = queueItem.subtitles;
+    let audioStreamId: number | undefined;
+    let subtitleStreamId: number | undefined;
+    // Selecting streams on the part is a change to the *item*, not to this
+    // client — Plex applies it server-wide — so it belongs to whoever is about
+    // to start the room's transcode. A co-host pressing Next runs this too, and
+    // two clients writing their own preference to the same part moments apart
+    // is a coin toss over which one the transcode ends up starting with.
+    // Everyone else still reads the selection below and gets their own tracks
+    // from the per-viewer restore instead.
+    const maySelect = effectiveIsHostRef.current;
     try {
       const meta = await fetchMeta(queueItem.ratingKey);
-      const pref = loadSubtitlePref();
-      if (pref && meta.partId != null) {
-        const match = matchSubtitleTrack(meta.subtitleTracks, pref);
-        await setStreams(meta.partId, { subtitleStreamID: match?.id ?? 0 });
+      // The version, not the title: a second file has its own part and its own
+      // stream ids, and `meta`'s top-level fields describe only the first.
+      const version = versionOf(meta);
+      const subtitlePref = loadSubtitlePref();
+      const audioMatch = matchAudioTrack(version.audioTracks, loadAudioPref());
+      // Null means this episode doesn't carry the language they were listening
+      // to, and there is no sensible substitute — leave Plex's own choice.
+      audioStreamId = audioMatch?.id ?? version.audioTracks.find((t) => t.selected)?.id;
+
+      if (maySelect && version.partId != null && (subtitlePref || audioMatch)) {
+        const subtitleMatch = subtitlePref
+          ? matchSubtitleTrack(version.subtitleTracks, subtitlePref)
+          : null;
+        if (subtitlePref) {
+          subtitles = subtitleMatch != null;
+          subtitleStreamId = subtitleMatch?.id ?? 0;
+        } else {
+          subtitleStreamId = version.subtitleTracks.find((t) => t.selected)?.id ?? 0;
+          subtitles = subtitleStreamId !== 0;
+        }
+        // Selected before the player mounts: once the transcode has started,
+        // changing it costs a restart. One call, so an episode that needs both
+        // doesn't pay for two round trips before it can start.
+        await setStreams(version.partId, {
+          ...(subtitlePref ? { subtitleStreamID: subtitleMatch?.id ?? 0 } : {}),
+          ...(audioMatch ? { audioStreamID: audioMatch.id } : {}),
+        });
         invalidateMeta(queueItem.ratingKey);
-        subtitles = match != null;
+      } else {
+        subtitleStreamId = version.subtitleTracks.find((t) => t.selected)?.id ?? 0;
+        subtitles = subtitleStreamId !== 0;
       }
     } catch (err) {
       console.error("Failed to carry subtitle preference to next item:", err);
@@ -601,14 +682,11 @@ export function App() {
         index: queueItem.index,
       },
       subtitles,
+      audioStreamId,
+      subtitleStreamId,
     };
-    setViewStack((s) => {
-      const covering = s[s.length - 1]?.kind !== "player";
-      if (covering) scrollPosRef.current[s.length - 1] = window.scrollY;
-      const base = covering ? s : s.slice(0, -1);
-      return [...base, playerView];
-    });
-  }, []);
+    showPlayer(playerView);
+  }, [showPlayer]);
 
   // Breadcrumb trail. Mostly mirrors the view stack, but synthesizes missing
   // ancestors so an episode always shows the full Home › Show › Season › Episode
@@ -752,6 +830,11 @@ export function App() {
               it to the left of the name puts it back in reach \u2014 the label is
               what gets clipped there instead, which costs nothing. */}
           <span style={styles.user}>
+            <PlexAccountButton
+              compact={phone}
+              onHistoryChanged={handlePlexHistoryChanged}
+              onOpenExternalLink={openExternalLink}
+            />
             {/* Sits with the roster rather than inside it: inviting is about
                 who isn't here yet, which is the same question the people
                 button answers from the other side. Not on a phone, where
@@ -763,7 +846,7 @@ export function App() {
               {!effectiveIsHost && syncState.connected && " • Synced"}
             </span>
             {syncState.connected && (
-              <button
+              <button className="btn"
                 onClick={() => setShowPeoplePanel(true)}
                 // Visual order only — the DOM order stays name-then-button, so
                 // reading order and focus order are unchanged either way.
@@ -808,7 +891,7 @@ export function App() {
                 : "Reconnecting to the watch party…"}
           </span>
           {syncState.reconnectFailed && (
-            <button style={styles.connectionRetryBtn} onClick={() => syncActions.retryConnection()}>
+            <button className="btn" style={styles.connectionRetryBtn} onClick={() => syncActions.retryConnection()}>
               Reconnect
             </button>
           )}
@@ -842,7 +925,7 @@ export function App() {
                 <strong>{formatMediaTitle(s)}</strong>
               </span>
               <div style={styles.suggestionActions}>
-                <button
+                <button className="btn"
                   onClick={() => {
                     // Carry the episode fields through, or the detail view and
                     // the browse label lose the show name all over again.
@@ -863,7 +946,7 @@ export function App() {
                 >
                   View
                 </button>
-                <button
+                <button className="btn"
                   onClick={() => syncActions.sendDismissSuggestion(s.ratingKey)}
                   style={styles.suggestionDismissBtn}
                 >
@@ -891,7 +974,7 @@ export function App() {
             <div style={styles.nowPlayingLabel}>NOW PLAYING</div>
             <div style={styles.nowPlayingTitle}>{syncState.title || "Untitled"}</div>
           </div>
-          <button onClick={handleRejoin} style={styles.nowPlayingBtn}>
+          <button className="btn" onClick={handleRejoin} style={styles.nowPlayingBtn}>
             Watch
           </button>
         </div>
@@ -1001,7 +1084,7 @@ export function App() {
               background: "#000", color: "#f0f0f0", fontFamily: "DM Sans, sans-serif",
             }}>
               <p style={{ fontSize: "16px", color: "#e74c3c" }}>Playback error</p>
-              <button
+              <button className="btn"
                 onClick={popView}
                 style={{
                   padding: "10px 24px", borderRadius: "8px", border: "none",

@@ -14,6 +14,7 @@ import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, f
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
+import { describeWatched, loadAudioPref, loadSubtitlePref, mergeTrackPrefs, saveTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { roomPositionNow } from "../hooks/useSync";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
@@ -360,7 +361,7 @@ interface PlayerProps {
   /** Our own Discord user id — lets the people panel label and skip ourselves. */
   selfUserId?: string | null;
   subtitles: boolean;
-  /** Seconds to start at, from the host's watch history. Consumed once, on mount:
+  /** Seconds to start at, from the initiating host's personal history. Consumed once, on mount:
    *  a later item (queue advance, next episode) starts from the beginning. */
   resumePosition?: number;
   onBack: () => void;
@@ -482,6 +483,26 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // The variant this client has already acted on, so an assignment that moves it
   // somewhere new can be told from a re-announcement of the same stream.
   const appliedVariantKeyRef = useRef<string | null>(null);
+  // The title this player opened on, and the last one whose tracks were restored
+  // — see the track-restore effect. Both are per-mount, and the player is not
+  // remounted between episodes, so "opened on" really does mean the episode this
+  // viewer walked in during.
+  const openedOnRatingKeyRef = useRef(item.ratingKey);
+  const restoredTracksForRef = useRef<string | null>(null);
+  /**
+   * The streams this client is on, and the ones it was on for the title before.
+   *
+   * The second is what a new episode is matched against. It is a better source
+   * than the stored preference: it is per room and per client, it cannot be
+   * overwritten by another show, and it is true of somebody who never opened a
+   * picker at all — the preference only knows about people who did.
+   */
+  const watchingRef = useRef<{ ratingKey: string; audioStreamId: number; subtitleStreamId: number } | null>(null);
+  const wasWatchingRef = useRef<{ ratingKey: string; audioStreamId: number; subtitleStreamId: number } | null>(null);
+  // Portable descriptions captured against the file this client is actually
+  // playing. Unlike a later metadata lookup, this cannot decode an old stream
+  // id against the wrong media version.
+  const watchedTrackPrefsRef = useRef<{ ratingKey: string; prefs: TrackPrefs } | null>(null);
   // Set when this client asked for the change itself — it already has its own
   // overlay up, and shouldn't be told it was moved.
   const askedForTracksRef = useRef(false);
@@ -642,6 +663,34 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // alongside the burn-in flag, for the same reason.
   const currentAudioStreamRef = useRef<number | null>(null);
   const currentSubtitleStreamRef = useRef<number | null>(null);
+
+  /**
+   * A new title is a new set of stream ids. Forget the last one's.
+   *
+   * Plex numbers audio and subtitle streams per media part, so an id from the
+   * episode that just finished names nothing in the one starting. This player
+   * is not remounted between episodes — the view stack swaps the item underneath
+   * it — so without this the refs below survive the change, and everything
+   * downstream of them inherits ids belonging to the previous file: the manifest
+   * request sends them to Plex, which quietly falls back to the part's defaults;
+   * the announcement puts them in the room's variant; and the switcher ticks a
+   * row that has nothing to do with what is playing. That is the "shows Japanese
+   * while English plays, and changing it does nothing" report.
+   *
+   * Resetting to the props leaves an episode change in exactly the state a fresh
+   * mount would be: whatever the incoming item resolved (see handlePlayNext), or
+   * nothing, in which case the manifest request omits them and Plex chooses.
+   *
+   * Declared above the stream-assignment and HLS effects so it runs before
+   * either reads these — effects fire in source order within a commit.
+   */
+  useEffect(() => {
+    currentAudioStreamRef.current = audioStreamId ?? null;
+    currentSubtitleStreamRef.current = subtitleStreamId ?? null;
+    subtitlesOnRef.current = subtitles;
+    appliedVariantKeyRef.current = null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item.ratingKey]);
   if (subtitlesItemRef.current !== item.ratingKey) {
     subtitlesItemRef.current = item.ratingKey;
     subtitlesOnRef.current = subtitles;
@@ -785,6 +834,19 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   useEffect(() => {
     const v = variantRef.current;
     if (!v) return;
+    // Bank what this client is on, per title. Rolled over rather than
+    // overwritten, because the moment a new title arrives the previous pair is
+    // the only record of what the person was actually watching.
+    if (v.ratingKey) {
+      const now = {
+        ratingKey: v.ratingKey,
+        audioStreamId: v.audioStreamId,
+        subtitleStreamId: v.subtitleStreamId,
+      };
+      const held = watchingRef.current;
+      if (held && held.ratingKey !== v.ratingKey) wasWatchingRef.current = held;
+      watchingRef.current = now;
+    }
     const prevAudio = currentAudioStreamRef.current;
     const prevSubtitle = currentSubtitleStreamRef.current;
     const hadTracks = appliedVariantKeyRef.current !== null;
@@ -905,6 +967,125 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // clears it when frames actually resume.
     setTrackSwitching(null);
   }, [variant?.seq]);
+
+  /**
+   * Take your own audio and subtitles into the next episode.
+   *
+   * A new title puts the whole room back on the host's stream — it has to, since
+   * every stream the room was running belonged to a file that is no longer
+   * playing. For the host that is the end of it: their choice travels with the
+   * item (see handlePlayNext). For everybody else it meant losing theirs at the
+   * end of every episode and picking it again, which is not a preference so much
+   * as a chore.
+   *
+   * So each viewer re-establishes its own, the same way the choice was carried
+   * in the first place: by language, against whatever the new file actually
+   * holds. Ids cannot be reused — they belong to the part — and a language can
+   * simply be absent from one episode of a season and present in the next.
+   *
+   * Where the new file has nothing matching, the host's track stands. That is
+   * the one sensible fallback: it is what the room is on, it certainly exists,
+   * and the alternative is silence or a language nobody asked for. A deliberate
+   * "None" for subtitles is honoured as a choice rather than read as a failure
+   * to match.
+   *
+   * Only on a *change* of title. A viewer joining mid-film is a different
+   * situation — they asked for this stream by walking into it — and forking
+   * everyone the moment they arrive would cost the server a transcode per
+   * person for something nobody asked for.
+   */
+  useEffect(() => {
+    const v = variantRef.current;
+    if (!v || isHost) return;
+    // The title this player opened on. Not an advance, so nothing to restore.
+    if (item.ratingKey === openedOnRatingKeyRef.current) return;
+    // The assignment has to be for *this* title. The item and the stream arrive
+    // in two messages, and when they land in separate frames this effect runs
+    // once with the previous episode's assignment still in hand — which is both
+    // the wrong thing to fall back to and, because the attempt was recorded
+    // below, the end of it: the real assignment arrived to an effect that had
+    // already decided it was done. Tracks came out differently depending on how
+    // the two messages happened to be batched.
+    if (v.ratingKey !== item.ratingKey) return;
+    if (restoredTracksForRef.current === item.ratingKey) return;
+    // Claimed before the fetch, so a second variant landing mid-flight doesn't
+    // start a duplicate lookup and a duplicate fork.
+    restoredTracksForRef.current = item.ratingKey;
+
+    const was = wasWatchingRef.current;
+    // Snapshot before awaiting the new episode's metadata. Its own metadata
+    // effect may finish during that wait and replace the ref with the new pair.
+    const observedBeforeAdvance = watchedTrackPrefsRef.current;
+    let cancelled = false;
+    (async () => {
+      let outcome = "no source";
+      let want = { audioStreamId: v.audioStreamId, subtitleStreamId: v.subtitleStreamId };
+      try {
+        // No media index: the host's tracks for this episode were resolved from
+        // the same default version, so matching against any other file would be
+        // comparing against streams nobody is playing.
+        const version = versionOf(await fetchMeta(item.ratingKey));
+
+        /**
+         * What this client was watching, described so it can be looked for here.
+         *
+         * The previous episode's own track list turns the pair of ids into a
+         * language and a flavour. That is a better source than the stored
+         * preference, which is one global slot shared by every show and
+         * overwritten by whoever last opened a picker — and which knows nothing
+         * at all about somebody who never opened one. The preference stays as
+         * the fallback for the first episode of a sitting, where there is no
+         * previous one to read.
+         */
+        const saved = { audio: loadAudioPref(), subtitle: loadSubtitlePref() };
+        let source = saved;
+        if (was) {
+          if (observedBeforeAdvance?.ratingKey === was.ratingKey) {
+            source = mergeTrackPrefs(observedBeforeAdvance.prefs, saved);
+            outcome = "from tracks observed on last episode, with saved fallback";
+          } else try {
+            const before = versionOf(await fetchMeta(was.ratingKey));
+            source = mergeTrackPrefs(describeWatched(before, was), saved);
+            outcome = "from last episode, with saved fallback";
+          } catch {
+            // The new episode's metadata is enough to apply the saved choice.
+            // A transient miss for the old episode must not discard it too.
+            outcome = "from saved preference (last episode lookup failed)";
+          }
+        } else {
+          outcome = "from saved preference";
+        }
+
+        want = tracksForNewItem(version, source, v);
+      } catch {
+        outcome = "lookup failed";
+      }
+      if (cancelled) return;
+
+      // Already what the room put us on — our tracks and the host's agree, or
+      // this episode carries neither. Forking would buy a second transcode of
+      // the same two tracks.
+      const same = want.audioStreamId === v.audioStreamId
+        && want.subtitleStreamId === v.subtitleStreamId;
+      // Logged either way. Silence here is what made the last round of this
+      // guesswork rather than diagnosis: "nothing happened" and "nothing needed
+      // to happen" looked identical from the outside.
+      logEvent("Player", same ? "keeping the room's tracks" : "restoring own tracks on the new episode", {
+        ratingKey: item.ratingKey,
+        was: was ? `${was.audioStreamId}:${was.subtitleStreamId}@${was.ratingKey}` : "none",
+        from: v.variantKey,
+        to: `${want.audioStreamId}:${want.subtitleStreamId}`,
+        source: outcome,
+      });
+      if (same) return;
+
+      // Ours, not something the host did to us — so the "moved onto other
+      // tracks" overlay stays out of it.
+      askedForTracksRef.current = true;
+      syncActionsRef.current?.sendSetTracks(want.audioStreamId, want.subtitleStreamId);
+    })();
+    return () => { cancelled = true; };
+  }, [item.ratingKey, variant?.seq, isHost]);
 
   // Handle promotion: start heartbeat when a viewer becomes host mid-playback.
   useEffect(() => {
@@ -1081,6 +1262,23 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const effectiveMediaIndex = mediaIndex ?? sessionMediaIndex ?? undefined;
 
   /**
+   * Describe this client's live pair while its media version is still known.
+   * Episode changes replace stream ids and metadata independently, so all three
+   * rating-key guards are required before banking the answer for the next one.
+   */
+  useEffect(() => {
+    const v = variantRef.current;
+    if (
+      !itemMeta
+      || itemMeta.ratingKey !== item.ratingKey
+      || v?.ratingKey !== item.ratingKey
+    ) return;
+    const prefs = describeWatched(versionOf(itemMeta, effectiveMediaIndex), v);
+    if (!prefs.audio && !prefs.subtitle) return;
+    watchedTrackPrefsRef.current = { ratingKey: item.ratingKey, prefs };
+  }, [item.ratingKey, itemMeta, effectiveMediaIndex, variant?.seq]);
+
+  /**
    * The parts of the metadata that belong to a file rather than to a title:
    * preview frames, and the stream ids the track switcher compares against.
    *
@@ -1171,10 +1369,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     const changed = prev
       ? (Object.keys(deps) as Array<keyof typeof deps>).filter((k) => deps[k] !== prev[k])
       : ["initial-mount"];
+    const titleChanged = !!prev && prev.ratingKey !== item.ratingKey;
     // A new title starts clean. Everything else — a seek restart, a subtitle
     // change, a viewer following the host onto a new session — is the same
     // picture continuing, so the held frame stays up over the rebuild.
-    if (prev && prev.ratingKey !== item.ratingKey) {
+    if (titleChanged) {
       canvasRef.current = null;
       setHoldingFrame(false);
     }
@@ -1193,8 +1392,22 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
     destroyLocal();
 
-    // Host creates a new session; viewer reuses the host's session
-    const sessionOwner = ownsSessionRef.current;
+    // A stream's current driver normally decides who creates a session. A new
+    // title is the exception: only the host can change what the room is
+    // watching, so the host must lead that new transcode even if it happened to
+    // be following somebody else's track variant on the preceding episode.
+    // Without this, Next changed only the host's local item while it kept
+    // replaying the old driver's session; successive clicks walked the UI
+    // through several episodes without moving the room.
+    const takingNewTitleAsHost = titleChanged && isHostRef.current;
+    const sessionOwner = ownsSessionRef.current || takingNewTitleAsHost;
+    if (takingNewTitleAsHost && !ownsSessionRef.current) {
+      ownsSessionRef.current = true;
+      logEvent("Player", "host taking ownership for a new title", {
+        from: prev?.ratingKey ?? "none",
+        to: item.ratingKey,
+      });
+    }
     let sessionId: string | null;
     if (adoptSessionIdRef.current) {
       // Adopt the live stream we were promoted into — reuse its transcode and
@@ -1632,7 +1845,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // Host: broadcast play with sessionId when manifest is ready. Skip it
           // when adopting an already-live session — the room is already on it,
           // and "play" would reset everyone's position to 0.
-          announceStream(sessionId!, startOffset);
+          announceStream(sessionId!, startOffset, sessionOwner);
         });
 
         // Clear error banner and reset retry count when recovery succeeds
@@ -1927,7 +2140,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         const onLoaded = () => {
           if (!mounted) return;
           video.play().catch((err) => console.warn("Autoplay prevented:", err));
-          announceStream(sessionId!, startOffset);
+          announceStream(sessionId!, startOffset, sessionOwner);
         };
         video.addEventListener("loadedmetadata", onLoaded, { once: true });
       } else {
@@ -2586,8 +2799,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
    *
    * Only a driver announces. A follower's job is to play what it is given.
    */
-  const announceStream = useCallback((sessionId: string, startOffset: number) => {
-    if (!ownsSessionRef.current) return;
+  const announceStream = useCallback((
+    sessionId: string,
+    startOffset: number,
+    startedAsOwner = ownsSessionRef.current,
+  ) => {
+    // `startedAsOwner` is captured by the HLS start. It stays authoritative if
+    // a late assignment for the preceding title lands while the new manifest
+    // is loading and briefly writes the old `isOwner=false` back into the ref.
+    if (!ownsSessionRef.current && !startedAsOwner) return;
     const offset = startOffset > 0 ? startOffset : undefined;
     /**
      * Adopting means the room is already on this stream and knows what it is,
@@ -3114,6 +3334,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       syncActionsRef.current?.sendPlayItem(target.ratingKey);
       return;
     }
+    // handlePlayNext resolves the new file from saved portable preferences.
+    // Refresh those from what the host is demonstrably playing now, rather
+    // than trusting the last picker interaction from this or another show.
+    const observed = watchedTrackPrefsRef.current;
+    if (observed?.ratingKey === itemRef.current.ratingKey) {
+      saveTrackPrefs(observed.prefs);
+    }
     if (fromQueue) syncActionsRef.current?.sendQueueRemove(target.ratingKey);
     onPlayNext?.(target);
   }, [onPlayNext]);
@@ -3298,7 +3525,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         // reads this.
         <div style={styles.error}>
           Connection lost
-          <button style={styles.inlineRetryBtn} onClick={() => syncActions?.retryConnection()}>
+          <button className="btn" style={styles.inlineRetryBtn} onClick={() => syncActions?.retryConnection()}>
             Reconnect
           </button>
         </div>
@@ -3450,7 +3677,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         <div style={styles.trackSwitchOverlay}>
           <div style={styles.trackSwitchMessage}>
             <span style={{ color: "#e74c3c", fontSize: "16px", fontWeight: 600 }}>Stream lost</span>
-            <button
+            <button className="btn"
               onClick={() => {
                 recoveryAttemptRef.current = 0;
                 mediaErrorCountRef.current = 0;
@@ -3468,7 +3695,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             >
               Retry
             </button>
-            <button
+            <button className="btn"
               onClick={handleBack}
               style={{
                 padding: "8px 20px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.2)",
@@ -3542,7 +3769,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           scope={isHost ? "room" : "self"}
           // This client's own tracks, so the tick marks what *it* is watching
           // rather than whatever the item was last pointed at.
-          currentAudioId={variant?.audioStreamId ?? currentAudioStreamRef.current}
+          // 0 is "nothing chosen" for audio — there is no such thing as no
+          // audio track — so it reads as absent and the switcher falls back to
+          // whichever track Plex reports as selected. For subtitles 0 is a real
+          // answer ("None"), so it is passed through as one.
+          currentAudioId={(variant?.audioStreamId ?? currentAudioStreamRef.current) || null}
           currentSubtitleId={variant?.subtitleStreamId ?? currentSubtitleStreamRef.current}
         />
       )}
@@ -3589,13 +3820,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
               that is already running — you'll lose the tracks you picked.
             </p>
             <div style={styles.confirmActions}>
-              <button
+              <button className="btn"
                 style={styles.confirmCancelBtn}
                 onClick={() => setOfferHostStream(false)}
               >
                 Keep waiting
               </button>
-              <button
+              <button className="btn"
                 style={styles.confirmEndBtn}
                 onClick={() => {
                   logEvent("Player", "viewer took the offer to rejoin the host's stream", {
@@ -3630,13 +3861,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
                 {" — going back stops playback for everyone."}
               </p>
               <div style={styles.confirmActions}>
-                <button
+                <button className="btn"
                   style={styles.confirmCancelBtn}
                   onClick={() => setConfirmingEnd(false)}
                 >
                   Cancel
                 </button>
-                <button
+                <button className="btn"
                   style={styles.confirmEndBtn}
                   onClick={() => {
                     setConfirmingEnd(false);

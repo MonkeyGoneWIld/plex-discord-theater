@@ -9,6 +9,7 @@ import { SkeletonBlock } from "./SkeletonBlock";
 import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
 import { DetailLoading } from "./DetailLoading";
+import { PlexMediaActions } from "./PlexMediaActions";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 
@@ -166,7 +167,7 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
     <div style={styles.container}>
       {!pageReady && <DetailLoading />}
       <div style={pageReady ? styles.revealed : styles.prerender} aria-hidden={!pageReady}>
-      <button onClick={onBack} style={styles.backBtn}>
+      <button className="btn" onClick={onBack} style={styles.backBtn}>
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
           <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
@@ -217,24 +218,27 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
           {/* Requesting — movies get a single button here; TV shows the season
               grid below. Both hidden when Seerr isn't set up or there's no
               TMDB id. */}
-          {tmdbId != null && mediaType === "movie" && seerrConfigured !== false && (
-            !statusLoaded ? (
-              // Same footprint as the real button, so nothing shifts when it lands.
-              <SkeletonBlock width={140} height={40} borderRadius={8} />
-            ) : statusLabel ? (
-              <button disabled style={{ ...styles.requestBtn, ...styles.requestBtnDone }}>
-                {statusLabel}
-              </button>
-            ) : (
-              <button
-                onClick={handleRequest}
-                disabled={requesting}
-                style={styles.requestBtn}
-              >
-                {requesting ? "Requesting…" : "Request"}
-              </button>
-            )
-          )}
+          <div style={styles.titleActions}>
+            {tmdbId != null && mediaType === "movie" && seerrConfigured !== false && (
+              !statusLoaded ? (
+                // Same footprint as the real button, so nothing shifts when it lands.
+                <SkeletonBlock width={140} height={40} borderRadius={8} />
+              ) : statusLabel ? (
+                <button className="btn" disabled style={{ ...styles.requestBtn, ...styles.requestBtnDone }}>
+                  {statusLabel}
+                </button>
+              ) : (
+                <button className="btn"
+                  onClick={handleRequest}
+                  disabled={requesting}
+                  style={styles.requestBtn}
+                >
+                  {requesting ? "Requesting…" : "Request"}
+                </button>
+              )
+            )}
+            <PlexMediaActions item={item} inline />
+          </div>
           {requestError && <div style={styles.requestError}>{requestError}</div>}
         </div>
       </div>
@@ -419,6 +423,9 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     cursor: "pointer",
     fontFamily: "inherit",
+  },
+  titleActions: {
+    display: "flex", alignItems: "center", flexWrap: "wrap", gap: "10px",
   },
   requestBtnDone: {
     background: "rgba(255,255,255,0.06)",

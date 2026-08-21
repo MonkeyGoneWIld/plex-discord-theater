@@ -13,7 +13,7 @@ interface SkipMarkerButtonProps {
  */
 export function SkipMarkerButton({ type, onSkip }: SkipMarkerButtonProps) {
   return (
-    <button onClick={onSkip} style={styles.button}>
+    <button onClick={onSkip} className="btn" style={styles.button}>
       {type === "intro" ? "Skip Intro" : "Skip Credits"}
     </button>
   );

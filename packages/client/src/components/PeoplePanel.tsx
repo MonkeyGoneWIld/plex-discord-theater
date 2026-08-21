@@ -52,7 +52,7 @@ export function PeoplePanel({
       <div style={styles.panel} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
           <h3 style={styles.title}>People ({participants.length})</h3>
-          <button className="btn-icon" onClick={onClose} style={styles.closeBtn}>&times;</button>
+          <button className="btn" onClick={onClose} style={styles.closeBtn}>&times;</button>
         </div>
 
         {/* Inviting lives here during playback rather than in the control bar:

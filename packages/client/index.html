@@ -177,6 +177,14 @@
          Brightening and shrinking both stay inside the box, which is what lets
          the same two rules cover a poster, a pill and a bare icon alike.
 
+         Nothing paints a background either. Icon buttons briefly got a wash
+         behind them on hover, on the reasoning that brightening a glyph on
+         nothing is fainter than brightening a filled pill. It is — but half of
+         them have no border radius, so the wash arrived as a hard square
+         around a round icon, which looks like a rendering fault rather than a
+         hover state. A slightly quiet cue everywhere beats a loud one that is
+         wrong on half the buttons.
+
          Expressed as `filter` and `scale` for a second reason: nearly every
          control here is styled inline, and an inline style beats a class for
          the same property. Those two are set inline almost nowhere, so the
@@ -192,30 +200,17 @@
         --ui-hover: 130ms;
         --ui-ease: cubic-bezier(0.2, 0, 0, 1);
       }
-      .btn, .btn-icon {
+      .btn {
         transition: filter var(--ui-hover) var(--ui-ease),
-                    box-shadow var(--ui-hover) var(--ui-ease),
                     scale var(--ui-press) var(--ui-ease);
       }
-      .btn:hover:not(:disabled), .btn-icon:hover:not(:disabled) { filter: brightness(1.14); }
-      .btn:active:not(:disabled), .btn-icon:active:not(:disabled) {
-        scale: 0.97;
-        filter: brightness(1.06);
-      }
-      /* An icon button sits on nothing, so brightening a glyph is a whisper
-         where brightening a filled pill is plain. It gets a wash behind it
-         instead — as an inset shadow, because `background` is already set
-         inline on nearly all of them and a class cannot outrank that. The
-         inset follows the button's own border radius, so a round control gets
-         a round wash. */
-      .btn-icon:hover:not(:disabled) {
-        box-shadow: inset 0 0 0 100px rgba(255, 255, 255, 0.09);
-      }
+      .btn:hover:not(:disabled) { filter: brightness(1.14); }
+      .btn:active:not(:disabled) { scale: 0.97; filter: brightness(1.06); }
       @media (prefers-reduced-motion: reduce) {
         /* Keep the colour change — it is the half that says "this is a button"
            — and drop the movement. */
-        .btn, .btn-icon { transition: filter var(--ui-hover) linear, box-shadow var(--ui-hover) linear; }
-        .btn:active:not(:disabled), .btn-icon:active:not(:disabled) { scale: 1; }
+        .btn { transition: filter var(--ui-hover) linear; }
+        .btn:active:not(:disabled) { scale: 1; }
       }
       .shelf-chev-dis { opacity: 0 !important; pointer-events: none !important; }
       .shelf-chev-l {

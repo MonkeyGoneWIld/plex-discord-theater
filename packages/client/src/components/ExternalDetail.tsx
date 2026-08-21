@@ -167,7 +167,7 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
     <div style={styles.container}>
       {!pageReady && <DetailLoading />}
       <div style={pageReady ? styles.revealed : styles.prerender} aria-hidden={!pageReady}>
-      <button className="btn-icon" onClick={onBack} style={styles.backBtn}>
+      <button className="btn" onClick={onBack} style={styles.backBtn}>
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
           <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>

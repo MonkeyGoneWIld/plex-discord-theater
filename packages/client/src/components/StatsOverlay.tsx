@@ -215,7 +215,7 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
     <div style={styles.panel}>
       <div style={styles.header}>
         <span style={styles.headerTitle}>Stats for nerds</span>
-        <button onClick={onClose} className="btn-icon" style={styles.closeBtn} title="Close (i)">
+        <button onClick={onClose} className="btn" style={styles.closeBtn} title="Close (i)">
           {"✕"}
         </button>
       </div>

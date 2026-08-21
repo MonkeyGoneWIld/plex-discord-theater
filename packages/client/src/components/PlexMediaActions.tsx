@@ -119,7 +119,7 @@ export function PlexMediaActions({
     <div style={{ ...styles.wrap, ...(inline ? styles.wrapInline : {}) }}>
       <div style={styles.buttons}>
         {linked && supportsWatchlist && (
-          <button className="btn-icon"
+          <button className="btn"
             type="button"
             onClick={() => void toggleWatchlist()}
             disabled={watchlistBusy}
@@ -136,7 +136,7 @@ export function PlexMediaActions({
           </button>
         )}
         {supportsWatched && (
-          <button className="btn-icon"
+          <button className="btn"
             type="button"
             onClick={() => void toggleWatched()}
             disabled={watchedBusy}

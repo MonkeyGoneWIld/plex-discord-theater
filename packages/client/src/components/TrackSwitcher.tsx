@@ -88,7 +88,7 @@ export function TrackSwitcher({
       <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
           <span style={styles.headerTitle}>Audio &amp; Subtitles</span>
-          <button className="btn-icon" onClick={onClose} style={styles.closeBtn}>{"\u2715"}</button>
+          <button className="btn" onClick={onClose} style={styles.closeBtn}>{"\u2715"}</button>
         </div>
 
         <div style={styles.tabs}>

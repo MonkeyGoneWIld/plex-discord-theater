@@ -28,7 +28,7 @@ export function NextUpButton({ item, source, onPlay, onDismiss }: NextUpButtonPr
         <button onClick={onPlay} className="btn" style={styles.playBtn}>
           {source === "series" ? "Play Next" : "Play Now"}
         </button>
-        <button onClick={onDismiss} className="btn-icon" style={styles.dismissBtn}>Dismiss</button>
+        <button onClick={onDismiss} className="btn" style={styles.dismissBtn}>Dismiss</button>
       </div>
     </div>
   );

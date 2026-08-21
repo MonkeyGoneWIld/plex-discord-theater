@@ -159,7 +159,7 @@ export function FilterBar({
 
       {/* Clear filters */}
       {hasFilters && (
-        <button className="btn-icon" onClick={handleClear} style={styles.clearBtn}>
+        <button className="btn" onClick={handleClear} style={styles.clearBtn}>
           Clear
         </button>
       )}

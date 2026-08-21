@@ -30,7 +30,7 @@ export function QueuePanel({ queue, onRemove, onClear, onReorder, onClose }: Que
       <div style={styles.panel} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
           <h3 style={styles.title}>Queue ({queue.length})</h3>
-          <button className="btn-icon" onClick={onClose} style={styles.closeBtn}>&times;</button>
+          <button className="btn" onClick={onClose} style={styles.closeBtn}>&times;</button>
         </div>
         {queue.length === 0 ? (
           <p style={styles.empty}>Queue is empty</p>
@@ -63,7 +63,7 @@ export function QueuePanel({ queue, onRemove, onClear, onReorder, onClose }: Que
           </div>
         )}
         {queue.length > 0 && (
-          <button className="btn-icon" onClick={onClear} style={styles.clearBtn}>Clear Queue</button>
+          <button className="btn" onClick={onClear} style={styles.clearBtn}>Clear Queue</button>
         )}
       </div>
     </div>

@@ -612,7 +612,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
           there before: over the field it covered the text, above the field it
           pushed the whole page down the moment you typed. */}
       {isSearching && !poster.phone && roomForBack && (
-        <button className="btn-icon" onClick={handleBackFromSearch} style={styles.backBtn}>
+        <button className="btn" onClick={handleBackFromSearch} style={styles.backBtn}>
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
@@ -810,7 +810,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                   clear. When a filter matches, it only clears those visible
                   matches, so the label says so rather than implying a full wipe. */}
               {plexLinked === false && (!historyQ || filteredHistoryItems.length > 0) && (
-                <button className="btn-icon" onClick={handleClearHistory} style={styles.clearBtn}>
+                <button className="btn" onClick={handleClearHistory} style={styles.clearBtn}>
                   {historyQ ? "Forget Filtered History" : "Clear History"}
                 </button>
               )}

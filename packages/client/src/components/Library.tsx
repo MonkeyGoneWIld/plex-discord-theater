@@ -97,9 +97,9 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
-  // null while the account check is unresolved. Destructive history controls
-  // stay hidden in that state so a linked account never sees Clear History
-  // flash briefly before its status request finishes.
+  // null while the account check is unresolved. Local-history navigation and
+  // destructive controls stay hidden in that state so a linked account never
+  // sees them flash briefly before its status request finishes.
   const [plexLinked, setPlexLinked] = useState<boolean | null>(null);
   const [watchlistItems, setWatchlistItems] = useState<PlexItem[]>([]);
   const [watchlistLoading, setWatchlistLoading] = useState(false);
@@ -218,11 +218,16 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
       .then((status) => {
         if (cancelled) return;
         setPlexLinked(status.linked);
-        if (!status.linked && isWatchlistTab) onActiveSectionChange("home");
+        if (
+          (status.linked && isHistoryTab)
+          || (!status.linked && isWatchlistTab)
+        ) {
+          onActiveSectionChange("home");
+        }
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [visible, historyNonce, isWatchlistTab, onActiveSectionChange]);
+  }, [visible, historyNonce, isHistoryTab, isWatchlistTab, onActiveSectionChange]);
 
   useEffect(() => {
     if (!visible || !isWatchlistTab || !plexLinked) return;
@@ -688,19 +693,21 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 Watchlist
               </button>
             )}
-            <button
-              onClick={() => {
-                onActiveSectionChange("history");
-                if (onBrowseContext) onBrowseContext("Browsing History");
-              }}
-              style={{
-                ...styles.tab,
-                ...(poster.phone ? styles.tabPhone : {}),
-                ...(isHistoryTab ? styles.tabActive : {}),
-              }}
-            >
-              History
-            </button>
+            {plexLinked === false && (
+              <button
+                onClick={() => {
+                  onActiveSectionChange("history");
+                  if (onBrowseContext) onBrowseContext("Browsing History");
+                }}
+                style={{
+                  ...styles.tab,
+                  ...(poster.phone ? styles.tabPhone : {}),
+                  ...(isHistoryTab ? styles.tabActive : {}),
+                }}
+              >
+                History
+              </button>
+            )}
           </div>
         )}
 
@@ -828,7 +835,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                       onClick={handleClick}
                       progress={progressOf(entry)}
                       watched={entry.watched}
-                      onRemove={handleForgetFromHistory}
+                      onRemove={plexLinked === false ? handleForgetFromHistory : undefined}
                       onSelectShow={handleShowClick}
                       removeLabel="Remove from watch history"
                     />

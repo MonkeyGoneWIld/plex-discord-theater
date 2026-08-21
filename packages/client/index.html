@@ -174,8 +174,14 @@
          scrollers, and `overflow-x: auto` clips both axes at the content edge,
          so a card that scaled up would lose its border to the row's top and
          bottom and an outer glow would lose its outer side on the end cards.
-         Brightening and shrinking both stay inside the box, which is what lets
-         the same two rules cover a poster, a pill and a bare icon alike.
+         Brightening and moving stay inside the box, which is what lets the same
+         two rules cover a poster, a pill and a bare icon alike.
+
+         The press moves the button rather than scaling it. Scaling was the
+         first answer and it is the wrong one for anything with a label: it
+         resizes the text along with the box, so the words shrink and go soft
+         for as long as the finger is down. A pixel of travel says the same
+         thing and leaves the type exactly as it was.
 
          Nothing paints a background either. Icon buttons briefly got a wash
          behind them on hover, on the reasoning that brightening a glyph on
@@ -185,11 +191,11 @@
          hover state. A slightly quiet cue everywhere beats a loud one that is
          wrong on half the buttons.
 
-         Expressed as `filter` and `scale` for a second reason: nearly every
-         control here is styled inline, and an inline style beats a class for
-         the same property. Those two are set inline almost nowhere, so the
-         feedback lands rather than being silently discarded — which is what a
-         `transform` or a `background` here would be.
+         Expressed as `filter` and the standalone `translate` for a second
+         reason: nearly every control here is styled inline, and an inline style
+         beats a class for the same property. Those two are set inline almost
+         nowhere, so the feedback lands rather than being silently discarded —
+         which is what a `transform` or a `background` here would be.
 
          The press is quicker than the hover it interrupts so it arrives under
          the finger rather than catching up afterwards, and the curve is a
@@ -202,15 +208,15 @@
       }
       .btn {
         transition: filter var(--ui-hover) var(--ui-ease),
-                    scale var(--ui-press) var(--ui-ease);
+                    translate var(--ui-press) var(--ui-ease);
       }
       .btn:hover:not(:disabled) { filter: brightness(1.14); }
-      .btn:active:not(:disabled) { scale: 0.97; filter: brightness(1.06); }
+      .btn:active:not(:disabled) { translate: 0 1px; filter: brightness(1.06); }
       @media (prefers-reduced-motion: reduce) {
         /* Keep the colour change — it is the half that says "this is a button"
            — and drop the movement. */
         .btn { transition: filter var(--ui-hover) linear; }
-        .btn:active:not(:disabled) { scale: 1; }
+        .btn:active:not(:disabled) { translate: none; }
       }
       .shelf-chev-dis { opacity: 0 !important; pointer-events: none !important; }
       .shelf-chev-l {

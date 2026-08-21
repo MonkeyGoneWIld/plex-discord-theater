@@ -1124,13 +1124,11 @@ const styles: Record<string, React.CSSProperties> = {
     position: "absolute",
     left: "50%",
     top: "50%",
-    // The standalone property, not `transform`. The hover feedback scales this
-    // button (see .tap in index.html), and the two compose correctly only as
-    // separate properties: translate is applied after scale, so the centring
-    // shift stays half the button's *unscaled* size and the middle stays put.
-    // Written as `transform: translate(...)` it grew about a point 4% off its
-    // own centre and drifted a couple of pixels on every hover.
-    translate: "-50% -50%",
+    // `transform`, deliberately, leaving the standalone `translate` free for
+    // the press dip every button shares (see .btn in index.html). The two
+    // compose in that order — translate, then transform — so the dip lands as
+    // one pixel down from a centre that stays centred.
+    transform: "translate(-50%, -50%)",
     zIndex: 1,
     display: "flex",
     alignItems: "center",

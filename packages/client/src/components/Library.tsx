@@ -97,13 +97,10 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
-  // Clearing a linked account can take a while because Plex history events are
-  // removed remotely before the local rows are committed. Keep the grid in
-  // place and say what is happening for that whole round trip instead of
-  // optimistically flashing an empty state while the request is still running.
-  const [historyClearing, setHistoryClearing] = useState(false);
-  const [historyClearError, setHistoryClearError] = useState<string | null>(null);
-  const [plexLinked, setPlexLinked] = useState(false);
+  // null while the account check is unresolved. Destructive history controls
+  // stay hidden in that state so a linked account never sees Clear History
+  // flash briefly before its status request finishes.
+  const [plexLinked, setPlexLinked] = useState<boolean | null>(null);
   const [watchlistItems, setWatchlistItems] = useState<PlexItem[]>([]);
   const [watchlistLoading, setWatchlistLoading] = useState(false);
   const [watchlistError, setWatchlistError] = useState<string | null>(null);
@@ -289,54 +286,38 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     });
   }, []);
 
-  const handleClearHistory = useCallback(async () => {
-    if (historyClearing) return;
+  const handleClearHistory = useCallback(() => {
     const q = historyQuery.trim().toLowerCase();
-    const keys = q
-      ? new Set(historyItems.filter((e) => historyMatches(e, q)).map((e) => e.ratingKey))
-      : null;
-    if (keys?.size === 0) return;
-
-    setHistoryClearing(true);
-    setHistoryClearError(null);
-    try {
-      if (keys) {
-        // Wait for every request, even if one fails. Promise.all rejects on the
-        // first failure and would hide the progress state while the remaining
-        // Plex deletions were still running in the background.
-        const results = await Promise.allSettled(
-          [...keys].map((key) => deleteHistoryEntry(key)),
-        );
-        const failed = results.find(
-          (result): result is PromiseRejectedResult => result.status === "rejected",
-        );
-        if (failed) throw failed.reason;
-
-        setContinueItems((prev) => prev.filter((e) => !keys.has(e.ratingKey)));
-        setHistoryItems((prev) => prev.filter((e) => !keys.has(e.ratingKey)));
-        setHistoryTotal((n) => Math.max(0, n - keys.size));
-        // Return to the full history after deleting the filtered matches.
-        setHistoryQuery("");
-        setSearchResetSignal((n) => n + 1);
-      } else {
-        await clearHistory();
-        setContinueItems([]);
-        setHistoryItems([]);
-        setHistoryTotal(0);
-      }
-    } catch (err) {
-      console.error(err);
-      const detail = err instanceof Error ? err.message : String(err);
-      setHistoryClearError(
-        `${detail}. The list was refreshed; try again for anything left.`,
+    // Filter active: clear only the items currently visible under the filter,
+    // leaving the rest of the history intact. Same optimistic pattern as the
+    // per-card remove — a single entry delete covers Continue Watching too.
+    if (q) {
+      const keys = new Set(
+        historyItems.filter((e) => historyMatches(e, q)).map((e) => e.ratingKey),
       );
-      // A filtered clear can partially succeed remotely. Reload the server's
-      // authoritative rows once all requests have settled so the grid agrees.
-      setRetryNonce((n) => n + 1);
-    } finally {
-      setHistoryClearing(false);
+      if (keys.size === 0) return;
+      setContinueItems((prev) => prev.filter((e) => !keys.has(e.ratingKey)));
+      setHistoryItems((prev) => prev.filter((e) => !keys.has(e.ratingKey)));
+      setHistoryTotal((n) => Math.max(0, n - keys.size));
+      Promise.all([...keys].map((key) => deleteHistoryEntry(key))).catch((err) => {
+        console.error(err);
+        setRetryNonce((n) => n + 1);
+      });
+      // Drop the filter and empty the search box, returning to the full history
+      // (now minus what was just cleared).
+      setHistoryQuery("");
+      setSearchResetSignal((n) => n + 1);
+      return;
     }
-  }, [historyClearing, historyItems, historyQuery]);
+    // Only reachable for a confirmed unlinked account (see the render gate).
+    setContinueItems([]);
+    setHistoryItems([]);
+    setHistoryTotal(0);
+    clearHistory().catch((err) => {
+      console.error(err);
+      setRetryNonce((n) => n + 1);
+    });
+  }, [historyItems, historyQuery]);
 
   // Fetch genres when section changes
   useEffect(() => {
@@ -833,42 +814,12 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               {/* Hidden while a filter matches nothing — there's nothing to
                   clear. When a filter matches, it only clears those visible
                   matches, so the label says so rather than implying a full wipe. */}
-              {(!historyQ || filteredHistoryItems.length > 0) && (
-                <button
-                  onClick={handleClearHistory}
-                  disabled={historyClearing}
-                  aria-busy={historyClearing}
-                  style={{
-                    ...styles.clearBtn,
-                    ...(historyClearing ? styles.clearBtnBusy : {}),
-                  }}
-                >
-                  {historyClearing
-                    ? "Deleting…"
-                    : historyQ
-                      ? "Forget Filtered History"
-                      : "Clear History"}
+              {plexLinked === false && (!historyQ || filteredHistoryItems.length > 0) && (
+                <button onClick={handleClearHistory} style={styles.clearBtn}>
+                  {historyQ ? "Forget Filtered History" : "Clear History"}
                 </button>
               )}
             </div>
-            {historyClearing && (
-              <div style={styles.historyClearStatus} role="status" aria-live="polite">
-                <div style={styles.historyClearStatusText}>
-                  Deleting {historyQ ? filteredHistoryItems.length : historyTotal}{" "}
-                  {(historyQ ? filteredHistoryItems.length : historyTotal) === 1 ? "title" : "titles"}
-                  {" "}from MonkeyPlex{plexLinked ? " and your Plex account" : ""}…
-                </div>
-                <div style={styles.historyClearTrack} aria-hidden="true">
-                  <div style={styles.historyClearBar} />
-                </div>
-              </div>
-            )}
-            {!historyClearing && historyClearError && (
-              <div style={styles.historyClearError} role="alert">
-                <strong style={styles.historyClearErrorTitle}>History deletion failed</strong>
-                <span>{historyClearError}</span>
-              </div>
-            )}
             {filteredHistoryItems.length === 0 ? (
               <div style={styles.emptyState}>
                 <div style={styles.emptyIcon}>
@@ -1327,64 +1278,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "12px",
     fontWeight: 600,
     fontFamily: "inherit",
-  },
-  clearBtnBusy: {
-    cursor: "wait",
-    color: "#d5d5d5",
-    borderColor: "rgba(229,160,13,0.35)",
-  },
-  historyClearStatus: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "stretch",
-    gap: "8px",
-    margin: "10px 24px 2px",
-    padding: "10px 12px 11px",
-    borderRadius: "8px",
-    border: "1px solid rgba(229,160,13,0.22)",
-    background: "rgba(229,160,13,0.08)",
-    color: "#d6b66a",
-    fontSize: "12px",
-    fontWeight: 600,
-  },
-  historyClearStatusText: {
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-  },
-  historyClearTrack: {
-    position: "relative",
-    height: "4px",
-    overflow: "hidden",
-    borderRadius: "999px",
-    background: "rgba(229,160,13,0.16)",
-  },
-  historyClearBar: {
-    width: "40%",
-    height: "100%",
-    borderRadius: "999px",
-    background: "#e5a00d",
-    transformOrigin: "center",
-    animation: "history-delete-progress 1.15s ease-in-out infinite",
-  },
-  historyClearError: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "3px",
-    margin: "10px 24px 2px",
-    padding: "9px 12px",
-    borderRadius: "8px",
-    border: "1px solid rgba(231,76,60,0.25)",
-    background: "rgba(231,76,60,0.08)",
-    color: "#d9938c",
-    fontSize: "12px",
-    fontWeight: 500,
-    lineHeight: 1.4,
-  },
-  historyClearErrorTitle: {
-    color: "#e0a09a",
-    fontSize: "12px",
-    fontWeight: 700,
   },
   historyWhen: {
     padding: "6px 2px 0",

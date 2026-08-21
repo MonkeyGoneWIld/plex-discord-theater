@@ -156,6 +156,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   container: {
     padding: "16px 24px",
+    width: "100%",
+    minWidth: 0,
   },
   inputWrap: {
     display: "flex",

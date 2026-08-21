@@ -611,7 +611,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
           Back
         </button>
       )}
-      <div style={styles.narrowWrap}>
+      <div style={{ ...styles.narrowWrap, ...(poster.phone ? styles.narrowWrapPhone : {}) }}>
         <Search
           onSearch={handleSearch}
           onClear={handleClearSearch}
@@ -640,7 +640,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
             Genre/Sort filter bar renders BELOW them (see next block) so switching
             to a Movies/TV Shows tab never shoves the tab row down. */}
         {!searchResults && (
-          <div style={styles.tabs}>
+          <div style={{ ...styles.tabs, ...(poster.phone ? styles.tabsPhone : {}) }}>
             <button
               onClick={() => {
                 onActiveSectionChange("home");
@@ -648,6 +648,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               }}
               style={{
                 ...styles.tab,
+                ...(poster.phone ? styles.tabPhone : {}),
                 ...(isHomeTab ? styles.tabActive : {}),
               }}
             >
@@ -662,6 +663,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 }}
                 style={{
                   ...styles.tab,
+                  ...(poster.phone ? styles.tabPhone : {}),
                   ...(s.id === activeSection ? styles.tabActive : {}),
                 }}
               >
@@ -676,6 +678,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 }}
                 style={{
                   ...styles.tab,
+                  ...(poster.phone ? styles.tabPhone : {}),
                   ...(isWatchlistTab ? styles.tabActive : {}),
                 }}
               >
@@ -689,6 +692,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               }}
               style={{
                 ...styles.tab,
+                ...(poster.phone ? styles.tabPhone : {}),
                 ...(isHistoryTab ? styles.tabActive : {}),
               }}
             >
@@ -1126,6 +1130,11 @@ const styles: Record<string, React.CSSProperties> = {
     maxWidth: "1200px",
     margin: "0 auto",
   },
+  narrowWrapPhone: {
+    width: "100%",
+    minWidth: 0,
+    maxWidth: "100%",
+  },
   wideWrap: {
     // Wider than the search/tabs column on purpose — this is what actually
     // lets 10 panels render at a real size instead of squeezing into the
@@ -1138,6 +1147,13 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "8px",
     padding: "0 24px 16px",
   },
+  tabsPhone: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(64px, 1fr))",
+    gap: "6px",
+    width: "100%",
+    minWidth: 0,
+  },
   tab: {
     padding: "8px 20px",
     borderRadius: "20px",
@@ -1149,6 +1165,15 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
     fontFamily: "inherit",
     transition: "all 0.2s ease",
+  },
+  tabPhone: {
+    width: "100%",
+    minWidth: 0,
+    padding: "8px 6px",
+    fontSize: "12px",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
   tabActive: {
     background: "rgba(229,160,13,0.15)",

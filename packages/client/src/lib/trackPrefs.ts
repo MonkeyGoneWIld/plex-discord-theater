@@ -21,6 +21,11 @@ interface TrackPref {
   title?: string | null;
 }
 
+export interface TrackPrefs {
+  audio: AudioPref | null;
+  subtitle: SubtitlePref | null;
+}
+
 export interface SubtitlePref extends TrackPref {
   /** `true` means the user explicitly chose "None" — remembered, so an opt-out
    *  isn't undone by a later episode that happens to have a default track. */
@@ -51,10 +56,61 @@ function isCommentary(title?: string | null): boolean {
   return /\b(commentary|descriptive|audio description)\b/i.test(title ?? "");
 }
 
+function normalizedText(value?: string | null): string {
+  return (value ?? "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+/** Plex may use either ISO-639-1 (`en`) or ISO-639-2 (`eng`) per file. */
+function canonicalLanguageCode(value?: string | null): string | null {
+  const code = normalizedText(value).replace(/_/g, "-");
+  if (!code || code === "und" || code === "unk" || code === "zxx") return null;
+  try {
+    return new Intl.Locale(code).language;
+  } catch {
+    return code;
+  }
+}
+
+/**
+ * Last-resort language hint for files whose subtitle streams are untagged.
+ * Plex titles commonly look like "English (ASS)" or "English - Forced".
+ */
+function titleLanguageHint(value?: string | null): string {
+  return normalizedText(value)
+    .replace(/\[[^\]]*\]|\([^)]*\)/g, " ")
+    .split(/\s[-·|]\s/, 1)[0]
+    .replace(/\b(forced|sdh|cc|closed captions?|full|dialogue|subtitles?)\b/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
 function sameLanguage(track: StreamTrack, pref: TrackPref): boolean {
-  return pref.languageCode && track.languageCode
-    ? track.languageCode === pref.languageCode
-    : (track.language ?? "").toLowerCase() === (pref.language ?? "").toLowerCase();
+  const trackCode = canonicalLanguageCode(track.languageCode);
+  const prefCode = canonicalLanguageCode(pref.languageCode);
+  if (trackCode && prefCode && trackCode === prefCode) return true;
+
+  const trackName = normalizedText(track.language);
+  const prefName = normalizedText(pref.language);
+  if (trackName && prefName && trackName === prefName) return true;
+
+  const trackTitle = normalizedText(track.title);
+  const prefTitle = normalizedText(pref.title);
+  if (prefName && new RegExp(`\\b${prefName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(trackTitle)) {
+    return true;
+  }
+  if (trackName && new RegExp(`\\b${trackName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(prefTitle)) {
+    return true;
+  }
+
+  // Explicit, conflicting language codes beat a coincidentally similar title.
+  if (trackCode && prefCode) return false;
+  const trackHint = titleLanguageHint(track.title);
+  const prefHint = titleLanguageHint(pref.title);
+  return !!trackHint && trackHint === prefHint;
 }
 
 function describe(track: StreamTrack): TrackPref {
@@ -154,7 +210,7 @@ export function matchSubtitleTrack(
 export function describeWatched(
   available: { audioTracks: StreamTrack[]; subtitleTracks: StreamTrack[] },
   watching: { audioStreamId: number; subtitleStreamId: number },
-): { audio: AudioPref | null; subtitle: SubtitlePref | null } {
+): TrackPrefs {
   const audio = available.audioTracks.find((t) => t.id === watching.audioStreamId);
   const subtitle = available.subtitleTracks.find((t) => t.id === watching.subtitleStreamId);
   return {
@@ -162,6 +218,14 @@ export function describeWatched(
     subtitle: watching.subtitleStreamId === 0
       ? { off: true }
       : subtitle ? { off: false, ...describe(subtitle) } : null,
+  };
+}
+
+/** Fill an unresolved side without replacing a side we observed directly. */
+export function mergeTrackPrefs(primary: TrackPrefs | null, fallback: TrackPrefs): TrackPrefs {
+  return {
+    audio: primary?.audio ?? fallback.audio,
+    subtitle: primary?.subtitle ?? fallback.subtitle,
   };
 }
 
@@ -179,7 +243,7 @@ export function describeWatched(
  */
 export function tracksForNewItem(
   available: { audioTracks: StreamTrack[]; subtitleTracks: StreamTrack[] },
-  prefs: { audio: AudioPref | null; subtitle: SubtitlePref | null },
+  prefs: TrackPrefs,
   fallback: { audioStreamId: number; subtitleStreamId: number },
 ): { audioStreamId: number; subtitleStreamId: number } {
   return {

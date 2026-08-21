@@ -6,7 +6,7 @@
  * file happens to hold. These are the cases where "same language" is not enough
  * to identify the right track.
  */
-import { describeWatched, matchAudioTrack, matchSubtitleTrack, tracksForNewItem, type AudioPref, type SubtitlePref } from "../src/lib/trackPrefs";
+import { describeWatched, matchAudioTrack, matchSubtitleTrack, mergeTrackPrefs, tracksForNewItem, type AudioPref, type SubtitlePref } from "../src/lib/trackPrefs";
 import type { StreamTrack } from "../src/lib/api";
 
 let pass = 0;
@@ -107,6 +107,20 @@ console.log("\n— subtitles still behave —");
     matchSubtitleTrack([plain], { off: true }), null);
   check("a language this episode lacks turns subtitles off rather than guessing",
     matchSubtitleTrack([track({ id: 52, title: "French", language: "French", languageCode: "fra" })], pref), null);
+  check("equivalent two- and three-letter Plex language codes match",
+    matchSubtitleTrack([
+      track({ id: 53, title: "English (ASS)", language: "English", languageCode: "en" }),
+    ], pref)?.id, 53);
+  check("an untagged track can still match the language named in its title",
+    matchSubtitleTrack([
+      track({ id: 54, title: "Japanese (ASS)" }),
+      track({ id: 55, title: "English (ASS)" }),
+    ], pref)?.id, 55);
+  check("the same subtitle codec wins over Plex's first same-language track",
+    matchSubtitleTrack([
+      track({ id: 56, title: "English (PGS)", language: "English", languageCode: "eng", codec: "pgs" }),
+      plain,
+    ], pref)?.id, 50);
 }
 
 console.log("\n— carrying a viewer's own tracks into the next episode —");
@@ -194,6 +208,17 @@ console.log("\n— what you were watching describes what to look for —");
   // falls through to the stored preference rather than inventing a match.
   const unknown = describeWatched(before, { audioStreamId: 999, subtitleStreamId: 998 });
   check("ids from nowhere describe nothing", [unknown.audio, unknown.subtitle], [null, null]);
+
+  // Resolving audio must not prevent the subtitle side from using its saved
+  // fallback when the previous episode's subtitle id cannot be described.
+  const partial = describeWatched(before, { audioStreamId: 81, subtitleStreamId: 998 });
+  const savedEnglishSubs: SubtitlePref = {
+    off: false, languageCode: "eng", language: "English", codec: "srt", title: "English (SRT)",
+  };
+  const filled = mergeTrackPrefs(partial, { audio: null, subtitle: savedEnglishSubs });
+  check("a missing watched subtitle falls back independently of resolved audio",
+    tracksForNewItem(now, filled, hostTracks),
+    { audioStreamId: 91, subtitleStreamId: 92 });
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

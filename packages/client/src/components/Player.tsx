@@ -14,7 +14,7 @@ import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, f
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
-import { describeWatched, loadAudioPref, loadSubtitlePref, tracksForNewItem } from "../lib/trackPrefs";
+import { describeWatched, loadAudioPref, loadSubtitlePref, mergeTrackPrefs, tracksForNewItem } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { roomPositionNow } from "../hooks/useSync";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
@@ -1030,14 +1030,19 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
          * the fallback for the first episode of a sitting, where there is no
          * previous one to read.
          */
-        let source: Parameters<typeof tracksForNewItem>[1] | null = null;
+        const saved = { audio: loadAudioPref(), subtitle: loadSubtitlePref() };
+        let source = saved;
         if (was) {
-          const before = versionOf(await fetchMeta(was.ratingKey));
-          source = describeWatched(before, was);
-          outcome = "from last episode";
-        }
-        if (!source?.audio && !source?.subtitle) {
-          source = { audio: loadAudioPref(), subtitle: loadSubtitlePref() };
+          try {
+            const before = versionOf(await fetchMeta(was.ratingKey));
+            source = mergeTrackPrefs(describeWatched(before, was), saved);
+            outcome = "from last episode, with saved fallback";
+          } catch {
+            // The new episode's metadata is enough to apply the saved choice.
+            // A transient miss for the old episode must not discard it too.
+            outcome = "from saved preference (last episode lookup failed)";
+          }
+        } else {
           outcome = "from saved preference";
         }
 

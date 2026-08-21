@@ -954,6 +954,7 @@ function mapSubtitleTracks(streams: PlexStream[]) {
     .map((s) => ({
       id: s.id,
       title: s.extendedDisplayTitle || s.displayTitle || s.title || "Unknown",
+      codec: s.codec ?? null,
       language: s.language ?? null,
       languageCode: s.languageCode ?? null,
       selected: !!s.selected,

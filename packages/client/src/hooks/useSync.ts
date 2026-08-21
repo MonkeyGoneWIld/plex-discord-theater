@@ -49,6 +49,10 @@ export interface SuggestionItem {
  * control of the room.
  */
 export interface StreamVariant {
+  /** The title this assignment is for. Lets anything acting on a change of
+   *  title tell a fresh assignment from the one left over from the last one —
+   *  the two arrive in separate messages and not always in the same frame. */
+  ratingKey: string | null;
   variantKey: string;
   audioStreamId: number;
   subtitleStreamId: number;
@@ -573,6 +577,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             setState((prev) => ({
               ...prev,
               variant: {
+                ratingKey: (msg.ratingKey as string) ?? null,
                 variantKey: msg.variantKey as string,
                 audioStreamId: (msg.audioStreamId as number) ?? 0,
                 subtitleStreamId: (msg.subtitleStreamId as number) ?? 0,

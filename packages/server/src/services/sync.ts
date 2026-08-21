@@ -458,9 +458,19 @@ function membersOf(room: Room, key: string): RoomClient[] {
 }
 
 /** What a client needs to play a stream: which one, and whether they drive it. */
-function variantMessage(v: Variant, isOwner: boolean) {
+/**
+ * A stream assignment, stamped with the title it is for.
+ *
+ * The title matters because a client is told about the item and about the
+ * stream in two separate messages, and they do not always land in the same
+ * frame. Without it, anything reacting to "I have been moved to a new title"
+ * could read the assignment left over from the previous one and take it for the
+ * new one's.
+ */
+function variantMessage(v: Variant, isOwner: boolean, ratingKey: string | null) {
   return {
     type: "variant",
+    ratingKey,
     variantKey: v.key,
     audioStreamId: v.audioStreamId,
     subtitleStreamId: v.subtitleStreamId,
@@ -473,7 +483,7 @@ function variantMessage(v: Variant, isOwner: boolean) {
 /** Tell each member of a stream what it is now — including who drives it. */
 function announceVariant(room: Room, v: Variant): void {
   for (const c of membersOf(room, v.key)) {
-    sendTo(c.ws, variantMessage(v, c.userId === v.ownerUserId));
+    sendTo(c.ws, variantMessage(v, c.userId === v.ownerUserId, room.state.ratingKey));
   }
 }
 
@@ -975,6 +985,7 @@ export function attachWebSocketServer(server: Server): void {
                 room.state.variants.get(room.state.hostVariantKey)!,
                 // A joiner never drives the host's stream — the host does.
                 false,
+                room.state.ratingKey,
               )
             : null,
         });
@@ -1085,7 +1096,7 @@ export function attachWebSocketServer(server: Server): void {
         // Only the client that moved. Nothing changed for the people already on
         // this stream, and a re-announcement of a stream they are already
         // playing is noise they have to reason about.
-        sendTo(client.ws, variantMessage(hostVariant, hostVariant.ownerUserId === client.userId));
+        sendTo(client.ws, variantMessage(hostVariant, hostVariant.ownerUserId === client.userId, room.state.ratingKey));
         return;
       }
 

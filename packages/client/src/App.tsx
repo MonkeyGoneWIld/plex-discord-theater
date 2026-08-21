@@ -306,6 +306,40 @@ export function App() {
 
   // Track previous ratingKey to detect changes
   const prevRatingKeyRef = useRef<string | null>(null);
+  // Read inside callbacks that must not be rebuilt when the role changes.
+  const effectiveIsHostRef = useRef(effectiveIsHost);
+  effectiveIsHostRef.current = effectiveIsHost;
+
+  /**
+   * Put a player on top of the stack, replacing one already there.
+   *
+   * Also drops the page underneath when it is the episode being left behind.
+   * Back means "where I came from", and where you came from was that episode's
+   * page — but three episodes later it is a page about something nobody is
+   * watching, and Back from the middle of a season landed on episode 1. The
+   * entry goes only when it names the outgoing episode, so a season list, a
+   * show or the home screen underneath is left exactly where it was and Back
+   * still goes there.
+   */
+  const showPlayer = useCallback((playerView: View) => {
+    setViewStack((s) => {
+      const top = s[s.length - 1];
+      const covering = top?.kind !== "player";
+      if (covering) scrollPosRef.current[s.length - 1] = window.scrollY;
+      let base = covering ? s : s.slice(0, -1);
+      const leaving = top?.kind === "player" ? top.item.ratingKey : null;
+      const under = base[base.length - 1];
+      if (
+        leaving &&
+        under?.kind === "detail" &&
+        under.item.type === "episode" &&
+        under.item.ratingKey === leaving
+      ) {
+        base = base.slice(0, -1);
+      }
+      return [...base, playerView];
+    });
+  }, []);
 
   // Viewer: auto-navigate when host starts or stops playback
   useEffect(() => {
@@ -328,12 +362,7 @@ export function App() {
         subtitles: syncState.subtitles,
         synthesized: true,
       };
-      setViewStack((s) => {
-        const covering = s[s.length - 1]?.kind !== "player";
-        if (covering) scrollPosRef.current[s.length - 1] = window.scrollY;
-        const base = covering ? s : s.slice(0, -1);
-        return [...base, playerView];
-      });
+      showPlayer(playerView);
     }
 
     // Host stopped — pop back from player if we're on one
@@ -594,6 +623,14 @@ export function App() {
     let subtitles = queueItem.subtitles;
     let audioStreamId: number | undefined;
     let subtitleStreamId: number | undefined;
+    // Selecting streams on the part is a change to the *item*, not to this
+    // client — Plex applies it server-wide — so it belongs to whoever is about
+    // to start the room's transcode. A co-host pressing Next runs this too, and
+    // two clients writing their own preference to the same part moments apart
+    // is a coin toss over which one the transcode ends up starting with.
+    // Everyone else still reads the selection below and gets their own tracks
+    // from the per-viewer restore instead.
+    const maySelect = effectiveIsHostRef.current;
     try {
       const meta = await fetchMeta(queueItem.ratingKey);
       // The version, not the title: a second file has its own part and its own
@@ -605,7 +642,7 @@ export function App() {
       // to, and there is no sensible substitute — leave Plex's own choice.
       audioStreamId = audioMatch?.id ?? version.audioTracks.find((t) => t.selected)?.id;
 
-      if (version.partId != null && (subtitlePref || audioMatch)) {
+      if (maySelect && version.partId != null && (subtitlePref || audioMatch)) {
         const subtitleMatch = subtitlePref
           ? matchSubtitleTrack(version.subtitleTracks, subtitlePref)
           : null;
@@ -648,13 +685,8 @@ export function App() {
       audioStreamId,
       subtitleStreamId,
     };
-    setViewStack((s) => {
-      const covering = s[s.length - 1]?.kind !== "player";
-      if (covering) scrollPosRef.current[s.length - 1] = window.scrollY;
-      const base = covering ? s : s.slice(0, -1);
-      return [...base, playerView];
-    });
-  }, []);
+    showPlayer(playerView);
+  }, [showPlayer]);
 
   // Breadcrumb trail. Mostly mirrors the view stack, but synthesizes missing
   // ancestors so an episode always shows the full Home › Show › Season › Episode

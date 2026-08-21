@@ -105,6 +105,10 @@ console.log("\n— everyone starts on the host's stream —");
   const [host, a, b] = await room("inst-1", ["host", "a", "b"]);
   const sid = await startPlayback(host);
   check("host is on its own stream", host.stream()?.key, "1:0");
+  // Which title the assignment is for. A client is told about the item and the
+  // stream in two messages that do not always land together, so anything acting
+  // on a change of title needs to tell a fresh assignment from a leftover one.
+  check("and it names the title it is for", a.last("variant")?.ratingKey, "100");
   check("viewer a shares it", a.stream()?.key, "1:0");
   check("viewer b shares it", b.stream()?.key, "1:0");
   check("one Plex session between them", new Set([a.stream()?.session, b.stream()?.session]).size, 1);

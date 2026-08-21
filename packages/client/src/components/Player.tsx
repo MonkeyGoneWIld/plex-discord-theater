@@ -972,6 +972,14 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     if (!v || isHost) return;
     // The title this player opened on. Not an advance, so nothing to restore.
     if (item.ratingKey === openedOnRatingKeyRef.current) return;
+    // The assignment has to be for *this* title. The item and the stream arrive
+    // in two messages, and when they land in separate frames this effect runs
+    // once with the previous episode's assignment still in hand — which is both
+    // the wrong thing to fall back to and, because the attempt was recorded
+    // below, the end of it: the real assignment arrived to an effect that had
+    // already decided it was done. Tracks came out differently depending on how
+    // the two messages happened to be batched.
+    if (v.ratingKey !== item.ratingKey) return;
     if (restoredTracksForRef.current === item.ratingKey) return;
     // Claimed before the fetch, so a second variant landing mid-flight doesn't
     // start a duplicate lookup and a duplicate fork.

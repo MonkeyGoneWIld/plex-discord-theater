@@ -198,6 +198,42 @@ console.log("\n— succession prefers someone on the host's stream —");
   [a, b, c].forEach((x) => x.close());
 }
 
+console.log("\n— handing the role over leaves you a co-host —");
+{
+  const [host, a, b] = await room("inst-9b", ["host", "a", "b"]);
+  await startPlayback(host);
+  [host, a, b].forEach((c) => c.clear());
+
+  host.send({ type: "promote-host", userId: "u-a" });
+  await sleep(80);
+
+  const roster = (b.last("participants")?.participants ?? []) as Array<any>;
+  const role = (id: string) => {
+    const p = roster.find((x) => x.userId === id);
+    return p ? [p.isHost === true, p.isCoHost === true] : "missing";
+  };
+
+  check("the target is host", role("u-a"), [true, false]);
+  // Passing the role is usually "you drive for a bit", not "I am done here".
+  check("the outgoing host keeps transport control", role("u-host"), [false, true]);
+  check("nobody else gained anything", role("u-b"), [false, false]);
+
+  // And it is a real grant, not a label: a co-host may pause the room.
+  b.clear();
+  host.send({ type: "pause", position: 120 });
+  await sleep(60);
+  check("and can actually use it", !!b.last("pause"), true);
+
+  // The new host outranks it and can take it away again.
+  a.send({ type: "set-cohost", userId: "u-host", value: false });
+  await sleep(60);
+  const after = (b.last("participants")?.participants ?? []) as Array<any>;
+  check("the new host can withdraw it",
+    after.find((x) => x.userId === "u-host")?.isCoHost === true, false);
+
+  [host, a, b].forEach((c) => c.close());
+}
+
 console.log("\n— a successor on another stream strands nobody —");
 {
   const [host, a, b] = await room("inst-6", ["host", "a", "b"]);

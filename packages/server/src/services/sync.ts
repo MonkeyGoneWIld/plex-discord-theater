@@ -1513,10 +1513,15 @@ export function attachWebSocketServer(server: Server): void {
           // be written, or not at all.
           persistProgress(room, undefined, "always");
 
-          // Hand over: the old host drops to a plain viewer, and the target
-          // clears any co-host flag since host already supersedes it.
+          // Hand over. The outgoing host keeps transport control as a co-host:
+          // passing the role is usually "you drive for a bit", not "I am done
+          // here", and dropping straight to a plain viewer took the pause button
+          // off the person who had been running the room a second earlier. The
+          // new host can still remove it from the people panel like any other
+          // grant.
           client.isHost = false;
-          client.isCoHost = false;
+          client.isCoHost = true;
+          room.coHostIds.add(client.userId);
           target.isHost = true;
           target.isCoHost = false;
           // Host outranks co-host, so the grant is spent rather than remembered

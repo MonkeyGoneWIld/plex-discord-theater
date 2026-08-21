@@ -11,7 +11,7 @@ sees the same thing at the same time — one person drives, everyone else follow
 > parties, and the awkward parts — playback sync, transcode teardown, host
 > handover — have been debugged against production logs rather than guessed at.
 > The sync protocol, person page and personal Plex account flow have harnesses
-> that run against a real WebSocket server and a stubbed Plex (`npm test`, 211
+> that run against a real WebSocket server and a stubbed Plex (`npm test`, 216
 > checks), but nothing runs them automatically, there is no external security
 > review, and no human has read every line.
 >
@@ -81,9 +81,10 @@ to everyone; audio and subtitles are each person's own.
   has to rebuild its stream — a track change, a seek, walking back into the
   player — rejoins at where the room has got to, not where it left.
 - **Co-hosts and host handover.** Hand out playback control, or the host role
-  itself, from the people panel. Roles belong to the person, not the connection,
-  so a dropped WiFi signal doesn't silently demote anyone. If the host leaves, a
-  co-host takes over and the film keeps going.
+  itself, from the people panel. Passing the role leaves you a co-host, so you
+  still have the pause button a second after giving it away. Roles belong to the
+  person, not the connection, so a dropped WiFi signal doesn't silently demote
+  anyone. If the host leaves, a co-host takes over and the film keeps going.
 - **Browse and search your whole library** — filters, sorting, Cast & Crew
   pages. Search takes in Plex Discover too, so titles you don't own show up
   badged **Not in library**, with a Request button if you run Overseerr or

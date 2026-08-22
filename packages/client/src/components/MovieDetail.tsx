@@ -775,9 +775,31 @@ const styles: Record<string, React.CSSProperties> = {
   // Height reservations for the parts that can't be drawn from the clicked card
   // (see the optimistic-render note). Each holds exactly the space its content
   // will take, so filling in never nudges what sits below it.
+  /**
+   * Reserved height for the genres, the 20px that follows them included.
+   *
+   * It used to reserve the pills alone, and the difference was not neutral. A
+   * row of pills is 27px inside a 34px reservation, and those 7px of slack
+   * swallowed the row's own 20px bottom margin whole — so the genres sat 7px
+   * off the ratings while every other gap in the column was 20px or more.
+   * flow-root holds the margin inside the reservation, where no amount of
+   * slack can eat it, and 47px is what the block occupies once it lands, so
+   * nothing moves when it does.
+   *
+   * The cost is that a title with no genres holds the gap open as well as the
+   * pills. That is the space the page takes when they exist, which is the
+   * point of reserving it.
+   */
   genresSlot: {
-    minHeight: "34px",
+    minHeight: "47px",
+    display: "flow-root",
   },
+  /**
+   * No such treatment needed: RatingsRow pins its own row to 26px, so the
+   * reservation and the content are the same height and there is no slack for
+   * the margin to disappear into. Left alone rather than made to match — a
+   * title MDBList has no scores for would otherwise hold 46px of nothing.
+   */
   ratingsSlot: {
     minHeight: "26px",
   },
@@ -876,15 +898,15 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     alignItems: "stretch",
     /**
-     * Looser than the 12px the row uses.
+     * The gap above the Play button, repeated below it.
      *
      * Side by side, 12px separates two things standing next to each other. In a
      * column it is the distance between the bottom edge of a full-width primary
-     * and the top of whatever follows, and at that width 12px reads as the two
-     * being one block — the watched control looked stuck to the underside of
-     * Play rather than sitting below it.
+     * and the top of whatever follows, and at that width anything under the
+     * gap above reads as the two being one block — the watched control looked
+     * stuck to the underside of Play rather than sitting below it.
      */
-    gap: "20px",
+    gap: "28px",
   },
   playBtnNarrow: {
     // Stretched to the column, so a long label like "Resume from 1:01:55"
@@ -971,7 +993,8 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     gap: "8px",
-    marginBottom: "16px",
+    // Matches the 20px between the genres, the ratings and the synopsis below.
+    marginBottom: "20px",
   },
   metaItem: {
     fontSize: "15px",
@@ -1044,7 +1067,10 @@ const styles: Record<string, React.CSSProperties> = {
   actions: {
     marginTop: "28px",
     display: "flex",
-    gap: "12px",
+    // Row gap matched to the marginTop above, so wrapping to a second line
+    // leaves the same air under the primary button as there is over it. The
+    // column gap is what separates buttons standing side by side.
+    gap: "28px 12px",
     alignItems: "center",
     flexWrap: "wrap",
   },

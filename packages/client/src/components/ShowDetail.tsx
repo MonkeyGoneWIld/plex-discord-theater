@@ -401,9 +401,11 @@ const styles: Record<string, React.CSSProperties> = {
     opacity: 1,
     transition: "opacity 0.28s ease",
   },
-  // Height reservations for the parts that need the metadata — see MovieDetail.
+  // Height reservations for the parts that need the metadata — see MovieDetail
+  // for why the genres reserve their trailing gap and the ratings don't.
   genresSlot: {
-    minHeight: "34px",
+    minHeight: "47px",
+    display: "flow-root",
   },
   ratingsSlot: {
     minHeight: "26px",
@@ -512,7 +514,10 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     gap: "8px",
-    marginBottom: "16px",
+    // The same 20px that separates the genres, the ratings and the synopsis
+    // below it. At 16px this one line sat measurably tighter than every other
+    // gap in the column.
+    marginBottom: "20px",
   },
   metaItem: {
     fontSize: "15px",
@@ -558,8 +563,18 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: "0 4px 20px rgba(229,160,13,0.3)",
     maxWidth: "100%",
   },
+  /**
+   * The action block's own spacing, matched to the gap above it.
+   *
+   * The row gap only shows on a narrow screen, where the primary button takes
+   * the whole width and the watchlist and watched controls wrap underneath it.
+   * It was the one gap on the page that did not match its neighbours: 28px of
+   * air above the button and 10px below, so the controls read as stuck to its
+   * underside rather than as the next thing down. The column gap is untouched
+   * — side by side these are one row of buttons, not two blocks.
+   */
   titleActions: {
-    display: "flex", alignItems: "center", flexWrap: "wrap", gap: "10px",
+    display: "flex", alignItems: "center", flexWrap: "wrap", gap: "28px 10px",
   },
   resumeText: {
     display: "flex",

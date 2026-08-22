@@ -386,16 +386,16 @@ const styles: Record<string, React.CSSProperties> = {
   facts: {
     color: "#888",
     fontSize: "14px",
-    marginBottom: "14px",
+    marginBottom: "20px",
   },
   genres: {
     display: "flex",
     flexWrap: "wrap",
     gap: "6px",
-    marginBottom: "16px",
+    marginBottom: "20px",
   },
   ratings: {
-    marginBottom: "18px",
+    marginBottom: "20px",
   },
   genre: {
     padding: "3px 10px",
@@ -409,12 +409,12 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#ccc",
     fontSize: "15px",
     lineHeight: 1.6,
-    margin: "0 0 24px",
+    margin: "0 0 28px",
   },
   summaryMuted: {
     color: "#666",
     fontSize: "14px",
-    margin: "0 0 24px",
+    margin: "0 0 28px",
   },
   requestBtn: {
     padding: "11px 24px",
@@ -427,8 +427,18 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
     fontFamily: "inherit",
   },
+  /**
+   * The action block's own spacing, matched to the gap above it.
+   *
+   * The row gap only shows when the row wraps — on a narrow screen, where the
+   * watchlist control drops below the Request button. It was the one gap on
+   * the page that did not match its neighbours: 28px of air above the row and
+   * 10px inside it, so the control read as stuck to the button's underside
+   * rather than as the next thing down. The column gap is untouched — side by
+   * side these are one row of buttons, not two blocks.
+   */
   titleActions: {
-    display: "flex", alignItems: "center", flexWrap: "wrap", gap: "10px",
+    display: "flex", alignItems: "center", flexWrap: "wrap", gap: "28px 10px",
   },
   requestBtnDone: {
     background: "rgba(255,255,255,0.06)",

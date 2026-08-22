@@ -611,7 +611,14 @@ export function seerrRequest(
  */
 export function fetchSiblingEpisodes(
   ratingKey: string,
-): Promise<{ prev: PlexItem | null; next: PlexItem | null }> {
+): Promise<{
+  /** Whether this item sits in a series at all — false for a film. A null
+   *  `next` only says there is nothing after it, which is also true of the
+   *  last episode of a show. */
+  episode: boolean;
+  prev: PlexItem | null;
+  next: PlexItem | null;
+}> {
   return cachedGet(`/api/plex/siblings/${encodeURIComponent(ratingKey)}`);
 }
 

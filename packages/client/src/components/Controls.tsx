@@ -61,6 +61,17 @@ interface ControlsProps {
   showKeyboardHints?: boolean;
   peopleCount?: number;
   onOpenPeople?: () => void;
+  /**
+   * Whether this item sits in a series, and so whether the transport carries
+   * episode buttons at all.
+   *
+   * Not the same question as whether either handler below is present. A film
+   * has no episode either side of it and neither does the last episode of a
+   * show, but only one of the two should be showing a pair of greyed-out
+   * episode buttons — on a film they are controls for something the item does
+   * not have.
+   */
+  episodeNav?: boolean;
   /** Episode navigation — omitted when there is no episode that way. */
   onPrevEpisode?: () => void;
   onNextEpisode?: () => void;
@@ -376,6 +387,7 @@ export function Controls({
   showKeyboardHints = true,
   peopleCount,
   onOpenPeople,
+  episodeNav = false,
   onPrevEpisode,
   onNextEpisode,
   previewPartId,
@@ -1153,10 +1165,12 @@ export function Controls({
 
           A missing neighbour leaves its space rather than closing it up — at
           either end of a series one of these is absent, and letting the row
-          re-centre would slide play out from under the thumb aiming at it. */}
+          re-centre would slide play out from under the thumb aiming at it. A
+          film has no neighbours to be missing, so it gets play on its own
+          rather than two reserved spaces around it. */}
       {phone && canControl && (
         <div style={styles.centerTransport}>
-          {onPrevEpisode ? (
+          {episodeNav && (onPrevEpisode ? (
             <button
               onClick={onPrevEpisode}
               className="btn"
@@ -1170,7 +1184,7 @@ export function Controls({
             </button>
           ) : (
             <div style={styles.centerNavSpacer} aria-hidden="true" />
-          )}
+          ))}
 
           <button
             onClick={togglePlay}
@@ -1190,7 +1204,7 @@ export function Controls({
             )}
           </button>
 
-          {onNextEpisode ? (
+          {episodeNav && (onNextEpisode ? (
             <button
               onClick={onNextEpisode}
               className="btn"
@@ -1204,7 +1218,7 @@ export function Controls({
             </button>
           ) : (
             <div style={styles.centerNavSpacer} aria-hidden="true" />
-          )}
+          ))}
         </div>
       )}
 
@@ -1263,8 +1277,11 @@ export function Controls({
           <div style={{ ...styles.center, ...(compact ? styles.centerCompact : {}) }}>
             {/* Reading order is the order they sit in: back through the
                 series, back ten, play, forward ten, forward through the series.
-                Play is the middle of five so that it is the middle of the bar,
-                which is the whole point of the column.
+                Play is the middle of the row — of five on an episode, of three
+                on a film, which drops the outer pair — so that it is the middle
+                of the bar, which is the whole point of the column. It is the
+                two equal side columns that actually centre it, so losing a
+                symmetric pair costs nothing.
 
                 Play, ±10s and episode navigation are all absent on a phone:
                 playback and episode navigation are the three buttons in the
@@ -1272,7 +1289,7 @@ export function Controls({
                 side. */}
             {canControl && !phone && (
               <>
-                {/* Always drawn, and disabled at the ends of a series rather
+                {/* On a series, always drawn and disabled at the ends rather
                     than dropped. A greyed button says there is nothing that way;
                     an empty gap says nothing at all, and left the row a
                     different shape depending on which episode you were on.
@@ -1280,7 +1297,14 @@ export function Controls({
                     Keeping it also keeps play centred for free: the row is the
                     same five items whatever the episode, so there is no gap to
                     close up around. .btn already withholds its hover and press
-                    from anything disabled. */}
+                    from anything disabled.
+
+                    A film gets neither button. There is no episode either side
+                    of it in the way there is at the end of a series, so a pair
+                    of permanently greyed controls would be describing something
+                    the item cannot have. The row is symmetric without them, so
+                    play stays centred there too. */}
+                {episodeNav && (
                 <button
                   onClick={onPrevEpisode}
                   disabled={!onPrevEpisode}
@@ -1294,6 +1318,7 @@ export function Controls({
                     <path d="M13.5 3.2v9.6a.6.6 0 0 1-.93.5L5.6 8.5a.6.6 0 0 1 0-1l6.97-4.8a.6.6 0 0 1 .93.5Z"/>
                   </svg>
                 </button>
+                )}
                 <button onClick={skipBack} className="btn" style={styles.skipBtn} title="Back 10s">
                   <SeekTen back />
                 </button>
@@ -1312,6 +1337,7 @@ export function Controls({
                 <button onClick={skipForward} className="btn" style={styles.skipBtn} title="Forward 10s">
                   <SeekTen back={false} />
                 </button>
+                {episodeNav && (
                 <button
                   onClick={onNextEpisode}
                   disabled={!onNextEpisode}
@@ -1325,6 +1351,7 @@ export function Controls({
                     <rect x="12" y="2.5" width="2" height="11" rx="0.75"/>
                   </svg>
                 </button>
+                )}
               </>
             )}
           </div>

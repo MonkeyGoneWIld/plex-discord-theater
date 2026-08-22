@@ -2140,7 +2140,9 @@ async function tmdbPerson(name: string): Promise<TmdbPerson | null> {
 
 /**
  * GET /api/plex/siblings/:ratingKey
- * Resolve the episodes either side of this one: { prev, next }, each nullable.
+ * Resolve the episodes either side of this one: { episode, prev, next } — the
+ * two neighbours each nullable, and `episode` saying whether there is a series
+ * around this item at all.
  *
  * Uses /allLeaves, which returns every episode of a show already ordered by
  * season then episode — so "the elements either side of mine" give season
@@ -2150,7 +2152,9 @@ async function tmdbPerson(name: string): Promise<TmdbPerson | null> {
  *
  * Returns 200 with nulls — rather than an error — for movies, the first/last
  * episode, and anything unresolvable, since "there is no episode that way" is a
- * normal answer the client renders as a disabled button.
+ * normal answer the client renders as a disabled button. `episode` is what
+ * separates the two: at the end of a series the client draws the button greyed
+ * out, and on a film it draws no episode buttons at all.
  *
  * Note: a show with a Season 0 has its specials in allLeaves (usually first), so
  * the last special rolls into S1E1. Rare, and filtering would need a rule about
@@ -2340,8 +2344,12 @@ router.get("/siblings/:ratingKey", async (req: Request, res: Response) => {
       return;
     }
 
+    // `episode` answers a different question from prev/next: whether there is
+    // a series around this item at all. A film and the last episode of a show
+    // both have nothing after them, and the player draws its episode buttons
+    // for one and not the other.
     if (m.type !== "episode" || !m.grandparentRatingKey) {
-      res.json({ prev: null, next: null });
+      res.json({ episode: false, prev: null, next: null });
       return;
     }
 
@@ -2352,11 +2360,12 @@ router.get("/siblings/:ratingKey", async (req: Request, res: Response) => {
     const i = leaves.findIndex((e) => e.ratingKey === ratingKey);
     // -1 covers merged/split shows where the leaf list doesn't contain our key.
     if (i === -1) {
-      res.json({ prev: null, next: null });
+      res.json({ episode: true, prev: null, next: null });
       return;
     }
 
     res.json({
+      episode: true,
       prev: i > 0 ? mapItem(leaves[i - 1]) : null,
       next: i < leaves.length - 1 ? mapItem(leaves[i + 1]) : null,
     });

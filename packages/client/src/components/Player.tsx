@@ -431,6 +431,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const [nextEpisode, setNextEpisode] = useState<PlexItem | null>(null);
   // Previous episode, for the control-bar back button. Not used by the card.
   const [prevEpisode, setPrevEpisode] = useState<PlexItem | null>(null);
+  // Whether there is a series around this item. Separate from having a next or
+  // a previous episode, because a film and the last episode of a show both have
+  // neither, and only one of them should be showing episode buttons at all.
+  const [inSeries, setInSeries] = useState(false);
   const [nearEnd, setNearEnd] = useState(false);
   // The item has genuinely finished, as opposed to merely being close to the
   // end. Drives the end-of-playback screen; nearEnd only drives the corner card.
@@ -1381,6 +1385,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   useEffect(() => {
     setNextEpisode(null);
     setPrevEpisode(null);
+    setInSeries(false);
     setDismissedFor(null);
     // Must reset: `ended` latches nearEnd true, and without clearing it here the
     // card would appear instantly at the start of the episode we just advanced to.
@@ -1397,6 +1402,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         if (cancelled) return;
         setNextEpisode(r.next);
         setPrevEpisode(r.prev);
+        setInSeries(r.episode);
       })
       .catch(() => { /* optional polish — never surface an error over a working stream */ })
       .finally(() => { if (!cancelled) setSiblingsResolved(true); });
@@ -3812,6 +3818,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         onOpenPeople={() => setShowPeoplePanel(true)}
         // Undefined at the series edges (and for movies), so Controls renders
         // no button rather than a dead one.
+        episodeNav={inSeries}
         onPrevEpisode={canControl && prevEpisode ? playPrevEpisode : undefined}
         onNextEpisode={canControl && nextEpisode ? playNextEpisode : undefined}
         // Undefined when the library has no generated preview thumbnails, so

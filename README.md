@@ -61,6 +61,27 @@ Each viewer selects their own audio and subtitle tracks without affecting other
 participants. Track selections persist into the next episode when the same
 tracks are available.
 
+### Subtitle timing
+
+Subtitles that are out of step with the dialogue can be shifted from the timing
+button in the player bar, beside the settings gear. Each press moves them
+50&nbsp;ms earlier or later, with no limit in either direction, and **Reset**
+restores the original timing.
+
+The adjustment belongs to the viewer who made it. It is never sent to the room
+and never written to storage, so several people watching the same stream can
+each shift their subtitles by a different amount without affecting anyone else.
+It carries into the next episode — a release that is out of step is usually out
+of step for the whole season — and clears when subtitles are turned off.
+
+> [!NOTE]
+> Timing is adjustable for **sidecar** subtitles only: a `.srt`, `.ass`, `.ssa`
+> or `.vtt` file sitting next to the video. Those are sent to the player as text
+> and drawn there, so shifting them costs nothing. Subtitles stored inside the
+> video file, and image-based ones such as PGS or VobSub, are burned into the
+> picture by Plex before it reaches you — they are pixels by that point and
+> cannot be moved, so the button does not appear for them.
+
 ### Playback features
 
 - **Viewer suggestions:** any participant can queue a title for the host.

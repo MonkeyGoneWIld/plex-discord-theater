@@ -10,6 +10,7 @@ import {
 import { formatTimecode } from "../lib/format";
 import { SkeletonBlock } from "./SkeletonBlock";
 import { PlexMediaActions, WatchedCheckIcon } from "./PlexMediaActions";
+import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import type { QueueItem } from "../hooks/useSync";
 
 interface SeasonDetailProps {
@@ -46,6 +47,15 @@ function fmtDuration(ms: number): string {
 export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClick, isHost, isPlaying, onAddToQueue }: SeasonDetailProps) {
   const [episodes, setEpisodes] = useState<PlexItem[]>([]);
   const [loading, setLoading] = useState(true);
+  /**
+   * A phone held upright, where the row has about 380px to divide up.
+   *
+   * A 200px still and a 46px control took 246px of that between them and left
+   * the title and synopsis roughly 120px — enough for "Road to..." and two
+   * clipped words. Both give some back here; the still is decoration and the
+   * control is one glyph, and neither is what the row is for.
+   */
+  const narrow = useMediaQuery(NARROW_QUERY);
   const [hoveredKey, setHoveredKey] = useState<string | null>(null);
   // The viewer's own watch history for these episodes, keyed by rating key.
   // Not host-gated: it's their history either way, and it's information rather
@@ -226,8 +236,12 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
          */
         <div style={styles.list} aria-hidden="true">
           {[0, 1, 2, 3].map((i) => (
-            <div key={i} style={styles.skeletonCard}>
-              <SkeletonBlock width={200} height={112} borderRadius={6} />
+            <div key={i} style={{ ...styles.skeletonCard, ...(narrow ? styles.episodeCardNarrow : {}) }}>
+              <SkeletonBlock
+                width={narrow ? NARROW_THUMB_W : 200}
+                height={narrow ? NARROW_THUMB_H : 112}
+                borderRadius={6}
+              />
               <div style={styles.skeletonBody}>
                 <SkeletonBlock width="42%" height={15} />
                 <SkeletonBlock width="96%" height={12} />
@@ -318,10 +332,11 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                 onMouseLeave={() => setHoveredKey(null)}
                 style={{
                   ...styles.episodeCard,
+                  ...(narrow ? styles.episodeCardNarrow : {}),
                   ...(isHovered ? styles.episodeCardHover : {}),
                 }}
               >
-                <div style={styles.thumbWrap}>
+                <div style={{ ...styles.thumbWrap, ...(narrow ? styles.thumbWrapNarrow : {}) }}>
                   {ep.thumb ? (
                     <img
                       src={authUrl(ep.thumb, 400, 225)}
@@ -388,8 +403,14 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                   <div style={styles.episodeMeta}>
                     <span style={styles.episodeNumber}>E{ep.index ?? "?"}</span>
                     <span style={styles.episodeTitle}>{ep.title}</span>
+                    {/* The still already dims and wears a tick when an episode
+                        is finished, so this word is a third way of saying the
+                        same thing — and on a phone it is a third way that costs
+                        the title 60px. Part-watched keeps its tag: the bar under
+                        the still says there is progress but not how much is
+                        left. */}
                     {watched ? (
-                      <span style={styles.watchedTag}>Watched</span>
+                      narrow ? null : <span style={styles.watchedTag}>Watched</span>
                     ) : partial != null ? (
                       <span style={styles.partialTag}>
                         {formatTimecode(seen!.durationMs - seen!.positionMs)} left
@@ -469,6 +490,11 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
 /** What holds an episode's watched checkbox off the edge of its column: the
  *  card's own padding, and the border outside that. The season header has no
  *  card and reproduces both — see seasonWatchedAction. */
+/** The still, on a phone held upright. 16:9, and small enough that the words
+ *  beside it get more of the row than it does. */
+const NARROW_THUMB_W = 140;
+const NARROW_THUMB_H = 79;
+
 const EPISODE_CARD_PADDING_PX = 10;
 const EPISODE_CARD_BORDER_PX = 1;
 
@@ -540,6 +566,8 @@ const styles: Record<string, React.CSSProperties> = {
     width: "200px", height: "112px", borderRadius: "6px", flexShrink: 0,
     position: "relative", overflow: "hidden", background: "rgba(255,255,255,0.03)",
   },
+  thumbWrapNarrow: { width: `${NARROW_THUMB_W}px`, height: `${NARROW_THUMB_H}px` },
+  episodeCardNarrow: { gap: "12px" },
   episodeThumb: { width: "100%", height: "100%", objectFit: "cover", display: "block" },
   episodePlaceholder: {
     width: "100%", height: "100%", display: "flex", alignItems: "center",
@@ -577,6 +605,10 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "9px 12px", borderRadius: "7px", border: "1px solid rgba(212,119,119,0.25)",
     background: "rgba(212,119,119,0.07)", color: "#d47777", fontSize: "12px",
   },
+  /** 46px on every screen, deliberately. Shrinking it on a phone bought the
+   *  words 8px of the 64 they were short, and cost the only control in the row
+   *  its touch target — which is the wrong 8px to go looking for. The still
+   *  next to it was the one taking the room. */
   watchedCheckbox: {
     alignSelf: "center", flexShrink: 0, width: "46px", height: "46px",
     display: "inline-flex", alignItems: "center", justifyContent: "center",

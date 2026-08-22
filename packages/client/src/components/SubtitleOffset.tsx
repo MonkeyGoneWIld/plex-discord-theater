@@ -68,18 +68,21 @@ export function SubtitleOffset({ offsetMs, onChange, onClose }: SubtitleOffsetPr
           style={{ ...styles.step, ...(offsetMs === 0 ? styles.stepDisabled : {}) }}
           onClick={() => onChange(0)}
           disabled={offsetMs === 0}
-          title="Back to the video's own timing"
+          title="Restore the original timing"
         >
           Reset
         </button>
       </div>
 
+      {/* Says which way the offset has moved things, in the words somebody
+          would use to describe the problem they are here to fix. The heading
+          above already carries the number, so this does not repeat it. */}
       <div style={styles.hint}>
         {offsetMs === 0
-          ? "Subtitles are using the video's own timing."
+          ? "Subtitles are using their original timing."
           : offsetMs > 0
-            ? "Subtitles appear later than the video says."
-            : "Subtitles appear earlier than the video says."}
+            ? "Subtitles now appear later."
+            : "Subtitles now appear earlier."}
       </div>
     </div>
   );

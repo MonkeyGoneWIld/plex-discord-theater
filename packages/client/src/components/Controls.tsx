@@ -1158,12 +1158,34 @@ export function Controls({
               window is doing — left-aligned, play drifts further from the
               settings you were last using with every inch of extra width. */}
           <div style={{ ...styles.center, ...(compact ? styles.centerCompact : {}) }}>
-            {/* Play, ±10s and episode navigation are all absent on a phone:
+            {/* Reading order is the order they sit in: back through the
+                series, back ten, play, forward ten, forward through the series.
+                Play is the middle of five so that it is the middle of the bar,
+                which is the whole point of the column.
+
+                Play, ±10s and episode navigation are all absent on a phone:
                 playback and episode navigation are the three buttons in the
                 middle of the picture, and skipping is a double-tap to one
                 side. */}
             {canControl && !phone && (
               <>
+                {/* An absent neighbour leaves its width behind. At the first or
+                    last episode of a series one of these is not rendered, and a
+                    row that closed up around the gap would take play off centre
+                    at exactly the moments it is least expected to move. */}
+                {onPrevEpisode ? (
+                  <button onClick={onPrevEpisode} className="btn" style={styles.skipBtn} title="Previous episode">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
+                      <rect x="2" y="2.5" width="2" height="11" rx="0.75"/>
+                      <path d="M13.5 3.2v9.6a.6.6 0 0 1-.93.5L5.6 8.5a.6.6 0 0 1 0-1l6.97-4.8a.6.6 0 0 1 .93.5Z"/>
+                    </svg>
+                  </button>
+                ) : (
+                  <div style={styles.skipSpacer} aria-hidden="true" />
+                )}
+                <button onClick={skipBack} className="btn" style={styles.skipBtn} title="Back 10s">
+                  <SeekTen back />
+                </button>
                 <button onClick={togglePlay} className="btn" style={{ ...styles.playBtn, ...(compact ? styles.playBtnCompact : {}) }}>
                   {playing ? (
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
@@ -1176,34 +1198,20 @@ export function Controls({
                     </svg>
                   )}
                 </button>
-                <button onClick={skipBack} className="btn" style={styles.skipBtn} title="Back 10s">
-                  <SeekTen back />
-                </button>
                 <button onClick={skipForward} className="btn" style={styles.skipBtn} title="Forward 10s">
                   <SeekTen back={false} />
                 </button>
+                {onNextEpisode ? (
+                  <button onClick={onNextEpisode} className="btn" style={styles.skipBtn} title="Next episode">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
+                      <path d="M2.5 3.2v9.6a.6.6 0 0 0 .93.5L10.4 8.5a.6.6 0 0 0 0-1L3.43 2.7a.6.6 0 0 0-.93.5Z"/>
+                      <rect x="12" y="2.5" width="2" height="11" rx="0.75"/>
+                    </svg>
+                  </button>
+                ) : (
+                  <div style={styles.skipSpacer} aria-hidden="true" />
+                )}
               </>
-            )}
-            {/* Episode nav sits together after the ±10s seek pair. Each is
-                rendered only when that sibling exists, so there's never a
-                dead control — the player omits the handler at series edges.
-                Desktop only: on a phone these live in the middle of the picture
-                beside play, which is where the thumb already is. */}
-            {canControl && !phone && onPrevEpisode && (
-              <button onClick={onPrevEpisode} className="btn" style={styles.skipBtn} title="Previous episode">
-                <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
-                  <rect x="2" y="2.5" width="2" height="11" rx="0.75"/>
-                  <path d="M13.5 3.2v9.6a.6.6 0 0 1-.93.5L5.6 8.5a.6.6 0 0 1 0-1l6.97-4.8a.6.6 0 0 1 .93.5Z"/>
-                </svg>
-              </button>
-            )}
-            {canControl && !phone && onNextEpisode && (
-              <button onClick={onNextEpisode} className="btn" style={styles.skipBtn} title="Next episode">
-                <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M2.5 3.2v9.6a.6.6 0 0 0 .93.5L10.4 8.5a.6.6 0 0 0 0-1L3.43 2.7a.6.6 0 0 0-.93.5Z"/>
-                  <rect x="12" y="2.5" width="2" height="11" rx="0.75"/>
-                </svg>
-              </button>
             )}
           </div>
           {/* Right column: everything that is not playback. */}
@@ -1769,6 +1777,9 @@ const styles: Record<string, React.CSSProperties> = {
   /** Tighter on a tablet, but never truncated: every item here is a target,
    *  and the time in the left column is the thing that gives instead. */
   centerCompact: { gap: "6px" },
+  /** Holds the place of an episode button that is not there. Matches skipBtn:
+   *  a 15px icon inside 4px of horizontal padding. */
+  skipSpacer: { width: "23px", height: "19px" },
   right: {
     display: "flex",
     alignItems: "center",

@@ -42,13 +42,13 @@ const STARVED_BUFFER_S = 1.5;
 /**
  * How long a stream may fail to keep up before its viewer is offered a way out.
  *
- * Ten seconds is long enough to ride out a stall that resolves itself and short
- * enough that nobody sits watching a frozen frame wondering whether it is
- * coming back. The offer is only ever an offer: switching would discard a
+ * Twenty seconds is long enough to ride out a stall that resolves itself and
+ * short enough that nobody sits watching a frozen frame wondering whether it
+ * is coming back. The offer is only ever an offer: switching would discard a
  * deliberate choice of subtitles or audio, which is not a decision to make on
  * somebody's behalf.
  */
-const STARVED_OFFER_MS = 10_000;
+const STARVED_OFFER_MS = 20_000;
 /** How often the check below runs. */
 const STARVED_POLL_MS = 1_000;
 /**
@@ -2756,7 +2756,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
    * joining it starts no new work at all.
    *
    * Polled rather than driven by heartbeats, which arrive every five seconds and
-   * would make a ten-second threshold mean anything between ten and fifteen.
+   * would make a twenty-second threshold mean anything between twenty and
+   * twenty-five.
    */
   useEffect(() => {
     const timer = setInterval(() => {

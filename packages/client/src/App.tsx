@@ -791,7 +791,7 @@ export function App() {
     <div style={styles.app}>
       {/* Header — visible on all non-player views */}
       {view.kind !== "player" && (
-        <header style={styles.header}>
+        <header style={{ ...styles.header, ...(phonePortrait ? styles.headerPortrait : {}) }}>
           {view.kind !== "library" ? (
             /* Breadcrumb trail — every ancestor is clickable. Home is a full
                reset (goHome); other crumbs jump back within the stack, keeping
@@ -1145,6 +1145,19 @@ const styles: Record<string, React.CSSProperties> = {
     paddingBottom: "16px",
     paddingLeft: "calc(24px + var(--sail, 0px))",
     borderBottom: "1px solid rgba(255,255,255,0.06)",
+  },
+  /**
+   * Tighter on an upright phone, where the rule sat a clear gap below the row
+   * it belongs to and read as a line floating under the bar rather than closing
+   * it. Both paddings come down together — halving only the lower one would
+   * leave the row sitting high in its own bar, which is the same fault the
+   * other way up.
+   *
+   * The safe-area inset is untouched: that is Discord's chrome, not spacing.
+   */
+  headerPortrait: {
+    paddingTop: "calc(9px + var(--sait, 0px))",
+    paddingBottom: "9px",
   },
   logo: {
     // Match the breadcrumb row's height (its crumb buttons carry 6px vertical

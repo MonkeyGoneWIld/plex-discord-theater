@@ -244,10 +244,19 @@ function SeekIndicator({
           }}
         />
       )}
-      {/* The readout itself, unchanged from what it has always been: the
-          chevron over the count, on a pill. Keyed on the tap so the chevron's
-          nudge replays for each one. */}
-      <div key={`body-${tapId}`} style={styles.skipIndicator}>
+      {/* The readout: the chevron over the count, as it has always been.
+          Keyed on the tap so both of its animations replay for each one.
+
+          The plate underneath is desktop-only. A gesture already has the D
+          behind it, and stacking a black pill on top of that is two grounds for
+          one readout — which is the box that had no business being there. */}
+      <div
+        key={`body-${tapId}`}
+        style={{
+          ...styles.skipIndicator,
+          ...(gesture ? styles.skipIndicatorOnD : styles.skipPlate),
+        }}
+      >
         <div
           className="seek-chevron"
           style={{
@@ -257,7 +266,13 @@ function SeekIndicator({
         >
           {back ? "\u00ab" : "\u00bb"}
         </div>
-        <div style={styles.skipAmount}>
+        <div
+          className="seek-amount"
+          style={{
+            ...styles.skipAmount,
+            animation: "seek-amount 280ms cubic-bezier(0.2, 0, 0, 1)",
+          }}
+        >
           {Math.abs(delta)} seconds
         </div>
       </div>
@@ -1295,11 +1310,19 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     alignItems: "center",
     gap: "4px",
+    color: "#f0f0f0",
+  },
+  /** Desktop: no D behind the readout, so it brings its own ground. */
+  skipPlate: {
     padding: "18px 26px",
     borderRadius: "999px",
     background: "rgba(0,0,0,0.55)",
     backdropFilter: "blur(6px)",
-    color: "#f0f0f0",
+  },
+  /** A gesture: the D is the ground. An outline keeps the text legible where
+   *  the arc runs thin without putting a second surface on top of the first. */
+  skipIndicatorOnD: {
+    textShadow: "0 1px 3px rgba(0,0,0,0.75), 0 0 10px rgba(0,0,0,0.5)",
   },
   skipChevrons: {
     fontSize: "26px",

@@ -82,6 +82,14 @@
         45%  { opacity: 1; transform: scale(1.06); }
         100% { opacity: 1; transform: scale(1); }
       }
+      /* The count, arriving rather than switching. It changes on every tap of a
+         burst, and a number that simply swaps from 10 to 20 mid-animation reads
+         as a glitch rather than as the total going up. */
+      @keyframes seek-amount {
+        0%   { opacity: 0.3; transform: translateY(4px) scale(0.94); }
+        55%  { opacity: 1; transform: translateY(0) scale(1.06); }
+        100% { opacity: 1; transform: translateY(0) scale(1); }
+      }
       @keyframes seek-pulse {
         0%   { opacity: 0; transform: scale(0.84); }
         30%  { opacity: 1; transform: scale(1); }
@@ -89,7 +97,7 @@
       }
       @media (prefers-reduced-motion: reduce) {
         /* The direction and the amount still read; nothing chases anything. */
-        .seek-chevron { animation: none !important; }
+        .seek-chevron, .seek-amount { animation: none !important; }
         .seek-pulse { display: none !important; }
       }
 

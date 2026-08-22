@@ -216,10 +216,12 @@ const TAP_SIDE_ZONE = 0.35;
 /**
  * The colour the slider takes above 100%.
  *
- * Amber is the app's ordinary accent and means nothing in particular. Going
- * past the mix as it was authored is a state worth being able to see from
- * across the room — a viewer wondering why one film is blaring should be able
- * to tell at a glance that the boost is on rather than reading a number.
+ * The only thing on the bar that says the boost is on, now that the percentage
+ * badge is gone — it was a number floating over the slider at all times once
+ * you crossed 100%, which is a lot of insistence about a setting you chose on
+ * purpose. The colour says the same thing without asking to be read, and the
+ * exact figure is in the tooltip and in the phone popover for anyone who wants
+ * it.
  */
 const BOOST_ACCENT = "#ff6b35";
 
@@ -237,12 +239,14 @@ const REQUEST_SENT_MS = 6000;
 /**
  * The horizontal slider's track, in pixels.
  *
- * Wider than the 80px it was, because it now carries twice the range: at 80px
- * the half of the track people use every day would have been 40px. 120px keeps
- * roughly 3px per 5% step across the whole thing, and the tick at the midpoint
- * is what makes 100% findable without counting pixels.
+ * It was widened to 120 when the range doubled, on the reasoning that the half
+ * people use daily should not halve with it. That was the wrong trade: a
+ * slider a third longer than everything beside it dominates the row, and full
+ * orange across all of it is a lot of colour for a control nobody is looking
+ * at. Back to the width the bar was drawn around. The tick at the midpoint is
+ * what makes 100% findable, not the length.
  */
-const VOLUME_TRACK_PX = 120;
+const VOLUME_TRACK_PX = 80;
 
 const BAR_EPISODE_ICON = 18;
 const BAR_SEEK_ICON = 23;
@@ -1437,15 +1441,18 @@ export function Controls({
                 )}
               </>
             )}
+          </div>
+          {/* Right column: everything that is not playback. */}
+          <div style={{ ...styles.right, ...styles.side, ...(compact ? styles.rightCompact : {}) }}>
             {/* Someone who cannot press pause, asking for one.
 
-                It stands where the transport would be, because that is where
-                the question is about — but it is a word rather than a glyph,
-                and deliberately so. A ▮▮ here would be the shape of the button
-                that pauses, in the place that button sits, worn by a control
-                that does not pause anything. "Ask to pause" cannot be misread
-                as pausing, and it is the whole design: no icon, no fill, a
-                hairline that only warms when you reach for it. */}
+                A raised hand rather than a pause glyph, and over here with the
+                other things that are not playback rather than in the middle
+                where the transport sits. Both for the same reason: this does
+                not pause anything, it asks a person to, and it should not be
+                wearing the shape or standing in the place of the control that
+                does. A hand is what you put up when you want the room to stop,
+                which is exactly the request being made. */}
             {!canControl && onRequestTransport && (
               <button
                 className="btn"
@@ -1455,23 +1462,38 @@ export function Controls({
                   onRequestTransport(action);
                 }}
                 disabled={requestSent != null}
-                style={{ ...styles.requestBtn, ...(requestSent ? styles.requestBtnSent : {}) }}
+                style={{
+                  ...styles.gearBtn,
+                  // The cluster squeezes its icons on a narrow phone, and a
+                  // request control worn down to a 15px target is one nobody
+                  // can hit. It keeps its size; the buttons around it were
+                  // already giving.
+                  flexShrink: 0,
+                  ...(requestSent ? styles.requestBtnSent : {}),
+                }}
                 title={
                   requestSent
-                    ? "The host has been asked"
+                    ? requestSent === "pause"
+                      ? "Asked the host to pause"
+                      : "Asked the host to resume"
                     : playing
                       ? "Ask the host to pause"
                       : "Ask the host to resume"
                 }
+                aria-label={playing ? "Ask the host to pause" : "Ask the host to resume"}
               >
-                {requestSent
-                  ? requestSent === "pause" ? "Pause requested" : "Resume requested"
-                  : playing ? "Ask to pause" : "Ask to resume"}
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  {/* Palm and four fingers, raised. */}
+                  <path
+                    d="M6.4 8.1V3.2a1 1 0 0 1 2 0v4M8.4 7.2V2.6a1 1 0 0 1 2 0v4.6M10.4 7.6V4.1a1 1 0 0 1 2 0v5.2c0 2.4-1.6 4.2-3.9 4.2-1.6 0-2.6-.6-3.4-1.8L3.3 9.2a1 1 0 0 1 1.6-1.2l1.5 1.7"
+                    stroke="currentColor"
+                    strokeWidth="1.3"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
               </button>
             )}
-          </div>
-          {/* Right column: everything that is not playback. */}
-          <div style={{ ...styles.right, ...styles.side, ...(compact ? styles.rightCompact : {}) }}>
             {/* Not host-gated: the roster is read-only, and PeoplePanel decides
                 for itself whether to offer role controls. Gating it here meant a
                 viewer had to back out of the video to see who else was watching. */}
@@ -1607,7 +1629,6 @@ export function Controls({
                   {muted ? "\u{1F507}" : "\u{1F50A}"}
                 </button>
                 <div style={styles.volumeSliderWrap}>
-                  {boosted && <span style={styles.boostBadge}>{volumePercent}%</span>}
                   <input
                     type="range"
                     min="0"
@@ -2049,40 +2070,14 @@ const styles: Record<string, React.CSSProperties> = {
    *  and the time in the left column is the thing that gives instead. */
   centerCompact: { gap: "6px" },
   /**
-   * Asking for a pause, in the space a host's transport occupies.
-   *
-   * Quiet on purpose. It is not the primary control on this bar — it is not a
-   * control at all, it is a message — so it carries no fill and no amber, and
-   * the hairline is the same one every secondary surface in the app uses. The
-   * text is what identifies it; there is no icon to mistake for a transport
-   * button.
-   */
-  requestBtn: {
-    display: "inline-flex",
-    alignItems: "center",
-    height: "28px",
-    padding: "0 14px",
-    borderRadius: "999px",
-    border: "1px solid rgba(255,255,255,0.14)",
-    background: "transparent",
-    color: "rgba(255,255,255,0.62)",
-    fontFamily: "inherit",
-    fontSize: "12px",
-    fontWeight: 500,
-    letterSpacing: "0.01em",
-    whiteSpace: "nowrap",
-    cursor: "pointer",
-    transition: "color 0.15s ease, border-color 0.15s ease",
-  },
-  /**
-   * Sent, and waiting on a person.
+   * Asked, and waiting on a person.
    *
    * Dimmed rather than swapped for a tick: the answer to this is somebody
    * else's decision, and a tick would be claiming one arrived.
    */
   requestBtnSent: {
-    color: "rgba(255,255,255,0.38)",
-    borderColor: "rgba(255,255,255,0.08)",
+    color: "rgba(255,255,255,0.4)",
+    background: "rgba(255,255,255,0.05)",
     cursor: "default",
   },
   right: {
@@ -2212,30 +2207,6 @@ const styles: Record<string, React.CSSProperties> = {
     width: "5px",
     height: "1px",
     background: "rgba(255,255,255,0.4)",
-    pointerEvents: "none",
-  },
-  /**
-   * The level, when it is above the mix.
-   *
-   * Floated over the slider rather than placed beside it: appearing and
-   * disappearing at the 100% boundary would otherwise shove the rest of the
-   * row sideways every time someone crossed it.
-   */
-  boostBadge: {
-    position: "absolute",
-    bottom: "calc(100% + 3px)",
-    left: "50%",
-    transform: "translateX(-50%)",
-    padding: "1px 5px",
-    borderRadius: "5px",
-    background: "rgba(255,107,53,0.18)",
-    border: "1px solid rgba(255,107,53,0.5)",
-    color: "#ff8f5e",
-    fontSize: "10px",
-    fontWeight: 700,
-    letterSpacing: "0.02em",
-    lineHeight: 1.4,
-    whiteSpace: "nowrap",
     pointerEvents: "none",
   },
   /** The popover has room for the number outright, so it always shows one. */

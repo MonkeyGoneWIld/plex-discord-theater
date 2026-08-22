@@ -1024,7 +1024,7 @@ export function Controls({
               style={styles.centerNavBtn}
               aria-label="Previous episode"
             >
-              <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
+              <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" style={styles.centerNavIcon}>
                   <rect x="2" y="2.5" width="2" height="11" rx="0.75"/>
                   <path d="M13.5 3.2v9.6a.6.6 0 0 1-.93.5L5.6 8.5a.6.6 0 0 1 0-1l6.97-4.8a.6.6 0 0 1 .93.5Z"/>
                 </svg>
@@ -1058,7 +1058,7 @@ export function Controls({
               style={styles.centerNavBtn}
               aria-label="Next episode"
             >
-              <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
+              <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" style={styles.centerNavIcon}>
                   <path d="M2.5 3.2v9.6a.6.6 0 0 0 .93.5L10.4 8.5a.6.6 0 0 0 0-1L3.43 2.7a.6.6 0 0 0-.93.5Z"/>
                   <rect x="12" y="2.5" width="2" height="11" rx="0.75"/>
                 </svg>
@@ -1458,7 +1458,14 @@ const styles: Record<string, React.CSSProperties> = {
     zIndex: 1,
     display: "flex",
     alignItems: "center",
-    gap: "26px",
+    /**
+     * Closed up from 26px, because the eye now measures to the icon rather
+     * than to the edge of a plate. A 52px box holding 13px of icon carries
+     * ~20px of empty space on the side facing play; left at 26px the gap read
+     * as 46px, nearly twice what it was when both were circles. At 8px the
+     * visible distance is back to ~28px, and the two targets still do not touch.
+     */
+    gap: "8px",
     pointerEvents: "none",
   },
   centerPlayBtn: {
@@ -1477,23 +1484,35 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 0,
     pointerEvents: "auto",
   },
-  /** Smaller than play, and quieter: these move you through the series, which
-   *  is a rarer thing to want than stopping the picture. */
+  /**
+   * Quieter than play: these move you through the series, which is a rarer
+   * thing to want than stopping the picture. Bare, with no plate behind them.
+   *
+   * The 52px box stays even though nothing is drawn on it — it is the touch
+   * target, and shrinking it to the 18px of icon would make a control you have
+   * to aim at. The icon carries a shadow instead of a plate; see the svg, where
+   * that filter has to live so `.btn`'s hover and press brightness still has
+   * the button's own `filter` to itself.
+   */
   centerNavBtn: {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     width: "52px",
     height: "52px",
+    // Round, so the focus ring is round. Nothing else is painted.
     borderRadius: "50%",
     border: "none",
-    background: "rgba(0,0,0,0.38)",
-    backdropFilter: "blur(4px)",
+    background: "transparent",
     color: "#fff",
     cursor: "pointer",
     fontFamily: "inherit",
     padding: 0,
     pointerEvents: "auto",
+  },
+  /** Stands in for the plate: enough edge to read on a bright frame. */
+  centerNavIcon: {
+    filter: "drop-shadow(0 1px 3px rgba(0,0,0,0.7)) drop-shadow(0 0 6px rgba(0,0,0,0.45))",
   },
   /** Holds the place of an absent neighbour so play stays under the thumb. */
   centerNavSpacer: { width: "52px", height: "52px" },

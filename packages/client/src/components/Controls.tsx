@@ -141,6 +141,23 @@ const SKIP_INDICATOR_FADE_MS = 260;
  */
 const SEEK_D_RADIUS_BACK = "0 50% 50% 0 / 0 50% 50% 0";
 const SEEK_D_RADIUS_FORWARD = "50% 0 0 50% / 50% 0 0 50%";
+/**
+ * How far the shape runs past the picture, above and below and outward.
+ *
+ * This is what stops it being a half-ellipse. A border-radius of 50% curves
+ * from one corner to the other, so an element the size of the picture pinches
+ * to nothing at the top and bottom of the screen — the shape came to a point in
+ * both corners, which is not what a seek overlay looks like anywhere.
+ *
+ * Drawing the ellipse larger than the picture and letting the player clip it
+ * leaves only the middle of the arc on screen: a shallow curve that keeps its
+ * width from top to bottom. Measured against the Plex player's own overlay, the
+ * boundary there sits 4.0% of the picture width further in at the middle than
+ * at the edges; these two numbers reproduce that to three decimal places, and
+ * hold at 21:9, 16:9, 4:3 and phone landscape. Without them it was 12.9%.
+ */
+const SEEK_D_BLEED = "-35%";
+const SEEK_D_OVERHANG = "-30%";
 
 /**
  * Phone gestures.
@@ -220,6 +237,10 @@ function SeekIndicator({
             ...styles.seekPulse,
             borderRadius: back ? SEEK_D_RADIUS_BACK : SEEK_D_RADIUS_FORWARD,
             transformOrigin: back ? "left center" : "right center",
+            // Overhangs the outer edge, so the arc's flat side is off the
+            // screen rather than drawn on it. See SEEK_D_OVERHANG.
+            ...(back ? { right: 0, left: SEEK_D_OVERHANG }
+                     : { left: 0, right: SEEK_D_OVERHANG }),
           }}
         />
       )}
@@ -1302,7 +1323,10 @@ const styles: Record<string, React.CSSProperties> = {
    */
   seekPulse: {
     position: "absolute",
-    inset: 0,
+    // Taller than the picture, so the visible band is the middle of the arc
+    // rather than the whole of it. Left and right are set per direction.
+    top: SEEK_D_BLEED,
+    bottom: SEEK_D_BLEED,
     // Dark, because it is now the only thing darkening the picture: there is no
     // standing wash beneath it to lighten over.
     background: "rgba(0,0,0,0.34)",

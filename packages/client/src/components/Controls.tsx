@@ -1024,7 +1024,7 @@ export function Controls({
               style={styles.centerNavBtn}
               aria-label="Previous episode"
             >
-              <svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor">
+              <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
                   <rect x="2" y="2.5" width="2" height="11" rx="0.75"/>
                   <path d="M13.5 3.2v9.6a.6.6 0 0 1-.93.5L5.6 8.5a.6.6 0 0 1 0-1l6.97-4.8a.6.6 0 0 1 .93.5Z"/>
                 </svg>
@@ -1058,7 +1058,7 @@ export function Controls({
               style={styles.centerNavBtn}
               aria-label="Next episode"
             >
-              <svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor">
+              <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M2.5 3.2v9.6a.6.6 0 0 0 .93.5L10.4 8.5a.6.6 0 0 0 0-1L3.43 2.7a.6.6 0 0 0-.93.5Z"/>
                   <rect x="12" y="2.5" width="2" height="11" rx="0.75"/>
                 </svg>

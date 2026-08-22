@@ -237,7 +237,10 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
                 </button>
               )
             )}
-            <PlexMediaActions item={item} inline />
+            {/* Named on a phone, where the bookmark is on its own under the
+                synopsis — a show we don't have has no watched control to sit
+                beside, and often no Request button either. */}
+            <PlexMediaActions item={item} inline labelled={narrow} />
           </div>
           {requestError && <div style={styles.requestError}>{requestError}</div>}
         </div>

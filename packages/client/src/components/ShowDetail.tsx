@@ -37,6 +37,25 @@ interface ShowDetailProps {
  */
 const REVEAL_TIMEOUT_MS = 1000;
 
+/**
+ * The second line of the play button: "Season 1 · Episode 3 — Title", plus the
+ * time left when the episode is part-watched. Episodes Plex hasn't numbered
+ * (extras, some specials) fall back to their title alone.
+ */
+function episodeLine(
+  parentIndex: number | null | undefined,
+  index: number | null | undefined,
+  title: string,
+  remainingMs?: number,
+): string {
+  const head = parentIndex != null && index != null
+    ? `Season ${parentIndex} · Episode ${index} — ${title}`
+    : title;
+  return remainingMs != null && remainingMs > 0
+    ? `${head} · ${formatTimecode(remainingMs)} left`
+    : head;
+}
+
 function authUrl(url: string): string {
   const token = getSessionToken();
   if (!token || !url) return url;
@@ -60,6 +79,11 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
   // Where this viewer left the show: the episode in progress, or the one after
   // the last they finished. Null when never started or watched to the end.
   const [nextUp, setNextUp] = useState<HistoryEntry | null>(null);
+  // Null means both "still asking" and "nothing to resume", so the first
+  // episode is only looked up once the lookup has actually answered.
+  const [nextUpLoaded, setNextUpLoaded] = useState(false);
+  // The show's opening episode, for when there's nothing to resume.
+  const [firstEpisode, setFirstEpisode] = useState<PlexItem | null>(null);
   // Phone portrait: the poster and the detail column can't sit side by side.
   // The poster is a fixed 240px, so on a 390px screen the text beside it got
   // roughly 90px — the title broke a word per line, the genre pills stacked one
@@ -69,12 +93,45 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
 
   useEffect(() => {
     setNextUp(null);
+    setNextUpLoaded(false);
+    setFirstEpisode(null);
     let cancelled = false;
     fetchShowNextUp(item.ratingKey)
       .then((res) => { if (!cancelled) setNextUp(res.nextUp); })
-      .catch(() => { /* the seasons grid is the real content — never block on this */ });
+      // A failed lookup falls through to the same place a never-started show
+      // does — offering episode one beats offering nothing.
+      .catch(() => { /* the seasons grid is the real content — never block on this */ })
+      .finally(() => { if (!cancelled) setNextUpLoaded(true); });
     return () => { cancelled = true; };
   }, [item.ratingKey]);
+
+  /**
+   * Nothing to resume, so start at the beginning.
+   *
+   * A show nobody here has played has no next-up episode, which left the page
+   * with no play control at all — the only way in was to pick a season, then an
+   * episode. Same for a show watched through to the end. Both get the show's
+   * opening episode instead.
+   *
+   * Specials are skipped where there's a numbered season to prefer: Plex files
+   * them as season 0 and returns them first, so "the first season" taken
+   * literally would start a lot of shows on a recap or an OVA.
+   */
+  useEffect(() => {
+    if (!nextUpLoaded || nextUp || seasons.length === 0) return;
+    const byIndex = [...seasons].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+    const opening = byIndex.find((season) => (season.index ?? 0) >= 1) ?? byIndex[0];
+    if (!opening) return;
+    let cancelled = false;
+    fetchChildren(opening.ratingKey)
+      .then((res) => {
+        if (cancelled) return;
+        const episodes = [...res.items].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+        setFirstEpisode(episodes[0] ?? null);
+      })
+      .catch(() => { /* the seasons grid is still a way in */ });
+    return () => { cancelled = true; };
+  }, [nextUp, nextUpLoaded, seasons]);
 
   // Metadata and seasons are fetched independently rather than through a single
   // Promise.all. They're separate requests to Plex and the header only needs the
@@ -129,6 +186,21 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
   const dTitle = meta?.title ?? item.title;
   const dYear = meta?.year ?? item.year;
   const dSummary = meta?.summary ?? item.summary ?? null;
+
+  // The play button, wherever it starts from. Resuming and starting fresh are
+  // the same button with a different word on it, so they're built as one.
+  const startFrom: PlexItem | null = nextUp ? historyEntryToItem(nextUp) : firstEpisode;
+  const startLabel = !nextUp ? "Play"
+    // Mid-episode reads as resuming; a fresh episode as continuing the show.
+    : nextUp.positionMs > 0 ? "Resume Watching" : "Continue Watching";
+  const startLine = nextUp
+    ? episodeLine(nextUp.parentIndex, nextUp.index, nextUp.title,
+        nextUp.positionMs > 0 && nextUp.durationMs > 0
+          ? nextUp.durationMs - nextUp.positionMs
+          : undefined)
+    : firstEpisode
+      ? episodeLine(firstEpisode.parentIndex, firstEpisode.index, firstEpisode.title)
+      : null;
 
   // Header and season list only — see MovieDetail for why the cast and the
   // collection rows are left to fill in on their own.
@@ -227,41 +299,31 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
                 <p style={styles.summary}>{dSummary}</p>
               )}
 
-              {/* Pick up where this viewer left off. Opens the episode's detail
-                  view rather than playing outright, so the audio/subtitle choice
-                  and the Resume/Start Over decision still happen there — the same
-                  route every other play in the app takes. */}
+              {/* Pick up where this viewer left off, or start the show from
+                  episode one. Opens the episode's detail view rather than
+                  playing outright, so the audio/subtitle choice and the
+                  Resume/Start Over decision still happen there — the same route
+                  every other play in the app takes. */}
               <div style={styles.titleActions}>
-                {nextUp && onSelectEpisode && (
+                {startFrom && onSelectEpisode && (
                   <button className="btn"
-                    onClick={() => onSelectEpisode(historyEntryToItem(nextUp))}
+                    onClick={() => onSelectEpisode(startFrom)}
                     style={styles.resumeBtn}
                   >
                     <svg width="20" height="20" viewBox="0 0 22 22" fill="none" style={{ flexShrink: 0 }}>
                       <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor"/>
                     </svg>
                     <span style={styles.resumeText}>
-                      <span style={styles.resumeLabel}>
-                        {/* Mid-episode reads as resuming; a fresh episode as
-                            continuing the show. */}
-                        {nextUp.positionMs > 0 ? "Resume Watching" : "Continue Watching"}
-                      </span>
-                      <span style={styles.resumeEpisode}>
-                        {nextUp.parentIndex != null && nextUp.index != null
-                          ? `Season ${nextUp.parentIndex} · Episode ${nextUp.index}`
-                          : nextUp.title}
-                        {nextUp.parentIndex != null && nextUp.index != null && ` — ${nextUp.title}`}
-                        {nextUp.positionMs > 0 && nextUp.durationMs > 0 &&
-                          ` · ${formatTimecode(nextUp.durationMs - nextUp.positionMs)} left`}
-                      </span>
+                      <span style={styles.resumeLabel}>{startLabel}</span>
+                      {startLine && <span style={styles.resumeEpisode}>{startLine}</span>}
                     </span>
                   </button>
                 )}
-                {/* Named whenever nothing ends up beside it: any show nobody
-                    has started, and any phone, where a Resume button is wide
-                    enough to take the whole row and wrap the glyph onto its
-                    own line underneath. */}
-                <PlexMediaActions item={item} inline labelled={!nextUp || narrow} />
+                {/* Named whenever nothing ends up beside it: a show with no
+                    playable episode at all, and any phone, where the play
+                    button is wide enough to take the whole row and wrap the
+                    glyphs onto their own line underneath. */}
+                <PlexMediaActions item={item} inline labelled={!startFrom || narrow} />
               </div>
             </div>
           </div>

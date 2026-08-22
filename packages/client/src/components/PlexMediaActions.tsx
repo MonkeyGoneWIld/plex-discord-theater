@@ -19,13 +19,17 @@ interface PlexMediaActionsProps {
   /** Sit alongside the page's primary Play/Resume/Request action. */
   inline?: boolean;
   /**
-   * Show the watched control as a named button rather than a bare glyph.
+   * Show these controls as named buttons rather than bare glyphs.
    *
-   * For when nothing else is in the row with it. Beside a Play or Resume button
-   * a lone circle-check reads as its companion; on its own under the synopsis
-   * it reads as a stray mark, and its 46px target puts the glyph 9px in from
-   * where every line above it starts. A label fixes both — it lines up with the
-   * text and it says what it does.
+   * For when nothing else is in the row with them. Beside a Play or Resume
+   * button a lone circle-check reads as its companion; on its own under the
+   * synopsis it reads as a stray mark, and its 46px target puts the glyph 9px
+   * in from where every line above it starts. A label fixes both — it lines up
+   * with the text and it says what it does.
+   *
+   * Both controls take the label together. A bookmark outline is the less
+   * self-evident of the two glyphs, so leaving it bare beside a named
+   * "Mark as watched" made the pair read as one button and one loose mark.
    */
   labelled?: boolean;
 }
@@ -50,14 +54,30 @@ export function PlexMediaActions({
    * One pattern across all three scopes rather than three phrasings: the older
    * strings spelled out "all episodes in this show", which repeats the page you
    * are already on, and dropped the "as" from the unwatched half so the two
-   * directions did not read as a pair. It also has to work as a button label
-   * now, not only as a tooltip — the long form ran to 342px.
+   * directions did not read as a pair. This is the tooltip and the accessible
+   * name; see watchedLabel for the shorter text the button itself carries.
    */
   const watchedScope = item.type === "season" ? "season "
     : item.type === "show" ? "show " : "";
   const watchedAction = watchedState
     ? `Mark ${watchedScope}as unwatched`
     : `Mark ${watchedScope}as watched`;
+  const watchlistAction = watchlisted ? "Remove from Watchlist" : "Add to Watchlist";
+  /**
+   * Shorter text for the buttons themselves — the tooltip and the accessible
+   * name above keep the full phrasing.
+   *
+   * The two have to share one line. Spelled out, "Add to Watchlist" beside
+   * "Mark show as watched" measures 469px against the 358px a 390px phone
+   * gives them, so they wrapped onto separate rows. These fit on one down to
+   * a 360px screen in every state (322px of 328px), at the same pill size.
+   *
+   * The watchlist button drops its verb rather than its noun: it is the one
+   * whose glyph already carries the state, filling in and turning amber once
+   * the title is on the list.
+   */
+  const watchlistLabel = "Watchlist";
+  const watchedLabel = watchedState ? "Mark unwatched" : "Mark watched";
 
   useEffect(() => {
     if (watched != null) setWatchedState(watched);
@@ -137,22 +157,23 @@ export function PlexMediaActions({
 
   return (
     <div style={{ ...styles.wrap, ...(inline ? styles.wrapInline : {}) }}>
-      <div style={styles.buttons}>
+      <div style={{ ...styles.buttons, ...(labelled ? styles.buttonsLabelled : {}) }}>
         {linked && supportsWatchlist && (
           <button className="btn"
             type="button"
             onClick={() => void toggleWatchlist()}
             disabled={watchlistBusy}
-            aria-label={watchlisted ? "Remove from Watchlist" : "Add to Watchlist"}
+            aria-label={watchlistAction}
             aria-pressed={watchlisted}
             title={watchlistBusy ? "Updating Watchlist..." : watchlisted ? "In Watchlist" : "Add to Watchlist"}
             style={{
-              ...styles.iconButton,
+              ...(labelled ? styles.labelledButton : styles.iconButton),
               ...(watchlisted ? styles.watchlistActive : {}),
               ...(watchlistBusy ? styles.busy : {}),
             }}
           >
             <Bookmark filled={watchlisted} />
+            {labelled && <span>{watchlistLabel}</span>}
           </button>
         )}
         {supportsWatched && (
@@ -170,7 +191,7 @@ export function PlexMediaActions({
             }}
           >
             <WatchedCheckIcon />
-            {labelled && <span>{watchedAction}</span>}
+            {labelled && <span>{watchedLabel}</span>}
           </button>
         )}
       </div>
@@ -201,6 +222,9 @@ const styles: Record<string, React.CSSProperties> = {
   wrap: { display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "8px", marginTop: "14px" },
   wrapInline: { marginTop: 0 },
   buttons: { display: "flex", flexWrap: "wrap", alignItems: "center", gap: "6px" },
+  /** 6px is the spacing between two touching circles; between two bordered
+   *  pills sharing a row it reads as a seam. */
+  buttonsLabelled: { gap: "10px" },
   iconButton: {
     width: "46px", height: "46px", display: "inline-flex", alignItems: "center",
     justifyContent: "center", padding: 0, borderRadius: "50%", border: "none",

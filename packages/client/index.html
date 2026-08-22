@@ -54,6 +54,18 @@
         outline: none;
       }
 
+      /* Touch leaves no square either.
+         A mobile webview paints its own translucent block over whatever was
+         tapped, sized to the element's border box — so a round icon button
+         flashed a blue rectangle around itself, and the shape of the thing you
+         pressed had nothing to do with the shape that lit up. It is the
+         browser's stand-in for press feedback, and this app has its own: .btn
+         dips and brightens, on a phone exactly as it does on a desktop.
+         Inherited, so declaring it here covers everything. */
+      html {
+        -webkit-tap-highlight-color: transparent;
+      }
+
       @keyframes spin { to { transform: rotate(360deg); } }
       @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
       @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } }

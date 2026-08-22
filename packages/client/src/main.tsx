@@ -3,6 +3,21 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
+/**
+ * Let :active fire under a finger.
+ *
+ * WebKit only applies :active to a touch when the document has a touch
+ * listener attached; without one it decides nothing is interactive and the
+ * press styles never come on. That went unnoticed while the webview was
+ * painting its own highlight over every tap — taking that away (see index.html)
+ * would have left a phone with no press feedback at all rather than with the
+ * same feedback as a desktop.
+ *
+ * Passive, so it never delays a scroll, and empty because attaching it is the
+ * entire effect.
+ */
+document.addEventListener("touchstart", () => {}, { passive: true });
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ErrorBoundary

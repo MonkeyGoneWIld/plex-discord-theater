@@ -411,6 +411,17 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // Whether the last frame is standing in for a stream that is being rebuilt.
   // Cleared the moment real frames resume — see the `playing` handler.
   const [holdingFrame, setHoldingFrame] = useState(false);
+  /**
+   * The queue panel, which currently has nothing to open it.
+   *
+   * Its button lived at the right-hand end of the control bar and was taken out
+   * when that bar was rearranged. Everything else about the queue still works:
+   * titles are added from a detail page, and whatever is queued still plays
+   * next and shows on the end-of-episode card. What is gone is the only way to
+   * *look* at the list, or take something back off it.
+   *
+   * Left wired so restoring an opener is one line, wherever it should go.
+   */
   const [showQueuePanel, setShowQueuePanel] = useState(false);
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
   const [showStats, setShowStats] = useState(false);
@@ -3792,8 +3803,6 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         onOpenTrackSwitcher={() => setShowTrackSwitcher(true)}
         onSurfaceClick={canControl ? togglePlayPause : undefined}
         restartingTo={restartingTo}
-        queueCount={syncState?.queue?.length}
-        onOpenQueue={isHost ? () => setShowQueuePanel(true) : undefined}
         peopleCount={syncState?.participants?.length}
         // Everyone, not just the host: seeing who else is in the room is
         // read-only information, and gating it meant a viewer had to leave the

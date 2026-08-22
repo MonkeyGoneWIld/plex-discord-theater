@@ -57,8 +57,6 @@ interface ControlsProps {
   onToggleStats?: () => void;
   statsActive?: boolean;
   showKeyboardHints?: boolean;
-  queueCount?: number;
-  onOpenQueue?: () => void;
   peopleCount?: number;
   onOpenPeople?: () => void;
   /** Episode navigation — omitted when there is no episode that way. */
@@ -175,6 +173,46 @@ const TAP_SKIP_SECONDS = 10;
  * on every near-miss of the thing people are actually aiming at.
  */
 const TAP_SIDE_ZONE = 0.35;
+
+/**
+ * The ten-second seek buttons.
+ *
+ * One shape, mirrored, rather than two drawings. Two hand-drawn arrows can end
+ * up pointing the same way or the wrong way round without either looking wrong
+ * on its own — mirroring makes that impossible: they are opposite by
+ * construction, so getting one right gets both right.
+ *
+ * The number does not mirror. It sits outside the flipped group, which is the
+ * whole reason the arrow is a group at all.
+ */
+function SeekTen({ back }: { back: boolean }) {
+  return (
+    <svg width="19" height="19" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+      <g transform={back ? undefined : "scale(-1,1) translate(-20,0)"}>
+        {/* Open at the top; the gap is where the arrowhead goes. */}
+        <path
+          d="M12.19 4.59A6.4 6.4 0 1 1 7.81 4.59"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+        />
+        {/* Points away from the gap, so back reads anticlockwise. */}
+        <path d="M4.4 4.6 8.9 2.2v4.8Z" fill="currentColor" />
+      </g>
+      <text
+        x="10"
+        y="13.6"
+        textAnchor="middle"
+        fontSize="7.4"
+        fontWeight="600"
+        fill="currentColor"
+        fontFamily="inherit"
+      >
+        10
+      </text>
+    </svg>
+  );
+}
 
 /**
  * The answer to a skip, drawn on the half of the picture it applies to.
@@ -305,8 +343,6 @@ export function Controls({
   onToggleStats,
   statsActive,
   showKeyboardHints = true,
-  queueCount,
-  onOpenQueue,
   peopleCount,
   onOpenPeople,
   onPrevEpisode,
@@ -1103,7 +1139,25 @@ export function Controls({
         )}
 
         <div style={{ ...styles.controls, ...(phone ? styles.controlsPhone : {}) }}>
-          <div style={{ ...styles.left, ...(compact ? styles.groupCompact : {}) }}>
+          {/* Left column: the time, alone.
+              The phone bar carries it either side of the scrub row instead,
+              where there is room for it. */}
+          {!phone && (
+            <div style={{ ...styles.side, ...(compact ? styles.groupCompact : {}) }}>
+              <span style={{ ...styles.time, ...(compact ? styles.timeCompact : {}) }}>
+                {/* Reads out the pending destination — a drag in progress, or a
+                    stack of ±10s presses — so the number agrees with where the
+                    handle is rather than with playback behind it. */}
+                {fmt(pendingTime ?? currentTime)} / {fmt(duration)}
+              </span>
+            </div>
+          )}
+          {/* Middle column: the transport.
+              In the middle because that is where the largest empty space on the
+              bar was, and because it then sits in the same place whatever the
+              window is doing — left-aligned, play drifts further from the
+              settings you were last using with every inch of extra width. */}
+          <div style={{ ...styles.center, ...(compact ? styles.centerCompact : {}) }}>
             {/* Play, ±10s and episode navigation are all absent on a phone:
                 playback and episode navigation are the three buttons in the
                 middle of the picture, and skipping is a double-tap to one
@@ -1123,12 +1177,10 @@ export function Controls({
                   )}
                 </button>
                 <button onClick={skipBack} className="btn" style={styles.skipBtn} title="Back 10s">
-                  <span style={{ fontSize: 16 }}>{"\u21BA"}</span>
-                  <span style={{ fontSize: 11 }}>10</span>
+                  <SeekTen back />
                 </button>
                 <button onClick={skipForward} className="btn" style={styles.skipBtn} title="Forward 10s">
-                  <span style={{ fontSize: 16 }}>{"\u21BB"}</span>
-                  <span style={{ fontSize: 11 }}>10</span>
+                  <SeekTen back={false} />
                 </button>
               </>
             )}
@@ -1153,18 +1205,9 @@ export function Controls({
                 </svg>
               </button>
             )}
-            {/* The phone bar carries the time either side of the scrub row
-                instead, where there is room for it. */}
-            {!phone && (
-              <span style={{ ...styles.time, ...(compact ? styles.timeCompact : {}) }}>
-                {/* Reads out the pending destination — a drag in progress, or a
-                    stack of ±10s presses — so the number agrees with where the
-                    handle is rather than with playback behind it. */}
-                {fmt(pendingTime ?? currentTime)} / {fmt(duration)}
-              </span>
-            )}
           </div>
-          <div style={{ ...styles.right, ...(compact ? styles.rightCompact : {}) }}>
+          {/* Right column: everything that is not playback. */}
+          <div style={{ ...styles.right, ...styles.side, ...(compact ? styles.rightCompact : {}) }}>
             {/* Not host-gated: the roster is read-only, and PeoplePanel decides
                 for itself whether to offer role controls. Gating it here meant a
                 viewer had to back out of the video to see who else was watching. */}
@@ -1172,7 +1215,7 @@ export function Controls({
               <button
                 onClick={onOpenPeople}
                 className="btn"
-                style={styles.queueBtn}
+                style={styles.peopleBtn}
                 title={isHost ? "People & roles" : "Who's here"}
               >
                 <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
@@ -1181,14 +1224,8 @@ export function Controls({
                   <path d="M11 4.2a2.2 2.2 0 0 1 0 4.2M12.5 13.5c0-1.7-.7-2.9-2-3.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
                 </svg>
                 {peopleCount != null && peopleCount > 0 && (
-                  <span style={styles.queueBadge}>{peopleCount}</span>
+                  <span style={styles.peopleBadge}>{peopleCount}</span>
                 )}
-              </button>
-            )}
-            {isHost && queueCount != null && queueCount > 0 && onOpenQueue && (
-              <button onClick={onOpenQueue} className="btn" style={styles.queueBtn} title="Queue">
-                <span style={{ fontSize: 14 }}>{"\u25B6"}</span>
-                <span style={styles.queueBadge}>{queueCount}</span>
               </button>
             )}
             {onToggleStats && (
@@ -1707,14 +1744,35 @@ const styles: Record<string, React.CSSProperties> = {
   timeCompact: {
     fontSize: "11px",
   },
-  left: {
+  /**
+   * The two outer columns.
+   *
+   * Both take the same share of what is left over, which is what actually
+   * centres the middle one: `space-between` alone would only centre it if the
+   * time and the settings cluster happened to be the same width, and they are
+   * not.
+   */
+  side: {
+    flex: "1 1 0",
+    minWidth: 0,
     display: "flex",
     alignItems: "center",
     gap: "12px",
   },
+  /** The transport, which takes only the room it needs. */
+  center: {
+    flex: "0 0 auto",
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
+  },
+  /** Tighter on a tablet, but never truncated: every item here is a target,
+   *  and the time in the left column is the thing that gives instead. */
+  centerCompact: { gap: "6px" },
   right: {
     display: "flex",
     alignItems: "center",
+    justifyContent: "flex-end",
     gap: "12px",
   },
   playBtn: {
@@ -1770,13 +1828,13 @@ const styles: Record<string, React.CSSProperties> = {
   /** Same treatment the stats toggle uses, so "this panel is open" reads the
    *  same way wherever it appears in the bar. */
   gearBtnActive: { color: "#e5a00d", background: "rgba(229,160,13,0.18)" },
-  queueBtn: {
+  peopleBtn: {
     display: "flex", alignItems: "center", gap: "4px",
     background: "rgba(255,255,255,0.1)", border: "none",
     borderRadius: "16px", padding: "4px 10px",
     color: "#fff", cursor: "pointer", fontSize: "12px", fontFamily: "inherit",
   },
-  queueBadge: {
+  peopleBadge: {
     background: "#e5a00d", color: "#000", borderRadius: "8px",
     padding: "1px 6px", fontSize: "11px", fontWeight: 700,
   },

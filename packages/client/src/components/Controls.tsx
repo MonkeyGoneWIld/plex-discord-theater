@@ -1187,20 +1187,28 @@ export function Controls({
                 side. */}
             {canControl && !phone && (
               <>
-                {/* An absent neighbour leaves its width behind. At the first or
-                    last episode of a series one of these is not rendered, and a
-                    row that closed up around the gap would take play off centre
-                    at exactly the moments it is least expected to move. */}
-                {onPrevEpisode ? (
-                  <button onClick={onPrevEpisode} className="btn" style={styles.skipBtn} title="Previous episode">
-                    <svg width={BAR_EPISODE_ICON} height={BAR_EPISODE_ICON} viewBox="0 0 16 16" fill="currentColor">
-                      <rect x="2" y="2.5" width="2" height="11" rx="0.75"/>
-                      <path d="M13.5 3.2v9.6a.6.6 0 0 1-.93.5L5.6 8.5a.6.6 0 0 1 0-1l6.97-4.8a.6.6 0 0 1 .93.5Z"/>
-                    </svg>
-                  </button>
-                ) : (
-                  <div style={styles.skipSpacer} aria-hidden="true" />
-                )}
+                {/* Always drawn, and disabled at the ends of a series rather
+                    than dropped. A greyed button says there is nothing that way;
+                    an empty gap says nothing at all, and left the row a
+                    different shape depending on which episode you were on.
+
+                    Keeping it also keeps play centred for free: the row is the
+                    same five items whatever the episode, so there is no gap to
+                    close up around. .btn already withholds its hover and press
+                    from anything disabled. */}
+                <button
+                  onClick={onPrevEpisode}
+                  disabled={!onPrevEpisode}
+                  className="btn"
+                  style={{ ...styles.skipBtn, ...(onPrevEpisode ? {} : styles.skipBtnOff) }}
+                  title={onPrevEpisode ? "Previous episode" : "No previous episode"}
+                  aria-label={onPrevEpisode ? "Previous episode" : "No previous episode"}
+                >
+                  <svg width={BAR_EPISODE_ICON} height={BAR_EPISODE_ICON} viewBox="0 0 16 16" fill="currentColor">
+                    <rect x="2" y="2.5" width="2" height="11" rx="0.75"/>
+                    <path d="M13.5 3.2v9.6a.6.6 0 0 1-.93.5L5.6 8.5a.6.6 0 0 1 0-1l6.97-4.8a.6.6 0 0 1 .93.5Z"/>
+                  </svg>
+                </button>
                 <button onClick={skipBack} className="btn" style={styles.skipBtn} title="Back 10s">
                   <SeekTen back />
                 </button>
@@ -1219,16 +1227,19 @@ export function Controls({
                 <button onClick={skipForward} className="btn" style={styles.skipBtn} title="Forward 10s">
                   <SeekTen back={false} />
                 </button>
-                {onNextEpisode ? (
-                  <button onClick={onNextEpisode} className="btn" style={styles.skipBtn} title="Next episode">
-                    <svg width={BAR_EPISODE_ICON} height={BAR_EPISODE_ICON} viewBox="0 0 16 16" fill="currentColor">
-                      <path d="M2.5 3.2v9.6a.6.6 0 0 0 .93.5L10.4 8.5a.6.6 0 0 0 0-1L3.43 2.7a.6.6 0 0 0-.93.5Z"/>
-                      <rect x="12" y="2.5" width="2" height="11" rx="0.75"/>
-                    </svg>
-                  </button>
-                ) : (
-                  <div style={styles.skipSpacer} aria-hidden="true" />
-                )}
+                <button
+                  onClick={onNextEpisode}
+                  disabled={!onNextEpisode}
+                  className="btn"
+                  style={{ ...styles.skipBtn, ...(onNextEpisode ? {} : styles.skipBtnOff) }}
+                  title={onNextEpisode ? "Next episode" : "No next episode"}
+                  aria-label={onNextEpisode ? "Next episode" : "No next episode"}
+                >
+                  <svg width={BAR_EPISODE_ICON} height={BAR_EPISODE_ICON} viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M2.5 3.2v9.6a.6.6 0 0 0 .93.5L10.4 8.5a.6.6 0 0 0 0-1L3.43 2.7a.6.6 0 0 0-.93.5Z"/>
+                    <rect x="12" y="2.5" width="2" height="11" rx="0.75"/>
+                  </svg>
+                </button>
               </>
             )}
           </div>
@@ -1795,12 +1806,6 @@ const styles: Record<string, React.CSSProperties> = {
   /** Tighter on a tablet, but never truncated: every item here is a target,
    *  and the time in the left column is the thing that gives instead. */
   centerCompact: { gap: "6px" },
-  /** Holds the place of an episode button that is not there — the same icon
-   *  inside the same padding, so it cannot come out a different width. */
-  skipSpacer: {
-    width: `${BAR_EPISODE_ICON + SKIP_BTN_PAD_X * 2}px`,
-    height: `${BAR_EPISODE_ICON + SKIP_BTN_PAD_Y * 2}px`,
-  },
   right: {
     display: "flex",
     alignItems: "center",
@@ -1830,6 +1835,12 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
     fontFamily: "inherit",
     padding: `${SKIP_BTN_PAD_Y}px ${SKIP_BTN_PAD_X}px`,
+  },
+  /** There is no episode that way. Dimmed rather than removed, so the row keeps
+   *  its shape and the control keeps saying what it would do. */
+  skipBtnOff: {
+    opacity: 0.3,
+    cursor: "default",
   },
   time: {
     fontSize: "13px",

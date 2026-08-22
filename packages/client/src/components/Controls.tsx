@@ -129,27 +129,20 @@ const SKIP_INDICATOR_FADE_MS = 260;
 const SEEK_BLADE_MS = 520;
 
 /**
- * The wash behind a gesture seek: a half-ellipse anchored to the edge the tap
- * landed on, curving into the middle of the picture.
+ * The D: a half-ellipse over the side of the picture that answered the tap,
+ * its flat edge on the side of the screen and its curve facing the centre.
  *
- * The shape is the border-radius, not an element — one side's corners rounded
- * to 50% turns the zone into a D whose flat edge is the side of the screen and
- * whose curve faces the centre. That is the shape both the Plex and the YouTube
+ * The shape is the border-radius, not an element — rounding one side's corners
+ * to 50% is the whole of it. That is the shape both the Plex and the YouTube
  * players draw, and it is what makes the gesture read as "this half of the
  * picture" rather than as a badge that happens to be over there.
  *
- * The fill fades out along the curve so the boundary is a wash rather than a
- * cut-out. A hard edge here is what turns a shape into a box, and a box half
- * off the side of the screen is exactly what this replaces.
+ * Nothing holds it on screen between taps: the D is drawn only while it is
+ * swelling and fading, so the picture is never dimmed for longer than the tap
+ * it is answering.
  */
-const SEEK_WASH_BACK =
-  "radial-gradient(125% 100% at 0% 50%, rgba(0,0,0,0.50) 0%, rgba(0,0,0,0.42) 55%, rgba(0,0,0,0.12) 92%, rgba(0,0,0,0) 100%)";
-const SEEK_WASH_FORWARD =
-  "radial-gradient(125% 100% at 100% 50%, rgba(0,0,0,0.50) 0%, rgba(0,0,0,0.42) 55%, rgba(0,0,0,0.12) 92%, rgba(0,0,0,0) 100%)";
-/** Rounds the inner edge of the zone into the curve. Outer corners stay square:
- *  they sit on the side of the screen, where there is nothing to round. */
-const SEEK_WASH_RADIUS_BACK = "0 50% 50% 0 / 0 50% 50% 0";
-const SEEK_WASH_RADIUS_FORWARD = "50% 0 0 50% / 50% 0 0 50%";
+const SEEK_D_RADIUS_BACK = "0 50% 50% 0 / 0 50% 50% 0";
+const SEEK_D_RADIUS_FORWARD = "50% 0 0 50% / 50% 0 0 50%";
 
 /**
  * Phone gestures.
@@ -193,8 +186,9 @@ function SeekBlade({ back, delayMs }: { back: boolean; delayMs: number }) {
  * The answer to a skip, drawn on the half of the picture it applies to.
  *
  * Modelled on the Plex and YouTube players: the gesture is a double-tap on one
- * side of the picture, so the acknowledgement belongs on that side, as a wash
- * fading inward from that edge with the amount centred inside it.
+ * side of the picture, so the acknowledgement belongs on that side — a
+ * half-ellipse over that half, swelling and fading once per tap, with the
+ * amount centred inside it.
  *
  * What this replaces was a pill pinned 6% from the edge with its contents
  * flush-aligned. Two things were wrong with that. 6% of the viewport is behind
@@ -203,19 +197,21 @@ function SeekBlade({ back, delayMs }: { back: boolean; delayMs: number }) {
  * edge instead of sitting under one another. Centring inside a zone fixes both
  * at once — the content lands ~19% in, clear of anything Discord draws.
  *
- * The wash is for the gesture only. On a desktop a skip comes from the ±10s
+ * The D is for the gesture only. On a desktop a skip comes from the ±10s
  * buttons or the arrow keys, where darkening a third of the picture would be a
- * far louder answer than a button press asks for; there the same chevrons and
+ * far louder answer than a button press asks for; there the same blades and
  * count appear on a small pill in the same place.
  */
 function SeekIndicator({
   delta,
-  wash,
+  gesture,
   fading,
   tapId,
 }: {
   delta: number;
-  wash: boolean;
+  /** A double-tap on the picture, rather than a button or an arrow key. Only a
+   *  gesture gets the D; a button press gets the same readout on a pill. */
+  gesture: boolean;
   fading: boolean;
   /** Bumped once per tap. Used as a key, so every element that animates is
    *  replaced and replays — an animation still running from the last tap does
@@ -230,30 +226,25 @@ function SeekIndicator({
     <div
       style={{
         ...styles.seekZone,
-        // The same share of the picture that responds to the tap, so the wash
-        // is a picture of the hit zone rather than an approximation of it.
+        // The same share of the picture that responds to the tap, so the D is
+        // a picture of the hit zone rather than an approximation of it.
         width: `${TAP_SIDE_ZONE * 100}%`,
         ...(back ? { left: 0 } : { right: 0 }),
-        ...(wash
-          ? {
-              background: back ? SEEK_WASH_BACK : SEEK_WASH_FORWARD,
-              borderRadius: back ? SEEK_WASH_RADIUS_BACK : SEEK_WASH_RADIUS_FORWARD,
-              animation: "seek-wash 120ms ease-out",
-            }
-          : {}),
         opacity: fading ? 0 : 1,
         transition: `opacity ${SKIP_INDICATOR_FADE_MS}ms ease-out`,
       }}
     >
-      {/* The shape itself swelling and fading, once per tap. Anchored at the
-          edge of the screen so it grows inward from the side that was tapped. */}
-      {wash && (
+      {/* The whole shape swelling and fading, once per tap, anchored at the
+          edge of the screen so it grows inward from the side that was tapped.
+          This is the only thing that darkens the picture — there is no standing
+          wash under it, so nothing is dimmed between taps. */}
+      {gesture && (
         <div
           key={`pulse-${tapId}`}
           className="seek-pulse"
           style={{
             ...styles.seekPulse,
-            borderRadius: back ? SEEK_WASH_RADIUS_BACK : SEEK_WASH_RADIUS_FORWARD,
+            borderRadius: back ? SEEK_D_RADIUS_BACK : SEEK_D_RADIUS_FORWARD,
             transformOrigin: back ? "left center" : "right center",
           }}
         />
@@ -264,11 +255,11 @@ function SeekIndicator({
         style={{
           ...styles.seekBody,
           ...(back ? { flexDirection: "row-reverse" as const } : {}),
-          ...(wash ? {} : styles.seekBodyPill),
+          ...(gesture ? {} : styles.seekBodyPill),
         }}
       >
-        <div className="seek-amount" style={styles.seekAmount}>
-          {back ? "\u2212" : "+"}{Math.abs(delta)}
+        <div style={styles.seekAmount}>
+          {Math.abs(delta)} seconds
         </div>
         <div style={styles.seekBlades}>
           {delays.map((d, i) => (
@@ -969,7 +960,7 @@ export function Controls({
       {skipPreview != null && skipPreview.delta !== 0 && (
         <SeekIndicator
           delta={skipPreview.delta}
-          wash={phone}
+          gesture={phone}
           fading={skipFading}
           tapId={skipPreview.tapId}
         />
@@ -1275,8 +1266,8 @@ const styles: Record<string, React.CSSProperties> = {
    *
    * Full height and a share of the width, with the content centred in it, so
    * the amount sits well inside the picture instead of against its edge. The
-   * zone is the positioning; whether anything is drawn behind it is the wash,
-   * which only the gesture gets.
+   * zone is only the positioning; the shape that appears inside it is the
+   * pulse, which only the gesture gets.
    */
   seekZone: {
     position: "absolute",
@@ -1306,7 +1297,7 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "9px",
     color: "#fff",
   },
-  /** Desktop, where there is no wash to read the text against. */
+  /** Desktop, where there is no D behind the text to read it against. */
   seekBodyPill: {
     padding: "10px 18px",
     borderRadius: "999px",
@@ -1314,7 +1305,7 @@ const styles: Record<string, React.CSSProperties> = {
     backdropFilter: "blur(6px)",
   },
   /**
-   * The swell: the whole D again, over the steady wash, played once per tap.
+   * The swell: the whole D, played once per tap and gone between them.
    *
    * Deliberately not a circle at the point touched. A double-tap means "this
    * side of the picture" and nothing more precise than that — answering the
@@ -1324,7 +1315,9 @@ const styles: Record<string, React.CSSProperties> = {
   seekPulse: {
     position: "absolute",
     inset: 0,
-    background: "rgba(255,255,255,0.13)",
+    // Dark, because it is now the only thing darkening the picture: there is no
+    // standing wash beneath it to lighten over.
+    background: "rgba(0,0,0,0.34)",
     opacity: 0,
     pointerEvents: "none",
     animation: "seek-pulse 520ms cubic-bezier(0.22, 0.7, 0.3, 1) forwards",
@@ -1335,14 +1328,15 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "1px",
     lineHeight: 0,
   },
+  /** The wording and the size this has always had. Direction is the blades'
+   *  job, so the number carries no sign. */
   seekAmount: {
-    fontSize: "clamp(17px, 3.1vw, 26px)",
+    fontSize: "13px",
     fontWeight: 600,
     lineHeight: 1,
     whiteSpace: "nowrap",
     fontVariantNumeric: "tabular-nums",
     textShadow: "0 1px 3px rgba(0,0,0,0.55)",
-    animation: "seek-amount 200ms cubic-bezier(0.2, 0, 0, 1)",
   },
   overlay: {
     position: "absolute",

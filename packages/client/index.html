@@ -71,11 +71,12 @@
          looping: a tap is an event, and an acknowledgement that was already
          running when you touched the screen does not read as a reply to you.
 
-         The blades brighten in turn so the run travels the way the seek does;
-         the whole D swells and fades; the amount takes a small step up as it
-         changes. The swell is the shape itself, anchored at the edge of the
-         screen so it grows inward — nothing about it depends on where the
-         finger landed, which is a detail the gesture does not mean anything by. */
+         The blades brighten in turn so the run travels the way the seek does,
+         and the whole D swells and fades behind them. The swell is the shape
+         itself, anchored at the edge of the screen so it grows inward — nothing
+         about it depends on where the finger landed, which is a detail the
+         gesture does not mean anything by. It is also the only thing that dims
+         the picture, so nothing is left darkened between taps. */
       @keyframes seek-blade {
         0%   { opacity: 0.28; }
         35%  { opacity: 1; }
@@ -86,22 +87,10 @@
         30%  { opacity: 1; transform: scale(1); }
         100% { opacity: 0; transform: scale(1.07); }
       }
-      @keyframes seek-amount {
-        0%   { transform: scale(1); }
-        40%  { transform: scale(1.13); }
-        100% { transform: scale(1); }
-      }
-      /* The wash arrives rather than appearing. Short: it is answering a tap,
-         and an acknowledgement that takes its time reads as lag. */
-      @keyframes seek-wash {
-        from { opacity: 0; }
-        to   { opacity: 1; }
-      }
       @media (prefers-reduced-motion: reduce) {
         /* The direction and the amount still read; nothing chases anything. */
         .seek-blade { animation: none !important; opacity: 1 !important; }
         .seek-pulse { display: none !important; }
-        .seek-amount { animation: none !important; }
       }
 
       html {

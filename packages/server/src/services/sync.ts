@@ -133,6 +133,9 @@ interface RoomClient {
   isHost: boolean;
   /** Granted by the host; allows transport control (pause/resume/seek) only. */
   isCoHost: boolean;
+  /** When this client last asked the host to pause or resume. See
+   *  TRANSPORT_REQUEST_COOLDOWN_MS. */
+  lastTransportRequestAt?: number;
   /**
    * Whether this client currently has the player open.
    *
@@ -164,6 +167,16 @@ interface RoomClient {
  * change carries only to the people actually watching the host's stream.
  */
 const CO_HOST_ALLOWED_TYPES = new Set(["pause", "resume", "seek", "play-item"]);
+
+/**
+ * How often one viewer may ask the host to pause or resume.
+ *
+ * The request is a card on somebody else's screen while they are watching
+ * something, so the cost of it is theirs rather than the sender's. Enforced
+ * here rather than only in the button, because the button is the client's and
+ * the host's peace is not.
+ */
+const TRANSPORT_REQUEST_COOLDOWN_MS = 5000;
 
 /**
  * Who inherits the room when the host goes, best first.
@@ -1169,6 +1182,48 @@ export function attachWebSocketServer(server: Server): void {
         for (const c of room.clients) {
           if (c.isHost) {
             sendTo(c.ws, { type: "suggestion", item: suggestion });
+          }
+        }
+        return;
+      }
+
+      /**
+       * Viewer → host and co-hosts: "could you pause this?"
+       *
+       * Open to any joined client, like "suggest" and for the same reason: it
+       * changes nothing. Nobody is paused by asking. The room's state is not
+       * touched here at all — whoever receives this presses their own pause,
+       * which is the message that actually does something and which already
+       * carries every check it needs.
+       *
+       * Co-hosts are included because they can act on it; a request that only
+       * reaches a host who has stepped away is a request that goes nowhere.
+       */
+      if (type === "request-transport") {
+        const action = msg.action;
+        if (action !== "pause" && action !== "resume") return;
+
+        const now = Date.now();
+        const last = client.lastTransportRequestAt ?? 0;
+        if (now - last < TRANSPORT_REQUEST_COOLDOWN_MS) return;
+        client.lastTransportRequestAt = now;
+
+        logEvent("Sync", "transport requested", {
+          by: client.username ?? client.userId,
+          action,
+        });
+
+        for (const c of room.clients) {
+          // Not back to the sender, even if they somehow hold a role: a card
+          // asking yourself for something is nonsense.
+          if (c === client) continue;
+          if (c.isHost || c.isCoHost) {
+            sendTo(c.ws, {
+              type: "transport-request",
+              action,
+              fromUsername: client.username ?? "Someone",
+              fromUserId: client.userId,
+            });
           }
         }
         return;

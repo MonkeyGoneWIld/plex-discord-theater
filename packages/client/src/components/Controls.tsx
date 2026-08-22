@@ -72,6 +72,11 @@ interface ControlsProps {
    * episode buttons — on a film they are controls for something the item does
    * not have.
    */
+  /**
+   * Viewer → host: ask for a pause or a resume. Omitted for anyone who can
+   * simply do it, which is what decides whether the control appears at all.
+   */
+  onRequestTransport?: (action: "pause" | "resume") => void;
   episodeNav?: boolean;
   /** Episode navigation — omitted when there is no episode that way. */
   onPrevEpisode?: () => void;
@@ -218,6 +223,17 @@ const TAP_SIDE_ZONE = 0.35;
  * to tell at a glance that the boost is on rather than reading a number.
  */
 const BOOST_ACCENT = "#ff6b35";
+
+/**
+ * How long the request button stays acknowledged after a press.
+ *
+ * The reply to asking is somebody else deciding, which may be never — so the
+ * button has to answer for itself or a viewer presses it again wondering
+ * whether it worked. Slightly longer than the server's own cooldown on the
+ * message, so the control is never sitting there looking ready while the next
+ * press would be dropped on arrival.
+ */
+const REQUEST_SENT_MS = 6000;
 
 /**
  * The horizontal slider's track, in pixels.
@@ -408,6 +424,7 @@ export function Controls({
   showKeyboardHints = true,
   peopleCount,
   onOpenPeople,
+  onRequestTransport,
   episodeNav = false,
   onPrevEpisode,
   onNextEpisode,
@@ -491,6 +508,9 @@ export function Controls({
   // before the frames themselves have; the ones still on the wire fall back to
   // the per-frame requests below, as does a part Plex has no index for.
   const previewFramesRef = useRef<PreviewFrames | null>(null);
+  // The request that was just sent, if any: what was asked for, so the label
+  // can keep saying it while the room carries on doing the opposite.
+  const [requestSent, setRequestSent] = useState<"pause" | "resume" | null>(null);
   const [hintsVisible, setHintsVisible] = useState(showKeyboardHints);
   // Phone-sized: the volume slider moves into a vertical popover rather than
   // eating the width of a row that has nowhere to put it.
@@ -531,6 +551,14 @@ export function Controls({
     video.addEventListener("volumechange", sync);
     return () => video.removeEventListener("volumechange", sync);
   }, [videoRef]);
+
+  // Clear the acknowledgement on its own, so a viewer who asked once and was
+  // answered by nobody can ask again.
+  useEffect(() => {
+    if (!requestSent) return;
+    const timer = setTimeout(() => setRequestSent(null), REQUEST_SENT_MS);
+    return () => clearTimeout(timer);
+  }, [requestSent]);
 
   // Fade out keyboard hints after 10s
   useEffect(() => {
@@ -1420,6 +1448,38 @@ export function Controls({
                 )}
               </>
             )}
+            {/* Someone who cannot press pause, asking for one.
+
+                It stands where the transport would be, because that is where
+                the question is about — but it is a word rather than a glyph,
+                and deliberately so. A ▮▮ here would be the shape of the button
+                that pauses, in the place that button sits, worn by a control
+                that does not pause anything. "Ask to pause" cannot be misread
+                as pausing, and it is the whole design: no icon, no fill, a
+                hairline that only warms when you reach for it. */}
+            {!canControl && onRequestTransport && (
+              <button
+                className="btn"
+                onClick={() => {
+                  const action = playing ? "pause" : "resume";
+                  setRequestSent(action);
+                  onRequestTransport(action);
+                }}
+                disabled={requestSent != null}
+                style={{ ...styles.requestBtn, ...(requestSent ? styles.requestBtnSent : {}) }}
+                title={
+                  requestSent
+                    ? "The host has been asked"
+                    : playing
+                      ? "Ask the host to pause"
+                      : "Ask the host to resume"
+                }
+              >
+                {requestSent
+                  ? requestSent === "pause" ? "Pause requested" : "Resume requested"
+                  : playing ? "Ask to pause" : "Ask to resume"}
+              </button>
+            )}
           </div>
           {/* Right column: everything that is not playback. */}
           <div style={{ ...styles.right, ...styles.side, ...(compact ? styles.rightCompact : {}) }}>
@@ -2007,6 +2067,43 @@ const styles: Record<string, React.CSSProperties> = {
   /** Tighter on a tablet, but never truncated: every item here is a target,
    *  and the time in the left column is the thing that gives instead. */
   centerCompact: { gap: "6px" },
+  /**
+   * Asking for a pause, in the space a host's transport occupies.
+   *
+   * Quiet on purpose. It is not the primary control on this bar — it is not a
+   * control at all, it is a message — so it carries no fill and no amber, and
+   * the hairline is the same one every secondary surface in the app uses. The
+   * text is what identifies it; there is no icon to mistake for a transport
+   * button.
+   */
+  requestBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    height: "28px",
+    padding: "0 14px",
+    borderRadius: "999px",
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: "transparent",
+    color: "rgba(255,255,255,0.62)",
+    fontFamily: "inherit",
+    fontSize: "12px",
+    fontWeight: 500,
+    letterSpacing: "0.01em",
+    whiteSpace: "nowrap",
+    cursor: "pointer",
+    transition: "color 0.15s ease, border-color 0.15s ease",
+  },
+  /**
+   * Sent, and waiting on a person.
+   *
+   * Dimmed rather than swapped for a tick: the answer to this is somebody
+   * else's decision, and a tick would be claiming one arrived.
+   */
+  requestBtnSent: {
+    color: "rgba(255,255,255,0.38)",
+    borderColor: "rgba(255,255,255,0.08)",
+    cursor: "default",
+  },
   right: {
     display: "flex",
     alignItems: "center",

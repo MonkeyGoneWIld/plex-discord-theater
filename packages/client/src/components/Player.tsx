@@ -10,6 +10,7 @@ import { NextUpButton } from "./NextUpButton";
 import { EndCard } from "./EndCard";
 import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
+import { TransportRequestCard } from "./TransportRequestCard";
 import { SubtitleLayer } from "./SubtitleLayer";
 import { SubtitleOffset } from "./SubtitleOffset";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
@@ -54,6 +55,15 @@ const STARVED_BUFFER_S = 1.5;
 const STARVED_OFFER_MS = 20_000;
 /** How often the check below runs. */
 const STARVED_POLL_MS = 1_000;
+
+/**
+ * How long an unanswered pause request stays on screen.
+ *
+ * It is a question about this moment. Left up, it becomes a button sitting in
+ * the corner of somebody's film that pauses it twenty minutes later for a
+ * reason nobody remembers.
+ */
+const TRANSPORT_REQUEST_TTL_MS = 45_000;
 /**
  * Drift past which a viewer is yanked into place with a seek rather than eased
  * there — see the soft-sync constants below.
@@ -734,6 +744,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // Session ownership stays strictly host-only (ownsSessionRef above): a co-host
   // never pings or stops the Plex transcode.
   const canControl = isHost || (syncState?.isCoHost ?? false);
+  const transportRequest = canControl ? syncState?.transportRequest ?? null : null;
   const canControlRef = useRef(canControl);
   canControlRef.current = canControl;
 
@@ -1410,6 +1421,31 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       .finally(() => { if (!cancelled) setSiblingsResolved(true); });
     return () => { cancelled = true; };
   }, [item.ratingKey]);
+
+  /**
+   * Put the request card down again, without anyone having to.
+   *
+   * Two ways it stops being a question. The room does what was asked, however
+   * that happened — the host pressing pause for their own reasons answers
+   * "could you pause?" just as well as pressing it for the person who asked.
+   * Or long enough passes that it is no longer about this moment: a card that
+   * outlives what prompted it is a card that gets pressed by accident twenty
+   * minutes later.
+   */
+  useEffect(() => {
+    if (!transportRequest) return;
+    const roomPlaying = syncState?.playing ?? false;
+    const satisfied = transportRequest.action === "pause" ? !roomPlaying : roomPlaying;
+    if (satisfied) {
+      syncActionsRef.current?.clearTransportRequest();
+      return;
+    }
+    const timer = setTimeout(
+      () => syncActionsRef.current?.clearTransportRequest(),
+      TRANSPORT_REQUEST_TTL_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [transportRequest, syncState?.playing]);
 
   // Single HLS session — no mid-stream switching
   useEffect(() => {
@@ -3807,6 +3843,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         onToggleStats={() => setShowStats((s) => !s)}
         statsActive={showStats}
         canControl={canControl}
+        // Only for someone who cannot press pause themselves — the control
+        // hides itself on the strength of this being absent.
+        onRequestTransport={
+          !canControl && syncActions ? syncActions.sendTransportRequest : undefined
+        }
         onSyncPause={canControl ? syncActions?.sendPause : undefined}
         onSyncResume={canControl ? syncActions?.sendResume : undefined}
         onSyncSeek={canControl ? syncActions?.sendSeek : undefined}
@@ -3984,8 +4025,30 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       {/* Bottom-right stack: owns placement so neither child positions itself and
           a third affordance costs one line. Bottom-anchored, so it grows upward
           and the skip button naturally sits above the card. */}
-      {(showSkip || showNextUp) && (
+      {(showSkip || showNextUp || transportRequest) && (
         <div style={styles.bottomRightStack}>
+          {transportRequest && (
+            <TransportRequestCard
+              action={transportRequest.action}
+              fromUsername={transportRequest.fromUsername}
+              onAccept={() => {
+                const video = videoRef.current;
+                const wantPause = transportRequest.action === "pause";
+                // Only if it is not already how they asked for it: the card can
+                // outlive the state it was about by a frame or two, and pausing
+                // an already-paused video would broadcast a spurious command.
+                if (video && wantPause && !video.paused) {
+                  video.pause();
+                  syncActions?.sendPause(video.currentTime);
+                } else if (video && !wantPause && video.paused) {
+                  void video.play();
+                  syncActions?.sendResume(video.currentTime);
+                }
+                syncActions?.clearTransportRequest();
+              }}
+              onDismiss={() => syncActions?.clearTransportRequest()}
+            />
+          )}
           {showSkip && (
             <SkipMarkerButton type={activeMarker!.type} onSkip={handleSkipMarker} />
           )}

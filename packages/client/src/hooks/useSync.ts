@@ -21,6 +21,21 @@ export interface QueueItem {
   year?: number;
 }
 
+/**
+ * A viewer asking whoever is driving to pause or resume.
+ *
+ * Reaches the host and any co-host, and reaches them as a question — nothing
+ * about the room changes until one of them presses their own pause. Only ever
+ * present on a client that can act on it.
+ */
+export interface TransportRequest {
+  action: "pause" | "resume";
+  fromUsername: string;
+  fromUserId: string;
+  /** By this client's clock, for expiring a request nobody answered. */
+  at: number;
+}
+
 export interface SuggestionItem {
   ratingKey: string;
   title: string;
@@ -125,6 +140,14 @@ export interface SyncState {
    *  Requires the server to relay "suggest" messages from a viewer to the
    *  host as a "suggestion" message: { type: "suggestion", item: {...} }. */
   suggestions: SuggestionItem[];
+  /**
+   * The most recent unanswered pause/resume request, on a host or co-host.
+   *
+   * One at a time rather than a list. Two people asking for the same thing is
+   * one question, and a queue of them would be a stack of cards over somebody's
+   * film — each of which is answered by the same single press.
+   */
+  transportRequest: TransportRequest | null;
   /** Everyone currently in the room, with their roles. Refreshed by the server
    *  on join, leave, and any role change. */
   participants: Participant[];
@@ -224,6 +247,16 @@ export interface SyncActions {
   sendSuggest: (item: SuggestionItem) => void;
   /** Host: dismiss a suggestion from the list once seen/handled. */
   sendDismissSuggestion: (ratingKey: string) => void;
+  /**
+   * Viewer → host and co-hosts: ask for a pause or a resume.
+   *
+   * Safe to call from anyone; it changes nothing on its own. The server drops
+   * one sent too soon after the last, so the button need not be the only thing
+   * standing between a viewer and somebody else's screen.
+   */
+  sendTransportRequest: (action: "pause" | "resume") => void;
+  /** Host or co-host: clear the request card, whether or not it was acted on. */
+  clearTransportRequest: () => void;
   /** Host: hand the host role to someone else. The sender drops to a plain viewer. */
   sendPromoteHost: (userId: string) => void;
   /** Host: grant or revoke transport control for a viewer. */
@@ -283,6 +316,7 @@ const INITIAL_STATE: SyncState = {
   isHost: null,
   hostUsername: null,
   suggestions: [],
+  transportRequest: null,
   commandSeq: 0,
   stateSeq: 0,
   sessionOffset: 0,
@@ -452,6 +486,11 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       sendQueueReorder: (queue: QueueItem[]) => send({ type: "queue-reorder", queue }),
       sendSuggest: (item: SuggestionItem) => send({ type: "suggest", item }),
       sendDismissSuggestion: (ratingKey: string) => send({ type: "suggest-dismiss", ratingKey }),
+      sendTransportRequest: (action: "pause" | "resume") =>
+        send({ type: "request-transport", action }),
+      // Local only: the request never became room state, so there is nothing to
+      // tell anyone about putting it down.
+      clearTransportRequest: () => setState((prev) => ({ ...prev, transportRequest: null })),
       sendPromoteHost: (targetUserId: string) => send({ type: "promote-host", userId: targetUserId }),
       sendSetCoHost: (targetUserId: string, value: boolean) =>
         send({ type: "set-cohost", userId: targetUserId, value }),
@@ -740,6 +779,20 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
                 ...prev.suggestions.filter((e) => e.ratingKey !== suggestion.ratingKey),
                 suggestion,
               ].slice(-MAX_SUGGESTIONS),
+            }));
+            break;
+          }
+          case "transport-request": {
+            const action = msg.action;
+            if (action !== "pause" && action !== "resume") break;
+            setState((prev) => ({
+              ...prev,
+              transportRequest: {
+                action,
+                fromUsername: typeof msg.fromUsername === "string" ? msg.fromUsername : "Someone",
+                fromUserId: typeof msg.fromUserId === "string" ? msg.fromUserId : "",
+                at: Date.now(),
+              },
             }));
             break;
           }

@@ -1,414 +1,344 @@
 # Plex Discord Theater
 
-Watch your Plex library with friends, inside a Discord voice channel. Everyone
-sees the same thing at the same time — one person drives, everyone else follows.
+A Discord Activity for synchronized watch parties from a Plex Media Server. One
+person hosts, playback stays in lockstep for everyone in the voice channel, and
+each viewer can independently select audio tracks and subtitles.
 
-> [!WARNING]
-> **This project is vibe coded.**
->
-> Nearly all of it was written by an AI assistant working from prompts, rather
-> than typed out and reviewed line by line by a person. It does run real watch
-> parties, and the awkward parts — playback sync, transcode teardown, host
-> handover — have been debugged against production logs rather than guessed at.
-> The sync protocol, person page and personal Plex account flow have harnesses
-> that run against a real WebSocket server and a stubbed Plex (`npm test`, 221
-> checks), but nothing runs them automatically, there is no external security
-> review, and no human has read every line.
->
-> Treat it accordingly: great for watching films with friends on a server you
-> control, not something to put in front of the open internet or trust with
-> anything you would miss.
+![A synchronized Plex watch party running inside Discord](docs/screenshots/player.jpg)
 
----
+## Overview
 
-## What it looks like
+Join a Discord voice channel, launch the Activity, and invite friends. Everyone
+in the channel joins the same room automatically.
 
-The Activity runs right inside the voice channel. Everyone in the room is on the
-same frame, and hovering the seek bar gives you Plex's thumbnail previews.
+The Activity provides a full Plex browser, including:
 
-![The player, with the control bar and a thumbnail preview on the seek bar](docs/screenshots/player.jpg)
+- The Plex home screen, movies, and TV libraries
+- Unified search across the local library and Plex Discover
+- Title pages with summaries, ratings, cast, versions, and tracks
+- Synchronized playback controls (pause, seek, skip intro, next episode)
+- Viewer suggestions and host/co-host role management
+- Optional per-user sync of progress, watched status, and Universal Watchlist
 
-Back out of the player and you land on your Plex home screen — the same hubs your
-server already builds.
+Discord presence and Activity invites display the currently playing title.
 
-![The Home tab, with Continue Watching, Trending Movies and Popular Movies poster rows](docs/screenshots/home.jpg)
+## Features
 
-Search covers your library and Plex Discover together, so titles you haven't got
-yet still turn up — badged **Not in library** so you can tell them apart.
+### Synchronized playback
 
-![Search results, split into titles in the library and titles that are not](docs/screenshots/search.jpg)
+The host controls the room timeline. Playback stays in sync for all viewers.
+Hosts can grant playback control to co-hosts or transfer the host role.
 
-Every title gets a detail page: ratings, synopsis, cast, and the audio and
-subtitle tracks to pick before you hit Play.
+### Plex browser
 
-![A film's detail page, with ratings, synopsis, cast, and audio and subtitle pickers](docs/screenshots/title.jpg)
+The home screen renders the same hubs Plex generates, including Continue
+Watching and recommendation rows.
 
-Click anyone in **Cast & Crew** for their filmography. What you have comes
-first, straight out of Plex's own cast index; the rest of their career follows
-behind it, requestable like anything else. Newest first in both halves, and
-appearances as themselves — chat shows, talking-head documentaries — left out.
+![The Plex-style home screen inside the Activity](docs/screenshots/home.jpg)
 
-![Hugh Jackman's page: biography and dates, then his films and shows — the ones in the library first, the rest badged Not in library](docs/screenshots/person.jpg)
+Search covers both the local library and Plex Discover. Results not present on
+the server are labelled **Not in library**.
 
-With Seerr connected, you can request anything you don't have
-without leaving the Activity.
+![Search results from the library and Plex Discover](docs/screenshots/search.jpg)
 
-![Primetime, a film that isn't in the library, with a Request button](docs/screenshots/request-movie.jpg)
+Title pages include description, ratings, cast and crew, collections, similar titles, available versions,
+audio tracks, and subtitles.
 
-Shows request by season, and only the seasons Sonarr could actually fill — so
-nothing sits in Seerr forever waiting on episodes that haven't aired.
+![A title page with playback details and track choices](docs/screenshots/title.jpg)
 
-![A show's page with its missing seasons selectable for request](docs/screenshots/request-seasons.jpg)
+Cast and crew pages list library titles first, followed by the rest of the
+person's filmography. Out-of-library titles can be requested when Seerr is
+connected.
 
-Mobile gets its own layout rather than a shrunk-down desktop one.
+![A cast member's library titles and wider filmography](docs/screenshots/person.jpg)
 
-| ![The TV Shows tab on a phone, three posters across](docs/screenshots/phone-browse.jpg) | ![A film's detail page on a phone, poster centred above the text](docs/screenshots/phone-title.jpg) |
-| :-- | :-- |
-| **On mobile** — browsing. | **On mobile** — a detail page |
+For TV shows, season pages show missing and unaired episodes with air dates, and
+available episodes can be played directly from the season view.
 
----
+### Per-viewer audio and subtitles
 
-## What you get
+Each viewer selects their own audio and subtitle tracks without affecting other
+participants. Track selections persist into the next episode when the same
+tracks are available.
 
-Everyone in the voice channel opens the Activity and lands in the same room.
-The host picks something; it starts for everybody at once. Pause and seek carry
-to everyone; audio and subtitles are each person's own.
+### Playback features
 
-- **Synchronised playback.** The room's position is the host's playhead, so a
-  host who stalls is waited for rather than left behind. Small drifts are pulled
-  back by nudging playback speed a fraction instead of seeking, so keeping the
-  room together doesn't cost everyone a buffer every few minutes. Anything that
-  has to rebuild its stream — a track change, a seek, walking back into the
-  player — rejoins at where the room has got to, not where it left.
-- **Co-hosts and host handover.** Hand out playback control, or the host role
-  itself, from the people panel. Passing the role leaves you a co-host, so you
-  still have the pause button a second after giving it away. Roles belong to the
-  person, not the connection, so a dropped WiFi signal doesn't silently demote
-  anyone. If the host leaves, a co-host takes over and the film keeps going.
-- **Browse and search your whole library** — filters, sorting, Cast & Crew
-  pages. Search takes in Plex Discover too, so titles you don't own show up
-  badged **Not in library**, with a Request button if you run Overseerr or
-  Jellyseerr.
-- **See what's missing from a season.** A toggle on the season page reveals the
-  episodes you don't have, keeping *missing* (aired, never downloaded) apart from
-  *unaired*, with air dates.
-- **Your own audio and subtitles.** Everyone starts on the host's, and anyone
-  can change theirs without changing anybody else's. The room stays one
-  timeline: pause, seek and skip still land on the same frame for everybody,
-  whatever they are listening to. Two people who pick the same thing share one
-  transcode rather than starting two, and the host's own choice still carries
-  the room's default with it. Both choices follow you into the next episode,
-  matched by language rather than track number — yours as well as the host's, so
-  a dub stays a dub without being re-picked every time, and a commentary track is
-  never mistaken for the film. Where an episode doesn't carry the language you
-  were on, you get the host's rather than silence.
-- **Optional personal Plex history sync.** Each Discord user can link their own
-  Plex account from the Activity. The first sync imports the complete,
-  deduplicated Plex history; later syncs fetch only the changes since the last
-  successful run, while current resume positions are always refreshed. History
-  is not capped or pruned. Linking a different Plex identity starts that Discord
-  user with clean Activity history so state never crosses accounts. Every linked
-  participant who actually has the player open receives credit — not only the
-  host. Plex passwords never enter this app; personal tokens stay encrypted on
-  the server and separate from the shared token used to stream the library.
-- **Play Version.** When a title has more than one version in Plex, pick which
-  one plays. The 4K version is hidden whenever there's a 1080p or lower one
-  alongside it — everything is transcoded to 1080p anyway, so streaming the 4K
-  file gains the room nothing and costs your server a 4K decode for every
-  viewer. A title that only exists in 4K still plays.
-- **Skip Intro and Skip Credits**, thumbnail previews on the seek bar, up-next
-  cards, a shared queue, and viewer suggestions.
-- **Stats for nerds** — press `i` during playback for resolution, codecs,
-  bitrate, buffer health and peer counters.
-- **A proper mobile layout**, not a shrunk-down desktop one. Three posters per
-  row, detail pages that stack, play/pause in the middle of the picture, and
-  double-tap either side to skip 10 seconds. Discord's mobile bar already has an
-  invite button, so this doesn't stack a second one on top of it.
+- **Viewer suggestions:** any participant can queue a title for the host.
+- **Up next:** the next episode loads automatically when the current one ends.
+- **Skip Intro / Skip Credits:** uses markers generated by Plex.
+- **Seek previews:** hover or scrub the timeline to see Plex-generated preview
+  frames.
+- **Play Version:** choose between multiple versions of a title when available.
+- **Stats for nerds:** press `i` during playback to view codec, bitrate,
+  resolution, buffer health, and peer information.
+- **Watched controls:** mark a title watched, or apply the change to a whole
+  season or show. Works with or without a linked Plex account.
 
 > [!NOTE]
-> Skip Intro/Credits and thumbnail previews both rely on data **Plex** has to
-> generate first, and neither says anything when it's missing. Turn on *Detect
-> intros and credits* and *Generate video preview thumbnails* under Library →
-> Edit → Advanced. Both are off by default on many servers.
+> Skip buttons and seek previews require Plex to have generated the underlying
+> data. Enable **Detect intros and credits** and **Generate video preview
+> thumbnails** under **Library → Edit → Advanced** in Plex.
 
----
+### Mobile support
 
-## Getting started
+The mobile layout includes compact library rows, stacked title pages, controls
+adapted to Discord's mobile header, a centered play button, and double-tap to
+skip ten seconds.
 
-You'll need: a Plex server, Docker, a Discord application, and a public HTTPS
-URL (Discord loads the Activity in an iframe, so it can't be localhost).
+| ![Browsing TV shows on a phone](docs/screenshots/phone-browse.jpg) | ![A movie detail page on a phone](docs/screenshots/phone-title.jpg) |
+| :-- | :-- |
+| Browse with three posters per row. | Open a title without desktop-sized clutter. |
 
-### 1. Create the Discord application
+## Personal Plex sync
 
-1. Go to [discord.com/developers/applications](https://discord.com/developers/applications)
-   and create an application.
-2. Under **Activities → Settings**, enable Activities.
-3. Add a URL mapping: `/` → your public URL.
-4. Copy the **Client ID** and **Client Secret** — you'll need both.
+Linking a personal Plex account is optional. The Activity uses the server
+owner's Plex connection for browsing and playback; each user can additionally
+link their own Plex account for personal features.
 
-### 2. Get your Plex token
+### Synced data
 
-Open Plex Web, play anything, and find `X-Plex-Token=` in the browser's Network
-tab. The [official guide](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)
-has screenshots.
+- Watched and unwatched status
+- Resume positions and Continue Watching progress
+- Progress earned during watch parties
+- Plex Universal Watchlist
 
-### 3. Configure
+Sync is bidirectional: existing Plex history is imported into the Activity, and
+Activity progress is written back to Plex. Sync runs automatically, with a
+**Sync now** button for manual refresh.
+
+### Watch party behavior
+
+Every linked participant in a room receives progress on their own Plex account,
+not only the host. Watched controls update Plex for linked users and remain
+local for unlinked users.
+
+### Interface changes
+
+Linked users see a **Watchlist** tab for their Plex Universal Watchlist and can
+add or remove titles from detail pages. The **Watchlist** tab replaces the local
+**History** tab; progress remains available through **Continue Watching** and
+watched controls.
+
+### Authentication
+
+Linking uses Plex's own sign-in page. Plex passwords never pass through this
+application. Personal Plex tokens are encrypted at rest.
+
+## Requests via Seerr
+
+When Seerr is connected, **Request** buttons appear on titles not in the
+library.
+
+![Requesting a movie from its title page](docs/screenshots/request-movie.jpg)
+
+Movies can be requested in one click. For shows, users can select which missing
+seasons to request and view what is already available or pending.
+
+![Choosing missing seasons to request](docs/screenshots/request-seasons.jpg)
+
+Requests authenticate to Seerr using the configured Plex account, so no Seerr
+administrator API key is required.
+
+## Installation
+
+### Requirements
+
+- A Plex Media Server with transcoding enabled
+- Docker
+- A Discord Bot with Activities enabled
+- A public HTTPS endpoint for the Activity
+- A Plex Account for the Bot to use
+
+Discord loads Activities in an iframe, so a plain `localhost` address is not
+sufficient. Use a reverse proxy, Cloudflare Tunnel, or another HTTPS endpoint.
+
+### 1. Create the Discord Activity
+
+1. Create an application in the [Discord Developer Portal](https://discord.com/developers/applications).
+2. Open **Activities → Settings** and enable Activities.
+3. Add a URL mapping from `/` to the public HTTPS address that will serve this
+   application.
+4. Copy the application's **Client ID** and **Client Secret**.
+
+### 2. Obtain the shared Plex token
+
+The shared token allows the application to browse and stream from the server.
+Follow Plex's [authentication token guide](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)
+to retrieve the `X-Plex-Token` value.
+
+### 3. Configure the application
+
+Copy the example configuration:
 
 ```bash
 cp .env.example .env
 ```
 
-Fill in these six, and you're running:
+Set the required values:
 
 ```env
 DISCORD_CLIENT_ID=your_discord_client_id
 DISCORD_CLIENT_SECRET=your_discord_client_secret
-PLEX_URL=http://localhost:32400
-PLEX_TOKEN=your_plex_token
-REDIRECT_URI=https://your-public-url.example.com
-ALLOWED_ORIGINS=https://your-public-url.example.com
+
+# Must be reachable from inside the Docker container.
+PLEX_URL=http://192.168.1.50:32400
+PLEX_TOKEN=your_shared_plex_token
+
+REDIRECT_URI=https://watch.example.com
+ALLOWED_ORIGINS=https://watch.example.com
 ```
 
-Everything else in `.env.example` is optional, and each one simply turns its
-feature off when unset. See [Optional extras](#optional-extras) — `TMDB_API_KEY`
-is the one worth adding first.
+Use the Plex server's LAN address or Docker hostname for `PLEX_URL`. Inside a
+container, `localhost` refers to the Activity container itself, not a separate
+Plex installation.
 
-### 4. Run it
+All other options in [.env.example](.env.example) are optional.
+
+### 4. Start the server
 
 ```bash
 docker compose up -d --build
 ```
 
-Check it came up, and see which extras are live:
+Verify the server started and review which optional features are active:
 
 ```bash
 docker compose logs | grep Config
 ```
 
-### 5. Launch
+### 5. Launch in Discord
 
-Join a voice channel, click the **Activities** (rocket) icon, and pick your app.
+Join a voice channel, select the **Activities** rocket, and choose the
+application. Use **Invite to Activity** to bring other channel members into the
+same room.
 
-<details>
-<summary><b>Running locally instead of Docker</b></summary>
+## Optional features
+
+Unset options simply hide the related row, tab, or button. At startup, the
+server prints a summary such as:
+
+```text
+[Config] ✓ TMDB   ✓ TVDB   ✓ Ratings   ✓ Requests   ✓ Discover   · VPS relay (P2P mode)
+```
+
+| Setting | Feature | Source |
+|---|---|---|
+| `TMDB_API_KEY` | Full collections, More Like This, and extended cast/crew filmographies | [TMDB API settings](https://www.themoviedb.org/settings/api) |
+| `TVDB_API_KEY` | Missing-episode lists using Sonarr-compatible TVDB season numbering | [TheTVDB API information](https://thetvdb.com/api-information) |
+| `TVDB_PIN` | Subscriber authentication for a user-supported TVDB key | Your TVDB account; not required for a free project key |
+| `MDBLIST_API_KEY` | IMDb, Rotten Tomatoes, and TMDB ratings | [MDBList API Access](https://mdblist.com/preferences) |
+| `PLEX_ACCOUNT_TOKEN` | Enhanced Plex Discover details and Plex sign-in to Seerr | An `X-Plex-Token` obtained from app.plex.tv |
+| `PLEX_LINK_SECRET` | Stable encryption key for personally linked Plex tokens | Generate a long random value; falls back to `DISCORD_CLIENT_SECRET` |
+| `SEERR_URL` | Request buttons via Seerr | Public URL of the Seerr installation |
+| `ALLOWED_GUILD_IDS` | Restrict the Activity to specific Discord servers | Comma-separated Discord server IDs |
+| `VPS_RELAY_URL`, `VPS_RELAY_KEY` | Single upstream video stream for larger rooms | Self-hosted relay; see [VPS relay](#vps-relay) |
+
+### Plex credentials
+
+Three Plex-related values are used, each with a distinct purpose:
+
+| Credential | Owner | Purpose |
+|---|---|---|
+| `PLEX_TOKEN` | Server owner | Required. Browses the configured library and starts streams for the room. |
+| `PLEX_ACCOUNT_TOKEN` | Server owner | Optional. Retrieves cloud-only Discover details and authenticates to Seerr. |
+| Per-user linked token | Individual user | Optional. Syncs that user's history, progress, watched status, and Watchlist. Stored encrypted. |
+
+## Video delivery
+
+The application streams browser-compatible video at up to 1080p. Default
+bitrate can be adjusted with `VIDEO_BITRATE_KBPS` and `VIDEO_PEAK_BITRATE_KBPS`.
+
+### VPS relay
+
+Without a relay, upstream bandwidth scales with the number of viewers. An
+optional VPS relay allows the home server to upload a single stream while the
+VPS serves the room. See [the VPS relay setup guide](docs/vps-relay-setup.md)
+for configuration.
+
+## Data and privacy
+
+The backend proxies Plex API calls and video segments, so Plex tokens are not
+exposed to browsers. Sessions, roles, local watch history, linked account
+records, and artwork metadata are stored in SQLite under the Docker data volume
+and persist across container rebuilds.
+
+> [!WARNING]
+> This is an experimental, self-hosted project developed primarily with
+> AI-assisted tooling. It has not undergone external security review and has no
+> automated CI gate. Deploy it on infrastructure you control; do not expose it
+> as a public service.
+
+## Troubleshooting
+
+| Problem | Resolution |
+|---|---|
+| **Failed to connect to Discord** | Launch the application as an Activity from a voice channel rather than visiting its URL directly. |
+| **Library is empty** | Verify `PLEX_URL` and `PLEX_TOKEN`, and confirm the container can reach the Plex address. |
+| **Video will not play** | Confirm Plex can transcode the title, then check the browser console and server logs for HLS errors. |
+| **Session expired** | The application server restarted. Close and reopen the Activity. |
+| **Reconnecting…** | The room WebSocket dropped. Playback continues locally while automatic reconnect attempts run. |
+| **Unknown instance** | Discord's Activity registration expired due to inactivity. Close and reopen the Activity. |
+| **Tunnel URL changed** | Update the URL mapping in the Discord Developer Portal. |
+| **No Skip Intro, Skip Credits, or previews** | Enable Plex's marker detection and video preview thumbnail generation for the library. |
+| **No ratings** | Set `MDBLIST_API_KEY`. |
+| **No full collections or More Like This** | Set `TMDB_API_KEY`. Without it, collection rows only include titles already in Plex. |
+| **Missing episodes numbered incorrectly** | Set `TVDB_API_KEY` so the list uses the same source as Sonarr. |
+| **No Request button** | Set both `SEERR_URL` and `PLEX_ACCOUNT_TOKEN`. |
+| **Unsure what is enabled** | Run `docker compose logs \| grep Config`. |
+| **VPS segments return 403** | Verify the relay key and confirm Cloudflare allows the VPS IP. |
+| **VPS segments return 502** | The VPS cannot reach the Activity backend. Check DNS, firewall, and proxy settings. |
+| **VPS playback stutters** | nginx must proxy segments through the Activity backend, not directly to Plex. |
+| **Discord blocks relay segments** | Add the `/theater` URL mapping in the Discord Developer Portal. |
+
+Diagnostic logs are written to `/data/logs` by default, with Plex and session
+tokens redacted. Copy them out of the container with:
+
+```bash
+docker cp plex-discord-theater:/data/logs ./logs
+```
+
+Set `DEBUG=1` only while investigating a specific playback issue; it produces
+substantially more verbose logging. See [.env.example](.env.example) for
+retention, cache warming, and other tuning options.
+
+## Local development
 
 ```bash
 npm install
-npm run dev        # server on :3000, client on :5173
+npm run dev
 ```
 
-You'll also need `packages/client/.env`:
+This starts the server on port 3000 and the client on port 5173. Add the
+Discord client ID to `packages/client/.env`:
 
 ```env
 VITE_DISCORD_CLIENT_ID=your_discord_client_id
 ```
 
-Discord still needs a public HTTPS URL, so tunnel it:
+Discord requires HTTPS even in development. For a temporary URL:
 
 ```bash
 cloudflared tunnel --url http://localhost:5173
 ```
 
-Set the resulting URL as your Discord URL mapping. It changes every restart —
-use a [named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-local-tunnel/)
-if that gets annoying.
-</details>
+Update the Discord URL mapping whenever the temporary address changes, or use
+a [named Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-local-tunnel/).
 
----
+Additional commands:
 
-## Optional extras
-
-Every one of these is off unless you set its variable, and every one **fails
-quietly** — the row or button just doesn't appear, which is easy to mistake for
-a bug. The server prints which are live at startup:
-
-```
-[Config] ✓ TMDB   ✓ TVDB   ✓ Ratings   ✓ Requests   ✓ Discover   · VPS relay (P2P mode)   · Guild allowlist (open to any Discord server)
+```bash
+npm test
+npm run build
 ```
 
-`✓` is on. `·` is off, with the consequence in brackets.
-
-| Variable | What it adds | Where to get it |
-|---|---|---|
-| `TMDB_API_KEY` | Collections, "More Like This", cast/crew pages | Free — [themoviedb.org](https://www.themoviedb.org/settings/api) |
-| `TVDB_API_KEY` | Accurate season numbering for the missing-episode list | Free — [thetvdb.com](https://thetvdb.com/api-information) |
-| `MDBLIST_API_KEY` | IMDb, Rotten Tomatoes and TMDB scores | Free — [mdblist.com](https://mdblist.com/preferences) → API Access |
-| `PLEX_ACCOUNT_TOKEN` | Detail pages for titles you don't own; signs in to Seerr as you | Your **account** token (not the server one) from an app.plex.tv request |
-| `PLEX_LINK_SECRET` | Stable encryption key for users' linked Plex tokens | A long random value; falls back to `DISCORD_CLIENT_SECRET` |
-| `SEERR_URL` | Request button on titles you don't have | Your Overseerr / Jellyseerr URL |
-| `VPS_RELAY_URL` + `VPS_RELAY_KEY` | [Relay](#vps-relay) — one upstream stream instead of one per viewer | Your own VPS |
-| `ALLOWED_GUILD_IDS` | Restricts the activity to named Discord servers | Comma-separated guild IDs. Unset = any server |
-
-### TMDB — collections, related titles, people
-
-Adds three things to detail pages: **"Also in this collection"** (the whole
-franchise, with anything you don't own marked and requestable), **"More Like
-This"**, and **cast and crew pages** listing everything a person appears in.
-
-Without a key the collection row still appears but lists only what you already
-own — so a partial series looks complete. Worth setting for that reason alone.
-
-### TVDB — which episodes a season actually has
-
-The missing-episode list needs to know what a season *should* contain. TMDB can
-tell it, and usually does fine — but Sonarr works from **TVDB**, and the two
-sometimes disagree about which season an episode belongs to. When they differ, a
-TMDB-derived list names episodes that really sit in a neighbouring season, and
-requesting them achieves nothing.
-
-With a key set, TVDB is used whenever the show has a TVDB id. Either way the
-list is checked against your own episode numbers first — if a source can't
-account for the episodes you already have, it's describing a different season,
-so it's dropped rather than shown.
-
-A free *project* key needs no PIN. A user-supported subscriber key does — put it
-in `TVDB_PIN`.
-
-### MDBList — ratings
-
-IMDb, Rotten Tomatoes (critic **and** audience) and TMDB scores on detail pages.
-Rotten Tomatoes has no public API, so the scores come via
-[MDBList](https://mdblist.com), a free aggregator.
-
-### Seerr — requesting titles
-
-Set `SEERR_URL` and a Request button appears on titles you don't own. Requests
-are made as **your own Seerr account**: the server signs in with
-`PLEX_ACCOUNT_TOKEN`, so there's no admin API key to configure. Films request in
-one click; TV offers per-season selection showing what you have, what's pending,
-and what's available.
-
----
-
-## How it works
-
-```
-Discord voice channel
-  └─ Activity (iframe)
-       └─ React client (hls.js)
-            ├─ VPS relay (nginx cache) — when configured
-            ├─ OR: WebRTC ↔ other viewers (P2P segment sharing) — fallback
-            └─ Express backend (WebSocket sync + API proxy + segment pre-fetch)
-                 └─ Plex Media Server (HLS transcoding)
-```
-
-The first person to join becomes the host. Everyone else follows over a
-WebSocket. The backend proxies every Plex API call and every video segment, so
-**Plex tokens never reach a browser**. Sessions, host roles, watch history and
-artwork live in SQLite and survive restarts. The shared `PLEX_TOKEN` browses and
-streams the server; optional personal account tokens are encrypted separately,
-keyed by verified Discord user ID, and used only for that person's watch-state
-sync.
-
-### Getting video to everyone
-
-This is all about one problem: your home upload. Plex transcodes once per set
-of tracks — everyone listening to the same thing shares a stream — but by
-default every viewer pulls that stream from your connection.
-
-**A VPS relay is the answer beyond a few viewers.** With `VPS_RELAY_URL` set,
-your server uploads one stream and the VPS fans it out:
-
-```
-Without:  home upload = viewers × bitrate
-With:     home upload = 1 stream (~8-12 Mbps), whatever the viewer count
-```
-
-**Segment pre-fetching** runs either way. Plex throttles delivery for roughly the
-first 30 seconds of a transcode — exactly when someone is staring at a spinner —
-so the server polls ahead, pulls segments with three workers and serves them from
-memory. Memory is capped at 384 MB in total, shared across up to four concurrent
-sessions.
-
-**P2P sharing** is the fallback with no VPS: viewers form a WebRTC mesh and
-share segments with each other, falling back to the server when a peer can't
-supply one in time.
-
-> [!NOTE]
-> P2P carries less than you'd expect — in one two-viewer session it moved 17 MB
-> against 3,994 MB over HTTP. The loader prefers HTTP for anything inside the
-> buffer window, which is most of it. **For more than a couple of viewers, use
-> the VPS relay.**
-
-### Transcode settings
-
-| Setting | Value | Why |
-|---|---|---|
-| Video codec | H.264 | Plays everywhere |
-| Audio | MP3, 2 channels | AAC is what the client profile asks for, and Plex has not honoured it on the servers this has been run against — worth checking your own decision log before assuming otherwise. Audio the browser can already play is passed through untouched |
-| Max resolution | 1920×1080 | Good quality without silly bandwidth |
-| Target bitrate | 12 Mbps (peak 20) | Tune with `VIDEO_BITRATE_KBPS` / `VIDEO_PEAK_BITRATE_KBPS` |
-| Segment length | 3 seconds | Faster cold start — Plex only transcodes 3s before the first segment is ready |
-| Location | LAN | Avoids Plex's WAN throttling |
-
-Video is always re-encoded rather than direct-streamed. Direct streaming hands
-the browser the source's raw stream including any keyframe or timestamp
-discontinuity in the file — which the browser cannot play across, wedging
-playback mid-episode with no recovery.
-
----
-
-## VPS relay
-
-Routes video segments through a VPS (~$7/mo) so your home connection uploads one
-stream instead of one per viewer. At 10 viewers and 8 Mbps that's the difference
-between 80 Mb/s and ~8 Mb/s.
-
-1. **Create a VPS** — e.g. Hetzner CAX11/CX23, Ubuntu 24.04, primary IPv4.
-2. **Install nginx + certbot** and set up SSL for `theater.yourdomain.com`.
-3. **Add a Discord URL mapping** — `/theater` → `theater.yourdomain.com`.
-4. **Whitelist the VPS IP in Cloudflare** (an IP Access Rule, not a WAF Skip
-   rule) if your domain sits behind it.
-5. **Point nginx at Express**, *not* directly at `Plex:32400` — Plex throttles
-   external delivery to 1× realtime and playback stutters.
-6. **Set both variables** (`VPS_RELAY_KEY` via `openssl rand -hex 32`):
-   ```env
-   VPS_RELAY_URL=https://theater.yourdomain.com
-   VPS_RELAY_KEY=your-secret-key
-   ```
-
-Full nginx config and step-by-step instructions:
-**[docs/vps-relay-setup.md](docs/vps-relay-setup.md)**
-
-With both set, segment URLs are rewritten to `/theater/seg/...`, nginx checks the
-key and proxies to Express, Express serves from its pre-fetch cache or fetches
-from Plex locally, and the VPS caches the result for five minutes. P2P turns
-itself off. Remove either variable and everything reverts.
-
----
-
-## Troubleshooting
-
-| Problem | What it means |
-|---|---|
-| "Failed to connect to Discord" | Launch it as an Activity from a voice channel, not by visiting the URL directly |
-| Library is empty | Check `PLEX_URL` / `PLEX_TOKEN`, and that the container can reach Plex |
-| Video won't play | Check the browser console for HLS errors; confirm Plex can transcode |
-| "Session expired" | The server restarted — close and reopen the Activity |
-| "Reconnecting…" | The sync socket dropped and is retrying. Your own playback keeps going; the room just can't see you until it's back. Clears itself, or offers a Reconnect button once the automatic attempts run out |
-| "Unknown instance" on join | The activity registration expired after 24h idle. Close and reopen the Activity |
-| Tunnel URL changed | Update the URL mapping in the Discord Developer Portal |
-| Audio is MP3, not AAC | Expected. The client profile asks for AAC and Plex has ignored it on every server this has been run against. MP3 plays fine everywhere; it is the bitrate, not the compatibility, that suffers |
-| No skip intro / previews | Plex hasn't generated them — see the note under [What you get](#what-you-get) |
-| No ratings | `MDBLIST_API_KEY` isn't set |
-| No collections or "More Like This" | `TMDB_API_KEY` isn't set. A collection row showing only titles you own means the same thing |
-| Missing episodes look wrong | Set `TVDB_API_KEY` — Sonarr numbers seasons by TVDB, and TMDB sometimes disagrees |
-| Not sure what's enabled | `docker compose logs \| grep Config` |
-| VPS segments 403 | Key mismatch between `.env` and the nginx config — or Cloudflare blocking the VPS, which needs an IP Access Rule |
-| VPS segments 502 | The VPS can't reach Express — check that Cloudflare rule and your domain's DNS |
-| VPS stutters | nginx is proxying straight to `Plex:32400`; it must go through Express |
-| Segments blocked in Discord | Missing `/theater` URL mapping in the Developer Portal |
-
----
-
-## Built with
+## Tech stack
 
 | Layer | Technology |
 |---|---|
-| Client | React, hls.js, [p2p-media-loader](https://github.com/novage/p2p-media-loader), Discord Embedded App SDK |
-| Server | Express, WebSocket (ws), bittorrent-tracker, better-sqlite3 |
-| Streaming | HLS via the Plex transcoder, server-side segment pre-fetch, WebRTC P2P sharing |
-| Infrastructure | Docker, Node.js 24, optional nginx VPS relay |
+| Client | React, hls.js, p2p-media-loader, Discord Embedded App SDK |
+| Server | Express, WebSocket, better-sqlite3, bittorrent-tracker |
+| Streaming | Plex HLS transcoding, server-side segment prefetch, optional WebRTC sharing |
+| Infrastructure | Docker, Node.js 24, optional nginx relay |
 
 ## License
 

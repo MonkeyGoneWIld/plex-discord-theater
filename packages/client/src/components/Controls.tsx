@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useImperativeHandle } from "react";
 import { authUrl } from "../lib/api";
 import { logEvent } from "../lib/log";
-import { createPreviewFrames, type PreviewFrames } from "../lib/previewFrames";
+import { createPreviewFrameReader, type PreviewFrames } from "../lib/previewFrames";
 import { loadVolume } from "../lib/volume";
 import { useMediaQuery, COMPACT_CONTROLS_QUERY, PHONE_QUERY } from "../lib/useMediaQuery";
 
@@ -465,9 +465,10 @@ export function Controls({
   // so mousemove never re-renders just to record where we're heading.
   const pendingPreviewRef = useRef<string | null>(null);
   const previewThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Every frame for the part, fetched once — see the prefetch effect. Null
-  // until it lands, and for a part Plex has no index for, in which case the
-  // per-frame requests below stay the only source.
+  // Every frame for the part, fetched once — see the prefetch effect. Set as
+  // soon as the index at the front of the file has arrived, which is long
+  // before the frames themselves have; the ones still on the wire fall back to
+  // the per-frame requests below, as does a part Plex has no index for.
   const previewFramesRef = useRef<PreviewFrames | null>(null);
   const [hintsVisible, setHintsVisible] = useState(showKeyboardHints);
   // Phone-sized: the volume slider moves into a vertical popover rather than
@@ -805,12 +806,15 @@ export function Controls({
   const showPreviewAt = useCallback((pct: number) => {
     setHoverPct(pct);
 
-    if (previewPartId == null || failedPartRef.current === previewPartId) return;
+    if (previewPartId == null) return;
     if (!(duration > 0) || !isFinite(duration)) return;
 
-    // The whole index is here, so the frame is a slice of memory. No request,
-    // no throttle, no waiting for a decode to promote it — the preview tracks
-    // the cursor exactly, which is the entire reason for fetching the file.
+    // The frame is already in memory, so it is a slice of it. No request, no
+    // throttle, no waiting for a decode to promote it — the preview tracks the
+    // cursor exactly, which is the entire reason for fetching the file.
+    //
+    // Ahead of the failure latch below deliberately: frames we hold are frames
+    // we can draw, whatever a single-frame request did earlier.
     const frames = previewFramesRef.current;
     if (frames) {
       const src = frames.frameAt(pct * duration * 1000, duration * 1000);
@@ -822,6 +826,8 @@ export function Controls({
       }
     }
 
+    // Not downloaded yet, or no index at all — ask Plex for the one frame.
+    if (failedPartRef.current === previewPartId) return;
     // Floor rather than round, so the frame is at or before the cursor.
     const bucketMs = Math.floor((pct * duration * 1000) / PREVIEW_BUCKET_MS) * PREVIEW_BUCKET_MS;
     // No w/h params: those divert the thumb route through /photo/:/transcode,
@@ -918,30 +924,56 @@ export function Controls({
     if (previewPartId == null || !started) return;
     let cancelled = false;
     const abort = new AbortController();
-    const timer = setTimeout(() => {
-      fetch(authUrl(`/api/plex/preview/${previewPartId}/index`), { signal: abort.signal })
-        .then((res) => (res.ok ? res.arrayBuffer() : null))
-        .then((buf) => {
-          if (cancelled || !buf) return;
-          const frames = createPreviewFrames(buf);
+    const reader = createPreviewFrameReader();
+
+    const read = async () => {
+      const res = await fetch(
+        authUrl(`/api/plex/preview/${previewPartId}/index`),
+        { signal: abort.signal },
+      );
+      if (!res.ok || !res.body) return;
+      const body = res.body.getReader();
+      let bytes = 0;
+      for (;;) {
+        const { done, value } = await body.read();
+        if (done || cancelled) break;
+        if (!value) continue;
+        bytes += value.length;
+        reader.push(value);
+        if (reader.rejected()) {
+          logEvent("Preview", "frame index unreadable", { partId: previewPartId, bytes });
+          await body.cancel();
+          return;
+        }
+        const frames = reader.frames();
+        if (frames && !previewFramesRef.current) {
           previewFramesRef.current = frames;
-          // Logged because the size of an index is the one thing that can't be
-          // known ahead of a real library: it decides whether this is a cheap
-          // win or a several-megabyte one.
-          logEvent("Preview", frames ? "frame index ready" : "frame index unreadable", {
-            partId: previewPartId, bytes: buf.byteLength, frames: frames?.count ?? 0,
+          // Logged at the moment the index lands rather than at the end of the
+          // download, because that is the moment scrubbing starts working. The
+          // size is the one thing that can't be known ahead of a real library.
+          logEvent("Preview", "frame index ready", {
+            partId: previewPartId, frames: frames.count, indexBytes: bytes,
           });
-        })
-        .catch(() => { /* the per-frame path is still there */ });
+        }
+      }
+      if (!cancelled) {
+        logEvent("Preview", "frames complete", {
+          partId: previewPartId, bytes, frames: reader.frames()?.count ?? 0,
+        });
+      }
+    };
+
+    const timer = setTimeout(() => {
+      read().catch(() => { /* the per-frame path is still there */ });
     }, PREVIEW_PREFETCH_DELAY_MS);
 
     return () => {
       cancelled = true;
       clearTimeout(timer);
       abort.abort();
-      // The blob URLs point into this part's buffer; the next item's frames
+      // The blob URLs point into this part's bytes; the next item's frames
       // are a different file entirely.
-      previewFramesRef.current?.dispose();
+      reader.dispose();
       previewFramesRef.current = null;
     };
   }, [previewPartId, started]);
@@ -955,8 +987,11 @@ export function Controls({
   useEffect(() => {
     if (!previewSrc) return;
     // A frame sliced out of the index is already in memory and was promoted to
-    // the display as it was picked. There is nothing here to preload.
-    if (previewFramesRef.current) return;
+    // the display as it was picked. Anything still coming from Plex one frame
+    // at a time — a part with no index, or one whose bytes have not arrived
+    // yet — still needs preloading, so the test is what this src is rather
+    // than whether an index exists.
+    if (previewSrc.startsWith("blob:")) return;
     const cache = previewCacheRef.current;
     if (cache.has(previewSrc)) {
       setLoadedPreviewSrc(previewSrc);

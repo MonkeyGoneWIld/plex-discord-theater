@@ -2510,12 +2510,17 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
 /**
  * Ceiling on a preview index, as a guard rather than a working limit.
  *
- * A BIF carries every preview frame in the file: at Plex's usual ten second
- * SD interval, a two hour film is around 720 frames of a few kilobytes each.
- * Nothing real approaches this, and a file that did is not one we should be
- * relaying into a browser in one piece.
+ * A BIF carries every preview frame in the file, so its size follows the
+ * runtime: a two hour film is around 720 frames at Plex's ten second SD
+ * interval, a six hour one 2,160, and a server generating at two seconds three
+ * times that again. At 64MB this was the length of the video deciding whether
+ * it got previews, which is exactly backwards — the client reads the index off
+ * the front of the response and shows frames as they arrive, so a long file
+ * costs a longer tail rather than a failure.
+ *
+ * What is left is a bound on something pathological, well past any real file.
  */
-const MAX_PREVIEW_INDEX_BYTES = 64 * 1024 * 1024;
+const MAX_PREVIEW_INDEX_BYTES = 1024 * 1024 * 1024;
 
 /**
  * GET /api/plex/preview/:partId/index

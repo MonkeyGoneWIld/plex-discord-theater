@@ -8,7 +8,7 @@
  * malformed files that have to come back null so the player falls back to
  * asking Plex for frames one at a time.
  */
-import { createPreviewFrames } from "../src/lib/previewFrames";
+import { createPreviewFrames, createPreviewFrameReader } from "../src/lib/previewFrames";
 
 let pass = 0;
 let fail = 0;
@@ -194,6 +194,75 @@ console.log("\n— one frame —");
     check("every position is that frame", await frameNumberAt(frames, 8000, 10_000), 1);
     frames.dispose();
   }
+}
+
+console.log("\n— arriving a piece at a time —");
+{
+  // The point of the streaming reader: a long video's frames are tens of
+  // megabytes, and the index that says where they all are is in the first few
+  // kilobytes. Waiting for the whole file before showing anything is what made
+  // a six hour video look like it had no previews at all.
+  const buf = makeBif({ count: 40, multiplier: 10_000, imageBytes: 32 });
+  const bytes = new Uint8Array(buf);
+  // Header + index + the first image's marker: 64 + 41*8 + 2.
+  const indexEnd = 64 + 41 * 8;
+
+  const reader = createPreviewFrameReader();
+  reader.push(bytes.subarray(0, 40));
+  check("nothing to read from a header that is not all there yet", reader.frames(), null);
+  check("and it is not rejected either", reader.rejected(), false);
+
+  reader.push(bytes.subarray(40, indexEnd));
+  check("still nothing without the first image's marker", reader.frames(), null);
+
+  // The index plus the first image.
+  reader.push(bytes.subarray(indexEnd, indexEnd + 32));
+  const frames = reader.frames();
+  check("the index reads once the first image is in", frames?.count, 40);
+  check("one frame usable out of forty", frames?.ready, 1);
+
+  if (frames) {
+    check("the frame that has arrived", await frameNumberAt(frames, 0, 400_000), 1);
+    // 25s is the third bucket, whose bytes are still on the wire. Null rather
+    // than a wrong frame — the player asks Plex for that one and keeps going.
+    check("a frame still on the wire is not guessed at",
+      frames.frameAt(25_000, 400_000), null);
+
+    // Halfway, in pieces small enough to split an image across two chunks.
+    for (let at = indexEnd + 32; at < indexEnd + 32 * 20; at += 7) {
+      reader.push(bytes.subarray(at, Math.min(at + 7, indexEnd + 32 * 20)));
+    }
+    check("twenty usable after twenty images", frames.ready, 20);
+    check("a frame split across chunks still reads",
+      await frameNumberAt(frames, 105_000, 400_000), 11);
+    check("and the one after the boundary is still withheld",
+      frames.frameAt(255_000, 400_000), null);
+
+    reader.push(bytes.subarray(indexEnd + 32 * 20));
+    check("all of them once the file is complete", frames.ready, 40);
+    check("the last frame", await frameNumberAt(frames, 399_000, 400_000), 40);
+  }
+  reader.dispose();
+}
+
+{
+  // A part with no BIF, or a proxy handing back an error page. The reader has
+  // to say so rather than sit waiting for an index that is never coming.
+  const reader = createPreviewFrameReader();
+  reader.push(new TextEncoder().encode("<!doctype html><title>404 Not Found</title>"));
+  check("something that is not a BIF is rejected on sight", reader.rejected(), true);
+  check("and offers no frames", reader.frames(), null);
+  reader.dispose();
+}
+
+{
+  // One byte at a time, which is the pathological version of a slow connection.
+  const bytes = new Uint8Array(makeBif({ count: 3, multiplier: 10_000 }));
+  const reader = createPreviewFrameReader();
+  for (const b of bytes) reader.push(new Uint8Array([b]));
+  check("a file delivered one byte at a time still reads", reader.frames()?.count, 3);
+  check("and all of it is usable", reader.frames()?.ready, 3);
+  reader.dispose();
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

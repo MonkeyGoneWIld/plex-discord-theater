@@ -1365,7 +1365,17 @@ const styles: Record<string, React.CSSProperties> = {
   },
   /** Desktop: no D behind the readout, so it brings its own ground. */
   skipPlate: {
-    padding: "18px 26px",
+    /**
+     * Uneven on purpose, and it is what makes the two lines look centred.
+     *
+     * The chevron is 10px of ink in a 26px line box, so it carries 8px of dead
+     * space above it; the count is 11px of ink in a 17px box and carries 3px
+     * below. Equal padding therefore reads as 26px of air over the chevron
+     * against 21px under the count - the contents sitting low in the plate by
+     * half of that. Splitting the same 36px as 15.5 and 20.5 puts 23.5px of
+     * visible space on each side. The plate's size does not change.
+     */
+    padding: "15.5px 26px 20.5px",
     borderRadius: "999px",
     background: "rgba(0,0,0,0.55)",
     backdropFilter: "blur(6px)",

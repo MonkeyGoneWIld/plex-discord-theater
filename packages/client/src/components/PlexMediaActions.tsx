@@ -211,7 +211,9 @@ const styles: Record<string, React.CSSProperties> = {
    *  a play button, so it starts where the text does. */
   labelledButton: {
     display: "inline-flex", alignItems: "center", gap: "9px",
-    height: "40px", padding: "0 16px 0 12px", borderRadius: "999px",
+    // 44px, the same floor the episode list's control is held to. It is a
+    // primary way to change state on a phone, and it was 4px short of it.
+    height: "44px", padding: "0 18px 0 13px", borderRadius: "999px",
     border: "1px solid rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.06)",
     color: "#d6d6d6", cursor: "pointer", fontFamily: "inherit",
     fontSize: "14px", fontWeight: 500, whiteSpace: "nowrap",

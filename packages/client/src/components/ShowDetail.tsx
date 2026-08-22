@@ -257,10 +257,11 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
                     </span>
                   </button>
                 )}
-                {/* Named when it is the only thing in the row — which is any
-                    show nobody has started, where there is no Resume button for
-                    it to sit beside. */}
-                <PlexMediaActions item={item} inline labelled={!nextUp} />
+                {/* Named whenever nothing ends up beside it: any show nobody
+                    has started, and any phone, where a Resume button is wide
+                    enough to take the whole row and wrap the glyph onto its
+                    own line underneath. */}
+                <PlexMediaActions item={item} inline labelled={!nextUp || narrow} />
               </div>
             </div>
           </div>

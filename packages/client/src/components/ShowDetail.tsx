@@ -84,6 +84,10 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
   const [nextUpLoaded, setNextUpLoaded] = useState(false);
   // The show's opening episode, for when there's nothing to resume.
   const [firstEpisode, setFirstEpisode] = useState<PlexItem | null>(null);
+  // Whether that lookup has been attempted. Separate from its result for the
+  // same reason as nextUpLoaded: an empty answer and an unasked question look
+  // identical from here, and the button below has to tell them apart.
+  const [firstEpisodeTried, setFirstEpisodeTried] = useState(false);
   // Phone portrait: the poster and the detail column can't sit side by side.
   // The poster is a fixed 240px, so on a 390px screen the text beside it got
   // roughly 90px — the title broke a word per line, the genre pills stacked one
@@ -95,6 +99,7 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
     setNextUp(null);
     setNextUpLoaded(false);
     setFirstEpisode(null);
+    setFirstEpisodeTried(false);
     let cancelled = false;
     fetchShowNextUp(item.ratingKey)
       .then((res) => { if (!cancelled) setNextUp(res.nextUp); })
@@ -129,7 +134,8 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
         const episodes = [...res.items].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
         setFirstEpisode(episodes[0] ?? null);
       })
-      .catch(() => { /* the seasons grid is still a way in */ });
+      .catch(() => { /* the seasons grid is still a way in */ })
+      .finally(() => { if (!cancelled) setFirstEpisodeTried(true); });
     return () => { cancelled = true; };
   }, [nextUp, nextUpLoaded, seasons]);
 
@@ -201,12 +207,34 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
     : firstEpisode
       ? episodeLine(firstEpisode.parentIndex, firstEpisode.index, firstEpisode.title)
       : null;
+  /**
+   * Still working out where the button starts from.
+   *
+   * Two requests can stand between opening the page and knowing: the next-up
+   * lookup, and then — for a show nobody has started — the first season's
+   * episode list. That reliably outlasts the reveal below, which waits on the
+   * metadata and the season list only, so the button used to appear a moment
+   * after the page did and shove the seasons grid down as it arrived.
+   *
+   * The reveal below waits on this, so normally the button is complete before
+   * the page is on screen. When the wait times out instead, the button is
+   * drawn at its full size and dimmed, and the text fills in underneath it
+   * without moving the seasons grid. It goes false either when there is
+   * something to play or when we know there is nothing.
+   */
+  const startPending = !startFrom
+    && (!nextUpLoaded || loading || (seasons.length > 0 && !firstEpisodeTried));
 
-  // Header and season list only — see MovieDetail for why the cast and the
-  // collection rows are left to fill in on their own.
+  // Header, season list and the play button — see MovieDetail for why the cast
+  // and the collection rows are left to fill in on their own.
+  //
+  // The button is in here because it changes width as well as height when it
+  // lands: on a wide screen the watchlist and watched controls sit to its
+  // right, and "Play" grew into "Play / Season 1 · Episode 1 — The Seinfeld
+  // Chronicles" and pushed them a couple of hundred pixels across.
   const revealTimedOut = useRevealTimeout(item.ratingKey, REVEAL_TIMEOUT_MS);
   const pageReady =
-    (meta != null && !loading && (posterLoaded || !posterUrl) && ratingsReady) ||
+    (meta != null && !loading && (posterLoaded || !posterUrl) && ratingsReady && !startPending) ||
     revealTimedOut;
 
   return (
@@ -305,17 +333,21 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
                   Resume/Start Over decision still happen there — the same route
                   every other play in the app takes. */}
               <div style={styles.titleActions}>
-                {startFrom && onSelectEpisode && (
+                {(startFrom || startPending) && onSelectEpisode && (
                   <button className="btn"
-                    onClick={() => onSelectEpisode(startFrom)}
-                    style={styles.resumeBtn}
+                    onClick={startFrom ? () => onSelectEpisode(startFrom) : undefined}
+                    disabled={!startFrom}
+                    style={{ ...styles.resumeBtn, ...(startFrom ? {} : styles.resumeBtnPending) }}
                   >
                     <svg width="20" height="20" viewBox="0 0 22 22" fill="none" style={{ flexShrink: 0 }}>
                       <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor"/>
                     </svg>
                     <span style={styles.resumeText}>
                       <span style={styles.resumeLabel}>{startLabel}</span>
-                      {startLine && <span style={styles.resumeEpisode}>{startLine}</span>}
+                      {/* A non-breaking space while the episode is unknown. An
+                          empty span has no line box, so the button would be a
+                          line shorter until the text landed and then grow. */}
+                      <span style={styles.resumeEpisode}>{startLine ?? "\u00a0"}</span>
                     </span>
                   </button>
                 )}
@@ -569,6 +601,13 @@ const styles: Record<string, React.CSSProperties> = {
    * underside rather than as the next thing down. The column gap is untouched
    * — side by side these are one row of buttons, not two blocks.
    */
+  /** The button at its final size, before it knows what it plays. Dimmed the
+   *  same way MovieDetail dims Play while it waits on the stream list. */
+  resumeBtnPending: {
+    opacity: 0.55,
+    cursor: "default",
+    boxShadow: "none",
+  },
   titleActions: {
     display: "flex", alignItems: "center", flexWrap: "wrap", gap: "28px 10px",
   },

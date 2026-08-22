@@ -213,6 +213,11 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   // This viewer's saved position for the item, or null if they've never played
   // it. Playback controls remain host-only; linked-account actions do not.
   const [progress, setProgress] = useState<HistoryEntry | null>(null);
+  // Whether the resume point has been looked up. Part of the reveal gate: it
+  // decides whether Play reads "Play" or "Resume from 1:01:55" with a Start
+  // Over beside it and a progress bar above, so a page revealed before it
+  // answered rearranged itself a moment later.
+  const [progressLoaded, setProgressLoaded] = useState(false);
   // Phone portrait: the poster and the detail column can't sit side by side.
   // At 390px the fixed 240px poster leaves the text roughly 66px, which wraps
   // the title one word per line and pushes the buttons off the screen edge.
@@ -279,10 +284,12 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   // is watched, and a stale resume point is worse than an extra request.
   useEffect(() => {
     setProgress(null);
+    setProgressLoaded(false);
     let cancelled = false;
     fetchProgress(item.ratingKey)
       .then((r) => { if (!cancelled) setProgress(r.progress); })
-      .catch(() => { /* resume is a convenience — never block playback on it */ });
+      .catch(() => { /* resume is a convenience — never block playback on it */ })
+      .finally(() => { if (!cancelled) setProgressLoaded(true); });
     return () => { cancelled = true; };
   }, [item.ratingKey]);
 
@@ -362,10 +369,15 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   const dSummary = meta?.summary ?? item.summary ?? null;
 
   // Waits on the header only: the poster, the metadata behind the title block,
-  // and the ratings. The cast row and the collection rows are deliberately not
-  // part of this — they sit below the fold and fill in on their own, and making
-  // the whole page wait on the slowest headshot or on /collections is what made
-  // every open feel long.
+  // the ratings, and the resume point. The cast row and the collection rows are
+  // deliberately not part of this — they sit below the fold and fill in on
+  // their own, and making the whole page wait on the slowest headshot or on
+  // /collections is what made every open feel long.
+  //
+  // The resume point earns its place because of what it changes rather than
+  // what it costs: it is a local read, and without it a part-watched title
+  // revealed as "Play" and then turned into "Resume from 1:01:55" with a Start
+  // Over button beside it and a progress bar above.
   //
   // Episodes have no ratings row, and a metadata failure renders none either.
   const wantsRatings = item.type === "movie" && meta != null;
@@ -373,6 +385,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
   const pageReady =
     ((meta != null || metaFailed) &&
       (posterLoaded || !posterUrl) &&
+      progressLoaded &&
       (!wantsRatings || ratingsReady)) ||
     revealTimedOut;
 

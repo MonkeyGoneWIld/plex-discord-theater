@@ -15,6 +15,54 @@ import { COLLECTION_ROW_CARD_WIDTH, usePosterLayout } from "../lib/grid";
  * Sized from the same constants as the real rows, so it can't drift out of step
  * with them.
  */
+
+/**
+ * The text under a card, as the real rows set it.
+ *
+ * A cast card carries a name and a character, a poster card a title and a
+ * year, and both were being stood in for by a single 13px bar. The card was
+ * then a line and a half short of what replaced it — 22px for a cast row, 37px
+ * for a row of posters — and every row below jumped by that much as each one
+ * landed. Reserving both lines is the whole job of this file, so it is worth
+ * spelling them out.
+ */
+const LINE_HEIGHT = 1.3;
+/** MovieCard's title/year, and CastRow's name/role. */
+const PRIMARY_FONT_PX = 13;
+const SECONDARY_FONT_PX = 12;
+/** CastRow: the gap over the name, and between the name and the character. */
+const CAST_NAME_GAP_PX = 10;
+const CAST_ROLE_GAP_PX = 3;
+/** MovieCard's `info` padding, and the gap between its two lines. */
+const CARD_INFO_PADDING = "10px 10px 12px";
+const CARD_YEAR_GAP_PX = 3;
+
+/**
+ * One line of text, not yet arrived.
+ *
+ * The bar is shorter than the line it stands in — a solid block at the full
+ * line height reads as a filled field rather than a placeholder — so the line
+ * box is held by the wrapper and the bar is centred inside it. That way the
+ * reservation is the real line height whatever the bar looks like.
+ */
+function SkeletonLine({
+  width, fontPx, marginTop = 0,
+}: { width: string; fontPx: number; marginTop?: number }) {
+  return (
+    <div
+      style={{
+        marginTop,
+        height: `${fontPx * LINE_HEIGHT}px`,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <SkeletonBlock width={width} height={Math.round(fontPx * 0.8)} />
+    </div>
+  );
+}
+
 export function ShelfSkeleton({
   variant,
   labelWidth = 170,
@@ -52,11 +100,17 @@ export function ShelfSkeleton({
               style={{ aspectRatio: cast ? "1 / 1" : "2 / 3", height: "auto" }}
               borderRadius={cast ? "50%" : 10}
             />
-            <SkeletonBlock
-              width={cast ? "70%" : "80%"}
-              height={13}
-              style={{ marginTop: cast ? 10 : 8 }}
-            />
+            {cast ? (
+              <>
+                <SkeletonLine width="70%" fontPx={PRIMARY_FONT_PX} marginTop={CAST_NAME_GAP_PX} />
+                <SkeletonLine width="45%" fontPx={SECONDARY_FONT_PX} marginTop={CAST_ROLE_GAP_PX} />
+              </>
+            ) : (
+              <div style={{ padding: CARD_INFO_PADDING }}>
+                <SkeletonLine width="80%" fontPx={PRIMARY_FONT_PX} />
+                <SkeletonLine width="50%" fontPx={SECONDARY_FONT_PX} marginTop={CARD_YEAR_GAP_PX} />
+              </div>
+            )}
           </div>
         ))}
       </div>

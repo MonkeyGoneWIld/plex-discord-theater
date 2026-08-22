@@ -59,7 +59,6 @@ interface ControlsProps {
   restartingTo?: number | null;
   onToggleStats?: () => void;
   statsActive?: boolean;
-  showKeyboardHints?: boolean;
   peopleCount?: number;
   onOpenPeople?: () => void;
   /**
@@ -421,7 +420,6 @@ export function Controls({
   restartingTo = null,
   onToggleStats,
   statsActive,
-  showKeyboardHints = true,
   peopleCount,
   onOpenPeople,
   onRequestTransport,
@@ -511,7 +509,6 @@ export function Controls({
   // The request that was just sent, if any: what was asked for, so the label
   // can keep saying it while the room carries on doing the opposite.
   const [requestSent, setRequestSent] = useState<"pause" | "resume" | null>(null);
-  const [hintsVisible, setHintsVisible] = useState(showKeyboardHints);
   // Phone-sized: the volume slider moves into a vertical popover rather than
   // eating the width of a row that has nowhere to put it.
   const compact = useMediaQuery(COMPACT_CONTROLS_QUERY);
@@ -525,7 +522,6 @@ export function Controls({
   const volumeWrapRef = useRef<HTMLDivElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hintsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previousVolumeRef = useRef(volume);
   const [bufferedEnd, setBufferedEnd] = useState(0);
 
@@ -559,13 +555,6 @@ export function Controls({
     const timer = setTimeout(() => setRequestSent(null), REQUEST_SENT_MS);
     return () => clearTimeout(timer);
   }, [requestSent]);
-
-  // Fade out keyboard hints after 10s
-  useEffect(() => {
-    if (!hintsVisible) return;
-    hintsTimer.current = setTimeout(() => setHintsVisible(false), 10_000);
-    return () => { if (hintsTimer.current) clearTimeout(hintsTimer.current); };
-  }, [hintsVisible]);
 
   const resetHideTimer = useCallback(() => {
     setVisible(true);
@@ -1639,14 +1628,6 @@ export function Controls({
                 </div>
               </>
             )}
-            {/* Keyboard hints have nothing to say on a touch device, and this
-                is the row with no width to spare. */}
-            {hintsVisible && !compact && (
-              <div style={styles.hints}>
-                <span style={styles.hintBadge}>Space</span>
-                <span style={styles.hintBadge}>{"\u2190\u2192"}</span>
-              </div>
-            )}
             </div>
           </div>
         </div>
@@ -2309,18 +2290,5 @@ const styles: Record<string, React.CSSProperties> = {
     transform: "rotate(-90deg)",
     // Drags belong to the slider, not to the page behind it.
     touchAction: "none",
-  },
-  hints: {
-    display: "flex",
-    gap: "4px",
-    transition: "opacity 0.5s ease",
-  },
-  hintBadge: {
-    background: "rgba(255,255,255,0.08)",
-    padding: "2px 6px",
-    borderRadius: "3px",
-    color: "rgba(255,255,255,0.3)",
-    fontSize: "10px",
-    letterSpacing: "0.5px",
   },
 };

@@ -64,6 +64,20 @@ const STARVED_POLL_MS = 1_000;
  * reason nobody remembers.
  */
 const TRANSPORT_REQUEST_TTL_MS = 45_000;
+
+/**
+ * Shortcuts that must not act again while the key is held.
+ *
+ * Every one of them is a toggle, and a toggle on auto-repeat flips its own
+ * state as fast as the OS sends the event — around thirty times a second.
+ * Holding space did not pause, it strobed, and each flip went out to everyone
+ * in the room as a pause or a resume.
+ *
+ * The arrows are deliberately not in here. Holding one of those is a feature:
+ * seeking stacks the repeats into a single jump (see queueSkip) and volume
+ * ramps smoothly, which is what holding a key is supposed to feel like.
+ */
+const NO_REPEAT_KEYS = new Set([" ", "m", "M", "i", "I"]);
 /**
  * Drift past which a viewer is yanked into place with a seek rather than eased
  * there — see the soft-sync constants below.
@@ -3221,6 +3235,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       // Chords with Ctrl/Cmd/Alt belong to the browser or OS (Ctrl+Shift+I =
       // DevTools, Ctrl+Shift+M = device toolbar) — never treat them as ours
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      // Held down. Swallowed rather than ignored, so holding space still does
+      // not scroll the page behind the player — only the toggle is skipped.
+      if (e.repeat && NO_REPEAT_KEYS.has(e.key)) {
+        e.preventDefault();
+        return;
+      }
 
       switch (e.key) {
         case "i":

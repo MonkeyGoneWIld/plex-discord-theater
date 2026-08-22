@@ -875,6 +875,16 @@ const styles: Record<string, React.CSSProperties> = {
   actionsNarrow: {
     flexDirection: "column",
     alignItems: "stretch",
+    /**
+     * Looser than the 12px the row uses.
+     *
+     * Side by side, 12px separates two things standing next to each other. In a
+     * column it is the distance between the bottom edge of a full-width primary
+     * and the top of whatever follows, and at that width 12px reads as the two
+     * being one block — the watched control looked stuck to the underside of
+     * Play rather than sitting below it.
+     */
+    gap: "20px",
   },
   playBtnNarrow: {
     // Stretched to the column, so a long label like "Resume from 1:01:55"

@@ -1,3 +1,5 @@
+import { MAX_LEVEL } from "./audioBoost";
+
 const STORAGE_KEY = "pdt:volume";
 
 /** Starting volume when nothing has been stored yet. */
@@ -16,7 +18,10 @@ export function loadVolume(): number {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw === null) return DEFAULT_VOLUME;
     const v = parseFloat(raw);
-    return Number.isFinite(v) && v >= 0 && v <= 1 ? v : DEFAULT_VOLUME;
+    // Up to MAX_LEVEL, not 1: the level above 100% is a boost the player has
+    // to rebuild each session, and a stored 1.5 that got clamped to the
+    // default here would silently forget it.
+    return Number.isFinite(v) && v >= 0 && v <= MAX_LEVEL ? v : DEFAULT_VOLUME;
   } catch {
     return DEFAULT_VOLUME;
   }

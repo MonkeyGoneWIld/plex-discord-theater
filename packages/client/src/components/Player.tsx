@@ -16,6 +16,7 @@ import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, f
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
+import { getLevel, setLevel, MAX_LEVEL } from "../lib/audioBoost";
 import { describeWatched, loadAudioPref, loadSubtitlePref, mergeTrackPrefs, saveTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { roomPositionNow } from "../hooks/useSync";
@@ -1217,13 +1218,14 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
   // Apply the remembered volume, and persist any later change. One listener on
   // the element covers every source — the Controls slider, the mute button and
-  // the keyboard shortcuts all write video.volume — so nothing else needs to
-  // know about persistence.
+  // the keyboard shortcuts all go through setLevel, which fires volumechange
+  // even for the part of the level video.volume cannot hold — so nothing else
+  // needs to know about persistence.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    video.volume = loadVolume();
-    const onVolumeChange = () => saveVolume(video.volume);
+    setLevel(video, loadVolume());
+    const onVolumeChange = () => saveVolume(getLevel(video));
     video.addEventListener("volumechange", onVolumeChange);
     return () => video.removeEventListener("volumechange", onVolumeChange);
   }, []);
@@ -3209,24 +3211,29 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           controlsRef.current?.queueSkip(10);
           break;
         case "m":
-        case "M":
+        case "M": {
           e.preventDefault();
-          if (video.volume > 0) {
-            (video as any).__prevVolume = video.volume;
-            video.volume = 0;
+          const level = getLevel(video);
+          if (level > 0) {
+            (video as any).__prevVolume = level;
+            setLevel(video, 0);
           } else {
             // Fall back to the remembered level rather than full volume — this
             // path is hit when something else (the slider) did the muting.
-            video.volume = (video as any).__prevVolume ?? loadVolume();
+            setLevel(video, (video as any).__prevVolume ?? loadVolume());
           }
           break;
+        }
         case "ArrowUp":
           e.preventDefault();
-          video.volume = Math.min(1, video.volume + 0.1);
+          // Past 1 as well: the arrows reach everything the slider does, so a
+          // quiet film can be turned up from the keyboard without hunting for
+          // the bar.
+          setLevel(video, Math.min(MAX_LEVEL, getLevel(video) + 0.1));
           break;
         case "ArrowDown":
           e.preventDefault();
-          video.volume = Math.max(0, video.volume - 0.1);
+          setLevel(video, Math.max(0, getLevel(video) - 0.1));
           break;
       }
     };

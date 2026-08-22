@@ -3,6 +3,7 @@ import { authUrl } from "../lib/api";
 import { logEvent } from "../lib/log";
 import { createPreviewFrameReader, type PreviewFrames } from "../lib/previewFrames";
 import { loadVolume } from "../lib/volume";
+import { getLevel, setLevel, boostAvailable, MAX_LEVEL } from "../lib/audioBoost";
 import { useMediaQuery, COMPACT_CONTROLS_QUERY, PHONE_QUERY } from "../lib/useMediaQuery";
 
 export interface ControlsHandle {
@@ -208,6 +209,26 @@ const TAP_SIDE_ZONE = 0.35;
  * the bar at the first and last episode of a series - which is a long way from
  * anything that looks like "the icon size changed".
  */
+/**
+ * The colour the slider takes above 100%.
+ *
+ * Amber is the app's ordinary accent and means nothing in particular. Going
+ * past the mix as it was authored is a state worth being able to see from
+ * across the room — a viewer wondering why one film is blaring should be able
+ * to tell at a glance that the boost is on rather than reading a number.
+ */
+const BOOST_ACCENT = "#ff6b35";
+
+/**
+ * The horizontal slider's track, in pixels.
+ *
+ * Wider than the 80px it was, because it now carries twice the range: at 80px
+ * the half of the track people use every day would have been 40px. 120px keeps
+ * roughly 3px per 5% step across the whole thing, and the tick at the midpoint
+ * is what makes 100% findable without counting pixels.
+ */
+const VOLUME_TRACK_PX = 120;
+
 const BAR_EPISODE_ICON = 18;
 const BAR_SEEK_ICON = 23;
 const SKIP_BTN_PAD_X = 4;
@@ -496,11 +517,15 @@ export function Controls({
     const video = videoRef.current;
     if (!video) return;
     const sync = () => {
-      setVolume(video.volume);
-      setMuted(video.volume === 0);
+      // getLevel, not video.volume: above 100% the element is pinned at 1 and
+      // the rest of the level lives in the gain node, so the slider would sit
+      // at the midpoint however far it had been dragged.
+      const level = getLevel(video);
+      setVolume(level);
+      setMuted(level === 0);
       // Track the last audible level so unmuting restores it no matter which
       // control silenced it.
-      if (video.volume > 0) previousVolumeRef.current = video.volume;
+      if (level > 0) previousVolumeRef.current = level;
     };
     sync();
     video.addEventListener("volumechange", sync);
@@ -774,12 +799,12 @@ export function Controls({
     const video = videoRef.current;
     if (!video) return;
     if (muted) {
-      video.volume = previousVolumeRef.current;
+      setLevel(video, previousVolumeRef.current);
       setVolume(previousVolumeRef.current);
       setMuted(false);
     } else {
       previousVolumeRef.current = volume;
-      video.volume = 0;
+      setLevel(video, 0);
       setVolume(0);
       setMuted(true);
     }
@@ -790,7 +815,7 @@ export function Controls({
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const v = parseFloat(e.target.value);
       setVolume(v);
-      if (videoRef.current) videoRef.current.volume = v;
+      if (videoRef.current) setLevel(videoRef.current, v);
       if (v > 0 && muted) {
         setMuted(false);
         previousVolumeRef.current = v;
@@ -1058,6 +1083,12 @@ export function Controls({
   useEffect(() => {
     if (!visible) setVolumeOpen(false);
   }, [visible]);
+
+  // The slider's top end. Collapses back to 100% if the boost turned out not
+  // to be available here, so the control can't offer something it cannot do.
+  const maxLevel = boostAvailable() ? MAX_LEVEL : 1;
+  const boosted = volume > 1;
+  const volumePercent = Math.round(volume * 100);
 
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
   // Where the bar points: the drag if one is in progress, otherwise the pending
@@ -1473,6 +1504,11 @@ export function Controls({
               <div ref={volumeWrapRef} style={styles.volumeWrap}>
                 {volumeOpen && (
                   <div style={styles.volumePopover}>
+                    {/* Always rendered, so opening the popover on a boosted
+                        stream doesn't make it a line taller than it was. */}
+                    <span style={{ ...styles.volumeReadout, ...(boosted ? styles.volumeReadoutBoosted : {}) }}>
+                      {volumePercent}%
+                    </span>
                     {/* A rotated element keeps its unrotated layout box, so the
                         wrapper carries the size the slider occupies on screen
                         and the slider itself overflows it invisibly. */}
@@ -1480,13 +1516,21 @@ export function Controls({
                       <input
                         type="range"
                         min="0"
-                        max="1"
+                        max={maxLevel}
                         step="0.05"
                         value={volume}
                         onChange={handleVolume}
                         aria-label="Volume"
-                        style={{ ...styles.volume, ...styles.volumeVertical }}
+                        aria-valuetext={`${volumePercent}%`}
+                        style={{
+                          ...styles.volume,
+                          ...styles.volumeVertical,
+                          accentColor: boosted ? BOOST_ACCENT : "#e5a00d",
+                        }}
                       />
+                      {maxLevel > 1 && (
+                        <span style={styles.volumeUnityTickVertical} aria-hidden="true" />
+                      )}
                     </div>
                     <button
                       onClick={toggleMute}
@@ -1513,16 +1557,26 @@ export function Controls({
                 <button onClick={toggleMute} className="btn" style={styles.muteBtn} title={muted ? "Unmute" : "Mute"}>
                   {muted ? "\u{1F507}" : "\u{1F50A}"}
                 </button>
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  value={volume}
-                  onChange={handleVolume}
-                  aria-label="Volume"
-                  style={styles.volume}
-                />
+                <div style={styles.volumeSliderWrap}>
+                  {boosted && <span style={styles.boostBadge}>{volumePercent}%</span>}
+                  <input
+                    type="range"
+                    min="0"
+                    max={maxLevel}
+                    step="0.05"
+                    value={volume}
+                    onChange={handleVolume}
+                    aria-label="Volume"
+                    aria-valuetext={`${volumePercent}%`}
+                    title={boosted ? `Volume ${volumePercent}% — louder than the mix` : `Volume ${volumePercent}%`}
+                    style={{ ...styles.volume, accentColor: boosted ? BOOST_ACCENT : "#e5a00d" }}
+                  />
+                  {/* Where the mix sits, so the neutral point can be found
+                      without reading the number. Under the track rather than
+                      across it: at exactly 100% a line through the middle
+                      would be drawn over the thumb. */}
+                  {maxLevel > 1 && <span style={styles.volumeUnityTick} aria-hidden="true" />}
+                </div>
               </>
             )}
             {/* Keyboard hints have nothing to say on a touch device, and this
@@ -2038,8 +2092,84 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "inherit",
   },
   volume: {
-    width: "80px",
+    width: `${VOLUME_TRACK_PX}px`,
     accentColor: "#e5a00d",
+    // The wrapper positions the tick and the badge against this, so the input's
+    // own box has to be the whole of it: a range input carries a 2px UA margin
+    // by default, which put the wrapper's midpoint 2px off the track's.
+    display: "block",
+    margin: 0,
+  },
+  volumeSliderWrap: {
+    position: "relative",
+    display: "flex",
+    alignItems: "center",
+  },
+  /**
+   * 100%, marked under the track.
+   *
+   * Absolute, so it costs the row no height: the bar is a single line of
+   * controls and a mark hanging below the slider must not be what decides how
+   * tall it is. The midpoint of the track is exactly the midpoint of the
+   * range whatever the thumb's width, so 50% needs no correction.
+   */
+  volumeUnityTick: {
+    position: "absolute",
+    left: "50%",
+    top: "calc(50% + 7px)",
+    // Centre the mark on the midpoint rather than starting it there — at 1px
+    // wide, `left: 50%` alone sits half a pixel to the right of the thumb.
+    transform: "translateX(-50%)",
+    width: "1px",
+    height: "5px",
+    background: "rgba(255,255,255,0.4)",
+    pointerEvents: "none",
+  },
+  /** The same mark on the rotated slider, where the track runs the other way. */
+  volumeUnityTickVertical: {
+    position: "absolute",
+    top: "50%",
+    left: "calc(50% + 7px)",
+    transform: "translateY(-50%)",
+    width: "5px",
+    height: "1px",
+    background: "rgba(255,255,255,0.4)",
+    pointerEvents: "none",
+  },
+  /**
+   * The level, when it is above the mix.
+   *
+   * Floated over the slider rather than placed beside it: appearing and
+   * disappearing at the 100% boundary would otherwise shove the rest of the
+   * row sideways every time someone crossed it.
+   */
+  boostBadge: {
+    position: "absolute",
+    bottom: "calc(100% + 3px)",
+    left: "50%",
+    transform: "translateX(-50%)",
+    padding: "1px 5px",
+    borderRadius: "5px",
+    background: "rgba(255,107,53,0.18)",
+    border: "1px solid rgba(255,107,53,0.5)",
+    color: "#ff8f5e",
+    fontSize: "10px",
+    fontWeight: 700,
+    letterSpacing: "0.02em",
+    lineHeight: 1.4,
+    whiteSpace: "nowrap",
+    pointerEvents: "none",
+  },
+  /** The popover has room for the number outright, so it always shows one. */
+  volumeReadout: {
+    fontSize: "11px",
+    fontWeight: 600,
+    fontVariantNumeric: "tabular-nums",
+    color: "rgba(255,255,255,0.65)",
+    lineHeight: 1,
+  },
+  volumeReadoutBoosted: {
+    color: "#ff8f5e",
   },
   volumeWrap: {
     position: "relative",
@@ -2055,7 +2185,7 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     alignItems: "center",
     gap: "6px",
-    padding: "14px 8px 8px",
+    padding: "10px 8px 8px",
     borderRadius: "12px",
     background: "rgba(15,15,15,0.95)",
     border: "1px solid rgba(255,255,255,0.15)",
@@ -2064,6 +2194,7 @@ const styles: Record<string, React.CSSProperties> = {
   volumeVerticalWrap: {
     // The on-screen footprint of the rotated slider below. Fixed, so the slider
     // overflowing its own box doesn't stretch the popover.
+    position: "relative",
     width: "26px",
     height: "110px",
     display: "flex",
@@ -2074,6 +2205,9 @@ const styles: Record<string, React.CSSProperties> = {
     // Rotation rather than `writing-mode: vertical-*`, which only lands a
     // usable vertical range input on very recent Chromium — and this runs in
     // whatever webview Discord ships on the device.
+    //
+    // Its own width, overriding the bar's: the popover's height is what this
+    // one has to fit, and it is a different number from the row's width.
     width: "110px",
     transform: "rotate(-90deg)",
     // Drags belong to the slider, not to the page behind it.

@@ -491,8 +491,13 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
               </div>
 
               {/* Genres — not on the card, so this appears with the metadata.
-                  The row reserves its height so the synopsis doesn't jump. */}
-              <div style={styles.genresSlot}>
+                  The row reserves its height so the synopsis doesn't jump when
+                  they arrive; an episode has none to arrive, so it reserves
+                  nothing. Held open regardless, it was 34px of blank between an
+                  episode's runtime and its synopsis, sitting exactly where a
+                  film shows its genres and ratings — which is why it read as
+                  space left for something missing. */}
+              <div style={item.type === "episode" ? undefined : styles.genresSlot}>
                 {meta && meta.genres.length > 0 && (
                   <div style={styles.genres}>
                     {meta.genres.map((g) => (

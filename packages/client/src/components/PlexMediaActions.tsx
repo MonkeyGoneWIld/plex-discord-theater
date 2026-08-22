@@ -18,11 +18,22 @@ interface PlexMediaActionsProps {
   onWatchedChange?: (watched: boolean) => void;
   /** Sit alongside the page's primary Play/Resume/Request action. */
   inline?: boolean;
+  /**
+   * Show the watched control as a named button rather than a bare glyph.
+   *
+   * For when nothing else is in the row with it. Beside a Play or Resume button
+   * a lone circle-check reads as its companion; on its own under the synopsis
+   * it reads as a stray mark, and its 46px target puts the glyph 9px in from
+   * where every line above it starts. A label fixes both — it lines up with the
+   * text and it says what it does.
+   */
+  labelled?: boolean;
 }
 
 /** Personal media actions. These never participate in room playback. */
 export function PlexMediaActions({
   item, progress, onProgressChange, watched, onWatchedChange, inline = false,
+  labelled = false,
 }: PlexMediaActionsProps) {
   const [linked, setLinked] = useState<boolean | null>(null);
   const [watchlisted, setWatchlisted] = useState(false);
@@ -144,12 +155,13 @@ export function PlexMediaActions({
             aria-pressed={watchedState}
             title={watchedBusy ? "Updating watched state..." : watchedAction}
             style={{
-              ...styles.iconButton,
+              ...(labelled ? styles.labelledButton : styles.iconButton),
               ...(watchedState ? styles.watchedActive : {}),
               ...(watchedBusy ? styles.busy : {}),
             }}
           >
             <WatchedCheckIcon />
+            {labelled && <span>{watchedAction}</span>}
           </button>
         )}
       </div>
@@ -185,6 +197,16 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: "center", padding: 0, borderRadius: "50%", border: "none",
     background: "transparent", color: "#d6d6d6", cursor: "pointer",
     fontFamily: "inherit", transition: "background 0.15s ease, color 0.15s ease, opacity 0.15s ease",
+  },
+  /** The same control, named. Sized to sit under a synopsis rather than beside
+   *  a play button, so it starts where the text does. */
+  labelledButton: {
+    display: "inline-flex", alignItems: "center", gap: "9px",
+    height: "40px", padding: "0 16px 0 12px", borderRadius: "999px",
+    border: "1px solid rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.06)",
+    color: "#d6d6d6", cursor: "pointer", fontFamily: "inherit",
+    fontSize: "14px", fontWeight: 500, whiteSpace: "nowrap",
+    transition: "background 0.15s ease, color 0.15s ease, opacity 0.15s ease",
   },
   watchlistActive: { color: "#e5a00d" },
   watchedActive: { color: "#6a9955" },

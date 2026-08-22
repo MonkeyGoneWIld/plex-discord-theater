@@ -257,7 +257,10 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
                     </span>
                   </button>
                 )}
-                <PlexMediaActions item={item} inline />
+                {/* Named when it is the only thing in the row — which is any
+                    show nobody has started, where there is no Resume button for
+                    it to sit beside. */}
+                <PlexMediaActions item={item} inline labelled={!nextUp} />
               </div>
             </div>
           </div>

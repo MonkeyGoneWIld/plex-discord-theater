@@ -175,6 +175,21 @@ const TAP_SKIP_SECONDS = 10;
 const TAP_SIDE_ZONE = 0.35;
 
 /**
+ * The bare icon buttons in the desktop transport: episode navigation and the
+ * two ten-second seeks.
+ *
+ * Sized here rather than at each <svg> because the spacer that stands in for an
+ * absent episode button is derived from these. Left as two literals they drift
+ * the moment one is nudged, and the symptom is play sliding off the centre of
+ * the bar at the first and last episode of a series - which is a long way from
+ * anything that looks like "the icon size changed".
+ */
+const BAR_EPISODE_ICON = 18;
+const BAR_SEEK_ICON = 23;
+const SKIP_BTN_PAD_X = 4;
+const SKIP_BTN_PAD_Y = 2;
+
+/**
  * The ten-second seek buttons.
  *
  * One shape, mirrored, rather than two drawings. Two hand-drawn arrows can end
@@ -189,7 +204,7 @@ const TAP_SIDE_ZONE = 0.35;
  */
 function SeekTen({ back }: { back: boolean }) {
   return (
-    <svg width="19" height="19" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+    <svg width={BAR_SEEK_ICON} height={BAR_SEEK_ICON} viewBox="0 0 20 20" fill="none" aria-hidden="true">
       <g transform={back ? "scale(-1,1) translate(-20,0)" : undefined}>
         {/* Open at the top; the gap is where the arrowhead goes. */}
         <path
@@ -1178,7 +1193,7 @@ export function Controls({
                     at exactly the moments it is least expected to move. */}
                 {onPrevEpisode ? (
                   <button onClick={onPrevEpisode} className="btn" style={styles.skipBtn} title="Previous episode">
-                    <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
+                    <svg width={BAR_EPISODE_ICON} height={BAR_EPISODE_ICON} viewBox="0 0 16 16" fill="currentColor">
                       <rect x="2" y="2.5" width="2" height="11" rx="0.75"/>
                       <path d="M13.5 3.2v9.6a.6.6 0 0 1-.93.5L5.6 8.5a.6.6 0 0 1 0-1l6.97-4.8a.6.6 0 0 1 .93.5Z"/>
                     </svg>
@@ -1206,7 +1221,7 @@ export function Controls({
                 </button>
                 {onNextEpisode ? (
                   <button onClick={onNextEpisode} className="btn" style={styles.skipBtn} title="Next episode">
-                    <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
+                    <svg width={BAR_EPISODE_ICON} height={BAR_EPISODE_ICON} viewBox="0 0 16 16" fill="currentColor">
                       <path d="M2.5 3.2v9.6a.6.6 0 0 0 .93.5L10.4 8.5a.6.6 0 0 0 0-1L3.43 2.7a.6.6 0 0 0-.93.5Z"/>
                       <rect x="12" y="2.5" width="2" height="11" rx="0.75"/>
                     </svg>
@@ -1780,9 +1795,12 @@ const styles: Record<string, React.CSSProperties> = {
   /** Tighter on a tablet, but never truncated: every item here is a target,
    *  and the time in the left column is the thing that gives instead. */
   centerCompact: { gap: "6px" },
-  /** Holds the place of an episode button that is not there. Matches skipBtn:
-   *  a 15px icon inside 4px of horizontal padding. */
-  skipSpacer: { width: "23px", height: "19px" },
+  /** Holds the place of an episode button that is not there — the same icon
+   *  inside the same padding, so it cannot come out a different width. */
+  skipSpacer: {
+    width: `${BAR_EPISODE_ICON + SKIP_BTN_PAD_X * 2}px`,
+    height: `${BAR_EPISODE_ICON + SKIP_BTN_PAD_Y * 2}px`,
+  },
   right: {
     display: "flex",
     alignItems: "center",
@@ -1811,7 +1829,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: "rgba(255,255,255,0.6)",
     cursor: "pointer",
     fontFamily: "inherit",
-    padding: "2px 4px",
+    padding: `${SKIP_BTN_PAD_Y}px ${SKIP_BTN_PAD_X}px`,
   },
   time: {
     fontSize: "13px",

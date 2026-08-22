@@ -96,8 +96,19 @@ const styles: Record<string, React.CSSProperties> = {
    */
   panel: {
     position: "absolute",
-    right: "calc(16px + var(--sair, 0px))",
-    bottom: "22%",
+    // Lined up with the control bar's own right padding, so the panel and the
+    // button that opens it share an edge.
+    right: "calc(20px + var(--sair, 0px))",
+    /**
+     * Just above the bar, in pixels rather than a percentage.
+     *
+     * The bar is a fixed stack — 16px of padding, a 32px row of buttons and a
+     * 25px scrub row — so it is about 73px tall on a desktop and 81px on a
+     * phone, whatever size the picture is. A percentage tracked the height of
+     * the player instead and left the panel floating a long way above the icon
+     * on anything tall.
+     */
+    bottom: "calc(94px + var(--saib, 0px))",
     display: "flex",
     flexDirection: "column",
     alignItems: "center",

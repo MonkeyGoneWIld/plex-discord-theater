@@ -703,17 +703,12 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                     )}
                   </>
                 )}
-                {/* Named on a phone. The row turns into a column there, so
-                    the glyph stops being the thing beside Play and becomes a
-                    stray mark under it — the same way it read on a show with
-                    nothing to resume. Beside Play on a wider screen it needs no
-                    label; the button next to it supplies the context. */}
                 <PlexMediaActions
                   item={item}
                   progress={progress}
                   onProgressChange={setProgress}
                   inline
-                  labelled={narrow}
+                  labelled
                 />
               </div>
             </div>

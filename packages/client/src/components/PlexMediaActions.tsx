@@ -21,15 +21,18 @@ interface PlexMediaActionsProps {
   /**
    * Show these controls as named buttons rather than bare glyphs.
    *
-   * For when nothing else is in the row with them. Beside a Play or Resume
-   * button a lone circle-check reads as its companion; on its own under the
-   * synopsis it reads as a stray mark, and its 46px target puts the glyph 9px
-   * in from where every line above it starts. A label fixes both — it lines up
-   * with the text and it says what it does.
+   * Every detail page passes this. A bookmark outline and a circle-check say
+   * nothing on their own — the circle-check in particular is read as a status
+   * ("watched") about as often as an action ("mark watched"), and neither
+   * glyph tells you which of the two it is until you hover for the tooltip.
    *
-   * Both controls take the label together. A bookmark outline is the less
-   * self-evident of the two glyphs, so leaving it bare beside a named
-   * "Mark as watched" made the pair read as one button and one loose mark.
+   * Both controls take the label together, or neither does: one named button
+   * beside one bare glyph reads as a button and a loose mark rather than as a
+   * pair.
+   *
+   * Left off only where the glyph is lining up with something rather than
+   * standing on its own — the season page, where it sits at the same right
+   * edge as the watched tick on every episode row beneath it.
    */
   labelled?: boolean;
 }
@@ -75,6 +78,11 @@ export function PlexMediaActions({
    * The watchlist button drops its verb rather than its noun: it is the one
    * whose glyph already carries the state, filling in and turning amber once
    * the title is on the list.
+   *
+   * The same words at every width, rather than the long form where there is
+   * room for it. A desktop row would otherwise resize as you pressed it —
+   * "Add to Watchlist" is 42px narrower than "Remove from Watchlist", enough
+   * to shift whatever sits to the right of it on every toggle.
    */
   const watchlistLabel = "Watchlist";
   const watchedLabel = watchedState ? "Mark unwatched" : "Mark watched";
@@ -231,8 +239,9 @@ const styles: Record<string, React.CSSProperties> = {
     background: "transparent", color: "#d6d6d6", cursor: "pointer",
     fontFamily: "inherit", transition: "background 0.15s ease, color 0.15s ease, opacity 0.15s ease",
   },
-  /** The same control, named. Sized to sit under a synopsis rather than beside
-   *  a play button, so it starts where the text does. */
+  /** The same control, named. A secondary pill: it sits beside the page's Play
+   *  button on a wide screen and wraps under it on a narrow one, and reads as
+   *  the quieter of the two either way. */
   labelledButton: {
     display: "inline-flex", alignItems: "center", gap: "9px",
     // 44px, the same floor the episode list's control is held to. It is a

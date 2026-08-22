@@ -319,11 +319,7 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
                     </span>
                   </button>
                 )}
-                {/* Named whenever nothing ends up beside it: a show with no
-                    playable episode at all, and any phone, where the play
-                    button is wide enough to take the whole row and wrap the
-                    glyphs onto their own line underneath. */}
-                <PlexMediaActions item={item} inline labelled={!startFrom || narrow} />
+                <PlexMediaActions item={item} inline labelled />
               </div>
             </div>
           </div>

@@ -125,8 +125,6 @@ const SKIP_STACK_MS = 700;
 const SKIP_INDICATOR_LINGER_MS = 400;
 /** And how long it then takes to fade, rather than blinking out of existence. */
 const SKIP_INDICATOR_FADE_MS = 260;
-/** One blade's pass. The three are staggered 90ms apart inside it. */
-const SEEK_BLADE_MS = 520;
 
 /**
  * The D: a half-ellipse over the side of the picture that answered the tap,
@@ -160,27 +158,6 @@ const TAP_SKIP_SECONDS = 10;
  * on every near-miss of the thing people are actually aiming at.
  */
 const TAP_SIDE_ZONE = 0.35;
-
-/** One blade of the three, pointing the way the seek is going. */
-function SeekBlade({ back, delayMs }: { back: boolean; delayMs: number }) {
-  return (
-    <svg
-      className="seek-blade"
-      width="17"
-      height="17"
-      viewBox="0 0 16 16"
-      fill="currentColor"
-      aria-hidden="true"
-      style={{
-        opacity: 0.28,
-        animation: `seek-blade ${SEEK_BLADE_MS}ms ${delayMs}ms ease-out forwards`,
-        ...(back ? { transform: "scaleX(-1)" } : {}),
-      }}
-    >
-      <path d="M5 2.5L12.5 8L5 13.5V2.5Z" />
-    </svg>
-  );
-}
 
 /**
  * The answer to a skip, drawn on the half of the picture it applies to.
@@ -219,9 +196,6 @@ function SeekIndicator({
   tapId: number;
 }) {
   const back = delta < 0;
-  // The outermost blade lights last in the direction of travel, so the run
-  // moves the same way the seek does.
-  const delays = back ? [180, 90, 0] : [0, 90, 180];
   return (
     <div
       style={{
@@ -249,22 +223,21 @@ function SeekIndicator({
           }}
         />
       )}
-      {/* Keyed too: replacing it is what restarts the blades and the amount. */}
-      <div
-        key={`body-${tapId}`}
-        style={{
-          ...styles.seekBody,
-          ...(back ? { flexDirection: "row-reverse" as const } : {}),
-          ...(gesture ? {} : styles.seekBodyPill),
-        }}
-      >
-        <div style={styles.seekAmount}>
-          {Math.abs(delta)} seconds
+      {/* The readout itself, unchanged from what it has always been: the
+          chevron over the count, on a pill. Keyed on the tap so the chevron's
+          nudge replays for each one. */}
+      <div key={`body-${tapId}`} style={styles.skipIndicator}>
+        <div
+          className="seek-chevron"
+          style={{
+            ...styles.skipChevrons,
+            animation: "seek-chevron 320ms cubic-bezier(0.2, 0, 0, 1)",
+          }}
+        >
+          {back ? "\u00ab" : "\u00bb"}
         </div>
-        <div style={styles.seekBlades}>
-          {delays.map((d, i) => (
-            <SeekBlade key={i} back={back} delayMs={d} />
-          ))}
+        <div style={styles.skipAmount}>
+          {Math.abs(delta)} seconds
         </div>
       </div>
     </div>
@@ -1286,23 +1259,38 @@ const styles: Record<string, React.CSSProperties> = {
     zIndex: 11,
   },
   /**
-   * The amount and the blades on one line, in the order they are read: the
-   * number first, the direction after it, mirrored for a backward seek.
+   * The readout, exactly as it has always looked: the chevron above the count
+   * on a rounded plate.
+   *
+   * The only thing that changed is where it sits. It used to be pinned 6% from
+   * the edge of the picture with its contents flush-aligned, which put it half
+   * underneath Discord's chrome on a phone and left the chevron over the end of
+   * the number rather than above it. Centred in the zone, it lands ~15% in and
+   * the two lines sit over one another.
    */
-  seekBody: {
+  skipIndicator: {
     position: "relative",
     display: "flex",
-    flexDirection: "row",
+    flexDirection: "column",
     alignItems: "center",
-    gap: "9px",
-    color: "#fff",
-  },
-  /** Desktop, where there is no D behind the text to read it against. */
-  seekBodyPill: {
-    padding: "10px 18px",
+    gap: "4px",
+    padding: "18px 26px",
     borderRadius: "999px",
     background: "rgba(0,0,0,0.55)",
     backdropFilter: "blur(6px)",
+    color: "#f0f0f0",
+  },
+  skipChevrons: {
+    fontSize: "26px",
+    lineHeight: 1,
+    fontWeight: 700,
+    color: "#e5a00d",
+  },
+  skipAmount: {
+    fontSize: "13px",
+    fontWeight: 600,
+    whiteSpace: "nowrap",
+    fontVariantNumeric: "tabular-nums",
   },
   /**
    * The swell: the whole D, played once per tap and gone between them.
@@ -1322,22 +1310,7 @@ const styles: Record<string, React.CSSProperties> = {
     pointerEvents: "none",
     animation: "seek-pulse 520ms cubic-bezier(0.22, 0.7, 0.3, 1) forwards",
   },
-  seekBlades: {
-    display: "flex",
-    alignItems: "center",
-    gap: "1px",
-    lineHeight: 0,
-  },
-  /** The wording and the size this has always had. Direction is the blades'
-   *  job, so the number carries no sign. */
-  seekAmount: {
-    fontSize: "13px",
-    fontWeight: 600,
-    lineHeight: 1,
-    whiteSpace: "nowrap",
-    fontVariantNumeric: "tabular-nums",
-    textShadow: "0 1px 3px rgba(0,0,0,0.55)",
-  },
+
   overlay: {
     position: "absolute",
     inset: 0,

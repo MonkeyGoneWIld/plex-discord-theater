@@ -71,16 +71,16 @@
          looping: a tap is an event, and an acknowledgement that was already
          running when you touched the screen does not read as a reply to you.
 
-         The blades brighten in turn so the run travels the way the seek does,
-         and the whole D swells and fades behind them. The swell is the shape
-         itself, anchored at the edge of the screen so it grows inward — nothing
-         about it depends on where the finger landed, which is a detail the
-         gesture does not mean anything by. It is also the only thing that dims
-         the picture, so nothing is left darkened between taps. */
-      @keyframes seek-blade {
-        0%   { opacity: 0.28; }
-        35%  { opacity: 1; }
-        100% { opacity: 0.55; }
+         The chevron takes a step forward, and the whole D swells and fades
+         behind it. The swell is the shape itself, anchored at the edge of the
+         screen so it grows inward — nothing about it depends on where the
+         finger landed, which is a detail the gesture does not mean anything by.
+         It is also the only thing that dims the picture, so nothing is left
+         darkened between taps. */
+      @keyframes seek-chevron {
+        0%   { opacity: 0.35; transform: scale(0.9); }
+        45%  { opacity: 1; transform: scale(1.06); }
+        100% { opacity: 1; transform: scale(1); }
       }
       @keyframes seek-pulse {
         0%   { opacity: 0; transform: scale(0.84); }
@@ -89,7 +89,7 @@
       }
       @media (prefers-reduced-motion: reduce) {
         /* The direction and the amount still read; nothing chases anything. */
-        .seek-blade { animation: none !important; opacity: 1 !important; }
+        .seek-chevron { animation: none !important; }
         .seek-pulse { display: none !important; }
       }
 

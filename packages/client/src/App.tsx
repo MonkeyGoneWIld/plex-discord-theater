@@ -788,7 +788,7 @@ export function App() {
   }
 
   return (
-    <div style={styles.app}>
+    <div style={{ ...styles.app, ...(phonePortrait ? styles.appPortrait : {}) }}>
       {/* Header — visible on all non-player views */}
       {view.kind !== "player" && (
         <header style={{ ...styles.header, ...(phonePortrait ? styles.headerPortrait : {}) }}>
@@ -1133,6 +1133,21 @@ const styles: Record<string, React.CSSProperties> = {
     minHeight: "100vh",
     background: "radial-gradient(ellipse at 50% 0%, #1a1a1a 0%, #0d0d0d 70%)",
   },
+  /**
+   * Flat on an upright phone.
+   *
+   * The gradient is painted on this wrapper, which is the parent of both the
+   * header and the page under it — so the lift at the top of it does not stop
+   * where the header stops. It reaches 70% of the way down before it is fully
+   * dark, which on a phone is most of the screen, and it read as the top bar
+   * continuing past its own rule and out around the Back button.
+   *
+   * On a wider window the same wash spreads over enough width to read as depth
+   * behind the whole page, which is what it is for, so it stays there.
+   */
+  appPortrait: {
+    background: "#0d0d0d",
+  },
   header: {
     display: "flex",
     justifyContent: "space-between",
@@ -1158,6 +1173,9 @@ const styles: Record<string, React.CSSProperties> = {
   headerPortrait: {
     paddingTop: "calc(9px + var(--sait, 0px))",
     paddingBottom: "9px",
+    /** Its own tone now that the wrapper behind it is flat, so the bar is a bar
+     *  and ends where its rule does. */
+    background: "#151517",
   },
   logo: {
     // Match the breadcrumb row's height (its crumb buttons carry 6px vertical

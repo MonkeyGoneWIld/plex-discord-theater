@@ -1003,27 +1003,70 @@ export function Controls({
         <div style={styles.gestureLayer} onClick={handlePictureTap} aria-hidden="true" />
       )}
 
-      {/* Play/pause, in the middle of the picture where it can be seen and
+      {/* Transport, in the middle of the picture where it can be seen and
           aimed at. Phone only: a desktop has a pointer, a keyboard and a bar
-          that doesn't hide itself after three seconds. */}
+          that doesn't hide itself after three seconds.
+
+          Episode navigation belongs here rather than in the bar on a phone.
+          Down there it was two 32px targets in a crowded row an inch from the
+          bottom edge, next to the scrub bar and the settings; up here it is
+          where a thumb already is, beside the control it is a sibling of.
+
+          A missing neighbour leaves its space rather than closing it up — at
+          either end of a series one of these is absent, and letting the row
+          re-centre would slide play out from under the thumb aiming at it. */}
       {phone && canControl && (
-        <button
-          onClick={togglePlay}
-          className="btn"
-          style={styles.centerPlayBtn}
-          aria-label={playing ? "Pause" : "Play"}
-        >
-          {playing ? (
-            <svg width="30" height="30" viewBox="0 0 22 22" fill="currentColor">
-              <rect x="5" y="3.5" width="4.5" height="15" rx="1.2" />
-              <rect x="12.5" y="3.5" width="4.5" height="15" rx="1.2" />
-            </svg>
+        <div style={styles.centerTransport}>
+          {onPrevEpisode ? (
+            <button
+              onClick={onPrevEpisode}
+              className="btn"
+              style={styles.centerNavBtn}
+              aria-label="Previous episode"
+            >
+              <svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor">
+                  <rect x="2" y="2.5" width="2" height="11" rx="0.75"/>
+                  <path d="M13.5 3.2v9.6a.6.6 0 0 1-.93.5L5.6 8.5a.6.6 0 0 1 0-1l6.97-4.8a.6.6 0 0 1 .93.5Z"/>
+                </svg>
+            </button>
           ) : (
-            <svg width="30" height="30" viewBox="0 0 22 22" fill="currentColor">
-              <path d="M6 3.5L18.5 11L6 18.5V3.5Z" />
-            </svg>
+            <div style={styles.centerNavSpacer} aria-hidden="true" />
           )}
-        </button>
+
+          <button
+            onClick={togglePlay}
+            className="btn"
+            style={styles.centerPlayBtn}
+            aria-label={playing ? "Pause" : "Play"}
+          >
+            {playing ? (
+              <svg width="30" height="30" viewBox="0 0 22 22" fill="currentColor">
+                <rect x="5" y="3.5" width="4.5" height="15" rx="1.2" />
+                <rect x="12.5" y="3.5" width="4.5" height="15" rx="1.2" />
+              </svg>
+            ) : (
+              <svg width="30" height="30" viewBox="0 0 22 22" fill="currentColor">
+                <path d="M6 3.5L18.5 11L6 18.5V3.5Z" />
+              </svg>
+            )}
+          </button>
+
+          {onNextEpisode ? (
+            <button
+              onClick={onNextEpisode}
+              className="btn"
+              style={styles.centerNavBtn}
+              aria-label="Next episode"
+            >
+              <svg width="22" height="22" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M2.5 3.2v9.6a.6.6 0 0 0 .93.5L10.4 8.5a.6.6 0 0 0 0-1L3.43 2.7a.6.6 0 0 0-.93.5Z"/>
+                  <rect x="12" y="2.5" width="2" height="11" rx="0.75"/>
+                </svg>
+            </button>
+          ) : (
+            <div style={styles.centerNavSpacer} aria-hidden="true" />
+          )}
+        </div>
       )}
 
       {/* Top bar: back + title */}
@@ -1061,9 +1104,10 @@ export function Controls({
 
         <div style={{ ...styles.controls, ...(phone ? styles.controlsPhone : {}) }}>
           <div style={{ ...styles.left, ...(compact ? styles.groupCompact : {}) }}>
-            {/* Play and ±10s are absent on a phone: playback is the button in
-                the middle of the picture, and skipping is a double-tap to one
-                side. Episode navigation stays — there is no gesture for it. */}
+            {/* Play, ±10s and episode navigation are all absent on a phone:
+                playback and episode navigation are the three buttons in the
+                middle of the picture, and skipping is a double-tap to one
+                side. */}
             {canControl && !phone && (
               <>
                 <button onClick={togglePlay} className="btn" style={{ ...styles.playBtn, ...(compact ? styles.playBtnCompact : {}) }}>
@@ -1090,8 +1134,10 @@ export function Controls({
             )}
             {/* Episode nav sits together after the ±10s seek pair. Each is
                 rendered only when that sibling exists, so there's never a
-                dead control — the player omits the handler at series edges. */}
-            {canControl && onPrevEpisode && (
+                dead control — the player omits the handler at series edges.
+                Desktop only: on a phone these live in the middle of the picture
+                beside play, which is where the thumb already is. */}
+            {canControl && !phone && onPrevEpisode && (
               <button onClick={onPrevEpisode} className="btn" style={styles.skipBtn} title="Previous episode">
                 <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
                   <rect x="2" y="2.5" width="2" height="11" rx="0.75"/>
@@ -1099,7 +1145,7 @@ export function Controls({
                 </svg>
               </button>
             )}
-            {canControl && onNextEpisode && (
+            {canControl && !phone && onNextEpisode && (
               <button onClick={onNextEpisode} className="btn" style={styles.skipBtn} title="Next episode">
                 <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor">
                   <path d="M2.5 3.2v9.6a.6.6 0 0 0 .93.5L10.4 8.5a.6.6 0 0 0 0-1L3.43 2.7a.6.6 0 0 0-.93.5Z"/>
@@ -1382,16 +1428,30 @@ const styles: Record<string, React.CSSProperties> = {
     zIndex: 0,
     pointerEvents: "auto",
   },
-  centerPlayBtn: {
+  /**
+   * The three transport buttons, centred on the picture.
+   *
+   * The centring lives here rather than on the play button, which leaves the
+   * standalone `translate` free on each button for the press dip they all share
+   * (see .btn in index.html) — `transform` and `translate` compose in a fixed
+   * order, and a button doing its own centring in `transform` would fight it.
+   *
+   * The row itself takes no pointer events: it spans the width of three buttons
+   * and two gaps, and the picture between them still belongs to the gesture
+   * layer underneath. Each button turns them back on for itself.
+   */
+  centerTransport: {
     position: "absolute",
     left: "50%",
     top: "50%",
-    // `transform`, deliberately, leaving the standalone `translate` free for
-    // the press dip every button shares (see .btn in index.html). The two
-    // compose in that order — translate, then transform — so the dip lands as
-    // one pixel down from a centre that stays centred.
     transform: "translate(-50%, -50%)",
     zIndex: 1,
+    display: "flex",
+    alignItems: "center",
+    gap: "26px",
+    pointerEvents: "none",
+  },
+  centerPlayBtn: {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -1405,7 +1465,28 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
     fontFamily: "inherit",
     padding: 0,
+    pointerEvents: "auto",
   },
+  /** Smaller than play, and quieter: these move you through the series, which
+   *  is a rarer thing to want than stopping the picture. */
+  centerNavBtn: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "52px",
+    height: "52px",
+    borderRadius: "50%",
+    border: "none",
+    background: "rgba(0,0,0,0.38)",
+    backdropFilter: "blur(4px)",
+    color: "#fff",
+    cursor: "pointer",
+    fontFamily: "inherit",
+    padding: 0,
+    pointerEvents: "auto",
+  },
+  /** Holds the place of an absent neighbour so play stays under the thumb. */
+  centerNavSpacer: { width: "52px", height: "52px" },
   topBar: {
     // Above the gesture layer, so the Back button is still a button.
     position: "relative",

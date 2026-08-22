@@ -214,15 +214,24 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
       </div>
 
       {loading ? (
-        <div style={{ padding: "0 24px", display: "flex", flexDirection: "column", gap: "16px" }}>
-          <SkeletonBlock width="30%" height={18} />
+        /**
+         * The same container the episodes land in, and rows built to the same
+         * measurements as the cards that replace them.
+         *
+         * It used to be an inline wrapper of its own with no max width, so the
+         * skeleton ran the full width of the window while the episodes it stood
+         * in for were centred in 1100px — the page visibly jumped sideways the
+         * moment it loaded. Sharing `styles.list` is what stops the two from
+         * being able to disagree again.
+         */
+        <div style={styles.list} aria-hidden="true">
           {[0, 1, 2, 3].map((i) => (
-            <div key={i} style={{ display: "flex", gap: "16px", alignItems: "center" }}>
-              <SkeletonBlock width={200} height={112} borderRadius={8} />
-              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "8px" }}>
-                <SkeletonBlock width="50%" height={16} />
-                <SkeletonBlock width="80%" height={12} />
-                <SkeletonBlock width="60%" height={12} />
+            <div key={i} style={styles.skeletonCard}>
+              <SkeletonBlock width={200} height={112} borderRadius={6} />
+              <div style={styles.skeletonBody}>
+                <SkeletonBlock width="42%" height={15} />
+                <SkeletonBlock width="96%" height={12} />
+                <SkeletonBlock width="72%" height={12} />
               </div>
             </div>
           ))}
@@ -514,6 +523,18 @@ const styles: Record<string, React.CSSProperties> = {
     // unable to restore it. See the note on episodeCard.
     border: "1px solid rgba(229,160,13,0.3)", background: "rgba(255,255,255,0.05)",
     transform: "scale(1.01)",
+  },
+  /** Matched to episodeCard: same padding, border, radius, and the same 14px
+   *  between the still and the text. */
+  skeletonCard: {
+    display: "flex", gap: "14px", padding: `${EPISODE_CARD_PADDING_PX}px`,
+    borderRadius: "8px",
+    border: `${EPISODE_CARD_BORDER_PX}px solid rgba(255,255,255,0.06)`,
+    background: "rgba(255,255,255,0.03)",
+  },
+  skeletonBody: {
+    flex: 1, minWidth: 0, display: "flex", flexDirection: "column",
+    gap: "8px", paddingTop: "6px",
   },
   thumbWrap: {
     width: "200px", height: "112px", borderRadius: "6px", flexShrink: 0,

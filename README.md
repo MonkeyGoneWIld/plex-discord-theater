@@ -59,8 +59,7 @@ available episodes can be played directly from the season view.
 
 Each viewer selects their own audio and subtitle tracks without affecting other
 participants. Track selections persist into the next episode when the same
-tracks are available. Subtitles that are out of sync can be nudged earlier or
-later from the player bar.
+tracks are available. Subtitles that are out of sync can be adjusted in the player bar.
 
 ### Playback features
 

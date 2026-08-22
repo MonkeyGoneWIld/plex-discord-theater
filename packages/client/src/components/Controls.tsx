@@ -213,7 +213,6 @@ function SeekIndicator({
   wash,
   fading,
   tapId,
-  origin,
 }: {
   delta: number;
   wash: boolean;
@@ -222,9 +221,6 @@ function SeekIndicator({
    *  replaced and replays — an animation still running from the last tap does
    *  not read as an answer to this one. */
   tapId: number;
-  /** Where in the zone the finger landed, 0-1 on each axis, or null when the
-   *  skip came from a button and there is no such point. */
-  origin: { x: number; y: number } | null;
 }) {
   const back = delta < 0;
   // The outermost blade lights last in the direction of travel, so the run
@@ -249,16 +245,16 @@ function SeekIndicator({
         transition: `opacity ${SKIP_INDICATOR_FADE_MS}ms ease-out`,
       }}
     >
-      {/* Opens from the point that was touched and is clipped by the curve, so
-          the shape is something the tap did rather than a panel that appeared. */}
-      {wash && origin && (
+      {/* The shape itself swelling and fading, once per tap. Anchored at the
+          edge of the screen so it grows inward from the side that was tapped. */}
+      {wash && (
         <div
-          key={`ripple-${tapId}`}
-          className="seek-ripple"
+          key={`pulse-${tapId}`}
+          className="seek-pulse"
           style={{
-            ...styles.seekRipple,
-            left: `${origin.x * 100}%`,
-            top: `${origin.y * 100}%`,
+            ...styles.seekPulse,
+            borderRadius: back ? SEEK_WASH_RADIUS_BACK : SEEK_WASH_RADIUS_FORWARD,
+            transformOrigin: back ? "left center" : "right center",
           }}
         />
       )}
@@ -348,13 +344,10 @@ export function Controls({
   // a key, so each press replaces the animating elements and their animations
   // start again. Without it a second tap during a run would leave the first
   // one's animation playing, which reads as the tap having been ignored.
-  // `origin` is where in the zone the finger landed, for the ripple; null for a
-  // button or a key, which has no such point.
   const [skipPreview, setSkipPreview] = useState<{
     delta: number;
     target: number;
     tapId: number;
-    origin: { x: number; y: number } | null;
   } | null>(null);
   const tapIdRef = useRef(0);
   const skipBaseRef = useRef(0);
@@ -570,10 +563,7 @@ export function Controls({
    * video.currentTime each time would fold in however much played during the
    * burst and make the total drift.
    */
-  const queueSkip = useCallback((
-    amount: number,
-    origin?: { x: number; y: number } | null,
-  ) => {
+  const queueSkip = useCallback((amount: number) => {
     const video = videoRef.current;
     if (!video || !canControl) return;
     const total = video.duration || duration || 0;
@@ -584,12 +574,7 @@ export function Controls({
 
     const target = Math.max(0, Math.min(total || Infinity, skipBaseRef.current + skipDeltaRef.current));
     tapIdRef.current += 1;
-    setSkipPreview({
-      delta: skipDeltaRef.current,
-      target,
-      tapId: tapIdRef.current,
-      origin: origin ?? null,
-    });
+    setSkipPreview({ delta: skipDeltaRef.current, target, tapId: tapIdRef.current });
 
     if (skipTimerRef.current !== null) clearTimeout(skipTimerRef.current);
     skipTimerRef.current = setTimeout(() => {
@@ -668,19 +653,7 @@ export function Controls({
       // Second (or third, or fourth) tap of a burst on one side — skip, and
       // leave the bar alone. queueSkip stacks them into a single seek.
       if (canControl && zone !== null && zone === prev.zone && now - prev.at < DOUBLE_TAP_MS) {
-        // Where the finger landed, as a fraction of the zone rather than of the
-        // picture — the ripple is drawn inside the zone, so that is the box its
-        // origin has to be expressed in.
-        const zoneWidth = rect.width * TAP_SIDE_ZONE;
-        const withinZone = zone === "back"
-          ? (e.clientX - rect.left) / zoneWidth
-          : (e.clientX - (rect.right - zoneWidth)) / zoneWidth;
-        queueSkip(zone === "back" ? -TAP_SKIP_SECONDS : TAP_SKIP_SECONDS, {
-          x: Math.min(1, Math.max(0, withinZone)),
-          y: rect.height > 0
-            ? Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height))
-            : 0.5,
-        });
+        queueSkip(zone === "back" ? -TAP_SKIP_SECONDS : TAP_SKIP_SECONDS);
         return;
       }
 
@@ -999,7 +972,6 @@ export function Controls({
           wash={phone}
           fading={skipFading}
           tapId={skipPreview.tapId}
-          origin={skipPreview.origin}
         />
       )}
 
@@ -1311,9 +1283,10 @@ const styles: Record<string, React.CSSProperties> = {
     top: 0,
     bottom: 0,
     // Width is set by the component, from TAP_SIDE_ZONE.
-    // Clips the ripple to the curve, which is what makes the shape read as
-    // something the tap opened rather than a rectangle that faded in.
-    overflow: "hidden",
+    // Deliberately not clipped. The swell grows a few per cent past the zone at
+    // its widest, and cutting it there would put a straight vertical edge back
+    // in the middle of the curve, which is the shape this is meant to be free
+    // of. The player container clips what leaves the screen.
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -1341,21 +1314,20 @@ const styles: Record<string, React.CSSProperties> = {
     backdropFilter: "blur(6px)",
   },
   /**
-   * The ripple, clipped by the zone's curve.
+   * The swell: the whole D again, over the steady wash, played once per tap.
    *
-   * Square via aspect-ratio rather than a fixed size, so it scales with the
-   * picture instead of being a coin on a television.
+   * Deliberately not a circle at the point touched. A double-tap means "this
+   * side of the picture" and nothing more precise than that — answering the
+   * exact pixel implies the gesture cared where it landed, and it makes the
+   * shape read as two unrelated things, a blob inside a panel.
    */
-  seekRipple: {
+  seekPulse: {
     position: "absolute",
-    width: "46%",
-    aspectRatio: "1",
-    borderRadius: "50%",
-    background: "rgba(255,255,255,0.16)",
-    transform: "translate(-50%, -50%) scale(0.2)",
+    inset: 0,
+    background: "rgba(255,255,255,0.13)",
     opacity: 0,
     pointerEvents: "none",
-    animation: "seek-ripple 560ms cubic-bezier(0.16, 0.8, 0.3, 1) forwards",
+    animation: "seek-pulse 520ms cubic-bezier(0.22, 0.7, 0.3, 1) forwards",
   },
   seekBlades: {
     display: "flex",

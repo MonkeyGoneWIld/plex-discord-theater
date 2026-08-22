@@ -72,16 +72,19 @@
          running when you touched the screen does not read as a reply to you.
 
          The blades brighten in turn so the run travels the way the seek does;
-         the ripple opens from the point that was actually touched; the amount
-         takes a small step up as it changes. */
+         the whole D swells and fades; the amount takes a small step up as it
+         changes. The swell is the shape itself, anchored at the edge of the
+         screen so it grows inward — nothing about it depends on where the
+         finger landed, which is a detail the gesture does not mean anything by. */
       @keyframes seek-blade {
         0%   { opacity: 0.28; }
         35%  { opacity: 1; }
         100% { opacity: 0.55; }
       }
-      @keyframes seek-ripple {
-        from { transform: translate(-50%, -50%) scale(0.2); opacity: 0.85; }
-        to   { transform: translate(-50%, -50%) scale(2.1); opacity: 0; }
+      @keyframes seek-pulse {
+        0%   { opacity: 0; transform: scale(0.84); }
+        30%  { opacity: 1; transform: scale(1); }
+        100% { opacity: 0; transform: scale(1.07); }
       }
       @keyframes seek-amount {
         0%   { transform: scale(1); }
@@ -97,7 +100,7 @@
       @media (prefers-reduced-motion: reduce) {
         /* The direction and the amount still read; nothing chases anything. */
         .seek-blade { animation: none !important; opacity: 1 !important; }
-        .seek-ripple { display: none !important; }
+        .seek-pulse { display: none !important; }
         .seek-amount { animation: none !important; }
       }
 

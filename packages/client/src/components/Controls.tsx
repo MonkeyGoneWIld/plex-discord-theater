@@ -266,14 +266,19 @@ function SeekIndicator({
         >
           {back ? "\u00ab" : "\u00bb"}
         </div>
-        <div
-          className="seek-amount"
-          style={{
-            ...styles.skipAmount,
-            animation: "seek-amount 280ms cubic-bezier(0.2, 0, 0, 1)",
-          }}
-        >
-          {Math.abs(delta)} seconds
+        <div style={styles.skipAmount}>
+          {/* The digits are their own element so the warm and the tightening
+              land on them alone. Applied to the whole line, the spacing would
+              widen it by several pixels and slide it sideways in its own
+              centring — movement, from the one design here chosen for having
+              none. */}
+          <span
+            className="seek-amount"
+            style={{ animation: "seek-amount 340ms ease-out" }}
+          >
+            {Math.abs(delta)}
+          </span>
+          {" seconds"}
         </div>
       </div>
     </div>

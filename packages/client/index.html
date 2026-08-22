@@ -82,13 +82,26 @@
         45%  { opacity: 1; transform: scale(1.06); }
         100% { opacity: 1; transform: scale(1); }
       }
-      /* The count, arriving rather than switching. It changes on every tap of a
-         burst, and a number that simply swaps from 10 to 20 mid-animation reads
-         as a glitch rather than as the total going up. */
+      /* The count, marking its change without moving.
+
+         It changes on every tap of a burst, and a number that simply swaps from
+         10 to 20 with nothing marking it reads as a glitch rather than as the
+         total going up. This warms it and draws the digits together for a beat
+         instead: no travel, nothing to catch the eye away from the picture.
+
+         Only the digits carry it, not the word after them — spacing applied to
+         ten characters would widen the line enough to shift it in its own
+         centring, which is the movement this is chosen for not having. */
       @keyframes seek-amount {
-        0%   { opacity: 0.3; transform: translateY(4px) scale(0.94); }
-        55%  { opacity: 1; transform: translateY(0) scale(1.06); }
-        100% { opacity: 1; transform: translateY(0) scale(1); }
+        0%   { color: #ffffff; letter-spacing: 0.04em; }
+        35%  { color: #ffe9b8; letter-spacing: -0.01em; }
+        100% { color: #f0f0f0; letter-spacing: 0; }
+      }
+      /* Same signal with the size change taken out. */
+      @keyframes seek-amount-still {
+        0%   { color: #ffffff; }
+        35%  { color: #ffe9b8; }
+        100% { color: #f0f0f0; }
       }
       @keyframes seek-pulse {
         0%   { opacity: 0; transform: scale(0.84); }
@@ -97,7 +110,10 @@
       }
       @media (prefers-reduced-motion: reduce) {
         /* The direction and the amount still read; nothing chases anything. */
-        .seek-chevron, .seek-amount { animation: none !important; }
+        .seek-chevron { animation: none !important; }
+        /* The count keeps its warm, which is not motion and is the only thing
+           telling you the total changed. */
+        .seek-amount { animation: seek-amount-still 340ms ease-out !important; }
         .seek-pulse { display: none !important; }
       }
 

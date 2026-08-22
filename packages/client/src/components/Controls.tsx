@@ -1,5 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useImperativeHandle } from "react";
 import { authUrl } from "../lib/api";
+import { logEvent } from "../lib/log";
+import { createPreviewFrames, type PreviewFrames } from "../lib/previewFrames";
 import { loadVolume } from "../lib/volume";
 import { useMediaQuery, COMPACT_CONTROLS_QUERY, PHONE_QUERY } from "../lib/useMediaQuery";
 
@@ -90,6 +92,17 @@ const PREVIEW_BUCKET_MS = 10_000;
  * immediately, with a trailing flush so wherever the cursor stops always loads.
  */
 const PREVIEW_THROTTLE_MS = 120;
+
+/**
+ * How long to leave the connection to the video before pulling the frames.
+ *
+ * The whole preview index arrives in one request, which is the point, but it
+ * is also the largest single thing this client asks for. The first seconds of
+ * playback are when the buffer is emptiest and a stall is most likely, and
+ * nobody scrubs a stream they have not started watching yet — so the frames
+ * wait until the video has had the pipe to itself for a moment.
+ */
+const PREVIEW_PREFETCH_DELAY_MS = 4000;
 
 /**
  * How many decoded frames to keep. Scrubbing back over ground you've already
@@ -368,6 +381,11 @@ export function Controls({
   previewPartId,
 }: ControlsProps) {
   const [playing, setPlaying] = useState(false);
+  // Latched on the first play, and never cleared: the preview prefetch below
+  // wants "this stream has begun", not "playing right now". Keying it on
+  // `playing` would throw the frames away on every pause and fetch them again
+  // on resume.
+  const [started, setStarted] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   // Only a genuinely different item invalidates the duration — see onDur below.
@@ -435,6 +453,10 @@ export function Controls({
   // so mousemove never re-renders just to record where we're heading.
   const pendingPreviewRef = useRef<string | null>(null);
   const previewThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Every frame for the part, fetched once — see the prefetch effect. Null
+  // until it lands, and for a part Plex has no index for, in which case the
+  // per-frame requests below stay the only source.
+  const previewFramesRef = useRef<PreviewFrames | null>(null);
   const [hintsVisible, setHintsVisible] = useState(showKeyboardHints);
   // Phone-sized: the volume slider moves into a vertical popover rather than
   // eating the width of a row that has nowhere to put it.
@@ -522,7 +544,7 @@ export function Controls({
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    const onPlay = () => setPlaying(true);
+    const onPlay = () => { setPlaying(true); setStarted(true); };
     const onPause = () => {
       setPlaying(false);
       setVisible(true);
@@ -773,6 +795,21 @@ export function Controls({
 
     if (previewPartId == null || failedPartRef.current === previewPartId) return;
     if (!(duration > 0) || !isFinite(duration)) return;
+
+    // The whole index is here, so the frame is a slice of memory. No request,
+    // no throttle, no waiting for a decode to promote it — the preview tracks
+    // the cursor exactly, which is the entire reason for fetching the file.
+    const frames = previewFramesRef.current;
+    if (frames) {
+      const src = frames.frameAt(pct * duration * 1000, duration * 1000);
+      if (src) {
+        pendingPreviewRef.current = src;
+        setPreviewSrc(src);
+        setLoadedPreviewSrc(src);
+        return;
+      }
+    }
+
     // Floor rather than round, so the frame is at or before the cursor.
     const bucketMs = Math.floor((pct * duration * 1000) / PREVIEW_BUCKET_MS) * PREVIEW_BUCKET_MS;
     // No w/h params: those divert the thumb route through /photo/:/transcode,
@@ -852,6 +889,51 @@ export function Controls({
     resetHideTimer();
   }, [pctFromClientX, commitSeekToPct, resetHideTimer]);
 
+  /**
+   * Pull the part's whole preview index shortly after the stream starts.
+   *
+   * Hovering the bar used to be the thing that fetched a frame: one request out
+   * to Plex per position, arriving a beat or two after the cursor had already
+   * moved on, and nothing at all for a sweep. The frames all live in one file,
+   * so this fetches that file once and every hover afterwards is free.
+   *
+   * Failure is not handled because it does not need to be — showPreviewAt keeps
+   * the per-frame path and falls back to it whenever this ref is empty, which
+   * covers a part with no index, a request that fails, and the window before
+   * this one lands.
+   */
+  useEffect(() => {
+    if (previewPartId == null || !started) return;
+    let cancelled = false;
+    const abort = new AbortController();
+    const timer = setTimeout(() => {
+      fetch(authUrl(`/api/plex/preview/${previewPartId}/index`), { signal: abort.signal })
+        .then((res) => (res.ok ? res.arrayBuffer() : null))
+        .then((buf) => {
+          if (cancelled || !buf) return;
+          const frames = createPreviewFrames(buf);
+          previewFramesRef.current = frames;
+          // Logged because the size of an index is the one thing that can't be
+          // known ahead of a real library: it decides whether this is a cheap
+          // win or a several-megabyte one.
+          logEvent("Preview", frames ? "frame index ready" : "frame index unreadable", {
+            partId: previewPartId, bytes: buf.byteLength, frames: frames?.count ?? 0,
+          });
+        })
+        .catch(() => { /* the per-frame path is still there */ });
+    }, PREVIEW_PREFETCH_DELAY_MS);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      abort.abort();
+      // The blob URLs point into this part's buffer; the next item's frames
+      // are a different file entirely.
+      previewFramesRef.current?.dispose();
+      previewFramesRef.current = null;
+    };
+  }, [previewPartId, started]);
+
   // Load the wanted frame, promoting it to the display only once decoded.
   //
   // A superseded load is deliberately NOT aborted: it costs nothing extra at this
@@ -860,6 +942,9 @@ export function Controls({
   // which aborted in flight — during a sweep almost nothing ever finished.
   useEffect(() => {
     if (!previewSrc) return;
+    // A frame sliced out of the index is already in memory and was promoted to
+    // the display as it was picked. There is nothing here to preload.
+    if (previewFramesRef.current) return;
     const cache = previewCacheRef.current;
     if (cache.has(previewSrc)) {
       setLoadedPreviewSrc(previewSrc);

@@ -70,6 +70,75 @@ function normalise(body: string): string {
 }
 
 /**
+ * The tags an SRT or VTT cue may carry, and which this renderer does not draw.
+ *
+ * Named rather than matched as "anything in angle brackets", because subtitle
+ * text does occasionally contain them for real — an SDH track writing
+ * <inaudible>, or dialogue quoting a filename. Those survive; the formatting
+ * that a player is expected to interpret does not.
+ *
+ * The list is what turns up in sidecar files: HTML inline formatting, <font>
+ * with its colour and face attributes, VTT's own <c.classname> spans and <v
+ * Speaker> voices, and ruby annotations from subtitles that carry furigana.
+ */
+const INLINE_TAG =
+  // The class run is VTT's own syntax, which hangs off the tag name with no
+  // space in between: <c.yellow.bg_blue>, <v.loud Roger>.
+  /<\/?(?:i|b|u|s|em|strong|font|ruby|rt|rp|c|v|lang|span)(?:\.[^\s.>]+)*(?:[ \t][^>]*)?\/?>/gi;
+
+/** VTT karaoke timestamps: <00:00:01.500> between words. */
+const CUE_TIMESTAMP = /<\d{1,3}:\d{2}:\d{2}[.,]\d{1,3}>/g;
+
+/** The handful of entities that turn up in files people actually have. */
+const NAMED_ENTITY: Record<string, string> = {
+  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\u00a0",
+};
+
+/**
+ * Strip a cue's inline markup down to the words.
+ *
+ * Sidecar SRTs regularly carry HTML: <i> for emphasis is near-universal, and
+ * fansubbed and re-muxed files often wrap every line in <font color="#FFFFFF">.
+ * The client draws cue text as text, so anything left here is shown to the
+ * viewer verbatim — which is what put `<font color="#FFFFFF">` on screen around
+ * the dialogue instead of colouring it.
+ *
+ * Colour and emphasis are dropped rather than honoured. Handing arbitrary
+ * styling from a file straight into the page is not something to do casually,
+ * and a subtitle that is legible over every frame of the film is worth more
+ * than one that matches what a fansubber picked in 2009.
+ */
+function cleanCueText(raw: string): string {
+  return raw
+    // <br> is a break rather than a decoration, so it leaves one behind.
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(CUE_TIMESTAMP, "")
+    .replace(INLINE_TAG, "")
+    // ASS override blocks turn up in SRT files too — {\an8} on a sign, most
+    // often. Only ones opening with a backslash: a bare {…} is more likely to
+    // be something a character said.
+    .replace(/\{\\[^}]*\}/g, "")
+    .replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (whole, body: string) => {
+      if (body[0] === "#") {
+        const code = body[1] === "x" || body[1] === "X"
+          ? parseInt(body.slice(2), 16)
+          : parseInt(body.slice(1), 10);
+        // Anything outside Unicode, or a control character, is likelier to be
+        // a false positive than an intended glyph — leave the text as it was.
+        return Number.isFinite(code) && code >= 32 && code <= 0x10ffff
+          ? String.fromCodePoint(code)
+          : whole;
+      }
+      return NAMED_ENTITY[body.toLowerCase()] ?? whole;
+    })
+    // Stripping a tag can leave the space that sat beside it doubled up.
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .trim();
+}
+
+/**
  * SRT, and VTT — which differ only in the separator before the milliseconds and
  * in whether cues carry a number above them.
  */
@@ -88,7 +157,7 @@ function parseSrtLike(body: string): Cue[] {
     // Cue settings ("align:start position:50%") ride on the end timestamp.
     const end = parseTimestamp(rawEnd.trim().split(/\s+/)[0]);
     if (start == null || end == null) continue;
-    const text = lines.slice(at + 1).join("\n").trim();
+    const text = cleanCueText(lines.slice(at + 1).join("\n"));
     if (text) cues.push({ start, end, text });
   }
   return cues;
@@ -96,14 +165,20 @@ function parseSrtLike(body: string): Cue[] {
 
 /** Strip ASS override blocks and turn its line breaks into real ones. */
 function cleanAssText(raw: string): string {
-  return raw
-    // {\an8}, {\i1}, {\pos(…)} — positioning and styling this renderer does not
-    // implement. Dropping them leaves the words, which is the part that matters.
-    .replace(/\{[^}]*\}/g, "")
-    // Hard and soft breaks. Both become a newline: the distinction is about
-    // whether a renderer may re-wrap, and ours does not.
-    .replace(/\\[Nnh]/g, "\n")
-    .trim();
+  return cleanCueText(
+    raw
+      // {\an8}, {\i1}, {\pos(…)} — positioning and styling this renderer does
+      // not implement. Dropping them leaves the words, which is the part that
+      // matters.
+      .replace(/\{[^}]*\}/g, "")
+      // Hard and soft breaks. Both become a newline: the distinction is about
+      // whether a renderer may re-wrap, and ours does not.
+      .replace(/\\[Nn]/g, "\n")
+      // \h is a non-breaking space, not a break. It was being turned into a
+      // newline with the other two, which split lines that were meant to hold
+      // together — a name and a title, most often.
+      .replace(/\\h/g, "\u00a0"),
+  );
 }
 
 /**

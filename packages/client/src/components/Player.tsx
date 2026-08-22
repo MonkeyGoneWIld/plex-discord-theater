@@ -522,8 +522,6 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
    */
   const [subtitleOffsetMs, setSubtitleOffsetMs] = useState(0);
   const [showSubtitleOffset, setShowSubtitleOffset] = useState(false);
-  /** Whether the control bar is up — see SubtitleLayer, which moves for it. */
-  const [controlsVisible, setControlsVisible] = useState(true);
   /** A sidecar that could not be read, so the offer to adjust it is withdrawn
    *  rather than left pointing at subtitles that never arrived. */
   const [sidecarFailed, setSidecarFailed] = useState(false);
@@ -3810,7 +3808,14 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         // Undefined when the library has no generated preview thumbnails, so
         // Controls shows a plain timestamp instead of chasing missing images.
         previewPartId={previewPartId ?? undefined}
-        onVisibilityChange={setControlsVisible}
+        // Only offered when there is a subtitle this client is drawing, which
+        // is the only kind with any timing to change.
+        onOpenSubtitleTiming={
+          drawnSubtitleId !== null && !sidecarFailed
+            ? () => setShowSubtitleOffset((open) => !open)
+            : undefined
+        }
+        subtitleTimingOpen={showSubtitleOffset}
       />
       {/* Subtitles this client draws, because Plex was told not to burn them
           in — the only kind there is anything to adjust about. */}
@@ -3819,7 +3824,6 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         videoRef={videoRef}
         offsetMs={subtitleOffsetMs}
         onUnavailable={() => setSidecarFailed(true)}
-        controlsVisible={controlsVisible}
       />
       {showSubtitleOffset && drawnSubtitleId !== null && !sidecarFailed && (
         <SubtitleOffset
@@ -3848,14 +3852,6 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // answer ("None"), so it is passed through as one.
           currentAudioId={(variant?.audioStreamId ?? currentAudioStreamRef.current) || null}
           currentSubtitleId={variant?.subtitleStreamId ?? currentSubtitleStreamRef.current}
-          // Offered only for a subtitle this client is drawing, which is the
-          // only kind that can be moved. Absent otherwise rather than disabled:
-          // "why is this greyed out" is a worse question than never asking it.
-          subtitleOffsetMs={drawnSubtitleId !== null && !sidecarFailed ? subtitleOffsetMs : null}
-          onAdjustSubtitleTiming={() => {
-            setShowTrackSwitcher(false);
-            setShowSubtitleOffset(true);
-          }}
         />
       )}
       {showQueuePanel && syncState && (

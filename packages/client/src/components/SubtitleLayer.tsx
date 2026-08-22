@@ -11,20 +11,81 @@ import { logEvent, logWarn } from "../lib/log";
  * them. A sidecar is still text, so the server hands over the cues and they are
  * drawn here — where an offset is a number added to two other numbers.
  *
- * The offset is per viewer and lives only as long as the player does. It is a
- * property of one badly-timed release rather than of the person watching, and a
- * remembered offset silently applying to a different show later is exactly the
- * kind of stale global setting worth not building.
+ * These have to be indistinguishable from the burned ones. Nobody picks a
+ * subtitle track by how it is delivered, so switching between an embedded track
+ * and a sidecar should show the same thing, the same size, in the same place —
+ * which is why everything below is measured against the picture rather than
+ * against the window.
+ *
+ * The offset itself is per viewer and lives only as long as the player does. It
+ * is a property of one badly-timed release rather than of the person watching,
+ * and a remembered offset silently applying to a different show later is
+ * exactly the kind of stale global setting worth not building.
  */
 
+/** Cue text as a share of the picture's height, matching a burned-in subtitle. */
+const FONT_SCALE = 0.043;
+/** And how far it sits above the bottom of the picture, in the same units. */
+const BOTTOM_SCALE = 0.055;
+/** Bounds for absurd geometry — a sliver of a window, or a wall-sized display. */
+const MIN_FONT_PX = 13;
+const MAX_FONT_PX = 56;
+
 /**
- * How often the cue on screen is re-checked.
+ * Where the picture actually is inside the video element.
+ *
+ * The element fills the player, but `object-fit: contain` letterboxes the image
+ * inside it, so the element's own box says nothing about where the picture
+ * ends. Burned-in subtitles are part of the picture; sitting where they sit
+ * means working out the same rectangle.
+ */
+function usePictureBox(videoRef: React.RefObject<HTMLVideoElement | null>) {
+  const [box, setBox] = useState<{ bottomInset: number; height: number } | null>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const measure = () => {
+      const v = videoRef.current;
+      if (!v || !v.videoWidth || !v.videoHeight || !v.clientHeight) return;
+      const scale = Math.min(v.clientWidth / v.videoWidth, v.clientHeight / v.videoHeight);
+      const height = v.videoHeight * scale;
+      setBox((prev) =>
+        prev && Math.abs(prev.height - height) < 0.5 ? prev : {
+          // Contain centres what it letterboxes, so the bar below the picture is
+          // half of what was left over.
+          bottomInset: (v.clientHeight - height) / 2,
+          height,
+        });
+    };
+
+    measure();
+    // The three things that change the answer: the window resizing, and the two
+    // moments the intrinsic size becomes known or changes — a stream starting,
+    // and the next episode replacing it.
+    const observer = new ResizeObserver(measure);
+    observer.observe(video);
+    video.addEventListener("loadedmetadata", measure);
+    video.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      video.removeEventListener("loadedmetadata", measure);
+      video.removeEventListener("resize", measure);
+    };
+  }, [videoRef]);
+
+  return box;
+}
+
+/**
+ * Which cue belongs on screen.
  *
  * `timeupdate` fires about four times a second, which is enough to be a quarter
  * of a second late putting a line up — visible, and the wrong thing to be
  * imprecise about in a component whose entire job is timing. An animation frame
- * is free when nothing changes, because the work is a comparison and the state
- * is only written when the answer differs.
+ * is nearly free when nothing changes, because the work is a comparison and
+ * React is only touched when the answer differs.
  */
 function useActiveCue(
   videoRef: React.RefObject<HTMLVideoElement | null>,
@@ -38,11 +99,11 @@ function useActiveCue(
   cuesRef.current = cues;
   const offsetRef = useRef(offsetMs);
   offsetRef.current = offsetMs;
-  // Where the last answer came from, so the common case — the same cue still
-  // showing — costs one comparison and no React work at all.
+  // What is on screen, so the common case — the same cue still showing — costs
+  // one comparison and no React work at all.
   const shownRef = useRef<SubtitleCue | null>(null);
-  // Index of the last cue found, so a linear scan starts from where it left off
-  // rather than from the beginning of a two-thousand-line file every frame.
+  // Index of the last cue found, so a scan starts from where it left off rather
+  // than from the beginning of a two-thousand-line file every frame.
   const hintRef = useRef(0);
   // Nothing loaded means nothing to time, and a frame loop that wakes up sixty
   // times a second to decide it has no work is worth not starting.
@@ -94,18 +155,9 @@ interface SubtitleLayerProps {
   /** Told when a sidecar can't be read, so the player can say so rather than
    *  leaving somebody staring at a film with no subtitles and no explanation. */
   onUnavailable?: () => void;
-  /** Whether the control bar is up, and so whether the text has to move above
-   *  it. See the `layer` style. */
-  controlsVisible?: boolean;
 }
 
-export function SubtitleLayer({
-  streamId,
-  videoRef,
-  offsetMs,
-  onUnavailable,
-  controlsVisible = false,
-}: SubtitleLayerProps) {
+export function SubtitleLayer({ streamId, videoRef, offsetMs, onUnavailable }: SubtitleLayerProps) {
   const [cues, setCues] = useState<SubtitleCue[]>([]);
   const onUnavailableRef = useRef(onUnavailable);
   onUnavailableRef.current = onUnavailable;
@@ -136,20 +188,22 @@ export function SubtitleLayer({
   }, [streamId]);
 
   const cue = useActiveCue(videoRef, cues, offsetMs);
+  const box = usePictureBox(videoRef);
   if (!cue) return null;
 
+  // Before the intrinsic size is known there is no picture to measure against.
+  // The fallbacks say the same thing about the player instead, so a cue landing
+  // in that window is approximately placed rather than missing.
+  const fontSize = box
+    ? Math.min(MAX_FONT_PX, Math.max(MIN_FONT_PX, box.height * FONT_SCALE))
+    : `clamp(${MIN_FONT_PX}px, 4.3vh, ${MAX_FONT_PX}px)`;
+  const bottom = box ? box.bottomInset + box.height * BOTTOM_SCALE : "5.5%";
+
   return (
-    <div
-      style={{
-        ...styles.layer,
-        // Up and out of the way of the control bar, and back down when it goes.
-        bottom: controlsVisible ? "22%" : "9%",
-      }}
-      aria-live="off"
-    >
-      <div style={styles.cue}>
+    <div style={{ ...styles.layer, bottom }} aria-live="off">
+      <div style={{ ...styles.cue, fontSize }}>
         {cue.text.split("\n").map((line, i) => (
-          <div key={i} style={styles.line}>{line}</div>
+          <div key={i}>{line}</div>
         ))}
       </div>
     </div>
@@ -160,21 +214,16 @@ const styles: Record<string, React.CSSProperties> = {
   /**
    * Sits above the picture and below the controls.
    *
-   * Anchored to the bottom of the player rather than to the bottom of the
-   * rendered picture: on letterboxed content that puts the text in the black
-   * bar, which is where most players put it and where it is easiest to read.
-   *
-   * Lifted while the control bar is up, because the bar is well over a fifth of
-   * the height of a phone in landscape and text left at 9% is behind it. Every
-   * other player does this for the same reason. The rise is animated rather
-   * than instant so it reads as making room rather than as the subtitle
-   * jumping — and it goes back down as soon as the bar does.
+   * Deliberately does NOT move when the control bar appears. It used to, on the
+   * reasoning that text behind the bar is unreadable — but a burned-in subtitle
+   * does not move either, and the difference was the whole complaint: subtitles
+   * that shift every time the window takes focus read as broken in a way that
+   * three seconds of overlap does not.
    */
   layer: {
     position: "absolute",
     left: 0,
     right: 0,
-    transition: "bottom 220ms cubic-bezier(0.2, 0, 0, 1)",
     display: "flex",
     justifyContent: "center",
     padding: "0 8%",
@@ -183,19 +232,16 @@ const styles: Record<string, React.CSSProperties> = {
   },
   cue: {
     textAlign: "center",
-    // Tracks the player rather than the page: the same subtitle has to be
-    // readable on a phone in Discord's picture-in-picture and on a television.
-    fontSize: "clamp(15px, 2.6vw, 30px)",
-    lineHeight: 1.3,
-    fontWeight: 500,
+    lineHeight: 1.25,
+    // Burned-in subtitles are rendered at a normal weight. Anything heavier
+    // reads as a different track rather than the same one delivered differently.
+    fontWeight: 400,
     color: "#fff",
-    // An outline rather than a box. A background plate is the safer choice for
-    // legibility, but it also covers the picture even when nothing needs
-    // covering; the shadow reads on white and on black alike.
+    // An outline rather than a plate: it reads on white and on black alike, and
+    // it is close to what the burned ones carry, so the two match.
     textShadow:
-      "0 0 4px rgba(0,0,0,0.9), 0 1px 2px rgba(0,0,0,0.95), 0 0 12px rgba(0,0,0,0.6)",
+      "0 0 3px rgba(0,0,0,0.85), 0 1px 2px rgba(0,0,0,0.95), 0 0 10px rgba(0,0,0,0.5)",
     whiteSpace: "pre-wrap",
     textWrap: "balance",
   },
-  line: { margin: 0 },
 };

@@ -42,14 +42,13 @@ interface ControlsProps {
    *  Omit for a viewer without transport control. */
   onSurfaceClick?: () => void;
   /**
-   * Told whenever the bar comes up or goes away.
-   *
-   * Only one thing needs this: subtitles drawn by the client sit where the bar
-   * does, and have to move out of its way while it is there. The bar's own
-   * visibility is otherwise nobody else's business, which is why this is a
-   * notification rather than a prop that controls it.
+   * Opens the subtitle timing panel. Absent unless this client is drawing its
+   * own subtitles, which is the only case where there is anything to time —
+   * a burned-in subtitle is part of the picture by the time it arrives.
    */
-  onVisibilityChange?: (visible: boolean) => void;
+  onOpenSubtitleTiming?: () => void;
+  /** Whether that panel is currently open, so the button can show it. */
+  subtitleTimingOpen?: boolean;
   /** Where a restart-in-progress is heading, in seconds, or null when playback
    *  is settled. A transcode restart detaches the media and the element reports
    *  0 until the replacement loads, which snapped the bar back to the start
@@ -126,6 +125,8 @@ const SKIP_STACK_MS = 700;
 const SKIP_INDICATOR_LINGER_MS = 400;
 /** And how long it then takes to fade, rather than blinking out of existence. */
 const SKIP_INDICATOR_FADE_MS = 260;
+/** One blade's pass. The three are staggered 90ms apart inside it. */
+const SEEK_BLADE_MS = 520;
 
 /**
  * The wash behind a gesture seek: a half-ellipse anchored to the edge the tap
@@ -167,18 +168,19 @@ const TAP_SKIP_SECONDS = 10;
  */
 const TAP_SIDE_ZONE = 0.35;
 
-/** One chevron of the three, pointing the way the seek is going. */
-function SeekChevron({ back, delayMs }: { back: boolean; delayMs: number }) {
+/** One blade of the three, pointing the way the seek is going. */
+function SeekBlade({ back, delayMs }: { back: boolean; delayMs: number }) {
   return (
     <svg
-      className="seek-chevron"
-      width="15"
-      height="15"
+      className="seek-blade"
+      width="17"
+      height="17"
       viewBox="0 0 16 16"
       fill="currentColor"
       aria-hidden="true"
       style={{
-        animation: `seek-chevron 900ms ${delayMs}ms ease-in-out infinite`,
+        opacity: 0.28,
+        animation: `seek-blade ${SEEK_BLADE_MS}ms ${delayMs}ms ease-out forwards`,
         ...(back ? { transform: "scaleX(-1)" } : {}),
       }}
     >
@@ -210,13 +212,22 @@ function SeekIndicator({
   delta,
   wash,
   fading,
+  tapId,
+  origin,
 }: {
   delta: number;
   wash: boolean;
   fading: boolean;
+  /** Bumped once per tap. Used as a key, so every element that animates is
+   *  replaced and replays — an animation still running from the last tap does
+   *  not read as an answer to this one. */
+  tapId: number;
+  /** Where in the zone the finger landed, 0-1 on each axis, or null when the
+   *  skip came from a button and there is no such point. */
+  origin: { x: number; y: number } | null;
 }) {
   const back = delta < 0;
-  // The outermost chevron lights last in the direction of travel, so the run
+  // The outermost blade lights last in the direction of travel, so the run
   // moves the same way the seek does.
   const delays = back ? [180, 90, 0] : [0, 90, 180];
   return (
@@ -238,13 +249,36 @@ function SeekIndicator({
         transition: `opacity ${SKIP_INDICATOR_FADE_MS}ms ease-out`,
       }}
     >
-      <div style={{ ...styles.seekBody, ...(wash ? {} : styles.seekBodyPill) }}>
-        <div style={styles.seekChevrons}>
+      {/* Opens from the point that was touched and is clipped by the curve, so
+          the shape is something the tap did rather than a panel that appeared. */}
+      {wash && origin && (
+        <div
+          key={`ripple-${tapId}`}
+          className="seek-ripple"
+          style={{
+            ...styles.seekRipple,
+            left: `${origin.x * 100}%`,
+            top: `${origin.y * 100}%`,
+          }}
+        />
+      )}
+      {/* Keyed too: replacing it is what restarts the blades and the amount. */}
+      <div
+        key={`body-${tapId}`}
+        style={{
+          ...styles.seekBody,
+          ...(back ? { flexDirection: "row-reverse" as const } : {}),
+          ...(wash ? {} : styles.seekBodyPill),
+        }}
+      >
+        <div className="seek-amount" style={styles.seekAmount}>
+          {back ? "\u2212" : "+"}{Math.abs(delta)}
+        </div>
+        <div style={styles.seekBlades}>
           {delays.map((d, i) => (
-            <SeekChevron key={i} back={back} delayMs={d} />
+            <SeekBlade key={i} back={back} delayMs={d} />
           ))}
         </div>
-        <div style={styles.seekAmount}>{Math.abs(delta)} seconds</div>
       </div>
     </div>
   );
@@ -264,7 +298,8 @@ export function Controls({
   onToggleMute,
   onOpenTrackSwitcher,
   onSurfaceClick,
-  onVisibilityChange,
+  onOpenSubtitleTiming,
+  subtitleTimingOpen = false,
   restartingTo = null,
   onToggleStats,
   statsActive,
@@ -290,9 +325,6 @@ export function Controls({
   const visibleRef = useRef(true);
   visibleRef.current = visible;
   const revealTapRef = useRef(false);
-  const onVisibilityChangeRef = useRef(onVisibilityChange);
-  onVisibilityChangeRef.current = onVisibilityChange;
-  useEffect(() => { onVisibilityChangeRef.current?.(visible); }, [visible]);
   // When and where the last picture tap landed, for the double-tap test below.
   const lastTapRef = useRef<{ at: number; zone: "back" | "forward" | null }>({ at: 0, zone: null });
   const [hoveringProgress, setHoveringProgress] = useState(false);
@@ -311,7 +343,20 @@ export function Controls({
   // Accumulated ±10s presses waiting to be applied as one seek, and where they
   // add up to. Null when nothing is pending. `delta` drives the on-screen total,
   // `target` is what the eventual seek uses.
-  const [skipPreview, setSkipPreview] = useState<{ delta: number; target: number } | null>(null);
+  //
+  // `tapId` counts presses rather than describing them: the indicator uses it as
+  // a key, so each press replaces the animating elements and their animations
+  // start again. Without it a second tap during a run would leave the first
+  // one's animation playing, which reads as the tap having been ignored.
+  // `origin` is where in the zone the finger landed, for the ripple; null for a
+  // button or a key, which has no such point.
+  const [skipPreview, setSkipPreview] = useState<{
+    delta: number;
+    target: number;
+    tapId: number;
+    origin: { x: number; y: number } | null;
+  } | null>(null);
+  const tapIdRef = useRef(0);
   const skipBaseRef = useRef(0);
   const skipDeltaRef = useRef(0);
   const skipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -525,7 +570,10 @@ export function Controls({
    * video.currentTime each time would fold in however much played during the
    * burst and make the total drift.
    */
-  const queueSkip = useCallback((amount: number) => {
+  const queueSkip = useCallback((
+    amount: number,
+    origin?: { x: number; y: number } | null,
+  ) => {
     const video = videoRef.current;
     if (!video || !canControl) return;
     const total = video.duration || duration || 0;
@@ -535,7 +583,13 @@ export function Controls({
     skipDeltaRef.current = (burstInProgress ? skipDeltaRef.current : 0) + amount;
 
     const target = Math.max(0, Math.min(total || Infinity, skipBaseRef.current + skipDeltaRef.current));
-    setSkipPreview({ delta: skipDeltaRef.current, target });
+    tapIdRef.current += 1;
+    setSkipPreview({
+      delta: skipDeltaRef.current,
+      target,
+      tapId: tapIdRef.current,
+      origin: origin ?? null,
+    });
 
     if (skipTimerRef.current !== null) clearTimeout(skipTimerRef.current);
     skipTimerRef.current = setTimeout(() => {
@@ -614,7 +668,19 @@ export function Controls({
       // Second (or third, or fourth) tap of a burst on one side — skip, and
       // leave the bar alone. queueSkip stacks them into a single seek.
       if (canControl && zone !== null && zone === prev.zone && now - prev.at < DOUBLE_TAP_MS) {
-        queueSkip(zone === "back" ? -TAP_SKIP_SECONDS : TAP_SKIP_SECONDS);
+        // Where the finger landed, as a fraction of the zone rather than of the
+        // picture — the ripple is drawn inside the zone, so that is the box its
+        // origin has to be expressed in.
+        const zoneWidth = rect.width * TAP_SIDE_ZONE;
+        const withinZone = zone === "back"
+          ? (e.clientX - rect.left) / zoneWidth
+          : (e.clientX - (rect.right - zoneWidth)) / zoneWidth;
+        queueSkip(zone === "back" ? -TAP_SKIP_SECONDS : TAP_SKIP_SECONDS, {
+          x: Math.min(1, Math.max(0, withinZone)),
+          y: rect.height > 0
+            ? Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height))
+            : 0.5,
+        });
         return;
       }
 
@@ -928,7 +994,13 @@ export function Controls({
           overlay below: that fades out on idle, and spamming the buttons is
           exactly when you most need to see the running total. */}
       {skipPreview != null && skipPreview.delta !== 0 && (
-        <SeekIndicator delta={skipPreview.delta} wash={phone} fading={skipFading} />
+        <SeekIndicator
+          delta={skipPreview.delta}
+          wash={phone}
+          fading={skipFading}
+          tapId={skipPreview.tapId}
+          origin={skipPreview.origin}
+        />
       )}
 
       <div
@@ -1120,6 +1192,36 @@ export function Controls({
                 {"\u2699"}
               </button>
             )}
+            {/* Next to the gear, because it belongs to the same family of
+                "how this is playing" controls — and because a subtitle that
+                needs nudging needs nudging while you watch it, which is two
+                menus deep from anywhere else. */}
+            {onOpenSubtitleTiming && (
+              <button
+                onClick={onOpenSubtitleTiming}
+                className="btn"
+                style={{
+                  ...styles.gearBtn,
+                  ...(compact ? styles.gearBtnCompact : {}),
+                  ...(subtitleTimingOpen ? styles.gearBtnActive : {}),
+                }}
+                title="Subtitle timing"
+                aria-label="Subtitle timing"
+                aria-pressed={subtitleTimingOpen}
+              >
+                <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                  {/* A subtitle frame with its lines, over the arrows that say
+                      it can be moved. Reads as "subtitles, sideways". */}
+                  <rect x="1.5" y="3" width="17" height="10.5" rx="2"
+                    stroke="currentColor" strokeWidth="1.4" />
+                  <path d="M4.5 7.5h5M11.5 7.5h4M4.5 10.5h3M9 10.5h6.5"
+                    stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                  <path d="M4 17.5h12M4 17.5l2-1.6M4 17.5l2 1.6M16 17.5l-2-1.6M16 17.5l-2 1.6"
+                    stroke="currentColor" strokeWidth="1.4"
+                    strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            )}
             {compact ? (
               /* Vertical slider in a popover. A horizontal one needs ~80px of a
                  row with none to give on a phone, and it was the control being
@@ -1209,6 +1311,9 @@ const styles: Record<string, React.CSSProperties> = {
     top: 0,
     bottom: 0,
     // Width is set by the component, from TAP_SIDE_ZONE.
+    // Clips the ripple to the curve, which is what makes the shape read as
+    // something the tap opened rather than a rectangle that faded in.
+    overflow: "hidden",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -1216,33 +1321,56 @@ const styles: Record<string, React.CSSProperties> = {
     // Above the control overlay, which the indicator deliberately outlives.
     zIndex: 11,
   },
+  /**
+   * The amount and the blades on one line, in the order they are read: the
+   * number first, the direction after it, mirrored for a backward seek.
+   */
   seekBody: {
+    position: "relative",
     display: "flex",
-    flexDirection: "column",
+    flexDirection: "row",
     alignItems: "center",
-    gap: "6px",
-    color: "#f0f0f0",
+    gap: "9px",
+    color: "#fff",
   },
   /** Desktop, where there is no wash to read the text against. */
   seekBodyPill: {
-    padding: "14px 22px",
+    padding: "10px 18px",
     borderRadius: "999px",
     background: "rgba(0,0,0,0.55)",
     backdropFilter: "blur(6px)",
   },
-  seekChevrons: {
+  /**
+   * The ripple, clipped by the zone's curve.
+   *
+   * Square via aspect-ratio rather than a fixed size, so it scales with the
+   * picture instead of being a coin on a television.
+   */
+  seekRipple: {
+    position: "absolute",
+    width: "46%",
+    aspectRatio: "1",
+    borderRadius: "50%",
+    background: "rgba(255,255,255,0.16)",
+    transform: "translate(-50%, -50%) scale(0.2)",
+    opacity: 0,
+    pointerEvents: "none",
+    animation: "seek-ripple 560ms cubic-bezier(0.16, 0.8, 0.3, 1) forwards",
+  },
+  seekBlades: {
     display: "flex",
     alignItems: "center",
     gap: "1px",
-    color: "#e5a00d",
     lineHeight: 0,
   },
   seekAmount: {
-    fontSize: "13px",
+    fontSize: "clamp(17px, 3.1vw, 26px)",
     fontWeight: 600,
+    lineHeight: 1,
     whiteSpace: "nowrap",
     fontVariantNumeric: "tabular-nums",
     textShadow: "0 1px 3px rgba(0,0,0,0.55)",
+    animation: "seek-amount 200ms cubic-bezier(0.2, 0, 0, 1)",
   },
   overlay: {
     position: "absolute",
@@ -1538,6 +1666,9 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "16px",
     fontFamily: "inherit",
   },
+  /** Same treatment the stats toggle uses, so "this panel is open" reads the
+   *  same way wherever it appears in the bar. */
+  gearBtnActive: { color: "#e5a00d", background: "rgba(229,160,13,0.18)" },
   queueBtn: {
     display: "flex", alignItems: "center", gap: "4px",
     background: "rgba(255,255,255,0.1)", border: "none",

@@ -13,19 +13,6 @@
 
 /** One press. Plex uses the same step, and people arrive here expecting it. */
 const STEP_MS = 50;
-/**
- * As far as this will go in either direction.
- *
- * Two seconds covers a subtitle cut for a different release of the same film —
- * the ordinary reason for a mismatch. Past that the file is for a different cut
- * entirely and no amount of nudging will line it up, so the limit is also a
- * hint to stop trying and pick a different subtitle.
- */
-const LIMIT_MS = 2_000;
-
-export function clampOffset(ms: number): number {
-  return Math.max(-LIMIT_MS, Math.min(LIMIT_MS, Math.round(ms)));
-}
 
 interface SubtitleOffsetProps {
   offsetMs: number;
@@ -34,9 +21,9 @@ interface SubtitleOffsetProps {
 }
 
 export function SubtitleOffset({ offsetMs, onChange, onClose }: SubtitleOffsetProps) {
-  const step = (delta: number) => onChange(clampOffset(offsetMs + delta));
-  const atMin = offsetMs <= -LIMIT_MS;
-  const atMax = offsetMs >= LIMIT_MS;
+  // Deliberately unbounded. A cap would be guessing at how badly out of sync
+  // somebody's file is, and the only person who knows that is watching it.
+  const step = (delta: number) => onChange(offsetMs + delta);
 
   return (
     <div style={styles.panel} role="group" aria-label="Subtitle offset">
@@ -62,18 +49,16 @@ export function SubtitleOffset({ offsetMs, onChange, onClose }: SubtitleOffsetPr
       <div style={styles.row}>
         <button
           className="btn"
-          style={{ ...styles.step, ...(atMin ? styles.stepDisabled : {}) }}
+          style={styles.step}
           onClick={() => step(-STEP_MS)}
-          disabled={atMin}
           title="Show subtitles earlier"
         >
           {"−"}{STEP_MS} ms
         </button>
         <button
           className="btn"
-          style={{ ...styles.step, ...(atMax ? styles.stepDisabled : {}) }}
+          style={styles.step}
           onClick={() => step(STEP_MS)}
-          disabled={atMax}
           title="Show subtitles later"
         >
           +{STEP_MS} ms
@@ -102,21 +87,17 @@ export function SubtitleOffset({ offsetMs, onChange, onClose }: SubtitleOffsetPr
 
 const styles: Record<string, React.CSSProperties> = {
   /**
-   * Upper middle, clear of both the title bar and the subtitles.
+   * Above the button that opened it, at the right-hand end of the control bar.
    *
-   * Deliberately not a modal: lining subtitles up means watching them while you
-   * press, so the picture has to stay visible and playing underneath.
-   *
-   * And deliberately not at the bottom, which is where a panel like this
-   * naturally wants to sit. Subtitles live at the bottom, a two-line cue
-   * reaches up into where the panel would be, and the one thing this control
-   * must never do is cover the text it is adjusting.
+   * Deliberately not a modal: lining subtitles up means watching the subtitles
+   * while you press, so the picture has to stay visible and playing underneath
+   * — and off to one side, so the panel is not sitting on top of the text it is
+   * adjusting.
    */
   panel: {
     position: "absolute",
-    left: "50%",
-    transform: "translateX(-50%)",
-    top: "17%",
+    right: "calc(16px + var(--sair, 0px))",
+    bottom: "22%",
     display: "flex",
     flexDirection: "column",
     alignItems: "center",

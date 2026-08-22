@@ -65,12 +65,28 @@
         22%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
         100% { opacity: 0; transform: translate(-50%, -50%) scale(1.5); }
       }
-      /* Double-tap seek. Three chevrons lit in turn, so the run reads as
-         movement in the direction of travel rather than as three things
-         blinking at once. The delay that staggers them is set per chevron. */
-      @keyframes seek-chevron {
-        0%, 100% { opacity: 0.25; }
-        45%      { opacity: 1; }
+      /* Double-tap seek.
+
+         Three things move, and all three restart on every tap rather than
+         looping: a tap is an event, and an acknowledgement that was already
+         running when you touched the screen does not read as a reply to you.
+
+         The blades brighten in turn so the run travels the way the seek does;
+         the ripple opens from the point that was actually touched; the amount
+         takes a small step up as it changes. */
+      @keyframes seek-blade {
+        0%   { opacity: 0.28; }
+        35%  { opacity: 1; }
+        100% { opacity: 0.55; }
+      }
+      @keyframes seek-ripple {
+        from { transform: translate(-50%, -50%) scale(0.2); opacity: 0.85; }
+        to   { transform: translate(-50%, -50%) scale(2.1); opacity: 0; }
+      }
+      @keyframes seek-amount {
+        0%   { transform: scale(1); }
+        40%  { transform: scale(1.13); }
+        100% { transform: scale(1); }
       }
       /* The wash arrives rather than appearing. Short: it is answering a tap,
          and an acknowledgement that takes its time reads as lag. */
@@ -79,8 +95,10 @@
         to   { opacity: 1; }
       }
       @media (prefers-reduced-motion: reduce) {
-        /* The chevrons still say which way, they just stop chasing each other. */
-        .seek-chevron { animation: none !important; opacity: 1 !important; }
+        /* The direction and the amount still read; nothing chases anything. */
+        .seek-blade { animation: none !important; opacity: 1 !important; }
+        .seek-ripple { display: none !important; }
+        .seek-amount { animation: none !important; }
       }
 
       html {

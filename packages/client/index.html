@@ -65,6 +65,23 @@
         22%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
         100% { opacity: 0; transform: translate(-50%, -50%) scale(1.5); }
       }
+      /* Double-tap seek. Three chevrons lit in turn, so the run reads as
+         movement in the direction of travel rather than as three things
+         blinking at once. The delay that staggers them is set per chevron. */
+      @keyframes seek-chevron {
+        0%, 100% { opacity: 0.25; }
+        45%      { opacity: 1; }
+      }
+      /* The wash arrives rather than appearing. Short: it is answering a tap,
+         and an acknowledgement that takes its time reads as lag. */
+      @keyframes seek-wash {
+        from { opacity: 0; }
+        to   { opacity: 1; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        /* The chevrons still say which way, they just stop chasing each other. */
+        .seek-chevron { animation: none !important; opacity: 1 !important; }
+      }
 
       html {
         scrollbar-width: thin;

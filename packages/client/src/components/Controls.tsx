@@ -41,6 +41,15 @@ interface ControlsProps {
   /** Click on the empty picture area (not a control) — used for click-to-pause.
    *  Omit for a viewer without transport control. */
   onSurfaceClick?: () => void;
+  /**
+   * Told whenever the bar comes up or goes away.
+   *
+   * Only one thing needs this: subtitles drawn by the client sit where the bar
+   * does, and have to move out of its way while it is there. The bar's own
+   * visibility is otherwise nobody else's business, which is why this is a
+   * notification rather than a prop that controls it.
+   */
+  onVisibilityChange?: (visible: boolean) => void;
   /** Where a restart-in-progress is heading, in seconds, or null when playback
    *  is settled. A transcode restart detaches the media and the element reports
    *  0 until the replacement loads, which snapped the bar back to the start
@@ -113,8 +122,33 @@ const HIDE_DELAY_MS = 3000;
  */
 const SKIP_STACK_MS = 700;
 
-/** How long the accumulated total lingers after the seek lands. */
+/** How long the accumulated total is held at full strength after the seek. */
 const SKIP_INDICATOR_LINGER_MS = 400;
+/** And how long it then takes to fade, rather than blinking out of existence. */
+const SKIP_INDICATOR_FADE_MS = 260;
+
+/**
+ * The wash behind a gesture seek: a half-ellipse anchored to the edge the tap
+ * landed on, curving into the middle of the picture.
+ *
+ * The shape is the border-radius, not an element — one side's corners rounded
+ * to 50% turns the zone into a D whose flat edge is the side of the screen and
+ * whose curve faces the centre. That is the shape both the Plex and the YouTube
+ * players draw, and it is what makes the gesture read as "this half of the
+ * picture" rather than as a badge that happens to be over there.
+ *
+ * The fill fades out along the curve so the boundary is a wash rather than a
+ * cut-out. A hard edge here is what turns a shape into a box, and a box half
+ * off the side of the screen is exactly what this replaces.
+ */
+const SEEK_WASH_BACK =
+  "radial-gradient(125% 100% at 0% 50%, rgba(0,0,0,0.50) 0%, rgba(0,0,0,0.42) 55%, rgba(0,0,0,0.12) 92%, rgba(0,0,0,0) 100%)";
+const SEEK_WASH_FORWARD =
+  "radial-gradient(125% 100% at 100% 50%, rgba(0,0,0,0.50) 0%, rgba(0,0,0,0.42) 55%, rgba(0,0,0,0.12) 92%, rgba(0,0,0,0) 100%)";
+/** Rounds the inner edge of the zone into the curve. Outer corners stay square:
+ *  they sit on the side of the screen, where there is nothing to round. */
+const SEEK_WASH_RADIUS_BACK = "0 50% 50% 0 / 0 50% 50% 0";
+const SEEK_WASH_RADIUS_FORWARD = "50% 0 0 50% / 50% 0 0 50%";
 
 /**
  * Phone gestures.
@@ -133,6 +167,89 @@ const TAP_SKIP_SECONDS = 10;
  */
 const TAP_SIDE_ZONE = 0.35;
 
+/** One chevron of the three, pointing the way the seek is going. */
+function SeekChevron({ back, delayMs }: { back: boolean; delayMs: number }) {
+  return (
+    <svg
+      className="seek-chevron"
+      width="15"
+      height="15"
+      viewBox="0 0 16 16"
+      fill="currentColor"
+      aria-hidden="true"
+      style={{
+        animation: `seek-chevron 900ms ${delayMs}ms ease-in-out infinite`,
+        ...(back ? { transform: "scaleX(-1)" } : {}),
+      }}
+    >
+      <path d="M5 2.5L12.5 8L5 13.5V2.5Z" />
+    </svg>
+  );
+}
+
+/**
+ * The answer to a skip, drawn on the half of the picture it applies to.
+ *
+ * Modelled on the Plex and YouTube players: the gesture is a double-tap on one
+ * side of the picture, so the acknowledgement belongs on that side, as a wash
+ * fading inward from that edge with the amount centred inside it.
+ *
+ * What this replaces was a pill pinned 6% from the edge with its contents
+ * flush-aligned. Two things were wrong with that. 6% of the viewport is behind
+ * Discord's own chrome on a phone, so the pill was clipped down the middle; and
+ * flush alignment meant the chevron and the number were pinned to the pill's
+ * edge instead of sitting under one another. Centring inside a zone fixes both
+ * at once — the content lands ~19% in, clear of anything Discord draws.
+ *
+ * The wash is for the gesture only. On a desktop a skip comes from the ±10s
+ * buttons or the arrow keys, where darkening a third of the picture would be a
+ * far louder answer than a button press asks for; there the same chevrons and
+ * count appear on a small pill in the same place.
+ */
+function SeekIndicator({
+  delta,
+  wash,
+  fading,
+}: {
+  delta: number;
+  wash: boolean;
+  fading: boolean;
+}) {
+  const back = delta < 0;
+  // The outermost chevron lights last in the direction of travel, so the run
+  // moves the same way the seek does.
+  const delays = back ? [180, 90, 0] : [0, 90, 180];
+  return (
+    <div
+      style={{
+        ...styles.seekZone,
+        // The same share of the picture that responds to the tap, so the wash
+        // is a picture of the hit zone rather than an approximation of it.
+        width: `${TAP_SIDE_ZONE * 100}%`,
+        ...(back ? { left: 0 } : { right: 0 }),
+        ...(wash
+          ? {
+              background: back ? SEEK_WASH_BACK : SEEK_WASH_FORWARD,
+              borderRadius: back ? SEEK_WASH_RADIUS_BACK : SEEK_WASH_RADIUS_FORWARD,
+              animation: "seek-wash 120ms ease-out",
+            }
+          : {}),
+        opacity: fading ? 0 : 1,
+        transition: `opacity ${SKIP_INDICATOR_FADE_MS}ms ease-out`,
+      }}
+    >
+      <div style={{ ...styles.seekBody, ...(wash ? {} : styles.seekBodyPill) }}>
+        <div style={styles.seekChevrons}>
+          {delays.map((d, i) => (
+            <SeekChevron key={i} back={back} delayMs={d} />
+          ))}
+        </div>
+        <div style={styles.seekAmount}>{Math.abs(delta)} seconds</div>
+      </div>
+    </div>
+  );
+}
+
 export function Controls({
   videoRef,
   handleRef,
@@ -147,6 +264,7 @@ export function Controls({
   onToggleMute,
   onOpenTrackSwitcher,
   onSurfaceClick,
+  onVisibilityChange,
   restartingTo = null,
   onToggleStats,
   statsActive,
@@ -172,6 +290,9 @@ export function Controls({
   const visibleRef = useRef(true);
   visibleRef.current = visible;
   const revealTapRef = useRef(false);
+  const onVisibilityChangeRef = useRef(onVisibilityChange);
+  onVisibilityChangeRef.current = onVisibilityChange;
+  useEffect(() => { onVisibilityChangeRef.current?.(visible); }, [visible]);
   // When and where the last picture tap landed, for the double-tap test below.
   const lastTapRef = useRef<{ at: number; zone: "back" | "forward" | null }>({ at: 0, zone: null });
   const [hoveringProgress, setHoveringProgress] = useState(false);
@@ -195,6 +316,11 @@ export function Controls({
   const skipDeltaRef = useRef(0);
   const skipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const skipClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The indicator is on its way out. Separate from `skipPreview` being null so
+  // the last frame of it can fade rather than being cut, which is the half of
+  // the Plex/YouTube read that a linger alone doesn't give.
+  const [skipFading, setSkipFading] = useState(false);
+  const skipFadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The frame we want (quantized) vs the one that has actually decoded. Two
   // values so a slow load keeps showing the previous frame rather than blanking
   // to an empty box mid-scrub.
@@ -416,18 +542,28 @@ export function Controls({
       skipTimerRef.current = null;
       skipTo(target);
       // Held a beat past the seek so the total doesn't vanish the instant it
-      // is applied, which reads as the click having been dropped.
-      skipClearTimerRef.current = setTimeout(
-        () => setSkipPreview(null),
-        SKIP_INDICATOR_LINGER_MS,
-      );
+      // is applied, which reads as the click having been dropped, and only then
+      // faded out.
+      skipClearTimerRef.current = setTimeout(() => {
+        setSkipFading(true);
+        skipFadeTimerRef.current = setTimeout(() => {
+          setSkipPreview(null);
+          setSkipFading(false);
+        }, SKIP_INDICATOR_FADE_MS);
+      }, SKIP_INDICATOR_LINGER_MS);
     }, SKIP_STACK_MS);
 
-    // A new click during the linger cancels the fade — the burst is continuing.
+    // A new click during the linger or the fade cancels it — the burst is
+    // continuing, and the total it is showing is about to change.
     if (skipClearTimerRef.current !== null) {
       clearTimeout(skipClearTimerRef.current);
       skipClearTimerRef.current = null;
     }
+    if (skipFadeTimerRef.current !== null) {
+      clearTimeout(skipFadeTimerRef.current);
+      skipFadeTimerRef.current = null;
+    }
+    setSkipFading(false);
     resetHideTimer();
   }, [videoRef, canControl, duration, skipTo, resetHideTimer]);
 
@@ -498,6 +634,7 @@ export function Controls({
   useEffect(() => () => {
     if (skipTimerRef.current !== null) clearTimeout(skipTimerRef.current);
     if (skipClearTimerRef.current !== null) clearTimeout(skipClearTimerRef.current);
+    if (skipFadeTimerRef.current !== null) clearTimeout(skipFadeTimerRef.current);
   }, []);
 
   const toggleMute = useCallback(() => {
@@ -791,21 +928,7 @@ export function Controls({
           overlay below: that fades out on idle, and spamming the buttons is
           exactly when you most need to see the running total. */}
       {skipPreview != null && skipPreview.delta !== 0 && (
-        <div
-          style={{
-            ...styles.skipIndicator,
-            ...(skipPreview.delta < 0
-              ? { left: "6%", alignItems: "flex-start" }
-              : { right: "6%", alignItems: "flex-end" }),
-          }}
-        >
-          <div style={styles.skipChevrons}>
-            {skipPreview.delta < 0 ? "«" : "»"}
-          </div>
-          <div style={styles.skipAmount}>
-            {Math.abs(skipPreview.delta)} seconds
-          </div>
-        </div>
+        <SeekIndicator delta={skipPreview.delta} wash={phone} fading={skipFading} />
       )}
 
       <div
@@ -1073,33 +1196,53 @@ export function Controls({
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  skipIndicator: {
+  /**
+   * The side of the picture a skip applies to.
+   *
+   * Full height and a share of the width, with the content centred in it, so
+   * the amount sits well inside the picture instead of against its edge. The
+   * zone is the positioning; whether anything is drawn behind it is the wash,
+   * which only the gesture gets.
+   */
+  seekZone: {
     position: "absolute",
-    top: "50%",
-    transform: "translateY(-50%)",
+    top: 0,
+    bottom: 0,
+    // Width is set by the component, from TAP_SIDE_ZONE.
     display: "flex",
-    flexDirection: "column",
-    gap: "4px",
-    padding: "18px 26px",
-    borderRadius: "999px",
-    background: "rgba(0,0,0,0.55)",
-    backdropFilter: "blur(6px)",
-    color: "#f0f0f0",
+    alignItems: "center",
+    justifyContent: "center",
     pointerEvents: "none",
     // Above the control overlay, which the indicator deliberately outlives.
     zIndex: 11,
   },
-  skipChevrons: {
-    fontSize: "26px",
-    lineHeight: 1,
-    fontWeight: 700,
-    color: "#e5a00d",
+  seekBody: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "6px",
+    color: "#f0f0f0",
   },
-  skipAmount: {
+  /** Desktop, where there is no wash to read the text against. */
+  seekBodyPill: {
+    padding: "14px 22px",
+    borderRadius: "999px",
+    background: "rgba(0,0,0,0.55)",
+    backdropFilter: "blur(6px)",
+  },
+  seekChevrons: {
+    display: "flex",
+    alignItems: "center",
+    gap: "1px",
+    color: "#e5a00d",
+    lineHeight: 0,
+  },
+  seekAmount: {
     fontSize: "13px",
     fontWeight: 600,
     whiteSpace: "nowrap",
     fontVariantNumeric: "tabular-nums",
+    textShadow: "0 1px 3px rgba(0,0,0,0.55)",
   },
   overlay: {
     position: "absolute",

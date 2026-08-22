@@ -44,11 +44,20 @@ export function PlexMediaActions({
   const supportsWatchlist = item.type === "movie" || item.type === "show";
   const supportsWatched = item.inLibrary !== false
     && (item.type === "movie" || item.type === "episode" || item.type === "season" || item.type === "show");
-  const watchedAction = item.type === "season"
-    ? watchedState ? "Mark all episodes in this season unwatched" : "Mark all episodes in this season as watched"
-    : item.type === "show"
-      ? watchedState ? "Mark all episodes in this show unwatched" : "Mark all episodes in this show as watched"
-      : watchedState ? "Mark unwatched" : "Mark as watched";
+  /**
+   * What the control does, named by what it applies to.
+   *
+   * One pattern across all three scopes rather than three phrasings: the older
+   * strings spelled out "all episodes in this show", which repeats the page you
+   * are already on, and dropped the "as" from the unwatched half so the two
+   * directions did not read as a pair. It also has to work as a button label
+   * now, not only as a tooltip — the long form ran to 342px.
+   */
+  const watchedScope = item.type === "season" ? "season "
+    : item.type === "show" ? "show " : "";
+  const watchedAction = watchedState
+    ? `Mark ${watchedScope}as unwatched`
+    : `Mark ${watchedScope}as watched`;
 
   useEffect(() => {
     if (watched != null) setWatchedState(watched);

@@ -2496,6 +2496,71 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
   }
 });
 
+// ─── Scrub previews ─────────────────────────────────────────────
+
+/**
+ * Ceiling on a preview index, as a guard rather than a working limit.
+ *
+ * A BIF carries every preview frame in the file: at Plex's usual ten second
+ * SD interval, a two hour film is around 720 frames of a few kilobytes each.
+ * Nothing real approaches this, and a file that did is not one we should be
+ * relaying into a browser in one piece.
+ */
+const MAX_PREVIEW_INDEX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * GET /api/plex/preview/:partId/index
+ *
+ * The part's whole BIF preview index, relayed as-is for the client to slice.
+ *
+ * The alternative is the per-frame form Plex also offers, and which the player
+ * still falls back to: /library/parts/<id>/indexes/sd/<offsetMs>, one request
+ * per frame. That costs a round trip out to Plex for every distinct position
+ * the cursor rests on, and through Discord's proxy those land well after the
+ * cursor has moved on. One file up front is about the bandwidth of two hundred
+ * of those requests, and makes every frame after it free.
+ */
+router.get("/preview/:partId/index", async (req: Request, res: Response) => {
+  const partId = req.params.partId as string;
+  if (!NUMERIC_RE.test(partId)) {
+    res.status(400).end();
+    return;
+  }
+
+  try {
+    const plexRes = await plexFetch(`/library/parts/${partId}/indexes/sd`);
+    if (!plexRes.ok) {
+      plexRes.body?.cancel().catch(() => {});
+      // 404 is ordinary — it means Plex has not generated previews for this
+      // file. The client reads it as "no frames" rather than as a failure.
+      res.status(plexRes.status === 404 ? 404 : 502).end();
+      return;
+    }
+
+    const declared = plexRes.headers.get("content-length");
+    if (declared && parseInt(declared, 10) > MAX_PREVIEW_INDEX_BYTES) {
+      plexRes.body?.cancel().catch(() => {});
+      res.status(502).end();
+      return;
+    }
+
+    res.setHeader("Content-Type", "application/octet-stream");
+    if (declared) res.setHeader("Content-Length", declared);
+    // The frames for a part never change. The client holds them for the length
+    // of the stream on its own, so this only matters on coming back to the
+    // same episode later.
+    res.setHeader("Cache-Control", "private, max-age=86400");
+    // Streamed rather than buffered: this is the one response on the server
+    // measured in megabytes rather than kilobytes, and it needs no inspection.
+    await pipeBody(plexRes.body, res);
+  } catch (err) {
+    console.error("Preview index error:", err);
+    if (res.headersSent) res.end();
+    else res.status(502).end();
+  }
+});
+
+
 // ─── Image proxy ────────────────────────────────────────────────
 
 /**

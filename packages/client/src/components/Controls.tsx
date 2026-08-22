@@ -180,7 +180,9 @@ const TAP_SIDE_ZONE = 0.35;
  * One shape, mirrored, rather than two drawings. Two hand-drawn arrows can end
  * up pointing the same way or the wrong way round without either looking wrong
  * on its own — mirroring makes that impossible: they are opposite by
- * construction, so getting one right gets both right.
+ * construction, and swapping them is one flag rather than two redraws.
+ *
+ * Back is the mirrored one: its head sits at the top right.
  *
  * The number does not mirror. It sits outside the flipped group, which is the
  * whole reason the arrow is a group at all.
@@ -188,7 +190,7 @@ const TAP_SIDE_ZONE = 0.35;
 function SeekTen({ back }: { back: boolean }) {
   return (
     <svg width="19" height="19" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-      <g transform={back ? undefined : "scale(-1,1) translate(-20,0)"}>
+      <g transform={back ? "scale(-1,1) translate(-20,0)" : undefined}>
         {/* Open at the top; the gap is where the arrowhead goes. */}
         <path
           d="M12.19 4.59A6.4 6.4 0 1 1 7.81 4.59"
@@ -196,7 +198,8 @@ function SeekTen({ back }: { back: boolean }) {
           strokeWidth="1.6"
           strokeLinecap="round"
         />
-        {/* Points away from the gap, so back reads anticlockwise. */}
+        {/* Sits in the gap at the top. Unmirrored this points left, which is
+            the forward icon; back is the mirror of it. */}
         <path d="M4.4 4.6 8.9 2.2v4.8Z" fill="currentColor" />
       </g>
       <text

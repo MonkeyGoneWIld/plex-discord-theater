@@ -10,6 +10,8 @@ import { NextUpButton } from "./NextUpButton";
 import { EndCard } from "./EndCard";
 import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
+import { SubtitleLayer } from "./SubtitleLayer";
+import { SubtitleOffset } from "./SubtitleOffset";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
@@ -510,6 +512,21 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // re-resolved without refetching (and without blanking the skip markers)
   // when the session's file turns out to be a different one.
   const [itemMeta, setItemMeta] = useState<PlexMeta | null>(null);
+  /**
+   * How far this client's own subtitles are shifted, in milliseconds.
+   *
+   * Per viewer and per sitting: it describes one badly-timed subtitle file, not
+   * the person watching, so it is neither sent to the room nor remembered past
+   * the player. It survives an episode change on purpose — a release that is
+   * half a second out is usually half a second out for the whole season.
+   */
+  const [subtitleOffsetMs, setSubtitleOffsetMs] = useState(0);
+  const [showSubtitleOffset, setShowSubtitleOffset] = useState(false);
+  /** Whether the control bar is up — see SubtitleLayer, which moves for it. */
+  const [controlsVisible, setControlsVisible] = useState(true);
+  /** A sidecar that could not be read, so the offer to adjust it is withdrawn
+   *  rather than left pointing at subtitles that never arrived. */
+  const [sidecarFailed, setSidecarFailed] = useState(false);
   // The live session, in state as well as in a ref — the ref is for the
   // listeners, this is what the version lookup below keys on.
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -1260,6 +1277,44 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // otherwise the session's. Undefined resolves to the item's default, which is
   // the same file the server starts when nobody has said otherwise.
   const effectiveMediaIndex = mediaIndex ?? sessionMediaIndex ?? undefined;
+
+  /**
+   * The subtitle this client is on, and whether it is one we draw ourselves.
+   *
+   * `external` means Plex can hand the file over as text, which the server
+   * takes as its cue not to burn it in — see subtitleIsDrawnByClient. Both ends
+   * read the same flag for the same stream id, so they cannot disagree about
+   * who is drawing it and end up showing every line twice or none at all.
+   */
+  const activeSubtitleId = variant?.subtitleStreamId ?? subtitleStreamId ?? 0;
+  const activeSubtitleTrack =
+    itemMeta && itemMeta.ratingKey === item.ratingKey
+      ? versionOf(itemMeta, effectiveMediaIndex).subtitleTracks
+          .find((t) => t.id === activeSubtitleId) ?? null
+      : null;
+  const drawnSubtitleId =
+    activeSubtitleId !== 0 && activeSubtitleTrack?.external ? activeSubtitleId : null;
+
+  // A different subtitle file is a different set of timings, so an offset dialled
+  // in for the last one means nothing here. The panel closes with it: it is only
+  // ever opened against a particular subtitle.
+  const offsetForRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (offsetForRef.current === drawnSubtitleId) return;
+    offsetForRef.current = drawnSubtitleId;
+    setSidecarFailed(false);
+    // Only "no subtitle to draw" clears it. Moving from one sidecar id to
+    // another is almost always the next episode of the same release, where
+    // carrying the offset is the entire point of it — Plex numbers streams per
+    // media part, so the same subtitle track has a different id every episode.
+    // Picking a genuinely different subtitle also keeps it, which is the one
+    // case that is arguably wrong; Reset is one press away, and losing an
+    // offset on an episode change is the more annoying of the two mistakes.
+    if (drawnSubtitleId === null) {
+      setShowSubtitleOffset(false);
+      setSubtitleOffsetMs(0);
+    }
+  }, [drawnSubtitleId]);
 
   /**
    * Describe this client's live pair while its media version is still known.
@@ -3755,7 +3810,24 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         // Undefined when the library has no generated preview thumbnails, so
         // Controls shows a plain timestamp instead of chasing missing images.
         previewPartId={previewPartId ?? undefined}
+        onVisibilityChange={setControlsVisible}
       />
+      {/* Subtitles this client draws, because Plex was told not to burn them
+          in — the only kind there is anything to adjust about. */}
+      <SubtitleLayer
+        streamId={drawnSubtitleId}
+        videoRef={videoRef}
+        offsetMs={subtitleOffsetMs}
+        onUnavailable={() => setSidecarFailed(true)}
+        controlsVisible={controlsVisible}
+      />
+      {showSubtitleOffset && drawnSubtitleId !== null && !sidecarFailed && (
+        <SubtitleOffset
+          offsetMs={subtitleOffsetMs}
+          onChange={setSubtitleOffsetMs}
+          onClose={() => setShowSubtitleOffset(false)}
+        />
+      )}
       {showTrackSwitcher && (
         <TrackSwitcher
           ratingKey={item.ratingKey}
@@ -3776,6 +3848,14 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // answer ("None"), so it is passed through as one.
           currentAudioId={(variant?.audioStreamId ?? currentAudioStreamRef.current) || null}
           currentSubtitleId={variant?.subtitleStreamId ?? currentSubtitleStreamRef.current}
+          // Offered only for a subtitle this client is drawing, which is the
+          // only kind that can be moved. Absent otherwise rather than disabled:
+          // "why is this greyed out" is a worse question than never asking it.
+          subtitleOffsetMs={drawnSubtitleId !== null && !sidecarFailed ? subtitleOffsetMs : null}
+          onAdjustSubtitleTiming={() => {
+            setShowTrackSwitcher(false);
+            setShowSubtitleOffset(true);
+          }}
         />
       )}
       {showQueuePanel && syncState && (

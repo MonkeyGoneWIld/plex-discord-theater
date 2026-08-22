@@ -32,6 +32,13 @@ interface TrackSwitcherProps {
    */
   currentAudioId?: number | null;
   currentSubtitleId?: number | null;
+  /**
+   * The offset currently applied to this client's subtitles, or null when there
+   * is nothing adjustable — subtitles off, or a track Plex burns into the
+   * picture, which is pixels by the time it arrives and cannot be moved.
+   */
+  subtitleOffsetMs?: number | null;
+  onAdjustSubtitleTiming?: () => void;
 }
 
 export function TrackSwitcher({
@@ -42,6 +49,8 @@ export function TrackSwitcher({
   scope = "self",
   currentAudioId,
   currentSubtitleId,
+  subtitleOffsetMs = null,
+  onAdjustSubtitleTiming,
 }: TrackSwitcherProps) {
   const [tab, setTab] = useState<"audio" | "subtitles">("audio");
   const [audioTracks, setAudioTracks] = useState<StreamTrack[]>([]);
@@ -157,6 +166,27 @@ export function TrackSwitcher({
                 </button>
               );
             })}
+            {/* Only for a subtitle the player is drawing itself. A burned-in
+                one is part of the picture by the time it arrives, so there is
+                nothing here that could move it — and a row that opens a panel
+                whose buttons do nothing is worse than no row. */}
+            {subtitleOffsetMs !== null && onAdjustSubtitleTiming && (
+              <button
+                className="btn"
+                onClick={onAdjustSubtitleTiming}
+                style={styles.timingRow}
+              >
+                <div>
+                  <div style={{ color: "#ccc", fontSize: 13 }}>Adjust timing</div>
+                  <div style={{ color: "#666", fontSize: 11 }}>
+                    {subtitleOffsetMs === 0
+                      ? "Subtitles out of sync? Nudge them."
+                      : `Shifted ${subtitleOffsetMs > 0 ? "+" : ""}${subtitleOffsetMs} ms`}
+                  </div>
+                </div>
+                <span style={styles.timingChevron}>{"\u203A"}</span>
+              </button>
+            )}
           </div>
         )}
 
@@ -228,6 +258,22 @@ const styles: Record<string, React.CSSProperties> = {
     background: "rgba(229,160,13,0.12)", border: "1px solid rgba(229,160,13,0.3)",
     cursor: "pointer", textAlign: "left", fontFamily: "inherit", color: "inherit",
   },
+  /** Not a track: an action, so it is separated from the list above it. */
+  timingRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    width: "100%",
+    textAlign: "left",
+    padding: "10px 12px",
+    marginTop: "6px",
+    borderRadius: "8px",
+    border: "none",
+    borderTop: "1px solid rgba(255,255,255,0.08)",
+    background: "transparent",
+    cursor: "pointer",
+  },
+  timingChevron: { color: "#666", fontSize: 16, lineHeight: 1 },
   checkmark: { color: "#e5a00d", fontSize: 12 },
   scopeNote: {
     margin: 0,

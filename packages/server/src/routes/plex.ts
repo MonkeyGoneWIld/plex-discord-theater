@@ -8,6 +8,7 @@ import { logEvent } from "../services/logger.js";
 import { sessionHostUserId, sessionHasOtherWatchers } from "../services/sync.js";
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
+import { parseSubtitles, type Cue } from "../services/subtitles.js";
 
 const router = Router();
 
@@ -97,6 +98,18 @@ interface PlexStream {
   extendedDisplayTitle?: string;
   title?: string;
   selected?: boolean;
+  /**
+   * Present only on a stream Plex can serve as a file of its own — a sidecar
+   * subtitle sitting next to the video, rather than a track muxed inside it.
+   * The value is the path to fetch it from, e.g. "/library/streams/863366".
+   *
+   * This is the whole difference between a subtitle that can be timed-shifted
+   * and one that cannot: a sidecar is text this server can read, and an
+   * embedded track is something only the transcoder ever sees.
+   */
+  key?: string;
+  /** Container of a sidecar: "srt", "ass", "vtt". Absent on embedded streams. */
+  format?: string;
 }
 
 interface PlexPart {
@@ -948,6 +961,23 @@ function mapAudioTracks(streams: PlexStream[]) {
     }));
 }
 
+/**
+ * Subtitle containers this server can turn into WebVTT, and so can hand to the
+ * client to draw itself.
+ *
+ * Text only. An image-based subtitle (PGS, VobSub) is a sequence of bitmaps
+ * that only a renderer can turn into a picture, so those stay with the
+ * transcoder and get burned in like everything else.
+ */
+const TEXT_SUBTITLE_FORMATS = new Set(["srt", "subrip", "vtt", "webvtt", "ass", "ssa", "text"]);
+
+/** Whether this subtitle is a sidecar file this server can read as text. */
+function isSidecarText(s: PlexStream): boolean {
+  if (!s.key) return false;
+  const kind = (s.format || s.codec || "").toLowerCase();
+  return TEXT_SUBTITLE_FORMATS.has(kind);
+}
+
 function mapSubtitleTracks(streams: PlexStream[]) {
   return streams
     .filter((s) => s.streamType === 3)
@@ -958,6 +988,14 @@ function mapSubtitleTracks(streams: PlexStream[]) {
       language: s.language ?? null,
       languageCode: s.languageCode ?? null,
       selected: !!s.selected,
+      /**
+       * Whether the client can fetch and draw this one itself.
+       *
+       * Which is also whether it can be timed against the picture: burned-in
+       * subtitles are pixels in the video frames by the time anyone sees them,
+       * and no amount of asking moves them. See the /subtitles route.
+       */
+      external: isSidecarText(s),
     }));
 }
 
@@ -2370,6 +2408,94 @@ router.put("/streams/:partId", async (req: Request, res: Response) => {
   }
 });
 
+// ─── Sidecar subtitles ──────────────────────────────────────────
+
+/**
+ * A parsed sidecar, kept so repeated opens of the same episode by a roomful of
+ * people cost one read of the file rather than one each. Keyed by stream id,
+ * which is per media part and so never collides across titles.
+ */
+const subtitleCache = new LruMap<string, { cues: Cue[]; at: number }>(200);
+const SUBTITLE_CACHE_TTL_MS = 30 * 60 * 1000;
+
+/** Guard against a "subtitle" that is really a video file. Comfortably larger
+ *  than any real subtitle: a three-hour ASS with full typesetting is ~1 MB. */
+const MAX_SUBTITLE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * GET /api/plex/subtitles/:streamId
+ *
+ * One sidecar subtitle, as cues in seconds.
+ *
+ * The client draws these itself rather than having Plex burn them into the
+ * picture, which is what makes them adjustable: burned subtitles are pixels in
+ * the video frames by the time they arrive, and no amount of asking moves them
+ * relative to the audio. Text can be shifted by adding a number to it.
+ *
+ * Only reachable for streams Plex exposes as files of their own — see
+ * isSidecarText. An embedded track has no `key` to fetch and stays burned in.
+ */
+router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
+  const streamId = req.params.streamId as string;
+  if (!NUMERIC_RE.test(streamId)) {
+    res.status(400).json({ error: "Invalid stream ID" });
+    return;
+  }
+
+  const hit = subtitleCache.get(streamId);
+  if (hit && Date.now() - hit.at < SUBTITLE_CACHE_TTL_MS) {
+    res.json({ cues: hit.cues });
+    return;
+  }
+
+  try {
+    const plexRes = await plexFetch(`/library/streams/${streamId}`);
+    if (!plexRes.ok) {
+      res.status(plexRes.status === 404 ? 404 : 502).json({ error: "Subtitle not available" });
+      return;
+    }
+
+    // Plex does not always send a length for these, so the cap is enforced on
+    // what actually arrived rather than on what was promised.
+    const raw = await plexRes.arrayBuffer();
+    if (raw.byteLength > MAX_SUBTITLE_BYTES) {
+      logEvent("Subtitles", "sidecar too large to be a subtitle", {
+        streamId, bytes: raw.byteLength,
+      });
+      res.status(413).json({ error: "Subtitle too large" });
+      return;
+    }
+
+    // Sidecars are UTF-8 far more often than not, and the ones that are not are
+    // usually Latin-1. Decoding strictly first means a mis-encoded file is
+    // detected rather than silently filled with replacement characters.
+    let body: string;
+    try {
+      body = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+    } catch {
+      body = new TextDecoder("windows-1252").decode(raw);
+    }
+
+    const parsed = parseSubtitles(body);
+    if (!parsed || parsed.cues.length === 0) {
+      logEvent("Subtitles", "sidecar could not be read as text", {
+        streamId, bytes: raw.byteLength, cues: parsed?.cues.length ?? "unparsed",
+      });
+      res.status(415).json({ error: "Unsupported subtitle format" });
+      return;
+    }
+
+    subtitleCache.set(streamId, { cues: parsed.cues, at: Date.now() });
+    logEvent("Subtitles", "sidecar ready to draw", {
+      streamId, format: parsed.format, cues: parsed.cues.length,
+    });
+    res.json({ cues: parsed.cues });
+  } catch (err) {
+    console.error("[Subtitles] fetch error:", err);
+    res.status(502).json({ error: "Failed to fetch subtitle" });
+  }
+});
+
 // ─── Image proxy ────────────────────────────────────────────────
 
 /**
@@ -3241,6 +3367,42 @@ async function selectTracksForStart(
   }
 }
 
+/**
+ * Whether the subtitle this transcode was asked for is one the client draws
+ * itself, and so must NOT also be burned into the picture.
+ *
+ * Decided here rather than by the client, deliberately. Both ends would reach
+ * the same answer from the same metadata, but only one of them can be the one
+ * that decides without a round of agreeing: the client would have to hold the
+ * stream back until metadata arrived, and getting it wrong in either direction
+ * shows — burned *and* drawn is every line twice, neither is no subtitles at
+ * all. The request already names the stream, so the server can answer for it.
+ *
+ * Unknown counts as "burn". A subtitle burned in when it needn't have been is
+ * one nobody can re-time; a subtitle neither burned nor drawn is missing.
+ */
+async function subtitleIsDrawnByClient(
+  ratingKey: string,
+  mediaIndex: number,
+  subtitleStreamID: number | null,
+): Promise<boolean> {
+  if (subtitleStreamID == null || subtitleStreamID === 0) return false;
+  try {
+    const meta = await buildMeta(ratingKey);
+    type Sub = { id: number; external?: boolean };
+    const versions = meta?.versions as
+      | Array<{ mediaIndex?: number; subtitleTracks?: Sub[] }>
+      | undefined;
+    const tracks =
+      versions?.find((v) => v.mediaIndex === mediaIndex)?.subtitleTracks ??
+      (meta?.subtitleTracks as Sub[] | undefined) ??
+      [];
+    return tracks.find((t) => t.id === subtitleStreamID)?.external === true;
+  } catch {
+    return false;
+  }
+}
+
 // ─── HLS streaming ──────────────────────────────────────────────
 
 /**
@@ -3316,8 +3478,10 @@ router.get(
       return;
     }
 
-    // Subtitle mode — "none" when user explicitly disabled subtitles, otherwise "burn"
-    const subtitleMode = req.query.subtitles === "burn" ? "burn" : "none";
+    // What the client asked for: "none" when subtitles are off, otherwise
+    // "burn". Whether burning is what actually happens is settled at start time
+    // — see subtitleIsDrawnByClient.
+    const requestedSubtitleMode = req.query.subtitles === "burn" ? "burn" : "none";
 
     // The tracks this session wants. Present once a room can hold more than one
     // combination at a time: the caller owns a variant and names the audio and
@@ -3335,7 +3499,7 @@ router.get(
     console.log("[HLS] Master manifest requested for ratingKey:", ratingKey, "session:", sessionId.substring(0, 8), offset ? `offset:${offset}s` : "");
 
     // Core manifest fetch logic — wrapped in a promise for in-flight deduplication
-    const fetchManifest = async (): Promise<string> => {
+    const fetchManifest = async (subtitleMode: "burn" | "none"): Promise<string> => {
       const params: Record<string, string> = {
         hasMDE: "1",
         path: `/library/metadata/${ratingKey}`,
@@ -3545,7 +3709,17 @@ router.get(
     // needs, and the decision + start that captures it.
     const promise = withItemLock(ratingKey, async () => {
       await selectTracksForStart(ratingKey, mediaIndex, audioStreamID, subtitleStreamID);
-      return fetchManifest();
+      // A sidecar goes to the client as text instead, so that it can be timed
+      // against the audio. Burning it here as well would draw every line twice.
+      const drawnByClient =
+        requestedSubtitleMode === "burn" &&
+        (await subtitleIsDrawnByClient(ratingKey, mediaIndex, subtitleStreamID));
+      if (drawnByClient) {
+        logEvent("Subtitles", "leaving this one to the client to draw", {
+          ratingKey, subtitleStreamID, session: sessionId.substring(0, 8),
+        });
+      }
+      return fetchManifest(drawnByClient ? "none" : requestedSubtitleMode);
     });
     manifestInFlight.set(sessionId, promise);
 

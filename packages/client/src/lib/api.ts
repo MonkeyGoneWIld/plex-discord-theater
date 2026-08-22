@@ -201,6 +201,15 @@ export interface StreamTrack {
   language?: string | null;
   languageCode?: string | null;
   selected: boolean;
+  /**
+   * Subtitles only: this one is a sidecar text file, so the player draws it
+   * itself instead of Plex burning it into the picture.
+   *
+   * Which is the same thing as saying it can be re-timed. Burned subtitles are
+   * pixels in the video frames by the time they arrive; a drawn one is a list
+   * of cues with numbers on them, and numbers can have an offset added.
+   */
+  external?: boolean;
 }
 
 /**
@@ -604,6 +613,24 @@ export function fetchSiblingEpisodes(
   ratingKey: string,
 ): Promise<{ prev: PlexItem | null; next: PlexItem | null }> {
   return cachedGet(`/api/plex/siblings/${encodeURIComponent(ratingKey)}`);
+}
+
+/** A subtitle cue, in seconds — the units video.currentTime is in. */
+export interface SubtitleCue {
+  start: number;
+  end: number;
+  text: string;
+}
+
+/**
+ * Every cue of one sidecar subtitle.
+ *
+ * Cached, because a roomful of people opening the same episode would otherwise
+ * each pull the same file. Stream ids belong to a media part, so the key is
+ * already unique across titles.
+ */
+export function fetchSubtitleCues(streamId: number): Promise<{ cues: SubtitleCue[] }> {
+  return cachedGet(`/api/plex/subtitles/${encodeURIComponent(String(streamId))}`);
 }
 
 export function hlsMasterUrl(

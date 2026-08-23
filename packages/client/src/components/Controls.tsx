@@ -248,6 +248,16 @@ const REQUEST_SENT_MS = 6000;
  */
 const VOLUME_TRACK_PX = 80;
 
+/**
+ * How long the level stays on screen after the last change to it.
+ *
+ * Long enough to survive the gaps inside a drag — a slow one produces changes
+ * seconds apart — and short enough that letting go clears it. It reads as
+ * "while you are moving it", which is when a number is worth having and the
+ * only time it is.
+ */
+const VOLUME_READOUT_MS = 900;
+
 const BAR_EPISODE_ICON = 18;
 const BAR_SEEK_ICON = 23;
 const SKIP_BTN_PAD_X = 4;
@@ -526,7 +536,13 @@ export function Controls({
   const volumeWrapRef = useRef<HTMLDivElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The volume as this component last saw it, and whether it has seen it at
+  // all — together they tell a change from the first read.
+  const lastLevel = useRef<number | null>(null);
+  const settled = useRef(false);
   const previousVolumeRef = useRef(volume);
+  // Shown only while the level is being changed — see VOLUME_READOUT_MS.
+  const [volumeReadout, setVolumeReadout] = useState(false);
   const [bufferedEnd, setBufferedEnd] = useState(0);
 
   // Mirror the element's volume, whoever changed it. Without this the slider
@@ -541,6 +557,12 @@ export function Controls({
       // the rest of the level lives in the gain node, so the slider would sit
       // at the midpoint however far it had been dragged.
       const level = getLevel(video);
+      // A change rather than the first read. Every route to the volume ends at
+      // this listener — the slider, the mute button, the keyboard — so raising
+      // the readout here covers all of them, and skipping the initial sync
+      // keeps the bar from opening with a number on it.
+      if (settled.current && level !== lastLevel.current) setVolumeReadout(true);
+      lastLevel.current = level;
       setVolume(level);
       setMuted(level === 0);
       // Track the last audible level so unmuting restores it no matter which
@@ -548,9 +570,18 @@ export function Controls({
       if (level > 0) previousVolumeRef.current = level;
     };
     sync();
+    settled.current = true;
     video.addEventListener("volumechange", sync);
     return () => video.removeEventListener("volumechange", sync);
   }, [videoRef]);
+
+  // Take the readout back down once the level stops moving, which is what
+  // letting go of the slider looks like from here.
+  useEffect(() => {
+    if (!volumeReadout) return;
+    const timer = setTimeout(() => setVolumeReadout(false), VOLUME_READOUT_MS);
+    return () => clearTimeout(timer);
+  }, [volumeReadout, volume]);
 
   // Clear the acknowledgement on its own, so a viewer who asked once and was
   // answered by nobody can ask again.
@@ -1626,6 +1657,14 @@ export function Controls({
                   {muted ? "\u{1F507}" : "\u{1F50A}"}
                 </button>
                 <div style={styles.volumeSliderWrap}>
+                  {volumeReadout && (
+                    <span
+                      style={{ ...styles.volumeBadge, ...(boosted ? styles.volumeBadgeBoosted : {}) }}
+                      aria-hidden="true"
+                    >
+                      {volumePercent}%
+                    </span>
+                  )}
                   <input
                     type="range"
                     min="0"
@@ -1635,7 +1674,7 @@ export function Controls({
                     onChange={handleVolume}
                     aria-label="Volume"
                     aria-valuetext={`${volumePercent}%`}
-                    title={boosted ? `Volume ${volumePercent}% — louder than the mix` : `Volume ${volumePercent}%`}
+                    title={`Volume ${volumePercent}%`}
                     style={{ ...styles.volume, accentColor: boosted ? BOOST_ACCENT : "#e5a00d" }}
                   />
                   {/* Where the mix sits, so the neutral point can be found
@@ -2205,6 +2244,34 @@ const styles: Record<string, React.CSSProperties> = {
     height: "1px",
     background: "rgba(255,255,255,0.4)",
     pointerEvents: "none",
+  },
+  /**
+   * The level, while it is being changed.
+   *
+   * Floated over the slider rather than placed beside it: it comes and goes,
+   * and a number that took up room in the row would shove everything sideways
+   * each time it did.
+   */
+  volumeBadge: {
+    position: "absolute",
+    bottom: "calc(100% + 4px)",
+    left: "50%",
+    transform: "translateX(-50%)",
+    padding: "2px 6px",
+    borderRadius: "5px",
+    background: "rgba(0,0,0,0.72)",
+    border: "1px solid rgba(255,255,255,0.14)",
+    color: "#f0f0f0",
+    fontSize: "10px",
+    fontWeight: 700,
+    fontVariantNumeric: "tabular-nums",
+    lineHeight: 1.4,
+    whiteSpace: "nowrap",
+    pointerEvents: "none",
+  },
+  volumeBadgeBoosted: {
+    borderColor: "rgba(255,107,53,0.55)",
+    color: "#ff8f5e",
   },
   /** The popover has room for the number outright, so it always shows one. */
   volumeReadout: {

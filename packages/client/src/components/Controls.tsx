@@ -1444,11 +1444,32 @@ export function Controls({
           </div>
           {/* Right column: everything that is not playback. */}
           <div style={{ ...styles.right, ...styles.side, ...(compact ? styles.rightCompact : {}) }}>
+            {/* Not host-gated: the roster is read-only, and PeoplePanel decides
+                for itself whether to offer role controls. Gating it here meant a
+                viewer had to back out of the video to see who else was watching. */}
+            {onOpenPeople && (
+              <button
+                onClick={onOpenPeople}
+                className="btn"
+                style={styles.peopleBtn}
+                title={isHost ? "People & roles" : "Who's here"}
+              >
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+                  <circle cx="6" cy="5" r="2.4" stroke="currentColor" strokeWidth="1.5"/>
+                  <path d="M1.5 13.5c0-2.2 2-3.6 4.5-3.6s4.5 1.4 4.5 3.6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                  <path d="M11 4.2a2.2 2.2 0 0 1 0 4.2M12.5 13.5c0-1.7-.7-2.9-2-3.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                </svg>
+                {peopleCount != null && peopleCount > 0 && (
+                  <span style={styles.peopleBadge}>{peopleCount}</span>
+                )}
+              </button>
+            )}
             {/* Someone who cannot press pause, asking for one.
 
                 A raised hand rather than a pause glyph, and over here with the
                 other things that are not playback rather than in the middle
-                where the transport sits. Both for the same reason: this does
+                where the transport sits. Between the roster and the stats:
+                next to the people it is addressed to. Both for the same reason: this does
                 not pause anything, it asks a person to, and it should not be
                 wearing the shape or standing in the place of the control that
                 does. A hand is what you put up when you want the room to stop,
@@ -1492,26 +1513,6 @@ export function Controls({
                     strokeLinejoin="round"
                   />
                 </svg>
-              </button>
-            )}
-            {/* Not host-gated: the roster is read-only, and PeoplePanel decides
-                for itself whether to offer role controls. Gating it here meant a
-                viewer had to back out of the video to see who else was watching. */}
-            {onOpenPeople && (
-              <button
-                onClick={onOpenPeople}
-                className="btn"
-                style={styles.peopleBtn}
-                title={isHost ? "People & roles" : "Who's here"}
-              >
-                <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
-                  <circle cx="6" cy="5" r="2.4" stroke="currentColor" strokeWidth="1.5"/>
-                  <path d="M1.5 13.5c0-2.2 2-3.6 4.5-3.6s4.5 1.4 4.5 3.6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-                  <path d="M11 4.2a2.2 2.2 0 0 1 0 4.2M12.5 13.5c0-1.7-.7-2.9-2-3.4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-                </svg>
-                {peopleCount != null && peopleCount > 0 && (
-                  <span style={styles.peopleBadge}>{peopleCount}</span>
-                )}
               </button>
             )}
             {onToggleStats && (

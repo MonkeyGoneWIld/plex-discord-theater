@@ -10,12 +10,14 @@ import { NextUpButton } from "./NextUpButton";
 import { EndCard } from "./EndCard";
 import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
+import { TransportRequestCard } from "./TransportRequestCard";
 import { SubtitleLayer } from "./SubtitleLayer";
 import { SubtitleOffset } from "./SubtitleOffset";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
+import { getLevel, setLevel, MAX_LEVEL } from "../lib/audioBoost";
 import { describeWatched, loadAudioPref, loadSubtitlePref, mergeTrackPrefs, saveTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { roomPositionNow } from "../hooks/useSync";
@@ -53,6 +55,29 @@ const STARVED_BUFFER_S = 1.5;
 const STARVED_OFFER_MS = 20_000;
 /** How often the check below runs. */
 const STARVED_POLL_MS = 1_000;
+
+/**
+ * How long an unanswered pause request stays on screen.
+ *
+ * It is a question about this moment. Left up, it becomes a button sitting in
+ * the corner of somebody's film that pauses it twenty minutes later for a
+ * reason nobody remembers.
+ */
+const TRANSPORT_REQUEST_TTL_MS = 45_000;
+
+/**
+ * Shortcuts that must not act again while the key is held.
+ *
+ * Every one of them is a toggle, and a toggle on auto-repeat flips its own
+ * state as fast as the OS sends the event — around thirty times a second.
+ * Holding space did not pause, it strobed, and each flip went out to everyone
+ * in the room as a pause or a resume.
+ *
+ * The arrows are deliberately not in here. Holding one of those is a feature:
+ * seeking stacks the repeats into a single jump (see queueSkip) and volume
+ * ramps smoothly, which is what holding a key is supposed to feel like.
+ */
+const NO_REPEAT_KEYS = new Set([" ", "m", "M", "i", "I"]);
 /**
  * Drift past which a viewer is yanked into place with a seek rather than eased
  * there — see the soft-sync constants below.
@@ -91,6 +116,32 @@ const MAX_VIEWER_RETRIES = 3;
 const MAX_NETWORK_RETRIES = 5;
 /** Consecutive hls.js media-error recoveries before we stop nudging and rebuild. */
 const MAX_MEDIA_ERROR_RECOVERIES = 3;
+
+/**
+ * How often to check whether the playhead has stopped moving with nothing
+ * buffered in front of it, and how many checks in a row it takes to act.
+ *
+ * The health sampler already spotted this condition and logged it, once, and
+ * then left the stream wedged — it is a diagnostic, on a ten second tick,
+ * which is far too slow to be a remedy. This is the remedy, on its own timer.
+ *
+ * Two consecutive checks rather than one: a single tick can catch a legitimate
+ * gap — the moment after a seek, a fragment boundary — and restarting the
+ * loader for that would cost more than it saved.
+ */
+const WEDGE_CHECK_MS = 2_000;
+const WEDGE_CHECKS_BEFORE_ACTING = 2;
+
+/**
+ * Attempts before giving the stream back to the error paths, and the quiet
+ * period that earns a fresh budget.
+ *
+ * Same shape as the media-error escalation above, for the same reason: a
+ * stream that recovers, breaks, recovers, forever is worse than one that
+ * fails, because nobody is told.
+ */
+const MAX_WEDGE_RECOVERIES = 3;
+const WEDGE_RESET_MS = 60_000;
 /** Clean playback for this long means the next media error starts a fresh budget. */
 const MEDIA_ERROR_RESET_MS = 60_000;
 // After an in-place seek to an unbuffered position, how long to wait for
@@ -469,6 +520,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // freeze must produce one diagnostic, not one per tick.
   const lastTickTimeRef = useRef(-1);
   const stallLoggedRef = useRef(false);
+  // The wedge watchdog's own state: consecutive stuck checks, where the
+  // playhead was when we last looked, how many times we have intervened, and
+  // when the last intervention was.
+  const wedgeTicksRef = useRef(0);
+  const wedgeLastPosRef = useRef(-1);
+  const wedgeRecoveriesRef = useRef(0);
+  const wedgeLastAtRef = useRef(0);
   // Plex intro/credits markers for the current item, and whichever one the
   // playhead currently sits inside (null when outside every window).
   const [markers, setMarkers] = useState<SkipMarker[]>([]);
@@ -615,6 +673,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // the dep that triggered it rather than just appearing in the log.
   const hlsDepsRef = useRef<Record<string, unknown> | null>(null);
   const healthIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** The wedge watchdog's timer — see WEDGE_CHECK_MS. */
+  const wedgeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // When the viewer first noticed it was seeking without getting anywhere, and
   // when it last actually moved the playhead to follow the room. Together these
   // stop the heartbeat from cancelling its own seek every 5s.
@@ -625,6 +685,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // is not describing a live transcode.
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartPendingRef = useRef(false);
+  /** Whether the element was paused when the pipeline was last torn down.
+   *  Null on a first build, and after being consumed. */
+  const pausedBeforeRebuildRef = useRef<boolean | null>(null);
   // When the in-flight restart was committed, and when we first started holding
   // a newer target back for it. Both exist so neither wait can last forever —
   // see isRestartPending and the commit below.
@@ -733,6 +796,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // Session ownership stays strictly host-only (ownsSessionRef above): a co-host
   // never pings or stops the Plex transcode.
   const canControl = isHost || (syncState?.isCoHost ?? false);
+  const transportRequest = canControl ? syncState?.transportRequest ?? null : null;
   const canControlRef = useRef(canControl);
   canControlRef.current = canControl;
 
@@ -1185,6 +1249,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       clearInterval(healthIntervalRef.current);
       healthIntervalRef.current = null;
     }
+    if (wedgeIntervalRef.current !== null) {
+      clearInterval(wedgeIntervalRef.current);
+      wedgeIntervalRef.current = null;
+    }
     // Deliberately does NOT clear sessionRegisteredRef: the recovery paths call
     // this and then decide whether to stop the session, and they need the flag
     // to still describe the session they just tore down. The HLS effect resets
@@ -1217,13 +1285,14 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
 
   // Apply the remembered volume, and persist any later change. One listener on
   // the element covers every source — the Controls slider, the mute button and
-  // the keyboard shortcuts all write video.volume — so nothing else needs to
-  // know about persistence.
+  // the keyboard shortcuts all go through setLevel, which fires volumechange
+  // even for the part of the level video.volume cannot hold — so nothing else
+  // needs to know about persistence.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    video.volume = loadVolume();
-    const onVolumeChange = () => saveVolume(video.volume);
+    setLevel(video, loadVolume());
+    const onVolumeChange = () => saveVolume(getLevel(video));
     video.addEventListener("volumechange", onVolumeChange);
     return () => video.removeEventListener("volumechange", onVolumeChange);
   }, []);
@@ -1387,6 +1456,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     setPrevEpisode(null);
     setInSeries(false);
     setDismissedFor(null);
+    // A different title is a start, not a rebuild — whatever the last one was
+    // doing has nothing to say about it.
+    pausedBeforeRebuildRef.current = null;
     // Must reset: `ended` latches nearEnd true, and without clearing it here the
     // card would appear instantly at the start of the episode we just advanced to.
     setPlaybackEnded(false);
@@ -1408,6 +1480,31 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       .finally(() => { if (!cancelled) setSiblingsResolved(true); });
     return () => { cancelled = true; };
   }, [item.ratingKey]);
+
+  /**
+   * Put the request card down again, without anyone having to.
+   *
+   * Two ways it stops being a question. The room does what was asked, however
+   * that happened — the host pressing pause for their own reasons answers
+   * "could you pause?" just as well as pressing it for the person who asked.
+   * Or long enough passes that it is no longer about this moment: a card that
+   * outlives what prompted it is a card that gets pressed by accident twenty
+   * minutes later.
+   */
+  useEffect(() => {
+    if (!transportRequest) return;
+    const roomPlaying = syncState?.playing ?? false;
+    const satisfied = transportRequest.action === "pause" ? !roomPlaying : roomPlaying;
+    if (satisfied) {
+      syncActionsRef.current?.clearTransportRequest();
+      return;
+    }
+    const timer = setTimeout(
+      () => syncActionsRef.current?.clearTransportRequest(),
+      TRANSPORT_REQUEST_TTL_MS,
+    );
+    return () => clearTimeout(timer);
+  }, [transportRequest, syncState?.playing]);
 
   // Single HLS session — no mid-stream switching
   useEffect(() => {
@@ -1902,9 +1999,35 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             followingRoom &&
             sync?.playing === false &&
             sync?.ratingKey === itemRef.current.ratingKey;
-          if (roomPaused) {
-            logEvent("HLS", "manifest ready but room is paused — holding", {
+          /**
+           * The host's own paused state, carried across its own rebuild.
+           *
+           * The room check above cannot cover this. A host is not following the
+           * room, it *is* the room — so seeking while paused rebuilt the
+           * transcode, played it here, and then announced the new stream, which
+           * told everybody else to play as well. A seek nobody asked to resume
+           * resumed the film, for the whole room.
+           *
+           * Captured at teardown rather than inferred, because only the element
+           * knows: a seek that stays inside the buffer never rebuilds at all,
+           * and the same rebuild happens for a track change, a retry and an
+           * adoption. Cleared on read, and again when the item changes, so a
+           * pause can never outlive the thing it was about.
+           */
+          const roomSaysPlaying =
+            sync?.playing === true && sync?.ratingKey === itemRef.current.ratingKey;
+          // Anything that told the room to run in the meantime outranks what
+          // the element was doing when we tore it down — pressing play while a
+          // seek restart is still loading is the case, and holding there would
+          // ignore the one instruction the person actually gave.
+          const rebuildPaused =
+            !roomSaysPlaying && pausedBeforeRebuildRef.current === true;
+          pausedBeforeRebuildRef.current = null;
+          const holding = roomPaused || rebuildPaused;
+          if (holding) {
+            logEvent("HLS", "manifest ready but playback is paused — holding", {
               session: sessionId?.substring(0, 8),
+              because: roomPaused ? "room" : "rebuild",
               roomPosS: syncStateRef.current?.position ?? "none",
             });
             setBuffering(false);
@@ -1915,7 +2038,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // Host: broadcast play with sessionId when manifest is ready. Skip it
           // when adopting an already-live session — the room is already on it,
           // and "play" would reset everyone's position to 0.
-          announceStream(sessionId!, startOffset, sessionOwner);
+          //
+          // The room is told whether to run it, not just what it is: announcing
+          // a rebuild we are deliberately holding must not start everyone else.
+          announceStream(sessionId!, startOffset, sessionOwner, !holding);
         });
 
         // Clear error banner and reset retry count when recovery succeeds
@@ -2365,6 +2491,80 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           stallLoggedRef.current = false;
         }
       }, HEALTH_SAMPLE_MS);
+
+      /**
+       * Get a wedged playhead moving again.
+       *
+       * The case this exists for: hls.js sitting in FRAG_LOADING on a fragment
+       * its loader never delivers. Seen once in a night of logs, at a host
+       * handover — stream ownership moves between two clients, the incoming
+       * one's source flips from peer to origin mid-flight, and the fragment
+       * under the playhead falls into the gap. The engine had already loaded
+       * three segments past it and was idle; hls.js was still waiting for the
+       * one it asked for. Twenty-five seconds, ended by nothing in particular.
+       *
+       * Two escalating nudges, both cheap, because there is no buffer left to
+       * protect at this point:
+       *
+       *   startLoad(playhead) re-points the loader at where we actually are,
+       *   which is the documented way out of a stuck fragment request.
+       *
+       *   A hair of a seek, if that did not take. It costs a frame and forces
+       *   the whole request path to be rebuilt around a new position, which
+       *   catches the case where the loader is wedged on something startLoad
+       *   is happy to keep waiting for.
+       *
+       * Past that it stops and lets the error paths have it — they can rebuild
+       * the pipeline, which this deliberately does not.
+       */
+      wedgeIntervalRef.current = setInterval(() => {
+        const v = videoRef.current;
+        const hls = hlsRef.current;
+        if (!v || !hls) return;
+
+        const moved = v.currentTime !== wedgeLastPosRef.current;
+        wedgeLastPosRef.current = v.currentTime;
+        // currentTime > 1 excludes cold start, where sitting at zero while the
+        // first segments arrive is buffering rather than a wedge.
+        const stuck = v.currentTime > 1 && !v.paused && !v.seeking
+          && !moved && bufferAheadSeconds(v) < 1;
+        if (!stuck) {
+          wedgeTicksRef.current = 0;
+          return;
+        }
+        if (++wedgeTicksRef.current < WEDGE_CHECKS_BEFORE_ACTING) return;
+        wedgeTicksRef.current = 0;
+
+        if (Date.now() - wedgeLastAtRef.current > WEDGE_RESET_MS) {
+          wedgeRecoveriesRef.current = 0;
+        }
+        wedgeLastAtRef.current = Date.now();
+        wedgeRecoveriesRef.current++;
+
+        if (wedgeRecoveriesRef.current > MAX_WEDGE_RECOVERIES) {
+          logError("Stall", "wedge recovery exhausted, leaving it to the error paths", {
+            attempts: wedgeRecoveriesRef.current - 1,
+            ...snapshot(v),
+          });
+          return;
+        }
+
+        const nudge = wedgeRecoveriesRef.current > 1;
+        logWarn("Stall", nudge ? "wedged, nudging the playhead" : "wedged, restarting the loader", {
+          attempt: wedgeRecoveriesRef.current,
+          max: MAX_WEDGE_RECOVERIES,
+          ...hlsLoadingState(hls),
+          ...snapshot(v),
+        });
+        try {
+          hls.startLoad(v.currentTime);
+          if (nudge) v.currentTime = v.currentTime + 0.1;
+        } catch (err) {
+          logWarn("Stall", "wedge recovery threw", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }, WEDGE_CHECK_MS);
     }
 
     start();
@@ -2381,6 +2581,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         canvasRef.current = held;
         setHoldingFrame(true);
       }
+      // And the play state with it, for the same reason: whatever comes next is
+      // a rebuild of what was already here, so it should come back the way it
+      // went away. Read at manifest-ready above.
+      pausedBeforeRebuildRef.current = videoRef.current?.paused ?? null;
       destroyLocal();
       if (restartTimerRef.current !== null) {
         clearTimeout(restartTimerRef.current);
@@ -2874,6 +3078,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     sessionId: string,
     startOffset: number,
     startedAsOwner = ownsSessionRef.current,
+    /** False when this stream was rebuilt without being started — see the
+     *  manifest-ready branch that holds a paused rebuild. */
+    playing = true,
   ) => {
     // `startedAsOwner` is captured by the HLS start. It stays authoritative if
     // a late assignment for the preceding title lands while the new manifest
@@ -2913,6 +3120,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         offset, undefined,
         currentAudioStreamRef.current ?? audioStreamId ?? 0,
         currentSubtitleStreamRef.current ?? subtitleStreamId ?? 0,
+        playing,
       );
       return;
     }
@@ -3183,6 +3391,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       // Chords with Ctrl/Cmd/Alt belong to the browser or OS (Ctrl+Shift+I =
       // DevTools, Ctrl+Shift+M = device toolbar) — never treat them as ours
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      // Held down. Swallowed rather than ignored, so holding space still does
+      // not scroll the page behind the player — only the toggle is skipped.
+      if (e.repeat && NO_REPEAT_KEYS.has(e.key)) {
+        e.preventDefault();
+        return;
+      }
 
       switch (e.key) {
         case "i":
@@ -3209,24 +3423,29 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           controlsRef.current?.queueSkip(10);
           break;
         case "m":
-        case "M":
+        case "M": {
           e.preventDefault();
-          if (video.volume > 0) {
-            (video as any).__prevVolume = video.volume;
-            video.volume = 0;
+          const level = getLevel(video);
+          if (level > 0) {
+            (video as any).__prevVolume = level;
+            setLevel(video, 0);
           } else {
             // Fall back to the remembered level rather than full volume — this
             // path is hit when something else (the slider) did the muting.
-            video.volume = (video as any).__prevVolume ?? loadVolume();
+            setLevel(video, (video as any).__prevVolume ?? loadVolume());
           }
           break;
+        }
         case "ArrowUp":
           e.preventDefault();
-          video.volume = Math.min(1, video.volume + 0.1);
+          // Past 1 as well: the arrows reach everything the slider does, so a
+          // quiet film can be turned up from the keyboard without hunting for
+          // the bar.
+          setLevel(video, Math.min(MAX_LEVEL, getLevel(video) + 0.1));
           break;
         case "ArrowDown":
           e.preventDefault();
-          video.volume = Math.max(0, video.volume - 0.1);
+          setLevel(video, Math.max(0, getLevel(video) - 0.1));
           break;
       }
     };
@@ -3800,6 +4019,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         onToggleStats={() => setShowStats((s) => !s)}
         statsActive={showStats}
         canControl={canControl}
+        // Only for someone who cannot press pause themselves — the control
+        // hides itself on the strength of this being absent.
+        onRequestTransport={
+          !canControl && syncActions ? syncActions.sendTransportRequest : undefined
+        }
         onSyncPause={canControl ? syncActions?.sendPause : undefined}
         onSyncResume={canControl ? syncActions?.sendResume : undefined}
         onSyncSeek={canControl ? syncActions?.sendSeek : undefined}
@@ -3977,8 +4201,30 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       {/* Bottom-right stack: owns placement so neither child positions itself and
           a third affordance costs one line. Bottom-anchored, so it grows upward
           and the skip button naturally sits above the card. */}
-      {(showSkip || showNextUp) && (
+      {(showSkip || showNextUp || transportRequest) && (
         <div style={styles.bottomRightStack}>
+          {transportRequest && (
+            <TransportRequestCard
+              action={transportRequest.action}
+              fromUsername={transportRequest.fromUsername}
+              onAccept={() => {
+                const video = videoRef.current;
+                const wantPause = transportRequest.action === "pause";
+                // Only if it is not already how they asked for it: the card can
+                // outlive the state it was about by a frame or two, and pausing
+                // an already-paused video would broadcast a spurious command.
+                if (video && wantPause && !video.paused) {
+                  video.pause();
+                  syncActions?.sendPause(video.currentTime);
+                } else if (video && !wantPause && video.paused) {
+                  void video.play();
+                  syncActions?.sendResume(video.currentTime);
+                }
+                syncActions?.clearTransportRequest();
+              }}
+              onDismiss={() => syncActions?.clearTransportRequest()}
+            />
+          )}
           {showSkip && (
             <SkipMarkerButton type={activeMarker!.type} onSkip={handleSkipMarker} />
           )}

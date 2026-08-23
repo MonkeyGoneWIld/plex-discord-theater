@@ -3,6 +3,7 @@ import { authUrl, fetchPerson, type PersonDetail as Person, type PlexItem } from
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { PosterShelf, shelfStyles } from "./PosterShelf";
 import { SkeletonBlock } from "./SkeletonBlock";
+import { QUIET_SURFACE } from "../lib/surface";
 
 interface PersonDetailProps {
   /** The key this page is fetched by — every credit carries a name, where tag
@@ -235,6 +236,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#0d0d0d",
   },
   backBtn: {
+    ...QUIET_SURFACE,
     position: "relative",
     zIndex: 10,
     margin: "20px 0 0 24px",
@@ -243,8 +245,6 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "4px",
     padding: "8px 16px 8px 10px",
     borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.1)",
-    background: "rgba(255,255,255,0.06)",
     color: "#ddd",
     fontSize: "14px",
     fontFamily: "inherit",

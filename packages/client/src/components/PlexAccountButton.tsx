@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { QUIET_SURFACE } from "../lib/surface";
 import plexMark from "../assets/plex-mark.svg";
 import {
   fetchPlexAccountStatus,
@@ -271,15 +272,17 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
 
 const styles: Record<string, React.CSSProperties> = {
   trigger: {
+    ...QUIET_SURFACE,
     display: "inline-flex", alignItems: "center", gap: "6px", padding: "5px 9px",
-    borderRadius: "999px", border: "1px solid rgba(255,255,255,0.10)",
-    background: "transparent", color: "#9a9a9a", cursor: "pointer",
+    borderRadius: "999px", color: "#9a9a9a", cursor: "pointer",
     fontFamily: "inherit", fontSize: "12px", fontWeight: 600, whiteSpace: "nowrap",
     transition: "border-color 0.15s ease, color 0.15s ease, background 0.15s ease",
   },
+  /** Linked: the same surface, wearing the accent on its edge. Only the
+   *  border and the colour change, so the fill stays the one every quiet
+   *  button uses. */
   triggerLinked: {
     color: "#e5a00d", border: "1px solid rgba(229,160,13,0.3)",
-    background: "rgba(255,255,255,0.05)",
   },
   plexMark: {
     display: "inline-flex", alignItems: "center", justifyContent: "center",

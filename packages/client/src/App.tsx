@@ -17,6 +17,7 @@ import { loadAudioPref, loadSubtitlePref, matchAudioTrack, matchSubtitleTrack } 
 import { useMediaQuery, MOBILE_LANDSCAPE_QUERY, NARROW_QUERY, PHONE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem } from "./hooks/useSync";
+import { QUIET_SURFACE } from "./lib/surface";
 
 /**
  * The player, and everything only it needs, in a separate chunk.
@@ -1018,8 +1019,12 @@ export function App() {
           key={view.item.ratingKey}
           item={view.item}
           onSelectSeason={handleShowSeason}
-          // Resume jumps straight to the episode; the breadcrumb synthesizes the
-          // show and season it skipped past, so Back still walks up properly.
+          // The play button starts the episode outright for whoever can start
+          // one. Everybody else lands on the episode's page, where the breadcrumb
+          // synthesizes the show and season it skipped past so Back still walks
+          // up properly — and where a viewer can suggest it instead.
+          canPlay={effectiveIsHost}
+          onPlay={handlePlay}
           onSelectEpisode={handleSeasonEpisode}
           onSelect={handleSelectRelated}
           onSelectPerson={handleSelectPerson}
@@ -1347,10 +1352,9 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
   },
   suggestionDismissBtn: {
+    ...QUIET_SURFACE,
     padding: "6px 14px",
     borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.15)",
-    background: "transparent",
     color: "#888",
     fontSize: "12px",
     fontFamily: "inherit",

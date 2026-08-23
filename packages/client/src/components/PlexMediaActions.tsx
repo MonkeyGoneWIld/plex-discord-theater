@@ -9,6 +9,7 @@ import {
   type HistoryEntry,
   type PlexItem,
 } from "../lib/api";
+import { GHOST_SURFACE } from "../lib/surface";
 
 interface PlexMediaActionsProps {
   item: PlexItem;
@@ -243,11 +244,12 @@ const styles: Record<string, React.CSSProperties> = {
    *  button on a wide screen and wraps under it on a narrow one, and reads as
    *  the quieter of the two either way. */
   labelledButton: {
+    // Beside Play — see GHOST_SURFACE.
+    ...GHOST_SURFACE,
     display: "inline-flex", alignItems: "center", gap: "9px",
     // 44px, the same floor the episode list's control is held to. It is a
     // primary way to change state on a phone, and it was 4px short of it.
     height: "44px", padding: "0 18px 0 13px", borderRadius: "999px",
-    border: "1px solid rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.06)",
     color: "#d6d6d6", cursor: "pointer", fontFamily: "inherit",
     fontSize: "14px", fontWeight: 500, whiteSpace: "nowrap",
     transition: "background 0.15s ease, color 0.15s ease, opacity 0.15s ease",

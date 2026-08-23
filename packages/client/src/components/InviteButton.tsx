@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { QUIET_SURFACE } from "../lib/surface";
 import type { InviteResult } from "../hooks/useDiscord";
 
 interface InviteButtonProps {
@@ -91,8 +92,7 @@ const base: React.CSSProperties = {
   // rectangle in a lighter tone it read as the loudest thing up there, which
   // is not what a secondary action should be doing.
   borderRadius: "999px",
-  border: "1px solid rgba(255,255,255,0.10)",
-  background: "transparent",
+  ...QUIET_SURFACE,
   color: "#9a9a9a",
   fontFamily: "inherit",
   fontWeight: 600,

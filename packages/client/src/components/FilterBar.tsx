@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import type { Genre } from "../lib/api";
+import { QUIET_SURFACE } from "../lib/surface";
 
 const SORT_OPTIONS = [
   { value: "titleSort:asc", label: "Title A-Z" },
@@ -187,12 +188,11 @@ const styles: Record<string, React.CSSProperties> = {
     position: "relative",
   },
   dropdownBtn: {
+    ...QUIET_SURFACE,
     display: "flex",
     alignItems: "center",
     padding: "7px 14px",
     borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.08)",
-    background: "rgba(255,255,255,0.04)",
     color: "#888",
     cursor: "pointer",
     fontSize: "13px",
@@ -276,10 +276,9 @@ const styles: Record<string, React.CSSProperties> = {
     background: "rgba(229,160,13,0.08)",
   },
   clearBtn: {
+    ...QUIET_SURFACE,
     padding: "7px 14px",
     borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.06)",
-    background: "transparent",
     color: "#666",
     cursor: "pointer",
     fontSize: "12px",

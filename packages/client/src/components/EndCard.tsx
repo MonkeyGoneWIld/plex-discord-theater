@@ -1,4 +1,5 @@
 import { stillThumbUrl } from "../lib/api";
+import { QUIET_SURFACE } from "../lib/surface";
 
 /** Only what this card draws. Structural on purpose: what comes next is a
  *  QueueItem when the host queued it and a PlexItem when it was resolved from
@@ -185,10 +186,9 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
   },
   exitBtn: {
+    ...QUIET_SURFACE,
     padding: "15px 30px",
     borderRadius: "9px",
-    border: "1px solid rgba(255,255,255,0.16)",
-    background: "rgba(255,255,255,0.06)",
     color: "#ddd",
     fontSize: "17px",
     fontWeight: 600,

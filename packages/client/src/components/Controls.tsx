@@ -111,15 +111,30 @@ const PREVIEW_BUCKET_MS = 10_000;
 const PREVIEW_THROTTLE_MS = 120;
 
 /**
- * How long to leave the connection to the video before pulling the frames.
+ * How much video has to be buffered ahead before the preview index may use the
+ * connection — and the level it has to stay above to go on using it.
  *
- * The whole preview index arrives in one request, which is the point, but it
- * is also the largest single thing this client asks for. The first seconds of
- * playback are when the buffer is emptiest and a stall is most likely, and
- * nobody scrubs a stream they have not started watching yet — so the frames
- * wait until the video has had the pipe to itself for a moment.
+ * This was a four second delay, on the reasoning that the first moments of
+ * playback are when a stall is likeliest. That reasoning was right and the
+ * mechanism was wrong: a wall-clock delay knows nothing about how the download
+ * is going. A client that joined a room mid-film, eleven seconds after
+ * pressing play, was 28.8MB into a preview index with 5.9 seconds of video
+ * buffered — and the index won. Its buffer went 5.97 → 4.17 → 2.68 → 0.11 and
+ * it stalled one second before the room handed it the host role.
+ *
+ * A gate rather than a delay, then, and one that keeps applying: the read loop
+ * below stops pulling whenever the buffer drops under this, and the fetch
+ * stops with it, because an unread response body applies backpressure all the
+ * way down to the socket. Video first, always; the frames get what is left.
+ *
+ * 30s against a 120s maxBufferLength — high enough that pulling tens of
+ * megabytes cannot starve the playhead, low enough to be reached in ordinary
+ * playback rather than only when parked.
  */
-const PREVIEW_PREFETCH_DELAY_MS = 4000;
+const PREVIEW_MIN_BUFFER_S = 30;
+
+/** How often to look again while the buffer is under that. */
+const PREVIEW_BUFFER_POLL_MS = 500;
 
 /**
  * How many decoded frames to keep. Scrubbing back over ground you've already
@@ -1004,7 +1019,35 @@ export function Controls({
     const abort = new AbortController();
     const reader = createPreviewFrameReader();
 
+    /**
+     * Seconds of video buffered past the playhead.
+     *
+     * A video with nothing loaded yet reports no headroom rather than infinite
+     * — the gate should wait for it to fill, not race it.
+     */
+    const headroom = (): number => {
+      const video = videoRef.current;
+      if (!video) return 0;
+      const at = video.currentTime;
+      for (let i = 0; i < video.buffered.length; i++) {
+        if (video.buffered.start(i) <= at && at <= video.buffered.end(i)) {
+          return video.buffered.end(i) - at;
+        }
+      }
+      return 0;
+    };
+
+    const waitForHeadroom = async () => {
+      while (!cancelled && headroom() < PREVIEW_MIN_BUFFER_S) {
+        await new Promise((r) => setTimeout(r, PREVIEW_BUFFER_POLL_MS));
+      }
+    };
+
     const read = async () => {
+      // Before the request, not only between reads: opening the connection at
+      // all is what starts the competition.
+      await waitForHeadroom();
+      if (cancelled) return;
       const res = await fetch(
         authUrl(`/api/plex/preview/${previewPartId}/index`),
         { signal: abort.signal },
@@ -1012,7 +1055,14 @@ export function Controls({
       if (!res.ok || !res.body) return;
       const body = res.body.getReader();
       let bytes = 0;
+      let waits = 0;
       for (;;) {
+        // Not reading is how this yields: an unread body backs pressure up
+        // through the stream to the socket, so the bytes stop arriving rather
+        // than piling up in a buffer somewhere out of sight.
+        const before = performance.now();
+        await waitForHeadroom();
+        if (performance.now() - before > PREVIEW_BUFFER_POLL_MS) waits++;
         const { done, value } = await body.read();
         if (done || cancelled) break;
         if (!value) continue;
@@ -1037,17 +1087,18 @@ export function Controls({
       if (!cancelled) {
         logEvent("Preview", "frames complete", {
           partId: previewPartId, bytes, frames: reader.frames()?.count ?? 0,
+          // How often the video needed the connection back. Zero means the
+          // download never had to yield; a high count on a stream that still
+          // played cleanly is the gate doing its job.
+          yielded: waits,
         });
       }
     };
 
-    const timer = setTimeout(() => {
-      read().catch(() => { /* the per-frame path is still there */ });
-    }, PREVIEW_PREFETCH_DELAY_MS);
+    read().catch(() => { /* the per-frame path is still there */ });
 
     return () => {
       cancelled = true;
-      clearTimeout(timer);
       abort.abort();
       // The blob URLs point into this part's bytes; the next item's frames
       // are a different file entirely.

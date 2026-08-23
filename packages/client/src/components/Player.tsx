@@ -116,6 +116,32 @@ const MAX_VIEWER_RETRIES = 3;
 const MAX_NETWORK_RETRIES = 5;
 /** Consecutive hls.js media-error recoveries before we stop nudging and rebuild. */
 const MAX_MEDIA_ERROR_RECOVERIES = 3;
+
+/**
+ * How often to check whether the playhead has stopped moving with nothing
+ * buffered in front of it, and how many checks in a row it takes to act.
+ *
+ * The health sampler already spotted this condition and logged it, once, and
+ * then left the stream wedged — it is a diagnostic, on a ten second tick,
+ * which is far too slow to be a remedy. This is the remedy, on its own timer.
+ *
+ * Two consecutive checks rather than one: a single tick can catch a legitimate
+ * gap — the moment after a seek, a fragment boundary — and restarting the
+ * loader for that would cost more than it saved.
+ */
+const WEDGE_CHECK_MS = 2_000;
+const WEDGE_CHECKS_BEFORE_ACTING = 2;
+
+/**
+ * Attempts before giving the stream back to the error paths, and the quiet
+ * period that earns a fresh budget.
+ *
+ * Same shape as the media-error escalation above, for the same reason: a
+ * stream that recovers, breaks, recovers, forever is worse than one that
+ * fails, because nobody is told.
+ */
+const MAX_WEDGE_RECOVERIES = 3;
+const WEDGE_RESET_MS = 60_000;
 /** Clean playback for this long means the next media error starts a fresh budget. */
 const MEDIA_ERROR_RESET_MS = 60_000;
 // After an in-place seek to an unbuffered position, how long to wait for
@@ -494,6 +520,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // freeze must produce one diagnostic, not one per tick.
   const lastTickTimeRef = useRef(-1);
   const stallLoggedRef = useRef(false);
+  // The wedge watchdog's own state: consecutive stuck checks, where the
+  // playhead was when we last looked, how many times we have intervened, and
+  // when the last intervention was.
+  const wedgeTicksRef = useRef(0);
+  const wedgeLastPosRef = useRef(-1);
+  const wedgeRecoveriesRef = useRef(0);
+  const wedgeLastAtRef = useRef(0);
   // Plex intro/credits markers for the current item, and whichever one the
   // playhead currently sits inside (null when outside every window).
   const [markers, setMarkers] = useState<SkipMarker[]>([]);
@@ -640,6 +673,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // the dep that triggered it rather than just appearing in the log.
   const hlsDepsRef = useRef<Record<string, unknown> | null>(null);
   const healthIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** The wedge watchdog's timer — see WEDGE_CHECK_MS. */
+  const wedgeIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // When the viewer first noticed it was seeking without getting anywhere, and
   // when it last actually moved the playhead to follow the room. Together these
   // stop the heartbeat from cancelling its own seek every 5s.
@@ -1210,6 +1245,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     if (healthIntervalRef.current !== null) {
       clearInterval(healthIntervalRef.current);
       healthIntervalRef.current = null;
+    }
+    if (wedgeIntervalRef.current !== null) {
+      clearInterval(wedgeIntervalRef.current);
+      wedgeIntervalRef.current = null;
     }
     // Deliberately does NOT clear sessionRegisteredRef: the recovery paths call
     // this and then decide whether to stop the session, and they need the flag
@@ -2417,6 +2456,80 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           stallLoggedRef.current = false;
         }
       }, HEALTH_SAMPLE_MS);
+
+      /**
+       * Get a wedged playhead moving again.
+       *
+       * The case this exists for: hls.js sitting in FRAG_LOADING on a fragment
+       * its loader never delivers. Seen once in a night of logs, at a host
+       * handover — stream ownership moves between two clients, the incoming
+       * one's source flips from peer to origin mid-flight, and the fragment
+       * under the playhead falls into the gap. The engine had already loaded
+       * three segments past it and was idle; hls.js was still waiting for the
+       * one it asked for. Twenty-five seconds, ended by nothing in particular.
+       *
+       * Two escalating nudges, both cheap, because there is no buffer left to
+       * protect at this point:
+       *
+       *   startLoad(playhead) re-points the loader at where we actually are,
+       *   which is the documented way out of a stuck fragment request.
+       *
+       *   A hair of a seek, if that did not take. It costs a frame and forces
+       *   the whole request path to be rebuilt around a new position, which
+       *   catches the case where the loader is wedged on something startLoad
+       *   is happy to keep waiting for.
+       *
+       * Past that it stops and lets the error paths have it — they can rebuild
+       * the pipeline, which this deliberately does not.
+       */
+      wedgeIntervalRef.current = setInterval(() => {
+        const v = videoRef.current;
+        const hls = hlsRef.current;
+        if (!v || !hls) return;
+
+        const moved = v.currentTime !== wedgeLastPosRef.current;
+        wedgeLastPosRef.current = v.currentTime;
+        // currentTime > 1 excludes cold start, where sitting at zero while the
+        // first segments arrive is buffering rather than a wedge.
+        const stuck = v.currentTime > 1 && !v.paused && !v.seeking
+          && !moved && bufferAheadSeconds(v) < 1;
+        if (!stuck) {
+          wedgeTicksRef.current = 0;
+          return;
+        }
+        if (++wedgeTicksRef.current < WEDGE_CHECKS_BEFORE_ACTING) return;
+        wedgeTicksRef.current = 0;
+
+        if (Date.now() - wedgeLastAtRef.current > WEDGE_RESET_MS) {
+          wedgeRecoveriesRef.current = 0;
+        }
+        wedgeLastAtRef.current = Date.now();
+        wedgeRecoveriesRef.current++;
+
+        if (wedgeRecoveriesRef.current > MAX_WEDGE_RECOVERIES) {
+          logError("Stall", "wedge recovery exhausted, leaving it to the error paths", {
+            attempts: wedgeRecoveriesRef.current - 1,
+            ...snapshot(v),
+          });
+          return;
+        }
+
+        const nudge = wedgeRecoveriesRef.current > 1;
+        logWarn("Stall", nudge ? "wedged, nudging the playhead" : "wedged, restarting the loader", {
+          attempt: wedgeRecoveriesRef.current,
+          max: MAX_WEDGE_RECOVERIES,
+          ...hlsLoadingState(hls),
+          ...snapshot(v),
+        });
+        try {
+          hls.startLoad(v.currentTime);
+          if (nudge) v.currentTime = v.currentTime + 0.1;
+        } catch (err) {
+          logWarn("Stall", "wedge recovery threw", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }, WEDGE_CHECK_MS);
     }
 
     start();

@@ -579,8 +579,11 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     gap: "12px",
     alignSelf: "flex-start",
-    padding: "12px 24px",
-    borderRadius: "12px",
+    // Wider ends than the single-line pills beside it, because it carries two
+    // lines and a pill's radius follows its height. Left at its own size
+    // rather than squeezed to 44px: the episode line is the point of it.
+    padding: "12px 26px",
+    borderRadius: "999px",
     border: "none",
     background: "#e5a00d",
     color: "#000",

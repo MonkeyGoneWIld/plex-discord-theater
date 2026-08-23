@@ -918,9 +918,9 @@ const styles: Record<string, React.CSSProperties> = {
   },
   playBtnNarrow: {
     // Stretched to the column, so a long label like "Resume from 1:01:55"
-    // wraps inside the button instead of running off the screen edge.
-    justifyContent: "center",
-    padding: "14px 20px",
+    // wraps inside the button instead of running off the screen edge. The
+    // minHeight above is what lets it: a fixed one would clip the second line.
+    padding: "10px 20px",
     textAlign: "center",
   },
   startOverBtnNarrow: {
@@ -1082,11 +1082,27 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     flexWrap: "wrap",
   },
+  /**
+   * Everything that stands in a detail page's action row is a pill, and every
+   * pill in that row is the same height.
+   *
+   * The second half is not decoration. A 999px radius resolves to half the
+   * button's height, so where a 12px corner looked identical on a 44px control
+   * and a 50px one, a pill does not: three heights side by side become three
+   * different silhouettes. The watchlist and watched controls were already
+   * 44px, so that is the height the rest come to.
+   *
+   * minHeight rather than height, because a long label — "Resume from 1:01:55"
+   * on a phone, where the row becomes a full-width column — wraps inside the
+   * button, and a fixed height would cut it off.
+   */
   playBtn: {
     display: "inline-flex",
     alignItems: "center",
-    padding: "14px 36px",
-    borderRadius: "12px",
+    justifyContent: "center",
+    minHeight: "44px",
+    padding: "10px 32px",
+    borderRadius: "999px",
     border: "none",
     background: "#e5a00d",
     color: "#000",
@@ -1107,8 +1123,11 @@ const styles: Record<string, React.CSSProperties> = {
     marginBottom: "-16px",
   },
   suggestBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    minHeight: "44px",
     padding: "10px 22px",
-    borderRadius: "10px",
+    borderRadius: "999px",
     border: "1px solid rgba(229,160,13,0.4)",
     background: "rgba(229,160,13,0.1)",
     color: "#e5a00d",
@@ -1119,8 +1138,11 @@ const styles: Record<string, React.CSSProperties> = {
     transition: "background 0.15s ease",
   },
   suggestBtnSent: {
+    display: "inline-flex",
+    alignItems: "center",
+    minHeight: "44px",
     padding: "10px 22px",
-    borderRadius: "10px",
+    borderRadius: "999px",
     border: "1px solid rgba(46,160,67,0.4)",
     background: "rgba(46,160,67,0.12)",
     color: "#4caf50",
@@ -1130,13 +1152,15 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "default",
   },
   queueBtn: {
-    padding: "10px 20px", borderRadius: "8px",
+    display: "inline-flex", alignItems: "center",
+    minHeight: "44px", padding: "10px 20px", borderRadius: "999px",
     border: "1px solid rgba(229,160,13,0.4)", background: "transparent",
     color: "#e5a00d", fontSize: "14px", fontWeight: 600,
     cursor: "pointer", fontFamily: "inherit",
   },
   startOverBtn: {
-    padding: "14px 26px", borderRadius: "12px",
+    display: "inline-flex", alignItems: "center", justifyContent: "center",
+    minHeight: "44px", padding: "10px 24px", borderRadius: "999px",
     border: "1px solid rgba(255,255,255,0.18)", background: "transparent",
     color: "#ccc", fontSize: "15px", fontWeight: 600,
     cursor: "pointer", fontFamily: "inherit",

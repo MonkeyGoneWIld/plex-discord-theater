@@ -221,8 +221,9 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
           <div style={styles.titleActions}>
             {tmdbId != null && mediaType === "movie" && seerrConfigured !== false && (
               !statusLoaded ? (
-                // Same footprint as the real button, so nothing shifts when it lands.
-                <SkeletonBlock width={140} height={40} borderRadius={8} />
+                // Same footprint as the real button, so nothing shifts when it
+                // lands — 44px and a pill, which is what it became.
+                <SkeletonBlock width={140} height={44} borderRadius={999} />
               ) : statusLabel ? (
                 <button className="btn" disabled style={{ ...styles.requestBtn, ...styles.requestBtnDone }}>
                   {statusLabel}
@@ -414,8 +415,11 @@ const styles: Record<string, React.CSSProperties> = {
     margin: "0 0 28px",
   },
   requestBtn: {
-    padding: "11px 24px",
-    borderRadius: "10px",
+    display: "inline-flex",
+    alignItems: "center",
+    minHeight: "44px",
+    padding: "10px 24px",
+    borderRadius: "999px",
     border: "none",
     background: "#e5a00d",
     color: "#000",

@@ -30,6 +30,7 @@ import {
   type PlexHub,
 } from "../lib/api";
 import { formatWhen } from "../lib/format";
+import { QUIET_SURFACE } from "../lib/surface";
 
 const PAGE_SIZE = 200;
 const HISTORY_PAGE_SIZE = 100;
@@ -1118,6 +1119,7 @@ const styles: Record<string, React.CSSProperties> = {
   // absolutely to the view's top-left so it lands in the exact same spot as the
   // detail-page Back and never shifts the centered search bar.
   backBtn: {
+    ...QUIET_SURFACE,
     position: "absolute",
     top: "16px",
     left: "24px",
@@ -1127,8 +1129,6 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "6px",
     padding: "8px 16px",
     borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.1)",
-    background: "rgba(255,255,255,0.05)",
     color: "#f0f0f0",
     cursor: "pointer",
     fontSize: "14px",
@@ -1264,10 +1264,9 @@ const styles: Record<string, React.CSSProperties> = {
     textTransform: "uppercase" as const,
   },
   clearBtn: {
+    ...QUIET_SURFACE,
     padding: "6px 14px",
     borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "transparent",
     color: "#888",
     cursor: "pointer",
     fontSize: "12px",
@@ -1322,10 +1321,9 @@ const styles: Record<string, React.CSSProperties> = {
     transition: "all 0.2s ease",
   },
   loadMoreBtn: {
+    ...QUIET_SURFACE,
     padding: "10px 28px",
     borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.1)",
-    background: "rgba(255,255,255,0.04)",
     color: "#aaa",
     cursor: "pointer",
     fontSize: "13px",

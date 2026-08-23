@@ -5,6 +5,7 @@ import { createPreviewFrameReader, type PreviewFrames } from "../lib/previewFram
 import { loadVolume } from "../lib/volume";
 import { getLevel, setLevel, boostAvailable, MAX_LEVEL } from "../lib/audioBoost";
 import { useMediaQuery, COMPACT_CONTROLS_QUERY, PHONE_QUERY } from "../lib/useMediaQuery";
+import { QUIET_SURFACE } from "../lib/surface";
 
 export interface ControlsHandle {
   /**
@@ -1905,12 +1906,11 @@ const styles: Record<string, React.CSSProperties> = {
     background: "linear-gradient(to bottom, rgba(0,0,0,0.8), transparent)",
   },
   backBtn: {
+    ...QUIET_SURFACE,
     display: "flex",
     alignItems: "center",
     padding: "6px 14px",
     borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.15)",
-    background: "rgba(255,255,255,0.08)",
     backdropFilter: "blur(12px)",
     color: "#f0f0f0",
     cursor: "pointer",

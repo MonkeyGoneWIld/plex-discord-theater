@@ -12,6 +12,7 @@ import { DetailLoading } from "./DetailLoading";
 import { PlexMediaActions } from "./PlexMediaActions";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
+import { QUIET_SURFACE } from "../lib/surface";
 
 interface ExternalDetailProps {
   item: PlexItem;
@@ -294,14 +295,13 @@ const styles: Record<string, React.CSSProperties> = {
   },
   // Matches MovieDetail's back button so navigation is consistent across pages.
   backBtn: {
+    ...QUIET_SURFACE,
     display: "flex",
     alignItems: "center",
     gap: "6px",
     margin: "16px 24px",
     padding: "8px 16px",
     borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.1)",
-    background: "rgba(255,255,255,0.05)",
     color: "#f0f0f0",
     cursor: "pointer",
     fontSize: "14px",

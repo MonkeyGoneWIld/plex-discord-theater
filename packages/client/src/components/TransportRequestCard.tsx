@@ -1,3 +1,5 @@
+import { QUIET_SURFACE } from "../lib/surface";
+
 interface TransportRequestCardProps {
   action: "pause" | "resume";
   fromUsername: string;
@@ -104,11 +106,10 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "inherit",
   },
   dismissBtn: {
+    ...QUIET_SURFACE,
     flex: 1,
     padding: "8px",
     borderRadius: "6px",
-    border: "1px solid rgba(255,255,255,0.15)",
-    background: "transparent",
     color: "#888",
     fontSize: "12px",
     cursor: "pointer",

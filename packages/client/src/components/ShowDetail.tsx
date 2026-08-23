@@ -19,6 +19,7 @@ import { shelfStyles } from "./PosterShelf";
 import { SeasonRequestGrid } from "./SeasonRequestGrid";
 import { DetailLoading } from "./DetailLoading";
 import { PlexMediaActions } from "./PlexMediaActions";
+import { QUIET_SURFACE } from "../lib/surface";
 
 interface ShowDetailProps {
   item: PlexItem;
@@ -573,6 +574,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "linear-gradient(to bottom, rgba(13,13,13,0.3) 0%, #0d0d0d 100%)",
   },
   backBtn: {
+    ...QUIET_SURFACE,
     position: "relative",
     zIndex: 10,
     display: "flex",
@@ -581,8 +583,6 @@ const styles: Record<string, React.CSSProperties> = {
     margin: "16px 24px",
     padding: "8px 16px",
     borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.1)",
-    background: "rgba(255,255,255,0.05)",
     color: "#f0f0f0",
     cursor: "pointer",
     fontSize: "14px",

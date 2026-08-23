@@ -11,6 +11,7 @@ import { shelfStyles } from "./PosterShelf";
 import { DetailLoading } from "./DetailLoading";
 import { PlexMediaActions } from "./PlexMediaActions";
 import type { QueueItem, SuggestionItem } from "../hooks/useSync";
+import { QUIET_SURFACE } from "../lib/surface";
 
 interface MovieDetailProps {
   item: PlexItem;
@@ -140,14 +141,13 @@ function TrackDropdown({
 const dropdownStyles: Record<string, React.CSSProperties> = {
   wrap: { position: "relative", width: "100%" },
   trigger: {
+    ...QUIET_SURFACE,
     width: "100%",
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
     padding: "9px 12px",
     borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(255,255,255,0.06)",
     color: "#ddd",
     fontSize: "14px",
     fontFamily: "inherit",
@@ -842,6 +842,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "linear-gradient(to bottom, rgba(13,13,13,0.3) 0%, #0d0d0d 100%)",
   },
   backBtn: {
+    ...QUIET_SURFACE,
     position: "relative",
     zIndex: 10,
     display: "flex",
@@ -850,8 +851,6 @@ const styles: Record<string, React.CSSProperties> = {
     margin: "16px 24px",
     padding: "8px 16px",
     borderRadius: "8px",
-    border: "1px solid rgba(255,255,255,0.1)",
-    background: "rgba(255,255,255,0.05)",
     color: "#f0f0f0",
     cursor: "pointer",
     fontSize: "14px",
@@ -1159,9 +1158,9 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer", fontFamily: "inherit",
   },
   startOverBtn: {
+    ...QUIET_SURFACE,
     display: "inline-flex", alignItems: "center", justifyContent: "center",
     minHeight: "44px", padding: "10px 24px", borderRadius: "999px",
-    border: "1px solid rgba(255,255,255,0.18)", background: "transparent",
     color: "#ccc", fontSize: "15px", fontWeight: 600,
     cursor: "pointer", fontFamily: "inherit",
   },

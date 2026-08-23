@@ -27,7 +27,8 @@ Discord presence and Activity invites display the currently playing title.
 ### Synchronized playback
 
 The host controls the room timeline. Playback stays in sync for all viewers.
-Hosts can grant playback control to co-hosts or transfer the host role.
+Hosts can grant playback control to co-hosts or transfer the host role. Viewers
+can ask the host or a co-host to pause or resume.
 
 ### Plex browser
 

@@ -1485,11 +1485,7 @@ export function Controls({
                 disabled={requestSent != null}
                 style={{
                   ...styles.gearBtn,
-                  // The cluster squeezes its icons on a narrow phone, and a
-                  // request control worn down to a 15px target is one nobody
-                  // can hit. It keeps its size; the buttons around it were
-                  // already giving.
-                  flexShrink: 0,
+                  ...(compact ? styles.gearBtnCompact : {}),
                   ...(requestSent ? styles.requestBtnSent : {}),
                 }}
                 title={

@@ -1294,7 +1294,13 @@ export function attachWebSocketServer(server: Server): void {
             typeof msg.title === "string" ? msg.title.slice(0, 500) : null;
           room.state.subtitles = Boolean(msg.subtitles);
           room.state.hlsSessionId = sid;
-          room.state.playing = true;
+          // Announcing a stream is not always asking for it to run. A host that
+          // seeks while paused rebuilds its transcode at the new position and
+          // has to tell the room about it, and that announcement used to start
+          // the film: the room went paused → playing on a seek nobody asked to
+          // resume. Absent means playing, which is what every other sender of
+          // this message means by it.
+          room.state.playing = msg.playing !== false;
           // A restart of something the room is already watching must not move
           // the clock. `startPosition` is where the restarting client was when
           // it *began* loading, seconds ago — writing it back rewinds everyone

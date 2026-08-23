@@ -685,6 +685,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // is not describing a live transcode.
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartPendingRef = useRef(false);
+  /** Whether the element was paused when the pipeline was last torn down.
+   *  Null on a first build, and after being consumed. */
+  const pausedBeforeRebuildRef = useRef<boolean | null>(null);
   // When the in-flight restart was committed, and when we first started holding
   // a newer target back for it. Both exist so neither wait can last forever —
   // see isRestartPending and the commit below.
@@ -1453,6 +1456,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     setPrevEpisode(null);
     setInSeries(false);
     setDismissedFor(null);
+    // A different title is a start, not a rebuild — whatever the last one was
+    // doing has nothing to say about it.
+    pausedBeforeRebuildRef.current = null;
     // Must reset: `ended` latches nearEnd true, and without clearing it here the
     // card would appear instantly at the start of the episode we just advanced to.
     setPlaybackEnded(false);
@@ -1993,9 +1999,35 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             followingRoom &&
             sync?.playing === false &&
             sync?.ratingKey === itemRef.current.ratingKey;
-          if (roomPaused) {
-            logEvent("HLS", "manifest ready but room is paused — holding", {
+          /**
+           * The host's own paused state, carried across its own rebuild.
+           *
+           * The room check above cannot cover this. A host is not following the
+           * room, it *is* the room — so seeking while paused rebuilt the
+           * transcode, played it here, and then announced the new stream, which
+           * told everybody else to play as well. A seek nobody asked to resume
+           * resumed the film, for the whole room.
+           *
+           * Captured at teardown rather than inferred, because only the element
+           * knows: a seek that stays inside the buffer never rebuilds at all,
+           * and the same rebuild happens for a track change, a retry and an
+           * adoption. Cleared on read, and again when the item changes, so a
+           * pause can never outlive the thing it was about.
+           */
+          const roomSaysPlaying =
+            sync?.playing === true && sync?.ratingKey === itemRef.current.ratingKey;
+          // Anything that told the room to run in the meantime outranks what
+          // the element was doing when we tore it down — pressing play while a
+          // seek restart is still loading is the case, and holding there would
+          // ignore the one instruction the person actually gave.
+          const rebuildPaused =
+            !roomSaysPlaying && pausedBeforeRebuildRef.current === true;
+          pausedBeforeRebuildRef.current = null;
+          const holding = roomPaused || rebuildPaused;
+          if (holding) {
+            logEvent("HLS", "manifest ready but playback is paused — holding", {
               session: sessionId?.substring(0, 8),
+              because: roomPaused ? "room" : "rebuild",
               roomPosS: syncStateRef.current?.position ?? "none",
             });
             setBuffering(false);
@@ -2006,7 +2038,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // Host: broadcast play with sessionId when manifest is ready. Skip it
           // when adopting an already-live session — the room is already on it,
           // and "play" would reset everyone's position to 0.
-          announceStream(sessionId!, startOffset, sessionOwner);
+          //
+          // The room is told whether to run it, not just what it is: announcing
+          // a rebuild we are deliberately holding must not start everyone else.
+          announceStream(sessionId!, startOffset, sessionOwner, !holding);
         });
 
         // Clear error banner and reset retry count when recovery succeeds
@@ -2546,6 +2581,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         canvasRef.current = held;
         setHoldingFrame(true);
       }
+      // And the play state with it, for the same reason: whatever comes next is
+      // a rebuild of what was already here, so it should come back the way it
+      // went away. Read at manifest-ready above.
+      pausedBeforeRebuildRef.current = videoRef.current?.paused ?? null;
       destroyLocal();
       if (restartTimerRef.current !== null) {
         clearTimeout(restartTimerRef.current);
@@ -3039,6 +3078,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     sessionId: string,
     startOffset: number,
     startedAsOwner = ownsSessionRef.current,
+    /** False when this stream was rebuilt without being started — see the
+     *  manifest-ready branch that holds a paused rebuild. */
+    playing = true,
   ) => {
     // `startedAsOwner` is captured by the HLS start. It stays authoritative if
     // a late assignment for the preceding title lands while the new manifest
@@ -3078,6 +3120,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         offset, undefined,
         currentAudioStreamRef.current ?? audioStreamId ?? 0,
         currentSubtitleStreamRef.current ?? subtitleStreamId ?? 0,
+        playing,
       );
       return;
     }

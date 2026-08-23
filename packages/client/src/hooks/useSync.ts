@@ -232,6 +232,13 @@ export interface SyncActions {
      *  and the one everybody who hasn't chosen otherwise watches. */
     audioStreamId?: number,
     subtitleStreamId?: number,
+    /**
+     * Whether the room should be running once it has this stream. Defaults to
+     * true, which is what announcing a stream nearly always means; false is a
+     * rebuild that has to be described without being started — a host seeking
+     * or changing tracks while paused.
+     */
+    playing?: boolean,
   ) => void;
   sendPause: (position: number) => void;
   sendResume: (position: number) => void;
@@ -391,15 +398,18 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         sessionOffset?: number,
         audioStreamId?: number,
         subtitleStreamId?: number,
+        playing = true,
       ) => {
         send({
           type: "play", ratingKey, title, subtitles, hlsSessionId, position, sessionOffset,
-          audioStreamId, subtitleStreamId,
+          audioStreamId, subtitleStreamId, playing,
         });
         setState((prev) => {
           // Restarting what is already running — a track change, or a seek that
-          // needed a new transcode — rather than starting something.
-          const restart = prev.playing && prev.ratingKey === ratingKey;
+          // needed a new transcode — rather than starting something. A rebuild
+          // announced as paused is still a restart: the room did not move, it
+          // was simply already stopped when we rebuilt.
+          const restart = prev.ratingKey === ratingKey && (prev.playing || !playing);
           return {
             ...prev,
             // What we have just told the room is playing. Leaving these out made
@@ -415,7 +425,9 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             title,
             subtitles,
             hlsSessionId,
-            playing: true,
+            // What we just told the room, which is not always "run it" — see
+            // the `playing` parameter.
+            playing,
             // A restart does not move the room, so it must not move our copy of
             // it either. `position` here is where this transcode was asked to
             // begin, which is behind the clock by the length of the load.

@@ -11,7 +11,7 @@ import { shelfStyles } from "./PosterShelf";
 import { DetailLoading } from "./DetailLoading";
 import { PlexMediaActions } from "./PlexMediaActions";
 import type { QueueItem, SuggestionItem } from "../hooks/useSync";
-import { QUIET_SURFACE } from "../lib/surface";
+import { GHOST_SURFACE, QUIET_SURFACE } from "../lib/surface";
 
 interface MovieDetailProps {
   item: PlexItem;
@@ -1158,7 +1158,8 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer", fontFamily: "inherit",
   },
   startOverBtn: {
-    ...QUIET_SURFACE,
+    // Beside Play — see GHOST_SURFACE.
+    ...GHOST_SURFACE,
     display: "inline-flex", alignItems: "center", justifyContent: "center",
     minHeight: "44px", padding: "10px 24px", borderRadius: "999px",
     color: "#ccc", fontSize: "15px", fontWeight: 600,

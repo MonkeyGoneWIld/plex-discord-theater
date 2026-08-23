@@ -23,3 +23,21 @@ export const QUIET_SURFACE = {
   background: "rgba(255,255,255,0.06)",
   border: "1px solid rgba(255,255,255,0.14)",
 } as const;
+
+/**
+ * The surface for a secondary standing next to the primary.
+ *
+ * Start Over, Watchlist and Mark watched are the three controls that share a
+ * row with Play. Filling them puts three lit panels around the one button that
+ * is supposed to be the loudest thing there; leaving them as outlines lets the
+ * amber carry the row on its own and reads the difference between "the action"
+ * and "the other things you could do" without needing a colour to say it.
+ *
+ * The distinction is proximity, not importance. A quiet control standing on its
+ * own — Back, Clear, Load more, a track dropdown — has nothing to defer to and
+ * takes QUIET_SURFACE, where a fill is what keeps it legible over artwork.
+ */
+export const GHOST_SURFACE = {
+  background: "transparent",
+  border: "1px solid rgba(255,255,255,0.18)",
+} as const;

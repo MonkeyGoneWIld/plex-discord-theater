@@ -1,9 +1,14 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import {
   fetchMeta, fetchChildren, fetchSeerrTv, fetchShowNextUp, historyEntryToItem, posterThumbUrl,
-  getSessionToken, type Credit, type HistoryEntry, type PlexItem, type PlexMeta, type SeerrSeason,
+  getSessionToken, invalidateMeta, setStreams, versionOf,
+  type Credit, type HistoryEntry, type PlexItem, type PlexMeta, type SeerrSeason,
 } from "../lib/api";
+import {
+  loadAudioPref, loadSubtitlePref, matchAudioTrack, matchSubtitleTrack,
+  saveAudioPref, saveSubtitlePref,
+} from "../lib/trackPrefs";
 import { formatTimecode } from "../lib/format";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
 import { MovieCard } from "./MovieCard";
@@ -18,8 +23,31 @@ import { PlexMediaActions } from "./PlexMediaActions";
 interface ShowDetailProps {
   item: PlexItem;
   onSelectSeason: (season: PlexItem, show: PlexItem) => void;
-  /** Open an episode's detail view — used by the resume button. Omit to hide it. */
+  /**
+   * Start the episode the play button points at.
+   *
+   * Same shape as the movie page's, because it is the same act: this is the
+   * room's opening stream, and the tracks named here are what a viewer has to
+   * match to join it rather than start a second one.
+   */
+  onPlay?: (
+    item: PlexItem,
+    subtitles: boolean,
+    resumePosition?: number,
+    mediaIndex?: number,
+    audioStreamId?: number,
+    subtitleStreamId?: number,
+  ) => void;
+  /**
+   * Open an episode's detail view.
+   *
+   * Where the play button goes for anyone who cannot start playback — there is
+   * nothing for them to press here, but the episode's own page has the suggest
+   * control and the rest of its detail.
+   */
   onSelectEpisode?: (episode: PlexItem) => void;
+  /** Whether this client can start playback. Viewers get onSelectEpisode. */
+  canPlay?: boolean;
   /** Open another show's detail page — used by the "also in this collection"
    *  rows. Omit to hide those rows. */
   onSelect?: (item: PlexItem) => void;
@@ -63,7 +91,10 @@ function authUrl(url: string): string {
   return `${url}${sep}token=${encodeURIComponent(token)}`;
 }
 
-export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, onSelectPerson, onBack }: ShowDetailProps) {
+export function ShowDetail({
+  item, onSelectSeason, onPlay, onSelectEpisode, canPlay = false,
+  onSelect, onSelectPerson, onBack,
+}: ShowDetailProps) {
   const [meta, setMeta] = useState<PlexMeta | null>(null);
   const [seasons, setSeasons] = useState<PlexItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -88,6 +119,9 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
   // same reason as nextUpLoaded: an empty answer and an unasked question look
   // identical from here, and the button below has to tell them apart.
   const [firstEpisodeTried, setFirstEpisodeTried] = useState(false);
+  // A press that is resolving the episode's own metadata before it can start.
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
   // Phone portrait: the poster and the detail column can't sit side by side.
   // The poster is a fixed 240px, so on a 390px screen the text beside it got
   // roughly 90px — the title broke a word per line, the genre pills stacked one
@@ -225,6 +259,76 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
   const startPending = !startFrom
     && (!nextUpLoaded || loading || (seasons.length > 0 && !firstEpisodeTried));
 
+  /**
+   * Start the episode, on the tracks this viewer already watches on.
+   *
+   * The button used to open the episode's page and leave the actual play to a
+   * second press there. That page exists to let you choose — audio, subtitles,
+   * resume or start over — and none of those are open questions here: the
+   * button already says which episode and whether it is resuming, and the
+   * tracks are the ones carried forward from the last episode watched.
+   *
+   * The episode's own metadata still has to be fetched, because track ids are
+   * per file and the saved preference is a description rather than a number —
+   * matchAudioTrack is what turns "Japanese 5.1" into an id in this file. That
+   * is one request, and the button says it is working while it runs.
+   */
+  const startPlaying = useCallback(async () => {
+    if (!startFrom || !onPlay || starting) return;
+    setStarting(true);
+    setStartError(null);
+    try {
+      const episodeMeta = await fetchMeta(startFrom.ratingKey);
+      const version = versionOf(episodeMeta);
+      // The same two rules the movie page's pickers open on, so pressing Play
+      // here and pressing it there land on the same tracks. Audio always
+      // resolves to something; subtitles resolve to nothing when the remembered
+      // kind is absent, which is the "off" this app defaults to.
+      const audioTracks = version.audioTracks ?? [];
+      const audio =
+        matchAudioTrack(audioTracks, loadAudioPref())
+        ?? audioTracks.find((t) => t.selected)
+        ?? audioTracks[0]
+        ?? null;
+      const subtitle = matchSubtitleTrack(version.subtitleTracks ?? [], loadSubtitlePref());
+
+      // What you pressed play on is what you want to keep watching — the same
+      // reasoning as the movie page, which records the pair on play rather than
+      // only on a change to a picker.
+      saveAudioPref(audio);
+      // Only a match is worth writing down. There is no subtitle picker on this
+      // page, so someone who pressed Play never said "off" — recording it
+      // because this one episode lacks their language would throw the
+      // preference away for every episode after it. The movie page can write
+      // the null safely; it had a picker showing None when they pressed it.
+      if (subtitle) saveSubtitlePref(subtitle);
+
+      if (version.partId != null && audio) {
+        await setStreams(version.partId, {
+          audioStreamID: audio.id,
+          subtitleStreamID: subtitle?.id ?? 0,
+        });
+        // The cached meta now reports stale selected-track flags — drop it.
+        invalidateMeta(startFrom.ratingKey);
+      }
+
+      onPlay(
+        startFrom,
+        subtitle != null,
+        // The player works in seconds; history stores milliseconds. Only a
+        // genuine part-watch resumes — the button says "Play" otherwise.
+        nextUp && nextUp.positionMs > 0 ? nextUp.positionMs / 1000 : undefined,
+        undefined,
+        audio?.id ?? 0,
+        subtitle?.id ?? 0,
+      );
+    } catch (err) {
+      console.error("Failed to start episode:", err);
+      setStartError("Couldn't start this episode. Open it from the season instead.");
+      setStarting(false);
+    }
+  }, [startFrom, onPlay, starting, nextUp]);
+
   // Header, season list and the play button — see MovieDetail for why the cast
   // and the collection rows are left to fill in on their own.
   //
@@ -333,11 +437,19 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
                   Resume/Start Over decision still happen there — the same route
                   every other play in the app takes. */}
               <div style={styles.titleActions}>
-                {(startFrom || startPending) && onSelectEpisode && (
+                {(startFrom || startPending) && (canPlay ? onPlay : onSelectEpisode) && (
                   <button className="btn"
-                    onClick={startFrom ? () => onSelectEpisode(startFrom) : undefined}
-                    disabled={!startFrom}
-                    style={{ ...styles.resumeBtn, ...(startFrom ? {} : styles.resumeBtnPending) }}
+                    onClick={
+                      !startFrom ? undefined
+                        : canPlay && onPlay ? () => void startPlaying()
+                          : onSelectEpisode ? () => onSelectEpisode(startFrom)
+                            : undefined
+                    }
+                    disabled={!startFrom || starting}
+                    style={{
+                      ...styles.resumeBtn,
+                      ...(startFrom && !starting ? {} : styles.resumeBtnPending),
+                    }}
                   >
                     <svg width="20" height="20" viewBox="0 0 22 22" fill="none" style={{ flexShrink: 0 }}>
                       <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor"/>
@@ -353,6 +465,7 @@ export function ShowDetail({ item, onSelectSeason, onSelectEpisode, onSelect, on
                 )}
                 <PlexMediaActions item={item} inline labelled />
               </div>
+              {startError && <p style={styles.startError}>{startError}</p>}
             </div>
           </div>
 
@@ -604,8 +717,15 @@ const styles: Record<string, React.CSSProperties> = {
    * underside rather than as the next thing down. The column gap is untouched
    * — side by side these are one row of buttons, not two blocks.
    */
-  /** The button at its final size, before it knows what it plays. Dimmed the
-   *  same way MovieDetail dims Play while it waits on the stream list. */
+  startError: {
+    color: "#d47777",
+    fontSize: "13px",
+    lineHeight: 1.4,
+    marginTop: "12px",
+  },
+  /** The button at its final size, before it knows what it plays — and while a
+   *  press is fetching the episode's tracks. Dimmed the same way MovieDetail
+   *  dims Play while it waits on the stream list. */
   resumeBtnPending: {
     opacity: 0.55,
     cursor: "default",

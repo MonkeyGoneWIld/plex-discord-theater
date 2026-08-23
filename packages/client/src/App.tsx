@@ -1018,8 +1018,12 @@ export function App() {
           key={view.item.ratingKey}
           item={view.item}
           onSelectSeason={handleShowSeason}
-          // Resume jumps straight to the episode; the breadcrumb synthesizes the
-          // show and season it skipped past, so Back still walks up properly.
+          // The play button starts the episode outright for whoever can start
+          // one. Everybody else lands on the episode's page, where the breadcrumb
+          // synthesizes the show and season it skipped past so Back still walks
+          // up properly — and where a viewer can suggest it instead.
+          canPlay={effectiveIsHost}
+          onPlay={handlePlay}
           onSelectEpisode={handleSeasonEpisode}
           onSelect={handleSelectRelated}
           onSelectPerson={handleSelectPerson}

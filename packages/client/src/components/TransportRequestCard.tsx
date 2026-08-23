@@ -8,7 +8,7 @@ interface TransportRequestCardProps {
 }
 
 /**
- * "monkey26 asked to pause" — shown to whoever can act on it.
+ * "Pause requested by monkey26" — shown to whoever can act on it.
  *
  * A card rather than a dialog. Someone is watching a film behind this, and a
  * request is not an interruption worth taking the screen for: nothing is
@@ -25,12 +25,13 @@ export function TransportRequestCard({
 }: TransportRequestCardProps) {
   return (
     <div style={styles.container}>
-      <div style={styles.label}>Request</div>
+      {/* No eyebrow over this. "Request" above "someone requested a pause" is
+          the same word twice, and the sentence identifies the card on its own. */}
       <div style={styles.text}>
-        <strong style={styles.who} title={fromUsername}>{fromUsername}</strong>
         <span style={styles.what}>
-          {action === "pause" ? " asked to pause" : " asked to resume"}
+          {action === "pause" ? "Pause requested by " : "Resume requested by "}
         </span>
+        <strong style={styles.who} title={fromUsername}>{fromUsername}</strong>
       </div>
       <div style={styles.buttons}>
         <button onClick={onAccept} className="btn" style={styles.acceptBtn}>
@@ -55,26 +56,18 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(255,255,255,0.1)",
     boxShadow: "0 2px 12px rgba(0,0,0,0.5)",
   },
-  label: {
-    color: "#e5a00d",
-    fontSize: "10px",
-    fontWeight: 700,
-    letterSpacing: "1px",
-    textTransform: "uppercase",
-    marginBottom: "6px",
-  },
   /**
-   * The name gives way, never the verb.
+   * The name gives way, never the request.
    *
    * A row rather than a sentence, so the two halves can be told apart: the
-   * name takes what is left and the question is never asked to shrink. As one
-   * line with an ellipsis on it, a long enough Discord name spent the whole
-   * card on itself and left "a_really_long_discord_nam…" with nothing after
-   * it — a card that says who wants something and not what.
+   * request holds its width and the name takes what is left. With the request
+   * leading, the ellipsis lands where a sentence would put it anyway — a long
+   * Discord name simply runs out of room at the end, and the line still says
+   * what is being asked for.
    *
-   * Flex rather than a max-width on the name, because the number that would
-   * be is the card's width minus the longest phrasing, and neither of those
-   * is something to keep in step by hand.
+   * Flex rather than a max-width on the name, because the number that would be
+   * is the card's width minus the longest phrasing, and neither of those is
+   * something to keep in step by hand.
    */
   text: {
     display: "flex",

@@ -1287,6 +1287,12 @@ export function Controls({
     </div>
   );
 
+  /**
+   * Whether a click on the surround toggles playback — see the overlay's
+   * onClick. Only drives the cursor; the handler decides for itself.
+   */
+  const scrimToggles = !!onSurfaceClick && !phone;
+
   return (
     <>
       {/* Accumulated skip, on the side it's heading. Deliberately outside the
@@ -1306,13 +1312,41 @@ export function Controls({
           ...styles.overlay,
           opacity: visible ? 1 : 0,
           pointerEvents: visible ? "auto" : "none",
+          // Set here and inherited, so one declaration covers the picture and
+          // the top scrim — every surface a click toggles from. The bottom bar
+          // turns it off again for itself, being mostly inert, and the lead
+          // strip inside it turns it back on. Everything with a job of its own
+          // — the scrub bar, every button — already sets its own.
+          ...(scrimToggles ? { cursor: "pointer" } : {}),
         }}
-        // This overlay spans the whole picture, so while the controls are up it
-        // swallows every click aimed at the video beneath — including the
-        // click-to-pause one. Forward only clicks that landed on the overlay
-        // itself (its empty middle); anything on a button or bar is that
-        // control's own click and stops here.
-        onClick={(e) => { if (e.target === e.currentTarget) onSurfaceClick?.(); }}
+        // This overlay spans the whole picture, so while the controls are up
+        // it swallows every click aimed at the video beneath — including the
+        // click-to-pause one. Forward the ones that landed on dead space.
+        //
+        // Its own empty middle used to be the only dead space recognised,
+        // which lost both scrims. They are mostly gradient, and gradient reads
+        // as picture — you can see the film through it — so a click there was
+        // aimed at the video and stopped on a bar instead.
+        //
+        // Two conditions keep the rest working. Direct hits only, so
+        // everything a bar contains still handles its own click. And above the
+        // scrub bar, which is where the line belongs: from the scrub bar down
+        // is the transport row, the padding beside it and the strip under it,
+        // all of it bar rather than picture. One comparison covers both
+        // scrims, the top one being entirely above the scrub bar already.
+        onClick={(e) => {
+          const hit = e.target as HTMLElement;
+          let deadSpace = hit === e.currentTarget;
+          // A phone tap belongs to the gesture layer, which already means
+          // something else by it — show or hide the bar, twice to skip — and
+          // play/pause is a button in the middle of the picture there, not a
+          // tap on the surround.
+          if (!deadSpace && !phone && hit.hasAttribute("data-scrim")) {
+            const bar = progressRef.current?.getBoundingClientRect();
+            deadSpace = !bar || e.clientY < bar.top;
+          }
+          if (deadSpace) onSurfaceClick?.();
+        }}
       >
       {/* Phone gesture layer.
           Covers the whole picture and keeps its own pointer events while the
@@ -1393,7 +1427,7 @@ export function Controls({
       )}
 
       {/* Top bar: back + title */}
-      <div style={styles.topBar}>
+      <div style={styles.topBar} data-scrim="">
         <button onClick={onBack} className="btn" style={styles.backBtn}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style={{ marginRight: 4 }}>
             <path d="M10 12L6 8L10 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
@@ -1404,11 +1438,27 @@ export function Controls({
       </div>
 
       {/* Bottom bar */}
-      <div style={{
-        ...styles.bottomBar,
-        ...(compact ? styles.bottomBarCompact : {}),
-        ...(phone ? styles.bottomBarPhone : {}),
-      }}>
+      <div
+        style={{
+          ...styles.bottomBar,
+          ...(compact ? styles.bottomBarCompact : {}),
+          ...(phone ? styles.bottomBarPhone : {}),
+          ...(scrimToggles ? { cursor: "default" } : {}),
+        }}
+        data-scrim=""
+      >
+        {/* The strip of gradient above the scrub bar. It is padding on the bar
+            and reads as picture, so it toggles playback — this carries the
+            cursor that says so, which the bar itself cannot: its box also
+            covers the padding around the transport row, where a click does
+            nothing. Purely presentational; the handler above decides. */}
+        {scrimToggles && (
+          <div
+            style={compact ? { ...styles.scrimLead, ...styles.scrimLeadCompact } : styles.scrimLead}
+            data-scrim=""
+            aria-hidden="true"
+          />
+        )}
         {/* The scrub bar. On a phone it is the bottom row, with elapsed and
             remaining either side of it — see progressRowPhone. */}
         {phone ? (
@@ -1970,6 +2020,8 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "inherit",
   },
   title: {
+    // Inert, in a bar that inherits the picture's pointer — say so.
+    cursor: "default",
     fontSize: "15px",
     fontWeight: 600,
     overflow: "hidden",
@@ -1989,6 +2041,25 @@ const styles: Record<string, React.CSSProperties> = {
     paddingLeft: "calc(20px + var(--sail, 0px))",
     background: "linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%)",
   },
+  /**
+   * Covers the bar's top padding — the gradient between the top of the scrim
+   * and the scrub bar — purely to carry a pointer cursor there, so the strip
+   * reads as clickable in the way the picture above it does.
+   *
+   * Absolutely positioned, so it takes no space and cannot change the bar's
+   * layout, and stopping at the padding rather than filling the bar: any
+   * further and it would be lying over the scrub bar and the transport row.
+   * Its height tracks the two paddingTop values below it.
+   */
+  scrimLead: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: "48px",
+    cursor: "pointer",
+  },
+  scrimLeadCompact: { height: "28px" },
   progressHit: {
     position: "relative",
     padding: "8px 0",

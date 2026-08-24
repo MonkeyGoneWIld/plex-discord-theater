@@ -3858,12 +3858,16 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       )}
 
       {/* Click the picture to play/pause, as every other video player does.
-          togglePlayPause no-ops for a plain viewer, so the cursor is the only
-          hint that differs. Overlays (controls, dialogs, skip buttons) sit above
-          this and handle their own clicks, so they never fall through to here. */}
+          togglePlayPause no-ops for a plain viewer. Overlays (controls,
+          dialogs, skip buttons) sit above this and handle their own clicks, so
+          they never fall through to here.
+
+          Deliberately no pointer cursor: the picture is a picture, and every
+          player leaves the ordinary arrow over it. A hand belongs to the
+          controls, which have their own. */}
       <video
         ref={videoRef}
-        style={canControl ? { ...styles.video, cursor: "pointer" } : styles.video}
+        style={styles.video}
         playsInline
         onClick={togglePlayPause}
       />

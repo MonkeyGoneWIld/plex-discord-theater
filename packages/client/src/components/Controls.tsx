@@ -1287,12 +1287,6 @@ export function Controls({
     </div>
   );
 
-  /**
-   * Whether a click on the surround toggles playback — see the overlay's
-   * onClick. Only drives the cursor; the handler decides for itself.
-   */
-  const scrimToggles = !!onSurfaceClick && !phone;
-
   return (
     <>
       {/* Accumulated skip, on the side it's heading. Deliberately outside the
@@ -1312,12 +1306,6 @@ export function Controls({
           ...styles.overlay,
           opacity: visible ? 1 : 0,
           pointerEvents: visible ? "auto" : "none",
-          // Set here and inherited, so one declaration covers the picture and
-          // the top scrim — every surface a click toggles from. The bottom bar
-          // turns it off again for itself, being mostly inert, and the lead
-          // strip inside it turns it back on. Everything with a job of its own
-          // — the scrub bar, every button — already sets its own.
-          ...(scrimToggles ? { cursor: "pointer" } : {}),
         }}
         // This overlay spans the whole picture, so while the controls are up
         // it swallows every click aimed at the video beneath — including the
@@ -1443,22 +1431,9 @@ export function Controls({
           ...styles.bottomBar,
           ...(compact ? styles.bottomBarCompact : {}),
           ...(phone ? styles.bottomBarPhone : {}),
-          ...(scrimToggles ? { cursor: "default" } : {}),
         }}
         data-scrim=""
       >
-        {/* The strip of gradient above the scrub bar. It is padding on the bar
-            and reads as picture, so it toggles playback — this carries the
-            cursor that says so, which the bar itself cannot: its box also
-            covers the padding around the transport row, where a click does
-            nothing. Purely presentational; the handler above decides. */}
-        {scrimToggles && (
-          <div
-            style={compact ? { ...styles.scrimLead, ...styles.scrimLeadCompact } : styles.scrimLead}
-            data-scrim=""
-            aria-hidden="true"
-          />
-        )}
         {/* The scrub bar. On a phone it is the bottom row, with elapsed and
             remaining either side of it — see progressRowPhone. */}
         {phone ? (
@@ -2020,8 +1995,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "inherit",
   },
   title: {
-    // Inert, in a bar that inherits the picture's pointer — say so.
-    cursor: "default",
     fontSize: "15px",
     fontWeight: 600,
     overflow: "hidden",
@@ -2041,25 +2014,6 @@ const styles: Record<string, React.CSSProperties> = {
     paddingLeft: "calc(20px + var(--sail, 0px))",
     background: "linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%)",
   },
-  /**
-   * Covers the bar's top padding — the gradient between the top of the scrim
-   * and the scrub bar — purely to carry a pointer cursor there, so the strip
-   * reads as clickable in the way the picture above it does.
-   *
-   * Absolutely positioned, so it takes no space and cannot change the bar's
-   * layout, and stopping at the padding rather than filling the bar: any
-   * further and it would be lying over the scrub bar and the transport row.
-   * Its height tracks the two paddingTop values below it.
-   */
-  scrimLead: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    right: 0,
-    height: "48px",
-    cursor: "pointer",
-  },
-  scrimLeadCompact: { height: "28px" },
   progressHit: {
     position: "relative",
     padding: "8px 0",

@@ -9,6 +9,7 @@ import cors from "cors";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import path from "path";
+import fs from "node:fs";
 import { fileURLToPath } from "url";
 import discordRoutes, { closeInstanceDb } from "./routes/discord.js";
 import plexRoutes from "./routes/plex.js";
@@ -218,13 +219,58 @@ app.use("/api/plex-account", requireAuth, plexAccountRoutes);
 app.use("/api/logs", requireAuth, logRoutes);
 
 const clientDist = path.resolve(__dirname, "../../client/dist");
-app.use(express.static(clientDist));
+const indexPath = path.join(clientDist, "index.html");
+
+/**
+ * The Discord application id, handed to the browser at request time.
+ *
+ * Vite resolves `import.meta.env` at *build* time, so the id used to be a
+ * string literal compiled into the bundle — which meant an image was built for
+ * one Discord application and setting DISCORD_CLIENT_ID in compose did nothing
+ * for the client half. Anyone running a prebuilt image got someone else's id
+ * and an Activity that never initialised.
+ *
+ * Injecting it here makes one image work for every deployment, which is what
+ * the environment variable always implied. The client prefers this over its
+ * compiled fallback; see useDiscord.ts.
+ *
+ * JSON.stringify does the quoting and escaping. The `<` is escaped separately
+ * because a JSON string may legally contain `</script>`, which would close the
+ * tag early — the value is our own env var rather than user input, but this is
+ * cheap and the failure would be baffling.
+ */
+function indexHtml(): string {
+  const html = fs.readFileSync(indexPath, "utf8");
+  const literal = JSON.stringify(process.env.DISCORD_CLIENT_ID ?? "").replace(/</g, "\\u003c");
+  return html.replace(
+    "</head>",
+    `  <script>window.__DISCORD_CLIENT_ID__=${literal};</script>\n  </head>`,
+  );
+}
+
+// Read once at startup — it never changes while the process runs, and this is
+// on the path of every page load. A miss is not fatal: in development the
+// client is served by Vite and this file does not exist.
+let cachedIndex: string | null = null;
+try {
+  cachedIndex = indexHtml();
+} catch {
+  console.warn("[Client] no built index.html — serving the API only");
+}
+
+// index: false so "/" falls through to the handler below rather than being
+// answered from disk, which would skip the injection above.
+app.use(express.static(clientDist, { index: false }));
 app.get("*", (req, res) => {
   if (req.path.startsWith("/api/")) {
     res.status(404).json({ error: "Not found" });
     return;
   }
-  res.sendFile(path.join(clientDist, "index.html"));
+  if (cachedIndex === null) {
+    res.status(404).end();
+    return;
+  }
+  res.type("html").send(cachedIndex);
 });
 
 /**

@@ -28,7 +28,10 @@ COPY tsconfig.base.json ./
 COPY packages/client/ packages/client/
 COPY packages/server/ packages/server/
 
-# Vite needs the Discord client ID at build time
+# Optional. The server injects the Discord application id into index.html at
+# request time, so an image built without this still works anywhere — set
+# DISCORD_CLIENT_ID in the environment instead. Kept because it is still the
+# fallback the bundle compiles in, and because existing build commands pass it.
 ARG VITE_DISCORD_CLIENT_ID
 ENV VITE_DISCORD_CLIENT_ID=$VITE_DISCORD_CLIENT_ID
 

@@ -60,7 +60,17 @@ export type InviteResult =
   /** No channel, or no permission to create an invite — worth a quiet note. */
   | "unavailable";
 
-const CLIENT_ID = import.meta.env.VITE_DISCORD_CLIENT_ID as string;
+/**
+ * The Discord application id.
+ *
+ * Injected into the page by the server (see its index.html handler), so one
+ * built image serves every deployment. Falls back to the build-time value,
+ * which is how `npm run dev` works — there Vite serves the page and nothing
+ * injects anything.
+ */
+const CLIENT_ID =
+  (globalThis as { __DISCORD_CLIENT_ID__?: string }).__DISCORD_CLIENT_ID__ ||
+  (import.meta.env.VITE_DISCORD_CLIENT_ID as string);
 
 export function useDiscord(): DiscordState {
   const [state, setState] = useState<

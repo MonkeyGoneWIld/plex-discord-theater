@@ -53,25 +53,6 @@ jobs:
         with:
           ref: ${{ github.event.inputs.ref || github.ref }}
 
-      # The Discord application id is compiled into the client bundle by Vite
-      # (see useDiscord.ts), so the image is built for one Discord app and
-      # cannot pick this up at runtime. It is a public identifier — it appears
-      # in every OAuth URL — so it lives in a repository *variable* rather than
-      # a secret.
-      #
-      # Checked rather than allowed to default: an empty value builds a
-      # perfectly healthy image whose Activity never initialises, which is a
-      # miserable thing to discover after publishing it.
-      - name: Require DISCORD_CLIENT_ID
-        env:
-          CLIENT_ID: ${{ vars.DISCORD_CLIENT_ID }}
-        run: |
-          if [ -z "$CLIENT_ID" ]; then
-            echo "::error::Repository variable DISCORD_CLIENT_ID is not set."
-            echo "Set it under Settings → Secrets and variables → Actions → Variables."
-            exit 1
-          fi
-
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -108,7 +89,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VITE_DISCORD_CLIENT_ID=${{ vars.DISCORD_CLIENT_ID }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

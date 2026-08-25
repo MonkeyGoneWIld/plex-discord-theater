@@ -6,6 +6,8 @@ each viewer can independently select audio tracks and subtitles.
 
 ![A synchronized Plex watch party running inside Discord](docs/screenshots/player.jpg)
 
+**[Read the documentation →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki)**
+
 ## Overview
 
 Join a Discord voice channel, launch the Activity, and invite friends. Everyone
@@ -142,58 +144,110 @@ administrator API key is required.
 
 ## Installation
 
+> **Full guide:** the [wiki](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki)
+> has a step-by-step walkthrough, including the Discord app setup and how to
+> keep it private. This section is the short version.
+
 ### Requirements
 
-- A Plex Media Server with transcoding enabled
+- Plex Media Server with transcoding enabled
 - Docker
-- A Discord Bot with Activities enabled
-- A public HTTPS endpoint for the Activity
-- A Plex Account for the Bot to use
+- A Discord application with Activities enabled
+- A public HTTPS endpoint (Discord will not load `localhost`)
 
-Discord loads Activities in an iframe, so a plain `localhost` address is not
-sufficient. Use a reverse proxy, Cloudflare Tunnel, or another HTTPS endpoint.
+### 1. Discord application
 
-### 1. Create the Discord Activity
+Create an application in the
+[Discord Developer Portal](https://discord.com/developers/applications), enable
+**Activities → Settings**, add a URL mapping from `/` to your public HTTPS host,
+and copy the **Application ID** and **Client Secret**.
 
-1. Create an application in the [Discord Developer Portal](https://discord.com/developers/applications).
-2. Open **Activities → Settings** and enable Activities.
-3. Add a URL mapping from `/` to the public HTTPS address that will serve this
-   application.
-4. Copy the application's **Client ID** and **Client Secret**.
+> An unverified Activity only works in servers with fewer than 25 members. See
+> [Discord Application Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup).
 
-### 2. Obtain the shared Plex token
+### 2. Plex token
 
-The shared token allows the application to browse and stream from the server.
-Follow Plex's [authentication token guide](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)
-to retrieve the `X-Plex-Token` value.
+Follow Plex's
+[authentication token guide](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)
+to get your `X-Plex-Token`.
 
 ### 3. Configure the application
-
-Copy the example configuration:
 
 ```bash
 cp .env.example .env
 ```
 
-Set the required values:
+The complete file:
 
 ```env
-DISCORD_CLIENT_ID=your_discord_client_id
-DISCORD_CLIENT_SECRET=your_discord_client_secret
+# Discord application
+DISCORD_CLIENT_ID=
+DISCORD_CLIENT_SECRET=
 
-# Must be reachable from inside the Docker container.
+# Plex — must be reachable from inside the container, so not localhost
 PLEX_URL=http://192.168.1.50:32400
-PLEX_TOKEN=your_shared_plex_token
+PLEX_TOKEN=
 
-REDIRECT_URI=https://watch.example.com
-ALLOWED_ORIGINS=https://watch.example.com
+# Optional — plex.tv ACCOUNT token; needed for Discover details and Seerr
+PLEX_ACCOUNT_TOKEN=
+
+# Optional — stable key for encrypting linked Plex tokens
+PLEX_LINK_SECRET=
+
+# Server
+PORT=3000
+
+# Public URL — must match the Discord URL mapping exactly
+REDIRECT_URI=https://your-domain.example.com
+ALLOWED_ORIGINS=https://your-domain.example.com
+
+# Optional — restrict to specific Discord servers, comma-separated
+ALLOWED_GUILD_IDS=
+
+# Optional — admin secret for /api/plex/hls/sessions
+ADMIN_SECRET=
+
+# Optional — VPS relay for segment delivery; also disables P2P
+# VPS_RELAY_URL=https://theater.your-domain.example.com
+# VPS_RELAY_KEY=
+
+# Optional — transcode bitrate (kbps); per-viewer bandwidth scales with this
+# VIDEO_BITRATE_KBPS=12000
+# VIDEO_PEAK_BITRATE_KBPS=20000
+
+# Optional — thumbnail cache
+# THUMB_CACHE_TTL_MS=604800000
+# THUMB_CACHE_MAX_MB=500
+
+# Optional — collection rows and "More Like This"
+# TMDB_API_KEY=
+
+# Optional — missing-episode lists using Sonarr-compatible numbering
+# TVDB_API_KEY=
+# TVDB_PIN=
+
+# Optional — Seerr requests (needs PLEX_ACCOUNT_TOKEN too)
+# SEERR_URL=https://requests.your-domain.example.com
+
+# Optional — IMDb / Rotten Tomatoes / TMDB ratings
+# MDBLIST_API_KEY=
+
+# Optional — diagnostic logging
+# LOG_TO_FILE=1
+# LOG_DIR=/app/data/logs
+# LOG_RETENTION_DAYS=7
+# LOG_MAX_FILE_MB=64
+# DEBUG=1
+
+# Optional — detail-page cache warming
+# WARM_CACHE=1
+# WARM_CACHE_MAX_ITEMS=600
+# WARM_CACHE_DELAY_MS=250
+# WARM_CACHE_INTERVAL_MIN=240
 ```
 
-Use the Plex server's LAN address or Docker hostname for `PLEX_URL`. Inside a
-container, `localhost` refers to the Activity container itself, not a separate
-Plex installation.
-
-All other options in [.env.example](.env.example) are optional.
+Only the six unset values at the top are required. Every option is documented in
+the [Configuration Reference](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Configuration-Reference).
 
 ### 4. Start the server
 
@@ -201,64 +255,32 @@ All other options in [.env.example](.env.example) are optional.
 docker compose up -d --build
 ```
 
-Verify the server started and review which optional features are active:
-
 ```bash
 docker compose logs | grep Config
 ```
 
 ### 5. Launch in Discord
 
-Join a voice channel, select the **Activities** rocket, and choose the
-application. Use **Invite to Activity** to bring other channel members into the
-same room.
+Join a voice channel, click the **Activities** rocket, and pick the application.
+**Invite to Activity** brings others into the same room.
 
-## Optional features
+## Documentation
 
-Unset options simply hide the related row, tab, or button. At startup, the
-server prints a summary such as:
-
-```text
-[Config] ✓ TMDB   ✓ TVDB   ✓ Ratings   ✓ Requests   ✓ Discover   · VPS relay (P2P mode)
-```
-
-| Setting | Feature | Source |
-|---|---|---|
-| `TMDB_API_KEY` | Full collections, More Like This, and extended cast/crew filmographies | [TMDB API settings](https://www.themoviedb.org/settings/api) |
-| `TVDB_API_KEY` | Missing-episode lists using Sonarr-compatible TVDB season numbering | [TheTVDB API information](https://thetvdb.com/api-information) |
-| `TVDB_PIN` | Subscriber authentication for a user-supported TVDB key | Your TVDB account; not required for a free project key |
-| `MDBLIST_API_KEY` | IMDb, Rotten Tomatoes, and TMDB ratings | [MDBList API Access](https://mdblist.com/preferences) |
-| `PLEX_ACCOUNT_TOKEN` | Enhanced Plex Discover details and Plex sign-in to Seerr | An `X-Plex-Token` obtained from app.plex.tv |
-| `PLEX_LINK_SECRET` | Stable encryption key for personally linked Plex tokens | Generate a long random value; falls back to `DISCORD_CLIENT_SECRET` |
-| `SEERR_URL` | Request buttons via Seerr | Public URL of the Seerr installation |
-| `ALLOWED_GUILD_IDS` | Restrict the Activity to specific Discord servers | Comma-separated Discord server IDs |
-| `VPS_RELAY_URL`, `VPS_RELAY_KEY` | Single upstream video stream for larger rooms | Self-hosted relay; see [VPS relay](#vps-relay) |
-
-### Plex credentials
-
-Three Plex-related values are used, each with a distinct purpose:
-
-| Credential | Owner | Purpose |
-|---|---|---|
-| `PLEX_TOKEN` | Server owner | Required. Browses the configured library and starts streams for the room. |
-| `PLEX_ACCOUNT_TOKEN` | Server owner | Optional. Retrieves cloud-only Discover details and authenticates to Seerr. |
-| Per-user linked token | Individual user | Optional. Syncs that user's history, progress, watched status, and Watchlist. Stored encrypted. |
-
-## Video delivery
-
-The application streams browser-compatible video at up to 1080p. Default
-bitrate can be adjusted with `VIDEO_BITRATE_KBPS` and `VIDEO_PEAK_BITRATE_KBPS`.
-
-### VPS relay
-
-Without a relay, upstream bandwidth scales with the number of viewers. An
-optional VPS relay allows the home server to upload a single stream while the
-VPS serves the room. See [the VPS relay setup guide](docs/vps-relay-setup.md)
-for configuration.
+| | |
+|---|---|
+| [Installation](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Installation) | Full setup walkthrough |
+| [Discord Application Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup) | Creating the app, keeping it private, the 25-member limit, verification |
+| [Plex Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Plex-Setup) | Tokens, markers, preview thumbnails |
+| [Configuration Reference](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Configuration-Reference) | Every environment variable |
+| [Using the Activity](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Using-the-Activity) | End-user guide |
+| [Optional Integrations](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Optional-Integrations) | TMDB, TVDB, MDBList, Seerr |
+| [VPS Relay](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/VPS-Relay) | Serving large rooms from one stream |
+| [Troubleshooting](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Troubleshooting) | When something breaks |
+| [FAQ](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FAQ) | Common questions |
 
 ## Data and privacy
 
-The backend proxies Plex API calls and video segments, so Plex tokens are not
+The backend proxies Plex API calls and video segments, so Plex tokens are never
 exposed to browsers. Sessions, roles, local watch history, linked account
 records, and artwork metadata are stored in SQLite under the Docker data volume
 and persist across container rebuilds.
@@ -269,39 +291,6 @@ and persist across container rebuilds.
 > automated CI gate. Deploy it on infrastructure you control; do not expose it
 > as a public service.
 
-## Troubleshooting
-
-| Problem | Resolution |
-|---|---|
-| **Failed to connect to Discord** | Launch the application as an Activity from a voice channel rather than visiting its URL directly. |
-| **Library is empty** | Verify `PLEX_URL` and `PLEX_TOKEN`, and confirm the container can reach the Plex address. |
-| **Video will not play** | Confirm Plex can transcode the title, then check the browser console and server logs for HLS errors. |
-| **Session expired** | The application server restarted. Close and reopen the Activity. |
-| **Reconnecting…** | The room WebSocket dropped. Playback continues locally while automatic reconnect attempts run. |
-| **Unknown instance** | Discord's Activity registration expired due to inactivity. Close and reopen the Activity. |
-| **Tunnel URL changed** | Update the URL mapping in the Discord Developer Portal. |
-| **No Skip Intro, Skip Credits, or previews** | Enable Plex's marker detection and video preview thumbnail generation for the library. |
-| **No ratings** | Set `MDBLIST_API_KEY`. |
-| **No full collections or More Like This** | Set `TMDB_API_KEY`. Without it, collection rows only include titles already in Plex. |
-| **Missing episodes numbered incorrectly** | Set `TVDB_API_KEY` so the list uses the same source as Sonarr. |
-| **No Request button** | Set both `SEERR_URL` and `PLEX_ACCOUNT_TOKEN`. |
-| **Unsure what is enabled** | Run `docker compose logs \| grep Config`. |
-| **VPS segments return 403** | Verify the relay key and confirm Cloudflare allows the VPS IP. |
-| **VPS segments return 502** | The VPS cannot reach the Activity backend. Check DNS, firewall, and proxy settings. |
-| **VPS playback stutters** | nginx must proxy segments through the Activity backend, not directly to Plex. |
-| **Discord blocks relay segments** | Add the `/theater` URL mapping in the Discord Developer Portal. |
-
-Diagnostic logs are written to `/data/logs` by default, with Plex and session
-tokens redacted. Copy them out of the container with:
-
-```bash
-docker cp plex-discord-theater:/data/logs ./logs
-```
-
-Set `DEBUG=1` only while investigating a specific playback issue; it produces
-substantially more verbose logging. See [.env.example](.env.example) for
-retention, cache warming, and other tuning options.
-
 ## Local development
 
 ```bash
@@ -309,23 +298,18 @@ npm install
 npm run dev
 ```
 
-This starts the server on port 3000 and the client on port 5173. Add the
-Discord client ID to `packages/client/.env`:
+Server on port 3000, client on port 5173. Add the Discord client ID to
+`packages/client/.env`:
 
 ```env
 VITE_DISCORD_CLIENT_ID=your_discord_client_id
 ```
 
-Discord requires HTTPS even in development. For a temporary URL:
+Discord requires HTTPS even in development:
 
 ```bash
 cloudflared tunnel --url http://localhost:5173
 ```
-
-Update the Discord URL mapping whenever the temporary address changes, or use
-a [named Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-local-tunnel/).
-
-Additional commands:
 
 ```bash
 npm test

@@ -144,16 +144,18 @@ administrator API key is required.
 
 ## Installation
 
-> **Full guide:** the [wiki](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki)
-> has a step-by-step walkthrough, including the Discord app setup and how to
-> keep it private. This section is the short version.
+> **Full walkthrough:** the
+> [wiki](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Installation)
+> covers each step in detail, including
+> [the Discord side](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup)
+> and how to keep the app private.
 
 ### Requirements
 
 - Plex Media Server with transcoding enabled
 - Docker
 - A Discord application with Activities enabled
-- A public HTTPS endpoint (Discord will not load `localhost`)
+- A public HTTPS endpoint — Discord will not load `localhost`
 
 ### 1. Discord application
 
@@ -162,7 +164,8 @@ Create an application in the
 **Activities → Settings**, add a URL mapping from `/` to your public HTTPS host,
 and copy the **Application ID** and **Client Secret**.
 
-> An unverified Activity only works in servers with fewer than 25 members. See
+> An unverified Activity only works in Discord servers with fewer than 25
+> members. See
 > [Discord Application Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup).
 
 ### 2. Plex token
@@ -171,95 +174,103 @@ Follow Plex's
 [authentication token guide](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)
 to get your `X-Plex-Token`.
 
-### 3. Configure the application
+### 3. Deploy
 
-```bash
-cp .env.example .env
+Paste this into Portainer, Dockge, or a `docker-compose.yml` and fill in the
+values. Everything is set inline, so no `.env` file is needed.
+
+```yaml
+services:
+  plex-discord-theater:
+    image: ghcr.io/monkeygonewild/plex-discord-theater:latest
+    container_name: plex-discord-theater
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - app-data:/data
+    environment:
+      # ── Required ─────────────────────────────────────────────────────────
+      # From the Discord Developer Portal.
+      DISCORD_CLIENT_ID: ""
+      DISCORD_CLIENT_SECRET: ""
+
+      # Your Plex server, reachable from inside this container.
+      # Not localhost — that means the container itself.
+      PLEX_URL: "http://192.168.1.50:32400"
+      PLEX_TOKEN: ""
+
+      # Your public HTTPS address. Must match the Discord URL mapping exactly.
+      REDIRECT_URI: "https://watch.example.com"
+      ALLOWED_ORIGINS: "https://watch.example.com"
+
+      # ── Recommended ──────────────────────────────────────────────────────
+      # These are what make the detail pages worth looking at. Leave any of
+      # them empty to turn that feature off.
+
+      # plex.tv ACCOUNT token, not the server token above. Without it, titles
+      # you don't own have blank detail pages. Also signs in to Seerr.
+      PLEX_ACCOUNT_TOKEN: ""
+
+      # Collections, "More Like This", and cast/crew filmographies.
+      # Free key: https://www.themoviedb.org/settings/api
+      TMDB_API_KEY: ""
+
+      # IMDb, Rotten Tomatoes and TMDB scores.
+      # Free key: https://mdblist.com/preferences
+      MDBLIST_API_KEY: ""
+
+      # Correct season numbering for missing-episode lists. TVDB is what
+      # Sonarr monitors. Free key: https://thetvdb.com/api-information
+      # TVDB_PIN is only needed for a subscriber key.
+      TVDB_API_KEY: ""
+      TVDB_PIN: ""
+
+      # Overseerr / Jellyseerr — enables the Request button.
+      SEERR_URL: ""
+
+      # ── Optional ─────────────────────────────────────────────────────────
+      # Stable key for encrypting linked Plex accounts. Generate with
+      # `openssl rand -hex 32` and keep it across deployments.
+      PLEX_LINK_SECRET: ""
+
+      # Restrict to named Discord servers, comma-separated. Empty = any.
+      ALLOWED_GUILD_IDS: ""
+
+      # Route video through a VPS so your upload carries one stream instead of
+      # one per viewer. See the VPS Relay page in the wiki.
+      VPS_RELAY_URL: ""
+      VPS_RELAY_KEY: ""
+
+      # Per-viewer bandwidth scales with the bitrate. Lower it if your upload
+      # is tight; defaults are 12000 / 20000.
+      VIDEO_BITRATE_KBPS: ""
+      VIDEO_PEAK_BITRATE_KBPS: ""
+
+      # Guards the "stop every transcode" endpoint.
+      ADMIN_SECRET: ""
+
+      # ── Leave these alone ────────────────────────────────────────────────
+      NODE_ENV: "production"
+      PORT: "3000"
+      THUMB_CACHE_DIR: "/data"
+
+volumes:
+  app-data:
 ```
 
-The complete file:
-
-```env
-# Discord application
-DISCORD_CLIENT_ID=
-DISCORD_CLIENT_SECRET=
-
-# Plex — must be reachable from inside the container, so not localhost
-PLEX_URL=http://192.168.1.50:32400
-PLEX_TOKEN=
-
-# Optional — plex.tv ACCOUNT token; needed for Discover details and Seerr
-PLEX_ACCOUNT_TOKEN=
-
-# Optional — stable key for encrypting linked Plex tokens
-PLEX_LINK_SECRET=
-
-# Server
-PORT=3000
-
-# Public URL — must match the Discord URL mapping exactly
-REDIRECT_URI=https://your-domain.example.com
-ALLOWED_ORIGINS=https://your-domain.example.com
-
-# Optional — restrict to specific Discord servers, comma-separated
-ALLOWED_GUILD_IDS=
-
-# Optional — admin secret for /api/plex/hls/sessions
-ADMIN_SECRET=
-
-# Optional — VPS relay for segment delivery; also disables P2P
-# VPS_RELAY_URL=https://theater.your-domain.example.com
-# VPS_RELAY_KEY=
-
-# Optional — transcode bitrate (kbps); per-viewer bandwidth scales with this
-# VIDEO_BITRATE_KBPS=12000
-# VIDEO_PEAK_BITRATE_KBPS=20000
-
-# Optional — thumbnail cache
-# THUMB_CACHE_TTL_MS=604800000
-# THUMB_CACHE_MAX_MB=500
-
-# Optional — collection rows and "More Like This"
-TMDB_API_KEY=
-
-# Optional — missing-episode lists using Sonarr-compatible numbering
-TVDB_API_KEY=
-# TVDB_PIN=
-
-# Optional — Seerr requests (needs PLEX_ACCOUNT_TOKEN too)
-SEERR_URL=https://requests.your-domain.example.com
-
-# Optional — IMDb / Rotten Tomatoes / TMDB ratings
-MDBLIST_API_KEY=
-
-# Optional — diagnostic logging
-# LOG_TO_FILE=1
-# LOG_DIR=/app/data/logs
-# LOG_RETENTION_DAYS=7
-# LOG_MAX_FILE_MB=64
-# DEBUG=1
-
-# Optional — detail-page cache warming
-# WARM_CACHE=1
-# WARM_CACHE_MAX_ITEMS=600
-# WARM_CACHE_DELAY_MS=250
-# WARM_CACHE_INTERVAL_MIN=240
-```
-
-Only the six unset values at the top are required. Every option is documented in
-the [Configuration Reference](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Configuration-Reference).
-
-### 4. Start the server
-
-```bash
-docker compose up -d --build
-```
+Then check it came up, and which integrations are live:
 
 ```bash
 docker compose logs | grep Config
 ```
 
-### 5. Launch in Discord
+> Prefer to build from source? Clone the repo and run `docker compose up -d
+> --build` — the bundled `docker-compose.yml` reads from a `.env` file instead.
+> See [.env.example](.env.example) and the
+> [Configuration Reference](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Configuration-Reference).
+
+### 4. Launch in Discord
 
 Join a voice channel, click the **Activities** rocket, and pick the application.
 **Invite to Activity** brings others into the same room.
@@ -275,6 +286,8 @@ Join a voice channel, click the **Activities** rocket, and pick the application.
 | [Using the Activity](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Using-the-Activity) | End-user guide |
 | [Optional Integrations](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Optional-Integrations) | TMDB, TVDB, MDBList, Seerr |
 | [VPS Relay](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/VPS-Relay) | Serving large rooms from one stream |
+| [Updating and Backups](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Updating-and-Backups) | Upgrades, data, restores |
+| [Local Development](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Local-Development) | Running from source, tech stack |
 | [Troubleshooting](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Troubleshooting) | When something breaks |
 | [FAQ](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FAQ) | Common questions |
 
@@ -290,40 +303,6 @@ and persist across container rebuilds.
 > AI-assisted tooling. It has not undergone external security review and has no
 > automated CI gate. Deploy it on infrastructure you control; do not expose it
 > as a public service.
-
-## Local development
-
-```bash
-npm install
-npm run dev
-```
-
-Server on port 3000, client on port 5173. Add the Discord client ID to
-`packages/client/.env`:
-
-```env
-VITE_DISCORD_CLIENT_ID=your_discord_client_id
-```
-
-Discord requires HTTPS even in development:
-
-```bash
-cloudflared tunnel --url http://localhost:5173
-```
-
-```bash
-npm test
-npm run build
-```
-
-## Tech stack
-
-| Layer | Technology |
-|---|---|
-| Client | React, hls.js, p2p-media-loader, Discord Embedded App SDK |
-| Server | Express, WebSocket, better-sqlite3, bittorrent-tracker |
-| Streaming | Plex HLS transcoding, server-side segment prefetch, optional WebRTC sharing |
-| Infrastructure | Docker, Node.js 24, optional nginx relay |
 
 ## License
 

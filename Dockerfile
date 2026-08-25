@@ -28,13 +28,9 @@ COPY tsconfig.base.json ./
 COPY packages/client/ packages/client/
 COPY packages/server/ packages/server/
 
-# Optional. The server injects the Discord application id into index.html at
-# request time, so an image built without this still works anywhere — set
-# DISCORD_CLIENT_ID in the environment instead. Kept because it is still the
-# fallback the bundle compiles in, and because existing build commands pass it.
-ARG VITE_DISCORD_CLIENT_ID
-ENV VITE_DISCORD_CLIENT_ID=$VITE_DISCORD_CLIENT_ID
-
+# No build args. The Discord application id used to be compiled into the
+# client bundle here; the server now injects it per request, so the image is
+# the same whoever builds it and whoever runs it.
 RUN npm run build -w packages/client && \
     npm run build -w packages/server
 

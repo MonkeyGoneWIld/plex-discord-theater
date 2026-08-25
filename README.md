@@ -4,6 +4,12 @@ A Discord Activity for synchronized watch parties from a Plex Media Server. One
 person hosts, playback stays in lockstep for everyone in the voice channel, and
 each viewer can independently select audio tracks and subtitles.
 
+> [!WARNING]
+> **This project was built with AI.** It was developed primarily with
+> AI-assisted tooling and has not had an external security review. Treat it as
+> a hobby project: run it on infrastructure you control, for people you know,
+> and do not expose it as a public service.
+
 ![A synchronized Plex watch party running inside Discord](docs/screenshots/player.jpg)
 
 **[Read the documentation →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki)**
@@ -297,12 +303,6 @@ The backend proxies Plex API calls and video segments, so Plex tokens are never
 exposed to browsers. Sessions, roles, local watch history, linked account
 records, and artwork metadata are stored in SQLite under the Docker data volume
 and persist across container rebuilds.
-
-> [!WARNING]
-> This is an experimental, self-hosted project developed primarily with
-> AI-assisted tooling. It has not undergone external security review and has no
-> automated CI gate. Deploy it on infrastructure you control; do not expose it
-> as a public service.
 
 ## License
 

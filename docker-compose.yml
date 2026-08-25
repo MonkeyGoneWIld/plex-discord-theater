@@ -1,16 +1,31 @@
+# Two ways to run this, from one file.
+#
+#   docker compose up -d            builds from this checkout
+#   docker compose pull && up -d    uses the published image instead
+#
+# `image` names the result either way, so a local build is tagged the same as
+# the published one and `pull` has something to fetch.
+#
+# Deploying through Portainer or Dockge instead? The README carries a
+# self-contained version of this with every value inline, so no .env is needed.
 services:
   app:
     container_name: plex-discord-theater
+    # Pin to a release tag (e.g. :1.0.0) if you would rather updates be
+    # deliberate than automatic.
+    image: ghcr.io/monkeygonewild/plex-discord-theater:latest
     build:
       context: .
-      args:
-        VITE_DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID}
     ports:
       - "${PORT:-3000}:${PORT:-3000}"
 
     # Everything below is read from your .env file. Copy .env.example to .env
     # and fill in the required block; the rest can stay empty, and each one
     # simply turns its feature off. See .env.example for what each does.
+    #
+    # All of it is read at runtime, DISCORD_CLIENT_ID included — the server
+    # hands that one to the browser on each request rather than it being
+    # compiled in, so changing any of these needs a restart, not a rebuild.
     environment:
       # ── Required ────────────────────────────────────────────────
       - NODE_ENV=production

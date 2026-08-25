@@ -78,10 +78,9 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
 
-      # amd64 only, matching the repo's own `docker:build` script. better-sqlite3
-      # compiles a native addon, and building arm64 under QEMU turns a two minute
-      # job into a twenty minute one — worth adding when someone actually needs
-      # it, not before.
+      # amd64 only. better-sqlite3 compiles a native addon, and building arm64
+      # under QEMU turns a two minute job into a twenty minute one — worth
+      # adding when someone actually needs it, not before.
       - uses: docker/build-push-action@v6
         with:
           context: .

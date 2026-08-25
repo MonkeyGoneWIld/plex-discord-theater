@@ -220,17 +220,17 @@ ADMIN_SECRET=
 # THUMB_CACHE_MAX_MB=500
 
 # Optional — collection rows and "More Like This"
-# TMDB_API_KEY=
+TMDB_API_KEY=
 
 # Optional — missing-episode lists using Sonarr-compatible numbering
-# TVDB_API_KEY=
+TVDB_API_KEY=
 # TVDB_PIN=
 
 # Optional — Seerr requests (needs PLEX_ACCOUNT_TOKEN too)
-# SEERR_URL=https://requests.your-domain.example.com
+SEERR_URL=https://requests.your-domain.example.com
 
 # Optional — IMDb / Rotten Tomatoes / TMDB ratings
-# MDBLIST_API_KEY=
+MDBLIST_API_KEY=
 
 # Optional — diagnostic logging
 # LOG_TO_FILE=1

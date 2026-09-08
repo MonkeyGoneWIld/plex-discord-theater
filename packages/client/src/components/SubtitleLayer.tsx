@@ -110,7 +110,16 @@ function useActiveCue(
   const hasCues = cues.length > 0;
 
   useEffect(() => {
-    if (!hasCues) return;
+    if (!hasCues) {
+      // Switching a sidecar track to None empties the cue list. Clear the
+      // previously active cue as part of that transition; otherwise the old
+      // React state remains rendered for the rest of playback because there is
+      // no animation frame left to discover that the list is empty.
+      hintRef.current = 0;
+      shownRef.current = null;
+      setActive(null);
+      return;
+    }
     let frame = 0;
     const tick = () => {
       frame = requestAnimationFrame(tick);

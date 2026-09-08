@@ -201,11 +201,9 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
               ))}
             </div>
           )}
-          {/* External ratings — keyed off the TMDB id the provider metadata gives
-              us (Discover results carry no imdb id). */}
+          {/* Ratings supplied by Plex's provider metadata. */}
           <RatingsRow
-            tmdbId={tmdbId}
-            mediaType={item.type === "show" ? "show" : "movie"}
+            ratings={meta?.ratings}
             style={styles.ratings}
             onReady={() => setRatingsReady(true)}
           />

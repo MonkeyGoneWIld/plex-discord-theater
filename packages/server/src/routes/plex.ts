@@ -13,6 +13,7 @@ import { sessionHostUserId, sessionHasOtherWatchers } from "../services/sync.js"
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
 import { parseSubtitles, type Cue } from "../services/subtitles.js";
+import { mapPlexRatings } from "../services/ratings.js";
 
 const router = Router();
 
@@ -245,6 +246,11 @@ interface PlexMetadataItem {
   librarySectionID?: number;
   guid?: string;
   contentRating?: string;
+  rating?: number | string;
+  ratingImage?: string;
+  audienceRating?: number | string;
+  audienceRatingImage?: string;
+  Rating?: Array<{ image?: string; type?: string; value?: number | string | null }>;
   /** External ids, e.g. { id: "imdb://tt123" }, { id: "tmdb://456" }. */
   Guid?: Array<{ id?: string }>;
   /** Collections this item belongs to (present with includeCollections=1). The
@@ -622,6 +628,7 @@ router.get("/discover/meta", async (req: Request, res: Response) => {
       thumb: m.thumb ? externalThumbUrl(m.thumb) : null,
       // TMDB id (for requesting via Seerr), pulled from the external id list.
       tmdbId: tmdbIdFromGuids(m.Guid),
+      ratings: mapPlexRatings(m),
       // Credits, when Plex's online catalog carries them for this title.
       cast: mapCredits(m.Role),
       directors: mapCredits(m.Director, 10, "Director"),
@@ -1077,6 +1084,7 @@ async function buildMetaUncached(ratingKey: string): Promise<Record<string, unkn
       // IMDb id — used by the client to look up external ratings. Null when
       // Plex's metadata agent never stored one.
       imdbId,
+      ratings: mapPlexRatings(m),
       // Credits for the detail page's Cast & Crew row. Episodes carry their own
       // guest cast; shows carry the series regulars.
       cast: mapCredits(m.Role),
@@ -1659,6 +1667,7 @@ router.get("/tmdb/meta", async (req: Request, res: Response) => {
         ? externalThumbUrl(`https://image.tmdb.org/t/p/w500${data.poster_path}`)
         : null,
       tmdbId: Number(tmdbId),
+      ratings: { imdb: null, tmdb: null, rtCritic: null, rtAudience: null },
       // Same credit shape the library meta endpoint returns, so the detail pages
       // render one Cast & Crew component regardless of where the title came from.
       cast: tmdbCredits(data.credits?.cast, MAX_CAST, (c) => c.character),

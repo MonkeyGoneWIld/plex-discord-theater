@@ -320,6 +320,8 @@ export interface PlexMeta {
   tmdbId?: number | null;
   /** IMDb id (e.g. "tt0111161") — for external ratings. Optional/nullable. */
   imdbId?: string | null;
+  /** Ratings reported directly by Plex metadata. */
+  ratings?: Ratings | null;
   /** Credits for the Cast & Crew row. Optional so a newer client served by an
    *  older server simply renders no row. */
   cast?: Credit[];
@@ -437,6 +439,8 @@ export interface DiscoverMeta {
   thumb: string | null;
   /** TMDB id for requesting via Seerr; null if unknown. */
   tmdbId: number | null;
+  /** Ratings reported directly by Plex's online metadata provider. */
+  ratings?: Ratings | null;
   /** Optional so a newer client served by an older server degrades to no row. */
   cast?: Credit[];
   directors?: Credit[];
@@ -505,29 +509,12 @@ export function fetchSeerrStatus(tmdbId: number, mediaType: SeerrMediaType): Pro
   return apiGet(`/api/seerr/status?tmdbId=${tmdbId}&mediaType=${mediaType}`);
 }
 
-/**
- * External ratings for a movie/show detail page, sourced from MDBList.
- * `imdb` is 0–10; `tmdb`, `rtCritic` and `rtAudience` are 0–100 percentages.
- * Any field is null when that source has no score. `configured` is false when
- * the server has no MDBList API key set (the ratings row is then hidden).
- */
+/** Scores reported by Plex; IMDb is 0–10 and the other sources are percentages. */
 export interface Ratings {
   imdb: number | null;
   tmdb: number | null;
   rtCritic: number | null;
   rtAudience: number | null;
-}
-
-export type RatingsMediaType = "movie" | "show";
-
-export function fetchRatings(
-  opts: { imdbId?: string | null; tmdbId?: number | null; mediaType: RatingsMediaType },
-): Promise<{ configured: boolean; ratings: Ratings }> {
-  const params = new URLSearchParams({ mediaType: opts.mediaType });
-  if (opts.imdbId) params.set("imdbId", opts.imdbId);
-  if (opts.tmdbId != null) params.set("tmdbId", String(opts.tmdbId));
-  // Cached (ratings are stable) so navigating back to a detail view is free.
-  return cachedGet(`/api/ratings?${params.toString()}`);
 }
 
 /** A show's season with its Seerr status (2=pending, 3=processing, 4=partial,

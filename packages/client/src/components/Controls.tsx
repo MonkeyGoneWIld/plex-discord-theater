@@ -57,6 +57,9 @@ interface ControlsProps {
   onOpenSubtitleTiming?: () => void;
   /** Whether that panel is currently open, so the button can show it. */
   subtitleTimingOpen?: boolean;
+  /** Opens the client-local video zoom panel; available only in Manual mode. */
+  onOpenZoom?: () => void;
+  zoomOpen?: boolean;
   /** Where a restart-in-progress is heading, in seconds, or null when playback
    *  is settled. A transcode restart detaches the media and the element reports
    *  0 until the replacement loads, which snapped the bar back to the start
@@ -437,6 +440,8 @@ export function Controls({
   onSurfaceClick,
   onOpenSubtitleTiming,
   subtitleTimingOpen = false,
+  onOpenZoom,
+  zoomOpen = false,
   restartingTo = null,
   onToggleStats,
   statsActive,
@@ -626,8 +631,11 @@ export function Controls({
     // Records whether the bar was hidden *before* this tap revealed it, which
     // is the thing the video's click handler needs and can no longer observe by
     // the time it runs.
-    const onReveal = () => {
-      if (!visibleRef.current) revealTapRef.current = true;
+    const onReveal = (event: Event) => {
+      // A pinch has no picture click to consume its reveal flag. Start each
+      // new pointer interaction with fresh state, and discard multi-touch.
+      if (event.type === "pointerdown") revealTapRef.current = !visibleRef.current;
+      if (event.type === "touchstart" && (event as TouchEvent).touches.length > 1) revealTapRef.current = false;
       resetHideTimer();
     };
     parent.addEventListener("pointerdown", onReveal);
@@ -1256,7 +1264,7 @@ export function Controls({
   // elapsed and remaining times either side, and a desktop doesn't.
   const progressBar = (
     <div
-      ref={progressRef}
+      ref={progressRef} data-player-progress
       onPointerDown={handleProgressPointerDown}
       onPointerMove={handleProgressPointerMove}
       onPointerUp={handleProgressPointerUp}
@@ -1346,7 +1354,7 @@ export function Controls({
         />
       )}
 
-      <div
+      <div data-zoom-surface
         style={{
           ...styles.overlay,
           opacity: visible ? 1 : 0,
@@ -1388,7 +1396,7 @@ export function Controls({
           steals a press aimed at a control. On a desktop it isn't rendered at
           all and the click-to-pause path below is untouched. */}
       {phone && (
-        <div style={styles.gestureLayer} onClick={handlePictureTap} aria-hidden="true" />
+        <div data-zoom-surface style={{ ...styles.gestureLayer, touchAction: "none" }} onClick={handlePictureTap} aria-hidden="true" />
       )}
 
       {/* Transport, in the middle of the picture where it can be seen and
@@ -1686,6 +1694,21 @@ export function Controls({
             {onOpenTrackSwitcher && (
               <button onClick={onOpenTrackSwitcher} className="btn" style={{ ...styles.gearBtn, ...(compact ? styles.gearBtnCompact : {}) }} title="Audio & Subtitles">
                 {"\u2699"}
+              </button>
+            )}
+            {onOpenZoom && !phone && (
+              <button
+                onClick={onOpenZoom}
+                className="btn"
+                style={{ ...styles.gearBtn, ...(compact ? styles.gearBtnCompact : {}), ...(zoomOpen ? styles.gearBtnActive : {}) }}
+                title="Custom Zoom"
+                aria-label="Custom Zoom"
+                aria-pressed={zoomOpen}
+              >
+                <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                  <rect x="3" y="3" width="14" height="14" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+                  <path d="M5 15L15 5M5 11v4h4M11 5h4v4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
               </button>
             )}
             {/* Next to the gear, because it belongs to the same family of

@@ -526,9 +526,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                 <div style={styles.ratingsSlot}>
                   {meta && (
                     <RatingsRow
-                      imdbId={meta.imdbId}
-                      tmdbId={meta.tmdbId}
-                      mediaType="movie"
+                      ratings={meta.ratings}
                       style={styles.ratings}
                       onReady={() => setRatingsReady(true)}
                     />

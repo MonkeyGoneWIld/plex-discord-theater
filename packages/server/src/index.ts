@@ -14,7 +14,6 @@ import { fileURLToPath } from "url";
 import discordRoutes, { closeInstanceDb } from "./routes/discord.js";
 import plexRoutes from "./routes/plex.js";
 import seerrRoutes from "./routes/seerr.js";
-import ratingsRoutes from "./routes/ratings.js";
 import historyRoutes from "./routes/history.js";
 import plexAccountRoutes from "./routes/plex-account.js";
 import logRoutes from "./routes/logs.js";
@@ -213,7 +212,6 @@ app.get("/api/health", async (_req, res) => {
 app.use("/api", discordRoutes);
 app.use("/api/plex", requireAuth, plexRoutes);
 app.use("/api/seerr", requireAuth, seerrRoutes);
-app.use("/api/ratings", requireAuth, ratingsRoutes);
 app.use("/api/history", requireAuth, historyRoutes);
 app.use("/api/plex-account", requireAuth, plexAccountRoutes);
 app.use("/api/logs", requireAuth, logRoutes);
@@ -290,7 +288,6 @@ function reportIntegrations(): void {
     [
       on("TMDB", !!process.env.TMDB_API_KEY, "no collections / recommendations / person pages"),
       on("TVDB", !!process.env.TVDB_API_KEY?.trim(), "missing-episode lists fall back to TMDB numbering"),
-      on("Ratings", !!process.env.MDBLIST_API_KEY?.trim(), "ratings row hidden"),
       on("Requests", !!process.env.SEERR_URL, "Seerr request flow off"),
       on("Discover", !!process.env.PLEX_ACCOUNT_TOKEN, "online search detail may 401"),
       on("VPS relay", !!(process.env.VPS_RELAY_URL && process.env.VPS_RELAY_KEY), "P2P mode"),

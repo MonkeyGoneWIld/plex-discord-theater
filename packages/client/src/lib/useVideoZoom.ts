@@ -8,8 +8,8 @@ export function useVideoZoom(root: RefObject<HTMLDivElement | null>, key: string
     state.current = { key, ...loadZoomPreference(key ?? ""), x: 0, y: 0 };
   }
   const update = (mode: ZoomMode, zoom = state.current.zoom, x = state.current.x, y = state.current.y) => {
-    const value = Math.max(100, Math.min(200, Math.round(zoom / 5) * 5));
-    state.current = { key: state.current.key, mode, zoom: value, x: value === 100 ? 0 : x, y: value === 100 ? 0 : y };
+    const value = Math.max(50, Math.min(200, Math.round(zoom / 5) * 5));
+    state.current = { key: state.current.key, mode, zoom: value, x: value <= 100 ? 0 : x, y: value <= 100 ? 0 : y };
     if (state.current.key) saveZoomPreference(state.current.key, state.current);
     render((v) => v + 1);
   };
@@ -36,6 +36,7 @@ export function useVideoZoom(root: RefObject<HTMLDivElement | null>, key: string
       return { distance: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), cx: (a.clientX + b.clientX) / 2, cy: (a.clientY + b.clientY) / 2 };
     };
     const start = (e: TouchEvent) => {
+      if (e.touches.length === 1) suppressUntil = 0;
       if (!surface(e.target, e.touches[0]?.clientY ?? 0)) return;
       if (e.touches.length === 2 || (state.current.mode === "manual" && state.current.zoom > 100)) {
         gesture = { ...measure(e.touches), zoom: state.current.zoom, x: state.current.x, y: state.current.y };
@@ -44,13 +45,15 @@ export function useVideoZoom(root: RefObject<HTMLDivElement | null>, key: string
     };
     const move = (e: TouchEvent) => {
       if (!gesture || !e.touches.length) return;
+      const m = measure(e.touches);
+      // Small finger motion during a tap is not an intentional pan.
+      if (e.touches.length === 1 && Math.hypot(m.cx - gesture.cx, m.cy - gesture.cy) < 6) return;
       e.preventDefault();
       e.stopPropagation();
       suppressUntil = Date.now() + 700;
-      const m = measure(e.touches);
       const ratio = gesture.distance > 0 && e.touches.length === 2 ? m.distance / gesture.distance : 1;
       if (state.current.mode === "manual") {
-        const zoom = Math.max(100, Math.min(200, Math.round(gesture.zoom * ratio / 5) * 5));
+        const zoom = Math.max(50, Math.min(200, Math.round(gesture.zoom * ratio / 5) * 5));
         const box = el.getBoundingClientRect();
         const video = el.querySelector("video");
         const fit = video?.videoWidth && video.videoHeight
@@ -70,7 +73,7 @@ export function useVideoZoom(root: RefObject<HTMLDivElement | null>, key: string
       else if (gesture) gesture = { ...measure(e.touches), zoom: state.current.zoom, x: state.current.x, y: state.current.y };
     };
     const click = (e: MouseEvent) => {
-      if (Date.now() < suppressUntil) { e.preventDefault(); e.stopPropagation(); }
+      if (Date.now() < suppressUntil && surface(e.target, e.clientY)) { e.preventDefault(); e.stopPropagation(); }
     };
     el.addEventListener("wheel", wheel, { passive: false, capture: true });
     el.addEventListener("touchstart", start, { passive: false, capture: true });
@@ -88,5 +91,5 @@ export function useVideoZoom(root: RefObject<HTMLDivElement | null>, key: string
     };
   }, [root]);
   void revision;
-  return { ...state.current, setMode: (mode: ZoomMode) => update(mode, state.current.zoom, 0, 0), setZoom: (zoom: number) => update("manual", zoom) };
+  return { ...state.current, setMode: (mode: ZoomMode) => update(mode, mode === "manual" ? 100 : state.current.zoom, 0, 0), setZoom: (zoom: number) => update("manual", zoom) };
 }

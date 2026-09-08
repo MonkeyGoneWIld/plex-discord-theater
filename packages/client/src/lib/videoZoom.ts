@@ -16,13 +16,13 @@ function readAll(): Record<string, ZoomPreference> {
 export function loadZoomPreference(key: string): ZoomPreference {
   const value = readAll()[key];
   if (!value || !["normal", "fill", "16:9", "21:9", "manual"].includes(value.mode)) return { ...DEFAULT };
-  return { mode: value.mode, zoom: Math.max(100, Math.min(200, Math.round((Number.isFinite(value.zoom) ? value.zoom : 100) / 5) * 5)) };
+  return { mode: value.mode, zoom: Math.max(50, Math.min(200, Math.round((Number.isFinite(value.zoom) ? value.zoom : 100) / 5) * 5)) };
 }
 
 export function saveZoomPreference(key: string, value: ZoomPreference): void {
   try {
     const all = readAll();
-    all[key] = { mode: value.mode, zoom: Math.max(100, Math.min(200, Math.round((Number.isFinite(value.zoom) ? value.zoom : 100) / 5) * 5)) };
+    all[key] = { mode: value.mode, zoom: Math.max(50, Math.min(200, Math.round((Number.isFinite(value.zoom) ? value.zoom : 100) / 5) * 5)) };
     localStorage.setItem(KEY, JSON.stringify(all));
   } catch { /* localStorage may be unavailable in private browsing */ }
 }

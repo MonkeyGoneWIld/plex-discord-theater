@@ -631,8 +631,11 @@ export function Controls({
     // Records whether the bar was hidden *before* this tap revealed it, which
     // is the thing the video's click handler needs and can no longer observe by
     // the time it runs.
-    const onReveal = () => {
-      if (!visibleRef.current) revealTapRef.current = true;
+    const onReveal = (event: Event) => {
+      // A pinch has no picture click to consume its reveal flag. Start each
+      // new pointer interaction with fresh state, and discard multi-touch.
+      if (event.type === "pointerdown") revealTapRef.current = !visibleRef.current;
+      if (event.type === "touchstart" && (event as TouchEvent).touches.length > 1) revealTapRef.current = false;
       resetHideTimer();
     };
     parent.addEventListener("pointerdown", onReveal);

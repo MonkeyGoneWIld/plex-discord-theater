@@ -41,7 +41,7 @@ for (const count of [1, 2, 3, 7, 49, 50, 51, 96, 385, 3214, 10800]) {
   const { coarse, medium } = previewTierIndices(count);
   assert.deepEqual(serverTierIndices(count), { coarse, medium });
   assert.equal(coarse.length, Math.ceil(count * 0.04));
-  assert.equal(medium.length, Math.ceil(count * 0.30));
+  assert.equal(medium.length, Math.ceil(count * 0.40));
   assert.equal(new Set(medium).size, medium.length);
   assert.ok(coarse.every((i) => medium.includes(i)), "overview is a subset of medium");
   let header = true;
@@ -71,8 +71,8 @@ for (const count of [1, 2, 3, 7, 49, 50, 51, 96, 385, 3214, 10800]) {
   assert.deepEqual(received, sent, "client confirms the same three tiers that the server sent");
   assert.deepEqual(received.map((p) => p.tier), ["coarse", "medium", "full"]);
   if (count === 3214) {
-    assert.deepEqual(received.map((p) => p.frames), [129, 836, 2249]);
-    assert.deepEqual(received.map((p) => p.ready), [129, 965, 3214]);
+    assert.deepEqual(received.map((p) => p.frames), [129, 1157, 1928]);
+    assert.deepEqual(received.map((p) => p.ready), [129, 1286, 3214]);
   }
   const frames = reader.frames()!;
   assert.equal(frames.ready, count);

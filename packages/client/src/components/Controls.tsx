@@ -918,7 +918,7 @@ export function Controls({
     if (failedPartRef.current === previewPartId) return;
     // Approximate overview density before the BIF timestamps arrive.
     const approximateCount = Math.max(1, Math.ceil(duration / 2));
-    const tierCount = Math.max(1, Math.ceil(approximateCount * (detail === "coarse" ? 0.04 : 0.30)));
+    const tierCount = Math.max(1, Math.ceil(approximateCount * (detail === "coarse" ? 0.04 : 0.40)));
     const bucketSize = detail === "full" ? 2000 : Math.max(2000, duration * 1000 / tierCount);
     const bucketMs = Math.floor(Math.floor(pct * duration * 1000 / bucketSize) * bucketSize);
     const url = authUrl(`/api/plex/thumb/library/parts/${previewPartId}/indexes/sd/${bucketMs}`);

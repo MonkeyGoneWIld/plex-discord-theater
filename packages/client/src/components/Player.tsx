@@ -605,7 +605,18 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const zoomMeta = itemMeta?.ratingKey === item.ratingKey ? itemMeta : null;
   const zoomItem = { ...item, type: zoomMeta?.type ?? item.type, grandparentRatingKey: item.grandparentRatingKey ?? zoomMeta?.grandparentRatingKey };
   const zoomPreferenceKey = zoomItem.type === "episode" && !zoomItem.grandparentRatingKey ? null : zoomKey(zoomItem);
-  const { mode: zoomMode, zoom, x: zoomX, y: zoomY, setMode: setZoomMode, setZoom } = useVideoZoom(zoomRootRef, zoomPreferenceKey);
+  const [zoomNotice, setZoomNotice] = useState<string | null>(null);
+  const zoomNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showZoomNotice = useCallback((message: string) => {
+    setZoomNotice(message);
+    if (zoomNoticeTimer.current) clearTimeout(zoomNoticeTimer.current);
+    zoomNoticeTimer.current = setTimeout(() => setZoomNotice(null), 1500);
+  }, []);
+  useEffect(() => {
+    setZoomNotice(null);
+    return () => { if (zoomNoticeTimer.current) clearTimeout(zoomNoticeTimer.current); };
+  }, [zoomPreferenceKey]);
+  const { mode: zoomMode, zoom, x: zoomX, y: zoomY, setMode: setZoomMode, setZoom } = useVideoZoom(zoomRootRef, zoomPreferenceKey, showZoomNotice);
   /** A sidecar that could not be read, so the offer to adjust it is withdrawn
    *  rather than left pointing at subtitles that never arrived. */
   const [sidecarFailed, setSidecarFailed] = useState(false);
@@ -3845,6 +3856,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         <div style={styles.hostDisconnected}>Host disconnected — waiting for reconnection...</div>
       ) : null}
 
+      {zoomNotice && (
+        <div style={{ ...styles.viewerStatus, top: viewerStatus ? "64px" : "18px" }} role="status" aria-live="polite">
+          {zoomNotice}
+        </div>
+      )}
       {/* Viewer status — what the host is doing to shared playback */}
       {viewerStatus && (
         <div style={styles.viewerStatus} role="status" aria-live="polite">

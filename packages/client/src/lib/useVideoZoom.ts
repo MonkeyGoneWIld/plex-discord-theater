@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { loadZoomPreference, saveZoomPreference, type ZoomMode } from "./videoZoom";
 
-export function useVideoZoom(root: RefObject<HTMLDivElement | null>, key: string | null) {
+export function useVideoZoom(root: RefObject<HTMLDivElement | null>, key: string | null, onGesture?: (message: string) => void) {
+  const gestureNotice = useRef(onGesture);
+  gestureNotice.current = onGesture;
   const [revision, render] = useState(0);
   const state = useRef({ key, ...loadZoomPreference(key ?? ""), x: 0, y: 0 });
   if (key !== state.current.key) {
@@ -27,7 +29,10 @@ export function useVideoZoom(root: RefObject<HTMLDivElement | null>, key: string
       if (!e.ctrlKey || state.current.mode !== "manual" || !surface(e.target, e.clientY)) return;
       e.preventDefault();
       e.stopPropagation();
-      if (e.deltaY) updateRef.current("manual", state.current.zoom + (e.deltaY < 0 ? 5 : -5));
+      if (e.deltaY) {
+        updateRef.current("manual", state.current.zoom + (e.deltaY < 0 ? 5 : -5));
+        gestureNotice.current?.(`Zoom: ${state.current.zoom}%`);
+      }
     };
     let gesture: { distance: number; zoom: number; cx: number; cy: number; x: number; y: number } | null = null;
     let suppressUntil = 0;
@@ -65,8 +70,14 @@ export function useVideoZoom(root: RefObject<HTMLDivElement | null>, key: string
         updateRef.current("manual", zoom,
           Math.max(-maxX, Math.min(maxX, gesture.x + m.cx - gesture.cx)),
           Math.max(-maxY, Math.min(maxY, gesture.y + m.cy - gesture.cy)));
-      } else if (ratio > 1.08) updateRef.current("fill");
-      else if (ratio < 0.92) updateRef.current("normal");
+        if (e.touches.length === 2) gestureNotice.current?.(`Zoom: ${state.current.zoom}%`);
+      } else if (ratio > 1.08 && state.current.mode !== "fill") {
+        updateRef.current("fill");
+        gestureNotice.current?.("Fill Screen");
+      } else if (ratio < 0.92 && state.current.mode !== "normal") {
+        updateRef.current("normal");
+        gestureNotice.current?.("Normal");
+      }
     };
     const end = (e: TouchEvent) => {
       if (e.touches.length === 0) gesture = null;

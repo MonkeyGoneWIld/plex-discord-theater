@@ -25,28 +25,29 @@ const root = { current: {
   addEventListener:(name,fn)=>listeners[name]=fn, removeEventListener:()=>{},
   querySelector:()=>null, getBoundingClientRect:()=>({width:1000,height:600})
 }};
-function render(key) { cursor=0; const v=hook.useVideoZoom(root,key); effects.splice(0).forEach(f=>f()); return v; }
+const notices = [];
+function render(key) { cursor=0; const v=hook.useVideoZoom(root,key,message=>notices.push(message)); effects.splice(0).forEach(f=>f()); return v; }
 const key1=pref.zoomKey({type:"episode",ratingKey:"11",grandparentRatingKey:"1"});
 const key2=pref.zoomKey({type:"episode",ratingKey:"12",grandparentRatingKey:"1"});
 let value=render(key1); value.setMode("manual"); value=render(key1); value.setZoom(145);
-assert.equal(render(key2).zoom,145);
+assert.equal(render(key2).zoom,145); assert.equal(notices.length,0);
 render("movie:2");
 assert.equal(render(key1).zoom,145);
 slots=[]; effects=[]; assert.equal(render(key1).zoom,145);
 let prevented=false;
 const event={target:{matches:()=>true},clientY:200,ctrlKey:true,deltaY:-1,preventDefault:()=>prevented=true,stopPropagation:()=>{}};
-listeners.wheel(event); assert.equal(render(key1).zoom,150); assert.ok(prevented);
+listeners.wheel(event); assert.equal(render(key1).zoom,150); assert.ok(prevented); assert.equal(notices.at(-1),"Zoom: 150%");
 render(key1).setMode("normal"); prevented=false;
 listeners.wheel(event); assert.equal(prevented,false);
 function touch(touches) { return {...event,touches}; }
 listeners.touchstart(touch([{clientX:100,clientY:200},{clientX:200,clientY:200}]));
 listeners.touchmove(touch([{clientX:80,clientY:200},{clientX:220,clientY:200}]));
-assert.equal(render(key1).mode,"fill");
+assert.equal(render(key1).mode,"fill"); assert.equal(notices.at(-1),"Fill Screen");
 listeners.touchend(touch([]));
 render(key1).setMode("manual");
 listeners.touchstart(touch([{clientX:100,clientY:200},{clientX:200,clientY:200}]));
 listeners.touchmove(touch([{clientX:90,clientY:200},{clientX:210,clientY:200}]));
-assert.equal(render(key1).zoom,120);
+assert.equal(render(key1).zoom,120); assert.equal(notices.at(-1),"Zoom: 120%");
 listeners.touchend(touch([]));
 listeners.touchstart(touch([{clientX:100,clientY:200}]));
 listeners.touchmove(touch([{clientX:140,clientY:220}]));
@@ -60,7 +61,9 @@ listeners.touchend(touch([]));
 prevented=false; listeners.click(event); assert.equal(prevented,false);
 render(key1).setZoom(50); assert.equal(render(key1).zoom,50);
 slots=[]; effects=[]; assert.equal(render(key1).zoom,50);
+const noticeCount = notices.length;
 render(key1).setMode("fill"); render(key1).setMode("manual");
+assert.equal(notices.length,noticeCount);
 assert.equal(render(key1).zoom,100);
 render(key1).setZoom(25); assert.equal(render(key1).zoom,50);
 render(key1).setZoom(250); assert.equal(render(key1).zoom,200);

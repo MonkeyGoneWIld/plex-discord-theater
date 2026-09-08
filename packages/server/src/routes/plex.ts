@@ -1,4 +1,7 @@
 import { Router, type Request, type Response } from "express";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { progressivePreview } from "../services/preview-stream.js";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
 import { playableVersionOrder, resolutionLabel, channelLabel } from "../services/media-versions.js";
 import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition } from "../services/segment-prefetch.js";
@@ -2555,6 +2558,23 @@ router.get("/preview/:partId/index", async (req: Request, res: Response) => {
     if (declared && parseInt(declared, 10) > MAX_PREVIEW_INDEX_BYTES) {
       plexRes.body?.cancel().catch(() => {});
       res.status(502).end();
+      return;
+    }
+
+    // Opt-in keeps older clients' ordinary BIF reader working.
+    if (req.query.progressive === "1" && plexRes.body) {
+      const abort = new AbortController();
+      const cancel = () => abort.abort();
+      res.on("close", cancel);
+      if (res.destroyed) abort.abort();
+      res.setHeader("Content-Type", "application/x-plex-preview-v1");
+      res.setHeader("Cache-Control", "private, max-age=86400");
+      res.setHeader("X-Accel-Buffering", "no");
+      try {
+        await pipeline(Readable.from(progressivePreview(plexRes.body, abort.signal)), res);
+      } finally {
+        res.off("close", cancel);
+      }
       return;
     }
 

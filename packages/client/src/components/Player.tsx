@@ -22,7 +22,7 @@ import { getLevel, setLevel, MAX_LEVEL } from "../lib/audioBoost";
 import { describeWatched, loadAudioPref, loadSubtitlePref, mergeTrackPrefs, saveTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { roomPositionNow } from "../hooks/useSync";
-import { zoomKey } from "../lib/videoZoom";
+import { axisZoomScale, zoomKey } from "../lib/videoZoom";
 import { useVideoZoom } from "../lib/useVideoZoom";
 import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
@@ -617,6 +617,32 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     return () => { if (zoomNoticeTimer.current) clearTimeout(zoomNoticeTimer.current); };
   }, [zoomPreferenceKey]);
   const { mode: zoomMode, zoom, setMode: setZoomMode, setZoom } = useVideoZoom(zoomRootRef, zoomPreferenceKey, showZoomNotice);
+  const [axisScale, setAxisScale] = useState(1);
+  useEffect(() => {
+    const root = zoomRootRef.current;
+    const video = videoRef.current;
+    if (!root || !video) return;
+    const resize = () => setAxisScale(axisZoomScale(
+      zoomMode, root.clientWidth, root.clientHeight, video.videoWidth, video.videoHeight,
+    ));
+    const observer = new ResizeObserver(resize);
+    observer.observe(root);
+    video.addEventListener("loadedmetadata", resize);
+    video.addEventListener("resize", resize);
+    resize();
+    return () => {
+      observer.disconnect();
+      video.removeEventListener("loadedmetadata", resize);
+      video.removeEventListener("resize", resize);
+    };
+  }, [zoomMode, item.ratingKey]);
+  const zoomPictureStyle: React.CSSProperties = {
+    objectFit: ["normal", "manual", "width", "height"].includes(zoomMode) ? "contain" : "cover",
+    transform: zoomMode === "manual" ? `scale(${zoom / 100})`
+      : zoomMode === "width" || zoomMode === "height" ? `scale(${axisScale})`
+      : zoomMode === "21:9" ? "scale(1.33)" : undefined,
+    transformOrigin: "center",
+  };
   /** A sidecar that could not be read, so the offer to adjust it is withdrawn
    *  rather than left pointing at subtitles that never arrived. */
   const [sidecarFailed, setSidecarFailed] = useState(false);
@@ -3857,7 +3883,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       ) : null}
 
       {zoomNotice && (
-        <div style={{ ...styles.viewerStatus, top: viewerStatus ? "64px" : "18px" }} role="status" aria-live="polite">
+        <div style={{ ...styles.viewerStatus, top: `calc(var(--sait, 0px) + ${(zoomPhone ? 76 : 18) + (viewerStatus ? 46 : 0)}px)` }} role="status" aria-live="polite">
           {zoomNotice}
         </div>
       )}
@@ -3896,10 +3922,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         ref={videoRef}
         style={{
           ...styles.video,
-          objectFit: zoomMode === "normal" || zoomMode === "manual" ? "contain" : "cover",
-          transform: zoomMode === "manual"
-            ? `scale(${zoom / 100})`
-            : zoomMode === "21:9" ? "scale(1.33)" : undefined,
+          ...zoomPictureStyle,
         }}
         playsInline
         onClick={togglePlayPause}
@@ -3912,7 +3935,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       {holdingFrame && canvasRef.current && (
         <canvas
           aria-hidden="true"
-          style={styles.heldFrame}
+          style={{ ...styles.heldFrame, ...zoomPictureStyle }}
           ref={(el) => {
             const src = canvasRef.current;
             if (!el || !src) return;
@@ -3965,7 +3988,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
                   el.getContext("2d")!.drawImage(canvasRef.current, 0, 0);
                 }
               }}
-              style={styles.trackSwitchCanvas}
+              style={{ ...styles.trackSwitchCanvas, ...zoomPictureStyle }}
             />
           )}
           <div style={styles.trackSwitchMessage}>
@@ -3989,7 +4012,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
                   el.getContext("2d")!.drawImage(canvasRef.current, 0, 0);
                 }
               }}
-              style={styles.trackSwitchCanvas}
+              style={{ ...styles.trackSwitchCanvas, ...zoomPictureStyle }}
             />
           )}
           <div style={styles.trackSwitchMessage}>

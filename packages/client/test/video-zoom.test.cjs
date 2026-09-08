@@ -79,3 +79,15 @@ render(key1).setZoom(25); assert.equal(render(key1).zoom,50);
 render(key1).setZoom(250); assert.equal(render(key1).zoom,200);
 saved.set("pdt:videoZoom:v1","null"); assert.equal(pref.loadZoomPreference(key1).mode,"normal");
 console.log("Zoom regression checks passed: episode continuity, remount persistence, title isolation, wheel gating, centered pinch and ignored single-finger drags.");
+
+// Width/height modes preserve aspect ratio and follow the actual window.
+assert.equal(pref.axisZoomScale("width",1920,1080,1440,1080),4/3);
+assert.equal(pref.axisZoomScale("height",1920,1080,1440,1080),1);
+assert.equal(pref.axisZoomScale("width",390,844,1920,1080),1);
+assert.ok(Math.abs(pref.axisZoomScale("height",390,844,1920,1080) - (1920/1080)/(390/844)) < 1e-9);
+assert.equal(pref.axisZoomScale("height",390,844,0,0),1);
+for (const mode of ["width","height"]) {
+  pref.saveZoomPreference("movie:axis",{mode,zoom:100});
+  assert.equal(pref.loadZoomPreference("movie:axis").mode,mode);
+}
+console.log("Fill Width/Height geometry and persistence checks passed.");

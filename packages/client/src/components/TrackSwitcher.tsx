@@ -170,7 +170,7 @@ export function TrackSwitcher({
           </div>
         ) : (
           <div style={styles.trackList}>
-            {([["normal", "Normal"], ["fill", "Fill Screen"], ["16:9", "Fill 16:9"], ["21:9", "Fill 21:9"], ["manual", "Manual Zoom"]] as const).map(([mode, label]) => (
+            {([["normal", "Normal"], ["fill", "Fill Screen"], ["width", "Fill Width"], ["height", "Fill Height"], ["16:9", "Fill 16:9"], ["21:9", "Fill 21:9"], ["manual", "Manual Zoom"]] as const).map(([mode, label]) => (
               <button className="btn" key={mode} onClick={() => onZoomModeChange(mode)}
                 style={zoomMode === mode ? styles.trackSelected : styles.track}>
                 <div style={{ color: zoomMode === mode ? "#f0f0f0" : "#ccc", fontSize: 13 }}>{label}</div>

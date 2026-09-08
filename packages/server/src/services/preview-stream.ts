@@ -6,6 +6,26 @@ const MAGIC = Buffer.from([0x89, 0x42, 0x49, 0x46, 13, 10, 26, 10]);
 const MAX_BYTES = 1024 * 1024 * 1024;
 const MAX_FRAME_BYTES = 10 * 1024 * 1024;
 
+/** Nested, evenly distributed cumulative tiers. v1 is retained for cached clients. */
+export function previewTierIndices(count: number, version: 1 | 2 = 2) {
+  if (version === 1) {
+    const stride = Math.max(1, Math.ceil(count / 96));
+    const grid = (step: number) => {
+      const result = Array.from({ length: Math.ceil(count / step) }, (_, i) => i * step);
+      if (result[result.length - 1] !== count - 1) result.push(count - 1);
+      return result;
+    };
+    return { coarse: grid(stride * 4), medium: grid(stride) };
+  }
+  const coarseCount = Math.max(1, Math.ceil(count * 0.02));
+  const mediumCount = Math.max(1, Math.ceil(count * 0.15));
+  const medium = Array.from({ length: mediumCount }, (_, i) =>
+    mediumCount === 1 ? 0 : Math.floor(i * (count - 1) / (mediumCount - 1)));
+  const coarse = Array.from({ length: coarseCount }, (_, i) =>
+    medium[coarseCount === 1 ? 0 : Math.floor(i * (mediumCount - 1) / (coarseCount - 1))]);
+  return { coarse, medium };
+}
+
 export interface PreviewTierProgress {
   tier: "coarse" | "medium" | "full";
   frames: number;
@@ -15,13 +35,14 @@ export interface PreviewTierProgress {
 
 /** v1 wire format: uint32 head length, BIF header/index + first JPEG marker,
  * then records of uint32 frame number, uint32 length, JPEG bytes (all LE).
- * Each image is sent exactly once: ~24 overview frames, ~96 medium frames,
- * then the rest. The last image is also in the overview.
+ * Each image is sent exactly once: 2% overview, another 13% for 15% medium,
+ * then the rest. v1 requests retain the original fixed-size grids.
  * Deferred images go to a temporary file, not a movie-sized heap allocation.
  */
 export async function* progressivePreview(
   body: ReadableStream<Uint8Array>, signal?: AbortSignal,
   onTierComplete?: (progress: PreviewTierProgress) => void,
+  version: 1 | 2 = 2,
 ) {
   const reader = body.getReader();
   const cancel = () => { void reader.cancel().catch(() => {}); };
@@ -94,9 +115,10 @@ export async function* progressivePreview(
 
     directory = await mkdtemp(join(tmpdir(), "plex-previews-"));
     file = await open(join(directory, "frames"), "w+");
-    const medium = Math.max(1, Math.ceil(count / 96));
-    const coarse = medium * 4;
-    const stage = (i: number) => i % coarse === 0 || i === count - 1 ? 0 : i % medium === 0 ? 1 : 2;
+    const tiers = previewTierIndices(count, version);
+    const coarse = new Set(tiers.coarse);
+    const medium = new Set(tiers.medium);
+    const stage = (i: number) => coarse.has(i) ? 0 : medium.has(i) ? 1 : 2;
     for (let i = 0; i < count; i++) {
       const size = positions[i + 1] - positions[i];
       const bytes = i === 0 ? Buffer.concat([marker, await take(size - 2)]) : await take(size);

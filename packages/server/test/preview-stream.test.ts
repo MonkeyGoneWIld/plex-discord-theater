@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { progressivePreview, type PreviewTierProgress } from "../src/services/preview-stream.js";
-import { createProgressivePreviewReader, previewStride } from "../../client/src/lib/previewFrames.js";
+import { progressivePreview, previewTierIndices as serverTierIndices, type PreviewTierProgress } from "../src/services/preview-stream.js";
+import { createProgressivePreviewReader, previewTierIndices } from "../../client/src/lib/previewFrames.js";
 import { createPreviewMotion } from "../../client/src/lib/previewMotion.js";
 
 function bif(count: number, multiplier = 1000) {
@@ -31,28 +31,33 @@ async function identity(url: string | null) {
   return new DataView(await (await fetch(url)).arrayBuffer()).getUint32(2, true);
 }
 
-for (const count of [1, 3, 96, 385, 3214, 10800]) {
+const atOrBefore = (target: number, grid: number[]) => grid.filter((i) => i <= target).at(-1)!;
+for (const count of [1, 2, 3, 7, 49, 50, 51, 96, 385, 3214, 10800]) {
   const sent: PreviewTierProgress[] = [];
   const received: PreviewTierProgress[] = [];
   const reader = createProgressivePreviewReader((progress) => received.push(progress));
   const order: number[] = [];
   let level = 0;
-  const coarse = previewStride(count, "coarse");
-  const medium = previewStride(count, "medium");
+  const { coarse, medium } = previewTierIndices(count);
+  assert.deepEqual(serverTierIndices(count), { coarse, medium });
+  assert.equal(coarse.length, Math.ceil(count * 0.02));
+  assert.equal(medium.length, Math.ceil(count * 0.15));
+  assert.equal(new Set(medium).size, medium.length);
+  assert.ok(coarse.every((i) => medium.includes(i)), "overview is a subset of medium");
   let header = true;
   for await (const chunk of progressivePreview(stream(bif(count)), undefined, (progress) => sent.push(progress))) {
     if (header) header = false;
     else {
       const i = chunk.readUInt32LE(0);
-      const stage = i % coarse === 0 || i === count - 1 ? 0 : i % medium === 0 ? 1 : 2;
+      const stage = coarse.includes(i) ? 0 : medium.includes(i) ? 1 : 2;
       assert.ok(stage >= level, "all overview records precede medium and full records");
       if (stage > level && count >= 385) {
         const frames = reader.frames()!;
         if (level === 0) {
-          assert.equal(await identity(frames.frameAt(191_000, count * 1000)), Math.floor(191 / coarse) * coarse);
+          assert.equal(await identity(frames.frameAt(191_000, count * 1000)), atOrBefore(191, coarse));
           assert.equal(await identity(frames.frameAt(count * 1000, count * 1000)), count - 1);
         }
-        if (stage === 2) assert.equal(await identity(frames.frameAt(191_000, count * 1000)), Math.floor(191 / medium) * medium);
+        if (stage === 2) assert.equal(await identity(frames.frameAt(191_000, count * 1000)), atOrBefore(191, medium));
       }
       level = stage;
       order.push(i);
@@ -66,14 +71,19 @@ for (const count of [1, 3, 96, 385, 3214, 10800]) {
   assert.deepEqual(received, sent, "client confirms the same three tiers that the server sent");
   assert.deepEqual(received.map((p) => p.tier), ["coarse", "medium", "full"]);
   if (count === 3214) {
-    assert.deepEqual(received.map((p) => p.frames), [25, 71, 3118]);
-    assert.deepEqual(received.map((p) => p.ready), [25, 96, 3214]);
+    assert.deepEqual(received.map((p) => p.frames), [65, 418, 2731]);
+    assert.deepEqual(received.map((p) => p.ready), [65, 483, 3214]);
   }
   const frames = reader.frames()!;
   assert.equal(frames.ready, count);
+  if (count === 3214) {
+    assert.equal(await identity(frames.frameAt(191_000, count * 1000, "medium")), atOrBefore(191, medium));
+    assert.equal(await identity(frames.frameAt(191_000, count * 1000, "full")), 191);
+    assert.equal(await identity(frames.frameAt(192_000, count * 1000, "full")), 192, "focused hover can select adjacent original frames");
+  }
   const target = Math.min(191, count - 1);
   assert.equal(await identity(frames.frameAt(target * 1000, count * 1000)), target);
-  const coarseTarget = target === count - 1 ? target : Math.floor(target / coarse) * coarse;
+  const coarseTarget = atOrBefore(target, coarse);
   assert.equal(await identity(frames.frameAt(target * 1000, count * 1000, "coarse")), coarseTarget);
   const url = frames.frameAt(0, count * 1000)!;
   reader.dispose();
@@ -137,44 +147,71 @@ for (const corrupt of [Buffer.alloc(80), bif(0), bif(5).subarray(0, 100)]) {
   reader.dispose();
   const outOfOrder = createProgressivePreviewReader();
   outOfOrder.push(chunks[0]);
-  outOfOrder.push(chunks[26]); // first medium frame, before any overview
+  outOfOrder.push(chunks[66]); // first medium frame, before any overview
   assert.equal(outOfOrder.rejected(), true, "reject a medium tier sent before the overview");
   outOfOrder.dispose();
 }
 
+// A v1 client/server pair keeps its original ordering during rolling upgrades.
+{
+  const received: PreviewTierProgress[] = [];
+  const reader = createProgressivePreviewReader((p) => received.push(p), 1);
+  for await (const chunk of progressivePreview(stream(bif(3214)), undefined, undefined, 1)) reader.push(chunk);
+  assert.equal(reader.rejected(), false);
+  assert.deepEqual(received.map((p) => p.ready), [25, 96, 3214]);
+  assert.equal(await identity(reader.frames()!.frameAt(191_000, 3214_000)), 191);
+  reader.dispose();
+}
+
 const motion = createPreviewMotion();
-assert.equal(motion.sample(0, 0, 3214), "medium", "enter on the stable medium grid");
-assert.equal(motion.sample(0.02, 10, 3214), "coarse");
-assert.equal(motion.sample(0, 20, 3214), "coarse", "reverse motion still counts as speed");
-for (let i = 1; i <= 20; i++) motion.sample(i * 0.004, 20 + i * 20, 3214);
-assert.equal(motion.sample(0.084, 440, 3214), "medium");
+assert.equal(motion.sample(0, 0, 1000), "medium");
+assert.equal(motion.sample(0.02, 10, 1000), "coarse");
+assert.equal(motion.sample(0, 20, 1000), "coarse", "reverse motion still counts as speed");
 
-// Previously these ordinary searching speeds could all switch to full detail.
-for (const velocity of [0.1, 0.04, 0.01, 0.005]) {
+// Searching across the bar stays medium; a brief slowdown must not unlock full.
+for (const velocity of [0.1, 0.06, 0.04]) {
   motion.reset();
-  motion.sample(0, 0, 3214);
-  for (let i = 1; i <= 100; i++) {
-    assert.equal(motion.sample(velocity * i * 0.02, i * 20, 3214), "medium");
-  }
+  motion.sample(0, 0, 1000);
+  for (let i = 1; i <= 100; i++) assert.equal(motion.sample(velocity * i * 0.02, i * 20, 1000), "medium");
 }
-motion.reset();
-motion.sample(0, 0, 3214);
-for (let i = 1; i <= 50; i++) {
-  assert.equal(motion.sample(i * 0.00001, i * 10, 3214), "medium", "brief slowdowns are not precise inspection");
-}
-assert.equal(motion.sample(0.00051, 510, 3214), "full", "sustained ~3 frames/second enables full detail");
-assert.equal(motion.sample(0.00151, 530, 3214), "medium", "resuming the search exits full immediately");
-assert.equal(motion.settle(), "full", "a deliberate stop refines the current position");
-assert.equal(motion.sample(0.002, 2000, 3214), "medium", "time spent stopped cannot qualify the resumed movement as slow");
-motion.reset();
-assert.equal(motion.sample(0.9, 2100, 3214), "medium", "re-entry starts fresh");
 
-// The same screen speed crosses far more original frames on a long video.
-for (const count of [96, 3214, 10800]) {
+// Slow movement is practical on both small and large timelines and does not
+// become impossible just because a video has thousands of original frames.
+for (const width of [400, 1000, 2400]) {
   motion.reset();
-  motion.sample(0, 0, count);
+  motion.sample(0, 0, width);
   let result;
-  for (let i = 1; i <= 100; i++) result = motion.sample(i * 0.00008, i * 20, count);
-  assert.equal(result, count === 96 ? "full" : "medium");
+  for (let i = 1; i <= 60; i++) {
+    result = motion.sample(i * 0.2 / width, i * 20, width); // 10 px/s
+    if (i <= 20) assert.equal(result, "medium");
+  }
+  assert.equal(result, "full", "sustained slow inspection becomes full");
 }
+
+// Quantized one-pixel movement has fast individual samples, but slow average
+// travel. It must not reset the precision dwell indefinitely.
+motion.reset();
+motion.sample(0, 0, 1000);
+let precise;
+for (let t = 16; t <= 1200; t += 16) precise = motion.sample(Math.floor(t / 100) / 1000, t, 1000);
+assert.equal(precise, "full");
+
+// Local searching/jitter must preserve the deadline rather than debounce it
+// forever. This exercises the same delay calculation used by the UI timer.
+motion.reset();
+motion.sample(0.5, 0, 1000);
+for (let t = 16; t < 650; t += 16) {
+  motion.sample(0.5 + (t % 32 === 0 ? 0.001 : -0.001), t, 1000);
+  assert.equal(motion.settleDelay(t), 650 - t);
+}
+assert.equal(motion.settle(649), "medium");
+assert.equal(motion.settleDelay(649), 1, "an early timer must reschedule the final millisecond");
+assert.equal(motion.settle(650), "full");
+assert.equal(motion.sample(0.501, 670, 1000), "full", "focused movement retains full detail");
+assert.equal(motion.sample(0.7, 680, 1000), "coarse", "leaving the area quickly restores overview");
+motion.reset();
+motion.sample(0.5, 0, 1000);
+assert.equal(motion.settle(650), "full", "a completely stationary hover always refines");
+motion.reset();
+assert.equal(motion.sample(0.9, 1000, 1000), "medium", "re-entry starts fresh");
 console.log("Progressive preview transfer and adaptive motion tests passed");

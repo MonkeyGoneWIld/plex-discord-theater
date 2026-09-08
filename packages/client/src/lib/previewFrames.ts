@@ -72,6 +72,7 @@ interface Index {
   frames: Frame[];
   /** Whether the header's timestamps survived the interval check. */
   timed: boolean;
+  tiers: ReturnType<typeof previewTierIndices>;
 }
 
 /** Not a BIF, as opposed to not enough of one yet. */
@@ -145,7 +146,7 @@ function readIndex(bytes: Uint8Array): Index | null | typeof REJECTED {
   const timed = interval >= MIN_INTERVAL_MS && interval <= MAX_INTERVAL_MS;
   if (!timed) for (const frame of frames) frame.at = null;
 
-  return { frames, timed };
+  return { frames, timed, tiers: previewTierIndices(count) };
 }
 
 /** Which frame covers `ms`, or -1 when there is nothing to answer with. */
@@ -176,14 +177,37 @@ function frameIndexAt(index: Index, ms: number, durationMs: number): number {
 
 export type PreviewDetail = "coarse" | "medium" | "full";
 
-/** Must match the server's progressive wire ordering. */
-export function previewStride(count: number, detail: PreviewDetail): number {
-  const medium = Math.max(1, Math.ceil(count / 96));
-  return detail === "coarse" ? medium * 4 : detail === "medium" ? medium : 1;
+/** Nested, evenly distributed cumulative tiers. v1 is retained for cached clients. */
+export function previewTierIndices(count: number, version: 1 | 2 = 2) {
+  if (version === 1) {
+    const stride = Math.max(1, Math.ceil(count / 96));
+    const grid = (step: number) => {
+      const result = Array.from({ length: Math.ceil(count / step) }, (_, i) => i * step);
+      if (result[result.length - 1] !== count - 1) result.push(count - 1);
+      return result;
+    };
+    return { coarse: grid(stride * 4), medium: grid(stride) };
+  }
+  const coarseCount = Math.max(1, Math.ceil(count * 0.02));
+  const mediumCount = Math.max(1, Math.ceil(count * 0.15));
+  const medium = Array.from({ length: mediumCount }, (_, i) =>
+    mediumCount === 1 ? 0 : Math.floor(i * (count - 1) / (mediumCount - 1)));
+  const coarse = Array.from({ length: coarseCount }, (_, i) =>
+    medium[coarseCount === 1 ? 0 : Math.floor(i * (mediumCount - 1) / (coarseCount - 1))]);
+  return { coarse, medium };
 }
 
-function detailIndex(i: number, count: number, detail: PreviewDetail): number {
-  return i === count - 1 ? i : Math.floor(i / previewStride(count, detail)) * previewStride(count, detail);
+function detailIndex(i: number, index: Index, detail: PreviewDetail): number {
+  if (detail === "full") return i;
+  const grid = index.tiers[detail];
+  let lo = 0;
+  let hi = grid.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (grid[mid] <= i) lo = mid;
+    else hi = mid - 1;
+  }
+  return grid[lo];
 }
 
 export interface PreviewFrames {
@@ -229,11 +253,11 @@ export interface PreviewFrameReader {
   dispose(): void;
 }
 
-/** Reader for application/x-plex-preview-v1. Only one incomplete record is
+/** Reader for application/x-plex-preview-v2 (or the legacy v1 ordering). Only one incomplete record is
  * buffered; complete JPEGs become blobs and survive a truncated download. */
 export function createProgressivePreviewReader(onTierReady?: (progress: {
   tier: PreviewDetail; frames: number; bytes: number; ready: number;
-}) => void): PreviewFrameReader {
+}) => void, version: 1 | 2 = 2): PreviewFrameReader {
   let index: Index | null = null;
   let rejected = false;
   let disposed = false;
@@ -257,14 +281,14 @@ export function createProgressivePreviewReader(onTierReady?: (progress: {
       const levels: PreviewDetail[] = detail === "full" ? ["full", "medium", "coarse"] : detail === "medium" ? ["medium", "coarse"] : ["coarse"];
       let selected = -1;
       for (const level of levels) {
-        const candidate = detailIndex(target, index.frames.length, level);
+        const candidate = detailIndex(target, index, level);
         if (images.has(candidate)) { selected = candidate; break; }
       }
       // Before the overview is complete, keep a nearby available overview.
       if (selected < 0) {
-        const stride = previewStride(index.frames.length, "coarse");
-        for (let i = detailIndex(target, index.frames.length, "coarse"); i >= 0; i = Math.floor((i - 1) / stride) * stride) {
-          if (images.has(i)) { selected = i; break; }
+        for (let at = index.tiers.coarse.length - 1; at >= 0; at--) {
+          const i = index.tiers.coarse[at];
+          if (i <= target && images.has(i)) { selected = i; break; }
         }
       }
       if (selected < 0) return null;
@@ -302,23 +326,17 @@ export function createProgressivePreviewReader(onTierReady?: (progress: {
           const result = readIndex(buffer);
           if (!result || result === REJECTED || buffer.length !== HEADER_BYTES + (result.frames.length + 1) * 8 + 2) { rejected = true; break; }
           index = result;
-          const count = index.frames.length;
-          const countAt = (detail: PreviewDetail) => {
-            const stride = previewStride(count, detail);
-            return Math.ceil(count / stride) + ((count - 1) % stride === 0 ? 0 : 1);
-          };
-          const coarse = countAt("coarse");
-          const medium = countAt("medium");
-          expected = [coarse, medium - coarse, count - medium];
+          index.tiers = previewTierIndices(index.frames.length, version);
+          expected = [index.tiers.coarse.length, index.tiers.medium.length - index.tiers.coarse.length,
+            index.frames.length - index.tiers.medium.length];
           next("record", 8);
         } else if (state === "record") {
           frame = data.getUint32(0, true);
           const size = data.getUint32(4, true);
           const entry = index?.frames[frame];
           if (!entry || images.has(frame) || size < 2 || size > 10 * 1024 * 1024 || size !== entry.end - entry.start) { rejected = true; break; }
-          const count = index!.frames.length;
-          const frameTier = frame % previewStride(count, "coarse") === 0 || frame === count - 1 ? 0
-            : frame % previewStride(count, "medium") === 0 ? 1 : 2;
+          const frameTier = detailIndex(frame, index!, "coarse") === frame ? 0
+            : detailIndex(frame, index!, "medium") === frame ? 1 : 2;
           if (frameTier !== tier) { rejected = true; break; }
           next("image", size);
         } else {
@@ -428,7 +446,7 @@ export function createPreviewFrameReader(): PreviewFrameReader {
       if (!index) return null;
       const target = frameIndexAt(index, ms, durationMs);
       if (target < 0) return null;
-      const i = detailIndex(target, index.frames.length, detail);
+      const i = detailIndex(target, index, detail);
       const cached = urls.get(i);
       if (cached) return cached;
       const { start, end } = index.frames[i];

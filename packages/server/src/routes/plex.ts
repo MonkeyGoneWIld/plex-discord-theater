@@ -2563,23 +2563,24 @@ router.get("/preview/:partId/index", async (req: Request, res: Response) => {
     }
 
     // Opt-in keeps older clients' ordinary BIF reader working.
-    if (req.query.progressive === "1" && plexRes.body) {
+    if ((req.query.progressive === "1" || req.query.progressive === "2") && plexRes.body) {
+      const version = req.query.progressive === "2" ? 2 : 1;
       const transfer = randomUUID().slice(0, 8);
       const startedAt = performance.now();
       const abort = new AbortController();
       const cancel = () => abort.abort();
       res.on("close", cancel);
       if (res.destroyed) abort.abort();
-      res.setHeader("Content-Type", "application/x-plex-preview-v1");
+      res.setHeader("Content-Type", `application/x-plex-preview-v${version}`);
       res.setHeader("Cache-Control", "private, max-age=86400");
       res.setHeader("X-Accel-Buffering", "no");
-      logEvent("Preview", "transfer started", { partId, transfer, transport: "progressive-v1" });
+      logEvent("Preview", "transfer started", { partId, transfer, transport: `progressive-v${version}` });
       try {
         await pipeline(Readable.from(progressivePreview(plexRes.body, abort.signal, (progress) => {
           logEvent("Preview", "tier sent", {
             partId, transfer, ...progress, elapsedMs: Math.round(performance.now() - startedAt),
           });
-        })), res);
+        }, version)), res);
       } finally {
         res.off("close", cancel);
       }

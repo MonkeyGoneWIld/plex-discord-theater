@@ -1,81 +1,84 @@
 # Adaptive scrub previews
 
 The tooltip position, timestamp, and seek destination always follow the pointer.
-Only the preview image changes density with movement speed:
+Only the preview image changes density with movement speed and focus.
 
-- Fast movement (0.8 timeline widths/second): about 24 evenly spaced images,
-  plus the last frame, with at least 180 ms between image selections.
-- Medium movement is the default: about 96 images, plus the last frame,
-  with at least 150 ms between selections.
-- Precise inspection requires 500 ms of sustained movement no faster than both
-  0.008 timeline widths/second and six original frames/second. Only then is every
-  original BIF frame selectable, with no image-selection throttle. Full detail
-  exits above 0.015 widths/second or ten original frames/second. Using the frame
-  count prevents long videos from entering full detail at ordinary search speeds.
-- A 650 ms pause restores full detail at the current position without requiring
-  another pointer event. Speed hysteresis prevents switching levels repeatedly
-  near a threshold. Leaving the timeline resets the motion history to medium.
-  Moving again after a pause starts in medium and must qualify for full detail
-  again; the time spent stationary does not count toward the movement dwell.
+- Fast movement (0.8 timeline widths/second) uses 2% of the original frames,
+  with at least 180 ms between image selections. The existing coarse-speed
+  hysteresis retains this level down to 0.55 widths/second.
+- Medium is the default and uses 15% of the original frames, with at least
+  150 ms between selections.
+- Full detail offers every original frame. It activates after 500 ms of slow
+  movement (20 screen pixels/second or less), or after spending 650 ms within
+  12 pixels of a focus anchor. A stationary pointer qualifies automatically.
+- While inspecting, movement up to 40 pixels/second retains full detail.
+  Leaving the focus area at normal search speed returns to medium; fast sweeps
+  return to coarse. Leaving the timeline resets the motion history.
 
-Once playback meets the existing buffer-headroom requirement, the client fetches
-`/api/plex/preview/:partId/index?progressive=1`. A single response automatically
-sends the overview, additional medium frames, and then all remaining frames.
-Each JPEG is transferred once. Short videos can have empty later passes.
-While a finer image is still arriving, a previously received coarser image is
-used. A stationary hover improves as those finer frames arrive.
+Slow speed is averaged over 150 ms to tolerate pixel quantization. It is based
+on the rendered timeline width, not the number of frames in a video. Small
+movements preserve the focus deadline rather than postponing it repeatedly.
+The focus timer selects the latest pointer position and reschedules if it fires
+early. This makes full detail reachable on long videos and during minor jitter.
 
-The server still reads the whole BIF from Plex in chronological order. It emits
-overview images as it encounters them and spools the deferred images to a
-temporary file. Thus this prioritizes **server-to-viewer** delivery; it does not
-reduce Plex-to-server traffic or make the final overview frame arrive before
-Plex supplies it. Deferred data stays off the server heap, and the temporary file
-is removed on completion, failure, or disconnect. Stalled upstream reads time out
-after 30 seconds. The existing 1 GiB overall bound is also enforced while reading.
+## Three automatic transfer passes
 
-The progressive response has content type `application/x-plex-preview-v1`. Its
-little-endian format is a uint32 header length, the original BIF header and index
-including the first JPEG marker, then `(uint32 frame index, uint32 byte length,
-JPEG bytes)` records. Client and server use medium stride `ceil(count / 96)`
-(minimum 1) and coarse stride `medium * 4`. The final frame belongs to the overview.
-The original endpoint response is unchanged without the opt-in; newer clients
-also accept the original BIF content type from older servers.
+After playback meets the existing buffer-headroom requirement, the client fetches
+`/api/plex/preview/:partId/index?progressive=2`. One response automatically sends:
 
-Server logs record `transfer started` with `transport=progressive-v1` (or
-`legacy-bif`) and a `tier sent` event for each pass. Client logs record
-`transfer accepted` and `tier ready` events as the JPEGs are parsed. Both tier
-events include `tier`, the number of new `frames`, their record `bytes`, cumulative
-`ready` frames, and elapsed milliseconds. Empty passes are recorded as zero.
-Client events are emitted at record boundaries, so they remain correct even if
-all three tiers arrive in one browser read. Server events mean data has been
-queued for sending; client events confirm receipt. No artificial delay separates
-the tiers, so a fast connection can complete all three almost immediately.
+1. `ceil(total * 0.02)` overview frames.
+2. Additional frames to reach `ceil(total * 0.15)` in total.
+3. All remaining frames to reach 100%.
 
-For a 3,214-frame BIF, the new-frame counts are **25 / 71 / 3,118** and cumulative
-ready counts are **25 / 96 / 3,214**. The progressive protocol's initial header is
-25,790 bytes. Older logs only recorded index arrival and overall completion,
-which cannot establish individual tier completion times.
+Counts round up to whole frames, with a minimum of one. Medium frames are evenly
+spread across the timeline; the overview is an evenly distributed subset of that
+grid. Each JPEG is transferred once. Tiny videos may have empty later passes.
+For 3,214 original frames, new-frame counts are **65 / 418 / 2,731** and cumulative
+ready counts are **65 / 483 / 3,214**. Downloading more frames never automatically
+changes the selected hover-detail level. Missing fine previews fall back to
+received coarser frames, and a stationary focused hover improves as data arrives.
 
-## Verification
+The server reads Plex's BIF chronologically, emits overview images as encountered,
+and spools deferred images to a temporary file for the later passes. This
+prioritizes server-to-viewer delivery; it does not reduce Plex-to-server traffic.
+The temporary file is removed on completion, failure, or disconnect. Upstream
+reads time out after 30 seconds and the 1 GiB overall bound is enforced as read.
+No artificial pause separates tiers, so fast connections can finish quickly.
 
-`npm test` includes `packages/server/test/preview-stream.test.ts`, covering the
-server-to-client protocol, stage ordering, no duplicate transfers, long videos,
-short videos, partial records, malformed input, cancellation, URL disposal, and
-movement-speed transitions, precision dwell, and long-video sensitivity. Server
-and client tier counts are compared, including coalesced network reads and
-rejection of a medium frame arriving before the overview. Existing BIF tests
-cover legacy download behavior.
+The content type is `application/x-plex-preview-v2`. The little-endian framing is
+a uint32 header length, original BIF header/index plus first JPEG marker, then
+records of `(uint32 frame number, uint32 byte length, JPEG bytes)`. Version 2
+changes the tier layout, not the framing. Explicit v1 requests retain their old
+fixed-size grids and content type, so cached clients still work during upgrades.
+New clients understand both versions and ordinary BIF responses from old servers.
+Client and server layout helpers are kept in their respective build roots;
+regression tests compare their outputs and end-to-end counts.
 
-For a live Plex/Discord check, open a title with generated preview thumbnails:
+## Diagnostics and verification
 
-1. Sweep the timeline quickly: images should remain readable while the timestamp
-   tracks the pointer precisely.
-2. Slow to a moderate sweep: the medium grid should remain stable. Move very
-   slowly within a small area for at least half a second: full detail should appear.
-3. Stop after a fast sweep: after 650 ms the preview should refine at the stopped
-   position. Brief pauses while searching should not enable full detail.
-4. Throttle the network and hover near the end: the overview should arrive before
-   the full set, followed by finer images without further movement.
-5. Change titles during the download and during a scrub: old frames and pending
-   timers must not appear on the new title. Repeat with a touch drag and a title
-   without generated previews.
+Server logs record `transfer started` with the transport version and `tier sent`
+for each pass. Client logs record `transfer accepted` and `tier ready` as complete
+JPEGs are parsed. Tier events include the number of new `frames`, record `bytes`,
+cumulative `ready` frames, and elapsed milliseconds. Empty passes are logged as
+zero. Client boundaries are reported even when a proxy combines all tiers into
+one read. `detail selected` logs separately record actual hover-detail transitions
+and how many original frames are available.
+
+`npm test` includes `packages/server/test/preview-stream.test.ts`. It covers exact
+percentage counts, nesting, stage ordering, no duplicates, long and short videos,
+partial and coalesced records, malformed input, cancellation, URL disposal, v1
+compatibility, screen widths, slow movement, one-pixel motion, focus jitter,
+early timers, stationary hovers, and fast reversals. Existing BIF tests cover
+legacy file parsing. Production builds and client type checking also apply.
+
+For a live Plex/Discord check:
+
+1. Sweep quickly and then normally: the overview and medium grids should be stable.
+2. Move slowly within a small area for half a second, or hold within a 12-pixel
+   area for 650 ms: full detail should become available despite minor jitter.
+3. Move by adjacent original-frame intervals while focused: the preview should
+   use the original frames rather than remain on the medium grid.
+4. On a throttled connection, inspect `tier ready` counts and `detail selected`
+   independently. For 3,214 frames, verify cumulative counts 65, 483, and 3,214.
+5. Change titles mid-download and mid-scrub; old frames and timers must not appear.
+   Repeat with a touch drag and a title without generated thumbnails.

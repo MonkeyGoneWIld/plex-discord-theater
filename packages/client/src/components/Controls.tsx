@@ -5,7 +5,7 @@ import {
   createPreviewFrameReader, createProgressivePreviewReader,
   type PreviewFrames, type PreviewDetail, type PreviewFrameReader,
 } from "../lib/previewFrames";
-import { createPreviewMotion, PREVIEW_SETTLE_MS } from "../lib/previewMotion";
+import { createPreviewMotion } from "../lib/previewMotion";
 import { loadVolume } from "../lib/volume";
 import { getLevel, setLevel, boostAvailable, MAX_LEVEL } from "../lib/audioBoost";
 import { useMediaQuery, COMPACT_CONTROLS_QUERY, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -89,20 +89,6 @@ interface ControlsProps {
    *  generated preview thumbnails — the tooltip then shows the timestamp alone. */
   previewPartId?: number;
 }
-
-/**
- * Bucket size for preview-frame requests, in milliseconds.
- *
- * Plex stores BIF frames at a fixed interval and snaps any requested offset to
- * the nearest one, so any value works. Quantizing is about cache hits: without
- * it, every pixel of cursor travel produces a unique URL and neither the browser
- * cache nor the server's thumb cache ever hits.
- *
- * 10s rather than 2s: it aligns with the common interval, and where the index is
- * denser we show a slightly coarser frame in exchange for ~5x fewer distinct
- * requests — a 2h film is then ~720 possible frames instead of ~3600.
- */
-const PREVIEW_BUCKET_MS = 10_000;
 
 /**
  * Minimum gap between preview-frame requests while the cursor is moving.
@@ -931,8 +917,9 @@ export function Controls({
     }
     if (failedPartRef.current === previewPartId) return;
     // Approximate overview density before the BIF timestamps arrive.
-    const bucketSize = detail === "full" ? PREVIEW_BUCKET_MS
-      : Math.max(PREVIEW_BUCKET_MS, duration * 1000 / (detail === "coarse" ? 24 : 96));
+    const approximateCount = Math.max(1, Math.ceil(duration / 2));
+    const tierCount = Math.max(1, Math.ceil(approximateCount * (detail === "coarse" ? 0.02 : 0.15)));
+    const bucketSize = detail === "full" ? 2000 : Math.max(2000, duration * 1000 / tierCount);
     const bucketMs = Math.floor(Math.floor(pct * duration * 1000 / bucketSize) * bucketSize);
     const url = authUrl(`/api/plex/thumb/library/parts/${previewPartId}/indexes/sd/${bucketMs}`);
     if (pendingPreviewRef.current === url) return;
@@ -948,22 +935,46 @@ export function Controls({
     }, PREVIEW_THROTTLE_MS);
   }, [previewPartId, duration]);
 
+  const setPreviewDetail = useCallback((detail: PreviewDetail) => {
+    if (detail !== previewDetailRef.current) {
+      logEvent("Preview", "detail selected", {
+        partId: previewPartId, detail, ready: previewFramesRef.current?.ready ?? 0,
+        frames: previewFramesRef.current?.count ?? 0,
+      });
+    }
+    previewDetailRef.current = detail;
+  }, [previewPartId]);
+
   /** Timestamp follows the pointer exactly; only the image adapts. */
   const showPreviewAt = useCallback((pct: number) => {
     setHoverPct(pct);
     previewPositionRef.current = pct;
     const detail = previewMotionRef.current.sample(
-      pct, performance.now(), previewFramesRef.current?.count ?? Math.ceil(duration / 2),
+      pct, performance.now(), progressRef.current?.getBoundingClientRect().width,
     );
-    previewDetailRef.current = detail;
+    setPreviewDetail(detail);
     selectPreview(pct, detail);
     if (previewSettleRef.current !== null) clearTimeout(previewSettleRef.current);
-    previewSettleRef.current = setTimeout(() => {
+    previewSettleRef.current = null;
+    if (detail === "full") return;
+    const settle = () => {
       previewSettleRef.current = null;
-      previewDetailRef.current = previewMotionRef.current.settle();
-      selectPreview(pct, "full");
-    }, PREVIEW_SETTLE_MS);
-  }, [selectPreview, duration]);
+      const latest = previewPositionRef.current;
+      if (latest === null) return;
+      const now = performance.now();
+      const remaining = previewMotionRef.current.settleDelay(now);
+      if (remaining > 0) {
+        previewSettleRef.current = setTimeout(settle, Math.ceil(remaining));
+        return;
+      }
+      const settled = previewMotionRef.current.settle(now);
+      setPreviewDetail(settled);
+      selectPreview(latest, settled);
+    };
+    // Keep the focus deadline across small movements, instead of postponing
+    // full detail on every jitter event. Always select the latest position.
+    previewSettleRef.current = setTimeout(settle, Math.ceil(previewMotionRef.current.settleDelay(performance.now())));
+  }, [selectPreview, setPreviewDetail]);
 
   // ─── Scrubbing ────────────────────────────────────────────────
   //
@@ -1038,12 +1049,13 @@ export function Controls({
     let cancelled = false;
     const abort = new AbortController();
     let transferStartedAt = 0;
-    let reader: PreviewFrameReader = createProgressivePreviewReader((progress) => {
+    const onTierReady = (progress: { tier: PreviewDetail; frames: number; bytes: number; ready: number }) => {
       logEvent("Preview", "tier ready", {
         partId: previewPartId, ...progress,
         elapsedMs: Math.round(performance.now() - transferStartedAt),
       });
-    });
+    };
+    let reader: PreviewFrameReader = createProgressivePreviewReader(onTierReady);
 
     /**
      * Seconds of video buffered past the playhead.
@@ -1076,18 +1088,20 @@ export function Controls({
       if (cancelled) return;
       transferStartedAt = performance.now();
       const res = await fetch(
-        authUrl(`/api/plex/preview/${previewPartId}/index?progressive=1`),
+        authUrl(`/api/plex/preview/${previewPartId}/index?progressive=2`),
         { signal: abort.signal },
       );
       if (!res.ok || !res.body) return;
-      const progressive = res.headers.get("content-type")?.startsWith("application/x-plex-preview-v1") ?? false;
+      const contentType = res.headers.get("content-type") ?? "";
+      const version = contentType.startsWith("application/x-plex-preview-v2") ? 2
+        : contentType.startsWith("application/x-plex-preview-v1") ? 1 : 0;
       logEvent("Preview", "transfer accepted", {
-        partId: previewPartId, transport: progressive ? "progressive-v1" : "legacy-bif",
+        partId: previewPartId, transport: version ? `progressive-v${version}` : "legacy-bif",
       });
       // Older servers still return an ordinary BIF.
-      if (!progressive) {
+      if (version !== 2) {
         reader.dispose();
-        reader = createPreviewFrameReader();
+        reader = version === 1 ? createProgressivePreviewReader(onTierReady, 1) : createPreviewFrameReader();
       }
       const body = res.body.getReader();
       let bytes = 0;

@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { fetchMeta, versionOf, type StreamTrack } from "../lib/api";
 import { saveAudioPref, saveSubtitlePref } from "../lib/trackPrefs";
-import { ZoomPanel } from "./ZoomPanel";
+
 import type { ZoomMode } from "../lib/videoZoom";
 
 interface TrackSwitcherProps {
@@ -35,9 +35,7 @@ interface TrackSwitcherProps {
   currentAudioId?: number | null;
   currentSubtitleId?: number | null;
   zoomMode: ZoomMode;
-  zoom: number;
   onZoomModeChange: (mode: ZoomMode) => void;
-  onZoomChange: (zoom: number) => void;
 }
 
 export function TrackSwitcher({
@@ -49,9 +47,7 @@ export function TrackSwitcher({
   currentAudioId,
   currentSubtitleId,
   zoomMode,
-  zoom,
   onZoomModeChange,
-  onZoomChange,
 }: TrackSwitcherProps) {
   const [tab, setTab] = useState<"audio" | "subtitles" | "zoom">("audio");
   const [audioTracks, setAudioTracks] = useState<StreamTrack[]>([]);
@@ -97,7 +93,7 @@ export function TrackSwitcher({
     <div style={styles.backdrop} onClick={onClose}>
       <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
-          <span style={styles.headerTitle}>Audio &amp; Subtitles</span>
+          <span style={styles.headerTitle}>Settings</span>
           <button className="btn" onClick={onClose} style={styles.closeBtn}>{"\u2715"}</button>
         </div>
 
@@ -119,12 +115,12 @@ export function TrackSwitcher({
         {/* What a change here reaches. The host's carries; everyone else's
             forks onto a stream of their own, which nobody else sees. */}
         <p style={styles.scopeNote}>
-          {scope === "room"
+          {tab !== "zoom" && scope === "room"
             ? "Changes apply to everyone watching your stream."
             : "Changes apply to you only."}
         </p>
 
-        {loading ? (
+        {loading && tab !== "zoom" ? (
           <div style={styles.loading}>Loading tracks...</div>
         ) : tab === "audio" ? (
           <div style={styles.trackList}>
@@ -173,17 +169,19 @@ export function TrackSwitcher({
             })}
           </div>
         ) : (
-          <ZoomPanel
-            mode={zoomMode}
-            zoom={zoom}
-            onChangeMode={onZoomModeChange}
-            onChangeZoom={onZoomChange}
-            onClose={onClose}
-          />
+          <div style={styles.trackList}>
+            {([["normal", "Normal"], ["fill", "Fill Screen"], ["16:9", "Fill 16:9"], ["21:9", "Fill 21:9"], ["manual", "Manual Zoom"]] as const).map(([mode, label]) => (
+              <button className="btn" key={mode} onClick={() => onZoomModeChange(mode)}
+                style={zoomMode === mode ? styles.trackSelected : styles.track}>
+                <div style={{ color: zoomMode === mode ? "#f0f0f0" : "#ccc", fontSize: 13 }}>{label}</div>
+                {zoomMode === mode && <span style={styles.checkmark}>✓</span>}
+              </button>
+            ))}
+          </div>
         )}
 
         <div style={styles.disclaimer}>
-          Changing tracks briefly restarts the stream at your current position.
+          {tab === "zoom" ? "Zoom is remembered for this movie or show on this device." : "Changing tracks briefly restarts the stream at your current position."}
         </div>
       </div>
     </div>

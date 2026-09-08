@@ -1261,7 +1261,7 @@ export function Controls({
   // elapsed and remaining times either side, and a desktop doesn't.
   const progressBar = (
     <div
-      ref={progressRef}
+      ref={progressRef} data-player-progress
       onPointerDown={handleProgressPointerDown}
       onPointerMove={handleProgressPointerMove}
       onPointerUp={handleProgressPointerUp}
@@ -1351,7 +1351,7 @@ export function Controls({
         />
       )}
 
-      <div
+      <div data-zoom-surface
         style={{
           ...styles.overlay,
           opacity: visible ? 1 : 0,
@@ -1393,7 +1393,7 @@ export function Controls({
           steals a press aimed at a control. On a desktop it isn't rendered at
           all and the click-to-pause path below is untouched. */}
       {phone && (
-        <div style={styles.gestureLayer} onClick={handlePictureTap} aria-hidden="true" />
+        <div data-zoom-surface style={{ ...styles.gestureLayer, touchAction: "none" }} onClick={handlePictureTap} aria-hidden="true" />
       )}
 
       {/* Transport, in the middle of the picture where it can be seen and
@@ -1693,7 +1693,7 @@ export function Controls({
                 {"\u2699"}
               </button>
             )}
-            {onOpenZoom && (
+            {onOpenZoom && !phone && (
               <button
                 onClick={onOpenZoom}
                 className="btn"
@@ -1704,7 +1704,7 @@ export function Controls({
               >
                 <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true">
                   <rect x="3" y="3" width="14" height="14" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
-                  <path d="M7 4.5H4.5V7M13 4.5h2.5V7M7 15.5H4.5V13M13 15.5h2.5V13" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M5 15L15 5M5 11v4h4M11 5h4v4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </button>
             )}

@@ -22,7 +22,9 @@ import { getLevel, setLevel, MAX_LEVEL } from "../lib/audioBoost";
 import { describeWatched, loadAudioPref, loadSubtitlePref, mergeTrackPrefs, saveTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { roomPositionNow } from "../hooks/useSync";
-import { loadZoomPreference, saveZoomPreference, zoomKey, type ZoomMode } from "../lib/videoZoom";
+import { zoomKey } from "../lib/videoZoom";
+import { useVideoZoom } from "../lib/useVideoZoom";
+import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
 import type { InviteResult } from "../hooks/useDiscord";
 
@@ -598,19 +600,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const [subtitleOffsetMs, setSubtitleOffsetMs] = useState(0);
   const [showSubtitleOffset, setShowSubtitleOffset] = useState(false);
   const [showZoomPanel, setShowZoomPanel] = useState(false);
-  const [zoomMode, setZoomMode] = useState<ZoomMode>(() => loadZoomPreference(zoomKey(item)).mode);
-  const [zoom, setZoom] = useState(() => loadZoomPreference(zoomKey(item)).zoom);
-  const pinchStartRef = useRef<number | null>(null);
-  const zoomPreferenceKey = zoomKey(item);
-  useEffect(() => {
-    const pref = loadZoomPreference(zoomPreferenceKey);
-    setZoomMode(pref.mode);
-    setZoom(pref.zoom);
-    setShowZoomPanel(false);
-  }, [zoomPreferenceKey]);
-  useEffect(() => {
-    saveZoomPreference(zoomPreferenceKey, { mode: zoomMode, zoom });
-  }, [zoomPreferenceKey, zoomMode, zoom]);
+  const zoomPhone = useMediaQuery(PHONE_QUERY);
+  const zoomRootRef = useRef<HTMLDivElement>(null);
+  const zoomMeta = itemMeta?.ratingKey === item.ratingKey ? itemMeta : null;
+  const zoomItem = { ...item, type: zoomMeta?.type ?? item.type, grandparentRatingKey: item.grandparentRatingKey ?? zoomMeta?.grandparentRatingKey };
+  const zoomPreferenceKey = zoomItem.type === "episode" && !zoomItem.grandparentRatingKey ? null : zoomKey(zoomItem);
+  const { mode: zoomMode, zoom, x: zoomX, y: zoomY, setMode: setZoomMode, setZoom } = useVideoZoom(zoomRootRef, zoomPreferenceKey);
   /** A sidecar that could not be read, so the offer to adjust it is withdrawn
    *  rather than left pointing at subtitles that never arrived. */
   const [sidecarFailed, setSidecarFailed] = useState(false);
@@ -3821,7 +3816,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     : null;
 
   return (
-    <div style={styles.container}>
+    <div ref={zoomRootRef} style={{ ...styles.container, touchAction: "none" }}>
       {syncState?.authFailed ? (
         <div style={styles.error}>Session expired — please close and restart the activity</div>
       ) : syncState?.reconnectFailed ? (
@@ -3885,41 +3880,13 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         ref={videoRef}
         style={{
           ...styles.video,
-          objectFit: zoomMode === "normal" ? "contain" : "cover",
+          objectFit: zoomMode === "normal" || zoomMode === "manual" ? "contain" : "cover",
           transform: zoomMode === "manual"
-            ? `scale(${zoom / 100})`
+            ? `translate(${zoomX}px, ${zoomY}px) scale(${zoom / 100})`
             : zoomMode === "21:9" ? "scale(1.33)" : undefined,
         }}
         playsInline
         onClick={togglePlayPause}
-        onWheel={(event) => {
-          if (!event.ctrlKey || zoomMode !== "manual") return;
-          event.preventDefault();
-          setZoom((value) => Math.max(100, Math.min(200, value + (event.deltaY < 0 ? 5 : -5))));
-        }}
-        onTouchStart={(event) => {
-          if (event.touches.length === 2) {
-            const dx = event.touches[0].clientX - event.touches[1].clientX;
-            const dy = event.touches[0].clientY - event.touches[1].clientY;
-            pinchStartRef.current = Math.hypot(dx, dy);
-          }
-        }}
-        onTouchMove={(event) => {
-          if (pinchStartRef.current == null || event.touches.length !== 2) return;
-          const dx = event.touches[0].clientX - event.touches[1].clientX;
-          const dy = event.touches[0].clientY - event.touches[1].clientY;
-          const ratio = Math.hypot(dx, dy) / pinchStartRef.current;
-          if (ratio > 1.08) {
-            setZoomMode("fill");
-            pinchStartRef.current = null;
-          } else if (ratio < 0.92) {
-            setZoomMode("normal");
-            pinchStartRef.current = null;
-          }
-        }}
-        onTouchEnd={(event) => {
-          if (event.touches.length === 0) pinchStartRef.current = null;
-        }}
       />
 
       {/* The last frame, standing in while the pipeline is rebuilt. Sits above
@@ -4121,22 +4088,6 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         offsetMs={subtitleOffsetMs}
         onUnavailable={() => setSidecarFailed(true)}
       />
-      {showSubtitleOffset && drawnSubtitleId !== null && !sidecarFailed && (
-        <SubtitleOffset
-          offsetMs={subtitleOffsetMs}
-          onChange={setSubtitleOffsetMs}
-          onClose={() => setShowSubtitleOffset(false)}
-        />
-      )}
-      {showZoomPanel && zoomMode === "manual" && (
-        <ZoomPanel
-          mode={zoomMode}
-          zoom={zoom}
-          onChangeMode={(mode) => { setZoomMode(mode); if (mode !== "manual") setShowZoomPanel(false); }}
-          onChangeZoom={setZoom}
-          onClose={() => setShowZoomPanel(false)}
-        />
-      )}
       {showTrackSwitcher && (
         <TrackSwitcher
           ratingKey={item.ratingKey}
@@ -4158,9 +4109,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           currentAudioId={(variant?.audioStreamId ?? currentAudioStreamRef.current) || null}
           currentSubtitleId={variant?.subtitleStreamId ?? currentSubtitleStreamRef.current}
           zoomMode={zoomMode}
-          zoom={zoom}
           onZoomModeChange={(mode) => { setZoomMode(mode); if (mode !== "manual") setShowZoomPanel(false); }}
-          onZoomChange={setZoom}
         />
       )}
       {showQueuePanel && syncState && (
@@ -4270,7 +4219,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       {/* Bottom-right stack: owns placement so neither child positions itself and
           a third affordance costs one line. Bottom-anchored, so it grows upward
           and the skip button naturally sits above the card. */}
-      {(showSkip || showNextUp || transportRequest) && (
+      {(showSkip || showNextUp || transportRequest || showSubtitleOffset || (showZoomPanel && !zoomPhone && zoomMode === "manual")) && (
         <div style={styles.bottomRightStack}>
           {transportRequest && (
             <TransportRequestCard
@@ -4312,6 +4261,20 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
               }}
             />
           )}
+      {showSubtitleOffset && drawnSubtitleId !== null && !sidecarFailed && (
+        <SubtitleOffset
+          offsetMs={subtitleOffsetMs}
+          onChange={setSubtitleOffsetMs}
+          onClose={() => setShowSubtitleOffset(false)}
+        />
+      )}
+      {showZoomPanel && !zoomPhone && zoomMode === "manual" && (
+        <ZoomPanel
+          zoom={zoom}
+          onChangeZoom={setZoom}
+          onClose={() => setShowZoomPanel(false)}
+        />
+      )}
         </div>
       )}
     </div>
@@ -4328,13 +4291,15 @@ const styles: Record<string, React.CSSProperties> = {
   confirmEndBtn: { padding: "8px 14px", borderRadius: "8px", border: "none", background: "#e5a00d", color: "#000", fontSize: "13px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
   bottomRightStack: {
     position: "absolute",
-    right: "20px",
-    bottom: "80px",
+    right: "calc(20px + var(--sair, 0px))",
+    bottom: "calc(94px + var(--saib, 0px))",
     zIndex: 30,
     display: "flex",
     flexDirection: "column",
     alignItems: "flex-end",
     gap: "12px",
+    maxHeight: "calc(100% - 120px - var(--sait, 0px) - var(--saib, 0px))",
+    overflowY: "auto",
   },
   container: {
     position: "fixed",

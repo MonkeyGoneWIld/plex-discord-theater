@@ -607,14 +607,24 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const zoomPreferenceKey = zoomItem.type === "episode" && !zoomItem.grandparentRatingKey ? null : zoomKey(zoomItem);
   const [zoomNotice, setZoomNotice] = useState<string | null>(null);
   const zoomNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [fillGestureAnimating, setFillGestureAnimating] = useState(false);
+  const fillAnimationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showZoomNotice = useCallback((message: string) => {
     setZoomNotice(message);
+    if (message === "Fill Screen" && zoomPhone) {
+      setFillGestureAnimating(true);
+      if (fillAnimationTimer.current) clearTimeout(fillAnimationTimer.current);
+      fillAnimationTimer.current = setTimeout(() => setFillGestureAnimating(false), 340);
+    }
     if (zoomNoticeTimer.current) clearTimeout(zoomNoticeTimer.current);
     zoomNoticeTimer.current = setTimeout(() => setZoomNotice(null), 1500);
-  }, []);
+  }, [zoomPhone]);
   useEffect(() => {
     setZoomNotice(null);
-    return () => { if (zoomNoticeTimer.current) clearTimeout(zoomNoticeTimer.current); };
+    return () => {
+      if (zoomNoticeTimer.current) clearTimeout(zoomNoticeTimer.current);
+      if (fillAnimationTimer.current) clearTimeout(fillAnimationTimer.current);
+    };
   }, [zoomPreferenceKey]);
   const { mode: zoomMode, zoom, setMode: setZoomMode, setZoom } = useVideoZoom(zoomRootRef, zoomPreferenceKey, showZoomNotice);
   const [axisScale, setAxisScale] = useState(1);
@@ -640,8 +650,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     objectFit: ["normal", "manual", "width", "height"].includes(zoomMode) ? "contain" : "cover",
     transform: zoomMode === "manual" ? `scale(${zoom / 100})`
       : zoomMode === "width" || zoomMode === "height" ? `scale(${axisScale})`
-      : zoomMode === "21:9" ? "scale(1.33)" : undefined,
+      : zoomMode === "21:9" ? "scale(1.33)"
+      : zoomMode === "fill" && fillGestureAnimating ? "scale(0.92)" : undefined,
     transformOrigin: "center",
+    transition: zoomPhone && zoomMode === "fill" ? "transform 340ms ease-out" : undefined,
   };
   /** A sidecar that could not be read, so the offer to adjust it is withdrawn
    *  rather than left pointing at subtitles that never arrived. */
@@ -4148,7 +4160,11 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           currentAudioId={(variant?.audioStreamId ?? currentAudioStreamRef.current) || null}
           currentSubtitleId={variant?.subtitleStreamId ?? currentSubtitleStreamRef.current}
           zoomMode={zoomMode}
-          onZoomModeChange={(mode) => { setZoomMode(mode); if (mode !== "manual") setShowZoomPanel(false); }}
+          onZoomModeChange={(mode) => {
+            setZoomMode(mode);
+            setShowZoomPanel(mode === "manual" && !zoomPhone);
+            if (mode === "manual" && zoomPhone) showZoomNotice("Custom Zoom: pinch to adjust");
+          }}
         />
       )}
       {showQueuePanel && syncState && (

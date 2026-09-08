@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { fetchMeta, versionOf, type StreamTrack } from "../lib/api";
 import { saveAudioPref, saveSubtitlePref } from "../lib/trackPrefs";
+import { ZoomPanel } from "./ZoomPanel";
+import type { ZoomMode } from "../lib/videoZoom";
 
 interface TrackSwitcherProps {
   ratingKey: string;
@@ -32,6 +34,10 @@ interface TrackSwitcherProps {
    */
   currentAudioId?: number | null;
   currentSubtitleId?: number | null;
+  zoomMode: ZoomMode;
+  zoom: number;
+  onZoomModeChange: (mode: ZoomMode) => void;
+  onZoomChange: (zoom: number) => void;
 }
 
 export function TrackSwitcher({
@@ -42,8 +48,12 @@ export function TrackSwitcher({
   scope = "self",
   currentAudioId,
   currentSubtitleId,
+  zoomMode,
+  zoom,
+  onZoomModeChange,
+  onZoomChange,
 }: TrackSwitcherProps) {
-  const [tab, setTab] = useState<"audio" | "subtitles">("audio");
+  const [tab, setTab] = useState<"audio" | "subtitles" | "zoom">("audio");
   const [audioTracks, setAudioTracks] = useState<StreamTrack[]>([]);
   const [subtitleTracks, setSubtitleTracks] = useState<StreamTrack[]>([]);
   const [partId, setPartId] = useState<number | null>(null);
@@ -100,6 +110,10 @@ export function TrackSwitcher({
               onClick={() => setTab("subtitles")}
               style={{ ...styles.tab, ...(tab === "subtitles" ? styles.tabActive : {}) }}
             >Subtitles</button>
+            <button className="btn"
+              onClick={() => setTab("zoom")}
+              style={{ ...styles.tab, ...(tab === "zoom" ? styles.tabActive : {}) }}
+            >Zoom</button>
         </div>
 
         {/* What a change here reaches. The host's carries; everyone else's
@@ -135,7 +149,7 @@ export function TrackSwitcher({
               );
             })}
           </div>
-        ) : (
+        ) : tab === "subtitles" ? (
           <div style={styles.trackList}>
             <button className="btn"
               onClick={() => handleSelect("subtitle", 0)}
@@ -158,6 +172,14 @@ export function TrackSwitcher({
               );
             })}
           </div>
+        ) : (
+          <ZoomPanel
+            mode={zoomMode}
+            zoom={zoom}
+            onChangeMode={onZoomModeChange}
+            onChangeZoom={onZoomChange}
+            onClose={onClose}
+          />
         )}
 
         <div style={styles.disclaimer}>

@@ -57,6 +57,9 @@ interface ControlsProps {
   onOpenSubtitleTiming?: () => void;
   /** Whether that panel is currently open, so the button can show it. */
   subtitleTimingOpen?: boolean;
+  /** Opens the client-local video zoom panel; available only in Manual mode. */
+  onOpenZoom?: () => void;
+  zoomOpen?: boolean;
   /** Where a restart-in-progress is heading, in seconds, or null when playback
    *  is settled. A transcode restart detaches the media and the element reports
    *  0 until the replacement loads, which snapped the bar back to the start
@@ -437,6 +440,8 @@ export function Controls({
   onSurfaceClick,
   onOpenSubtitleTiming,
   subtitleTimingOpen = false,
+  onOpenZoom,
+  zoomOpen = false,
   restartingTo = null,
   onToggleStats,
   statsActive,
@@ -1686,6 +1691,21 @@ export function Controls({
             {onOpenTrackSwitcher && (
               <button onClick={onOpenTrackSwitcher} className="btn" style={{ ...styles.gearBtn, ...(compact ? styles.gearBtnCompact : {}) }} title="Audio & Subtitles">
                 {"\u2699"}
+              </button>
+            )}
+            {onOpenZoom && (
+              <button
+                onClick={onOpenZoom}
+                className="btn"
+                style={{ ...styles.gearBtn, ...(compact ? styles.gearBtnCompact : {}), ...(zoomOpen ? styles.gearBtnActive : {}) }}
+                title="Video zoom"
+                aria-label="Video zoom"
+                aria-pressed={zoomOpen}
+              >
+                <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                  <rect x="3" y="3" width="14" height="14" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+                  <path d="M7 4.5H4.5V7M13 4.5h2.5V7M7 15.5H4.5V13M13 15.5h2.5V13" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
               </button>
             )}
             {/* Next to the gear, because it belongs to the same family of

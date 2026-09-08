@@ -13,6 +13,7 @@ import { SkipMarkerButton } from "./SkipMarkerButton";
 import { TransportRequestCard } from "./TransportRequestCard";
 import { SubtitleLayer } from "./SubtitleLayer";
 import { SubtitleOffset } from "./SubtitleOffset";
+import { ZoomPanel } from "./ZoomPanel";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
@@ -21,6 +22,7 @@ import { getLevel, setLevel, MAX_LEVEL } from "../lib/audioBoost";
 import { describeWatched, loadAudioPref, loadSubtitlePref, mergeTrackPrefs, saveTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { roomPositionNow } from "../hooks/useSync";
+import { loadZoomPreference, saveZoomPreference, zoomKey, type ZoomMode } from "../lib/videoZoom";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
 import type { InviteResult } from "../hooks/useDiscord";
 
@@ -595,6 +597,20 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
    */
   const [subtitleOffsetMs, setSubtitleOffsetMs] = useState(0);
   const [showSubtitleOffset, setShowSubtitleOffset] = useState(false);
+  const [showZoomPanel, setShowZoomPanel] = useState(false);
+  const [zoomMode, setZoomMode] = useState<ZoomMode>(() => loadZoomPreference(zoomKey(item)).mode);
+  const [zoom, setZoom] = useState(() => loadZoomPreference(zoomKey(item)).zoom);
+  const pinchStartRef = useRef<number | null>(null);
+  const zoomPreferenceKey = zoomKey(item);
+  useEffect(() => {
+    const pref = loadZoomPreference(zoomPreferenceKey);
+    setZoomMode(pref.mode);
+    setZoom(pref.zoom);
+    setShowZoomPanel(false);
+  }, [zoomPreferenceKey]);
+  useEffect(() => {
+    saveZoomPreference(zoomPreferenceKey, { mode: zoomMode, zoom });
+  }, [zoomPreferenceKey, zoomMode, zoom]);
   /** A sidecar that could not be read, so the offer to adjust it is withdrawn
    *  rather than left pointing at subtitles that never arrived. */
   const [sidecarFailed, setSidecarFailed] = useState(false);
@@ -3867,9 +3883,43 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           controls, which have their own. */}
       <video
         ref={videoRef}
-        style={styles.video}
+        style={{
+          ...styles.video,
+          objectFit: zoomMode === "normal" ? "contain" : "cover",
+          transform: zoomMode === "manual"
+            ? `scale(${zoom / 100})`
+            : zoomMode === "21:9" ? "scale(1.33)" : undefined,
+        }}
         playsInline
         onClick={togglePlayPause}
+        onWheel={(event) => {
+          if (!event.ctrlKey || zoomMode !== "manual") return;
+          event.preventDefault();
+          setZoom((value) => Math.max(100, Math.min(200, value + (event.deltaY < 0 ? 5 : -5))));
+        }}
+        onTouchStart={(event) => {
+          if (event.touches.length === 2) {
+            const dx = event.touches[0].clientX - event.touches[1].clientX;
+            const dy = event.touches[0].clientY - event.touches[1].clientY;
+            pinchStartRef.current = Math.hypot(dx, dy);
+          }
+        }}
+        onTouchMove={(event) => {
+          if (pinchStartRef.current == null || event.touches.length !== 2) return;
+          const dx = event.touches[0].clientX - event.touches[1].clientX;
+          const dy = event.touches[0].clientY - event.touches[1].clientY;
+          const ratio = Math.hypot(dx, dy) / pinchStartRef.current;
+          if (ratio > 1.08) {
+            setZoomMode("fill");
+            pinchStartRef.current = null;
+          } else if (ratio < 0.92) {
+            setZoomMode("normal");
+            pinchStartRef.current = null;
+          }
+        }}
+        onTouchEnd={(event) => {
+          if (event.touches.length === 0) pinchStartRef.current = null;
+        }}
       />
 
       {/* The last frame, standing in while the pipeline is rebuilt. Sits above
@@ -4060,6 +4110,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             : undefined
         }
         subtitleTimingOpen={showSubtitleOffset}
+        onOpenZoom={zoomMode === "manual" ? () => setShowZoomPanel((open) => !open) : undefined}
+        zoomOpen={showZoomPanel}
       />
       {/* Subtitles this client draws, because Plex was told not to burn them
           in — the only kind there is anything to adjust about. */}
@@ -4074,6 +4126,15 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           offsetMs={subtitleOffsetMs}
           onChange={setSubtitleOffsetMs}
           onClose={() => setShowSubtitleOffset(false)}
+        />
+      )}
+      {showZoomPanel && zoomMode === "manual" && (
+        <ZoomPanel
+          mode={zoomMode}
+          zoom={zoom}
+          onChangeMode={(mode) => { setZoomMode(mode); if (mode !== "manual") setShowZoomPanel(false); }}
+          onChangeZoom={setZoom}
+          onClose={() => setShowZoomPanel(false)}
         />
       )}
       {showTrackSwitcher && (
@@ -4096,6 +4157,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // answer ("None"), so it is passed through as one.
           currentAudioId={(variant?.audioStreamId ?? currentAudioStreamRef.current) || null}
           currentSubtitleId={variant?.subtitleStreamId ?? currentSubtitleStreamRef.current}
+          zoomMode={zoomMode}
+          zoom={zoom}
+          onZoomModeChange={(mode) => { setZoomMode(mode); if (mode !== "manual") setShowZoomPanel(false); }}
+          onZoomChange={setZoom}
         />
       )}
       {showQueuePanel && syncState && (

@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from "express";
 import { Readable } from "node:stream";
+import { randomUUID } from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import { progressivePreview } from "../services/preview-stream.js";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
@@ -2563,6 +2564,8 @@ router.get("/preview/:partId/index", async (req: Request, res: Response) => {
 
     // Opt-in keeps older clients' ordinary BIF reader working.
     if (req.query.progressive === "1" && plexRes.body) {
+      const transfer = randomUUID().slice(0, 8);
+      const startedAt = performance.now();
       const abort = new AbortController();
       const cancel = () => abort.abort();
       res.on("close", cancel);
@@ -2570,14 +2573,20 @@ router.get("/preview/:partId/index", async (req: Request, res: Response) => {
       res.setHeader("Content-Type", "application/x-plex-preview-v1");
       res.setHeader("Cache-Control", "private, max-age=86400");
       res.setHeader("X-Accel-Buffering", "no");
+      logEvent("Preview", "transfer started", { partId, transfer, transport: "progressive-v1" });
       try {
-        await pipeline(Readable.from(progressivePreview(plexRes.body, abort.signal)), res);
+        await pipeline(Readable.from(progressivePreview(plexRes.body, abort.signal, (progress) => {
+          logEvent("Preview", "tier sent", {
+            partId, transfer, ...progress, elapsedMs: Math.round(performance.now() - startedAt),
+          });
+        })), res);
       } finally {
         res.off("close", cancel);
       }
       return;
     }
 
+    logEvent("Preview", "transfer started", { partId, transport: "legacy-bif" });
     res.setHeader("Content-Type", "application/octet-stream");
     if (declared) res.setHeader("Content-Length", declared);
     // The frames for a part never change. The client holds them for the length

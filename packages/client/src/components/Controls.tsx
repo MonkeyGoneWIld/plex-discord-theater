@@ -5,7 +5,7 @@ import {
   createPreviewFrameReader, createProgressivePreviewReader,
   type PreviewFrames, type PreviewDetail, type PreviewFrameReader,
 } from "../lib/previewFrames";
-import { createPreviewMotion } from "../lib/previewMotion";
+import { createPreviewMotion, PREVIEW_SETTLE_MS } from "../lib/previewMotion";
 import { loadVolume } from "../lib/volume";
 import { getLevel, setLevel, boostAvailable, MAX_LEVEL } from "../lib/audioBoost";
 import { useMediaQuery, COMPACT_CONTROLS_QUERY, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -543,7 +543,7 @@ export function Controls({
   const previewMotionRef = useRef(createPreviewMotion());
   const previewSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewPositionRef = useRef<number | null>(null);
-  const previewDetailRef = useRef<PreviewDetail>("full");
+  const previewDetailRef = useRef<PreviewDetail>("medium");
   const previewLastShownRef = useRef(-Infinity);
   // The request that was just sent, if any: what was asked for, so the label
   // can keep saying it while the room carries on doing the opposite.
@@ -905,7 +905,7 @@ export function Controls({
 
   const clearPreviewMotion = useCallback(() => {
     previewMotionRef.current.reset();
-    previewDetailRef.current = "full";
+    previewDetailRef.current = "medium";
     previewPositionRef.current = null;
     previewLastShownRef.current = -Infinity;
     if (previewSettleRef.current !== null) clearTimeout(previewSettleRef.current);
@@ -918,7 +918,7 @@ export function Controls({
   const selectPreview = useCallback((pct: number, detail: PreviewDetail) => {
     if (previewPartId == null || !(duration > 0) || !isFinite(duration)) return;
     const now = performance.now();
-    const gap = detail === "coarse" ? 180 : detail === "medium" ? 100 : 0;
+    const gap = detail === "coarse" ? 180 : detail === "medium" ? 150 : 0;
     if (now - previewLastShownRef.current < gap) return;
     const local = previewFramesRef.current?.frameAt(pct * duration * 1000, duration * 1000, detail);
     if (local) {
@@ -952,17 +952,18 @@ export function Controls({
   const showPreviewAt = useCallback((pct: number) => {
     setHoverPct(pct);
     previewPositionRef.current = pct;
-    const detail = previewMotionRef.current.sample(pct, performance.now());
+    const detail = previewMotionRef.current.sample(
+      pct, performance.now(), previewFramesRef.current?.count ?? Math.ceil(duration / 2),
+    );
     previewDetailRef.current = detail;
     selectPreview(pct, detail);
     if (previewSettleRef.current !== null) clearTimeout(previewSettleRef.current);
     previewSettleRef.current = setTimeout(() => {
       previewSettleRef.current = null;
-      previewMotionRef.current.reset();
-      previewDetailRef.current = "full";
+      previewDetailRef.current = previewMotionRef.current.settle();
       selectPreview(pct, "full");
-    }, 240);
-  }, [selectPreview]);
+    }, PREVIEW_SETTLE_MS);
+  }, [selectPreview, duration]);
 
   // ─── Scrubbing ────────────────────────────────────────────────
   //
@@ -1036,7 +1037,13 @@ export function Controls({
     if (previewPartId == null || !started) return;
     let cancelled = false;
     const abort = new AbortController();
-    let reader: PreviewFrameReader = createProgressivePreviewReader();
+    let transferStartedAt = 0;
+    let reader: PreviewFrameReader = createProgressivePreviewReader((progress) => {
+      logEvent("Preview", "tier ready", {
+        partId: previewPartId, ...progress,
+        elapsedMs: Math.round(performance.now() - transferStartedAt),
+      });
+    });
 
     /**
      * Seconds of video buffered past the playhead.
@@ -1067,13 +1074,18 @@ export function Controls({
       // all is what starts the competition.
       await waitForHeadroom();
       if (cancelled) return;
+      transferStartedAt = performance.now();
       const res = await fetch(
         authUrl(`/api/plex/preview/${previewPartId}/index?progressive=1`),
         { signal: abort.signal },
       );
       if (!res.ok || !res.body) return;
+      const progressive = res.headers.get("content-type")?.startsWith("application/x-plex-preview-v1") ?? false;
+      logEvent("Preview", "transfer accepted", {
+        partId: previewPartId, transport: progressive ? "progressive-v1" : "legacy-bif",
+      });
       // Older servers still return an ordinary BIF.
-      if (!res.headers.get("content-type")?.startsWith("application/x-plex-preview-v1")) {
+      if (!progressive) {
         reader.dispose();
         reader = createPreviewFrameReader();
       }

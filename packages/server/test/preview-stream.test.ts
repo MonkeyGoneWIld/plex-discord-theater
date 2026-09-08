@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { progressivePreview } from "../src/services/preview-stream.js";
+import { progressivePreview, type PreviewTierProgress } from "../src/services/preview-stream.js";
 import { createProgressivePreviewReader, previewStride } from "../../client/src/lib/previewFrames.js";
 import { createPreviewMotion } from "../../client/src/lib/previewMotion.js";
 
@@ -31,14 +31,16 @@ async function identity(url: string | null) {
   return new DataView(await (await fetch(url)).arrayBuffer()).getUint32(2, true);
 }
 
-for (const count of [1, 3, 96, 385, 10800]) {
-  const reader = createProgressivePreviewReader();
+for (const count of [1, 3, 96, 385, 3214, 10800]) {
+  const sent: PreviewTierProgress[] = [];
+  const received: PreviewTierProgress[] = [];
+  const reader = createProgressivePreviewReader((progress) => received.push(progress));
   const order: number[] = [];
   let level = 0;
   const coarse = previewStride(count, "coarse");
   const medium = previewStride(count, "medium");
   let header = true;
-  for await (const chunk of progressivePreview(stream(bif(count)))) {
+  for await (const chunk of progressivePreview(stream(bif(count)), undefined, (progress) => sent.push(progress))) {
     if (header) header = false;
     else {
       const i = chunk.readUInt32LE(0);
@@ -61,6 +63,12 @@ for (const count of [1, 3, 96, 385, 10800]) {
   }
   assert.equal(new Set(order).size, count, "each image transferred exactly once");
   assert.equal(order.length, count);
+  assert.deepEqual(received, sent, "client confirms the same three tiers that the server sent");
+  assert.deepEqual(received.map((p) => p.tier), ["coarse", "medium", "full"]);
+  if (count === 3214) {
+    assert.deepEqual(received.map((p) => p.frames), [25, 71, 3118]);
+    assert.deepEqual(received.map((p) => p.ready), [25, 96, 3214]);
+  }
   const frames = reader.frames()!;
   assert.equal(frames.ready, count);
   const target = Math.min(191, count - 1);
@@ -115,14 +123,58 @@ for (const corrupt of [Buffer.alloc(80), bif(0), bif(5).subarray(0, 100)]) {
   assert.ok(cancelled, "disconnect cancels a stalled upstream read");
 }
 
+// A proxy may combine an entire response into one read. Tier callbacks still
+// fire at the actual protocol boundaries, not once per network chunk.
+{
+  const sent: PreviewTierProgress[] = [];
+  const received: PreviewTierProgress[] = [];
+  const chunks: Buffer[] = [];
+  for await (const chunk of progressivePreview(stream(bif(3214)), undefined, (p) => sent.push(p))) chunks.push(chunk);
+  const reader = createProgressivePreviewReader((p) => received.push(p));
+  reader.push(Buffer.concat(chunks));
+  assert.equal(reader.rejected(), false);
+  assert.deepEqual(received, sent);
+  reader.dispose();
+  const outOfOrder = createProgressivePreviewReader();
+  outOfOrder.push(chunks[0]);
+  outOfOrder.push(chunks[26]); // first medium frame, before any overview
+  assert.equal(outOfOrder.rejected(), true, "reject a medium tier sent before the overview");
+  outOfOrder.dispose();
+}
+
 const motion = createPreviewMotion();
-assert.equal(motion.sample(0, 0), "full");
-assert.equal(motion.sample(0.02, 10), "coarse");
-assert.equal(motion.sample(0, 20), "coarse", "reverse motion still counts as speed");
-for (let i = 1; i <= 20; i++) motion.sample(i * 0.004, 20 + i * 20);
-assert.equal(motion.sample(0.084, 440), "medium");
-for (let i = 1; i <= 20; i++) motion.sample(0.084 + i * 0.0004, 440 + i * 20);
-assert.equal(motion.sample(0.0924, 860), "full");
+assert.equal(motion.sample(0, 0, 3214), "medium", "enter on the stable medium grid");
+assert.equal(motion.sample(0.02, 10, 3214), "coarse");
+assert.equal(motion.sample(0, 20, 3214), "coarse", "reverse motion still counts as speed");
+for (let i = 1; i <= 20; i++) motion.sample(i * 0.004, 20 + i * 20, 3214);
+assert.equal(motion.sample(0.084, 440, 3214), "medium");
+
+// Previously these ordinary searching speeds could all switch to full detail.
+for (const velocity of [0.1, 0.04, 0.01, 0.005]) {
+  motion.reset();
+  motion.sample(0, 0, 3214);
+  for (let i = 1; i <= 100; i++) {
+    assert.equal(motion.sample(velocity * i * 0.02, i * 20, 3214), "medium");
+  }
+}
 motion.reset();
-assert.equal(motion.sample(0.9, 900), "full", "re-entry starts fresh");
+motion.sample(0, 0, 3214);
+for (let i = 1; i <= 50; i++) {
+  assert.equal(motion.sample(i * 0.00001, i * 10, 3214), "medium", "brief slowdowns are not precise inspection");
+}
+assert.equal(motion.sample(0.00051, 510, 3214), "full", "sustained ~3 frames/second enables full detail");
+assert.equal(motion.sample(0.00151, 530, 3214), "medium", "resuming the search exits full immediately");
+assert.equal(motion.settle(), "full", "a deliberate stop refines the current position");
+assert.equal(motion.sample(0.002, 2000, 3214), "medium", "time spent stopped cannot qualify the resumed movement as slow");
+motion.reset();
+assert.equal(motion.sample(0.9, 2100, 3214), "medium", "re-entry starts fresh");
+
+// The same screen speed crosses far more original frames on a long video.
+for (const count of [96, 3214, 10800]) {
+  motion.reset();
+  motion.sample(0, 0, count);
+  let result;
+  for (let i = 1; i <= 100; i++) result = motion.sample(i * 0.00008, i * 20, count);
+  assert.equal(result, count === 96 ? "full" : "medium");
+}
 console.log("Progressive preview transfer and adaptive motion tests passed");

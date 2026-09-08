@@ -231,7 +231,9 @@ export interface PreviewFrameReader {
 
 /** Reader for application/x-plex-preview-v1. Only one incomplete record is
  * buffered; complete JPEGs become blobs and survive a truncated download. */
-export function createProgressivePreviewReader(): PreviewFrameReader {
+export function createProgressivePreviewReader(onTierReady?: (progress: {
+  tier: PreviewDetail; frames: number; bytes: number; ready: number;
+}) => void): PreviewFrameReader {
   let index: Index | null = null;
   let rejected = false;
   let disposed = false;
@@ -239,6 +241,10 @@ export function createProgressivePreviewReader(): PreviewFrameReader {
   let buffer: Uint8Array<ArrayBuffer> = new Uint8Array(4);
   let filled = 0;
   let frame = 0;
+  let tier = 0;
+  let tierFrames = 0;
+  let tierBytes = 0;
+  let expected: number[] = [];
   const images = new Map<number, Blob>();
   const urls = new Map<number, string>();
   const view: PreviewFrames = {
@@ -296,16 +302,38 @@ export function createProgressivePreviewReader(): PreviewFrameReader {
           const result = readIndex(buffer);
           if (!result || result === REJECTED || buffer.length !== HEADER_BYTES + (result.frames.length + 1) * 8 + 2) { rejected = true; break; }
           index = result;
+          const count = index.frames.length;
+          const countAt = (detail: PreviewDetail) => {
+            const stride = previewStride(count, detail);
+            return Math.ceil(count / stride) + ((count - 1) % stride === 0 ? 0 : 1);
+          };
+          const coarse = countAt("coarse");
+          const medium = countAt("medium");
+          expected = [coarse, medium - coarse, count - medium];
           next("record", 8);
         } else if (state === "record") {
           frame = data.getUint32(0, true);
           const size = data.getUint32(4, true);
           const entry = index?.frames[frame];
           if (!entry || images.has(frame) || size < 2 || size > 10 * 1024 * 1024 || size !== entry.end - entry.start) { rejected = true; break; }
+          const count = index!.frames.length;
+          const frameTier = frame % previewStride(count, "coarse") === 0 || frame === count - 1 ? 0
+            : frame % previewStride(count, "medium") === 0 ? 1 : 2;
+          if (frameTier !== tier) { rejected = true; break; }
           next("image", size);
         } else {
           if (buffer[0] !== 0xff || buffer[1] !== 0xd8) { rejected = true; break; }
           images.set(frame, new Blob([buffer], { type: "image/jpeg" }));
+          tierFrames++;
+          tierBytes += buffer.length + 8;
+          // Report inside the parser so boundaries remain visible even when a
+          // proxy/browser combines multiple tiers into a single network chunk.
+          while (tier < 3 && tierFrames === expected[tier]) {
+            onTierReady?.({ tier: (["coarse", "medium", "full"] as const)[tier], frames: tierFrames, bytes: tierBytes, ready: images.size });
+            tier++;
+            tierFrames = 0;
+            tierBytes = 0;
+          }
           next("record", 8);
         }
       }

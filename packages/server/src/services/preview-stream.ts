@@ -6,19 +6,32 @@ const MAGIC = Buffer.from([0x89, 0x42, 0x49, 0x46, 13, 10, 26, 10]);
 const MAX_BYTES = 1024 * 1024 * 1024;
 const MAX_FRAME_BYTES = 10 * 1024 * 1024;
 
+export interface PreviewTierProgress {
+  tier: "coarse" | "medium" | "full";
+  frames: number;
+  bytes: number;
+  ready: number;
+}
+
 /** v1 wire format: uint32 head length, BIF header/index + first JPEG marker,
  * then records of uint32 frame number, uint32 length, JPEG bytes (all LE).
  * Each image is sent exactly once: ~24 overview frames, ~96 medium frames,
  * then the rest. The last image is also in the overview.
  * Deferred images go to a temporary file, not a movie-sized heap allocation.
  */
-export async function* progressivePreview(body: ReadableStream<Uint8Array>, signal?: AbortSignal) {
+export async function* progressivePreview(
+  body: ReadableStream<Uint8Array>, signal?: AbortSignal,
+  onTierComplete?: (progress: PreviewTierProgress) => void,
+) {
   const reader = body.getReader();
   const cancel = () => { void reader.cancel().catch(() => {}); };
   signal?.addEventListener("abort", cancel, { once: true });
   let chunk: Uint8Array = new Uint8Array(0);
   let offset = 0;
   let consumed = 0;
+  let tierFrames = 0;
+  let tierBytes = 0;
+  let ready = 0;
   let directory: string | undefined;
   let file: Awaited<ReturnType<typeof open>> | undefined;
   const take = async (length: number): Promise<Buffer> => {
@@ -49,7 +62,15 @@ export async function* progressivePreview(body: ReadableStream<Uint8Array>, sign
     const header = Buffer.alloc(8);
     header.writeUInt32LE(i, 0);
     header.writeUInt32LE(bytes.length, 4);
+    tierFrames++;
+    ready++;
+    tierBytes += header.length + bytes.length;
     return Buffer.concat([header, bytes]);
+  };
+  const completeTier = (tier: PreviewTierProgress["tier"]) => {
+    onTierComplete?.({ tier, frames: tierFrames, bytes: tierBytes, ready });
+    tierFrames = 0;
+    tierBytes = 0;
   };
   try {
     const header = await take(64);
@@ -90,6 +111,7 @@ export async function* progressivePreview(body: ReadableStream<Uint8Array>, sign
         }
       }
     }
+    completeTier("coarse");
     // Stop the upstream even if Plex appended bytes past the BIF terminator.
     await reader.cancel();
     for (const level of [1, 2]) {
@@ -105,6 +127,7 @@ export async function* progressivePreview(body: ReadableStream<Uint8Array>, sign
         }
         yield record(i, bytes);
       }
+      completeTier(level === 1 ? "medium" : "full");
     }
   } finally {
     signal?.removeEventListener("abort", cancel);

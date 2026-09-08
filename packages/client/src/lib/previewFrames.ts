@@ -188,8 +188,8 @@ export function previewTierIndices(count: number, version: 1 | 2 = 2) {
     };
     return { coarse: grid(stride * 4), medium: grid(stride) };
   }
-  const coarseCount = Math.max(1, Math.ceil(count * 0.02));
-  const mediumCount = Math.max(1, Math.ceil(count * 0.15));
+  const coarseCount = Math.max(1, Math.ceil(count * 0.04));
+  const mediumCount = Math.max(1, Math.ceil(count * 0.30));
   const medium = Array.from({ length: mediumCount }, (_, i) =>
     mediumCount === 1 ? 0 : Math.floor(i * (count - 1) / (mediumCount - 1)));
   const coarse = Array.from({ length: coarseCount }, (_, i) =>

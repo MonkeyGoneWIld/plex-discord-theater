@@ -3,10 +3,10 @@
 The tooltip position, timestamp, and seek destination always follow the pointer.
 Only the preview image changes density with movement speed and focus.
 
-- Fast movement (0.8 timeline widths/second) uses 2% of the original frames,
+- Fast movement (0.8 timeline widths/second) uses 4% of the original frames,
   with at least 180 ms between image selections. The existing coarse-speed
   hysteresis retains this level down to 0.55 widths/second.
-- Medium is the default and uses 15% of the original frames, with at least
+- Medium is the default and uses 30% of the original frames, with at least
   150 ms between selections.
 - Full detail offers every original frame. It activates after 500 ms of slow
   movement (20 screen pixels/second or less), or after spending 650 ms within
@@ -26,15 +26,15 @@ early. This makes full detail reachable on long videos and during minor jitter.
 After playback meets the existing buffer-headroom requirement, the client fetches
 `/api/plex/preview/:partId/index?progressive=2`. One response automatically sends:
 
-1. `ceil(total * 0.02)` overview frames.
-2. Additional frames to reach `ceil(total * 0.15)` in total.
+1. `ceil(total * 0.04)` overview frames.
+2. Additional frames to reach `ceil(total * 0.30)` in total.
 3. All remaining frames to reach 100%.
 
 Counts round up to whole frames, with a minimum of one. Medium frames are evenly
 spread across the timeline; the overview is an evenly distributed subset of that
 grid. Each JPEG is transferred once. Tiny videos may have empty later passes.
-For 3,214 original frames, new-frame counts are **65 / 418 / 2,731** and cumulative
-ready counts are **65 / 483 / 3,214**. Downloading more frames never automatically
+For 3,214 original frames, new-frame counts are **129 / 836 / 2,249** and cumulative
+ready counts are **129 / 965 / 3,214**. Downloading more frames never automatically
 changes the selected hover-detail level. Missing fine previews fall back to
 received coarser frames, and a stationary focused hover improves as data arrives.
 
@@ -79,6 +79,6 @@ For a live Plex/Discord check:
 3. Move by adjacent original-frame intervals while focused: the preview should
    use the original frames rather than remain on the medium grid.
 4. On a throttled connection, inspect `tier ready` counts and `detail selected`
-   independently. For 3,214 frames, verify cumulative counts 65, 483, and 3,214.
+   independently. For 3,214 frames, verify cumulative counts 129, 965, and 3,214.
 5. Change titles mid-download and mid-scrub; old frames and timers must not appear.
    Repeat with a touch drag and a title without generated thumbnails.

@@ -49,14 +49,24 @@ listeners.touchstart(touch([{clientX:100,clientY:200},{clientX:200,clientY:200}]
 listeners.touchmove(touch([{clientX:90,clientY:200},{clientX:210,clientY:200}]));
 assert.equal(render(key1).zoom,120); assert.equal(notices.at(-1),"Zoom: 120%");
 listeners.touchend(touch([]));
-listeners.touchstart(touch([{clientX:100,clientY:200}]));
-listeners.touchmove(touch([{clientX:140,clientY:220}]));
-assert.equal(render(key1).x,40);
+// Shift the pinch midpoint while zooming to 200%; translation is unsupported.
+listeners.touchstart(touch([{clientX:100,clientY:200},{clientX:200,clientY:200}]));
+listeners.touchmove(touch([{clientX:250,clientY:400},{clientX:450,clientY:400}]));
+assert.equal(render(key1).zoom,200);
+assert.equal("x" in render(key1),false);
+assert.equal("y" in render(key1),false);
 listeners.touchend(touch([]));
 // Ignore only the trailing picture click, never a deliberate control click.
 prevented=false; listeners.click(event); assert.equal(prevented,true);
 prevented=false; listeners.click({...event,target:{matches:()=>false}}); assert.equal(prevented,false);
-listeners.touchstart(touch([{clientX:300,clientY:200}]));
+// One-finger dragging cannot pan, zoom, or swallow the next fresh tap.
+const beforeDrag = notices.length;
+listeners.touchstart(touch([{clientX:100,clientY:200}]));
+prevented=false;
+listeners.touchmove(touch([{clientX:140,clientY:220}]));
+assert.equal(prevented,false);
+assert.equal(render(key1).zoom,200);
+assert.equal(notices.length,beforeDrag);
 listeners.touchend(touch([]));
 prevented=false; listeners.click(event); assert.equal(prevented,false);
 render(key1).setZoom(50); assert.equal(render(key1).zoom,50);
@@ -68,4 +78,4 @@ assert.equal(render(key1).zoom,100);
 render(key1).setZoom(25); assert.equal(render(key1).zoom,50);
 render(key1).setZoom(250); assert.equal(render(key1).zoom,200);
 saved.set("pdt:videoZoom:v1","null"); assert.equal(pref.loadZoomPreference(key1).mode,"normal");
-console.log("Zoom regression checks passed: episode continuity, remount persistence, title isolation, wheel gating, pinch and pan.");
+console.log("Zoom regression checks passed: episode continuity, remount persistence, title isolation, wheel gating, centered pinch and ignored single-finger drags.");

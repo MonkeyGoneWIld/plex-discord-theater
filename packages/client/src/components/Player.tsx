@@ -616,7 +616,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     setZoomNotice(null);
     return () => { if (zoomNoticeTimer.current) clearTimeout(zoomNoticeTimer.current); };
   }, [zoomPreferenceKey]);
-  const { mode: zoomMode, zoom, x: zoomX, y: zoomY, setMode: setZoomMode, setZoom } = useVideoZoom(zoomRootRef, zoomPreferenceKey, showZoomNotice);
+  const { mode: zoomMode, zoom, setMode: setZoomMode, setZoom } = useVideoZoom(zoomRootRef, zoomPreferenceKey, showZoomNotice);
   /** A sidecar that could not be read, so the offer to adjust it is withdrawn
    *  rather than left pointing at subtitles that never arrived. */
   const [sidecarFailed, setSidecarFailed] = useState(false);
@@ -3898,7 +3898,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           ...styles.video,
           objectFit: zoomMode === "normal" || zoomMode === "manual" ? "contain" : "cover",
           transform: zoomMode === "manual"
-            ? `translate(${zoomX}px, ${zoomY}px) scale(${zoom / 100})`
+            ? `scale(${zoom / 100})`
             : zoomMode === "21:9" ? "scale(1.33)" : undefined,
         }}
         playsInline

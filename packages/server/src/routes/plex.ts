@@ -1662,11 +1662,22 @@ router.get("/tmdb/meta", async (req: Request, res: Response) => {
     let ratings = mapPlexRatings({});
     if (externalTitle) {
       const matches = await searchDiscover(externalTitle);
+      const normalizedTitle = externalTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
       const match = matches.find((candidate) =>
         tmdbIdFromGuids(candidate.Guid) === Number(tmdbId)
         && candidate.type === type,
-      );
-      if (match) ratings = mapPlexRatings(match);
+      ) ?? matches.find((candidate) => {
+        const candidateTitle = String(candidate.title ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        return candidate.type === type && candidateTitle === normalizedTitle
+          && (candidate.year == null || !yearStr || candidate.year === Number(yearStr));
+      });
+      if (match) {
+        // Search records can omit Rating[] even though the full Plex provider
+        // record has it. Follow the plex:// guid when available.
+        const providerId = /^plex:\/\/[^/]+\/(.+)$/.exec(match.guid ?? "")?.[1];
+        const detailed = providerId ? await fetchDiscoverMeta(providerId) : null;
+        ratings = mapPlexRatings(detailed ?? match);
+      }
     }
     res.json({
       title: externalTitle,

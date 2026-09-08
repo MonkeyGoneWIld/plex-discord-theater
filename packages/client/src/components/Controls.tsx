@@ -1701,8 +1701,8 @@ export function Controls({
                 onClick={onOpenZoom}
                 className="btn"
                 style={{ ...styles.gearBtn, ...(compact ? styles.gearBtnCompact : {}), ...(zoomOpen ? styles.gearBtnActive : {}) }}
-                title="Video zoom"
-                aria-label="Video zoom"
+                title="Custom Zoom"
+                aria-label="Custom Zoom"
                 aria-pressed={zoomOpen}
               >
                 <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true">

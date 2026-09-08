@@ -31,7 +31,7 @@ export function useVideoZoom(root: RefObject<HTMLDivElement | null>, key: string
       e.stopPropagation();
       if (e.deltaY) {
         updateRef.current("manual", state.current.zoom + (e.deltaY < 0 ? 5 : -5));
-        gestureNotice.current?.(`Zoom: ${state.current.zoom}%`);
+        gestureNotice.current?.(`Custom Zoom: ${state.current.zoom}%`);
       }
     };
     let gesture: { distance: number; zoom: number } | null = null;
@@ -58,13 +58,13 @@ export function useVideoZoom(root: RefObject<HTMLDivElement | null>, key: string
       if (state.current.mode === "manual") {
         const zoom = Math.max(50, Math.min(200, Math.round(gesture.zoom * ratio / 5) * 5));
         updateRef.current("manual", zoom);
-        if (e.touches.length === 2) gestureNotice.current?.(`Zoom: ${state.current.zoom}%`);
+        if (e.touches.length === 2) gestureNotice.current?.(`Custom Zoom: ${state.current.zoom}%`);
       } else if (ratio > 1.08 && state.current.mode !== "fill") {
         updateRef.current("fill");
         gestureNotice.current?.("Fill Screen");
       } else if (ratio < 0.92 && state.current.mode !== "normal") {
         updateRef.current("normal");
-        gestureNotice.current?.("Normal");
+        gestureNotice.current?.("Original");
       }
     };
     const end = (e: TouchEvent) => {

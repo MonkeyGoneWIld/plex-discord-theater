@@ -91,7 +91,7 @@ export function TrackSwitcher({
 
   return (
     <div style={styles.backdrop} onClick={onClose}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+      <div style={{ ...styles.modal, ...(tab === "zoom" ? styles.zoomModal : {}) }} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
           <span style={styles.headerTitle}>Settings</span>
           <button className="btn" onClick={onClose} style={styles.closeBtn}>{"\u2715"}</button>
@@ -114,11 +114,11 @@ export function TrackSwitcher({
 
         {/* What a change here reaches. The host's carries; everyone else's
             forks onto a stream of their own, which nobody else sees. */}
-        <p style={styles.scopeNote}>
-          {tab !== "zoom" && scope === "room"
+        {tab !== "zoom" && <p style={styles.scopeNote}>
+          {scope === "room"
             ? "Changes apply to everyone watching your stream."
             : "Changes apply to you only."}
-        </p>
+        </p>}
 
         {loading && tab !== "zoom" ? (
           <div style={styles.loading}>Loading tracks...</div>
@@ -169,8 +169,8 @@ export function TrackSwitcher({
             })}
           </div>
         ) : (
-          <div style={styles.trackList}>
-            {([["normal", "Normal"], ["fill", "Fill Screen"], ["width", "Fill Width"], ["height", "Fill Height"], ["16:9", "Fill 16:9"], ["21:9", "Fill 21:9"], ["manual", "Manual Zoom"]] as const).map(([mode, label]) => (
+          <div style={{ ...styles.trackList, maxHeight: "none", flexShrink: 0 }}>
+            {([["normal", "Original"], ["fill", "Fill Screen"], ["width", "Match Width"], ["height", "Match Height"], ["16:9", "Widescreen (16:9)"], ["21:9", "Ultrawide (21:9)"], ["manual", "Custom Zoom"]] as const).map(([mode, label]) => (
               <button className="btn" key={mode} onClick={() => onZoomModeChange(mode)}
                 style={zoomMode === mode ? styles.trackSelected : styles.track}>
                 <div style={{ color: zoomMode === mode ? "#f0f0f0" : "#ccc", fontSize: 13 }}>{label}</div>
@@ -181,7 +181,7 @@ export function TrackSwitcher({
         )}
 
         <div style={styles.disclaimer}>
-          {tab === "zoom" ? "Zoom is remembered for this movie or show on this device." : "Changing tracks briefly restarts the stream at your current position."}
+          {tab === "zoom" ? "Saved for this movie or show. Only affects your view." : "Changing tracks briefly restarts the stream at your current position."}
         </div>
       </div>
     </div>
@@ -209,7 +209,16 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     gap: 18,
   },
+  zoomModal: {
+    boxSizing: "border-box",
+    maxWidth: "calc(100% - 32px)",
+    maxHeight: "calc(100% - 32px - var(--sait, 0px) - var(--saib, 0px))",
+    overflowY: "auto",
+    marginTop: "var(--sait, 0px)",
+    marginBottom: "var(--saib, 0px)",
+  },
   header: {
+    flexShrink: 0,
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
@@ -222,6 +231,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "inherit",
   },
   tabs: {
+    flexShrink: 0,
     display: "flex", borderRadius: 8, overflow: "hidden",
     border: "1px solid rgba(255,255,255,0.08)",
   },

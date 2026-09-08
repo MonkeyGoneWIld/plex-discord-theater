@@ -36,7 +36,7 @@ assert.equal(render(key1).zoom,145);
 slots=[]; effects=[]; assert.equal(render(key1).zoom,145);
 let prevented=false;
 const event={target:{matches:()=>true},clientY:200,ctrlKey:true,deltaY:-1,preventDefault:()=>prevented=true,stopPropagation:()=>{}};
-listeners.wheel(event); assert.equal(render(key1).zoom,150); assert.ok(prevented); assert.equal(notices.at(-1),"Zoom: 150%");
+listeners.wheel(event); assert.equal(render(key1).zoom,150); assert.ok(prevented); assert.equal(notices.at(-1),"Custom Zoom: 150%");
 render(key1).setMode("normal"); prevented=false;
 listeners.wheel(event); assert.equal(prevented,false);
 function touch(touches) { return {...event,touches}; }
@@ -47,7 +47,7 @@ listeners.touchend(touch([]));
 render(key1).setMode("manual");
 listeners.touchstart(touch([{clientX:100,clientY:200},{clientX:200,clientY:200}]));
 listeners.touchmove(touch([{clientX:90,clientY:200},{clientX:210,clientY:200}]));
-assert.equal(render(key1).zoom,120); assert.equal(notices.at(-1),"Zoom: 120%");
+assert.equal(render(key1).zoom,120); assert.equal(notices.at(-1),"Custom Zoom: 120%");
 listeners.touchend(touch([]));
 // Shift the pinch midpoint while zooming to 200%; translation is unsupported.
 listeners.touchstart(touch([{clientX:100,clientY:200},{clientX:200,clientY:200}]));

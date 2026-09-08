@@ -1655,8 +1655,21 @@ router.get("/tmdb/meta", async (req: Request, res: Response) => {
     const yearStr = (data.release_date ?? data.first_air_date ?? "").slice(0, 4);
     // Movie runtime is a single value; TV reports a per-episode array.
     const runtimeMin = data.runtime ?? data.episode_run_time?.[0] ?? null;
+    // TMDB-only recommendation items do not carry a plex:// guid. Resolve the
+    // title through Plex Discover so their ratings still come from Plex rather
+    // than silently disappearing on the external detail page.
+    const externalTitle = data.title ?? data.name ?? "";
+    let ratings = mapPlexRatings({});
+    if (externalTitle) {
+      const matches = await searchDiscover(externalTitle);
+      const match = matches.find((candidate) =>
+        tmdbIdFromGuids(candidate.Guid) === Number(tmdbId)
+        && candidate.type === type,
+      );
+      if (match) ratings = mapPlexRatings(match);
+    }
     res.json({
-      title: data.title ?? data.name ?? "",
+      title: externalTitle,
       year: yearStr ? Number(yearStr) : null,
       summary: data.overview || null,
       genres: (data.genres ?? []).map((g) => g.name).filter(Boolean),
@@ -1667,7 +1680,7 @@ router.get("/tmdb/meta", async (req: Request, res: Response) => {
         ? externalThumbUrl(`https://image.tmdb.org/t/p/w500${data.poster_path}`)
         : null,
       tmdbId: Number(tmdbId),
-      ratings: { imdb: null, tmdb: null, rtCritic: null, rtAudience: null },
+      ratings,
       // Same credit shape the library meta endpoint returns, so the detail pages
       // render one Cast & Crew component regardless of where the title came from.
       cast: tmdbCredits(data.credits?.cast, MAX_CAST, (c) => c.character),

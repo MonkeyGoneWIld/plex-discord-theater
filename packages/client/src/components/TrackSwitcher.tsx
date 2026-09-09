@@ -91,7 +91,7 @@ export function TrackSwitcher({
 
   return (
     <div style={styles.backdrop} onClick={onClose}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+      <div className="settings-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
           <span style={styles.headerTitle}>Settings</span>
           <button className="btn" onClick={onClose} style={styles.closeBtn}>{"\u2715"}</button>
@@ -123,7 +123,7 @@ export function TrackSwitcher({
         {loading && tab !== "zoom" ? (
           <div style={styles.loading}>Loading tracks...</div>
         ) : tab === "audio" ? (
-          <div style={styles.trackList}>
+          <div className="settings-scroll" style={styles.trackList}>
             {audioTracks.map((t) => {
               const on = t.id === activeAudio;
               return (
@@ -146,7 +146,7 @@ export function TrackSwitcher({
             })}
           </div>
         ) : tab === "subtitles" ? (
-          <div style={styles.trackList}>
+          <div className="settings-scroll" style={styles.trackList}>
             <button className="btn"
               onClick={() => handleSelect("subtitle", 0)}
               style={!activeSubtitle ? styles.trackSelected : styles.track}
@@ -169,7 +169,7 @@ export function TrackSwitcher({
             })}
           </div>
         ) : (
-          <div style={{ ...styles.trackList, maxHeight: "none", flexShrink: 0 }}>
+          <div className="settings-scroll" style={styles.zoomList}>
             {([["normal", "Original"], ["fill", "Fill Screen"], ["width", "Match Width"], ["height", "Match Height"], ["16:9", "Widescreen (16:9)"], ["21:9", "Ultrawide (21:9)"], ["manual", "Custom Zoom"]] as const).map(([mode, label]) => (
               <button className="btn" key={mode} onClick={() => onZoomModeChange(mode)}
                 style={zoomMode === mode ? styles.trackSelected : styles.track}>
@@ -202,6 +202,7 @@ const styles: Record<string, React.CSSProperties> = {
     width: "min(320px, calc(100% - 24px))",
     maxWidth: "calc(100% - 24px)",
     maxHeight: "calc(100% - 24px - var(--sait, 0px) - var(--saib, 0px))",
+    minHeight: 0,
     boxSizing: "border-box",
     background: "rgba(13,13,13,0.95)",
     backdropFilter: "blur(20px)",
@@ -214,7 +215,7 @@ const styles: Record<string, React.CSSProperties> = {
     overflowY: "auto",
     overflowX: "hidden",
     overscrollBehavior: "contain",
-    scrollbarWidth: "thin",
+    scrollbarWidth: "auto",
     scrollbarColor: "rgba(229,160,13,0.55) transparent",
     marginTop: "var(--sait, 0px)",
     marginBottom: "var(--saib, 0px)",
@@ -247,6 +248,12 @@ const styles: Record<string, React.CSSProperties> = {
   },
   trackList: {
     display: "flex", flexDirection: "column", gap: 4, maxHeight: 240, overflowY: "auto",
+  },
+  zoomList: {
+    display: "flex", flexDirection: "column", gap: 4,
+    maxHeight: "calc(100dvh - 220px)", minHeight: 0, flexShrink: 1,
+    overflowY: "auto", paddingRight: 4,
+    scrollbarWidth: "auto", scrollbarColor: "rgba(229,160,13,0.7) transparent",
   },
   track: {
     display: "flex", alignItems: "center", justifyContent: "space-between",

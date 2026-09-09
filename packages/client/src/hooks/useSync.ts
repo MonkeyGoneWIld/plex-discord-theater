@@ -818,9 +818,6 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               suggestions: prev.suggestions.filter((s) => s.ratingKey !== msg.ratingKey),
             }));
             break;
-          case "host-disconnected":
-            setState((prev) => ({ ...prev, hostDisconnected: true }));
-            break;
           case "host-reconnected":
             setState((prev) => ({ ...prev, hostDisconnected: false }));
             break;

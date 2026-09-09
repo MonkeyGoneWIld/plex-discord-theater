@@ -384,8 +384,9 @@ export function prefetchDetail(item: Pick<PlexItem, "ratingKey" | "type" | "inLi
 
 export function searchPlex(
   query: string,
+  options?: { signal?: AbortSignal },
 ): Promise<{ items: PlexItem[]; people?: PersonResult[] }> {
-  return apiGet(`/api/plex/search?q=${encodeURIComponent(query)}`);
+  return apiGet(`/api/plex/search?q=${encodeURIComponent(query)}`, options);
 }
 
 export function fetchChildren(ratingKey: string): Promise<{ items: PlexItem[] }> {

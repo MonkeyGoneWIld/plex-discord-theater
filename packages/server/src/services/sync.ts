@@ -12,6 +12,14 @@ import { logEvent } from "./logger.js";
 /** Interval between WebSocket pings to detect dead connections. */
 const WS_PING_INTERVAL_MS = 30_000;
 
+/**
+ * Keep the current host reserved briefly after a socket closes. Mobile Discord
+ * and browser networking can drop a WebSocket for a few seconds while the
+ * client is still present and about to reconnect. Promoting someone else
+ * immediately turns that short interruption into a permanent host handoff.
+ */
+const HOST_RECONNECT_GRACE_MS = 15_000;
+
 /** Messages one connection may send per MSG_WINDOW_MS before the rest are
  *  dropped. Sized well above anything a person can produce — see the budget
  *  check in the connection handler. */
@@ -269,6 +277,8 @@ interface RoomState {
 interface Room {
   clients: Set<RoomClient>;
   state: RoomState;
+  /** A closed host remains reserved until this timer expires or they rejoin. */
+  hostReconnect?: { client: RoomClient; timer: ReturnType<typeof setTimeout> };
   /**
    * Co-host grants, by Discord user id.
    *
@@ -393,6 +403,7 @@ function getOrCreateRoom(instanceId: string): Room {
   if (!room) {
     room = {
       clients: new Set(),
+      hostReconnect: undefined,
       state: {
         ratingKey: null,
         title: null,
@@ -936,6 +947,18 @@ export function attachWebSocketServer(server: Server): void {
         const isHost = instance.hostUserId === userId;
         const room = getOrCreateRoom(instanceId);
 
+        // A host reconnecting during the grace window keeps the original role.
+        // Clear the timer before duplicate-connection eviction below, so the
+        // old closed socket cannot later promote a different client.
+        if (room.hostReconnect?.client.userId === userId) {
+          clearTimeout(room.hostReconnect.timer);
+          room.hostReconnect = undefined;
+          logEvent("Sync", "host reconnected during grace", {
+            room: instanceId.substring(0, 8),
+            user: username ?? userId,
+          });
+        }
+
         // Evict stale connection from the same user (e.g. browser reconnected
         // before Node processed the close event for the old socket)
         for (const existing of room.clients) {
@@ -1002,6 +1025,10 @@ export function attachWebSocketServer(server: Server): void {
               )
             : null,
         });
+
+        // A joiner arriving while the host is reconnecting needs the same
+        // banner as clients that were already in the room.
+        if (room.hostReconnect) sendTo(ws, { type: "host-disconnected" });
 
         // Everyone else needs to see the new arrival in their roster
         broadcastParticipants(room);
@@ -1715,7 +1742,9 @@ export function attachWebSocketServer(server: Server): void {
       const room = rooms.get(roomId);
       if (!room) return;
 
-      room.clients.delete(client);
+      const finalizeClose = () => {
+        if (!room.clients.has(client)) return;
+        room.clients.delete(client);
 
       // The stream they were watching may now be empty, or may have just lost
       // the client that was driving it. Done before succession so the successor
@@ -1846,6 +1875,33 @@ export function attachWebSocketServer(server: Server): void {
         // Someone left — refresh everyone's roster
         broadcastParticipants(room);
       }
+      };
+
+      // A transient socket drop should not permanently transfer ownership.
+      // Keep the host in the room, and therefore keep the instance's
+      // hostUserId unchanged, until the reconnect window expires. A joining
+      // socket for the same user cancels this timer before the duplicate
+      // connection eviction below runs.
+      if (client.isHost && !room.hostReconnect) {
+        const timer = setTimeout(() => {
+          if (room.hostReconnect?.client !== client) return;
+          room.hostReconnect = undefined;
+          finalizeClose();
+        }, HOST_RECONNECT_GRACE_MS);
+        room.hostReconnect = { client, timer };
+        logEvent("Sync", "host socket closed, waiting for reconnect", {
+          room: roomId.substring(0, 8),
+          host: client.username ?? client.userId,
+          graceMs: HOST_RECONNECT_GRACE_MS,
+        });
+        for (const c of room.clients) {
+          if (c !== client) sendTo(c.ws, { type: "host-disconnected" });
+        }
+        broadcastParticipants(room);
+        return;
+      }
+
+      finalizeClose();
     });
   });
 

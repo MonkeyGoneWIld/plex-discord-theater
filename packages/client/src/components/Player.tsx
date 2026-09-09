@@ -3858,7 +3858,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // Viewer status pill: what the host is doing to shared playback. Seeking is a
   // brief flash (takes precedence); paused persists while the stream sits paused.
   // Only for pure viewers, and never over an error/disconnect/recovery banner.
-  const streamActive = !!syncState?.ratingKey && !error && !recovering && !syncState?.hostDisconnected;
+  const streamActive = !!syncState?.ratingKey && !error && !recovering;
   const hostPaused = !canControl && streamActive && syncState?.playing === false;
   const viewerStatus = !canControl && streamActive
     ? (hostSeeking ? "Host is seeking…" : hostPaused ? "Host paused the video" : null)
@@ -3887,11 +3887,9 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         // watching nothing happen to anyone else, with no way to tell that from
         // the room simply ignoring you. Held back a couple of seconds so an
         // ordinary blip doesn't flash a banner over the film.
-        <div style={styles.hostDisconnected}>
+        <div style={styles.reconnecting}>
           Reconnecting to the watch party… (playback continues locally)
         </div>
-      ) : syncState?.hostDisconnected ? (
-        <div style={styles.hostDisconnected}>Host disconnected — waiting for reconnection...</div>
       ) : null}
 
       {zoomNotice && (
@@ -4163,7 +4161,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           onZoomModeChange={(mode) => {
             setZoomMode(mode);
             setShowZoomPanel(mode === "manual" && !zoomPhone);
-            if (mode === "manual" && zoomPhone) showZoomNotice("Custom Zoom: pinch to adjust");
+            if (mode === "manual" && zoomPhone) showZoomNotice("Custom Zoom: Pinch To Adjust");
           }}
         />
       )}
@@ -4425,7 +4423,7 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
     fontFamily: "inherit",
   },
-  hostDisconnected: {
+  reconnecting: {
     position: "absolute",
     top: 0,
     left: 0,
@@ -4463,6 +4461,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "13px",
     fontWeight: 600,
     letterSpacing: "0.2px",
+    whiteSpace: "nowrap",
     zIndex: 16,
     pointerEvents: "none",
     backdropFilter: "blur(6px)",

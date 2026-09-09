@@ -13,6 +13,7 @@ import { SkipMarkerButton } from "./SkipMarkerButton";
 import { TransportRequestCard } from "./TransportRequestCard";
 import { SubtitleLayer } from "./SubtitleLayer";
 import { SubtitleOffset } from "./SubtitleOffset";
+import { ZoomPanel } from "./ZoomPanel";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
@@ -21,6 +22,9 @@ import { getLevel, setLevel, MAX_LEVEL } from "../lib/audioBoost";
 import { describeWatched, loadAudioPref, loadSubtitlePref, mergeTrackPrefs, saveTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { roomPositionNow } from "../hooks/useSync";
+import { axisZoomScale, zoomKey } from "../lib/videoZoom";
+import { useVideoZoom } from "../lib/useVideoZoom";
+import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
 import type { InviteResult } from "../hooks/useDiscord";
 
@@ -595,6 +599,62 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
    */
   const [subtitleOffsetMs, setSubtitleOffsetMs] = useState(0);
   const [showSubtitleOffset, setShowSubtitleOffset] = useState(false);
+  const [showZoomPanel, setShowZoomPanel] = useState(false);
+  const zoomPhone = useMediaQuery(PHONE_QUERY);
+  const zoomRootRef = useRef<HTMLDivElement>(null);
+  const zoomMeta = itemMeta?.ratingKey === item.ratingKey ? itemMeta : null;
+  const zoomItem = { ...item, type: zoomMeta?.type ?? item.type, grandparentRatingKey: item.grandparentRatingKey ?? zoomMeta?.grandparentRatingKey };
+  const zoomPreferenceKey = zoomItem.type === "episode" && !zoomItem.grandparentRatingKey ? null : zoomKey(zoomItem);
+  const [zoomNotice, setZoomNotice] = useState<string | null>(null);
+  const zoomNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [fillGestureAnimating, setFillGestureAnimating] = useState(false);
+  const fillAnimationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showZoomNotice = useCallback((message: string) => {
+    setZoomNotice(message);
+    if (message === "Fill Screen" && zoomPhone) {
+      setFillGestureAnimating(true);
+      if (fillAnimationTimer.current) clearTimeout(fillAnimationTimer.current);
+      fillAnimationTimer.current = setTimeout(() => setFillGestureAnimating(false), 340);
+    }
+    if (zoomNoticeTimer.current) clearTimeout(zoomNoticeTimer.current);
+    zoomNoticeTimer.current = setTimeout(() => setZoomNotice(null), 1500);
+  }, [zoomPhone]);
+  useEffect(() => {
+    setZoomNotice(null);
+    return () => {
+      if (zoomNoticeTimer.current) clearTimeout(zoomNoticeTimer.current);
+      if (fillAnimationTimer.current) clearTimeout(fillAnimationTimer.current);
+    };
+  }, [zoomPreferenceKey]);
+  const { mode: zoomMode, zoom, setMode: setZoomMode, setZoom } = useVideoZoom(zoomRootRef, zoomPreferenceKey, showZoomNotice);
+  const [axisScale, setAxisScale] = useState(1);
+  useEffect(() => {
+    const root = zoomRootRef.current;
+    const video = videoRef.current;
+    if (!root || !video) return;
+    const resize = () => setAxisScale(axisZoomScale(
+      zoomMode, root.clientWidth, root.clientHeight, video.videoWidth, video.videoHeight,
+    ));
+    const observer = new ResizeObserver(resize);
+    observer.observe(root);
+    video.addEventListener("loadedmetadata", resize);
+    video.addEventListener("resize", resize);
+    resize();
+    return () => {
+      observer.disconnect();
+      video.removeEventListener("loadedmetadata", resize);
+      video.removeEventListener("resize", resize);
+    };
+  }, [zoomMode, item.ratingKey]);
+  const zoomPictureStyle: React.CSSProperties = {
+    objectFit: ["normal", "manual", "width", "height"].includes(zoomMode) ? "contain" : "cover",
+    transform: zoomMode === "manual" ? `scale(${zoom / 100})`
+      : zoomMode === "width" || zoomMode === "height" ? `scale(${axisScale})`
+      : zoomMode === "21:9" ? "scale(1.33)"
+      : zoomMode === "fill" && fillGestureAnimating ? "scale(0.92)" : undefined,
+    transformOrigin: "center",
+    transition: zoomPhone && zoomMode === "fill" ? "transform 340ms ease-out" : undefined,
+  };
   /** A sidecar that could not be read, so the offer to adjust it is withdrawn
    *  rather than left pointing at subtitles that never arrived. */
   const [sidecarFailed, setSidecarFailed] = useState(false);
@@ -3798,14 +3858,14 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   // Viewer status pill: what the host is doing to shared playback. Seeking is a
   // brief flash (takes precedence); paused persists while the stream sits paused.
   // Only for pure viewers, and never over an error/disconnect/recovery banner.
-  const streamActive = !!syncState?.ratingKey && !error && !recovering && !syncState?.hostDisconnected;
+  const streamActive = !!syncState?.ratingKey && !error && !recovering;
   const hostPaused = !canControl && streamActive && syncState?.playing === false;
   const viewerStatus = !canControl && streamActive
     ? (hostSeeking ? "Host is seeking…" : hostPaused ? "Host paused the video" : null)
     : null;
 
   return (
-    <div style={styles.container}>
+    <div ref={zoomRootRef} style={{ ...styles.container, touchAction: "none" }}>
       {syncState?.authFailed ? (
         <div style={styles.error}>Session expired — please close and restart the activity</div>
       ) : syncState?.reconnectFailed ? (
@@ -3827,13 +3887,16 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         // watching nothing happen to anyone else, with no way to tell that from
         // the room simply ignoring you. Held back a couple of seconds so an
         // ordinary blip doesn't flash a banner over the film.
-        <div style={styles.hostDisconnected}>
+        <div style={styles.reconnecting}>
           Reconnecting to the watch party… (playback continues locally)
         </div>
-      ) : syncState?.hostDisconnected ? (
-        <div style={styles.hostDisconnected}>Host disconnected — waiting for reconnection...</div>
       ) : null}
 
+      {zoomNotice && (
+        <div style={{ ...styles.viewerStatus, top: `calc(var(--sait, 0px) + ${(zoomPhone ? 76 : 18) + (viewerStatus ? 46 : 0)}px)` }} role="status" aria-live="polite">
+          {zoomNotice}
+        </div>
+      )}
       {/* Viewer status — what the host is doing to shared playback */}
       {viewerStatus && (
         <div style={styles.viewerStatus} role="status" aria-live="polite">
@@ -3867,7 +3930,10 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           controls, which have their own. */}
       <video
         ref={videoRef}
-        style={styles.video}
+        style={{
+          ...styles.video,
+          ...zoomPictureStyle,
+        }}
         playsInline
         onClick={togglePlayPause}
       />
@@ -3879,7 +3945,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       {holdingFrame && canvasRef.current && (
         <canvas
           aria-hidden="true"
-          style={styles.heldFrame}
+          style={{ ...styles.heldFrame, ...zoomPictureStyle }}
           ref={(el) => {
             const src = canvasRef.current;
             if (!el || !src) return;
@@ -3932,7 +3998,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
                   el.getContext("2d")!.drawImage(canvasRef.current, 0, 0);
                 }
               }}
-              style={styles.trackSwitchCanvas}
+              style={{ ...styles.trackSwitchCanvas, ...zoomPictureStyle }}
             />
           )}
           <div style={styles.trackSwitchMessage}>
@@ -3956,7 +4022,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
                   el.getContext("2d")!.drawImage(canvasRef.current, 0, 0);
                 }
               }}
-              style={styles.trackSwitchCanvas}
+              style={{ ...styles.trackSwitchCanvas, ...zoomPictureStyle }}
             />
           )}
           <div style={styles.trackSwitchMessage}>
@@ -4060,6 +4126,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
             : undefined
         }
         subtitleTimingOpen={showSubtitleOffset}
+        onOpenZoom={zoomMode === "manual" ? () => setShowZoomPanel((open) => !open) : undefined}
+        zoomOpen={showZoomPanel}
       />
       {/* Subtitles this client draws, because Plex was told not to burn them
           in — the only kind there is anything to adjust about. */}
@@ -4069,13 +4137,6 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         offsetMs={subtitleOffsetMs}
         onUnavailable={() => setSidecarFailed(true)}
       />
-      {showSubtitleOffset && drawnSubtitleId !== null && !sidecarFailed && (
-        <SubtitleOffset
-          offsetMs={subtitleOffsetMs}
-          onChange={setSubtitleOffsetMs}
-          onClose={() => setShowSubtitleOffset(false)}
-        />
-      )}
       {showTrackSwitcher && (
         <TrackSwitcher
           ratingKey={item.ratingKey}
@@ -4096,6 +4157,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           // answer ("None"), so it is passed through as one.
           currentAudioId={(variant?.audioStreamId ?? currentAudioStreamRef.current) || null}
           currentSubtitleId={variant?.subtitleStreamId ?? currentSubtitleStreamRef.current}
+          zoomMode={zoomMode}
+          onZoomModeChange={(mode) => {
+            setZoomMode(mode);
+            setShowZoomPanel(mode === "manual" && !zoomPhone);
+            if (mode === "manual" && zoomPhone) showZoomNotice("Custom Zoom: Pinch To Adjust");
+          }}
         />
       )}
       {showQueuePanel && syncState && (
@@ -4205,7 +4272,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
       {/* Bottom-right stack: owns placement so neither child positions itself and
           a third affordance costs one line. Bottom-anchored, so it grows upward
           and the skip button naturally sits above the card. */}
-      {(showSkip || showNextUp || transportRequest) && (
+      {(showSkip || showNextUp || transportRequest || showSubtitleOffset || (showZoomPanel && !zoomPhone && zoomMode === "manual")) && (
         <div style={styles.bottomRightStack}>
           {transportRequest && (
             <TransportRequestCard
@@ -4247,6 +4314,20 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
               }}
             />
           )}
+      {showSubtitleOffset && drawnSubtitleId !== null && !sidecarFailed && (
+        <SubtitleOffset
+          offsetMs={subtitleOffsetMs}
+          onChange={setSubtitleOffsetMs}
+          onClose={() => setShowSubtitleOffset(false)}
+        />
+      )}
+      {showZoomPanel && !zoomPhone && zoomMode === "manual" && (
+        <ZoomPanel
+          zoom={zoom}
+          onChangeZoom={setZoom}
+          onClose={() => setShowZoomPanel(false)}
+        />
+      )}
         </div>
       )}
     </div>
@@ -4263,13 +4344,15 @@ const styles: Record<string, React.CSSProperties> = {
   confirmEndBtn: { padding: "8px 14px", borderRadius: "8px", border: "none", background: "#e5a00d", color: "#000", fontSize: "13px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
   bottomRightStack: {
     position: "absolute",
-    right: "20px",
-    bottom: "80px",
+    right: "calc(20px + var(--sair, 0px))",
+    bottom: "calc(94px + var(--saib, 0px))",
     zIndex: 30,
     display: "flex",
     flexDirection: "column",
     alignItems: "flex-end",
     gap: "12px",
+    maxHeight: "calc(100% - 120px - var(--sait, 0px) - var(--saib, 0px))",
+    overflowY: "auto",
   },
   container: {
     position: "fixed",
@@ -4340,7 +4423,7 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
     fontFamily: "inherit",
   },
-  hostDisconnected: {
+  reconnecting: {
     position: "absolute",
     top: 0,
     left: 0,
@@ -4378,6 +4461,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "13px",
     fontWeight: 600,
     letterSpacing: "0.2px",
+    whiteSpace: "nowrap",
     zIndex: 16,
     pointerEvents: "none",
     backdropFilter: "blur(6px)",

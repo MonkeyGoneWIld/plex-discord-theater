@@ -613,8 +613,12 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               ...prev,
               participants,
               // Re-derive our own role from the roster so a revoked co-host
-              // loses their controls without needing a separate message.
+              // loses their controls without needing a separate message. Do
+              // the same for host status: a roster is authoritative after a
+              // reconnect, and relying only on a separate host-changed event
+              // could leave the local role stale if those messages raced.
               isCoHost: participants.find((p) => p.userId === userId)?.isCoHost ?? false,
+              isHost: participants.find((p) => p.userId === userId)?.isHost ?? prev.isHost,
             }));
             break;
           }
@@ -813,9 +817,6 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               ...prev,
               suggestions: prev.suggestions.filter((s) => s.ratingKey !== msg.ratingKey),
             }));
-            break;
-          case "host-disconnected":
-            setState((prev) => ({ ...prev, hostDisconnected: true }));
             break;
           case "host-reconnected":
             setState((prev) => ({ ...prev, hostDisconnected: false }));

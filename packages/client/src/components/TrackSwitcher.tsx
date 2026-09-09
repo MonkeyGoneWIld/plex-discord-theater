@@ -2,6 +2,8 @@ import { useState, useEffect } from "react";
 import { fetchMeta, versionOf, type StreamTrack } from "../lib/api";
 import { saveAudioPref, saveSubtitlePref } from "../lib/trackPrefs";
 
+import type { ZoomMode } from "../lib/videoZoom";
+
 interface TrackSwitcherProps {
   ratingKey: string;
   /** Which of the title's files is playing, for the few Plex holds more than one
@@ -32,6 +34,8 @@ interface TrackSwitcherProps {
    */
   currentAudioId?: number | null;
   currentSubtitleId?: number | null;
+  zoomMode: ZoomMode;
+  onZoomModeChange: (mode: ZoomMode) => void;
 }
 
 export function TrackSwitcher({
@@ -42,8 +46,10 @@ export function TrackSwitcher({
   scope = "self",
   currentAudioId,
   currentSubtitleId,
+  zoomMode,
+  onZoomModeChange,
 }: TrackSwitcherProps) {
-  const [tab, setTab] = useState<"audio" | "subtitles">("audio");
+  const [tab, setTab] = useState<"audio" | "subtitles" | "zoom">("audio");
   const [audioTracks, setAudioTracks] = useState<StreamTrack[]>([]);
   const [subtitleTracks, setSubtitleTracks] = useState<StreamTrack[]>([]);
   const [partId, setPartId] = useState<number | null>(null);
@@ -85,9 +91,9 @@ export function TrackSwitcher({
 
   return (
     <div style={styles.backdrop} onClick={onClose}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+      <div className="settings-modal" style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
-          <span style={styles.headerTitle}>Audio &amp; Subtitles</span>
+          <span style={styles.headerTitle}>Settings</span>
           <button className="btn" onClick={onClose} style={styles.closeBtn}>{"\u2715"}</button>
         </div>
 
@@ -100,20 +106,24 @@ export function TrackSwitcher({
               onClick={() => setTab("subtitles")}
               style={{ ...styles.tab, ...(tab === "subtitles" ? styles.tabActive : {}) }}
             >Subtitles</button>
+            <button className="btn"
+              onClick={() => setTab("zoom")}
+              style={{ ...styles.tab, ...(tab === "zoom" ? styles.tabActive : {}) }}
+            >Zoom</button>
         </div>
 
         {/* What a change here reaches. The host's carries; everyone else's
             forks onto a stream of their own, which nobody else sees. */}
-        <p style={styles.scopeNote}>
+        {tab !== "zoom" && <p style={styles.scopeNote}>
           {scope === "room"
             ? "Changes apply to everyone watching your stream."
             : "Changes apply to you only."}
-        </p>
+        </p>}
 
-        {loading ? (
+        {loading && tab !== "zoom" ? (
           <div style={styles.loading}>Loading tracks...</div>
         ) : tab === "audio" ? (
-          <div style={styles.trackList}>
+          <div className="settings-scroll" style={styles.trackList}>
             {audioTracks.map((t) => {
               const on = t.id === activeAudio;
               return (
@@ -135,8 +145,8 @@ export function TrackSwitcher({
               );
             })}
           </div>
-        ) : (
-          <div style={styles.trackList}>
+        ) : tab === "subtitles" ? (
+          <div className="settings-scroll" style={styles.trackList}>
             <button className="btn"
               onClick={() => handleSelect("subtitle", 0)}
               style={!activeSubtitle ? styles.trackSelected : styles.track}
@@ -158,10 +168,20 @@ export function TrackSwitcher({
               );
             })}
           </div>
+        ) : (
+          <div className="settings-scroll" style={styles.zoomList}>
+            {([["normal", "Original"], ["fill", "Fill Screen"], ["width", "Match Width"], ["height", "Match Height"], ["16:9", "Widescreen (16:9)"], ["21:9", "Ultrawide (21:9)"], ["manual", "Custom Zoom"]] as const).map(([mode, label]) => (
+              <button className="btn" key={mode} onClick={() => onZoomModeChange(mode)}
+                style={zoomMode === mode ? styles.trackSelected : styles.track}>
+                <div style={{ color: zoomMode === mode ? "#f0f0f0" : "#ccc", fontSize: 13 }}>{label}</div>
+                {zoomMode === mode && <span style={styles.checkmark}>✓</span>}
+              </button>
+            ))}
+          </div>
         )}
 
         <div style={styles.disclaimer}>
-          Changing tracks briefly restarts the stream at your current position.
+          {tab === "zoom" ? "Saved for this movie or show. Only affects your view." : "Changing tracks briefly restarts the stream at your current position."}
         </div>
       </div>
     </div>
@@ -179,17 +199,29 @@ const styles: Record<string, React.CSSProperties> = {
     zIndex: 20,
   },
   modal: {
-    width: 320,
+    width: "min(320px, calc(100% - 24px))",
+    maxWidth: "calc(100% - 24px)",
+    maxHeight: "calc(100% - 24px - var(--sait, 0px) - var(--saib, 0px))",
+    minHeight: 0,
+    boxSizing: "border-box",
     background: "rgba(13,13,13,0.95)",
     backdropFilter: "blur(20px)",
     border: "1px solid rgba(255,255,255,0.1)",
     borderRadius: 12,
-    padding: 20,
+    padding: "clamp(14px, 3vw, 20px)",
     display: "flex",
     flexDirection: "column",
-    gap: 18,
+    gap: "clamp(12px, 2.5vw, 18px)",
+    overflowY: "auto",
+    overflowX: "hidden",
+    overscrollBehavior: "contain",
+    scrollbarWidth: "auto",
+    scrollbarColor: "rgba(229,160,13,0.55) transparent",
+    marginTop: "var(--sait, 0px)",
+    marginBottom: "var(--saib, 0px)",
   },
   header: {
+    flexShrink: 0,
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
@@ -202,6 +234,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "inherit",
   },
   tabs: {
+    flexShrink: 0,
     display: "flex", borderRadius: 8, overflow: "hidden",
     border: "1px solid rgba(255,255,255,0.08)",
   },
@@ -216,15 +249,21 @@ const styles: Record<string, React.CSSProperties> = {
   trackList: {
     display: "flex", flexDirection: "column", gap: 4, maxHeight: 240, overflowY: "auto",
   },
+  zoomList: {
+    display: "flex", flexDirection: "column", gap: 4,
+    maxHeight: "calc(100dvh - 220px)", minHeight: 0, flexShrink: 1,
+    overflowY: "auto", paddingRight: 4,
+    scrollbarWidth: "auto", scrollbarColor: "rgba(229,160,13,0.7) transparent",
+  },
   track: {
     display: "flex", alignItems: "center", justifyContent: "space-between",
-    padding: "8px 10px", borderRadius: 6,
+    padding: "clamp(6px, 1.6vh, 8px) 10px", borderRadius: 6,
     background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)",
     cursor: "pointer", textAlign: "left", fontFamily: "inherit", color: "inherit",
   },
   trackSelected: {
     display: "flex", alignItems: "center", justifyContent: "space-between",
-    padding: "8px 10px", borderRadius: 6,
+    padding: "clamp(6px, 1.6vh, 8px) 10px", borderRadius: 6,
     background: "rgba(229,160,13,0.12)", border: "1px solid rgba(229,160,13,0.3)",
     cursor: "pointer", textAlign: "left", fontFamily: "inherit", color: "inherit",
   },

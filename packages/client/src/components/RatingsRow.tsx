@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { fetchRatings, type Ratings, type RatingsMediaType } from "../lib/api";
+import { useEffect, useRef } from "react";
+import type { Ratings } from "../lib/api";
 // Rating-source marks — the same icons Rotten Tomatoes and Seerr use.
 // RT: Fresh tomato / Rotten green splat, and upright / spilled audience popcorn.
 // IMDb + TMDB: the official brand logos. All from Wikimedia Commons.
@@ -11,9 +11,7 @@ import imdbLogo from "../assets/rt/imdb.svg";
 import tmdbLogo from "../assets/rt/tmdb.svg";
 
 interface RatingsRowProps {
-  imdbId?: string | null;
-  tmdbId?: number | null;
-  mediaType: RatingsMediaType;
+  ratings?: Ratings | null;
   /** Extra style for the row container (e.g. margins) set by the caller. */
   style?: React.CSSProperties;
   /** Fired once the lookup settles, so a detail page can include the scores in
@@ -27,31 +25,19 @@ const ROW_MIN_HEIGHT = 26;
 
 /**
  * External ratings — Rotten Tomatoes (Tomatometer + Audience), IMDb and TMDB —
- * shown on a movie/show detail page. Self-contained: it fetches its own data.
+ * shown on a movie/show detail page. Scores are already included in Plex metadata.
  *
- * The row's height is reserved up front, so it holds its place while the request
- * is in flight and the scores fade in without shifting the layout. If nothing is
- * available (no key configured, or the title is unknown to MDBList) it collapses.
+ * The row's height is reserved up front, so it holds its place while the scores
+ * are being prepared without shifting the layout. If Plex has no scores, it
+ * collapses.
  */
-export function RatingsRow({ imdbId, tmdbId, mediaType, style, onReady }: RatingsRowProps) {
-  const [ratings, setRatings] = useState<Ratings | null>(null);
-  const [loading, setLoading] = useState(true);
+export function RatingsRow({ ratings, style, onReady }: RatingsRowProps) {
   // Ref, not a dependency: callers pass an inline arrow, and depending on it
   // would refetch on every parent render.
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
 
-  useEffect(() => {
-    setRatings(null);
-    if (!imdbId && tmdbId == null) { setLoading(false); onReadyRef.current?.(); return; }
-    setLoading(true);
-    let cancelled = false;
-    fetchRatings({ imdbId, tmdbId, mediaType })
-      .then((res) => { if (!cancelled && res.configured) setRatings(res.ratings); })
-      .catch(() => { /* ratings are a nicety — never surface an error for them */ })
-      .finally(() => { if (!cancelled) { setLoading(false); onReadyRef.current?.(); } });
-    return () => { cancelled = true; };
-  }, [imdbId, tmdbId, mediaType]);
+  useEffect(() => { onReadyRef.current?.(); }, []);
 
   const hasAny = !!ratings && (
     ratings.imdb != null || ratings.tmdb != null ||
@@ -59,7 +45,7 @@ export function RatingsRow({ imdbId, tmdbId, mediaType, style, onReady }: Rating
   );
 
   // Nothing to show and nothing pending — take up no space at all.
-  if (!loading && !hasAny) return null;
+  if (!hasAny) return null;
 
   return (
     <div style={{ ...styles.row, ...style, minHeight: ROW_MIN_HEIGHT }}>

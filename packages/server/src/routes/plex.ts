@@ -1,4 +1,8 @@
 import { Router, type Request, type Response } from "express";
+import { Readable } from "node:stream";
+import { randomUUID } from "node:crypto";
+import { pipeline } from "node:stream/promises";
+import { progressivePreview } from "../services/preview-stream.js";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
 import { playableVersionOrder, resolutionLabel, channelLabel } from "../services/media-versions.js";
 import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition } from "../services/segment-prefetch.js";
@@ -9,6 +13,7 @@ import { sessionHostUserId, sessionHasOtherWatchers } from "../services/sync.js"
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
 import { parseSubtitles, type Cue } from "../services/subtitles.js";
+import { mapPlexRatings } from "../services/ratings.js";
 
 const router = Router();
 
@@ -241,6 +246,11 @@ interface PlexMetadataItem {
   librarySectionID?: number;
   guid?: string;
   contentRating?: string;
+  rating?: number | string;
+  ratingImage?: string;
+  audienceRating?: number | string;
+  audienceRatingImage?: string;
+  Rating?: Array<{ image?: string; type?: string; value?: number | string | null }>;
   /** External ids, e.g. { id: "imdb://tt123" }, { id: "tmdb://456" }. */
   Guid?: Array<{ id?: string }>;
   /** Collections this item belongs to (present with includeCollections=1). The
@@ -618,6 +628,7 @@ router.get("/discover/meta", async (req: Request, res: Response) => {
       thumb: m.thumb ? externalThumbUrl(m.thumb) : null,
       // TMDB id (for requesting via Seerr), pulled from the external id list.
       tmdbId: tmdbIdFromGuids(m.Guid),
+      ratings: mapPlexRatings(m),
       // Credits, when Plex's online catalog carries them for this title.
       cast: mapCredits(m.Role),
       directors: mapCredits(m.Director, 10, "Director"),
@@ -1073,6 +1084,7 @@ async function buildMetaUncached(ratingKey: string): Promise<Record<string, unkn
       // IMDb id — used by the client to look up external ratings. Null when
       // Plex's metadata agent never stored one.
       imdbId,
+      ratings: mapPlexRatings(m),
       // Credits for the detail page's Cast & Crew row. Episodes carry their own
       // guest cast; shows carry the series regulars.
       cast: mapCredits(m.Role),
@@ -1643,8 +1655,32 @@ router.get("/tmdb/meta", async (req: Request, res: Response) => {
     const yearStr = (data.release_date ?? data.first_air_date ?? "").slice(0, 4);
     // Movie runtime is a single value; TV reports a per-episode array.
     const runtimeMin = data.runtime ?? data.episode_run_time?.[0] ?? null;
+    // TMDB-only recommendation items do not carry a plex:// guid. Resolve the
+    // title through Plex Discover so their ratings still come from Plex rather
+    // than silently disappearing on the external detail page.
+    const externalTitle = data.title ?? data.name ?? "";
+    let ratings = mapPlexRatings({});
+    if (externalTitle) {
+      const matches = await searchDiscover(externalTitle);
+      const normalizedTitle = externalTitle.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+      const match = matches.find((candidate) =>
+        tmdbIdFromGuids(candidate.Guid) === Number(tmdbId)
+        && candidate.type === type,
+      ) ?? matches.find((candidate) => {
+        const candidateTitle = String(candidate.title ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        return candidate.type === type && candidateTitle === normalizedTitle
+          && (candidate.year == null || !yearStr || candidate.year === Number(yearStr));
+      });
+      if (match) {
+        // Search records can omit Rating[] even though the full Plex provider
+        // record has it. Follow the plex:// guid when available.
+        const providerId = /^plex:\/\/[^/]+\/(.+)$/.exec(match.guid ?? "")?.[1];
+        const detailed = providerId ? await fetchDiscoverMeta(providerId) : null;
+        ratings = mapPlexRatings(detailed ?? match);
+      }
+    }
     res.json({
-      title: data.title ?? data.name ?? "",
+      title: externalTitle,
       year: yearStr ? Number(yearStr) : null,
       summary: data.overview || null,
       genres: (data.genres ?? []).map((g) => g.name).filter(Boolean),
@@ -1655,6 +1691,7 @@ router.get("/tmdb/meta", async (req: Request, res: Response) => {
         ? externalThumbUrl(`https://image.tmdb.org/t/p/w500${data.poster_path}`)
         : null,
       tmdbId: Number(tmdbId),
+      ratings,
       // Same credit shape the library meta endpoint returns, so the detail pages
       // render one Cast & Crew component regardless of where the title came from.
       cast: tmdbCredits(data.credits?.cast, MAX_CAST, (c) => c.character),
@@ -2558,6 +2595,32 @@ router.get("/preview/:partId/index", async (req: Request, res: Response) => {
       return;
     }
 
+    // Opt-in keeps older clients' ordinary BIF reader working.
+    if ((req.query.progressive === "1" || req.query.progressive === "2") && plexRes.body) {
+      const version = req.query.progressive === "2" ? 2 : 1;
+      const transfer = randomUUID().slice(0, 8);
+      const startedAt = performance.now();
+      const abort = new AbortController();
+      const cancel = () => abort.abort();
+      res.on("close", cancel);
+      if (res.destroyed) abort.abort();
+      res.setHeader("Content-Type", `application/x-plex-preview-v${version}`);
+      res.setHeader("Cache-Control", "private, max-age=86400");
+      res.setHeader("X-Accel-Buffering", "no");
+      logEvent("Preview", "transfer started", { partId, transfer, transport: `progressive-v${version}` });
+      try {
+        await pipeline(Readable.from(progressivePreview(plexRes.body, abort.signal, (progress) => {
+          logEvent("Preview", "tier sent", {
+            partId, transfer, ...progress, elapsedMs: Math.round(performance.now() - startedAt),
+          });
+        }, version)), res);
+      } finally {
+        res.off("close", cancel);
+      }
+      return;
+    }
+
+    logEvent("Preview", "transfer started", { partId, transport: "legacy-bif" });
     res.setHeader("Content-Type", "application/octet-stream");
     if (declared) res.setHeader("Content-Length", declared);
     // The frames for a part never change. The client holds them for the length

@@ -51,8 +51,6 @@ services:
       - PLEX_LINK_SECRET=${PLEX_LINK_SECRET}
       # Collections, "More Like This", and cast/crew pages.
       - TMDB_API_KEY=${TMDB_API_KEY}
-      # IMDb / Rotten Tomatoes / TMDB scores on detail pages.
-      - MDBLIST_API_KEY=${MDBLIST_API_KEY}
       # Correct season numbering for the missing-episode list. TVDB is what
       # Sonarr monitors, so without this the list falls back to TMDB, which
       # sometimes disagrees about which season an episode belongs to.

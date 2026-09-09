@@ -88,7 +88,7 @@ export function SubtitleOffset({ offsetMs, onChange, onClose }: SubtitleOffsetPr
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
+export const adjustmentStyles: Record<string, React.CSSProperties> = {
   /**
    * Above the button that opened it, at the right-hand end of the control bar.
    *
@@ -98,10 +98,10 @@ const styles: Record<string, React.CSSProperties> = {
    * adjusting.
    */
   panel: {
-    position: "absolute",
+    position: "relative",
     // Lined up with the control bar's own right padding, so the panel and the
     // button that opens it share an edge.
-    right: "calc(20px + var(--sair, 0px))",
+    flexShrink: 0,
     /**
      * Just above the bar, in pixels rather than a percentage.
      *
@@ -111,7 +111,6 @@ const styles: Record<string, React.CSSProperties> = {
      * the player instead and left the panel floating a long way above the icon
      * on anything tall.
      */
-    bottom: "calc(94px + var(--saib, 0px))",
     display: "flex",
     flexDirection: "column",
     alignItems: "center",
@@ -171,3 +170,4 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: "center",
   },
 };
+const styles = adjustmentStyles;

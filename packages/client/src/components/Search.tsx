@@ -43,6 +43,10 @@ export function Search({ onSearch, onClear, placeholder = "Search your library..
     clearTimeout(debounceRef.current);
     setPending(false);
     setValue("");
+    // A parent reset is the same logical operation as clicking the clear
+    // button. Notify it so an in-flight request is invalidated and its busy
+    // state cannot leave the spinner visible after the field was cleared.
+    onClearRef.current();
   }, [clearSignal]);
 
   const handleChange = useCallback(

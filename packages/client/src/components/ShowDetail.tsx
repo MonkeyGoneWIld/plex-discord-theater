@@ -419,9 +419,7 @@ export function ShowDetail({
               <div style={styles.ratingsSlot}>
                 {meta && (
                   <RatingsRow
-                    imdbId={meta.imdbId}
-                    tmdbId={meta.tmdbId}
-                    mediaType="show"
+                    ratings={meta.ratings}
                     style={styles.ratings}
                     onReady={() => setRatingsReady(true)}
                   />

@@ -72,6 +72,7 @@ interface Index {
   frames: Frame[];
   /** Whether the header's timestamps survived the interval check. */
   timed: boolean;
+  tiers: ReturnType<typeof previewTierIndices>;
 }
 
 /** Not a BIF, as opposed to not enough of one yet. */
@@ -145,7 +146,7 @@ function readIndex(bytes: Uint8Array): Index | null | typeof REJECTED {
   const timed = interval >= MIN_INTERVAL_MS && interval <= MAX_INTERVAL_MS;
   if (!timed) for (const frame of frames) frame.at = null;
 
-  return { frames, timed };
+  return { frames, timed, tiers: previewTierIndices(count) };
 }
 
 /** Which frame covers `ms`, or -1 when there is nothing to answer with. */
@@ -174,6 +175,41 @@ function frameIndexAt(index: Index, ms: number, durationMs: number): number {
   return i;
 }
 
+export type PreviewDetail = "coarse" | "medium" | "full";
+
+/** Nested, evenly distributed cumulative tiers. v1 is retained for cached clients. */
+export function previewTierIndices(count: number, version: 1 | 2 = 2) {
+  if (version === 1) {
+    const stride = Math.max(1, Math.ceil(count / 96));
+    const grid = (step: number) => {
+      const result = Array.from({ length: Math.ceil(count / step) }, (_, i) => i * step);
+      if (result[result.length - 1] !== count - 1) result.push(count - 1);
+      return result;
+    };
+    return { coarse: grid(stride * 4), medium: grid(stride) };
+  }
+  const coarseCount = Math.max(1, Math.ceil(count * 0.04));
+  const mediumCount = Math.max(1, Math.ceil(count * 0.40));
+  const medium = Array.from({ length: mediumCount }, (_, i) =>
+    mediumCount === 1 ? 0 : Math.floor(i * (count - 1) / (mediumCount - 1)));
+  const coarse = Array.from({ length: coarseCount }, (_, i) =>
+    medium[coarseCount === 1 ? 0 : Math.floor(i * (mediumCount - 1) / (coarseCount - 1))]);
+  return { coarse, medium };
+}
+
+function detailIndex(i: number, index: Index, detail: PreviewDetail): number {
+  if (detail === "full") return i;
+  const grid = index.tiers[detail];
+  let lo = 0;
+  let hi = grid.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (grid[mid] <= i) lo = mid;
+    else hi = mid - 1;
+  }
+  return grid[lo];
+}
+
 export interface PreviewFrames {
   readonly count: number;
   /** How many of them have arrived. Equal to `count` once the file is complete. */
@@ -189,7 +225,7 @@ export interface PreviewFrames {
    * `durationMs` is only consulted for a file whose header timestamps didn't
    * survive the sanity check above.
    */
-  frameAt(ms: number, durationMs: number): string | null;
+  frameAt(ms: number, durationMs: number, detail?: PreviewDetail): string | null;
   /** Release every blob URL handed out. Call when the item changes. */
   dispose(): void;
 }
@@ -215,6 +251,115 @@ export interface PreviewFrameReader {
   /** This will never parse; stop feeding it. */
   rejected(): boolean;
   dispose(): void;
+}
+
+/** Reader for application/x-plex-preview-v2 (or the legacy v1 ordering). Only one incomplete record is
+ * buffered; complete JPEGs become blobs and survive a truncated download. */
+export function createProgressivePreviewReader(onTierReady?: (progress: {
+  tier: PreviewDetail; frames: number; bytes: number; ready: number;
+}) => void, version: 1 | 2 = 2): PreviewFrameReader {
+  let index: Index | null = null;
+  let rejected = false;
+  let disposed = false;
+  let state: "length" | "index" | "record" | "image" = "length";
+  let buffer: Uint8Array<ArrayBuffer> = new Uint8Array(4);
+  let filled = 0;
+  let frame = 0;
+  let tier = 0;
+  let tierFrames = 0;
+  let tierBytes = 0;
+  let expected: number[] = [];
+  const images = new Map<number, Blob>();
+  const urls = new Map<number, string>();
+  const view: PreviewFrames = {
+    get count() { return index?.frames.length ?? 0; },
+    get ready() { return images.size; },
+    frameAt(ms, durationMs, detail = "full") {
+      if (!index || disposed) return null;
+      const target = frameIndexAt(index, ms, durationMs);
+      if (target < 0) return null;
+      const levels: PreviewDetail[] = detail === "full" ? ["full", "medium", "coarse"] : detail === "medium" ? ["medium", "coarse"] : ["coarse"];
+      let selected = -1;
+      for (const level of levels) {
+        const candidate = detailIndex(target, index, level);
+        if (images.has(candidate)) { selected = candidate; break; }
+      }
+      // Before the overview is complete, keep a nearby available overview.
+      if (selected < 0) {
+        for (let at = index.tiers.coarse.length - 1; at >= 0; at--) {
+          const i = index.tiers.coarse[at];
+          if (i <= target && images.has(i)) { selected = i; break; }
+        }
+      }
+      if (selected < 0) return null;
+      let url = urls.get(selected);
+      if (!url) { url = URL.createObjectURL(images.get(selected)!); urls.set(selected, url); }
+      return url;
+    },
+    dispose() {
+      for (const url of urls.values()) URL.revokeObjectURL(url);
+      urls.clear();
+      images.clear();
+    },
+  };
+  const next = (stage: typeof state, size: number) => {
+    state = stage;
+    buffer = new Uint8Array(size);
+    filled = 0;
+  };
+  return {
+    push(chunk) {
+      if (rejected || disposed) return;
+      let offset = 0;
+      while (offset < chunk.length && !rejected) {
+        const n = Math.min(buffer.length - filled, chunk.length - offset);
+        buffer.set(chunk.subarray(offset, offset + n), filled);
+        filled += n;
+        offset += n;
+        if (filled !== buffer.length) continue;
+        const data = new DataView(buffer.buffer);
+        if (state === "length") {
+          const length = data.getUint32(0, true);
+          if (length < 82 || length > HEADER_BYTES + (MAX_FRAMES + 1) * 8 + 2) { rejected = true; break; }
+          next("index", length);
+        } else if (state === "index") {
+          const result = readIndex(buffer);
+          if (!result || result === REJECTED || buffer.length !== HEADER_BYTES + (result.frames.length + 1) * 8 + 2) { rejected = true; break; }
+          index = result;
+          index.tiers = previewTierIndices(index.frames.length, version);
+          expected = [index.tiers.coarse.length, index.tiers.medium.length - index.tiers.coarse.length,
+            index.frames.length - index.tiers.medium.length];
+          next("record", 8);
+        } else if (state === "record") {
+          frame = data.getUint32(0, true);
+          const size = data.getUint32(4, true);
+          const entry = index?.frames[frame];
+          if (!entry || images.has(frame) || size < 2 || size > 10 * 1024 * 1024 || size !== entry.end - entry.start) { rejected = true; break; }
+          const frameTier = detailIndex(frame, index!, "coarse") === frame ? 0
+            : detailIndex(frame, index!, "medium") === frame ? 1 : 2;
+          if (frameTier !== tier) { rejected = true; break; }
+          next("image", size);
+        } else {
+          if (buffer[0] !== 0xff || buffer[1] !== 0xd8) { rejected = true; break; }
+          images.set(frame, new Blob([buffer], { type: "image/jpeg" }));
+          tierFrames++;
+          tierBytes += buffer.length + 8;
+          // Report inside the parser so boundaries remain visible even when a
+          // proxy/browser combines multiple tiers into a single network chunk.
+          while (tier < 3 && tierFrames === expected[tier]) {
+            onTierReady?.({ tier: (["coarse", "medium", "full"] as const)[tier], frames: tierFrames, bytes: tierBytes, ready: images.size });
+            tier++;
+            tierFrames = 0;
+            tierBytes = 0;
+          }
+          next("record", 8);
+        }
+      }
+    },
+    frames() { return index && !disposed ? view : null; },
+    rejected() { return rejected; },
+    dispose() { disposed = true; view.dispose(); index = null; buffer = new Uint8Array(0); },
+  };
 }
 
 export function createPreviewFrameReader(): PreviewFrameReader {
@@ -297,10 +442,11 @@ export function createPreviewFrameReader(): PreviewFrameReader {
       }
       return lo;
     },
-    frameAt(ms: number, durationMs: number): string | null {
+    frameAt(ms: number, durationMs: number, detail: PreviewDetail = "full"): string | null {
       if (!index) return null;
-      const i = frameIndexAt(index, ms, durationMs);
-      if (i < 0) return null;
+      const target = frameIndexAt(index, ms, durationMs);
+      if (target < 0) return null;
+      const i = detailIndex(target, index, detail);
       const cached = urls.get(i);
       if (cached) return cached;
       const { start, end } = index.frames[i];

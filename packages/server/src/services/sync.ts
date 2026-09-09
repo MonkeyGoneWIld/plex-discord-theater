@@ -12,6 +12,13 @@ import { logEvent } from "./logger.js";
 /** Interval between WebSocket pings to detect dead connections. */
 const WS_PING_INTERVAL_MS = 30_000;
 
+/**
+ * Keep a former host eligible to reclaim ownership briefly after a socket
+ * closes. Mobile Discord and browser networking can drop a WebSocket for a few
+ * seconds while the client is still present and about to reconnect.
+ */
+const HOST_RECONNECT_GRACE_MS = 15_000;
+
 /** Messages one connection may send per MSG_WINDOW_MS before the rest are
  *  dropped. Sized well above anything a person can produce — see the budget
  *  check in the connection handler. */
@@ -269,6 +276,8 @@ interface RoomState {
 interface Room {
   clients: Set<RoomClient>;
   state: RoomState;
+  /** Former host may reclaim ownership until this timer expires. */
+  hostReconnect?: { client: RoomClient; timer: ReturnType<typeof setTimeout> };
   /**
    * Co-host grants, by Discord user id.
    *
@@ -393,6 +402,7 @@ function getOrCreateRoom(instanceId: string): Room {
   if (!room) {
     room = {
       clients: new Set(),
+      hostReconnect: undefined,
       state: {
         ratingKey: null,
         title: null,
@@ -933,8 +943,32 @@ export function attachWebSocketServer(server: Server): void {
         // 24h TTL counted from first registration and reaped live parties.
         touchInstance(instanceId);
 
-        const isHost = instance.hostUserId === userId;
         const room = getOrCreateRoom(instanceId);
+        const reconnectingHost = room.hostReconnect;
+        const reclaimingHost = reconnectingHost?.client.userId === userId;
+        const isHost = instance.hostUserId === userId || reclaimingHost;
+
+        // A host reconnecting during the grace window reclaims the role that
+        // was immediately handed to the successor.
+        if (reclaimingHost && reconnectingHost) {
+          clearTimeout(reconnectingHost.timer);
+          room.hostReconnect = undefined;
+          // The successor has been the active host since the disconnect. Move
+          // that role back before adding the reconnecting socket, so the room
+          // never has two hosts even for one roster broadcast.
+          for (const existing of room.clients) {
+            if (!existing.isHost) continue;
+            existing.isHost = false;
+            existing.isCoHost = false;
+            room.coHostIds.delete(existing.userId);
+          }
+          instance.hostUserId = userId;
+          updateInstanceHost(instanceId, userId);
+          logEvent("Sync", "host reconnected during grace", {
+            room: instanceId.substring(0, 8),
+            user: username ?? userId,
+          });
+        }
 
         // Evict stale connection from the same user (e.g. browser reconnected
         // before Node processed the close event for the old socket)
@@ -967,12 +1001,16 @@ export function attachWebSocketServer(server: Server): void {
         roomId = instanceId;
         room.clients.add(client);
 
-        // If the host is (re)joining and there are other clients, clear their disconnect banner
-        // and refresh their view of who the host is (covers host reconnecting on a new device,
-        // or joining after other clients already have a stale/missing hostUsername).
+        // If the host is (re)joining and there are other clients, refresh their
+        // view of who the host is (covers a reclaim after a socket drop, a host
+        // joining on a new device, or a stale/missing hostUsername).
         if (isHost && room.clients.size > 1) {
           broadcast(room, ws, { type: "host-reconnected" });
           broadcast(room, ws, { type: "host-info", hostUsername: username });
+          if (reclaimingHost) {
+            sendTo(ws, { type: "host-promoted", hostUsername: username });
+            broadcast(room, ws, { type: "host-changed", hostUsername: username });
+          }
         }
 
         // Send current state to newly joined client
@@ -1712,30 +1750,38 @@ export function attachWebSocketServer(server: Server): void {
     ws.on("close", () => {
       clearInterval(pingTimer);
       if (!client || !roomId) return;
-      const room = rooms.get(roomId);
+      // Capture the narrowed values before defining deferred cleanup. The
+      // outer variables are mutable because they are assigned during join, so
+      // TypeScript cannot safely carry their non-null narrowing into the
+      // nested function or timer callback.
+      const closingClient = client;
+      const closingRoomId = roomId;
+      const room = rooms.get(closingRoomId);
       if (!room) return;
 
-      room.clients.delete(client);
+      const finalizeClose = () => {
+        if (!room.clients.has(closingClient)) return;
+        room.clients.delete(closingClient);
 
       // The stream they were watching may now be empty, or may have just lost
       // the client that was driving it. Done before succession so the successor
       // is chosen against an accurate picture of who is on what.
-      const leftVariantKey = client.variantKey;
-      client.variantKey = null;
+      const leftVariantKey = closingClient.variantKey;
+      closingClient.variantKey = null;
       if (leftVariantKey && room.clients.size > 0) {
         const left = room.state.variants.get(leftVariantKey);
         if (left) {
           if (membersOf(room, leftVariantKey).length === 0) {
             // Nobody is left watching it. Never the host's own stream while the
             // room lives on — a successor inherits that below.
-            if (leftVariantKey !== room.state.hostVariantKey || !client.isHost) {
+            if (leftVariantKey !== room.state.hostVariantKey || !closingClient.isHost) {
               destroyVariant(room, leftVariantKey);
             }
-          } else if (left.ownerUserId === client.userId) {
+          } else if (left.ownerUserId === closingClient.userId) {
             ensureVariantOwner(room, left);
             announceVariant(room, left);
             logEvent("Sync", "stream driver left, promoting a watcher", {
-              room: roomId.substring(0, 8),
+              room: closingRoomId.substring(0, 8),
               variant: leftVariantKey,
               to: left.ownerUserId ?? "none",
             });
@@ -1743,11 +1789,11 @@ export function attachWebSocketServer(server: Server): void {
         }
       }
 
-      if (client.isHost) {
+      if (closingClient.isHost) {
         // Attribute the position to the host who is leaving, before a successor
         // takes over the instance record. Closing the tab is the other common
         // way a watch ends, so this is as important as the explicit stop path.
-        persistProgress(room, client.isWatching ? client.userId : undefined, "always");
+        persistProgress(room, closingClient.isWatching ? closingClient.userId : undefined, "always");
 
         if (room.clients.size > 0) {
           // Co-host, then whoever is actually watching, then anyone — see
@@ -1786,15 +1832,15 @@ export function attachWebSocketServer(server: Server): void {
             destroyVariant(room, leftVariantKey);
           }
 
-          const instance = instanceHosts.get(roomId);
+          const instance = instanceHosts.get(closingRoomId);
           if (instance) {
             instance.hostUserId = newHost.userId;
           }
-          updateInstanceHost(roomId, newHost.userId);
+          updateInstanceHost(closingRoomId, newHost.userId);
 
           logEvent("Sync", "host left, promoting successor", {
-            room: roomId.substring(0, 8),
-            left: client.username ?? client.userId,
+            room: closingRoomId.substring(0, 8),
+            left: closingClient.username ?? closingClient.userId,
             promoted: newHost.username ?? newHost.userId,
             // Which band they came from, so a surprising successor can be
             // explained rather than guessed at.
@@ -1812,15 +1858,14 @@ export function attachWebSocketServer(server: Server): void {
 
           for (const c of room.clients) {
             if (c !== newHost) {
-              sendTo(c.ws, { type: "host-disconnected" });
               sendTo(c.ws, { type: "host-changed", hostUsername: newHost.username });
             }
           }
         } else {
           const disconnectedSessionId = room.state.hlsSessionId;
           logEvent("Sync", "last client left, killing transcode", {
-            room: roomId.substring(0, 8),
-            left: client.username ?? client.userId,
+            room: closingRoomId.substring(0, 8),
+            left: closingClient.username ?? closingClient.userId,
             session: disconnectedSessionId?.substring(0, 8) ?? "none",
             roomPosS: room.state.position,
           });
@@ -1841,11 +1886,33 @@ export function attachWebSocketServer(server: Server): void {
         // isn't always flagged as one, and the interval then pinged Plex every
         // 30s for a room that no longer existed.
         destroyAllVariants(room);
-        rooms.delete(roomId);
+        rooms.delete(closingRoomId);
       } else {
         // Someone left — refresh everyone's roster
         broadcastParticipants(room);
       }
+      };
+
+      // Transfer ownership immediately, as before, so the room never waits on
+      // a disconnected socket. Keep a short-lived marker so the original host
+      // can reclaim the role if this was only a transient network drop.
+      if (closingClient.isHost && !room.hostReconnect) {
+        finalizeClose();
+        if (room.clients.size === 0) return;
+        const timer = setTimeout(() => {
+          if (room.hostReconnect?.client !== closingClient) return;
+          room.hostReconnect = undefined;
+        }, HOST_RECONNECT_GRACE_MS);
+        room.hostReconnect = { client: closingClient, timer };
+        logEvent("Sync", "host socket closed, waiting for reconnect", {
+          room: closingRoomId.substring(0, 8),
+          host: closingClient.username ?? closingClient.userId,
+          graceMs: HOST_RECONNECT_GRACE_MS,
+        });
+        return;
+      }
+
+      finalizeClose();
     });
   });
 

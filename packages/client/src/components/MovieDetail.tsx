@@ -526,9 +526,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                 <div style={styles.ratingsSlot}>
                   {meta && (
                     <RatingsRow
-                      imdbId={meta.imdbId}
-                      tmdbId={meta.tmdbId}
-                      mediaType="movie"
+                      ratings={meta.ratings}
                       style={styles.ratings}
                       onReady={() => setRatingsReady(true)}
                     />
@@ -806,7 +804,7 @@ const styles: Record<string, React.CSSProperties> = {
    * No such treatment needed: RatingsRow pins its own row to 26px, so the
    * reservation and the content are the same height and there is no slack for
    * the margin to disappear into. Left alone rather than made to match — a
-   * title MDBList has no scores for would otherwise hold 46px of nothing.
+   * title with no scores would otherwise hold 46px of nothing.
    */
   ratingsSlot: {
     minHeight: "26px",

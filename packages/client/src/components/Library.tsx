@@ -34,6 +34,7 @@ import { QUIET_SURFACE } from "../lib/surface";
 
 const PAGE_SIZE = 200;
 const HISTORY_PAGE_SIZE = 100;
+const SEARCH_TIMEOUT_MS = 30_000;
 
 /** Watched fraction for a history entry, or null when the runtime is unknown. */
 function progressOf(entry: HistoryEntry): number | null {
@@ -132,6 +133,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   // it's been superseded (by a newer search or a clear) and discard itself,
   // instead of overwriting the UI with stale results after the box was cleared.
   const searchReqId = useRef(0);
+  const searchAbortRef = useRef<AbortController | null>(null);
   const [homeError, setHomeError] = useState<string | null>(null);
   const [itemsError, setItemsError] = useState<string | null>(null);
   // Bumped by the Retry button to re-run the fetch effects after a failure
@@ -397,6 +399,11 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     searchQueryRef.current = query;
     const reqId = ++searchReqId.current;
 
+    searchAbortRef.current?.abort();
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
+    const timeout = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
+
     // History tab with history present: filter the History grid in place. No
     // separate search view — the tabs, the "Clear history" button and the
     // history layout all stay exactly as they are; only the visible cards
@@ -404,6 +411,10 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     // fall through to the global search, which behaves just like Home
     // ("if there is no history, then search everything").
     if (isHistoryTab && historyItems.length > 0) {
+      clearTimeout(timeout);
+      searchAbortRef.current = null;
+      setLoading(false);
+      setSearchBusy(false);
       setHistoryQuery(query);
       return;
     }
@@ -411,7 +422,9 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     setLoading(true);
     setSearchBusy(true);
     try {
-      const { items: results, people: peopleResults } = await searchPlex(query);
+      const { items: results, people: peopleResults } = await searchPlex(query, {
+        signal: controller.signal,
+      });
       // A newer search started or the box was cleared while this was in
       // flight — this response is stale, discard it.
       if (reqId !== searchReqId.current) return;
@@ -425,10 +438,18 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     } catch (err) {
       if (reqId !== searchReqId.current) return;
       console.error("Search failed:", err);
-    }
-    if (reqId === searchReqId.current) {
-      setLoading(false);
-      setSearchBusy(false);
+    } finally {
+      // A superseded request can return after a newer query or a clear. Keep
+      // the newer request's spinner alive, but always clean up the request
+      // that is still current. `finally` is essential here: the old code's
+      // early return above skipped this cleanup and could leave the spinner
+      // running forever after the results had already changed.
+      if (reqId === searchReqId.current) {
+        setLoading(false);
+        setSearchBusy(false);
+        if (searchAbortRef.current === controller) searchAbortRef.current = null;
+      }
+      clearTimeout(timeout);
     }
   }, [activeSectionType, isHistoryTab, historyItems.length]);
 
@@ -473,10 +494,13 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   const handleClearSearch = useCallback(() => {
     // Invalidate any in-flight search so its response can't land after clear
     searchReqId.current++;
+    searchAbortRef.current?.abort();
+    searchAbortRef.current = null;
     rawSearchResults.current = null;
     setSearchResults(null);
     setPeople([]);
     setLoading(false);
+    setSearchBusy(false);
     // Emptying the box (via its "X" or by deleting the text) also drops the
     // in-place History filter, restoring the full history grid.
     setHistoryQuery("");

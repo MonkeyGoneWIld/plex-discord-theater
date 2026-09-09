@@ -197,6 +197,27 @@
         position: absolute; top: 0; height: 8px; min-width: 36px;
         background: rgba(229,160,13,0.85); border-radius: 4px; cursor: grab;
       }
+      /* Settings lists must keep a usable vertical scrollbar on short mobile
+         landscape screens. The poster shelf intentionally hides its native bar,
+         but that rule must never apply to the settings modal or its lists. */
+      .settings-modal, .settings-scroll {
+        scrollbar-width: auto;
+        scrollbar-color: rgba(229,160,13,0.7) rgba(255,255,255,0.06);
+      }
+      .settings-modal::-webkit-scrollbar, .settings-scroll::-webkit-scrollbar {
+        width: 8px;
+      }
+      .settings-modal::-webkit-scrollbar-track, .settings-scroll::-webkit-scrollbar-track {
+        background: rgba(255,255,255,0.04);
+        border-radius: 4px;
+      }
+      .settings-modal::-webkit-scrollbar-thumb, .settings-scroll::-webkit-scrollbar-thumb {
+        background: rgba(229,160,13,0.7);
+        border-radius: 4px;
+      }
+      .settings-modal::-webkit-scrollbar-thumb:hover, .settings-scroll::-webkit-scrollbar-thumb:hover {
+        background: rgba(229,160,13,0.95);
+      }
       /* Invisible hit area so the thin 8px thumb is easy to grab. It's a child of
          the thumb, so pointer-downs on it still start the drag — it just extends
          the grabbable zone (mostly downward, into empty space, to avoid stealing

@@ -1,7 +1,11 @@
 import { useState, useCallback, useRef, useEffect, useImperativeHandle } from "react";
 import { authUrl } from "../lib/api";
 import { logEvent } from "../lib/log";
-import { createPreviewFrameReader, type PreviewFrames } from "../lib/previewFrames";
+import {
+  createPreviewFrameReader, createProgressivePreviewReader,
+  type PreviewFrames, type PreviewDetail, type PreviewFrameReader,
+} from "../lib/previewFrames";
+import { createPreviewMotion } from "../lib/previewMotion";
 import { loadVolume } from "../lib/volume";
 import { getLevel, setLevel, boostAvailable, MAX_LEVEL } from "../lib/audioBoost";
 import { useMediaQuery, COMPACT_CONTROLS_QUERY, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -53,6 +57,9 @@ interface ControlsProps {
   onOpenSubtitleTiming?: () => void;
   /** Whether that panel is currently open, so the button can show it. */
   subtitleTimingOpen?: boolean;
+  /** Opens the client-local video zoom panel; available only in Manual mode. */
+  onOpenZoom?: () => void;
+  zoomOpen?: boolean;
   /** Where a restart-in-progress is heading, in seconds, or null when playback
    *  is settled. A transcode restart detaches the media and the element reports
    *  0 until the replacement loads, which snapped the bar back to the start
@@ -85,20 +92,6 @@ interface ControlsProps {
    *  generated preview thumbnails — the tooltip then shows the timestamp alone. */
   previewPartId?: number;
 }
-
-/**
- * Bucket size for preview-frame requests, in milliseconds.
- *
- * Plex stores BIF frames at a fixed interval and snaps any requested offset to
- * the nearest one, so any value works. Quantizing is about cache hits: without
- * it, every pixel of cursor travel produces a unique URL and neither the browser
- * cache nor the server's thumb cache ever hits.
- *
- * 10s rather than 2s: it aligns with the common interval, and where the index is
- * denser we show a slightly coarser frame in exchange for ~5x fewer distinct
- * requests — a 2h film is then ~720 possible frames instead of ~3600.
- */
-const PREVIEW_BUCKET_MS = 10_000;
 
 /**
  * Minimum gap between preview-frame requests while the cursor is moving.
@@ -447,6 +440,8 @@ export function Controls({
   onSurfaceClick,
   onOpenSubtitleTiming,
   subtitleTimingOpen = false,
+  onOpenZoom,
+  zoomOpen = false,
   restartingTo = null,
   onToggleStats,
   statsActive,
@@ -536,6 +531,11 @@ export function Controls({
   // before the frames themselves have; the ones still on the wire fall back to
   // the per-frame requests below, as does a part Plex has no index for.
   const previewFramesRef = useRef<PreviewFrames | null>(null);
+  const previewMotionRef = useRef(createPreviewMotion());
+  const previewSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const previewPositionRef = useRef<number | null>(null);
+  const previewDetailRef = useRef<PreviewDetail>("medium");
+  const previewLastShownRef = useRef(-Infinity);
   // The request that was just sent, if any: what was asked for, so the label
   // can keep saying it while the room carries on doing the opposite.
   const [requestSent, setRequestSent] = useState<"pause" | "resume" | null>(null);
@@ -631,8 +631,11 @@ export function Controls({
     // Records whether the bar was hidden *before* this tap revealed it, which
     // is the thing the video's click handler needs and can no longer observe by
     // the time it runs.
-    const onReveal = () => {
-      if (!visibleRef.current) revealTapRef.current = true;
+    const onReveal = (event: Event) => {
+      // A pinch has no picture click to consume its reveal flag. Start each
+      // new pointer interaction with fresh state, and discard multi-touch.
+      if (event.type === "pointerdown") revealTapRef.current = !visibleRef.current;
+      if (event.type === "touchstart" && (event as TouchEvent).touches.length > 1) revealTapRef.current = false;
       resetHideTimer();
     };
     parent.addEventListener("pointerdown", onReveal);
@@ -894,50 +897,43 @@ export function Controls({
     [videoRef, muted],
   );
 
-  /** Point the tooltip and preview frame at a position on the bar. Shared by
-   *  hovering and dragging — a scrub wants exactly the same affordances. */
-  const showPreviewAt = useCallback((pct: number) => {
-    setHoverPct(pct);
+  const clearPreviewMotion = useCallback(() => {
+    previewMotionRef.current.reset();
+    previewDetailRef.current = "medium";
+    previewPositionRef.current = null;
+    previewLastShownRef.current = -Infinity;
+    if (previewSettleRef.current !== null) clearTimeout(previewSettleRef.current);
+    previewSettleRef.current = null;
+    if (previewThrottleRef.current !== null) clearTimeout(previewThrottleRef.current);
+    previewThrottleRef.current = null;
+    pendingPreviewRef.current = null;
+  }, []);
 
-    if (previewPartId == null) return;
-    if (!(duration > 0) || !isFinite(duration)) return;
-
-    // The frame is already in memory, so it is a slice of it. No request, no
-    // throttle, no waiting for a decode to promote it — the preview tracks the
-    // cursor exactly, which is the entire reason for fetching the file.
-    //
-    // Ahead of the failure latch below deliberately: frames we hold are frames
-    // we can draw, whatever a single-frame request did earlier.
-    const frames = previewFramesRef.current;
-    if (frames) {
-      const src = frames.frameAt(pct * duration * 1000, duration * 1000);
-      if (src) {
-        pendingPreviewRef.current = src;
-        setPreviewSrc(src);
-        setLoadedPreviewSrc(src);
-        return;
-      }
+  const selectPreview = useCallback((pct: number, detail: PreviewDetail) => {
+    if (previewPartId == null || !(duration > 0) || !isFinite(duration)) return;
+    const now = performance.now();
+    const gap = detail === "coarse" ? 180 : detail === "medium" ? 150 : 0;
+    if (now - previewLastShownRef.current < gap) return;
+    const local = previewFramesRef.current?.frameAt(pct * duration * 1000, duration * 1000, detail);
+    if (local) {
+      if (previewThrottleRef.current !== null) clearTimeout(previewThrottleRef.current);
+      previewThrottleRef.current = null;
+      pendingPreviewRef.current = local;
+      previewLastShownRef.current = now;
+      setPreviewSrc(local);
+      return;
     }
-
-    // Not downloaded yet, or no index at all — ask Plex for the one frame.
     if (failedPartRef.current === previewPartId) return;
-    // Floor rather than round, so the frame is at or before the cursor.
-    const bucketMs = Math.floor((pct * duration * 1000) / PREVIEW_BUCKET_MS) * PREVIEW_BUCKET_MS;
-    // No w/h params: those divert the thumb route through /photo/:/transcode,
-    // which can't resolve a BIF path. Frames are already small — size with CSS.
+    // Approximate overview density before the BIF timestamps arrive.
+    const approximateCount = Math.max(1, Math.ceil(duration / 2));
+    const tierCount = Math.max(1, Math.ceil(approximateCount * (detail === "coarse" ? 0.04 : 0.40)));
+    const bucketSize = detail === "full" ? 2000 : Math.max(2000, duration * 1000 / tierCount);
+    const bucketMs = Math.floor(Math.floor(pct * duration * 1000 / bucketSize) * bucketSize);
     const url = authUrl(`/api/plex/thumb/library/parts/${previewPartId}/indexes/sd/${bucketMs}`);
     if (pendingPreviewRef.current === url) return;
     pendingPreviewRef.current = url;
-
-    // A cached frame is free — show it now and skip the throttle entirely, so
-    // retracing ground you've already scrubbed tracks the cursor exactly.
-    if (previewCacheRef.current.has(url)) {
-      setPreviewSrc(url);
-      setLoadedPreviewSrc(url);
-      return;
-    }
-
-    // Leading edge, then a single trailing flush to wherever the cursor ended up.
+    previewLastShownRef.current = now;
+    if (previewCacheRef.current.has(url)) { setPreviewSrc(url); return; }
     if (previewThrottleRef.current !== null) return;
     setPreviewSrc(url);
     previewThrottleRef.current = setTimeout(() => {
@@ -946,6 +942,47 @@ export function Controls({
       if (latest && latest !== url) setPreviewSrc(latest);
     }, PREVIEW_THROTTLE_MS);
   }, [previewPartId, duration]);
+
+  const setPreviewDetail = useCallback((detail: PreviewDetail) => {
+    if (detail !== previewDetailRef.current) {
+      logEvent("Preview", "detail selected", {
+        partId: previewPartId, detail, ready: previewFramesRef.current?.ready ?? 0,
+        frames: previewFramesRef.current?.count ?? 0,
+      });
+    }
+    previewDetailRef.current = detail;
+  }, [previewPartId]);
+
+  /** Timestamp follows the pointer exactly; only the image adapts. */
+  const showPreviewAt = useCallback((pct: number) => {
+    setHoverPct(pct);
+    previewPositionRef.current = pct;
+    const detail = previewMotionRef.current.sample(
+      pct, performance.now(), progressRef.current?.getBoundingClientRect().width,
+    );
+    setPreviewDetail(detail);
+    selectPreview(pct, detail);
+    if (previewSettleRef.current !== null) clearTimeout(previewSettleRef.current);
+    previewSettleRef.current = null;
+    if (detail === "full") return;
+    const settle = () => {
+      previewSettleRef.current = null;
+      const latest = previewPositionRef.current;
+      if (latest === null) return;
+      const now = performance.now();
+      const remaining = previewMotionRef.current.settleDelay(now);
+      if (remaining > 0) {
+        previewSettleRef.current = setTimeout(settle, Math.ceil(remaining));
+        return;
+      }
+      const settled = previewMotionRef.current.settle(now);
+      setPreviewDetail(settled);
+      selectPreview(latest, settled);
+    };
+    // Keep the focus deadline across small movements, instead of postponing
+    // full detail on every jitter event. Always select the latest position.
+    previewSettleRef.current = setTimeout(settle, Math.ceil(previewMotionRef.current.settleDelay(performance.now())));
+  }, [selectPreview, setPreviewDetail]);
 
   // ─── Scrubbing ────────────────────────────────────────────────
   //
@@ -993,12 +1030,13 @@ export function Controls({
     }
     setScrubPct(null);
     if (e.pointerType !== "mouse") {
+      clearPreviewMotion();
       setHoveringProgress(false);
       setHoverPct(null);
     }
     commitSeekToPct(pct);
     resetHideTimer();
-  }, [pctFromClientX, commitSeekToPct, resetHideTimer]);
+  }, [pctFromClientX, commitSeekToPct, resetHideTimer, clearPreviewMotion]);
 
   /**
    * Pull the part's whole preview index shortly after the stream starts.
@@ -1006,7 +1044,8 @@ export function Controls({
    * Hovering the bar used to be the thing that fetched a frame: one request out
    * to Plex per position, arriving a beat or two after the cursor had already
    * moved on, and nothing at all for a sweep. The frames all live in one file,
-   * so this fetches that file once and every hover afterwards is free.
+   * so this fetches it once, ordered overview, medium, then full detail. All
+   * three passes start automatically; hovering never starts a later pass.
    *
    * Failure is not handled because it does not need to be — showPreviewAt keeps
    * the per-frame path and falls back to it whenever this ref is empty, which
@@ -1017,7 +1056,14 @@ export function Controls({
     if (previewPartId == null || !started) return;
     let cancelled = false;
     const abort = new AbortController();
-    const reader = createPreviewFrameReader();
+    let transferStartedAt = 0;
+    const onTierReady = (progress: { tier: PreviewDetail; frames: number; bytes: number; ready: number }) => {
+      logEvent("Preview", "tier ready", {
+        partId: previewPartId, ...progress,
+        elapsedMs: Math.round(performance.now() - transferStartedAt),
+      });
+    };
+    let reader: PreviewFrameReader = createProgressivePreviewReader(onTierReady);
 
     /**
      * Seconds of video buffered past the playhead.
@@ -1048,11 +1094,23 @@ export function Controls({
       // all is what starts the competition.
       await waitForHeadroom();
       if (cancelled) return;
+      transferStartedAt = performance.now();
       const res = await fetch(
-        authUrl(`/api/plex/preview/${previewPartId}/index`),
+        authUrl(`/api/plex/preview/${previewPartId}/index?progressive=2`),
         { signal: abort.signal },
       );
       if (!res.ok || !res.body) return;
+      const contentType = res.headers.get("content-type") ?? "";
+      const version = contentType.startsWith("application/x-plex-preview-v2") ? 2
+        : contentType.startsWith("application/x-plex-preview-v1") ? 1 : 0;
+      logEvent("Preview", "transfer accepted", {
+        partId: previewPartId, transport: version ? `progressive-v${version}` : "legacy-bif",
+      });
+      // Older servers still return an ordinary BIF.
+      if (version !== 2) {
+        reader.dispose();
+        reader = version === 1 ? createProgressivePreviewReader(onTierReady, 1) : createPreviewFrameReader();
+      }
       const body = res.body.getReader();
       let bytes = 0;
       let waits = 0;
@@ -1083,10 +1141,15 @@ export function Controls({
             partId: previewPartId, frames: frames.count, indexBytes: bytes,
           });
         }
+        const activePct = previewPositionRef.current;
+        if (activePct !== null && frames) {
+          selectPreview(activePct, previewDetailRef.current);
+        }
       }
       if (!cancelled) {
-        logEvent("Preview", "frames complete", {
+        logEvent("Preview", reader.frames()?.ready === reader.frames()?.count ? "frames complete" : "frames incomplete", {
           partId: previewPartId, bytes, frames: reader.frames()?.count ?? 0,
+          ready: reader.frames()?.ready ?? 0,
           // How often the video needed the connection back. Zero means the
           // download never had to yield; a high count on a stream that still
           // played cleanly is the gate doing its job.
@@ -1105,7 +1168,7 @@ export function Controls({
       reader.dispose();
       previewFramesRef.current = null;
     };
-  }, [previewPartId, started]);
+  }, [previewPartId, started, selectPreview]);
 
   // Load the wanted frame, promoting it to the display only once decoded.
   //
@@ -1115,12 +1178,7 @@ export function Controls({
   // which aborted in flight — during a sweep almost nothing ever finished.
   useEffect(() => {
     if (!previewSrc) return;
-    // A frame sliced out of the index is already in memory and was promoted to
-    // the display as it was picked. Anything still coming from Plex one frame
-    // at a time — a part with no index, or one whose bytes have not arrived
-    // yet — still needs preloading, so the test is what this src is rather
-    // than whether an index exists.
-    if (previewSrc.startsWith("blob:")) return;
+    // Decode blob images too before replacing the visible preview.
     const cache = previewCacheRef.current;
     if (cache.has(previewSrc)) {
       setLoadedPreviewSrc(previewSrc);
@@ -1140,7 +1198,7 @@ export function Controls({
       // Latch even when superseded. Since loads are no longer aborted, a part
       // with no frames would otherwise keep firing 404s for the whole sweep
       // before a non-superseded one happened to land.
-      if (previewPartId != null) failedPartRef.current = previewPartId;
+      if (previewPartId != null && !previewSrc.startsWith("blob:")) failedPartRef.current = previewPartId;
       if (superseded) return;
       pendingPreviewRef.current = null;
       setPreviewSrc(null);
@@ -1156,18 +1214,12 @@ export function Controls({
     setPreviewSrc(null);
     setLoadedPreviewSrc(null);
     failedPartRef.current = null;
-    previewCacheRef.current.clear();
-    pendingPreviewRef.current = null;
-    if (previewThrottleRef.current !== null) {
-      clearTimeout(previewThrottleRef.current);
-      previewThrottleRef.current = null;
-    }
-  }, [previewPartId]);
+    clearPreviewMotion();
+    previewCacheRef.current = new Map();
+  }, [previewPartId, duration, clearPreviewMotion]);
 
   // Drop the throttle timer on unmount.
-  useEffect(() => () => {
-    if (previewThrottleRef.current !== null) clearTimeout(previewThrottleRef.current);
-  }, []);
+  useEffect(() => clearPreviewMotion, [clearPreviewMotion]);
 
   // Dismiss the volume popover on a tap anywhere else. Pointerdown rather than
   // click so it closes on the press that starts an interaction elsewhere,
@@ -1212,16 +1264,17 @@ export function Controls({
   // elapsed and remaining times either side, and a desktop doesn't.
   const progressBar = (
     <div
-      ref={progressRef}
+      ref={progressRef} data-player-progress
       onPointerDown={handleProgressPointerDown}
       onPointerMove={handleProgressPointerMove}
       onPointerUp={handleProgressPointerUp}
       // Losing the pointer (a system gesture, a phone call) should still land
       // the scrub where the user left it rather than silently dropping it.
-      onPointerCancel={handleProgressPointerUp}
+      onPointerCancel={(e) => { handleProgressPointerUp(e); clearPreviewMotion(); }}
       onPointerEnter={(e) => { if (e.pointerType === "mouse") setHoveringProgress(true); }}
       onPointerLeave={(e) => {
         if (e.pointerType !== "mouse" || draggingRef.current) return;
+        clearPreviewMotion();
         setHoveringProgress(false);
         setHoverPct(null);
       }}
@@ -1301,7 +1354,7 @@ export function Controls({
         />
       )}
 
-      <div
+      <div data-zoom-surface
         style={{
           ...styles.overlay,
           opacity: visible ? 1 : 0,
@@ -1343,7 +1396,7 @@ export function Controls({
           steals a press aimed at a control. On a desktop it isn't rendered at
           all and the click-to-pause path below is untouched. */}
       {phone && (
-        <div style={styles.gestureLayer} onClick={handlePictureTap} aria-hidden="true" />
+        <div data-zoom-surface style={{ ...styles.gestureLayer, touchAction: "none" }} onClick={handlePictureTap} aria-hidden="true" />
       )}
 
       {/* Transport, in the middle of the picture where it can be seen and
@@ -1641,6 +1694,21 @@ export function Controls({
             {onOpenTrackSwitcher && (
               <button onClick={onOpenTrackSwitcher} className="btn" style={{ ...styles.gearBtn, ...(compact ? styles.gearBtnCompact : {}) }} title="Audio & Subtitles">
                 {"\u2699"}
+              </button>
+            )}
+            {onOpenZoom && !phone && (
+              <button
+                onClick={onOpenZoom}
+                className="btn"
+                style={{ ...styles.gearBtn, ...(compact ? styles.gearBtnCompact : {}), ...(zoomOpen ? styles.gearBtnActive : {}) }}
+                title="Custom Zoom"
+                aria-label="Custom Zoom"
+                aria-pressed={zoomOpen}
+              >
+                <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                  <rect x="3" y="3" width="14" height="14" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
+                  <path d="M5 15L15 5M5 11v4h4M11 5h4v4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
               </button>
             )}
             {/* Next to the gear, because it belongs to the same family of

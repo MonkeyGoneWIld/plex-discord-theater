@@ -4163,7 +4163,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           onZoomModeChange={(mode) => {
             setZoomMode(mode);
             setShowZoomPanel(mode === "manual" && !zoomPhone);
-            if (mode === "manual" && zoomPhone) showZoomNotice("Custom Zoom: pinch to adjust");
+            if (mode === "manual" && zoomPhone) showZoomNotice("Custom Zoom: Pinch To Adjust");
           }}
         />
       )}
@@ -4463,6 +4463,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "13px",
     fontWeight: 600,
     letterSpacing: "0.2px",
+    whiteSpace: "nowrap",
     zIndex: 16,
     pointerEvents: "none",
     backdropFilter: "blur(6px)",

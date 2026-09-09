@@ -147,7 +147,7 @@ for (const corrupt of [Buffer.alloc(80), bif(0), bif(5).subarray(0, 100)]) {
   reader.dispose();
   const outOfOrder = createProgressivePreviewReader();
   outOfOrder.push(chunks[0]);
-  outOfOrder.push(chunks[66]); // first medium frame, before any overview
+  outOfOrder.push(chunks[1 + Math.ceil(3214 * 0.04)]); // first medium frame, before any overview
   assert.equal(outOfOrder.rejected(), true, "reject a medium tier sent before the overview");
   outOfOrder.dispose();
 }

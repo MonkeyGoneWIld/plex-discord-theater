@@ -10,6 +10,22 @@ API or rejected request shows a dismissible message suggesting the Activity
 pop-out. There is no CSS fullscreen fallback, so a failed request cannot be
 mistaken for a successful native fullscreen transition.
 
+## Discord layout limitation
+
+The Activity runs inside an iframe owned by Discord. Discord's Activity iframe
+does not grant the embedded page the browser `fullscreen` permission, so the
+player's Fullscreen API request reports that fullscreen is unavailable in the
+voice and text Activity views. The black space around the Activity is also part
+of Discord's outer call layout; CSS in the Activity cannot extend outside its
+iframe or remove that space.
+
+To cover that outer space, use Discord's own **Full Screen** control in the
+voice call toolbar (the control outside the Activity). Discord changes its
+outer layout when that button is used. The Activity SDK exposes layout updates
+to the app, but no supported command for an Activity to activate Discord's
+outer fullscreen mode. Popping the Activity out and using the native fullscreen
+control there is the other supported path.
+
 ## Live verification
 
 Deploy the `feat/activity-native-fullscreen` branch using your normal deployment

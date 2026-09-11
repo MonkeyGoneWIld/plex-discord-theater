@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 
+const UNAVAILABLE_MESSAGE =
+  "Fullscreen is unavailable in this view. Try Discord's Activity pop-out, then fullscreen there.";
+
 /** Fullscreen is local to this viewer and subject to the embedding client's policy. */
 export function useFullscreen(targetRef: RefObject<HTMLDivElement | null>) {
   const [active, setActive] = useState(false);
@@ -19,7 +22,7 @@ export function useFullscreen(targetRef: RefObject<HTMLDivElement | null>) {
     setError(null);
     const exiting = document.fullscreenElement === target;
     if (!exiting && (!target.requestFullscreen || !document.fullscreenEnabled)) {
-      setError("Fullscreen is unavailable in this view. Try Discord's Activity pop-out, then fullscreen there.");
+      setError(UNAVAILABLE_MESSAGE);
       return;
     }
     pending.current = true;
@@ -31,7 +34,7 @@ export function useFullscreen(targetRef: RefObject<HTMLDivElement | null>) {
     } catch {
       setError(exiting
         ? "Could not exit fullscreen. Try pressing Esc."
-        : "Fullscreen was blocked or failed in this view. Try Discord's Activity pop-out, then fullscreen there.");
+        : UNAVAILABLE_MESSAGE);
     } finally {
       pending.current = false;
     }

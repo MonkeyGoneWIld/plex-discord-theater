@@ -14,6 +14,7 @@ import { TransportRequestCard } from "./TransportRequestCard";
 import { SubtitleLayer } from "./SubtitleLayer";
 import { SubtitleOffset } from "./SubtitleOffset";
 import { ZoomPanel } from "./ZoomPanel";
+import { useFullscreen } from "../lib/useFullscreen";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
@@ -602,6 +603,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
   const [showZoomPanel, setShowZoomPanel] = useState(false);
   const zoomPhone = useMediaQuery(PHONE_QUERY);
   const zoomRootRef = useRef<HTMLDivElement>(null);
+  const fullscreen = useFullscreen(zoomRootRef);
   const zoomMeta = itemMeta?.ratingKey === item.ratingKey ? itemMeta : null;
   const zoomItem = { ...item, type: zoomMeta?.type ?? item.type, grandparentRatingKey: item.grandparentRatingKey ?? zoomMeta?.grandparentRatingKey };
   const zoomPreferenceKey = zoomItem.type === "episode" && !zoomItem.grandparentRatingKey ? null : zoomKey(zoomItem);
@@ -3897,6 +3899,12 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           {zoomNotice}
         </div>
       )}
+      {fullscreen.error && (
+        <div role="status" style={{ position: "absolute", top: "calc(var(--sait, 0px) + 70px)", left: "5%", right: "5%", zIndex: 120, padding: "12px 16px", borderRadius: 8, background: "#222", color: "#fff", display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ flex: 1 }}>{fullscreen.error}</span>
+          <button type="button" className="btn" onClick={fullscreen.dismissError} style={{ color: "#fff", padding: 8 }}>Dismiss</button>
+        </div>
+      )}
       {/* Viewer status — what the host is doing to shared playback */}
       {viewerStatus && (
         <div style={styles.viewerStatus} role="status" aria-live="polite">
@@ -4128,6 +4136,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
         subtitleTimingOpen={showSubtitleOffset}
         onOpenZoom={zoomMode === "manual" ? () => setShowZoomPanel((open) => !open) : undefined}
         zoomOpen={showZoomPanel}
+        onToggleFullscreen={fullscreen.toggle}
+        fullscreenActive={fullscreen.active}
       />
       {/* Subtitles this client draws, because Plex was told not to burn them
           in — the only kind there is anything to adjust about. */}

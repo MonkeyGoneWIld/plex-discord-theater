@@ -60,6 +60,8 @@ interface ControlsProps {
   /** Opens the client-local video zoom panel; available only in Manual mode. */
   onOpenZoom?: () => void;
   zoomOpen?: boolean;
+  onToggleFullscreen?: () => void;
+  fullscreenActive?: boolean;
   /** Where a restart-in-progress is heading, in seconds, or null when playback
    *  is settled. A transcode restart detaches the media and the element reports
    *  0 until the replacement loads, which snapped the bar back to the start
@@ -442,6 +444,8 @@ export function Controls({
   subtitleTimingOpen = false,
   onOpenZoom,
   zoomOpen = false,
+  onToggleFullscreen,
+  fullscreenActive = false,
   restartingTo = null,
   onToggleStats,
   statsActive,
@@ -1708,6 +1712,26 @@ export function Controls({
                 <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true">
                   <rect x="3" y="3" width="14" height="14" rx="1.5" stroke="currentColor" strokeWidth="1.4" />
                   <path d="M5 15L15 5M5 11v4h4M11 5h4v4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            )}
+            {onToggleFullscreen && (
+              <button
+                type="button"
+                onClick={onToggleFullscreen}
+                className="btn"
+                style={{ ...styles.gearBtn, ...(compact ? styles.gearBtnCompact : {}) }}
+                title={fullscreenActive ? "Exit fullscreen" : "Enter fullscreen"}
+                aria-label={fullscreenActive ? "Exit fullscreen" : "Enter fullscreen"}
+                aria-pressed={fullscreenActive}
+              >
+                <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                  <path
+                    d={fullscreenActive
+                      ? "M3 7h4V3M13 3v4h4M17 13h-4v4M7 17v-4H3"
+                      : "M7 3H3v4M13 3h4v4M17 13v4h-4M7 17H3v-4"}
+                    stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
+                  />
                 </svg>
               </button>
             )}

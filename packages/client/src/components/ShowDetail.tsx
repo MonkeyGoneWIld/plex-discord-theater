@@ -101,6 +101,9 @@ export function ShowDetail({
   const [loading, setLoading] = useState(true);
   // Seasons the library is missing, per Seerr (posters from TMDB).
   const [missingSeasons, setMissingSeasons] = useState<SeerrSeason[]>([]);
+  const [missingLoading, setMissingLoading] = useState(false);
+  const [missingError, setMissingError] = useState<string | null>(null);
+  const [metaRetry, setMetaRetry] = useState(0);
   const [reloadNonce, setReloadNonce] = useState(0);
   // The backdrop is the one part that can't come from the clicked card, so it
   // fades in on load rather than appearing hard.
@@ -180,15 +183,21 @@ export function ShowDetail({
   // back by the season list — the slower of the two on a long-running show.
   useEffect(() => {
     let cancelled = false;
+    setMeta(null);
+    setMissingSeasons([]);
+    setMissingError(null);
     fetchMeta(item.ratingKey)
       .then((m) => { if (!cancelled) setMeta(m); })
-      .catch(console.error);
+      .catch(() => {
+        if (!cancelled) setMissingError("Could not load show details to check missing seasons.");
+      });
     return () => { cancelled = true; };
-  }, [item.ratingKey]);
+  }, [item.ratingKey, metaRetry]);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setSeasons([]);
     fetchChildren(item.ratingKey)
       .then((c) => { if (!cancelled) setSeasons(c.items); })
       .catch(console.error)
@@ -198,19 +207,49 @@ export function ShowDetail({
 
   // Once meta is in, ask Seerr which seasons exist that we don't have.
   useEffect(() => {
-    if (loading || !meta || meta.tmdbId == null) return;
+    if (loading || !meta || meta.ratingKey !== item.ratingKey) return;
+    if (meta.tmdbId == null) {
+      setMissingError("Could not identify this show to check missing seasons.");
+      return;
+    }
     let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    setMissingLoading(true);
+    setMissingError(null);
     const owned = new Set(seasons.map((s) => s.index).filter((n) => n != null));
-    fetchSeerrTv(meta.tmdbId)
+    const load = (retry: boolean) => fetchSeerrTv(meta.tmdbId!)
       .then((tv) => {
         if (cancelled) return;
-        if (tv.configured) {
-          setMissingSeasons(tv.seasons.filter((s) => !owned.has(s.seasonNumber) && s.status !== 5));
-        }
+        setMissingSeasons(tv.configured
+          ? tv.seasons.filter((s) => !owned.has(s.seasonNumber) && s.status !== 5)
+          : []);
+        setMissingLoading(false);
       })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [loading, meta, seasons, reloadNonce]);
+      .catch(() => {
+        if (cancelled) return;
+        if (retry) {
+          retryTimer = setTimeout(() => { void load(false); }, 1000);
+        } else {
+          setMissingLoading(false);
+          setMissingError("Could not load missing seasons. Please try again.");
+        }
+      });
+    void load(true);
+    return () => {
+      cancelled = true;
+      clearTimeout(retryTimer);
+      setMissingLoading(false);
+    };
+  }, [item.ratingKey, loading, meta, seasons, reloadNonce]);
+
+  const retryMissingSeasons = () => {
+    if (meta?.tmdbId == null) {
+      invalidateMeta(item.ratingKey);
+      setMetaRetry((n) => n + 1);
+    } else {
+      setReloadNonce((n) => n + 1);
+    }
+  };
 
   const backdropUrl = meta?.art ? authUrl(meta.art) : null;
   // Same sized URL the card used — see posterThumbUrl.
@@ -470,7 +509,14 @@ export function ShowDetail({
 
           {/* Seasons grid — owned (playable) cards plus the seasons we don't
               have yet, rendered as selectable request cards with TMDB posters. */}
-          {seasons.length === 0 && missingSeasons.length === 0 && !loading ? (
+          {missingLoading && <p role="status">Loading missing seasons…</p>}
+          {missingError && (
+            <p role="alert">
+              {missingError}{" "}
+              <button className="btn" onClick={retryMissingSeasons}>Retry</button>
+            </p>
+          )}
+          {seasons.length === 0 && missingSeasons.length === 0 && !loading && !missingLoading && !missingError ? (
             <div style={{
               display: "flex", flexDirection: "column" as const, alignItems: "center",
               padding: "48px 24px", gap: "12px",

@@ -716,8 +716,9 @@ function tmdbIdFromGuids(guids?: Array<{ id?: string }>): number | null {
 // Local library items don't always carry a tmdb:// guid — older metadata agents
 // only store tvdb/imdb ids. When the direct lookup misses, resolve via Plex's
 // metadata provider using the item's plex:// guid (the same path Discover uses),
-// so Seerr season requests still work. Cached per ratingKey (incl. misses).
-const tmdbIdCache = new LruMap<string, number | null>(2_000);
+// so Seerr season requests still work. Cache successes only: a provider outage
+// must not disable season requests for the rest of the server's lifetime.
+const tmdbIdCache = new LruMap<string, number>(2_000);
 
 async function resolveTmdbId(m: PlexMetadataItem): Promise<number | null> {
   const direct = tmdbIdFromGuids(m.Guid);
@@ -734,7 +735,7 @@ async function resolveTmdbId(m: PlexMetadataItem): Promise<number | null> {
     const pm = await fetchDiscoverMeta(providerId);
     resolved = pm ? tmdbIdFromGuids(pm.Guid) : null;
   }
-  if (key) tmdbIdCache.set(key, resolved);
+  if (key && resolved != null) tmdbIdCache.set(key, resolved);
   return resolved;
 }
 
@@ -935,7 +936,11 @@ export async function buildMeta(ratingKey: string): Promise<Record<string, unkno
   if (hit && Date.now() - hit.at < META_CACHE_TTL_MS) return hit.payload;
 
   const payload = await buildMetaUncached(ratingKey);
-  if (payload) metaCache.set(ratingKey, { payload, at: Date.now() });
+  // An incomplete show must also bypass this outer cache, or a failed ID
+  // lookup would still hide requestable seasons for an hour.
+  if (payload && !(payload.type === "show" && payload.tmdbId == null)) {
+    metaCache.set(ratingKey, { payload, at: Date.now() });
+  }
   return payload;
 }
 

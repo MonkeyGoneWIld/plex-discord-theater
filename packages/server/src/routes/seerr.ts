@@ -135,7 +135,8 @@ router.get("/tv/:tmdbId", async (req: Request, res: Response) => {
   try {
     const r = await seerrFetch(cfg, `/tv/${tmdbId}`);
     if (!r || !r.ok) {
-      res.json({ configured: true, status: null, seasons: [] });
+      console.warn("[Seerr] tv lookup failed:", tmdbId, r?.status ?? "authentication failed");
+      res.status(502).json({ error: "Failed to load seasons from Seerr" });
       return;
     }
     const data = (await r.json()) as {

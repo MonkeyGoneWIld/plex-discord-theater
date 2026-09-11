@@ -1,6 +1,6 @@
 {
   "name": "plex-discord-theater",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "A Discord Activity that lets you browse your Plex library and watch movies and TV shows together in a voice channel with synchronized playback.",
   "private": true,
   "license": "GPL-3.0",

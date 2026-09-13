@@ -417,6 +417,8 @@ interface PlayerProps {
   isHost: boolean;
   /** Our own Discord user id — lets the people panel label and skip ourselves. */
   selfUserId?: string | null;
+  sharePresenceDetails: boolean;
+  onSharePresenceDetails: (share: boolean) => void;
   subtitles: boolean;
   /** Seconds to start at, from the initiating host's personal history. Consumed once, on mount:
    *  a later item (queue advance, next episode) starts from the beginning. */
@@ -440,7 +442,7 @@ interface PlayerProps {
   onPlayNext?: (item: QueueItem) => void;
 }
 
-export function Player({ item, isHost, selfUserId = null, subtitles, resumePosition, mediaIndex, audioStreamId, subtitleStreamId, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext }: PlayerProps) {
+export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, onSharePresenceDetails, subtitles, resumePosition, mediaIndex, audioStreamId, subtitleStreamId, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext }: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -4179,6 +4181,8 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
           participants={syncState.participants}
           selfUserId={selfUserId}
           isHost={isHost}
+          sharePresenceDetails={sharePresenceDetails}
+          onSharePresenceDetails={onSharePresenceDetails}
           onPromoteHost={(uid) => {
             // Ownership of a *stream* is no longer tied to the host role, so a
             // handover doesn't release one — the outgoing host may well be the

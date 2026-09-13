@@ -1,5 +1,8 @@
 # Plex Discord Theater
 
+For viewer-aware qBittorrent upload limits and Discord pause detection, see the
+[qbt-manager integration setup](docs/qbt-manager-integration.md).
+
 A Discord Activity for synchronized watch parties from a Plex Media Server. One
 person hosts, playback stays in lockstep for everyone in the voice channel, and
 each viewer can independently select audio tracks and subtitles.

@@ -2877,7 +2877,7 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     // because it is the pause the room most likely missed — it is the one that
     // happened while the socket was down.
     if (video.paused) syncActionsRef.current?.sendPause(video.currentTime);
-    else syncActionsRef.current?.sendHeartbeat(video.currentTime, true);
+    else syncActionsRef.current?.sendResume(video.currentTime);
   }, [syncState?.stateSeq]);
 
   /**
@@ -2930,6 +2930,27 @@ export function Player({ item, isHost, selfUserId = null, subtitles, resumePosit
     const held = setTimeout(() => setRestartingTo(null), 20_000);
     return () => { clearTimeout(badge); clearTimeout(held); };
   }, [syncState?.seekSeq, canControl]);
+
+  // A received revision is acknowledged only after the element agrees. This
+  // runs after command application, preventing a queued host heartbeat from
+  // undoing a cohost pause before React has applied it to the video.
+  useEffect(() => {
+    const video = videoRef.current;
+    const revision = syncState?.transportRevision;
+    if (!video || revision === undefined) return;
+    const acknowledge = () => {
+      if (video.paused === !syncState?.playing) {
+        syncActionsRef.current?.acknowledgeTransport(revision);
+      }
+    };
+    acknowledge();
+    video.addEventListener("playing", acknowledge);
+    video.addEventListener("pause", acknowledge);
+    return () => {
+      video.removeEventListener("playing", acknowledge);
+      video.removeEventListener("pause", acknowledge);
+    };
+  }, [syncState?.transportRevision, syncState?.playing, syncState?.commandSeq]);
 
   // Viewer: periodic drift correction on heartbeats (larger threshold than explicit commands).
   // Also fires on explicit command position updates, but the command-based effect above

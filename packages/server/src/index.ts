@@ -17,6 +17,7 @@ import seerrRoutes from "./routes/seerr.js";
 import historyRoutes from "./routes/history.js";
 import plexAccountRoutes from "./routes/plex-account.js";
 import logRoutes from "./routes/logs.js";
+import qbtManagerRoutes from "./routes/qbt-manager.js";
 import { requireAuth, closeSessionDb } from "./middleware/auth.js";
 import * as thumbCache from "./services/thumb-cache.js";
 import { startCacheWarmer, stopCacheWarmer } from "./services/cache-warmer.js";
@@ -152,6 +153,8 @@ const logLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Private service polling has its own authentication and rate budget.
+app.use("/api/integrations/qbt-manager", qbtManagerRoutes);
 app.use("/api/token", authLimiter);
 app.use("/api/register", authLimiter);
 app.use("/api/plex/hls/seg", hlsLimiter);

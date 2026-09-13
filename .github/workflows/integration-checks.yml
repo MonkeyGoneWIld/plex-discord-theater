@@ -1,0 +1,23 @@
+name: Integration checks
+on:
+  push:
+    branches: [feature/qbt-manager-integration]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx tsc --noEmit -p packages/client
+      - run: npm test
+        env:
+          DATA_DIR: ${{ runner.temp }}/theater-tests

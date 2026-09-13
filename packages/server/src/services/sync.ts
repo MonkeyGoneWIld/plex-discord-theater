@@ -247,6 +247,10 @@ interface RoomState {
    */
   positionConfirmed: boolean;
   updatedAt: number;
+  transportRevision: number;
+  transportChangedAt: number;
+  hostHeartbeatAt: number | null;
+  awaitingHostTransport: boolean;
   hlsSessionId: string | null;
   /**
    * The offset the current transcode was started at.
@@ -297,6 +301,41 @@ interface Room {
 const MAX_CO_HOSTS = 50;
 
 const rooms = new Map<string, Room>();
+
+/** Transport age never advances on position-only heartbeats. */
+function setTransport(room: Room, playing: boolean): void {
+  if (room.state.playing !== playing) {
+    room.state.transportRevision++;
+    room.state.transportChangedAt = performance.now();
+    console.debug("[QbtIntegration] transport", {
+      revision: room.state.transportRevision, playing,
+    });
+  }
+  room.state.playing = playing;
+}
+
+/** Full private snapshot. A participant must have an open player and live socket. */
+export function getQbtManagerStreams() {
+  const now = performance.now();
+  return [...rooms].flatMap(([roomId, room]) => [...room.state.variants.values()]
+    .filter((variant) => variant.hlsSessionId && room.state.ratingKey)
+    .map((variant) => ({
+      room_id: roomId,
+      variant_id: variant.key,
+      hls_session_id: variant.hlsSessionId!,
+      plex_transcode_key: getPlexTranscodeKey(variant.hlsSessionId!) ?? null,
+      rating_key: room.state.ratingKey!,
+      state: room.state.playing ? "playing" : "paused",
+      state_revision: room.state.transportRevision,
+      state_age_seconds: Math.max(0, now - room.state.transportChangedAt) / 1000,
+      viewer_count: new Set([...room.clients].filter((client) =>
+        client.ws.readyState === WebSocket.OPEN && client.isWatching && client.variantKey === variant.key
+      ).map((client) => client.userId)).size,
+      host_heartbeat_age_seconds: room.state.hostHeartbeatAt === null ? null :
+        Math.max(0, now - room.state.hostHeartbeatAt) / 1000,
+    })));
+}
+
 
 /**
  * Keep-alive timers, one per *stream* rather than one per room.
@@ -411,6 +450,10 @@ function getOrCreateRoom(instanceId: string): Room {
         position: 0,
         positionConfirmed: false,
         updatedAt: Date.now(),
+        transportRevision: 0,
+        transportChangedAt: performance.now(),
+        hostHeartbeatAt: null,
+        awaitingHostTransport: false,
         hlsSessionId: null,
         sessionOffset: 0,
         browseContext: null,
@@ -1025,6 +1068,7 @@ export function attachWebSocketServer(server: Server): void {
           hlsSessionId: room.state.hlsSessionId,
           sessionOffset: room.state.sessionOffset,
           lastCommandAt: room.state.updatedAt,
+          transportRevision: room.state.transportRevision,
           browseContext: room.state.browseContext,
           queue: room.state.queue,
           hostUsername: hostClient?.username ?? null,
@@ -1338,7 +1382,7 @@ export function attachWebSocketServer(server: Server): void {
           // the film: the room went paused → playing on a seek nobody asked to
           // resume. Absent means playing, which is what every other sender of
           // this message means by it.
-          room.state.playing = msg.playing !== false;
+          setTransport(room, msg.playing !== false);
           // A restart of something the room is already watching must not move
           // the clock. `startPosition` is where the restarting client was when
           // it *began* loading, seconds ago — writing it back rewinds everyone
@@ -1405,6 +1449,7 @@ export function attachWebSocketServer(server: Server): void {
 
           broadcast(room, ws, {
             type: "play",
+            transportRevision: room.state.transportRevision,
             ratingKey: room.state.ratingKey,
             title: room.state.title,
             subtitles: room.state.subtitles,
@@ -1414,28 +1459,33 @@ export function attachWebSocketServer(server: Server): void {
             position: room.state.position,
             sessionOffset: room.state.sessionOffset,
           });
+          sendTo(ws, { type: "transport-state", playing: room.state.playing, transportRevision: room.state.transportRevision });
           // Everyone on the host's stream — which for a new title is everyone —
           // needs the session as well as the announcement.
           announceVariant(room, hostVariant);
           break;
         }
         case "pause": {
-          room.state.playing = false;
+          setTransport(room, false);
           room.state.position = positionForCommand(room, client, msg.position);
           // Only the host's pause carries an observed playhead; a co-host's is
           // served from the room's own clock and so confirms nothing.
           if (client.isHost) room.state.positionConfirmed = true;
           room.state.updatedAt = Date.now();
           persistProgress(room, undefined, true);
-          broadcast(room, ws, { type: "pause", position: room.state.position });
+          room.state.awaitingHostTransport = !client.isHost;
+          sendTo(ws, { type: "transport-state", playing: room.state.playing, transportRevision: room.state.transportRevision });
+          broadcast(room, ws, { type: "pause", position: room.state.position, transportRevision: room.state.transportRevision });
           break;
         }
         case "resume": {
-          room.state.playing = true;
+          setTransport(room, true);
           room.state.position = positionForCommand(room, client, msg.position);
           if (client.isHost) room.state.positionConfirmed = true;
           room.state.updatedAt = Date.now();
-          broadcast(room, ws, { type: "resume", position: room.state.position });
+          room.state.awaitingHostTransport = !client.isHost;
+          sendTo(ws, { type: "transport-state", playing: room.state.playing, transportRevision: room.state.transportRevision });
+          broadcast(room, ws, { type: "resume", position: room.state.position, transportRevision: room.state.transportRevision });
           break;
         }
         case "seek": {
@@ -1479,7 +1529,7 @@ export function attachWebSocketServer(server: Server): void {
           room.state.title = null;
           room.state.hlsSessionId = null;
           room.state.sessionOffset = 0;
-          room.state.playing = false;
+          setTransport(room, false);
           room.state.position = 0;
           room.state.updatedAt = Date.now();
           // The queue deliberately survives.
@@ -1500,6 +1550,22 @@ export function attachWebSocketServer(server: Server): void {
         }
         case "heartbeat": {
           if (!room.state.ratingKey) break;
+          room.state.hostHeartbeatAt = performance.now();
+          const playing = msg.playing !== false;
+          const hasRevision = Number.isSafeInteger(msg.transportRevision);
+          // Current clients can fence by revision. Legacy clients must first echo
+          // the accepted cohost state before another native state change is trusted.
+          if ((hasRevision && msg.transportRevision !== room.state.transportRevision) ||
+              (!hasRevision && room.state.awaitingHostTransport && playing !== room.state.playing)) {
+            console.debug("[QbtIntegration] ignored stale host heartbeat", {
+              room: roomId, expectedRevision: room.state.transportRevision,
+              receivedRevision: msg.transportRevision ?? null, playing,
+            });
+            sendTo(ws, { type: room.state.playing ? "resume" : "pause", position: room.state.position,
+              transportRevision: room.state.transportRevision });
+            break;
+          }
+          room.state.awaitingHostTransport = false;
           /**
            * The room's position is the host's playhead, in both directions.
            *
@@ -1541,12 +1607,14 @@ export function attachWebSocketServer(server: Server): void {
           }
           room.state.position = reported;
           room.state.positionConfirmed = true;
-          room.state.playing = msg.playing !== false;
+          setTransport(room, msg.playing !== false);
           room.state.updatedAt = Date.now();
+          sendTo(ws, { type: "transport-state", playing: room.state.playing, transportRevision: room.state.transportRevision });
           // Throttled inside the history service — this fires every 5s per room.
           persistProgress(room, undefined, false);
           broadcast(room, ws, {
             type: "heartbeat",
+            transportRevision: room.state.transportRevision,
             position: room.state.position,
             playing: room.state.playing,
             // Carry the "what's playing" snapshot so a viewer whose ratingKey
@@ -1869,7 +1937,7 @@ export function attachWebSocketServer(server: Server): void {
             session: disconnectedSessionId?.substring(0, 8) ?? "none",
             roomPosS: room.state.position,
           });
-          room.state.playing = false;
+          setTransport(room, false);
           room.state.hlsSessionId = null;
           room.state.sessionOffset = 0;
           // Every stream, not only the host's — anyone watching in another

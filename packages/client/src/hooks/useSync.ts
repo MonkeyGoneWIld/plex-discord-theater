@@ -79,6 +79,7 @@ export interface StreamVariant {
 }
 
 export interface SyncState {
+  transportRevision?: number;
   connected: boolean;
   ratingKey: string | null;
   title: string | null;
@@ -245,6 +246,7 @@ export interface SyncActions {
   sendSeek: (position: number) => void;
   sendStop: () => void;
   sendHeartbeat: (position: number, playing: boolean) => void;
+  acknowledgeTransport: (revision: number) => void;
   sendBrowse: (context: string) => void;
   sendQueueAdd: (item: QueueItem) => void;
   sendQueueRemove: (ratingKey: string) => void;
@@ -346,6 +348,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
 } {
   const [state, setState] = useState<SyncState>(INITIAL_STATE);
   const wsRef = useRef<WebSocket | null>(null);
+  const appliedTransportRevision = useRef<number | undefined>(undefined);
   const retryRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Bumped by retryConnection. It is a dependency of the connect effect, so a
@@ -473,14 +476,16 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           position: 0,
         }));
       },
+      acknowledgeTransport: (revision: number) => { appliedTransportRevision.current = revision; },
       sendHeartbeat: (position: number, playing: boolean) => {
-        send({ type: "heartbeat", position, playing });
+        send({ type: "heartbeat", position, playing, transportRevision: appliedTransportRevision.current });
         // Kept locally too. The server excludes a sender from its own
         // broadcast, and the host is the only client that heartbeats — so the
         // host's copy of the room's position stopped updating the moment it
         // took the role, and anything reading it got a number frozen minutes
         // ago. It is reporting the room's clock, so it may as well hold it.
         setState((prev) => {
+          if (prev.transportRevision !== undefined && prev.transportRevision !== appliedTransportRevision.current) return prev;
           // The same test viewers apply to the heartbeats they receive. It
           // matters here too: this is the number the host's own next rebuild
           // lands on, and a stalled host should come back where it stopped
@@ -538,6 +543,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       ws.addEventListener("open", () => {
         if (!active) return;
         retryRef.current = 0;
+        appliedTransportRevision.current = undefined;
         ws.send(
           JSON.stringify({
             type: "join",
@@ -559,7 +565,13 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           return;
         }
 
+        if (typeof msg.transportRevision === "number") {
+          setState((prev) => ({ ...prev, transportRevision: msg.transportRevision as number }));
+        }
         switch (msg.type) {
+          case "transport-state":
+            setState((prev) => ({ ...prev, playing: Boolean(msg.playing) }));
+            break;
           case "state":
             setState((prev) => ({
               ...prev,

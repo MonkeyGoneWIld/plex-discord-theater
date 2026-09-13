@@ -94,6 +94,7 @@ services:
       # Guards the "stop every transcode" endpoint. Without it that endpoint
       # only answers requests originating on this machine.
       - ADMIN_SECRET=${ADMIN_SECRET}
+      - QBT_MANAGER_API_KEY=${QBT_MANAGER_API_KEY:-}
 
     volumes:
       # SQLite (sessions, watch history, linked Plex accounts, thumbnail cache)

@@ -170,15 +170,23 @@ async function artwork(cacheKey: string, path: string, signal: AbortSignal): Pro
       url: path,
     }, signal, true);
     if (!image || !isRaster(image)) return null;
-    // Plex fits within 512×512 but returns a rectangular image. Discord then
-    // cover-crops that rectangle. Publish a padded square so the full poster
-    // survives even when Discord uses object-fit: cover.
+    // Plex returns a rectangle that Discord cover-crops. Keep the full poster
+    // sharp over a dimmed, blurred copy that fills Discord's square image slot.
     signal.throwIfAborted();
-    const square = await sharp(image.data, { limitInputPixels: 1024 * 1024 })
+    const poster = sharp(image.data, { limitInputPixels: 1024 * 1024 })
       .autoOrient()
-      .resize(512, 512, { fit: "contain", background: "#1e1f22" })
+      .timeout({ seconds: 2 });
+    const foreground = await poster.clone()
+      .resize(512, 512, { fit: "contain", background: { r: 0, g: 0, b: 0, alpha: 0 } })
       .png()
-      .timeout({ seconds: 2 })
+      .toBuffer();
+    signal.throwIfAborted();
+    const square = await poster
+      .resize(512, 512, { fit: "cover" })
+      .blur(24)
+      .modulate({ brightness: 0.68, saturation: 0.8 })
+      .composite([{ input: foreground }])
+      .png()
       .toBuffer();
     signal.throwIfAborted();
     if (square.length > MAX_IMAGE_BYTES) return null;
@@ -219,7 +227,7 @@ async function publish(ratingKey: string): Promise<string | null> {
   try {
     const path = await resolvePoster(ratingKey, controller.signal);
     if (path) {
-      const cacheKey = `presence:v2:square512:${path}`;
+      const cacheKey = `presence:v3:blurred512:${path}`;
       const image = await artwork(cacheKey, path, controller.signal);
       if (image) {
         const id = randomBytes(24).toString("hex");

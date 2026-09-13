@@ -18,6 +18,8 @@ process.env.PLEX_TOKEN = "private-plex-token";
 const pixels = Buffer.alloc(256 * 512 * 3);
 for (let offset = 0; offset < pixels.length; offset += 3) {
   const row = Math.floor(offset / (256 * 3));
+  // A hard black stripe distinguishes a blurred backdrop from a sharp copy.
+  if (row >= 248 && row < 264) continue;
   pixels[offset + (row < 64 ? 0 : row >= 448 ? 2 : 1)] = 255;
 }
 const png = await sharp(pixels, { raw: { width: 256, height: 512, channels: 3 } }).png().toBuffer();
@@ -76,6 +78,9 @@ try {
   assert.equal(upstream.length, 0, "unauthenticated publication never reaches Plex");
   assert.equal((await publish("../../identity")).status, 400);
   assert.equal(upstream.length, 0, "rating keys cannot inject paths");
+  // Existing dark-padded cache entries must not survive the artwork cutover.
+  thumbs.set("presence:v2:square512:/library/metadata/1/thumb/1", "image/png",
+    await sharp(png).resize(512, 512, { fit: "contain", background: "#1e1f22" }).png().toBuffer());
   for (const ratingKey of ["1", "2", "3"]) {
     const result = await publish(ratingKey);
     assert.equal(result.status, 200);
@@ -95,8 +100,15 @@ try {
     const mid = Math.floor(decoded.info.width / 2);
     assert.ok(pixel(mid, 16)[0] > 220 && pixel(mid, 16)[1] < 30, "top of portrait survives");
     assert.ok(pixel(mid, decoded.info.height - 17)[2] > 220, "bottom of portrait survives");
-    assert.ok(pixel(mid, mid)[1] > 220, "poster centre survives");
-    assert.ok(pixel(16, mid).every((channel) => channel < 40), "side padding preserves the portrait aspect ratio");
+    assert.ok(pixel(mid, mid - 32)[1] > 220, "poster colours remain undimmed");
+    assert.ok(pixel(mid, mid).every((channel) => channel < 30), "foreground stripe stays sharp and black");
+    for (const side of [16, decoded.info.width - 17]) {
+      const background = pixel(side, mid);
+      assert.ok(background[1] > 70 && background[1] > background[0] + 40,
+        "blurred background blends the black stripe with the poster's green");
+      assert.ok(pixel(side, mid - 100)[1] < pixel(mid, mid - 32)[1] - 30,
+        "background is dimmer than the full-strength foreground");
+    }
     assert.equal(upstream.length, count, "public GET only reads cached bytes");
   }
   const images = upstream.filter((url) => url.pathname === "/photo/:/transcode").map((url) => url.searchParams.get("url")!);

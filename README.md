@@ -121,8 +121,9 @@ must be reachable by Discord's image proxy without an extra login:
 - Unauthenticated `GET /api/presence/artwork/:opaqueId` serves only the published
   cached image. It cannot browse Plex, fetch arbitrary URLs, or expose tokens.
   JPEG, PNG, and WebP inputs are validated and fitted inside a 512×512 square
-  with dark padding, then published as PNG. This keeps the entire poster visible
-  in Discord's square image slot without stretching it. Images are capped at 2 MiB.
+  over a dimmed, blurred copy of the same poster, then published as PNG. The
+  foreground stays sharp and fully visible without stretching or solid side
+  bars. Images are capped at 2 MiB.
 - Links expire after 24 hours, potentially earlier after cache eviction or a
   server restart. Public reads do not extend their lifetime.
 

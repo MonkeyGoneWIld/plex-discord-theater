@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useLayoutEffect, useRef, lazy, Suspense } from "react";
 import { useDiscord } from "./hooks/useDiscord";
-import { useSync } from "./hooks/useSync";
+import { useSync, roomPositionNow } from "./hooks/useSync";
 import { Library } from "./components/Library";
 import { MovieDetail } from "./components/MovieDetail";
 import { ShowDetail } from "./components/ShowDetail";
@@ -12,7 +12,7 @@ import { PeoplePanel } from "./components/PeoplePanel";
 import { InviteButton } from "./components/InviteButton";
 import { PlexAccountButton } from "./components/PlexAccountButton";
 import { formatMediaTitle } from "./lib/format";
-import { authUrl, fetchMeta, invalidateMeta, setStreams, versionOf } from "./lib/api";
+import { apiPost, authUrl, fetchMeta, invalidateMeta, setStreams, versionOf } from "./lib/api";
 import { loadAudioPref, loadSubtitlePref, matchAudioTrack, matchSubtitleTrack } from "./lib/trackPrefs";
 import { useMediaQuery, MOBILE_LANDSCAPE_QUERY, NARROW_QUERY, PHONE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
@@ -98,6 +98,15 @@ export function App() {
     useDiscord();
   const [viewStack, setViewStack] = useState<View[]>([{ kind: "library" }]);
   const view = viewStack[viewStack.length - 1];
+  const [sharePresenceDetails, setSharePresenceDetails] = useState(() => {
+    try { return localStorage.getItem("plex-presence-details") !== "false"; }
+    catch { return true; }
+  });
+  const handleSharePresenceDetails = useCallback((share: boolean) => {
+    setSharePresenceDetails(share);
+    try { localStorage.setItem("plex-presence-details", String(share)); }
+    catch { /* The preference still applies for this session. */ }
+  }, []);
 
   const { state: syncState, actions: syncActions } = useSync({
     instanceId,
@@ -128,13 +137,6 @@ export function App() {
     }
   }, [syncState.isHost]);
 
-  // Keep Discord's member list honest about what this person is doing.
-  // Sourced from room state rather than the local view, so every participant
-  // shows the same title — which is what makes it read as a shared session in
-  // the member list rather than one person watching something.
-  useEffect(() => {
-    setPresence(syncState.ratingKey ? syncState.title : null);
-  }, [syncState.ratingKey, syncState.title, setPresence]);
 
   // Warm the player chunk in the background as soon as the app is idle. Nobody
   // opens this activity without eventually playing something, so the only
@@ -475,6 +477,7 @@ export function App() {
           parentIndex: meta.parentIndex,
           index: meta.index,
           year: meta.year,
+          duration: meta.duration,
           parentRatingKey: meta.parentRatingKey,
           grandparentRatingKey: meta.grandparentRatingKey,
         });
@@ -482,6 +485,46 @@ export function App() {
       .catch(() => { if (!cancelled) setNowPlayingMeta(null); });
     return () => { cancelled = true; };
   }, [syncState.ratingKey]);
+
+  // Artwork publication is authenticated; the returned image URL is deliberately
+  // public so Discord can fetch it without receiving a user's session token.
+  const [presenceArtwork, setPresenceArtwork] = useState<{ ratingKey: string; url: string | null } | null>(null);
+  useEffect(() => {
+    const ratingKey = syncState.ratingKey;
+    setPresenceArtwork(null);
+    if (!isReady || !sharePresenceDetails || !ratingKey) return;
+    let cancelled = false;
+    apiPost<{ url: string | null }>("/api/presence/artwork", { ratingKey })
+      .then(({ url }) => {
+        if (!cancelled) setPresenceArtwork({ ratingKey, url });
+      })
+      .catch(() => { /* Artwork is optional; playback and text presence continue. */ });
+    return () => { cancelled = true; };
+  }, [isReady, sharePresenceDetails, syncState.ratingKey]);
+
+  // Presence describes the shared room, even while this user browses locally.
+  // A new rating key must never inherit the preceding title's artwork/duration.
+  useEffect(() => {
+    const meta = nowPlayingMeta?.ratingKey === syncState.ratingKey ? nowPlayingMeta : null;
+    setPresence({
+      ratingKey: syncState.ratingKey,
+      title: meta ? formatMediaTitle(meta) : syncState.title,
+      playing: syncState.playing,
+      position: roomPositionNow(syncState),
+      durationMs: meta?.duration ?? null,
+      timelineVersion: syncState.commandSeq,
+      participantCount: syncState.participants.length,
+      connected: syncState.connected && !syncState.hostDisconnected,
+      shareDetails: sharePresenceDetails,
+      artworkUrl: sharePresenceDetails && presenceArtwork?.ratingKey === syncState.ratingKey
+        ? presenceArtwork.url : null,
+    });
+  }, [
+    isReady, syncState.ratingKey, syncState.title, syncState.playing,
+    syncState.position, syncState.positionAt, syncState.commandSeq,
+    syncState.participants.length, syncState.connected, syncState.hostDisconnected,
+    nowPlayingMeta, presenceArtwork, sharePresenceDetails, setPresence,
+  ]);
 
   /**
    * Swap the synthesized item for the real one once metadata arrives.
@@ -905,6 +948,8 @@ export function App() {
           participants={syncState.participants}
           selfUserId={userId}
           isHost={effectiveIsHost}
+          sharePresenceDetails={sharePresenceDetails}
+          onSharePresenceDetails={handleSharePresenceDetails}
           onPromoteHost={(uid) => {
             syncActions.sendPromoteHost(uid);
             setShowPeoplePanel(false);
@@ -1111,6 +1156,8 @@ export function App() {
             item={view.item}
             isHost={effectiveIsHost}
             selfUserId={userId}
+            sharePresenceDetails={sharePresenceDetails}
+            onSharePresenceDetails={handleSharePresenceDetails}
             subtitles={view.subtitles}
             resumePosition={view.resumePosition}
             mediaIndex={view.mediaIndex}

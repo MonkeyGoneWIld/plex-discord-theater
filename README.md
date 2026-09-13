@@ -31,7 +31,8 @@ The Activity provides a full Plex browser, including:
 - Viewer suggestions and host/co-host role management
 - Optional per-user sync of progress, watched status, and Universal Watchlist
 
-Discord presence and Activity invites display the currently playing title.
+Discord Rich Presence shows the room's current title, playback status, artwork,
+and progress. Discord's native Activity invitation/launch card is unchanged.
 
 ## Features
 
@@ -91,6 +92,43 @@ tracks are available. Subtitles that are out of sync can be adjusted in the play
 > Skip buttons and seek previews require Plex to have generated the underlying
 > data. Enable **Detect intros and credits** and **Generate video preview
 > thumbnails** under **Library → Edit → Advanced** in Plex.
+
+### Discord Rich Presence
+
+Profile presence uses **Watching**, with the movie/year or show/episode in its
+details. The state line also retains the title alongside playback status and
+room count, preserving media context for consumers that read only state.
+This can repeat the title on profile layouts that display both fields.
+It describes the shared room even while you browse locally; the count is room
+membership, not a claim that every participant's player is running.
+
+When duration is known, playing sessions send start/end timestamps for Discord's
+native progress display. Discord controls each card's layout; the app cannot
+force a compact popover to use the full profile layout. Pause removes the
+running timer; seeks and resume update it. Missing artwork or denied
+`rpc.activities.write` permission never blocks playback. Transient presence
+failures receive bounded retries rather than disabling presence immediately.
+
+Open **People** in the browsing header or player and turn off **Show media
+details on Discord** for generic presence without the title, artwork, or progress.
+The choice is saved on this device and applies only to your own presence.
+Previously fetched artwork may remain in Discord's cache.
+
+Artwork uses the public HTTPS origin configured in `REDIRECT_URI`. That origin
+must be reachable by Discord's image proxy without an extra login:
+
+- Authenticated `POST /api/presence/artwork` with `{"ratingKey":"123"}` publishes
+  a movie/show poster and returns `{"url":"https://…/api/presence/artwork/…"}`.
+  Episodes use their show's poster. Missing or unavailable artwork returns
+  `{"url":null}`.
+- Unauthenticated `GET /api/presence/artwork/:opaqueId` serves only the published
+  cached image. It cannot browse Plex, fetch arbitrary URLs, or expose tokens.
+  JPEG, PNG, and WebP inputs are validated and fitted inside a 512×512 square
+  over a dimmed, blurred copy of the same poster, then published as PNG. The
+  foreground stays sharp and fully visible without stretching or solid side
+  bars. Images are capped at 2 MiB.
+- Links expire after 24 hours, potentially earlier after cache eviction or a
+  server restart. Public reads do not extend their lifetime.
 
 ### Mobile support
 

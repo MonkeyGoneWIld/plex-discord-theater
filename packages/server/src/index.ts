@@ -18,6 +18,7 @@ import historyRoutes from "./routes/history.js";
 import plexAccountRoutes from "./routes/plex-account.js";
 import logRoutes from "./routes/logs.js";
 import qbtManagerRoutes from "./routes/qbt-manager.js";
+import presenceRoutes from "./routes/presence.js";
 import { requireAuth, closeSessionDb } from "./middleware/auth.js";
 import * as thumbCache from "./services/thumb-cache.js";
 import { startCacheWarmer, stopCacheWarmer } from "./services/cache-warmer.js";
@@ -168,6 +169,8 @@ app.use("/api", (req, res, next) => {
     req.path.startsWith("/plex/hls/ping") ||
     req.path.startsWith("/plex/thumb") ||
     req.path.startsWith("/logs") ||
+    req.path === "/presence/artwork" ||
+    req.path.startsWith("/presence/artwork/") ||
     req.path === "/token" ||
     req.path === "/register"
   ) {
@@ -213,6 +216,7 @@ app.get("/api/health", async (_req, res) => {
 });
 
 app.use("/api", discordRoutes);
+app.use("/api/presence", presenceRoutes);
 app.use("/api/plex", requireAuth, plexRoutes);
 app.use("/api/seerr", requireAuth, seerrRoutes);
 app.use("/api/history", requireAuth, historyRoutes);

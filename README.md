@@ -1,7 +1,11 @@
 # Plex Discord Theater
 
+Current release: **v1.0.3**. Images are published as
+`ghcr.io/monkeygonewild/plex-discord-theater:latest` and
+`ghcr.io/monkeygonewild/plex-discord-theater:1.0.3`.
+
 For viewer-aware qBittorrent upload limits and Discord pause detection, see the
-[qbt-manager integration setup](docs/qbt-manager-integration.md).
+[qBittorrent Manager integration guide](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/qBittorrent-Manager-API).
 
 A Discord Activity for synchronized watch parties from a Plex Media Server. One
 person hosts, playback stays in lockstep for everyone in the voice channel, and

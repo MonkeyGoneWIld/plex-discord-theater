@@ -11,6 +11,7 @@ const input: PresenceInput = {
   artworkUrl: "https://theater.example/api/presence/artwork/opaque",
 };
 const first = buildPresence(input, now);
+assert.ok(first.activity.state.includes(input.title!), "state-only consumers retain the current media title");
 assert.deepEqual(first.activity.timestamps, { start: now - 60_000, end: now + 540_000 });
 const heartbeat = buildPresence({ ...input, position: 65.3 }, now + 5_000, first);
 assert.deepEqual(heartbeat.activity.timestamps, first.activity.timestamps, "heartbeat jitter does not shift the bar");
@@ -20,6 +21,7 @@ const replacement = buildPresence({ ...input, ratingKey: "2", position: 60.5 }, 
 assert.equal(replacement.activity.timestamps!.start, now - 60_500, "same-title media changes reset the anchor");
 const paused = buildPresence({ ...input, playing: false }, now + 5_000, first);
 assert.equal(paused.activity.timestamps, null, "pausing clears the running bar");
+assert.ok(paused.activity.state.includes(input.title!), "pausing must not remove the title from state");
 const resumed = buildPresence(input, now + 10_000, paused);
 assert.equal(resumed.activity.timestamps!.start, now - 50_000, "resuming excludes paused wall time");
 for (const change of [{ shareDetails: false }, { connected: false }, { ratingKey: null }]) {

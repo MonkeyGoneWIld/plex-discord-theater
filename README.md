@@ -93,7 +93,9 @@ tracks are available. Subtitles that are out of sync can be adjusted in the play
 ### Discord Rich Presence
 
 Profile presence uses **Watching**, with the movie/year or show/episode in its
-details and the playback state plus number of people in the room below it.
+details. The state line also retains the title alongside playback status and
+room count, preserving media context for consumers that read only state.
+This can repeat the title on profile layouts that display both fields.
 It describes the shared room even while you browse locally; the count is room
 membership, not a claim that every participant's player is running.
 

@@ -65,11 +65,15 @@ export function buildPresence(
       ? "Browsing the library"
       : !input.shareDetails
         ? "In a watch party"
-        : input.playing ? "Playing" : "Paused";
+        : showMedia
+          ? `${input.playing ? "Watching" : "Paused"} ${input.title}`
+          : input.playing ? "Playing" : "Paused";
   const count = Number.isFinite(input.participantCount)
     ? Math.max(0, Math.floor(input.participantCount))
     : 0;
   // A disconnected client's last room roster is no longer authoritative.
+  // Keep the title in state as well as details: this was the pre-rich-presence
+  // contract, and consumers that read only state otherwise lose media context.
   const state = input.connected && count > 0
     ? `${status} · ${count} ${count === 1 ? "person" : "people"} in room`
     : status;

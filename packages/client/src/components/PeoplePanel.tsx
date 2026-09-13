@@ -17,6 +17,8 @@ interface PeoplePanelProps {
    *  Ignored on a phone — see the invite row below. */
   onInvite?: () => Promise<InviteResult>;
   onClose: () => void;
+  sharePresenceDetails: boolean;
+  onSharePresenceDetails: (share: boolean) => void;
 }
 
 function roleLabel(p: Participant): string | null {
@@ -33,6 +35,8 @@ export function PeoplePanel({
   onSetCoHost,
   onInvite,
   onClose,
+  sharePresenceDetails,
+  onSharePresenceDetails,
 }: PeoplePanelProps) {
   // Handing over the host role loses you all control, so it takes two taps.
   const [confirmingPromote, setConfirmingPromote] = useState<string | null>(null);
@@ -119,6 +123,22 @@ export function PeoplePanel({
           })}
         </div>
 
+        <label style={styles.presencePreference}>
+          <input
+            type="checkbox"
+            checked={sharePresenceDetails}
+            onChange={(event) => onSharePresenceDetails(event.target.checked)}
+            style={{ accentColor: "#e5a00d", marginTop: "3px" }}
+          />
+          <span>
+            <span style={styles.presenceLabel}>Show media details on Discord</span>
+            <span style={styles.presenceHelp}>
+              Share this room's title, artwork and progress on your profile.
+              Turn off for a generic watching status. Artwork already fetched by Discord may remain cached.
+            </span>
+          </span>
+        </label>
+
         {isHost && (
           <p style={styles.hint}>
             Co-hosts can play, pause and seek. Making someone host hands over full
@@ -160,5 +180,8 @@ const styles: Record<string, React.CSSProperties> = {
   promoteBtn: { padding: "4px 8px", borderRadius: "6px", border: "1px solid rgba(229,160,13,0.4)", background: "transparent", color: "#e5a00d", fontSize: "11px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
   confirmBtn: { padding: "4px 8px", borderRadius: "6px", border: "none", background: "#e5a00d", color: "#000", fontSize: "11px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
   inviteRow: { padding: "10px 16px 12px", borderBottom: "1px solid rgba(255,255,255,0.06)" },
+  presencePreference: { display: "flex", alignItems: "flex-start", gap: "10px", padding: "14px 16px", borderTop: "1px solid rgba(255,255,255,0.06)", cursor: "pointer", flexShrink: 0 },
+  presenceLabel: { display: "block", color: "#ddd", fontSize: "12px", fontWeight: 600 },
+  presenceHelp: { display: "block", color: "#888", fontSize: "11px", lineHeight: 1.5, marginTop: "5px" },
   hint: { color: "#666", fontSize: "11px", lineHeight: 1.5, padding: "12px 16px 16px", borderTop: "1px solid rgba(255,255,255,0.06)" },
 };

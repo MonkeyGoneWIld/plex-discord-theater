@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { DiscordSDK } from "@discord/embedded-app-sdk";
 import { apiPost, setSessionToken } from "../lib/api";
 import { initClientLogging, logEvent } from "../lib/log";
+import { createPresenceSender } from "../lib/presence";
+import type { PresenceInput, PresenceSender } from "../lib/presence";
 
 interface DiscordState {
   isReady: boolean;
@@ -35,16 +37,8 @@ interface DiscordState {
   openInvite: () => Promise<InviteResult>;
   /** Open a URL outside Discord's embedded Activity webview. */
   openExternalLink: (url: string) => Promise<boolean>;
-  /**
-   * Update what Discord shows this user as doing.
-   *
-   * Pass the title while something is playing, or null while browsing. Discord
-   * renders it under the activity name in the member list and on the profile,
-   * which for a watch-together activity is most of the point — and it was set
-   * once at startup and then never again, so it said "Browsing the library" for
-   * the whole session including two hours into a film.
-   */
-  setPresence: (nowPlaying: string | null) => void;
+  /** Update this user's optional, room-centric rich presence. */
+  setPresence: (input: PresenceInput) => void;
 }
 
 /**
@@ -72,6 +66,19 @@ const CLIENT_ID =
   (globalThis as { __DISCORD_CLIENT_ID__?: string }).__DISCORD_CLIENT_ID__ ||
   (import.meta.env.VITE_DISCORD_CLIENT_ID as string);
 
+const BROWSING_PRESENCE: PresenceInput = {
+  ratingKey: null,
+  title: null,
+  playing: false,
+  position: 0,
+  durationMs: null,
+  timelineVersion: 0,
+  participantCount: 0,
+  connected: true,
+  shareDetails: false,
+  artworkUrl: null,
+};
+
 export function useDiscord(): DiscordState {
   const [state, setState] = useState<
     Omit<DiscordState, "openInvite" | "openExternalLink" | "setPresence" | "canInvite"> & { canInvite: boolean }
@@ -89,49 +96,18 @@ export function useDiscord(): DiscordState {
   // otherwise scoped to the effect below.
   const sdkRef = useRef<DiscordSDK | null>(null);
 
-  // Last presence we sent, so repeated renders with the same title don't turn
-  // into a stream of RPC calls.
-  const presenceRef = useRef<string | null>(null);
+  const presenceInputRef = useRef<PresenceInput | null>(null);
+  const presenceSenderRef = useRef<PresenceSender | null>(null);
   const presenceReadyRef = useRef(false);
+  const mountedRef = useRef(false);
   /** Whether the authorize call that ran actually included the presence scope. */
   const presenceAllowedRef = useRef(false);
-  /** Set after the first rejection, so a scope Discord won't grant produces one
-   *  line rather than one per title change for the rest of the session. */
-  const presenceDeadRef = useRef(false);
 
-  const setPresence = useCallback((nowPlaying: string | null): void => {
-    const sdk = sdkRef.current;
-    if (!sdk || !presenceReadyRef.current) return;
-    if (!presenceAllowedRef.current || presenceDeadRef.current) return;
-    const state = nowPlaying ? `Watching ${nowPlaying}` : "Browsing the library";
-    if (presenceRef.current === state) return;
-    presenceRef.current = state;
-    // type 3 = Watching (same enum as bot Gateway presences).
-    sdk.commands
-      .setActivity({
-        activity: {
-          type: 3,
-          details: "Watch Together",
-          // Discord caps this at 128 characters and rejects the whole payload
-          // over it, which a long "Show — S1E1 · Episode Title" can reach.
-          state: state.slice(0, 128),
-        },
-      })
-      .catch((err: unknown) => {
-        // Presence is decoration; a rejection must never surface to the user.
-        // Latched, because the realistic cause is a scope this app will never
-        // be granted, and repeating that on every title change buries the log
-        // in a line that says the same thing each time. `[object Object]` is
-        // what the old formatting produced for Discord's error shape, which
-        // meant the one useful detail — the code — never made it in.
-        presenceDeadRef.current = true;
-        logEvent("Discord", "presence disabled after rejection", {
-          reason:
-            err instanceof Error
-              ? err.message
-              : (() => { try { return JSON.stringify(err); } catch { return String(err); } })(),
-        });
-      });
+  const setPresence = useCallback((input: PresenceInput): void => {
+    // App input can arrive while authorization is pending. Never overwrite it
+    // with the generic startup presence once the SDK becomes ready.
+    presenceInputRef.current = input;
+    presenceSenderRef.current?.update(input);
   }, []);
 
   const openInvite = useCallback(async (): Promise<InviteResult> => {
@@ -169,7 +145,32 @@ export function useDiscord(): DiscordState {
   }, []);
 
   useEffect(() => {
-    if (initRef.current) return;
+    mountedRef.current = true;
+    const startPresence = () => {
+      const sdk = sdkRef.current;
+      if (!mountedRef.current || !sdk || !presenceReadyRef.current ||
+          !presenceAllowedRef.current || presenceSenderRef.current) return;
+      presenceSenderRef.current = createPresenceSender(
+        (payload) => sdk.commands.setActivity(payload),
+        (failure) => {
+          // Discord error messages may echo a rejected payload. Log only the
+          // classified error code, never titles, artwork URLs, or timestamps.
+          logEvent("Discord", "presence delivery stopped", { ...failure });
+        },
+      );
+      presenceSenderRef.current.update(presenceInputRef.current ?? BROWSING_PRESENCE);
+    };
+    const cleanup = () => {
+      mountedRef.current = false;
+      presenceSenderRef.current?.dispose();
+      presenceSenderRef.current = null;
+    };
+    if (initRef.current) {
+      // Strict Mode replays effects without replaying authorization. Recreate
+      // only the disposable sender if initialization has already finished.
+      startPresence();
+      return cleanup;
+    }
     initRef.current = true;
 
     const init = async () => {
@@ -182,11 +183,8 @@ export function useDiscord(): DiscordState {
         // identify — who the user is, bound to their session server-side.
         // guilds  — which servers they are in, checked against
         //           ALLOWED_GUILD_IDS at /register (see routes/discord.ts).
-        // rpc.activities.write — what setActivity needs. Without it every
-        //           presence update is rejected with 4006 "Not authenticated or
-        //           invalid scope", which is what was happening on every client
-        //           in production: the member list said "Browsing the library"
-        //           for the whole session, two hours into a film.
+        // rpc.activities.write — required by setActivity. RPC error 4006 is
+        // INVALID_PERMISSIONS (also returned before authentication).
         //
         // Requested as an extra rather than assumed, because an app that hasn't
         // been granted it would fail `authorize` outright — and a broken launch
@@ -258,12 +256,10 @@ export function useDiscord(): DiscordState {
           channelId: sdk.channelId ?? "none",
         });
 
-        // Rich Presence: without this, Discord shows members as "Playing"
-        // this Activity by default. type: 3 = Watching (same enum as bot
-        // Gateway presences: 0 Playing, 1 Streaming, 2 Listening, 3 Watching).
-        // Kept current from here on by setPresence — see App.tsx.
+        // Presence remains optional; a missing scope cannot prevent joining.
         presenceReadyRef.current = true;
-        setPresence(null);
+        startPresence();
+        if (!mountedRef.current) return;
 
         setState({
           isReady: true,
@@ -279,6 +275,7 @@ export function useDiscord(): DiscordState {
           canInvite: sdk.guildId != null,
         });
       } catch (err) {
+        if (!mountedRef.current) return;
         console.error("Discord SDK init failed:", JSON.stringify(err, null, 2), err);
         const message = err instanceof Error ? err.message : JSON.stringify(err);
         setState((prev) => ({
@@ -289,6 +286,7 @@ export function useDiscord(): DiscordState {
     };
 
     init();
+    return cleanup;
   }, []);
 
   return { ...state, openInvite, openExternalLink, setPresence };

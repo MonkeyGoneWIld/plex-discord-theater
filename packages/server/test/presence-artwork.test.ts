@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import express from "express";
+import sharp from "sharp";
 
 // Real auth and HTTP routes; only Plex is a local fixture. Public image requests
 // must not become an unauthenticated route into the library or photo proxy.
@@ -13,7 +14,13 @@ const directory = mkdtempSync(path.join(tmpdir(), "presence-artwork-"));
 process.env.THUMB_CACHE_DIR = directory;
 process.env.REDIRECT_URI = "https://theater.example";
 process.env.PLEX_TOKEN = "private-plex-token";
-const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jA1sAAAAASUVORK5CYII=", "base64");
+// A portrait with distinctive top/bottom edges: a square cover-crop loses both.
+const pixels = Buffer.alloc(256 * 512 * 3);
+for (let offset = 0; offset < pixels.length; offset += 3) {
+  const row = Math.floor(offset / (256 * 3));
+  pixels[offset + (row < 64 ? 0 : row >= 448 ? 2 : 1)] = 255;
+}
+const png = await sharp(pixels, { raw: { width: 256, height: 512, channels: 3 } }).png().toBuffer();
 const upstream: URL[] = [];
 const plex = http.createServer((req, res) => {
   const url = new URL(req.url!, "http://plex");
@@ -79,8 +86,17 @@ try {
     const count = upstream.length;
     const image = await fetch(`${origin}${new URL(url).pathname}`);
     assert.equal(image.status, 200, "artwork is fetchable without authentication");
-    assert.equal(image.headers.get("content-type")?.split(";")[0], "image/png");
-    assert.deepEqual(Buffer.from(await image.arrayBuffer()), png);
+    const bytes = Buffer.from(await image.arrayBuffer());
+    const decoded = await sharp(bytes).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    assert.equal(decoded.info.width, decoded.info.height, "public artwork must fit Discord's square slot without cropping");
+    const pixel = (x: number, y: number) => Array.from(decoded.data.subarray(
+      (y * decoded.info.width + x) * 3, (y * decoded.info.width + x) * 3 + 3,
+    ));
+    const mid = Math.floor(decoded.info.width / 2);
+    assert.ok(pixel(mid, 16)[0] > 220 && pixel(mid, 16)[1] < 30, "top of portrait survives");
+    assert.ok(pixel(mid, decoded.info.height - 17)[2] > 220, "bottom of portrait survives");
+    assert.ok(pixel(mid, mid)[1] > 220, "poster centre survives");
+    assert.ok(pixel(16, mid).every((channel) => channel < 40), "side padding preserves the portrait aspect ratio");
     assert.equal(upstream.length, count, "public GET only reads cached bytes");
   }
   const images = upstream.filter((url) => url.pathname === "/photo/:/transcode").map((url) => url.searchParams.get("url")!);

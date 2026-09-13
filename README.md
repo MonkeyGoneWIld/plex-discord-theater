@@ -99,8 +99,10 @@ This can repeat the title on profile layouts that display both fields.
 It describes the shared room even while you browse locally; the count is room
 membership, not a claim that every participant's player is running.
 
-When duration is known, playing sessions include a progress bar. Pause removes
-the running timer; seeks and resume update it. Missing artwork or denied
+When duration is known, playing sessions send start/end timestamps for Discord's
+native progress display. Discord controls each card's layout; the app cannot
+force a compact popover to use the full profile layout. Pause removes the
+running timer; seeks and resume update it. Missing artwork or denied
 `rpc.activities.write` permission never blocks playback. Transient presence
 failures receive bounded retries rather than disabling presence immediately.
 
@@ -118,7 +120,9 @@ must be reachable by Discord's image proxy without an extra login:
   `{"url":null}`.
 - Unauthenticated `GET /api/presence/artwork/:opaqueId` serves only the published
   cached image. It cannot browse Plex, fetch arbitrary URLs, or expose tokens.
-  Images are restricted to JPEG, PNG, and WebP, capped at 2 MiB.
+  JPEG, PNG, and WebP inputs are validated and fitted inside a 512×512 square
+  with dark padding, then published as PNG. This keeps the entire poster visible
+  in Discord's square image slot without stretching it. Images are capped at 2 MiB.
 - Links expire after 24 hours, potentially earlier after cache eviction or a
   server restart. Public reads do not extend their lifetime.
 

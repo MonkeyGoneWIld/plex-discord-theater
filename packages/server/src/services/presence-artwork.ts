@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import sharp from "sharp";
 import { LruMap } from "./lru.js";
 import { plexUrl } from "./plex.js";
 import * as thumbCache from "./thumb-cache.js";
@@ -169,9 +170,21 @@ async function artwork(cacheKey: string, path: string, signal: AbortSignal): Pro
       url: path,
     }, signal, true);
     if (!image || !isRaster(image)) return null;
+    // Plex fits within 512×512 but returns a rectangular image. Discord then
+    // cover-crops that rectangle. Publish a padded square so the full poster
+    // survives even when Discord uses object-fit: cover.
+    signal.throwIfAborted();
+    const square = await sharp(image.data, { limitInputPixels: 1024 * 1024 })
+      .autoOrient()
+      .resize(512, 512, { fit: "contain", background: "#1e1f22" })
+      .png()
+      .timeout({ seconds: 2 })
+      .toBuffer();
+    signal.throwIfAborted();
+    if (square.length > MAX_IMAGE_BYTES) return null;
     // Separate namespace: the broader authenticated thumb proxy cannot seed a
     // public entry with an unchecked response. Honor cache eviction immediately.
-    thumbCache.set(cacheKey, image.contentType, image.data);
+    thumbCache.set(cacheKey, "image/png", square);
     return thumbCache.get(cacheKey);
   })();
   imagesInFlight.set(cacheKey, work);
@@ -206,7 +219,7 @@ async function publish(ratingKey: string): Promise<string | null> {
   try {
     const path = await resolvePoster(ratingKey, controller.signal);
     if (path) {
-      const cacheKey = `presence:v1:512:${path}`;
+      const cacheKey = `presence:v2:square512:${path}`;
       const image = await artwork(cacheKey, path, controller.signal);
       if (image) {
         const id = randomBytes(24).toString("hex");

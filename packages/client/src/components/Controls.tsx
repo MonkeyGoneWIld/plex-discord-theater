@@ -40,6 +40,8 @@ interface ControlsProps {
   canControl?: boolean;
   title: string;
   onBack: () => void;
+  /** Minimize into the Activity's own PiP without leaving playback. */
+  onMinimize?: () => void;
   onSyncPause?: (position: number) => void;
   onSyncResume?: (position: number) => void;
   onSyncSeek?: (position: number) => void;
@@ -431,6 +433,7 @@ export function Controls({
   canControl = isHost,
   title,
   onBack,
+  onMinimize,
   onSyncPause,
   onSyncResume,
   onSyncSeek,
@@ -1476,6 +1479,19 @@ export function Controls({
           Back
         </button>
         <span style={styles.title}>{title}</span>
+        {onMinimize && (
+          <button
+            onClick={onMinimize}
+            className="btn"
+            style={styles.minimizeBtn}
+            title="Minimize player"
+            aria-label="Minimize player"
+          >
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+              <path d="M4.5 6.5L9 11l4.5-4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        )}
       </div>
 
       {/* Bottom bar */}
@@ -2069,6 +2085,20 @@ const styles: Record<string, React.CSSProperties> = {
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
     color: "#f0f0f0",
+  },
+  minimizeBtn: {
+    ...QUIET_SURFACE,
+    marginLeft: "auto",
+    width: "34px",
+    height: "34px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: "8px",
+    backdropFilter: "blur(12px)",
+    color: "#d8d8d8",
+    cursor: "pointer",
+    flex: "0 0 auto",
   },
   bottomBar: {
     // Above the gesture layer — see topBar.

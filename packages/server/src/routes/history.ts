@@ -16,12 +16,16 @@ import {
   getProgressMany,
   getShowNextUp,
   dismissFromContinueWatching,
+  getHistorySaveMode,
+  setHistorySaveMode,
+  type HistorySaveMode,
 } from "../services/watch-history.js";
 import { clearPlexHistory, removePlexHistoryEntry } from "../services/plex-accounts.js";
 
 const router = Router();
 
 const RATING_KEY_RE = /^\d+$/;
+const HISTORY_SAVE_MODES = new Set<HistorySaveMode>(["all", "host_only"]);
 
 /**
  * The verified Discord user id behind this request, or null when the session
@@ -54,6 +58,26 @@ function parseLimit(raw: unknown, fallback: number, max: number): number {
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return Math.min(n, max);
 }
+
+/** GET /api/history/settings — the caller's personal recording preference. */
+router.get("/settings", (req: Request, res: Response) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+  res.json({ saveMode: getHistorySaveMode(userId) });
+});
+
+/** PUT /api/history/settings — update only future history writes. */
+router.put("/settings", (req: Request, res: Response) => {
+  const userId = requireUserId(req, res);
+  if (!userId) return;
+  const saveMode = req.body?.saveMode as HistorySaveMode | undefined;
+  if (!saveMode || !HISTORY_SAVE_MODES.has(saveMode)) {
+    res.status(400).json({ error: "Invalid history save mode" });
+    return;
+  }
+  setHistorySaveMode(userId, saveMode);
+  res.json({ saveMode });
+});
 
 /**
  * GET /api/history/continue?limit=20

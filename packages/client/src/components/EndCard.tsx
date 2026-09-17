@@ -23,6 +23,8 @@ interface EndCardProps {
   onPlay?: () => void;
   /** Leave the player — back to the title this came from. */
   onExit: () => void;
+  /** The same end-of-item decision, fitted into the in-activity PiP surface. */
+  compact?: boolean;
 }
 
 /**
@@ -40,7 +42,7 @@ interface EndCardProps {
  * one that just finished, and this card exists to identify what's next, not to
  * sell it.
  */
-export function EndCard({ item, source, onPlay, onExit }: EndCardProps) {
+export function EndCard({ item, source, onPlay, onExit, compact = false }: EndCardProps) {
   const still = item.thumb ? stillThumbUrl(item.thumb) : null;
   const show = item.showTitle ?? item.parentTitle ?? null;
   const numbering =
@@ -51,34 +53,34 @@ export function EndCard({ item, source, onPlay, onExit }: EndCardProps) {
         : null;
 
   return (
-    <div style={styles.backdrop}>
-      <div style={styles.panel}>
-        <div style={styles.eyebrow}>{source === "series" ? "Next episode" : "Up next"}</div>
+    <div style={{ ...styles.backdrop, ...(compact ? styles.backdropCompact : {}) }}>
+      <div style={{ ...styles.panel, ...(compact ? styles.panelCompact : {}) }}>
+        <div style={{ ...styles.eyebrow, ...(compact ? styles.eyebrowCompact : {}) }}>{source === "series" ? "Next episode" : "Up next"}</div>
 
-        <div style={styles.body}>
+        <div style={{ ...styles.body, ...(compact ? styles.bodyCompact : {}) }}>
           {still ? (
-            <img src={still} alt="" style={styles.still} />
+            <img src={still} alt="" style={{ ...styles.still, ...(compact ? styles.stillCompact : {}) }} />
           ) : (
-            <div style={{ ...styles.still, ...styles.stillEmpty }} />
+            <div style={{ ...styles.still, ...styles.stillEmpty, ...(compact ? styles.stillCompact : {}) }} />
           )}
 
-          <div style={styles.meta}>
-            {show && <div style={styles.show}>{show}</div>}
-            <div style={styles.title}>{item.title}</div>
-            {numbering && <div style={styles.numbering}>{numbering}</div>}
+          <div style={{ ...styles.meta, ...(compact ? styles.metaCompact : {}) }}>
+            {show && <div style={{ ...styles.show, ...(compact ? styles.showCompact : {}) }}>{show}</div>}
+            <div style={{ ...styles.title, ...(compact ? styles.titleCompact : {}) }}>{item.title}</div>
+            {numbering && <div style={{ ...styles.numbering, ...(compact ? styles.numberingCompact : {}) }}>{numbering}</div>}
           </div>
         </div>
 
-        <div style={styles.actions}>
+        <div style={{ ...styles.actions, ...(compact ? styles.actionsCompact : {}) }}>
           {onPlay && (
-            <button type="button" onClick={onPlay} className="btn" style={styles.playBtn}>
-              <svg width="20" height="20" viewBox="0 0 22 22" fill="none" style={{ marginRight: 10 }}>
+            <button type="button" onClick={onPlay} className="btn" style={{ ...styles.playBtn, ...(compact ? styles.actionBtnCompact : {}) }}>
+              <svg width={compact ? 14 : 20} height={compact ? 14 : 20} viewBox="0 0 22 22" fill="none" style={{ marginRight: compact ? 5 : 10 }}>
                 <path d="M5 3.5L18 11L5 18.5V3.5Z" fill="currentColor" />
               </svg>
               {source === "series" ? "Play next episode" : "Play now"}
             </button>
           )}
-          <button type="button" onClick={onExit} className="btn" style={styles.exitBtn}>
+          <button type="button" onClick={onExit} className="btn" style={{ ...styles.exitBtn, ...(compact ? styles.actionBtnCompact : {}) }}>
             {/* Keyed to where it goes, not to who is pressing it: this leaves
                 for the show whenever there is one, host or viewer alike. */}
             {show ? "Back to show" : "Back"}
@@ -86,7 +88,7 @@ export function EndCard({ item, source, onPlay, onExit }: EndCardProps) {
         </div>
 
         {!onPlay && (
-          <div style={styles.viewerNote}>Waiting for the host to choose what's next</div>
+          <div style={{ ...styles.viewerNote, ...(compact ? styles.viewerNoteCompact : {}) }}>Waiting for the host to choose what's next</div>
         )}
       </div>
     </div>
@@ -106,6 +108,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "24px",
     zIndex: 40,
   },
+  backdropCompact: { padding: "10px" },
   panel: {
     width: "100%",
     maxWidth: "900px",
@@ -113,6 +116,7 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     gap: "24px",
   },
+  panelCompact: { maxWidth: "none", gap: "8px" },
   eyebrow: {
     color: "#e5a00d",
     fontSize: "13px",
@@ -120,6 +124,7 @@ const styles: Record<string, React.CSSProperties> = {
     letterSpacing: "1.6px",
     textTransform: "uppercase",
   },
+  eyebrowCompact: { fontSize: "9px", letterSpacing: "1px" },
   body: {
     display: "flex",
     gap: "28px",
@@ -128,6 +133,7 @@ const styles: Record<string, React.CSSProperties> = {
     // a Discord sidebar as easily as a full window.
     flexWrap: "wrap",
   },
+  bodyCompact: { gap: "10px", flexWrap: "nowrap" },
   still: {
     // Fluid between a floor that stays legible and a cap that stops it
     // dominating a wide screen.
@@ -139,6 +145,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#1a1a1a",
     border: "1px solid rgba(255,255,255,0.08)",
   },
+  stillCompact: { width: "38%", minWidth: 0, borderRadius: "7px" },
   stillEmpty: {
     display: "block",
   },
@@ -151,11 +158,13 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     gap: "8px",
   },
+  metaCompact: { flexBasis: 0, gap: "2px" },
   show: {
     color: "#9a9a9a",
     fontSize: "16px",
     fontWeight: 600,
   },
+  showCompact: { fontSize: "9px" },
   title: {
     color: "#f2f2f2",
     fontSize: "clamp(26px, 3.4vw, 36px)",
@@ -163,15 +172,19 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1.15,
     letterSpacing: "-0.015em",
   },
+  titleCompact: { fontSize: "13px", lineHeight: 1.1 },
   numbering: {
     color: "#8a8a8a",
     fontSize: "17px",
   },
+  numberingCompact: { fontSize: "9px" },
   actions: {
     display: "flex",
     gap: "12px",
     flexWrap: "wrap",
   },
+  actionsCompact: { gap: "6px" },
+  actionBtnCompact: { padding: "7px 9px", borderRadius: "6px", fontSize: "9px" },
   playBtn: {
     display: "inline-flex",
     alignItems: "center",
@@ -199,4 +212,5 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#7d7d7d",
     fontSize: "15px",
   },
+  viewerNoteCompact: { fontSize: "9px" },
 };

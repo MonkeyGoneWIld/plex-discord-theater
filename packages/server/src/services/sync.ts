@@ -5,7 +5,7 @@ import { instanceHosts, updateInstanceHost, touchInstance } from "../routes/disc
 import { plexFetch } from "./plex.js";
 import { getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode, stopTranscodeSession, protectSession, releaseSession } from "../routes/plex.js";
 import { createTracker, handleTrackerSocket, destroyTracker } from "./tracker.js";
-import { recordProgress } from "./watch-history.js";
+import { recordProgress, shouldRecordHistory } from "./watch-history.js";
 import { pushProgressToPlex } from "./plex-accounts.js";
 import { logEvent } from "./logger.js";
 
@@ -772,7 +772,7 @@ const FORCED_PERSIST_MIN_INTERVAL_MS = 2_000;
  */
 function persistProgress(
   room: Room,
-  extraUserId: string | undefined,
+  extraClient: Pick<RoomClient, "userId" | "isHost"> | undefined,
   force: boolean | "always",
 ): void {
   const ratingKey = room.state.ratingKey;
@@ -785,11 +785,19 @@ function persistProgress(
   } else if (force === "always") {
     room.lastForcedPersistAt = Date.now();
   }
-  const userIds = new Set(
-    [...room.clients].filter((c) => c.isWatching).map((c) => c.userId),
-  );
-  if (extraUserId) userIds.add(extraUserId);
-  for (const userId of userIds) {
+  const viewers = new Map<string, boolean>();
+  for (const client of room.clients) {
+    if (!client.isWatching) continue;
+    viewers.set(client.userId, (viewers.get(client.userId) ?? false) || client.isHost);
+  }
+  if (extraClient) {
+    viewers.set(
+      extraClient.userId,
+      (viewers.get(extraClient.userId) ?? false) || extraClient.isHost,
+    );
+  }
+  for (const [userId, userIsHost] of viewers) {
+    if (!shouldRecordHistory(userId, userIsHost)) continue;
     recordProgress(userId, ratingKey, interpolatedPosition(room.state), { force: forced })
       .then((entry) => {
         if (!entry) return;
@@ -1861,7 +1869,7 @@ export function attachWebSocketServer(server: Server): void {
         // Attribute the position to the host who is leaving, before a successor
         // takes over the instance record. Closing the tab is the other common
         // way a watch ends, so this is as important as the explicit stop path.
-        persistProgress(room, closingClient.isWatching ? closingClient.userId : undefined, "always");
+        persistProgress(room, closingClient.isWatching ? closingClient : undefined, "always");
 
         if (room.clients.size > 0) {
           // Co-host, then whoever is actually watching, then anyone — see

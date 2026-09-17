@@ -15,6 +15,8 @@ import {
   searchPlex,
   fetchContinueWatching,
   fetchHistory,
+  fetchHistorySettings,
+  updateHistorySettings,
   deleteHistoryEntry,
   dismissFromContinueWatching,
   clearHistory,
@@ -23,6 +25,7 @@ import {
   setPlexWatchlistState,
   historyEntryToItem,
   type HistoryEntry,
+  type HistorySaveMode,
   type PersonResult,
   type PlexItem,
   type PlexSection,
@@ -99,6 +102,11 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historySettingsOpen, setHistorySettingsOpen] = useState(false);
+  const [historySettingsLoading, setHistorySettingsLoading] = useState(false);
+  const [historySettingsSaving, setHistorySettingsSaving] = useState(false);
+  const [historySettingsError, setHistorySettingsError] = useState<string | null>(null);
+  const [historySaveMode, setHistorySaveMode] = useState<HistorySaveMode>("all");
   // null while the account check is unresolved. Local-history navigation and
   // destructive controls stay hidden in that state so a linked account never
   // sees them flash briefly before its status request finishes.
@@ -138,6 +146,25 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   const [itemsError, setItemsError] = useState<string | null>(null);
   // Bumped by the Retry button to re-run the fetch effects after a failure
   const [retryNonce, setRetryNonce] = useState(0);
+
+  const openHistorySettings = useCallback(() => {
+    setHistorySettingsOpen(true);
+    setHistorySettingsLoading(true);
+    setHistorySettingsError(null);
+    fetchHistorySettings()
+      .then((settings) => setHistorySaveMode(settings.saveMode))
+      .catch(() => setHistorySettingsError("Couldn't load your history preference."))
+      .finally(() => setHistorySettingsLoading(false));
+  }, []);
+
+  const saveHistorySettings = useCallback(() => {
+    setHistorySettingsSaving(true);
+    setHistorySettingsError(null);
+    updateHistorySettings(historySaveMode)
+      .then(() => setHistorySettingsOpen(false))
+      .catch(() => setHistorySettingsError("Couldn't save your history preference."))
+      .finally(() => setHistorySettingsSaving(false));
+  }, [historySaveMode]);
 
   // Load sections on mount
   useEffect(() => {
@@ -753,6 +780,23 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
 
       <div style={styles.wideWrap}>
 
+      {/* History is replaced by Watchlist for linked Plex accounts. Keep the
+          same personal preference reachable in either tab; these are two
+          entrances to one server-side setting, not separate modes. */}
+      {(isHistoryTab || isWatchlistTab) && !searchResults && (
+        <div style={styles.historySettingsRow}>
+          <button className="btn" type="button" onClick={openHistorySettings} style={styles.settingsBtn}>
+            <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <path d="M3 5h8M15 5h2M3 10h2M9 10h8M3 15h6M13 15h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              <circle cx="13" cy="5" r="2" stroke="currentColor" strokeWidth="1.5" />
+              <circle cx="7" cy="10" r="2" stroke="currentColor" strokeWidth="1.5" />
+              <circle cx="11" cy="15" r="2" stroke="currentColor" strokeWidth="1.5" />
+            </svg>
+            History settings
+          </button>
+        </div>
+      )}
+
       {isWatchlistTab && !searchResults ? (
         watchlistLoading ? (
           <SkeletonGrid />
@@ -1130,6 +1174,93 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
         </>
       )}
       </div>
+
+      {historySettingsOpen && (
+        <div style={styles.settingsBackdrop} onMouseDown={() => !historySettingsSaving && setHistorySettingsOpen(false)}>
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="history-settings-title"
+            style={styles.settingsDialog}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div style={styles.settingsTitleRow}>
+              <h2 id="history-settings-title" style={styles.settingsTitle}>History settings</h2>
+              <button
+                className="btn"
+                type="button"
+                aria-label="Close history settings"
+                onClick={() => setHistorySettingsOpen(false)}
+                disabled={historySettingsSaving}
+                style={styles.settingsCloseBtn}
+              >
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                  <path d="M4 4l10 10M14 4L4 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
+
+            <div style={styles.settingsSectionTitle}>Save watch history</div>
+            <p style={styles.settingsDescription}>Choose which watch parties are added to your personal history.</p>
+
+            <div style={styles.settingsChoices} aria-busy={historySettingsLoading}>
+              {([
+                ["all", "All watch parties", "Save history whether I’m hosting or watching."],
+                ["host_only", "Only when I host", "Save history only while I’m the host."],
+              ] as Array<[HistorySaveMode, string, string]>).map(([mode, label, description]) => {
+                const selected = historySaveMode === mode;
+                return (
+                  <button
+                    key={mode}
+                    className="btn"
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    disabled={historySettingsLoading || historySettingsSaving}
+                    onClick={() => setHistorySaveMode(mode)}
+                    style={{ ...styles.settingsChoice, ...(selected ? styles.settingsChoiceSelected : {}) }}
+                  >
+                    <span style={{ ...styles.settingsRadio, ...(selected ? styles.settingsRadioSelected : {}) }}>
+                      {selected && <span style={styles.settingsRadioDot} />}
+                    </span>
+                    <span style={styles.settingsChoiceCopy}>
+                      <span style={styles.settingsChoiceLabel}>{label}</span>
+                      <span style={styles.settingsChoiceDescription}>{description}</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Developer note: this preference changes future history writes
+                only. It must not delete old rows or send playback commands. */}
+            <div style={styles.settingsPersonalNote}>Personal to your Discord account.</div>
+            {historySettingsError && <div role="alert" style={styles.settingsError}>{historySettingsError}</div>}
+
+            <div style={styles.settingsActions}>
+              <button
+                className="btn"
+                type="button"
+                onClick={() => setHistorySettingsOpen(false)}
+                disabled={historySettingsSaving}
+                style={styles.settingsCancelBtn}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn"
+                type="button"
+                onClick={saveHistorySettings}
+                disabled={historySettingsLoading || historySettingsSaving}
+                style={styles.settingsSaveBtn}
+              >
+                {historySettingsSaving ? "Saving…" : "Save preference"}
+              </button>
+            </div>
+            <div style={styles.settingsFutureNote}>Applies to future playback.</div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1280,6 +1411,118 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: "space-between",
     padding: "8px 24px 0",
   },
+  historySettingsRow: {
+    display: "flex",
+    justifyContent: "flex-end",
+    padding: "8px 24px 0",
+  },
+  settingsBtn: {
+    ...QUIET_SURFACE,
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "8px",
+    padding: "7px 13px",
+    borderRadius: "8px",
+    color: "#aaa",
+    cursor: "pointer",
+    fontSize: "12px",
+    fontWeight: 600,
+    fontFamily: "inherit",
+  },
+  settingsBackdrop: {
+    position: "fixed",
+    inset: 0,
+    zIndex: 120,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "24px",
+    background: "rgba(0,0,0,0.68)",
+  },
+  settingsDialog: {
+    width: "min(560px, 100%)",
+    borderRadius: "14px",
+    border: "1px solid rgba(255,255,255,0.1)",
+    background: "#181a1e",
+    boxShadow: "0 24px 80px rgba(0,0,0,0.55)",
+    padding: "24px",
+    color: "#f2f2f2",
+  },
+  settingsTitleRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: "28px",
+  },
+  settingsTitle: { margin: 0, fontSize: "22px", fontWeight: 700 },
+  settingsCloseBtn: {
+    border: "none",
+    background: "transparent",
+    color: "#999",
+    padding: "6px",
+    cursor: "pointer",
+  },
+  settingsSectionTitle: { fontSize: "16px", fontWeight: 700, marginBottom: "6px" },
+  settingsDescription: { margin: "0 0 16px", color: "#aaa", fontSize: "13px", lineHeight: 1.5 },
+  settingsChoices: { display: "flex", flexDirection: "column", gap: "10px" },
+  settingsChoice: {
+    display: "flex",
+    alignItems: "center",
+    gap: "14px",
+    width: "100%",
+    padding: "16px",
+    borderRadius: "10px",
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: "rgba(255,255,255,0.025)",
+    color: "#eee",
+    textAlign: "left",
+    cursor: "pointer",
+    fontFamily: "inherit",
+  },
+  settingsChoiceSelected: {
+    borderColor: "#e5a00d",
+    background: "rgba(229,160,13,0.08)",
+  },
+  settingsRadio: {
+    width: "20px",
+    height: "20px",
+    flex: "0 0 auto",
+    borderRadius: "50%",
+    border: "2px solid #777",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  settingsRadioSelected: { borderColor: "#e5a00d" },
+  settingsRadioDot: { width: "10px", height: "10px", borderRadius: "50%", background: "#e5a00d" },
+  settingsChoiceCopy: { display: "flex", flexDirection: "column", gap: "4px", minWidth: 0 },
+  settingsChoiceLabel: { fontSize: "14px", fontWeight: 700 },
+  settingsChoiceDescription: { color: "#aaa", fontSize: "12px", lineHeight: 1.45 },
+  settingsPersonalNote: { marginTop: "18px", color: "#888", fontSize: "12px" },
+  settingsError: { marginTop: "12px", color: "#ef7770", fontSize: "12px" },
+  settingsActions: { display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "24px" },
+  settingsCancelBtn: {
+    ...QUIET_SURFACE,
+    padding: "9px 16px",
+    borderRadius: "8px",
+    color: "#ddd",
+    cursor: "pointer",
+    fontSize: "13px",
+    fontWeight: 600,
+    fontFamily: "inherit",
+  },
+  settingsSaveBtn: {
+    padding: "9px 16px",
+    border: "none",
+    borderRadius: "8px",
+    background: "#e5a00d",
+    color: "#211700",
+    cursor: "pointer",
+    fontSize: "13px",
+    fontWeight: 700,
+    fontFamily: "inherit",
+  },
+  settingsFutureNote: { marginTop: "12px", color: "#666", fontSize: "11px", textAlign: "right" },
   historyCount: {
     fontSize: "13px",
     fontWeight: 600,

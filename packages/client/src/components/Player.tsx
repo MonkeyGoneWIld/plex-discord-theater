@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, type CSSProperties, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import Hls from "hls.js";
 import { HlsJsP2PEngine } from "p2p-media-loader-hlsjs";
 import { Controls, type ControlsHandle } from "./Controls";
@@ -440,9 +440,66 @@ interface PlayerProps {
   syncState?: SyncState;
   syncActions?: SyncActions;
   onPlayNext?: (item: QueueItem) => void;
+  /** Full player or the Activity's own persistent, video-only PiP surface. */
+  presentation?: "full" | "pip";
+  /** Move to browsing without invoking the player's leave/stop path. */
+  onMinimize?: () => void;
+  /** Restore PiP to the full player. Invoked only by an intentional double-click. */
+  onRestore?: () => void;
 }
 
-export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, onSharePresenceDetails, subtitles, resumePosition, mediaIndex, audioStreamId, subtitleStreamId, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext }: PlayerProps) {
+type PipCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+interface PipRect { left: number; top: number; width: number; height: number }
+
+const PIP_MARGIN = 18;
+const PIP_ASPECT = 16 / 9;
+const PIP_MIN_WIDTH = 240;
+
+function pipBounds(): { viewportWidth: number; viewportHeight: number; maxWidth: number } {
+  const viewportWidth = typeof window === "undefined" ? 1280 : window.innerWidth;
+  const viewportHeight = typeof window === "undefined" ? 720 : window.innerHeight;
+  return {
+    viewportWidth,
+    viewportHeight,
+    maxWidth: Math.max(PIP_MIN_WIDTH, Math.min(720, viewportWidth * 0.55, (viewportHeight - PIP_MARGIN * 2) * PIP_ASPECT)),
+  };
+}
+
+function defaultPipWidth(): number {
+  const { viewportWidth, maxWidth } = pipBounds();
+  return Math.min(maxWidth, Math.max(PIP_MIN_WIDTH, viewportWidth * 0.3));
+}
+
+function snapPip(corner: PipCorner, width: number): PipRect {
+  const { viewportWidth, viewportHeight, maxWidth } = pipBounds();
+  const nextWidth = Math.min(maxWidth, Math.max(PIP_MIN_WIDTH, width));
+  const height = nextWidth / PIP_ASPECT;
+  return {
+    left: corner.endsWith("right") ? viewportWidth - nextWidth - PIP_MARGIN : PIP_MARGIN,
+    top: corner.startsWith("bottom") ? viewportHeight - height - PIP_MARGIN : PIP_MARGIN,
+    width: nextWidth,
+    height,
+  };
+}
+
+function loadPipCorner(): PipCorner {
+  try {
+    const saved = localStorage.getItem("plex-pip-corner") as PipCorner | null;
+    if (["top-left", "top-right", "bottom-left", "bottom-right"].includes(saved ?? "")) return saved!;
+  } catch { /* Default still works when storage is unavailable. */ }
+  return "bottom-right";
+}
+
+function loadPipWidth(): number {
+  try {
+    const saved = Number(localStorage.getItem("plex-pip-width"));
+    if (Number.isFinite(saved) && saved >= PIP_MIN_WIDTH) return saved;
+  } catch { /* Default still works when storage is unavailable. */ }
+  return defaultPipWidth();
+}
+
+export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, onSharePresenceDetails, subtitles, resumePosition, mediaIndex, audioStreamId, subtitleStreamId, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext, presentation = "full", onMinimize, onRestore }: PlayerProps) {
+  const isPip = presentation === "pip";
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -483,6 +540,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
   const [showStats, setShowStats] = useState(false);
   const [confirmingEnd, setConfirmingEnd] = useState(false);
+  const [pipCorner, setPipCorner] = useState<PipCorner>(loadPipCorner);
+  const [pipRect, setPipRect] = useState<PipRect>(() => snapPip(loadPipCorner(), loadPipWidth()));
+  const pipRectRef = useRef(pipRect);
+  pipRectRef.current = pipRect;
+  const [pipInteracting, setPipInteracting] = useState(false);
+  const pipDragRef = useRef<{ pointerId: number; startX: number; startY: number; rect: PipRect } | null>(null);
+  const pipResizeRef = useRef<{ pointerId: number; startX: number; width: number; rect: PipRect } | null>(null);
+  const lastPipDragAtRef = useRef(0);
   // Next item to offer, auto-resolved from the series. Queue takes precedence
   // over this at render time — a queued item is a deliberate choice, this is a guess.
   const [nextEpisode, setNextEpisode] = useState<PlexItem | null>(null);
@@ -507,6 +572,124 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   nextEpisodeRef.current = nextEpisode;
   const prevEpisodeRef = useRef<PlexItem | null>(null);
   prevEpisodeRef.current = prevEpisode;
+
+  const persistPipPlacement = useCallback((corner: PipCorner, width: number) => {
+    try {
+      localStorage.setItem("plex-pip-corner", corner);
+      localStorage.setItem("plex-pip-width", String(Math.round(width)));
+    } catch { /* Placement persistence is optional. */ }
+  }, []);
+
+  const settlePip = useCallback((rect: PipRect) => {
+    const { viewportWidth, viewportHeight } = pipBounds();
+    const corner: PipCorner = `${rect.top + rect.height / 2 < viewportHeight / 2 ? "top" : "bottom"}-${rect.left + rect.width / 2 < viewportWidth / 2 ? "left" : "right"}` as PipCorner;
+    const snapped = snapPip(corner, rect.width);
+    setPipCorner(corner);
+    setPipRect(snapped);
+    setPipInteracting(false);
+    persistPipPlacement(corner, snapped.width);
+  }, [persistPipPlacement]);
+
+  const startPipDrag = useCallback((event: ReactPointerEvent<HTMLVideoElement>) => {
+    if (!isPip || event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    pipDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      rect: pipRect,
+    };
+    setPipInteracting(true);
+  }, [isPip, pipRect]);
+
+  const movePip = useCallback((event: ReactPointerEvent<HTMLVideoElement>) => {
+    const drag = pipDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (Math.hypot(dx, dy) > 5) lastPipDragAtRef.current = Date.now();
+    const { viewportWidth, viewportHeight } = pipBounds();
+    const next = {
+      ...drag.rect,
+      left: Math.min(viewportWidth - drag.rect.width, Math.max(0, drag.rect.left + dx)),
+      top: Math.min(viewportHeight - drag.rect.height, Math.max(0, drag.rect.top + dy)),
+    };
+    pipRectRef.current = next;
+    setPipRect(next);
+  }, []);
+
+  const endPipDrag = useCallback((event: ReactPointerEvent<HTMLVideoElement>) => {
+    const drag = pipDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    pipDragRef.current = null;
+    settlePip(pipRectRef.current);
+  }, [settlePip]);
+
+  const startPipResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!isPip || event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    pipResizeRef.current = { pointerId: event.pointerId, startX: event.clientX, width: pipRect.width, rect: pipRect };
+    setPipInteracting(true);
+    lastPipDragAtRef.current = Date.now();
+  }, [isPip, pipRect]);
+
+  const movePipResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const resize = pipResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    const horizontalDirection = pipCorner.endsWith("right") ? -1 : 1;
+    const rawWidth = resize.width + (event.clientX - resize.startX) * horizontalDirection;
+    const { maxWidth } = pipBounds();
+    const width = Math.min(maxWidth, Math.max(PIP_MIN_WIDTH, rawWidth));
+    const height = width / PIP_ASPECT;
+    const right = resize.rect.left + resize.rect.width;
+    const bottom = resize.rect.top + resize.rect.height;
+    const next = {
+      left: pipCorner.endsWith("right") ? right - width : resize.rect.left,
+      top: pipCorner.startsWith("bottom") ? bottom - height : resize.rect.top,
+      width,
+      height,
+    };
+    pipRectRef.current = next;
+    setPipRect(next);
+  }, [pipCorner]);
+
+  const endPipResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const resize = pipResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    pipResizeRef.current = null;
+    settlePip(pipRectRef.current);
+  }, [settlePip]);
+
+  const restoreFromPip = useCallback((event: ReactMouseEvent<HTMLVideoElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    // A drag produces click events on some webviews. Only a clean double-click
+    // is allowed to restore the full player.
+    if (Date.now() - lastPipDragAtRef.current < 350) return;
+    onRestore?.();
+  }, [onRestore]);
+
+  useEffect(() => {
+    if (!isPip) return;
+    const onResize = () => setPipRect((rect) => snapPip(pipCorner, rect.width));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [isPip, pipCorner]);
+
+  useEffect(() => {
+    if (!isPip) return;
+    // Developer note: PiP is video-only. Close every optional player surface;
+    // the end card below is the sole intentional exception.
+    setShowTrackSwitcher(false);
+    setShowQueuePanel(false);
+    setShowPeoplePanel(false);
+    setShowStats(false);
+    setShowSubtitleOffset(false);
+    setShowZoomPanel(false);
+    setConfirmingEnd(false);
+  }, [isPip]);
   // Cumulative P2P delivery counters, filled from the p2p-media-loader engine
   // events below and read by the StatsOverlay each poll.
   const p2pStatsRef = useRef<P2PStats>({ p2pBytes: 0, httpBytes: 0, uploadBytes: 0, peers: new Set() });
@@ -3887,9 +4070,31 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     ? (hostSeeking ? "Host is seeking…" : hostPaused ? "Host paused the video" : null)
     : null;
 
+  const playerContainerStyle: CSSProperties = isPip
+    ? {
+        ...styles.container,
+        ...styles.pipContainer,
+        left: pipRect.left,
+        top: pipRect.top,
+        width: pipRect.width,
+        height: pipRect.height,
+        transition: pipInteracting
+          ? "none"
+          : "left 320ms cubic-bezier(.2,.8,.2,1), top 320ms cubic-bezier(.2,.8,.2,1), width 320ms cubic-bezier(.2,.8,.2,1), height 320ms cubic-bezier(.2,.8,.2,1)",
+      }
+    : { ...styles.container, ...styles.fullContainer };
+
+  const pipResizeHandleStyle: CSSProperties = {
+    ...styles.pipResizeHandle,
+    ...(pipCorner === "bottom-right" ? { left: 0, top: 0, cursor: "nwse-resize" }
+      : pipCorner === "bottom-left" ? { right: 0, top: 0, cursor: "nesw-resize" }
+        : pipCorner === "top-right" ? { left: 0, bottom: 0, cursor: "nesw-resize" }
+          : { right: 0, bottom: 0, cursor: "nwse-resize" }),
+  };
+
   return (
-    <div ref={zoomRootRef} style={{ ...styles.container, touchAction: "none" }}>
-      {syncState?.authFailed ? (
+    <div ref={zoomRootRef} style={{ ...playerContainerStyle, touchAction: "none" }} data-presentation={presentation}>
+      {!isPip && (syncState?.authFailed ? (
         <div style={styles.error}>Session expired — please close and restart the activity</div>
       ) : syncState?.reconnectFailed ? (
         // A retry, rather than only telling someone to leave the call and come
@@ -3913,15 +4118,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         <div style={styles.reconnecting}>
           Reconnecting to the watch party… (playback continues locally)
         </div>
-      ) : null}
+      ) : null)}
 
-      {zoomNotice && (
+      {!isPip && zoomNotice && (
         <div style={{ ...styles.viewerStatus, top: `calc(var(--sait, 0px) + ${(zoomPhone ? 76 : 18) + (viewerStatus ? 46 : 0)}px)` }} role="status" aria-live="polite">
           {zoomNotice}
         </div>
       )}
       {/* Viewer status — what the host is doing to shared playback */}
-      {viewerStatus && (
+      {!isPip && viewerStatus && (
         <div style={styles.viewerStatus} role="status" aria-live="polite">
           {hostSeeking ? (
             <span style={styles.viewerStatusSpinner} />
@@ -3936,7 +4141,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       )}
 
       {/* Buffering indicator */}
-      {buffering && !error && (
+      {!isPip && buffering && !error && (
         <div style={styles.bufferingOverlay}>
           <div style={styles.bufferingSpinner} />
           <span style={styles.bufferingText}>Loading...</span>
@@ -3958,8 +4163,25 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           ...zoomPictureStyle,
         }}
         playsInline
-        onClick={togglePlayPause}
+        onClick={isPip ? undefined : togglePlayPause}
+        onDoubleClick={isPip ? restoreFromPip : undefined}
+        onPointerDown={isPip ? startPipDrag : undefined}
+        onPointerMove={isPip ? movePip : undefined}
+        onPointerUp={isPip ? endPipDrag : undefined}
+        onPointerCancel={isPip ? endPipDrag : undefined}
       />
+
+      {isPip && (
+        <div
+          aria-label="Resize picture in picture"
+          role="separator"
+          style={pipResizeHandleStyle}
+          onPointerDown={startPipResize}
+          onPointerMove={movePipResize}
+          onPointerUp={endPipResize}
+          onPointerCancel={endPipResize}
+        />
+      )}
 
       {/* The last frame, standing in while the pipeline is rebuilt. Sits above
           the (currently blank) video and below every real overlay, so the
@@ -3981,7 +4203,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
       {/* Play/pause acknowledgement — purely decorative, so it never takes
           pointer events away from the picture underneath. */}
-      {tapAck && (
+      {!isPip && tapAck && (
         <div key={tapAck.at} style={styles.tapAck} aria-hidden="true"
              onAnimationEnd={() => setTapAck(null)}>
           {tapAck.kind === "play" ? (
@@ -4006,11 +4228,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           source={queuedNext ? "queue" : "series"}
           onPlay={canControl ? playNextItem : undefined}
           onExit={exitToShow}
+          compact={isPip}
         />
       )}
 
       {/* Track switching freeze-frame overlay */}
-      {trackSwitching && (
+      {!isPip && trackSwitching && (
         <div style={styles.trackSwitchOverlay}>
           {canvasRef.current && (
             <canvas
@@ -4034,7 +4257,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       )}
 
       {/* Recovery overlay (stream interrupted) */}
-      {recovering && (
+      {!isPip && recovering && (
         <div style={styles.trackSwitchOverlay}>
           {canvasRef.current && (
             <canvas
@@ -4056,7 +4279,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       )}
 
       {/* Recovery exhausted — manual retry */}
-      {playbackDead && !recovering && !error && (
+      {!isPip && playbackDead && !recovering && !error && (
         <div style={styles.trackSwitchOverlay}>
           <div style={styles.trackSwitchMessage}>
             <span style={{ color: "#e74c3c", fontSize: "16px", fontWeight: 600 }}>Stream lost</span>
@@ -4092,7 +4315,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         </div>
       )}
 
-      {showStats && vpsRelay !== null && (
+      {!isPip && showStats && vpsRelay !== null && (
         <StatsOverlay
           videoRef={videoRef}
           hlsRef={hlsRef}
@@ -4103,12 +4326,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         />
       )}
 
-      <Controls
+      {!isPip && <Controls
         videoRef={videoRef}
         handleRef={controlsRef}
         isHost={isHost}
         title={displayTitle}
         onBack={handleBack}
+        onMinimize={onMinimize}
         onToggleStats={() => setShowStats((s) => !s)}
         statsActive={showStats}
         canControl={canControl}
@@ -4151,7 +4375,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         subtitleTimingOpen={showSubtitleOffset}
         onOpenZoom={zoomMode === "manual" ? () => setShowZoomPanel((open) => !open) : undefined}
         zoomOpen={showZoomPanel}
-      />
+      />}
       {/* Subtitles this client draws, because Plex was told not to burn them
           in — the only kind there is anything to adjust about. */}
       <SubtitleLayer
@@ -4160,7 +4384,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         offsetMs={subtitleOffsetMs}
         onUnavailable={() => setSidecarFailed(true)}
       />
-      {showTrackSwitcher && (
+      {!isPip && showTrackSwitcher && (
         <TrackSwitcher
           ratingKey={item.ratingKey}
           // So the switcher lists — and sets — streams belonging to the file
@@ -4188,7 +4412,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           }}
         />
       )}
-      {showQueuePanel && syncState && (
+      {!isPip && showQueuePanel && syncState && (
         <QueuePanel
           queue={syncState.queue}
           onRemove={(rk) => syncActions?.sendQueueRemove(rk)}
@@ -4197,7 +4421,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           onClose={() => setShowQueuePanel(false)}
         />
       )}
-      {showPeoplePanel && syncState && (
+      {!isPip && showPeoplePanel && syncState && (
         <PeoplePanel
           participants={syncState.participants}
           selfUserId={selfUserId}
@@ -4223,7 +4447,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           plainly isn't recovering on its own. The host's stream is already
           running, so moving onto it costs the server nothing — but it means
           giving up the tracks that were chosen, so it stays a choice. */}
-      {offerHostStream && (
+      {!isPip && offerHostStream && (
         <div style={styles.confirmBackdrop} onClick={() => setOfferHostStream(false)}>
           <div style={styles.confirmDialog} onClick={(e) => e.stopPropagation()}>
             <div style={styles.confirmTitle}>Your stream can't keep up</div>
@@ -4259,7 +4483,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         </div>
       )}
 
-      {confirmingEnd && (() => {
+      {!isPip && confirmingEnd && (() => {
         const otherCount = (syncState?.participants ?? []).filter(
           (p) => p.userId !== selfUserId,
         ).length;
@@ -4297,7 +4521,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       {/* Bottom-right stack: owns placement so neither child positions itself and
           a third affordance costs one line. Bottom-anchored, so it grows upward
           and the skip button naturally sits above the card. */}
-      {(showSkip || showNextUp || transportRequest || showSubtitleOffset || (showZoomPanel && !zoomPhone && zoomMode === "manual")) && (
+      {!isPip && (showSkip || showNextUp || transportRequest || showSubtitleOffset || (showZoomPanel && !zoomPhone && zoomMode === "manual")) && (
         <div style={styles.bottomRightStack}>
           {transportRequest && (
             <TransportRequestCard
@@ -4381,10 +4605,31 @@ const styles: Record<string, React.CSSProperties> = {
   },
   container: {
     position: "fixed",
-    inset: 0,
     background: "#000",
     overflow: "hidden",
     zIndex: 50,
+  },
+  fullContainer: {
+    left: 0,
+    top: 0,
+    width: "100vw",
+    height: "100vh",
+  },
+  pipContainer: {
+    zIndex: 70,
+    borderRadius: "12px",
+    border: "1px solid rgba(255,255,255,0.16)",
+    boxShadow: "0 18px 52px rgba(0,0,0,0.6)",
+    background: "#000",
+  },
+  pipResizeHandle: {
+    position: "absolute",
+    zIndex: 70,
+    width: "28px",
+    height: "28px",
+    touchAction: "none",
+    opacity: 0.45,
+    background: "linear-gradient(135deg, transparent 42%, rgba(255,255,255,0.75) 44%, rgba(255,255,255,0.75) 50%, transparent 52%, transparent 62%, rgba(255,255,255,0.55) 64%, rgba(255,255,255,0.55) 70%, transparent 72%)",
   },
   video: {
     width: "100%",

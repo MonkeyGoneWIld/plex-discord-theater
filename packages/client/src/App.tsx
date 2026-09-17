@@ -73,6 +73,8 @@ type View =
       synthesized?: boolean;
     };
 
+type PlayerView = Extract<View, { kind: "player" }>;
+
 // Breadcrumb label for a stack entry.
 function crumbLabel(v: View): string {
   switch (v.kind) {
@@ -98,6 +100,9 @@ export function App() {
     useDiscord();
   const [viewStack, setViewStack] = useState<View[]>([{ kind: "library" }]);
   const view = viewStack[viewStack.length - 1];
+  const [minimizedPlayer, setMinimizedPlayer] = useState<PlayerView | null>(null);
+  const minimizedPlayerRef = useRef<PlayerView | null>(null);
+  minimizedPlayerRef.current = minimizedPlayer;
   const [sharePresenceDetails, setSharePresenceDetails] = useState(() => {
     try { return localStorage.getItem("plex-presence-details") !== "false"; }
     catch { return true; }
@@ -365,11 +370,13 @@ export function App() {
         subtitles: syncState.subtitles,
         synthesized: true,
       };
-      showPlayer(playerView);
+      if (minimizedPlayerRef.current) setMinimizedPlayer(playerView);
+      else showPlayer(playerView);
     }
 
     // Host stopped — pop back from player if we're on one
     if (!newKey && prevKey) {
+      setMinimizedPlayer(null);
       setViewStack((s) => {
         const top = s[s.length - 1];
         if (top?.kind === "player") return s.slice(0, -1);
@@ -386,7 +393,7 @@ export function App() {
   // a host starting playback is already on the player, and a host who stops has
   // a null ratingKey (sendStop clears it), so neither triggers a spurious push.
   useEffect(() => {
-    if (!effectiveIsHost || !syncState.ratingKey || view.kind === "player") return;
+    if (!effectiveIsHost || !syncState.ratingKey || view.kind === "player" || minimizedPlayer) return;
     const playerView: View = {
       kind: "player",
       item: {
@@ -404,7 +411,7 @@ export function App() {
       const base = covering ? s : s.slice(0, -1);
       return [...base, playerView];
     });
-  }, [effectiveIsHost, syncState.ratingKey, syncState.title, syncState.subtitles, view.kind]);
+  }, [effectiveIsHost, syncState.ratingKey, syncState.title, syncState.subtitles, view.kind, minimizedPlayer]);
 
   const handleRejoin = useCallback(() => {
     if (!syncState.ratingKey) return;
@@ -431,10 +438,25 @@ export function App() {
     });
   }, [syncState.ratingKey, syncState.title, syncState.subtitles]);
 
+  const handleMinimizePlayer = useCallback(() => {
+    if (view.kind !== "player") return;
+    // Developer note: minimizing is navigation only. Do not call Player.onBack
+    // here—the back path tears down local playback and may stop the room.
+    setMinimizedPlayer(view);
+    setViewStack((stack) => stack[stack.length - 1]?.kind === "player" ? stack.slice(0, -1) : stack);
+  }, [view]);
+
+  const handleRestorePlayer = useCallback(() => {
+    const player = minimizedPlayerRef.current;
+    if (!player) return;
+    setViewStack((stack) => [...stack, player]);
+    setMinimizedPlayer(null);
+  }, []);
+
   // Show "Now Playing" banner when viewer is not on the player but host is playing
   // Also shown to a host who is out of the player while a stream is live — e.g.
   // promoted back to host after leaving — so they aren't stranded with no way in.
-  const showNowPlaying = !!syncState.ratingKey && view.kind !== "player";
+  const showNowPlaying = !!syncState.ratingKey && view.kind !== "player" && !minimizedPlayer;
 
   /**
    * Real metadata for whatever the room is playing.
@@ -541,6 +563,10 @@ export function App() {
       if (top.item.ratingKey !== nowPlayingMeta.ratingKey) return s;
       return [...s.slice(0, -1), { ...top, item: nowPlayingMeta, synthesized: false }];
     });
+    setMinimizedPlayer((player) => {
+      if (!player?.synthesized || player.item.ratingKey !== nowPlayingMeta.ratingKey) return player;
+      return { ...player, item: nowPlayingMeta, synthesized: false };
+    });
   }, [nowPlayingMeta]);
 
   const handleSelect = useCallback((item: PlexItem, flat = false) => {
@@ -586,6 +612,7 @@ export function App() {
     audioStreamId?: number,
     subtitleStreamId?: number,
   ) => {
+    setMinimizedPlayer(null);
     pushView({
       kind: "player", item, subtitles, resumePosition, mediaIndex,
       audioStreamId, subtitleStreamId,
@@ -729,7 +756,8 @@ export function App() {
       audioStreamId,
       subtitleStreamId,
     };
-    showPlayer(playerView);
+    if (minimizedPlayerRef.current) setMinimizedPlayer(playerView);
+    else showPlayer(playerView);
   }, [showPlayer]);
 
   // Breadcrumb trail. Mostly mirrors the view stack, but synthesizes missing
@@ -812,6 +840,19 @@ export function App() {
    * the logo instead of any trail when the library is the view on screen.
    */
   const shownCrumbs = phonePortrait ? crumbs.slice(0, 1) : crumbs;
+
+  const activePlayerView: PlayerView | null = view.kind === "player" ? view : minimizedPlayer;
+  const handleActivePlayerBack = useCallback(() => {
+    if (minimizedPlayerRef.current) {
+      setMinimizedPlayer(null);
+      return;
+    }
+    popView();
+  }, [popView]);
+  const handleActivePlayerFinished = useCallback((item: PlexItem) => {
+    setMinimizedPlayer(null);
+    handleEpisodeShowClick(item);
+  }, [handleEpisodeShowClick]);
 
   if (error) {
     return (
@@ -1125,8 +1166,9 @@ export function App() {
         />
       )}
 
-      {view.kind === "player" && (
+      {activePlayerView && (
         <ErrorBoundary
+          key="active-player"
           fallback={
             <div style={{
               display: "flex", flexDirection: "column", alignItems: "center",
@@ -1135,7 +1177,7 @@ export function App() {
             }}>
               <p style={{ fontSize: "16px", color: "#e74c3c" }}>Playback error</p>
               <button className="btn"
-                onClick={popView}
+                onClick={handleActivePlayerBack}
                 style={{
                   padding: "10px 24px", borderRadius: "8px", border: "none",
                   background: "#e5a00d", color: "#000", fontSize: "14px",
@@ -1146,28 +1188,31 @@ export function App() {
               </button>
             </div>
           }
-          onReset={popView}
+          onReset={handleActivePlayerBack}
         >
           {/* Black with the same spinner playback itself uses, so a cold chunk
               load is indistinguishable from the buffering that follows it —
               and after the idle preload above, it is almost never seen. */}
           <Suspense fallback={<div style={styles.playerLoading}><div style={styles.playerSpinner} /></div>}>
           <Player
-            item={view.item}
+            item={activePlayerView.item}
             isHost={effectiveIsHost}
             selfUserId={userId}
             sharePresenceDetails={sharePresenceDetails}
             onSharePresenceDetails={handleSharePresenceDetails}
-            subtitles={view.subtitles}
-            resumePosition={view.resumePosition}
-            mediaIndex={view.mediaIndex}
-            audioStreamId={view.audioStreamId}
-            subtitleStreamId={view.subtitleStreamId}
-            onBack={popView}
+            subtitles={activePlayerView.subtitles}
+            resumePosition={activePlayerView.resumePosition}
+            mediaIndex={activePlayerView.mediaIndex}
+            audioStreamId={activePlayerView.audioStreamId}
+            subtitleStreamId={activePlayerView.subtitleStreamId}
+            onBack={handleActivePlayerBack}
+            presentation={view.kind === "player" ? "full" : "pip"}
+            onMinimize={handleMinimizePlayer}
+            onRestore={handleRestorePlayer}
             // Finishing an episode lands on the show, not on the episode that
             // just ended. Same rebuild the in-page show breadcrumb uses, so the
             // trail reads Home › Show rather than keeping the player's ancestry.
-            onFinished={handleEpisodeShowClick}
+            onFinished={handleActivePlayerFinished}
             onInvite={canInvite ? openInvite : undefined}
             syncState={syncState}
             syncActions={syncActions}

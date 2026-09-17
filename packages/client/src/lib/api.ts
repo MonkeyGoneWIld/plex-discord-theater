@@ -744,6 +744,12 @@ export interface HistoryEntry {
   updatedAt: number;
 }
 
+export type HistorySaveMode = "all" | "host_only";
+
+export interface HistorySettings {
+  saveMode: HistorySaveMode;
+}
+
 /** History entries carry nulls where PlexItem wants undefined — bridge the two. */
 export function historyEntryToItem(entry: HistoryEntry): PlexItem {
   return {
@@ -774,6 +780,14 @@ export function fetchHistory(
   if (options?.offset != null) params.set("offset", String(options.offset));
   const qs = params.toString();
   return apiGet(`/api/history${qs ? `?${qs}` : ""}`);
+}
+
+export function fetchHistorySettings(): Promise<HistorySettings> {
+  return apiGet("/api/history/settings");
+}
+
+export function updateHistorySettings(saveMode: HistorySaveMode): Promise<HistorySettings> {
+  return apiPut("/api/history/settings", { saveMode });
 }
 
 /** Saved progress for one item, or null if it's never been played. */

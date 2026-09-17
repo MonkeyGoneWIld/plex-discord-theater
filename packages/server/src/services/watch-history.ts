@@ -68,6 +68,12 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_watch_history_user_updated
     ON watch_history (user_id, updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS history_preferences (
+    user_id TEXT PRIMARY KEY,
+    save_mode TEXT NOT NULL DEFAULT 'all'
+      CHECK (save_mode IN ('all', 'host_only'))
+  );
 `);
 // Idempotent migration for databases created before `dismissed` existed. New
 // installs already have it from CREATE TABLE, where this fails harmlessly.
@@ -218,6 +224,33 @@ const insertDismissalMarkerStmt = db.prepare(`
   )
 `);
 const deleteAllStmt = db.prepare("DELETE FROM watch_history WHERE user_id = ?");
+const selectPreferenceStmt = db.prepare(
+  "SELECT save_mode FROM history_preferences WHERE user_id = ?",
+);
+const upsertPreferenceStmt = db.prepare(`
+  INSERT INTO history_preferences (user_id, save_mode) VALUES (?, ?)
+  ON CONFLICT(user_id) DO UPDATE SET save_mode = excluded.save_mode
+`);
+
+export type HistorySaveMode = "all" | "host_only";
+
+/** Missing rows retain the historical behaviour for existing installations. */
+export function getHistorySaveMode(userId: string): HistorySaveMode {
+  const row = selectPreferenceStmt.get(userId) as { save_mode: string } | undefined;
+  return row?.save_mode === "host_only" ? "host_only" : "all";
+}
+
+export function setHistorySaveMode(userId: string, mode: HistorySaveMode): void {
+  upsertPreferenceStmt.run(userId, mode);
+}
+
+/**
+ * Developer note: this decision gates only personal history and linked-Plex
+ * progress writes. It must never alter room playback or synchronization.
+ */
+export function shouldRecordHistory(userId: string, isHost: boolean): boolean {
+  return isHost || getHistorySaveMode(userId) === "all";
+}
 
 function toEntry(row: HistoryRow): HistoryEntry {
   return {

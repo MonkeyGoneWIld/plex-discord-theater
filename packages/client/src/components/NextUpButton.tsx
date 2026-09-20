@@ -35,10 +35,10 @@ export function NextUpButton({ item, source, onPlay, onDismiss }: NextUpButtonPr
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  container: { background: "rgba(0,0,0,0.85)", backdropFilter: "blur(12px)", borderRadius: "12px", padding: "16px 20px", maxWidth: "280px", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 2px 12px rgba(0,0,0,0.5)" },
+  container: { background: "rgba(0,0,0,0.85)", backdropFilter: "blur(12px)", borderRadius: "12px", padding: "16px 20px", maxWidth: "280px", border: "none", boxShadow: "none" },
   label: { color: "#e5a00d", fontSize: "10px", fontWeight: 700, letterSpacing: "1px", textTransform: "uppercase", marginBottom: "6px" },
   title: { color: "#f0f0f0", fontSize: "14px", fontWeight: 600, marginBottom: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   buttons: { display: "flex", gap: "8px" },
-  playBtn: { flex: 1, padding: "8px", borderRadius: "6px", border: "none", background: "#e5a00d", color: "#000", fontSize: "12px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
+  playBtn: { flex: 1, padding: "8px", borderRadius: "6px", border: "none", outline: "none", appearance: "none", boxShadow: "none", background: "#e5a00d", color: "#000", fontSize: "12px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
   dismissBtn: { flex: 1, padding: "8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#888", fontSize: "12px", cursor: "pointer", fontFamily: "inherit" },
 };

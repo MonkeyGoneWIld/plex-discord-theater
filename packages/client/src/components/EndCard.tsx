@@ -87,9 +87,6 @@ export function EndCard({ item, source, onPlay, onExit, compact = false }: EndCa
           </button>
         </div>
 
-        {!onPlay && (
-          <div style={{ ...styles.viewerNote, ...(compact ? styles.viewerNoteCompact : {}) }}>Waiting for the host to choose what's next</div>
-        )}
       </div>
     </div>
   );
@@ -108,7 +105,11 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "24px",
     zIndex: 40,
   },
-  backdropCompact: { padding: "10px" },
+  backdropCompact: {
+    padding: "10px",
+    zIndex: 90,
+    background: "linear-gradient(145deg, #080808, #111318)",
+  },
   panel: {
     width: "100%",
     maxWidth: "900px",
@@ -116,7 +117,15 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     gap: "24px",
   },
-  panelCompact: { maxWidth: "none", gap: "8px" },
+  panelCompact: {
+    maxWidth: "none",
+    gap: "9px",
+    padding: "12px",
+    boxSizing: "border-box",
+    borderRadius: "12px",
+    background: "rgba(20,21,24,0.96)",
+    boxShadow: "0 12px 34px rgba(0,0,0,0.45)",
+  },
   eyebrow: {
     color: "#e5a00d",
     fontSize: "13px",
@@ -124,7 +133,7 @@ const styles: Record<string, React.CSSProperties> = {
     letterSpacing: "1.6px",
     textTransform: "uppercase",
   },
-  eyebrowCompact: { fontSize: "9px", letterSpacing: "1px" },
+  eyebrowCompact: { fontSize: "9px", letterSpacing: "1.15px" },
   body: {
     display: "flex",
     gap: "28px",
@@ -133,7 +142,7 @@ const styles: Record<string, React.CSSProperties> = {
     // a Discord sidebar as easily as a full window.
     flexWrap: "wrap",
   },
-  bodyCompact: { gap: "10px", flexWrap: "nowrap" },
+  bodyCompact: { gap: "11px", flexWrap: "nowrap", alignItems: "center" },
   still: {
     // Fluid between a floor that stays legible and a cap that stops it
     // dominating a wide screen.
@@ -145,7 +154,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#1a1a1a",
     border: "1px solid rgba(255,255,255,0.08)",
   },
-  stillCompact: { width: "38%", minWidth: 0, borderRadius: "7px" },
+  stillCompact: { width: "42%", minWidth: 0, borderRadius: "8px", border: "none" },
   stillEmpty: {
     display: "block",
   },
@@ -172,7 +181,14 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1.15,
     letterSpacing: "-0.015em",
   },
-  titleCompact: { fontSize: "13px", lineHeight: 1.1 },
+  titleCompact: {
+    fontSize: "13px",
+    lineHeight: 1.15,
+    display: "-webkit-box",
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: "vertical",
+    overflow: "hidden",
+  },
   numbering: {
     color: "#8a8a8a",
     fontSize: "17px",
@@ -183,8 +199,8 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "12px",
     flexWrap: "wrap",
   },
-  actionsCompact: { gap: "6px" },
-  actionBtnCompact: { padding: "7px 9px", borderRadius: "6px", fontSize: "9px" },
+  actionsCompact: { gap: "7px", flexWrap: "nowrap" },
+  actionBtnCompact: { flex: 1, justifyContent: "center", padding: "8px 9px", borderRadius: "7px", fontSize: "10px", whiteSpace: "nowrap" },
   playBtn: {
     display: "inline-flex",
     alignItems: "center",
@@ -197,6 +213,9 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     fontFamily: "inherit",
     cursor: "pointer",
+    outline: "none",
+    boxShadow: "none",
+    appearance: "none",
   },
   exitBtn: {
     ...QUIET_SURFACE,
@@ -208,9 +227,4 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "inherit",
     cursor: "pointer",
   },
-  viewerNote: {
-    color: "#7d7d7d",
-    fontSize: "15px",
-  },
-  viewerNoteCompact: { fontSize: "9px" },
 };

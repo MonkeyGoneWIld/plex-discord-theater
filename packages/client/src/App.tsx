@@ -103,6 +103,10 @@ export function App() {
   const [minimizedPlayer, setMinimizedPlayer] = useState<PlayerView | null>(null);
   const minimizedPlayerRef = useRef<PlayerView | null>(null);
   minimizedPlayerRef.current = minimizedPlayer;
+  // Closing PiP clears its local view before the stop command has completed a
+  // socket round trip. Keep the host auto-rejoin effect from reopening the old
+  // stream during that short gap.
+  const hostPlayerClosingRef = useRef(false);
   const [sharePresenceDetails, setSharePresenceDetails] = useState(() => {
     try { return localStorage.getItem("plex-presence-details") !== "false"; }
     catch { return true; }
@@ -393,7 +397,7 @@ export function App() {
   // a host starting playback is already on the player, and a host who stops has
   // a null ratingKey (sendStop clears it), so neither triggers a spurious push.
   useEffect(() => {
-    if (!effectiveIsHost || !syncState.ratingKey || view.kind === "player" || minimizedPlayer) return;
+    if (!effectiveIsHost || !syncState.ratingKey || view.kind === "player" || minimizedPlayer || hostPlayerClosingRef.current) return;
     const playerView: View = {
       kind: "player",
       item: {
@@ -412,6 +416,10 @@ export function App() {
       return [...base, playerView];
     });
   }, [effectiveIsHost, syncState.ratingKey, syncState.title, syncState.subtitles, view.kind, minimizedPlayer]);
+
+  useEffect(() => {
+    if (!syncState.ratingKey) hostPlayerClosingRef.current = false;
+  }, [syncState.ratingKey]);
 
   const handleRejoin = useCallback(() => {
     if (!syncState.ratingKey) return;
@@ -612,6 +620,7 @@ export function App() {
     audioStreamId?: number,
     subtitleStreamId?: number,
   ) => {
+    hostPlayerClosingRef.current = false;
     setMinimizedPlayer(null);
     pushView({
       kind: "player", item, subtitles, resumePosition, mediaIndex,
@@ -670,6 +679,7 @@ export function App() {
   }, [goToShow]);
 
   const handlePlayNext = useCallback(async (queueItem: QueueItem) => {
+    hostPlayerClosingRef.current = false;
     /**
      * Re-apply the remembered subtitle choice, and find out which streams the
      * incoming episode is actually going to play.
@@ -843,16 +853,18 @@ export function App() {
 
   const activePlayerView: PlayerView | null = view.kind === "player" ? view : minimizedPlayer;
   const handleActivePlayerBack = useCallback(() => {
+    if (effectiveIsHost) hostPlayerClosingRef.current = true;
     if (minimizedPlayerRef.current) {
       setMinimizedPlayer(null);
       return;
     }
     popView();
-  }, [popView]);
+  }, [effectiveIsHost, popView]);
   const handleActivePlayerFinished = useCallback((item: PlexItem) => {
+    if (effectiveIsHost) hostPlayerClosingRef.current = true;
     setMinimizedPlayer(null);
     handleEpisodeShowClick(item);
-  }, [handleEpisodeShowClick]);
+  }, [effectiveIsHost, handleEpisodeShowClick]);
 
   if (error) {
     return (

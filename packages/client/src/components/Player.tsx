@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback, type CSSProperties, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { createPortal } from "react-dom";
 import Hls from "hls.js";
 import { HlsJsP2PEngine } from "p2p-media-loader-hlsjs";
 import { Controls, type ControlsHandle } from "./Controls";
@@ -503,26 +504,7 @@ function dockPip({ edge, offset }: PipDock, width: number, aspect = PIP_DEFAULT_
 }
 
 function defaultPipDock(): PipDock {
-  const phone = typeof window !== "undefined" && window.matchMedia(PHONE_QUERY).matches;
-  return { edge: "bottom", offset: phone ? 0 : 1 };
-}
-
-function loadPipDock(): PipDock {
-  try {
-    const saved = JSON.parse(localStorage.getItem("plex-pip-dock-v2") ?? "null") as Partial<PipDock> | null;
-    if (saved && ["top", "right", "bottom", "left"].includes(saved.edge ?? "") && Number.isFinite(saved.offset)) {
-      return { edge: saved.edge as PipEdge, offset: Math.max(0, Math.min(1, Number(saved.offset))) };
-    }
-  } catch { /* Default still works when storage is unavailable. */ }
-  return defaultPipDock();
-}
-
-function loadPipWidth(): number {
-  try {
-    const saved = Number(localStorage.getItem("plex-pip-width"));
-    if (Number.isFinite(saved) && saved >= 160) return saved;
-  } catch { /* Default still works when storage is unavailable. */ }
-  return defaultPipWidth();
+  return { edge: "bottom", offset: 0 };
 }
 
 export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, onSharePresenceDetails, subtitles, resumePosition, mediaIndex, audioStreamId, subtitleStreamId, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext, presentation = "full", onMinimize, onRestore }: PlayerProps) {
@@ -567,18 +549,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
   const [showStats, setShowStats] = useState(false);
   const [confirmingEnd, setConfirmingEnd] = useState(false);
-  const initialPipDockRef = useRef<PipDock>(loadPipDock());
+  const initialPipDockRef = useRef<PipDock>(defaultPipDock());
   const [pipDock, setPipDock] = useState<PipDock>(initialPipDockRef.current);
   const [pipAspect, setPipAspect] = useState(PIP_DEFAULT_ASPECT);
   const pipAspectRef = useRef(pipAspect);
   pipAspectRef.current = pipAspect;
-  const [pipRect, setPipRect] = useState<PipRect>(() => dockPip(initialPipDockRef.current, loadPipWidth()));
+  const [pipRect, setPipRect] = useState<PipRect>(() => dockPip(initialPipDockRef.current, defaultPipWidth()));
   const pipRectRef = useRef(pipRect);
   pipRectRef.current = pipRect;
   const [pipInteracting, setPipInteracting] = useState(false);
   const pipDragRef = useRef<{ pointerId: number; startX: number; startY: number; rect: PipRect } | null>(null);
   const pipResizeRef = useRef<{ pointerId: number; startX: number; width: number; rect: PipRect; handle: "top-left" | "top-right" | "bottom-left" | "bottom-right" } | null>(null);
   const lastPipDragAtRef = useRef(0);
+  const pipVelocityRef = useRef({ x: 0, y: 0, at: 0, vx: 0, vy: 0 });
   const pipTouchRef = useRef<{
     kind: "drag" | "pinch";
     startX: number;
@@ -615,13 +598,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const prevEpisodeRef = useRef<PlexItem | null>(null);
   prevEpisodeRef.current = prevEpisode;
 
-  const persistPipPlacement = useCallback((dock: PipDock, width: number) => {
-    try {
-      localStorage.setItem("plex-pip-dock-v2", JSON.stringify(dock));
-      localStorage.setItem("plex-pip-width", String(Math.round(width)));
-    } catch { /* Placement persistence is optional. */ }
-  }, []);
-
   const settlePip = useCallback((rect: PipRect) => {
     const aspect = pipAspectRef.current;
     const { viewportWidth, viewportHeight } = pipBounds(aspect);
@@ -643,12 +619,47 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     setPipDock(dock);
     setPipRect(snapped);
     setPipInteracting(false);
-    persistPipPlacement(dock, snapped.width);
-  }, [persistPipPlacement]);
+  }, []);
+
+  const startPipVelocity = useCallback((x: number, y: number) => {
+    pipVelocityRef.current = { x, y, at: performance.now(), vx: 0, vy: 0 };
+  }, []);
+
+  const updatePipVelocity = useCallback((x: number, y: number) => {
+    const now = performance.now();
+    const previous = pipVelocityRef.current;
+    const elapsed = Math.max(1, now - previous.at);
+    const instantX = (x - previous.x) / elapsed;
+    const instantY = (y - previous.y) / elapsed;
+    pipVelocityRef.current = {
+      x,
+      y,
+      at: now,
+      vx: previous.vx * 0.35 + instantX * 0.65,
+      vy: previous.vy * 0.35 + instantY * 0.65,
+    };
+  }, []);
+
+  const coastAndSettlePip = useCallback((rect: PipRect) => {
+    const velocity = pipVelocityRef.current;
+    const { viewportWidth, viewportHeight } = pipBounds(pipAspectRef.current);
+    const coastMs = 220;
+    // A quick release carries momentum; holding the PiP still before release
+    // intentionally drains it so an ordinary placement does not keep sliding.
+    const velocityAge = performance.now() - velocity.at;
+    const releaseScale = Math.max(0, Math.min(1, 1 - velocityAge / 140));
+    const projected = {
+      ...rect,
+      left: Math.min(viewportWidth - rect.width, Math.max(0, rect.left + Math.max(-2, Math.min(2, velocity.vx)) * coastMs * releaseScale)),
+      top: Math.min(viewportHeight - rect.height, Math.max(0, rect.top + Math.max(-2, Math.min(2, velocity.vy)) * coastMs * releaseScale)),
+    };
+    settlePip(projected);
+  }, [settlePip]);
 
   const startPipDrag = useCallback((event: ReactPointerEvent<HTMLVideoElement>) => {
     if (!isPip || event.button !== 0 || event.pointerType === "touch") return;
     event.currentTarget.setPointerCapture(event.pointerId);
+    startPipVelocity(event.clientX, event.clientY);
     pipDragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -656,13 +667,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       rect: pipRect,
     };
     setPipInteracting(true);
-  }, [isPip, pipRect]);
+  }, [isPip, pipRect, startPipVelocity]);
 
   const movePip = useCallback((event: ReactPointerEvent<HTMLVideoElement>) => {
     const drag = pipDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     const dx = event.clientX - drag.startX;
     const dy = event.clientY - drag.startY;
+    updatePipVelocity(event.clientX, event.clientY);
     if (Math.hypot(dx, dy) > 5) lastPipDragAtRef.current = Date.now();
     const { viewportWidth, viewportHeight } = pipBounds(pipAspectRef.current);
     const next = {
@@ -672,14 +684,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     };
     pipRectRef.current = next;
     setPipRect(next);
-  }, []);
+  }, [updatePipVelocity]);
 
   const endPipDrag = useCallback((event: ReactPointerEvent<HTMLVideoElement>) => {
     const drag = pipDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     pipDragRef.current = null;
-    settlePip(pipRectRef.current);
-  }, [settlePip]);
+    coastAndSettlePip(pipRectRef.current);
+  }, [coastAndSettlePip]);
 
   const startPipResize = useCallback((event: ReactPointerEvent<HTMLDivElement>, handle: "top-left" | "top-right" | "bottom-left" | "bottom-right") => {
     if (!isPip || event.button !== 0) return;
@@ -764,7 +776,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
     };
     const isControl = (target: EventTarget | null) =>
-      target instanceof Element && !!target.closest("[data-pip-control]");
+      target instanceof Element && !!target.closest("button, [data-pip-control], [data-pip-interactive]");
     const start = (event: TouchEvent) => {
       if (isControl(event.target) || event.touches.length === 0) {
         pipTouchRef.current = null;
@@ -786,6 +798,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         return;
       }
       const touch = event.touches[0];
+      startPipVelocity(touch.clientX, touch.clientY);
       pipTouchRef.current = {
         kind: "drag",
         startX: touch.clientX,
@@ -832,6 +845,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       }
       if (gesture.kind !== "drag" || event.touches.length !== 1) return;
       const touch = event.touches[0];
+      updatePipVelocity(touch.clientX, touch.clientY);
       const dx = touch.clientX - gesture.startX;
       const dy = touch.clientY - gesture.startY;
       const { viewportWidth, viewportHeight } = pipBounds(pipAspectRef.current);
@@ -853,7 +867,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       pipTouchRef.current = null;
       if (gesture.moved) {
         lastPipDragAtRef.current = Date.now();
-        settlePip(pipRectRef.current);
+        if (gesture.kind === "drag") coastAndSettlePip(pipRectRef.current);
+        else settlePip(pipRectRef.current);
       } else {
         setPipInteracting(false);
         onRestore?.();
@@ -869,10 +884,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       root.removeEventListener("touchend", end, true);
       root.removeEventListener("touchcancel", end, true);
     };
-  }, [isPip, pipPhone, onRestore, settlePip]);
+  }, [isPip, pipPhone, onRestore, settlePip, coastAndSettlePip, startPipVelocity, updatePipVelocity]);
 
   useEffect(() => {
     if (!isPip) return;
+    // Every minimize is a fresh PiP session. Placement and size are deliberately
+    // reset instead of carrying an old drag from another title or device size.
+    const dock = defaultPipDock();
+    const rect = dockPip(dock, defaultPipWidth(pipAspectRef.current), pipAspectRef.current);
+    setPipDock(dock);
+    pipRectRef.current = rect;
+    setPipRect(rect);
+    setPipInteracting(false);
     // Developer note: PiP is video-only. Close every optional player surface;
     // the end card below is the sole intentional exception.
     setShowTrackSwitcher(false);
@@ -4285,12 +4308,30 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         top: pipRect.top,
         width: pipRect.width,
         height: pipRect.height,
-        overflow: confirmingEnd ? "visible" : "hidden",
+        overflow: "hidden",
         transition: pipInteracting
           ? "none"
           : "left 320ms cubic-bezier(.2,.8,.2,1), top 320ms cubic-bezier(.2,.8,.2,1), width 320ms cubic-bezier(.2,.8,.2,1), height 320ms cubic-bezier(.2,.8,.2,1)",
       }
     : { ...styles.container, ...styles.fullContainer };
+
+  const pipDockAtStart = pipDock.offset <= 0.01;
+  const pipDockAtEnd = pipDock.offset >= 0.99;
+  const pipTouchesTop = pipDock.edge === "top"
+    || ((pipDock.edge === "left" || pipDock.edge === "right") && pipDockAtStart);
+  const pipTouchesBottom = pipDock.edge === "bottom"
+    || ((pipDock.edge === "left" || pipDock.edge === "right") && pipDockAtEnd);
+  const pipTouchesLeft = pipDock.edge === "left"
+    || ((pipDock.edge === "top" || pipDock.edge === "bottom") && pipDockAtStart);
+  const pipTouchesRight = pipDock.edge === "right"
+    || ((pipDock.edge === "top" || pipDock.edge === "bottom") && pipDockAtEnd);
+  const pipResizeHandles = (["top-left", "top-right", "bottom-left", "bottom-right"] as const).filter((handle) => {
+    if (handle.startsWith("top") && pipTouchesTop) return false;
+    if (handle.startsWith("bottom") && pipTouchesBottom) return false;
+    if (handle.endsWith("left") && pipTouchesLeft) return false;
+    if (handle.endsWith("right") && pipTouchesRight) return false;
+    return true;
+  });
 
   return (
     <div
@@ -4378,7 +4419,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         onPointerCancel={isPip ? endPipDrag : undefined}
       />
 
-      {isPip && (pipPhone || pipControlsVisible) && (
+      {isPip && !playbackEnded && (pipPhone || pipControlsVisible) && (
         <div style={styles.pipControls}>
           {canControl && <button
             className="btn"
@@ -4440,7 +4481,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         </div>
       )}
 
-      {isPip && !pipPhone && (["top-left", "top-right", "bottom-left", "bottom-right"] as const).map((handle) => (
+      {isPip && !pipPhone && pipResizeHandles.map((handle) => (
         <div
           key={handle}
           aria-label={`Resize picture in picture from ${handle}`}
@@ -4758,7 +4799,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         </div>
       )}
 
-      {confirmingEnd && (() => {
+      {confirmingEnd && createPortal((() => {
         const otherCount = (syncState?.participants ?? []).filter(
           (p) => p.userId !== selfUserId,
         ).length;
@@ -4803,7 +4844,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             </div>
           </div>
         );
-      })()}
+      })(), document.body)}
       {/* Bottom-right stack: owns placement so neither child positions itself and
           a third affordance costs one line. Bottom-anchored, so it grows upward
           and the skip button naturally sits above the card. */}
@@ -4870,14 +4911,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  confirmBackdrop: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 110, display: "flex", alignItems: "center", justifyContent: "center" },
-  confirmDialog: { width: "420px", maxWidth: "85vw", background: "#1a1a1a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "12px", padding: "20px" },
+  confirmBackdrop: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 110, display: "flex", alignItems: "center", justifyContent: "center", padding: "16px", boxSizing: "border-box" },
+  confirmDialog: { width: "440px", maxWidth: "100%", boxSizing: "border-box", background: "#1a1a1a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "12px", padding: "20px" },
   confirmTitle: { color: "#f0f0f0", fontSize: "16px", fontWeight: 600, marginBottom: "8px" },
   confirmText: { color: "#aaa", fontSize: "13px", lineHeight: 1.5, margin: "0 0 16px" },
-  confirmActions: { display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: "8px" },
-  confirmCancelBtn: { padding: "8px 14px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#ccc", fontSize: "13px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
-  confirmPipBtn: { padding: "8px 14px", borderRadius: "8px", border: "1px solid rgba(229,160,13,0.5)", background: "transparent", color: "#e5a00d", fontSize: "13px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
-  confirmEndBtn: { padding: "8px 14px", borderRadius: "8px", border: "none", background: "#e5a00d", color: "#000", fontSize: "13px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
+  confirmActions: { display: "flex", justifyContent: "stretch", flexWrap: "wrap", gap: "8px", width: "100%" },
+  confirmCancelBtn: { flex: "1 1 100px", minWidth: 0, padding: "8px 12px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#ccc", fontSize: "13px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
+  confirmPipBtn: { flex: "1.45 1 150px", minWidth: 0, padding: "8px 12px", borderRadius: "8px", border: "1px solid rgba(229,160,13,0.5)", background: "transparent", color: "#e5a00d", fontSize: "13px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
+  confirmEndBtn: { flex: "1 1 100px", minWidth: 0, padding: "8px 12px", borderRadius: "8px", border: "none", background: "#e5a00d", color: "#000", fontSize: "13px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
   bottomRightStack: {
     position: "absolute",
     right: "calc(20px + var(--sair, 0px))",

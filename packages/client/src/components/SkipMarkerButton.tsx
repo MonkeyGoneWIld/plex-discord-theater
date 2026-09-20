@@ -30,6 +30,8 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     cursor: "pointer",
     fontFamily: "inherit",
-    boxShadow: "0 2px 12px rgba(0,0,0,0.5)",
+    boxShadow: "none",
+    outline: "none",
+    appearance: "none",
   },
 };

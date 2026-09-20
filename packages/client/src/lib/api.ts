@@ -47,6 +47,20 @@ export const POSTER_THUMB_W = 400;
 export const POSTER_THUMB_H = 600;
 
 /**
+ * Cast portraits at the one square size used by both speculative prefetch and
+ * the rendered row. Plex otherwise serves the original portrait, which can be
+ * several times larger than the circle on screen and cannot share a cache entry
+ * with a later sized request.
+ */
+export function personThumbUrl(thumb: string): string {
+  const withToken = authUrl(thumb);
+  const sep = withToken.includes("?") ? "&" : "?";
+  return `${withToken}${sep}w=${PERSON_THUMB_SIZE}&h=${PERSON_THUMB_SIZE}`;
+}
+
+export const PERSON_THUMB_SIZE = 320;
+
+/**
  * Episode-still URL, at 16:9 rather than the poster's 2:3.
  *
  * Asking for the poster size here hands Plex's photo transcoder a portrait box
@@ -376,10 +390,96 @@ export function prefetchDetail(item: Pick<PlexItem, "ratingKey" | "type" | "inLi
   // Not-in-library results resolve through a different endpoint keyed on guid or
   // tmdbId, and episodes have no related rows — neither is worth speculating on.
   if (item.inLibrary === false) return;
-  void fetchMeta(item.ratingKey).catch(() => {});
+  void fetchMeta(item.ratingKey)
+    .then((meta) => {
+      // Director is drawn first, followed by cast. Prime only the first screen
+      // or so rather than turning a hover into thirty image requests.
+      const seen = new Set<string>();
+      for (const person of [...(meta.directors ?? []), ...(meta.cast ?? [])]) {
+        if (!person.thumb || seen.has(person.thumb)) continue;
+        seen.add(person.thumb);
+        queueDetailArtwork(personThumbUrl(person.thumb));
+        if (seen.size >= DETAIL_CAST_PREFETCH_LIMIT) break;
+      }
+    })
+    .catch(() => {});
   if (item.type === "movie" || item.type === "show") {
-    void fetchRelated(item.ratingKey).catch(() => {});
+    void fetchRelated(item.ratingKey)
+      .then((related) => {
+        // Collections are above recommendations on the page. Warm their first
+        // visible posters specifically; More Like This already benefits from
+        // the persistent related-data cache and can load normally below it.
+        let queued = 0;
+        const seen = new Set<string>();
+        for (const collection of related.collections) {
+          for (const relatedItem of collection.items) {
+            if (!relatedItem.thumb || seen.has(relatedItem.thumb)) continue;
+            seen.add(relatedItem.thumb);
+            queueDetailArtwork(posterThumbUrl(relatedItem.thumb));
+            queued++;
+            if (queued >= DETAIL_COLLECTION_PREFETCH_LIMIT) return;
+          }
+        }
+      })
+      .catch(() => {});
   }
+}
+
+/**
+ * Artwork prefetch is intentionally demand-driven rather than part of the
+ * server's startup warmer. A deployment therefore does not ask Plex for every
+ * portrait and poster in the library; only a title the user rests on is primed.
+ * Four concurrent images are enough to fill the visible rows quickly without
+ * competing aggressively with navigation or playback.
+ */
+const DETAIL_CAST_PREFETCH_LIMIT = 12;
+const DETAIL_COLLECTION_PREFETCH_LIMIT = 12;
+const DETAIL_ARTWORK_CONCURRENCY = 4;
+const DETAIL_ARTWORK_QUEUE_LIMIT = 32;
+const DETAIL_ARTWORK_MEMORY_LIMIT = 300;
+const detailArtworkQueue: string[] = [];
+const detailArtworkSeen = new Set<string>();
+let detailArtworkActive = 0;
+
+function trimDetailArtworkMemory(): void {
+  while (detailArtworkSeen.size > DETAIL_ARTWORK_MEMORY_LIMIT) {
+    const oldest = detailArtworkSeen.values().next().value;
+    if (oldest === undefined) break;
+    detailArtworkSeen.delete(oldest);
+  }
+}
+
+function pumpDetailArtwork(): void {
+  if (typeof Image === "undefined") return;
+  while (detailArtworkActive < DETAIL_ARTWORK_CONCURRENCY && detailArtworkQueue.length > 0) {
+    const url = detailArtworkQueue.shift()!;
+    const image = new Image();
+    detailArtworkActive++;
+    const finished = () => {
+      image.onload = null;
+      image.onerror = null;
+      detailArtworkActive--;
+      pumpDetailArtwork();
+    };
+    image.onload = finished;
+    image.onerror = () => {
+      // A transient failure should be allowed to retry on a future hover.
+      detailArtworkSeen.delete(url);
+      finished();
+    };
+    image.decoding = "async";
+    image.src = url;
+  }
+}
+
+function queueDetailArtwork(url: string): void {
+  if (!url || typeof Image === "undefined" || detailArtworkSeen.has(url)) return;
+  // Do not let somebody sweeping across a shelf create an unbounded backlog.
+  if (detailArtworkQueue.length >= DETAIL_ARTWORK_QUEUE_LIMIT) return;
+  detailArtworkSeen.add(url);
+  trimDetailArtworkMemory();
+  detailArtworkQueue.push(url);
+  pumpDetailArtwork();
 }
 
 export function searchPlex(

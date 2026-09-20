@@ -63,6 +63,10 @@ export function MovieCard({ item, onClick, progress, watched, onRemove, removeLa
   return (
     <button
       onClick={() => onClick(item)}
+      // Touch devices do not hover. Start the same bounded detail/artwork warm
+      // on press; the detail components then join these in-flight requests.
+      onPointerDown={() => prefetchDetail(item)}
+      onFocus={() => prefetchDetail(item)}
       // Native tooltip on the whole card, so the full title shows on hover
       // anywhere over it (poster included), not only over the ellipsized text.
       title={item.title}

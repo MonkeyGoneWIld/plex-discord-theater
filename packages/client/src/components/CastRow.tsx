@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ScrollShelf } from "./ScrollShelf";
-import { authUrl, type Credit } from "../lib/api";
+import { personThumbUrl, type Credit } from "../lib/api";
 import { ShelfSkeleton } from "./ShelfSkeleton";
 import { usePosterLayout } from "../lib/grid";
 
@@ -58,7 +58,7 @@ function CastAvatar({
     >
       {show ? (
         <img
-          src={authUrl(person.thumb!)}
+          src={personThumbUrl(person.thumb!)}
           alt={person.name}
           style={styles.avatar}
           loading="eager"

@@ -97,8 +97,8 @@ services:
       - QBT_MANAGER_API_KEY=${QBT_MANAGER_API_KEY:-}
 
     volumes:
-      # SQLite (sessions, watch history, linked Plex accounts, thumbnail cache)
-      # and logs. A named
+      # SQLite (sessions, watch history, linked Plex accounts, detail metadata,
+      # thumbnail cache) and logs. A named
       # volume keeps them across rebuilds; swap for a host path (e.g.
       # ./data:/data) if you'd rather have them somewhere you can browse.
       - app-data:/data

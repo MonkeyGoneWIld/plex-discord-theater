@@ -24,6 +24,7 @@ import * as thumbCache from "./services/thumb-cache.js";
 import { startCacheWarmer, stopCacheWarmer } from "./services/cache-warmer.js";
 import { closeHistoryDb } from "./services/watch-history.js";
 import { closePlexAccountsDb } from "./services/plex-accounts.js";
+import { closeDetailCache } from "./services/detail-cache.js";
 import { attachWebSocketServer, closeWebSocketServer } from "./services/sync.js";
 
 const required = ["DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET", "PLEX_URL", "PLEX_TOKEN", "REDIRECT_URI"] as const;
@@ -336,6 +337,7 @@ async function shutdown(signal: string) {
     closeInstanceDb();
     closeHistoryDb();
     closePlexAccountsDb();
+    closeDetailCache();
     closeLogger(); // last — everything above may still log on the way out
     process.exit(0);
   });

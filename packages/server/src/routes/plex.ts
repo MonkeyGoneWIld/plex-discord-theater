@@ -14,6 +14,8 @@ import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
 import { parseSubtitles, type Cue } from "../services/subtitles.js";
 import { mapPlexRatings } from "../services/ratings.js";
+import { readDetailCache, writeDetailCache, invalidateDetailCache } from "../services/detail-cache.js";
+import { findIndexedLibraryItem } from "../services/library-index.js";
 
 const router = Router();
 
@@ -214,10 +216,12 @@ interface SkipMarker {
   end: number;
 }
 
-interface PlexMetadataItem {
+export interface PlexMetadataItem {
   ratingKey: string;
   title: string;
   year?: number;
+  addedAt?: number;
+  updatedAt?: number;
   type: string;
   thumb?: string;
   summary?: string;
@@ -935,11 +939,18 @@ export async function buildMeta(ratingKey: string): Promise<Record<string, unkno
   const hit = metaCache.get(ratingKey);
   if (hit && Date.now() - hit.at < META_CACHE_TTL_MS) return hit.payload;
 
+  const persisted = readDetailCache<Record<string, unknown>>("meta", ratingKey);
+  if (persisted) {
+    metaCache.set(ratingKey, { payload: persisted.payload, at: Date.now() });
+    return persisted.payload;
+  }
+
   const payload = await buildMetaUncached(ratingKey);
   // An incomplete show must also bypass this outer cache, or a failed ID
   // lookup would still hide requestable seasons for an hour.
   if (payload && !(payload.type === "show" && payload.tmdbId == null)) {
     metaCache.set(ratingKey, { payload, at: Date.now() });
+    writeDetailCache("meta", ratingKey, payload);
   }
   return payload;
 }
@@ -960,7 +971,18 @@ const RELATED_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours — this rarely chan
  *  uses it to skip anything already warm. */
 export function getRelatedCached(ratingKey: string): RelatedPayload | null {
   const hit = relatedCache.get(ratingKey);
-  return hit && Date.now() - hit.at < RELATED_CACHE_TTL_MS ? hit.payload : null;
+  if (hit && Date.now() - hit.at < RELATED_CACHE_TTL_MS) return hit.payload;
+  const persisted = readDetailCache<RelatedPayload>("related", ratingKey);
+  if (!persisted) return null;
+  relatedCache.set(ratingKey, { payload: persisted.payload, at: Date.now() });
+  return persisted.payload;
+}
+
+/** Drop both layers before rebuilding a title whose Plex updatedAt changed. */
+export function invalidateTitleDetailCaches(ratingKey: string): void {
+  metaCache.delete(ratingKey);
+  relatedCache.delete(ratingKey);
+  invalidateDetailCache(ratingKey);
 }
 
 function mapAudioTracks(streams: PlexStream[]) {
@@ -1278,6 +1300,13 @@ const libraryMatchCache = new LruMap<string, PlexMetadataItem | null>(5_000);
 async function findLibraryMatch(part: TmdbPart, type: string): Promise<PlexMetadataItem | null> {
   const title = part.title ?? part.name ?? "";
   const key = `${type}:${part.id}`;
+  const indexed = findIndexedLibraryItem({
+    tmdbId: part.id,
+    title,
+    type,
+    year: tmdbResultYear(part),
+  });
+  if (indexed !== undefined) return indexed as PlexMetadataItem | null;
   if (libraryMatchCache.has(key)) return libraryMatchCache.get(key)!;
   let found: PlexMetadataItem | null = null;
   if (title) {
@@ -1361,6 +1390,7 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
   // recommendations lookup, which is why these rows lagged the rest of the page.
   const send = (payload: RelatedPayload) => {
     relatedCache.set(ratingKey, { payload, at: Date.now() });
+    writeDetailCache("related", ratingKey, payload);
     res.json(payload);
   };
 

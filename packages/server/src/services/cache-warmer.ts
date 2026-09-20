@@ -1,6 +1,13 @@
 import { plexJSON } from "./plex.js";
-import { buildMeta, getRelatedCached } from "../routes/plex.js";
+import {
+  buildMeta,
+  getRelatedCached,
+  invalidateTitleDetailCaches,
+  type PlexMetadataItem,
+} from "../routes/plex.js";
 import { createSession } from "../middleware/auth.js";
+import { detailCacheMatches, markDetailCacheVersion } from "./detail-cache.js";
+import { replaceLibraryIndex } from "./library-index.js";
 
 /**
  * Background cache warmer.
@@ -34,28 +41,54 @@ let running = false;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Every movie and show ratingKey in the library, newest first — the order that
- *  best matches what people actually open. */
-async function libraryRatingKeys(): Promise<string[]> {
+interface CatalogItem extends PlexMetadataItem {
+  addedAt?: number;
+  updatedAt?: number;
+}
+
+const CATALOG_PAGE_SIZE = 1_000;
+
+/**
+ * One catalog scan supplies both jobs the old warmer performed expensively:
+ * the newest-first warm queue and a complete local ownership index for TMDB
+ * recommendations. Ownership matching can then stay in memory instead of
+ * issuing as many as twenty `/hubs/search` requests for each title.
+ */
+async function libraryCatalog(): Promise<CatalogItem[]> {
   const sections = await plexJSON<{
     MediaContainer: { Directory?: Array<{ key: string; type: string }> };
   }>("/library/sections");
 
-  const keys: string[] = [];
+  const items: CatalogItem[] = [];
   for (const dir of sections.MediaContainer.Directory ?? []) {
     if (dir.type !== "movie" && dir.type !== "show") continue;
-    const data = await plexJSON<{
-      MediaContainer: { Metadata?: Array<{ ratingKey: string }> };
-    }>(`/library/sections/${dir.key}/all`, {
-      // Newest first, and capped per section so one huge library can't crowd out
-      // the others entirely.
-      sort: "addedAt:desc",
-      "X-Plex-Container-Start": "0",
-      "X-Plex-Container-Size": String(MAX_ITEMS),
-    });
-    for (const item of data.MediaContainer.Metadata ?? []) keys.push(item.ratingKey);
+    let start = 0;
+    for (;;) {
+      const data = await plexJSON<{
+        MediaContainer: { Metadata?: CatalogItem[]; totalSize?: number };
+      }>(`/library/sections/${dir.key}/all`, {
+        sort: "addedAt:desc",
+        includeGuids: "1",
+        "X-Plex-Container-Start": String(start),
+        "X-Plex-Container-Size": String(CATALOG_PAGE_SIZE),
+      });
+      const page = data.MediaContainer.Metadata ?? [];
+      const sectionId = Number.parseInt(dir.key, 10);
+      for (const item of page) {
+        items.push({
+          ...item,
+          librarySectionID: item.librarySectionID ?? (Number.isFinite(sectionId) ? sectionId : undefined),
+        });
+      }
+      start += page.length;
+      if (
+        page.length === 0 ||
+        page.length < CATALOG_PAGE_SIZE ||
+        (data.MediaContainer.totalSize != null && start >= data.MediaContainer.totalSize)
+      ) break;
+    }
   }
-  return keys.slice(0, MAX_ITEMS);
+  return items;
 }
 
 /**
@@ -113,12 +146,29 @@ async function runPass(port: number): Promise<void> {
   running = true;
   const startedAt = Date.now();
   let warmed = 0;
+  let unchanged = 0;
   try {
-    const keys = await libraryRatingKeys();
-    for (const ratingKey of keys) {
+    const catalog = await libraryCatalog();
+    replaceLibraryIndex(catalog);
+    const candidates = [...catalog]
+      .sort((a, b) => (b.addedAt ?? 0) - (a.addedAt ?? 0))
+      .slice(0, MAX_ITEMS);
+
+    for (const item of candidates) {
+      const ratingKey = String(item.ratingKey);
+      const sourceUpdatedAt = item.updatedAt;
+      if (sourceUpdatedAt != null && detailCacheMatches(ratingKey, sourceUpdatedAt)) {
+        unchanged++;
+        continue;
+      }
+      // Disk and memory must agree on invalidation. Otherwise buildMeta would
+      // immediately return the old persistent row we came here to replace.
+      invalidateTitleDetailCaches(ratingKey);
       try {
-        await buildMeta(ratingKey);
+        const meta = await buildMeta(ratingKey);
+        if (!meta) throw new Error("metadata warm returned no item");
         await warmRelated(port, ratingKey);
+        if (sourceUpdatedAt != null) markDetailCacheVersion(ratingKey, sourceUpdatedAt);
         warmed++;
       } catch {
         // One unreachable title must not end the pass — the next one may be fine.
@@ -126,7 +176,7 @@ async function runPass(port: number): Promise<void> {
       await sleep(ITEM_DELAY_MS);
     }
     console.log(
-      `[warm] cached ${warmed}/${keys.length} titles in ${Math.round((Date.now() - startedAt) / 1000)}s`,
+      `[warm] refreshed ${warmed}, reused ${unchanged}/${candidates.length} titles in ${Math.round((Date.now() - startedAt) / 1000)}s`,
     );
   } catch (err) {
     console.warn("[warm] pass failed:", err);

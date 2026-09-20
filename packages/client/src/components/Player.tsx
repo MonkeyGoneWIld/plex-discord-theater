@@ -26,6 +26,7 @@ import { roomPositionNow } from "../hooks/useSync";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
 import { useVideoZoom } from "../lib/useVideoZoom";
 import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
+import { clampPipRect, pipDockForRect, releasePipDock, startPipMotion, samplePipMotion, PIP_MARGIN, PIP_DRAG_SLOP, type PipDock, type PipRect } from "../lib/pipMotion";
 import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
 import type { InviteResult } from "../hooks/useDiscord";
 
@@ -449,11 +450,6 @@ interface PlayerProps {
   onRestore?: () => void;
 }
 
-type PipEdge = "top" | "right" | "bottom" | "left";
-interface PipRect { left: number; top: number; width: number; height: number }
-interface PipDock { edge: PipEdge; offset: number }
-
-const PIP_MARGIN = 18;
 const PIP_DEFAULT_ASPECT = 16 / 9;
 const PIP_MIN_WIDTH = 240;
 
@@ -551,6 +547,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [confirmingEnd, setConfirmingEnd] = useState(false);
   const initialPipDockRef = useRef<PipDock>(defaultPipDock());
   const [pipDock, setPipDock] = useState<PipDock>(initialPipDockRef.current);
+  const pipDockRef = useRef(pipDock);
+  pipDockRef.current = pipDock;
   const [pipAspect, setPipAspect] = useState(PIP_DEFAULT_ASPECT);
   const pipAspectRef = useRef(pipAspect);
   pipAspectRef.current = pipAspect;
@@ -558,10 +556,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const pipRectRef = useRef(pipRect);
   pipRectRef.current = pipRect;
   const [pipInteracting, setPipInteracting] = useState(false);
-  const pipDragRef = useRef<{ pointerId: number; startX: number; startY: number; rect: PipRect } | null>(null);
+  const pipDragRef = useRef<{ pointerId: number; startX: number; startY: number; rect: PipRect; restingRect: PipRect; moved: boolean } | null>(null);
   const pipResizeRef = useRef<{ pointerId: number; startX: number; width: number; rect: PipRect; handle: "top-left" | "top-right" | "bottom-left" | "bottom-right" } | null>(null);
   const lastPipDragAtRef = useRef(0);
-  const pipVelocityRef = useRef({ x: 0, y: 0, at: 0, startX: 0, startY: 0, startAt: 0, vx: 0, vy: 0 });
+  const pipMotionRef = useRef(startPipMotion(0, 0, 0));
   const pipTouchRef = useRef<{
     kind: "drag" | "pinch";
     startX: number;
@@ -569,6 +567,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     distance: number;
     width: number;
     rect: PipRect;
+    restingRect: PipRect;
     moved: boolean;
   } | null>(null);
   const [pipControlsVisible, setPipControlsVisible] = useState(false);
@@ -598,103 +597,59 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const prevEpisodeRef = useRef<PlexItem | null>(null);
   prevEpisodeRef.current = prevEpisode;
 
-  const settlePip = useCallback((rect: PipRect, preferredEdge?: PipEdge) => {
+  const settlePip = useCallback((rect: PipRect, withMomentum = false) => {
     const aspect = pipAspectRef.current;
     const { viewportWidth, viewportHeight } = pipBounds(aspect);
-    const distances: Array<[PipEdge, number]> = [
-      ["top", rect.top],
-      ["right", viewportWidth - rect.left - rect.width],
-      ["bottom", viewportHeight - rect.top - rect.height],
-      ["left", rect.left],
-    ];
-    distances.sort((a, b) => a[1] - b[1]);
-    const edge = preferredEdge ?? distances[0][0];
-    const horizontalTravel = Math.max(1, viewportWidth - rect.width - PIP_MARGIN * 2);
-    const verticalTravel = Math.max(1, viewportHeight - rect.height - PIP_MARGIN * 2);
-    const offset = edge === "top" || edge === "bottom"
-      ? (rect.left - PIP_MARGIN) / horizontalTravel
-      : (rect.top - PIP_MARGIN) / verticalTravel;
-    const dock = { edge, offset: Math.max(0, Math.min(1, offset)) };
+    const viewport = { width: viewportWidth, height: viewportHeight };
+    const dock = withMomentum
+      ? releasePipDock(rect, viewport, pipDockRef.current.edge, pipMotionRef.current, performance.now())
+      : pipDockForRect(rect, viewport, pipDockRef.current.edge);
     const snapped = dockPip(dock, rect.width, aspect);
+    pipDockRef.current = dock;
+    pipRectRef.current = snapped;
     setPipDock(dock);
     setPipRect(snapped);
     setPipInteracting(false);
   }, []);
 
   const startPipVelocity = useCallback((x: number, y: number) => {
-    const now = performance.now();
-    pipVelocityRef.current = { x, y, at: now, startX: x, startY: y, startAt: now, vx: 0, vy: 0 };
+    pipMotionRef.current = startPipMotion(x, y, performance.now());
   }, []);
 
   const updatePipVelocity = useCallback((x: number, y: number) => {
-    const now = performance.now();
-    const previous = pipVelocityRef.current;
-    const elapsed = Math.max(1, now - previous.at);
-    const instantX = (x - previous.x) / elapsed;
-    const instantY = (y - previous.y) / elapsed;
-    pipVelocityRef.current = {
-      x,
-      y,
-      at: now,
-      startX: previous.startX,
-      startY: previous.startY,
-      startAt: previous.startAt,
-      vx: previous.vx * 0.35 + instantX * 0.65,
-      vy: previous.vy * 0.35 + instantY * 0.65,
-    };
+    samplePipMotion(pipMotionRef.current, x, y, performance.now());
   }, []);
 
-  const coastAndSettlePip = useCallback((rect: PipRect) => {
-    const velocity = pipVelocityRef.current;
-    const { viewportWidth, viewportHeight } = pipBounds(pipAspectRef.current);
-    // Momentum requires a deliberate, quick throw. Using a capped travel
-    // distance instead of raw px/ms prevents one unusually short pointer event
-    // interval from launching the window across the entire Activity.
-    const velocityAge = performance.now() - velocity.at;
-    const totalX = velocity.x - velocity.startX;
-    const totalY = velocity.y - velocity.startY;
-    const totalDistance = Math.hypot(totalX, totalY);
-    const totalTime = Math.max(1, velocity.at - velocity.startAt);
-    const gestureSpeed = totalDistance / totalTime;
-    const hasThrow = totalDistance >= 48 && gestureSpeed >= 0.4 && velocityAge < 120;
-    let directionX = hasThrow ? totalX : 0;
-    let directionY = hasThrow ? totalY : 0;
-    let preferredEdge: PipEdge | undefined;
-    // A clearly horizontal throw stays horizontal (and vice versa), so a small
-    // off-axis wobble cannot make left-to-right motion dock on the top edge.
-    if (Math.abs(directionX) >= Math.abs(directionY) * 1.2) {
-      directionY = 0;
-      preferredEdge = directionX < 0 ? "left" : "right";
-    } else if (Math.abs(directionY) >= Math.abs(directionX) * 1.2) {
-      directionX = 0;
-      preferredEdge = directionY < 0 ? "top" : "bottom";
-    }
-    const directionLength = Math.hypot(directionX, directionY);
-    const momentumDistance = hasThrow
-      ? Math.min(140, totalDistance * 0.65, Math.max(0, (gestureSpeed - 0.28) * 110))
-      : 0;
-    const projected = {
-      ...rect,
-      left: Math.min(viewportWidth - rect.width, Math.max(0, rect.left + (directionLength ? directionX / directionLength * momentumDistance : 0))),
-      top: Math.min(viewportHeight - rect.height, Math.max(0, rect.top + (directionLength ? directionY / directionLength * momentumDistance : 0))),
-    };
-    settlePip(projected, preferredEdge);
-  }, [settlePip]);
+  // CSS settling has a destination state ahead of the visible position. A new
+  // grab must begin at the visible rectangle so it can interrupt the animation.
+  const grabPipRect = useCallback((): PipRect => {
+    const visible = zoomRootRef.current?.getBoundingClientRect();
+    const rect = visible && visible.width > 0
+      ? { left: visible.left, top: visible.top, width: visible.width, height: visible.height }
+      : pipRectRef.current;
+    pipRectRef.current = rect;
+    setPipRect(rect);
+    setPipInteracting(true);
+    return rect;
+  }, []);
 
   const startPipDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (!isPip || event.button !== 0 || event.pointerType === "touch") return;
     const target = event.target as Element;
-    if (target.closest("button, [role='separator'], [data-pip-interactive]")) return;
+    if (!event.currentTarget.contains(target) || target.closest("button, [role='separator'], [data-pip-interactive]")) return;
     event.currentTarget.setPointerCapture(event.pointerId);
+    const restingRect = pipRectRef.current;
+    const rect = grabPipRect();
     startPipVelocity(event.clientX, event.clientY);
     pipDragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      rect: pipRect,
+      rect,
+      restingRect,
+      moved: false,
     };
-    setPipInteracting(true);
-  }, [isPip, pipRect, startPipVelocity]);
+  }, [isPip, grabPipRect, startPipVelocity]);
 
   const movePip = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = pipDragRef.current;
@@ -702,13 +657,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const dx = event.clientX - drag.startX;
     const dy = event.clientY - drag.startY;
     updatePipVelocity(event.clientX, event.clientY);
-    if (Math.hypot(dx, dy) > 5) lastPipDragAtRef.current = Date.now();
+    if (!drag.moved && Math.hypot(dx, dy) < PIP_DRAG_SLOP) return;
+    drag.moved = true;
+    event.preventDefault();
+    lastPipDragAtRef.current = Date.now();
     const { viewportWidth, viewportHeight } = pipBounds(pipAspectRef.current);
-    const next = {
+    const next = clampPipRect({
       ...drag.rect,
-      left: Math.min(viewportWidth - drag.rect.width, Math.max(0, drag.rect.left + dx)),
-      top: Math.min(viewportHeight - drag.rect.height, Math.max(0, drag.rect.top + dy)),
-    };
+      left: drag.rect.left + dx,
+      top: drag.rect.top + dy,
+    }, { width: viewportWidth, height: viewportHeight });
     pipRectRef.current = next;
     setPipRect(next);
   }, [updatePipVelocity]);
@@ -717,18 +675,28 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const drag = pipDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     pipDragRef.current = null;
-    coastAndSettlePip(pipRectRef.current);
-  }, [coastAndSettlePip]);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (drag.moved) {
+      lastPipDragAtRef.current = Date.now();
+      settlePip(pipRectRef.current, event.type === "pointerup");
+    } else {
+      // A click during settling pauses it only while pressed. If no drag
+      // follows, finish the original docking rather than strand PiP mid-screen.
+      pipRectRef.current = drag.restingRect;
+      setPipRect(drag.restingRect);
+      setPipInteracting(false);
+    }
+  }, [settlePip]);
 
   const startPipResize = useCallback((event: ReactPointerEvent<HTMLDivElement>, handle: "top-left" | "top-right" | "bottom-left" | "bottom-right") => {
-    if (!isPip || event.button !== 0) return;
+    if (!isPip || event.button !== 0 || event.pointerType === "touch") return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
-    pipResizeRef.current = { pointerId: event.pointerId, startX: event.clientX, width: pipRect.width, rect: pipRect, handle };
-    setPipInteracting(true);
+    const rect = grabPipRect();
+    pipResizeRef.current = { pointerId: event.pointerId, startX: event.clientX, width: rect.width, rect, handle };
     lastPipDragAtRef.current = Date.now();
-  }, [isPip, pipRect]);
+  }, [isPip, grabPipRect]);
 
   const movePipResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const resize = pipResizeRef.current;
@@ -755,10 +723,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const resize = pipResizeRef.current;
     if (!resize || resize.pointerId !== event.pointerId) return;
     pipResizeRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     settlePip(pipRectRef.current);
   }, [settlePip]);
 
-  const restoreFromPip = useCallback((event: ReactMouseEvent<HTMLVideoElement>) => {
+  const restoreFromPip = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    const target = event.target as Element;
+    if (!event.currentTarget.contains(target) || target.closest("button, [role='separator'], [data-pip-interactive]")) return;
     event.preventDefault();
     event.stopPropagation();
     // A drag produces click events on some webviews. Only a clean double-click
@@ -796,7 +767,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
   useEffect(() => {
     const root = zoomRootRef.current;
-    if (!isPip || !pipPhone || !root) return;
+    if (!isPip || !root) return;
     const distance = (touches: TouchList) => {
       const a = touches[0];
       const b = touches[1] ?? a;
@@ -812,27 +783,32 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       if (event.touches.length >= 2) {
         event.preventDefault();
         event.stopImmediatePropagation();
+        const restingRect = pipRectRef.current;
+        const rect = grabPipRect();
         pipTouchRef.current = {
           kind: "pinch",
           startX: 0,
           startY: 0,
           distance: distance(event.touches),
-          width: pipRectRef.current.width,
-          rect: pipRectRef.current,
+          width: rect.width,
+          rect,
+          restingRect,
           moved: false,
         };
-        setPipInteracting(true);
         return;
       }
       const touch = event.touches[0];
+      const restingRect = pipRectRef.current;
+      const rect = grabPipRect();
       startPipVelocity(touch.clientX, touch.clientY);
       pipTouchRef.current = {
         kind: "drag",
         startX: touch.clientX,
         startY: touch.clientY,
         distance: 0,
-        width: pipRectRef.current.width,
-        rect: pipRectRef.current,
+        width: rect.width,
+        rect,
+        restingRect,
         moved: false,
       };
     };
@@ -875,30 +851,32 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       updatePipVelocity(touch.clientX, touch.clientY);
       const dx = touch.clientX - gesture.startX;
       const dy = touch.clientY - gesture.startY;
+      if (!gesture.moved && Math.hypot(dx, dy) < PIP_DRAG_SLOP) return;
+      gesture.moved = true;
       const { viewportWidth, viewportHeight } = pipBounds(pipAspectRef.current);
-      const next = {
+      const next = clampPipRect({
         ...gesture.rect,
-        left: Math.min(viewportWidth - gesture.rect.width, Math.max(0, gesture.rect.left + dx)),
-        top: Math.min(viewportHeight - gesture.rect.height, Math.max(0, gesture.rect.top + dy)),
-      };
-      gesture.moved = gesture.moved || Math.hypot(dx, dy) > 5;
-      if (gesture.moved) setPipInteracting(true);
+        left: gesture.rect.left + dx,
+        top: gesture.rect.top + dy,
+      }, { width: viewportWidth, height: viewportHeight });
       pipRectRef.current = next;
       setPipRect(next);
     };
     const end = (event: TouchEvent) => {
       const gesture = pipTouchRef.current;
-      if (!gesture || isControl(event.target) || event.touches.length > 0) return;
+      if (!gesture || (event.type !== "touchcancel" && event.touches.length > 0)) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       pipTouchRef.current = null;
-      if (gesture.moved) {
+      if (gesture.moved || gesture.kind === "pinch") {
         lastPipDragAtRef.current = Date.now();
-        if (gesture.kind === "drag") coastAndSettlePip(pipRectRef.current);
-        else settlePip(pipRectRef.current);
+        settlePip(pipRectRef.current, gesture.kind === "drag" && event.type !== "touchcancel");
       } else {
         setPipInteracting(false);
-        onRestore?.();
+        if (event.type === "touchcancel") {
+          pipRectRef.current = gesture.restingRect;
+          setPipRect(gesture.restingRect);
+        } else onRestore?.();
       }
     };
     root.addEventListener("touchstart", start, { passive: false, capture: true });
@@ -911,14 +889,31 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       root.removeEventListener("touchend", end, true);
       root.removeEventListener("touchcancel", end, true);
     };
-  }, [isPip, pipPhone, onRestore, settlePip, coastAndSettlePip, startPipVelocity, updatePipVelocity]);
+  }, [isPip, onRestore, grabPipRect, settlePip, startPipVelocity, updatePipVelocity]);
 
   useEffect(() => {
+    if (!isPip) return;
+    const cancel = () => {
+      if (!pipDragRef.current && !pipTouchRef.current && !pipResizeRef.current) return;
+      pipDragRef.current = null;
+      pipTouchRef.current = null;
+      pipResizeRef.current = null;
+      settlePip(pipRectRef.current);
+    };
+    window.addEventListener("blur", cancel);
+    return () => window.removeEventListener("blur", cancel);
+  }, [isPip, settlePip]);
+
+  useEffect(() => {
+    pipDragRef.current = null;
+    pipTouchRef.current = null;
+    pipResizeRef.current = null;
     if (!isPip) return;
     // Every minimize is a fresh PiP session. Placement and size are deliberately
     // reset instead of carrying an old drag from another title or device size.
     const dock = defaultPipDock();
     const rect = dockPip(dock, defaultPipWidth(pipAspectRef.current), pipAspectRef.current);
+    pipDockRef.current = dock;
     setPipDock(dock);
     pipRectRef.current = rect;
     setPipRect(rect);
@@ -4038,17 +4033,21 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   }, [teardownPlayback, onBack, onFinished, item]);
 
   const handleBack = useCallback(() => {
-    // The host backing out ends the stream for the whole room, so confirm
-    // first when anyone else is watching. Viewers only leave for themselves.
+    if (!isHostRef.current && !isPip && onMinimize) {
+      onMinimize();
+      return;
+    }
+    // Back is the entry to PiP. Hosts need the choice even when alone; closing
+    // an existing PiP keeps the ordinary end-stream confirmation rules.
     const hasOtherViewers = (syncStateRef.current?.participants ?? []).some(
       (p) => p.userId !== selfUserId,
     );
-    if (isHostRef.current && hasOtherViewers) {
+    if (isHostRef.current && (hasOtherViewers || (!isPip && onMinimize))) {
       setConfirmingEnd(true);
       return;
     }
     endPlayback();
-  }, [endPlayback, selfUserId]);
+  }, [endPlayback, selfUserId, isPip, onMinimize]);
 
   /**
    * Choose tracks.
@@ -4371,6 +4370,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       onPointerMove={isPip ? movePip : undefined}
       onPointerUp={isPip ? endPipDrag : undefined}
       onPointerCancel={isPip ? endPipDrag : undefined}
+      onLostPointerCapture={isPip ? endPipDrag : undefined}
+      onDoubleClick={isPip && !pipPhone ? restoreFromPip : undefined}
+      onDragStart={isPip ? (event) => event.preventDefault() : undefined}
     >
       {!isPip && (syncState?.authFailed ? (
         <div style={styles.error}>Session expired — please close and restart the activity</div>
@@ -4443,7 +4445,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         }}
         playsInline
         onClick={isPip ? undefined : togglePlayPause}
-        onDoubleClick={isPip && !pipPhone ? restoreFromPip : undefined}
       />
 
       {isPip && !playbackEnded && (pipPhone || pipControlsVisible) && (
@@ -4523,6 +4524,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           onPointerMove={movePipResize}
           onPointerUp={endPipResize}
           onPointerCancel={endPipResize}
+          onLostPointerCapture={endPipResize}
         />
       ))}
 
@@ -4676,7 +4678,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         isHost={isHost}
         title={displayTitle}
         onBack={handleBack}
-        onMinimize={onMinimize}
         onToggleStats={() => setShowStats((s) => !s)}
         statsActive={showStats}
         canControl={canControl}
@@ -4836,10 +4837,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             <div style={styles.confirmDialog} onClick={(e) => e.stopPropagation()}>
               <div style={styles.confirmTitle}>End stream?</div>
               <p style={styles.confirmText}>
-                {otherCount === 1
-                  ? "1 other person is watching"
-                  : `${otherCount} other people are watching`}
-                {" — going back stops playback for everyone."}
+                {otherCount === 0
+                  ? (isPip ? "End this stream and return to browsing?" : "Keep watching in picture in picture, or end the stream.")
+                  : `${otherCount === 1 ? "1 other person is watching" : `${otherCount} other people are watching`} — ending the stream stops playback for everyone.`}
               </p>
               <div style={styles.confirmActions}>
                 <button className="btn"
@@ -4972,6 +4972,8 @@ const styles: Record<string, React.CSSProperties> = {
     height: "100vh",
   },
   pipContainer: {
+    boxSizing: "border-box",
+    userSelect: "none",
     zIndex: 70,
     borderRadius: "12px",
     border: "1px solid rgba(255,255,255,0.16)",

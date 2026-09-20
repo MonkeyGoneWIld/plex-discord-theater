@@ -2063,6 +2063,10 @@ const styles: Record<string, React.CSSProperties> = {
   },
   backBtn: {
     ...QUIET_SURFACE,
+    // The top-bar scrim is intentionally gone so revealing controls cannot
+    // alter the picture. Give Back its own dependable contrast instead.
+    background: "rgba(0,0,0,0.55)",
+    border: "1px solid rgba(255,255,255,0.22)",
     display: "flex",
     alignItems: "center",
     height: "34px",

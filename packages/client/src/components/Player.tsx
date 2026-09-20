@@ -452,14 +452,16 @@ interface PlayerProps {
 
 const PIP_DEFAULT_ASPECT = 16 / 9;
 const PIP_MIN_WIDTH = 240;
+const PIP_MAX_WIDTH = 1200;
+const PIP_MAX_VIEWPORT_FRACTION = 0.8;
 
 function pipBounds(aspect = PIP_DEFAULT_ASPECT): { viewportWidth: number; viewportHeight: number; minWidth: number; maxWidth: number } {
   const viewportWidth = typeof window === "undefined" ? 1280 : window.innerWidth;
   const viewportHeight = typeof window === "undefined" ? 720 : window.innerHeight;
   const phone = typeof window !== "undefined" && window.matchMedia(PHONE_QUERY).matches;
   const maxWidth = Math.max(1, Math.min(
-    720,
-    phone ? viewportWidth - PIP_MARGIN * 2 : viewportWidth * 0.55,
+    PIP_MAX_WIDTH,
+    phone ? viewportWidth - PIP_MARGIN * 2 : viewportWidth * PIP_MAX_VIEWPORT_FRACTION,
     (viewportHeight - PIP_MARGIN * 2) * aspect,
   ));
   return {

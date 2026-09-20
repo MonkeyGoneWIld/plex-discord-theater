@@ -1125,9 +1125,6 @@ export function App() {
           onSelectEpisode={handleSeasonEpisode}
           onShowClick={() => handleSeasonShowClick(view.show)}
           onBack={popView}
-          isHost={effectiveIsHost}
-          isPlaying={!!syncState.ratingKey}
-          onAddToQueue={effectiveIsHost ? (qi) => syncActions.sendQueueAdd(qi) : undefined}
         />
       )}
 
@@ -1140,8 +1137,6 @@ export function App() {
           onBack={popView}
           onShowClick={() => handleEpisodeShowClick(view.item)}
           onSeasonClick={() => handleEpisodeSeasonClick(view.item)}
-          isPlaying={!!syncState.ratingKey}
-          onAddToQueue={effectiveIsHost ? (qi) => syncActions.sendQueueAdd(qi) : undefined}
           onSuggest={!effectiveIsHost ? (item) => syncActions.sendSuggest(item) : undefined}
           onSelect={handleSelectRelated}
           onSelectPerson={handleSelectPerson}

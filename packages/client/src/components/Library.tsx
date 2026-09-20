@@ -645,6 +645,17 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   const gridStyle = { ...styles.grid, gridTemplateColumns: poster.gridColumns };
   const peopleRowStyle = { ...styles.peopleRow, gridTemplateColumns: poster.gridColumns };
   const hubCardStyle = { ...styles.hubCard, width: poster.rowCardWidth };
+  const historySettingsButton = (
+    <button className="btn" type="button" onClick={openHistorySettings} style={styles.settingsBtn}>
+      <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+        <path d="M3 5h8M15 5h2M3 10h2M9 10h8M3 15h6M13 15h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        <circle cx="13" cy="5" r="2" stroke="currentColor" strokeWidth="1.5" />
+        <circle cx="7" cy="10" r="2" stroke="currentColor" strokeWidth="1.5" />
+        <circle cx="11" cy="15" r="2" stroke="currentColor" strokeWidth="1.5" />
+      </svg>
+      History settings
+    </button>
+  );
 
   return (
     <div style={styles.container}>
@@ -780,20 +791,14 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
 
       <div style={styles.wideWrap}>
 
-      {/* History is replaced by Watchlist for linked Plex accounts. Keep the
-          same personal preference reachable in either tab; these are two
-          entrances to one server-side setting, not separate modes. */}
-      {(isHistoryTab || isWatchlistTab) && !searchResults && (
+      {/* Keep settings reachable when either personal tab has no list header.
+          With content present, the button lives in that header below. */}
+      {!searchResults && (
+        (isHistoryTab && (historyLoading || !!historyError || historyItems.length === 0))
+        || (isWatchlistTab && (watchlistLoading || !!watchlistError || watchlistItems.length === 0))
+      ) && (
         <div style={styles.historySettingsRow}>
-          <button className="btn" type="button" onClick={openHistorySettings} style={styles.settingsBtn}>
-            <svg width="15" height="15" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-              <path d="M3 5h8M15 5h2M3 10h2M9 10h8M3 15h6M13 15h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-              <circle cx="13" cy="5" r="2" stroke="currentColor" strokeWidth="1.5" />
-              <circle cx="7" cy="10" r="2" stroke="currentColor" strokeWidth="1.5" />
-              <circle cx="11" cy="15" r="2" stroke="currentColor" strokeWidth="1.5" />
-            </svg>
-            History settings
-          </button>
+          {historySettingsButton}
         </div>
       )}
 
@@ -825,6 +830,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               <span style={styles.historyCount}>
                 {watchlistItems.length} {watchlistItems.length === 1 ? "title" : "titles"}
               </span>
+              {historySettingsButton}
             </div>
             <div style={gridStyle}>
               {watchlistItems.map((item) => (
@@ -875,14 +881,17 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                   ? `${filteredHistoryItems.length} ${filteredHistoryItems.length === 1 ? "title" : "titles"}`
                   : `${historyTotal} ${historyTotal === 1 ? "title" : "titles"}`}
               </span>
-              {/* Hidden while a filter matches nothing — there's nothing to
-                  clear. When a filter matches, it only clears those visible
-                  matches, so the label says so rather than implying a full wipe. */}
-              {plexLinked === false && (!historyQ || filteredHistoryItems.length > 0) && (
-                <button className="btn" onClick={handleClearHistory} style={styles.clearBtn}>
-                  {historyQ ? "Forget Filtered History" : "Clear History"}
-                </button>
-              )}
+              <div style={styles.historyActions}>
+                {historySettingsButton}
+                {/* Hidden while a filter matches nothing — there's nothing to
+                    clear. When a filter matches, it only clears those visible
+                    matches, so the label says so rather than implying a full wipe. */}
+                {plexLinked === false && (!historyQ || filteredHistoryItems.length > 0) && (
+                  <button className="btn" onClick={handleClearHistory} style={styles.clearBtn}>
+                    {historyQ ? "Forget Filtered History" : "Clear History"}
+                  </button>
+                )}
+              </div>
             </div>
             {filteredHistoryItems.length === 0 ? (
               <div style={styles.emptyState}>
@@ -1415,6 +1424,11 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     justifyContent: "flex-end",
     padding: "8px 24px 0",
+  },
+  historyActions: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
   },
   settingsBtn: {
     ...QUIET_SURFACE,

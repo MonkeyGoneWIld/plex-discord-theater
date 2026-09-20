@@ -11,7 +11,6 @@ import { formatTimecode } from "../lib/format";
 import { SkeletonBlock } from "./SkeletonBlock";
 import { PlexMediaActions, WatchedCheckIcon } from "./PlexMediaActions";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
-import type { QueueItem } from "../hooks/useSync";
 
 interface SeasonDetailProps {
   season: PlexItem;
@@ -20,9 +19,6 @@ interface SeasonDetailProps {
   onBack: () => void;
   /** Jump to the show landing page from the in-content breadcrumb. */
   onShowClick?: () => void;
-  isHost?: boolean;
-  isPlaying?: boolean;
-  onAddToQueue?: (item: QueueItem) => void;
 }
 
 function authUrl(url: string, w?: number, h?: number): string {
@@ -44,7 +40,7 @@ function fmtDuration(ms: number): string {
     : `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClick, isHost, isPlaying, onAddToQueue }: SeasonDetailProps) {
+export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClick }: SeasonDetailProps) {
   const [episodes, setEpisodes] = useState<PlexItem[]>([]);
   const [loading, setLoading] = useState(true);
   /**
@@ -143,19 +139,6 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
   const gapLabel = describeGaps(gaps);
 
   const seasonLabel = season.index != null ? `Season ${season.index}` : season.title;
-
-  const addToQueue = (ep: PlexItem) => {
-    onAddToQueue?.({
-      ratingKey: ep.ratingKey,
-      title: ep.title,
-      type: ep.type,
-      thumb: ep.thumb,
-      subtitles: false,
-      parentTitle: show.title,
-      parentIndex: season.index,
-      index: ep.index,
-    });
-  };
 
   const toggleWatched = async (ep: PlexItem, watched: boolean) => {
     if (watchedBusy) return;
@@ -350,8 +333,8 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                     <div style={styles.episodePlaceholder}>No Image</div>
                   )}
                   {/* No play button on hover. This card opens the episode's
-                      page — where the play, resume and queue controls actually
-                      are — so a play symbol over the thumbnail was promising
+                      page — where its playback controls actually are — so a
+                      play symbol over the thumbnail was promising
                       something the click doesn't do. The card's own hover state
                       says it is clickable without saying what it will do. */}
                   {watched && (
@@ -372,31 +355,6 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                     <div style={styles.progressTrack}>
                       <div style={{ ...styles.progressFill, width: `${partial * 100}%` }} />
                     </div>
-                  )}
-                  {isHost && isPlaying && onAddToQueue && (
-                    // A <button> here would be nested inside the card's own
-                    // button — invalid HTML, and browsers handle the nesting
-                    // inconsistently. React builds it via the DOM API so it
-                    // renders anyway, which is what made it easy to miss.
-                    // Same span/role treatment as MovieCard's dismiss control.
-                    <span
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`Add ${ep.title} to the queue`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        addToQueue(ep);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key !== "Enter" && e.key !== " ") return;
-                        e.preventDefault();
-                        e.stopPropagation();
-                        addToQueue(ep);
-                      }}
-                      style={styles.queueBtn}
-                    >
-                      + Queue
-                    </span>
                   )}
                 </div>
                 <div style={styles.episodeInfo}>
@@ -623,13 +581,6 @@ const styles: Record<string, React.CSSProperties> = {
   episodeTitle: {
     color: "#f0f0f0", fontSize: "14px", fontWeight: 500,
     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-  },
-  queueBtn: {
-    position: "absolute", bottom: "8px", right: "8px",
-    padding: "4px 10px", borderRadius: "6px",
-    border: "1px solid rgba(229,160,13,0.4)", background: "rgba(0,0,0,0.6)",
-    color: "#e5a00d", fontSize: "11px", fontWeight: 600,
-    cursor: "pointer", fontFamily: "inherit",
   },
   thumbWatched: { opacity: 0.45 },
   watchedBadge: {

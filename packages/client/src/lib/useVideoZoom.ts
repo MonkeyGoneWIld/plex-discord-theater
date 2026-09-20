@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { loadZoomPreference, saveZoomPreference, type ZoomMode } from "./videoZoom";
 
-export function useVideoZoom(root: RefObject<HTMLDivElement | null>, key: string | null, onGesture?: (message: string) => void) {
+export function useVideoZoom(root: RefObject<HTMLDivElement | null>, key: string | null, onGesture?: (message: string) => void, enabled = true) {
   const gestureNotice = useRef(onGesture);
   gestureNotice.current = onGesture;
   const [revision, render] = useState(0);
@@ -19,7 +19,7 @@ export function useVideoZoom(root: RefObject<HTMLDivElement | null>, key: string
   updateRef.current = update;
   useEffect(() => {
     const el = root.current;
-    if (!el) return;
+    if (!el || !enabled) return;
     const surface = (target: EventTarget | null, y: number) => {
       const hit = target as HTMLElement;
       const bar = el.querySelector("[data-player-progress]")?.getBoundingClientRect();
@@ -88,7 +88,7 @@ export function useVideoZoom(root: RefObject<HTMLDivElement | null>, key: string
       el.removeEventListener("touchcancel", end, true);
       el.removeEventListener("click", click, true);
     };
-  }, [root]);
+  }, [root, enabled]);
   void revision;
   return { ...state.current, setMode: (mode: ZoomMode) => update(mode, mode === "manual" ? 100 : state.current.zoom), setZoom: (zoom: number) => update("manual", zoom) };
 }

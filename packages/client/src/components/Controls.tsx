@@ -681,6 +681,13 @@ export function Controls({
       const d = video.duration;
       if (Number.isFinite(d) && d > 0) setDuration(d);
     };
+    // Controls unmount while the Activity PiP is open. When they mount again,
+    // the video already has metadata and may not emit another metadata or
+    // duration event, so seed every live value before waiting for changes.
+    setPlaying(!video.paused);
+    if (!video.paused) setStarted(true);
+    onTime();
+    onDur();
     video.addEventListener("play", onPlay);
     video.addEventListener("pause", onPause);
     video.addEventListener("timeupdate", onTime);
@@ -2069,6 +2076,8 @@ const styles: Record<string, React.CSSProperties> = {
     ...QUIET_SURFACE,
     display: "flex",
     alignItems: "center",
+    height: "34px",
+    boxSizing: "border-box",
     padding: "6px 14px",
     borderRadius: "8px",
     backdropFilter: "blur(12px)",
@@ -2091,6 +2100,7 @@ const styles: Record<string, React.CSSProperties> = {
     marginLeft: "auto",
     width: "34px",
     height: "34px",
+    boxSizing: "border-box",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",

@@ -10,7 +10,7 @@ import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
 import { DetailLoading } from "./DetailLoading";
 import { PlexMediaActions } from "./PlexMediaActions";
-import type { QueueItem, SuggestionItem } from "../hooks/useSync";
+import type { SuggestionItem } from "../hooks/useSync";
 import { GHOST_SURFACE, QUIET_SURFACE } from "../lib/surface";
 
 interface MovieDetailProps {
@@ -30,8 +30,6 @@ interface MovieDetailProps {
     subtitleStreamId?: number,
   ) => void;
   onBack: () => void;
-  isPlaying?: boolean;
-  onAddToQueue?: (item: QueueItem) => void;
   /** Viewer-only: suggest this title to the host. Omit/undefined for the host. */
   onSuggest?: (item: SuggestionItem) => void;
   /** Episodes only: jump to the show landing page / the season's episode list.
@@ -191,7 +189,7 @@ const dropdownStyles: Record<string, React.CSSProperties> = {
   },
 };
 
-export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQueue, onSuggest, onShowClick, onSeasonClick, onSelect, onSelectPerson }: MovieDetailProps) {
+export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowClick, onSeasonClick, onSelect, onSelectPerson }: MovieDetailProps) {
   const [meta, setMeta] = useState<PlexMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedAudio, setSelectedAudio] = useState<number | null>(null);
@@ -665,27 +663,6 @@ export function MovieDetail({ item, isHost, onPlay, onBack, isPlaying, onAddToQu
                         {progress?.watched ? "Watch Again" : "Play"}
                       </button>
                     )}
-                    {isPlaying && onAddToQueue && (
-                      <button className="btn"
-                        onClick={() => {
-                          if (!meta) return;
-                          onAddToQueue({
-                            ratingKey: item.ratingKey,
-                            title: item.title,
-                            type: item.type,
-                            thumb: item.thumb,
-                            subtitles: selectedSubtitle != null,
-                            parentTitle: item.parentTitle,
-                            parentIndex: item.parentIndex,
-                            index: item.index,
-                            year: item.year,
-                          });
-                        }}
-                        style={styles.queueBtn}
-                      >
-                        Add to Queue
-                      </button>
-                    )}
                   </>
                 ) : (
                   <>
@@ -1147,13 +1124,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     fontFamily: "inherit",
     cursor: "default",
-  },
-  queueBtn: {
-    display: "inline-flex", alignItems: "center",
-    minHeight: "44px", padding: "10px 20px", borderRadius: "999px",
-    border: "1px solid rgba(229,160,13,0.4)", background: "transparent",
-    color: "#e5a00d", fontSize: "14px", fontWeight: 600,
-    cursor: "pointer", fontFamily: "inherit",
   },
   startOverBtn: {
     // Beside Play — see GHOST_SURFACE.

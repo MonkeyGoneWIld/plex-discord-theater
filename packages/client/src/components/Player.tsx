@@ -448,58 +448,86 @@ interface PlayerProps {
   onRestore?: () => void;
 }
 
-type PipCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+type PipEdge = "top" | "right" | "bottom" | "left";
 interface PipRect { left: number; top: number; width: number; height: number }
+interface PipDock { edge: PipEdge; offset: number }
 
 const PIP_MARGIN = 18;
-const PIP_ASPECT = 16 / 9;
+const PIP_DEFAULT_ASPECT = 16 / 9;
 const PIP_MIN_WIDTH = 240;
 
-function pipBounds(): { viewportWidth: number; viewportHeight: number; maxWidth: number } {
+function pipBounds(aspect = PIP_DEFAULT_ASPECT): { viewportWidth: number; viewportHeight: number; minWidth: number; maxWidth: number } {
   const viewportWidth = typeof window === "undefined" ? 1280 : window.innerWidth;
   const viewportHeight = typeof window === "undefined" ? 720 : window.innerHeight;
+  const phone = typeof window !== "undefined" && window.matchMedia(PHONE_QUERY).matches;
+  const maxWidth = Math.max(1, Math.min(
+    720,
+    phone ? viewportWidth - PIP_MARGIN * 2 : viewportWidth * 0.55,
+    (viewportHeight - PIP_MARGIN * 2) * aspect,
+  ));
   return {
     viewportWidth,
     viewportHeight,
-    maxWidth: Math.max(PIP_MIN_WIDTH, Math.min(720, viewportWidth * 0.55, (viewportHeight - PIP_MARGIN * 2) * PIP_ASPECT)),
+    minWidth: Math.min(phone ? 160 : PIP_MIN_WIDTH, maxWidth),
+    maxWidth,
   };
 }
 
-function defaultPipWidth(): number {
-  const { viewportWidth, maxWidth } = pipBounds();
-  return Math.min(maxWidth, Math.max(PIP_MIN_WIDTH, viewportWidth * 0.3));
+function defaultPipWidth(aspect = PIP_DEFAULT_ASPECT): number {
+  const { viewportWidth, minWidth, maxWidth } = pipBounds(aspect);
+  const phone = typeof window !== "undefined" && window.matchMedia(PHONE_QUERY).matches;
+  return Math.min(maxWidth, Math.max(minWidth, viewportWidth * (phone ? 0.62 : 0.3)));
 }
 
-function snapPip(corner: PipCorner, width: number): PipRect {
-  const { viewportWidth, viewportHeight, maxWidth } = pipBounds();
-  const nextWidth = Math.min(maxWidth, Math.max(PIP_MIN_WIDTH, width));
-  const height = nextWidth / PIP_ASPECT;
+function dockPip({ edge, offset }: PipDock, width: number, aspect = PIP_DEFAULT_ASPECT): PipRect {
+  const { viewportWidth, viewportHeight, minWidth, maxWidth } = pipBounds(aspect);
+  const nextWidth = Math.min(maxWidth, Math.max(minWidth, width));
+  const height = nextWidth / aspect;
+  const horizontalTravel = Math.max(0, viewportWidth - nextWidth - PIP_MARGIN * 2);
+  const verticalTravel = Math.max(0, viewportHeight - height - PIP_MARGIN * 2);
+  const clampedOffset = Math.max(0, Math.min(1, offset));
   return {
-    left: corner.endsWith("right") ? viewportWidth - nextWidth - PIP_MARGIN : PIP_MARGIN,
-    top: corner.startsWith("bottom") ? viewportHeight - height - PIP_MARGIN : PIP_MARGIN,
+    left: edge === "left"
+      ? PIP_MARGIN
+      : edge === "right"
+        ? viewportWidth - nextWidth - PIP_MARGIN
+        : PIP_MARGIN + horizontalTravel * clampedOffset,
+    top: edge === "top"
+      ? PIP_MARGIN
+      : edge === "bottom"
+        ? viewportHeight - height - PIP_MARGIN
+        : PIP_MARGIN + verticalTravel * clampedOffset,
     width: nextWidth,
     height,
   };
 }
 
-function loadPipCorner(): PipCorner {
+function defaultPipDock(): PipDock {
+  const phone = typeof window !== "undefined" && window.matchMedia(PHONE_QUERY).matches;
+  return { edge: "bottom", offset: phone ? 0 : 1 };
+}
+
+function loadPipDock(): PipDock {
   try {
-    const saved = localStorage.getItem("plex-pip-corner") as PipCorner | null;
-    if (["top-left", "top-right", "bottom-left", "bottom-right"].includes(saved ?? "")) return saved!;
+    const saved = JSON.parse(localStorage.getItem("plex-pip-dock-v2") ?? "null") as Partial<PipDock> | null;
+    if (saved && ["top", "right", "bottom", "left"].includes(saved.edge ?? "") && Number.isFinite(saved.offset)) {
+      return { edge: saved.edge as PipEdge, offset: Math.max(0, Math.min(1, Number(saved.offset))) };
+    }
   } catch { /* Default still works when storage is unavailable. */ }
-  return "bottom-right";
+  return defaultPipDock();
 }
 
 function loadPipWidth(): number {
   try {
     const saved = Number(localStorage.getItem("plex-pip-width"));
-    if (Number.isFinite(saved) && saved >= PIP_MIN_WIDTH) return saved;
+    if (Number.isFinite(saved) && saved >= 160) return saved;
   } catch { /* Default still works when storage is unavailable. */ }
   return defaultPipWidth();
 }
 
 export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, onSharePresenceDetails, subtitles, resumePosition, mediaIndex, audioStreamId, subtitleStreamId, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext, presentation = "full", onMinimize, onRestore }: PlayerProps) {
   const isPip = presentation === "pip";
+  const pipPhone = useMediaQuery(PHONE_QUERY);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -526,13 +554,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // Cleared the moment real frames resume — see the `playing` handler.
   const [holdingFrame, setHoldingFrame] = useState(false);
   /**
-   * The queue panel, which currently has nothing to open it.
+   * Legacy room queue state, which currently has nothing to open it.
    *
    * Its button lived at the right-hand end of the control bar and was taken out
-   * when that bar was rearranged. Everything else about the queue still works:
-   * titles are added from a detail page, and whatever is queued still plays
-   * next and shows on the end-of-episode card. What is gone is the only way to
-   * *look* at the list, or take something back off it.
+   * when that bar was rearranged. The protocol remains compatible with rooms
+   * that already contain queued items, but this client no longer offers an Add
+   * to Queue action or a queue-management surface.
    *
    * Left wired so restoring an opener is one line, wherever it should go.
    */
@@ -540,14 +567,29 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
   const [showStats, setShowStats] = useState(false);
   const [confirmingEnd, setConfirmingEnd] = useState(false);
-  const [pipCorner, setPipCorner] = useState<PipCorner>(loadPipCorner);
-  const [pipRect, setPipRect] = useState<PipRect>(() => snapPip(loadPipCorner(), loadPipWidth()));
+  const initialPipDockRef = useRef<PipDock>(loadPipDock());
+  const [pipDock, setPipDock] = useState<PipDock>(initialPipDockRef.current);
+  const [pipAspect, setPipAspect] = useState(PIP_DEFAULT_ASPECT);
+  const pipAspectRef = useRef(pipAspect);
+  pipAspectRef.current = pipAspect;
+  const [pipRect, setPipRect] = useState<PipRect>(() => dockPip(initialPipDockRef.current, loadPipWidth()));
   const pipRectRef = useRef(pipRect);
   pipRectRef.current = pipRect;
   const [pipInteracting, setPipInteracting] = useState(false);
   const pipDragRef = useRef<{ pointerId: number; startX: number; startY: number; rect: PipRect } | null>(null);
-  const pipResizeRef = useRef<{ pointerId: number; startX: number; width: number; rect: PipRect } | null>(null);
+  const pipResizeRef = useRef<{ pointerId: number; startX: number; width: number; rect: PipRect; handle: "top-left" | "top-right" | "bottom-left" | "bottom-right" } | null>(null);
   const lastPipDragAtRef = useRef(0);
+  const pipTouchRef = useRef<{
+    kind: "drag" | "pinch";
+    startX: number;
+    startY: number;
+    distance: number;
+    width: number;
+    rect: PipRect;
+    moved: boolean;
+  } | null>(null);
+  const [pipControlsVisible, setPipControlsVisible] = useState(false);
+  const [pipPlaying, setPipPlaying] = useState(false);
   // Next item to offer, auto-resolved from the series. Queue takes precedence
   // over this at render time — a queued item is a deliberate choice, this is a guess.
   const [nextEpisode, setNextEpisode] = useState<PlexItem | null>(null);
@@ -573,25 +615,39 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const prevEpisodeRef = useRef<PlexItem | null>(null);
   prevEpisodeRef.current = prevEpisode;
 
-  const persistPipPlacement = useCallback((corner: PipCorner, width: number) => {
+  const persistPipPlacement = useCallback((dock: PipDock, width: number) => {
     try {
-      localStorage.setItem("plex-pip-corner", corner);
+      localStorage.setItem("plex-pip-dock-v2", JSON.stringify(dock));
       localStorage.setItem("plex-pip-width", String(Math.round(width)));
     } catch { /* Placement persistence is optional. */ }
   }, []);
 
   const settlePip = useCallback((rect: PipRect) => {
-    const { viewportWidth, viewportHeight } = pipBounds();
-    const corner: PipCorner = `${rect.top + rect.height / 2 < viewportHeight / 2 ? "top" : "bottom"}-${rect.left + rect.width / 2 < viewportWidth / 2 ? "left" : "right"}` as PipCorner;
-    const snapped = snapPip(corner, rect.width);
-    setPipCorner(corner);
+    const aspect = pipAspectRef.current;
+    const { viewportWidth, viewportHeight } = pipBounds(aspect);
+    const distances: Array<[PipEdge, number]> = [
+      ["top", rect.top],
+      ["right", viewportWidth - rect.left - rect.width],
+      ["bottom", viewportHeight - rect.top - rect.height],
+      ["left", rect.left],
+    ];
+    distances.sort((a, b) => a[1] - b[1]);
+    const edge = distances[0][0];
+    const horizontalTravel = Math.max(1, viewportWidth - rect.width - PIP_MARGIN * 2);
+    const verticalTravel = Math.max(1, viewportHeight - rect.height - PIP_MARGIN * 2);
+    const offset = edge === "top" || edge === "bottom"
+      ? (rect.left - PIP_MARGIN) / horizontalTravel
+      : (rect.top - PIP_MARGIN) / verticalTravel;
+    const dock = { edge, offset: Math.max(0, Math.min(1, offset)) };
+    const snapped = dockPip(dock, rect.width, aspect);
+    setPipDock(dock);
     setPipRect(snapped);
     setPipInteracting(false);
-    persistPipPlacement(corner, snapped.width);
+    persistPipPlacement(dock, snapped.width);
   }, [persistPipPlacement]);
 
   const startPipDrag = useCallback((event: ReactPointerEvent<HTMLVideoElement>) => {
-    if (!isPip || event.button !== 0) return;
+    if (!isPip || event.button !== 0 || event.pointerType === "touch") return;
     event.currentTarget.setPointerCapture(event.pointerId);
     pipDragRef.current = {
       pointerId: event.pointerId,
@@ -608,7 +664,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const dx = event.clientX - drag.startX;
     const dy = event.clientY - drag.startY;
     if (Math.hypot(dx, dy) > 5) lastPipDragAtRef.current = Date.now();
-    const { viewportWidth, viewportHeight } = pipBounds();
+    const { viewportWidth, viewportHeight } = pipBounds(pipAspectRef.current);
     const next = {
       ...drag.rect,
       left: Math.min(viewportWidth - drag.rect.width, Math.max(0, drag.rect.left + dx)),
@@ -625,12 +681,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     settlePip(pipRectRef.current);
   }, [settlePip]);
 
-  const startPipResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+  const startPipResize = useCallback((event: ReactPointerEvent<HTMLDivElement>, handle: "top-left" | "top-right" | "bottom-left" | "bottom-right") => {
     if (!isPip || event.button !== 0) return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
-    pipResizeRef.current = { pointerId: event.pointerId, startX: event.clientX, width: pipRect.width, rect: pipRect };
+    pipResizeRef.current = { pointerId: event.pointerId, startX: event.clientX, width: pipRect.width, rect: pipRect, handle };
     setPipInteracting(true);
     lastPipDragAtRef.current = Date.now();
   }, [isPip, pipRect]);
@@ -638,22 +694,23 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const movePipResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const resize = pipResizeRef.current;
     if (!resize || resize.pointerId !== event.pointerId) return;
-    const horizontalDirection = pipCorner.endsWith("right") ? -1 : 1;
-    const rawWidth = resize.width + (event.clientX - resize.startX) * horizontalDirection;
-    const { maxWidth } = pipBounds();
-    const width = Math.min(maxWidth, Math.max(PIP_MIN_WIDTH, rawWidth));
-    const height = width / PIP_ASPECT;
+    const growsRight = resize.handle.endsWith("right");
+    const rawWidth = resize.width + (event.clientX - resize.startX) * (growsRight ? 1 : -1);
+    const aspect = pipAspectRef.current;
+    const { minWidth, maxWidth } = pipBounds(aspect);
+    const width = Math.min(maxWidth, Math.max(minWidth, rawWidth));
+    const height = width / aspect;
     const right = resize.rect.left + resize.rect.width;
     const bottom = resize.rect.top + resize.rect.height;
     const next = {
-      left: pipCorner.endsWith("right") ? right - width : resize.rect.left,
-      top: pipCorner.startsWith("bottom") ? bottom - height : resize.rect.top,
+      left: growsRight ? resize.rect.left : right - width,
+      top: resize.handle.startsWith("bottom") ? resize.rect.top : bottom - height,
       width,
       height,
     };
     pipRectRef.current = next;
     setPipRect(next);
-  }, [pipCorner]);
+  }, []);
 
   const endPipResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const resize = pipResizeRef.current;
@@ -673,10 +730,146 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
   useEffect(() => {
     if (!isPip) return;
-    const onResize = () => setPipRect((rect) => snapPip(pipCorner, rect.width));
+    const onResize = () => setPipRect((rect) => dockPip(pipDock, rect.width, pipAspectRef.current));
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, [isPip, pipCorner]);
+  }, [isPip, pipDock]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const updateAspect = () => {
+      if (!(video.videoWidth > 0) || !(video.videoHeight > 0)) return;
+      const nextAspect = video.videoWidth / video.videoHeight;
+      if (!Number.isFinite(nextAspect) || nextAspect <= 0) return;
+      pipAspectRef.current = nextAspect;
+      setPipAspect(nextAspect);
+      setPipRect((rect) => dockPip(pipDock, rect.width, nextAspect));
+    };
+    video.addEventListener("loadedmetadata", updateAspect);
+    video.addEventListener("resize", updateAspect);
+    updateAspect();
+    return () => {
+      video.removeEventListener("loadedmetadata", updateAspect);
+      video.removeEventListener("resize", updateAspect);
+    };
+  }, [item.ratingKey, pipDock]);
+
+  useEffect(() => {
+    const root = zoomRootRef.current;
+    if (!isPip || !pipPhone || !root) return;
+    const distance = (touches: TouchList) => {
+      const a = touches[0];
+      const b = touches[1] ?? a;
+      return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    };
+    const isControl = (target: EventTarget | null) =>
+      target instanceof Element && !!target.closest("[data-pip-control]");
+    const start = (event: TouchEvent) => {
+      if (isControl(event.target) || event.touches.length === 0) {
+        pipTouchRef.current = null;
+        return;
+      }
+      if (event.touches.length >= 2) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        pipTouchRef.current = {
+          kind: "pinch",
+          startX: 0,
+          startY: 0,
+          distance: distance(event.touches),
+          width: pipRectRef.current.width,
+          rect: pipRectRef.current,
+          moved: false,
+        };
+        setPipInteracting(true);
+        return;
+      }
+      const touch = event.touches[0];
+      pipTouchRef.current = {
+        kind: "drag",
+        startX: touch.clientX,
+        startY: touch.clientY,
+        distance: 0,
+        width: pipRectRef.current.width,
+        rect: pipRectRef.current,
+        moved: false,
+      };
+    };
+    const move = (event: TouchEvent) => {
+      let gesture = pipTouchRef.current;
+      if (!gesture || isControl(event.target)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.touches.length >= 2) {
+        if (gesture.kind !== "pinch") {
+          gesture = {
+            ...gesture,
+            kind: "pinch",
+            distance: distance(event.touches),
+            width: pipRectRef.current.width,
+            rect: pipRectRef.current,
+          };
+          pipTouchRef.current = gesture;
+        }
+        const ratio = gesture.distance > 0 ? distance(event.touches) / gesture.distance : 1;
+        const aspect = pipAspectRef.current;
+        const { viewportWidth, viewportHeight, minWidth, maxWidth } = pipBounds(aspect);
+        const width = Math.min(maxWidth, Math.max(minWidth, gesture.width * ratio));
+        const height = width / aspect;
+        const centerX = gesture.rect.left + gesture.rect.width / 2;
+        const centerY = gesture.rect.top + gesture.rect.height / 2;
+        const next = {
+          left: Math.min(viewportWidth - width, Math.max(0, centerX - width / 2)),
+          top: Math.min(viewportHeight - height, Math.max(0, centerY - height / 2)),
+          width,
+          height,
+        };
+        gesture.moved = gesture.moved || Math.abs(width - gesture.width) > 2;
+        pipRectRef.current = next;
+        setPipRect(next);
+        return;
+      }
+      if (gesture.kind !== "drag" || event.touches.length !== 1) return;
+      const touch = event.touches[0];
+      const dx = touch.clientX - gesture.startX;
+      const dy = touch.clientY - gesture.startY;
+      const { viewportWidth, viewportHeight } = pipBounds(pipAspectRef.current);
+      const next = {
+        ...gesture.rect,
+        left: Math.min(viewportWidth - gesture.rect.width, Math.max(0, gesture.rect.left + dx)),
+        top: Math.min(viewportHeight - gesture.rect.height, Math.max(0, gesture.rect.top + dy)),
+      };
+      gesture.moved = gesture.moved || Math.hypot(dx, dy) > 5;
+      if (gesture.moved) setPipInteracting(true);
+      pipRectRef.current = next;
+      setPipRect(next);
+    };
+    const end = (event: TouchEvent) => {
+      const gesture = pipTouchRef.current;
+      if (!gesture || isControl(event.target) || event.touches.length > 0) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      pipTouchRef.current = null;
+      if (gesture.moved) {
+        lastPipDragAtRef.current = Date.now();
+        settlePip(pipRectRef.current);
+      } else {
+        setPipInteracting(false);
+        onRestore?.();
+      }
+    };
+    root.addEventListener("touchstart", start, { passive: false, capture: true });
+    root.addEventListener("touchmove", move, { passive: false, capture: true });
+    root.addEventListener("touchend", end, { passive: false, capture: true });
+    root.addEventListener("touchcancel", end, { passive: false, capture: true });
+    return () => {
+      root.removeEventListener("touchstart", start, true);
+      root.removeEventListener("touchmove", move, true);
+      root.removeEventListener("touchend", end, true);
+      root.removeEventListener("touchcancel", end, true);
+    };
+  }, [isPip, pipPhone, onRestore, settlePip]);
 
   useEffect(() => {
     if (!isPip) return;
@@ -690,6 +883,20 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     setShowZoomPanel(false);
     setConfirmingEnd(false);
   }, [isPip]);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const update = () => setPipPlaying(!video.paused && !video.ended);
+    update();
+    video.addEventListener("play", update);
+    video.addEventListener("pause", update);
+    video.addEventListener("ended", update);
+    return () => {
+      video.removeEventListener("play", update);
+      video.removeEventListener("pause", update);
+      video.removeEventListener("ended", update);
+    };
+  }, [item.ratingKey]);
   // Cumulative P2P delivery counters, filled from the p2p-media-loader engine
   // events below and read by the StatsOverlay each poll.
   const p2pStatsRef = useRef<P2PStats>({ p2pBytes: 0, httpBytes: 0, uploadBytes: 0, peers: new Set() });
@@ -811,7 +1018,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       if (fillAnimationTimer.current) clearTimeout(fillAnimationTimer.current);
     };
   }, [zoomPreferenceKey]);
-  const { mode: zoomMode, zoom, setMode: setZoomMode, setZoom } = useVideoZoom(zoomRootRef, zoomPreferenceKey, showZoomNotice);
+  const { mode: zoomMode, zoom, setMode: setZoomMode, setZoom } = useVideoZoom(zoomRootRef, zoomPreferenceKey, showZoomNotice, !isPip);
   const [axisScale, setAxisScale] = useState(1);
   useEffect(() => {
     const root = zoomRootRef.current;
@@ -4078,22 +4285,21 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         top: pipRect.top,
         width: pipRect.width,
         height: pipRect.height,
+        overflow: confirmingEnd ? "visible" : "hidden",
         transition: pipInteracting
           ? "none"
           : "left 320ms cubic-bezier(.2,.8,.2,1), top 320ms cubic-bezier(.2,.8,.2,1), width 320ms cubic-bezier(.2,.8,.2,1), height 320ms cubic-bezier(.2,.8,.2,1)",
       }
     : { ...styles.container, ...styles.fullContainer };
 
-  const pipResizeHandleStyle: CSSProperties = {
-    ...styles.pipResizeHandle,
-    ...(pipCorner === "bottom-right" ? { left: 0, top: 0, cursor: "nwse-resize" }
-      : pipCorner === "bottom-left" ? { right: 0, top: 0, cursor: "nesw-resize" }
-        : pipCorner === "top-right" ? { left: 0, bottom: 0, cursor: "nesw-resize" }
-          : { right: 0, bottom: 0, cursor: "nwse-resize" }),
-  };
-
   return (
-    <div ref={zoomRootRef} style={{ ...playerContainerStyle, touchAction: "none" }} data-presentation={presentation}>
+    <div
+      ref={zoomRootRef}
+      style={{ ...playerContainerStyle, touchAction: "none" }}
+      data-presentation={presentation}
+      onMouseEnter={isPip && !pipPhone ? () => setPipControlsVisible(true) : undefined}
+      onMouseLeave={isPip && !pipPhone ? () => setPipControlsVisible(false) : undefined}
+    >
       {!isPip && (syncState?.authFailed ? (
         <div style={styles.error}>Session expired — please close and restart the activity</div>
       ) : syncState?.reconnectFailed ? (
@@ -4161,27 +4367,96 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         style={{
           ...styles.video,
           ...zoomPictureStyle,
+          ...(isPip ? { objectFit: "cover" as const } : {}),
         }}
         playsInline
         onClick={isPip ? undefined : togglePlayPause}
-        onDoubleClick={isPip ? restoreFromPip : undefined}
+        onDoubleClick={isPip && !pipPhone ? restoreFromPip : undefined}
         onPointerDown={isPip ? startPipDrag : undefined}
         onPointerMove={isPip ? movePip : undefined}
         onPointerUp={isPip ? endPipDrag : undefined}
         onPointerCancel={isPip ? endPipDrag : undefined}
       />
 
-      {isPip && (
+      {isPip && (pipPhone || pipControlsVisible) && (
+        <div style={styles.pipControls}>
+          {canControl && <button
+            className="btn"
+            type="button"
+            data-pip-control
+            aria-label={pipPlaying ? "Pause" : "Play"}
+            style={{
+              ...styles.pipControlBtn,
+              ...(pipPhone ? styles.pipTopLeftBtn : styles.pipBottomCenterBtn),
+            }}
+            onClick={(event) => {
+              event.stopPropagation();
+              togglePlayPause();
+            }}
+          >
+            {pipPlaying ? (
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <rect x="4" y="3" width="4" height="14" rx="1" />
+                <rect x="12" y="3" width="4" height="14" rx="1" />
+              </svg>
+            ) : (
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path d="M5 3.5 16 10 5 16.5Z" />
+              </svg>
+            )}
+          </button>}
+          {!pipPhone && (
+            <button
+              className="btn"
+              type="button"
+              data-pip-control
+              aria-label="Return to full player"
+              style={{ ...styles.pipControlBtn, ...styles.pipTopLeftBtn }}
+              onClick={(event) => {
+                event.stopPropagation();
+                onRestore?.();
+              }}
+            >
+              <svg width="19" height="19" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <path d="M7 4H4v3M13 4h3v3M7 16H4v-3M13 16h3v-3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          )}
+          <button
+            className="btn"
+            type="button"
+            data-pip-control
+            aria-label="Close picture in picture"
+            style={{ ...styles.pipControlBtn, ...styles.pipTopRightBtn }}
+            onClick={(event) => {
+              event.stopPropagation();
+              handleBack();
+            }}
+          >
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <path d="m5 5 10 10M15 5 5 15" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+      )}
+
+      {isPip && !pipPhone && (["top-left", "top-right", "bottom-left", "bottom-right"] as const).map((handle) => (
         <div
-          aria-label="Resize picture in picture"
+          key={handle}
+          aria-label={`Resize picture in picture from ${handle}`}
           role="separator"
-          style={pipResizeHandleStyle}
-          onPointerDown={startPipResize}
+          style={{
+            ...styles.pipResizeHandle,
+            ...(handle.includes("left") ? { left: 0 } : { right: 0 }),
+            ...(handle.includes("top") ? { top: 0 } : { bottom: 0 }),
+            cursor: handle === "top-left" || handle === "bottom-right" ? "nwse-resize" : "nesw-resize",
+          }}
+          onPointerDown={(event) => startPipResize(event, handle)}
           onPointerMove={movePipResize}
           onPointerUp={endPipResize}
           onPointerCancel={endPipResize}
         />
-      )}
+      ))}
 
       {/* The last frame, standing in while the pipeline is rebuilt. Sits above
           the (currently blank) video and below every real overlay, so the
@@ -4190,7 +4465,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       {holdingFrame && canvasRef.current && (
         <canvas
           aria-hidden="true"
-          style={{ ...styles.heldFrame, ...zoomPictureStyle }}
+          style={{ ...styles.heldFrame, ...zoomPictureStyle, ...(isPip ? { objectFit: "cover" as const } : {}) }}
           ref={(el) => {
             const src = canvasRef.current;
             if (!el || !src) return;
@@ -4483,7 +4758,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         </div>
       )}
 
-      {!isPip && confirmingEnd && (() => {
+      {confirmingEnd && (() => {
         const otherCount = (syncState?.participants ?? []).filter(
           (p) => p.userId !== selfUserId,
         ).length;
@@ -4504,6 +4779,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 >
                   Cancel
                 </button>
+                {!isPip && onMinimize && (
+                  <button className="btn"
+                    style={styles.confirmPipBtn}
+                    onClick={() => {
+                      setConfirmingEnd(false);
+                      onMinimize();
+                    }}
+                  >
+                    Use picture in picture
+                  </button>
+                )}
                 <button className="btn"
                   style={styles.confirmEndBtn}
                   onClick={() => {
@@ -4585,11 +4871,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
 const styles: Record<string, React.CSSProperties> = {
   confirmBackdrop: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 110, display: "flex", alignItems: "center", justifyContent: "center" },
-  confirmDialog: { width: "340px", maxWidth: "85vw", background: "#1a1a1a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "12px", padding: "20px" },
+  confirmDialog: { width: "420px", maxWidth: "85vw", background: "#1a1a1a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "12px", padding: "20px" },
   confirmTitle: { color: "#f0f0f0", fontSize: "16px", fontWeight: 600, marginBottom: "8px" },
   confirmText: { color: "#aaa", fontSize: "13px", lineHeight: 1.5, margin: "0 0 16px" },
-  confirmActions: { display: "flex", justifyContent: "flex-end", gap: "8px" },
+  confirmActions: { display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: "8px" },
   confirmCancelBtn: { padding: "8px 14px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#ccc", fontSize: "13px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
+  confirmPipBtn: { padding: "8px 14px", borderRadius: "8px", border: "1px solid rgba(229,160,13,0.5)", background: "transparent", color: "#e5a00d", fontSize: "13px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
   confirmEndBtn: { padding: "8px 14px", borderRadius: "8px", border: "none", background: "#e5a00d", color: "#000", fontSize: "13px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
   bottomRightStack: {
     position: "absolute",
@@ -4628,9 +4915,36 @@ const styles: Record<string, React.CSSProperties> = {
     width: "28px",
     height: "28px",
     touchAction: "none",
-    opacity: 0.45,
-    background: "linear-gradient(135deg, transparent 42%, rgba(255,255,255,0.75) 44%, rgba(255,255,255,0.75) 50%, transparent 52%, transparent 62%, rgba(255,255,255,0.55) 64%, rgba(255,255,255,0.55) 70%, transparent 72%)",
+    // Invisible hit target: resizing remains available without painting the
+    // diagonal grip over the video.
+    background: "transparent",
   },
+  pipControls: {
+    position: "absolute",
+    inset: 0,
+    zIndex: 80,
+    pointerEvents: "none",
+    background: "linear-gradient(to bottom, rgba(0,0,0,0.26), transparent 42%, rgba(0,0,0,0.2))",
+  },
+  pipControlBtn: {
+    position: "absolute",
+    width: "38px",
+    height: "38px",
+    padding: 0,
+    borderRadius: "50%",
+    border: "1px solid rgba(255,255,255,0.22)",
+    background: "rgba(0,0,0,0.62)",
+    color: "#fff",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "pointer",
+    pointerEvents: "auto",
+    backdropFilter: "blur(5px)",
+  },
+  pipTopLeftBtn: { top: "10px", left: "10px" },
+  pipTopRightBtn: { top: "10px", right: "10px" },
+  pipBottomCenterBtn: { bottom: "10px", left: "50%", transform: "translateX(-50%)" },
   video: {
     width: "100%",
     height: "100%",

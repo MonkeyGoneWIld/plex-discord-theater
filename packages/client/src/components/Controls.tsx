@@ -2063,10 +2063,11 @@ const styles: Record<string, React.CSSProperties> = {
   },
   backBtn: {
     ...QUIET_SURFACE,
-    // The top-bar scrim is intentionally gone so revealing controls cannot
-    // alter the picture. Give Back its own dependable contrast instead.
-    background: "rgba(0,0,0,0.55)",
-    border: "1px solid rgba(255,255,255,0.22)",
+    // Blur is local to this small surface and keeps it readable on both bright
+    // and dark frames without the heavy black plate. The inline filter and
+    // transition below prevent the old delayed change after it appears.
+    backdropFilter: "blur(12px)",
+    WebkitBackdropFilter: "blur(12px)",
     display: "flex",
     alignItems: "center",
     height: "34px",
@@ -2100,7 +2101,10 @@ const styles: Record<string, React.CSSProperties> = {
     paddingRight: "calc(20px + var(--sair, 0px))",
     paddingBottom: "calc(16px + var(--saib, 0px))",
     paddingLeft: "calc(20px + var(--sail, 0px))",
-    background: "transparent",
+    // This lower scrim is intentional: it keeps the timeline, timestamps and
+    // small utility controls readable. Unlike the removed top/full overlays it
+    // is confined to the control area and does not wash the whole picture.
+    background: "linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%)",
   },
   progressHit: {
     position: "relative",

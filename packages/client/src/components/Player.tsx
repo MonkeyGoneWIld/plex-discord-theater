@@ -504,7 +504,7 @@ function dockPip({ edge, offset }: PipDock, width: number, aspect = PIP_DEFAULT_
 }
 
 function defaultPipDock(): PipDock {
-  return { edge: "bottom", offset: 0 };
+  return { edge: "bottom", offset: 1 };
 }
 
 export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, onSharePresenceDetails, subtitles, resumePosition, mediaIndex, audioStreamId, subtitleStreamId, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext, presentation = "full", onMinimize, onRestore }: PlayerProps) {
@@ -561,7 +561,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const pipDragRef = useRef<{ pointerId: number; startX: number; startY: number; rect: PipRect } | null>(null);
   const pipResizeRef = useRef<{ pointerId: number; startX: number; width: number; rect: PipRect; handle: "top-left" | "top-right" | "bottom-left" | "bottom-right" } | null>(null);
   const lastPipDragAtRef = useRef(0);
-  const pipVelocityRef = useRef({ x: 0, y: 0, at: 0, vx: 0, vy: 0 });
+  const pipVelocityRef = useRef({ x: 0, y: 0, at: 0, startX: 0, startY: 0, startAt: 0, vx: 0, vy: 0 });
   const pipTouchRef = useRef<{
     kind: "drag" | "pinch";
     startX: number;
@@ -598,7 +598,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const prevEpisodeRef = useRef<PlexItem | null>(null);
   prevEpisodeRef.current = prevEpisode;
 
-  const settlePip = useCallback((rect: PipRect) => {
+  const settlePip = useCallback((rect: PipRect, preferredEdge?: PipEdge) => {
     const aspect = pipAspectRef.current;
     const { viewportWidth, viewportHeight } = pipBounds(aspect);
     const distances: Array<[PipEdge, number]> = [
@@ -608,7 +608,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       ["left", rect.left],
     ];
     distances.sort((a, b) => a[1] - b[1]);
-    const edge = distances[0][0];
+    const edge = preferredEdge ?? distances[0][0];
     const horizontalTravel = Math.max(1, viewportWidth - rect.width - PIP_MARGIN * 2);
     const verticalTravel = Math.max(1, viewportHeight - rect.height - PIP_MARGIN * 2);
     const offset = edge === "top" || edge === "bottom"
@@ -622,7 +622,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   }, []);
 
   const startPipVelocity = useCallback((x: number, y: number) => {
-    pipVelocityRef.current = { x, y, at: performance.now(), vx: 0, vy: 0 };
+    const now = performance.now();
+    pipVelocityRef.current = { x, y, at: now, startX: x, startY: y, startAt: now, vx: 0, vy: 0 };
   }, []);
 
   const updatePipVelocity = useCallback((x: number, y: number) => {
@@ -635,6 +636,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       x,
       y,
       at: now,
+      startX: previous.startX,
+      startY: previous.startY,
+      startAt: previous.startAt,
       vx: previous.vx * 0.35 + instantX * 0.65,
       vy: previous.vy * 0.35 + instantY * 0.65,
     };
@@ -643,21 +647,44 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const coastAndSettlePip = useCallback((rect: PipRect) => {
     const velocity = pipVelocityRef.current;
     const { viewportWidth, viewportHeight } = pipBounds(pipAspectRef.current);
-    const coastMs = 220;
-    // A quick release carries momentum; holding the PiP still before release
-    // intentionally drains it so an ordinary placement does not keep sliding.
+    // Momentum requires a deliberate, quick throw. Using a capped travel
+    // distance instead of raw px/ms prevents one unusually short pointer event
+    // interval from launching the window across the entire Activity.
     const velocityAge = performance.now() - velocity.at;
-    const releaseScale = Math.max(0, Math.min(1, 1 - velocityAge / 140));
+    const totalX = velocity.x - velocity.startX;
+    const totalY = velocity.y - velocity.startY;
+    const totalDistance = Math.hypot(totalX, totalY);
+    const totalTime = Math.max(1, velocity.at - velocity.startAt);
+    const gestureSpeed = totalDistance / totalTime;
+    const hasThrow = totalDistance >= 48 && gestureSpeed >= 0.4 && velocityAge < 120;
+    let directionX = hasThrow ? totalX : 0;
+    let directionY = hasThrow ? totalY : 0;
+    let preferredEdge: PipEdge | undefined;
+    // A clearly horizontal throw stays horizontal (and vice versa), so a small
+    // off-axis wobble cannot make left-to-right motion dock on the top edge.
+    if (Math.abs(directionX) >= Math.abs(directionY) * 1.2) {
+      directionY = 0;
+      preferredEdge = directionX < 0 ? "left" : "right";
+    } else if (Math.abs(directionY) >= Math.abs(directionX) * 1.2) {
+      directionX = 0;
+      preferredEdge = directionY < 0 ? "top" : "bottom";
+    }
+    const directionLength = Math.hypot(directionX, directionY);
+    const momentumDistance = hasThrow
+      ? Math.min(140, totalDistance * 0.65, Math.max(0, (gestureSpeed - 0.28) * 110))
+      : 0;
     const projected = {
       ...rect,
-      left: Math.min(viewportWidth - rect.width, Math.max(0, rect.left + Math.max(-2, Math.min(2, velocity.vx)) * coastMs * releaseScale)),
-      top: Math.min(viewportHeight - rect.height, Math.max(0, rect.top + Math.max(-2, Math.min(2, velocity.vy)) * coastMs * releaseScale)),
+      left: Math.min(viewportWidth - rect.width, Math.max(0, rect.left + (directionLength ? directionX / directionLength * momentumDistance : 0))),
+      top: Math.min(viewportHeight - rect.height, Math.max(0, rect.top + (directionLength ? directionY / directionLength * momentumDistance : 0))),
     };
-    settlePip(projected);
+    settlePip(projected, preferredEdge);
   }, [settlePip]);
 
-  const startPipDrag = useCallback((event: ReactPointerEvent<HTMLVideoElement>) => {
+  const startPipDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (!isPip || event.button !== 0 || event.pointerType === "touch") return;
+    const target = event.target as Element;
+    if (target.closest("button, [role='separator'], [data-pip-interactive]")) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     startPipVelocity(event.clientX, event.clientY);
     pipDragRef.current = {
@@ -669,7 +696,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     setPipInteracting(true);
   }, [isPip, pipRect, startPipVelocity]);
 
-  const movePip = useCallback((event: ReactPointerEvent<HTMLVideoElement>) => {
+  const movePip = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = pipDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     const dx = event.clientX - drag.startX;
@@ -686,7 +713,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     setPipRect(next);
   }, [updatePipVelocity]);
 
-  const endPipDrag = useCallback((event: ReactPointerEvent<HTMLVideoElement>) => {
+  const endPipDrag = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = pipDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     pipDragRef.current = null;
@@ -4340,6 +4367,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       data-presentation={presentation}
       onMouseEnter={isPip && !pipPhone ? () => setPipControlsVisible(true) : undefined}
       onMouseLeave={isPip && !pipPhone ? () => setPipControlsVisible(false) : undefined}
+      onPointerDown={isPip ? startPipDrag : undefined}
+      onPointerMove={isPip ? movePip : undefined}
+      onPointerUp={isPip ? endPipDrag : undefined}
+      onPointerCancel={isPip ? endPipDrag : undefined}
     >
       {!isPip && (syncState?.authFailed ? (
         <div style={styles.error}>Session expired — please close and restart the activity</div>
@@ -4413,10 +4444,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         playsInline
         onClick={isPip ? undefined : togglePlayPause}
         onDoubleClick={isPip && !pipPhone ? restoreFromPip : undefined}
-        onPointerDown={isPip ? startPipDrag : undefined}
-        onPointerMove={isPip ? movePip : undefined}
-        onPointerUp={isPip ? endPipDrag : undefined}
-        onPointerCancel={isPip ? endPipDrag : undefined}
       />
 
       {isPip && !playbackEnded && (pipPhone || pipControlsVisible) && (
@@ -4544,6 +4571,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           source={queuedNext ? "queue" : "series"}
           onPlay={canControl ? playNextItem : undefined}
           onExit={exitToShow}
+          onClose={isPip ? handleBack : undefined}
           compact={isPip}
         />
       )}

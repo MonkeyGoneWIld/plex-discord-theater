@@ -23,6 +23,8 @@ interface EndCardProps {
   onPlay?: () => void;
   /** Leave the player — back to the title this came from. */
   onExit: () => void;
+  /** Close the PiP through the player's ordinary leave/host-warning flow. */
+  onClose?: () => void;
   /** The same end-of-item decision, fitted into the in-activity PiP surface. */
   compact?: boolean;
 }
@@ -42,7 +44,7 @@ interface EndCardProps {
  * one that just finished, and this card exists to identify what's next, not to
  * sell it.
  */
-export function EndCard({ item, source, onPlay, onExit, compact = false }: EndCardProps) {
+export function EndCard({ item, source, onPlay, onExit, onClose, compact = false }: EndCardProps) {
   const still = item.thumb ? stillThumbUrl(item.thumb) : null;
   const show = item.showTitle ?? item.parentTitle ?? null;
   const numbering =
@@ -55,7 +57,21 @@ export function EndCard({ item, source, onPlay, onExit, compact = false }: EndCa
   return (
     <div style={{ ...styles.backdrop, ...(compact ? styles.backdropCompact : {}) }}>
       <div style={{ ...styles.panel, ...(compact ? styles.panelCompact : {}) }}>
-        <div style={{ ...styles.eyebrow, ...(compact ? styles.eyebrowCompact : {}) }}>{source === "series" ? "Next episode" : "Up next"}</div>
+        <div style={compact ? styles.compactHeader : undefined}>
+          <div style={{ ...styles.eyebrow, ...(compact ? styles.eyebrowCompact : {}) }}>{source === "series" ? "Next episode" : "Up next"}</div>
+          {compact && onClose && (
+            <button
+              type="button"
+              aria-label="Close picture in picture"
+              onClick={onClose}
+              style={styles.closeBtn}
+            >
+              <svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <path d="m5 5 10 10M15 5 5 15" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </button>
+          )}
+        </div>
 
         <div style={{ ...styles.body, ...(compact ? styles.bodyCompact : {}) }}>
           {still ? (
@@ -106,9 +122,9 @@ const styles: Record<string, React.CSSProperties> = {
     zIndex: 40,
   },
   backdropCompact: {
-    padding: "10px",
+    padding: 0,
     zIndex: 90,
-    background: "linear-gradient(145deg, #080808, #111318)",
+    background: "linear-gradient(145deg, #08090b, #15171b)",
   },
   panel: {
     width: "100%",
@@ -118,13 +134,34 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "24px",
   },
   panelCompact: {
+    height: "100%",
     maxWidth: "none",
-    gap: "9px",
-    padding: "12px",
+    gap: "10px",
+    padding: "14px 16px",
     boxSizing: "border-box",
-    borderRadius: "12px",
-    background: "rgba(20,21,24,0.96)",
-    boxShadow: "0 12px 34px rgba(0,0,0,0.45)",
+    justifyContent: "center",
+    background: "transparent",
+    boxShadow: "none",
+  },
+  compactHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    minHeight: "30px",
+  },
+  closeBtn: {
+    width: "30px",
+    height: "30px",
+    margin: "-5px -5px -5px 0",
+    padding: 0,
+    border: "1px solid rgba(255,255,255,0.18)",
+    borderRadius: "50%",
+    background: "rgba(0,0,0,0.38)",
+    color: "#fff",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "pointer",
   },
   eyebrow: {
     color: "#e5a00d",
@@ -133,7 +170,7 @@ const styles: Record<string, React.CSSProperties> = {
     letterSpacing: "1.6px",
     textTransform: "uppercase",
   },
-  eyebrowCompact: { fontSize: "9px", letterSpacing: "1.15px" },
+  eyebrowCompact: { fontSize: "10px", letterSpacing: "1.2px" },
   body: {
     display: "flex",
     gap: "28px",
@@ -142,7 +179,7 @@ const styles: Record<string, React.CSSProperties> = {
     // a Discord sidebar as easily as a full window.
     flexWrap: "wrap",
   },
-  bodyCompact: { gap: "11px", flexWrap: "nowrap", alignItems: "center" },
+  bodyCompact: { gap: "13px", flexWrap: "nowrap", alignItems: "center", minHeight: 0 },
   still: {
     // Fluid between a floor that stays legible and a cap that stops it
     // dominating a wide screen.
@@ -154,7 +191,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#1a1a1a",
     border: "1px solid rgba(255,255,255,0.08)",
   },
-  stillCompact: { width: "42%", minWidth: 0, borderRadius: "8px", border: "none" },
+  stillCompact: { width: "45%", minWidth: 0, borderRadius: "9px", border: "none" },
   stillEmpty: {
     display: "block",
   },
@@ -173,7 +210,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "16px",
     fontWeight: 600,
   },
-  showCompact: { fontSize: "9px" },
+  showCompact: { fontSize: "10px" },
   title: {
     color: "#f2f2f2",
     fontSize: "clamp(26px, 3.4vw, 36px)",
@@ -182,7 +219,7 @@ const styles: Record<string, React.CSSProperties> = {
     letterSpacing: "-0.015em",
   },
   titleCompact: {
-    fontSize: "13px",
+    fontSize: "14px",
     lineHeight: 1.15,
     display: "-webkit-box",
     WebkitLineClamp: 2,
@@ -193,7 +230,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#8a8a8a",
     fontSize: "17px",
   },
-  numberingCompact: { fontSize: "9px" },
+  numberingCompact: { fontSize: "10px" },
   actions: {
     display: "flex",
     gap: "12px",

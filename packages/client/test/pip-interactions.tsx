@@ -90,6 +90,13 @@ function Fixture() {
       check(!document.querySelector('[aria-label="Minimize player"]'), "Minimize arrow still exists");
       check(closeEnough(rect().right, innerWidth - 18) && closeEnough(rect().bottom, innerHeight - 18), "Initial bottom-right placement");
       pass("Every PiP entry starts bottom-right");
+      surface().dispatchEvent(new MouseEvent("mouseover", { bubbles: true })); await frame();
+      const restoreButton = button("Return to full player") as HTMLElement;
+      const initialSurface = getComputedStyle(restoreButton).backgroundColor;
+      await pause(600);
+      check(getComputedStyle(restoreButton).backgroundColor === initialSurface, "PiP control background changed after appearing");
+      check(!restoreButton.classList.contains("btn"), "PiP control still inherits the global hover transition");
+      pass("PiP controls appear with one stable translucent surface");
       for (const edge of ["left", "top", "right", "bottom"]) {
         const size = rect();
         const x = edge === "left" ? 18 : edge === "right" ? innerWidth - size.width - 18 : (innerWidth - size.width) / 2;

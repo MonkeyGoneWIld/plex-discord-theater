@@ -4450,7 +4450,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       {isPip && !playbackEnded && (pipPhone || pipControlsVisible) && (
         <div style={styles.pipControls}>
           {canControl && <button
-            className="btn"
             type="button"
             data-pip-control
             aria-label={pipPlaying ? "Pause" : "Play"}
@@ -4476,7 +4475,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           </button>}
           {!pipPhone && (
             <button
-              className="btn"
               type="button"
               data-pip-control
               aria-label="Return to full player"
@@ -4492,7 +4490,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             </button>
           )}
           <button
-            className="btn"
             type="button"
             data-pip-control
             aria-label="Close picture in picture"
@@ -5004,14 +5001,20 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 0,
     borderRadius: "50%",
     border: "1px solid rgba(255,255,255,0.22)",
-    background: "rgba(0,0,0,0.62)",
+    // These controls are mounted under an already-hovering pointer. Keep their
+    // surface self-contained rather than inheriting .btn's delayed brightness
+    // transition, which made the background visibly change after appearing.
+    background: "rgba(0,0,0,0.32)",
     color: "#fff",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     cursor: "pointer",
     pointerEvents: "auto",
-    backdropFilter: "blur(5px)",
+    backdropFilter: "blur(8px)",
+    WebkitBackdropFilter: "blur(8px)",
+    transition: "none",
+    filter: "none",
   },
   pipTopLeftBtn: { top: "10px", left: "10px" },
   pipTopRightBtn: { top: "10px", right: "10px" },
@@ -5041,7 +5044,9 @@ const styles: Record<string, React.CSSProperties> = {
     width: "82px",
     height: "82px",
     borderRadius: "50%",
-    background: "rgba(0,0,0,0.55)",
+    background: "rgba(0,0,0,0.32)",
+    backdropFilter: "blur(8px)",
+    WebkitBackdropFilter: "blur(8px)",
     color: "#fff",
     display: "flex",
     alignItems: "center",

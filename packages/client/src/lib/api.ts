@@ -398,7 +398,7 @@ export function prefetchDetail(item: Pick<PlexItem, "ratingKey" | "type" | "inLi
       for (const person of [...(meta.directors ?? []), ...(meta.cast ?? [])]) {
         if (!person.thumb || seen.has(person.thumb)) continue;
         seen.add(person.thumb);
-        queueDetailArtwork(personThumbUrl(person.thumb));
+        queueDetailArtwork(personThumbUrl(person.thumb), true);
         if (seen.size >= DETAIL_CAST_PREFETCH_LIMIT) break;
       }
     })
@@ -434,9 +434,10 @@ export function prefetchDetail(item: Pick<PlexItem, "ratingKey" | "type" | "inLi
  */
 const DETAIL_CAST_PREFETCH_LIMIT = 12;
 const DETAIL_COLLECTION_PREFETCH_LIMIT = 12;
-const DETAIL_ARTWORK_CONCURRENCY = 4;
+const DETAIL_ARTWORK_CONCURRENCY = 6;
 const DETAIL_ARTWORK_QUEUE_LIMIT = 32;
 const DETAIL_ARTWORK_MEMORY_LIMIT = 300;
+const detailArtworkPriorityQueue: string[] = [];
 const detailArtworkQueue: string[] = [];
 const detailArtworkSeen = new Set<string>();
 let detailArtworkActive = 0;
@@ -451,8 +452,13 @@ function trimDetailArtworkMemory(): void {
 
 function pumpDetailArtwork(): void {
   if (typeof Image === "undefined") return;
-  while (detailArtworkActive < DETAIL_ARTWORK_CONCURRENCY && detailArtworkQueue.length > 0) {
-    const url = detailArtworkQueue.shift()!;
+  while (
+    detailArtworkActive < DETAIL_ARTWORK_CONCURRENCY &&
+    (detailArtworkPriorityQueue.length > 0 || detailArtworkQueue.length > 0)
+  ) {
+    // Portraits are visible above collection shelves and were consistently the
+    // last detail-page content to settle, so they may pass queued poster work.
+    const url = detailArtworkPriorityQueue.shift() ?? detailArtworkQueue.shift()!;
     const image = new Image();
     detailArtworkActive++;
     const finished = () => {
@@ -472,13 +478,13 @@ function pumpDetailArtwork(): void {
   }
 }
 
-function queueDetailArtwork(url: string): void {
+function queueDetailArtwork(url: string, priority = false): void {
   if (!url || typeof Image === "undefined" || detailArtworkSeen.has(url)) return;
   // Do not let somebody sweeping across a shelf create an unbounded backlog.
-  if (detailArtworkQueue.length >= DETAIL_ARTWORK_QUEUE_LIMIT) return;
+  if (detailArtworkPriorityQueue.length + detailArtworkQueue.length >= DETAIL_ARTWORK_QUEUE_LIMIT) return;
   detailArtworkSeen.add(url);
   trimDetailArtworkMemory();
-  detailArtworkQueue.push(url);
+  (priority ? detailArtworkPriorityQueue : detailArtworkQueue).push(url);
   pumpDetailArtwork();
 }
 

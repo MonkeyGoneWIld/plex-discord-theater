@@ -2,8 +2,11 @@ import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
 
-const DEFAULT_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-const DEFAULT_MAX_MB = 500;
+// Artwork paths are content-addressed by Plex/TMDB in practice, so keeping the
+// resized result for a season is both safe and much cheaper than regenerating
+// cast and collection art after every routine deployment.
+const DEFAULT_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+const DEFAULT_MAX_MB = 10 * 1024; // 10 GB
 
 const TTL_MS = parseInt(process.env.THUMB_CACHE_TTL_MS || "", 10) || DEFAULT_TTL_MS;
 const MAX_BYTES =

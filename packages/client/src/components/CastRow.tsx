@@ -62,6 +62,8 @@ function CastAvatar({
           alt={person.name}
           style={styles.avatar}
           loading="eager"
+          fetchPriority="high"
+          decoding="async"
           onError={() => setFailed(true)}
         />
       ) : (

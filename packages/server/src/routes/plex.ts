@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { Readable } from "node:stream";
 import { randomUUID } from "node:crypto";
 import { pipeline } from "node:stream/promises";
+import sharp from "sharp";
 import { progressivePreview } from "../services/preview-stream.js";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
 import { playableVersionOrder, resolutionLabel, channelLabel } from "../services/media-versions.js";
@@ -2675,6 +2676,10 @@ router.get("/preview/:partId/index", async (req: Request, res: Response) => {
 
 // ─── Image proxy ────────────────────────────────────────────────
 
+const THUMB_BROWSER_CACHE_SECONDS = 90 * 24 * 60 * 60;
+const THUMB_BROWSER_CACHE_CONTROL = `public, max-age=${THUMB_BROWSER_CACHE_SECONDS}, immutable`;
+const MAX_THUMB_DIMENSION = 2_000;
+
 /**
  * GET /api/plex/thumb/*
  * Proxy Plex images (posters, artwork).
@@ -2691,6 +2696,15 @@ router.get("/thumb/*", async (req: Request, res: Response) => {
   const h = req.query.h as string | undefined;
   if (w && !NUMERIC_RE.test(w)) { res.status(400).end(); return; }
   if (h && !NUMERIC_RE.test(h)) { res.status(400).end(); return; }
+  const width = w ? Number(w) : null;
+  const height = h ? Number(h) : null;
+  if (
+    (width != null && (width < 1 || width > MAX_THUMB_DIMENSION)) ||
+    (height != null && (height < 1 || height > MAX_THUMB_DIMENSION))
+  ) {
+    res.status(400).end();
+    return;
+  }
 
   // External (Discover) artwork: a ?url= pointing at a cloud poster (TMDB or
   // Plex CDN). Host-allowlisted so this can't become an open image proxy. When
@@ -2705,19 +2719,18 @@ router.get("/thumb/*", async (req: Request, res: Response) => {
   }
 
   const transcodeSource = externalUrl ?? imagePath;
-  // External images always render at a fixed size via images.plex.tv regardless
-  // of the client's w/h, so key them on the source alone — otherwise the same
-  // image caches under multiple keys and a stale low-res copy can linger. The
-  // "ext:" prefix also abandons pre-fix entries (e.g. the old ~120px ones).
+  // External images are resized here rather than relying on each provider to
+  // honour dimensions. Version the key so old original-size cache entries are
+  // not mistaken for the new exact-size variants.
   const cacheKey = externalUrl
-    ? `ext:${externalUrl}`
+    ? `ext:v2:${externalUrl}:${width ?? "original"}x${height ?? "original"}`
     : w && h ? `${transcodeSource}:${w}x${h}` : transcodeSource;
 
   // Check server-side cache first
   const cached = thumbCache.get(cacheKey);
   if (cached) {
     res.setHeader("Content-Type", cached.contentType);
-    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader("Cache-Control", THUMB_BROWSER_CACHE_CONTROL);
     res.send(cached.data);
     return;
   }
@@ -2744,9 +2757,10 @@ router.get("/thumb/*", async (req: Request, res: Response) => {
       return;
     }
     const contentType = plexRes.headers.get("content-type");
+    const normalizedContentType = contentType?.split(";")[0];
     const resolvedType =
-      contentType && ALLOWED_IMAGE_TYPES.has(contentType.split(";")[0])
-        ? contentType
+      normalizedContentType && ALLOWED_IMAGE_TYPES.has(normalizedContentType)
+        ? normalizedContentType
         : "application/octet-stream";
 
     const contentLength = plexRes.headers.get("content-length");
@@ -2757,10 +2771,23 @@ router.get("/thumb/*", async (req: Request, res: Response) => {
     }
 
     // Buffer the response so we can cache it
-    const data = Buffer.from(await plexRes.arrayBuffer());
+    let data = Buffer.from(await plexRes.arrayBuffer());
     if (data.length > 10 * 1024 * 1024) {
       res.status(502).end();
       return;
+    }
+
+    // Plex's local photo transcoder already sizes local art. Cloud portraits
+    // and TMDB posters bypass it, so resize those once on the bot and persist
+    // the compact result. The browser then downloads only the pixels it draws.
+    if (
+      externalUrl && width != null && height != null &&
+      resolvedType !== "image/gif" && resolvedType !== "application/octet-stream"
+    ) {
+      data = await sharp(data)
+        .rotate()
+        .resize(width, height, { fit: "cover", position: "centre" })
+        .toBuffer();
     }
 
     // Store in cache (fire-and-forget, don't block response)
@@ -2771,7 +2798,7 @@ router.get("/thumb/*", async (req: Request, res: Response) => {
     }
 
     res.setHeader("Content-Type", resolvedType);
-    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.setHeader("Cache-Control", THUMB_BROWSER_CACHE_CONTROL);
     res.send(data);
   } catch (err) {
     console.error("Thumb proxy error:", err);

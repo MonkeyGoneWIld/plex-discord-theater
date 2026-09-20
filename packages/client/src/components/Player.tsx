@@ -4992,7 +4992,9 @@ const styles: Record<string, React.CSSProperties> = {
     inset: 0,
     zIndex: 80,
     pointerEvents: "none",
-    background: "linear-gradient(to bottom, rgba(0,0,0,0.26), transparent 42%, rgba(0,0,0,0.2))",
+    // Revealing PiP controls must not tint or blur the video itself. Each
+    // button supplies its own small translucent surface instead.
+    background: "transparent",
   },
   pipControlBtn: {
     position: "absolute",
@@ -5001,18 +5003,15 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 0,
     borderRadius: "50%",
     border: "1px solid rgba(255,255,255,0.22)",
-    // These controls are mounted under an already-hovering pointer. Keep their
-    // surface self-contained rather than inheriting .btn's delayed brightness
-    // transition, which made the background visibly change after appearing.
-    background: "rgba(0,0,0,0.32)",
+    // A plain translucent black plate: no backdrop blur, and no delayed hover
+    // treatment after the control appears beneath an already-hovering pointer.
+    background: "rgba(0,0,0,0.38)",
     color: "#fff",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     cursor: "pointer",
     pointerEvents: "auto",
-    backdropFilter: "blur(8px)",
-    WebkitBackdropFilter: "blur(8px)",
     transition: "none",
     filter: "none",
   },
@@ -5044,9 +5043,7 @@ const styles: Record<string, React.CSSProperties> = {
     width: "82px",
     height: "82px",
     borderRadius: "50%",
-    background: "rgba(0,0,0,0.32)",
-    backdropFilter: "blur(8px)",
-    WebkitBackdropFilter: "blur(8px)",
+    background: "rgba(0,0,0,0.38)",
     color: "#fff",
     display: "flex",
     alignItems: "center",

@@ -2002,12 +2002,16 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: "50%",
     border: "none",
     background: "rgba(0,0,0,0.45)",
-    backdropFilter: "blur(4px)",
     color: "#fff",
     cursor: "pointer",
     fontFamily: "inherit",
     padding: 0,
     pointerEvents: "auto",
+    // The overlay can mount while the pointer is already here. Keep the
+    // button visually stable instead of starting the global .btn hover fade.
+    transition: "none",
+    filter: "none",
+    translate: "none",
   },
   /**
    * Quieter than play: these move you through the series, which is a rarer
@@ -2054,7 +2058,8 @@ const styles: Record<string, React.CSSProperties> = {
     paddingRight: "calc(20px + var(--sair, 0px))",
     paddingBottom: "16px",
     paddingLeft: "calc(20px + var(--sail, 0px))",
-    background: "linear-gradient(to bottom, rgba(0,0,0,0.8), transparent)",
+    // Controls may appear over the frame; the frame itself must not change.
+    background: "transparent",
   },
   backBtn: {
     ...QUIET_SURFACE,
@@ -2064,12 +2069,14 @@ const styles: Record<string, React.CSSProperties> = {
     boxSizing: "border-box",
     padding: "6px 14px",
     borderRadius: "8px",
-    backdropFilter: "blur(12px)",
     color: "#f0f0f0",
     cursor: "pointer",
     fontSize: "13px",
     fontWeight: 500,
     fontFamily: "inherit",
+    transition: "none",
+    filter: "none",
+    translate: "none",
   },
   title: {
     fontSize: "15px",
@@ -2089,7 +2096,7 @@ const styles: Record<string, React.CSSProperties> = {
     paddingRight: "calc(20px + var(--sair, 0px))",
     paddingBottom: "calc(16px + var(--saib, 0px))",
     paddingLeft: "calc(20px + var(--sail, 0px))",
-    background: "linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%)",
+    background: "transparent",
   },
   progressHit: {
     position: "relative",

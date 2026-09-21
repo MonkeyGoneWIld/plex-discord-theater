@@ -8,7 +8,9 @@ import { RatingsRow } from "./RatingsRow";
 import { SkeletonBlock } from "./SkeletonBlock";
 import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
+import { DetailLoading } from "./DetailLoading";
 import { PlexMediaActions } from "./PlexMediaActions";
+import { useRevealTimeout } from "../lib/useRevealTimeout";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { QUIET_SURFACE } from "../lib/surface";
 
@@ -18,6 +20,15 @@ interface ExternalDetailProps {
   onSelectPerson?: (person: Credit) => void;
   onBack: () => void;
 }
+
+/**
+ * Hard cap on the wait.
+ *
+ * The gate below reveals as soon as the page's header is in — poster, metadata
+ * and ratings — and gives up waiting after a second regardless. A cached page
+ * satisfies it within a frame or two and never shows the spinner at all.
+ */
+const REVEAL_TIMEOUT_MS = 1000;
 
 function formatRuntime(ms: number | null): string {
   if (!ms) return "";
@@ -56,6 +67,9 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
   const [statusLoaded, setStatusLoaded] = useState(false);
   const [requesting, setRequesting] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
+  // Reveal gate — see `pageReady`.
+  const [posterLoaded, setPosterLoaded] = useState(false);
+  const [ratingsReady, setRatingsReady] = useState(false);
   // Phone portrait. This page wraps rather than stacks without it: the poster is
   // a fixed 220px and the text column asks for 260px, so on a phone the text
   // dropped below the poster and the poster stayed pinned to the left edge —
@@ -75,12 +89,10 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
         ? fetchTmdbMeta(item.tmdbId, item.type === "show" ? "show" : "movie")
         : null;
     if (!load) {
-      setMeta(null);
       setLoading(false);
       return;
     }
     let cancelled = false;
-    setMeta(null);
     setLoading(true);
     load
       .then((m) => { if (!cancelled) setMeta(m); })
@@ -138,12 +150,24 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
   const facts = [year, runtime, rating].filter(Boolean).join("  ·  ");
   const statusLabel = status != null ? STATUS_LABEL[status] ?? null : null;
 
+  // Appear once, complete — the same gate the library detail pages use. The
+  // Seerr answer is part of it here, because the request button is what this
+  // page exists for and showing it in the wrong state is worse than waiting.
+  const wantsStatus = tmdbId != null && mediaType === "movie";
+  const wantsSeasons = tmdbId != null && mediaType === "tv";
+  const revealTimedOut = useRevealTimeout(item.ratingKey, REVEAL_TIMEOUT_MS);
+  const pageReady =
+    (!loading &&
+      (posterLoaded || !poster) &&
+      ratingsReady &&
+      (!wantsStatus || statusLoaded) &&
+      (!wantsSeasons || seerrTv != null)) ||
+    revealTimedOut;
+
   return (
     <div style={styles.container}>
-      {/* Search already supplied the title and usually the poster/summary. Show
-          those immediately while the existing inline skeletons resolve the
-          request status and provider-only fields. */}
-      <div>
+      {!pageReady && <DetailLoading />}
+      <div style={pageReady ? styles.revealed : styles.prerender} aria-hidden={!pageReady}>
       <button className="btn" onClick={onBack} style={styles.backBtn}>
         <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
           <path d="M12.5 15L7.5 10L12.5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
@@ -156,6 +180,8 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
             src={authUrl(poster)}
             alt={title}
             style={{ ...styles.poster, ...(narrow ? styles.posterNarrow : {}) }}
+            onLoad={() => setPosterLoaded(true)}
+            onError={() => setPosterLoaded(true)}
           />
         ) : (
           <div style={{
@@ -179,6 +205,7 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
           <RatingsRow
             ratings={meta?.ratings}
             style={styles.ratings}
+            onReady={() => setRatingsReady(true)}
           />
           {loading && !summary ? (
             <div style={styles.summaryMuted}>Loading details…</div>
@@ -252,6 +279,18 @@ const styles: Record<string, React.CSSProperties> = {
     position: "relative",
   },
   // Reveal gate — see MovieDetail.
+  prerender: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    opacity: 0,
+    pointerEvents: "none" as const,
+  },
+  revealed: {
+    opacity: 1,
+    transition: "opacity 0.28s ease",
+  },
   // Matches MovieDetail's back button so navigation is consistent across pages.
   backBtn: {
     ...QUIET_SURFACE,

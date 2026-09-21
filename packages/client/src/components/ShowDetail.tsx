@@ -10,12 +10,14 @@ import {
   saveAudioPref, saveSubtitlePref,
 } from "../lib/trackPrefs";
 import { formatTimecode } from "../lib/format";
+import { useRevealTimeout } from "../lib/useRevealTimeout";
 import { MovieCard } from "./MovieCard";
 import { RatingsRow } from "./RatingsRow";
 import { RelatedRows } from "./RelatedRows";
 import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
 import { SeasonRequestGrid } from "./SeasonRequestGrid";
+import { DetailLoading } from "./DetailLoading";
 import { PlexMediaActions } from "./PlexMediaActions";
 import { QUIET_SURFACE } from "../lib/surface";
 
@@ -62,6 +64,8 @@ interface ShowDetailProps {
  * and ratings — and gives up waiting after a second regardless. A cached page
  * satisfies it within a frame or two and never shows the spinner at all.
  */
+const REVEAL_TIMEOUT_MS = 1000;
+
 /**
  * The second line of the play button: "Season 1 · Episode 3 — Title", plus the
  * time left when the episode is part-watched. Episodes Plex hasn't numbered
@@ -104,6 +108,9 @@ export function ShowDetail({
   // The backdrop is the one part that can't come from the clicked card, so it
   // fades in on load rather than appearing hard.
   const [backdropLoaded, setBackdropLoaded] = useState(false);
+  // Reveal gate — see `pageReady`.
+  const [posterLoaded, setPosterLoaded] = useState(false);
+  const [ratingsReady, setRatingsReady] = useState(false);
   // Where this viewer left the show: the episode in progress, or the one after
   // the last they finished. Null when never started or watched to the end.
   const [nextUp, setNextUp] = useState<HistoryEntry | null>(null);
@@ -362,12 +369,23 @@ export function ShowDetail({
     }
   }, [startFrom, onPlay, starting, nextUp]);
 
+  // Header, season list and the play button — see MovieDetail for why the cast
+  // and the collection rows are left to fill in on their own.
+  //
+  // The button is in here because it changes width as well as height when it
+  // lands: on a wide screen the watchlist and watched controls sit to its
+  // right, and "Play" grew into "Play / Season 1 · Episode 1 — The Seinfeld
+  // Chronicles" and pushed them a couple of hundred pixels across.
+  const revealTimedOut = useRevealTimeout(item.ratingKey, REVEAL_TIMEOUT_MS);
+  const pageReady =
+    (meta != null && !loading && (posterLoaded || !posterUrl) && ratingsReady && !startPending) ||
+    revealTimedOut;
+
   return (
     <div style={styles.page}>
-      {/* Render from the clicked card immediately. The season grid and disabled
-          play-button placeholder already absorb slower answers without moving
-          the rest of the page. */}
-      <div>
+      {!pageReady && <DetailLoading />}
+      {/* Kept mounted behind the placeholder — see MovieDetail. */}
+      <div style={pageReady ? styles.revealed : styles.prerender} aria-hidden={!pageReady}>
       {/* Backdrop — the one part not available from the clicked card. */}
       {backdropUrl && (
         <div style={styles.backdropWrap}>
@@ -399,6 +417,12 @@ export function ShowDetail({
                   src={posterUrl}
                   alt={dTitle}
                   style={styles.poster}
+                  onLoad={() => setPosterLoaded(true)}
+                  onError={() => setPosterLoaded(true)}
+                  // A poster served from the browser cache can finish decoding
+                  // before onLoad is attached, in which case the event never
+                  // arrives and the gate would wait for nothing.
+                  ref={(el) => { if (el?.complete) setPosterLoaded(true); }}
                 />
               </div>
             )}
@@ -436,6 +460,7 @@ export function ShowDetail({
                   <RatingsRow
                     ratings={meta.ratings}
                     style={styles.ratings}
+                    onReady={() => setRatingsReady(true)}
                   />
                 )}
               </div>
@@ -550,6 +575,18 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: "hidden",
   },
   // Reveal gate — see MovieDetail for both halves.
+  prerender: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    opacity: 0,
+    pointerEvents: "none" as const,
+  },
+  revealed: {
+    opacity: 1,
+    transition: "opacity 0.28s ease",
+  },
   // Height reservations for the parts that need the metadata — see MovieDetail
   // for why the genres reserve their trailing gap and the ratings don't.
   genresSlot: {

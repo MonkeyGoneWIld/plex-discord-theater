@@ -1,4 +1,3 @@
-import { useEffect, useRef } from "react";
 import type { Ratings } from "../lib/api";
 // Rating-source marks — the same icons Rotten Tomatoes and Seerr use.
 // RT: Fresh tomato / Rotten green splat, and upright / spilled audience popcorn.
@@ -14,9 +13,6 @@ interface RatingsRowProps {
   ratings?: Ratings | null;
   /** Extra style for the row container (e.g. margins) set by the caller. */
   style?: React.CSSProperties;
-  /** Fired once the lookup settles, so a detail page can include the scores in
-   *  what it waits for before revealing itself. */
-  onReady?: () => void;
 }
 
 // Reserve the row's height from first paint so filling in the (async) ratings
@@ -31,14 +27,7 @@ const ROW_MIN_HEIGHT = 26;
  * are being prepared without shifting the layout. If Plex has no scores, it
  * collapses.
  */
-export function RatingsRow({ ratings, style, onReady }: RatingsRowProps) {
-  // Ref, not a dependency: callers pass an inline arrow, and depending on it
-  // would refetch on every parent render.
-  const onReadyRef = useRef(onReady);
-  onReadyRef.current = onReady;
-
-  useEffect(() => { onReadyRef.current?.(); }, []);
-
+export function RatingsRow({ ratings, style }: RatingsRowProps) {
   const hasAny = !!ratings && (
     ratings.imdb != null || ratings.tmdb != null ||
     ratings.rtCritic != null || ratings.rtAudience != null

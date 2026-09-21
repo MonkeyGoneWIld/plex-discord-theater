@@ -2,13 +2,11 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, setStreams, getSessionToken, versionOf, type Credit, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
 import { formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
-import { useRevealTimeout } from "../lib/useRevealTimeout";
 import { loadAudioPref, loadSubtitlePref, saveAudioPref, saveSubtitlePref, matchAudioTrack, matchSubtitleTrack } from "../lib/trackPrefs";
 import { RatingsRow } from "./RatingsRow";
 import { RelatedRows } from "./RelatedRows";
 import { CastRow } from "./CastRow";
 import { shelfStyles } from "./PosterShelf";
-import { DetailLoading } from "./DetailLoading";
 import { PlexMediaActions } from "./PlexMediaActions";
 import type { SuggestionItem } from "../hooks/useSync";
 import { GHOST_SURFACE, QUIET_SURFACE } from "../lib/surface";
@@ -42,15 +40,6 @@ interface MovieDetailProps {
   /** Open a cast/crew member's page. Omit to render the row unclickable. */
   onSelectPerson?: (person: Credit) => void;
 }
-
-/**
- * Hard cap on the wait.
- *
- * The gate below reveals as soon as the page's header is in — poster, metadata
- * and ratings — and gives up waiting after a second regardless. A cached page
- * satisfies it within a frame or two and never shows the spinner at all.
- */
-const REVEAL_TIMEOUT_MS = 1000;
 
 function authUrl(url: string): string {
   const token = getSessionToken();
@@ -205,17 +194,9 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
   // The backdrop is the one thing that can't be drawn from the clicked card, so
   // it fades in on load instead of appearing hard.
   const [backdropLoaded, setBackdropLoaded] = useState(false);
-  // Reveal gate — see `pageReady`.
-  const [posterLoaded, setPosterLoaded] = useState(false);
-  const [ratingsReady, setRatingsReady] = useState(false);
   // This viewer's saved position for the item, or null if they've never played
   // it. Playback controls remain host-only; linked-account actions do not.
   const [progress, setProgress] = useState<HistoryEntry | null>(null);
-  // Whether the resume point has been looked up. Part of the reveal gate: it
-  // decides whether Play reads "Play" or "Resume from 1:01:55" with a Start
-  // Over beside it and a progress bar above, so a page revealed before it
-  // answered rearranged itself a moment later.
-  const [progressLoaded, setProgressLoaded] = useState(false);
   // Phone portrait: the poster and the detail column can't sit side by side.
   // At 390px the fixed 240px poster leaves the text roughly 66px, which wraps
   // the title one word per line and pushes the buttons off the screen edge.
@@ -224,6 +205,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
   useEffect(() => {
     let cancelled = false;
     setMetaFailed(false);
+    setMeta(null);
     setBackdropLoaded(false);
     setSelectedVersion(null);
     fetchMeta(item.ratingKey)
@@ -282,12 +264,10 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
   // is watched, and a stale resume point is worse than an extra request.
   useEffect(() => {
     setProgress(null);
-    setProgressLoaded(false);
     let cancelled = false;
     fetchProgress(item.ratingKey)
       .then((r) => { if (!cancelled) setProgress(r.progress); })
-      .catch(() => { /* resume is a convenience — never block playback on it */ })
-      .finally(() => { if (!cancelled) setProgressLoaded(true); });
+      .catch(() => { /* resume is a convenience — never block playback on it */ });
     return () => { cancelled = true; };
   }, [item.ratingKey]);
 
@@ -366,33 +346,12 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
   const dDuration = meta?.duration ?? item.duration;
   const dSummary = meta?.summary ?? item.summary ?? null;
 
-  // Waits on the header only: the poster, the metadata behind the title block,
-  // the ratings, and the resume point. The cast row and the collection rows are
-  // deliberately not part of this — they sit below the fold and fill in on
-  // their own, and making the whole page wait on the slowest headshot or on
-  // /collections is what made every open feel long.
-  //
-  // The resume point earns its place because of what it changes rather than
-  // what it costs: it is a local read, and without it a part-watched title
-  // revealed as "Play" and then turned into "Resume from 1:01:55" with a Start
-  // Over button beside it and a progress bar above.
-  //
-  // Episodes have no ratings row, and a metadata failure renders none either.
-  const wantsRatings = item.type === "movie" && meta != null;
-  const revealTimedOut = useRevealTimeout(item.ratingKey, REVEAL_TIMEOUT_MS);
-  const pageReady =
-    ((meta != null || metaFailed) &&
-      (posterLoaded || !posterUrl) &&
-      progressLoaded &&
-      (!wantsRatings || ratingsReady)) ||
-    revealTimedOut;
-
   return (
     <div style={styles.page}>
-      {!pageReady && <DetailLoading />}
-      {/* Kept mounted behind the placeholder: the images and row requests the
-          gate is waiting on only make progress once they're in the tree. */}
-      <div style={pageReady ? styles.revealed : styles.prerender} aria-hidden={!pageReady}>
+      {/* The clicked card already has enough to paint this page. Metadata,
+          progress, ratings and shelves fill their reserved slots in place;
+          hiding all of that behind a spinner made even cache hits look slow. */}
+      <div>
       {/* Backdrop — the one part that can't come from the clicked card, so it
           fades in on load rather than snapping into place. */}
       {backdropUrl && (
@@ -434,12 +393,6 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
                   src={posterUrl}
                   alt={dTitle}
                   style={{ ...styles.poster, ...(item.type === "episode" ? styles.posterEpisode : {}) }}
-                  onLoad={() => setPosterLoaded(true)}
-                  onError={() => setPosterLoaded(true)}
-                  // A poster served from the browser cache can finish decoding
-                  // before onLoad is attached, in which case the event never
-                  // arrives and the gate would wait for nothing.
-                  ref={(el) => { if (el?.complete) setPosterLoaded(true); }}
                 />
               </div>
             )}
@@ -526,7 +479,6 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
                     <RatingsRow
                       ratings={meta.ratings}
                       style={styles.ratings}
-                      onReady={() => setRatingsReady(true)}
                     />
                   )}
                 </div>
@@ -738,22 +690,6 @@ const styles: Record<string, React.CSSProperties> = {
     minHeight: "100vh",
     background: "#0d0d0d",
     overflow: "hidden",
-  },
-  // The two halves of the reveal. `prerender` keeps the real page mounted and
-  // laid out at full width — so its images load and the shelves measure — while
-  // painting nothing. Width is explicit because an absolutely-positioned box
-  // would otherwise shrink-wrap.
-  prerender: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    width: "100%",
-    opacity: 0,
-    pointerEvents: "none" as const,
-  },
-  revealed: {
-    opacity: 1,
-    transition: "opacity 0.28s ease",
   },
   // Height reservations for the parts that can't be drawn from the clicked card
   // (see the optimistic-render note). Each holds exactly the space its content

@@ -508,8 +508,11 @@ export function ShowDetail({
           </div>
 
           {/* Seasons grid — owned (playable) cards plus the seasons we don't
-              have yet, rendered as selectable request cards with TMDB posters. */}
-          {missingLoading && <p role="status">Loading missing seasons…</p>}
+              have yet, rendered as selectable request cards with TMDB posters.
+              The missing ones simply join the grid when Seerr answers: the
+              lookup starts only once the page is up, and now that a cached page
+              is up at once, a "loading" line sat under every show for as long
+              as Seerr took. */}
           {missingError && (
             <p role="alert">
               {missingError}{" "}

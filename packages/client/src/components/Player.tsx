@@ -1804,9 +1804,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       .catch(() => setVpsRelay(false)); // default to non-VPS (P2P mode) if config fails
   }, []);
 
-  // Where Plex counts a title as watched, as a share of its runtime. Only read
-  // when the host presses Back, so nothing waits on it; Plex's default stands in
-  // until it lands.
+  // Where Plex counts a title with no credits marker as watched, as a share of
+  // its runtime. Only read when the host presses Back, so nothing waits on it;
+  // Plex's default stands in until it lands.
   const playedThresholdRef = useRef(DEFAULT_PLAYED_THRESHOLD);
   useEffect(() => {
     fetchPlayedThreshold()

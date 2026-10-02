@@ -16,9 +16,8 @@ import path from "node:path";
 import fs from "node:fs";
 import { plexJSON } from "./plex.js";
 import { LruMap } from "./lru.js";
+import { firstCreditsStartMs, isWatchedThrough, playedThreshold } from "./played-state.js";
 
-/** Watched past this fraction of the runtime counts as finished. */
-const COMPLETE_RATIO = 0.9;
 /** Below this, there's nothing worth resuming — the entry stays out of Continue Watching. */
 const MIN_RESUME_MS = 60_000;
 /** A brand-new entry needs at least this much watched before it's worth remembering. */
@@ -289,6 +288,8 @@ interface ItemSummary {
   parentRatingKey: string | null;
   grandparentRatingKey: string | null;
   durationMs: number;
+  /** Where the first credits marker starts, or null when Plex found none. */
+  creditsStartMs: number | null;
 }
 
 const metaCache = new Map<string, { at: number; summary: ItemSummary }>();
@@ -307,6 +308,8 @@ export interface PlexHistoryMetadata {
   grandparentTitle?: string;
   grandparentThumb?: string;
   grandparentRatingKey?: string;
+  /** Present only when asked for with includeMarkers. */
+  Marker?: Array<{ type?: string; startTimeOffset?: number }>;
 }
 
 function toSummary(m: PlexHistoryMetadata): ItemSummary {
@@ -325,6 +328,7 @@ function toSummary(m: PlexHistoryMetadata): ItemSummary {
     parentRatingKey: m.parentRatingKey ?? null,
     grandparentRatingKey: m.grandparentRatingKey ?? null,
     durationMs: m.duration ?? 0,
+    creditsStartMs: firstCreditsStartMs(m.Marker),
   };
 }
 
@@ -339,6 +343,8 @@ async function fetchItemSummary(ratingKey: string): Promise<ItemSummary | null> 
 
   const data = await plexJSON<{ MediaContainer: { Metadata?: PlexHistoryMetadata[] } }>(
     `/library/metadata/${ratingKey}`,
+    // Markers decide when a title counts as watched — see recordProgress.
+    { includeMarkers: "1" },
   );
   const m = data.MediaContainer.Metadata?.[0];
   if (!m) return null;
@@ -500,8 +506,14 @@ export async function recordProgress(
 
   const durationMs = summary?.durationMs || existing?.duration_ms || 0;
   // Recomputed on every write rather than latched, so restarting a finished
-  // title clears its watched flag and puts it back in Continue Watching.
-  const watched = durationMs > 0 && positionMs >= durationMs * COMPLETE_RATIO ? 1 : 0;
+  // title clears its watched flag and puts it back in Continue Watching. The
+  // credits marker decides when there is one; the threshold only without.
+  const watched = isWatchedThrough(
+    positionMs,
+    durationMs,
+    summary?.creditsStartMs ?? null,
+    await playedThreshold(),
+  ) ? 1 : 0;
 
   upsertStmt.run({
     user_id: userId,

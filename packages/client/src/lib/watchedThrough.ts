@@ -1,10 +1,13 @@
 /**
- * Whether a title has been watched through, by the same rule Plex uses to mark
- * it played: the playhead has reached the first credits marker, or the share of
- * the runtime the server counts as watched — whichever comes first.
+ * Whether a title has been watched through. A title with a credits marker is
+ * finished once the playhead reaches the first one, and the percentage plays no
+ * part; only a title without one falls back to the share of the runtime the
+ * server counts as watched.
  *
- * Kept free of the player so the rule can be tested on its own. The player uses
- * it to tell a host who has finished from one stepping away mid-film.
+ * The same rule the server uses to mark history watched — keep the two in step
+ * with packages/server/src/services/played-state.ts. Kept free of the player so
+ * it can be tested on its own; the player uses it to tell a host who has
+ * finished from one stepping away mid-film.
  */
 import type { SkipMarker } from "./api";
 
@@ -22,6 +25,6 @@ export function isWatchedThrough(
 ): boolean {
   if (!(position > 0)) return false;
   const creditsStarts = markers.filter((m) => m.type === "credits").map((m) => m.start);
-  if (creditsStarts.length > 0 && position >= Math.min(...creditsStarts)) return true;
+  if (creditsStarts.length > 0) return position >= Math.min(...creditsStarts);
   return duration > 0 && position >= duration * threshold;
 }

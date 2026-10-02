@@ -2,9 +2,10 @@
  * When a host pressing Back has finished the title.
  *
  * Past this point Back ends the stream outright — no PiP, no warning, even with
- * other people in the room — so it must not fire for someone mid-film, and must
- * fire by whichever of Plex's two rules comes first: the first credits marker,
- * or the share of the runtime the server counts as watched.
+ * other people in the room — so it must not fire for someone mid-film. A title
+ * with a credits marker is finished at the first one and nowhere else; only a
+ * title without one falls back to the share of the runtime the server counts
+ * as watched.
  */
 import { isWatchedThrough } from "../src/lib/watchedThrough";
 import type { SkipMarker } from "../src/lib/api";
@@ -32,11 +33,15 @@ check("the server's own threshold is honoured", isWatchedThrough(5100, film, [],
 check("…in both directions", isWatchedThrough(5500, film, [], 0.95), false);
 
 console.log("credits markers");
-check("first credits marker before the threshold wins", isWatchedThrough(5200, film, [intro, credits]), true);
+check("credits before the threshold finish it", isWatchedThrough(5200, film, [intro, credits]), true);
 check("just before the credits", isWatchedThrough(5199, film, [intro, credits]), false);
 check("the first credits marker, not a later one", isWatchedThrough(5250, film, [postCredits, credits]), true);
-check("threshold still applies when credits start later", isWatchedThrough(5500, film, [{ type: "credits", start: 5700, end: 5900 }]), true);
+const lateCredits: SkipMarker = { type: "credits", start: 5700, end: 5900 };
+check("past the threshold but before late credits is not finished", isWatchedThrough(5500, film, [lateCredits]), false);
+check("…and is once the late credits start", isWatchedThrough(5700, film, [lateCredits]), true);
+check("a lower threshold doesn't override the marker", isWatchedThrough(5100, film, [credits], 0.8), false);
 check("an intro marker is not an ending", isWatchedThrough(100, film, [intro]), false);
+check("intro-only titles fall back to the threshold", isWatchedThrough(5400, film, [intro]), true);
 
 console.log("unknowns");
 check("unknown runtime falls back to credits only", isWatchedThrough(5300, 0, [credits]), true);

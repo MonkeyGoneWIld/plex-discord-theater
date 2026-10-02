@@ -1123,24 +1123,32 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const lastMediaErrorAtRef = useRef(0);
   const pendingStopRef = useRef<Promise<void> | null>(null);
   const bufferCleanupRef = useRef<(() => void) | null>(null);
-  // Offset for the next transcode start. Seeded with the resume position so the
-  // very first session starts there; the HLS effect clears it after each use, so
-  // restarts and later items begin at 0 unless a seek sets it again.
-  const seekOffsetRef = useRef<number | null>(
-    resumePosition && resumePosition > 0 ? resumePosition : null,
-  );
+  // Offset for the next transcode start. Seeded with the resume position so a
+  // title's first session starts there; the HLS effect clears it after each use,
+  // so restarts begin at 0 unless a seek sets it again.
+  const resumeAtS = resumePosition && resumePosition > 0 ? resumePosition : null;
+  const seekOffsetRef = useRef<number | null>(resumeAtS);
   // Last position this client is confident playback actually reached for the
   // current item. Updated only from a video that is genuinely playing, so it is
   // never polluted by the transient 0 a torn-down element reports mid-restart.
   // This is what a restart resumes from when no explicit offset is pending.
-  const lastGoodPositionRef = useRef(resumePosition && resumePosition > 0 ? resumePosition : 0);
+  const lastGoodPositionRef = useRef(resumeAtS ?? 0);
   // A new item must not inherit the previous one's position. Done during render
   // for the same reason subtitlesOnRef is: the HLS effect reads it, and an
   // effect-based reset would land after the transcode had already started.
+  //
+  // It takes the new item's resume position, too. The player is not remounted
+  // for a new title — choosing one from the picture in picture hands this same
+  // instance a new item — so the seeding above, which only runs on mount, used
+  // to be the only place a resume position was ever read, and a title resumed
+  // from PiP started at 0:00. Every other way of changing title (next episode,
+  // following the host, rejoining) passes no resume position, so they still
+  // start clean.
   const lastGoodItemRef = useRef(item.ratingKey);
   if (lastGoodItemRef.current !== item.ratingKey) {
     lastGoodItemRef.current = item.ratingKey;
-    lastGoodPositionRef.current = 0;
+    lastGoodPositionRef.current = resumeAtS ?? 0;
+    seekOffsetRef.current = resumeAtS;
   }
   /**
    * Record a position, but only from a video that actually has media loaded.

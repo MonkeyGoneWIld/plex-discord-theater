@@ -10,9 +10,23 @@ import type { SyncState } from "../src/hooks/useSync";
 const item: PlexItem = { ratingKey: "pip-fixture", title: "A quiet afternoon", type: "episode", thumb: null, parentIndex: 1, index: 1 };
 const artwork = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 180"><rect width="320" height="180" fill="#304c59"/><circle cx="240" cy="55" r="25" fill="#e5a00d"/><path d="M0 180 95 65 180 150 230 110 320 180" fill="#59755c"/></svg>')}#still`;
 const next = { ...item, ratingKey: "pip-fixture-next", title: "The next chapter", index: 2, showTitle: "Sample series", thumb: artwork };
+const resumed: PlexItem = { ratingKey: "pip-fixture-resumed", title: "Half watched", type: "movie", thumb: null };
+// Off for everything but the resume check. While /config goes unanswered the
+// player never starts a stream, which keeps the gesture checks free of network
+// noise; the resume check needs the stream start, where the offset is chosen.
+let streaming = false;
+// The player's own account of each stream it starts, and at what offset.
+const hlsLog: Array<{ msg: string; data: Record<string, unknown> }> = [];
+const consoleLog = console.log.bind(console);
+console.log = (...args: unknown[]) => {
+  if (typeof args[0] === "string" && args[0].startsWith("[HLS] ")) {
+    hlsLog.push({ msg: args[0].slice(6), data: (args[1] ?? {}) as Record<string, unknown> });
+  }
+  consoleLog(...args);
+};
 window.fetch = async (input) => {
   const url = String(input);
-  if (url.includes("/config")) return new Promise<Response>(() => {}); // Keep the streaming pipeline idle.
+  if (url.includes("/config")) return streaming ? Response.json({ vpsRelay: true }) : new Promise<Response>(() => {});
   if (url.includes("/played-threshold")) return Response.json({ threshold: 0.9 });
   if (url.includes("/siblings/")) return Response.json({ episode: true, prev: null, next });
   if (url.includes("/meta/")) return Response.json({ ...item, partId: null, markers: [], genres: [], versions: [], audioTracks: [], subtitleTracks: [] });
@@ -63,6 +77,7 @@ function Fixture() {
   const [mode, setMode] = useState<"full" | "pip">("pip");
   const [host, setHost] = useState(false);
   const [others, setOthers] = useState(false);
+  const [current, setCurrent] = useState<{ item: PlexItem; resumePosition?: number }>({ item });
   const [closed, setClosed] = useState(false);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<string[]>([]);
@@ -71,7 +86,7 @@ function Fixture() {
   const minimize = useCallback(() => setMode("pip"), []);
   const leave = useCallback(() => setClosed(true), []);
   const reset = useCallback((asHost = false, presentation: "full" | "pip" = "pip", withOthers = asHost) => {
-    setHost(asHost); setOthers(withOthers); setMode(presentation); setClosed(false); setGeneration((n) => n + 1);
+    setHost(asHost); setOthers(withOthers); setMode(presentation); setCurrent({ item }); setClosed(false); setGeneration((n) => n + 1);
   }, []);
   useEffect(() => {
     let id: number;
@@ -196,9 +211,20 @@ function Fixture() {
       check(!document.body.textContent?.includes("End stream?"), "Finished host Back showed a warning");
       check(!surface(), "Finished host Back did not end the stream");
       pass("Host Back after finishing ends the stream, even with others watching");
+      streaming = true;
+      reset(true, "pip", false); await pause(800);
+      hlsLog.length = 0;
+      // What App's handlePlay does when a title is resumed while PiP is up: the
+      // same player instance goes full screen with a new item and resume point.
+      setMode("full"); setCurrent({ item: resumed, resumePosition: 430 }); await pause(800);
+      const effect = hlsLog.findIndex((e) => e.msg === "session effect running" && e.data.ratingKey === resumed.ratingKey);
+      const started = effect >= 0 ? hlsLog.slice(effect + 1).find((e) => e.msg === "starting session") : undefined;
+      check(started?.data.offsetS === 430, `Title resumed from PiP started at ${String(started?.data.offsetS)}s, not 430s`);
+      pass("A title resumed from PiP starts at its resume point");
     } catch (error) {
       setResults((lines) => [...lines, `FAIL ${String(error)}`]);
     } finally {
+      streaming = false;
       reset(); setRunning(false);
     }
   }
@@ -216,7 +242,7 @@ function Fixture() {
       <pre aria-live="polite">{results.join("\n")}</pre>
     </main>
     <div id="rect">{geometry}</div>
-    {!closed && <Player key={generation} item={item} isHost={host} selfUserId="self" subtitles={false} sharePresenceDetails={false} onSharePresenceDetails={() => {}} onBack={leave} syncState={state} presentation={mode} onMinimize={minimize} onRestore={restore} />}
+    {!closed && <Player key={generation} item={current.item} resumePosition={current.resumePosition} isHost={host} selfUserId="self" subtitles={false} sharePresenceDetails={false} onSharePresenceDetails={() => {}} onBack={leave} syncState={state} presentation={mode} onMinimize={minimize} onRestore={restore} />}
   </>;
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);

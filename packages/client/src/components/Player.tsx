@@ -4035,17 +4035,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   }, [teardownPlayback, onBack, onFinished, item]);
 
   const handleBack = useCallback(() => {
-    if (!isHostRef.current && !isPip && onMinimize) {
-      onMinimize();
-      return;
-    }
-    // Back is the entry to PiP. Hosts need the choice even when alone; closing
-    // an existing PiP keeps the ordinary end-stream confirmation rules.
+    // Ending the stream for other people needs their host's say-so. That is the
+    // only case that asks; otherwise Back is the entry to PiP, and closing an
+    // existing PiP leaves.
     const hasOtherViewers = (syncStateRef.current?.participants ?? []).some(
       (p) => p.userId !== selfUserId,
     );
-    if (isHostRef.current && (hasOtherViewers || (!isPip && onMinimize))) {
+    if (isHostRef.current && hasOtherViewers) {
       setConfirmingEnd(true);
+      return;
+    }
+    if (!isPip && onMinimize) {
+      onMinimize();
       return;
     }
     endPlayback();

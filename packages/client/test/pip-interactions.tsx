@@ -61,6 +61,7 @@ function Fixture() {
   const [generation, setGeneration] = useState(0);
   const [mode, setMode] = useState<"full" | "pip">("pip");
   const [host, setHost] = useState(false);
+  const [others, setOthers] = useState(false);
   const [closed, setClosed] = useState(false);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<string[]>([]);
@@ -68,8 +69,8 @@ function Fixture() {
   const restore = useCallback(() => setMode("full"), []);
   const minimize = useCallback(() => setMode("pip"), []);
   const leave = useCallback(() => setClosed(true), []);
-  const reset = useCallback((asHost = false, presentation: "full" | "pip" = "pip") => {
-    setHost(asHost); setMode(presentation); setClosed(false); setGeneration((n) => n + 1);
+  const reset = useCallback((asHost = false, presentation: "full" | "pip" = "pip", withOthers = asHost) => {
+    setHost(asHost); setOthers(withOthers); setMode(presentation); setClosed(false); setGeneration((n) => n + 1);
   }, []);
   useEffect(() => {
     let id: number;
@@ -170,6 +171,12 @@ function Fixture() {
       check(surface().dataset.presentation === "full" && video() === originalVideo, "Touch tap did not restore the same player");
       button("Back").click(); await pause();
       pass("Touch tap restores; Back returns to bottom-right PiP");
+      reset(true, "full", false); await pause();
+      const aloneVideo = video();
+      button("Back").click(); await pause();
+      check(!document.body.textContent?.includes("End stream?"), "Lone host Back showed a warning");
+      check(surface().dataset.presentation === "pip" && video() === aloneVideo, "Lone host Back did not go straight to PiP");
+      pass("Lone host Back goes straight to PiP with no warning");
       reset(true, "full"); await pause();
       button("Back").click(); await pause();
       check(document.body.textContent?.includes("End stream?"), "Host Back lacked warning");
@@ -188,7 +195,7 @@ function Fixture() {
       reset(); setRunning(false);
     }
   }
-  const state = { participants: host ? [{ userId: "other", username: "Other viewer" }] : [], queue: [], commandSeq: 0, stateSeq: 0, seekSeq: 0, connected: false } as unknown as SyncState;
+  const state = { participants: host && others ? [{ userId: "other", username: "Other viewer" }] : [], queue: [], commandSeq: 0, stateSeq: 0, seekSeq: 0, connected: false } as unknown as SyncState;
   return <>
     <main>
       <h1>PiP interaction checks</h1>

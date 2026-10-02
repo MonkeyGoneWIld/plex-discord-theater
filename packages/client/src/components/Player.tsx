@@ -15,13 +15,14 @@ import { TransportRequestCard } from "./TransportRequestCard";
 import { SubtitleLayer } from "./SubtitleLayer";
 import { SubtitleOffset } from "./SubtitleOffset";
 import { ZoomPanel } from "./ZoomPanel";
-import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
+import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchPlayedThreshold, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { loadVolume, saveVolume } from "../lib/volume";
 import { getLevel, setLevel, MAX_LEVEL } from "../lib/audioBoost";
 import { describeWatched, loadAudioPref, loadSubtitlePref, mergeTrackPrefs, saveTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
+import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
 import { useVideoZoom } from "../lib/useVideoZoom";
@@ -1801,6 +1802,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     fetchConfig()
       .then((config) => setVpsRelay(config.vpsRelay))
       .catch(() => setVpsRelay(false)); // default to non-VPS (P2P mode) if config fails
+  }, []);
+
+  // Where Plex counts a title as watched, as a share of its runtime. Only read
+  // when the host presses Back, so nothing waits on it; Plex's default stands in
+  // until it lands.
+  const playedThresholdRef = useRef(DEFAULT_PLAYED_THRESHOLD);
+  useEffect(() => {
+    fetchPlayedThreshold()
+      .then((threshold) => { if (threshold > 0 && threshold <= 1) playedThresholdRef.current = threshold; })
+      .catch(() => { /* keep the default */ });
   }, []);
 
   // Per-item metadata: intro/credits markers, and the part id for hover-preview
@@ -4034,7 +4045,34 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     onBack();
   }, [teardownPlayback, onBack, onFinished, item]);
 
+  /** Whether this client has watched the title through — see isWatchedThrough. */
+  const hasFinishedItem = useCallback((): boolean => {
+    if (playbackEnded) return true;
+    const video = videoRef.current;
+    // Mid-restart the element sits at 0 with nothing loaded, and the last
+    // position playback really reached is the truth.
+    const position =
+      video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.currentTime > 0
+        ? video.currentTime
+        : lastGoodPositionRef.current;
+    const meta = itemMeta?.ratingKey === item.ratingKey ? itemMeta : null;
+    const durationMs = meta?.duration ?? item.duration ?? 0;
+    const duration =
+      durationMs > 0 ? durationMs / 1000 : video && Number.isFinite(video.duration) ? video.duration : 0;
+    return isWatchedThrough(position, duration, meta?.markers ?? [], playedThresholdRef.current);
+  }, [playbackEnded, itemMeta, item.ratingKey, item.duration]);
+
   const handleBack = useCallback(() => {
+    // A host who has finished the title has no use for PiP or a warning, and
+    // nor does anyone still in the room — there is nothing left to watch.
+    if (isHostRef.current && hasFinishedItem()) {
+      logEvent("Player", "host left a finished title, ending stream", {
+        ratingKey: item.ratingKey,
+        ...snapshot(videoRef.current),
+      });
+      endPlayback();
+      return;
+    }
     // Ending the stream for other people needs their host's say-so. That is the
     // only case that asks; otherwise Back is the entry to PiP, and closing an
     // existing PiP leaves.
@@ -4050,7 +4088,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       return;
     }
     endPlayback();
-  }, [endPlayback, selfUserId, isPip, onMinimize]);
+  }, [endPlayback, hasFinishedItem, item.ratingKey, selfUserId, isPip, onMinimize]);
 
   /**
    * Choose tracks.

@@ -291,6 +291,44 @@ router.get("/config", (_req: Request, res: Response) => {
   });
 });
 
+/** Plex's own default for "Video played threshold". */
+const DEFAULT_PLAYED_THRESHOLD = 0.9;
+/** A server-wide setting that changes about never; no need to ask Plex per play. */
+const PLAYED_THRESHOLD_TTL_MS = 10 * 60 * 1000;
+let playedThresholdCache: { value: number; at: number } | null = null;
+
+/**
+ * The fraction of a video's runtime at which Plex counts it as watched — the
+ * server's "Video played threshold" (Settings → Library). A failed read falls
+ * back to Plex's default rather than failing: the player only uses this to
+ * tell a host who has finished a title from one stepping away mid-film.
+ */
+async function playedThreshold(): Promise<number> {
+  if (playedThresholdCache && Date.now() - playedThresholdCache.at < PLAYED_THRESHOLD_TTL_MS) {
+    return playedThresholdCache.value;
+  }
+  let value = DEFAULT_PLAYED_THRESHOLD;
+  try {
+    const data = await plexJSON<{ MediaContainer: { Setting?: Array<{ id: string; value?: unknown }> } }>("/:/prefs");
+    const setting = data.MediaContainer.Setting?.find((s) => s.id === "LibraryVideoPlayedThreshold");
+    const percent = Number(setting?.value);
+    if (Number.isFinite(percent) && percent > 0 && percent <= 100) value = percent / 100;
+  } catch (err) {
+    console.warn("[Plex] Could not read the played threshold, using the default:", err);
+  }
+  playedThresholdCache = { value, at: Date.now() };
+  return value;
+}
+
+/**
+ * GET /api/plex/played-threshold
+ * Kept apart from /config: HLS start waits on /config, and this costs a Plex
+ * round trip the first time.
+ */
+router.get("/played-threshold", async (_req: Request, res: Response) => {
+  res.json({ threshold: await playedThreshold() });
+});
+
 /**
  * GET /api/plex/sections
  * List all library sections (Movies, TV Shows, etc.)

@@ -824,6 +824,12 @@ export function fetchConfig(): Promise<AppConfig> {
   return apiGet("/api/plex/config");
 }
 
+/** Fraction of runtime (0-1) at which the Plex server counts a video as watched. */
+export async function fetchPlayedThreshold(): Promise<number> {
+  const { threshold } = await apiGet<{ threshold: number }>("/api/plex/played-threshold");
+  return threshold;
+}
+
 /**
  * A watched (or part-watched) item from the current Discord user's history. Shares its item
  * fields with PlexItem so history entries render through MovieCard unchanged;

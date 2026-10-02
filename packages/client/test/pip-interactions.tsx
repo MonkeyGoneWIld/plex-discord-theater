@@ -13,6 +13,7 @@ const next = { ...item, ratingKey: "pip-fixture-next", title: "The next chapter"
 window.fetch = async (input) => {
   const url = String(input);
   if (url.includes("/config")) return new Promise<Response>(() => {}); // Keep the streaming pipeline idle.
+  if (url.includes("/played-threshold")) return Response.json({ threshold: 0.9 });
   if (url.includes("/siblings/")) return Response.json({ episode: true, prev: null, next });
   if (url.includes("/meta/")) return Response.json({ ...item, partId: null, markers: [], genres: [], versions: [], audioTracks: [], subtitleTracks: [] });
   return Response.json({});
@@ -189,6 +190,12 @@ function Fixture() {
       button("End stream").click(); await pause();
       check(!surface(), "Confirmed host close didn't leave");
       pass("Host Back offers PiP; PiP X confirms once and ends stream");
+      reset(true, "full"); await pause();
+      video().dispatchEvent(new Event("ended")); await pause();
+      button("Back").click(); await pause();
+      check(!document.body.textContent?.includes("End stream?"), "Finished host Back showed a warning");
+      check(!surface(), "Finished host Back did not end the stream");
+      pass("Host Back after finishing ends the stream, even with others watching");
     } catch (error) {
       setResults((lines) => [...lines, `FAIL ${String(error)}`]);
     } finally {

@@ -1043,6 +1043,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const zoomPhone = useMediaQuery(PHONE_QUERY);
   const zoomRootRef = useRef<HTMLDivElement>(null);
   const zoomMeta = itemMeta?.ratingKey === item.ratingKey ? itemMeta : null;
+  // The title as the control bar shows it — set where that is computed, below.
+  const displayTitleRef = useRef(formatMediaTitle(item));
   const zoomItem = { ...item, type: zoomMeta?.type ?? item.type, grandparentRatingKey: item.grandparentRatingKey ?? zoomMeta?.grandparentRatingKey };
   const zoomPreferenceKey = zoomItem.type === "episode" && !zoomItem.grandparentRatingKey ? null : zoomKey(zoomItem);
   const [zoomNotice, setZoomNotice] = useState<string | null>(null);
@@ -3323,7 +3325,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         roomRatingKey: s.ratingKey ?? "none",
       });
       syncActionsRef.current?.sendPlay(
-        currentItem.ratingKey, formatMediaTitle(currentItem), subtitlesOnRef.current, sid,
+        currentItem.ratingKey, displayTitleRef.current, subtitlesOnRef.current, sid,
         video.currentTime > 0 ? video.currentTime : undefined,
         // The transcode's own start, not the playhead — a viewer told the wrong
         // floor treats every reachable backward seek as needing a restart.
@@ -3655,7 +3657,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // restart. Without it "play" resets everyone to 0:00 until the next
       // heartbeat drags them back.
       syncActionsRef.current?.sendPlay(
-        item.ratingKey, formatMediaTitle(item), subtitlesOnRef.current, sessionId,
+        item.ratingKey, displayTitleRef.current, subtitlesOnRef.current, sessionId,
         offset, undefined,
         currentAudioStreamRef.current ?? audioStreamId ?? 0,
         currentSubtitleStreamRef.current ?? subtitleStreamId ?? 0,
@@ -4311,8 +4313,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     return () => video.removeEventListener("timeupdate", onTime);
   }, [canControl, markers]);
 
-  // Build rich display title for Controls top bar
-  const displayTitle = formatMediaTitle(item);
+  // Build rich display title for Controls top bar. The host's item comes from a
+  // library listing, which can't know its file plays more than one episode
+  // (S02E18-E19); the metadata can, so a multi-episode file names them all.
+  const displayTitle = formatMediaTitle(
+    item.fileEpisodes ? item : { ...item, fileEpisodes: zoomMeta?.fileEpisodes },
+  );
+  // For the room's copy of the title, which is sent from callbacks.
+  displayTitleRef.current = displayTitle;
 
   // What to offer next, and whether to offer it. A queued item wins over the
   // auto-resolved sibling — it's a deliberate choice rather than a guess.

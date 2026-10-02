@@ -9,6 +9,8 @@ export interface TitleParts {
   parentTitle?: string;
   parentIndex?: number;
   index?: number;
+  /** Every episode a multi-episode file plays, in order — see FileEpisode. */
+  fileEpisodes?: ReadonlyArray<{ index: number | null; title: string }>;
 }
 
 /**
@@ -52,6 +54,15 @@ export function formatWhen(timestamp: number): string {
 export function formatMediaTitle(item: TitleParts): string {
   const show = item.showTitle ?? item.parentTitle;
   if (show) {
+    // A multi-episode file names every episode it plays, as Plex does:
+    // "Show — S2E18–E19 · First Title / Second Title".
+    const episodes = item.fileEpisodes && item.fileEpisodes.length > 1 ? item.fileEpisodes : null;
+    if (episodes) {
+      const first = episodes[0].index ?? "?";
+      const last = episodes[episodes.length - 1].index ?? "?";
+      const titles = episodes.map((e) => e.title || `Episode ${e.index ?? "?"}`).join(" / ");
+      return `${show} — S${item.parentIndex ?? "?"}E${first}–E${last} · ${titles}`;
+    }
     return `${show} — S${item.parentIndex ?? "?"}E${item.index ?? "?"} · ${item.title}`;
   }
   if (item.year) return `${item.title} (${item.year})`;

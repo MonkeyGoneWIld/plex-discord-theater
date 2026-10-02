@@ -17,6 +17,7 @@ import fs from "node:fs";
 import { plexJSON } from "./plex.js";
 import { LruMap } from "./lru.js";
 import { firstCreditsStartMs, isWatchedThrough, playedThreshold } from "./played-state.js";
+import { sameFileRun } from "./episode-files.js";
 
 /** Below this, there's nothing worth resuming — the entry stays out of Continue Watching. */
 const MIN_RESUME_MS = 60_000;
@@ -310,6 +311,8 @@ export interface PlexHistoryMetadata {
   grandparentRatingKey?: string;
   /** Present only when asked for with includeMarkers. */
   Marker?: Array<{ type?: string; startTimeOffset?: number }>;
+  /** The files it plays — how a multi-episode file's entries are told apart. */
+  Media?: Array<{ Part?: Array<{ id?: number; file?: string }> }>;
 }
 
 function toSummary(m: PlexHistoryMetadata): ItemSummary {
@@ -423,7 +426,11 @@ async function resolveNextUp(
   // -1 covers merged/split shows whose leaf list doesn't contain our key.
   if (i === -1) return null;
 
-  for (const episode of episodes.slice(i + 1)) {
+  // From the end of the finished episode's file, not the episode: the rest of
+  // a multi-episode file (S02E18-E19) was watched along with it, whether or not
+  // its own history row says so.
+  const { end } = sameFileRun(episodes, i);
+  for (const episode of episodes.slice(end + 1)) {
     const existing = selectOneStmt.get(userId, episode.ratingKey!) as HistoryRow | undefined;
     if (respectDismissals && existing?.dismissed === 1) return null;
     if (existing?.watched === 1) continue;

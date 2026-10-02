@@ -18,6 +18,7 @@ import { mapPlexRatings } from "../services/ratings.js";
 import { readDetailCache, writeDetailCache, invalidateDetailCache } from "../services/detail-cache.js";
 import { findIndexedLibraryItem } from "../services/library-index.js";
 import { playedThreshold } from "../services/played-state.js";
+import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
 
 const router = Router();
 
@@ -929,7 +930,13 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
       res.status(404).json({ error: "Item not found" });
       return;
     }
-    res.json(payload);
+    // Every episode a multi-episode file plays, so the player and presence can
+    // name them all. Added per request rather than stored in the payload, which
+    // is persisted for days and would hide this from every cached episode.
+    const fileEpisodes = payload.type === "episode"
+      ? await episodesInSameFile(ratingKey).catch(() => [])
+      : [];
+    res.json(fileEpisodes.length > 1 ? { ...payload, fileEpisodes } : payload);
   } catch (err) {
     console.error("Metadata error:", err);
     res.status(502).json({ error: "Failed to fetch metadata" });
@@ -2448,10 +2455,15 @@ router.get("/siblings/:ratingKey", async (req: Request, res: Response) => {
       return;
     }
 
+    // Episodes that share this one's file (S02E18-E19) are the same playback,
+    // not neighbours: next is the first episode after the whole file, and
+    // previous is the start of the file before it.
+    const { start, end } = sameFileRun(leaves, i);
+    const prev = start > 0 ? sameFileRun(leaves, start - 1).start : -1;
     res.json({
       episode: true,
-      prev: i > 0 ? mapItem(leaves[i - 1]) : null,
-      next: i < leaves.length - 1 ? mapItem(leaves[i + 1]) : null,
+      prev: prev >= 0 ? mapItem(leaves[prev]) : null,
+      next: end < leaves.length - 1 ? mapItem(leaves[end + 1]) : null,
     });
   } catch (err) {
     console.error("Sibling episode error:", err);

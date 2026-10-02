@@ -510,6 +510,7 @@ export function App() {
           duration: meta.duration,
           parentRatingKey: meta.parentRatingKey,
           grandparentRatingKey: meta.grandparentRatingKey,
+          fileEpisodes: meta.fileEpisodes,
         });
       })
       .catch(() => { if (!cancelled) setNowPlayingMeta(null); });

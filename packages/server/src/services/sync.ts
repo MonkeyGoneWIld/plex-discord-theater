@@ -7,6 +7,7 @@ import { getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTrans
 import { createTracker, handleTrackerSocket, destroyTracker } from "./tracker.js";
 import { recordProgress, shouldRecordHistory } from "./watch-history.js";
 import { pushProgressToPlex } from "./plex-accounts.js";
+import { episodesInSameFile } from "./episode-files.js";
 import { logEvent } from "./logger.js";
 
 /** Interval between WebSocket pings to detect dead connections. */
@@ -796,16 +797,29 @@ function persistProgress(
       (viewers.get(extraClient.userId) ?? false) || extraClient.isHost,
     );
   }
+  const position = interpolatedPosition(room.state);
+  // A multi-episode file (S02E18-E19) is one playback of every episode in it,
+  // so each one is recorded — the way Plex marks them all played — and the next
+  // episode offered after it is the one after the whole file. A failed lookup
+  // records just the episode that was asked for, as before.
+  const recordFor = (userId: string) => (ratingKeys: string[]) => {
+    for (const key of ratingKeys) {
+      recordProgress(userId, key, position, { force: forced })
+        .then((entry) => {
+          if (!entry) return;
+          return pushProgressToPlex(userId, entry, forced).catch((err) => {
+            console.warn("[Plex Account] Live progress sync failed for", userId.substring(0, 8), err);
+          });
+        })
+        .catch((err) => console.error("[History] Failed to record progress:", err));
+    }
+  };
   for (const [userId, userIsHost] of viewers) {
     if (!shouldRecordHistory(userId, userIsHost)) continue;
-    recordProgress(userId, ratingKey, interpolatedPosition(room.state), { force: forced })
-      .then((entry) => {
-        if (!entry) return;
-        return pushProgressToPlex(userId, entry, forced).catch((err) => {
-          console.warn("[Plex Account] Live progress sync failed for", userId.substring(0, 8), err);
-        });
-      })
-      .catch((err) => console.error("[History] Failed to record progress:", err));
+    const record = recordFor(userId);
+    episodesInSameFile(ratingKey)
+      .then((episodes) => record(episodes.length > 1 ? episodes.map((e) => e.ratingKey) : [ratingKey]))
+      .catch(() => record([ratingKey]));
   }
 }
 

@@ -194,6 +194,19 @@ export interface PlexItem {
    *  plex:// guid) so their detail page can drive ratings and the request flow
    *  directly. Absent on library items and Discover search results. */
   tmdbId?: number;
+  /** Every episode a multi-episode file plays — see FileEpisode. Carried by a
+   *  player item built from metadata; absent everywhere else. */
+  fileEpisodes?: FileEpisode[];
+}
+
+/**
+ * One of the episodes a multi-episode file (S02E18-E19) plays. Plex files each
+ * as its own episode pointing at the same file; playing either plays both.
+ */
+export interface FileEpisode {
+  ratingKey: string;
+  index: number | null;
+  title: string;
 }
 
 export interface PlexSection {
@@ -319,6 +332,9 @@ export interface PlexMeta {
   parentRatingKey?: string;
   grandparentRatingKey?: string;
   showTitle?: string;
+  /** Every episode this item's file plays, in order, when that is more than
+   *  one (a multi-episode file); absent for everything else. */
+  fileEpisodes?: FileEpisode[];
   partId: number | null;
   /** Whether BIF hover-preview frames exist for this item. Optional so a newer
    *  client served by an older server degrades to "no previews". */

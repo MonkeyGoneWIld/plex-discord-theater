@@ -914,7 +914,7 @@ export function Controls({
     const now = performance.now();
     // The least time between picture changes per tier. Mouse events arrive far
     // more often than this; any inside the gap move only the time label.
-    const gap = detail === "coarse" ? 120 : detail === "medium" ? 100 : 0;
+    const gap = detail === "coarse" ? 150 : detail === "medium" ? 100 : 0;
     if (now - previewLastShownRef.current < gap) return;
     const local = previewFramesRef.current?.frameAt(pct * duration * 1000, duration * 1000, detail);
     if (local) {

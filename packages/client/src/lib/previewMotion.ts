@@ -4,11 +4,11 @@ import type { PreviewDetail } from "./previewFrames";
  * Which preview tier to show, from how fast the cursor is moving along the bar.
  *
  * Speed is in bar-widths per second — how much of the bar the cursor covers in
- * a second — so it behaves the same on a phone and a desktop.
+ * a second — so it behaves the same on a phone and a desktop:
  *
- * Trying medium only for now: full ends at 0 and medium never does, so every
- * speed, standing still included, picks medium. The bands being tried before
- * were full below 0.01, medium 0.01 – 0.04, coarse 0.04 and up.
+ *   full     below 0.01   slower than 100s to cross the bar
+ *   medium   0.01 – 0.12  about 8s to 100s to cross it
+ *   coarse   0.12 and up  faster than about 8s
  *
  * It is how far the cursor got over the last SPEED_WINDOW_MS, rather than the
  * speed between two pointer events: those arrive unevenly, and pointer
@@ -18,8 +18,8 @@ import type { PreviewDetail } from "./previewFrames";
  * again once the window has passed (settleDelay) and the speed reads 0.
  */
 export const SPEED_WINDOW_MS = 250;
-const FULL_MAX_SPEED = 0;
-const MEDIUM_MAX_SPEED = Infinity;
+const FULL_MAX_SPEED = 0.01;
+const MEDIUM_MAX_SPEED = 0.12;
 
 export function tierForSpeed(barWidthsPerSecond: number): PreviewDetail {
   if (barWidthsPerSecond < FULL_MAX_SPEED) return "full";

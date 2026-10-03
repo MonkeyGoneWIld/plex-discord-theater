@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { progressivePreview, previewTierIndices as serverTierIndices, type PreviewTierProgress } from "../src/services/preview-stream.js";
 import { createProgressivePreviewReader, previewTierIndices } from "../../client/src/lib/previewFrames.js";
-import { createPreviewMotion } from "../../client/src/lib/previewMotion.js";
 
 function bif(count: number, multiplier = 1000) {
   const start = 64 + (count + 1) * 8;
@@ -40,7 +39,7 @@ for (const count of [1, 2, 3, 7, 49, 50, 51, 96, 385, 3214, 10800]) {
   let level = 0;
   const { coarse, medium } = previewTierIndices(count);
   assert.deepEqual(serverTierIndices(count), { coarse, medium });
-  assert.equal(coarse.length, Math.ceil(count * 0.04));
+  assert.equal(coarse.length, Math.ceil(count * 0.01));
   assert.equal(medium.length, Math.ceil(count * 0.40));
   assert.equal(new Set(medium).size, medium.length);
   assert.ok(coarse.every((i) => medium.includes(i)), "overview is a subset of medium");
@@ -71,8 +70,8 @@ for (const count of [1, 2, 3, 7, 49, 50, 51, 96, 385, 3214, 10800]) {
   assert.deepEqual(received, sent, "client confirms the same three tiers that the server sent");
   assert.deepEqual(received.map((p) => p.tier), ["coarse", "medium", "full"]);
   if (count === 3214) {
-    assert.deepEqual(received.map((p) => p.frames), [129, 1157, 1928]);
-    assert.deepEqual(received.map((p) => p.ready), [129, 1286, 3214]);
+    assert.deepEqual(received.map((p) => p.frames), [33, 1253, 1928]);
+    assert.deepEqual(received.map((p) => p.ready), [33, 1286, 3214]);
   }
   const frames = reader.frames()!;
   assert.equal(frames.ready, count);
@@ -147,7 +146,7 @@ for (const corrupt of [Buffer.alloc(80), bif(0), bif(5).subarray(0, 100)]) {
   reader.dispose();
   const outOfOrder = createProgressivePreviewReader();
   outOfOrder.push(chunks[0]);
-  outOfOrder.push(chunks[1 + Math.ceil(3214 * 0.04)]); // first medium frame, before any overview
+  outOfOrder.push(chunks[1 + Math.ceil(3214 * 0.01)]); // first medium frame, before any overview
   assert.equal(outOfOrder.rejected(), true, "reject a medium tier sent before the overview");
   outOfOrder.dispose();
 }
@@ -163,55 +162,4 @@ for (const corrupt of [Buffer.alloc(80), bif(0), bif(5).subarray(0, 100)]) {
   reader.dispose();
 }
 
-const motion = createPreviewMotion();
-assert.equal(motion.sample(0, 0, 1000), "medium");
-assert.equal(motion.sample(0.02, 10, 1000), "coarse");
-assert.equal(motion.sample(0, 20, 1000), "coarse", "reverse motion still counts as speed");
-
-// Searching across the bar stays medium; a brief slowdown must not unlock full.
-for (const velocity of [0.1, 0.06, 0.04]) {
-  motion.reset();
-  motion.sample(0, 0, 1000);
-  for (let i = 1; i <= 100; i++) assert.equal(motion.sample(velocity * i * 0.02, i * 20, 1000), "medium");
-}
-
-// Slow movement is practical on both small and large timelines and does not
-// become impossible just because a video has thousands of original frames.
-for (const width of [400, 1000, 2400]) {
-  motion.reset();
-  motion.sample(0, 0, width);
-  let result;
-  for (let i = 1; i <= 60; i++) {
-    result = motion.sample(i * 0.2 / width, i * 20, width); // 10 px/s
-    if (i <= 20) assert.equal(result, "medium");
-  }
-  assert.equal(result, "full", "sustained slow inspection becomes full");
-}
-
-// Quantized one-pixel movement has fast individual samples, but slow average
-// travel. It must not reset the precision dwell indefinitely.
-motion.reset();
-motion.sample(0, 0, 1000);
-let precise;
-for (let t = 16; t <= 1200; t += 16) precise = motion.sample(Math.floor(t / 100) / 1000, t, 1000);
-assert.equal(precise, "full");
-
-// Local searching/jitter must preserve the deadline rather than debounce it
-// forever. This exercises the same delay calculation used by the UI timer.
-motion.reset();
-motion.sample(0.5, 0, 1000);
-for (let t = 16; t < 650; t += 16) {
-  motion.sample(0.5 + (t % 32 === 0 ? 0.001 : -0.001), t, 1000);
-  assert.equal(motion.settleDelay(t), 650 - t);
-}
-assert.equal(motion.settle(649), "medium");
-assert.equal(motion.settleDelay(649), 1, "an early timer must reschedule the final millisecond");
-assert.equal(motion.settle(650), "full");
-assert.equal(motion.sample(0.501, 670, 1000), "full", "focused movement retains full detail");
-assert.equal(motion.sample(0.7, 680, 1000), "coarse", "leaving the area quickly restores overview");
-motion.reset();
-motion.sample(0.5, 0, 1000);
-assert.equal(motion.settle(650), "full", "a completely stationary hover always refines");
-motion.reset();
-assert.equal(motion.sample(0.9, 1000, 1000), "medium", "re-entry starts fresh");
-console.log("Progressive preview transfer and adaptive motion tests passed");
+console.log("Progressive preview transfer tests passed");

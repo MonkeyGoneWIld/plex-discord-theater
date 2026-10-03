@@ -17,11 +17,14 @@ import type { PreviewDetail } from "./previewFrames";
  * flicker between tiers. Net distance also lets a hand's jitter around one spot
  * read as still.
  *
- * Speeding up switches tier at once. Slowing down steps one tier at a time,
- * each only once the speed has read finer for STEP_DOWN_MS: coarse to medium,
- * to fine, to full. A hover starts at coarse and steps down the same way.
- * A pointer that stops sends no more events, so the caller asks again after
- * nextChangeIn, which is when the window or a step-down next moves on.
+ * Speeding up switches tier at once. Slowing down while still moving steps
+ * one tier at a time, each only once the speed has read finer for
+ * STEP_DOWN_MS: coarse to medium to fine. Holding still is different: once the
+ * speed has read full for STEP_DOWN_MS it goes straight to full, so the
+ * picture changes once, not once per tier, under a cursor that isn't moving.
+ * A hover starts at coarse. A pointer that stops sends no more events, so the
+ * caller asks again after nextChangeIn, which is when the window or a step
+ * next moves on.
  */
 export const SPEED_WINDOW_MS = 250;
 export const STEP_DOWN_MS = 300;
@@ -46,6 +49,8 @@ export function createPreviewMotion() {
   let tier: PreviewDetail = "coarse";
   // Since when the speed has read finer than `tier`, or null while it doesn't.
   let finerSince: number | null = null;
+  // Since when it has read full — the cursor held still — while `tier` isn't.
+  let stillSince: number | null = null;
 
   const speedAt = (time: number): number => {
     if (samples.length === 0) return 0;
@@ -60,10 +65,20 @@ export function createPreviewMotion() {
     const band = tierForSpeed(speedAt(time));
     if (RANK[band] >= RANK[tier]) {
       tier = band;
-      finerSince = null;
+      finerSince = stillSince = null;
       return tier;
     }
     if (finerSince === null) finerSince = time;
+    if (band === "full") {
+      // Held still: no steps on the way, one change straight to full.
+      if (stillSince === null) stillSince = time;
+      if (time - stillSince >= STEP_DOWN_MS) {
+        tier = "full";
+        finerSince = stillSince = null;
+      }
+      return tier;
+    }
+    stillSince = null;
     // A late look can be owed more than one step; each still takes its turn.
     while (finerSince !== null && time - finerSince >= STEP_DOWN_MS) {
       tier = FINER[tier];
@@ -76,17 +91,18 @@ export function createPreviewMotion() {
     reset() {
       samples = [];
       tier = "coarse";
-      finerSince = null;
+      finerSince = stillSince = null;
     },
     /**
      * How long until the tier could change with no more pointer events: the
-     * next step down, or the window dropping its oldest position. Null at full,
-     * where only movement can change it.
+     * next step down, the move to full, or the window dropping its oldest
+     * position. Null at full, where only movement can change it.
      */
     nextChangeIn(time: number): number | null {
       if (tier === "full") return null;
       let next = Infinity;
-      if (finerSince !== null) next = finerSince + STEP_DOWN_MS;
+      if (stillSince !== null) next = stillSince + STEP_DOWN_MS;
+      else if (finerSince !== null) next = finerSince + STEP_DOWN_MS;
       if (samples.length > 1) next = Math.min(next, samples[1].time + SPEED_WINDOW_MS);
       return next === Infinity ? null : Math.max(0, next - time);
     },

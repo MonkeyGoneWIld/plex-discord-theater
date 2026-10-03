@@ -3,9 +3,10 @@
  *
  * Four bands of speed along the bar, in bar-widths per second: full below
  * 0.025, fine to 0.08, medium to 0.17, coarse above. Speeding up switches at
- * once; slowing down steps one tier per STEP_DOWN_MS, and a hover starts at
- * coarse. Driven here the way a pointer drives it — an event every 16ms, at
- * whole-pixel positions — on a desktop-width and a phone-width bar.
+ * once; slowing down while moving steps one tier per STEP_DOWN_MS; holding
+ * still goes straight to full after STEP_DOWN_MS, a single change; and a hover
+ * starts at coarse. Driven here the way a pointer drives it — an event every
+ * 16ms, at whole-pixel positions — on a desktop-width and a phone-width bar.
  */
 import { createPreviewMotion, tierForSpeed, STEP_DOWN_MS } from "../src/lib/previewMotion";
 
@@ -75,8 +76,7 @@ console.log("starting");
 {
   const motion = createPreviewMotion();
   check("a hover starts at coarse", motion.sample(0.5, 0), "coarse");
-  check("then steps through medium and fine to full", rest(motion, 0, "coarse"),
-    [["medium", STEP_DOWN_MS], ["fine", 2 * STEP_DOWN_MS], ["full", 3 * STEP_DOWN_MS]]);
+  check("held still, it changes once, straight to full", rest(motion, 0, "coarse"), [["full", STEP_DOWN_MS]]);
   motion.reset();
   check("and again after leaving the bar", motion.sample(0.2, 5000), "coarse");
 }
@@ -85,11 +85,10 @@ console.log("stopping");
 {
   const fast = sweep(1300, 2000, 300);
   check("coarse on the last event of a fast sweep", fast.tier, "coarse");
-  // The window drops below coarse speed 234ms after the last event, and to
-  // still at 250ms; each step down then waits its 300ms in turn.
-  check("steps down one tier at a time to full", rest(fast.motion, fast.t, "coarse"),
-    [["medium", 534], ["fine", 834], ["full", 1134]]);
-  check("and stays there", fast.motion.nextChangeIn(fast.t + 1200), null);
+  // The window reads still 250ms after the last event; 300ms after that it
+  // goes to full, without stopping at medium or fine on the way.
+  check("changes once, straight to full", rest(fast.motion, fast.t, "coarse"), [["full", 550]]);
+  check("and stays there", fast.motion.nextChangeIn(fast.t + 600), null);
 }
 
 console.log("speeding up");
@@ -118,6 +117,18 @@ console.log("slowing down");
   }
   check("coarse to medium, and no further", [...new Set(tiers)], ["coarse", "medium"]);
   check("holding coarse for at least 300ms after slowing", tiers.indexOf("medium") * 16 >= STEP_DOWN_MS, true);
+}
+{
+  // Slowing further while still moving passes through each tier in turn.
+  const slowing = createPreviewMotion();
+  const tiers: string[] = [];
+  let { px, t } = sweep(1300, 300, 1500, slowing);
+  for (let e = 0; e < 1200; e += 16) {
+    t += 16;
+    px += 80 * 16 / 1000;
+    tiers.push(slowing.sample(Math.round(px) / 1300, t));
+  }
+  check("coarse to medium to fine while moving", [...new Set(tiers)], ["coarse", "medium", "fine"]);
 }
 
 console.log("a hand that isn't quite still");

@@ -537,7 +537,7 @@ export function Controls({
   const previewMotionRef = useRef(createPreviewMotion());
   const previewSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewPositionRef = useRef<number | null>(null);
-  const previewDetailRef = useRef<PreviewDetail>("medium");
+  const previewDetailRef = useRef<PreviewDetail>("coarse");
   // The tier as state, for PREVIEW_TIER_DOT; null while nothing is hovered.
   const [previewTier, setPreviewTier] = useState<PreviewDetail | null>(null);
   const previewLastShownRef = useRef(-Infinity);
@@ -911,7 +911,7 @@ export function Controls({
 
   const clearPreviewMotion = useCallback(() => {
     previewMotionRef.current.reset();
-    previewDetailRef.current = "medium";
+    previewDetailRef.current = "coarse";
     setPreviewTier(null);
     previewPositionRef.current = null;
     previewLastShownRef.current = -Infinity;
@@ -927,7 +927,7 @@ export function Controls({
     const now = performance.now();
     // The least time between picture changes per tier. Mouse events arrive far
     // more often than this; any inside the gap move only the time label.
-    const gap = detail === "coarse" ? 150 : detail === "medium" ? 120 : 0;
+    const gap = detail === "coarse" ? 150 : detail === "medium" ? 130 : 0;
     if (now - previewLastShownRef.current < gap) return;
     const local = previewFramesRef.current?.frameAt(pct * duration * 1000, duration * 1000, detail);
     if (local) {
@@ -973,30 +973,30 @@ export function Controls({
   const showPreviewAt = useCallback((pct: number) => {
     setHoverPct(pct);
     previewPositionRef.current = pct;
-    const detail = previewMotionRef.current.sample(pct, performance.now());
+    const motion = previewMotionRef.current;
+    const detail = motion.sample(pct, performance.now());
     setPreviewDetail(detail);
     selectPreview(pct, detail);
     if (previewSettleRef.current !== null) clearTimeout(previewSettleRef.current);
     previewSettleRef.current = null;
-    if (detail === "full") return;
+    // A pointer that stops sends no more events, but its tier still has to
+    // step down as the speed window empties. Look again whenever the tier next
+    // could change, until it reaches full, always at the latest position.
+    const lookAgain = (now: number) => {
+      const delay = motion.nextChangeIn(now);
+      if (delay !== null) previewSettleRef.current = setTimeout(settle, Math.ceil(delay));
+    };
     const settle = () => {
       previewSettleRef.current = null;
       const latest = previewPositionRef.current;
       if (latest === null) return;
       const now = performance.now();
-      const remaining = previewMotionRef.current.settleDelay(now);
-      if (remaining > 0) {
-        previewSettleRef.current = setTimeout(settle, Math.ceil(remaining));
-        return;
-      }
-      const settled = previewMotionRef.current.settle(now);
+      const settled = motion.settle(now);
       setPreviewDetail(settled);
       selectPreview(latest, settled);
+      lookAgain(now);
     };
-    // A pointer that stops sends no more events, so look again once it has been
-    // still for the whole speed window: its speed then reads 0, which is full
-    // detail. Always select the latest position.
-    previewSettleRef.current = setTimeout(settle, Math.ceil(previewMotionRef.current.settleDelay(performance.now())));
+    lookAgain(performance.now());
   }, [selectPreview, setPreviewDetail]);
 
   // ─── Scrubbing ────────────────────────────────────────────────

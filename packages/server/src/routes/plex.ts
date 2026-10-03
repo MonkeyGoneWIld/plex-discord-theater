@@ -956,20 +956,37 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
  */
 export async function buildMeta(ratingKey: string): Promise<Record<string, unknown> | null> {
   const hit = metaCache.get(ratingKey);
-  if (hit && Date.now() - hit.at < META_CACHE_TTL_MS) return hit.payload;
+  if (hit && Date.now() - hit.at < META_CACHE_TTL_MS) return rememberDuration(ratingKey, hit.payload);
 
   const persisted = readDetailCache<Record<string, unknown>>("meta", ratingKey);
   if (persisted) {
     metaCache.set(ratingKey, { payload: persisted.payload, at: Date.now() });
-    return persisted.payload;
+    return rememberDuration(ratingKey, persisted.payload);
   }
 
   const payload = await buildMetaUncached(ratingKey);
+  if (!payload) return null;
   // An incomplete show must also bypass this outer cache, or a failed ID
   // lookup would still hide requestable seasons for an hour.
-  if (payload && !(payload.type === "show" && payload.tmdbId == null)) {
+  if (!(payload.type === "show" && payload.tmdbId == null)) {
     metaCache.set(ratingKey, { payload, at: Date.now() });
     writeDetailCache("meta", ratingKey, payload);
+  }
+  return rememberDuration(ratingKey, payload);
+}
+
+/**
+ * Record a /meta payload's duration for the Plex timeline (see mediaDurations),
+ * and hand the payload back.
+ *
+ * Every way out of buildMeta goes through here, the cached ones included. Only
+ * a fresh build used to record it — and the persisted cache answers for nearly
+ * every title after a restart, so Plex was told duration=0 for almost
+ * everything played.
+ */
+function rememberDuration(ratingKey: string, payload: Record<string, unknown>): Record<string, unknown> {
+  if (typeof payload.duration === "number" && payload.duration > 0) {
+    mediaDurations.set(ratingKey, payload.duration);
   }
   return payload;
 }
@@ -1074,11 +1091,6 @@ async function buildMetaUncached(ratingKey: string): Promise<Record<string, unkn
     const defaultVersion = versions[0] ?? null;
     const audioTracks = defaultVersion?.audioTracks ?? [];
     const subtitleTracks = defaultVersion?.subtitleTracks ?? [];
-
-    // Cache duration for timeline stopped notifications
-    if (m.duration && m.ratingKey) {
-      mediaDurations.set(m.ratingKey, m.duration);
-    }
 
     const tmdbId = await resolveTmdbId(m);
     // IMDb id (when Plex stored one) — the preferred key for external ratings.
@@ -2852,7 +2864,8 @@ const sessionRatingKeys = new Map<string, string>();
  * plays one file for its whole life, which makes this a safe thing to cache.
  */
 const sessionMediaIndex = new Map<string, number>();
-/** Maps ratingKey → duration in ms (cached from metadata endpoint for timeline stopped). */
+/** Maps ratingKey → duration in ms, for the timeline updates we send Plex. Filled
+ *  by buildMeta; read through durationFor, which fills it on a miss. */
 const mediaDurations = new LruMap<string, number>(5_000);
 const PLEX_SESSION_KEY_RE = /session\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//i;
 
@@ -3122,6 +3135,26 @@ async function stopTranscodeKey(sessionIdentifier: string): Promise<void> {
 }
 
 /**
+ * A title's duration in ms for a timeline update, or undefined if Plex has none.
+ *
+ * Almost always already known: the detail page reads /meta, and a start that
+ * doesn't name a version reads it for the default one. A start that does name
+ * one reads nothing, and an entry can age out of the map, so a miss reads it
+ * through the metadata cache rather than reporting duration=0, which leaves
+ * Plex tracking progress against nothing ("progress of 3437358/0ms").
+ */
+async function durationFor(ratingKey: string): Promise<number | undefined> {
+  const known = mediaDurations.get(ratingKey);
+  if (known) return known;
+  try {
+    await buildMeta(ratingKey);
+  } catch {
+    // A failed lookup costs the timeline its duration, never the timeline.
+  }
+  return mediaDurations.get(ratingKey);
+}
+
+/**
  * POST a Plex timeline "playing" update so it knows the playback position and
  * keeps transcoding ahead (Plex throttles/stalls the encoder without one).
  */
@@ -3129,7 +3162,7 @@ async function postTimeline(
   sessionId: string, ratingKey: string, timeMs: number, clientId: string,
   state: "playing" | "buffering" = "playing",
 ): Promise<void> {
-  const duration = mediaDurations.get(ratingKey);
+  const duration = await durationFor(ratingKey);
   await plexFetch(
     "/:/timeline",
     {
@@ -3186,7 +3219,7 @@ setInterval(() => { reapOrphanTranscodes(); }, 60_000).unref();
 export async function notifyPlexStopped(ratingKey: string | null, sessionId: string): Promise<void> {
   // Use the tracked ratingKey if caller doesn't provide one
   const effectiveRatingKey = ratingKey || sessionRatingKeys.get(sessionId) || "0";
-  const duration = mediaDurations.get(effectiveRatingKey);
+  const duration = effectiveRatingKey === "0" ? undefined : await durationFor(effectiveRatingKey);
   try {
     const res = await plexFetch(
       "/:/timeline",
@@ -3330,7 +3363,7 @@ export async function pingPlexTranscode(hlsSessionId: string): Promise<boolean> 
   const host = hostPingInfo.get(hlsSessionId);
   const ratingKey = sessionRatingKeys.get(hlsSessionId);
   if (host && ratingKey && Date.now() - host.at > HOST_SILENT_MS) {
-    const duration = mediaDurations.get(ratingKey);
+    const duration = await durationFor(ratingKey);
     // Two reasons the host stops pinging, needing opposite timelines:
     //   • backgrounded tab still playing — the position was advancing right up to
     //     the silence, so extrapolate forward at ~1x to keep Plex encoding ahead.
@@ -3906,23 +3939,8 @@ router.get(
       // Send initial timeline "playing" at position 0 so Plex unthrottles delivery.
       // Without this, Plex throttles segment HTTP delivery to ~1x because it has no
       // playback position context. Subsequent pings update the position.
-      const duration = mediaDurations.get(ratingKey);
-      plexFetch(
-        "/:/timeline",
-        {
-          ratingKey,
-          key: `/library/metadata/${ratingKey}`,
-          state: "playing",
-          time: offset ? String(Math.round(parseFloat(offset) * 1000)) : "0",
-          duration: duration ? String(duration) : "0",
-          identifier: "com.plexapp.plugins.library",
-        },
-        {
-          "X-Plex-Session-Identifier": sessionId,
-          "X-Plex-Client-Identifier": OUR_CLIENT_ID,
-        },
-        "POST",
-      ).catch(() => {}); // fire-and-forget
+      postTimeline(sessionId, ratingKey, offset ? parseFloat(offset) * 1000 : 0, OUR_CLIENT_ID)
+        .catch(() => {}); // fire-and-forget
 
       const authToken = req.query.token as string | undefined;
       const rewritten = rewriteManifestUrls(m3u8, authToken);

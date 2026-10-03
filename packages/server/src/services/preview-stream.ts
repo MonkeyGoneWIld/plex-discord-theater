@@ -26,9 +26,9 @@ export function previewTierIndices(count: number, version: 1 | 2 = 2) {
   // from the next finer one and contains every tier before it.
   const spread = (n: number, length: number, pick: (i: number) => number) =>
     Array.from({ length: n }, (_, i) => pick(n === 1 ? 0 : Math.floor(i * (length - 1) / (n - 1))));
-  const fine = spread(Math.max(1, Math.ceil(count * 0.10)), count, (i) => i);
-  const medium = spread(Math.max(1, Math.ceil(count * 0.05)), fine.length, (i) => fine[i]);
-  const coarse = spread(Math.max(1, Math.ceil(count * 0.01)), medium.length, (i) => medium[i]);
+  const fine = spread(Math.max(1, Math.ceil(count * 0.40)), count, (i) => i);
+  const medium = spread(Math.max(1, Math.ceil(count * 0.15)), fine.length, (i) => fine[i]);
+  const coarse = spread(Math.max(1, Math.ceil(count * 0.05)), medium.length, (i) => medium[i]);
   return { coarse, medium, fine };
 }
 
@@ -41,8 +41,8 @@ export interface PreviewTierProgress {
 
 /** v1 wire format: uint32 head length, BIF header/index + first JPEG marker,
  * then records of uint32 frame number, uint32 length, JPEG bytes (all LE).
- * Each image is sent exactly once, a tier at a time: 1% coarse, then the rest
- * of 5% medium, of 10% fine, and of full. v1 requests retain the original
+ * Each image is sent exactly once, a tier at a time: 5% coarse, then the rest
+ * of 15% medium, of 40% fine, and of full. v1 requests retain the original
  * fixed-size grids, with an empty fine pass.
  * Deferred images go to a temporary file, not a movie-sized heap allocation.
  */

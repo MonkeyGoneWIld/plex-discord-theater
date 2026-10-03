@@ -119,7 +119,7 @@ const TIER_COLOR: Record<PreviewDetail, string> = { coarse: "#e53935", medium: "
 /** The least time between picture changes per tier. */
 const PREVIEW_GAP_MS: Record<PreviewDetail, number> = { coarse: 220, medium: 180, fine: 150, full: 0 };
 /** Each tier's share of the frames, as previewTierIndices lays them out. */
-const PREVIEW_SHARE: Record<PreviewDetail, number> = { coarse: 0.01, medium: 0.05, fine: 0.10, full: 1 };
+const PREVIEW_SHARE: Record<PreviewDetail, number> = { coarse: 0.05, medium: 0.15, fine: 0.40, full: 1 };
 
 /*
  * Preview frames download as soon as the stream starts, alongside the video.

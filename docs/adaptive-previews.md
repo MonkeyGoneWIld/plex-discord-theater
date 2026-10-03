@@ -10,22 +10,23 @@ second, so it behaves the same on a phone and a desktop.
 
 | Tier | Speed | Picture changes at most every |
 |---|---|---|
-| full | below 0.025 | no limit |
-| fine | 0.025 – 0.08 | 140 ms |
-| medium | 0.08 – 0.17 | 170 ms |
-| coarse | 0.17 and up | 200 ms |
+| still | below 0.02 | no limit |
+| slow | 0.02 – 0.05 | 100 ms |
+| moderate | 0.05 – 0.085 | 140 ms |
+| fast | 0.085 – 0.17 | 170 ms |
+| sweep | 0.17 and up | 200 ms |
 
 Every tier shows the finest frame downloaded for the pointer's position. The
 tiers never pick different frames, so a tier changing never changes the picture
 under a pointer that isn't moving. Showing the same frame again does not restart
 the gap.
 
-- A hover starts at coarse.
+- A hover starts at sweep.
 - Speeding up switches tier at once. The 250 ms window still takes a moment to
   register a sudden speed-up.
 - Slowing down while still moving steps one tier at a time, each once the speed
-  has read finer for 300 ms: coarse to medium to fine.
-- Holding still, when the speed reads full, goes straight to full after 300 ms.
+  has read slower for 300 ms: sweep to fast to moderate to slow.
+- Holding still goes straight to still after 300 ms.
 - A pointer that stops sends no more events, so a timer looks again whenever the
   window or a step next moves on, always at the latest position. After a sweep,
   the picture catches up once to where the pointer stopped.
@@ -87,13 +88,13 @@ Server logs record `transfer started` with the transport and pass, and
 `tier sent` for each pass. Client logs record `transfer accepted`,
 `frame index ready`, `pass requested` with the buffer it was requested at,
 `tier ready` as complete JPEGs are parsed, and `frames complete` or
-`frames incomplete`. `detail selected` records each change of speed tier.
+`frames incomplete`. `speed tier selected` records each change of speed tier.
 
 `npm test` includes:
 
 - `packages/client/test/scrub-preview-motion.test.ts`: the speed bands on
-  desktop and phone widths, starting at coarse, step-down timing, going straight
-  to full when still, and pointer jitter.
+  desktop and phone widths, starting at sweep, step-down timing, going straight
+  to still when the pointer stops, and pointer jitter.
 - `packages/server/test/preview-stream.test.ts`: exact percentage counts,
   nesting, ordering, no duplicates, long and short videos, partial and coalesced
   records, one pass per response, mismatched heads, malformed input,

@@ -5,7 +5,7 @@ import {
   createPreviewFrameReader, createProgressivePreviewReader,
   type PreviewFrames, type PreviewDetail, type PreviewFrameReader,
 } from "../lib/previewFrames";
-import { createPreviewMotion } from "../lib/previewMotion";
+import { createPreviewMotion, type SpeedTier } from "../lib/previewMotion";
 import { loadVolume } from "../lib/volume";
 import { getLevel, setLevel, boostAvailable, MAX_LEVEL } from "../lib/audioBoost";
 import { useMediaQuery, COMPACT_CONTROLS_QUERY, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -107,12 +107,23 @@ interface ControlsProps {
 const PREVIEW_THROTTLE_MS = 120;
 
 /**
- * The least time between picture changes per tier — the only thing the tiers
- * differ in. Every tier shows the finest frame downloaded for the cursor's
- * position, so a tier changing never changes the picture under a cursor that
- * isn't moving.
+ * The least time between picture changes per speed tier — the only thing the
+ * tiers differ in. Every tier shows the finest frame downloaded for the
+ * cursor's position, so a tier changing never changes the picture under a
+ * cursor that isn't moving.
  */
-const PREVIEW_GAP_MS: Record<PreviewDetail, number> = { coarse: 200, medium: 170, fine: 140, full: 0 };
+const PREVIEW_GAP_MS: Record<SpeedTier, number> = { still: 0, slow: 100, moderate: 140, fast: 170, sweep: 200 };
+
+/**
+ * Testing aid: a dot in the thumbnail's top-left corner, in the colour of the
+ * speed tier — green still, lime slow, yellow moderate, orange fast, red sweep
+ * — so the bands can be felt while scrubbing. It changes the moment the tier
+ * does, ahead of the picture gaps. Turn off once the bands are settled.
+ */
+const PREVIEW_TIER_DOT = true;
+const TIER_COLOR: Record<SpeedTier, string> = {
+  still: "#43a047", slow: "#aeea00", moderate: "#fdd835", fast: "#fb8c00", sweep: "#e53935",
+};
 
 /**
  * Seconds of video buffered past the playhead before each preview pass is
@@ -542,7 +553,9 @@ export function Controls({
   const previewMotionRef = useRef(createPreviewMotion());
   const previewSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewPositionRef = useRef<number | null>(null);
-  const previewDetailRef = useRef<PreviewDetail>("coarse");
+  const speedTierRef = useRef<SpeedTier>("sweep");
+  // The tier as state, for PREVIEW_TIER_DOT; null while nothing is hovered.
+  const [dotTier, setDotTier] = useState<SpeedTier | null>(null);
   const previewLastShownRef = useRef(-Infinity);
   // The request that was just sent, if any: what was asked for, so the label
   // can keep saying it while the room carries on doing the opposite.
@@ -922,7 +935,8 @@ export function Controls({
 
   const clearPreviewMotion = useCallback(() => {
     previewMotionRef.current.reset();
-    previewDetailRef.current = "coarse";
+    speedTierRef.current = "sweep";
+    setDotTier(null);
     previewPositionRef.current = null;
     previewLastShownRef.current = -Infinity;
     if (previewSettleRef.current !== null) clearTimeout(previewSettleRef.current);
@@ -932,12 +946,12 @@ export function Controls({
     pendingPreviewRef.current = null;
   }, []);
 
-  const selectPreview = useCallback((pct: number, detail: PreviewDetail) => {
+  const selectPreview = useCallback((pct: number, tier: SpeedTier) => {
     if (previewPartId == null || !(duration > 0) || !isFinite(duration)) return;
     const now = performance.now();
     // Mouse events arrive far more often than the tier's picture gap; any
     // inside it move only the time label.
-    if (now - previewLastShownRef.current < PREVIEW_GAP_MS[detail]) return;
+    if (now - previewLastShownRef.current < PREVIEW_GAP_MS[tier]) return;
     // The finest frame there is: while the index is still downloading, the
     // nearest one from an earlier pass stands in.
     const local = previewFramesRef.current?.frameAt(pct * duration * 1000, duration * 1000);
@@ -968,14 +982,15 @@ export function Controls({
     }, PREVIEW_THROTTLE_MS);
   }, [previewPartId, duration]);
 
-  const setPreviewDetail = useCallback((detail: PreviewDetail) => {
-    if (detail !== previewDetailRef.current) {
-      logEvent("Preview", "detail selected", {
-        partId: previewPartId, detail, ready: previewFramesRef.current?.ready ?? 0,
+  const noteSpeedTier = useCallback((tier: SpeedTier) => {
+    if (tier !== speedTierRef.current) {
+      logEvent("Preview", "speed tier selected", {
+        partId: previewPartId, tier, ready: previewFramesRef.current?.ready ?? 0,
         frames: previewFramesRef.current?.count ?? 0,
       });
     }
-    previewDetailRef.current = detail;
+    speedTierRef.current = tier;
+    if (PREVIEW_TIER_DOT) setDotTier(tier);
   }, [previewPartId]);
 
   /** Timestamp follows the pointer exactly; only the image adapts. */
@@ -983,14 +998,14 @@ export function Controls({
     setHoverPct(pct);
     previewPositionRef.current = pct;
     const motion = previewMotionRef.current;
-    const detail = motion.sample(pct, performance.now());
-    setPreviewDetail(detail);
-    selectPreview(pct, detail);
+    const tier = motion.sample(pct, performance.now());
+    noteSpeedTier(tier);
+    selectPreview(pct, tier);
     if (previewSettleRef.current !== null) clearTimeout(previewSettleRef.current);
     previewSettleRef.current = null;
     // A pointer that stops sends no more events, but its tier still has to
     // step down as the speed window empties. Look again whenever the tier next
-    // could change, until it reaches full, always at the latest position.
+    // could change, until it reaches still, always at the latest position.
     const lookAgain = (now: number) => {
       const delay = motion.nextChangeIn(now);
       if (delay !== null) previewSettleRef.current = setTimeout(settle, Math.ceil(delay));
@@ -1001,12 +1016,12 @@ export function Controls({
       if (latest === null) return;
       const now = performance.now();
       const settled = motion.settle(now);
-      setPreviewDetail(settled);
+      noteSpeedTier(settled);
       selectPreview(latest, settled);
       lookAgain(now);
     };
     lookAgain(performance.now());
-  }, [selectPreview, setPreviewDetail]);
+  }, [selectPreview, noteSpeedTier]);
 
   // ─── Scrubbing ────────────────────────────────────────────────
   //
@@ -1176,7 +1191,7 @@ export function Controls({
           }
           const activePct = previewPositionRef.current;
           if (activePct !== null && frames) {
-            selectPreview(activePct, previewDetailRef.current);
+            selectPreview(activePct, speedTierRef.current);
           }
         }
         // A server without passes sends them all in the first response, and
@@ -1337,7 +1352,12 @@ export function Controls({
           }}
         >
           {loadedPreviewSrc && (
-            <img src={loadedPreviewSrc} alt="" style={styles.seekPreviewImg} />
+            <div style={{ position: "relative" }}>
+              <img src={loadedPreviewSrc} alt="" style={styles.seekPreviewImg} />
+              {PREVIEW_TIER_DOT && dotTier && (
+                <div data-preview-tier style={{ ...styles.previewTierDot, background: TIER_COLOR[dotTier] }} />
+              )}
+            </div>
           )}
           {fmt(hoverPct * duration)}
         </div>
@@ -2206,6 +2226,16 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 3,
     display: "block",
     background: "#000",
+  },
+  previewTierDot: {
+    position: "absolute",
+    top: 6,
+    left: 6,
+    width: 12,
+    height: 12,
+    borderRadius: "50%",
+    // A dark ring so the dot reads against a bright frame as well as a dark one.
+    boxShadow: "0 0 0 2px rgba(0,0,0,0.6)",
   },
   hoverMarker: {
     position: "absolute",

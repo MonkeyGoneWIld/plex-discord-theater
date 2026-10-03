@@ -115,17 +115,6 @@ const PREVIEW_THROTTLE_MS = 120;
 const PREVIEW_GAP_MS: Record<SpeedTier, number> = { still: 0, slow: 100, moderate: 140, fast: 170, sweep: 200 };
 
 /**
- * Testing aid: a dot in the thumbnail's top-left corner, in the colour of the
- * speed tier — green still, lime slow, yellow moderate, orange fast, red sweep
- * — so the bands can be felt while scrubbing. It changes the moment the tier
- * does, ahead of the picture gaps. Turn off once the bands are settled.
- */
-const PREVIEW_TIER_DOT = true;
-const TIER_COLOR: Record<SpeedTier, string> = {
-  still: "#43a047", slow: "#aeea00", moderate: "#fdd835", fast: "#fb8c00", sweep: "#e53935",
-};
-
-/**
  * Seconds of video buffered past the playhead before each preview pass is
  * requested — 5% of the frames at once, 15% at 7s, 40% at 15s, the rest at
  * 30s — and kept while it downloads: a pass stops pulling whenever the buffer
@@ -554,8 +543,6 @@ export function Controls({
   const previewSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewPositionRef = useRef<number | null>(null);
   const speedTierRef = useRef<SpeedTier>("sweep");
-  // The tier as state, for PREVIEW_TIER_DOT; null while nothing is hovered.
-  const [dotTier, setDotTier] = useState<SpeedTier | null>(null);
   const previewLastShownRef = useRef(-Infinity);
   // The request that was just sent, if any: what was asked for, so the label
   // can keep saying it while the room carries on doing the opposite.
@@ -936,7 +923,6 @@ export function Controls({
   const clearPreviewMotion = useCallback(() => {
     previewMotionRef.current.reset();
     speedTierRef.current = "sweep";
-    setDotTier(null);
     previewPositionRef.current = null;
     previewLastShownRef.current = -Infinity;
     if (previewSettleRef.current !== null) clearTimeout(previewSettleRef.current);
@@ -990,7 +976,6 @@ export function Controls({
       });
     }
     speedTierRef.current = tier;
-    if (PREVIEW_TIER_DOT) setDotTier(tier);
   }, [previewPartId]);
 
   /** Timestamp follows the pointer exactly; only the image adapts. */
@@ -1352,12 +1337,7 @@ export function Controls({
           }}
         >
           {loadedPreviewSrc && (
-            <div style={{ position: "relative" }}>
-              <img src={loadedPreviewSrc} alt="" style={styles.seekPreviewImg} />
-              {PREVIEW_TIER_DOT && dotTier && (
-                <div data-preview-tier style={{ ...styles.previewTierDot, background: TIER_COLOR[dotTier] }} />
-              )}
-            </div>
+            <img src={loadedPreviewSrc} alt="" style={styles.seekPreviewImg} />
           )}
           {fmt(hoverPct * duration)}
         </div>
@@ -2226,16 +2206,6 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 3,
     display: "block",
     background: "#000",
-  },
-  previewTierDot: {
-    position: "absolute",
-    top: 6,
-    left: 6,
-    width: 12,
-    height: 12,
-    borderRadius: "50%",
-    // A dark ring so the dot reads against a bright frame as well as a dark one.
-    boxShadow: "0 0 0 2px rgba(0,0,0,0.6)",
   },
   hoverMarker: {
     position: "absolute",

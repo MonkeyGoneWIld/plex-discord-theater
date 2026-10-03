@@ -2,7 +2,7 @@
  * Which scrub-preview tier the cursor's speed picks.
  *
  * Three bands of speed along the bar, in bar-widths per second, and nothing
- * else: full below 0.03, medium to 0.2, coarse above. Driven here the way a
+ * else: full below 0.04, medium to 0.2, coarse above. Driven here the way a
  * pointer drives it — an event every 16ms, at whole-pixel positions — on a
  * desktop-width and a phone-width bar.
  */
@@ -31,8 +31,8 @@ function sweep(width: number, pxPerS: number, ms: number, motion = createPreview
 
 console.log("the bands");
 check("standing still is full", tierForSpeed(0), "full");
-check("just under 0.03 is full", tierForSpeed(0.0299), "full");
-check("0.03 is medium", tierForSpeed(0.03), "medium");
+check("just under 0.04 is full", tierForSpeed(0.0399), "full");
+check("0.04 is medium", tierForSpeed(0.04), "medium");
 check("just under 0.2 is medium", tierForSpeed(0.1999), "medium");
 check("0.2 is coarse", tierForSpeed(0.2), "coarse");
 check("a flick across the bar is coarse", tierForSpeed(3), "coarse");
@@ -69,7 +69,7 @@ function jitterTiers(px: number) {
   }
   return [...tiers].sort();
 }
-// At most 4px apart within the window: 16px/s, inside full's 39px/s on this bar
+// At most 4px apart within the window: 16px/s, inside full's 52px/s on this bar
 // whatever the timing.
 check("2px of jitter either side always reads full", jitterTiers(2), ["full"]);
 

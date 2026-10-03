@@ -6,8 +6,8 @@ import type { PreviewDetail } from "./previewFrames";
  * Speed is in bar-widths per second — how much of the bar the cursor covers in
  * a second — so it behaves the same on a phone and a desktop:
  *
- *   full     below 0.03   slower than about 33s to cross the bar
- *   medium   0.03 – 0.2   5s to about 33s to cross it
+ *   full     below 0.04   slower than 25s to cross the bar
+ *   medium   0.04 – 0.2   5s to 25s to cross it
  *   coarse   0.2 and up   faster than 5s
  *
  * It is how far the cursor got over the last SPEED_WINDOW_MS, rather than the
@@ -18,7 +18,7 @@ import type { PreviewDetail } from "./previewFrames";
  * again once the window has passed (settleDelay) and the speed reads 0.
  */
 export const SPEED_WINDOW_MS = 250;
-const FULL_MAX_SPEED = 0.03;
+const FULL_MAX_SPEED = 0.04;
 const MEDIUM_MAX_SPEED = 0.2;
 
 export function tierForSpeed(barWidthsPerSecond: number): PreviewDetail {

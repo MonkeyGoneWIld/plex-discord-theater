@@ -107,12 +107,13 @@ interface ControlsProps {
 const PREVIEW_THROTTLE_MS = 120;
 
 /**
- * Testing aid: in place of the thumbnail, a solid block in the colour of the
+ * Testing aid: a dot in the thumbnail's top-left corner, in the colour of the
  * tier the cursor's speed picks — red coarse, yellow medium, green full — so
- * the speed bands can be felt. It changes the moment the tier does, ahead of
- * the per-tier picture gaps. Turn off once the bands are settled.
+ * the speed bands can be felt against the pictures they produce. It changes
+ * the moment the tier does, ahead of the per-tier picture gaps. Turn off once
+ * the bands are settled.
  */
-const PREVIEW_TIER_COLORS = true;
+const PREVIEW_TIER_DOT = true;
 const TIER_COLOR: Record<PreviewDetail, string> = { coarse: "#e53935", medium: "#fdd835", full: "#43a047" };
 
 /*
@@ -537,7 +538,7 @@ export function Controls({
   const previewSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewPositionRef = useRef<number | null>(null);
   const previewDetailRef = useRef<PreviewDetail>("medium");
-  // The tier as state, for PREVIEW_TIER_COLORS; null while nothing is hovered.
+  // The tier as state, for PREVIEW_TIER_DOT; null while nothing is hovered.
   const [previewTier, setPreviewTier] = useState<PreviewDetail | null>(null);
   const previewLastShownRef = useRef(-Infinity);
   // The request that was just sent, if any: what was asked for, so the label
@@ -965,7 +966,7 @@ export function Controls({
       });
     }
     previewDetailRef.current = detail;
-    if (PREVIEW_TIER_COLORS) setPreviewTier(detail);
+    if (PREVIEW_TIER_DOT) setPreviewTier(detail);
   }, [previewPartId]);
 
   /** Timestamp follows the pointer exactly; only the image adapts. */
@@ -1234,7 +1235,7 @@ export function Controls({
   const fillPct = pendingTime != null && duration > 0 ? (pendingTime / duration) * 100 : progress;
   const buffered = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
   const barHeight = hoveringProgress || scrubPct != null ? 8 : 5;
-  const tierSwatch = PREVIEW_TIER_COLORS && previewTier ? TIER_COLOR[previewTier] : null;
+  const tierDot = PREVIEW_TIER_DOT && previewTier ? TIER_COLOR[previewTier] : null;
 
   // Hoisted out of the tree below because a phone wraps it in a row with the
   // elapsed and remaining times either side, and a desktop doesn't.
@@ -1270,18 +1271,19 @@ export function Controls({
         <div
           style={{
             ...styles.seekTooltip,
-            ...(tierSwatch || loadedPreviewSrc ? styles.seekTooltipWithPreview : null),
+            ...(loadedPreviewSrc ? styles.seekTooltipWithPreview : null),
             // A bare M:SS bubble only needs 30px of edge margin; a 160px
             // preview needs half its width to avoid overflowing the bar.
-            left: tierSwatch || loadedPreviewSrc
+            left: loadedPreviewSrc
               ? `clamp(84px, ${hoverPct * 100}%, calc(100% - 84px))`
               : `clamp(30px, ${hoverPct * 100}%, calc(100% - 30px))`,
           }}
         >
-          {tierSwatch ? (
-            <div style={{ ...styles.seekPreviewImg, background: tierSwatch }} />
-          ) : loadedPreviewSrc && (
-            <img src={loadedPreviewSrc} alt="" style={styles.seekPreviewImg} />
+          {loadedPreviewSrc && (
+            <div style={{ position: "relative" }}>
+              <img src={loadedPreviewSrc} alt="" style={styles.seekPreviewImg} />
+              {tierDot && <div data-preview-tier style={{ ...styles.previewTierDot, background: tierDot }} />}
+            </div>
           )}
           {fmt(hoverPct * duration)}
         </div>
@@ -2150,6 +2152,16 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 3,
     display: "block",
     background: "#000",
+  },
+  previewTierDot: {
+    position: "absolute",
+    top: 6,
+    left: 6,
+    width: 12,
+    height: 12,
+    borderRadius: "50%",
+    // A dark ring so the dot reads against a bright frame as well as a dark one.
+    boxShadow: "0 0 0 2px rgba(0,0,0,0.6)",
   },
   hoverMarker: {
     position: "absolute",

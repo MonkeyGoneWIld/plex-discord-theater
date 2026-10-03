@@ -959,9 +959,7 @@ export function Controls({
   const showPreviewAt = useCallback((pct: number) => {
     setHoverPct(pct);
     previewPositionRef.current = pct;
-    const detail = previewMotionRef.current.sample(
-      pct, performance.now(), progressRef.current?.getBoundingClientRect().width,
-    );
+    const detail = previewMotionRef.current.sample(pct, performance.now());
     setPreviewDetail(detail);
     selectPreview(pct, detail);
     if (previewSettleRef.current !== null) clearTimeout(previewSettleRef.current);
@@ -981,8 +979,9 @@ export function Controls({
       setPreviewDetail(settled);
       selectPreview(latest, settled);
     };
-    // Keep the focus deadline across small movements, instead of postponing
-    // full detail on every jitter event. Always select the latest position.
+    // A pointer that stops sends no more events, so look again once it has been
+    // still for the whole speed window: its speed then reads 0, which is full
+    // detail. Always select the latest position.
     previewSettleRef.current = setTimeout(settle, Math.ceil(previewMotionRef.current.settleDelay(performance.now())));
   }, [selectPreview, setPreviewDetail]);
 

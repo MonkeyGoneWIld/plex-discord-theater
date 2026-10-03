@@ -4,12 +4,21 @@
  * nothing here starts a transcode, so the assertions are about which stream
  * each client is told to play and who is told to drive it.
  */
+import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 import { WebSocket } from "ws";
 import type { AddressInfo } from "node:net";
-import { attachWebSocketServer, closeWebSocketServer, sessionHasOtherWatchers } from "../src/services/sync.js";
-import { createSession } from "../src/middleware/auth.js";
-import { instanceHosts } from "../src/routes/discord.js";
+
+process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "variant-sync-"));
+
+// Imported only now: the session, instance and history stores open their
+// databases wherever THUMB_CACHE_DIR points as they load, and a static import
+// would load them before the line above runs.
+const { attachWebSocketServer, closeWebSocketServer, sessionHasOtherWatchers } = await import("../src/services/sync.js");
+const { createSession } = await import("../src/middleware/auth.js");
+const { instanceHosts } = await import("../src/routes/discord.js");
 
 let pass = 0;
 let fail = 0;

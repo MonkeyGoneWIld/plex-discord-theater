@@ -8,9 +8,13 @@
  * Plex already had, which is where five to ten seconds went. So the assertions
  * below count upstream requests.
  */
+import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
+import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 
+process.env.THUMB_CACHE_DIR = fs.mkdtempSync(join(os.tmpdir(), "person-page-"));
 process.env.PLEX_TOKEN = "test-token";
 // TMDB is stubbed at the fetch boundary below rather than skipped, because the
 // half of the page it supplies — everything the library *doesn't* have — is

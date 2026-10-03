@@ -618,7 +618,13 @@ export function Controls({
   const resetHideTimer = useCallback(() => {
     setVisible(true);
     if (hideTimer.current) clearTimeout(hideTimer.current);
-    hideTimer.current = setTimeout(() => setVisible(false), HIDE_DELAY_MS);
+    // Never out from under a drag on the bar. On a phone the touchstart that
+    // follows the bar's pointerdown lands here and restarts the countdown the
+    // drag had just cleared, and hiding the controls takes the bar away mid-
+    // drag. The drag's end starts a fresh countdown.
+    hideTimer.current = setTimeout(() => {
+      if (!draggingRef.current) setVisible(false);
+    }, HIDE_DELAY_MS);
   }, []);
 
   useEffect(() => {
@@ -626,6 +632,8 @@ export function Controls({
     if (!parent) return;
     const onMove = () => resetHideTimer();
     const onLeave = () => {
+      // A drag carried past the player's edge is still a drag.
+      if (draggingRef.current) return;
       if (hideTimer.current) clearTimeout(hideTimer.current);
       setVisible(false);
     };

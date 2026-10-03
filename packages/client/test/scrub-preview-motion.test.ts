@@ -1,7 +1,7 @@
 /**
  * Which scrub-preview tier the cursor's speed picks.
  *
- * Coarse only for now: every speed, standing still included, picks coarse.
+ * Medium only for now: every speed, standing still included, picks medium.
  * Driven here the way a pointer drives it — an event every 16ms, at
  * whole-pixel positions — on a desktop-width and a phone-width bar.
  */
@@ -29,26 +29,26 @@ function sweep(width: number, pxPerS: number, ms: number, motion = createPreview
 }
 
 console.log("the bands");
-check("standing still is coarse", tierForSpeed(0), "coarse");
-check("0.01 is coarse", tierForSpeed(0.01), "coarse");
-check("0.04 is coarse", tierForSpeed(0.04), "coarse");
-check("a flick across the bar is coarse", tierForSpeed(3), "coarse");
+check("standing still is medium", tierForSpeed(0), "medium");
+check("0.01 is medium", tierForSpeed(0.01), "medium");
+check("0.04 is medium", tierForSpeed(0.04), "medium");
+check("a flick across the bar is medium", tierForSpeed(3), "medium");
 
 console.log("a 1300px desktop bar");
-check("creeping at 8px/s is coarse", sweep(1300, 8, 1000).tier, "coarse");
-check("30px/s is coarse", sweep(1300, 30, 1000).tier, "coarse");
-check("a fast sweep is coarse", sweep(1300, 2000, 300).tier, "coarse");
+check("creeping at 8px/s is medium", sweep(1300, 8, 1000).tier, "medium");
+check("30px/s is medium", sweep(1300, 30, 1000).tier, "medium");
+check("a fast sweep is medium", sweep(1300, 2000, 300).tier, "medium");
 
 console.log("a 375px phone bar");
-check("2px/s is coarse there", sweep(375, 2, 1000).tier, "coarse");
-check("30px/s is coarse there", sweep(375, 30, 1000).tier, "coarse");
+check("2px/s is medium there", sweep(375, 2, 1000).tier, "medium");
+check("30px/s is medium there", sweep(375, 30, 1000).tier, "medium");
 
 console.log("stopping");
 const fast = sweep(1300, 2000, 300);
-check("coarse on the last event of a sweep", fast.tier, "coarse");
+check("medium on the last event of a sweep", fast.tier, "medium");
 check("asks again once the window has passed", fast.motion.settleDelay(fast.t), SPEED_WINDOW_MS);
-check("still coarse once still for the whole window", fast.motion.settle(fast.t + SPEED_WINDOW_MS), "coarse");
-check("and long after", fast.motion.settle(fast.t + 10_000), "coarse");
+check("still medium once still for the whole window", fast.motion.settle(fast.t + SPEED_WINDOW_MS), "medium");
+check("and long after", fast.motion.settle(fast.t + 10_000), "medium");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

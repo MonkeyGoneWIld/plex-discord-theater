@@ -108,13 +108,18 @@ const PREVIEW_THROTTLE_MS = 120;
 
 /**
  * Testing aid: a dot in the thumbnail's top-left corner, in the colour of the
- * tier the cursor's speed picks — red coarse, yellow medium, green full — so
- * the speed bands can be felt against the pictures they produce. It changes
- * the moment the tier does, ahead of the per-tier picture gaps. Turn off once
- * the bands are settled.
+ * tier the cursor's speed picks — red coarse, orange medium, yellow fine, green
+ * full — so the speed bands can be felt against the pictures they produce. It
+ * changes the moment the tier does, ahead of the per-tier picture gaps. Turn
+ * off once the bands are settled.
  */
 const PREVIEW_TIER_DOT = true;
-const TIER_COLOR: Record<PreviewDetail, string> = { coarse: "#e53935", medium: "#fdd835", full: "#43a047" };
+const TIER_COLOR: Record<PreviewDetail, string> = { coarse: "#e53935", medium: "#fb8c00", fine: "#fdd835", full: "#43a047" };
+
+/** The least time between picture changes per tier. */
+const PREVIEW_GAP_MS: Record<PreviewDetail, number> = { coarse: 180, medium: 150, fine: 100, full: 0 };
+/** Each tier's share of the frames, as previewTierIndices lays them out. */
+const PREVIEW_SHARE: Record<PreviewDetail, number> = { coarse: 0.01, medium: 0.05, fine: 0.10, full: 1 };
 
 /*
  * Preview frames download as soon as the stream starts, alongside the video.
@@ -925,10 +930,9 @@ export function Controls({
   const selectPreview = useCallback((pct: number, detail: PreviewDetail) => {
     if (previewPartId == null || !(duration > 0) || !isFinite(duration)) return;
     const now = performance.now();
-    // The least time between picture changes per tier. Mouse events arrive far
-    // more often than this; any inside the gap move only the time label.
-    const gap = detail === "coarse" ? 150 : detail === "medium" ? 130 : 0;
-    if (now - previewLastShownRef.current < gap) return;
+    // Mouse events arrive far more often than the tier's picture gap; any
+    // inside it move only the time label.
+    if (now - previewLastShownRef.current < PREVIEW_GAP_MS[detail]) return;
     const local = previewFramesRef.current?.frameAt(pct * duration * 1000, duration * 1000, detail);
     if (local) {
       if (previewThrottleRef.current !== null) clearTimeout(previewThrottleRef.current);
@@ -941,7 +945,7 @@ export function Controls({
     if (failedPartRef.current === previewPartId) return;
     // Approximate overview density before the BIF timestamps arrive.
     const approximateCount = Math.max(1, Math.ceil(duration / 2));
-    const tierCount = Math.max(1, Math.ceil(approximateCount * (detail === "coarse" ? 0.01 : 0.10)));
+    const tierCount = Math.max(1, Math.ceil(approximateCount * PREVIEW_SHARE[detail]));
     const bucketSize = detail === "full" ? 2000 : Math.max(2000, duration * 1000 / tierCount);
     const bucketMs = Math.floor(Math.floor(pct * duration * 1000 / bucketSize) * bucketSize);
     const url = authUrl(`/api/plex/thumb/library/parts/${previewPartId}/indexes/sd/${bucketMs}`);

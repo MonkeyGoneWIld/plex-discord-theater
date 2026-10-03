@@ -1,11 +1,11 @@
 /**
  * Which scrub-preview tier the cursor's speed picks.
  *
- * Three bands of speed along the bar, in bar-widths per second: full below
- * 0.035, medium to 0.16, coarse above. Speeding up switches at once; slowing
- * down steps one tier per STEP_DOWN_MS, and a hover starts at coarse. Driven
- * here the way a pointer drives it — an event every 16ms, at whole-pixel
- * positions — on a desktop-width and a phone-width bar.
+ * Four bands of speed along the bar, in bar-widths per second: full below
+ * 0.03, fine to 0.09, medium to 0.15, coarse above. Speeding up switches at
+ * once; slowing down steps one tier per STEP_DOWN_MS, and a hover starts at
+ * coarse. Driven here the way a pointer drives it — an event every 16ms, at
+ * whole-pixel positions — on a desktop-width and a phone-width bar.
  */
 import { createPreviewMotion, tierForSpeed, STEP_DOWN_MS } from "../src/lib/previewMotion";
 
@@ -48,31 +48,35 @@ function rest(motion: ReturnType<typeof createPreviewMotion>, from: number, tier
 
 console.log("the bands");
 check("standing still is full", tierForSpeed(0), "full");
-check("just under 0.035 is full", tierForSpeed(0.0349), "full");
-check("0.035 is medium", tierForSpeed(0.035), "medium");
-check("just under 0.16 is medium", tierForSpeed(0.1599), "medium");
-check("0.16 is coarse", tierForSpeed(0.16), "coarse");
+check("just under 0.03 is full", tierForSpeed(0.0299), "full");
+check("0.03 is fine", tierForSpeed(0.03), "fine");
+check("just under 0.09 is fine", tierForSpeed(0.0899), "fine");
+check("0.09 is medium", tierForSpeed(0.09), "medium");
+check("just under 0.15 is medium", tierForSpeed(0.1499), "medium");
+check("0.15 is coarse", tierForSpeed(0.15), "coarse");
 check("a flick across the bar is coarse", tierForSpeed(3), "coarse");
 
+// Long enough for a hover's three steps down from coarse.
 console.log("a 1300px desktop bar");
-check("creeping at 8px/s is full", sweep(1300, 8, 1000).tier, "full");
-check("30px/s is full", sweep(1300, 30, 1000).tier, "full");
-check("120px/s is medium", sweep(1300, 120, 1000).tier, "medium");
-check("180px/s is medium", sweep(1300, 180, 1000).tier, "medium");
-check("400px/s is coarse", sweep(1300, 400, 1000).tier, "coarse");
+check("creeping at 8px/s is full", sweep(1300, 8, 1500).tier, "full");
+check("30px/s is full", sweep(1300, 30, 1500).tier, "full");
+check("80px/s is fine", sweep(1300, 80, 1500).tier, "fine");
+check("150px/s is medium", sweep(1300, 150, 1500).tier, "medium");
+check("300px/s is coarse", sweep(1300, 300, 1500).tier, "coarse");
 check("a fast sweep is coarse", sweep(1300, 2000, 300).tier, "coarse");
 
 console.log("a 375px phone bar");
-check("5px/s is full there", sweep(375, 5, 1000).tier, "full");
-check("30px/s is medium there", sweep(375, 30, 1000).tier, "medium");
-check("40px/s is medium there", sweep(375, 40, 1000).tier, "medium");
-check("100px/s is coarse there", sweep(375, 100, 1000).tier, "coarse");
+check("5px/s is full there", sweep(375, 5, 1500).tier, "full");
+check("20px/s is fine there", sweep(375, 20, 1500).tier, "fine");
+check("45px/s is medium there", sweep(375, 45, 1500).tier, "medium");
+check("100px/s is coarse there", sweep(375, 100, 1500).tier, "coarse");
 
 console.log("starting");
 {
   const motion = createPreviewMotion();
   check("a hover starts at coarse", motion.sample(0.5, 0), "coarse");
-  check("then steps to medium, then full", rest(motion, 0, "coarse"), [["medium", STEP_DOWN_MS], ["full", 2 * STEP_DOWN_MS]]);
+  check("then steps through medium and fine to full", rest(motion, 0, "coarse"),
+    [["medium", STEP_DOWN_MS], ["fine", 2 * STEP_DOWN_MS], ["full", 3 * STEP_DOWN_MS]]);
   motion.reset();
   check("and again after leaving the bar", motion.sample(0.2, 5000), "coarse");
 }
@@ -82,37 +86,38 @@ console.log("stopping");
   const fast = sweep(1300, 2000, 300);
   check("coarse on the last event of a fast sweep", fast.tier, "coarse");
   // The window drops below coarse speed 234ms after the last event, and to
-  // still at 250ms; each step down then waits its 150ms in turn.
-  check("steps down through medium to full", rest(fast.motion, fast.t, "coarse"), [["medium", 384], ["full", 534]]);
-  check("and stays there", fast.motion.nextChangeIn(fast.t + 600), null);
+  // still at 250ms; each step down then waits its 300ms in turn.
+  check("steps down one tier at a time to full", rest(fast.motion, fast.t, "coarse"),
+    [["medium", 534], ["fine", 834], ["full", 1134]]);
+  check("and stays there", fast.motion.nextChangeIn(fast.t + 1200), null);
 }
 
 console.log("speeding up");
 {
-  const settled = sweep(1300, 8, 1000);
+  const settled = sweep(1300, 8, 1500);
   check("full while creeping", settled.tier, "full");
   check("a flick is coarse on its first event", settled.motion.sample((settled.px + 100) / 1300, settled.t + 16), "coarse");
   // The window still holds the slower part for a moment, so this is the
   // speed's own lag, not a hold: no step-up delay on top of it.
-  const medium = sweep(1300, 120, 1000);
-  check("medium to coarse within 100ms of speeding up", sweep(1300, 600, 100, medium.motion, medium).tier, "coarse");
+  const fine = sweep(1300, 80, 1500);
+  check("fine to coarse within 100ms of speeding up", sweep(1300, 600, 100, fine.motion, fine).tier, "coarse");
 }
 
 console.log("slowing down");
 {
   // From a coarse sweep to a medium speed: the window lets go of the fast part
-  // within 250ms, and the step then waits another 150ms.
+  // within 250ms, and the step then waits another 300ms.
   const slowing = createPreviewMotion();
   const tiers: string[] = [];
-  let { px, t, tier } = sweep(1300, 400, 1000, slowing);
+  let { px, t, tier } = sweep(1300, 300, 1500, slowing);
   check("coarse before the slowdown", tier, "coarse");
-  for (let e = 0; e < 600; e += 16) {
+  for (let e = 0; e < 1000; e += 16) {
     t += 16;
-    px += 120 * 16 / 1000;
+    px += 150 * 16 / 1000;
     tiers.push(slowing.sample(Math.round(px) / 1300, t));
   }
-  check("coarse to medium, never straight to full", [...new Set(tiers)], ["coarse", "medium"]);
-  check("holding coarse for at least 150ms after the speed drops", tiers.indexOf("medium") * 16 >= STEP_DOWN_MS, true);
+  check("coarse to medium, and no further", [...new Set(tiers)], ["coarse", "medium"]);
+  check("holding coarse for at least 300ms after slowing", tiers.indexOf("medium") * 16 >= STEP_DOWN_MS, true);
 }
 
 console.log("a hand that isn't quite still");
@@ -122,11 +127,11 @@ function jitterTiers(px: number) {
   const tiers = new Set<string>();
   for (let t = 0; t <= 2000; t += 16) {
     const tier = motion.sample((650 + (t % 64 < 32 ? px : -px)) / 1300, t);
-    if (t >= 400) tiers.add(tier);
+    if (t >= 3 * STEP_DOWN_MS + 100) tiers.add(tier);
   }
   return [...tiers].sort();
 }
-// At most 4px apart within the window: 16px/s, inside full's 45px/s on this bar
+// At most 4px apart within the window: 16px/s, inside full's 39px/s on this bar
 // whatever the timing.
 check("2px of jitter either side always reads full", jitterTiers(2), ["full"]);
 

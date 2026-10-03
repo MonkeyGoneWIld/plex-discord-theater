@@ -6,9 +6,10 @@ import type { PreviewDetail } from "./previewFrames";
  * Speed is in bar-widths per second — how much of the bar the cursor covers in
  * a second — so it behaves the same on a phone and a desktop:
  *
- *   full     below 0.035  slower than about 29s to cross the bar
- *   medium   0.035 – 0.16 about 6s to 29s to cross it
- *   coarse   0.16 and up  faster than about 6s
+ *   full     below 0.03   slower than about 33s to cross the bar
+ *   fine     0.03 – 0.09  about 11s to 33s to cross it
+ *   medium   0.09 – 0.15  about 7s to 11s
+ *   coarse   0.15 and up  faster than about 7s
  *
  * It is how far the cursor got over the last SPEED_WINDOW_MS, rather than the
  * speed between two pointer events: those arrive unevenly, and pointer
@@ -18,19 +19,22 @@ import type { PreviewDetail } from "./previewFrames";
  *
  * Speeding up switches tier at once. Slowing down steps one tier at a time,
  * each only once the speed has read finer for STEP_DOWN_MS: coarse to medium,
- * then medium to full. A hover starts at coarse and steps down the same way.
+ * to fine, to full. A hover starts at coarse and steps down the same way.
  * A pointer that stops sends no more events, so the caller asks again after
  * nextChangeIn, which is when the window or a step-down next moves on.
  */
 export const SPEED_WINDOW_MS = 250;
-export const STEP_DOWN_MS = 150;
-const FULL_MAX_SPEED = 0.035;
-const MEDIUM_MAX_SPEED = 0.16;
+export const STEP_DOWN_MS = 300;
+const FULL_MAX_SPEED = 0.03;
+const FINE_MAX_SPEED = 0.09;
+const MEDIUM_MAX_SPEED = 0.15;
 
-const RANK: Record<PreviewDetail, number> = { full: 0, medium: 1, coarse: 2 };
+const RANK: Record<PreviewDetail, number> = { full: 0, fine: 1, medium: 2, coarse: 3 };
+const FINER: Record<PreviewDetail, PreviewDetail> = { coarse: "medium", medium: "fine", fine: "full", full: "full" };
 
 export function tierForSpeed(barWidthsPerSecond: number): PreviewDetail {
   if (barWidthsPerSecond < FULL_MAX_SPEED) return "full";
+  if (barWidthsPerSecond < FINE_MAX_SPEED) return "fine";
   if (barWidthsPerSecond < MEDIUM_MAX_SPEED) return "medium";
   return "coarse";
 }
@@ -62,7 +66,7 @@ export function createPreviewMotion() {
     if (finerSince === null) finerSince = time;
     // A late look can be owed more than one step; each still takes its turn.
     while (finerSince !== null && time - finerSince >= STEP_DOWN_MS) {
-      tier = tier === "coarse" ? "medium" : "full";
+      tier = FINER[tier];
       finerSince = RANK[band] < RANK[tier] ? finerSince + STEP_DOWN_MS : null;
     }
     return tier;

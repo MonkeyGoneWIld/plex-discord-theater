@@ -175,7 +175,9 @@ function frameIndexAt(index: Index, ms: number, durationMs: number): number {
   return i;
 }
 
-export type PreviewDetail = "coarse" | "medium" | "full";
+/** The preview tiers, coarsest first — the order they are sent in. */
+export const PREVIEW_DETAILS = ["coarse", "medium", "fine", "full"] as const;
+export type PreviewDetail = typeof PREVIEW_DETAILS[number];
 
 /** Nested, evenly distributed cumulative tiers. v1 is retained for cached clients. */
 export function previewTierIndices(count: number, version: 1 | 2 = 2) {
@@ -186,15 +188,18 @@ export function previewTierIndices(count: number, version: 1 | 2 = 2) {
       if (result[result.length - 1] !== count - 1) result.push(count - 1);
       return result;
     };
-    return { coarse: grid(stride * 4), medium: grid(stride) };
+    // v1 had no fine tier; giving it medium's grid leaves that pass empty.
+    const medium = grid(stride);
+    return { coarse: grid(stride * 4), medium, fine: medium };
   }
-  const coarseCount = Math.max(1, Math.ceil(count * 0.01));
-  const mediumCount = Math.max(1, Math.ceil(count * 0.10));
-  const medium = Array.from({ length: mediumCount }, (_, i) =>
-    mediumCount === 1 ? 0 : Math.floor(i * (count - 1) / (mediumCount - 1)));
-  const coarse = Array.from({ length: coarseCount }, (_, i) =>
-    medium[coarseCount === 1 ? 0 : Math.floor(i * (mediumCount - 1) / (coarseCount - 1))]);
-  return { coarse, medium };
+  // n evenly spread picks out of `length` candidates, so each tier is drawn
+  // from the next finer one and contains every tier before it.
+  const spread = (n: number, length: number, pick: (i: number) => number) =>
+    Array.from({ length: n }, (_, i) => pick(n === 1 ? 0 : Math.floor(i * (length - 1) / (n - 1))));
+  const fine = spread(Math.max(1, Math.ceil(count * 0.10)), count, (i) => i);
+  const medium = spread(Math.max(1, Math.ceil(count * 0.05)), fine.length, (i) => fine[i]);
+  const coarse = spread(Math.max(1, Math.ceil(count * 0.01)), medium.length, (i) => medium[i]);
+  return { coarse, medium, fine };
 }
 
 function detailIndex(i: number, index: Index, detail: PreviewDetail): number {
@@ -278,7 +283,8 @@ export function createProgressivePreviewReader(onTierReady?: (progress: {
       if (!index || disposed) return null;
       const target = frameIndexAt(index, ms, durationMs);
       if (target < 0) return null;
-      const levels: PreviewDetail[] = detail === "full" ? ["full", "medium", "coarse"] : detail === "medium" ? ["medium", "coarse"] : ["coarse"];
+      // The tier asked for, then each coarser one, until a frame is there.
+      const levels = PREVIEW_DETAILS.slice(0, PREVIEW_DETAILS.indexOf(detail) + 1).reverse();
       let selected = -1;
       for (const level of levels) {
         const candidate = detailIndex(target, index, level);
@@ -327,16 +333,16 @@ export function createProgressivePreviewReader(onTierReady?: (progress: {
           if (!result || result === REJECTED || buffer.length !== HEADER_BYTES + (result.frames.length + 1) * 8 + 2) { rejected = true; break; }
           index = result;
           index.tiers = previewTierIndices(index.frames.length, version);
-          expected = [index.tiers.coarse.length, index.tiers.medium.length - index.tiers.coarse.length,
-            index.frames.length - index.tiers.medium.length];
+          const { coarse, medium, fine } = index.tiers;
+          expected = [coarse.length, medium.length - coarse.length, fine.length - medium.length,
+            index.frames.length - fine.length];
           next("record", 8);
         } else if (state === "record") {
           frame = data.getUint32(0, true);
           const size = data.getUint32(4, true);
           const entry = index?.frames[frame];
           if (!entry || images.has(frame) || size < 2 || size > 10 * 1024 * 1024 || size !== entry.end - entry.start) { rejected = true; break; }
-          const frameTier = detailIndex(frame, index!, "coarse") === frame ? 0
-            : detailIndex(frame, index!, "medium") === frame ? 1 : 2;
+          const frameTier = PREVIEW_DETAILS.findIndex((level) => detailIndex(frame, index!, level) === frame);
           if (frameTier !== tier) { rejected = true; break; }
           next("image", size);
         } else {
@@ -346,8 +352,8 @@ export function createProgressivePreviewReader(onTierReady?: (progress: {
           tierBytes += buffer.length + 8;
           // Report inside the parser so boundaries remain visible even when a
           // proxy/browser combines multiple tiers into a single network chunk.
-          while (tier < 3 && tierFrames === expected[tier]) {
-            onTierReady?.({ tier: (["coarse", "medium", "full"] as const)[tier], frames: tierFrames, bytes: tierBytes, ready: images.size });
+          while (tier < PREVIEW_DETAILS.length && tierFrames === expected[tier]) {
+            onTierReady?.({ tier: PREVIEW_DETAILS[tier], frames: tierFrames, bytes: tierBytes, ready: images.size });
             tier++;
             tierFrames = 0;
             tierBytes = 0;

@@ -6,6 +6,9 @@ const MAGIC = Buffer.from([0x89, 0x42, 0x49, 0x46, 13, 10, 26, 10]);
 const MAX_BYTES = 1024 * 1024 * 1024;
 const MAX_FRAME_BYTES = 10 * 1024 * 1024;
 
+/** The preview tiers, coarsest first — the order they are sent in. */
+const PREVIEW_DETAILS = ["coarse", "medium", "fine", "full"] as const;
+
 /** Nested, evenly distributed cumulative tiers. v1 is retained for cached clients. */
 export function previewTierIndices(count: number, version: 1 | 2 = 2) {
   if (version === 1) {
@@ -15,19 +18,22 @@ export function previewTierIndices(count: number, version: 1 | 2 = 2) {
       if (result[result.length - 1] !== count - 1) result.push(count - 1);
       return result;
     };
-    return { coarse: grid(stride * 4), medium: grid(stride) };
+    // v1 had no fine tier; giving it medium's grid leaves that pass empty.
+    const medium = grid(stride);
+    return { coarse: grid(stride * 4), medium, fine: medium };
   }
-  const coarseCount = Math.max(1, Math.ceil(count * 0.01));
-  const mediumCount = Math.max(1, Math.ceil(count * 0.10));
-  const medium = Array.from({ length: mediumCount }, (_, i) =>
-    mediumCount === 1 ? 0 : Math.floor(i * (count - 1) / (mediumCount - 1)));
-  const coarse = Array.from({ length: coarseCount }, (_, i) =>
-    medium[coarseCount === 1 ? 0 : Math.floor(i * (mediumCount - 1) / (coarseCount - 1))]);
-  return { coarse, medium };
+  // n evenly spread picks out of `length` candidates, so each tier is drawn
+  // from the next finer one and contains every tier before it.
+  const spread = (n: number, length: number, pick: (i: number) => number) =>
+    Array.from({ length: n }, (_, i) => pick(n === 1 ? 0 : Math.floor(i * (length - 1) / (n - 1))));
+  const fine = spread(Math.max(1, Math.ceil(count * 0.10)), count, (i) => i);
+  const medium = spread(Math.max(1, Math.ceil(count * 0.05)), fine.length, (i) => fine[i]);
+  const coarse = spread(Math.max(1, Math.ceil(count * 0.01)), medium.length, (i) => medium[i]);
+  return { coarse, medium, fine };
 }
 
 export interface PreviewTierProgress {
-  tier: "coarse" | "medium" | "full";
+  tier: typeof PREVIEW_DETAILS[number];
   frames: number;
   bytes: number;
   ready: number;
@@ -35,8 +41,9 @@ export interface PreviewTierProgress {
 
 /** v1 wire format: uint32 head length, BIF header/index + first JPEG marker,
  * then records of uint32 frame number, uint32 length, JPEG bytes (all LE).
- * Each image is sent exactly once: 1% overview, another 9% for 10% medium,
- * then the rest. v1 requests retain the original fixed-size grids.
+ * Each image is sent exactly once, a tier at a time: 1% coarse, then the rest
+ * of 5% medium, of 10% fine, and of full. v1 requests retain the original
+ * fixed-size grids, with an empty fine pass.
  * Deferred images go to a temporary file, not a movie-sized heap allocation.
  */
 export async function* progressivePreview(
@@ -115,10 +122,14 @@ export async function* progressivePreview(
 
     directory = await mkdtemp(join(tmpdir(), "plex-previews-"));
     file = await open(join(directory, "frames"), "w+");
+    // Which pass each frame goes out in: its coarsest tier, finest first so
+    // the coarser tiers that contain it overwrite.
     const tiers = previewTierIndices(count, version);
-    const coarse = new Set(tiers.coarse);
-    const medium = new Set(tiers.medium);
-    const stage = (i: number) => coarse.has(i) ? 0 : medium.has(i) ? 1 : 2;
+    const stages = new Uint8Array(count).fill(3);
+    for (const i of tiers.fine) stages[i] = 2;
+    for (const i of tiers.medium) stages[i] = 1;
+    for (const i of tiers.coarse) stages[i] = 0;
+    const stage = (i: number) => stages[i];
     for (let i = 0; i < count; i++) {
       const size = positions[i + 1] - positions[i];
       const bytes = i === 0 ? Buffer.concat([marker, await take(size - 2)]) : await take(size);
@@ -136,7 +147,7 @@ export async function* progressivePreview(
     completeTier("coarse");
     // Stop the upstream even if Plex appended bytes past the BIF terminator.
     await reader.cancel();
-    for (const level of [1, 2]) {
+    for (const level of [1, 2, 3]) {
       for (let i = 0; i < count; i++) {
         signal?.throwIfAborted();
         if (stage(i) !== level) continue;
@@ -149,7 +160,7 @@ export async function* progressivePreview(
         }
         yield record(i, bytes);
       }
-      completeTier(level === 1 ? "medium" : "full");
+      completeTier(PREVIEW_DETAILS[level]);
     }
   } finally {
     signal?.removeEventListener("abort", cancel);

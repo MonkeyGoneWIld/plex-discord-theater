@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { progressivePreview, previewTierIndices as serverTierIndices, type PreviewTierProgress } from "../src/services/preview-stream.js";
-import { createProgressivePreviewReader, previewTierIndices } from "../../client/src/lib/previewFrames.js";
+import { createProgressivePreviewReader, previewTierIndices, PREVIEW_DETAILS } from "../../client/src/lib/previewFrames.js";
 
 function bif(count: number, multiplier = 1000) {
   const start = 64 + (count + 1) * 8;
@@ -37,26 +37,30 @@ for (const count of [1, 2, 3, 7, 49, 50, 51, 96, 385, 3214, 10800]) {
   const reader = createProgressivePreviewReader((progress) => received.push(progress));
   const order: number[] = [];
   let level = 0;
-  const { coarse, medium } = previewTierIndices(count);
-  assert.deepEqual(serverTierIndices(count), { coarse, medium });
+  const { coarse, medium, fine } = previewTierIndices(count);
+  assert.deepEqual(serverTierIndices(count), { coarse, medium, fine });
   assert.equal(coarse.length, Math.ceil(count * 0.01));
-  assert.equal(medium.length, Math.ceil(count * 0.10));
+  assert.equal(medium.length, Math.ceil(count * 0.05));
+  assert.equal(fine.length, Math.ceil(count * 0.10));
   assert.equal(new Set(medium).size, medium.length);
+  assert.equal(new Set(fine).size, fine.length);
   assert.ok(coarse.every((i) => medium.includes(i)), "overview is a subset of medium");
+  assert.ok(medium.every((i) => fine.includes(i)), "medium is a subset of fine");
   let header = true;
   for await (const chunk of progressivePreview(stream(bif(count)), undefined, (progress) => sent.push(progress))) {
     if (header) header = false;
     else {
       const i = chunk.readUInt32LE(0);
-      const stage = coarse.includes(i) ? 0 : medium.includes(i) ? 1 : 2;
-      assert.ok(stage >= level, "all overview records precede medium and full records");
+      const stage = coarse.includes(i) ? 0 : medium.includes(i) ? 1 : fine.includes(i) ? 2 : 3;
+      assert.ok(stage >= level, "each tier's records precede every finer tier's");
       if (stage > level && count >= 385) {
         const frames = reader.frames()!;
-        if (level === 0) {
-          assert.equal(await identity(frames.frameAt(191_000, count * 1000)), atOrBefore(191, coarse));
-          assert.equal(await identity(frames.frameAt(count * 1000, count * 1000)), count - 1);
+        // Every tier before this pass is complete, and answers with its own frame.
+        const grids = [coarse, medium, fine];
+        for (let done = 0; done < stage; done++) {
+          assert.equal(await identity(frames.frameAt(191_000, count * 1000, PREVIEW_DETAILS[done])), atOrBefore(191, grids[done]));
         }
-        if (stage === 2) assert.equal(await identity(frames.frameAt(191_000, count * 1000)), atOrBefore(191, medium));
+        if (level === 0) assert.equal(await identity(frames.frameAt(count * 1000, count * 1000)), count - 1);
       }
       level = stage;
       order.push(i);
@@ -67,16 +71,17 @@ for (const count of [1, 2, 3, 7, 49, 50, 51, 96, 385, 3214, 10800]) {
   }
   assert.equal(new Set(order).size, count, "each image transferred exactly once");
   assert.equal(order.length, count);
-  assert.deepEqual(received, sent, "client confirms the same three tiers that the server sent");
-  assert.deepEqual(received.map((p) => p.tier), ["coarse", "medium", "full"]);
+  assert.deepEqual(received, sent, "client confirms the same four tiers that the server sent");
+  assert.deepEqual(received.map((p) => p.tier), ["coarse", "medium", "fine", "full"]);
   if (count === 3214) {
-    assert.deepEqual(received.map((p) => p.frames), [33, 289, 2892]);
-    assert.deepEqual(received.map((p) => p.ready), [33, 322, 3214]);
+    assert.deepEqual(received.map((p) => p.frames), [33, 128, 161, 2892]);
+    assert.deepEqual(received.map((p) => p.ready), [33, 161, 322, 3214]);
   }
   const frames = reader.frames()!;
   assert.equal(frames.ready, count);
   if (count === 3214) {
     assert.equal(await identity(frames.frameAt(191_000, count * 1000, "medium")), atOrBefore(191, medium));
+    assert.equal(await identity(frames.frameAt(191_000, count * 1000, "fine")), atOrBefore(191, fine));
     assert.equal(await identity(frames.frameAt(191_000, count * 1000, "full")), 191);
     assert.equal(await identity(frames.frameAt(192_000, count * 1000, "full")), 192, "focused hover can select adjacent original frames");
   }
@@ -157,7 +162,7 @@ for (const corrupt of [Buffer.alloc(80), bif(0), bif(5).subarray(0, 100)]) {
   const reader = createProgressivePreviewReader((p) => received.push(p), 1);
   for await (const chunk of progressivePreview(stream(bif(3214)), undefined, undefined, 1)) reader.push(chunk);
   assert.equal(reader.rejected(), false);
-  assert.deepEqual(received.map((p) => p.ready), [25, 96, 3214]);
+  assert.deepEqual(received.map((p) => p.ready), [25, 96, 96, 3214], "v1 has no fine tier: that pass is empty");
   assert.equal(await identity(reader.frames()!.frameAt(191_000, 3214_000)), 191);
   reader.dispose();
 }

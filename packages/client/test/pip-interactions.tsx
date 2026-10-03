@@ -11,6 +11,8 @@ const item: PlexItem = { ratingKey: "pip-fixture", title: "A quiet afternoon", t
 const artwork = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 180"><rect width="320" height="180" fill="#304c59"/><circle cx="240" cy="55" r="25" fill="#e5a00d"/><path d="M0 180 95 65 180 150 230 110 320 180" fill="#59755c"/></svg>')}#still`;
 const next = { ...item, ratingKey: "pip-fixture-next", title: "The next chapter", index: 2, showTitle: "Sample series", thumb: artwork };
 const resumed: PlexItem = { ratingKey: "pip-fixture-resumed", title: "Half watched", type: "movie", thumb: null };
+// A runtime to measure a lone host's watching against: a quarter is 25s.
+const timed: PlexItem = { ...item, ratingKey: "pip-fixture-timed", title: "A hundred seconds", duration: 100_000 };
 // Off for everything but the resume check. While /config goes unanswered the
 // player never starts a stream, which keeps the gesture checks free of network
 // noise; the resume check needs the stream start, where the offset is chosen.
@@ -55,6 +57,18 @@ function touch(type: string, points: number[][]) {
   const touches = points.map(([clientX, clientY], identifier) => new Touch({ identifier, target: dragTarget(), clientX, clientY }));
   dragTarget().dispatchEvent(new TouchEvent(type, { bubbles: true, cancelable: true, touches, targetTouches: touches, changedTouches: touches }));
 }
+/**
+ * Pretend the video played `seconds` from `from`, a timeupdate every quarter
+ * second as a playing element sends them. There is no media here, so the
+ * element's own clock never moves.
+ */
+function play(seconds: number, from = 0, paused = false) {
+  const el = video();
+  let at = from;
+  Object.defineProperty(el, "paused", { configurable: true, get: () => paused });
+  Object.defineProperty(el, "currentTime", { configurable: true, get: () => at, set: () => {} });
+  for (; at <= from + seconds; at += 0.25) el.dispatchEvent(new Event("timeupdate"));
+}
 async function dragTo(left: number, top: number, cancel = false, mobile = false) {
   const before = rect();
   const x = before.left + before.width / 2, y = before.top + before.height / 2;
@@ -85,8 +99,8 @@ function Fixture() {
   const restore = useCallback(() => setMode("full"), []);
   const minimize = useCallback(() => setMode("pip"), []);
   const leave = useCallback(() => setClosed(true), []);
-  const reset = useCallback((asHost = false, presentation: "full" | "pip" = "pip", withOthers = asHost) => {
-    setHost(asHost); setOthers(withOthers); setMode(presentation); setCurrent({ item }); setClosed(false); setGeneration((n) => n + 1);
+  const reset = useCallback((asHost = false, presentation: "full" | "pip" = "pip", withOthers = asHost, which = item) => {
+    setHost(asHost); setOthers(withOthers); setMode(presentation); setCurrent({ item: which }); setClosed(false); setGeneration((n) => n + 1);
   }, []);
   useEffect(() => {
     let id: number;
@@ -192,7 +206,26 @@ function Fixture() {
       button("Back").click(); await pause();
       check(!document.body.textContent?.includes("End stream?"), "Lone host Back showed a warning");
       check(surface().dataset.presentation === "pip" && video() === aloneVideo, "Lone host Back did not go straight to PiP");
-      pass("Lone host Back goes straight to PiP with no warning");
+      pass("Lone host Back goes straight to PiP with no warning while the runtime is unknown");
+      reset(true, "full", false, timed); await pause();
+      play(20);
+      button("Back").click(); await pause();
+      check(!document.body.textContent?.includes("End stream?"), "Early lone host Back showed a warning");
+      check(!surface(), "Lone host Back after watching 20% did not end the stream");
+      reset(true, "full", false, timed); await pause();
+      play(10); video().dispatchEvent(new Event("seeking")); play(10, 80);
+      button("Back").click(); await pause();
+      check(!surface(), "A seek's jump counted as watching");
+      reset(true, "full", false, timed); await pause();
+      play(40, 0, true);
+      button("Back").click(); await pause();
+      check(!surface(), "Paused time counted as watching");
+      reset(true, "full", false, timed); await pause();
+      const watchedVideo = video();
+      play(30);
+      button("Back").click(); await pause();
+      check(surface()?.dataset.presentation === "pip" && video() === watchedVideo, "Lone host Back after watching 30% did not go to PiP");
+      pass("Lone host Back ends the stream until a quarter is watched, then keeps PiP; seeks and pauses don't count");
       reset(true, "full"); await pause();
       button("Back").click(); await pause();
       check(document.body.textContent?.includes("End stream?"), "Host Back lacked warning");

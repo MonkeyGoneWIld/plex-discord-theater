@@ -537,6 +537,14 @@ function defaultPipDock(): PipDock {
   return { edge: "bottom", offset: 1 };
 }
 
+/**
+ * How much of a title a host on their own must have watched for Back to keep
+ * it in PiP. Less than that, and Back ends the stream: PiP is for coming back
+ * to something you have been watching, not for a title you have only just
+ * opened. Watched means time spent playing, not where the playhead is.
+ */
+const PIP_MIN_WATCHED_SHARE = 0.25;
+
 export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, onSharePresenceDetails, subtitles, resumePosition, mediaIndex, audioStreamId, subtitleStreamId, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext, presentation = "full", onMinimize, onRestore }: PlayerProps) {
   const isPip = presentation === "pip";
   const pipPhone = useMediaQuery(PHONE_QUERY);
@@ -4346,11 +4354,23 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       return;
     }
     if (!isPip && onMinimize) {
+      // A host on their own who has watched less than a quarter of the title
+      // ends the stream instead.
+      const neededS = itemDurationS() * PIP_MIN_WATCHED_SHARE;
+      if (isHostRef.current && watchedSRef.current < neededS) {
+        logEvent("Player", "host left before watching enough for PiP, ending stream", {
+          ratingKey: item.ratingKey,
+          watchedS: Math.round(watchedSRef.current),
+          neededS: Math.round(neededS),
+        });
+        endPlayback();
+        return;
+      }
       onMinimize();
       return;
     }
     endPlayback();
-  }, [endPlayback, hasFinishedItem, item.ratingKey, selfUserId, isPip, onMinimize]);
+  }, [endPlayback, hasFinishedItem, item.ratingKey, item.duration, selfUserId, isPip, onMinimize]);
 
   /**
    * Choose tracks.
@@ -4546,6 +4566,33 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       video.removeEventListener("ended", onEnded);
     };
   }, [canControl, item.ratingKey]);
+
+  /**
+   * How long this title has actually played here, in seconds: time spent
+   * watching, not where the playhead is. Paused and stalled time add nothing,
+   * and nor does a seek's jump. Back reads it — see PIP_MIN_WATCHED_SHARE.
+   */
+  const watchedSRef = useRef(0);
+  useEffect(() => {
+    watchedSRef.current = 0;
+    const video = videoRef.current;
+    if (!video) return;
+    let last: number | null = null;
+    const onTime = () => {
+      const at = video.currentTime;
+      // Playing moves the time a fraction of a second between updates.
+      if (last !== null && !video.paused && at > last && at - last < 10) watchedSRef.current += at - last;
+      last = at;
+    };
+    // Count again from wherever a seek lands.
+    const onSeeking = () => { last = null; };
+    video.addEventListener("timeupdate", onTime);
+    video.addEventListener("seeking", onSeeking);
+    return () => {
+      video.removeEventListener("timeupdate", onTime);
+      video.removeEventListener("seeking", onSeeking);
+    };
+  }, [item.ratingKey]);
 
   // Track whether the playhead is inside an intro/credits window. Shown to
   // anyone with transport rights, since skipping is a transport action.

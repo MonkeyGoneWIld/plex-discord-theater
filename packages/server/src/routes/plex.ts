@@ -2641,10 +2641,14 @@ const MAX_PREVIEW_INDEX_BYTES = 1024 * 1024 * 1024;
  * the cursor rests on, and through Discord's proxy those land well after the
  * cursor has moved on. One file up front is about the bandwidth of two hundred
  * of those requests, and makes every frame after it free.
+ *
+ * `progressive=2&pass=<0-3>` sends one pass of the progressive stream: the
+ * player asks for each as its video buffer allows.
  */
 router.get("/preview/:partId/index", async (req: Request, res: Response) => {
   const partId = req.params.partId as string;
-  if (!NUMERIC_RE.test(partId)) {
+  const pass = req.query.pass === undefined ? undefined : Number(req.query.pass);
+  if (!NUMERIC_RE.test(partId) || (pass !== undefined && !(Number.isInteger(pass) && pass >= 0 && pass <= 3))) {
     res.status(400).end();
     return;
   }
@@ -2678,13 +2682,15 @@ router.get("/preview/:partId/index", async (req: Request, res: Response) => {
       res.setHeader("Content-Type", `application/x-plex-preview-v${version}`);
       res.setHeader("Cache-Control", "private, max-age=86400");
       res.setHeader("X-Accel-Buffering", "no");
-      logEvent("Preview", "transfer started", { partId, transfer, transport: `progressive-v${version}` });
+      // Passes are a v2 layout; a v1 request always gets the whole stream.
+      const onePass = version === 2 ? pass : undefined;
+      logEvent("Preview", "transfer started", { partId, transfer, transport: `progressive-v${version}`, pass: onePass });
       try {
         await pipeline(Readable.from(progressivePreview(plexRes.body, abort.signal, (progress) => {
           logEvent("Preview", "tier sent", {
             partId, transfer, ...progress, elapsedMs: Math.round(performance.now() - startedAt),
           });
-        }, version)), res);
+        }, version, onePass)), res);
       } finally {
         res.off("close", cancel);
       }

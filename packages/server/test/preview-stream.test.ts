@@ -156,6 +156,57 @@ for (const corrupt of [Buffer.alloc(80), bif(0), bif(5).subarray(0, 100)]) {
   outOfOrder.dispose();
 }
 
+// One pass per response, as the player asks for them as its buffer allows:
+// one reader carries on across all four, ending with the same frames as the
+// single stream.
+for (const count of [1, 7, 385, 3214]) {
+  const sent: PreviewTierProgress[] = [];
+  const received: PreviewTierProgress[] = [];
+  const reader = createProgressivePreviewReader((p) => received.push(p));
+  for (let pass = 0; pass < 4; pass++) {
+    if (pass > 0) reader.nextResponse();
+    for await (const chunk of progressivePreview(stream(bif(count)), undefined, (p) => sent.push(p), 2, pass)) {
+      for (let at = 0; at < chunk.length; at += 7) reader.push(chunk.subarray(at, at + 7));
+      assert.equal(reader.rejected(), false);
+    }
+  }
+  assert.deepEqual(sent.map((p) => p.tier), ["coarse", "medium", "fine", "full"], "each response is its own pass");
+  assert.deepEqual(received.map((p) => p.tier), ["coarse", "medium", "fine", "full"]);
+  if (count === 3214) {
+    assert.deepEqual(sent.map((p) => p.frames), [161, 322, 803, 1928]);
+    assert.deepEqual(received.map((p) => p.ready), [161, 483, 1286, 3214]);
+  }
+  const frames = reader.frames()!;
+  assert.equal(frames.ready, count);
+  const target = Math.min(191, count - 1);
+  assert.equal(await identity(frames.frameAt(target * 1000, count * 1000)), target);
+  reader.dispose();
+}
+
+// A pass cut off inside a record cannot be followed by the next one; what
+// arrived before the cut is kept.
+{
+  const chunks: Buffer[] = [];
+  for await (const chunk of progressivePreview(stream(bif(3214)), undefined, undefined, 2, 0)) chunks.push(chunk);
+  const whole = Buffer.concat(chunks);
+  const reader = createProgressivePreviewReader();
+  reader.push(whole.subarray(0, whole.length - 3));
+  reader.nextResponse();
+  assert.equal(reader.rejected(), true);
+  assert.equal(reader.frames()!.ready, 160);
+  reader.dispose();
+}
+
+// A later response whose head differs from the first is refused.
+{
+  const reader = createProgressivePreviewReader();
+  for await (const chunk of progressivePreview(stream(bif(3214)), undefined, undefined, 2, 0)) reader.push(chunk);
+  reader.nextResponse();
+  for await (const chunk of progressivePreview(stream(bif(3215)), undefined, undefined, 2, 1)) reader.push(chunk);
+  assert.equal(reader.rejected(), true);
+  reader.dispose();
+}
+
 // A v1 client/server pair keeps its original ordering during rolling upgrades.
 {
   const received: PreviewTierProgress[] = [];

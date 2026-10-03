@@ -258,12 +258,23 @@ export interface PreviewFrameReader {
   dispose(): void;
 }
 
+export interface ProgressivePreviewReader extends PreviewFrameReader {
+  /**
+   * The next pass is coming in a response of its own. It repeats the head,
+   * which must match the one already read, and its records carry on where the
+   * last response's left off.
+   */
+  nextResponse(): void;
+}
+
 /** Reader for application/x-plex-preview-v2 (or the legacy v1 ordering). Only one incomplete record is
  * buffered; complete JPEGs become blobs and survive a truncated download. */
 export function createProgressivePreviewReader(onTierReady?: (progress: {
   tier: PreviewDetail; frames: number; bytes: number; ready: number;
-}) => void, version: 1 | 2 = 2): PreviewFrameReader {
+}) => void, version: 1 | 2 = 2): ProgressivePreviewReader {
   let index: Index | null = null;
+  // The head as first read, for checking the copy each later response repeats.
+  let head: Uint8Array | null = null;
   let rejected = false;
   let disposed = false;
   let state: "length" | "index" | "record" | "image" = "length";
@@ -328,10 +339,14 @@ export function createProgressivePreviewReader(onTierReady?: (progress: {
           const length = data.getUint32(0, true);
           if (length < 82 || length > HEADER_BYTES + (MAX_FRAMES + 1) * 8 + 2) { rejected = true; break; }
           next("index", length);
+        } else if (state === "index" && head) {
+          if (buffer.length !== head.length || buffer.some((b, i) => b !== head![i])) { rejected = true; break; }
+          next("record", 8);
         } else if (state === "index") {
           const result = readIndex(buffer);
           if (!result || result === REJECTED || buffer.length !== HEADER_BYTES + (result.frames.length + 1) * 8 + 2) { rejected = true; break; }
           index = result;
+          head = buffer;
           index.tiers = previewTierIndices(index.frames.length, version);
           const { coarse, medium, fine } = index.tiers;
           expected = [coarse.length, medium.length - coarse.length, fine.length - medium.length,
@@ -362,9 +377,16 @@ export function createProgressivePreviewReader(onTierReady?: (progress: {
         }
       }
     },
+    nextResponse() {
+      if (rejected || disposed) return;
+      // A response cut off inside a record leaves a pass that can never
+      // complete, so nothing after it can be placed. What arrived still works.
+      if (state !== "record" || filled !== 0) { rejected = true; return; }
+      next("length", 4);
+    },
     frames() { return index && !disposed ? view : null; },
     rejected() { return rejected; },
-    dispose() { disposed = true; view.dispose(); index = null; buffer = new Uint8Array(0); },
+    dispose() { disposed = true; view.dispose(); index = null; head = null; buffer = new Uint8Array(0); },
   };
 }
 

@@ -45,11 +45,15 @@ export interface PreviewTierProgress {
  * of 15% medium, of 40% fine, and of full. v1 requests retain the original
  * fixed-size grids, with an empty fine pass.
  * Deferred images go to a temporary file, not a movie-sized heap allocation.
+ *
+ * With `pass` (0 coarse to 3 full), the head is followed by that pass's records
+ * alone, so a client can ask for each pass when it is ready for it.
  */
 export async function* progressivePreview(
   body: ReadableStream<Uint8Array>, signal?: AbortSignal,
   onTierComplete?: (progress: PreviewTierProgress) => void,
   version: 1 | 2 = 2,
+  pass?: number,
 ) {
   const reader = body.getReader();
   const cancel = () => { void reader.cancel().catch(() => {}); };
@@ -120,8 +124,6 @@ export async function* progressivePreview(
     length.writeUInt32LE(indexEnd + 2);
     yield Buffer.concat([length, header, table, marker]);
 
-    directory = await mkdtemp(join(tmpdir(), "plex-previews-"));
-    file = await open(join(directory, "frames"), "w+");
     // Which pass each frame goes out in: its coarsest tier, finest first so
     // the coarser tiers that contain it overwrite.
     const tiers = previewTierIndices(count, version);
@@ -130,10 +132,31 @@ export async function* progressivePreview(
     for (const i of tiers.medium) stages[i] = 1;
     for (const i of tiers.coarse) stages[i] = 0;
     const stage = (i: number) => stages[i];
-    for (let i = 0; i < count; i++) {
+    // The next image in the file; the first one's marker was read with the index.
+    const image = async (i: number) => {
       const size = positions[i + 1] - positions[i];
       const bytes = i === 0 ? Buffer.concat([marker, await take(size - 2)]) : await take(size);
       if (bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new Error("Invalid preview JPEG");
+      return bytes;
+    };
+
+    if (pass !== undefined) {
+      // One pass on its own: its images as they come up, nothing to hold back,
+      // and no reading past the last of them.
+      const last = stages.lastIndexOf(pass);
+      for (let i = 0; i <= last; i++) {
+        const bytes = await image(i);
+        if (stage(i) === pass) yield record(i, bytes);
+      }
+      completeTier(PREVIEW_DETAILS[pass]);
+      return;
+    }
+
+    directory = await mkdtemp(join(tmpdir(), "plex-previews-"));
+    file = await open(join(directory, "frames"), "w+");
+    for (let i = 0; i < count; i++) {
+      const size = positions[i + 1] - positions[i];
+      const bytes = await image(i);
       if (stage(i) === 0) yield record(i, bytes);
       else {
         let written = 0;

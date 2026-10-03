@@ -124,15 +124,22 @@ const TIER_COLOR: Record<PreviewDetail, string> = { coarse: "#e53935", medium: "
  */
 const PREVIEW_GAP_MS: Record<PreviewDetail, number> = { coarse: 200, medium: 170, fine: 140, full: 0 };
 
-/*
- * Preview frames download as soon as the stream starts, alongside the video.
- * A buffer-headroom gate used to hold them back until 30s of video was
- * buffered, after one client's start-up stall (its buffer ran from 5.97s down
- * to 0.11s while a 28.8MB index downloaded). But a transcoded stream can take
- * a long time to build 30s of headroom, and seeking is mostly done right after
- * starting, so the frames arrived too late to help. Coarse, the first tier,
- * is a few hundred kilobytes; the rest follows in the background.
+/**
+ * Seconds of video buffered past the playhead before each preview pass is
+ * requested — 5% of the frames at once, 15% at 7s, 40% at 15s, the rest at
+ * 30s — and kept while it downloads: a pass stops pulling whenever the buffer
+ * drops back under its mark.
+ *
+ * One client stalled at start-up once (its buffer ran from 5.97s down to 0.11s
+ * while a 28.8MB index downloaded), which is why the passes wait on the video.
+ * The first is a few hundred kilobytes and goes regardless: seeking mostly
+ * happens right after starting, and a transcode can take a while to build
+ * much headroom.
  */
+const PREVIEW_PASS_BUFFER_S = [0, 7, 15, 30];
+
+/** How often to look again while the buffer is under a pass's mark. */
+const PREVIEW_BUFFER_POLL_MS = 500;
 
 /**
  * How many decoded frames to keep. Scrubbing back over ground you've already
@@ -1062,15 +1069,16 @@ export function Controls({
   }, [pctFromClientX, commitSeekToPct, resetHideTimer, clearPreviewMotion]);
 
   /**
-   * Pull the part's whole preview index as soon as the stream starts.
+   * Pull the part's whole preview index, a pass at a time, once the stream
+   * starts.
    *
    * Hovering the bar used to be the thing that fetched a frame: one request out
    * to Plex per position, arriving a beat or two after the cursor had already
    * moved on, and nothing at all for a sweep. The frames all live in one file,
-   * so this fetches it once, in four passes: 5% of the frames, then to 15%, to
-   * 40%, and the rest. All of them start automatically; hovering never starts
-   * a later pass. Until a pass arrives, the nearest frame from an earlier one
-   * stands in.
+   * so this fetches it in four passes, each its own request once the video has
+   * buffered enough (PREVIEW_PASS_BUFFER_S): 5% of the frames, then to 15%, to
+   * 40%, and the rest. Hovering never starts a pass. Until a pass arrives, the
+   * nearest frame from an earlier one stands in.
    *
    * Failure is not handled because it does not need to be — showPreviewAt keeps
    * the per-frame path and falls back to it whenever this ref is empty, which
@@ -1088,53 +1096,99 @@ export function Controls({
         elapsedMs: Math.round(performance.now() - transferStartedAt),
       });
     };
-    let reader: PreviewFrameReader = createProgressivePreviewReader(onTierReady);
+    const progressive = createProgressivePreviewReader(onTierReady);
+    let reader: PreviewFrameReader = progressive;
+
+    /**
+     * Seconds of video buffered past the playhead; unlimited once the buffer
+     * reaches the end of the video, where there is no more to wait for.
+     */
+    const headroom = (): number => {
+      const video = videoRef.current;
+      if (!video) return 0;
+      const at = video.currentTime;
+      for (let i = 0; i < video.buffered.length; i++) {
+        const end = video.buffered.end(i);
+        if (video.buffered.start(i) <= at && at <= end) {
+          return isFinite(video.duration) && end >= video.duration - 0.5 ? Infinity : end - at;
+        }
+      }
+      return 0;
+    };
+    const waitForHeadroom = async (seconds: number) => {
+      while (!cancelled && headroom() < seconds) {
+        await new Promise((r) => setTimeout(r, PREVIEW_BUFFER_POLL_MS));
+      }
+    };
 
     const read = async () => {
       transferStartedAt = performance.now();
-      const res = await fetch(
-        authUrl(`/api/plex/preview/${previewPartId}/index?progressive=2`),
-        { signal: abort.signal },
-      );
-      if (!res.ok || !res.body) return;
-      const contentType = res.headers.get("content-type") ?? "";
-      const version = contentType.startsWith("application/x-plex-preview-v2") ? 2
-        : contentType.startsWith("application/x-plex-preview-v1") ? 1 : 0;
-      logEvent("Preview", "transfer accepted", {
-        partId: previewPartId, transport: version ? `progressive-v${version}` : "legacy-bif",
-      });
-      // Older servers still return an ordinary BIF.
-      if (version !== 2) {
-        reader.dispose();
-        reader = version === 1 ? createProgressivePreviewReader(onTierReady, 1) : createPreviewFrameReader();
-      }
-      const body = res.body.getReader();
       let bytes = 0;
-      for (;;) {
-        const { done, value } = await body.read();
-        if (done || cancelled) break;
-        if (!value) continue;
-        bytes += value.length;
-        reader.push(value);
-        if (reader.rejected()) {
-          logEvent("Preview", "frame index unreadable", { partId: previewPartId, bytes });
-          await body.cancel();
-          return;
-        }
-        const frames = reader.frames();
-        if (frames && !previewFramesRef.current) {
-          previewFramesRef.current = frames;
-          // Logged at the moment the index lands rather than at the end of the
-          // download, because that is the moment scrubbing starts working. The
-          // size is the one thing that can't be known ahead of a real library.
-          logEvent("Preview", "frame index ready", {
-            partId: previewPartId, frames: frames.count, indexBytes: bytes,
+      for (let pass = 0; pass < PREVIEW_PASS_BUFFER_S.length; pass++) {
+        const mark = PREVIEW_PASS_BUFFER_S[pass];
+        // Before the request, not only between reads: opening the connection
+        // at all is what starts the competition with the video.
+        await waitForHeadroom(mark);
+        if (cancelled) return;
+        if (pass > 0) {
+          logEvent("Preview", "pass requested", {
+            partId: previewPartId, pass, bufferS: Math.round(Math.min(headroom(), 999)),
           });
         }
-        const activePct = previewPositionRef.current;
-        if (activePct !== null && frames) {
-          selectPreview(activePct, previewDetailRef.current);
+        const res = await fetch(
+          authUrl(`/api/plex/preview/${previewPartId}/index?progressive=2&pass=${pass}`),
+          { signal: abort.signal },
+        );
+        if (!res.ok || !res.body) return;
+        const contentType = res.headers.get("content-type") ?? "";
+        const version = contentType.startsWith("application/x-plex-preview-v2") ? 2
+          : contentType.startsWith("application/x-plex-preview-v1") ? 1 : 0;
+        if (pass === 0) {
+          logEvent("Preview", "transfer accepted", {
+            partId: previewPartId, transport: version ? `progressive-v${version}` : "legacy-bif",
+          });
+          // Older servers still return an ordinary BIF.
+          if (version !== 2) {
+            reader.dispose();
+            reader = version === 1 ? createProgressivePreviewReader(onTierReady, 1) : createPreviewFrameReader();
+          }
+        } else {
+          progressive.nextResponse();
         }
+        const body = res.body.getReader();
+        for (;;) {
+          // Still giving way while it downloads: a seek empties the buffer, and
+          // the video refills it before the pass carries on.
+          await waitForHeadroom(mark);
+          const { done, value } = await body.read();
+          if (done || cancelled) break;
+          if (!value) continue;
+          bytes += value.length;
+          reader.push(value);
+          if (reader.rejected()) {
+            logEvent("Preview", "frame index unreadable", { partId: previewPartId, bytes });
+            await body.cancel();
+            return;
+          }
+          const frames = reader.frames();
+          if (frames && !previewFramesRef.current) {
+            previewFramesRef.current = frames;
+            // Logged at the moment the index lands rather than at the end of the
+            // download, because that is the moment scrubbing starts working. The
+            // size is the one thing that can't be known ahead of a real library.
+            logEvent("Preview", "frame index ready", {
+              partId: previewPartId, frames: frames.count, indexBytes: bytes,
+            });
+          }
+          const activePct = previewPositionRef.current;
+          if (activePct !== null && frames) {
+            selectPreview(activePct, previewDetailRef.current);
+          }
+        }
+        // A server without passes sends them all in the first response, and
+        // so does a v1 or plain BIF one.
+        const frames = reader.frames();
+        if (cancelled || version !== 2 || !frames || frames.ready === frames.count) break;
       }
       if (!cancelled) {
         logEvent("Preview", reader.frames()?.ready === reader.frames()?.count ? "frames complete" : "frames incomplete", {

@@ -2,7 +2,7 @@
  * Which scrub-preview tier the cursor's speed picks.
  *
  * Three bands of speed along the bar, in bar-widths per second, and nothing
- * else: full below 0.01, medium to 0.12, coarse above. Driven here the way a
+ * else: full below 0.03, medium to 0.2, coarse above. Driven here the way a
  * pointer drives it — an event every 16ms, at whole-pixel positions — on a
  * desktop-width and a phone-width bar.
  */
@@ -31,23 +31,25 @@ function sweep(width: number, pxPerS: number, ms: number, motion = createPreview
 
 console.log("the bands");
 check("standing still is full", tierForSpeed(0), "full");
-check("just under 0.01 is full", tierForSpeed(0.0099), "full");
-check("0.01 is medium", tierForSpeed(0.01), "medium");
-check("just under 0.12 is medium", tierForSpeed(0.1199), "medium");
-check("0.12 is coarse", tierForSpeed(0.12), "coarse");
+check("just under 0.03 is full", tierForSpeed(0.0299), "full");
+check("0.03 is medium", tierForSpeed(0.03), "medium");
+check("just under 0.2 is medium", tierForSpeed(0.1999), "medium");
+check("0.2 is coarse", tierForSpeed(0.2), "coarse");
 check("a flick across the bar is coarse", tierForSpeed(3), "coarse");
 
 console.log("a 1300px desktop bar");
 check("creeping at 8px/s is full", sweep(1300, 8, 1000).tier, "full");
-check("30px/s is medium", sweep(1300, 30, 1000).tier, "medium");
+check("30px/s is full", sweep(1300, 30, 1000).tier, "full");
 check("120px/s is medium", sweep(1300, 120, 1000).tier, "medium");
-check("300px/s is coarse", sweep(1300, 300, 1000).tier, "coarse");
+check("200px/s is medium", sweep(1300, 200, 1000).tier, "medium");
+check("400px/s is coarse", sweep(1300, 400, 1000).tier, "coarse");
 check("a fast sweep is coarse", sweep(1300, 2000, 300).tier, "coarse");
 
 console.log("a 375px phone bar");
-check("10px/s is medium there", sweep(375, 10, 1000).tier, "medium");
+check("5px/s is full there", sweep(375, 5, 1000).tier, "full");
 check("30px/s is medium there", sweep(375, 30, 1000).tier, "medium");
-check("60px/s is coarse there", sweep(375, 60, 1000).tier, "coarse");
+check("60px/s is medium there", sweep(375, 60, 1000).tier, "medium");
+check("100px/s is coarse there", sweep(375, 100, 1000).tier, "coarse");
 
 console.log("stopping");
 const fast = sweep(1300, 2000, 300);
@@ -67,9 +69,9 @@ function jitterTiers(px: number) {
   }
   return [...tiers].sort();
 }
-// At most 2px apart within the window: 8px/s, inside full's 13px/s on this bar
+// At most 4px apart within the window: 16px/s, inside full's 39px/s on this bar
 // whatever the timing.
-check("1px of jitter either side always reads full", jitterTiers(1), ["full"]);
+check("2px of jitter either side always reads full", jitterTiers(2), ["full"]);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

@@ -106,6 +106,15 @@ interface ControlsProps {
  */
 const PREVIEW_THROTTLE_MS = 120;
 
+/**
+ * Testing aid: in place of the thumbnail, a solid block in the colour of the
+ * tier the cursor's speed picks — red coarse, yellow medium, green full — so
+ * the speed bands can be felt. It changes the moment the tier does, ahead of
+ * the per-tier picture gaps. Turn off once the bands are settled.
+ */
+const PREVIEW_TIER_COLORS = true;
+const TIER_COLOR: Record<PreviewDetail, string> = { coarse: "#e53935", medium: "#fdd835", full: "#43a047" };
+
 /*
  * Preview frames download as soon as the stream starts, alongside the video.
  * A buffer-headroom gate used to hold them back until 30s of video was
@@ -528,6 +537,8 @@ export function Controls({
   const previewSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewPositionRef = useRef<number | null>(null);
   const previewDetailRef = useRef<PreviewDetail>("medium");
+  // The tier as state, for PREVIEW_TIER_COLORS; null while nothing is hovered.
+  const [previewTier, setPreviewTier] = useState<PreviewDetail | null>(null);
   const previewLastShownRef = useRef(-Infinity);
   // The request that was just sent, if any: what was asked for, so the label
   // can keep saying it while the room carries on doing the opposite.
@@ -900,6 +911,7 @@ export function Controls({
   const clearPreviewMotion = useCallback(() => {
     previewMotionRef.current.reset();
     previewDetailRef.current = "medium";
+    setPreviewTier(null);
     previewPositionRef.current = null;
     previewLastShownRef.current = -Infinity;
     if (previewSettleRef.current !== null) clearTimeout(previewSettleRef.current);
@@ -953,6 +965,7 @@ export function Controls({
       });
     }
     previewDetailRef.current = detail;
+    if (PREVIEW_TIER_COLORS) setPreviewTier(detail);
   }, [previewPartId]);
 
   /** Timestamp follows the pointer exactly; only the image adapts. */
@@ -1221,6 +1234,7 @@ export function Controls({
   const fillPct = pendingTime != null && duration > 0 ? (pendingTime / duration) * 100 : progress;
   const buffered = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
   const barHeight = hoveringProgress || scrubPct != null ? 8 : 5;
+  const tierSwatch = PREVIEW_TIER_COLORS && previewTier ? TIER_COLOR[previewTier] : null;
 
   // Hoisted out of the tree below because a phone wraps it in a row with the
   // elapsed and remaining times either side, and a desktop doesn't.
@@ -1256,15 +1270,17 @@ export function Controls({
         <div
           style={{
             ...styles.seekTooltip,
-            ...(loadedPreviewSrc ? styles.seekTooltipWithPreview : null),
+            ...(tierSwatch || loadedPreviewSrc ? styles.seekTooltipWithPreview : null),
             // A bare M:SS bubble only needs 30px of edge margin; a 160px
             // preview needs half its width to avoid overflowing the bar.
-            left: loadedPreviewSrc
+            left: tierSwatch || loadedPreviewSrc
               ? `clamp(84px, ${hoverPct * 100}%, calc(100% - 84px))`
               : `clamp(30px, ${hoverPct * 100}%, calc(100% - 30px))`,
           }}
         >
-          {loadedPreviewSrc && (
+          {tierSwatch ? (
+            <div style={{ ...styles.seekPreviewImg, background: tierSwatch }} />
+          ) : loadedPreviewSrc && (
             <img src={loadedPreviewSrc} alt="" style={styles.seekPreviewImg} />
           )}
           {fmt(hoverPct * duration)}

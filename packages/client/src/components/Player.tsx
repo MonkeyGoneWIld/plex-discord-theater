@@ -151,6 +151,15 @@ const MAX_WEDGE_RECOVERIES = 3;
 const WEDGE_RESET_MS = 60_000;
 /** Clean playback for this long means the next media error starts a fresh budget. */
 const MEDIA_ERROR_RESET_MS = 60_000;
+/**
+ * The same, for the rebuild budgets behind it — a viewer's retries and the
+ * host's transcode restarts. These used to refill on every fragment that
+ * downloaded, which proves the network works and nothing about whether the
+ * fragment plays: a stream whose segments arrive but won't decode recovered,
+ * failed and recovered again forever, a few times a second, detaching the
+ * picture each time.
+ */
+const FATAL_ERROR_RESET_MS = 60_000;
 // After an in-place seek to an unbuffered position, how long to wait for
 // segments before giving up and restarting the transcode at the target.
 const SEEK_STALL_TIMEOUT_MS = 6_000;
@@ -1123,6 +1132,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // MEDIA_ERROR branch of the fatal-error handler.
   const mediaErrorCountRef = useRef(0);
   const lastMediaErrorAtRef = useRef(0);
+  const lastFatalErrorAtRef = useRef(0);
+  // Whether a stream that can't go on may just end here — see brokenStreamCanEnd.
+  // A ref because the HLS error handler outlives the render it was made in.
+  const brokenStreamCanEndRef = useRef<(breakAtS: number) => boolean>(() => false);
   const pendingStopRef = useRef<Promise<void> | null>(null);
   const bufferCleanupRef = useRef<(() => void) | null>(null);
   // Offset for the next transcode start. Seeded with the resume position so a
@@ -1163,6 +1176,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
     if (!(video.currentTime > 0)) return;
     lastGoodPositionRef.current = video.currentTime;
+  }, []);
+  /**
+   * The playhead as the room should hear it, or a restart should begin from.
+   *
+   * An element with no media reads 0 — mid recoverMediaError, mid-rebuild — and
+   * that 0 used to go out as if it were real: a pause pressed during a media
+   * error told the room the film was back at the start, and a recovery restarted
+   * the transcode there. The heartbeat was already gated on this; these weren't.
+   */
+  const positionForRoom = useCallback((): number => {
+    const video = videoRef.current;
+    if (video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return video.currentTime;
+    return lastGoodPositionRef.current;
   }, []);
   // Offset the current transcode session started at — Plex has no segments
   // before this position, so seeks behind it always need a restart.
@@ -2040,6 +2066,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (vpsRelay === null) return;
 
     let mounted = true;
+    // This stream breaks for good near the end and is playing out to the break
+    // — see the fatal-error handler. Nothing more to recover once it is.
+    let endingAtBreak = false;
 
     // Which dependency moved. This effect owns the whole HLS lifecycle, so
     // every restart in the log traces back to one of these — and "which one"
@@ -2564,15 +2593,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           announceStream(sessionId!, startOffset, sessionOwner, !holding);
         });
 
-        // Clear error banner and reset retry count when recovery succeeds
+        // Clear the error banner once fragments flow again. Only the network
+        // budget refills here: a fragment arriving is exactly what a network
+        // retry was waiting for, but says nothing about whether it decodes —
+        // the media and rebuild budgets refill on time instead (see
+        // FATAL_ERROR_RESET_MS), or a fragment that downloads and won't play
+        // resets the very counter meant to stop it.
         hls.on(Hls.Events.FRAG_LOADED, () => {
           if (mounted) {
             setError(null);
             setBuffering(false);
-            retryCountRef.current = 0;
             networkRetryRef.current = 0;
-            recoveryAttemptRef.current = 0;
-            mediaErrorCountRef.current = 0;
             hlsDeadRef.current = false;
           }
         });
@@ -2594,6 +2625,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (!data.fatal) return;
+          if (endingAtBreak) return;
           // A restart that dies before parsing a manifest would otherwise leave
           // this latched, and every later seek would skip the cheap in-place
           // path forever.
@@ -2608,6 +2640,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             url: data.frag?.url ?? data.url,
             ...snapshot(videoRef.current),
           });
+
+          // A minute without a fatal error is a fresh episode of trouble, and
+          // earns the rebuild budgets back.
+          if (Date.now() - lastFatalErrorAtRef.current > FATAL_ERROR_RESET_MS) {
+            retryCountRef.current = 0;
+            recoveryAttemptRef.current = 0;
+          }
+          lastFatalErrorAtRef.current = Date.now();
 
           // MEDIA_ERROR: hls.js's own recovery, escalating and then giving up.
           //
@@ -2656,6 +2696,54 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             return;
           }
 
+          // Broken with the title as good as over. Rebuilding would only replay
+          // the same break — the stream's tail is what won't play — so the
+          // title ends at the break instead: what is already buffered plays
+          // out, and then the end screen offers whatever comes next, the way
+          // reaching the end does. Everyone on the stream hits the same break,
+          // so each client ends on its own, as with `ended`.
+          //
+          // The break is the fragment that failed, not the playhead. hls.js
+          // reads up to two minutes ahead, so the playhead can be well short of
+          // it — on The Queen's Gambit it was at 3441s and the break at 3489s.
+          const breakAtS = typeof data.frag?.start === "number" ? data.frag.start : positionForRoom();
+          if (brokenStreamCanEndRef.current(breakAtS)) {
+            endingAtBreak = true;
+            hls.stopLoad();
+            const video = videoRef.current;
+            const finish = (event?: Event) => {
+              // A seek inside what's buffered stalls for a moment too; only
+              // running out of buffer is the break.
+              if (event?.type === "waiting" && video && (video.seeking || bufferAheadSeconds(video) >= 1)) return;
+              video?.removeEventListener("waiting", finish);
+              video?.removeEventListener("ended", finish);
+              // A rebuild since (the host seeking back, say) is a new stream
+              // with nothing wrong with it yet.
+              if (!mounted || hlsRef.current !== hls) return;
+              logEvent("HLS", "reached the break, ending the title", { ...snapshot(video) });
+              video?.pause();
+              setRecovering(false);
+              setError(null);
+              setNearEnd(true);
+              setPlaybackEnded(true);
+            };
+            const playingOut = !!video && !video.paused && bufferAheadSeconds(video) >= 1;
+            logWarn("HLS", "stream breaks near the end of the title, ending it there", {
+              type: data.type,
+              details: data.details,
+              session: sessionId?.substring(0, 8),
+              breakAtS,
+              playingOutS: playingOut ? bufferAheadSeconds(video!) : 0,
+            });
+            if (playingOut) {
+              video!.addEventListener("waiting", finish);
+              video!.addEventListener("ended", finish);
+            } else {
+              finish();
+            }
+            return;
+          }
+
           // Viewer: retry by bumping retryKey
           if (!ownsSessionRef.current) {
             if (retryCountRef.current < MAX_VIEWER_RETRIES) {
@@ -2694,7 +2782,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             recoveryPositionRef.current =
               !mountedAsHostRef.current && typeof roomPos === "number" && roomPos > 0
                 ? roomPos
-                : (video?.currentTime ?? 0);
+                : positionForRoom();
 
             canvasRef.current = captureFrame(video) ?? canvasRef.current;
 
@@ -2715,6 +2803,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               resumeAtS: recoveryPositionRef.current,
               roomPosS: roomPos ?? "none",
               currentTimeS: video?.currentTime ?? "none",
+              lastGoodPosS: lastGoodPositionRef.current,
               inMs: 2000,
             });
 
@@ -3894,6 +3983,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     syncActionsRef.current?.sendSeek(positionSeconds);
   }, [handleHostSeek]);
 
+  // The control bar's play/pause. It reports the element's own currentTime,
+  // which reads 0 while the element has no media — see positionForRoom.
+  const sendPauseForControls = useCallback(() => {
+    syncActionsRef.current?.sendPause(positionForRoom());
+  }, [positionForRoom]);
+  const sendResumeForControls = useCallback(() => {
+    syncActionsRef.current?.sendResume(positionForRoom());
+  }, [positionForRoom]);
+
   /**
    * Toggle playback and announce it to the room. Shared by the spacebar shortcut
    * and by clicking the video itself, so both stay in step.
@@ -3912,10 +4010,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const resuming = video.paused;
     if (resuming) {
       video.play();
-      syncActionsRef.current?.sendResume(video.currentTime);
+      syncActionsRef.current?.sendResume(positionForRoom());
     } else {
       video.pause();
-      syncActionsRef.current?.sendPause(video.currentTime);
+      syncActionsRef.current?.sendPause(positionForRoom());
     }
     // Acknowledge the input. Clicking the picture otherwise gives no feedback
     // until the frame moves, which on a paused-to-playing transition can be
@@ -4058,19 +4156,51 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /** Whether this client has watched the title through — see isWatchedThrough. */
   const hasFinishedItem = useCallback((): boolean => {
     if (playbackEnded) return true;
+    const meta = itemMeta?.ratingKey === item.ratingKey ? itemMeta : null;
+    return isWatchedThrough(positionReached(), itemDurationS(), meta?.markers ?? [], playedThresholdRef.current);
+  }, [playbackEnded, itemMeta, item.ratingKey, item.duration]);
+
+  /** Where playback has got to. Mid-restart the element sits at 0 with nothing
+   *  loaded, and the last position playback really reached is the truth. */
+  function positionReached(): number {
     const video = videoRef.current;
-    // Mid-restart the element sits at 0 with nothing loaded, and the last
-    // position playback really reached is the truth.
-    const position =
-      video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.currentTime > 0
-        ? video.currentTime
-        : lastGoodPositionRef.current;
+    return video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.currentTime > 0
+      ? video.currentTime
+      : lastGoodPositionRef.current;
+  }
+
+  /** The title's runtime in seconds, or 0 when nothing knows it yet. */
+  function itemDurationS(): number {
     const meta = itemMeta?.ratingKey === item.ratingKey ? itemMeta : null;
     const durationMs = meta?.duration ?? item.duration ?? 0;
-    const duration =
-      durationMs > 0 ? durationMs / 1000 : video && Number.isFinite(video.duration) ? video.duration : 0;
-    return isWatchedThrough(position, duration, meta?.markers ?? [], playedThresholdRef.current);
-  }, [playbackEnded, itemMeta, item.ratingKey, item.duration]);
+    if (durationMs > 0) return durationMs / 1000;
+    const video = videoRef.current;
+    return video && Number.isFinite(video.duration) ? video.duration : 0;
+  }
+
+  /**
+   * Whether a stream that can't be played past `breakAtS` may simply end there.
+   *
+   * When the title counts as watched by then, yes — and also when the break is
+   * past the share of the runtime Plex counts as watched, even if a later
+   * credits marker means the title doesn't count yet: there is a minute or two
+   * left at most, and restarting a transcode for it only replays the same
+   * break. That is the case this exists for. On The Queen's Gambit, Plex's
+   * transcoder stopped 65s short of the runtime the file reports, and the
+   * segments it then served for the rest would not decode, at the same place
+   * every time.
+   *
+   * Anywhere earlier, a broken stream is still worth rebuilding.
+   */
+  const brokenStreamCanEnd = (breakAtS: number): boolean => {
+    if (playbackEnded) return true;
+    const at = Math.max(positionReached(), breakAtS);
+    const duration = itemDurationS();
+    const meta = itemMeta?.ratingKey === item.ratingKey ? itemMeta : null;
+    return isWatchedThrough(at, duration, meta?.markers ?? [], playedThresholdRef.current)
+      || (duration > 0 && at >= duration * playedThresholdRef.current);
+  };
+  brokenStreamCanEndRef.current = brokenStreamCanEnd;
 
   const handleBack = useCallback(() => {
     // A host who has finished the title has no use for PiP or a warning, and
@@ -4740,8 +4870,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         onRequestTransport={
           !canControl && syncActions ? syncActions.sendTransportRequest : undefined
         }
-        onSyncPause={canControl ? syncActions?.sendPause : undefined}
-        onSyncResume={canControl ? syncActions?.sendResume : undefined}
+        onSyncPause={canControl && syncActions ? sendPauseForControls : undefined}
+        onSyncResume={canControl && syncActions ? sendResumeForControls : undefined}
         onSyncSeek={canControl ? syncActions?.sendSeek : undefined}
         onSeekRestart={canControl ? handleSeekCommand : undefined}
         // Everyone, not just whoever can drive the room. Choosing tracks puts
@@ -4944,10 +5074,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // an already-paused video would broadcast a spurious command.
                 if (video && wantPause && !video.paused) {
                   video.pause();
-                  syncActions?.sendPause(video.currentTime);
+                  syncActions?.sendPause(positionForRoom());
                 } else if (video && !wantPause && video.paused) {
                   void video.play();
-                  syncActions?.sendResume(video.currentTime);
+                  syncActions?.sendResume(positionForRoom());
                 }
                 syncActions?.clearTransportRequest();
               }}

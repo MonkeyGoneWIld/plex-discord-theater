@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Broken-stream checks</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #181b20; color: #eee; font: 14px system-ui, sans-serif; }
+      main { padding: 32px; max-width: 650px; }
+      button { font: inherit; cursor: pointer; }
+      .tools { display: flex; flex-wrap: wrap; gap: 8px; }
+      .tools button { padding: 9px 12px; background: #313842; color: #fff; border: 1px solid #596372; border-radius: 6px; }
+      pre { white-space: pre-wrap; line-height: 1.7; }
+      #results { position: fixed; top: 8px; left: 8px; z-index: 200; margin: 0; padding: 6px 10px; background: #000c; }
+    </style>
+  </head>
+  <body><div id="root"></div><script type="module" src="./media-errors.tsx"></script></body>
+</html>

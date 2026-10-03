@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { AddressInfo } from "node:net";
 import express from "express";
 
+// A data dir of its own. The default is packages/server/data, where the first
+// run left show 123 in the persisted detail cache with the TMDB id it recovers
+// below — so every later run answered the "provider unavailable" step from
+// that row and failed it.
+process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "missing-seasons-"));
 process.env.PLEX_URL = "http://plex.test";
 process.env.PLEX_TOKEN = "test-token";
 process.env.SEERR_URL = "http://seerr.test";

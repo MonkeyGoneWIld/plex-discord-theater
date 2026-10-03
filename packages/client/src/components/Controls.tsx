@@ -107,16 +107,6 @@ interface ControlsProps {
 const PREVIEW_THROTTLE_MS = 120;
 
 /**
- * Testing aid: a dot in the thumbnail's top-left corner, in the colour of the
- * tier the cursor's speed picks — red coarse, orange medium, yellow fine, green
- * full — so the speed bands can be felt against the pictures they produce. It
- * changes the moment the tier does, ahead of the per-tier picture gaps. Turn
- * off once the bands are settled.
- */
-const PREVIEW_TIER_DOT = true;
-const TIER_COLOR: Record<PreviewDetail, string> = { coarse: "#e53935", medium: "#fb8c00", fine: "#fdd835", full: "#43a047" };
-
-/**
  * The least time between picture changes per tier — the only thing the tiers
  * differ in. Every tier shows the finest frame downloaded for the cursor's
  * position, so a tier changing never changes the picture under a cursor that
@@ -553,8 +543,6 @@ export function Controls({
   const previewSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previewPositionRef = useRef<number | null>(null);
   const previewDetailRef = useRef<PreviewDetail>("coarse");
-  // The tier as state, for PREVIEW_TIER_DOT; null while nothing is hovered.
-  const [previewTier, setPreviewTier] = useState<PreviewDetail | null>(null);
   const previewLastShownRef = useRef(-Infinity);
   // The request that was just sent, if any: what was asked for, so the label
   // can keep saying it while the room carries on doing the opposite.
@@ -927,7 +915,6 @@ export function Controls({
   const clearPreviewMotion = useCallback(() => {
     previewMotionRef.current.reset();
     previewDetailRef.current = "coarse";
-    setPreviewTier(null);
     previewPositionRef.current = null;
     previewLastShownRef.current = -Infinity;
     if (previewSettleRef.current !== null) clearTimeout(previewSettleRef.current);
@@ -981,7 +968,6 @@ export function Controls({
       });
     }
     previewDetailRef.current = detail;
-    if (PREVIEW_TIER_DOT) setPreviewTier(detail);
   }, [previewPartId]);
 
   /** Timestamp follows the pointer exactly; only the image adapts. */
@@ -1299,7 +1285,6 @@ export function Controls({
   const fillPct = pendingTime != null && duration > 0 ? (pendingTime / duration) * 100 : progress;
   const buffered = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
   const barHeight = hoveringProgress || scrubPct != null ? 8 : 5;
-  const tierDot = PREVIEW_TIER_DOT && previewTier ? TIER_COLOR[previewTier] : null;
 
   // Hoisted out of the tree below because a phone wraps it in a row with the
   // elapsed and remaining times either side, and a desktop doesn't.
@@ -1344,10 +1329,7 @@ export function Controls({
           }}
         >
           {loadedPreviewSrc && (
-            <div style={{ position: "relative" }}>
-              <img src={loadedPreviewSrc} alt="" style={styles.seekPreviewImg} />
-              {tierDot && <div data-preview-tier style={{ ...styles.previewTierDot, background: tierDot }} />}
-            </div>
+            <img src={loadedPreviewSrc} alt="" style={styles.seekPreviewImg} />
           )}
           {fmt(hoverPct * duration)}
         </div>
@@ -2216,16 +2198,6 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 3,
     display: "block",
     background: "#000",
-  },
-  previewTierDot: {
-    position: "absolute",
-    top: 6,
-    left: 6,
-    width: 12,
-    height: 12,
-    borderRadius: "50%",
-    // A dark ring so the dot reads against a bright frame as well as a dark one.
-    boxShadow: "0 0 0 2px rgba(0,0,0,0.6)",
   },
   hoverMarker: {
     position: "absolute",

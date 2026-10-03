@@ -17,7 +17,7 @@ export function previewTierIndices(count: number, version: 1 | 2 = 2) {
     };
     return { coarse: grid(stride * 4), medium: grid(stride) };
   }
-  const coarseCount = Math.max(1, Math.ceil(count * 0.01));
+  const coarseCount = Math.max(1, Math.ceil(count * 0.005));
   const mediumCount = Math.max(1, Math.ceil(count * 0.40));
   const medium = Array.from({ length: mediumCount }, (_, i) =>
     mediumCount === 1 ? 0 : Math.floor(i * (count - 1) / (mediumCount - 1)));
@@ -35,7 +35,7 @@ export interface PreviewTierProgress {
 
 /** v1 wire format: uint32 head length, BIF header/index + first JPEG marker,
  * then records of uint32 frame number, uint32 length, JPEG bytes (all LE).
- * Each image is sent exactly once: 1% overview, another 39% for 40% medium,
+ * Each image is sent exactly once: 0.5% overview, another 39.5% for 40% medium,
  * then the rest. v1 requests retain the original fixed-size grids.
  * Deferred images go to a temporary file, not a movie-sized heap allocation.
  */

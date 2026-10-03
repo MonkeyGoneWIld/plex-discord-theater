@@ -2,7 +2,7 @@
  * Which scrub-preview tier the cursor's speed picks.
  *
  * Three bands of speed along the bar, in bar-widths per second, and nothing
- * else: full below 0.04, medium to 0.2, coarse above. Driven here the way a
+ * else: full below 0.04, medium to 0.16, coarse above. Driven here the way a
  * pointer drives it — an event every 16ms, at whole-pixel positions — on a
  * desktop-width and a phone-width bar.
  */
@@ -33,22 +33,22 @@ console.log("the bands");
 check("standing still is full", tierForSpeed(0), "full");
 check("just under 0.04 is full", tierForSpeed(0.0399), "full");
 check("0.04 is medium", tierForSpeed(0.04), "medium");
-check("just under 0.2 is medium", tierForSpeed(0.1999), "medium");
-check("0.2 is coarse", tierForSpeed(0.2), "coarse");
+check("just under 0.16 is medium", tierForSpeed(0.1599), "medium");
+check("0.16 is coarse", tierForSpeed(0.16), "coarse");
 check("a flick across the bar is coarse", tierForSpeed(3), "coarse");
 
 console.log("a 1300px desktop bar");
 check("creeping at 8px/s is full", sweep(1300, 8, 1000).tier, "full");
 check("30px/s is full", sweep(1300, 30, 1000).tier, "full");
 check("120px/s is medium", sweep(1300, 120, 1000).tier, "medium");
-check("200px/s is medium", sweep(1300, 200, 1000).tier, "medium");
+check("180px/s is medium", sweep(1300, 180, 1000).tier, "medium");
 check("400px/s is coarse", sweep(1300, 400, 1000).tier, "coarse");
 check("a fast sweep is coarse", sweep(1300, 2000, 300).tier, "coarse");
 
 console.log("a 375px phone bar");
 check("5px/s is full there", sweep(375, 5, 1000).tier, "full");
 check("30px/s is medium there", sweep(375, 30, 1000).tier, "medium");
-check("60px/s is medium there", sweep(375, 60, 1000).tier, "medium");
+check("40px/s is medium there", sweep(375, 40, 1000).tier, "medium");
 check("100px/s is coarse there", sweep(375, 100, 1000).tier, "coarse");
 
 console.log("stopping");

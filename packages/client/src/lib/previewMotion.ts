@@ -7,8 +7,8 @@ import type { PreviewDetail } from "./previewFrames";
  * a second — so it behaves the same on a phone and a desktop:
  *
  *   full     below 0.04   slower than 25s to cross the bar
- *   medium   0.04 – 0.2   5s to 25s to cross it
- *   coarse   0.2 and up   faster than 5s
+ *   medium   0.04 – 0.16  about 6s to 25s to cross it
+ *   coarse   0.16 and up  faster than about 6s
  *
  * It is how far the cursor got over the last SPEED_WINDOW_MS, rather than the
  * speed between two pointer events: those arrive unevenly, and pointer
@@ -19,7 +19,7 @@ import type { PreviewDetail } from "./previewFrames";
  */
 export const SPEED_WINDOW_MS = 250;
 const FULL_MAX_SPEED = 0.04;
-const MEDIUM_MAX_SPEED = 0.2;
+const MEDIUM_MAX_SPEED = 0.16;
 
 export function tierForSpeed(barWidthsPerSecond: number): PreviewDetail {
   if (barWidthsPerSecond < FULL_MAX_SPEED) return "full";

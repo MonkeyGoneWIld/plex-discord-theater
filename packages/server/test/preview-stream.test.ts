@@ -39,8 +39,8 @@ for (const count of [1, 2, 3, 7, 49, 50, 51, 96, 385, 3214, 10800]) {
   let level = 0;
   const { coarse, medium } = previewTierIndices(count);
   assert.deepEqual(serverTierIndices(count), { coarse, medium });
-  assert.equal(coarse.length, Math.ceil(count * 0.005));
-  assert.equal(medium.length, Math.ceil(count * 0.05));
+  assert.equal(coarse.length, Math.ceil(count * 0.01));
+  assert.equal(medium.length, Math.ceil(count * 0.10));
   assert.equal(new Set(medium).size, medium.length);
   assert.ok(coarse.every((i) => medium.includes(i)), "overview is a subset of medium");
   let header = true;
@@ -70,8 +70,8 @@ for (const count of [1, 2, 3, 7, 49, 50, 51, 96, 385, 3214, 10800]) {
   assert.deepEqual(received, sent, "client confirms the same three tiers that the server sent");
   assert.deepEqual(received.map((p) => p.tier), ["coarse", "medium", "full"]);
   if (count === 3214) {
-    assert.deepEqual(received.map((p) => p.frames), [17, 144, 3053]);
-    assert.deepEqual(received.map((p) => p.ready), [17, 161, 3214]);
+    assert.deepEqual(received.map((p) => p.frames), [33, 289, 2892]);
+    assert.deepEqual(received.map((p) => p.ready), [33, 322, 3214]);
   }
   const frames = reader.frames()!;
   assert.equal(frames.ready, count);
@@ -146,7 +146,7 @@ for (const corrupt of [Buffer.alloc(80), bif(0), bif(5).subarray(0, 100)]) {
   reader.dispose();
   const outOfOrder = createProgressivePreviewReader();
   outOfOrder.push(chunks[0]);
-  outOfOrder.push(chunks[1 + Math.ceil(3214 * 0.005)]); // first medium frame, before any overview
+  outOfOrder.push(chunks[1 + Math.ceil(3214 * 0.01)]); // first medium frame, before any overview
   assert.equal(outOfOrder.rejected(), true, "reject a medium tier sent before the overview");
   outOfOrder.dispose();
 }

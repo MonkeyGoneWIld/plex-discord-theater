@@ -927,7 +927,7 @@ export function Controls({
     const now = performance.now();
     // The least time between picture changes per tier. Mouse events arrive far
     // more often than this; any inside the gap move only the time label.
-    const gap = detail === "coarse" ? 150 : detail === "medium" ? 100 : 0;
+    const gap = detail === "coarse" ? 150 : detail === "medium" ? 120 : 0;
     if (now - previewLastShownRef.current < gap) return;
     const local = previewFramesRef.current?.frameAt(pct * duration * 1000, duration * 1000, detail);
     if (local) {
@@ -941,7 +941,7 @@ export function Controls({
     if (failedPartRef.current === previewPartId) return;
     // Approximate overview density before the BIF timestamps arrive.
     const approximateCount = Math.max(1, Math.ceil(duration / 2));
-    const tierCount = Math.max(1, Math.ceil(approximateCount * (detail === "coarse" ? 0.005 : 0.05)));
+    const tierCount = Math.max(1, Math.ceil(approximateCount * (detail === "coarse" ? 0.01 : 0.10)));
     const bucketSize = detail === "full" ? 2000 : Math.max(2000, duration * 1000 / tierCount);
     const bucketMs = Math.floor(Math.floor(pct * duration * 1000 / bucketSize) * bucketSize);
     const url = authUrl(`/api/plex/thumb/library/parts/${previewPartId}/indexes/sd/${bucketMs}`);

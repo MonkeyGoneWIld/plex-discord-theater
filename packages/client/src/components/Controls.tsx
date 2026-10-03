@@ -40,6 +40,9 @@ interface ControlsProps {
   canControl?: boolean;
   title: string;
   onBack: () => void;
+  /** Where the title really ends, when its stream stops short of the runtime
+   *  the element reports. The scrub bar ends there. */
+  endsAtS?: number | null;
   onSyncPause?: (position: number) => void;
   onSyncResume?: (position: number) => void;
   onSyncSeek?: (position: number) => void;
@@ -431,6 +434,7 @@ export function Controls({
   canControl = isHost,
   title,
   onBack,
+  endsAtS,
   onSyncPause,
   onSyncResume,
   onSyncSeek,
@@ -460,9 +464,14 @@ export function Controls({
   // on resume.
   const [started, setStarted] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
+  const [mediaDuration, setDuration] = useState(0);
   // Only a genuinely different item invalidates the duration — see onDur below.
   useEffect(() => { setDuration(0); }, [title]);
+  // What the bar spans: the element's runtime, unless the stream is known to
+  // stop short of it, in which case the bar ends where the title does.
+  const duration = endsAtS != null && endsAtS > 0 && (!mediaDuration || endsAtS < mediaDuration)
+    ? endsAtS
+    : mediaDuration;
   const [volume, setVolume] = useState(loadVolume);
   const [muted, setMuted] = useState(false);
   const [visible, setVisible] = useState(true);
@@ -763,7 +772,7 @@ export function Controls({
   const queueSkip = useCallback((amount: number) => {
     const video = videoRef.current;
     if (!video || !canControl) return;
-    const total = video.duration || duration || 0;
+    const total = duration || video.duration || 0;
 
     const burstInProgress = skipTimerRef.current !== null;
     if (!burstInProgress) skipBaseRef.current = video.currentTime;

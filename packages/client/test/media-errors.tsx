@@ -4,10 +4,13 @@
 // mounts the actual Player as host over real hls.js, against a stream with
 // segments replaced by bytes that can't be parsed. Not in the production entry.
 //
-// The loop it guards against: a fragment that downloads but won't decode used to
+// What it guards against: a fragment that downloads but won't decode used to
 // reset the recovery budget it had just spent, so the player detached and
 // reattached the picture several times a second forever — the flicker — and a
-// position read from the detached element sent the room back to 0:00.
+// position read from the detached element sent the room back to 0:00. Near the
+// end, where Plex pads a stream that stopped short with blank segments, even a
+// few recovery attempts were a stutter, and the padding played on as if it were
+// the episode.
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Player } from "../src/components/Player";
@@ -85,16 +88,21 @@ function Fixture() {
       await start("tail");
       await waitFor(() => find("stream breaks near the end"), 20_000, "the end-of-stream decision");
       const decision = find("stream breaks near the end")!;
-      check(decision.data.breakAtS > 108, `Break placed at ${decision.data.breakAtS}s, not ~111s`);
-      check(count("recoverMediaError") <= 3, `${count("recoverMediaError")} media recoveries — the loop is back`);
+      check(decision.data.breakAtS > 108 && decision.data.breakAtS < 114, `Break placed at ${decision.data.breakAtS}s, not ~111s`);
+      check(count("recoverMediaError") === 0, `${count("recoverMediaError")} media recoveries — each one is a stutter`);
       check(count("auto-recovery scheduled") === 0, "Restarted a transcode for a break past the watched point");
-      pass("A break near the end is found where it is, after at most 3 recoveries");
+      pass("A break near the end is taken as the end at once, with no recovery attempts to stutter");
+      const breakAt = Math.floor(decision.data.breakAtS);
+      const spans = `/ ${Math.floor(breakAt / 60)}:${String(breakAt % 60).padStart(2, "0")}`;
+      await waitFor(() => document.body.textContent?.includes(spans), 3_000, `the timeline to read "${spans}"`);
+      pass("The timeline ends at the break, not at the padded runtime");
       document.querySelector("video")!.currentTime = 105;
       await waitFor(() => find("reached the break"), 20_000, "playback to reach the break");
-      check(find("reached the break")!.data.posS > 109, `Ended at ${find("reached the break")!.data.posS}s, short of the break`);
+      const endedAt = find("reached the break")!.data.posS;
+      check(endedAt > 109 && endedAt < 112, `Ended at ${endedAt}s, not at the break`);
       await waitFor(() => shows("Episode Two"), 5_000, "the end screen");
       check(count("starting session") === 1, `${count("starting session")} sessions started for one play`);
-      pass("What is buffered plays out to the break, then the end screen offers the next episode");
+      pass("The title ends at the break, not after the padding that parsed, and offers the next episode");
       const reached = positions.findIndex((p) => p.at >= 100);
       check(reached >= 0, "The room never heard the position past 100s");
       const behind = positions.slice(reached).filter((p) => p.at < 100);

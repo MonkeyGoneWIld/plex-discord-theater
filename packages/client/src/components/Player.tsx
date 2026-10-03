@@ -160,6 +160,8 @@ const MEDIA_ERROR_RESET_MS = 60_000;
  * picture each time.
  */
 const FATAL_ERROR_RESET_MS = 60_000;
+/** How close the playhead must come to a stream's break to have reached it — timeupdate fires about four times a second. */
+const BREAK_REACHED_SLACK_S = 0.3;
 // After an in-place seek to an unbuffered position, how long to wait for
 // segments before giving up and restarting the transcode at the target.
 const SEEK_STALL_TIMEOUT_MS = 6_000;
@@ -597,6 +599,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // The item has genuinely finished, as opposed to merely being close to the
   // end. Drives the end-of-playback screen; nearEnd only drives the corner card.
   const [playbackEnded, setPlaybackEnded] = useState(false);
+  // Where the title's content really ends, when its stream turns out to stop
+  // short of the runtime the playlist was built for — see endAtBreak in the HLS
+  // effect. Null for an ordinary stream. The ref is for listeners.
+  const [contentEndsAtS, setContentEndsAtS] = useState<number | null>(null);
+  const contentEndsAtRef = useRef<number | null>(null);
+  contentEndsAtRef.current = contentEndsAtS;
   // Whether the "what comes after this" lookup has answered. The end screen has
   // to wait for it: an item that ends before the answer arrives would otherwise
   // look like it has no next episode and close the player on a series.
@@ -2009,6 +2017,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // card would appear instantly at the start of the episode we just advanced to.
     setPlaybackEnded(false);
     setNearEnd(false);
+    setContentEndsAtS(null);
     setSiblingsResolved(false);
     // Viewers resolve this too now. They can't act on it — the transport
     // buttons stay host-only — but the end-of-playback screen shows everyone
@@ -2066,9 +2075,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (vpsRelay === null) return;
 
     let mounted = true;
-    // This stream breaks for good near the end and is playing out to the break
-    // — see the fatal-error handler. Nothing more to recover once it is.
-    let endingAtBreak = false;
+    // Where this stream stops being the title — set by endAtBreak, below, once
+    // a fragment past the point the title counts as finished won't play.
+    let breakAtS: number | null = null;
 
     // Which dependency moved. This effect owns the whole HLS lifecycle, so
     // every restart in the log traces back to one of these — and "which one"
@@ -2608,11 +2617,78 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           }
         });
 
+        /**
+         * End the title where its stream breaks, if that is near enough the end.
+         *
+         * Plex can stop short of the runtime it builds a playlist for. On The
+         * Queen's Gambit its transcoder died a minute before the end every
+         * time, and Plex answered for each segment after that with "sending
+         * back blank segment, we overestimated the number of segments". The
+         * blanks don't parse — and the ones that do are buffered as nothing
+         * worth watching — so the episode seemed to end with the timeline still
+         * running, and recovering from them, which detaches the picture each
+         * time, was a stutter.
+         *
+         * A fragment that breaks past the point the title counts as finished is
+         * that tail. Loading stops, the scrub bar ends at the break, and the
+         * title ends when the playhead reaches it, the way reaching the end
+         * does — not when the buffer runs out, since that holds the blanks too.
+         * The earliest such fragment is the break. Returns whether `atS` was
+         * taken as one.
+         */
+        const endAtBreak = (atS: number): boolean => {
+          if (breakAtS !== null && atS >= breakAtS) return true;
+          if (!brokenStreamCanEndRef.current(atS)) return false;
+          const first = breakAtS === null;
+          breakAtS = atS;
+          setContentEndsAtS(atS);
+          logWarn("HLS", "stream breaks near the end of the title, ending it there", {
+            session: sessionId?.substring(0, 8),
+            breakAtS: atS,
+            ...snapshot(videoRef.current),
+          });
+          const video = videoRef.current;
+          if (!first || !video) return true;
+          hls.stopLoad();
+          const stop = () => {
+            video.removeEventListener("timeupdate", check);
+            video.removeEventListener("waiting", check);
+            video.removeEventListener("ended", check);
+          };
+          function check(event?: Event) {
+            // A rebuild since (the host seeking back, say) is a new stream.
+            if (!mounted || hlsRef.current !== hls) { stop(); return; }
+            const reached = video!.currentTime >= breakAtS! - BREAK_REACHED_SLACK_S
+              || event?.type === "ended"
+              // Out of buffer short of the break, with nothing more coming. Not
+              // on a seek, which stalls for a moment inside the buffer too.
+              || (event?.type !== "timeupdate" && !video!.seeking && bufferAheadSeconds(video!) < 1);
+            if (!reached) return;
+            stop();
+            logEvent("HLS", "reached the break, ending the title", { breakAtS, ...snapshot(video) });
+            video!.pause();
+            setRecovering(false);
+            setError(null);
+            setNearEnd(true);
+            setPlaybackEnded(true);
+          }
+          video.addEventListener("timeupdate", check);
+          video.addEventListener("waiting", check);
+          video.addEventListener("ended", check);
+          // Once fragments already loading have landed, in case playback has
+          // already stalled and no event is coming.
+          setTimeout(() => check(), 1000);
+          return true;
+        };
+
         // Non-fatal errors are the early warning: a run of fragment timeouts or
         // gap-jumps usually precedes the fatal one by several seconds, and
         // without them the log shows a stream dying with no run-up.
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (data.fatal) return;
+          const fragStart = data.frag?.start;
+          // Past a known break is the blank tail; it has been said once.
+          if (breakAtS !== null && typeof fragStart === "number" && fragStart >= breakAtS) return;
           logWarn("HLS", "non-fatal error", {
             type: data.type,
             details: data.details,
@@ -2621,11 +2697,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             httpStatus: data.response?.code,
             ...snapshot(videoRef.current),
           });
+          // A fragment that won't parse past the finished point is the end of
+          // the title, not a glitch: act on it now, before it turns fatal and
+          // the recovery attempts start detaching the picture.
+          if (data.details === Hls.ErrorDetails.FRAG_PARSING_ERROR && typeof fragStart === "number") {
+            endAtBreak(fragStart);
+          }
         });
 
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (!data.fatal) return;
-          if (endingAtBreak) return;
+          if (breakAtS !== null) return;
           // A restart that dies before parsing a manifest would otherwise leave
           // this latched, and every later seek would skip the cheap in-place
           // path forever.
@@ -2648,6 +2730,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             recoveryAttemptRef.current = 0;
           }
           lastFatalErrorAtRef.current = Date.now();
+
+          // Past the finished point, a fragment that won't parse is the blank
+          // tail of a stream that stopped short — see endAtBreak. No recovery
+          // brings it back, and each attempt detaches the picture.
+          if (
+            data.details === Hls.ErrorDetails.FRAG_PARSING_ERROR
+            && typeof data.frag?.start === "number"
+            && endAtBreak(data.frag.start)
+          ) return;
 
           // MEDIA_ERROR: hls.js's own recovery, escalating and then giving up.
           //
@@ -2696,53 +2787,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             return;
           }
 
-          // Broken with the title as good as over. Rebuilding would only replay
-          // the same break — the stream's tail is what won't play — so the
-          // title ends at the break instead: what is already buffered plays
-          // out, and then the end screen offers whatever comes next, the way
-          // reaching the end does. Everyone on the stream hits the same break,
-          // so each client ends on its own, as with `ended`.
-          //
-          // The break is the fragment that failed, not the playhead. hls.js
-          // reads up to two minutes ahead, so the playhead can be well short of
-          // it — on The Queen's Gambit it was at 3441s and the break at 3489s.
-          const breakAtS = typeof data.frag?.start === "number" ? data.frag.start : positionForRoom();
-          if (brokenStreamCanEndRef.current(breakAtS)) {
-            endingAtBreak = true;
-            hls.stopLoad();
-            const video = videoRef.current;
-            const finish = (event?: Event) => {
-              // A seek inside what's buffered stalls for a moment too; only
-              // running out of buffer is the break.
-              if (event?.type === "waiting" && video && (video.seeking || bufferAheadSeconds(video) >= 1)) return;
-              video?.removeEventListener("waiting", finish);
-              video?.removeEventListener("ended", finish);
-              // A rebuild since (the host seeking back, say) is a new stream
-              // with nothing wrong with it yet.
-              if (!mounted || hlsRef.current !== hls) return;
-              logEvent("HLS", "reached the break, ending the title", { ...snapshot(video) });
-              video?.pause();
-              setRecovering(false);
-              setError(null);
-              setNearEnd(true);
-              setPlaybackEnded(true);
-            };
-            const playingOut = !!video && !video.paused && bufferAheadSeconds(video) >= 1;
-            logWarn("HLS", "stream breaks near the end of the title, ending it there", {
-              type: data.type,
-              details: data.details,
-              session: sessionId?.substring(0, 8),
-              breakAtS,
-              playingOutS: playingOut ? bufferAheadSeconds(video!) : 0,
-            });
-            if (playingOut) {
-              video!.addEventListener("waiting", finish);
-              video!.addEventListener("ended", finish);
-            } else {
-              finish();
-            }
-            return;
-          }
+          // Anything else that can't be recovered, with the title as good as
+          // over: rebuilding would only replay the same break, so the title
+          // ends there instead — at the fragment that failed, which hls.js can
+          // have reached two minutes ahead of the playhead, or else the playhead.
+          // Everyone on the stream hits the same break, so each client ends on
+          // its own, as with `ended`.
+          if (endAtBreak(typeof data.frag?.start === "number" ? data.frag.start : positionForRoom())) return;
 
           // Viewer: retry by bumping retryKey
           if (!ownsSessionRef.current) {
@@ -4394,7 +4445,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const video = videoRef.current;
     if (!video) return;
     const onTime = () => {
-      const d = video.duration;
+      // Against where the content really ends, when the stream stops short.
+      const d = Math.min(video.duration, contentEndsAtRef.current ?? Infinity);
       const remaining = d - video.currentTime;
       // No `remaining > 0` guard: once the episode finishes there is nothing on
       // screen but black, which is precisely when the card matters most. Nothing
@@ -4870,6 +4922,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         onRequestTransport={
           !canControl && syncActions ? syncActions.sendTransportRequest : undefined
         }
+        endsAtS={contentEndsAtS}
         onSyncPause={canControl && syncActions ? sendPauseForControls : undefined}
         onSyncResume={canControl && syncActions ? sendResumeForControls : undefined}
         onSyncSeek={canControl ? syncActions?.sendSeek : undefined}

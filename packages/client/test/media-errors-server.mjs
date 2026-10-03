@@ -3,8 +3,9 @@
 // Serves a two-minute HLS stream shaped like a Plex transcode (H.264 + MP3 in
 // MPEG-TS, 3s segments) on http://localhost:3999/<scenario>/, with some segments
 // replaced by random bytes that hls.js cannot parse:
-//   tail   — segments 37-39 (111s to the end): a stream that breaks near the end,
-//            the way The Queen's Gambit's last minute did
+//   tail   — segment 37 (111-114s), with the two after it intact: a stream that
+//            stops short of its runtime and is padded to the end, the way Plex
+//            padded The Queen's Gambit's last minute with blank segments
 //   middle — segments 20-22 (60-69s): a bad patch mid-film
 //   clean  — nothing broken
 // Needs ffmpeg on the PATH the first time, to generate the stream.
@@ -17,7 +18,7 @@ import { spawnSync } from "node:child_process";
 
 const PORT = 3999;
 const dir = path.join(os.tmpdir(), "plex-theater-media-errors");
-const broken = { tail: [37, 38, 39], middle: [20, 21, 22], clean: [] };
+const broken = { tail: [37], middle: [20, 21, 22], clean: [] };
 
 if (!fs.existsSync(path.join(dir, "index.m3u8"))) {
   fs.mkdirSync(dir, { recursive: true });

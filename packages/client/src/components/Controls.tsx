@@ -106,31 +106,15 @@ interface ControlsProps {
  */
 const PREVIEW_THROTTLE_MS = 120;
 
-/**
- * How much video has to be buffered ahead before the preview index may use the
- * connection — and the level it has to stay above to go on using it.
- *
- * This was a four second delay, on the reasoning that the first moments of
- * playback are when a stall is likeliest. That reasoning was right and the
- * mechanism was wrong: a wall-clock delay knows nothing about how the download
- * is going. A client that joined a room mid-film, eleven seconds after
- * pressing play, was 28.8MB into a preview index with 5.9 seconds of video
- * buffered — and the index won. Its buffer went 5.97 → 4.17 → 2.68 → 0.11 and
- * it stalled one second before the room handed it the host role.
- *
- * A gate rather than a delay, then, and one that keeps applying: the read loop
- * below stops pulling whenever the buffer drops under this, and the fetch
- * stops with it, because an unread response body applies backpressure all the
- * way down to the socket. Video first, always; the frames get what is left.
- *
- * 30s against a 120s maxBufferLength — high enough that pulling tens of
- * megabytes cannot starve the playhead, low enough to be reached in ordinary
- * playback rather than only when parked.
+/*
+ * Preview frames download as soon as the stream starts, alongside the video.
+ * A buffer-headroom gate used to hold them back until 30s of video was
+ * buffered, after one client's start-up stall (its buffer ran from 5.97s down
+ * to 0.11s while a 28.8MB index downloaded). But a transcoded stream can take
+ * a long time to build 30s of headroom, and seeking is mostly done right after
+ * starting, so the frames arrived too late to help. Coarse, the first tier,
+ * is a few hundred kilobytes; the rest follows in the background.
  */
-const PREVIEW_MIN_BUFFER_S = 30;
-
-/** How often to look again while the buffer is under that. */
-const PREVIEW_BUFFER_POLL_MS = 500;
 
 /**
  * How many decoded frames to keep. Scrubbing back over ground you've already
@@ -928,7 +912,9 @@ export function Controls({
   const selectPreview = useCallback((pct: number, detail: PreviewDetail) => {
     if (previewPartId == null || !(duration > 0) || !isFinite(duration)) return;
     const now = performance.now();
-    const gap = detail === "coarse" ? 180 : detail === "medium" ? 150 : 0;
+    // The least time between picture changes per tier. Mouse events arrive far
+    // more often than this; any inside the gap move only the time label.
+    const gap = detail === "coarse" ? 60 : detail === "medium" ? 30 : 0;
     if (now - previewLastShownRef.current < gap) return;
     const local = previewFramesRef.current?.frameAt(pct * duration * 1000, duration * 1000, detail);
     if (local) {
@@ -1055,7 +1041,7 @@ export function Controls({
   }, [pctFromClientX, commitSeekToPct, resetHideTimer, clearPreviewMotion]);
 
   /**
-   * Pull the part's whole preview index shortly after the stream starts.
+   * Pull the part's whole preview index as soon as the stream starts.
    *
    * Hovering the bar used to be the thing that fetched a frame: one request out
    * to Plex per position, arriving a beat or two after the cursor had already
@@ -1081,35 +1067,7 @@ export function Controls({
     };
     let reader: PreviewFrameReader = createProgressivePreviewReader(onTierReady);
 
-    /**
-     * Seconds of video buffered past the playhead.
-     *
-     * A video with nothing loaded yet reports no headroom rather than infinite
-     * — the gate should wait for it to fill, not race it.
-     */
-    const headroom = (): number => {
-      const video = videoRef.current;
-      if (!video) return 0;
-      const at = video.currentTime;
-      for (let i = 0; i < video.buffered.length; i++) {
-        if (video.buffered.start(i) <= at && at <= video.buffered.end(i)) {
-          return video.buffered.end(i) - at;
-        }
-      }
-      return 0;
-    };
-
-    const waitForHeadroom = async () => {
-      while (!cancelled && headroom() < PREVIEW_MIN_BUFFER_S) {
-        await new Promise((r) => setTimeout(r, PREVIEW_BUFFER_POLL_MS));
-      }
-    };
-
     const read = async () => {
-      // Before the request, not only between reads: opening the connection at
-      // all is what starts the competition.
-      await waitForHeadroom();
-      if (cancelled) return;
       transferStartedAt = performance.now();
       const res = await fetch(
         authUrl(`/api/plex/preview/${previewPartId}/index?progressive=2`),
@@ -1129,14 +1087,7 @@ export function Controls({
       }
       const body = res.body.getReader();
       let bytes = 0;
-      let waits = 0;
       for (;;) {
-        // Not reading is how this yields: an unread body backs pressure up
-        // through the stream to the socket, so the bytes stop arriving rather
-        // than piling up in a buffer somewhere out of sight.
-        const before = performance.now();
-        await waitForHeadroom();
-        if (performance.now() - before > PREVIEW_BUFFER_POLL_MS) waits++;
         const { done, value } = await body.read();
         if (done || cancelled) break;
         if (!value) continue;
@@ -1166,10 +1117,6 @@ export function Controls({
         logEvent("Preview", reader.frames()?.ready === reader.frames()?.count ? "frames complete" : "frames incomplete", {
           partId: previewPartId, bytes, frames: reader.frames()?.count ?? 0,
           ready: reader.frames()?.ready ?? 0,
-          // How often the video needed the connection back. Zero means the
-          // download never had to yield; a high count on a stream that still
-          // played cleanly is the gate doing its job.
-          yielded: waits,
         });
       }
     };

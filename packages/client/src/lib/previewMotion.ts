@@ -1,8 +1,18 @@
 import type { PreviewDetail } from "./previewFrames";
 
-export const PREVIEW_SETTLE_MS = 650;
-const PRECISE_DWELL_MS = 500;
-const FOCUS_RADIUS_PX = 12;
+/** Resting within FOCUS_RADIUS_PX for this long switches to full detail. */
+export const PREVIEW_SETTLE_MS = 250;
+/** Moving slower than PRECISE_SPEED_PX for this long also switches to full detail. */
+const PRECISE_DWELL_MS = 150;
+const FOCUS_RADIUS_PX = 24;
+/** Pixels per second that count as holding still. */
+const PRECISE_SPEED_PX = 50;
+/** Full detail holds until movement passes twice the way in, so it doesn't flicker at the edge. */
+const PRECISE_EXIT_SPEED_PX = PRECISE_SPEED_PX * 2;
+/** Sweeping faster than this, in fractions of the bar per second, shows the coarse tier... */
+const COARSE_ENTER_SPEED = 1.2;
+/** ...and it stays coarse until the sweep slows below this. */
+const COARSE_EXIT_SPEED = 0.8;
 
 /** Broad sweeps use timeline speed. Precise inspection uses screen pixels and
  * a local focus window, so video length and one-pixel jitter cannot lock it out. */
@@ -32,13 +42,13 @@ export function createPreviewMotion() {
         const weight = 1 - Math.exp(-elapsed / 150);
         preciseSpeed = elapsed > PREVIEW_SETTLE_MS ? instant * width
           : preciseSpeed + weight * (instant * width - preciseSpeed);
-        if (speed >= 0.8 || (detail === "coarse" && speed >= 0.55)) {
+        if (speed >= COARSE_ENTER_SPEED || (detail === "coarse" && speed >= COARSE_EXIT_SPEED)) {
           detail = "coarse";
           slowSince = null;
           focus = { pct, time };
-        } else if (time - focus.time >= PREVIEW_SETTLE_MS || (detail === "full" && preciseSpeed <= 40)) {
+        } else if (time - focus.time >= PREVIEW_SETTLE_MS || (detail === "full" && preciseSpeed <= PRECISE_EXIT_SPEED_PX)) {
           detail = "full";
-        } else if (preciseSpeed <= 20) {
+        } else if (preciseSpeed <= PRECISE_SPEED_PX) {
           slowSince ??= time;
           detail = time - slowSince >= PRECISE_DWELL_MS ? "full" : "medium";
         } else {

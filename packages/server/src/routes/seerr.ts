@@ -22,7 +22,8 @@ function seerrConfig(): SeerrConfig | null {
   return url && token ? { url, token } : null;
 }
 
-// Cached Seerr session cookie from the Plex login; refreshed on TTL or a 401.
+// Cached Seerr session cookie from the Plex login; refreshed on TTL, or when
+// Seerr turns it away — see seerrFetch.
 let sessionCookie: string | null = null;
 let sessionAt = 0;
 
@@ -52,8 +53,17 @@ async function currentSession(cfg: SeerrConfig): Promise<string | null> {
   return login(cfg);
 }
 
-/** Authenticated Seerr call via the Plex session cookie. Retries once with a
- *  fresh login if the session has expired. Returns null if we can't authenticate. */
+/**
+ * Authenticated Seerr call via the Plex session cookie. Retries once with a
+ * fresh login if the session has expired. Returns null if we can't authenticate.
+ *
+ * Expired means 403 as well as 401. Overseerr and Jellyseerr answer a request
+ * with no valid session 403 ("You do not have permission to access this
+ * endpoint"), not 401, so retrying on 401 alone never fired: once Seerr dropped
+ * the session, every lookup failed until the cookie's own TTL ran out, and show
+ * pages said "Could not load missing seasons" for hours. A 403 that survives a
+ * fresh login is a real refusal, and comes back as it is.
+ */
 async function seerrFetch(
   cfg: SeerrConfig,
   path: string,
@@ -74,7 +84,7 @@ async function seerrFetch(
   let cookie = await currentSession(cfg);
   if (!cookie) return null;
   let r = await call(cookie);
-  if (r.status === 401) {
+  if (r.status === 401 || r.status === 403) {
     sessionCookie = null;
     cookie = await login(cfg);
     if (!cookie) return null;

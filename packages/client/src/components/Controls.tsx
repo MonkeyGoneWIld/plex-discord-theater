@@ -117,7 +117,7 @@ const PREVIEW_TIER_DOT = true;
 const TIER_COLOR: Record<PreviewDetail, string> = { coarse: "#e53935", medium: "#fb8c00", fine: "#fdd835", full: "#43a047" };
 
 /** The least time between picture changes per tier. */
-const PREVIEW_GAP_MS: Record<PreviewDetail, number> = { coarse: 220, medium: 180, fine: 150, full: 0 };
+const PREVIEW_GAP_MS: Record<PreviewDetail, number> = { coarse: 200, medium: 170, fine: 140, full: 0 };
 /** Each tier's share of the frames, as previewTierIndices lays them out. */
 const PREVIEW_SHARE: Record<PreviewDetail, number> = { coarse: 0.05, medium: 0.15, fine: 0.40, full: 1 };
 

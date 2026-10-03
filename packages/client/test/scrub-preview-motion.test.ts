@@ -2,7 +2,7 @@
  * Which scrub-preview tier the cursor's speed picks.
  *
  * Four bands of speed along the bar, in bar-widths per second: full below
- * 0.03, fine to 0.09, medium to 0.15, coarse above. Speeding up switches at
+ * 0.025, fine to 0.08, medium to 0.17, coarse above. Speeding up switches at
  * once; slowing down steps one tier per STEP_DOWN_MS, and a hover starts at
  * coarse. Driven here the way a pointer drives it — an event every 16ms, at
  * whole-pixel positions — on a desktop-width and a phone-width bar.
@@ -48,18 +48,18 @@ function rest(motion: ReturnType<typeof createPreviewMotion>, from: number, tier
 
 console.log("the bands");
 check("standing still is full", tierForSpeed(0), "full");
-check("just under 0.03 is full", tierForSpeed(0.0299), "full");
-check("0.03 is fine", tierForSpeed(0.03), "fine");
-check("just under 0.09 is fine", tierForSpeed(0.0899), "fine");
-check("0.09 is medium", tierForSpeed(0.09), "medium");
-check("just under 0.15 is medium", tierForSpeed(0.1499), "medium");
-check("0.15 is coarse", tierForSpeed(0.15), "coarse");
+check("just under 0.025 is full", tierForSpeed(0.0249), "full");
+check("0.025 is fine", tierForSpeed(0.025), "fine");
+check("just under 0.08 is fine", tierForSpeed(0.0799), "fine");
+check("0.08 is medium", tierForSpeed(0.08), "medium");
+check("just under 0.17 is medium", tierForSpeed(0.1699), "medium");
+check("0.17 is coarse", tierForSpeed(0.17), "coarse");
 check("a flick across the bar is coarse", tierForSpeed(3), "coarse");
 
 // Long enough for a hover's three steps down from coarse.
 console.log("a 1300px desktop bar");
 check("creeping at 8px/s is full", sweep(1300, 8, 1500).tier, "full");
-check("30px/s is full", sweep(1300, 30, 1500).tier, "full");
+check("20px/s is full", sweep(1300, 20, 1500).tier, "full");
 check("80px/s is fine", sweep(1300, 80, 1500).tier, "fine");
 check("150px/s is medium", sweep(1300, 150, 1500).tier, "medium");
 check("300px/s is coarse", sweep(1300, 300, 1500).tier, "coarse");
@@ -131,7 +131,7 @@ function jitterTiers(px: number) {
   }
   return [...tiers].sort();
 }
-// At most 4px apart within the window: 16px/s, inside full's 39px/s on this bar
+// At most 4px apart within the window: 16px/s, inside full's 32px/s on this bar
 // whatever the timing.
 check("2px of jitter either side always reads full", jitterTiers(2), ["full"]);
 

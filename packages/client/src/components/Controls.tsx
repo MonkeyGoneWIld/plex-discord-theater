@@ -116,10 +116,13 @@ const PREVIEW_THROTTLE_MS = 120;
 const PREVIEW_TIER_DOT = true;
 const TIER_COLOR: Record<PreviewDetail, string> = { coarse: "#e53935", medium: "#fb8c00", fine: "#fdd835", full: "#43a047" };
 
-/** The least time between picture changes per tier. */
+/**
+ * The least time between picture changes per tier — the only thing the tiers
+ * differ in. Every tier shows the finest frame downloaded for the cursor's
+ * position, so a tier changing never changes the picture under a cursor that
+ * isn't moving.
+ */
 const PREVIEW_GAP_MS: Record<PreviewDetail, number> = { coarse: 200, medium: 170, fine: 140, full: 0 };
-/** Each tier's share of the frames, as previewTierIndices lays them out. */
-const PREVIEW_SHARE: Record<PreviewDetail, number> = { coarse: 0.05, medium: 0.15, fine: 0.40, full: 1 };
 
 /*
  * Preview frames download as soon as the stream starts, alongside the video.
@@ -933,7 +936,11 @@ export function Controls({
     // Mouse events arrive far more often than the tier's picture gap; any
     // inside it move only the time label.
     if (now - previewLastShownRef.current < PREVIEW_GAP_MS[detail]) return;
-    const local = previewFramesRef.current?.frameAt(pct * duration * 1000, duration * 1000, detail);
+    // The finest frame there is: while the index is still downloading, the
+    // nearest one from an earlier pass stands in.
+    const local = previewFramesRef.current?.frameAt(pct * duration * 1000, duration * 1000);
+    // The same picture again is no change, and must not restart the gap.
+    if (local && local === pendingPreviewRef.current) return;
     if (local) {
       if (previewThrottleRef.current !== null) clearTimeout(previewThrottleRef.current);
       previewThrottleRef.current = null;
@@ -943,11 +950,8 @@ export function Controls({
       return;
     }
     if (failedPartRef.current === previewPartId) return;
-    // Approximate overview density before the BIF timestamps arrive.
-    const approximateCount = Math.max(1, Math.ceil(duration / 2));
-    const tierCount = Math.max(1, Math.ceil(approximateCount * PREVIEW_SHARE[detail]));
-    const bucketSize = detail === "full" ? 2000 : Math.max(2000, duration * 1000 / tierCount);
-    const bucketMs = Math.floor(Math.floor(pct * duration * 1000 / bucketSize) * bucketSize);
+    // Plex's own two-second frame interval, before the BIF timestamps arrive.
+    const bucketMs = Math.floor(pct * duration * 1000 / 2000) * 2000;
     const url = authUrl(`/api/plex/thumb/library/parts/${previewPartId}/indexes/sd/${bucketMs}`);
     if (pendingPreviewRef.current === url) return;
     pendingPreviewRef.current = url;
@@ -1063,8 +1067,10 @@ export function Controls({
    * Hovering the bar used to be the thing that fetched a frame: one request out
    * to Plex per position, arriving a beat or two after the cursor had already
    * moved on, and nothing at all for a sweep. The frames all live in one file,
-   * so this fetches it once, ordered overview, medium, then full detail. All
-   * three passes start automatically; hovering never starts a later pass.
+   * so this fetches it once, in four passes: 5% of the frames, then to 15%, to
+   * 40%, and the rest. All of them start automatically; hovering never starts
+   * a later pass. Until a pass arrives, the nearest frame from an earlier one
+   * stands in.
    *
    * Failure is not handled because it does not need to be — showPreviewAt keeps
    * the per-frame path and falls back to it whenever this ref is empty, which

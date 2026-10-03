@@ -1,7 +1,9 @@
 import type { PreviewDetail } from "./previewFrames";
 
 /**
- * Which preview tier to show, from how fast the cursor is moving along the bar.
+ * Which preview tier to use, from how fast the cursor is moving along the bar.
+ * A tier only sets how often the picture may change (PREVIEW_GAP_MS in
+ * Controls); every tier shows the same frames.
  *
  * Speed is in bar-widths per second — how much of the bar the cursor covers in
  * a second — so it behaves the same on a phone and a desktop:
@@ -20,8 +22,8 @@ import type { PreviewDetail } from "./previewFrames";
  * Speeding up switches tier at once. Slowing down while still moving steps
  * one tier at a time, each only once the speed has read finer for
  * STEP_DOWN_MS: coarse to medium to fine. Holding still is different: once the
- * speed has read full for STEP_DOWN_MS it goes straight to full, so the
- * picture changes once, not once per tier, under a cursor that isn't moving.
+ * speed has read full for STEP_DOWN_MS it goes straight to full, so the next
+ * small move is shown at once.
  * A hover starts at coarse. A pointer that stops sends no more events, so the
  * caller asks again after nextChangeIn, which is when the window or a step
  * next moves on.

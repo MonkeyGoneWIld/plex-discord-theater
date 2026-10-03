@@ -162,6 +162,8 @@ const MEDIA_ERROR_RESET_MS = 60_000;
 const FATAL_ERROR_RESET_MS = 60_000;
 /** How close the playhead must come to a stream's break to have reached it — timeupdate fires about four times a second. */
 const BREAK_REACHED_SLACK_S = 0.3;
+/** How far short of a fragment, or of a stalled playhead, the picture may stop and still be what it ran out of. */
+const PICTURE_END_SLACK_S = 10;
 // After an in-place seek to an unbuffered position, how long to wait for
 // segments before giving up and restarting the transcode at the target.
 const SEEK_STALL_TIMEOUT_MS = 6_000;
@@ -289,6 +291,24 @@ function toQueueItem(ep: PlexItem | null, subtitles: boolean): QueueItem | null 
 function bufferedEnd(video: HTMLVideoElement): number | null {
   const { buffered } = video;
   return buffered.length > 0 ? buffered.end(buffered.length - 1) : null;
+}
+
+/**
+ * Where the picture stops, for a stream with nothing to show from `fromS` on:
+ * the end of the buffered range that runs up to it. The element reports only
+ * what it has both picture and sound for, so that range stops at the last
+ * video frame even when sound was buffered past it. Null when no buffered range
+ * ends close enough before `fromS` to be the one it ran out of.
+ */
+function pictureEndsAtS(video: HTMLVideoElement | null, fromS: number): number | null {
+  if (!video) return null;
+  const { buffered } = video;
+  for (let i = buffered.length - 1; i >= 0; i--) {
+    if (buffered.start(i) > fromS + 0.5) continue;
+    const end = buffered.end(i);
+    return end >= fromS - PICTURE_END_SLACK_S ? Math.min(end, fromS) : null;
+  }
+  return null;
 }
 
 /** Seconds of contiguous buffer ahead of the current playhead (0 if none). */
@@ -2078,6 +2098,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // Where this stream stops being the title — set by endAtBreak, below, once
     // a fragment past the point the title counts as finished won't play.
     let breakAtS: number | null = null;
+    // endAtBreak, for the stall watchdog, which lives outside the block that
+    // defines it. Null until there is an hls.js stream to end.
+    let endTitleAtBreak: ((atS: number) => boolean) | null = null;
 
     // Which dependency moved. This effect owns the whole HLS lifecycle, so
     // every restart in the log traces back to one of these — and "which one"
@@ -2635,7 +2658,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
          * does — not when the buffer runs out, since that holds the blanks too.
          * The earliest such fragment is the break. Returns whether `atS` was
          * taken as one.
+         *
+         * Plex doesn't always send blanks. Other times the segments past that
+         * point parse cleanly and carry sound with no picture, so no error ever
+         * says so — see the FRAG_BUFFERED handler and the stall watchdog, which
+         * find those.
          */
+        let recheckBreak: (() => void) | null = null;
         const endAtBreak = (atS: number): boolean => {
           if (breakAtS !== null && atS >= breakAtS) return true;
           if (!brokenStreamCanEndRef.current(atS)) return false;
@@ -2648,7 +2677,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             ...snapshot(videoRef.current),
           });
           const video = videoRef.current;
-          if (!first || !video) return true;
+          // An earlier break than the one already ending the title: the
+          // playhead may be past it already, and stalled, so look now.
+          if (!first) { recheckBreak?.(); return true; }
+          if (!video) return true;
           hls.stopLoad();
           const stop = () => {
             video.removeEventListener("timeupdate", check);
@@ -2675,11 +2707,43 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           video.addEventListener("timeupdate", check);
           video.addEventListener("waiting", check);
           video.addEventListener("ended", check);
+          recheckBreak = () => check();
           // Once fragments already loading have landed, in case playback has
           // already stalled and no event is coming.
           setTimeout(() => check(), 1000);
           return true;
         };
+        endTitleAtBreak = endAtBreak;
+
+        // A fragment that buffered with sound and no picture: the video has
+        // ended, whatever the playlist says. Past the point its transcoder can't
+        // get through, Plex sometimes serves segments like this rather than
+        // blanks. They parse cleanly, so no error said the title was over —
+        // playback ran on past the last frame, stalled, and sat "buffering",
+        // with the scrub bar still promising the rest of the runtime. Found
+        // here as soon as one loads, typically two minutes ahead.
+        //
+        // The break is the last frame of picture that did arrive: the end of
+        // the latest video hls.js parsed, which can be a couple of seconds short
+        // of where the sound-only fragment starts. Browsers can count the
+        // sound-only stretch as buffered, so the element can't say where that is.
+        let pictureEndS = 0;
+        hls.on(Hls.Events.FRAG_BUFFERED, (_event, data) => {
+          if (data.frag.type !== "main") return;
+          const streams = data.frag.elementaryStreams;
+          const picture = streams.video ?? streams.audiovideo;
+          if (picture) {
+            pictureEndS = Math.max(pictureEndS, picture.endPTS);
+            return;
+          }
+          if (breakAtS !== null || !streams.audio) return;
+          const fragStart = data.frag.start;
+          const lastFrame = pictureEndS > 0 && pictureEndS <= fragStart + 0.5
+            && pictureEndS >= fragStart - PICTURE_END_SLACK_S
+            ? pictureEndS
+            : pictureEndsAtS(videoRef.current, fragStart);
+          endAtBreak(lastFrame ?? fragStart);
+        });
 
         // Non-fatal errors are the early warning: a run of fragment timeouts or
         // gap-jumps usually precedes the fatal one by several seconds, and
@@ -3194,6 +3258,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         }
         if (++wedgeTicksRef.current < WEDGE_CHECKS_BEFORE_ACTING) return;
         wedgeTicksRef.current = 0;
+
+        // Stuck where the picture ran out, with the title as good as over:
+        // that is the end of the stream, not a wedge, and no amount of
+        // restarting the loader produces frames that don't exist. The last
+        // net for a stream that stops short with no sign of it until now.
+        const pictureEnd = pictureEndsAtS(v, v.currentTime);
+        if (pictureEnd !== null && endTitleAtBreak?.(pictureEnd)) return;
 
         if (Date.now() - wedgeLastAtRef.current > WEDGE_RESET_MS) {
           wedgeRecoveriesRef.current = 0;

@@ -45,7 +45,7 @@ const events: Array<{ msg: string; data: Record<string, any> }> = [];
 for (const level of ["log", "warn", "error"] as const) {
   const original = console[level].bind(console);
   console[level] = (...args: unknown[]) => {
-    if (typeof args[0] === "string" && /^\[(HLS|Host)\] /.test(args[0])) {
+    if (typeof args[0] === "string" && /^\[(HLS|Host|Stall)\] /.test(args[0])) {
       events.push({ msg: args[0].replace(/^\[\w+\] /, ""), data: (args[1] ?? {}) as Record<string, any> });
     }
     original(...args);
@@ -109,6 +109,26 @@ function Fixture() {
       check(behind.length === 0, `Sent ${behind.map((p) => `${p.name}@${p.at}`).join(", ")} after reaching 100s`);
       pass("No position from a detached element reaches the room");
 
+      // Plex's other padding: segments that parse cleanly but carry sound only.
+      // No error ever fires; this used to stall at the last frame, "buffering",
+      // with the scrub bar still reading the full runtime.
+      await start("silent");
+      await waitFor(() => find("stream breaks near the end"), 20_000, "the picture's end to be noticed");
+      const silentBreak = find("stream breaks near the end")!.data.breakAtS;
+      check(silentBreak > 108 && silentBreak < 112, `Picture's end placed at ${silentBreak}s, not ~111s`);
+      check(count("fatal error") === 0 && count("recoverMediaError") === 0, "Errors or recoveries for a stream that parses cleanly");
+      const silentAt = Math.floor(silentBreak);
+      const silentSpans = `/ ${Math.floor(silentAt / 60)}:${String(silentAt % 60).padStart(2, "0")}`;
+      await waitFor(() => document.body.textContent?.includes(silentSpans), 3_000, `the timeline to read "${silentSpans}"`);
+      pass("Sound-only padding is noticed as soon as it loads, and the timeline ends at the last frame");
+      document.querySelector("video")!.currentTime = 105;
+      await waitFor(() => find("reached the break"), 20_000, "playback to reach the last frame");
+      const silentEnded = find("reached the break")!.data.posS;
+      check(silentEnded > 109 && silentEnded < 112, `Ended at ${silentEnded}s, not at the last frame`);
+      await waitFor(() => shows("Episode Two"), 5_000, "the end screen");
+      check(count("wedged") === 0, "Sat stalled at the last frame before ending");
+      pass("The title ends at the last frame instead of buffering, and offers the next episode");
+
       await start("middle");
       await waitFor(() => shows("Stream lost"), 40_000, "the stream-lost panel");
       check(count("stream breaks near the end") === 0, "Ended the title at a break halfway through");
@@ -127,6 +147,7 @@ function Fixture() {
       <p>Real player over real hls.js. Needs the fixture stream server running (see the top of media-errors.tsx).</p>
       <div className="tools">
         <button disabled={running} onClick={() => void start("tail")}>Play: breaks near the end</button>
+        <button disabled={running} onClick={() => void start("silent")}>Play: picture ends early</button>
         <button disabled={running} onClick={() => void start("middle")}>Play: breaks mid-film</button>
         <button disabled={running} onClick={run}>{running ? "Checking…" : "Run checks"}</button>
       </div>

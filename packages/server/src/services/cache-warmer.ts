@@ -3,12 +3,21 @@ import {
   buildMeta,
   getRelatedCached,
   invalidateTitleDetailCaches,
+  warmThumb,
   type PlexMetadataItem,
 } from "../routes/plex.js";
 import { createSession } from "../middleware/auth.js";
 import { detailCacheMatches, markDetailCacheVersion } from "./detail-cache.js";
 import { replaceLibraryIndex } from "./library-index.js";
 import { numberSetting } from "./env-settings.js";
+import {
+  BACKDROP_SIZE,
+  EPISODE_STILL_SIZE,
+  PERSON_SIZE,
+  POSTER_SIZE,
+  WARM_PORTRAITS_PER_TITLE,
+  type ArtworkSize,
+} from "./artwork-sizes.js";
 
 /**
  * Background cache warmer.
@@ -19,18 +28,35 @@ import { numberSetting } from "./env-settings.js";
  * watching a skeleton. This walks the library after startup and fills those
  * caches ahead of time, so opening a title is a cache hit.
  *
+ * Then the artwork for those titles: posters and backdrops, then each title's
+ * first portraits, then each show's season posters, episode details and
+ * episode stills. Every image is fetched at the size the page asks for, so the
+ * image proxy answers from its cache instead of waiting for Plex to resize an
+ * original. Anything already cached is skipped, so after the first pass only
+ * what is new, changed or expired costs anything.
+ *
  * Deliberately slow and bounded. It runs behind the server rather than in front
  * of it, and a library of any size would otherwise mean thousands of Plex calls
- * in a burst — on the same machine that is about to transcode video. One item at
- * a time with a pause between them keeps it in the background where it belongs.
+ * in a burst — on the same machine that is about to transcode video. One request
+ * at a time with a pause after each keeps it in the background where it
+ * belongs, and nothing is asked of Plex at all while a room is playing.
  */
 
 const ENABLED = process.env.WARM_CACHE !== "0";
+/** Posters, backdrops, portraits and episode stills. WARM_CACHE_ARTWORK=0 leaves
+ *  artwork to be fetched when a page first shows it. */
+const ARTWORK = process.env.WARM_CACHE_ARTWORK !== "0";
+/** Each warmed show's seasons and episodes. WARM_CACHE_EPISODES=0 stops at the
+ *  show itself. */
+const EPISODES = process.env.WARM_CACHE_EPISODES !== "0";
 /** Titles to keep warm. Beyond this the tail is unlikely to be opened before
  *  the next pass comes round anyway. */
 const MAX_ITEMS = numberSetting("WARM_CACHE_MAX_ITEMS", 600);
-/** Gap between items — the throttle that keeps this off Plex's critical path. */
+/** Pause after each title, episode or image fetched from Plex — the throttle
+ *  that keeps this off Plex's critical path. Nothing already cached waits. */
 const ITEM_DELAY_MS = numberSetting("WARM_CACHE_DELAY_MS", 250);
+/** How often to look again while a room is playing. */
+const BUSY_POLL_MS = 30_000;
 /** How long after boot to start, letting the server settle first. */
 const START_DELAY_MS = 15_000;
 /** Re-run interval. Comfortably inside the 6h /collections TTL, so warm entries
@@ -142,43 +168,212 @@ async function warmRelated(port: number, ratingKey: string): Promise<void> {
   if (!res.ok) throw new Error(`collections warm failed: ${res.status}`);
 }
 
-async function runPass(port: number): Promise<void> {
-  if (running) return;
-  running = true;
+/** What a pass needs from its caller. Injected so the server can say when a room
+ *  is playing without this module importing the sync service, and so tests can. */
+export interface WarmOptions {
+  /** True while a room is playing. Nothing is asked of Plex until it is false. */
+  isBusy?: () => boolean;
+  busyPollMs?: number;
+}
+
+interface PassContext {
+  port: number;
+  isBusy: () => boolean;
+  busyPollMs: number;
+}
+
+interface ArtworkTally {
+  fetched: number;
+  cached: number;
+  failed: number;
+}
+
+/**
+ * Hold the next request to Plex while a room is playing.
+ *
+ * Every request here lands on the Plex server that is transcoding the room's
+ * stream. One poster costs it little, but a first pass is tens of thousands
+ * of them, and that is better spent between films than during one.
+ */
+async function whenIdle(ctx: PassContext): Promise<void> {
+  if (!ctx.isBusy()) return;
+  console.log("[warm] paused while a room is playing");
+  while (ctx.isBusy()) await sleep(ctx.busyPollMs);
+  console.log("[warm] resumed");
+}
+
+/** An artwork URL as the API gives it to the client — see mapItem. */
+function apiThumb(plexPath: string | undefined): string | null {
+  return plexPath ? `/api/plex/thumb${plexPath}` : null;
+}
+
+async function warmImage(
+  ctx: PassContext,
+  tally: ArtworkTally,
+  url: string | null,
+  size: ArtworkSize,
+): Promise<void> {
+  if (!url) return;
+  const outcome = await warmThumb(url, size.w, size.h, () => whenIdle(ctx));
+  tally[outcome]++;
+  // Only a request that reached Plex is paced. A pass over a warm cache is
+  // all cache hits and has no reason to take hours.
+  if (outcome !== "cached") await sleep(ITEM_DELAY_MS);
+}
+
+/**
+ * The portraits a title page shows first: directors, then cast, without
+ * repeats, up to WARM_PORTRAITS_PER_TITLE. The order and limit match the
+ * client's hover prefetch.
+ */
+export function portraitUrls(meta: Record<string, unknown> | null): string[] {
+  const credits = (list: unknown) => (Array.isArray(list) ? list : []) as Array<{ thumb?: string | null }>;
+  const urls = new Set<string>();
+  for (const person of [...credits(meta?.directors), ...credits(meta?.cast)]) {
+    if (urls.size >= WARM_PORTRAITS_PER_TITLE) break;
+    if (person.thumb) urls.add(person.thumb);
+  }
+  return [...urls];
+}
+
+/** Titles: the detail-page data, rebuilt only where Plex's copy changed. */
+async function warmDetails(ctx: PassContext, candidates: CatalogItem[]): Promise<void> {
   const startedAt = Date.now();
   let warmed = 0;
   let unchanged = 0;
+  for (const item of candidates) {
+    const ratingKey = String(item.ratingKey);
+    const sourceUpdatedAt = item.updatedAt;
+    if (sourceUpdatedAt != null && detailCacheMatches(ratingKey, sourceUpdatedAt)) {
+      unchanged++;
+      continue;
+    }
+    await whenIdle(ctx);
+    // Disk and memory must agree on invalidation. Otherwise buildMeta would
+    // immediately return the old persistent row we came here to replace.
+    invalidateTitleDetailCaches(ratingKey);
+    try {
+      const meta = await buildMeta(ratingKey);
+      if (!meta) throw new Error("metadata warm returned no item");
+      await warmRelated(ctx.port, ratingKey);
+      if (sourceUpdatedAt != null) markDetailCacheVersion(ratingKey, sourceUpdatedAt);
+      warmed++;
+    } catch {
+      // One unreachable title must not end the pass — the next one may be fine.
+    }
+    await sleep(ITEM_DELAY_MS);
+  }
+  console.log(
+    `[warm] refreshed ${warmed}, reused ${unchanged}/${candidates.length} titles in ${Math.round((Date.now() - startedAt) / 1000)}s`,
+  );
+}
+
+/**
+ * Titles: posters and backdrops for all of them first, since the library grid
+ * is the first thing anyone sees, then their portraits.
+ */
+async function warmTitleArtwork(ctx: PassContext, candidates: CatalogItem[]): Promise<void> {
+  const startedAt = Date.now();
+  const tally: ArtworkTally = { fetched: 0, cached: 0, failed: 0 };
+  for (const item of candidates) {
+    await warmImage(ctx, tally, apiThumb(item.thumb), POSTER_SIZE);
+    await warmImage(ctx, tally, apiThumb(item.art), BACKDROP_SIZE);
+  }
+  for (const item of candidates) {
+    // Answered from the detail cache the first phase just filled. Only a title
+    // that failed there reaches Plex.
+    await whenIdle(ctx);
+    const meta = await buildMeta(String(item.ratingKey)).catch(() => null);
+    for (const url of portraitUrls(meta)) await warmImage(ctx, tally, url, PERSON_SIZE);
+  }
+  console.log(
+    `[warm] title artwork: fetched ${tally.fetched}, already cached ${tally.cached}, failed ${tally.failed} in ${Math.round((Date.now() - startedAt) / 1000)}s`,
+  );
+}
+
+/**
+ * Shows: every season and episode. Episode details are rebuilt only where
+ * Plex's copy changed, the same test titles get. Without it an episode's
+ * stored details were never refreshed at all. Then season posters and the
+ * stills of the season's episode list.
+ */
+async function warmEpisodes(ctx: PassContext, shows: CatalogItem[]): Promise<void> {
+  const startedAt = Date.now();
+  const tally: ArtworkTally = { fetched: 0, cached: 0, failed: 0 };
+  let refreshed = 0;
+  let unchanged = 0;
+  let failed = 0;
+  let episodeCount = 0;
+  for (const show of shows) {
+    const showKey = String(show.ratingKey);
+    let seasons: CatalogItem[];
+    let episodes: CatalogItem[];
+    try {
+      await whenIdle(ctx);
+      const children = await plexJSON<{ MediaContainer: { Metadata?: CatalogItem[] } }>(
+        `/library/metadata/${showKey}/children`,
+      );
+      const leaves = await plexJSON<{ MediaContainer: { Metadata?: CatalogItem[] } }>(
+        `/library/metadata/${showKey}/allLeaves`,
+      );
+      seasons = children.MediaContainer.Metadata ?? [];
+      episodes = leaves.MediaContainer.Metadata ?? [];
+    } catch {
+      continue;
+    }
+    await sleep(ITEM_DELAY_MS);
+    episodeCount += episodes.length;
+
+    for (const episode of episodes) {
+      const ratingKey = String(episode.ratingKey);
+      const sourceUpdatedAt = episode.updatedAt;
+      if (sourceUpdatedAt != null && detailCacheMatches(ratingKey, sourceUpdatedAt, ["meta"])) {
+        unchanged++;
+        continue;
+      }
+      await whenIdle(ctx);
+      invalidateTitleDetailCaches(ratingKey);
+      try {
+        if (!(await buildMeta(ratingKey))) throw new Error("metadata warm returned no item");
+        if (sourceUpdatedAt != null) markDetailCacheVersion(ratingKey, sourceUpdatedAt);
+        refreshed++;
+      } catch {
+        failed++;
+      }
+      await sleep(ITEM_DELAY_MS);
+    }
+
+    if (ARTWORK) {
+      for (const season of seasons) await warmImage(ctx, tally, apiThumb(season.thumb), POSTER_SIZE);
+      for (const episode of episodes) await warmImage(ctx, tally, apiThumb(episode.thumb), EPISODE_STILL_SIZE);
+    }
+  }
+  console.log(
+    `[warm] episodes of ${shows.length} shows: refreshed ${refreshed}, reused ${unchanged}/${episodeCount}, failed ${failed}; ` +
+    `artwork fetched ${tally.fetched}, already cached ${tally.cached}, failed ${tally.failed} in ${Math.round((Date.now() - startedAt) / 1000)}s`,
+  );
+}
+
+/** One full pass. Exported for tests; the server runs it from startCacheWarmer. */
+export async function runWarmPass(port: number, options: WarmOptions = {}): Promise<void> {
+  if (running) return;
+  running = true;
+  const ctx: PassContext = {
+    port,
+    isBusy: options.isBusy ?? (() => false),
+    busyPollMs: options.busyPollMs ?? BUSY_POLL_MS,
+  };
   try {
+    await whenIdle(ctx);
     const catalog = await libraryCatalog();
     replaceLibraryIndex(catalog);
     const candidates = [...catalog]
       .sort((a, b) => (b.addedAt ?? 0) - (a.addedAt ?? 0))
       .slice(0, MAX_ITEMS);
 
-    for (const item of candidates) {
-      const ratingKey = String(item.ratingKey);
-      const sourceUpdatedAt = item.updatedAt;
-      if (sourceUpdatedAt != null && detailCacheMatches(ratingKey, sourceUpdatedAt)) {
-        unchanged++;
-        continue;
-      }
-      // Disk and memory must agree on invalidation. Otherwise buildMeta would
-      // immediately return the old persistent row we came here to replace.
-      invalidateTitleDetailCaches(ratingKey);
-      try {
-        const meta = await buildMeta(ratingKey);
-        if (!meta) throw new Error("metadata warm returned no item");
-        await warmRelated(port, ratingKey);
-        if (sourceUpdatedAt != null) markDetailCacheVersion(ratingKey, sourceUpdatedAt);
-        warmed++;
-      } catch {
-        // One unreachable title must not end the pass — the next one may be fine.
-      }
-      await sleep(ITEM_DELAY_MS);
-    }
-    console.log(
-      `[warm] refreshed ${warmed}, reused ${unchanged}/${candidates.length} titles in ${Math.round((Date.now() - startedAt) / 1000)}s`,
-    );
+    await warmDetails(ctx, candidates);
+    if (ARTWORK) await warmTitleArtwork(ctx, candidates);
+    if (EPISODES) await warmEpisodes(ctx, candidates.filter((item) => item.type === "show"));
   } catch (err) {
     console.warn("[warm] pass failed:", err);
   } finally {
@@ -186,15 +381,18 @@ async function runPass(port: number): Promise<void> {
   }
 }
 
-/** Begin warming in the background. No-op when WARM_CACHE=0. */
-export function startCacheWarmer(port: number): void {
+/**
+ * Begin warming in the background. No-op when WARM_CACHE=0. `isBusy` reports
+ * whether a room is playing, which holds every request to Plex until it isn't.
+ */
+export function startCacheWarmer(port: number, isBusy: () => boolean = () => false): void {
   if (!ENABLED) {
     console.log("[warm] disabled (WARM_CACHE=0)");
     return;
   }
   setTimeout(() => {
-    void runPass(port);
-    timer = setInterval(() => void runPass(port), INTERVAL_MS);
+    void runWarmPass(port, { isBusy });
+    timer = setInterval(() => void runWarmPass(port, { isBusy }), INTERVAL_MS);
     // Don't hold the process open on shutdown for the sake of a warm-up pass.
     timer.unref?.();
   }, START_DELAY_MS).unref?.();

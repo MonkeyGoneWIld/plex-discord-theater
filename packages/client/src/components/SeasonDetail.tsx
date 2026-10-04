@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import {
-  fetchChildren, fetchProgressMany, fetchSeasonEpisodes, getSessionToken,
+  fetchChildren, fetchProgressMany, fetchSeasonEpisodes, episodeThumbUrl,
   setPlexItemWatched,
   type HistoryEntry, type PlexItem, type SeasonEpisode,
 } from "../lib/api";
@@ -19,15 +19,6 @@ interface SeasonDetailProps {
   onBack: () => void;
   /** Jump to the show landing page from the in-content breadcrumb. */
   onShowClick?: () => void;
-}
-
-function authUrl(url: string, w?: number, h?: number): string {
-  const token = getSessionToken();
-  if (!token || !url) return url;
-  const sep = url.includes("?") ? "&" : "?";
-  let out = `${url}${sep}token=${encodeURIComponent(token)}`;
-  if (w && h) out += `&w=${w}&h=${h}`;
-  return out;
 }
 
 function fmtDuration(ms: number): string {
@@ -322,7 +313,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                 <div style={{ ...styles.thumbWrap, ...(narrow ? styles.thumbWrapNarrow : {}) }}>
                   {ep.thumb ? (
                     <img
-                      src={authUrl(ep.thumb, 400, 225)}
+                      src={episodeThumbUrl(ep.thumb)}
                       alt=""
                       // Dimmed when finished, so a season scans at a glance
                       // rather than needing the badges read one by one.

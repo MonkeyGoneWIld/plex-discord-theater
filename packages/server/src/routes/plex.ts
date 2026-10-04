@@ -2759,13 +2759,8 @@ router.get("/thumb/*", async (req: Request, res: Response) => {
     }
   }
 
-  const transcodeSource = externalUrl ?? imagePath;
-  // External images are resized here rather than relying on each provider to
-  // honour dimensions. Version the key so old original-size cache entries are
-  // not mistaken for the new exact-size variants.
-  const cacheKey = externalUrl
-    ? `ext:v2:${externalUrl}:${width ?? "original"}x${height ?? "original"}`
-    : w && h ? `${transcodeSource}:${w}x${h}` : transcodeSource;
+  const request: ThumbRequest = { imagePath, externalUrl, width, height };
+  const cacheKey = thumbCacheKey(request);
 
   // Check server-side cache first
   const cached = thumbCache.get(cacheKey);
@@ -2777,75 +2772,153 @@ router.get("/thumb/*", async (req: Request, res: Response) => {
   }
 
   try {
-    // External artwork is fetched directly (Plex's transcoder won't reliably
-    // pull non-Plex CDNs like TMDB). Local images use the photo transcoder when
-    // resizing, otherwise a raw local fetch.
-    const plexRes = externalUrl
-      ? await fetchExternalImage(externalUrl)
-      : (w && h)
-        ? await plexFetch("/photo/:/transcode", {
-            width: w,
-            height: h,
-            minSize: "1",
-            upscale: "1",
-            url: imagePath,
-          })
-        : await plexFetch(imagePath);
-
-    if (!plexRes.ok) {
-      plexRes.body?.cancel().catch(() => {});
-      res.status(plexRes.status).end();
+    const result = await fetchThumb(request);
+    if (!result.ok) {
+      res.status(result.status).end();
       return;
-    }
-    const contentType = plexRes.headers.get("content-type");
-    const normalizedContentType = contentType?.split(";")[0];
-    const resolvedType =
-      normalizedContentType && ALLOWED_IMAGE_TYPES.has(normalizedContentType)
-        ? normalizedContentType
-        : "application/octet-stream";
-
-    const contentLength = plexRes.headers.get("content-length");
-    if (contentLength && parseInt(contentLength, 10) > 10 * 1024 * 1024) {
-      plexRes.body?.cancel().catch(() => {});
-      res.status(502).end();
-      return;
-    }
-
-    // Buffer the response so we can cache it
-    let data = Buffer.from(await plexRes.arrayBuffer());
-    if (data.length > 10 * 1024 * 1024) {
-      res.status(502).end();
-      return;
-    }
-
-    // Plex's local photo transcoder already sizes local art. Cloud portraits
-    // and TMDB posters bypass it, so resize those once on the bot and persist
-    // the compact result. The browser then downloads only the pixels it draws.
-    if (
-      externalUrl && width != null && height != null &&
-      resolvedType !== "image/gif" && resolvedType !== "application/octet-stream"
-    ) {
-      data = await sharp(data)
-        .rotate()
-        .resize(width, height, { fit: "cover", position: "centre" })
-        .toBuffer();
     }
 
     // Store in cache (fire-and-forget, don't block response)
     try {
-      thumbCache.set(cacheKey, resolvedType, data);
+      thumbCache.set(cacheKey, result.contentType, result.data);
     } catch (cacheErr) {
       console.error("Thumb cache write error:", cacheErr);
     }
 
-    res.setHeader("Content-Type", resolvedType);
+    res.setHeader("Content-Type", result.contentType);
     res.setHeader("Cache-Control", THUMB_BROWSER_CACHE_CONTROL);
-    res.send(data);
+    res.send(result.data);
   } catch (err) {
     console.error("Thumb proxy error:", err);
     res.status(502).end();
   }
 });
+
+/** One image the thumb proxy serves: a Plex path, or external art, at a size. */
+interface ThumbRequest {
+  imagePath: string;
+  externalUrl?: string;
+  width: number | null;
+  height: number | null;
+}
+
+/**
+ * The thumb-cache key for one image at one size.
+ *
+ * Shared by the route and the cache warmer, which has to fill exactly the
+ * entries the route will look for. External images are resized here rather
+ * than relying on each provider to honour dimensions. Version the key so old
+ * original-size cache entries are not mistaken for the new exact-size variants.
+ */
+function thumbCacheKey({ imagePath, externalUrl, width, height }: ThumbRequest): string {
+  if (externalUrl) return `ext:v2:${externalUrl}:${width ?? "original"}x${height ?? "original"}`;
+  return width != null && height != null ? `${imagePath}:${width}x${height}` : imagePath;
+}
+
+type ThumbResult =
+  | { ok: true; contentType: string; data: Buffer }
+  | { ok: false; status: number };
+
+/** Fetch one image from Plex (or through it, for external art), sized and checked. */
+async function fetchThumb({ imagePath, externalUrl, width, height }: ThumbRequest): Promise<ThumbResult> {
+  // External artwork is fetched directly (Plex's transcoder won't reliably
+  // pull non-Plex CDNs like TMDB). Local images use the photo transcoder when
+  // resizing, otherwise a raw local fetch.
+  const plexRes = externalUrl
+    ? await fetchExternalImage(externalUrl)
+    : width != null && height != null
+      ? await plexFetch("/photo/:/transcode", {
+          width: String(width),
+          height: String(height),
+          minSize: "1",
+          upscale: "1",
+          url: imagePath,
+        })
+      : await plexFetch(imagePath);
+
+  if (!plexRes.ok) {
+    plexRes.body?.cancel().catch(() => {});
+    return { ok: false, status: plexRes.status };
+  }
+  const contentType = plexRes.headers.get("content-type");
+  const normalizedContentType = contentType?.split(";")[0];
+  const resolvedType =
+    normalizedContentType && ALLOWED_IMAGE_TYPES.has(normalizedContentType)
+      ? normalizedContentType
+      : "application/octet-stream";
+
+  const contentLength = plexRes.headers.get("content-length");
+  if (contentLength && parseInt(contentLength, 10) > 10 * 1024 * 1024) {
+    plexRes.body?.cancel().catch(() => {});
+    return { ok: false, status: 502 };
+  }
+
+  // Buffer the response so we can cache it
+  let data = Buffer.from(await plexRes.arrayBuffer());
+  if (data.length > 10 * 1024 * 1024) return { ok: false, status: 502 };
+
+  // Plex's local photo transcoder already sizes local art. Cloud portraits
+  // and TMDB posters bypass it, so resize those once on the bot and persist
+  // the compact result. The browser then downloads only the pixels it draws.
+  if (
+    externalUrl && width != null && height != null &&
+    resolvedType !== "image/gif" && resolvedType !== "application/octet-stream"
+  ) {
+    data = await sharp(data)
+      .rotate()
+      .resize(width, height, { fit: "cover", position: "centre" })
+      .toBuffer();
+  }
+  return { ok: true, contentType: resolvedType, data };
+}
+
+/**
+ * Put one image in the thumb cache ahead of anyone asking for it — for the
+ * cache warmer.
+ *
+ * `url` is an artwork URL as the API hands it to the client
+ * (`/api/plex/thumb/...`), and the size is the one the client asks for, so the
+ * entry is the one the route will look up. Held to the route's own checks.
+ * `beforeFetch` runs only when the image has to come from Plex, which lets the
+ * warmer hold that request without holding the cache checks. Never throws:
+ * one bad image must not end a warm-up pass.
+ */
+export async function warmThumb(
+  url: string,
+  width: number,
+  height: number,
+  beforeFetch?: () => Promise<void>,
+): Promise<"cached" | "fetched" | "failed"> {
+  const PREFIX = "/api/plex/thumb";
+  if (!url.startsWith(`${PREFIX}/`)) return "failed";
+  let imagePath: string;
+  let externalUrl: string | undefined;
+  try {
+    const parsed = new URL(url, "http://local");
+    // Express hands the route its wildcard already decoded.
+    imagePath = decodeURIComponent(parsed.pathname.slice(PREFIX.length));
+    externalUrl = parsed.searchParams.get("url") ?? undefined;
+  } catch {
+    return "failed";
+  }
+  if (imagePath.length > MAX_PROXY_PATH_LENGTH || !isAllowedThumbPath(imagePath)) return "failed";
+  if (externalUrl !== undefined && (imagePath !== "/photo/:/transcode" || !isAllowedExternalImage(externalUrl))) {
+    return "failed";
+  }
+
+  const request: ThumbRequest = { imagePath, externalUrl, width, height };
+  const cacheKey = thumbCacheKey(request);
+  if (thumbCache.has(cacheKey)) return "cached";
+  try {
+    await beforeFetch?.();
+    const result = await fetchThumb(request);
+    if (!result.ok) return "failed";
+    thumbCache.set(cacheKey, result.contentType, result.data);
+    return "fetched";
+  } catch {
+    return "failed";
+  }
+}
 
 // ─── HLS helpers ────────────────────────────────────────────────
 

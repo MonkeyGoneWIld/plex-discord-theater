@@ -315,6 +315,18 @@ function setTransport(room: Room, playing: boolean): void {
   room.state.playing = playing;
 }
 
+/**
+ * Whether any room is playing a title right now. The cache warmer holds its
+ * Plex work while one is, since it runs against the same Plex server that is
+ * transcoding the stream. A paused room doesn't count.
+ */
+export function anyRoomPlaying(): boolean {
+  for (const room of rooms.values()) {
+    if (room.state.playing && room.state.ratingKey) return true;
+  }
+  return false;
+}
+
 /** Full private snapshot. A participant must have an open player and live socket. */
 export function getQbtManagerStreams() {
   const now = performance.now();

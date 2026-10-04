@@ -49,6 +49,10 @@ const stmtSizeOf = db.prepare<[string], { len: number }>(
 
 const stmtDeleteOne = db.prepare("DELETE FROM thumbs WHERE path = ?");
 
+const stmtCachedAt = db.prepare<[string], { cached_at: number }>(
+  "SELECT cached_at FROM thumbs WHERE path = ?",
+);
+
 // Eviction and the expiry sweep both order by cached_at, and `get` deletes by
 // primary key. Without this index every write scanned the whole table — up to
 // 500 MB of BLOBs — twice.
@@ -95,6 +99,16 @@ export function get(thumbPath: string): CacheEntry | null {
   }
 
   return { contentType: row.content_type, data: row.data };
+}
+
+/**
+ * Whether a fresh entry exists, without reading its image. The cache warmer
+ * asks this of thousands of entries a pass, and `get` would load every one of
+ * them only to throw it away.
+ */
+export function has(thumbPath: string): boolean {
+  const row = stmtCachedAt.get(thumbPath);
+  return !!row && Date.now() - row.cached_at <= TTL_MS;
 }
 
 export function set(thumbPath: string, contentType: string, data: Buffer): void {

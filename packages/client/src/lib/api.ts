@@ -43,6 +43,9 @@ export function posterThumbUrl(thumb: string): string {
   return `${withToken}${sep}w=${POSTER_THUMB_W}&h=${POSTER_THUMB_H}`;
 }
 
+// The server's cache warmer requests these same sizes ahead of time, so they
+// are mirrored in packages/server/src/services/artwork-sizes.ts. Its test fails
+// if the two disagree.
 export const POSTER_THUMB_W = 400;
 export const POSTER_THUMB_H = 600;
 
@@ -76,6 +79,19 @@ export function stillThumbUrl(thumb: string): string {
 
 export const STILL_THUMB_W = 880;
 export const STILL_THUMB_H = 495;
+
+/**
+ * Episode-still URL for a season's episode list, which draws them at card
+ * size. The end card's larger one is stillThumbUrl.
+ */
+export function episodeThumbUrl(thumb: string): string {
+  const withToken = authUrl(thumb);
+  const sep = withToken.includes("?") ? "&" : "?";
+  return `${withToken}${sep}w=${EPISODE_THUMB_W}&h=${EPISODE_THUMB_H}`;
+}
+
+export const EPISODE_THUMB_W = 400;
+export const EPISODE_THUMB_H = 225;
 
 /**
  * Title-page backdrop URL, at one fixed size shared by the page and the hover

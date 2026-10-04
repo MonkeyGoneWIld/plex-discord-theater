@@ -96,13 +96,21 @@ export function writeDetailCache(kind: DetailCacheKind, ratingKey: string, paylo
   writeStmt.run(kind, ratingKey, JSON.stringify(payload), Date.now());
 }
 
-/** True only after both detail-page halves were built from this Plex version. */
-export function detailCacheMatches(ratingKey: string, sourceUpdatedAt: number): boolean {
+/**
+ * True only after every half named was built from this Plex version, within
+ * the last week. A title has both; an episode has no related rows, so the
+ * warmer asks about its metadata alone.
+ */
+export function detailCacheMatches(
+  ratingKey: string,
+  sourceUpdatedAt: number,
+  kinds: readonly DetailCacheKind[] = ["meta", "related"],
+): boolean {
   const rows = versionsStmt.all(ratingKey);
   const oldestAllowed = Date.now() - MAX_REUSE_AGE_MS;
-  return rows.length === 2 && rows.every(
-    (row) => row.source_updated_at === sourceUpdatedAt && row.cached_at >= oldestAllowed,
-  );
+  return kinds.every((kind) => rows.some(
+    (row) => row.kind === kind && row.source_updated_at === sourceUpdatedAt && row.cached_at >= oldestAllowed,
+  ));
 }
 
 /** Mark meta + related atomically after a complete warm succeeds. */

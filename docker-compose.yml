@@ -73,12 +73,16 @@ services:
       - VIDEO_PEAK_BITRATE_KBPS=${VIDEO_PEAK_BITRATE_KBPS}
       - THUMB_CACHE_TTL_MS=${THUMB_CACHE_TTL_MS}
       - THUMB_CACHE_MAX_MB=${THUMB_CACHE_MAX_MB}
-      # Background pre-fetch of detail-page data, so opening a title is a cache
-      # hit instead of several round trips. WARM_CACHE=0 turns it off.
+      # Background pre-fetch of detail-page data and artwork, seasons and
+      # episodes included, so opening a title is a cache hit instead of several
+      # round trips. WARM_CACHE=0 turns it off; WARM_CACHE_ARTWORK=0 and
+      # WARM_CACHE_EPISODES=0 turn off those parts.
       - WARM_CACHE=${WARM_CACHE}
       - WARM_CACHE_MAX_ITEMS=${WARM_CACHE_MAX_ITEMS}
       - WARM_CACHE_DELAY_MS=${WARM_CACHE_DELAY_MS}
       - WARM_CACHE_INTERVAL_MIN=${WARM_CACHE_INTERVAL_MIN}
+      - WARM_CACHE_ARTWORK=${WARM_CACHE_ARTWORK}
+      - WARM_CACHE_EPISODES=${WARM_CACHE_EPISODES}
 
       # ── Diagnostics ─────────────────────────────────────────────
       # Server and client events are written to /data/logs, so a stream that

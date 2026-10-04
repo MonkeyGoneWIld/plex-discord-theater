@@ -25,7 +25,7 @@ import { startCacheWarmer, stopCacheWarmer } from "./services/cache-warmer.js";
 import { closeHistoryDb } from "./services/watch-history.js";
 import { closePlexAccountsDb } from "./services/plex-accounts.js";
 import { closeDetailCache } from "./services/detail-cache.js";
-import { attachWebSocketServer, closeWebSocketServer } from "./services/sync.js";
+import { anyRoomPlaying, attachWebSocketServer, closeWebSocketServer } from "./services/sync.js";
 
 const required = ["DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET", "PLEX_URL", "PLEX_TOKEN", "REDIRECT_URI"] as const;
 for (const name of required) {
@@ -315,7 +315,7 @@ const server = app.listen(PORT, () => {
   // Pre-fill the detail-page caches (metadata, cast, collections, related) in
   // the background so opening a title doesn't wait on Plex and TMDB. Started
   // from the listen callback because it calls back into our own HTTP port.
-  startCacheWarmer(Number(PORT));
+  startCacheWarmer(Number(PORT), anyRoomPlaying);
 });
 
 attachWebSocketServer(server);

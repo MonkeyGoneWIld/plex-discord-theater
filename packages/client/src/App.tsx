@@ -614,6 +614,31 @@ export function App() {
     syncActions.sendDismissSuggestion(s.ratingKey);
   };
 
+  /**
+   * Publishes the height of the banners above the page as --top-banners-h.
+   *
+   * Title and show pages slide up by that much and pad their content back
+   * down by the same amount, so their backdrop starts under the header and
+   * runs behind a suggestion instead of being pushed below it, while
+   * everything else on the page stays where it was. Set on the app root,
+   * which is the banners' parent and an ancestor of every page. Written
+   * straight to the style from the observer rather than through state:
+   * ResizeObserver reports before paint, so the page moves in the same frame
+   * as a banner appearing, with no frame of the old layout.
+   */
+  const observeTopBanners = useCallback((el: HTMLDivElement | null) => {
+    const app = el?.parentElement;
+    if (!el || !app) return;
+    const apply = () => app.style.setProperty("--top-banners-h", `${el.getBoundingClientRect().height}px`);
+    apply();
+    const observer = new ResizeObserver(apply);
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      app.style.removeProperty("--top-banners-h");
+    };
+  }, []);
+
   // Navigation from a collection / "More Like This" row — flags the opened title
   // as `flat` so its breadcrumb collapses to Home › <title> (see isFlatView).
   const handleSelectRelated = useCallback(
@@ -1032,6 +1057,9 @@ export function App() {
         />
       )}
 
+      {/* The banners a page sits under. One layer, measured as a whole (see
+          observeTopBanners), so a page tucks under both when both show. */}
+      <div ref={observeTopBanners} style={styles.topBanners}>
       {/* Viewer suggestions — host only */}
       {effectiveIsHost && syncState.suggestions.length > 0 && (
         <div style={styles.suggestionsPanel}>
@@ -1094,6 +1122,7 @@ export function App() {
           </button>
         </div>
       )}
+      </div>
 
       {/* Library stays mounted (hidden) while browsing details, so Back returns
           to the exact search results, filters, loaded pages, and scroll. Home
@@ -1435,10 +1464,9 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: "column" as const,
     gap: "8px",
     margin: "16px 24px 0",
-    // The same 16px below as above. With none, a title page's backdrop began
-    // at the banner's bottom edge. The space is taken here, above every page,
-    // rather than inside one, so every page moves down by the same amount and
-    // the Back buttons still line up.
+    // The same 16px below as above, before the Back button. Taken here, above
+    // every page, rather than inside one, so every page moves down by the
+    // same amount and the Back buttons still line up.
     //
     // Padding, not margin: the season, person and external pages let their
     // Back button's 16px top margin collapse out through the page, and a
@@ -1446,6 +1474,20 @@ const styles: Record<string, React.CSSProperties> = {
     // all while the title and show pages, which contain their margins, moved
     // 16px, and the Back buttons would no longer line up.
     paddingBottom: "16px",
+  },
+  /**
+   * The layer holding the banners above the page.
+   *
+   * flow-root keeps the banners' own margins inside it, so its measured
+   * height is all the room they take. Positioned and above the page, because
+   * a title page now reaches up underneath it and would otherwise paint its
+   * backdrop over them. 1 is enough to clear the page; the header's menus sit
+   * far higher.
+   */
+  topBanners: {
+    display: "flow-root",
+    position: "relative",
+    zIndex: 1,
   },
   suggestionRow: {
     display: "flex",

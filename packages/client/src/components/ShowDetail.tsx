@@ -572,6 +572,9 @@ const styles: Record<string, React.CSSProperties> = {
     minHeight: "100vh",
     background: "#0d0d0d",
     overflow: "hidden",
+    // Tucks under the banners above it — see MovieDetail.
+    marginTop: "calc(-1 * var(--top-banners-h, 0px))",
+    paddingTop: "var(--top-banners-h, 0px)",
   },
   // Reveal gate — see MovieDetail for both halves.
   prerender: {
@@ -600,7 +603,8 @@ const styles: Record<string, React.CSSProperties> = {
     top: 0,
     left: 0,
     right: 0,
-    height: "60vh",
+    // See MovieDetail.
+    height: "calc(60vh + var(--top-banners-h, 0px))",
     overflow: "hidden",
   },
   backdropImg: {

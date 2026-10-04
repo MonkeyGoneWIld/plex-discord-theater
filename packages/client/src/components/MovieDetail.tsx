@@ -735,6 +735,11 @@ const styles: Record<string, React.CSSProperties> = {
     minHeight: "100vh",
     background: "#0d0d0d",
     overflow: "hidden",
+    // Up under the banners above the page and back down by the same amount
+    // (App's observeTopBanners), so the backdrop runs behind a suggestion
+    // rather than starting below it, and nothing else on the page moves.
+    marginTop: "calc(-1 * var(--top-banners-h, 0px))",
+    paddingTop: "var(--top-banners-h, 0px)",
   },
   // The two halves of the reveal. `prerender` keeps the real page mounted and
   // laid out at full width — so its images load and the shelves measure — while
@@ -797,7 +802,9 @@ const styles: Record<string, React.CSSProperties> = {
     top: 0,
     left: 0,
     right: 0,
-    height: "60vh",
+    // Plus the banners it reaches up behind, so its faded bottom edge stays
+    // where it was.
+    height: "calc(60vh + var(--top-banners-h, 0px))",
     overflow: "hidden",
   },
   backdropImg: {

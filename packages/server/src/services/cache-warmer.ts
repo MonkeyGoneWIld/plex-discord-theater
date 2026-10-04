@@ -8,6 +8,7 @@ import {
 import { createSession } from "../middleware/auth.js";
 import { detailCacheMatches, markDetailCacheVersion } from "./detail-cache.js";
 import { replaceLibraryIndex } from "./library-index.js";
+import { numberSetting } from "./env-settings.js";
 
 /**
  * Background cache warmer.
@@ -27,14 +28,14 @@ import { replaceLibraryIndex } from "./library-index.js";
 const ENABLED = process.env.WARM_CACHE !== "0";
 /** Titles to keep warm. Beyond this the tail is unlikely to be opened before
  *  the next pass comes round anyway. */
-const MAX_ITEMS = Number(process.env.WARM_CACHE_MAX_ITEMS ?? 600);
+const MAX_ITEMS = numberSetting("WARM_CACHE_MAX_ITEMS", 600);
 /** Gap between items — the throttle that keeps this off Plex's critical path. */
-const ITEM_DELAY_MS = Number(process.env.WARM_CACHE_DELAY_MS ?? 250);
+const ITEM_DELAY_MS = numberSetting("WARM_CACHE_DELAY_MS", 250);
 /** How long after boot to start, letting the server settle first. */
 const START_DELAY_MS = 15_000;
 /** Re-run interval. Comfortably inside the 6h /collections TTL, so warm entries
  *  are refreshed rather than allowed to expire under a user. */
-const INTERVAL_MS = Number(process.env.WARM_CACHE_INTERVAL_MIN ?? 240) * 60 * 1000;
+const INTERVAL_MS = numberSetting("WARM_CACHE_INTERVAL_MIN", 240, 1) * 60 * 1000;
 
 let timer: NodeJS.Timeout | null = null;
 let running = false;

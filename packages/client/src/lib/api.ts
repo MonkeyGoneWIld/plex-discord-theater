@@ -77,6 +77,25 @@ export function stillThumbUrl(thumb: string): string {
 export const STILL_THUMB_W = 880;
 export const STILL_THUMB_H = 495;
 
+/**
+ * Title-page backdrop URL, at one fixed size shared by the page and the hover
+ * prefetch so the two hit the same browser-cache entry.
+ *
+ * It was the unsized original — often megabytes, sometimes 4K — for an image
+ * the page blurs by 20px and darkens to 30%, so none of that detail reached
+ * the screen.
+ * It was also the last thing a title page finished loading. 960×540 looks the
+ * same through that blur and is a small fraction of the download.
+ */
+export function backdropThumbUrl(art: string): string {
+  const withToken = authUrl(art);
+  const sep = withToken.includes("?") ? "&" : "?";
+  return `${withToken}${sep}w=${BACKDROP_THUMB_W}&h=${BACKDROP_THUMB_H}`;
+}
+
+export const BACKDROP_THUMB_W = 960;
+export const BACKDROP_THUMB_H = 540;
+
 const BASE = "";
 
 async function throwApiError(res: Response, path: string): Promise<never> {
@@ -408,6 +427,9 @@ export function prefetchDetail(item: Pick<PlexItem, "ratingKey" | "type" | "inLi
   if (item.inLibrary === false) return;
   void fetchMeta(item.ratingKey)
     .then((meta) => {
+      // The backdrop goes first: it is the largest image on the page and the
+      // only one that needs this metadata before it can even be requested.
+      if (meta.art) queueDetailArtwork(backdropThumbUrl(meta.art), true);
       // Director is drawn first, followed by cast. Prime only the first screen
       // or so rather than turning a hover into thirty image requests.
       const seen = new Set<string>();

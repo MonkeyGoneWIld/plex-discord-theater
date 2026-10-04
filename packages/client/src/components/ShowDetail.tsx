@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import {
   fetchMeta, fetchChildren, fetchSeerrTv, fetchShowNextUp, historyEntryToItem, posterThumbUrl,
-  getSessionToken, invalidateMeta, setStreams, versionOf,
+  backdropThumbUrl, invalidateMeta, setStreams, versionOf,
   type Credit, type HistoryEntry, type PlexItem, type PlexMeta, type SeerrSeason,
 } from "../lib/api";
 import {
@@ -83,13 +83,6 @@ function episodeLine(
   return remainingMs != null && remainingMs > 0
     ? `${head} · ${formatTimecode(remainingMs)} left`
     : head;
-}
-
-function authUrl(url: string): string {
-  const token = getSessionToken();
-  if (!token || !url) return url;
-  const sep = url.includes("?") ? "&" : "?";
-  return `${url}${sep}token=${encodeURIComponent(token)}`;
 }
 
 export function ShowDetail({
@@ -251,7 +244,7 @@ export function ShowDetail({
     }
   };
 
-  const backdropUrl = meta?.art ? authUrl(meta.art) : null;
+  const backdropUrl = meta?.art ? backdropThumbUrl(meta.art) : null;
   // Same sized URL the card used — see posterThumbUrl.
   const posterSrc = meta?.thumb ?? item.thumb;
   const posterUrl = posterSrc ? posterThumbUrl(posterSrc) : null;
@@ -393,6 +386,9 @@ export function ShowDetail({
             src={backdropUrl}
             alt=""
             style={{ ...styles.backdropImg, opacity: backdropLoaded ? 1 : 0 }}
+            // See MovieDetail.
+            fetchPriority="high"
+            decoding="async"
             onLoad={() => setBackdropLoaded(true)}
           />
           <div style={styles.backdropOverlay} />

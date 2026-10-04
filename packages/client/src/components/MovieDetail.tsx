@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, setStreams, getSessionToken, versionOf, type Credit, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
+import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, backdropThumbUrl, setStreams, versionOf, type Credit, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
 import { formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
@@ -51,13 +51,6 @@ interface MovieDetailProps {
  * satisfies it within a frame or two and never shows the spinner at all.
  */
 const REVEAL_TIMEOUT_MS = 1000;
-
-function authUrl(url: string): string {
-  const token = getSessionToken();
-  if (!token || !url) return url;
-  const sep = url.includes("?") ? "&" : "?";
-  return `${url}${sep}token=${encodeURIComponent(token)}`;
-}
 
 function formatDuration(ms: number | undefined): string {
   if (!ms) return "";
@@ -344,7 +337,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
       ? Math.min(1, progress.positionMs / progress.durationMs)
       : null;
 
-  const backdropUrl = meta?.art ? authUrl(meta.art) : null;
+  const backdropUrl = meta?.art ? backdropThumbUrl(meta.art) : null;
   // Same sized URL the card used, so the poster is already in the browser
   // cache and paints on the first frame (see posterThumbUrl).
   const posterSrc = meta?.thumb ?? item.thumb;
@@ -401,6 +394,10 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
             src={backdropUrl}
             alt=""
             style={{ ...styles.backdropImg, opacity: backdropLoaded ? 1 : 0 }}
+            // High, like the cast portraits requested in the same render.
+            // At the default it waited behind them and arrived last.
+            fetchPriority="high"
+            decoding="async"
             onLoad={() => setBackdropLoaded(true)}
           />
           <div style={styles.backdropOverlay} />

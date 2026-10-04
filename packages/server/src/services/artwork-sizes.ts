@@ -18,8 +18,11 @@ export const POSTER_SIZE: ArtworkSize = { w: 400, h: 600 };
 export const BACKDROP_SIZE: ArtworkSize = { w: 240, h: 135 };
 /** Cast and crew portraits (PERSON_THUMB_SIZE). */
 export const PERSON_SIZE: ArtworkSize = { w: 320, h: 320 };
-/** Episode stills in a season's episode list (EPISODE_THUMB_*). */
+/** Episode stills in a season's episode list (EPISODE_THUMB_*). An episode's
+ *  own page shows the same still at POSTER_SIZE, where a film has its poster. */
 export const EPISODE_STILL_SIZE: ArtworkSize = { w: 400, h: 225 };
+/** The next episode's still on the card at the end of an episode (STILL_THUMB_*). */
+export const END_CARD_STILL_SIZE: ArtworkSize = { w: 880, h: 495 };
 
 /**
  * Portraits warmed per title: directors first, then cast, as the page lays

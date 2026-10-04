@@ -72,6 +72,8 @@ services:
       - VIDEO_BITRATE_KBPS=${VIDEO_BITRATE_KBPS}
       - VIDEO_PEAK_BITRATE_KBPS=${VIDEO_PEAK_BITRATE_KBPS}
       - THUMB_CACHE_TTL_MS=${THUMB_CACHE_TTL_MS}
+      # Image cache size, with a unit: 500M, 10G (the default), 2T.
+      - THUMB_CACHE_MAX_SIZE=${THUMB_CACHE_MAX_SIZE}
       - THUMB_CACHE_MAX_MB=${THUMB_CACHE_MAX_MB}
       # Background pre-fetch of detail-page data and artwork, seasons and
       # episodes included, so opening a title is a cache hit instead of several

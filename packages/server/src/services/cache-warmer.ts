@@ -3,15 +3,20 @@ import {
   buildMeta,
   getRelatedCached,
   invalidateTitleDetailCaches,
+  seasonEpisodeSourcesConfigured,
+  warmSeasonEpisodes,
   warmThumb,
   type PlexMetadataItem,
+  type RelatedPayload,
 } from "../routes/plex.js";
 import { createSession } from "../middleware/auth.js";
 import { detailCacheMatches, markDetailCacheVersion } from "./detail-cache.js";
 import { replaceLibraryIndex } from "./library-index.js";
 import { numberSetting } from "./env-settings.js";
+import * as thumbCache from "./thumb-cache.js";
 import {
   BACKDROP_SIZE,
+  END_CARD_STILL_SIZE,
   EPISODE_STILL_SIZE,
   PERSON_SIZE,
   POSTER_SIZE,
@@ -29,11 +34,14 @@ import {
  * caches ahead of time, so opening a title is a cache hit.
  *
  * Then the artwork for those titles: posters and backdrops, then each title's
- * first portraits, then each show's season posters, episode details and
- * episode stills. Every image is fetched at the size the page asks for, so the
- * image proxy answers from its cache instead of waiting for Plex to resize an
- * original. Anything already cached is skipped, so after the first pass only
- * what is new, changed or expired costs anything.
+ * first portraits, then the posters in its collection and "More Like This"
+ * rows. Then every season and episode of the shows among them: each season's
+ * full episode list from TVDB or TMDB, episode details, season posters,
+ * episode stills at the three sizes they are shown at, and each episode's
+ * first portraits. Every image is fetched at the size the page asks for, so
+ * the image proxy answers from its cache instead of waiting for Plex to resize
+ * an original. Anything already cached is skipped, so after the first pass
+ * only what is new, changed or expired costs anything.
  *
  * Deliberately slow and bounded. It runs behind the server rather than in front
  * of it, and a library of any size would otherwise mean thousands of Plex calls
@@ -49,14 +57,25 @@ const ARTWORK = process.env.WARM_CACHE_ARTWORK !== "0";
 /** Each warmed show's seasons and episodes. WARM_CACHE_EPISODES=0 stops at the
  *  show itself. */
 const EPISODES = process.env.WARM_CACHE_EPISODES !== "0";
-/** Titles to keep warm. Beyond this the tail is unlikely to be opened before
- *  the next pass comes round anyway. */
-const MAX_ITEMS = numberSetting("WARM_CACHE_MAX_ITEMS", 600);
+/** Titles to keep warm, newest first, or "all" for the whole library. Beyond
+ *  the default the tail is unlikely to be opened before the next pass comes
+ *  round anyway. */
+const MAX_ITEMS = process.env.WARM_CACHE_MAX_ITEMS?.trim().toLowerCase() === "all"
+  ? Infinity
+  : numberSetting("WARM_CACHE_MAX_ITEMS", 600);
 /** Pause after each title, episode or image fetched from Plex — the throttle
  *  that keeps this off Plex's critical path. Nothing already cached waits. */
 const ITEM_DELAY_MS = numberSetting("WARM_CACHE_DELAY_MS", 250);
 /** How often to look again while a room is playing. */
 const BUSY_POLL_MS = 30_000;
+/**
+ * How full the image cache may get from warming. When the cache is full it
+ * evicts its oldest entries, so warming into a full cache would push out
+ * images people opened and then fetch them again on the next pass. Stopping
+ * short leaves the rest for images pages fetch themselves. Raise
+ * THUMB_CACHE_MAX_SIZE to warm more.
+ */
+const ARTWORK_CACHE_SHARE = 0.9;
 /** How long after boot to start, letting the server settle first. */
 const START_DELAY_MS = 15_000;
 /** Re-run interval. Comfortably inside the 6h /collections TTL, so warm entries
@@ -180,6 +199,8 @@ interface PassContext {
   port: number;
   isBusy: () => boolean;
   busyPollMs: number;
+  /** Set once the image cache reaches ARTWORK_CACHE_SHARE. No more artwork this pass. */
+  cacheFull: boolean;
 }
 
 interface ArtworkTally {
@@ -202,6 +223,12 @@ async function whenIdle(ctx: PassContext): Promise<void> {
   console.log("[warm] resumed");
 }
 
+function formatSize(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${+(bytes / 1024 ** 3).toFixed(1)} GB`;
+  if (bytes >= 1024 ** 2) return `${+(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${+(bytes / 1024).toFixed(1)} KB`;
+}
+
 /** An artwork URL as the API gives it to the client — see mapItem. */
 function apiThumb(plexPath: string | undefined): string | null {
   return plexPath ? `/api/plex/thumb${plexPath}` : null;
@@ -213,7 +240,16 @@ async function warmImage(
   url: string | null,
   size: ArtworkSize,
 ): Promise<void> {
-  if (!url) return;
+  if (!url || ctx.cacheFull) return;
+  const { bytes, maxBytes } = thumbCache.usage();
+  if (bytes >= maxBytes * ARTWORK_CACHE_SHARE) {
+    ctx.cacheFull = true;
+    console.log(
+      `[warm] image cache is ${Math.round((bytes / maxBytes) * 100)}% of its ${formatSize(maxBytes)}; ` +
+      "no more artwork this pass (THUMB_CACHE_MAX_SIZE raises the limit)",
+    );
+    return;
+  }
   const outcome = await warmThumb(url, size.w, size.h, () => whenIdle(ctx));
   tally[outcome]++;
   // Only a request that reached Plex is paced. A pass over a warm cache is
@@ -232,6 +268,25 @@ export function portraitUrls(meta: Record<string, unknown> | null): string[] {
   for (const person of [...credits(meta?.directors), ...credits(meta?.cast)]) {
     if (urls.size >= WARM_PORTRAITS_PER_TITLE) break;
     if (person.thumb) urls.add(person.thumb);
+  }
+  return [...urls];
+}
+
+/**
+ * The posters in a title's collection and "More Like This" rows, as the
+ * shelves draw them: an episode card shows its show's poster. Titles not in
+ * the library carry TMDB artwork, which the proxy resizes itself.
+ */
+export function relatedPosterUrls(related: RelatedPayload | null): string[] {
+  type Card = { type?: string; thumb?: string | null; showThumb?: string | null };
+  const cards = [
+    ...(related?.collections ?? []).flatMap((row) => ((row as { items?: Card[] }).items ?? [])),
+    ...((related?.recommendations ?? []) as Card[]),
+  ];
+  const urls = new Set<string>();
+  for (const card of cards) {
+    const poster = card.type === "episode" ? card.showThumb ?? card.thumb : card.thumb;
+    if (poster) urls.add(poster);
   }
   return [...urls];
 }
@@ -270,7 +325,8 @@ async function warmDetails(ctx: PassContext, candidates: CatalogItem[]): Promise
 
 /**
  * Titles: posters and backdrops for all of them first, since the library grid
- * is the first thing anyone sees, then their portraits.
+ * is the first thing anyone sees, then their portraits, then the posters in
+ * their related rows.
  */
 async function warmTitleArtwork(ctx: PassContext, candidates: CatalogItem[]): Promise<void> {
   const startedAt = Date.now();
@@ -286,20 +342,32 @@ async function warmTitleArtwork(ctx: PassContext, candidates: CatalogItem[]): Pr
     const meta = await buildMeta(String(item.ratingKey)).catch(() => null);
     for (const url of portraitUrls(meta)) await warmImage(ctx, tally, url, PERSON_SIZE);
   }
+  for (const item of candidates) {
+    // Saved by the first phase. A title whose rows failed there has none.
+    const related = getRelatedCached(String(item.ratingKey));
+    for (const url of relatedPosterUrls(related)) await warmImage(ctx, tally, url, POSTER_SIZE);
+  }
   console.log(
     `[warm] title artwork: fetched ${tally.fetched}, already cached ${tally.cached}, failed ${tally.failed} in ${Math.round((Date.now() - startedAt) / 1000)}s`,
   );
 }
 
 /**
- * Shows: every season and episode. Episode details are rebuilt only where
- * Plex's copy changed, the same test titles get. Without it an episode's
- * stored details were never refreshed at all. Then season posters and the
- * stills of the season's episode list.
+ * Shows: every season and episode.
+ *
+ * Each season's full episode list first, the one that shows its missing and
+ * upcoming episodes, when TVDB or TMDB is set up. Then episode details,
+ * rebuilt only where Plex's copy changed, the same test titles get. Then the
+ * artwork: season posters, then each episode's still at the three sizes it is
+ * shown at — the season's list, the episode's own page, where a film has its
+ * poster, and the card at the end of the episode before it — then each
+ * episode's first portraits, guest cast included.
  */
 async function warmEpisodes(ctx: PassContext, shows: CatalogItem[]): Promise<void> {
   const startedAt = Date.now();
   const tally: ArtworkTally = { fetched: 0, cached: 0, failed: 0 };
+  const lists: ArtworkTally = { fetched: 0, cached: 0, failed: 0 };
+  const seasonLists = seasonEpisodeSourcesConfigured();
   let refreshed = 0;
   let unchanged = 0;
   let failed = 0;
@@ -324,6 +392,14 @@ async function warmEpisodes(ctx: PassContext, shows: CatalogItem[]): Promise<voi
     await sleep(ITEM_DELAY_MS);
     episodeCount += episodes.length;
 
+    if (seasonLists) {
+      for (const season of seasons) {
+        const outcome = await warmSeasonEpisodes(String(season.ratingKey), () => whenIdle(ctx));
+        lists[outcome]++;
+        if (outcome !== "cached") await sleep(ITEM_DELAY_MS);
+      }
+    }
+
     for (const episode of episodes) {
       const ratingKey = String(episode.ratingKey);
       const sourceUpdatedAt = episode.updatedAt;
@@ -345,11 +421,20 @@ async function warmEpisodes(ctx: PassContext, shows: CatalogItem[]): Promise<voi
 
     if (ARTWORK) {
       for (const season of seasons) await warmImage(ctx, tally, apiThumb(season.thumb), POSTER_SIZE);
-      for (const episode of episodes) await warmImage(ctx, tally, apiThumb(episode.thumb), EPISODE_STILL_SIZE);
+      for (const size of [EPISODE_STILL_SIZE, POSTER_SIZE, END_CARD_STILL_SIZE]) {
+        for (const episode of episodes) await warmImage(ctx, tally, apiThumb(episode.thumb), size);
+      }
+      for (const episode of episodes) {
+        if (ctx.cacheFull) break;
+        await whenIdle(ctx);
+        const meta = await buildMeta(String(episode.ratingKey)).catch(() => null);
+        for (const url of portraitUrls(meta)) await warmImage(ctx, tally, url, PERSON_SIZE);
+      }
     }
   }
   console.log(
     `[warm] episodes of ${shows.length} shows: refreshed ${refreshed}, reused ${unchanged}/${episodeCount}, failed ${failed}; ` +
+    (seasonLists ? `season lists fetched ${lists.fetched}, reused ${lists.cached}, failed ${lists.failed}; ` : "") +
     `artwork fetched ${tally.fetched}, already cached ${tally.cached}, failed ${tally.failed} in ${Math.round((Date.now() - startedAt) / 1000)}s`,
   );
 }
@@ -362,6 +447,7 @@ export async function runWarmPass(port: number, options: WarmOptions = {}): Prom
     port,
     isBusy: options.isBusy ?? (() => false),
     busyPollMs: options.busyPollMs ?? BUSY_POLL_MS,
+    cacheFull: false,
   };
   try {
     await whenIdle(ctx);

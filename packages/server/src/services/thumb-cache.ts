@@ -1,16 +1,24 @@
 import Database from "better-sqlite3";
 import path from "node:path";
 import fs from "node:fs";
+import { sizeSetting } from "./env-settings.js";
 
 // Artwork paths are content-addressed by Plex/TMDB in practice, so keeping the
 // resized result for a season is both safe and much cheaper than regenerating
 // cast and collection art after every routine deployment.
 const DEFAULT_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
-const DEFAULT_MAX_MB = 10 * 1024; // 10 GB
+const DEFAULT_MAX_BYTES = 10 * 1024 ** 3; // 10 GB
 
 const TTL_MS = parseInt(process.env.THUMB_CACHE_TTL_MS || "", 10) || DEFAULT_TTL_MS;
-const MAX_BYTES =
-  (parseInt(process.env.THUMB_CACHE_MAX_MB || "", 10) || DEFAULT_MAX_MB) * 1024 * 1024;
+/**
+ * The size limit. THUMB_CACHE_MAX_SIZE takes a unit — "10G", "500M", "2T".
+ * THUMB_CACHE_MAX_MB, the older setting, is read when it is unset, and a bare
+ * number in either is megabytes. It used to be parsed with parseInt, which
+ * read "50G" as 50 MB.
+ */
+const MAX_BYTES = process.env.THUMB_CACHE_MAX_SIZE?.trim()
+  ? sizeSetting("THUMB_CACHE_MAX_SIZE", DEFAULT_MAX_BYTES)
+  : sizeSetting("THUMB_CACHE_MAX_MB", DEFAULT_MAX_BYTES);
 
 const dbDir = process.env.THUMB_CACHE_DIR
   ? path.resolve(process.env.THUMB_CACHE_DIR)
@@ -125,6 +133,11 @@ export function set(thumbPath: string, contentType: string, data: Buffer): void 
     if (freed.length === 0) break; // nothing left to evict
     for (const row of freed) totalBytes -= row.freed;
   }
+}
+
+/** How much is cached and how much may be, in bytes. */
+export function usage(): { bytes: number; maxBytes: number } {
+  return { bytes: totalBytes, maxBytes: MAX_BYTES };
 }
 
 /** Drop expired rows. On a timer rather than on every write — see SWEEP_INTERVAL_MS. */

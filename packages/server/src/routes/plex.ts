@@ -15,7 +15,14 @@ import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
 import { parseSubtitles, type Cue } from "../services/subtitles.js";
 import { mapPlexRatings } from "../services/ratings.js";
-import { readDetailCache, writeDetailCache, invalidateDetailCache } from "../services/detail-cache.js";
+import {
+  DETAIL_MAX_AGE_MS,
+  invalidateDetailCache,
+  readDetailCache,
+  readSeasonEpisodes,
+  writeDetailCache,
+  writeSeasonEpisodes,
+} from "../services/detail-cache.js";
 import { findIndexedLibraryItem } from "../services/library-index.js";
 import { playedThreshold } from "../services/played-state.js";
 import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
@@ -959,12 +966,21 @@ export async function buildMeta(ratingKey: string): Promise<Record<string, unkno
   if (hit && Date.now() - hit.at < META_CACHE_TTL_MS) return rememberDuration(ratingKey, hit.payload);
 
   const persisted = readDetailCache<Record<string, unknown>>("meta", ratingKey);
-  if (persisted) {
+  if (persisted && Date.now() - persisted.cachedAt < DETAIL_MAX_AGE_MS) {
     metaCache.set(ratingKey, { payload: persisted.payload, at: Date.now() });
     return rememberDuration(ratingKey, persisted.payload);
   }
 
-  const payload = await buildMetaUncached(ratingKey);
+  // Past its age a saved row is rebuilt, but it is still a better answer than
+  // an error when Plex can't be reached. Not put back in memory, so the next
+  // request tries Plex again.
+  let payload: Record<string, unknown> | null;
+  try {
+    payload = await buildMetaUncached(ratingKey);
+  } catch (err) {
+    if (persisted) return rememberDuration(ratingKey, persisted.payload);
+    throw err;
+  }
   if (!payload) return null;
   // An incomplete show must also bypass this outer cache, or a failed ID
   // lookup would still hide requestable seasons for an hour.
@@ -1009,7 +1025,9 @@ export function getRelatedCached(ratingKey: string): RelatedPayload | null {
   const hit = relatedCache.get(ratingKey);
   if (hit && Date.now() - hit.at < RELATED_CACHE_TTL_MS) return hit.payload;
   const persisted = readDetailCache<RelatedPayload>("related", ratingKey);
-  if (!persisted) return null;
+  // Past its age a saved row is rebuilt — see DETAIL_MAX_AGE_MS. The route
+  // still falls back to it if the rebuild fails.
+  if (!persisted || Date.now() - persisted.cachedAt >= DETAIL_MAX_AGE_MS) return null;
   relatedCache.set(ratingKey, { payload: persisted.payload, at: Date.now() });
   return persisted.payload;
 }
@@ -1584,6 +1602,12 @@ router.get("/collections/:ratingKey", async (req: Request, res: Response) => {
     send({ collections, recommendations });
   } catch (err) {
     console.error("Collections error:", err);
+    // A saved answer past its age is still better than none.
+    const stale = readDetailCache<RelatedPayload>("related", ratingKey);
+    if (stale) {
+      res.json(stale.payload);
+      return;
+    }
     res.status(502).json({ error: "Failed to fetch collections" });
   }
 });
@@ -2348,87 +2372,154 @@ router.get("/season-episodes/:seasonRatingKey", async (req: Request, res: Respon
     return;
   }
   try {
-    const seasonData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
-      `/library/metadata/${seasonRatingKey}`,
-    );
-    const season = seasonData.MediaContainer.Metadata?.[0];
-    const seasonNumber = season?.index;
-    const showKey = season?.parentRatingKey;
-    if (seasonNumber == null || !showKey) {
-      res.json({ source: null, episodes: [] });
-      return;
-    }
-
-    // Guids live on the series, not on the season.
-    const showData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
-      `/library/metadata/${showKey}`,
-      { includeGuids: "1" },
-    );
-    const show = showData.MediaContainer.Metadata?.[0];
-    const tvdbId = tvdbIdFromGuids(show?.Guid);
-    const tmdbId = show ? await resolveTmdbId(show) : null;
-
-    // What Plex actually holds, so the source can be checked against it.
-    const childData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
-      `/library/metadata/${seasonRatingKey}/children`,
-    );
-    const plexNumbers = (childData.MediaContainer.Metadata ?? [])
-      .map((e) => e.index)
-      .filter((n): n is number => typeof n === "number");
-
-    let fromTvdb: SeasonEpisode[] | null = null;
-    if (tvdbId != null && isTvdbConfigured()) {
-      const raw = await tvdbSeasonEpisodes(tvdbId, seasonNumber);
-      fromTvdb = raw
-        ? raw.map((e) => ({
-            episodeNumber: e.episodeNumber,
-            name: e.name,
-            overview: e.overview,
-            airDate: e.airDate,
-            // TVDB artwork is an absolute URL; the thumb route proxies any
-            // https source through images.plex.tv, so this reaches nothing new.
-            still: e.image ? externalThumbUrl(e.image) : null,
-            runtime: e.runtime,
-          }))
-        : null;
-    }
-    const fromTmdb = tmdbId != null ? await tmdbSeasonEpisodes(tmdbId, seasonNumber) : null;
-
-    let source: "tvdb" | "tmdb" | null = null;
-    let episodes: SeasonEpisode[] = [];
-    if (fromTvdb && agreesWithPlex(fromTvdb, plexNumbers)) {
-      source = "tvdb";
-      episodes = fromTvdb;
-    } else if (fromTmdb && agreesWithPlex(fromTmdb, plexNumbers)) {
-      source = "tmdb";
-      episodes = fromTmdb;
-      if (fromTvdb) {
-        logEvent("Season", "TVDB disagrees with Plex numbering, using TMDB", {
-          season: seasonRatingKey,
-          seasonNumber,
-          plexEpisodes: plexNumbers.length,
-          tvdbEpisodes: fromTvdb.length,
-        });
-      }
-    } else if (fromTvdb || fromTmdb) {
-      // Neither accounts for everything on disk. Report nothing rather than
-      // invent gaps: a wrong list is worse than no list, because it asks people
-      // to request episodes they already have under a different number.
-      logEvent("Season", "no source agrees with Plex numbering, reporting no gaps", {
-        season: seasonRatingKey,
-        seasonNumber,
-        plexEpisodes: plexNumbers.length,
-        tvdb: fromTvdb?.length ?? "none",
-        tmdb: fromTmdb?.length ?? "none",
-      });
-    }
-
-    res.json({ source, episodes: episodes.slice(0, MAX_SEASON_EPISODES) });
+    res.json(await seasonEpisodes(seasonRatingKey));
   } catch (err) {
     console.error("[Season] episode list error:", err);
     res.status(502).json({ error: "Failed to fetch season episodes" });
   }
 });
+
+interface SeasonEpisodesPayload {
+  source: "tvdb" | "tmdb" | null;
+  episodes: SeasonEpisode[];
+}
+
+/**
+ * How long a season's episode list is reused. It changes when an episode is
+ * announced or an air date moves, so a day old is still right nearly always,
+ * and every rebuild is three Plex calls and a TVDB or TMDB lookup. The
+ * warmer refreshes them at half this, so a page rarely meets an expired one.
+ */
+const SEASON_EPISODES_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** A season's episode list, from disk while it is under a day old. */
+async function seasonEpisodes(seasonRatingKey: string): Promise<SeasonEpisodesPayload> {
+  const saved = readSeasonEpisodes<SeasonEpisodesPayload>(seasonRatingKey);
+  if (saved && Date.now() - saved.cachedAt < SEASON_EPISODES_TTL_MS) return saved.payload;
+  try {
+    const { payload, settled } = await buildSeasonEpisodes(seasonRatingKey);
+    if (settled) writeSeasonEpisodes(seasonRatingKey, payload);
+    return payload;
+  } catch (err) {
+    // An old list is still better than none.
+    if (saved) return saved.payload;
+    throw err;
+  }
+}
+
+/**
+ * Rebuild a season's episode list ahead of anyone opening the season — for
+ * the cache warmer. Leaves one under half its age alone. `beforeFetch` runs
+ * only when it is rebuilt. Never throws.
+ */
+export async function warmSeasonEpisodes(
+  seasonRatingKey: string,
+  beforeFetch?: () => Promise<void>,
+): Promise<"cached" | "fetched" | "failed"> {
+  const saved = readSeasonEpisodes<SeasonEpisodesPayload>(seasonRatingKey);
+  if (saved && Date.now() - saved.cachedAt < SEASON_EPISODES_TTL_MS / 2) return "cached";
+  try {
+    await beforeFetch?.();
+    const { payload, settled } = await buildSeasonEpisodes(seasonRatingKey);
+    if (!settled) return "failed";
+    writeSeasonEpisodes(seasonRatingKey, payload);
+    return "fetched";
+  } catch {
+    return "failed";
+  }
+}
+
+/** Whether there is anywhere to get season episode lists from. Without TVDB or
+ *  TMDB every list is empty, and warming them would only ask Plex. */
+export function seasonEpisodeSourcesConfigured(): boolean {
+  return isTvdbConfigured() || !!TMDB_API_KEY;
+}
+
+/** The list, and whether it can be saved. */
+async function buildSeasonEpisodes(
+  seasonRatingKey: string,
+): Promise<{ payload: SeasonEpisodesPayload; settled: boolean }> {
+  const seasonData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+    `/library/metadata/${seasonRatingKey}`,
+  );
+  const season = seasonData.MediaContainer.Metadata?.[0];
+  const seasonNumber = season?.index;
+  const showKey = season?.parentRatingKey;
+  if (seasonNumber == null || !showKey) {
+    return { payload: { source: null, episodes: [] }, settled: true };
+  }
+
+  // Guids live on the series, not on the season.
+  const showData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+    `/library/metadata/${showKey}`,
+    { includeGuids: "1" },
+  );
+  const show = showData.MediaContainer.Metadata?.[0];
+  const tvdbId = tvdbIdFromGuids(show?.Guid);
+  const tmdbId = show ? await resolveTmdbId(show) : null;
+
+  // What Plex actually holds, so the source can be checked against it.
+  const childData = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+    `/library/metadata/${seasonRatingKey}/children`,
+  );
+  const plexNumbers = (childData.MediaContainer.Metadata ?? [])
+    .map((e) => e.index)
+    .filter((n): n is number => typeof n === "number");
+
+  let fromTvdb: SeasonEpisode[] | null = null;
+  if (tvdbId != null && isTvdbConfigured()) {
+    const raw = await tvdbSeasonEpisodes(tvdbId, seasonNumber);
+    fromTvdb = raw
+      ? raw.map((e) => ({
+          episodeNumber: e.episodeNumber,
+          name: e.name,
+          overview: e.overview,
+          airDate: e.airDate,
+          // TVDB artwork is an absolute URL; the thumb route proxies any
+          // https source through images.plex.tv, so this reaches nothing new.
+          still: e.image ? externalThumbUrl(e.image) : null,
+          runtime: e.runtime,
+        }))
+      : null;
+  }
+  const fromTmdb = tmdbId != null ? await tmdbSeasonEpisodes(tmdbId, seasonNumber) : null;
+
+  let source: "tvdb" | "tmdb" | null = null;
+  let episodes: SeasonEpisode[] = [];
+  if (fromTvdb && agreesWithPlex(fromTvdb, plexNumbers)) {
+    source = "tvdb";
+    episodes = fromTvdb;
+  } else if (fromTmdb && agreesWithPlex(fromTmdb, plexNumbers)) {
+    source = "tmdb";
+    episodes = fromTmdb;
+    if (fromTvdb) {
+      logEvent("Season", "TVDB disagrees with Plex numbering, using TMDB", {
+        season: seasonRatingKey,
+        seasonNumber,
+        plexEpisodes: plexNumbers.length,
+        tvdbEpisodes: fromTvdb.length,
+      });
+    }
+  } else if (fromTvdb || fromTmdb) {
+    // Neither accounts for everything on disk. Report nothing rather than
+    // invent gaps: a wrong list is worse than no list, because it asks people
+    // to request episodes they already have under a different number.
+    logEvent("Season", "no source agrees with Plex numbering, reporting no gaps", {
+      season: seasonRatingKey,
+      seasonNumber,
+      plexEpisodes: plexNumbers.length,
+      tvdb: fromTvdb?.length ?? "none",
+      tmdb: fromTmdb?.length ?? "none",
+    });
+  }
+
+  // Both sources answer null for "nothing here" and for a failed request
+  // alike. A list where every source asked came back null may be an outage,
+  // so it is answered but not saved.
+  const asked = (tvdbId != null && isTvdbConfigured()) || (tmdbId != null && !!TMDB_API_KEY);
+  const settled = !asked || fromTvdb != null || fromTmdb != null;
+  return { payload: { source, episodes: episodes.slice(0, MAX_SEASON_EPISODES) }, settled };
+}
 
 router.get("/siblings/:ratingKey", async (req: Request, res: Response) => {
   const ratingKey = req.params.ratingKey as string;

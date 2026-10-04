@@ -37,6 +37,13 @@ fs.mkdirSync(dbDir, { recursive: true });
 
 const db = new Database(path.join(dbDir, "detail-cache.sqlite"));
 const MAX_REUSE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * How long a saved row is answered from without being rebuilt. The warmer
+ * refreshes the titles it covers on the same schedule. This is what refreshes
+ * everything else: a title older than the warmed set, an episode of a show
+ * outside it. Before it, a row read from disk was used for ever.
+ */
+export const DETAIL_MAX_AGE_MS = MAX_REUSE_AGE_MS;
 db.pragma("journal_mode = WAL");
 db.exec(`
   CREATE TABLE IF NOT EXISTS detail_cache (
@@ -49,6 +56,11 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_detail_cache_source
     ON detail_cache (rating_key, source_updated_at);
+  CREATE TABLE IF NOT EXISTS season_episodes (
+    season_key TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    cached_at INTEGER NOT NULL
+  );
 `);
 
 const readStmt = db.prepare<[DetailCacheKind, string], DetailCacheRow>(`
@@ -124,6 +136,36 @@ export function markDetailCacheVersion(ratingKey: string, sourceUpdatedAt: numbe
 
 export function invalidateDetailCache(ratingKey: string): void {
   deleteStmt.run(ratingKey);
+}
+
+const readSeasonStmt = db.prepare<[string], { payload_json: string; cached_at: number }>(
+  "SELECT payload_json, cached_at FROM season_episodes WHERE season_key = ?",
+);
+const writeSeasonStmt = db.prepare(`
+  INSERT INTO season_episodes (season_key, payload_json, cached_at) VALUES (?, ?, ?)
+  ON CONFLICT(season_key) DO UPDATE SET
+    payload_json = excluded.payload_json,
+    cached_at = excluded.cached_at
+`);
+
+/**
+ * A season's full episode list from TVDB or TMDB — the one that shows its
+ * missing and upcoming episodes. Kept in its own table: it is not a detail
+ * page half, and it ages by the clock rather than by Plex's updatedAt.
+ */
+export function readSeasonEpisodes<T>(seasonKey: string): { payload: T; cachedAt: number } | null {
+  const row = readSeasonStmt.get(seasonKey);
+  if (!row) return null;
+  try {
+    return { payload: JSON.parse(row.payload_json) as T, cachedAt: row.cached_at };
+  } catch {
+    db.prepare("DELETE FROM season_episodes WHERE season_key = ?").run(seasonKey);
+    return null;
+  }
+}
+
+export function writeSeasonEpisodes(seasonKey: string, payload: unknown): void {
+  writeSeasonStmt.run(seasonKey, JSON.stringify(payload), Date.now());
 }
 
 export function closeDetailCache(): void {

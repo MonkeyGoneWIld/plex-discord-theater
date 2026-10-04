@@ -370,8 +370,8 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
   // revealed as "Play" and then turned into "Resume from 1:01:55" with a Start
   // Over button beside it and a progress bar above.
   //
-  // Episodes have no ratings row, and a metadata failure renders none either.
-  const wantsRatings = item.type === "movie" && meta != null;
+  // A metadata failure renders no ratings row.
+  const wantsRatings = (item.type === "movie" || item.type === "episode") && meta != null;
   const revealTimedOut = useRevealTimeout(item.ratingKey, REVEAL_TIMEOUT_MS);
   const pageReady =
     ((meta != null || metaFailed) &&
@@ -515,8 +515,8 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
                 )}
               </div>
 
-              {/* External ratings — movies only (not episodes, per design).
-                  Height reserved for the same reason as the genres above. */}
+              {/* External ratings. Height reserved for the same reason as the
+                  genres above. */}
               {item.type === "movie" && (
                 <div style={styles.ratingsSlot}>
                   {meta && (
@@ -527,6 +527,18 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
                     />
                   )}
                 </div>
+              )}
+              {/* An episode's own scores, which Plex keeps per episode (IMDb and
+                  TMDB). No reserved height, as with the genres: plenty of
+                  episodes have none, and a held gap above the synopsis read
+                  as something missing. The page waits for the metadata before
+                  it reveals, so the row is in place by then. */}
+              {item.type === "episode" && meta && (
+                <RatingsRow
+                  ratings={meta.ratings}
+                  style={styles.ratings}
+                  onReady={() => setRatingsReady(true)}
+                />
               )}
 
               {/* Summary — from the clicked card until the fuller one arrives. */}

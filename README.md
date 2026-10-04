@@ -354,10 +354,10 @@ exposed to browsers. Sessions, roles, local watch history, linked account
 records, cached title details, and cached artwork are stored in SQLite under
 the Docker data volume and persist across container rebuilds. Artwork is kept
 for up to 90 days and 10 GB by default; set `THUMB_CACHE_TTL_MS` and
-`THUMB_CACHE_MAX_MB` to change that. A background warm-up fills both caches for
-the newest 600 titles, their artwork and their shows' seasons and episodes
-included, and waits while a room is playing. Its `WARM_CACHE_*` settings are in
-`.env.example`.
+`THUMB_CACHE_MAX_SIZE` (for example `50G`) to change that. A background warm-up
+fills both caches for the newest 600 titles (`WARM_CACHE_MAX_ITEMS`, or `all`),
+their artwork and their shows' seasons and episodes included, and waits while a
+room is playing. Its other `WARM_CACHE_*` settings are in `.env.example`.
 
 ## License
 

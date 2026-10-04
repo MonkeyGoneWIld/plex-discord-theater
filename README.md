@@ -32,6 +32,7 @@ The Activity provides a full Plex browser, including:
 - Unified search across the local library and Plex Discover
 - Title pages with summaries, ratings, cast, versions, and tracks
 - Synchronized playback controls (pause, seek, skip intro, next episode)
+- Picture-in-picture, to keep watching while you browse
 - Viewer suggestions and host/co-host role management
 - Optional per-user sync of progress, watched status, and Universal Watchlist
 
@@ -169,8 +170,10 @@ Activity progress is written back to Plex. Sync runs automatically, with a
 ### Watch party behavior
 
 Every linked participant in a room receives progress on their own Plex account,
-not only the host. Watched controls update Plex for linked users and remain
-local for unlinked users.
+not only the host, unless they set their watch history to count only when they
+host. A title is marked watched once playback reaches its credits marker, or
+Plex's **Video played threshold** when it has none. Watched controls update
+Plex for linked users and remain local for unlinked users.
 
 ### Interface changes
 
@@ -348,8 +351,10 @@ Join a voice channel, click the **Activities** rocket, and pick the application.
 
 The backend proxies Plex API calls and video segments, so Plex tokens are never
 exposed to browsers. Sessions, roles, local watch history, linked account
-records, cached title details, and artwork metadata are stored in SQLite under
-the Docker data volume and persist across container rebuilds.
+records, cached title details, and cached artwork are stored in SQLite under
+the Docker data volume and persist across container rebuilds. Artwork is kept
+for up to 90 days and 10 GB by default; set `THUMB_CACHE_TTL_MS` and
+`THUMB_CACHE_MAX_MB` to change that.
 
 ## License
 

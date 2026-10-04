@@ -106,6 +106,7 @@ async function play(ratingKey: string): Promise<string> {
 
 console.log("— a title answered from the persisted cache —");
 writeDetailCache("meta", CACHED, {
+  payloadVersion: plexRoutes.META_PAYLOAD_VERSION,
   ratingKey: CACHED, title: "Cached", type: "movie", duration: 7_200_000,
   versions: [{ mediaIndex: 0, partId: Number(CACHED) }],
 });

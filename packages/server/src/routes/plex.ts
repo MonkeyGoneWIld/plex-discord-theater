@@ -230,6 +230,8 @@ export interface PlexMetadataItem {
   ratingKey: string;
   title: string;
   year?: number;
+  /** Release or air date, "YYYY-MM-DD". An episode's is the day it aired. */
+  originallyAvailableAt?: string;
   addedAt?: number;
   updatedAt?: number;
   type: string;
@@ -966,7 +968,11 @@ export async function buildMeta(ratingKey: string): Promise<Record<string, unkno
   if (hit && Date.now() - hit.at < META_CACHE_TTL_MS) return rememberDuration(ratingKey, hit.payload);
 
   const persisted = readDetailCache<Record<string, unknown>>("meta", ratingKey);
-  if (persisted && Date.now() - persisted.cachedAt < DETAIL_MAX_AGE_MS) {
+  if (
+    persisted &&
+    Date.now() - persisted.cachedAt < DETAIL_MAX_AGE_MS &&
+    persisted.payload.payloadVersion === META_PAYLOAD_VERSION
+  ) {
     metaCache.set(ratingKey, { payload: persisted.payload, at: Date.now() });
     return rememberDuration(ratingKey, persisted.payload);
   }
@@ -1006,6 +1012,14 @@ function rememberDuration(ratingKey: string, payload: Record<string, unknown>): 
   }
   return payload;
 }
+
+/**
+ * The shape of a saved /meta payload. Raise it when the payload gains a field
+ * the client relies on. A saved row from an older shape is then rebuilt when it
+ * is next read, instead of answering without the field for up to a week. It is
+ * still the answer if that rebuild fails. 2 added originallyAvailableAt.
+ */
+export const META_PAYLOAD_VERSION = 2;
 
 const metaCache = new LruMap<string, { payload: Record<string, unknown>; at: number }>(2_000);
 const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -1115,9 +1129,12 @@ async function buildMetaUncached(ratingKey: string): Promise<Record<string, unkn
     const imdbId = imdbIdFromGuids(m.Guid);
 
     return {
+      payloadVersion: META_PAYLOAD_VERSION,
       ratingKey: m.ratingKey,
       title: m.title,
       year: m.year,
+      // The full date an episode page shows in place of the year.
+      originallyAvailableAt: m.originallyAvailableAt ?? null,
       summary: m.summary,
       duration: m.duration,
       // Cut/edition label ("Director's Cut", "Extended Edition", …) when this
@@ -4709,6 +4726,7 @@ function mapItem(m: PlexMetadataItem) {
     year: m.year,
     type: m.type,
     thumb: m.thumb ? `/api/plex/thumb${m.thumb}` : null,
+    ...(m.originallyAvailableAt != null && { originallyAvailableAt: m.originallyAvailableAt }),
     ...(m.index != null && { index: m.index }),
     ...(m.parentIndex != null && { parentIndex: m.parentIndex }),
     ...(m.parentTitle != null && { parentTitle: m.parentTitle }),

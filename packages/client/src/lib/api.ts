@@ -209,6 +209,8 @@ export interface PlexItem {
   ratingKey: string;
   title: string;
   year?: number;
+  /** Release or air date, "YYYY-MM-DD". */
+  originallyAvailableAt?: string;
   type: string;
   thumb: string | null;
   index?: number;
@@ -351,6 +353,8 @@ export interface PlexMeta {
   ratingKey: string;
   title: string;
   year?: number;
+  /** Release or air date, "YYYY-MM-DD". */
+  originallyAvailableAt?: string | null;
   /** Milliseconds (raw Plex value) — note markers below are in SECONDS. */
   duration?: number;
   summary?: string;

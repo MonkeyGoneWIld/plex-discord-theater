@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, backdropThumbUrl, setStreams, versionOf, type Credit, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
-import { formatTimecode } from "../lib/format";
+import { formatAirDate, formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
 import { loadAudioPref, loadSubtitlePref, saveAudioPref, saveSubtitlePref, matchAudioTrack, matchSubtitleTrack } from "../lib/trackPrefs";
@@ -356,6 +356,14 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
   // `trackSlot`) so filling in never moves the text above it.
   const dTitle = meta?.title ?? item.title;
   const dYear = meta?.year ?? item.year;
+  // An episode shows the day it aired in place of the year.
+  const airDate = item.type === "episode"
+    ? formatAirDate(meta?.originallyAvailableAt ?? item.originallyAvailableAt)
+    : null;
+  // An episode on a wide screen: its still beside the heading, and everything
+  // from the synopsis down beneath both — see styles.layoutEpisode. Without a
+  // still there is nothing to sit beside, so it lays out as a film does.
+  const split = item.type === "episode" && !narrow && !!posterUrl;
   const dDuration = meta?.duration ?? item.duration;
   const dSummary = meta?.summary ?? item.summary ?? null;
 
@@ -415,7 +423,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
       <>
         <div style={{ ...styles.content, ...(narrow ? styles.contentNarrow : {}) }}>
           {/* Poster + Info layout — stacks on phone portrait */}
-          <div style={{ ...styles.layout, ...(narrow ? styles.layoutNarrow : {}) }}>
+          <div style={{ ...styles.layout, ...(narrow ? styles.layoutNarrow : {}), ...(split ? styles.layoutEpisode : {}) }}>
             {/* Poster */}
             {posterUrl && (
               <div
@@ -425,6 +433,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
                   ...(narrow
                     ? (item.type === "episode" ? styles.posterWrapNarrowEpisode : styles.posterWrapNarrow)
                     : {}),
+                  ...(split ? styles.posterWrapSplit : {}),
                 }}
               >
                 <img
@@ -441,8 +450,10 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
               </div>
             )}
 
-            {/* Info */}
-            <div style={styles.info}>
+            {/* Info. Split, its two halves become cells of the grid above: the
+                heading beside the still, and the rest across beneath them. */}
+            <div style={split ? styles.infoSplit : styles.info}>
+              <div style={split ? styles.headSplit : undefined}>
               {/* Episode label */}
               {item.type === "episode" && item.parentIndex != null && item.index != null && (
                 <>
@@ -483,7 +494,15 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
 
               {/* Meta row */}
               <div style={styles.metaRow}>
-                {dYear && <span style={styles.metaItem}>{dYear}</span>}
+                {airDate ? (
+                  <span style={styles.metaItem}>
+                    {airDate.day}
+                    <span style={styles.ordinal}>{airDate.suffix}</span>
+                    {" "}{airDate.rest}
+                  </span>
+                ) : (
+                  dYear && <span style={styles.metaItem}>{dYear}</span>
+                )}
                 {dDuration && (
                   <>
                     <span style={styles.metaDot}>&middot;</span>
@@ -540,7 +559,9 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
                   onReady={() => setRatingsReady(true)}
                 />
               )}
+              </div>
 
+              <div style={split ? styles.bodySplit : undefined}>
               {/* Summary — from the clicked card until the fuller one arrives. */}
               {dSummary && (
                 <p style={styles.summary}>{dSummary}</p>
@@ -707,6 +728,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
                   inline
                   labelled
                 />
+              </div>
               </div>
             </div>
           </div>
@@ -937,6 +959,53 @@ const styles: Record<string, React.CSSProperties> = {
   posterEpisode: {
     aspectRatio: "16/9",
   },
+  /**
+   * An episode on a wide screen.
+   *
+   * The film layout puts everything beside the poster, and a poster is tall
+   * enough to match it. An episode's still is 16:9: at 360px wide it was 200px
+   * tall beside a column twice that, leaving the rest of the left side empty.
+   * Here the still sits beside only the heading, which is about its height,
+   * and the synopsis, tracks and buttons run beneath both. They are the film
+   * page's own controls in the same order, just moved below.
+   *
+   * A grid rather than moving markup: the info column turns `display:
+   * contents`, so its two halves (headSplit and bodySplit) become cells here.
+   */
+  layoutEpisode: {
+    display: "grid",
+    gridTemplateColumns: "min(420px, 46%) minmax(0, 1fr)",
+    gridTemplateAreas: '"still head" "body body"',
+    // Rows then columns. One shorthand, as the flex layout it replaces uses:
+    // mixing gap with rowGap/columnGap across a re-render makes React warn.
+    gap: "28px 36px",
+    alignItems: "center",
+  },
+  posterWrapSplit: {
+    gridArea: "still",
+    width: "100%",
+  },
+  infoSplit: {
+    display: "contents",
+  },
+  headSplit: {
+    gridArea: "head",
+    minWidth: 0,
+    // The heading's last row (the date, or the ratings under it) carries a
+    // 20px bottom margin for whatever follows it in a single column. Here
+    // nothing follows, so that space would sit inside the cell and centre the
+    // heading 10px high against the still.
+    marginBottom: "-20px",
+  },
+  bodySplit: {
+    gridArea: "body",
+    alignSelf: "start",
+    // The film page's info column is 1100 - 2 x 24 padding - 240 poster -
+    // 36 gap = 776px, so the dropdowns and buttons are the same size here as
+    // on a film.
+    maxWidth: "776px",
+    minWidth: 0,
+  },
   info: {
     flex: 1,
     minWidth: 0,
@@ -998,6 +1067,14 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "15px",
     color: "#888",
     fontWeight: 500,
+  },
+  // The "th" in "28th September 2026": small and raised, as it is written.
+  // lineHeight 0 so the raised suffix doesn't make the row taller.
+  ordinal: {
+    fontSize: "0.68em",
+    verticalAlign: "super",
+    lineHeight: 0,
+    marginLeft: "1px",
   },
   metaDot: {
     color: "#555",

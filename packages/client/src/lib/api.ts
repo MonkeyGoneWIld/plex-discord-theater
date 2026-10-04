@@ -83,9 +83,14 @@ export const STILL_THUMB_H = 495;
  *
  * It was the unsized original — often megabytes, sometimes 4K — for an image
  * the page blurs by 20px and darkens to 30%, so none of that detail reached
- * the screen.
- * It was also the last thing a title page finished loading. 960×540 looks the
- * same through that blur and is a small fraction of the download.
+ * the screen. It was also the last thing a title page finished loading.
+ *
+ * Stretched across the page, even a very small source is blurred over many of
+ * its own pixels, so the size can go almost all the way down. Put through the
+ * page's own blur, darkening and fade at 1280 and 1920 wide, 240×135 came
+ * within 1/255 of the full-size original on 99% of pixels, for a dark film
+ * still and for a bright grid of posters alike. It is a few kilobytes, where
+ * 960×540 was 50-80 KB.
  */
 export function backdropThumbUrl(art: string): string {
   const withToken = authUrl(art);
@@ -93,8 +98,8 @@ export function backdropThumbUrl(art: string): string {
   return `${withToken}${sep}w=${BACKDROP_THUMB_W}&h=${BACKDROP_THUMB_H}`;
 }
 
-export const BACKDROP_THUMB_W = 960;
-export const BACKDROP_THUMB_H = 540;
+export const BACKDROP_THUMB_W = 240;
+export const BACKDROP_THUMB_H = 135;
 
 const BASE = "";
 

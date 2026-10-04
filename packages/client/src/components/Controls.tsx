@@ -150,6 +150,13 @@ function fmt(seconds: number): string {
 const HIDE_DELAY_MS = 3000;
 
 /**
+ * How often the bar looks at how much is buffered, besides on timeupdate.
+ * timeupdate only fires while the time is moving, but the buffer keeps
+ * filling while paused and while stalled, which is when it matters most.
+ */
+const BUFFER_POLL_MS = 500;
+
+/**
  * How long the ±10s buttons keep collecting before the seek actually happens.
  *
  * Every seek can restart the Plex transcode, so firing one per click makes
@@ -675,11 +682,14 @@ export function Controls({
       setVisible(true);
       if (hideTimer.current) clearTimeout(hideTimer.current);
     };
-    const onTime = () => {
-      setCurrentTime(video.currentTime);
+    const onBuffer = () => {
       if (video.buffered.length > 0) {
         setBufferedEnd(video.buffered.end(video.buffered.length - 1));
       }
+    };
+    const onTime = () => {
+      setCurrentTime(video.currentTime);
+      onBuffer();
     };
     // Keep the last real duration through a restart.
     //
@@ -706,12 +716,18 @@ export function Controls({
     video.addEventListener("timeupdate", onTime);
     video.addEventListener("loadedmetadata", onDur);
     video.addEventListener("durationchange", onDur);
+    // The buffer on its own, so the bar keeps filling while paused or stalled:
+    // on progress, and on a poll for when a media-source stream sends none.
+    video.addEventListener("progress", onBuffer);
+    const bufferPoll = setInterval(onBuffer, BUFFER_POLL_MS);
     return () => {
       video.removeEventListener("play", onPlay);
       video.removeEventListener("pause", onPause);
       video.removeEventListener("timeupdate", onTime);
       video.removeEventListener("loadedmetadata", onDur);
       video.removeEventListener("durationchange", onDur);
+      video.removeEventListener("progress", onBuffer);
+      clearInterval(bufferPoll);
     };
   }, [videoRef]);
 

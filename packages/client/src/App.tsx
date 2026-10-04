@@ -1420,6 +1420,17 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: "column" as const,
     gap: "8px",
     margin: "16px 24px 0",
+    // The same 16px below as above. With none, a title page's backdrop began
+    // at the banner's bottom edge. The space is taken here, above every page,
+    // rather than inside one, so every page moves down by the same amount and
+    // the Back buttons still line up.
+    //
+    // Padding, not margin: the season, person and external pages let their
+    // Back button's 16px top margin collapse out through the page, and a
+    // bottom margin here would merge with it. Those pages would not move at
+    // all while the title and show pages, which contain their margins, moved
+    // 16px, and the Back buttons would no longer line up.
+    paddingBottom: "16px",
   },
   suggestionRow: {
     display: "flex",

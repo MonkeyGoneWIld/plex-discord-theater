@@ -16,7 +16,7 @@ import { apiPost, authUrl, fetchMeta, invalidateMeta, setStreams, versionOf } fr
 import { loadAudioPref, loadSubtitlePref, matchAudioTrack, matchSubtitleTrack } from "./lib/trackPrefs";
 import { useMediaQuery, MOBILE_LANDSCAPE_QUERY, NARROW_QUERY, PHONE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
-import type { QueueItem } from "./hooks/useSync";
+import type { QueueItem, SuggestionItem } from "./hooks/useSync";
 import { QUIET_SURFACE } from "./lib/surface";
 
 /**
@@ -595,6 +595,25 @@ export function App() {
     }
   }, [pushView, emitBrowse]);
 
+  // A viewer's suggestion, opened from the host's banner. Opening it is the
+  // answer, so it is dismissed at the same time.
+  const openSuggestion = (s: SuggestionItem) => {
+    // Carry the episode fields through, or the detail view and the browse
+    // label lose the show name all over again.
+    handleSelect({
+      ratingKey: s.ratingKey,
+      title: s.title,
+      type: s.type,
+      thumb: s.thumb,
+      year: s.year,
+      showTitle: s.showTitle,
+      parentTitle: s.parentTitle,
+      parentIndex: s.parentIndex,
+      index: s.index,
+    });
+    syncActions.sendDismissSuggestion(s.ratingKey);
+  };
+
   // Navigation from a collection / "More Like This" row — flags the opened title
   // as `flat` so its breadcrumb collapses to Home › <title> (see isFlatView).
   const handleSelectRelated = useCallback(
@@ -1017,42 +1036,38 @@ export function App() {
       {effectiveIsHost && syncState.suggestions.length > 0 && (
         <div style={styles.suggestionsPanel}>
           {syncState.suggestions.map((s) => (
-            <div key={s.ratingKey} style={styles.suggestionRow}>
+            // The whole row opens the title. Only Dismiss, inside it, does
+            // anything else, and it stops its click from reaching the row.
+            <div
+              key={s.ratingKey}
+              className="btn"
+              role="button"
+              tabIndex={0}
+              style={styles.suggestionRow}
+              onClick={() => openSuggestion(s)}
+              onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  openSuggestion(s);
+                }
+              }}
+            >
               <span style={styles.suggestionText}>
                 {s.fromUsername ? <strong>{s.fromUsername}</strong> : "Someone"} suggested{" "}
                 {/* formatMediaTitle already appends the year for films, so no
                     separate year suffix here. */}
                 <strong>{formatMediaTitle(s)}</strong>
               </span>
-              <div style={styles.suggestionActions}>
-                <button className="btn"
-                  onClick={() => {
-                    // Carry the episode fields through, or the detail view and
-                    // the browse label lose the show name all over again.
-                    handleSelect({
-                      ratingKey: s.ratingKey,
-                      title: s.title,
-                      type: s.type,
-                      thumb: s.thumb,
-                      year: s.year,
-                      showTitle: s.showTitle,
-                      parentTitle: s.parentTitle,
-                      parentIndex: s.parentIndex,
-                      index: s.index,
-                    });
-                    syncActions.sendDismissSuggestion(s.ratingKey);
-                  }}
-                  style={styles.suggestionViewBtn}
-                >
-                  View
-                </button>
-                <button className="btn"
-                  onClick={() => syncActions.sendDismissSuggestion(s.ratingKey)}
-                  style={styles.suggestionDismissBtn}
-                >
-                  Dismiss
-                </button>
-              </div>
+              <button className="btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  syncActions.sendDismissSuggestion(s.ratingKey);
+                }}
+                style={styles.suggestionDismissBtn}
+              >
+                Dismiss
+              </button>
             </div>
           ))}
         </div>
@@ -1441,29 +1456,15 @@ const styles: Record<string, React.CSSProperties> = {
     background: "linear-gradient(135deg, rgba(229,160,13,0.08), rgba(229,160,13,0.15))",
     border: "1px solid rgba(229,160,13,0.25)",
     borderRadius: "10px",
+    cursor: "pointer",
   },
   suggestionText: {
     color: "#e0e0e0",
     fontSize: "13px",
   },
-  suggestionActions: {
-    display: "flex",
-    gap: "8px",
-    flexShrink: 0,
-  },
-  suggestionViewBtn: {
-    padding: "6px 14px",
-    borderRadius: "8px",
-    border: "none",
-    background: "#e5a00d",
-    color: "#000",
-    fontSize: "12px",
-    fontWeight: 700,
-    fontFamily: "inherit",
-    cursor: "pointer",
-  },
   suggestionDismissBtn: {
     ...QUIET_SURFACE,
+    flexShrink: 0,
     padding: "6px 14px",
     borderRadius: "8px",
     color: "#888",

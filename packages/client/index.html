@@ -307,6 +307,11 @@
       }
       .btn:hover:not(:disabled) { filter: brightness(1.14); }
       .btn:active:not(:disabled) { translate: 0 1px; filter: brightness(1.06); }
+      /* A button inside another — Dismiss inside a suggestion, whose whole row
+         opens the title — answers on its own. Otherwise pointing at or pressing
+         it lit and sank the row around it as well, as if that were the press. */
+      .btn:has(.btn:hover) { filter: none; }
+      .btn:has(.btn:active) { translate: none; }
       @media (prefers-reduced-motion: reduce) {
         /* Keep the colour change — it is the half that says "this is a button"
            — and drop the movement. */

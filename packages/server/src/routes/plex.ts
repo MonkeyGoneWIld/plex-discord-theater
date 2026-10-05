@@ -19,10 +19,13 @@ import {
 import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
-import { sessionHostUserId, sessionHasOtherWatchers, roomPlaysHevc } from "../services/sync.js";
+import { sessionHostUserId, sessionHasOtherWatchers, roomPlaysHevc, restartStreams } from "../services/sync.js";
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
 import { parseSubtitles, type Cue } from "../services/subtitles.js";
+import {
+  decodeSubtitle, embeddedSubtitleState, onEmbeddedSubtitleLost, readEmbeddedSubtitle, type EmbeddedSubtitle,
+} from "../services/embedded-subtitles.js";
 import { mapPlexRatings } from "../services/ratings.js";
 import {
   DETAIL_MAX_AGE_MS,
@@ -2703,129 +2706,48 @@ const subtitleCache = new LruMap<string, { cues: Cue[]; at: number }>(200);
 const SUBTITLE_CACHE_TTL_MS = 30 * 60 * 1000;
 
 /**
- * Embedded subtitles Plex couldn't read out, by stream id, with when. The start
- * burns these in and the /subtitles route refuses them, so the picture and the
- * player agree about who shows them. Retried after EMBEDDED_RETRY_MS.
- */
-const unreadableEmbedded = new LruMap<string, number>(500);
-const EMBEDDED_RETRY_MS = 60 * 60 * 1000;
-/** Reads in flight, so a start and a player asking together share one. */
-const embeddedReads = new Map<string, Promise<Cue[] | null>>();
-/**
- * How long reading one out may take before it counts as unreadable. Plex has
- * to go through the file to collect a track that is spread across all of it, so
- * a big file on slow storage takes a while — but this holds up a start, once
- * per title (the result is cached), and a burned subtitle beats a long wait.
- */
-const EMBEDDED_READ_TIMEOUT_MS = 30_000;
-
-/** Text from a subtitle's bytes: UTF-8 if it is valid, Windows-1252 if not. */
-function decodeSubtitle(raw: ArrayBuffer): string {
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(raw);
-  } catch {
-    return new TextDecoder("windows-1252").decode(raw);
-  }
-}
-
-/**
- * A text subtitle stored inside the media file, as cues — read out through
- * Plex's subtitle-only transcode, which answers with the item's selected
- * subtitle track as SRT. The track has to be the selected one (Plex takes no
- * stream id here), so this runs under the item lock — see embeddedSubtitleCues.
- */
-async function readEmbeddedSubtitle(ratingKey: string, mediaIndex: number, streamId: string): Promise<Cue[] | null> {
-  const started = Date.now();
-  const sessionId = randomUUID();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), EMBEDDED_READ_TIMEOUT_MS);
-  try {
-    const res = await fetch(plexUrl("/video/:/transcode/universal/subtitles", {
-      path: `/library/metadata/${ratingKey}`,
-      mediaIndex: String(mediaIndex),
-      partIndex: "0",
-      protocol: "http",
-      subtitles: "sidecar",
-      // ASS/SSA as plain text, which is how sidecar ASS is drawn too.
-      advancedSubtitles: "text",
-      transcodeSessionId: sessionId,
-    }), {
-      headers: {
-        Accept: "text/srt, text/plain, */*",
-        "X-Plex-Client-Identifier": OUR_CLIENT_ID,
-        "X-Plex-Product": "Plex Discord Theater",
-        "X-Plex-Platform": "Chrome",
-        "X-Plex-Device": "Browser",
-        "X-Plex-Session-Identifier": sessionId,
-      },
-      signal: controller.signal,
-    });
-    const raw = await res.arrayBuffer();
-    const parsed = res.ok && raw.byteLength <= MAX_SUBTITLE_BYTES ? parseSubtitles(decodeSubtitle(raw)) : null;
-    if (!parsed || parsed.cues.length === 0) {
-      logEvent("Subtitles", "couldn't read an embedded subtitle out of the file", {
-        ratingKey, streamId, status: res.status,
-        type: res.headers.get("content-type") ?? "none",
-        bytes: raw.byteLength,
-        start: JSON.stringify(decodeSubtitle(raw.slice(0, 120))),
-        ms: Date.now() - started,
-      });
-      return null;
-    }
-    logEvent("Subtitles", "read an embedded subtitle out of the file", {
-      ratingKey, streamId, format: parsed.format, cues: parsed.cues.length, ms: Date.now() - started,
-    });
-    return parsed.cues;
-  } catch (err) {
-    logEvent("Subtitles", "couldn't read an embedded subtitle out of the file", {
-      ratingKey, streamId,
-      error: controller.signal.aborted ? `timed out after ${EMBEDDED_READ_TIMEOUT_MS / 1000}s` : String(err),
-    });
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * An embedded text subtitle's cues, or null when it can't be read. Cached like
- * a sidecar; remembered as unreadable for a while when it fails; shared while
- * in flight.
+ * Text subtitles inside the media file, read out by Plex and drawn by the
+ * player, so subtitles being on no longer means re-encoding the video to burn
+ * them in — see services/embedded-subtitles.ts.
  *
  * `lockHeld` is for the transcode start, which already holds the item lock and
- * has selected the track. Everyone else selects it under the lock here. A start
- * never joins a read queued behind its own lock — it would be waiting for
- * itself — and does its own instead.
+ * has selected the track. Everyone else selects it under the lock here.
  */
-function embeddedSubtitleCues(
+function embeddedSubtitle(
   ratingKey: string, mediaIndex: number, streamId: string, lockHeld: boolean,
-): Promise<Cue[] | null> {
-  const fresh = () => {
-    const hit = subtitleCache.get(streamId);
-    return hit && Date.now() - hit.at < SUBTITLE_CACHE_TTL_MS ? hit.cues : null;
-  };
-  const known = fresh();
-  if (known) return Promise.resolve(known);
-  const failedAt = unreadableEmbedded.get(streamId);
-  if (failedAt && Date.now() - failedAt < EMBEDDED_RETRY_MS) return Promise.resolve(null);
-  if (!lockHeld) {
-    const pending = embeddedReads.get(streamId);
-    if (pending) return pending;
-  }
-  const read = async () => {
-    const meanwhile = fresh();
-    if (meanwhile) return meanwhile;
-    if (!lockHeld) await selectTracksForStart(ratingKey, mediaIndex, null, Number(streamId));
-    const cues = await readEmbeddedSubtitle(ratingKey, mediaIndex, streamId);
-    if (cues) subtitleCache.set(streamId, { cues, at: Date.now() });
-    else unreadableEmbedded.set(streamId, Date.now());
-    return cues;
-  };
-  const promise = (lockHeld ? read() : withItemLock(ratingKey, read))
-    .finally(() => { if (embeddedReads.get(streamId) === promise) embeddedReads.delete(streamId); });
-  if (!lockHeld) embeddedReads.set(streamId, promise);
-  return promise;
+): Promise<EmbeddedSubtitle> {
+  return readEmbeddedSubtitle({
+    streamId,
+    ratingKey,
+    mediaIndex,
+    lockHeld,
+    withTrackSelected: lockHeld
+      ? (start) => start()
+      : (start) => withItemLock(ratingKey, async () => {
+          await selectTracksForStart(ratingKey, mediaIndex, null, Number(streamId));
+          return start();
+        }),
+  });
 }
+
+/**
+ * Streams started without their subtitle burned in while it was still being
+ * read out, by session, with the subtitle's stream id. If the read then fails,
+ * these are the ones left with no subtitle at all, and they are restarted —
+ * the new start finds it unreadable and burns it in.
+ */
+const drawingEmbedded = new Map<string, string>();
+
+onEmbeddedSubtitleLost((streamId) => {
+  const sessions = new Set<string>();
+  for (const [sessionId, id] of drawingEmbedded) if (id === streamId) sessions.add(sessionId);
+  for (const sessionId of sessions) drawingEmbedded.delete(sessionId);
+  if (sessions.size === 0) return;
+  const restarted = restartStreams(sessions, "its subtitle couldn't be read out of the file");
+  logEvent("Subtitles", "burning in a subtitle Plex couldn't read out after all", {
+    streamId, sessions: sessions.size, restarted,
+  });
+});
 
 /** Guard against a "subtitle" that is really a video file. Comfortably larger
  *  than any real subtitle: a three-hour ASS with full typesetting is ~1 MB. */
@@ -2843,8 +2765,10 @@ const MAX_SUBTITLE_BYTES = 8 * 1024 * 1024;
  *
  * A sidecar is fetched as the file it is. A track inside the media file needs
  * `?ratingKey=` (and `mediaIndex=` for a second version) and is read out through
- * Plex — see embeddedSubtitleCues — and one that couldn't be is refused, because
- * the stream will have burned it in instead.
+ * Plex — see embeddedSubtitle. That takes a while the first time, so the answer
+ * carries `complete: false` and the cues so far until it is done, and the
+ * player asks again. One that couldn't be read is refused, because the stream
+ * will have burned it in instead.
  */
 router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
   const streamId = req.params.streamId as string;
@@ -2867,9 +2791,13 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
     const mediaIndex = Number.isInteger(requested) && requested >= 0 ? requested : await defaultMediaIndex(ratingKey);
     const track = await subtitleTrackOf(ratingKey, mediaIndex, Number(streamId));
     if (track?.external && track.sidecar === false) {
-      const cues = await embeddedSubtitleCues(ratingKey, mediaIndex, streamId, false);
-      if (cues) res.json({ cues });
-      else res.status(404).json({ error: "Subtitle not available" });
+      const sub = await embeddedSubtitle(ratingKey, mediaIndex, streamId, false);
+      if (sub.state === "unreadable") {
+        res.status(404).json({ error: "Subtitle not available" });
+        return;
+      }
+      if (sub.state === "reading") res.setHeader("Cache-Control", "no-store");
+      res.json({ cues: sub.cues, complete: sub.state === "ready" });
       return;
     }
   }
@@ -3395,6 +3323,7 @@ export function markTranscodeStopped(sessionId: string): void {
   sessionRatingKeys.delete(sessionId);
   sessionMediaIndex.delete(sessionId);
   sessionVideoCodec.delete(sessionId);
+  drawingEmbedded.delete(sessionId);
   manifestCache.delete(sessionId);
   hostPingInfo.delete(sessionId);
   // DIAGNOSTIC: should trend back toward 0 between watch sessions.
@@ -4059,11 +3988,11 @@ async function subtitleIsDrawnByClient(
   // A sidecar is a file that is simply there. Entries cached before `sidecar`
   // existed only ever marked sidecars as drawable.
   if (track.sidecar !== false) return true;
-  // Text inside the file: drawn only if it can actually be read out, which this
-  // finds out now, before the transcode starts. Called with the item lock held
-  // and the track already selected.
-  const cues = await embeddedSubtitleCues(ratingKey, mediaIndex, String(subtitleStreamID), true);
-  return cues !== null;
+  // Text inside the file: drawn unless Plex can't read it out, which a start
+  // finds out within a few seconds. The reading itself carries on afterwards —
+  // see embeddedSubtitle. Called with the item lock held and the track selected.
+  const sub = await embeddedSubtitle(ratingKey, mediaIndex, String(subtitleStreamID), true);
+  return sub.state !== "unreadable";
 }
 
 /** One subtitle track from a title's metadata, as mapSubtitleTracks made it. */
@@ -4457,8 +4386,11 @@ router.get(
         requestedSubtitleMode === "burn" &&
         (await subtitleIsDrawnByClient(ratingKey, mediaIndex, subtitleStreamID));
       if (drawnByClient) {
+        const stillReading = embeddedSubtitleState(String(subtitleStreamID))?.state === "reading";
+        if (stillReading) drawingEmbedded.set(sessionId, String(subtitleStreamID));
         logEvent("Subtitles", "leaving this one to the client to draw", {
           ratingKey, subtitleStreamID, session: sessionId.substring(0, 8),
+          ...(stillReading ? { stillReading } : {}),
         });
       }
       // Decided per start, so a room that has gained someone who can't decode

@@ -792,18 +792,24 @@ export interface SubtitleCue {
  * Cached, because a roomful of people opening the same episode would otherwise
  * each pull the same file. Stream ids belong to a media part, so the key is
  * already unique across titles.
+ *
+ * A subtitle inside the media file is read out by Plex, which takes a while
+ * the first time: until then the answer says `complete: false` with the cues
+ * so far, and is asked for again with `fresh` rather than from the cache.
  */
 export function fetchSubtitleCues(
   streamId: number,
   /** The title, so a subtitle inside the media file can be read out of it. */
   ratingKey?: string,
   mediaIndex?: number,
-): Promise<{ cues: SubtitleCue[] }> {
+  fresh = false,
+): Promise<{ cues: SubtitleCue[]; complete?: boolean }> {
   const params = new URLSearchParams();
   if (ratingKey) params.set("ratingKey", ratingKey);
   if (mediaIndex != null && mediaIndex > 0) params.set("mediaIndex", String(mediaIndex));
   const qs = params.toString();
-  return cachedGet(`/api/plex/subtitles/${encodeURIComponent(String(streamId))}${qs ? `?${qs}` : ""}`);
+  const path = `/api/plex/subtitles/${encodeURIComponent(String(streamId))}${qs ? `?${qs}` : ""}`;
+  return fresh ? apiGet(path) : cachedGet(path);
 }
 
 export function hlsMasterUrl(

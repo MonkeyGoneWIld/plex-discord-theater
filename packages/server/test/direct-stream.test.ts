@@ -16,6 +16,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
+import Database from "better-sqlite3";
 
 process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "direct-stream-"));
 process.env.PLEX_TOKEN = "test-token";
@@ -160,7 +161,12 @@ const decisions: Array<{ ratingKey: string; directStream: string | null; profile
 /** The subtitle the item has selected, as Plex keeps it — per item, not per request. */
 let selectedSubtitle: string | null = null;
 let subtitleReads = 0;
-const SRT = "1\n00:00:01,000 --> 00:00:02,500\nHello\n\n2\n00:00:03,000 --> 00:00:04,000\nAgain\n";
+/** Asks of the endpoint the first version used, which Plex answers with the film. */
+let wrongEndpointReads = 0;
+const SRT_FIRST = "1\n00:00:01,000 --> 00:00:02,500\nHello\n\n";
+const SRT = SRT_FIRST + "2\n00:00:03,000 --> 00:00:04,000\nAgain\n";
+/** The first bytes of a Matroska file. */
+const MKV = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x23, 0x42, 0x86]);
 const plex = http.createServer((req, res) => {
   const url = new URL(req.url!, "http://plex");
   const send = (body: unknown) => {
@@ -178,6 +184,9 @@ const plex = http.createServer((req, res) => {
         { id: 22, streamType: 3, codec: "pgs", language: "English" },
         { id: 23, streamType: 3, codec: "srt", language: "French" },
         { id: 24, streamType: 3, codec: "srt", key: "/library/streams/24", format: "srt", language: "German" },
+        { id: 25, streamType: 3, codec: "srt", language: "Spanish" },
+        { id: 26, streamType: 3, codec: "srt", language: "Italian" },
+        { id: 27, streamType: 3, codec: "srt", language: "Dutch" },
       ] }] }],
     }] });
   }
@@ -186,12 +195,34 @@ const plex = http.createServer((req, res) => {
     return send({});
   }
   if (url.pathname === "/video/:/transcode/universal/subtitles") {
+    // What the real one did with this: started a second transcode of the whole
+    // film and sent that.
+    wrongEndpointReads++;
+    res.writeHead(200, { "Content-Type": "video/x-matroska" });
+    return res.end(MKV);
+  }
+  if (url.pathname === "/subtitles/:/transcode/universal/start") {
     subtitleReads++;
-    // Reads whatever the item has selected; 23 is one Plex can't read out.
-    if (selectedSubtitle === "23") { res.writeHead(500); return res.end(); }
-    if (selectedSubtitle !== "21") { res.writeHead(400); return res.end(); }
+    // Reads whatever the item has selected, at the moment it is asked.
+    const selected = selectedSubtitle;
+    // 23: one Plex can't read out.
+    if (selected === "23") { res.writeHead(500); return res.end(); }
+    // 27: one it answers with video anyway.
+    if (selected === "27") {
+      res.writeHead(200, { "Content-Type": "video/x-matroska" });
+      return res.end(MKV);
+    }
+    if (selected !== "21" && selected !== "25" && selected !== "26") { res.writeHead(400); return res.end(); }
     res.writeHead(200, { "Content-Type": "text/srt" });
-    return res.end(SRT);
+    if (selected === "21") return res.end(SRT);
+    // 25: a big file — the first line straight away, the rest a while later.
+    // 26: one that breaks off partway.
+    res.write(SRT_FIRST);
+    setTimeout(() => {
+      if (selected === "25") res.end(SRT.slice(SRT_FIRST.length));
+      else res.destroy();
+    }, selected === "25" ? 6_000 : 300);
+    return;
   }
   if (url.pathname === "/library/streams/24") {
     res.writeHead(200, { "Content-Type": "text/srt" });
@@ -199,6 +230,8 @@ const plex = http.createServer((req, res) => {
   }
   if (url.pathname === "/video/:/transcode/universal/decision") {
     const copy = url.searchParams.get("directStream") === "1";
+    // A subtitle read's own decision isn't one of the stream's.
+    if (url.searchParams.get("protocol") === "http") return send({});
     decisions.push({
       ratingKey: (url.searchParams.get("path") ?? "").split("/").pop()!,
       directStream: url.searchParams.get("directStream"),
@@ -244,6 +277,7 @@ await new Promise<void>((r) => plex.listen(0, "127.0.0.1", r));
 process.env.PLEX_URL = `http://127.0.0.1:${(plex.address() as AddressInfo).port}`;
 
 const ds = await import("../src/services/direct-stream.js");
+const embeddedSubs = await import("../src/services/embedded-subtitles.js");
 const pathOf = (key: string, index: number) =>
   `/video/:/transcode/universal/session/${key}/base/${String(index).padStart(5, "0")}.ts`;
 
@@ -410,18 +444,52 @@ console.log("\n— through the routes —");
     plexRoutes.markTranscodeStopped(sid);
     return decisions.at(-1)!;
   };
-  const cues = (id: number) => fetch(`${origin}/api/plex/subtitles/${id}?ratingKey=900`)
-    .then(async (r) => [r.status, r.ok ? ((await r.json()) as { cues: unknown[] }).cues.length : 0]);
+  const answer = async (id: number) => {
+    const r = await fetch(`${origin}/api/plex/subtitles/${id}?ratingKey=900`);
+    const body = r.ok ? ((await r.json()) as { cues: unknown[]; complete?: boolean }) : null;
+    return { status: r.status, cues: body?.cues.length ?? 0, complete: body?.complete };
+  };
+  const cues = async (id: number) => {
+    const a = await answer(id);
+    return [a.status, a.cues];
+  };
+  const lost: string[] = [];
+  embeddedSubs.onEmbeddedSubtitleLost((id) => lost.push(id));
 
   const embedded = await start(21);
   check("a text subtitle inside the file isn't burned, so the video can still be copied",
     [embedded.subtitles, embedded.directStream], ["none", "1"]);
-  check("the player gets it as text to draw", await cues(21), [200, 2]);
+  check("the player gets it as text to draw", await answer(21), { status: 200, cues: 2, complete: true });
   check("read out of the file once, for the start and the player both", subtitleReads, 1);
+  check("through Plex's subtitle-only transcode, never the one that sends the film", wrongEndpointReads, 0);
+  const kept = new Database(path.join(process.env.THUMB_CACHE_DIR!, "subtitles.sqlite"), { readonly: true });
+  check("and kept on disk, so a restart doesn't read the file again",
+    kept.prepare("SELECT COUNT(*) AS n FROM embedded_subtitles WHERE stream_id = '21'").get(), { n: 1 });
+  kept.close();
   check("a picture subtitle (PGS) is burned in as before", (await start(22)).subtitles, "burn");
   check("a text one Plex can't read out is burned in instead", (await start(23)).subtitles, "burn");
   check("and the player is told it's not there, so it isn't shown twice", (await cues(23))[0], 404);
   check("a separate subtitle file is drawn as before", [(await start(24)).subtitles, await cues(24)], ["none", [200, 2]]);
+
+  let began = Date.now();
+  const video = await start(27);
+  check("one Plex answers with video is burned in, and found out at once",
+    [video.subtitles, Date.now() - began < 2000], ["burn", true]);
+
+  began = Date.now();
+  const slow = await start(25);
+  check("a big file's start doesn't wait for the whole read",
+    [slow.subtitles, slow.directStream, Date.now() - began < 2000], ["none", "1", true]);
+  check("the player gets the lines read so far, and is told there's more",
+    await answer(25), { status: 200, cues: 1, complete: false });
+  await until(() => embeddedSubs.embeddedSubtitleState("25")?.state === "ready", 10_000);
+  check("and all of them once Plex is done", await answer(25), { status: 200, cues: 2, complete: true });
+
+  const broken = await start(26);
+  check("one that breaks off partway starts drawn by the player", broken.subtitles, "none");
+  await until(() => lost.includes("26"));
+  check("its failure is reported, so the streams drawing it restart with it burned in", lost, ["26"]);
+  check("which the restart does", (await start(26)).subtitles, "burn");
 
   await plexRoutes.stopAllActiveSessions();
   api.close();

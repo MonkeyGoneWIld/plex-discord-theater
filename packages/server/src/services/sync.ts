@@ -483,6 +483,34 @@ function moveRoomOffHevc(room: Room, roomId: string, cause: RoomClient, why: str
   }
 }
 
+/**
+ * Have these streams' drivers start them over where playback is — the same
+ * "you have no transcode" move as moveRoomOffHevc, for a reason the server
+ * found on its own: a subtitle the player was meant to draw turned out to be
+ * unreadable, so the stream has to come back with it burned in. Returns how
+ * many were told.
+ */
+export function restartStreams(sessionIds: ReadonlySet<string>, why: string): number {
+  let told = 0;
+  for (const [roomId, room] of rooms) {
+    for (const v of room.state.variants.values()) {
+      if (!v.hlsSessionId || !sessionIds.has(v.hlsSessionId)) continue;
+      const owner = [...room.clients].find((c) => c.userId === v.ownerUserId);
+      if (!owner) continue;
+      sendTo(owner.ws, { ...variantMessage(v, true, room.state.ratingKey), hlsSessionId: null });
+      told++;
+      logEvent("Sync", "restarting a stream", {
+        room: roomId.substring(0, 8),
+        variant: v.key,
+        session: v.hlsSessionId.substring(0, 8),
+        driver: owner.username ?? owner.userId,
+        why,
+      });
+    }
+  }
+  return told;
+}
+
 export function sessionHostUserId(sessionId: string): string | null {
   for (const room of rooms.values()) {
     // Whoever drives this particular stream. With one transcode per set of

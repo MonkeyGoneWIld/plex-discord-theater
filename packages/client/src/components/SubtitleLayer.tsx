@@ -27,6 +27,8 @@ import { logEvent, logWarn } from "../lib/log";
 const FONT_SCALE = 0.043;
 /** And how far it sits above the bottom of the picture, in the same units. */
 const BOTTOM_SCALE = 0.055;
+/** How often to ask again for a subtitle Plex is still reading out of the file. */
+const STILL_READING_POLL_MS = 4_000;
 /** Bounds for absurd geometry — a sliver of a window, or a wall-sized display. */
 const MIN_FONT_PX = 13;
 const MAX_FONT_PX = 56;
@@ -172,37 +174,60 @@ interface SubtitleLayerProps {
 
 export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offsetMs, onUnavailable }: SubtitleLayerProps) {
   const [cues, setCues] = useState<SubtitleCue[]>([]);
+  // Plex is still reading this one out of the media file: cues so far are
+  // drawn, and the rest is asked for again shortly.
+  const [stillReading, setStillReading] = useState(false);
   const onUnavailableRef = useRef(onUnavailable);
   onUnavailableRef.current = onUnavailable;
 
   useEffect(() => {
     setCues([]);
+    setStillReading(false);
     if (streamId == null) return;
     let cancelled = false;
-    fetchSubtitleCues(streamId, ratingKey, mediaIndex)
-      .then((r) => {
-        if (cancelled) return;
-        setCues(r.cues);
-        logEvent("Subtitles", "drawing a sidecar here rather than burning it in", {
-          streamId, cues: r.cues.length,
+    let poll: ReturnType<typeof setTimeout> | undefined;
+    const startedAt = Date.now();
+    const load = (fresh: boolean) => {
+      fetchSubtitleCues(streamId, ratingKey, mediaIndex, fresh)
+        .then((r) => {
+          if (cancelled) return;
+          setCues(r.cues);
+          if (r.complete === false) {
+            setStillReading(true);
+            poll = setTimeout(() => load(true), STILL_READING_POLL_MS);
+            return;
+          }
+          setStillReading(false);
+          logEvent("Subtitles", "drawing a sidecar here rather than burning it in", {
+            streamId, cues: r.cues.length,
+            ...(fresh ? { waitedMs: Date.now() - startedAt } : {}),
+          });
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          setStillReading(false);
+          // The stream is already running without burned-in subtitles, so there
+          // is nothing to fall back to in place — say so instead of showing a
+          // film that silently has no subtitles. (A subtitle inside the file
+          // that Plex fails to read out has the server restart the stream with
+          // it burned in.)
+          logWarn("Subtitles", "sidecar could not be loaded", {
+            streamId, error: String(err),
+          });
+          onUnavailableRef.current?.();
         });
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        // The stream is already running without burned-in subtitles, so there
-        // is nothing to fall back to in place — say so instead of showing a
-        // film that silently has no subtitles.
-        logWarn("Subtitles", "sidecar could not be loaded", {
-          streamId, error: String(err),
-        });
-        onUnavailableRef.current?.();
-      });
-    return () => { cancelled = true; };
+    };
+    load(false);
+    return () => { cancelled = true; clearTimeout(poll); };
   }, [streamId]);
 
   const cue = useActiveCue(videoRef, cues, offsetMs);
   const box = usePictureBox(videoRef);
-  if (!cue) return null;
+  // While Plex is still reading it out, say so wherever there is no line yet —
+  // a film that starts with no subtitles otherwise looks like a broken track.
+  const lastEnd = cues.length > 0 ? cues[cues.length - 1].end : -1;
+  const waiting = stillReading && !cue && (videoRef.current?.currentTime ?? 0) >= lastEnd;
+  if (!cue && !waiting) return null;
 
   // Before the intrinsic size is known there is no picture to measure against.
   // The fallbacks say the same thing about the player instead, so a cue landing
@@ -211,6 +236,14 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
     ? Math.min(MAX_FONT_PX, Math.max(MIN_FONT_PX, box.height * FONT_SCALE))
     : `clamp(${MIN_FONT_PX}px, 4.3vh, ${MAX_FONT_PX}px)`;
   const bottom = box ? box.bottomInset + box.height * BOTTOM_SCALE : "5.5%";
+
+  if (!cue) {
+    return (
+      <div style={{ ...styles.layer, bottom }} aria-live="polite">
+        <div style={{ ...styles.cue, ...styles.waiting }}>Loading subtitles…</div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ ...styles.layer, bottom }} aria-live="off">
@@ -256,5 +289,10 @@ const styles: Record<string, React.CSSProperties> = {
       "0 0 3px rgba(0,0,0,0.85), 0 1px 2px rgba(0,0,0,0.95), 0 0 10px rgba(0,0,0,0.5)",
     whiteSpace: "pre-wrap",
     textWrap: "balance",
+  },
+  /** Small and faint: a note about the track, not a line of it. */
+  waiting: {
+    fontSize: 13,
+    opacity: 0.7,
   },
 };

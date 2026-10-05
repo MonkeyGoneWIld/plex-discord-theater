@@ -495,11 +495,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
               {/* Meta row */}
               <div style={styles.metaRow}>
                 {airDate ? (
-                  <span style={styles.metaItem}>
-                    {airDate.day}
-                    <span style={styles.ordinal}>{airDate.suffix}</span>
-                    {" "}{airDate.rest}
-                  </span>
+                  <span style={styles.metaItem}>{airDate}</span>
                 ) : (
                   dYear && <span style={styles.metaItem}>{dYear}</span>
                 )}
@@ -1073,14 +1069,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "15px",
     color: "#888",
     fontWeight: 500,
-  },
-  // The "th" in "28th September 2026": small and raised, as it is written.
-  // lineHeight 0 so the raised suffix doesn't make the row taller.
-  ordinal: {
-    fontSize: "0.68em",
-    verticalAlign: "super",
-    lineHeight: 0,
-    marginLeft: "1px",
   },
   metaDot: {
     color: "#555",

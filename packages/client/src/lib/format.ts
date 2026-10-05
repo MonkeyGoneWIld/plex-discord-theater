@@ -44,28 +44,20 @@ const MONTHS = [
 ];
 
 /**
- * An air date as the episode page shows it: the day, its ordinal suffix kept
- * apart so the page can set it small, then the month in full and the year.
- * "2026-09-28" is { day: "28", suffix: "th", rest: "September 2026" }.
+ * An air date as the episode page shows it: "June 3, 2005".
  *
  * Read from Plex's "YYYY-MM-DD" as written rather than through Date, which
  * takes it as UTC midnight and shows the day before anywhere west of UTC.
  * Null for anything that isn't such a date.
  */
-export function formatAirDate(iso: string | null | undefined): { day: string; suffix: string; rest: string } | null {
+export function formatAirDate(iso: string | null | undefined): string | null {
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso ?? "");
   if (!match) return null;
   const year = Number(match[1]);
   const month = Number(match[2]);
   const day = Number(match[3]);
   if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-  return { day: String(day), suffix: ordinalSuffix(day), rest: `${MONTHS[month - 1]} ${year}` };
-}
-
-function ordinalSuffix(n: number): string {
-  // 11th, 12th and 13th, not 11st, 12nd and 13rd.
-  if (n % 100 >= 11 && n % 100 <= 13) return "th";
-  return n % 10 === 1 ? "st" : n % 10 === 2 ? "nd" : n % 10 === 3 ? "rd" : "th";
+  return `${MONTHS[month - 1]} ${day}, ${year}`;
 }
 
 /** Coarse "when did this happen" label for history rows. */

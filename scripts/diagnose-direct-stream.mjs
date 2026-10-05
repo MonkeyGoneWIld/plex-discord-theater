@@ -424,11 +424,23 @@ async function decisionProbes(item) {
   const frame = transcodeFrame(version);
   // What the app sends now, then what Direct Stream would need. Earlier rounds
   // (the wordings Plex ignored) are in this file's history.
+  // Plex refuses to copy HEVC under its Chrome profile even sized to the file,
+  // while it happily encodes HEVC itself — at 8 bits, which suggests a bit-depth
+  // limit in that profile. Two ways round one: replace Plex's HEVC limits with
+  // ours (add-limitation with replace=true drops every limit with the same
+  // scope and codec), or ask for Plex's plain "generic" profile instead.
+  const hevcLimits = "add-limitation(scope=videoCodec&scopeName=hevc&type=upperBound&name=video.bitDepth&value=10&replace=true)";
+  const generic = { "X-Plex-Client-Profile-Name": "generic" };
   const probes = [
     { name: "app today", directStream: false, extra: appProfile(), videoResolution: frame },
     { name: "app with HEVC_TRANSCODE=1", directStream: false, extra: appProfile("hevc,h264"), videoResolution: frame },
-    { name: "copy allowed, H.264 or HEVC, old 1920x1080 box", directStream: true, extra: appProfile("h264,hevc") },
     { name: "copy allowed, H.264 or HEVC, sized to the file", directStream: true, extra: appProfile("h264,hevc"), videoResolution: frame },
+    { name: "copy allowed, Plex's HEVC limits replaced (10-bit allowed)", directStream: true,
+      extra: [appProfile("h264,hevc"), hevcLimits].join("+"), videoResolution: frame },
+    { name: "copy allowed, Plex's generic profile", directStream: true, extra: appProfile("h264,hevc"), videoResolution: frame,
+      headers: generic },
+    { name: "copy allowed, generic profile, HEVC limits replaced", directStream: true,
+      extra: [appProfile("h264,hevc"), hevcLimits].join("+"), videoResolution: frame, headers: generic },
     { name: "copy allowed, sized to the file, 60 Mbps cap", directStream: true, extra: appProfile("h264,hevc"), videoResolution: frame,
       videoBitrate: 60000, peakBitrate: 80000 },
   ];
@@ -442,7 +454,7 @@ async function decisionProbes(item) {
     try {
       const res = await plexFetch("/video/:/transcode/universal/decision", {
         params,
-        headers: plexHeaders(sessionId, { "X-Plex-Client-Profile-Extra": probe.extra }),
+        headers: plexHeaders(sessionId, { "X-Plex-Client-Profile-Extra": probe.extra, ...probe.headers }),
       });
       const text = await res.text();
       let body = null;
@@ -701,6 +713,40 @@ async function walkSegments(item) {
     index++;
   }
 
+  // A session started mid-file — which is what every seek restart is. Plex's
+  // playlist still describes the whole title, so: does it number the segments
+  // it produces from the start of the title or from the offset, and what
+  // timestamps does the first one carry? A corrected playlist has to know both.
+  if (FROM > 0) {
+    out(`Started at ${fmtTime(FROM)}. Which segments did Plex produce first?`);
+    const peek = async (i, label) => {
+      const entry = playlist.entries[i];
+      if (!entry) return null;
+      const bytes = await fetchSegment(resolvePlexPath(entry.uri, baseDir), 30).catch(() => null);
+      if (!bytes) {
+        out(`   ${entry.uri} (${label}): not produced`);
+        return null;
+      }
+      const file = path.join(segDir, `peek-${i}.ts`);
+      await writeFile(file, bytes);
+      const a = analyseSegment(await probePackets(file));
+      await rm(file, { force: true });
+      out(`   ${entry.uri} (${label}): ${bytes.length} bytes, ` +
+        (a.videoPackets
+          ? `first frame at ${fmtNum(a.vFirst, 3)}s raw, ${a.firstIsKey ? "on a keyframe" : "NOT on a keyframe"}`
+          : "no video in it"));
+      return a.videoPackets ? a : null;
+    };
+    const byTitle = await peek(index, "numbered from the title's start");
+    const byOffset = index > 0 ? await peek(0, "numbered from the offset") : null;
+    reportJson.offsetStart = { byTitle, byOffset };
+    if (!byTitle && byOffset) {
+      out("Plex numbers an offset session's segments from 0 — walking from there.");
+      index = 0;
+      declaredStart = FROM;
+    }
+  }
+
   while (declaredStart < to) {
     if (index >= playlist.entries.length) {
       if (playlist.tags.endList) break;
@@ -750,6 +796,11 @@ async function walkSegments(item) {
   process.stdout.write("\n");
 
   const flagged = annotate(results);
+  const firstWithVideo = results.find((r) => Number.isFinite(r.vFirst));
+  if (firstWithVideo) {
+    out(`First segment walked (${firstWithVideo.name}) starts at ${fmtNum(firstWithVideo.vFirst, 3)}s raw — ` +
+      `compare with where the session was asked to start (${FROM}s).`);
+  }
   reportSegments(results, flagged);
   reportJson.segments = results.map(({ keyTimes, file, ...rest }) => rest);
   return results;

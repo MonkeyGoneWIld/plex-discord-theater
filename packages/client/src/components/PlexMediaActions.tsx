@@ -249,9 +249,13 @@ const styles: Record<string, React.CSSProperties> = {
     display: "inline-flex", alignItems: "center", gap: "9px",
     // 44px, the same floor the episode list's control is held to. It is a
     // primary way to change state on a phone, and it was 4px short of it.
-    height: "44px", padding: "0 18px 0 13px", borderRadius: "999px",
-    color: "#d6d6d6", cursor: "pointer", fontFamily: "inherit",
-    fontSize: "14px", fontWeight: 500, whiteSpace: "nowrap",
+    // The rest matches Start Over (MovieDetail's startOverBtn), the pill it
+    // stands beside: the same text size, weight and colour. At 14px and 500
+    // they read as a lighter kind of button than the one next to them. The
+    // padding is narrower on the left, where the icon brings its own space.
+    height: "44px", padding: "0 22px 0 16px", borderRadius: "999px",
+    color: "#ccc", cursor: "pointer", fontFamily: "inherit",
+    fontSize: "15px", fontWeight: 600, whiteSpace: "nowrap",
     transition: "background 0.15s ease, color 0.15s ease, opacity 0.15s ease",
   },
   watchlistActive: { color: "#e5a00d" },

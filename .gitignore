@@ -35,3 +35,6 @@ bun.lock
 docs/plans/
 docs/superpowers/
 /.superpowers
+
+# Output of scripts/diagnose-direct-stream.mjs
+diagnose-out/

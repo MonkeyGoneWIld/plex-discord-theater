@@ -11,7 +11,9 @@
  *
  * Video is found by its PES stream id (0xE0–0xEF) rather than through the
  * PAT/PMT, which keeps this a single pass and indifferent to which PID Plex
- * happens to use.
+ * happens to use. Audio (0xC0–0xDF) is read too, for where it starts: hls.js
+ * lines a stream up by whichever of the two starts first, and in a copy begun
+ * mid-film the audio can start well before the first keyframe.
  */
 
 const PACKET = 188;
@@ -25,6 +27,8 @@ export interface VideoSpan {
   end: number;
   /** Video frames found. */
   frames: number;
+  /** Earliest audio presentation time, Plex's clock, or null with no audio. */
+  audioStart: number | null;
 }
 
 /** The first offset at which two consecutive packets both start with a sync byte. */
@@ -52,6 +56,7 @@ export function videoSpan(buf: Uint8Array): VideoSpan | null {
   const first = alignment(buf);
   if (first < 0) return null;
   const pts: number[] = [];
+  let audioStart: number | null = null;
   for (let p = first; p + PACKET <= buf.length; p += PACKET) {
     if (buf[p] !== SYNC) continue;
     // A PES header only ever begins where a payload unit starts.
@@ -62,9 +67,13 @@ export function videoSpan(buf: Uint8Array): VideoSpan | null {
     if (payload + 14 > p + PACKET) continue;
     if (buf[payload] !== 0 || buf[payload + 1] !== 0 || buf[payload + 2] !== 1) continue;
     const streamId = buf[payload + 3];
-    if (streamId < 0xe0 || streamId > 0xef) continue;
+    const video = streamId >= 0xe0 && streamId <= 0xef;
+    const audio = streamId >= 0xc0 && streamId <= 0xdf;
+    if (!video && !audio) continue;
     if ((buf[payload + 7] & 0x80) === 0) continue; // no PTS on this one
-    pts.push(readPts(buf, payload + 9));
+    const at = readPts(buf, payload + 9);
+    if (video) pts.push(at);
+    else if (audioStart === null || at < audioStart) audioStart = at;
   }
   if (pts.length === 0) return null;
 
@@ -82,5 +91,6 @@ export function videoSpan(buf: Uint8Array): VideoSpan | null {
     start: pts[0] / PTS_HZ,
     end: (pts[pts.length - 1] + frame) / PTS_HZ,
     frames: pts.length,
+    audioStart: audioStart === null ? null : audioStart / PTS_HZ,
   };
 }

@@ -20,6 +20,8 @@ import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { isHevcCodec, markHevcUnplayable } from "../lib/hevc";
 import { loadVolume, saveVolume } from "../lib/volume";
+import { lowerQualityFor, preferredQuality, qualityLabel, setPreferredQuality, usePreferredQuality } from "../lib/quality";
+import { readStreamNotes, type StreamNotes } from "../lib/streamNotes";
 import { getLevel, setLevel, MAX_LEVEL } from "../lib/audioBoost";
 import { describeWatched, loadAudioPref, loadSubtitlePref, mergeTrackPrefs, saveTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
@@ -165,6 +167,27 @@ const MAX_HOLE_JUMP_S = 10;
  * "seeking" for twenty-five seconds while segments it couldn't use came in.
  */
 const WEDGE_DOWNLOAD_GRACE_MS = 15_000;
+/**
+ * How long a playhead sits in front of a hole — with what comes after it
+ * already buffered — before it is jumped, downloads or not. No download fills
+ * a hole the loader has already gone past. Deadpool started at 3:39 sat
+ * twenty seconds in front of each of two, both times with bytes still coming
+ * in for segments further on.
+ */
+const HOLE_JUMP_AFTER_MS = 3_000;
+
+/**
+ * Buffering that keeps coming back is a connection that can't carry the
+ * stream, and the answer to that is a lower quality — see lib/quality.ts. Seconds
+ * spent starved within the window before it is offered.
+ */
+const REBUFFER_WINDOW_MS = 120_000;
+const REBUFFER_OFFER_S = 12;
+/** Not counted: the first seconds of a stream, which are loading, not stalling. */
+const REBUFFER_STARTUP_MS = 10_000;
+/** How long "not now" holds. */
+const REBUFFER_SNOOZE_MS = 10 * 60_000;
+
 /** Clean playback for this long means the next media error starts a fresh budget. */
 const MEDIA_ERROR_RESET_MS = 60_000;
 /**
@@ -342,6 +365,18 @@ function nextBufferedStart(video: HTMLVideoElement, t: number): number | null {
     if (buffered.start(i) > t + 0.1) return buffered.start(i);
   }
   return null;
+}
+
+/** Where the buffered range around the playhead starts — the playhead itself
+ *  when it is in none. */
+function bufferedRangeStart(video: HTMLVideoElement): number {
+  const { buffered, currentTime } = video;
+  for (let i = 0; i < buffered.length; i++) {
+    if (currentTime >= buffered.start(i) - 0.1 && currentTime <= buffered.end(i) + 0.1) {
+      return Math.min(buffered.start(i), currentTime);
+    }
+  }
+  return currentTime;
 }
 
 /** Seconds of contiguous buffer ahead of the current playhead (0 if none). */
@@ -594,7 +629,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // and auto-cleared shortly after (see effect below).
   const [hostSeeking, setHostSeeking] = useState(false);
   const [showTrackSwitcher, setShowTrackSwitcher] = useState(false);
-  const [trackSwitching, setTrackSwitching] = useState<"audio" | "subtitle" | null>(null);
+  const [trackSwitching, setTrackSwitching] = useState<"audio" | "subtitle" | "quality" | null>(null);
   // Transient play/pause acknowledgement. `at` is part of the key so a rapid
   // second toggle restarts the animation instead of being swallowed by React
   // seeing the same value.
@@ -619,6 +654,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [showQueuePanel, setShowQueuePanel] = useState(false);
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
   const [showStats, setShowStats] = useState(false);
+  /** The server's account of the stream playing — see StreamNotes. */
+  const [streamNotes, setStreamNotes] = useState<StreamNotes | null>(null);
+  const streamNotesRef = useRef<StreamNotes | null>(null);
+  /** This viewer's quality ceiling — see lib/quality.ts. */
+  const quality = usePreferredQuality();
+  /** A lower quality to suggest, after a lot of buffering; null when not. */
+  const [offerLowerQuality, setOfferLowerQuality] = useState<number | null>(null);
+  /** The seconds this player spent starved, recently — see REBUFFER_WINDOW_MS. */
+  const starvedSecondsRef = useRef<number[]>([]);
+  /** Until when starving isn't counted: a stream starting, or "not now". */
+  const rebufferQuietUntilRef = useRef(0);
   const [confirmingEnd, setConfirmingEnd] = useState(false);
   const initialPipDockRef = useRef<PipDock>(defaultPipDock());
   const [pipDock, setPipDock] = useState<PipDock>(initialPipDockRef.current);
@@ -1454,6 +1500,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    */
   const [startedBurnedSubtitle, setStartedBurnedSubtitle] = useState(0);
   const sessionBurnedRef = useRef(0);
+  /** The quality ceiling the stream this client last started was made at, for
+   *  the announcement that follows the start. */
+  const sessionQualityRef = useRef(0);
 
   // The room's stream, which is the host's. Still the fallback for a client that
   // has not been assigned a variant — an older server, or the moment before the
@@ -2069,6 +2118,97 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * nobody else) onto a stream of its own: a re-encode, since a burned subtitle
    * is part of the picture.
    */
+  /**
+   * Keep this client on a stream at its own quality.
+   *
+   * The room puts people on the host's stream — joining, a new title, going
+   * back to the host's — and that is at the host's quality, not theirs. Someone
+   * who has chosen another asks again for the same tracks at their own, which
+   * gives them a stream of their own, or puts them on someone else's at it.
+   * Declared before the burn-in request below: when both fire on one
+   * assignment, the burn-in has to be the one the server hears last.
+   */
+  const qualityAskedRef = useRef<string | null>(null);
+  useEffect(() => {
+    const v = variantRef.current;
+    if (!v || v.ratingKey !== item.ratingKey || v.quality === quality) return;
+    const key = `${v.variantKey}>${quality}`;
+    if (qualityAskedRef.current === key) return;
+    qualityAskedRef.current = key;
+    logEvent("Player", "asking for a stream at this quality", {
+      from: v.variantKey,
+      quality: quality || "auto",
+    });
+    askedForTracksRef.current = true;
+    syncActionsRef.current?.sendSetTracks(
+      v.audioStreamId,
+      v.subtitleStreamId,
+      // Drawn here unless it is the one the stream burns in.
+      v.subtitleStreamId !== 0 && v.burnedSubtitleId === 0,
+      quality,
+    );
+  }, [variant?.seq, quality, item.ratingKey]);
+
+  /**
+   * Notice a connection that can't keep up, and offer a lower quality.
+   *
+   * Polled once a second while the room plays: a second spent with the
+   * picture stopped for want of data counts, unless the stream has only just
+   * started or the player is seeking. REBUFFER_OFFER_S of those within
+   * REBUFFER_WINDOW_MS is buffering that isn't going away on its own.
+   */
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const video = videoRef.current;
+      const sync = syncStateRef.current;
+      if (!video || !sync?.playing || video.paused || video.seeking) return;
+      const now = Date.now();
+      const recent = starvedSecondsRef.current.filter((t) => now - t < REBUFFER_WINDOW_MS);
+      starvedSecondsRef.current = recent;
+      if (now < rebufferQuietUntilRef.current) return;
+      const starved = bufferAheadSeconds(video) < 0.5 &&
+        video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA;
+      if (!starved) return;
+      recent.push(now);
+      if (recent.length < REBUFFER_OFFER_S) return;
+      const notes = streamNotesRef.current;
+      const ceiling = preferredQuality();
+      const nowKbps = Math.min(notes?.kbps ?? Infinity, ceiling || Infinity);
+      const suggest = lowerQualityFor(nowKbps, hlsRef.current?.bandwidthEstimate ?? 0);
+      if (suggest === null) return;
+      logEvent("Player", "buffering a lot, offering a lower quality", {
+        starvedS: recent.length,
+        streamKbps: notes?.kbps ?? "unknown",
+        measuredKbps: Math.round((hlsRef.current?.bandwidthEstimate ?? 0) / 1000),
+        suggestKbps: suggest,
+      });
+      starvedSecondsRef.current = [];
+      setOfferLowerQuality(suggest);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  /** A quality chosen in the settings or from the buffering hint. */
+  const handleQualityChange = useCallback((kbps: number) => {
+    setOfferLowerQuality(null);
+    starvedSecondsRef.current = [];
+    if (kbps === preferredQuality()) return;
+    logEvent("Player", "quality changed", {
+      from: preferredQuality() || "auto",
+      to: kbps || "auto",
+      stream: variantRef.current?.variantKey ?? "none",
+    });
+    // Hold the frame over the swap, as a track change does — only when the
+    // ask below goes out (see the quality effect above), or the overlay would
+    // wait on a stream that never comes.
+    const v = variantRef.current;
+    if (v && v.ratingKey === itemRef.current.ratingKey && v.quality !== kbps) {
+      canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
+      setTrackSwitching("quality");
+    }
+    setPreferredQuality(kbps);
+  }, []);
+
   const burnAskedRef = useRef<string | null>(null);
   useEffect(() => {
     if (activeSubtitleId === 0 || activeSubtitleId === burnedSubtitleId) return;
@@ -2357,7 +2497,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     });
 
     const chosenSubtitle = currentSubtitleStreamRef.current ?? subtitleStreamId ?? 0;
+    // The ceiling this stream is made at: the assigned stream's own when this
+    // client drives it, otherwise this viewer's choice — a host starting a
+    // title, which has no assignment yet. A follower's URL starts nothing.
+    const assigned = variantRef.current;
+    const streamQuality = assigned && assigned.ratingKey === item.ratingKey && assigned.isOwner
+      ? assigned.quality
+      : preferredQuality();
+    if (sessionOwner) sessionQualityRef.current = streamQuality;
     const urlFor = (burned: number) => hlsMasterUrl(item.ratingKey, sessionId, {
+      quality: streamQuality,
       subtitles: burned !== 0,
       offset: startOffset > 0 ? startOffset : undefined,
       // The tracks this transcode is for. The server applies them to the item
@@ -2559,8 +2708,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   eng.starts++;
                 });
                 hls.p2pEngine.addEventListener("onSegmentError", ({ segment, error, downloadSource }) => {
+                  // A stream already torn down: its engine retries the
+                  // segments it had queued against a session that no longer
+                  // exists for a few seconds, three times each. That was most
+                  // of a day's warnings, and none of it was a real failure.
+                  if ((hlsRef.current as unknown) !== hls) return;
                   eng.lastErrorSeg = segment.externalId ?? segIndexFromUrl(segment.url);
-                  eng.lastError = error instanceof Error ? error.message : String(error);
+                  // The engine's RequestError isn't an Error; its type is what
+                  // says what happened ("http-error", "aborted"…).
+                  eng.lastError = error instanceof Error
+                    ? error.message
+                    : (error as { type?: string } | null)?.type ?? String(error);
                   eng.lastEventAt = Date.now();
                   eng.errors++;
                   logWarn("P2P", "segment error", {
@@ -2608,6 +2766,26 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         copiedStreamRef.current = false;
         playlistEdgeRef.current = null;
         setCopiedStream(false);
+        // What the server says about this stream — copied or re-encoded, and
+        // why — for Stats for nerds and the buffering hint. A new stream also
+        // starts the buffering count over: its first seconds are loading.
+        streamNotesRef.current = null;
+        setStreamNotes(null);
+        setOfferLowerQuality(null);
+        starvedSecondsRef.current = [];
+        rebufferQuietUntilRef.current = Math.max(rebufferQuietUntilRef.current, Date.now() + REBUFFER_STARTUP_MS);
+        hls.on(Hls.Events.MANIFEST_LOADED, (_e, data) => {
+          const notes = readStreamNotes(data.sessionData);
+          streamNotesRef.current = notes;
+          setStreamNotes(notes);
+          if (notes?.video === "transcode") {
+            logEvent("HLS", "the server re-encoded this stream", {
+              session: sessionId?.substring(0, 8),
+              why: notes.reason ?? "unknown",
+              kbps: notes.kbps ?? "unknown",
+            });
+          }
+        });
         hls.on(Hls.Events.LEVEL_LOADED, (_e, data) => {
           const copied = data.details.type === "EVENT";
           if (copied && !copiedStreamRef.current) {
@@ -3170,7 +3348,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               // "seeking" into a segment it didn't have, and one viewer sat
               // there for twenty-five seconds. Whatever is left over the
               // ordinary drift handling closes.
-              const reachable = Math.min(target, video.currentTime + bufferAheadSeconds(video) - 0.5);
+              //
+              // Nor back out of it: a room behind this player is reached only
+              // as far as the start of what is buffered here. Going all the way
+              // undid a jump over a hole the player had just made, and put it
+              // back in front of the same hole for another stall.
+              const reachable = Math.max(
+                bufferedRangeStart(video) + 0.1,
+                Math.min(target, video.currentTime + bufferAheadSeconds(video) - 0.5),
+              );
               const behind = reachable - video.currentTime;
               if (target > DRIFT_THRESHOLD_S && Math.abs(behind) > JOIN_SETTLE_TOLERANCE_S) {
                 logEvent("Sync", "settling onto the room after joining", {
@@ -3447,12 +3633,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           return;
         }
         if (!wedgeStuckSinceRef.current) wedgeStuckSinceRef.current = Date.now();
+        const stuckMs = Date.now() - wedgeStuckSinceRef.current;
+        // A hole with the rest already buffered behind it waits for nothing —
+        // see HOLE_JUMP_AFTER_MS — so neither the download grace nor the
+        // second look applies to it.
+        const holeAhead = nextBufferedStart(v, v.currentTime);
+        const jumpNow = holeAhead !== null && holeAhead - v.currentTime <= MAX_HOLE_JUMP_S &&
+          stuckMs >= HOLE_JUMP_AFTER_MS;
         const downloading = Date.now() - engineLoaderRef.current.lastChunkAt < WEDGE_CHECK_MS * 2;
-        if (downloading && Date.now() - wedgeStuckSinceRef.current < WEDGE_DOWNLOAD_GRACE_MS) {
+        if (!jumpNow && downloading && stuckMs < WEDGE_DOWNLOAD_GRACE_MS) {
           wedgeTicksRef.current = 0;
           return;
         }
-        if (++wedgeTicksRef.current < WEDGE_CHECKS_BEFORE_ACTING) return;
+        if (!jumpNow && ++wedgeTicksRef.current < WEDGE_CHECKS_BEFORE_ACTING) return;
         wedgeTicksRef.current = 0;
 
         // Stuck where the picture ran out, with the title as good as over:
@@ -3772,6 +3965,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         subtitle,
         true,
         subtitle !== 0 && sessionBurnedRef.current !== subtitle,
+        sessionQualityRef.current,
       );
     }
     // Then the position and play state. A pause goes out as a real pause rather
@@ -4023,7 +4217,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // Only worth offering to somebody who is on a stream of their own, while
       // the room is actually playing. The host's own stream failing is a
       // different problem with no better stream to point at.
-      if (!video || !sync?.playing || ownsHostStreamRef.current || video.paused) {
+      // Nor to someone on their own stream for its quality: the host's tracks
+      // at that quality are the same stream, and the answer to a connection
+      // that can't keep up is the lower-quality hint instead.
+      if (!video || !sync?.playing || ownsHostStreamRef.current || video.paused || preferredQuality() > 0) {
         starvedSinceRef.current = null;
         setOfferHostStream(false);
         return;
@@ -4107,6 +4304,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         playing,
         // Drawn by this player unless the stream just started burns it in.
         subtitle !== 0 && sessionBurnedRef.current !== subtitle,
+        sessionQualityRef.current,
       );
       return;
     }
@@ -5239,7 +5437,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           <div style={styles.trackSwitchMessage}>
             <div style={styles.bufferingSpinner} />
             <span style={styles.bufferingText}>
-              {trackSwitching === "audio" ? "Switching audio..." : "Switching subtitles..."}
+              {trackSwitching === "audio"
+                ? "Switching audio..."
+                : trackSwitching === "quality" ? "Switching quality..." : "Switching subtitles..."}
             </span>
           </div>
         </div>
@@ -5311,6 +5511,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           vpsRelay={vpsRelay}
           sessionId={sessionIdRef.current}
           p2pStatsRef={p2pStatsRef}
+          notes={streamNotes}
+          quality={quality}
           onClose={() => setShowStats(false)}
         />
       )}
@@ -5402,6 +5604,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             setShowZoomPanel(mode === "manual" && !zoomPhone);
             if (mode === "manual" && zoomPhone) showZoomNotice("Custom Zoom: Pinch To Adjust");
           }}
+          quality={quality}
+          onQualityChange={handleQualityChange}
+          streamNow={streamNotes?.video
+            ? `${streamNotes.video === "copy" ? "the original video" : "re-encoded"}${streamNotes.kbps ? `, ${(streamNotes.kbps / 1000).toFixed(streamNotes.kbps % 1000 ? 1 : 0)} Mbps` : ""}`
+            : null}
         />
       )}
       {!isPip && showQueuePanel && syncState && (
@@ -5435,6 +5642,34 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           onClose={() => setShowPeoplePanel(false)}
         />
       )}
+      {/* Buffering that keeps coming back: offer a quality this connection can
+          carry. Not a dialog — it waits at the bottom until answered. */}
+      {!isPip && offerLowerQuality !== null && (
+        <div style={styles.qualityHint} role="status">
+          <span>Buffering a lot?</span>
+          <button className="btn"
+            style={styles.qualityHintBtn}
+            onClick={() => {
+              logEvent("Player", "took the lower quality offered", { kbps: offerLowerQuality });
+              handleQualityChange(offerLowerQuality);
+            }}
+          >
+            Try {qualityLabel(offerLowerQuality)}
+          </button>
+          <button className="btn"
+            style={styles.qualityHintClose}
+            aria-label="Not now"
+            onClick={() => {
+              setOfferLowerQuality(null);
+              starvedSecondsRef.current = [];
+              rebufferQuietUntilRef.current = Date.now() + REBUFFER_SNOOZE_MS;
+            }}
+          >
+            {"\u2715"}
+          </button>
+        </div>
+      )}
+
       {/* This client's stream has been unable to keep up for long enough that it
           plainly isn't recovering on its own. The host's stream is already
           running, so moving onto it costs the server nothing — but it means
@@ -5752,6 +5987,36 @@ const styles: Record<string, React.CSSProperties> = {
     background: "rgba(0,0,0,0.4)",
     zIndex: 5,
     pointerEvents: "none",
+  },
+  qualityHint: {
+    position: "absolute",
+    left: "50%",
+    bottom: "calc(110px + var(--saib, 0px))",
+    transform: "translateX(-50%)",
+    maxWidth: "calc(100% - 32px)",
+    display: "flex",
+    alignItems: "center",
+    gap: "10px",
+    padding: "8px 8px 8px 16px",
+    borderRadius: "999px",
+    background: "rgba(0,0,0,0.78)",
+    color: "rgba(255,255,255,0.92)",
+    fontSize: "13px",
+    fontWeight: 600,
+    zIndex: 30,
+    backdropFilter: "blur(6px)",
+    border: "1px solid rgba(255,255,255,0.12)",
+    boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+  },
+  qualityHintBtn: {
+    padding: "6px 12px", borderRadius: "999px", border: "none",
+    background: "#e5a00d", color: "#000", fontSize: "12px", fontWeight: 700,
+    cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
+  },
+  qualityHintClose: {
+    width: 26, height: 26, borderRadius: "50%", border: "none",
+    background: "rgba(255,255,255,0.08)", color: "#aaa", fontSize: "12px",
+    cursor: "pointer", fontFamily: "inherit", flexShrink: 0,
   },
   viewerStatus: {
     position: "absolute",

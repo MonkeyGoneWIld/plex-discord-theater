@@ -825,9 +825,12 @@ export function hlsMasterUrl(
      *  several sets of tracks play at once — see selectTracksForStart. */
     audioStreamId?: number;
     subtitleStreamId?: number;
+    /** A viewer's quality ceiling, kbps — see lib/quality.ts. */
+    quality?: number;
   },
 ): string {
   const params = new URLSearchParams();
+  if (options?.quality) params.set("quality", String(options.quality));
   if (options?.offset != null && options.offset > 0) params.set("offset", String(options.offset));
   // Which file to play, for a title that has more than one. Sent only by the
   // client that chose it — the server remembers it against the session, so a

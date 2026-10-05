@@ -9,6 +9,7 @@ import { recordProgress, shouldRecordHistory } from "./watch-history.js";
 import { pushProgressToPlex } from "./plex-accounts.js";
 import { episodesInSameFile } from "./episode-files.js";
 import { logEvent } from "./logger.js";
+import { qualityKbps } from "./media-versions.js";
 
 /** Interval between WebSocket pings to detect dead connections. */
 const WS_PING_INTERVAL_MS = 30_000;
@@ -93,12 +94,13 @@ interface QueueItem {
  * choosing different subtitles forks you onto another; choosing a combination
  * somebody already has puts you on theirs rather than starting a third.
  *
- * Only the tracks vary. Position never does, which is what keeps a room in sync
- * across several streams: a seek is a room command, and each variant's owner
- * applies it to its own transcode.
+ * Only the tracks vary — and the quality, for someone whose connection can't
+ * keep up and has asked for less. Position never does, which is what keeps a
+ * room in sync across several streams: a seek is a room command, and each
+ * variant's owner applies it to its own transcode.
  */
 interface Variant {
-  /** `audio:subtitle` — see variantKeyOf. */
+  /** `audio:subtitle`, plus `@quality` when it has one — see variantKeyOf. */
   key: string;
   /** Plex stream ids. 0 means "whatever the file defaults to" for audio, and
    *  "none" for subtitles, which is what the client sends before it knows.
@@ -110,6 +112,10 @@ interface Variant {
    *  a client draws is RoomClient.subtitleStreamId. */
   audioStreamId: number;
   subtitleStreamId: number;
+  /** The most this stream may be, kbps (QUALITY_LEVELS_KBPS), or 0 for the
+   *  server's own choice. Set by a viewer for themselves, never by the host
+   *  for anyone else. */
+  quality: number;
   hlsSessionId: string | null;
   /** Where this transcode was started — per stream, since two variants forked at
    *  different moments have transcoded from different points. */
@@ -131,9 +137,10 @@ interface Variant {
 }
 
 /** Tracks identify a stream, so they are its key — the audio, and the subtitle
- *  burned into it (0 when the picture is clean). */
-function variantKeyOf(audioStreamId: number, subtitleStreamId: number): string {
-  return `${audioStreamId}:${subtitleStreamId}`;
+ *  burned into it (0 when the picture is clean) — and so does a quality
+ *  ceiling, when there is one. */
+function variantKeyOf(audioStreamId: number, subtitleStreamId: number, quality = 0): string {
+  return quality ? `${audioStreamId}:${subtitleStreamId}@${quality}` : `${audioStreamId}:${subtitleStreamId}`;
 }
 
 /**
@@ -181,6 +188,9 @@ interface RoomClient {
    * read a different one.
    */
   subtitleStreamId: number;
+  /** The quality ceiling this client asked for, kbps, or 0. Their own, kept
+   *  when the host carries them to other tracks. */
+  quality: number;
   /**
    * Whether this client's player can decode an HEVC transcode. Reported on
    * joining, and withdrawn ("caps") if a stream it was told it could play
@@ -642,6 +652,7 @@ function variantMessage(
     // What the stream itself burns in. A client draws its subtitle only when it
     // isn't this one, so nobody ever sees a line twice.
     burnedSubtitleId: v.subtitleStreamId,
+    quality: v.quality,
     hlsSessionId: v.hlsSessionId,
     sessionOffset: v.sessionOffset,
     isOwner,
@@ -720,11 +731,12 @@ function assignVariant(
   client: RoomClient,
   audioStreamId: number,
   subtitleStreamId: number,
+  quality: number,
   /** Settle the stream the client left now. False when several are moving at
    *  once — see settleLeftStream. */
   settleLeft = true,
 ): Variant {
-  const key = variantKeyOf(audioStreamId, subtitleStreamId);
+  const key = variantKeyOf(audioStreamId, subtitleStreamId, quality);
   const previousKey = client.variantKey;
   let v = room.state.variants.get(key);
   if (!v) {
@@ -732,6 +744,7 @@ function assignVariant(
       key,
       audioStreamId,
       subtitleStreamId,
+      quality,
       hlsSessionId: null,
       // A fork inherits the room's clock and nothing else: the new transcode
       // starts where playback is, not where the stream it forked from began.
@@ -1177,6 +1190,9 @@ export function attachWebSocketServer(server: Server): void {
           // deliberate act ("set-tracks"), never the starting position.
           variantKey: room.state.hostVariantKey,
           subtitleStreamId: room.state.hostVariantKey ? room.state.hostSubtitleId : 0,
+          // A joiner asks for their own quality once they are in, if they
+          // have one; until then they watch what the host does.
+          quality: 0,
           hevc: msg.hevc === true,
         };
         roomId = instanceId;
@@ -1292,28 +1308,45 @@ export function attachWebSocketServer(server: Server): void {
         // choosing one keeps everybody on the same transcode — only a subtitle
         // that has to be burned in (a picture format) puts someone on their own.
         const burned = burnedSubtitle(subtitleStreamId, msg.drawn);
-        const targetKey = variantKeyOf(audioStreamId, burned);
+        // Absent from an older client, which never sets one: no ceiling.
+        const quality = qualityKbps(msg.quality);
+        const targetKey = variantKeyOf(audioStreamId, burned, quality);
         const hostKey = room.state.hostVariantKey;
+        const hostVariant = hostKey ? room.state.variants.get(hostKey) : undefined;
         // The host takes their audience with them: everyone seeing exactly what
-        // the host sees. Someone on the host's stream who picked their own
-        // subtitle made a choice, and the host's doesn't override it. Everyone
-        // else moves alone.
+        // the host sees, at whatever quality each of them chose. Someone on the
+        // host's tracks who picked their own subtitle made a choice, and the
+        // host's doesn't override it. Everyone else moves alone — and so does
+        // the host when only their quality changed, which is theirs alone.
         const hostSees = client.subtitleStreamId;
-        const movers = client.isHost && hostKey
-          ? membersOf(room, hostKey).filter((m) => m.subtitleStreamId === hostSees)
+        const tracksChange = !hostVariant ||
+          hostVariant.audioStreamId !== audioStreamId ||
+          hostVariant.subtitleStreamId !== burned ||
+          hostSees !== subtitleStreamId;
+        const movers = client.isHost && hostVariant && tracksChange
+          ? [...room.clients].filter((m) => {
+              const v = m.variantKey ? room.state.variants.get(m.variantKey) : undefined;
+              return v !== undefined &&
+                v.audioStreamId === hostVariant.audioStreamId &&
+                v.subtitleStreamId === hostVariant.subtitleStreamId &&
+                m.subtitleStreamId === hostSees;
+            })
           : [client];
         if (!movers.includes(client)) movers.push(client);
-        if (movers.every((m) => m.variantKey === targetKey && m.subtitleStreamId === subtitleStreamId)) return;
+        client.quality = quality;
+        const keyFor = (m: RoomClient) => variantKeyOf(audioStreamId, burned, m.quality);
+        if (movers.every((m) => m.variantKey === keyFor(m) && m.subtitleStreamId === subtitleStreamId)) return;
 
         const fromKey = client.variantKey;
         const fromSubtitle = client.subtitleStreamId;
         const left = new Set<string>();
+        const targets = new Set<string>();
         for (const m of movers) {
-          if (m.variantKey && m.variantKey !== targetKey) left.add(m.variantKey);
-          assignVariant(room, m, audioStreamId, burned, false);
+          if (m.variantKey && m.variantKey !== keyFor(m)) left.add(m.variantKey);
+          targets.add(assignVariant(room, m, audioStreamId, burned, m.quality, false).key);
           m.subtitleStreamId = subtitleStreamId;
         }
-        for (const key of left) settleLeftStream(room, key);
+        for (const key of left) if (!targets.has(key)) settleLeftStream(room, key);
         const target = room.state.variants.get(targetKey)!;
 
         if (client.isHost) {
@@ -1340,8 +1373,9 @@ export function attachWebSocketServer(server: Server): void {
         });
 
         // Everyone on the stream, each with their own subtitle — so the people
-        // who were already on it hear nothing they need to act on.
-        announceVariant(room, target);
+        // who were already on it hear nothing they need to act on. One stream
+        // per quality among the people who moved.
+        for (const key of targets) announceVariant(room, room.state.variants.get(key)!);
         return;
       }
 
@@ -1355,22 +1389,25 @@ export function attachWebSocketServer(server: Server): void {
        */
       if (type === "rejoin-host") {
         const hostKey = room.state.hostVariantKey;
-        if (!hostKey || client.variantKey === hostKey) return;
-        const hostVariant = room.state.variants.get(hostKey);
+        const hostVariant = hostKey ? room.state.variants.get(hostKey) : undefined;
         if (!hostVariant) return;
+        // The host's tracks at this client's own quality — the host's stream
+        // itself unless they asked for less than the host is watching.
+        const to = variantKeyOf(hostVariant.audioStreamId, hostVariant.subtitleStreamId, client.quality);
+        if (client.variantKey === to) return;
         const from = client.variantKey;
-        assignVariant(room, client, hostVariant.audioStreamId, hostVariant.subtitleStreamId);
+        const target = assignVariant(room, client, hostVariant.audioStreamId, hostVariant.subtitleStreamId, client.quality);
         client.subtitleStreamId = room.state.hostSubtitleId;
         logEvent("Sync", "client rejoined the host's stream", {
           room: roomId.substring(0, 8),
           who: client.username ?? client.userId,
           from: from ?? "none",
-          to: hostKey,
+          to,
         });
         // Only the client that moved. Nothing changed for the people already on
         // this stream, and a re-announcement of a stream they are already
         // playing is noise they have to reason about.
-        sendTo(client.ws, variantMessage(hostVariant, hostVariant.ownerUserId === client.userId, room.state.ratingKey, client.subtitleStreamId));
+        sendTo(client.ws, variantMessage(target, target.ownerUserId === client.userId, room.state.ratingKey, client.subtitleStreamId));
         return;
       }
 
@@ -1603,13 +1640,17 @@ export function attachWebSocketServer(server: Server): void {
           const audioStreamId = trackId(msg.audioStreamId) ?? 0;
           const subtitleStreamId = trackId(msg.subtitleStreamId) ?? 0;
           const burned = burnedSubtitle(subtitleStreamId, msg.subtitleDrawn);
-          const hostKey = variantKeyOf(audioStreamId, burned);
+          // The host's own ceiling, which their start was made at.
+          const quality = qualityKbps(msg.quality);
+          client.quality = quality;
+          const hostKey = variantKeyOf(audioStreamId, burned, quality);
           let hostVariant = room.state.variants.get(hostKey);
           if (!hostVariant) {
             hostVariant = {
               key: hostKey,
               audioStreamId,
               subtitleStreamId: burned,
+              quality,
               hlsSessionId: null,
               sessionOffset: room.state.sessionOffset,
               ownerUserId: client.userId,

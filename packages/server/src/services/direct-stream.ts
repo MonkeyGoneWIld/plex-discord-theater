@@ -34,6 +34,16 @@
  * film; the playlist is laid out in film time, with the part before the
  * session's first segment marked as a gap, so that currentTime means the same
  * thing it does for a re-encoded stream.
+ *
+ * A segment starts where its audio or its video does, whichever is first,
+ * because that is where hls.js puts it: it pins the first segment it loads to
+ * the playlist by the earlier of the two, and places everything after by
+ * timestamp. Laid out by the video alone, a copy whose audio led was played
+ * shifted by the lead. Deadpool started at 3:39 had audio from ten seconds
+ * before its first keyframe, so its whole stream landed ten seconds late: the
+ * player waited at 3:39 on a picture that began at 3:49, and once hls.js had
+ * corrected its own idea of where segments were, a playlist reload put that
+ * back and it skipped a segment, leaving a second hole.
  */
 
 import { plexFetchSegment } from "./plex.js";
@@ -94,9 +104,13 @@ interface Measured {
   index: number;
   /** Its path on Plex, which is also how clients name it. */
   path: string;
-  /** Film time, seconds. */
+  /** Film time, seconds: the earlier of where its audio and its video start —
+   *  see the module comment — and where its video ends. */
   start: number;
   end: number;
+  /** Where its picture starts, and its sound (null with none), film time. */
+  videoStart: number;
+  audioStart: number | null;
   /** Null once let go. */
   data: Buffer | null;
 }
@@ -124,6 +138,8 @@ interface CopySession {
   wake: (() => void) | null;
   /** Waiting for the first playlist. */
   readyWaiters: Array<() => void>;
+  /** Segments whose audio and video start far apart, logged — a few, not all. */
+  skewLogged: number;
 }
 
 const sessions = new Map<string, CopySession>();
@@ -363,13 +379,27 @@ async function pump(s: CopySession): Promise<void> {
         rawStartS: round3(span.start),
         clockOffsetS: round3(s.clockOffset),
         assumed: !plausible,
+        // Positive: sound from before the first picture, which the layout
+        // has to allow for — see the module comment.
+        audioLeadS: span.audioStart === null ? "none" : round3(span.start - span.audioStart),
+      });
+    } else if (span.audioStart !== null && Math.abs(span.start - span.audioStart) > 1 && s.skewLogged < 3) {
+      s.skewLogged++;
+      logEvent("DirectStream", "a copied segment's audio and video start apart", {
+        session: s.sessionId.substring(0, 8),
+        index: s.nextIndex,
+        audioLeadS: round3(span.start - span.audioStart),
       });
     }
+    const videoStart = span.start - s.clockOffset;
+    const audioStart = span.audioStart === null ? null : span.audioStart - s.clockOffset;
     const seg: Measured = {
       index: s.nextIndex,
       path,
-      start: span.start - s.clockOffset,
+      start: audioStart === null ? videoStart : Math.min(videoStart, audioStart),
       end: span.end - s.clockOffset,
+      videoStart,
+      audioStart,
       data,
     };
     s.segments.push(seg);
@@ -407,6 +437,7 @@ export function startDirectStream(sessionId: string, plexKey: string, ratingKey:
     abort: new AbortController(),
     wake: null,
     readyWaiters: [],
+    skewLogged: 0,
   };
   sessions.set(sessionId, s);
   byPlexKey.set(plexKey, s);
@@ -516,8 +547,13 @@ export async function directStreamPlaylist(
   ];
   // Always, from the start of the title too: a playlist that is still growing
   // is live as far as hls.js is concerned, and without a start it begins near
-  // the end of what is listed — minutes into the film.
-  head.push(`#EXT-X-START:TIME-OFFSET=${round3(Math.max(s.offsetS, fillTo)).toFixed(3)},PRECISE=YES`);
+  // the end of what is listed — minutes into the film. Never before both
+  // picture and sound have begun, which with a lead in the audio is later
+  // than the first segment's start.
+  const playable = first
+    ? Math.max(first.videoStart, first.audioStart ?? first.videoStart)
+    : fillTo;
+  head.push(`#EXT-X-START:TIME-OFFSET=${round3(Math.max(s.offsetS, playable)).toFixed(3)},PRECISE=YES`);
   const tail = s.ended ? ["#EXT-X-ENDLIST"] : [];
   return [...head, ...lines, ...tail].join("\n") + "\n";
 }

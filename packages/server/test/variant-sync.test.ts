@@ -785,6 +785,54 @@ console.log("\n— the host announcing a stream with a drawn subtitle —");
   [host, a].forEach((c) => c.close());
 }
 
+console.log("\n— a viewer asking for a lower quality —");
+{
+  const [host, a, b] = await room("inst-quality", ["host", "a", "b"]);
+  await startPlayback(host);
+  [host, a, b].forEach((c) => c.clear());
+  a.send({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 0, drawn: false, quality: 8000 });
+  await sleep(60);
+  const own = a.last("variant");
+  check("gets a stream of their own at it, which they drive",
+    [own?.variantKey, own?.quality, own?.isOwner], ["1:0@8000", 8000, true]);
+  check("and nobody else hears about it", [host.last("variant"), b.last("variant")], [undefined, undefined]);
+
+  [host, a, b].forEach((c) => c.clear());
+  host.send({ type: "set-tracks", audioStreamId: 2, subtitleStreamId: 0, drawn: false });
+  await sleep(60);
+  check("the host changing the audio takes everyone along, each at their own quality",
+    [host.last("variant")?.variantKey, a.last("variant")?.variantKey, b.last("variant")?.variantKey],
+    ["2:0", "2:0@8000", "2:0"]);
+
+  [host, a, b].forEach((c) => c.clear());
+  host.send({ type: "set-tracks", audioStreamId: 2, subtitleStreamId: 0, drawn: false, quality: 4000 });
+  await sleep(60);
+  check("the host lowering their own quality moves only the host",
+    [host.last("variant")?.variantKey, a.last("variant"), b.last("variant")?.variantKey],
+    ["2:0@4000", undefined, "2:0"]);
+  check("and whoever is left on the stream drives it now", b.last("variant")?.isOwner, true);
+
+  [host, a, b].forEach((c) => c.clear());
+  a.send({ type: "set-tracks", audioStreamId: 2, subtitleStreamId: 0, drawn: false, quality: 1234 });
+  await sleep(60);
+  check("a quality that isn't one of the levels is no ceiling", a.last("variant")?.variantKey, "2:0");
+  [host, a, b].forEach((c) => c.close());
+}
+
+console.log("\n— going back to the host's stream keeps your quality —");
+{
+  const [host, a] = await room("inst-quality-rejoin", ["host", "a"]);
+  await startPlayback(host);
+  a.send({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 5, drawn: false, quality: 8000 });
+  await sleep(60);
+  check("a burned subtitle at a lower quality", a.last("variant")?.variantKey, "1:5@8000");
+  a.clear();
+  a.send({ type: "rejoin-host" });
+  await sleep(60);
+  check("back on the host's tracks, still at their own quality", a.last("variant")?.variantKey, "1:0@8000");
+  [host, a].forEach((c) => c.close());
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 closeWebSocketServer();
 server.close();

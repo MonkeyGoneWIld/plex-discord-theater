@@ -9,7 +9,9 @@
  * which is what a real deployment showed (the first version of the tracker
  * never asked, and got 404 for as long as anyone waited). It also keeps count
  * of every request that arrives out of order, which the real one answers by
- * starting the stream over — the one thing that must never happen.
+ * starting the stream over — the one thing that must never happen. And, as
+ * Deadpool started at 3:39 showed, a session begun mid-film can open with
+ * audio from well before its first keyframe.
  */
 import fs from "node:fs";
 import http from "node:http";
@@ -82,16 +84,17 @@ function continuation(): Buffer {
 const FRAME = 1001 / 24000;
 
 /** A segment of video frames from `start` for `frames`, in B-frame decode order,
- *  with an audio PES in front that has to be ignored. */
-function segment(start: number, frames: number): Buffer {
+ *  with its audio starting `audioLead` seconds before the picture (null: none). */
+function segment(start: number, frames: number, audioLead: number | null = 0): Buffer {
   const order: number[] = [];
   for (let i = 0; i < frames; i += 3) {
     order.push(i);
     if (i + 2 < frames) order.push(i + 2);
     if (i + 1 < frames) order.push(i + 1);
   }
-  const packets = [pesPacket(0xc0, start - 0.5)];
+  const packets = audioLead === null ? [] : [pesPacket(0xc0, start - audioLead)];
   order.forEach((f, n) => packets.push(pesPacket(0xe0, start + f * FRAME, n % 4 === 0), continuation()));
+  if (audioLead !== null) packets.push(pesPacket(0xc0, start - audioLead + frames * FRAME / 2));
   return Buffer.concat(packets);
 }
 
@@ -104,6 +107,8 @@ console.log("— reading a segment's timestamps —");
   check("starts at its earliest frame, out-of-order frames and all", span.start.toFixed(3), "1808.551");
   check("ends one frame after its latest", span.end.toFixed(3), (1808.551 + 50 * FRAME).toFixed(3));
   check("counts only the video", span.frames, 50);
+  check("and says where the audio starts", videoSpan(segment(1808.551, 50, 9.72))!.audioStart!.toFixed(3), "1798.831");
+  check("or that there is none", videoSpan(segment(20, 12, null))!.audioStart, null);
   check("Plex's single-packet end-of-stream segment holds no video", videoSpan(STUB), null);
   check("nor does anything that isn't MPEG-TS", videoSpan(Buffer.from("not a transport stream")), null);
   const shifted = Buffer.concat([Buffer.from([1, 2, 3]), segment(20, 12)]);
@@ -122,6 +127,8 @@ const gopLength = (i: number) => ((keyframes[i + 1] ?? Math.round(FILM_END / FRA
 
 interface PlexSession {
   firstIndex: number; firstGop: number; produced: number; outOfOrder: number[];
+  /** How far the first segment's audio starts before its keyframe. */
+  firstAudioLead: number;
   /** When its playlist was first asked for — copying starts then, not before. */
   startedAt: number | null;
 }
@@ -131,10 +138,10 @@ const unreadable = new Set<string>();
 /** Paths answered 200 with JSON, as a misbehaving server might. */
 const notSegments = new Set<string>();
 
-function plexSession(key: string, offset: number): PlexSession {
+function plexSession(key: string, offset: number, firstAudioLead = 0): PlexSession {
   const firstGop = keyframes.filter((k) => k * FRAME <= offset).length - 1;
   const firstIndex = Math.floor(offset / 3);
-  const s: PlexSession = { firstIndex, firstGop, produced: firstIndex - 1, startedAt: null, outOfOrder: [] };
+  const s: PlexSession = { firstIndex, firstGop, produced: firstIndex - 1, startedAt: null, outOfOrder: [], firstAudioLead };
   plexSessions.set(key, s);
   return s;
 }
@@ -144,7 +151,7 @@ function copiedSegment(s: PlexSession, index: number): Buffer {
   const gop = s.firstGop + (index - s.firstIndex);
   if (gop >= keyframes.length) return STUB;
   const endFrame = gop + 1 < keyframes.length ? keyframes[gop + 1] : Math.round(FILM_END / FRAME);
-  return segment(keyframes[gop] * FRAME + CLOCK, endFrame - keyframes[gop]);
+  return segment(keyframes[gop] * FRAME + CLOCK, endFrame - keyframes[gop], index === s.firstIndex ? s.firstAudioLead : 0);
 }
 
 /** Segment `index` as a request for it would get it: 404 until copied. */
@@ -375,6 +382,45 @@ console.log("\n— a copy started mid-film, as a seek starts one —");
   ds.stopDirectStream("s-mid");
 }
 
+console.log("\n— a copy started mid-film whose audio begins before its picture —");
+{
+  // Deadpool from 3:39: audio from almost ten seconds before the first keyframe.
+  const LEAD = 9.72;
+  const key = crypto.randomUUID();
+  const plexSide = plexSession(key, 100, LEAD);
+  ds.startDirectStream("s-lead", key, "500", 100);
+  const playlist = (await ds.directStreamPlaylist(key, (p) => p))!;
+  const list = entries(playlist);
+  const firstAt = sum(list.filter((e) => e.gap).map((e) => e.d));
+  const picture = keyframes[plexSide.firstGop] * FRAME;
+  check("the first segment starts where its sound does", firstAt.toFixed(3), (picture - LEAD).toFixed(3));
+  // What hls.js does with it: pins the earlier of the first segment's audio and
+  // video timestamps to where the playlist says the segment starts, and places
+  // everything else by timestamp from there.
+  const pinned = Math.min(picture + CLOCK, picture + CLOCK - LEAD) - firstAt;
+  check("so the player puts its picture where it is in the film, not ten seconds late",
+    (picture + CLOCK - pinned).toFixed(3), picture.toFixed(3));
+  const firstReal = list.find((e) => !e.gap)!;
+  check("and lists it as long as it really is, sound and all",
+    Math.abs(firstReal.d - (gopLength(plexSide.firstGop) + LEAD)) < 0.0015, true);
+  check("playback still starts where the seek asked, after picture and sound have begun",
+    playlist.includes("#EXT-X-START:TIME-OFFSET=100.000"), true);
+  ds.stopDirectStream("s-lead");
+
+  // The other way round: sound that starts three seconds after the picture.
+  // Started at the picture, the player would wait there on silence that has
+  // nothing buffered under it; it starts where the sound does instead.
+  const late = crypto.randomUUID();
+  plexSession(late, picture, -3);
+  ds.startDirectStream("s-lead-late", late, "500", picture);
+  const lateList = (await ds.directStreamPlaylist(late, (p) => p))!;
+  check("sound that starts after the picture: laid out from the picture, started on the sound",
+    [sum(entries(lateList).filter((e) => e.gap).map((e) => e.d)).toFixed(3),
+      lateList.includes(`#EXT-X-START:TIME-OFFSET=${(picture + 3).toFixed(3)}`)],
+    [picture.toFixed(3), true]);
+  ds.stopDirectStream("s-lead-late");
+}
+
 console.log("\n— a copy Plex never starts —");
 {
   // A session Plex knows nothing about: every segment 404s, forever.
@@ -478,6 +524,34 @@ console.log("\n— through the routes —");
   check("and played as the re-encode it is", ds.isDirectStreamKey(plexRoutes.getPlexTranscodeKey(wont) ?? ""), false);
   plexRoutes.markTranscodeStopped(wont);
 
+  console.log("\n— what the player is told about the stream, for Stats for nerds —");
+  /** The notes a master playlist carries, as hls.js would read them. */
+  const notesOf = (m3u8: string) => Object.fromEntries(
+    [...m3u8.matchAll(/#EXT-X-SESSION-DATA:DATA-ID="com\.pdt\.([a-z]+)",VALUE="([^"]*)"/g)].map((m) => [m[1], m[2]]));
+  const startNotes = async (ratingKey: string, query = "") => {
+    const sid = crypto.randomUUID();
+    const text = await (await fetch(`${origin}/api/plex/hls/${ratingKey}/${sid}/master.m3u8${query}`)).text();
+    plexRoutes.markTranscodeStopped(sid);
+    return { notes: notesOf(text), asked: decisions.at(-1)! };
+  };
+  check("a copy says so, and how heavy it is", (await startNotes("100")).notes, { video: "copy", kbps: "8000" });
+  check("a file over the copy limit says that is why, and what it is re-encoded at",
+    (await startNotes("950")).notes,
+    { video: "transcode", reason: "the file is 31 Mbps, over this server's 20 Mbps copy limit", kbps: "12000" });
+  check("one Plex declined to copy says so, against the file's average",
+    (await startNotes("970")).notes.reason,
+    "Plex wouldn't copy it at 20 Mbps: the file averages 15 Mbps, and its peaks are likely higher");
+
+  console.log("\n— a viewer's own quality setting —");
+  const capped = await startNotes("960", "?quality=8000");
+  check("a file over it is re-encoded at it, without asking for a copy first, and the player told why",
+    [capped.asked.directStream, capped.asked.videoBitrate, capped.notes],
+    ["0", "8000", { video: "transcode", reason: "the file is 15 Mbps, over your 8 Mbps quality setting", kbps: "8000", quality: "8000" }]);
+  const fits = await startNotes("100", "?quality=12000");
+  check("a file under it is still copied, asked for at it",
+    [fits.asked.directStream, fits.asked.videoBitrate, fits.notes.video], ["1", "12000", "copy"]);
+  check("a setting that isn't one of the levels is no setting", (await startNotes("100", "?quality=123")).asked.videoBitrate, "20000");
+
   console.log("\n— subtitles, which used to force a re-encode —");
   /** A stream start, burning in `burn` (the player asks for that only when it
    *  can't draw a subtitle itself), or with a clean picture. */
@@ -512,7 +586,10 @@ console.log("\n— through the routes —");
   check("one Plex can't read out is refused, so the player asks for it burned in",
     (await answer(23)).status, 404);
   check("one Plex answers with video is refused too", (await answer(27)).status, 404);
-  check("a picture subtitle (PGS) is burned in when asked", (await start(22)).subtitles, "burn");
+  const beforeBurn = decisions.length;
+  const burnt = await start(22);
+  check("a picture subtitle (PGS) is burned in when asked, as the re-encode that needs — not asked for as a copy first",
+    [burnt.subtitles, burnt.directStream, burnt.videoBitrate, decisions.length - beforeBurn], ["burn", "0", "12000", 1]);
   check("and so is text that couldn't be drawn", (await start(23)).subtitles, "burn");
 
   let began = Date.now();

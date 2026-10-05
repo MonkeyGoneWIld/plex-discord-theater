@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type Hls from "hls.js";
 import HlsPkg from "hls.js";
+import { qualityLabel } from "../lib/quality";
+import type { StreamNotes } from "../lib/streamNotes";
 
 /**
  * Cumulative P2P delivery counters, accumulated in the Player from the
@@ -21,6 +23,10 @@ interface StatsOverlayProps {
   vpsRelay: boolean;
   sessionId: string | null;
   p2pStatsRef: React.RefObject<P2PStats>;
+  /** The server's own account of the stream — see StreamNotes. */
+  notes: StreamNotes | null;
+  /** This viewer's quality ceiling, kbps, 0 for none. */
+  quality: number;
   onClose: () => void;
 }
 
@@ -53,7 +59,7 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRef, onClose }: StatsOverlayProps) {
+export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRef, notes, quality, onClose }: StatsOverlayProps) {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   // Force a re-render each tick so P2P counters (read from a ref) stay live.
   const [, setTick] = useState(0);
@@ -198,6 +204,15 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
   const totalDelivered = p2p.p2pBytes + p2p.httpBytes;
   const p2pRatio = totalDelivered > 0 ? Math.round((p2p.p2pBytes / totalDelivered) * 100) : 0;
 
+  // The server's word on the stream beats the playlist-type guess, which can't
+  // say why or at what rate.
+  const mbpsOf = (kbps: number | null) => (kbps ? ` · ${(kbps / 1000).toFixed(kbps % 1000 ? 1 : 0)} Mbps` : "");
+  const videoPath = notes?.video === "copy"
+    ? `Original (Direct Stream)${mbpsOf(notes.kbps)}`
+    : notes?.video === "transcode"
+      ? `Re-encoded by Plex${mbpsOf(notes.kbps)}`
+      : snap?.videoPath ?? "—";
+
   const rows: Array<[string, string]> = [
     ["Viewport / Frames", `${snap?.resolution ?? "—"} · dropped ${snap?.droppedFrames ?? 0} / ${snap?.totalFrames ?? 0}`],
     ["Stream resolution", snap?.streamResolution ?? "—"],
@@ -205,7 +220,9 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
     ["Video bitrate", snap?.videoBitrate ?? "—"],
     ["Connection speed", snap?.bandwidth ?? "—"],
     ["Buffer health", snap?.bufferHealth ?? "—"],
-    ["Video", snap?.videoPath ?? "—"],
+    ["Video", videoPath],
+    ...(notes?.video === "transcode" && notes.reason ? [["Re-encoded because", notes.reason] as [string, string]] : []),
+    ["Your quality", quality ? `Up to ${qualityLabel(quality)}` : "Auto"],
     ["Codecs", `${snap?.videoCodec ?? "—"} / ${snap?.audioCodec ?? "—"}`],
     ["Last segment", snap?.lastFrag ?? "—"],
     ["Delivery", vpsRelay ? "VPS relay (nginx cache)" : "P2P mesh (WebRTC)"],

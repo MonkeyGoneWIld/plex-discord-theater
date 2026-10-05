@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { fetchMeta, versionOf, type StreamTrack } from "../lib/api";
 import { saveAudioPref, saveSubtitlePref } from "../lib/trackPrefs";
+import { QUALITY_LEVELS_KBPS, qualityLabel } from "../lib/quality";
 
 import type { ZoomMode } from "../lib/videoZoom";
 
@@ -36,6 +37,12 @@ interface TrackSwitcherProps {
   currentSubtitleId?: number | null;
   zoomMode: ZoomMode;
   onZoomModeChange: (mode: ZoomMode) => void;
+  /** This viewer's quality ceiling, kbps, 0 for none — see lib/quality.ts. */
+  quality: number;
+  onQualityChange: (kbps: number) => void;
+  /** What the stream is now, for the Quality tab to say, e.g. "the original
+   *  video, 30 Mbps". Null before it is known. */
+  streamNow?: string | null;
 }
 
 export function TrackSwitcher({
@@ -48,8 +55,11 @@ export function TrackSwitcher({
   currentSubtitleId,
   zoomMode,
   onZoomModeChange,
+  quality,
+  onQualityChange,
+  streamNow,
 }: TrackSwitcherProps) {
-  const [tab, setTab] = useState<"audio" | "subtitles" | "zoom">("audio");
+  const [tab, setTab] = useState<"audio" | "subtitles" | "quality" | "zoom">("audio");
   const [audioTracks, setAudioTracks] = useState<StreamTrack[]>([]);
   const [subtitleTracks, setSubtitleTracks] = useState<StreamTrack[]>([]);
   const [partId, setPartId] = useState<number | null>(null);
@@ -107,20 +117,50 @@ export function TrackSwitcher({
               style={{ ...styles.tab, ...(tab === "subtitles" ? styles.tabActive : {}) }}
             >Subtitles</button>
             <button className="btn"
+              onClick={() => setTab("quality")}
+              style={{ ...styles.tab, ...(tab === "quality" ? styles.tabActive : {}) }}
+            >Quality</button>
+            <button className="btn"
               onClick={() => setTab("zoom")}
               style={{ ...styles.tab, ...(tab === "zoom" ? styles.tabActive : {}) }}
             >Zoom</button>
         </div>
 
         {/* What a change here reaches. The host's carries; everyone else's
-            forks onto a stream of their own, which nobody else sees. */}
+            forks onto a stream of their own, which nobody else sees. Quality
+            is always the viewer's own, the host's included. */}
         {tab !== "zoom" && <p style={styles.scopeNote}>
-          {scope === "room"
+          {scope === "room" && tab !== "quality"
             ? "Changes apply to everyone watching your stream."
             : "Changes apply to you only."}
         </p>}
 
-        {loading && tab !== "zoom" ? (
+        {tab === "quality" ? (
+          <div className="settings-scroll" style={styles.trackList}>
+            {[0, ...QUALITY_LEVELS_KBPS].map((kbps) => {
+              const on = kbps === quality;
+              return (
+                <button className="btn"
+                  key={kbps}
+                  onClick={() => { onQualityChange(kbps); onClose(); }}
+                  style={on ? styles.trackSelected : styles.track}
+                >
+                  <div>
+                    <div style={{ color: on ? "#f0f0f0" : "#ccc", fontSize: 13 }}>
+                      {kbps ? `Up to ${qualityLabel(kbps)}` : "Auto"}
+                    </div>
+                    {!kbps && (
+                      <div style={{ color: on ? "#888" : "#666", fontSize: 11 }}>
+                        The original video when it can be, the same stream as everyone else
+                      </div>
+                    )}
+                  </div>
+                  {on && <span style={styles.checkmark}>{"\u2713"}</span>}
+                </button>
+              );
+            })}
+          </div>
+        ) : loading && tab !== "zoom" ? (
           <div style={styles.loading}>Loading tracks...</div>
         ) : tab === "audio" ? (
           <div className="settings-scroll" style={styles.trackList}>
@@ -193,6 +233,8 @@ export function TrackSwitcher({
         <div style={styles.disclaimer}>
           {tab === "zoom"
             ? "Saved for this movie or show. Only affects your view."
+            : tab === "quality"
+              ? `If the video keeps stopping to buffer, a lower quality gives you a stream of your own that your connection can keep up with.${streamNow ? ` Now: ${streamNow}.` : ""}`
             : tab === "subtitles"
               ? "Only affects your view. Text subtitles switch instantly; a picture subtitle restarts the stream."
               : "Changing tracks briefly restarts the stream at your current position."}

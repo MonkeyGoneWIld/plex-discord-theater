@@ -97,6 +97,21 @@ export function resolutionLabel(media: VersionSource): string {
  * 1440p and 4K cost far more to encode and carry than they give back at these
  * bitrates — and nothing is ever made larger, since the box only grows.
  */
+/**
+ * The ceilings a viewer may put on their own stream ("Quality" in the player),
+ * kbps. Choosing one gives that viewer a stream of their own at no more than
+ * it — a copy when the file fits, a re-encode at it when it doesn't — for a
+ * connection that can't keep up with what everyone else is watching.
+ */
+export const QUALITY_LEVELS_KBPS = [20000, 12000, 8000, 4000];
+
+/** A quality ceiling from a request or a message: one of the levels, else 0 —
+ *  no ceiling. */
+export function qualityKbps(v: unknown): number {
+  const n = Number(v);
+  return QUALITY_LEVELS_KBPS.includes(n) ? n : 0;
+}
+
 export function transcodeFrame(media: { width?: number | null; height?: number | null }): string {
   const w = media.width ?? 0;
   const h = media.height ?? 0;

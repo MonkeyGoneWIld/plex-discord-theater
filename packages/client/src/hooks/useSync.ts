@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { getSessionToken } from "../lib/api";
 import { canPlayHevcTranscode } from "../lib/hevc";
+import { preferredQuality } from "../lib/quality";
 
 const MAX_RECONNECT_ATTEMPTS = 20;
 /** Suggestions held for the host. Bounded so a viewer holding the button down
@@ -80,6 +81,9 @@ export interface StreamVariant {
    * ever burned in, so people drawing different subtitles share one stream.
    */
   burnedSubtitleId: number;
+  /** The most the stream may be, kbps, or 0 for whatever the server sends
+   *  everyone — see lib/quality.ts. */
+  quality: number;
   /** Null when the stream has no transcode yet, which is the owner's cue to
    *  start one and report it back with sendVariantSession. */
   hlsSessionId: string | null;
@@ -252,6 +256,8 @@ export interface SyncActions {
     /** Whether the subtitle is drawn by the player rather than burned into
      *  this stream — see StreamVariant.burnedSubtitleId. */
     subtitleDrawn?: boolean,
+    /** The quality ceiling the stream was started at — StreamVariant.quality. */
+    quality?: number,
   ) => void;
   sendPause: (position: number) => void;
   sendResume: (position: number) => void;
@@ -292,9 +298,10 @@ export interface SyncActions {
    *
    * `drawn` says this player draws the subtitle itself, which keeps it on the
    * same stream — changing it restarts nothing. Otherwise the subtitle is
-   * burned in, which takes a stream of its own.
+   * burned in, which takes a stream of its own. So does a `quality` ceiling,
+   * which is this client's alone: the host's carries to nobody.
    */
-  sendSetTracks: (audioStreamId: number, subtitleStreamId: number, drawn: boolean) => void;
+  sendSetTracks: (audioStreamId: number, subtitleStreamId: number, drawn: boolean, quality?: number) => void;
   /** Stream owner → room: the transcode I just brought up for my variant. */
   sendVariantSession: (hlsSessionId: string, sessionOffset: number) => void;
   /** Move onto whatever the host is watching, whatever its tracks are. Used by
@@ -422,10 +429,11 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         subtitleStreamId?: number,
         playing = true,
         subtitleDrawn = false,
+        quality = preferredQuality(),
       ) => {
         send({
           type: "play", ratingKey, title, subtitles, hlsSessionId, position, sessionOffset,
-          audioStreamId, subtitleStreamId, playing, subtitleDrawn,
+          audioStreamId, subtitleStreamId, playing, subtitleDrawn, quality,
         });
         setState((prev) => {
           // Restarting what is already running — a track change, or a seek that
@@ -531,8 +539,11 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       sendPromoteHost: (targetUserId: string) => send({ type: "promote-host", userId: targetUserId }),
       sendSetCoHost: (targetUserId: string, value: boolean) =>
         send({ type: "set-cohost", userId: targetUserId, value }),
-      sendSetTracks: (audioStreamId: number, subtitleStreamId: number, drawn: boolean) =>
-        send({ type: "set-tracks", audioStreamId, subtitleStreamId, drawn }),
+      // The viewer's own quality goes with every track change, unasked: the
+      // server takes a missing one as "no ceiling", so a subtitle change would
+      // otherwise put them back on the full-rate stream.
+      sendSetTracks: (audioStreamId: number, subtitleStreamId: number, drawn: boolean, quality = preferredQuality()) =>
+        send({ type: "set-tracks", audioStreamId, subtitleStreamId, drawn, quality }),
       sendVariantSession: (hlsSessionId: string, sessionOffset: number) =>
         send({ type: "variant-session", hlsSessionId, sessionOffset }),
       sendRejoinHost: () => send({ type: "rejoin-host" }),
@@ -625,6 +636,8 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
                     ? null
                     : {
                         ...(msg.variant as Omit<StreamVariant, "isOwner"> & { isOwner: boolean }),
+                        // Absent from a server older than quality ceilings.
+                        quality: ((msg.variant as { quality?: number }).quality) ?? 0,
                         seq: (prev.variant?.seq ?? 0) + 1,
                       },
               hostUsername: (msg.hostUsername as string) || prev.hostUsername,
@@ -672,6 +685,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
                 audioStreamId: (msg.audioStreamId as number) ?? 0,
                 subtitleStreamId: (msg.subtitleStreamId as number) ?? 0,
                 burnedSubtitleId: (msg.burnedSubtitleId as number) ?? 0,
+                quality: (msg.quality as number) ?? 0,
                 hlsSessionId: (msg.hlsSessionId as string) || null,
                 sessionOffset: (msg.sessionOffset as number) ?? 0,
                 isOwner: Boolean(msg.isOwner),

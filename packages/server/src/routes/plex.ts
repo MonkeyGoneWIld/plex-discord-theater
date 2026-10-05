@@ -5,7 +5,7 @@ import { pipeline } from "node:stream/promises";
 import sharp from "sharp";
 import { progressivePreview } from "../services/preview-stream.js";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
-import { playableVersionOrder, resolutionLabel, channelLabel, transcodeFrame } from "../services/media-versions.js";
+import { playableVersionOrder, resolutionLabel, channelLabel, transcodeFrame, qualityKbps } from "../services/media-versions.js";
 import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition } from "../services/segment-prefetch.js";
 import {
   startDirectStream,
@@ -149,6 +149,10 @@ const DIRECT_STREAM_MAX_KBPS = envInt("DIRECT_STREAM_MAX_KBPS", 0);
 /** What a stream that may be copied is asked for — see DIRECT_STREAM_MAX_KBPS. */
 const COPY_REQUEST_KBPS = Math.max(VIDEO_BITRATE_KBPS, DIRECT_STREAM_MAX_KBPS);
 
+/** A viewer's quality ceiling (QUALITY_LEVELS_KBPS) at or under which a
+ *  re-encode is 720p: 1080p at 4 Mbps is mostly blocks. */
+const QUALITY_720P_KBPS = 4000;
+
 // ─── Types ──────────────────────────────────────────────────────
 
 interface PlexDirectory {
@@ -180,6 +184,8 @@ interface PlexStream {
   key?: string;
   /** Container of a sidecar: "srt", "ass", "vtt". Absent on embedded streams. */
   format?: string;
+  /** Bits per sample of a video stream. */
+  bitDepth?: number;
 }
 
 interface PlexPart {
@@ -234,6 +240,10 @@ interface MediaVersion {
   height: number | null;
   /** The file's overall bitrate in kbps, for DIRECT_STREAM_MAX_KBPS. */
   bitrate: number | null;
+  /** Its video, for saying why it was re-encoded: Plex's codec name
+   *  ("h264", "hevc", "vc1"…) and bit depth. */
+  videoCodec: string | null;
+  bitDepth: number | null;
   previewThumbs: boolean;
   audioTracks: ReturnType<typeof mapAudioTracks>;
   subtitleTracks: ReturnType<typeof mapSubtitleTracks>;
@@ -260,6 +270,8 @@ function mapVersions(media: PlexMedia[] | undefined): MediaVersion[] {
       width: m.width ?? null,
       height: m.height ?? null,
       bitrate: m.bitrate ?? null,
+      videoCodec: m.videoCodec ?? null,
+      bitDepth: streams.find((s) => s.streamType === 1)?.bitDepth ?? null,
       previewThumbs: part?.indexes === "sd",
       audioTracks: mapAudioTracks(streams),
       subtitleTracks: mapSubtitleTracks(streams),
@@ -1080,9 +1092,10 @@ function rememberDuration(ratingKey: string, payload: Record<string, unknown>): 
  * is next read, instead of answering without the field for up to a week. It is
  * still the answer if that rebuild fails. 2 added originallyAvailableAt; 3
  * added each version's width and height; 4 made embedded text subtitles
- * drawable and added `sidecar`; 5 added each version's bitrate.
+ * drawable and added `sidecar`; 5 added each version's bitrate; 6 its video
+ * codec and bit depth.
  */
-export const META_PAYLOAD_VERSION = 5;
+export const META_PAYLOAD_VERSION = 6;
 
 const metaCache = new LruMap<string, { payload: Record<string, unknown>; at: number }>(2_000);
 const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -3983,33 +3996,68 @@ async function subtitleTrackOf(
  * Plex nothing when the title is cached. A version the list doesn't offer (a
  * hidden 4K copy) or a lookup that fails gets the old fixed 1920x1080.
  */
-/**
- * Whether a file is too big to copy under DIRECT_STREAM_MAX_KBPS. A version
- * whose bitrate Plex doesn't report is let through: the cap is there for the
- * remuxes, and Plex always knows theirs.
- */
-async function overCopyCap(ratingKey: string, mediaIndex: number): Promise<number | null> {
-  if (DIRECT_STREAM_MAX_KBPS <= 0) return null;
+/** What a stream start needs to know about the file it plays. */
+interface VersionFacts {
+  width: number | null;
+  height: number | null;
+  bitrate: number | null;
+  videoCodec: string | null;
+  bitDepth: number | null;
+}
+
+/** The version a start plays, from buildMeta; null when that can't be had. */
+async function versionFacts(ratingKey: string, mediaIndex: number): Promise<VersionFacts | null> {
   try {
     const meta = await buildMeta(ratingKey);
-    const versions = meta?.versions as Array<{ mediaIndex?: number; bitrate?: number | null }> | undefined;
-    const kbps = versions?.find((v) => v.mediaIndex === mediaIndex)?.bitrate ?? null;
-    return kbps !== null && kbps > DIRECT_STREAM_MAX_KBPS ? kbps : null;
+    const versions = meta?.versions as Array<Partial<VersionFacts> & { mediaIndex?: number }> | undefined;
+    const v = versions?.find((x) => x.mediaIndex === mediaIndex);
+    if (!v) return null;
+    return {
+      width: v.width ?? null,
+      height: v.height ?? null,
+      bitrate: v.bitrate ?? null,
+      videoCodec: v.videoCodec ?? null,
+      bitDepth: v.bitDepth ?? null,
+    };
   } catch {
     return null;
   }
 }
 
-async function outputFrame(ratingKey: string, mediaIndex: number): Promise<string> {
-  try {
-    const meta = await buildMeta(ratingKey);
-    const versions = meta?.versions as
-      | Array<{ mediaIndex?: number; width?: number | null; height?: number | null }>
-      | undefined;
-    return transcodeFrame(versions?.find((v) => v.mediaIndex === mediaIndex) ?? {});
-  } catch {
-    return transcodeFrame({});
+const mbpsText = (kbps: number) => `${(kbps / 1000).toFixed(kbps % 1000 ? 1 : 0)} Mbps`;
+
+/**
+ * Why Plex, asked for a copy, re-encoded instead — from what is known about
+ * the file and the room, since Plex's answer doesn't say. Its own log does
+ * ("video.bitrate limitation applies", "Calculated bandwidth … exceeds"), and
+ * the last case here is that one: a file is judged on its peaks, which can be
+ * twice its average.
+ */
+function refusedCopyReason(version: VersionFacts | null, askedKbps: number, roomHevc: boolean): string {
+  const codec = version?.videoCodec?.toLowerCase() ?? null;
+  if (codec && codec !== "h264" && codec !== "hevc") {
+    return `${codec.toUpperCase()} video, and only H.264 and HEVC can be copied`;
   }
+  if (codec === "hevc" && !roomHevc) return "HEVC video, and not everyone here can play HEVC";
+  if (codec === "h264" && (version?.bitDepth ?? 8) > 8) return `${version!.bitDepth}-bit H.264, which browsers can't play`;
+  if ((version?.width ?? 0) > 2048 || (version?.height ?? 0) > 1200) return "larger than 1080p, so it is scaled down";
+  if (version?.bitrate) {
+    return `Plex wouldn't copy it at ${mbpsText(askedKbps)}: the file averages ${mbpsText(version.bitrate)}, and its peaks are likely higher`;
+  }
+  return `Plex wouldn't copy it at ${mbpsText(askedKbps)}`;
+}
+
+/**
+ * Notes for the player about the stream a master playlist starts, as
+ * EXT-X-SESSION-DATA, which hls.js hands over with the playlist: copied or
+ * re-encoded, why, and at what bitrate — "Stats for nerds" shows them. In the
+ * playlist rather than an API of its own because everyone on the stream loads
+ * this same playlist, so a viewer who joined later sees what the driver did.
+ */
+function streamNotes(notes: Record<string, string | number | null>): string[] {
+  return Object.entries(notes)
+    .filter(([, v]) => v !== null && v !== "")
+    .map(([k, v]) => `#EXT-X-SESSION-DATA:DATA-ID="com.pdt.${k}",VALUE="${String(v).replace(/["\r\n]/g, "'")}"`);
 }
 
 // ─── HLS streaming ──────────────────────────────────────────────
@@ -4093,6 +4141,9 @@ router.get(
     // here — the player decides which kind it has, and a stream carries only
     // the burned kind, so that everyone drawing their own can share it.
     const requestedSubtitleMode = req.query.subtitles === "burn" ? "burn" : "none";
+    // The viewer's own ceiling on this stream — see QUALITY_LEVELS_KBPS
+    // (services/media-versions.ts).
+    const quality = qualityKbps(req.query.quality);
 
     // The tracks this session wants. Present once a room can hold more than one
     // combination at a time: the caller owns a variant and names the audio and
@@ -4112,13 +4163,26 @@ router.get(
     // Core manifest fetch logic — wrapped in a promise for in-flight deduplication
     const fetchManifest = async (
       subtitleMode: "burn" | "none",
-      { videoResolution, hevc, copy }: {
+      { videoResolution, hevc, copy, copyKbps, transcodeKbps, peakKbps, notCopied, refused, quality, fileKbps }: {
         videoResolution: string;
         /** Which way HEVC is offered: as what Plex encodes to, as something it
          *  may copy, or not at all. */
         hevc: "encode" | "copy" | false;
         /** Whether Plex may copy the video rather than re-encode it. */
         copy: boolean;
+        /** The bitrate a copy is asked for at, and a re-encode is made at and
+         *  allowed to peak to. */
+        copyKbps: number;
+        transcodeKbps: number;
+        peakKbps: number;
+        /** Why it isn't even asked for as a copy, when it isn't. */
+        notCopied: string | null;
+        /** Why Plex declined, if it does — see refusedCopyReason. */
+        refused: (askedKbps: number) => string;
+        /** The viewer's ceiling, kbps, or 0. */
+        quality: number;
+        /** The file's own bitrate, which is a copy's, when Plex knows it. */
+        fileKbps: number | null;
       },
     ): Promise<string> => {
       const params: Record<string, string> = {
@@ -4141,8 +4205,8 @@ router.get(
         // re-encodes anything over the bitrate it is asked for. If Plex then
         // re-encodes it anyway, it is asked again at the transcode bitrate
         // below, so a re-encode never comes out at the copy limit.
-        videoBitrate: String(copy ? COPY_REQUEST_KBPS : VIDEO_BITRATE_KBPS),
-        peakBitrate: String(copy ? Math.max(VIDEO_PEAK_BITRATE_KBPS, COPY_REQUEST_KBPS) : VIDEO_PEAK_BITRATE_KBPS),
+        videoBitrate: String(copy ? copyKbps : transcodeKbps),
+        peakBitrate: String(copy ? Math.max(peakKbps, copyKbps) : peakKbps),
         videoQuality: "99",
         autoAdjustQuality: "0",
         location: "lan",
@@ -4156,6 +4220,21 @@ router.get(
       };
       if (offset) params.offset = offset;
 
+      // HEVC comes first when Plex should encode to it, after H.264 when it is
+      // only there to be copied. Either way Plex's own HEVC limits are swapped
+      // for one allowing 10-bit: its Chrome profile caps HEVC at 8-bit, which
+      // turned away the copy of every 10-bit file — most of the HEVC there is.
+      function profileExtra(offer: "encode" | "copy" | false): string {
+        return [
+          "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts" +
+            `&videoCodec=${offer === "encode" ? "hevc,h264" : offer === "copy" ? "h264,hevc" : "h264"}` +
+            "&audioCodec=aac&replace=true)",
+          ...(offer
+            ? ["add-limitation(scope=videoCodec&scopeName=hevc&type=upperBound&name=video.bitDepth&value=10&replace=true)"]
+            : []),
+        ].join("+");
+      }
+
       // Use a single stable client identifier so Plex counts us as one player.
       // Per-session IDs caused Plex to count each session as a separate stream,
       // hitting the "remote streams per user" limit after 2 sessions.
@@ -4164,8 +4243,9 @@ router.get(
         "X-Plex-Session-Identifier": sessionId,
         /**
          * What we can play, in Plex's profile language: HLS in MPEG-TS, H.264
-         * (and HEVC, first, when the room can decode it — see HEVC_TRANSCODE),
-         * AAC audio. Plex encodes to the first codec listed.
+         * (and HEVC when the room can decode it — see HEVC_TRANSCODE), AAC
+         * audio. Plex may encode to any codec listed, not only the first: with
+         * "h264,hevc" offered for a copy it encoded HEVC — see profileExtra.
          *
          * `replace=true` is what makes Plex read any of it. Without it this
          * target is added *behind* the HLS target Plex's own Chrome profile
@@ -4179,19 +4259,7 @@ router.get(
          * Audio that is already AAC is still copied untouched — see
          * directStreamAudio.
          */
-        //
-        // HEVC comes first when Plex should encode to it, after H.264 when it is
-        // only there to be copied. Either way Plex's own HEVC limits are swapped
-        // for one allowing 10-bit: its Chrome profile caps HEVC at 8-bit, which
-        // turned away the copy of every 10-bit file — most of the HEVC there is.
-        "X-Plex-Client-Profile-Extra": [
-          "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts" +
-            `&videoCodec=${hevc === "encode" ? "hevc,h264" : hevc === "copy" ? "h264,hevc" : "h264"}` +
-            "&audioCodec=aac&replace=true)",
-          ...(hevc
-            ? ["add-limitation(scope=videoCodec&scopeName=hevc&type=upperBound&name=video.bitDepth&value=10&replace=true)"]
-            : []),
-        ].join("+"),
+        "X-Plex-Client-Profile-Extra": profileExtra(hevc),
         "X-Plex-Client-Identifier": OUR_CLIENT_ID,
         "X-Plex-Product": "Plex Discord Theater",
         "X-Plex-Platform": "Chrome",
@@ -4260,12 +4328,17 @@ router.get(
         }
       };
       await decide();
-      // Asked at the copy limit and re-encoded anyway (a codec the room can't
-      // play, a burned subtitle): ask again at the transcode bitrate, so the
-      // re-encode is the size it would have been without Direct Stream.
-      if (copy && !videoCopied && COPY_REQUEST_KBPS > VIDEO_BITRATE_KBPS) {
-        params.videoBitrate = String(VIDEO_BITRATE_KBPS);
-        params.peakBitrate = String(VIDEO_PEAK_BITRATE_KBPS);
+      // Asked for a copy and re-encoded anyway (a codec the room can't play, a
+      // file whose peaks are over the limit): ask again as the re-encode it is
+      // going to be — at the transcode bitrate, so it is the size it would have
+      // been without Direct Stream, and without HEVC unless HEVC_TRANSCODE says
+      // to encode to it. Offered for copying, Plex took HEVC as what to encode
+      // to as well, whatever HEVC_TRANSCODE said.
+      const askedKbps = Number(params.videoBitrate);
+      if (copy && !videoCopied && (copyKbps > transcodeKbps || hevc === "copy")) {
+        params.videoBitrate = String(transcodeKbps);
+        params.peakBitrate = String(peakKbps);
+        if (hevc === "copy") hlsHeaders["X-Plex-Client-Profile-Extra"] = profileExtra(false);
         sessionVideoCodec.delete(sessionId);
         await decide();
       }
@@ -4366,7 +4439,21 @@ router.get(
         .catch(() => {}); // fire-and-forget
 
       const authToken = req.query.token as string | undefined;
-      const rewritten = rewriteManifestUrls(m3u8, authToken);
+      const reason = videoCopied ? null : notCopied ?? (copy ? refused(askedKbps) : null);
+      if (reason && copy) {
+        logEvent("DirectStream", "Plex re-encoded a title it was asked to copy", {
+          ratingKey, session: sessionId.substring(0, 8), askedKbps, why: reason,
+        });
+      }
+      const notes = streamNotes({
+        video: videoCopied ? "copy" : "transcode",
+        reason,
+        // Roughly what each viewer pulls: the file's own rate for a copy.
+        kbps: videoCopied ? fileKbps : Number(params.videoBitrate),
+        quality: quality || null,
+      });
+      const rewritten = rewriteManifestUrls(m3u8, authToken)
+        .replace(/^#EXTM3U[^\n]*\n/, (head) => `${head}${notes.map((n) => `${n}\n`).join("")}`);
       // Cache for viewer session sharing
       manifestCache.set(sessionId, { manifest: rewritten, createdAt: Date.now() });
       return rewritten;
@@ -4380,17 +4467,41 @@ router.get(
       // Decided per start, so a room that has gained someone who can't decode
       // HEVC gets H.264 from its next transcode on.
       const roomHevc = userId !== null && roomPlaysHevc(userId);
-      const overCap = DIRECT_STREAM ? await overCopyCap(ratingKey, mediaIndex) : null;
-      if (overCap !== null) {
+      const version = await versionFacts(ratingKey, mediaIndex);
+      const kbps = version?.bitrate ?? null;
+      // A viewer's ceiling is what their stream is, copied or re-encoded,
+      // within what this server would send anyone: its copy limit.
+      const copyKbps = quality ? Math.min(COPY_REQUEST_KBPS, quality) : COPY_REQUEST_KBPS;
+      const transcodeKbps = quality ? copyKbps : VIDEO_BITRATE_KBPS;
+      const peakKbps = Math.max(
+        transcodeKbps,
+        Math.round(transcodeKbps * VIDEO_PEAK_BITRATE_KBPS / VIDEO_BITRATE_KBPS),
+      );
+      // Copied unless something rules it out before Plex is even asked — and
+      // what does is the reason the player shows.
+      let notCopied: string | null = null;
+      if (!DIRECT_STREAM) notCopied = "Direct Stream is off on this server";
+      else if (requestedSubtitleMode === "burn") notCopied = "a picture subtitle is burned into it";
+      else if (quality && kbps !== null && kbps > quality) {
+        notCopied = `the file is ${mbpsText(kbps)}, over your ${mbpsText(quality)} quality setting`;
+      } else if (DIRECT_STREAM_MAX_KBPS > 0 && kbps !== null && kbps > DIRECT_STREAM_MAX_KBPS) {
+        notCopied = `the file is ${mbpsText(kbps)}, over this server's ${mbpsText(DIRECT_STREAM_MAX_KBPS)} copy limit`;
         logEvent("DirectStream", "re-encoding a file above DIRECT_STREAM_MAX_KBPS", {
-          ratingKey, session: sessionId.substring(0, 8), kbps: overCap, capKbps: DIRECT_STREAM_MAX_KBPS,
+          ratingKey, session: sessionId.substring(0, 8), kbps, capKbps: DIRECT_STREAM_MAX_KBPS,
         });
-      }
-      const copy = DIRECT_STREAM && overCap === null && !directStreamRefused(ratingKey);
+      } else if (directStreamRefused(ratingKey)) notCopied = "copying this title failed earlier";
+      const copy = notCopied === null;
       return fetchManifest(requestedSubtitleMode, {
-        videoResolution: await outputFrame(ratingKey, mediaIndex),
+        videoResolution: quality && quality <= QUALITY_720P_KBPS ? "1280x720" : transcodeFrame(version ?? {}),
         hevc: roomHevc && HEVC_TRANSCODE ? "encode" : roomHevc && copy ? "copy" : false,
         copy,
+        copyKbps,
+        transcodeKbps,
+        peakKbps,
+        notCopied,
+        refused: (asked) => refusedCopyReason(version, asked, roomHevc),
+        quality,
+        fileKbps: kbps,
       });
     });
     manifestInFlight.set(sessionId, promise);

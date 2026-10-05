@@ -241,6 +241,10 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
   const resolved = meta ? versionOf(meta, selectedVersion ?? undefined) : null;
   const audioTracks = resolved?.audioTracks ?? [];
   const subtitleTracks = resolved?.subtitleTracks ?? [];
+  // How many track pickers the row shows — see styles.trackRow.
+  const trackPickers = meta
+    ? [(meta.versions?.length ?? 0) > 1, audioTracks.length > 1, subtitleTracks.length > 0].filter(Boolean).length
+    : 0;
   const partId = resolved?.partId ?? null;
 
   /**
@@ -566,7 +570,16 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
               {/* Audio & Subtitle selectors — these need the stream list, so they
                   can't be drawn from the card. The row holds its height while
                   the metadata is in flight so the Play button doesn't move. */}
-              <div style={{ ...styles.trackRow, ...(narrow ? styles.trackRowNarrow : {}), ...styles.trackSlot }}>
+              <div
+                style={{
+                  ...styles.trackRow,
+                  gridTemplateColumns: narrow
+                    ? "minmax(0, 1fr)"
+                    : `repeat(${Math.max(2, trackPickers)}, minmax(0, 1fr))`,
+                  ...(narrow ? styles.trackRowNarrow : {}),
+                  ...styles.trackSlot,
+                }}
+              >
                 {/* Which file, for the few titles Plex holds more than one of.
                     First, because it decides what the other two can offer. A 4K
                     copy is missing from this list whenever a lower-resolution one
@@ -907,7 +920,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "24px",
   },
   trackRowNarrow: {
-    flexDirection: "column",
     gap: "12px",
   },
   actionsNarrow: {
@@ -1115,13 +1127,22 @@ const styles: Record<string, React.CSSProperties> = {
     WebkitBoxOrient: "vertical",
     overflow: "hidden",
   },
+  /**
+   * The Version, Audio and Subtitles pickers, side by side.
+   *
+   * Never fewer than two columns. Only the pickers with a choice to make are
+   * shown, and as flex items sharing the row a lone Subtitles stretched across
+   * the whole column, a bar far wider than anything it could hold. A lone one
+   * now takes half the row, the width it has beside a second. A phone in
+   * portrait stacks them in one column instead (see trackRowNarrow), and the
+   * column count is set where the row is drawn, from trackPickers.
+   */
   trackRow: {
-    display: "flex",
+    display: "grid",
     gap: "16px",
     marginBottom: "20px",
   },
   trackField: {
-    flex: 1,
     minWidth: 0,
   },
   trackLabel: {

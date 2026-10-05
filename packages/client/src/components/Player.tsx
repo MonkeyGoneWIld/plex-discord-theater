@@ -158,6 +158,13 @@ const WEDGE_RESET_MS = 60_000;
  * old remedy — a 0.1s seek — landed in the gap and sat "seeking" for good.
  */
 const MAX_HOLE_JUMP_S = 10;
+/**
+ * How long a playhead stuck with bytes still arriving is left to the download.
+ * A big Direct Stream segment on a slow connection can take this long; past it
+ * the bytes are evidently not the ones it is waiting for — a viewer sat
+ * "seeking" for twenty-five seconds while segments it couldn't use came in.
+ */
+const WEDGE_DOWNLOAD_GRACE_MS = 15_000;
 /** Clean playback for this long means the next media error starts a fresh budget. */
 const MEDIA_ERROR_RESET_MS = 60_000;
 /**
@@ -1045,6 +1052,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const wedgeLastPosRef = useRef(-1);
   const wedgeRecoveriesRef = useRef(0);
   const wedgeLastAtRef = useRef(0);
+  /** When the playhead last started being stuck, or 0 while it isn't. */
+  const wedgeStuckSinceRef = useRef(0);
   // Plex intro/credits markers for the current item, and whichever one the
   // playhead currently sits inside (null when outside every window).
   const [markers, setMarkers] = useState<SkipMarker[]>([]);
@@ -3156,15 +3165,22 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             // startup cost on top of it.
             if (sync && sync.playing) {
               const target = roomPositionNow(sync);
-              const behind = target - video.currentTime;
+              // No further than this player has buffered. Jumping past it — on
+              // the very first frames, with one segment in — sent the player
+              // "seeking" into a segment it didn't have, and one viewer sat
+              // there for twenty-five seconds. Whatever is left over the
+              // ordinary drift handling closes.
+              const reachable = Math.min(target, video.currentTime + bufferAheadSeconds(video) - 0.5);
+              const behind = reachable - video.currentTime;
               if (target > DRIFT_THRESHOLD_S && Math.abs(behind) > JOIN_SETTLE_TOLERANCE_S) {
                 logEvent("Sync", "settling onto the room after joining", {
                   fromS: video.currentTime,
-                  toS: target,
+                  toS: reachable,
                   behindS: behind,
+                  ...(reachable < target ? { roomS: target } : {}),
                 });
                 resetPlaybackRate(video);
-                video.currentTime = target;
+                video.currentTime = reachable;
               }
             }
           }
@@ -3425,8 +3441,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // first segments arrive is buffering rather than a wedge.
         const stuck = v.currentTime > 1 && !v.paused
           && !moved && bufferAheadSeconds(v) < 1;
+        if (!stuck) {
+          wedgeStuckSinceRef.current = 0;
+          wedgeTicksRef.current = 0;
+          return;
+        }
+        if (!wedgeStuckSinceRef.current) wedgeStuckSinceRef.current = Date.now();
         const downloading = Date.now() - engineLoaderRef.current.lastChunkAt < WEDGE_CHECK_MS * 2;
-        if (!stuck || downloading) {
+        if (downloading && Date.now() - wedgeStuckSinceRef.current < WEDGE_DOWNLOAD_GRACE_MS) {
           wedgeTicksRef.current = 0;
           return;
         }
@@ -3544,7 +3566,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           owner: ownsSessionRef.current,
         });
       }
-      if (!leavingPlayer && ownsSessionRef.current && sessionIdRef.current && sessionRegisteredRef.current) {
+      // Owned when it was started as well as now. A viewer moving onto a
+      // stream of its own becomes an owner a moment before the host's stream
+      // it was following is torn down here, and tried to stop it.
+      const ownedThisSession = sessionOwner && ownsSessionRef.current;
+      if (!leavingPlayer && ownedThisSession && sessionIdRef.current && sessionRegisteredRef.current) {
         logEvent("HLS", "effect cleanup stopping session", {
           session: sessionIdRef.current.substring(0, 8),
           ...snapshot(videoRef.current),

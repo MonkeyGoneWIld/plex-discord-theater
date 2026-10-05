@@ -132,15 +132,22 @@ const DIRECT_STREAM = process.env.DIRECT_STREAM === "1";
 
 /**
  * The highest bitrate a file may have and still be copied, in kbps. Above it
- * the file is re-encoded at VIDEO_BITRATE_KBPS instead. 0 (unset) is no limit
- * beyond Plex's own.
+ * the file is re-encoded at VIDEO_BITRATE_KBPS instead. Unset, it is
+ * VIDEO_BITRATE_KBPS itself, which is what Plex holds a copy to on its own.
  *
  * A copy is the file's own bitrate, and every viewer pulls all of it from this
  * server: a 30 Mbps remux watched by two people is 60 Mbps of upload. A home
  * connection that can't carry that stalls the stream, where a re-encode at a
  * bitrate it can carry only looks slightly softer.
+ *
+ * It has to be told to Plex as well as checked here: Plex reads the bitrate it
+ * is asked for as the limit on copying too, and re-encodes anything over it —
+ * the first version only checked, so with VIDEO_BITRATE_KBPS at 12000 every
+ * file over about 11 Mbps was re-encoded whatever this was set to.
  */
 const DIRECT_STREAM_MAX_KBPS = envInt("DIRECT_STREAM_MAX_KBPS", 0);
+/** What a stream that may be copied is asked for — see DIRECT_STREAM_MAX_KBPS. */
+const COPY_REQUEST_KBPS = Math.max(VIDEO_BITRATE_KBPS, DIRECT_STREAM_MAX_KBPS);
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -4130,8 +4137,12 @@ router.get(
         directStream: copy ? "1" : "0",
         directStreamAudio: "1",
         videoResolution,
-        videoBitrate: String(VIDEO_BITRATE_KBPS),
-        peakBitrate: String(VIDEO_PEAK_BITRATE_KBPS),
+        // A stream that may be copied asks at the copy limit, since Plex
+        // re-encodes anything over the bitrate it is asked for. If Plex then
+        // re-encodes it anyway, it is asked again at the transcode bitrate
+        // below, so a re-encode never comes out at the copy limit.
+        videoBitrate: String(copy ? COPY_REQUEST_KBPS : VIDEO_BITRATE_KBPS),
+        peakBitrate: String(copy ? Math.max(VIDEO_PEAK_BITRATE_KBPS, COPY_REQUEST_KBPS) : VIDEO_PEAK_BITRATE_KBPS),
         videoQuality: "99",
         autoAdjustQuality: "0",
         location: "lan",
@@ -4198,51 +4209,65 @@ router.get(
       // the measured playlist plays a re-encoded stream just as well, while
       // Plex's own playlist for a copied one is the thing that breaks.
       let videoCopied = false;
-      try {
-        const decisionRes = await plexFetch(decisionPath, { ...params, transcodeSessionId: sessionId }, hlsHeaders);
-        // Log the decision body — contains generalDecisionCode that tells us
-        // whether Plex will direct play (1000), transcode (1001), or error (2xxx/4xxx)
+      const decide = async (): Promise<void> => {
+        videoCopied = false;
         try {
-          const decBody = await decisionRes.json() as Record<string, unknown>;
-          const mc = decBody.MediaContainer as Record<string, unknown> | undefined;
-          // What Plex settled on. Worth a place on this line because it is the
-          // only cheap way to see whether the client profile above was
-          // understood: the alternative is digging a codec out of the
-          // transcoder statistics XML after the fact, which is where the mp3
-          // audio hid for as long as it did.
-          const media = (
-            (mc?.Metadata as Array<Record<string, unknown>> | undefined)?.[0]
-              ?.Media as Array<Record<string, unknown>> | undefined
-          )?.[0];
-          // The stream's own entry is the more specific of the two; the
-          // media-level field is the fallback.
-          const videoStream = (
-            (media?.Part as Array<Record<string, unknown>> | undefined)?.[0]
-              ?.Stream as Array<Record<string, unknown>> | undefined
-          )?.find((st) => st.streamType === 1);
-          const videoCodec = videoStream?.codec ?? media?.videoCodec;
-          if (typeof videoCodec === "string" && videoCodec) {
-            recordSessionVideoCodec(sessionId, videoCodec);
+          const decisionRes = await plexFetch(decisionPath, { ...params, transcodeSessionId: sessionId }, hlsHeaders);
+          // Log the decision body — contains generalDecisionCode that tells us
+          // whether Plex will direct play (1000), transcode (1001), or error (2xxx/4xxx)
+          try {
+            const decBody = await decisionRes.json() as Record<string, unknown>;
+            const mc = decBody.MediaContainer as Record<string, unknown> | undefined;
+            // What Plex settled on. Worth a place on this line because it is the
+            // only cheap way to see whether the client profile above was
+            // understood: the alternative is digging a codec out of the
+            // transcoder statistics XML after the fact, which is where the mp3
+            // audio hid for as long as it did.
+            const media = (
+              (mc?.Metadata as Array<Record<string, unknown>> | undefined)?.[0]
+                ?.Media as Array<Record<string, unknown>> | undefined
+            )?.[0];
+            // The stream's own entry is the more specific of the two; the
+            // media-level field is the fallback.
+            const videoStream = (
+              (media?.Part as Array<Record<string, unknown>> | undefined)?.[0]
+                ?.Stream as Array<Record<string, unknown>> | undefined
+            )?.find((st) => st.streamType === 1);
+            const videoCodec = videoStream?.codec ?? media?.videoCodec;
+            if (typeof videoCodec === "string" && videoCodec) {
+              recordSessionVideoCodec(sessionId, videoCodec);
+            }
+            console.log("[HLS] Decision:", decisionRes.status,
+              "code:", mc?.generalDecisionCode, mc?.generalDecisionText,
+              "→", videoCodec ?? "?", "+", media?.audioCodec ?? "?",
+              "| frame", videoResolution, hevc ? `| HEVC offered (${hevc})` : "",
+              `| ${params.videoBitrate} kbps`,
+              copy ? `| video ${videoStream?.decision ?? "?"}` : "");
+            if (copy && (videoStream?.decision === "copy" || videoStream?.decision === undefined)) {
+              videoCopied = true;
+            }
+          } catch {
+            console.log("[HLS] Decision:", decisionRes.status, "(no body)");
+            if (copy) videoCopied = true;
           }
-          console.log("[HLS] Decision:", decisionRes.status,
-            "code:", mc?.generalDecisionCode, mc?.generalDecisionText,
-            "→", videoCodec ?? "?", "+", media?.audioCodec ?? "?",
-            "| frame", videoResolution, hevc ? `| HEVC offered (${hevc})` : "",
-            copy ? `| video ${videoStream?.decision ?? "?"}` : "");
-          if (copy && (videoStream?.decision === "copy" || videoStream?.decision === undefined)) {
-            videoCopied = true;
+          if (!decisionRes.ok) {
+            console.error("[HLS] Decision returned non-OK status:", decisionRes.status,
+              "— transcode start may fail");
           }
-        } catch {
-          console.log("[HLS] Decision:", decisionRes.status, "(no body)");
+        } catch (err) {
+          console.log("[HLS] Decision failed (non-fatal):", err);
           if (copy) videoCopied = true;
         }
-        if (!decisionRes.ok) {
-          console.error("[HLS] Decision returned non-OK status:", decisionRes.status,
-            "— transcode start may fail");
-        }
-      } catch (err) {
-        console.log("[HLS] Decision failed (non-fatal):", err);
-        if (copy) videoCopied = true;
+      };
+      await decide();
+      // Asked at the copy limit and re-encoded anyway (a codec the room can't
+      // play, a burned subtitle): ask again at the transcode bitrate, so the
+      // re-encode is the size it would have been without Direct Stream.
+      if (copy && !videoCopied && COPY_REQUEST_KBPS > VIDEO_BITRATE_KBPS) {
+        params.videoBitrate = String(VIDEO_BITRATE_KBPS);
+        params.peakBitrate = String(VIDEO_PEAK_BITRATE_KBPS);
+        sessionVideoCodec.delete(sessionId);
+        await decide();
       }
       // No readable answer: assume the worst of what was offered.
       if (!sessionVideoCodec.has(sessionId)) {
@@ -4637,13 +4662,18 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
     }
 
     // Ping to keep the transcode alive — see transcodeControl for which
-    // identifier this ends up using.
-    const pingRes = await transcodeControl("ping", sessionId, clientId);
-    if (!pingRes.ok) {
-      logEvent("Ping", "Plex rejected keep-alive", {
-        session: sessionId.substring(0, 8),
-        status: pingRes.status,
-      });
+    // identifier this ends up using. Not before there is one: the client's
+    // first ping races the start (see above), and Plex answers a ping for a
+    // transcode it hasn't begun with a 404, which logged a "rejected
+    // keep-alive" at every single start.
+    if (plexTranscodeKeys.has(sessionId) || transcodeControlKey.has(sessionId)) {
+      const pingRes = await transcodeControl("ping", sessionId, clientId);
+      if (!pingRes.ok) {
+        logEvent("Ping", "Plex rejected keep-alive", {
+          session: sessionId.substring(0, 8),
+          status: pingRes.status,
+        });
+      }
     }
 
     // Send timeline update so Plex knows our playback position.

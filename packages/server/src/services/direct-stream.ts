@@ -61,9 +61,14 @@ const SECONDS_PER_SEGMENT = 3;
  * Long, because hls.js walks them: until the element has jumped to the start
  * position it reads 0:00, and hls.js fills from there, one gap entry at a time,
  * a few milliseconds each. At 10s a session started an hour and a half in had
- * 540 of them. The target duration has to cover the longest entry, which is
- * harmless here — hls.js reloads a playlist this close to its end at the length
- * of the last segment, not at the target duration.
+ * 540 of them.
+ *
+ * They are left out of the target duration, which hls.js doesn't hold an entry
+ * to. It does time reloads by it: the first load of a playlist happens with
+ * nothing buffered, so hls.js measures the player as being at 0:00, far from
+ * the end, and waits a whole target duration to reload. With the gap entries
+ * counted that was a minute, and a session started mid-film played the half
+ * minute its first playlist listed and then sat waiting for the rest.
  */
 const FILLER_STEP_S = 60;
 /** Never advertised lower than this. Copied segments run to ~10.5s. */
@@ -487,8 +492,8 @@ export async function directStreamPlaylist(
     filled = round3(filled + step);
   }
 
-  // The longest gap entry has to fit the target duration too.
-  let longest = filled > 0 ? Math.min(FILLER_STEP_S, fillTo) : 0;
+  // The target duration is the segments' alone — see FILLER_STEP_S.
+  let longest = 0;
   // Each segment runs to where the next one starts, so the running total is
   // exactly the timestamps — the last one, once the end is known, to its own end.
   for (let i = 0; i < list.length; i++) {

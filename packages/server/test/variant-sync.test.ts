@@ -755,6 +755,20 @@ console.log("\n— a subtitle that has to be burned in gets a stream of its own 
   [host, a, b].forEach((c) => c.close());
 }
 
+console.log("\n— the host taking their audience onto a burned subtitle —");
+{
+  const [host, a] = await room("inst-burn-move", ["host", "a"]);
+  await startPlayback(host);
+  [host, a].forEach((c) => c.clear());
+  host.send({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 5, drawn: false });
+  await sleep(60);
+  const told = a.seen.filter((m) => m.type === "variant");
+  check("the viewer goes with them", told.at(-1)?.variantKey, "1:5");
+  check("without first being told to drive the stream they both left",
+    told.some((m) => m.variantKey === "1:0" && m.isOwner === true), false);
+  [host, a].forEach((c) => c.close());
+}
+
 console.log("\n— the host announcing a stream with a drawn subtitle —");
 {
   const [host, a] = await room("inst-drawn-play", ["host", "a"]);

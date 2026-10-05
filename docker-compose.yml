@@ -78,7 +78,7 @@ services:
       # can decode it. Files over VIDEO_BITRATE_KBPS are still re-encoded.
       - DIRECT_STREAM=${DIRECT_STREAM:-}
       # Highest bitrate (kbps) still copied; bigger files are re-encoded so a
-      # home upload isn't asked for more than it has. Unset = no limit.
+      # home upload isn't asked for more than it has. Unset = VIDEO_BITRATE_KBPS.
       - DIRECT_STREAM_MAX_KBPS=${DIRECT_STREAM_MAX_KBPS:-}
       - THUMB_CACHE_TTL_MS=${THUMB_CACHE_TTL_MS}
       # Image cache size, with a unit: 500M, 10G (the default), 2T.

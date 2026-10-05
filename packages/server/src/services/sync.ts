@@ -720,6 +720,9 @@ function assignVariant(
   client: RoomClient,
   audioStreamId: number,
   subtitleStreamId: number,
+  /** Settle the stream the client left now. False when several are moving at
+   *  once — see settleLeftStream. */
+  settleLeft = true,
 ): Variant {
   const key = variantKeyOf(audioStreamId, subtitleStreamId);
   const previousKey = client.variantKey;
@@ -741,23 +744,33 @@ function assignVariant(
   client.variantKey = key;
   ensureVariantOwner(room, v);
 
-  if (previousKey && previousKey !== key) {
-    const old = room.state.variants.get(previousKey);
-    if (old) {
-      if (membersOf(room, previousKey).length === 0) {
-        destroyVariant(room, previousKey);
-      } else {
-        // The leaver may have been the one driving it. Only worth telling the
-        // people still on it when that is what happened — their stream is
-        // otherwise exactly as it was, and a re-announcement of it reads on the
-        // client as a reason to rebuild.
-        const before = old.ownerUserId;
-        ensureVariantOwner(room, old);
-        if (old.ownerUserId !== before) announceVariant(room, old);
-      }
-    }
-  }
+  if (settleLeft && previousKey && previousKey !== key) settleLeftStream(room, previousKey);
   return v;
+}
+
+/**
+ * A stream somebody has just left: torn down if that was everybody, otherwise
+ * handed to a new driver if it was the driver who left.
+ *
+ * When several people move together — a host taking their audience to new
+ * tracks — this waits until all of them have: settled after the first, the
+ * stream they are all leaving still had the others on it, and one of them was
+ * told it now drove a stream it was about to be moved off.
+ */
+function settleLeftStream(room: Room, key: string): void {
+  const old = room.state.variants.get(key);
+  if (!old) return;
+  if (membersOf(room, key).length === 0) {
+    destroyVariant(room, key);
+    return;
+  }
+  // The leaver may have been the one driving it. Only worth telling the
+  // people still on it when that is what happened — their stream is
+  // otherwise exactly as it was, and a re-announcement of it reads on the
+  // client as a reason to rebuild.
+  const before = old.ownerUserId;
+  ensureVariantOwner(room, old);
+  if (old.ownerUserId !== before) announceVariant(room, old);
 }
 
 /**
@@ -1294,10 +1307,13 @@ export function attachWebSocketServer(server: Server): void {
 
         const fromKey = client.variantKey;
         const fromSubtitle = client.subtitleStreamId;
+        const left = new Set<string>();
         for (const m of movers) {
-          assignVariant(room, m, audioStreamId, burned);
+          if (m.variantKey && m.variantKey !== targetKey) left.add(m.variantKey);
+          assignVariant(room, m, audioStreamId, burned, false);
           m.subtitleStreamId = subtitleStreamId;
         }
+        for (const key of left) settleLeftStream(room, key);
         const target = room.state.variants.get(targetKey)!;
 
         if (client.isHost) {

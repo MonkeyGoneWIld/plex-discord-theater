@@ -316,7 +316,7 @@ services:
       # The highest bitrate (kbps) a file may have and still be copied. Every
       # viewer pulls a copy at the file's own bitrate, so keep this below your
       # upload divided by how many usually watch; bigger files are re-encoded.
-      # Empty = no limit.
+      # Empty = VIDEO_BITRATE_KBPS.
       DIRECT_STREAM_MAX_KBPS: ""
 
       # Guards the "stop every transcode" endpoint.

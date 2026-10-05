@@ -159,7 +159,13 @@ function plexSegment(s: PlexSession, index: number): Buffer | null {
   return copiedSegment(s, index);
 }
 
-const decisions: Array<{ ratingKey: string; directStream: string | null; profile: string; subtitles: string | null }> = [];
+const decisions: Array<{
+  ratingKey: string; directStream: string | null; profile: string; subtitles: string | null; videoBitrate: string | null;
+}> = [];
+/** Each title's bitrate, kbps: 950 is over DIRECT_STREAM_MAX_KBPS, 960 and 970
+ *  over VIDEO_BITRATE_KBPS's default of 12000 but under the cap. */
+const fileKbps = (ratingKey: string) =>
+  ratingKey === "950" ? 31000 : ratingKey === "960" || ratingKey === "970" ? 15000 : 8000;
 /** The subtitle the item has selected, as Plex keeps it — per item, not per request. */
 let selectedSubtitle: string | null = null;
 let subtitleReads = 0;
@@ -179,7 +185,7 @@ const plex = http.createServer((req, res) => {
   if (meta) {
     return send({ Metadata: [{
       ratingKey: meta[1], title: "Film", type: "movie", duration: FILM_END * 1000,
-      Media: [{ id: 1, width: 1920, height: 1080, videoCodec: "h264", bitrate: meta[1] === "950" ? 31000 : 8000, Part: [{ id: 1, file: "/movies/Film.mkv", Stream: [
+      Media: [{ id: 1, width: 1920, height: 1080, videoCodec: "h264", bitrate: fileKbps(meta[1]), Part: [{ id: 1, file: "/movies/Film.mkv", Stream: [
         { id: 11, streamType: 1, codec: "h264" },
         { id: 12, streamType: 2, codec: "aac", selected: true },
         { id: 21, streamType: 3, codec: "srt", language: "English" },
@@ -231,14 +237,20 @@ const plex = http.createServer((req, res) => {
     return res.end(SRT);
   }
   if (url.pathname === "/video/:/transcode/universal/decision") {
-    const copy = url.searchParams.get("directStream") === "1";
     // A subtitle read's own decision isn't one of the stream's.
     if (url.searchParams.get("protocol") === "http") return send({});
+    const ratingKey = (url.searchParams.get("path") ?? "").split("/").pop()!;
+    // As the real one does: a copy only of a file within the bitrate asked
+    // for. 970 stands for one it won't copy at any bitrate (a codec the room
+    // can't play, say).
+    const copy = url.searchParams.get("directStream") === "1" &&
+      Number(url.searchParams.get("videoBitrate")) >= fileKbps(ratingKey) && ratingKey !== "970";
     decisions.push({
-      ratingKey: (url.searchParams.get("path") ?? "").split("/").pop()!,
+      ratingKey,
       directStream: url.searchParams.get("directStream"),
       profile: String(req.headers["x-plex-client-profile-extra"] ?? ""),
       subtitles: url.searchParams.get("subtitles"),
+      videoBitrate: url.searchParams.get("videoBitrate"),
     });
     return send({ generalDecisionCode: 1001, Metadata: [{ Media: [{ selected: true, protocol: "hls", videoCodec: "h264", audioCodec: "aac",
       Part: [{ Stream: [{ streamType: 1, codec: "h264", decision: copy ? "copy" : "transcode" }, { streamType: 2, codec: "aac", decision: "copy" }] }] }] }] });
@@ -352,8 +364,12 @@ console.log("\n— a copy started mid-film, as a seek starts one —");
   check("and the gap reaches exactly to the keyframe it starts on",
     sum(gaps.map((e) => e.d)).toFixed(3), (keyframes[plexSide.firstGop] * FRAME).toFixed(3));
   const target = Number(playlist.match(/#EXT-X-TARGETDURATION:(\d+)/)![1]);
-  check("in a few long pieces, each within the target duration",
-    [gaps.length, gaps.every((e) => e.d <= 60 && e.d <= target)], [Math.ceil((keyframes[plexSide.firstGop] * FRAME) / 60), true]);
+  check("in a few long pieces", [gaps.length, gaps.every((e) => e.d <= 60)], [Math.ceil((keyframes[plexSide.firstGop] * FRAME) / 60), true]);
+  // hls.js waits a whole target duration before its first reload of a playlist
+  // like this one; at the gap entries' sixty seconds, the half minute listed
+  // ran out first.
+  check("which don't count toward the target duration, so the player reloads in seconds",
+    [target, target < sum(list.filter((e) => !e.gap).map((e) => e.d))], [12, true]);
   check("playback starts where the seek asked", playlist.includes("#EXT-X-START:TIME-OFFSET=100.000"), true);
   check("Plex was never asked for anything out of order", plexSide.outOfOrder, []);
   ds.stopDirectStream("s-mid");
@@ -444,6 +460,23 @@ console.log("\n— through the routes —");
   plexRoutes.markTranscodeStopped(big);
   check("a file above DIRECT_STREAM_MAX_KBPS is re-encoded instead of copied",
     [decisions.at(-1)?.ratingKey, decisions.at(-1)?.directStream], ["950", "0"]);
+
+  // Over VIDEO_BITRATE_KBPS but under the cap: Plex has to be asked at the cap,
+  // or it re-encodes it down to the transcode bitrate whatever the cap says.
+  const mid = crypto.randomUUID();
+  await (await fetch(`${origin}/api/plex/hls/960/${mid}/master.m3u8`)).text();
+  check("a file under DIRECT_STREAM_MAX_KBPS is asked for at it, and copied",
+    [decisions.at(-1)?.ratingKey, decisions.at(-1)?.videoBitrate, ds.isDirectStreamKey(plexRoutes.getPlexTranscodeKey(mid) ?? "")],
+    ["960", "20000", true]);
+  plexRoutes.markTranscodeStopped(mid);
+
+  const before = decisions.length;
+  const wont = crypto.randomUUID();
+  await (await fetch(`${origin}/api/plex/hls/970/${wont}/master.m3u8`)).text();
+  check("one Plex won't copy anyway is asked again at the transcode bitrate",
+    decisions.slice(before).map((d) => [d.ratingKey, d.videoBitrate]), [["970", "20000"], ["970", "12000"]]);
+  check("and played as the re-encode it is", ds.isDirectStreamKey(plexRoutes.getPlexTranscodeKey(wont) ?? ""), false);
+  plexRoutes.markTranscodeStopped(wont);
 
   console.log("\n— subtitles, which used to force a re-encode —");
   /** A stream start, burning in `burn` (the player asks for that only when it

@@ -74,6 +74,9 @@ services:
       # 1 = HEVC transcodes when every player in the room can decode them.
       # Needs Plex Pass and hardware HEVC encoding enabled in Plex.
       - HEVC_TRANSCODE=${HEVC_TRANSCODE:-}
+      # 1 = copy the original video instead of re-encoding it, when the room
+      # can decode it. Files over VIDEO_BITRATE_KBPS are still re-encoded.
+      - DIRECT_STREAM=${DIRECT_STREAM:-}
       - THUMB_CACHE_TTL_MS=${THUMB_CACHE_TTL_MS}
       # Image cache size, with a unit: 500M, 10G (the default), 2T.
       - THUMB_CACHE_MAX_SIZE=${THUMB_CACHE_MAX_SIZE}

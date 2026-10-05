@@ -175,6 +175,14 @@ const SEEK_STALL_TIMEOUT_MS = 6_000;
 // stall. Modest jumps stay in-place: Plex has usually transcoded a bit ahead of
 // what hls.js has buffered, and the stall timeout recovers if it hasn't.
 const FAR_SEEK_THRESHOLD_S = 120;
+/**
+ * How far back a copied stream (DIRECT_STREAM) can be sought without a restart.
+ * The server keeps a copied segment's bytes for 180s after the playhead passes
+ * it (services/direct-stream.ts) and answers 410 for anything older; a seek
+ * further back than this restarts at the target straight away rather than
+ * finding that out one failed fragment at a time.
+ */
+const COPY_BACK_WINDOW_S = 120;
 // Quiet window before a seek actually tears the transcode down. Long enough to
 // swallow a burst of scrub clicks, short enough that a single deliberate seek
 // still feels immediate. The room is told about the seek straight away — only
@@ -1232,6 +1240,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // Note: a promoted host inherits the stream without knowing the original
   // offset (stays 0); the stall-timeout fallback still recovers in that case.
   const sessionStartOffsetRef = useRef(0);
+  /**
+   * Whether the stream is a copied one — Plex's original video, played through
+   * a playlist the server builds as it measures the segments, which therefore
+   * grows as it plays (services/direct-stream.ts). Known from the playlist's
+   * EVENT type; Plex's own playlists have none. State as well as a ref because
+   * the scrub bar needs the title's runtime instead of the element's duration.
+   */
+  const [copiedStream, setCopiedStream] = useState(false);
+  const copiedStreamRef = useRef(false);
+  /** Where that playlist ends for now, in film time; null once it is complete. */
+  const playlistEdgeRef = useRef<number | null>(null);
+  /** The title's runtime, kept current every render — see itemDurationS. */
+  const runtimeRef = useRef(0);
   // seekSeq of the last seek this client has already acted on. Seeded from the
   // room's current value so a seek that happened before we joined isn't replayed
   // against us on the first command we see.
@@ -2479,6 +2500,23 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           if (data.video) hevcStream = isHevcCodec(data.video.codec);
         });
 
+        // Copied or re-encoded, and how far a copied stream's playlist reaches.
+        // LEVEL_LOADED fires on every reload, which is how the edge keeps up.
+        copiedStreamRef.current = false;
+        playlistEdgeRef.current = null;
+        setCopiedStream(false);
+        hls.on(Hls.Events.LEVEL_LOADED, (_e, data) => {
+          const copied = data.details.type === "EVENT";
+          if (copied && !copiedStreamRef.current) {
+            logEvent("HLS", "playing the original video (Direct Stream)", {
+              session: sessionId?.substring(0, 8),
+            });
+          }
+          copiedStreamRef.current = copied;
+          playlistEdgeRef.current = copied && data.details.live ? data.details.edge : null;
+          setCopiedStream(copied);
+        });
+
         hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
           if (!mounted) return;
           // The room as it stands at the instant the manifest lands, which is
@@ -2766,6 +2804,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // without them the log shows a stream dying with no run-up.
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (data.fatal) return;
+          // A copied stream's playlist marks everything before the session's
+          // start as a gap, and hls.js reports each one it passes over. That is
+          // the playlist working, not trouble.
+          if (data.details === Hls.ErrorDetails.FRAG_GAP) return;
           const fragStart = data.frag?.start;
           // Past a known break is the blank tail; it has been said once.
           if (breakAtS !== null && typeof fragStart === "number" && fragStart >= breakAtS) return;
@@ -4040,6 +4082,27 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       return;
     }
 
+    // A copied stream lists only what the server has measured so far, and lets
+    // go of what is well behind the playhead. Past the end of that list there
+    // is nothing to seek to in place — the element would clamp to the end and
+    // play on from there — and far behind it the segments may be gone. Either
+    // way the stream restarts at the target, which for a copy is quick.
+    if (copiedStreamRef.current && !isPositionBuffered(video, positionSeconds)) {
+      const edge = playlistEdgeRef.current;
+      const pastEnd = edge !== null && positionSeconds > edge - 1;
+      const farBack = positionSeconds < video.currentTime - COPY_BACK_WINDOW_S;
+      if (pastEnd || farBack) {
+        logEvent("Seek", "copied stream can't serve this in place → restart", {
+          targetS: positionSeconds,
+          playlistEdgeS: edge ?? "complete",
+          currentS: video.currentTime,
+          why: pastEnd ? "past the measured end" : "too far back",
+        });
+        handleSeekRestart(positionSeconds, broadcast);
+        return;
+      }
+    }
+
     const wasBuffered = isPositionBuffered(video, positionSeconds);
     // Large forward jump past the transcode head — segments can't exist yet, so
     // an in-place seek would only stall for SEEK_STALL_TIMEOUT_MS before falling
@@ -4330,6 +4393,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const video = videoRef.current;
     return video && Number.isFinite(video.duration) ? video.duration : 0;
   }
+  // For listeners attached once — see the near-end effect.
+  runtimeRef.current = itemDurationS();
 
   /**
    * Whether a stream that can't be played past `breakAtS` may simply end there.
@@ -4559,8 +4624,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const video = videoRef.current;
     if (!video) return;
     const onTime = () => {
-      // Against where the content really ends, when the stream stops short.
-      const d = Math.min(video.duration, contentEndsAtRef.current ?? Infinity);
+      // Against where the content really ends, when the stream stops short —
+      // and against the title's runtime for a copied stream, whose element only
+      // knows as much of the film as has been measured.
+      const runtime = copiedStreamRef.current ? runtimeRef.current : video.duration;
+      const d = Math.min(runtime, contentEndsAtRef.current ?? Infinity);
       const remaining = d - video.currentTime;
       // No `remaining > 0` guard: once the episode finishes there is nothing on
       // screen but black, which is precisely when the card matters most. Nothing
@@ -5064,6 +5132,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           !canControl && syncActions ? syncActions.sendTransportRequest : undefined
         }
         endsAtS={contentEndsAtS}
+        runtimeS={copiedStream ? itemDurationS() : null}
         onSyncPause={canControl && syncActions ? sendPauseForControls : undefined}
         onSyncResume={canControl && syncActions ? sendResumeForControls : undefined}
         onSyncSeek={canControl ? syncActions?.sendSeek : undefined}

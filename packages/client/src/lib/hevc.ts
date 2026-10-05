@@ -1,8 +1,10 @@
 const STORAGE_KEY = "pdt:hevc-failed";
 
 /**
- * Whether this player can decode the HEVC transcodes Plex makes when asked:
- * 8-bit HEVC Main at 1080p, handed to Media Source Extensions by hls.js.
+ * Whether this player can decode HEVC as the room might send it: 8-bit, which
+ * is what Plex encodes, and 10-bit, which is what most HEVC files are and what a
+ * copied stream (DIRECT_STREAM) hands over untouched — 1080p either way, through
+ * Media Source Extensions as hls.js feeds it.
  *
  * Reported to the room on joining. The server only offers Plex HEVC when every
  * client in a room has said yes here, so a wrong yes costs that client its
@@ -27,8 +29,10 @@ export function canPlayHevcTranscode(): boolean {
     };
     const ms = w.MediaSource ?? w.ManagedMediaSource;
     if (!ms) return false;
-    return ["hvc1.1.6.L123.B0", "hev1.1.6.L123.B0"].some((codec) =>
-      ms.isTypeSupported(`video/mp4; codecs="${codec}"`),
+    const supports = (codec: string) => ms.isTypeSupported(`video/mp4; codecs="${codec}"`);
+    return (
+      ["hvc1.1.6.L123.B0", "hev1.1.6.L123.B0"].some(supports) &&
+      ["hvc1.2.4.L123.B0", "hev1.2.4.L123.B0"].some(supports)
     );
   } catch {
     return false;

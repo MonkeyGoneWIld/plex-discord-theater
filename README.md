@@ -308,6 +308,11 @@ services:
       # HEVC encoding enabled in Plex; otherwise Plex keeps sending H.264.
       HEVC_TRANSCODE: ""
 
+      # "1" = play the original video instead of a re-encode whenever the room
+      # can decode it (Direct Stream). Audio is still converted where needed;
+      # files over VIDEO_BITRATE_KBPS are still re-encoded.
+      DIRECT_STREAM: ""
+
       # Guards the "stop every transcode" endpoint.
       ADMIN_SECRET: ""
 

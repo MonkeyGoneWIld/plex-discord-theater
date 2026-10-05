@@ -43,6 +43,10 @@ interface ControlsProps {
   /** Where the title really ends, when its stream stops short of the runtime
    *  the element reports. The scrub bar ends there. */
   endsAtS?: number | null;
+  /** The title's full runtime, for a stream whose element doesn't know it yet:
+   *  a copied stream's playlist only reaches as far as the server has measured,
+   *  so the element's duration grows as it plays. The scrub bar spans this. */
+  runtimeS?: number | null;
   onSyncPause?: (position: number) => void;
   onSyncResume?: (position: number) => void;
   onSyncSeek?: (position: number) => void;
@@ -441,6 +445,7 @@ export function Controls({
   title,
   onBack,
   endsAtS,
+  runtimeS,
   onSyncPause,
   onSyncResume,
   onSyncSeek,
@@ -475,9 +480,10 @@ export function Controls({
   useEffect(() => { setDuration(0); }, [title]);
   // What the bar spans: the element's runtime, unless the stream is known to
   // stop short of it, in which case the bar ends where the title does.
-  const duration = endsAtS != null && endsAtS > 0 && (!mediaDuration || endsAtS < mediaDuration)
+  const span = runtimeS != null && runtimeS > mediaDuration ? runtimeS : mediaDuration;
+  const duration = endsAtS != null && endsAtS > 0 && (!span || endsAtS < span)
     ? endsAtS
-    : mediaDuration;
+    : span;
   const [volume, setVolume] = useState(loadVolume);
   const [muted, setMuted] = useState(false);
   const [visible, setVisible] = useState(true);

@@ -7,6 +7,15 @@ import { progressivePreview } from "../services/preview-stream.js";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
 import { playableVersionOrder, resolutionLabel, channelLabel, transcodeFrame } from "../services/media-versions.js";
 import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition } from "../services/segment-prefetch.js";
+import {
+  startDirectStream,
+  stopDirectStream,
+  isDirectStreamKey,
+  directStreamRefused,
+  directStreamPlaylist,
+  directStreamSegment,
+  updateDirectStreamPosition,
+} from "../services/direct-stream.js";
 import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
@@ -108,6 +117,17 @@ const VIDEO_PEAK_BITRATE_KBPS = envInt(
  * H.264.
  */
 const HEVC_TRANSCODE = process.env.HEVC_TRANSCODE === "1";
+
+/**
+ * Let Plex copy the video instead of re-encoding it, whenever everyone in the
+ * room can decode it — H.264 always, HEVC (8- or 10-bit) when every player says
+ * so. The audio is still converted to AAC where it needs to be, and anything
+ * Plex can't copy (a burned subtitle, a file over the bitrate cap, a codec the
+ * room can't play) is re-encoded exactly as before. Copied streams are played
+ * through a playlist this server builds from the segments themselves — see
+ * services/direct-stream.ts for why Plex's own can't be used. Off unless set.
+ */
+const DIRECT_STREAM = process.env.DIRECT_STREAM === "1";
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -3209,6 +3229,7 @@ function noteHeadAdvance(key: string, segPath: string): void {
 /** Mark a Plex transcode key as stopped — segment requests will be rejected. */
 export function markTranscodeStopped(sessionId: string): void {
   stopPrefetch(sessionId);
+  stopDirectStream(sessionId);
   transcodeControlKey.delete(sessionId);
   const plexKey = plexTranscodeKeys.get(sessionId);
   if (plexKey) {
@@ -4012,7 +4033,14 @@ router.get(
     // Core manifest fetch logic — wrapped in a promise for in-flight deduplication
     const fetchManifest = async (
       subtitleMode: "burn" | "none",
-      { videoResolution, hevc }: { videoResolution: string; hevc: boolean },
+      { videoResolution, hevc, copy }: {
+        videoResolution: string;
+        /** Which way HEVC is offered: as what Plex encodes to, as something it
+         *  may copy, or not at all. */
+        hevc: "encode" | "copy" | false;
+        /** Whether Plex may copy the video rather than re-encode it. */
+        copy: boolean;
+      },
     ): Promise<string> => {
       const params: Record<string, string> = {
         hasMDE: "1",
@@ -4022,16 +4050,12 @@ router.get(
         protocol: "hls",
         fastSeek: "1",
         directPlay: "0",
-        // Force a real video re-encode instead of a remux (copy). Direct-streaming
-        // (directStream=1 → videoDecision=copy) hands the source's elementary h264
-        // stream to the browser untouched, including any keyframe/timestamp
-        // discontinuity the file carries. The browser's MSE cannot append across
-        // such a discontinuity, so playback wedges at a fixed point mid-episode
-        // (bufferStalledError, buffer stops growing) and never recovers. Re-encoding
-        // produces clean, monotonic, uniformly-keyframed HLS that MSE plays through.
-        // Audio copy is left on — the discontinuity is in the video stream, and
-        // AAC passthrough is cheap and reliable.
-        directStream: "0",
+        // Copying the video was switched off in July after copied streams
+        // wedged at a fixed point mid-episode. The segments were never the
+        // problem; Plex's playlist for them is (services/direct-stream.ts), and a
+        // copied stream is now played through one built from the segments
+        // instead. Without DIRECT_STREAM every title is re-encoded, as then.
+        directStream: copy ? "1" : "0",
         directStreamAudio: "1",
         videoResolution,
         videoBitrate: String(VIDEO_BITRATE_KBPS),
@@ -4072,9 +4096,19 @@ router.get(
          * Audio that is already AAC is still copied untouched — see
          * directStreamAudio.
          */
-        "X-Plex-Client-Profile-Extra":
+        //
+        // HEVC comes first when Plex should encode to it, after H.264 when it is
+        // only there to be copied. Either way Plex's own HEVC limits are swapped
+        // for one allowing 10-bit: its Chrome profile caps HEVC at 8-bit, which
+        // turned away the copy of every 10-bit file — most of the HEVC there is.
+        "X-Plex-Client-Profile-Extra": [
           "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts" +
-          `&videoCodec=${hevc ? "hevc,h264" : "h264"}&audioCodec=aac&replace=true)`,
+            `&videoCodec=${hevc === "encode" ? "hevc,h264" : hevc === "copy" ? "h264,hevc" : "h264"}` +
+            "&audioCodec=aac&replace=true)",
+          ...(hevc
+            ? ["add-limitation(scope=videoCodec&scopeName=hevc&type=upperBound&name=video.bitDepth&value=10&replace=true)"]
+            : []),
+        ].join("+"),
         "X-Plex-Client-Identifier": OUR_CLIENT_ID,
         "X-Plex-Product": "Plex Discord Theater",
         "X-Plex-Platform": "Chrome",
@@ -4087,6 +4121,11 @@ router.get(
       const decisionPath = "/video/:/transcode/universal/decision";
       // Whatever an earlier start of this session was, this one is decided anew.
       sessionVideoCodec.delete(sessionId);
+      // Whether Plex is copying the video, which decides who serves it. A
+      // decision that can't be read counts as copying when copying was allowed:
+      // the measured playlist plays a re-encoded stream just as well, while
+      // Plex's own playlist for a copied one is the thing that breaks.
+      let videoCopied = false;
       try {
         const decisionRes = await plexFetch(decisionPath, { ...params, transcodeSessionId: sessionId }, hlsHeaders);
         // Log the decision body — contains generalDecisionCode that tells us
@@ -4116,9 +4155,14 @@ router.get(
           console.log("[HLS] Decision:", decisionRes.status,
             "code:", mc?.generalDecisionCode, mc?.generalDecisionText,
             "→", videoCodec ?? "?", "+", media?.audioCodec ?? "?",
-            "| frame", videoResolution, hevc ? "| HEVC offered" : "");
+            "| frame", videoResolution, hevc ? `| HEVC offered (${hevc})` : "",
+            copy ? `| video ${videoStream?.decision ?? "?"}` : "");
+          if (copy && (videoStream?.decision === "copy" || videoStream?.decision === undefined)) {
+            videoCopied = true;
+          }
         } catch {
           console.log("[HLS] Decision:", decisionRes.status, "(no body)");
+          if (copy) videoCopied = true;
         }
         if (!decisionRes.ok) {
           console.error("[HLS] Decision returned non-OK status:", decisionRes.status,
@@ -4126,6 +4170,7 @@ router.get(
         }
       } catch (err) {
         console.log("[HLS] Decision failed (non-fatal):", err);
+        if (copy) videoCopied = true;
       }
       // No readable answer: assume the worst of what was offered.
       if (!sessionVideoCodec.has(sessionId)) {
@@ -4196,8 +4241,17 @@ router.get(
         // secondsPerSegment=3s each) — the prefetcher now bounds itself to a
         // window ahead of the head and retries near-head 404s, so it tracks the
         // head instead of racing past it and starving the seek target.
-        const startSeg = offset ? Math.floor(parseInt(offset, 10) / 3) : 0;
-        startPrefetch(sessionId, plexKeyMatch[1], startSeg);
+        //
+        // A copied stream is measured and served by the Direct Stream tracker
+        // instead, which fetches strictly in order: this prefetcher's 3s
+        // arithmetic and parallel fetches would ask Plex for segments out of
+        // order, and Plex answers that by renumbering the stream.
+        if (videoCopied) {
+          startDirectStream(sessionId, plexKeyMatch[1], ratingKey, offset ? parseInt(offset, 10) : 0);
+        } else {
+          const startSeg = offset ? Math.floor(parseInt(offset, 10) / 3) : 0;
+          startPrefetch(sessionId, plexKeyMatch[1], startSeg);
+        }
       } else {
         console.error("[HLS] FATAL: Could not extract Plex transcode key from manifest for session:",
           sessionId.substring(0, 8), "— aborting session to prevent phantom state");
@@ -4236,11 +4290,14 @@ router.get(
           ratingKey, subtitleStreamID, session: sessionId.substring(0, 8),
         });
       }
+      // Decided per start, so a room that has gained someone who can't decode
+      // HEVC gets H.264 from its next transcode on.
+      const roomHevc = userId !== null && roomPlaysHevc(userId);
+      const copy = DIRECT_STREAM && !directStreamRefused(ratingKey);
       return fetchManifest(drawnByClient ? "none" : requestedSubtitleMode, {
         videoResolution: await outputFrame(ratingKey, mediaIndex),
-        // Decided per start, so a room that has gained someone who can't
-        // decode HEVC gets H.264 from its next transcode on.
-        hevc: HEVC_TRANSCODE && userId !== null && roomPlaysHevc(userId),
+        hevc: roomHevc && HEVC_TRANSCODE ? "encode" : roomHevc && copy ? "copy" : false,
+        copy,
       });
     });
     manifestInFlight.set(sessionId, promise);
@@ -4302,6 +4359,36 @@ async function isTranscodeSessionAlive(plexKey: string): Promise<boolean> {
   }
 }
 
+/** The playlist or a segment of a copied stream — see the /hls/seg route. */
+async function serveDirectStream(req: Request, res: Response, plexKey: string, segPath: string): Promise<void> {
+  if (segPath.endsWith(".m3u8")) {
+    const authToken = req.query.token as string | undefined;
+    const playlist = await directStreamPlaylist(plexKey, (path) => segProxyUrl(path, authToken));
+    if (playlist === null) {
+      res.status(410).end();
+      return;
+    }
+    res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+    res.setHeader("Cache-Control", "no-cache");
+    res.send(playlist);
+    return;
+  }
+  const segment = directStreamSegment(plexKey, segPath);
+  // Measured, then let go to stay within memory. The player restarts where it
+  // is, which beats asking Plex for an old segment and having it renumber.
+  if (segment === "gone") {
+    res.status(410).end();
+    return;
+  }
+  if (!segment) {
+    res.status(404).end();
+    return;
+  }
+  setSegmentCacheHeaders(res, segPath);
+  res.setHeader("Content-Type", "video/MP2T");
+  res.send(segment);
+}
+
 router.get("/hls/seg", async (req: Request, res: Response) => {
   const rawPath = req.query.p;
   if (!rawPath || typeof rawPath !== "string") {
@@ -4327,6 +4414,14 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
   }
 
   if (DEBUG) console.log("[HLS seg] Fetching:", segPath.substring(0, 120));
+
+  // A copied stream is answered entirely from here: its playlist is the one
+  // measured from its segments, and its segments are never fetched from Plex on
+  // a client's behalf — see services/direct-stream.ts.
+  if (segKeyMatch && isDirectStreamKey(segKeyMatch[1])) {
+    await serveDirectStream(req, res, segKeyMatch[1], segPath);
+    return;
+  }
 
   // Check pre-fetch cache first — serves instantly if the segment was already fetched
   const cachedSeg = getCachedSegment(segPath);
@@ -4565,6 +4660,7 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
       // hangs its window off the transcode head, which it advances itself, and
       // the whole thing runs away to the end of the file.
       updatePrefetchPosition(sessionId, timeMs / 1000);
+      updateDirectStreamPosition(sessionId, timeMs / 1000);
 
       // If the reported position has frozen while still playing, the host's
       // playback stalled and the client is starved. Match what Plex's own web

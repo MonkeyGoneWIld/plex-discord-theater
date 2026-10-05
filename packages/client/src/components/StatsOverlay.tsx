@@ -35,6 +35,8 @@ interface Snapshot {
   bufferHealth: string;
   videoCodec: string;
   audioCodec: string;
+  /** Whether the video is Plex's original, copied, or a re-encode of it. */
+  videoPath: string;
   lastFrag: string;
 }
 
@@ -145,6 +147,7 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
       let videoBitrate = "—";
       let videoCodec = "—";
       let audioCodec = "—";
+      let videoPath = "—";
       if (hls) {
         const level = hls.levels[hls.currentLevel] ?? hls.levels[hls.loadLevel] ?? hls.levels[0];
         if (level) {
@@ -155,6 +158,11 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
         // CODECS attribute on the off-chance a playlist does declare it.
         videoCodec = codecsRef.current.video ?? level?.videoCodec ?? "—";
         audioCodec = codecsRef.current.audio ?? level?.audioCodec ?? "—";
+        // The server marks the playlists it builds for copied streams as EVENT
+        // playlists (services/direct-stream.ts); Plex's own have no type.
+        if (level?.details) {
+          videoPath = level.details.type === "EVENT" ? "Original (Direct Stream)" : "Re-encoded by Plex";
+        }
       }
 
       setSnap({
@@ -168,6 +176,7 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
         bufferHealth,
         videoCodec,
         audioCodec,
+        videoPath,
         lastFrag: lastFragRef.current,
       });
       setTick((n) => n + 1);
@@ -196,6 +205,7 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
     ["Video bitrate", snap?.videoBitrate ?? "—"],
     ["Connection speed", snap?.bandwidth ?? "—"],
     ["Buffer health", snap?.bufferHealth ?? "—"],
+    ["Video", snap?.videoPath ?? "—"],
     ["Codecs", `${snap?.videoCodec ?? "—"} / ${snap?.audioCodec ?? "—"}`],
     ["Last segment", snap?.lastFrag ?? "—"],
     ["Delivery", vpsRelay ? "VPS relay (nginx cache)" : "P2P mesh (WebRTC)"],

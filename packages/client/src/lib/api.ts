@@ -793,8 +793,17 @@ export interface SubtitleCue {
  * each pull the same file. Stream ids belong to a media part, so the key is
  * already unique across titles.
  */
-export function fetchSubtitleCues(streamId: number): Promise<{ cues: SubtitleCue[] }> {
-  return cachedGet(`/api/plex/subtitles/${encodeURIComponent(String(streamId))}`);
+export function fetchSubtitleCues(
+  streamId: number,
+  /** The title, so a subtitle inside the media file can be read out of it. */
+  ratingKey?: string,
+  mediaIndex?: number,
+): Promise<{ cues: SubtitleCue[] }> {
+  const params = new URLSearchParams();
+  if (ratingKey) params.set("ratingKey", ratingKey);
+  if (mediaIndex != null && mediaIndex > 0) params.set("mediaIndex", String(mediaIndex));
+  const qs = params.toString();
+  return cachedGet(`/api/plex/subtitles/${encodeURIComponent(String(streamId))}${qs ? `?${qs}` : ""}`);
 }
 
 export function hlsMasterUrl(

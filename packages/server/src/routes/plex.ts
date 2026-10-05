@@ -1056,9 +1056,10 @@ function rememberDuration(ratingKey: string, payload: Record<string, unknown>): 
  * the client relies on. A saved row from an older shape is then rebuilt when it
  * is next read, instead of answering without the field for up to a week. It is
  * still the answer if that rebuild fails. 2 added originallyAvailableAt; 3
- * added each version's width and height.
+ * added each version's width and height; 4 made embedded text subtitles
+ * drawable and added `sidecar`.
  */
-export const META_PAYLOAD_VERSION = 3;
+export const META_PAYLOAD_VERSION = 4;
 
 const metaCache = new LruMap<string, { payload: Record<string, unknown>; at: number }>(2_000);
 const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -1114,13 +1115,26 @@ function mapAudioTracks(streams: PlexStream[]) {
  * that only a renderer can turn into a picture, so those stay with the
  * transcoder and get burned in like everything else.
  */
-const TEXT_SUBTITLE_FORMATS = new Set(["srt", "subrip", "vtt", "webvtt", "ass", "ssa", "text"]);
+const TEXT_SUBTITLE_FORMATS = new Set(["srt", "subrip", "vtt", "webvtt", "ass", "ssa", "text", "mov_text", "tx3g"]);
 
 /** Whether this subtitle is a sidecar file this server can read as text. */
 function isSidecarText(s: PlexStream): boolean {
   if (!s.key) return false;
   const kind = (s.format || s.codec || "").toLowerCase();
   return TEXT_SUBTITLE_FORMATS.has(kind);
+}
+
+/**
+ * Whether this subtitle is text stored inside the media file.
+ *
+ * Those used to be burned in, because there was no file to fetch, and burning
+ * a subtitle means re-encoding the picture — which made "subtitles on" the
+ * commonest reason a copyable file wasn't copied. Plex will read one out as SRT
+ * (readEmbeddedSubtitle), so it can be drawn like a sidecar instead.
+ */
+function isEmbeddedText(s: PlexStream): boolean {
+  if (s.key) return false;
+  return TEXT_SUBTITLE_FORMATS.has((s.codec || "").toLowerCase());
 }
 
 function mapSubtitleTracks(streams: PlexStream[]) {
@@ -1139,8 +1153,14 @@ function mapSubtitleTracks(streams: PlexStream[]) {
        * Which is also whether it can be timed against the picture: burned-in
        * subtitles are pixels in the video frames by the time anyone sees them,
        * and no amount of asking moves them. See the /subtitles route.
+       *
+       * Text inside the file counts too. If it then can't be read, the server
+       * burns it after all and the /subtitles route refuses it, so the two
+       * ends still never both show it — see subtitleIsDrawnByClient.
        */
-      external: isSidecarText(s),
+      external: isSidecarText(s) || isEmbeddedText(s),
+      /** A file of its own, as opposed to a track inside the media file. */
+      sidecar: isSidecarText(s),
     }));
 }
 
@@ -2682,6 +2702,131 @@ router.put("/streams/:partId", async (req: Request, res: Response) => {
 const subtitleCache = new LruMap<string, { cues: Cue[]; at: number }>(200);
 const SUBTITLE_CACHE_TTL_MS = 30 * 60 * 1000;
 
+/**
+ * Embedded subtitles Plex couldn't read out, by stream id, with when. The start
+ * burns these in and the /subtitles route refuses them, so the picture and the
+ * player agree about who shows them. Retried after EMBEDDED_RETRY_MS.
+ */
+const unreadableEmbedded = new LruMap<string, number>(500);
+const EMBEDDED_RETRY_MS = 60 * 60 * 1000;
+/** Reads in flight, so a start and a player asking together share one. */
+const embeddedReads = new Map<string, Promise<Cue[] | null>>();
+/**
+ * How long reading one out may take before it counts as unreadable. Plex has
+ * to go through the file to collect a track that is spread across all of it, so
+ * a big file on slow storage takes a while — but this holds up a start, once
+ * per title (the result is cached), and a burned subtitle beats a long wait.
+ */
+const EMBEDDED_READ_TIMEOUT_MS = 30_000;
+
+/** Text from a subtitle's bytes: UTF-8 if it is valid, Windows-1252 if not. */
+function decodeSubtitle(raw: ArrayBuffer): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(raw);
+  } catch {
+    return new TextDecoder("windows-1252").decode(raw);
+  }
+}
+
+/**
+ * A text subtitle stored inside the media file, as cues — read out through
+ * Plex's subtitle-only transcode, which answers with the item's selected
+ * subtitle track as SRT. The track has to be the selected one (Plex takes no
+ * stream id here), so this runs under the item lock — see embeddedSubtitleCues.
+ */
+async function readEmbeddedSubtitle(ratingKey: string, mediaIndex: number, streamId: string): Promise<Cue[] | null> {
+  const started = Date.now();
+  const sessionId = randomUUID();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), EMBEDDED_READ_TIMEOUT_MS);
+  try {
+    const res = await fetch(plexUrl("/video/:/transcode/universal/subtitles", {
+      path: `/library/metadata/${ratingKey}`,
+      mediaIndex: String(mediaIndex),
+      partIndex: "0",
+      protocol: "http",
+      subtitles: "sidecar",
+      // ASS/SSA as plain text, which is how sidecar ASS is drawn too.
+      advancedSubtitles: "text",
+      transcodeSessionId: sessionId,
+    }), {
+      headers: {
+        Accept: "text/srt, text/plain, */*",
+        "X-Plex-Client-Identifier": OUR_CLIENT_ID,
+        "X-Plex-Product": "Plex Discord Theater",
+        "X-Plex-Platform": "Chrome",
+        "X-Plex-Device": "Browser",
+        "X-Plex-Session-Identifier": sessionId,
+      },
+      signal: controller.signal,
+    });
+    const raw = await res.arrayBuffer();
+    const parsed = res.ok && raw.byteLength <= MAX_SUBTITLE_BYTES ? parseSubtitles(decodeSubtitle(raw)) : null;
+    if (!parsed || parsed.cues.length === 0) {
+      logEvent("Subtitles", "couldn't read an embedded subtitle out of the file", {
+        ratingKey, streamId, status: res.status,
+        type: res.headers.get("content-type") ?? "none",
+        bytes: raw.byteLength,
+        start: JSON.stringify(decodeSubtitle(raw.slice(0, 120))),
+        ms: Date.now() - started,
+      });
+      return null;
+    }
+    logEvent("Subtitles", "read an embedded subtitle out of the file", {
+      ratingKey, streamId, format: parsed.format, cues: parsed.cues.length, ms: Date.now() - started,
+    });
+    return parsed.cues;
+  } catch (err) {
+    logEvent("Subtitles", "couldn't read an embedded subtitle out of the file", {
+      ratingKey, streamId,
+      error: controller.signal.aborted ? `timed out after ${EMBEDDED_READ_TIMEOUT_MS / 1000}s` : String(err),
+    });
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * An embedded text subtitle's cues, or null when it can't be read. Cached like
+ * a sidecar; remembered as unreadable for a while when it fails; shared while
+ * in flight.
+ *
+ * `lockHeld` is for the transcode start, which already holds the item lock and
+ * has selected the track. Everyone else selects it under the lock here. A start
+ * never joins a read queued behind its own lock — it would be waiting for
+ * itself — and does its own instead.
+ */
+function embeddedSubtitleCues(
+  ratingKey: string, mediaIndex: number, streamId: string, lockHeld: boolean,
+): Promise<Cue[] | null> {
+  const fresh = () => {
+    const hit = subtitleCache.get(streamId);
+    return hit && Date.now() - hit.at < SUBTITLE_CACHE_TTL_MS ? hit.cues : null;
+  };
+  const known = fresh();
+  if (known) return Promise.resolve(known);
+  const failedAt = unreadableEmbedded.get(streamId);
+  if (failedAt && Date.now() - failedAt < EMBEDDED_RETRY_MS) return Promise.resolve(null);
+  if (!lockHeld) {
+    const pending = embeddedReads.get(streamId);
+    if (pending) return pending;
+  }
+  const read = async () => {
+    const meanwhile = fresh();
+    if (meanwhile) return meanwhile;
+    if (!lockHeld) await selectTracksForStart(ratingKey, mediaIndex, null, Number(streamId));
+    const cues = await readEmbeddedSubtitle(ratingKey, mediaIndex, streamId);
+    if (cues) subtitleCache.set(streamId, { cues, at: Date.now() });
+    else unreadableEmbedded.set(streamId, Date.now());
+    return cues;
+  };
+  const promise = (lockHeld ? read() : withItemLock(ratingKey, read))
+    .finally(() => { if (embeddedReads.get(streamId) === promise) embeddedReads.delete(streamId); });
+  if (!lockHeld) embeddedReads.set(streamId, promise);
+  return promise;
+}
+
 /** Guard against a "subtitle" that is really a video file. Comfortably larger
  *  than any real subtitle: a three-hour ASS with full typesetting is ~1 MB. */
 const MAX_SUBTITLE_BYTES = 8 * 1024 * 1024;
@@ -2696,8 +2841,10 @@ const MAX_SUBTITLE_BYTES = 8 * 1024 * 1024;
  * the video frames by the time they arrive, and no amount of asking moves them
  * relative to the audio. Text can be shifted by adding a number to it.
  *
- * Only reachable for streams Plex exposes as files of their own — see
- * isSidecarText. An embedded track has no `key` to fetch and stays burned in.
+ * A sidecar is fetched as the file it is. A track inside the media file needs
+ * `?ratingKey=` (and `mediaIndex=` for a second version) and is read out through
+ * Plex — see embeddedSubtitleCues — and one that couldn't be is refused, because
+ * the stream will have burned it in instead.
  */
 router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
   const streamId = req.params.streamId as string;
@@ -2710,6 +2857,21 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
   if (hit && Date.now() - hit.at < SUBTITLE_CACHE_TTL_MS) {
     res.json({ cues: hit.cues });
     return;
+  }
+
+  const ratingKey = typeof req.query.ratingKey === "string" && NUMERIC_RE.test(req.query.ratingKey)
+    ? req.query.ratingKey
+    : null;
+  if (ratingKey) {
+    const requested = Number(req.query.mediaIndex);
+    const mediaIndex = Number.isInteger(requested) && requested >= 0 ? requested : await defaultMediaIndex(ratingKey);
+    const track = await subtitleTrackOf(ratingKey, mediaIndex, Number(streamId));
+    if (track?.external && track.sidecar === false) {
+      const cues = await embeddedSubtitleCues(ratingKey, mediaIndex, streamId, false);
+      if (cues) res.json({ cues });
+      else res.status(404).json({ error: "Subtitle not available" });
+      return;
+    }
   }
 
   try {
@@ -2733,14 +2895,7 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
     // Sidecars are UTF-8 far more often than not, and the ones that are not are
     // usually Latin-1. Decoding strictly first means a mis-encoded file is
     // detected rather than silently filled with replacement characters.
-    let body: string;
-    try {
-      body = new TextDecoder("utf-8", { fatal: true }).decode(raw);
-    } catch {
-      body = new TextDecoder("windows-1252").decode(raw);
-    }
-
-    const parsed = parseSubtitles(body);
+    const parsed = parseSubtitles(decodeSubtitle(raw));
     if (!parsed || parsed.cues.length === 0) {
       logEvent("Subtitles", "sidecar could not be read as text", {
         streamId, bytes: raw.byteLength, cues: parsed?.cues.length ?? "unparsed",
@@ -3899,9 +4054,25 @@ async function subtitleIsDrawnByClient(
   subtitleStreamID: number | null,
 ): Promise<boolean> {
   if (subtitleStreamID == null || subtitleStreamID === 0) return false;
+  const track = await subtitleTrackOf(ratingKey, mediaIndex, subtitleStreamID);
+  if (!track?.external) return false;
+  // A sidecar is a file that is simply there. Entries cached before `sidecar`
+  // existed only ever marked sidecars as drawable.
+  if (track.sidecar !== false) return true;
+  // Text inside the file: drawn only if it can actually be read out, which this
+  // finds out now, before the transcode starts. Called with the item lock held
+  // and the track already selected.
+  const cues = await embeddedSubtitleCues(ratingKey, mediaIndex, String(subtitleStreamID), true);
+  return cues !== null;
+}
+
+/** One subtitle track from a title's metadata, as mapSubtitleTracks made it. */
+async function subtitleTrackOf(
+  ratingKey: string, mediaIndex: number, streamId: number,
+): Promise<{ id: number; external?: boolean; sidecar?: boolean } | null> {
   try {
     const meta = await buildMeta(ratingKey);
-    type Sub = { id: number; external?: boolean };
+    type Sub = { id: number; external?: boolean; sidecar?: boolean };
     const versions = meta?.versions as
       | Array<{ mediaIndex?: number; subtitleTracks?: Sub[] }>
       | undefined;
@@ -3909,9 +4080,9 @@ async function subtitleIsDrawnByClient(
       versions?.find((v) => v.mediaIndex === mediaIndex)?.subtitleTracks ??
       (meta?.subtitleTracks as Sub[] | undefined) ??
       [];
-    return tracks.find((t) => t.id === subtitleStreamID)?.external === true;
+    return tracks.find((t) => t.id === streamId) ?? null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -4366,6 +4537,11 @@ async function serveDirectStream(req: Request, res: Response, plexKey: string, s
     const playlist = await directStreamPlaylist(plexKey, (path) => segProxyUrl(path, authToken));
     if (playlist === null) {
       res.status(410).end();
+      return;
+    }
+    if (playlist === "retry") {
+      res.setHeader("Retry-After", "1");
+      res.status(503).end();
       return;
     }
     res.setHeader("Content-Type", "application/vnd.apple.mpegurl");

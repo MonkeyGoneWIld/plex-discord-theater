@@ -76,9 +76,13 @@ const MIN_TARGET_DURATION = 12;
 const READY_SPAN_S = 30;
 /** Plex not producing the next segment for this long means it isn't going to. */
 const STUCK_MS = 60_000;
-/** How long a fresh session's first playlist waits for READY_SPAN_S, at most;
- *  inside hls.js's own timeout for loading a playlist. */
-const READY_TIMEOUT_MS = 10_000;
+/** How long a fresh session's first playlist waits for READY_SPAN_S, at most —
+ *  well inside hls.js's 10s timeout for loading a playlist, so the player hears
+ *  "try again" (503) rather than giving up on a request that never answered. */
+const READY_TIMEOUT_MS = 6_000;
+/** How often to ask Plex for its own playlist while waiting on a segment — see
+ *  primePlexPlaylist. */
+const PRIME_EVERY_MS = 5_000;
 
 interface Measured {
   /** Plex's segment number. */
@@ -215,12 +219,41 @@ function fail(s: CopySession, reason: string, detail: Record<string, unknown> = 
 }
 
 /**
+ * Ask Plex for its own playlist for the session.
+ *
+ * Plex doesn't start copying until something asks for it. Every client that
+ * plays one of its HLS sessions loads that playlist before any segment — the
+ * re-encode prefetcher polls it, the diagnosis script loaded it — and the first
+ * version of this tracker went straight to segment 0 instead, and was answered
+ * 404 for as long as anyone waited. The playlist itself is no use here (that is
+ * the point of this module); asking for it is.
+ */
+async function primePlexPlaylist(s: CopySession): Promise<number> {
+  try {
+    const res = await plexFetchSegment(`${s.baseDir}index.m3u8`);
+    await res.text().catch(() => "");
+    return res.status;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Fetch Plex's segments one at a time, in order, for as long as the watcher
  * needs more — see the module comment for why never out of order.
  */
 async function pump(s: CopySession): Promise<void> {
   let missingSince: number | null = null;
   let misses = 0;
+  let primedAt = Date.now();
+  const primed = await primePlexPlaylist(s);
+  let waitLogged = false;
+  if (primed !== 200) {
+    logEvent("DirectStream", "Plex's playlist for the session didn't load", {
+      session: s.sessionId.substring(0, 8),
+      status: primed,
+    });
+  }
   while (!s.abort.signal.aborted && !s.ended && !s.failed) {
     if (!wantsMore(s)) {
       await rest(s, 2000);
@@ -249,6 +282,20 @@ async function pump(s: CopySession): Promise<void> {
         fail(s, "Plex stopped producing segments", { index: s.nextIndex, status: res.status });
         return;
       }
+      // Nudge it again while waiting, in case the first ask was too early.
+      if (Date.now() - primedAt > PRIME_EVERY_MS) {
+        primedAt = Date.now();
+        await primePlexPlaylist(s);
+      }
+      if (!waitLogged && s.segments.length === 0 && Date.now() - missingSince > 10_000) {
+        waitLogged = true;
+        logEvent("DirectStream", "still waiting for Plex's first copied segment", {
+          session: s.sessionId.substring(0, 8),
+          index: s.nextIndex,
+          status: res.status,
+          waitedS: Math.round((Date.now() - missingSince) / 1000),
+        });
+      }
       await rest(s, res.status === 404 ? Math.min(1000, 100 * 2 ** misses++) : 2000);
       continue;
     }
@@ -267,6 +314,17 @@ async function pump(s: CopySession): Promise<void> {
 
     const span = videoSpan(data);
     if (!span) {
+      // Not MPEG-TS at all — an error page, or JSON, answered with a 200. Not
+      // a segment and not the end either; treated like one not copied yet.
+      if (data.length === 0 || data[0] !== 0x47) {
+        missingSince ??= Date.now();
+        if (Date.now() - missingSince > STUCK_MS) {
+          fail(s, "Plex answered with something other than a segment", { index: s.nextIndex, bytes: data.length });
+          return;
+        }
+        await rest(s, Math.min(1000, 100 * 2 ** misses++));
+        continue;
+      }
       // Plex's copied streams end with segments of a single packet. Anything
       // bigger with no video in it is something this can't read, and listing
       // past it would be guessing.
@@ -283,6 +341,8 @@ async function pump(s: CopySession): Promise<void> {
       }
       return;
     }
+    missingSince = null;
+    misses = 0;
 
     if (s.clockOffset === null) {
       // Plex's clock is 10s ahead of the film. Checked against where the session
@@ -400,7 +460,7 @@ export function updateDirectStreamPosition(sessionId: string, positionS: number)
 export async function directStreamPlaylist(
   plexKey: string,
   urlFor: (plexPath: string) => string,
-): Promise<string | null> {
+): Promise<string | "retry" | null> {
   const s = byPlexKey.get(plexKey);
   if (!s) return null;
   if (!ready(s)) {
@@ -411,6 +471,10 @@ export async function directStreamPlaylist(
   }
 
   const list = published(s);
+  // Nothing measured yet: say so, and hls.js asks again shortly. An empty
+  // playlist would be an error to it, and a request left hanging past its own
+  // timeout is one it stops waiting for.
+  if (list.length === 0 && !s.ended) return "retry";
   const first = list[0] ?? s.segments[0];
   const lines: string[] = [];
 

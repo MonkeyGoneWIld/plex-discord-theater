@@ -158,6 +158,10 @@ interface SubtitleLayerProps {
   /** The sidecar to draw, or null when subtitles are off or Plex is burning
    *  them in. Changing it loads the new one and clears what was on screen. */
   streamId: number | null;
+  /** The title and version it belongs to, so a subtitle stored inside the
+   *  media file can be read out of it rather than burned in. */
+  ratingKey?: string;
+  mediaIndex?: number;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   /** Milliseconds. Positive shows the text later than the file says. */
   offsetMs: number;
@@ -166,7 +170,7 @@ interface SubtitleLayerProps {
   onUnavailable?: () => void;
 }
 
-export function SubtitleLayer({ streamId, videoRef, offsetMs, onUnavailable }: SubtitleLayerProps) {
+export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offsetMs, onUnavailable }: SubtitleLayerProps) {
   const [cues, setCues] = useState<SubtitleCue[]>([]);
   const onUnavailableRef = useRef(onUnavailable);
   onUnavailableRef.current = onUnavailable;
@@ -175,7 +179,7 @@ export function SubtitleLayer({ streamId, videoRef, offsetMs, onUnavailable }: S
     setCues([]);
     if (streamId == null) return;
     let cancelled = false;
-    fetchSubtitleCues(streamId)
+    fetchSubtitleCues(streamId, ratingKey, mediaIndex)
       .then((r) => {
         if (cancelled) return;
         setCues(r.cues);

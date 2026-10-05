@@ -4,10 +4,12 @@
  * Against a fake Plex that copies the way the real one was measured to
  * (scripts/diagnose-direct-stream.mjs): one segment per keyframe interval, of
  * whatever length that is; its clock 10s ahead of the film; a session started
- * mid-film numbered from offset ÷ 3; single-packet segments past the end. It
- * also keeps count of every request that arrives out of order, which the real
- * one answers by starting the stream over — the one thing that must never
- * happen.
+ * mid-film numbered from offset ÷ 3; single-packet segments past the end; and
+ * nothing at all until its own playlist for the session has been asked for,
+ * which is what a real deployment showed (the first version of the tracker
+ * never asked, and got 404 for as long as anyone waited). It also keeps count
+ * of every request that arrives out of order, which the real one answers by
+ * starting the stream over — the one thing that must never happen.
  */
 import fs from "node:fs";
 import http from "node:http";
@@ -115,15 +117,21 @@ for (let f = 0, i = 0; f * FRAME < FILM_END; f += GOP_FRAMES[i++ % GOP_FRAMES.le
 const CLOCK = 10;
 const gopLength = (i: number) => ((keyframes[i + 1] ?? Math.round(FILM_END / FRAME)) - keyframes[i]) * FRAME;
 
-interface PlexSession { firstIndex: number; firstGop: number; produced: number; startedAt: number; outOfOrder: number[] }
+interface PlexSession {
+  firstIndex: number; firstGop: number; produced: number; outOfOrder: number[];
+  /** When its playlist was first asked for — copying starts then, not before. */
+  startedAt: number | null;
+}
 const plexSessions = new Map<string, PlexSession>();
 /** Paths answered with something unreadable instead of a segment. */
 const unreadable = new Set<string>();
+/** Paths answered 200 with JSON, as a misbehaving server might. */
+const notSegments = new Set<string>();
 
 function plexSession(key: string, offset: number): PlexSession {
   const firstGop = keyframes.filter((k) => k * FRAME <= offset).length - 1;
   const firstIndex = Math.floor(offset / 3);
-  const s = { firstIndex, firstGop, produced: firstIndex - 1, startedAt: Date.now(), outOfOrder: [] as number[] };
+  const s: PlexSession = { firstIndex, firstGop, produced: firstIndex - 1, startedAt: null, outOfOrder: [] };
   plexSessions.set(key, s);
   return s;
 }
@@ -140,13 +148,19 @@ function copiedSegment(s: PlexSession, index: number): Buffer {
 function plexSegment(s: PlexSession, index: number): Buffer | null {
   // Real Plex starts over on a request this far off; here it is only counted.
   if (index < s.firstIndex || index > s.produced + 2) s.outOfOrder.push(index);
-  // Copying runs far faster than real time, but not instantly.
+  // Copying starts when the playlist is asked for, and then runs far faster
+  // than real time, but not instantly.
+  if (s.startedAt === null) return null;
   if (index > s.firstIndex + Math.floor((Date.now() - s.startedAt) / 5)) return null;
   s.produced = Math.max(s.produced, index);
   return copiedSegment(s, index);
 }
 
-const decisions: Array<{ ratingKey: string; directStream: string | null; profile: string }> = [];
+const decisions: Array<{ ratingKey: string; directStream: string | null; profile: string; subtitles: string | null }> = [];
+/** The subtitle the item has selected, as Plex keeps it — per item, not per request. */
+let selectedSubtitle: string | null = null;
+let subtitleReads = 0;
+const SRT = "1\n00:00:01,000 --> 00:00:02,500\nHello\n\n2\n00:00:03,000 --> 00:00:04,000\nAgain\n";
 const plex = http.createServer((req, res) => {
   const url = new URL(req.url!, "http://plex");
   const send = (body: unknown) => {
@@ -157,8 +171,31 @@ const plex = http.createServer((req, res) => {
   if (meta) {
     return send({ Metadata: [{
       ratingKey: meta[1], title: "Film", type: "movie", duration: FILM_END * 1000,
-      Media: [{ id: 1, width: 1920, height: 1080, videoCodec: "h264", Part: [{ id: 1, file: "/movies/Film.mkv" }] }],
+      Media: [{ id: 1, width: 1920, height: 1080, videoCodec: "h264", Part: [{ id: 1, file: "/movies/Film.mkv", Stream: [
+        { id: 11, streamType: 1, codec: "h264" },
+        { id: 12, streamType: 2, codec: "aac", selected: true },
+        { id: 21, streamType: 3, codec: "srt", language: "English" },
+        { id: 22, streamType: 3, codec: "pgs", language: "English" },
+        { id: 23, streamType: 3, codec: "srt", language: "French" },
+        { id: 24, streamType: 3, codec: "srt", key: "/library/streams/24", format: "srt", language: "German" },
+      ] }] }],
     }] });
+  }
+  if (url.pathname === "/library/parts/1" && req.method === "PUT") {
+    selectedSubtitle = url.searchParams.get("subtitleStreamID") ?? selectedSubtitle;
+    return send({});
+  }
+  if (url.pathname === "/video/:/transcode/universal/subtitles") {
+    subtitleReads++;
+    // Reads whatever the item has selected; 23 is one Plex can't read out.
+    if (selectedSubtitle === "23") { res.writeHead(500); return res.end(); }
+    if (selectedSubtitle !== "21") { res.writeHead(400); return res.end(); }
+    res.writeHead(200, { "Content-Type": "text/srt" });
+    return res.end(SRT);
+  }
+  if (url.pathname === "/library/streams/24") {
+    res.writeHead(200, { "Content-Type": "text/srt" });
+    return res.end(SRT);
   }
   if (url.pathname === "/video/:/transcode/universal/decision") {
     const copy = url.searchParams.get("directStream") === "1";
@@ -166,6 +203,7 @@ const plex = http.createServer((req, res) => {
       ratingKey: (url.searchParams.get("path") ?? "").split("/").pop()!,
       directStream: url.searchParams.get("directStream"),
       profile: String(req.headers["x-plex-client-profile-extra"] ?? ""),
+      subtitles: url.searchParams.get("subtitles"),
     });
     return send({ generalDecisionCode: 1001, Metadata: [{ Media: [{ selected: true, protocol: "hls", videoCodec: "h264", audioCodec: "aac",
       Part: [{ Stream: [{ streamType: 1, codec: "h264", decision: copy ? "copy" : "transcode" }, { streamType: 2, codec: "aac", decision: "copy" }] }] }] }] });
@@ -176,8 +214,17 @@ const plex = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
     return res.end(`#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080\nsession/${key}/base/index.m3u8\n`);
   }
+  const own = url.pathname.match(/^\/video\/:\/transcode\/universal\/session\/([0-9a-f-]{36})\/base\/index\.m3u8$/);
+  if (own && plexSessions.has(own[1])) {
+    const s = plexSessions.get(own[1])!;
+    s.startedAt ??= Date.now();
+    // Plex's own playlist: three seconds a segment, whatever they really are.
+    res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
+    return res.end("#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXTINF:3,\n00000.ts\n#EXT-X-ENDLIST\n");
+  }
   const seg = url.pathname.match(/^\/video\/:\/transcode\/universal\/session\/([0-9a-f-]{36})\/base\/(\d{5,})\.ts$/);
   if (seg && plexSessions.has(seg[1])) {
+    if (notSegments.has(url.pathname)) return send({});
     if (unreadable.has(url.pathname)) {
       res.writeHead(200);
       return res.end(Buffer.concat(Array.from({ length: 12 }, continuation)));
@@ -187,6 +234,8 @@ const plex = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "video/MP2T" });
     return res.end(body);
   }
+  // A segment of a session it doesn't know, the way Plex answers one.
+  if (/\/session\/[0-9a-f-]{36}\/base\//.test(url.pathname)) { res.writeHead(404); return res.end(); }
   if (url.pathname === "/:/timeline" || url.pathname.startsWith("/video/:/transcode/universal/")) return send({});
   res.writeHead(404);
   res.end();
@@ -274,6 +323,33 @@ console.log("\n— a copy started mid-film, as a seek starts one —");
   ds.stopDirectStream("s-mid");
 }
 
+console.log("\n— a copy Plex never starts —");
+{
+  // A session Plex knows nothing about: every segment 404s, forever.
+  const key = crypto.randomUUID();
+  ds.startDirectStream("s-never", key, "700", 0);
+  const started = Date.now();
+  const playlist = await ds.directStreamPlaylist(key, (p) => p);
+  check("the player is told to try again rather than left waiting past its own timeout",
+    [playlist, Date.now() - started < 9000], ["retry", true]);
+  ds.stopDirectStream("s-never");
+}
+
+console.log("\n— Plex answering with something that isn't a segment —");
+{
+  // A 200 with JSON in it, where a segment should be: not the end of the film.
+  const key = crypto.randomUUID();
+  plexSession(key, 0);
+  notSegments.add(pathOf(key, 3));
+  ds.startDirectStream("s-json", key, "800", 0);
+  await sleep(1500);
+  notSegments.delete(pathOf(key, 3));
+  const playlist = (await ds.directStreamPlaylist(key, (p) => p))!;
+  check("is waited out rather than taken for the end of the film",
+    [playlist.includes("#EXT-X-ENDLIST"), entries(playlist).length > 3], [false, true]);
+  ds.stopDirectStream("s-json");
+}
+
 console.log("\n— a copy that can't be read —");
 {
   const key = crypto.randomUUID();
@@ -326,6 +402,26 @@ console.log("\n— through the routes —");
 
   await (await fetch(`${origin}/api/plex/hls/600/${crypto.randomUUID()}/master.m3u8`)).text();
   check("a title whose copy failed is asked for as a re-encode", [decisions.at(-1)?.ratingKey, decisions.at(-1)?.directStream], ["600", "0"]);
+
+  console.log("\n— subtitles, which used to force a re-encode —");
+  const start = async (subtitleStreamID: number) => {
+    const sid = crypto.randomUUID();
+    await (await fetch(`${origin}/api/plex/hls/900/${sid}/master.m3u8?subtitles=burn&audioStreamID=12&subtitleStreamID=${subtitleStreamID}`)).text();
+    plexRoutes.markTranscodeStopped(sid);
+    return decisions.at(-1)!;
+  };
+  const cues = (id: number) => fetch(`${origin}/api/plex/subtitles/${id}?ratingKey=900`)
+    .then(async (r) => [r.status, r.ok ? ((await r.json()) as { cues: unknown[] }).cues.length : 0]);
+
+  const embedded = await start(21);
+  check("a text subtitle inside the file isn't burned, so the video can still be copied",
+    [embedded.subtitles, embedded.directStream], ["none", "1"]);
+  check("the player gets it as text to draw", await cues(21), [200, 2]);
+  check("read out of the file once, for the start and the player both", subtitleReads, 1);
+  check("a picture subtitle (PGS) is burned in as before", (await start(22)).subtitles, "burn");
+  check("a text one Plex can't read out is burned in instead", (await start(23)).subtitles, "burn");
+  check("and the player is told it's not there, so it isn't shown twice", (await cues(23))[0], 404);
+  check("a separate subtitle file is drawn as before", [(await start(24)).subtitles, await cues(24)], ["none", [200, 2]]);
 
   await plexRoutes.stopAllActiveSessions();
   api.close();

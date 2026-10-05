@@ -5172,6 +5172,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           in — the only kind there is anything to adjust about. */}
       <SubtitleLayer
         streamId={drawnSubtitleId}
+        ratingKey={item.ratingKey}
+        mediaIndex={effectiveMediaIndex}
         videoRef={videoRef}
         offsetMs={subtitleOffsetMs}
         onUnavailable={() => setSidecarFailed(true)}

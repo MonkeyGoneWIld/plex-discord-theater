@@ -150,6 +150,14 @@ const WEDGE_CHECKS_BEFORE_ACTING = 2;
  */
 const MAX_WEDGE_RECOVERIES = 3;
 const WEDGE_RESET_MS = 60_000;
+/**
+ * A hole in the buffer this close ahead of a wedged playhead is jumped rather
+ * than waited out. Seen with Direct Stream, where one copied segment can be
+ * 12 MB: a load cut short left the buffer ending a tenth of a second past the
+ * playhead with the next ninety appended beyond a three-second gap, and the
+ * old remedy — a 0.1s seek — landed in the gap and sat "seeking" for good.
+ */
+const MAX_HOLE_JUMP_S = 10;
 /** Clean playback for this long means the next media error starts a fresh budget. */
 const MEDIA_ERROR_RESET_MS = 60_000;
 /**
@@ -316,6 +324,15 @@ function pictureEndsAtS(video: HTMLVideoElement | null, fromS: number): number |
     if (buffered.start(i) > fromS + 0.5) continue;
     const end = buffered.end(i);
     return end >= fromS - PICTURE_END_SLACK_S ? Math.min(end, fromS) : null;
+  }
+  return null;
+}
+
+/** Where the next buffered range starts after `t`, or null if none does. */
+function nextBufferedStart(video: HTMLVideoElement, t: number): number | null {
+  const { buffered } = video;
+  for (let i = 0; i < buffered.length; i++) {
+    if (buffered.start(i) > t + 0.1) return buffered.start(i);
   }
   return null;
 }
@@ -1012,6 +1029,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     lastStartSeg: -1, lastLoadedSeg: -1, lastErrorSeg: -1,
     lastEventAt: 0, lastError: null as string | null,
     starts: 0, loaded: 0, errors: 0, aborts: 0,
+    // When the last bytes of any segment arrived. A playhead waiting on a big
+    // segment that is still coming in is slow, not wedged.
+    lastChunkAt: 0,
   });
   // Stall-watchdog bookkeeping: currentTime at the previous health tick, and
   // whether the current stall episode has already been logged — a multi-minute
@@ -1413,6 +1433,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const variant = syncState?.variant ?? null;
   const variantRef = useRef(variant);
   variantRef.current = variant;
+  /**
+   * Subtitles that failed to load here, by stream id (unique across titles), so
+   * choosing one again asks for it burned in rather than trying to draw it.
+   */
+  const failedSubtitlesRef = useRef(new Set<number>());
+  /**
+   * What the stream this client last started burns in, until the room's
+   * assignment says — a host starting a title has no assignment for it yet.
+   * The ref is the same answer for the announcement that follows the start.
+   */
+  const [startedBurnedSubtitle, setStartedBurnedSubtitle] = useState(0);
+  const sessionBurnedRef = useRef(0);
 
   // The room's stream, which is the host's. Still the fallback for a client that
   // has not been assigned a variant — an older server, or the moment before the
@@ -1708,6 +1740,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     (async () => {
       let outcome = "no source";
       let want = { audioStreamId: v.audioStreamId, subtitleStreamId: v.subtitleStreamId };
+      let wantDrawn = false;
       try {
         // No media index: the host's tracks for this episode were resolved from
         // the same default version, so matching against any other file would be
@@ -1745,6 +1778,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         }
 
         want = tracksForNewItem(version, source, v);
+        wantDrawn = want.subtitleStreamId !== 0 &&
+          version.subtitleTracks.find((t) => t.id === want.subtitleStreamId)?.external === true &&
+          !failedSubtitlesRef.current.has(want.subtitleStreamId);
       } catch {
         outcome = "lookup failed";
       }
@@ -1770,7 +1806,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // Ours, not something the host did to us — so the "moved onto other
       // tracks" overlay stays out of it.
       askedForTracksRef.current = true;
-      syncActionsRef.current?.sendSetTracks(want.audioStreamId, want.subtitleStreamId);
+      syncActionsRef.current?.sendSetTracks(want.audioStreamId, want.subtitleStreamId, wantDrawn);
     })();
     return () => { cancelled = true; };
   }, [item.ratingKey, variant?.seq, isHost]);
@@ -1967,19 +2003,31 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /**
    * The subtitle this client is on, and whether it is one we draw ourselves.
    *
-   * `external` means Plex can hand the file over as text, which the server
-   * takes as its cue not to burn it in — see subtitleIsDrawnByClient. Both ends
-   * read the same flag for the same stream id, so they cannot disagree about
-   * who is drawing it and end up showing every line twice or none at all.
+   * `external` means it is text this player can fetch and draw: a sidecar, or
+   * text Plex reads out of the file. Those are never burned into a stream — the
+   * player decides which kind a subtitle is, and asks for a stream with one
+   * burned in only when it can't draw it — so the people on one stream can
+   * each draw a different subtitle, or none, and switching restarts nothing.
+   * The one a stream does burn in is never drawn as well, so no line shows
+   * twice.
    */
   const activeSubtitleId = variant?.subtitleStreamId ?? subtitleStreamId ?? 0;
-  const activeSubtitleTrack =
+  const burnedSubtitleId = variant && variant.ratingKey === item.ratingKey
+    ? variant.burnedSubtitleId ?? 0
+    : startedBurnedSubtitle;
+  const burnedSubtitleRef = useRef(burnedSubtitleId);
+  burnedSubtitleRef.current = burnedSubtitleId;
+  const subtitleTracks =
     itemMeta && itemMeta.ratingKey === item.ratingKey
       ? versionOf(itemMeta, effectiveMediaIndex).subtitleTracks
-          .find((t) => t.id === activeSubtitleId) ?? null
       : null;
+  const subtitleTracksRef = useRef(subtitleTracks);
+  subtitleTracksRef.current = subtitleTracks;
+  const activeSubtitleTrack = subtitleTracks?.find((t) => t.id === activeSubtitleId) ?? null;
   const drawnSubtitleId =
-    activeSubtitleId !== 0 && activeSubtitleTrack?.external ? activeSubtitleId : null;
+    activeSubtitleId !== 0 && activeSubtitleId !== burnedSubtitleId && activeSubtitleTrack?.external
+      ? activeSubtitleId
+      : null;
 
   // A different subtitle file is a different set of timings, so an offset dialled
   // in for the last one means nothing here. The panel closes with it: it is only
@@ -2001,6 +2049,38 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       setSubtitleOffsetMs(0);
     }
   }, [drawnSubtitleId]);
+
+  /**
+   * A subtitle this player can't draw has to be burned into a stream instead.
+   *
+   * A picture subtitle (PGS, VobSub) is that from the start; text becomes it
+   * when it fails to load here — Plex couldn't read it out of the file, or a
+   * sidecar wasn't text after all. Either way it means asking the room for a
+   * stream with it burned in, once per subtitle, which moves this client (and
+   * nobody else) onto a stream of its own: a re-encode, since a burned subtitle
+   * is part of the picture.
+   */
+  const burnAskedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (activeSubtitleId === 0 || activeSubtitleId === burnedSubtitleId) return;
+    // Not known yet; this runs again when the metadata arrives.
+    if (!activeSubtitleTrack) return;
+    if (activeSubtitleTrack.external && !sidecarFailed) return;
+    const key = `${item.ratingKey}:${activeSubtitleId}`;
+    if (burnAskedRef.current === key) return;
+    burnAskedRef.current = key;
+    if (sidecarFailed) failedSubtitlesRef.current.add(activeSubtitleId);
+    logEvent("Subtitles", "asking for this subtitle burned in", {
+      streamId: activeSubtitleId,
+      why: activeSubtitleTrack.external ? "it couldn't be loaded here" : "a picture subtitle",
+    });
+    askedForTracksRef.current = true;
+    syncActionsRef.current?.sendSetTracks(
+      variantRef.current?.audioStreamId ?? currentAudioStreamRef.current ?? 0,
+      activeSubtitleId,
+      false,
+    );
+  }, [activeSubtitleId, burnedSubtitleId, activeSubtitleTrack, sidecarFailed, item.ratingKey]);
 
   /**
    * Describe this client's live pair while its media version is still known.
@@ -2267,14 +2347,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       roomPosS: syncStateRef.current?.position ?? "none",
     });
 
-    const url = hlsMasterUrl(item.ratingKey, sessionId, {
-      subtitles: subtitlesOnRef.current,
+    const chosenSubtitle = currentSubtitleStreamRef.current ?? subtitleStreamId ?? 0;
+    const urlFor = (burned: number) => hlsMasterUrl(item.ratingKey, sessionId, {
+      subtitles: burned !== 0,
       offset: startOffset > 0 ? startOffset : undefined,
       // The tracks this transcode is for. The server applies them to the item
       // under a lock immediately before starting, so two streams of the same
       // film can be brought up at once without stealing each other's selection.
       audioStreamId: currentAudioStreamRef.current ?? audioStreamId ?? undefined,
-      subtitleStreamId: currentSubtitleStreamRef.current ?? subtitleStreamId ?? undefined,
+      // Only a subtitle to burn in. One this player draws is no business of the
+      // stream's, which is what lets everyone drawing their own share it.
+      subtitleStreamId: burned,
       // Only the client that owns the session chose a file; a viewer sending its
       // own idea of one would restart the host's transcode on a different track.
       mediaIndex: sessionOwner ? mediaIndexRef.current : undefined,
@@ -2287,6 +2370,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // Give Plex time to fully release transcode resources
         await new Promise(r => setTimeout(r, 500));
       }
+
+      const burned = await subtitleToBurn(item.ratingKey, chosenSubtitle);
+      if (!mounted) return;
+      if (sessionOwner) {
+        sessionBurnedRef.current = burned;
+        setStartedBurnedSubtitle(burned);
+      }
+      const url = urlFor(burned);
 
       const video = videoRef.current;
       if (!mounted || !video) return;
@@ -2470,6 +2561,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 hls.p2pEngine.addEventListener("onSegmentAbort", () => {
                   eng.aborts++;
                   eng.lastEventAt = Date.now();
+                });
+                hls.p2pEngine.addEventListener("onChunkDownloaded", () => {
+                  eng.lastChunkAt = Date.now();
                 });
                 hls.p2pEngine.addEventListener("onChunkUploaded", (bytesLength) => {
                   stats.uploadBytes += bytesLength;
@@ -3300,19 +3394,25 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
        * three segments past it and was idle; hls.js was still waiting for the
        * one it asked for. Twenty-five seconds, ended by nothing in particular.
        *
-       * Two escalating nudges, both cheap, because there is no buffer left to
-       * protect at this point:
+       * In order, cheapest first, because there is no buffer left to protect at
+       * this point:
        *
-       *   startLoad(playhead) re-points the loader at where we actually are,
-       *   which is the documented way out of a stuck fragment request.
+       *   A hole just ahead — the data after it already buffered — is jumped.
+       *   Waiting for the loader to fill it is what never happened.
        *
-       *   A hair of a seek, if that did not take. It costs a frame and forces
-       *   the whole request path to be rebuilt around a new position, which
-       *   catches the case where the loader is wedged on something startLoad
-       *   is happy to keep waiting for.
+       *   Otherwise startLoad(playhead) re-points the loader at where we
+       *   actually are, which is the documented way out of a stuck fragment
+       *   request.
        *
-       * Past that it stops and lets the error paths have it — they can rebuild
-       * the pipeline, which this deliberately does not.
+       *   Past MAX_WEDGE_RECOVERIES the stream is rebuilt where it is, the way
+       *   the error paths rebuild it. This used to stop there and leave it to
+       *   them — but a wedge throws no error, so nothing ever came, and the
+       *   picture stayed frozen until somebody closed the player.
+       *
+       * Not while bytes are still arriving: a big Direct Stream segment on a
+       * slow connection takes a while, and restarting the loader under it only
+       * starts the wait over. A seek that never completes counts, though —
+       * that was the frozen Deadpool: "seeking" for six minutes.
        */
       wedgeIntervalRef.current = setInterval(() => {
         const v = videoRef.current;
@@ -3323,9 +3423,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         wedgeLastPosRef.current = v.currentTime;
         // currentTime > 1 excludes cold start, where sitting at zero while the
         // first segments arrive is buffering rather than a wedge.
-        const stuck = v.currentTime > 1 && !v.paused && !v.seeking
+        const stuck = v.currentTime > 1 && !v.paused
           && !moved && bufferAheadSeconds(v) < 1;
-        if (!stuck) {
+        const downloading = Date.now() - engineLoaderRef.current.lastChunkAt < WEDGE_CHECK_MS * 2;
+        if (!stuck || downloading) {
           wedgeTicksRef.current = 0;
           return;
         }
@@ -3346,23 +3447,47 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         wedgeRecoveriesRef.current++;
 
         if (wedgeRecoveriesRef.current > MAX_WEDGE_RECOVERIES) {
-          logError("Stall", "wedge recovery exhausted, leaving it to the error paths", {
-            attempts: wedgeRecoveriesRef.current - 1,
-            ...snapshot(v),
-          });
+          wedgeRecoveriesRef.current = 0;
+          const at = v.currentTime;
+          if (ownsSessionRef.current) {
+            // Same as the host's recovery restart: a fresh transcode from here.
+            logError("Stall", "wedge recovery exhausted, restarting the stream here", {
+              session: sessionIdRef.current?.substring(0, 8) ?? "none",
+              ...snapshot(v),
+            });
+            destroyLocal();
+            if (sessionIdRef.current && sessionRegisteredRef.current) {
+              pendingStopRef.current = stopSession(sessionIdRef.current, "wedge-recovery").catch(() => {});
+            }
+            sessionIdRef.current = null;
+            seekOffsetRef.current = at;
+            setRetryKey((k) => k + 1);
+          } else if (retryCountRef.current < MAX_VIEWER_RETRIES) {
+            retryCountRef.current++;
+            logError("Stall", "wedge recovery exhausted, rebuilding the player", {
+              attempt: retryCountRef.current,
+              max: MAX_VIEWER_RETRIES,
+              ...snapshot(v),
+            });
+            setRetryKey((k) => k + 1);
+          } else {
+            logError("Stall", "wedge recovery exhausted, and so are the retries", { ...snapshot(v) });
+          }
           return;
         }
 
-        const nudge = wedgeRecoveriesRef.current > 1;
-        logWarn("Stall", nudge ? "wedged, nudging the playhead" : "wedged, restarting the loader", {
+        const holeEnd = nextBufferedStart(v, v.currentTime);
+        const jump = holeEnd !== null && holeEnd - v.currentTime <= MAX_HOLE_JUMP_S;
+        logWarn("Stall", jump ? "wedged at a hole in the buffer, jumping it" : "wedged, restarting the loader", {
           attempt: wedgeRecoveriesRef.current,
           max: MAX_WEDGE_RECOVERIES,
+          ...(jump ? { toS: Math.round(holeEnd * 100) / 100 } : {}),
           ...hlsLoadingState(hls),
           ...snapshot(v),
         });
         try {
-          hls.startLoad(v.currentTime);
-          if (nudge) v.currentTime = v.currentTime + 0.1;
+          if (jump) v.currentTime = holeEnd + 0.05;
+          else hls.startLoad(v.currentTime);
         } catch (err) {
           logWarn("Stall", "wedge recovery threw", {
             error: err instanceof Error ? err.message : String(err),
@@ -3608,12 +3733,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         ownSession: sid.substring(0, 8),
         roomRatingKey: s.ratingKey ?? "none",
       });
+      const subtitle = currentSubtitleStreamRef.current ?? 0;
       syncActionsRef.current?.sendPlay(
         currentItem.ratingKey, displayTitleRef.current, subtitlesOnRef.current, sid,
         video.currentTime > 0 ? video.currentTime : undefined,
         // The transcode's own start, not the playhead — a viewer told the wrong
         // floor treats every reachable backward seek as needing a restart.
         sessionStartOffsetRef.current,
+        // The tracks too, or the room files this stream under none at all and
+        // everyone on it loses their subtitle.
+        currentAudioStreamRef.current ?? 0,
+        subtitle,
+        true,
+        subtitle !== 0 && sessionBurnedRef.current !== subtitle,
       );
     }
     // Then the position and play state. A pause goes out as a real pause rather
@@ -3940,17 +4072,44 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // transcode does — a resume from history, or a seek that needed a
       // restart. Without it "play" resets everyone to 0:00 until the next
       // heartbeat drags them back.
+      const subtitle = currentSubtitleStreamRef.current ?? subtitleStreamId ?? 0;
       syncActionsRef.current?.sendPlay(
         item.ratingKey, displayTitleRef.current, subtitlesOnRef.current, sessionId,
         offset, undefined,
         currentAudioStreamRef.current ?? audioStreamId ?? 0,
-        currentSubtitleStreamRef.current ?? subtitleStreamId ?? 0,
+        subtitle,
         playing,
+        // Drawn by this player unless the stream just started burns it in.
+        subtitle !== 0 && sessionBurnedRef.current !== subtitle,
       );
       return;
     }
     syncActionsRef.current?.sendVariantSession(sessionId, startOffset);
   }, [item, audioStreamId, subtitleStreamId]);
+
+  /**
+   * The subtitle a stream this client starts has to burn in, 0 for none — only
+   * one this player can't draw.
+   *
+   * The room's assignment says which. A host starting a title has none for it
+   * yet, and looks its subtitle up instead, waiting for the metadata (cached
+   * from the detail page, nearly always) rather than guessing: a picture
+   * subtitle taken for text would start a stream nobody sees it on.
+   */
+  async function subtitleToBurn(ratingKey: string, chosen: number): Promise<number> {
+    const v = variantRef.current;
+    if (v && v.ratingKey === ratingKey) return v.burnedSubtitleId ?? 0;
+    if (chosen === 0) return 0;
+    if (failedSubtitlesRef.current.has(chosen)) return chosen;
+    try {
+      const track = versionOf(await fetchMeta(ratingKey), mediaIndexRef.current)
+        .subtitleTracks.find((t) => t.id === chosen);
+      return track?.external ? 0 : chosen;
+    } catch {
+      // Can't tell. Burned in, it is at least on screen.
+      return chosen;
+    }
+  }
 
   const handleSeekRestart = useCallback((positionSeconds: number, broadcast = true) => {
     if (seekStallTimerRef.current !== null) {
@@ -4495,10 +4654,22 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       return;
     }
 
+    // A subtitle this player draws keeps it on the stream it is on; anything
+    // else (other audio, a subtitle that has to be burned in) moves it to
+    // another one.
+    const drawn = subtitle !== 0 &&
+      subtitleTracksRef.current?.find((t) => t.id === subtitle)?.external === true &&
+      !failedSubtitlesRef.current.has(subtitle);
+    const streamChanges = audio !== (currentAudioStreamRef.current ?? 0) ||
+      (drawn ? 0 : subtitle) !== burnedSubtitleRef.current;
+
     // Hold the last frame over the swap, as before — a fork tears this client's
-    // transcode down and waits out a new one.
-    canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
-    setTrackSwitching(audioStreamID !== undefined ? "audio" : "subtitle");
+    // transcode down and waits out a new one. Nothing to hold when only the
+    // subtitle drawn over the picture changes.
+    if (streamChanges) {
+      canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
+      setTrackSwitching(audioStreamID !== undefined ? "audio" : "subtitle");
+    }
     setShowTrackSwitcher(false);
 
     // The cached track list carries `selected` flags, which describe whichever
@@ -4508,11 +4679,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
     askedForTracksRef.current = true;
     logEvent("Player", "asking for tracks", {
-      partId, audio, subtitle,
+      partId, audio, subtitle, drawn,
       from: variantRef.current?.variantKey ?? "none",
+      sameStream: !streamChanges,
       role: isHostRef.current ? "host" : canControlRef.current ? "cohost" : "viewer",
     });
-    syncActionsRef.current?.sendSetTracks(audio, subtitle);
+    syncActionsRef.current?.sendSetTracks(audio, subtitle, drawn);
   }, [item.ratingKey]);
 
 

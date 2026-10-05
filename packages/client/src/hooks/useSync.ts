@@ -71,7 +71,15 @@ export interface StreamVariant {
   ratingKey: string | null;
   variantKey: string;
   audioStreamId: number;
+  /** The subtitle this client sees, 0 for none — drawn by this player, unless
+   *  it is the one the stream burns in. */
   subtitleStreamId: number;
+  /**
+   * The subtitle burned into the stream's picture, 0 for none. Only a subtitle
+   * a player can't draw (a picture format, or text that failed to load) is
+   * ever burned in, so people drawing different subtitles share one stream.
+   */
+  burnedSubtitleId: number;
   /** Null when the stream has no transcode yet, which is the owner's cue to
    *  start one and report it back with sendVariantSession. */
   hlsSessionId: string | null;
@@ -241,6 +249,9 @@ export interface SyncActions {
      * or changing tracks while paused.
      */
     playing?: boolean,
+    /** Whether the subtitle is drawn by the player rather than burned into
+     *  this stream — see StreamVariant.burnedSubtitleId. */
+    subtitleDrawn?: boolean,
   ) => void;
   sendPause: (position: number) => void;
   sendResume: (position: number) => void;
@@ -276,10 +287,14 @@ export interface SyncActions {
    * "Put me on these tracks."
    *
    * Anyone may call it. The server decides the scope: the host's choice carries
-   * to everyone watching the host's stream, anyone else's moves only them. The
-   * answer comes back as a `variant`.
+   * to everyone seeing exactly what the host sees, anyone else's moves only
+   * them. The answer comes back as a `variant`.
+   *
+   * `drawn` says this player draws the subtitle itself, which keeps it on the
+   * same stream — changing it restarts nothing. Otherwise the subtitle is
+   * burned in, which takes a stream of its own.
    */
-  sendSetTracks: (audioStreamId: number, subtitleStreamId: number) => void;
+  sendSetTracks: (audioStreamId: number, subtitleStreamId: number, drawn: boolean) => void;
   /** Stream owner → room: the transcode I just brought up for my variant. */
   sendVariantSession: (hlsSessionId: string, sessionOffset: number) => void;
   /** Move onto whatever the host is watching, whatever its tracks are. Used by
@@ -406,10 +421,11 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         audioStreamId?: number,
         subtitleStreamId?: number,
         playing = true,
+        subtitleDrawn = false,
       ) => {
         send({
           type: "play", ratingKey, title, subtitles, hlsSessionId, position, sessionOffset,
-          audioStreamId, subtitleStreamId, playing,
+          audioStreamId, subtitleStreamId, playing, subtitleDrawn,
         });
         setState((prev) => {
           // Restarting what is already running — a track change, or a seek that
@@ -515,8 +531,8 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       sendPromoteHost: (targetUserId: string) => send({ type: "promote-host", userId: targetUserId }),
       sendSetCoHost: (targetUserId: string, value: boolean) =>
         send({ type: "set-cohost", userId: targetUserId, value }),
-      sendSetTracks: (audioStreamId: number, subtitleStreamId: number) =>
-        send({ type: "set-tracks", audioStreamId, subtitleStreamId }),
+      sendSetTracks: (audioStreamId: number, subtitleStreamId: number, drawn: boolean) =>
+        send({ type: "set-tracks", audioStreamId, subtitleStreamId, drawn }),
       sendVariantSession: (hlsSessionId: string, sessionOffset: number) =>
         send({ type: "variant-session", hlsSessionId, sessionOffset }),
       sendRejoinHost: () => send({ type: "rejoin-host" }),
@@ -655,6 +671,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
                 variantKey: msg.variantKey as string,
                 audioStreamId: (msg.audioStreamId as number) ?? 0,
                 subtitleStreamId: (msg.subtitleStreamId as number) ?? 0,
+                burnedSubtitleId: (msg.burnedSubtitleId as number) ?? 0,
                 hlsSessionId: (msg.hlsSessionId as string) || null,
                 sessionOffset: (msg.sessionOffset as number) ?? 0,
                 isOwner: Boolean(msg.isOwner),

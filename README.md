@@ -313,6 +313,12 @@ services:
       # files over VIDEO_BITRATE_KBPS are still re-encoded.
       DIRECT_STREAM: ""
 
+      # The highest bitrate (kbps) a file may have and still be copied. Every
+      # viewer pulls a copy at the file's own bitrate, so keep this below your
+      # upload divided by how many usually watch; bigger files are re-encoded.
+      # Empty = no limit.
+      DIRECT_STREAM_MAX_KBPS: ""
+
       # Guards the "stop every transcode" endpoint.
       ADMIN_SECRET: ""
 

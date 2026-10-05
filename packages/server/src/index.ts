@@ -300,7 +300,13 @@ function reportIntegrations(): void {
       on("Discover", !!process.env.PLEX_ACCOUNT_TOKEN, "online search detail may 401"),
       on("VPS relay", !!(process.env.VPS_RELAY_URL && process.env.VPS_RELAY_KEY), "P2P mode"),
       on("HEVC", process.env.HEVC_TRANSCODE === "1", "H.264 only"),
-      on("Direct Stream", process.env.DIRECT_STREAM === "1", "every title re-encoded"),
+      on(
+        Number(process.env.DIRECT_STREAM_MAX_KBPS) > 0
+          ? `Direct Stream up to ${Number(process.env.DIRECT_STREAM_MAX_KBPS)} kbps`
+          : "Direct Stream",
+        process.env.DIRECT_STREAM === "1",
+        "every title re-encoded",
+      ),
       on("Guild allowlist", allowedGuildCount > 0, "open to any Discord server"),
     ].join("   "),
   );

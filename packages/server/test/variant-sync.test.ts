@@ -680,6 +680,97 @@ console.log("\n— rejoining the host's stream on request —");
   [host, a, b].forEach((c) => c.close());
 }
 
+console.log("\n— subtitles each player draws share one stream —");
+{
+  const [host, a, b] = await room("inst-drawn", ["host", "a", "b"]);
+  const sid = await startPlayback(host);
+  [host, a, b].forEach((c) => c.clear());
+
+  // a picks a text subtitle, which a's player draws itself.
+  a.send({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 7, drawn: true });
+  await sleep(60);
+  const toA = a.last("variant");
+  check("a stays on the host's stream", [toA?.variantKey, toA?.hlsSessionId], ["1:0", sid]);
+  check("and is told its own subtitle, burned into nothing", [toA?.subtitleStreamId, toA?.burnedSubtitleId], [7, 0]);
+  check("so a has nothing to start", toA?.isOwner, false);
+  check("b keeps seeing no subtitle", b.last("variant")?.subtitleStreamId ?? 0, 0);
+
+  // b picks a different one.
+  b.send({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 8, drawn: true });
+  await sleep(60);
+  check("b is on the same stream too", b.last("variant")?.hlsSessionId, sid);
+  check("with its own subtitle", b.last("variant")?.subtitleStreamId, 8);
+  check("and a still has a's", a.last("variant")?.subtitleStreamId, 7);
+
+  // The host changes their own drawn subtitle: nobody else had theirs.
+  [host, a, b].forEach((c) => c.clear());
+  host.send({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 9, drawn: true });
+  await sleep(60);
+  check("the host's stream doesn't restart", host.last("variant")?.hlsSessionId, sid);
+  check("people who picked their own keep them",
+    [a.last("variant")?.subtitleStreamId ?? 7, b.last("variant")?.subtitleStreamId ?? 8], [7, 8]);
+  [host, a, b].forEach((c) => c.close());
+}
+
+console.log("\n— the host's subtitle carries to everyone seeing what the host sees —");
+{
+  const [host, a, b] = await room("inst-drawn-2", ["host", "a", "b"]);
+  const sid = await startPlayback(host);
+  b.send({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 8, drawn: true });
+  await sleep(60);
+  [host, a, b].forEach((c) => c.clear());
+
+  host.send({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 9, drawn: true });
+  await sleep(60);
+  check("a, who never chose, follows the host's subtitle", a.last("variant")?.subtitleStreamId, 9);
+  check("on the same stream", a.last("variant")?.hlsSessionId, sid);
+  check("b, who did, keeps theirs", b.last("variant")?.subtitleStreamId ?? 8, 8);
+
+  // A joiner starts where the host is.
+  const c = new Client("u-c", "c");
+  await c.connect("inst-drawn-2");
+  check("a joiner starts on the host's subtitle", c.last("state")?.variant?.subtitleStreamId, 9);
+  check("drawn over the host's stream", [c.last("state")?.variant?.burnedSubtitleId, c.last("state")?.variant?.hlsSessionId], [0, sid]);
+  [host, a, b, c].forEach((x) => x.close());
+}
+
+console.log("\n— a subtitle that has to be burned in gets a stream of its own —");
+{
+  const [host, a, b] = await room("inst-burned", ["host", "a", "b"]);
+  const sid = await startPlayback(host);
+  [host, a, b].forEach((c) => c.clear());
+
+  a.send({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 5, drawn: false });
+  await sleep(60);
+  const toA = a.last("variant");
+  check("a is put on a stream with it burned in", [toA?.variantKey, toA?.burnedSubtitleId, toA?.subtitleStreamId], ["1:5", 5, 5]);
+  check("which a has to start", [toA?.hlsSessionId, toA?.isOwner], [null, true]);
+  check("the host's stream is untouched", host.last("variant"), undefined);
+
+  // Going back to a drawn subtitle puts a back on the shared stream.
+  a.clear();
+  a.send({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 6, drawn: true });
+  await sleep(60);
+  check("and a drawn one back on the shared stream", [a.last("variant")?.variantKey, a.last("variant")?.hlsSessionId], ["1:0", sid]);
+  [host, a, b].forEach((c) => c.close());
+}
+
+console.log("\n— the host announcing a stream with a drawn subtitle —");
+{
+  const [host, a] = await room("inst-drawn-play", ["host", "a"]);
+  const sid = uuid();
+  host.send({
+    type: "play", ratingKey: "200", title: "A Film", subtitles: true,
+    hlsSessionId: sid, position: 0, sessionOffset: 0,
+    audioStreamId: 1, subtitleStreamId: 4, subtitleDrawn: true,
+  });
+  await sleep(60);
+  const toA = a.last("variant");
+  check("the stream carries no subtitle", [toA?.variantKey, toA?.burnedSubtitleId], ["1:0", 0]);
+  check("and everyone draws the host's", toA?.subtitleStreamId, 4);
+  [host, a].forEach((c) => c.close());
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 closeWebSocketServer();
 server.close();

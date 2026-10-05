@@ -17,7 +17,7 @@ process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "hevc-transc
 
 // After THUMB_CACHE_DIR, for the same reason as variant-sync.test.ts: the stores
 // open their databases as they load.
-const { attachWebSocketServer, closeWebSocketServer, roomPlaysHevc, restartStreams } = await import("../src/services/sync.js");
+const { attachWebSocketServer, closeWebSocketServer, roomPlaysHevc } = await import("../src/services/sync.js");
 const { recordSessionVideoCodec, isHevcSession } = await import("../src/routes/plex.js");
 const { transcodeFrame } = await import("../src/services/media-versions.js");
 const { createSession } = await import("../src/middleware/auth.js");
@@ -198,29 +198,6 @@ console.log("\n— a viewer's own stream is rebuilt by that viewer —");
   check("the fork's driver is told to rebuild it", a.toldToRebuild(), true);
   check("the host's H.264 stream is left alone", host.toldToRebuild(), false);
   [host, a, b].forEach((c) => c.close());
-}
-
-console.log("\n— the server restarting a stream on its own —");
-{
-  // What happens when a subtitle the player was drawing turns out to be
-  // unreadable: the stream has to come back with it burned in.
-  newRoom("restart-1");
-  const host = await join("restart-1", "u-host", "host", true);
-  const a = await join("restart-1", "u-a", "a", true);
-  const sid = await startPlayback(host, "h264");
-  a.send({ type: "set-tracks", audioStreamId: 2, subtitleStreamId: 0 });
-  await sleep(60);
-  const forkSid = crypto.randomUUID();
-  a.send({ type: "variant-session", hlsSessionId: forkSid, sessionOffset: 0 });
-  await sleep(60);
-  [host, a].forEach((c) => c.clear());
-
-  check("one stream named, one driver told", restartStreams(new Set([sid]), "test"), 1);
-  await sleep(60);
-  check("its driver is told to rebuild it", host.toldToRebuild(), true);
-  check("the other stream is left alone", a.toldToRebuild(), false);
-  check("a stream nobody is playing tells nobody", restartStreams(new Set([crypto.randomUUID()]), "test"), 0);
-  [host, a].forEach((c) => c.close());
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

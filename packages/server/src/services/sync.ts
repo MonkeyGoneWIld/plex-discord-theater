@@ -101,7 +101,13 @@ interface Variant {
   /** `audio:subtitle` — see variantKeyOf. */
   key: string;
   /** Plex stream ids. 0 means "whatever the file defaults to" for audio, and
-   *  "none" for subtitles, which is what the client sends before it knows. */
+   *  "none" for subtitles, which is what the client sends before it knows.
+   *
+   *  The subtitle is the one burned into this stream's picture, and only that.
+   *  A subtitle each player draws for itself — a sidecar, or text Plex reads
+   *  out of the file — is nothing to do with the stream: everyone on it can
+   *  draw a different one, or none, and changing it restarts nothing. Which one
+   *  a client draws is RoomClient.subtitleStreamId. */
   audioStreamId: number;
   subtitleStreamId: number;
   hlsSessionId: string | null;
@@ -124,9 +130,19 @@ interface Variant {
   idleSince: number | null;
 }
 
-/** Tracks identify a stream, so they are its key. */
+/** Tracks identify a stream, so they are its key — the audio, and the subtitle
+ *  burned into it (0 when the picture is clean). */
 function variantKeyOf(audioStreamId: number, subtitleStreamId: number): string {
   return `${audioStreamId}:${subtitleStreamId}`;
+}
+
+/**
+ * The subtitle a choice burns into the stream: the subtitle itself, unless the
+ * client said it draws that one — then none, and the client shares the stream
+ * with everyone else on that audio.
+ */
+function burnedSubtitle(subtitleStreamId: number, drawn: unknown): number {
+  return drawn === true ? 0 : subtitleStreamId;
 }
 
 /** A stream id from a client message, or null when it isn't one. */
@@ -158,6 +174,13 @@ interface RoomClient {
   joinedAt: number;
   /** Which stream this client is watching. Null before playback starts. */
   variantKey: string | null;
+  /**
+   * The subtitle this client sees, 0 for none: either drawn by its own player
+   * over a clean stream, or the one its stream burns in (then the same as the
+   * stream's). The first is per person, so people sharing a stream can each
+   * read a different one.
+   */
+  subtitleStreamId: number;
   /**
    * Whether this client's player can decode an HEVC transcode. Reported on
    * joining, and withdrawn ("caps") if a stream it was told it could play
@@ -282,6 +305,8 @@ interface RoomState {
   variants: Map<string, Variant>;
   /** The stream the host is watching — the one their track changes carry to. */
   hostVariantKey: string | null;
+  /** And the subtitle the host sees, which is where a joiner starts. */
+  hostSubtitleId: number;
 }
 
 interface Room {
@@ -471,7 +496,7 @@ function moveRoomOffHevc(room: Room, roomId: string, cause: RoomClient, why: str
     if (!v.hlsSessionId || !isHevcSession(v.hlsSessionId)) continue;
     const owner = [...room.clients].find((c) => c.userId === v.ownerUserId);
     if (!owner) continue;
-    sendTo(owner.ws, { ...variantMessage(v, true, room.state.ratingKey), hlsSessionId: null });
+    sendTo(owner.ws, { ...variantMessage(v, true, room.state.ratingKey, owner.subtitleStreamId), hlsSessionId: null });
     logEvent("Sync", "moving a stream off HEVC", {
       room: roomId.substring(0, 8),
       variant: v.key,
@@ -481,34 +506,6 @@ function moveRoomOffHevc(room: Room, roomId: string, cause: RoomClient, why: str
       why,
     });
   }
-}
-
-/**
- * Have these streams' drivers start them over where playback is — the same
- * "you have no transcode" move as moveRoomOffHevc, for a reason the server
- * found on its own: a subtitle the player was meant to draw turned out to be
- * unreadable, so the stream has to come back with it burned in. Returns how
- * many were told.
- */
-export function restartStreams(sessionIds: ReadonlySet<string>, why: string): number {
-  let told = 0;
-  for (const [roomId, room] of rooms) {
-    for (const v of room.state.variants.values()) {
-      if (!v.hlsSessionId || !sessionIds.has(v.hlsSessionId)) continue;
-      const owner = [...room.clients].find((c) => c.userId === v.ownerUserId);
-      if (!owner) continue;
-      sendTo(owner.ws, { ...variantMessage(v, true, room.state.ratingKey), hlsSessionId: null });
-      told++;
-      logEvent("Sync", "restarting a stream", {
-        room: roomId.substring(0, 8),
-        variant: v.key,
-        session: v.hlsSessionId.substring(0, 8),
-        driver: owner.username ?? owner.userId,
-        why,
-      });
-    }
-  }
-  return told;
 }
 
 export function sessionHostUserId(sessionId: string): string | null {
@@ -555,6 +552,7 @@ function getOrCreateRoom(instanceId: string): Room {
         queue: [],
         variants: new Map(),
         hostVariantKey: null,
+        hostSubtitleId: 0,
       },
       coHostIds: new Set(),
       lastForcedPersistAt: 0,
@@ -628,13 +626,22 @@ function membersOf(room: Room, key: string): RoomClient[] {
  * could read the assignment left over from the previous one and take it for the
  * new one's.
  */
-function variantMessage(v: Variant, isOwner: boolean, ratingKey: string | null) {
+function variantMessage(
+  v: Variant,
+  isOwner: boolean,
+  ratingKey: string | null,
+  /** The subtitle the receiver sees — see RoomClient.subtitleStreamId. */
+  subtitleStreamId: number,
+) {
   return {
     type: "variant",
     ratingKey,
     variantKey: v.key,
     audioStreamId: v.audioStreamId,
-    subtitleStreamId: v.subtitleStreamId,
+    subtitleStreamId,
+    // What the stream itself burns in. A client draws its subtitle only when it
+    // isn't this one, so nobody ever sees a line twice.
+    burnedSubtitleId: v.subtitleStreamId,
     hlsSessionId: v.hlsSessionId,
     sessionOffset: v.sessionOffset,
     isOwner,
@@ -644,7 +651,7 @@ function variantMessage(v: Variant, isOwner: boolean, ratingKey: string | null) 
 /** Tell each member of a stream what it is now — including who drives it. */
 function announceVariant(room: Room, v: Variant): void {
   for (const c of membersOf(room, v.key)) {
-    sendTo(c.ws, variantMessage(v, c.userId === v.ownerUserId, room.state.ratingKey));
+    sendTo(c.ws, variantMessage(v, c.userId === v.ownerUserId, room.state.ratingKey, c.subtitleStreamId));
   }
 }
 
@@ -1156,6 +1163,7 @@ export function attachWebSocketServer(server: Server): void {
           // A joiner watches what the host watches. Choosing otherwise is a
           // deliberate act ("set-tracks"), never the starting position.
           variantKey: room.state.hostVariantKey,
+          subtitleStreamId: room.state.hostVariantKey ? room.state.hostSubtitleId : 0,
           hevc: msg.hevc === true,
         };
         roomId = instanceId;
@@ -1198,6 +1206,7 @@ export function attachWebSocketServer(server: Server): void {
                 // A joiner never drives the host's stream — the host does.
                 false,
                 room.state.ratingKey,
+                client.subtitleStreamId,
               )
             : null,
         });
@@ -1266,20 +1275,34 @@ export function attachWebSocketServer(server: Server): void {
         if (audioStreamId === null || subtitleStreamId === null) return;
         if (!room.state.ratingKey) return;
 
-        const targetKey = variantKeyOf(audioStreamId, subtitleStreamId);
+        // A subtitle the client draws itself doesn't change the stream, so
+        // choosing one keeps everybody on the same transcode — only a subtitle
+        // that has to be burned in (a picture format) puts someone on their own.
+        const burned = burnedSubtitle(subtitleStreamId, msg.drawn);
+        const targetKey = variantKeyOf(audioStreamId, burned);
         const hostKey = room.state.hostVariantKey;
-        // The host takes their audience with them; everyone else moves alone.
-        const movers =
-          client.isHost && hostKey ? membersOf(room, hostKey) : [client];
+        // The host takes their audience with them: everyone seeing exactly what
+        // the host sees. Someone on the host's stream who picked their own
+        // subtitle made a choice, and the host's doesn't override it. Everyone
+        // else moves alone.
+        const hostSees = client.subtitleStreamId;
+        const movers = client.isHost && hostKey
+          ? membersOf(room, hostKey).filter((m) => m.subtitleStreamId === hostSees)
+          : [client];
         if (!movers.includes(client)) movers.push(client);
-        if (movers.every((m) => m.variantKey === targetKey)) return;
+        if (movers.every((m) => m.variantKey === targetKey && m.subtitleStreamId === subtitleStreamId)) return;
 
         const fromKey = client.variantKey;
-        for (const m of movers) assignVariant(room, m, audioStreamId, subtitleStreamId);
+        const fromSubtitle = client.subtitleStreamId;
+        for (const m of movers) {
+          assignVariant(room, m, audioStreamId, burned);
+          m.subtitleStreamId = subtitleStreamId;
+        }
         const target = room.state.variants.get(targetKey)!;
 
         if (client.isHost) {
           room.state.hostVariantKey = targetKey;
+          room.state.hostSubtitleId = subtitleStreamId;
           room.state.subtitles = subtitleStreamId !== 0;
           if (target.hlsSessionId) {
             room.state.hlsSessionId = target.hlsSessionId;
@@ -1291,13 +1314,17 @@ export function attachWebSocketServer(server: Server): void {
           room: roomId.substring(0, 8),
           by: client.username ?? client.userId,
           role: client.isHost ? "host" : client.isCoHost ? "cohost" : "viewer",
-          from: fromKey ?? "none",
-          to: targetKey,
+          from: `${fromKey ?? "none"}/${fromSubtitle}`,
+          to: `${targetKey}/${subtitleStreamId}`,
           moved: movers.length,
+          // Same stream, different subtitle: nothing restarts.
+          sameStream: fromKey === targetKey,
           joinedExisting: target.hlsSessionId !== null,
           streams: room.state.variants.size,
         });
 
+        // Everyone on the stream, each with their own subtitle — so the people
+        // who were already on it hear nothing they need to act on.
         announceVariant(room, target);
         return;
       }
@@ -1317,6 +1344,7 @@ export function attachWebSocketServer(server: Server): void {
         if (!hostVariant) return;
         const from = client.variantKey;
         assignVariant(room, client, hostVariant.audioStreamId, hostVariant.subtitleStreamId);
+        client.subtitleStreamId = room.state.hostSubtitleId;
         logEvent("Sync", "client rejoined the host's stream", {
           room: roomId.substring(0, 8),
           who: client.username ?? client.userId,
@@ -1326,7 +1354,7 @@ export function attachWebSocketServer(server: Server): void {
         // Only the client that moved. Nothing changed for the people already on
         // this stream, and a re-announcement of a stream they are already
         // playing is noise they have to reason about.
-        sendTo(client.ws, variantMessage(hostVariant, hostVariant.ownerUserId === client.userId, room.state.ratingKey));
+        sendTo(client.ws, variantMessage(hostVariant, hostVariant.ownerUserId === client.userId, room.state.ratingKey, client.subtitleStreamId));
         return;
       }
 
@@ -1558,13 +1586,14 @@ export function attachWebSocketServer(server: Server): void {
 
           const audioStreamId = trackId(msg.audioStreamId) ?? 0;
           const subtitleStreamId = trackId(msg.subtitleStreamId) ?? 0;
-          const hostKey = variantKeyOf(audioStreamId, subtitleStreamId);
+          const burned = burnedSubtitle(subtitleStreamId, msg.subtitleDrawn);
+          const hostKey = variantKeyOf(audioStreamId, burned);
           let hostVariant = room.state.variants.get(hostKey);
           if (!hostVariant) {
             hostVariant = {
               key: hostKey,
               audioStreamId,
-              subtitleStreamId,
+              subtitleStreamId: burned,
               hlsSessionId: null,
               sessionOffset: room.state.sessionOffset,
               ownerUserId: client.userId,
@@ -1574,11 +1603,17 @@ export function attachWebSocketServer(server: Server): void {
           }
           hostVariant.ownerUserId = client.userId;
           client.variantKey = hostKey;
+          client.subtitleStreamId = subtitleStreamId;
           room.state.hostVariantKey = hostKey;
+          room.state.hostSubtitleId = subtitleStreamId;
           if (itemChanged) {
             // Everyone lands on the host's stream for a new title, whatever
-            // they were listening to during the last one.
-            for (const c of room.clients) c.variantKey = hostKey;
+            // they were listening to during the last one — and on the host's
+            // subtitle, since stream ids belong to the file that just ended.
+            for (const c of room.clients) {
+              c.variantKey = hostKey;
+              c.subtitleStreamId = subtitleStreamId;
+            }
           }
           attachSession(room, hostVariant, sid, room.state.sessionOffset, roomId);
 
@@ -1862,7 +1897,8 @@ export function attachWebSocketServer(server: Server): void {
               // audio or subtitle row selected in the switcher.
               hv.ownerUserId = target.userId;
               transferredVariant = hv;
-              room.state.subtitles = hv.subtitleStreamId !== 0;
+              room.state.hostSubtitleId = target.subtitleStreamId;
+              room.state.subtitles = target.subtitleStreamId !== 0;
               if (hv.hlsSessionId) {
                 room.state.hlsSessionId = hv.hlsSessionId;
                 room.state.sessionOffset = hv.sessionOffset;
@@ -2024,7 +2060,8 @@ export function attachWebSocketServer(server: Server): void {
                 room.state.hlsSessionId = hv.hlsSessionId;
                 room.state.sessionOffset = hv.sessionOffset;
               }
-              room.state.subtitles = hv.subtitleStreamId !== 0;
+              room.state.hostSubtitleId = newHost.subtitleStreamId;
+              room.state.subtitles = newHost.subtitleStreamId !== 0;
               announceVariant(room, hv);
             }
           }

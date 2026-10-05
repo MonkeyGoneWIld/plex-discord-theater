@@ -21,6 +21,8 @@ import Database from "better-sqlite3";
 process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "direct-stream-"));
 process.env.PLEX_TOKEN = "test-token";
 process.env.DIRECT_STREAM = "1";
+// Remuxes above this are re-encoded rather than copied. Title 950 is one.
+process.env.DIRECT_STREAM_MAX_KBPS = "20000";
 
 let pass = 0;
 let fail = 0;
@@ -177,7 +179,7 @@ const plex = http.createServer((req, res) => {
   if (meta) {
     return send({ Metadata: [{
       ratingKey: meta[1], title: "Film", type: "movie", duration: FILM_END * 1000,
-      Media: [{ id: 1, width: 1920, height: 1080, videoCodec: "h264", Part: [{ id: 1, file: "/movies/Film.mkv", Stream: [
+      Media: [{ id: 1, width: 1920, height: 1080, videoCodec: "h264", bitrate: meta[1] === "950" ? 31000 : 8000, Part: [{ id: 1, file: "/movies/Film.mkv", Stream: [
         { id: 11, streamType: 1, codec: "h264" },
         { id: 12, streamType: 2, codec: "aac", selected: true },
         { id: 21, streamType: 3, codec: "srt", language: "English" },
@@ -216,12 +218,12 @@ const plex = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/srt" });
     if (selected === "21") return res.end(SRT);
     // 25: a big file — the first line straight away, the rest a while later.
-    // 26: one that breaks off partway.
+    // 26: one that breaks off partway, after the player's first ask is answered.
     res.write(SRT_FIRST);
     setTimeout(() => {
       if (selected === "25") res.end(SRT.slice(SRT_FIRST.length));
       else res.destroy();
-    }, selected === "25" ? 6_000 : 300);
+    }, selected === "25" ? 6_000 : 5_000);
     return;
   }
   if (url.pathname === "/library/streams/24") {
@@ -437,10 +439,19 @@ console.log("\n— through the routes —");
   await (await fetch(`${origin}/api/plex/hls/600/${crypto.randomUUID()}/master.m3u8`)).text();
   check("a title whose copy failed is asked for as a re-encode", [decisions.at(-1)?.ratingKey, decisions.at(-1)?.directStream], ["600", "0"]);
 
+  const big = crypto.randomUUID();
+  await (await fetch(`${origin}/api/plex/hls/950/${big}/master.m3u8`)).text();
+  plexRoutes.markTranscodeStopped(big);
+  check("a file above DIRECT_STREAM_MAX_KBPS is re-encoded instead of copied",
+    [decisions.at(-1)?.ratingKey, decisions.at(-1)?.directStream], ["950", "0"]);
+
   console.log("\n— subtitles, which used to force a re-encode —");
-  const start = async (subtitleStreamID: number) => {
+  /** A stream start, burning in `burn` (the player asks for that only when it
+   *  can't draw a subtitle itself), or with a clean picture. */
+  const start = async (burn: number) => {
     const sid = crypto.randomUUID();
-    await (await fetch(`${origin}/api/plex/hls/900/${sid}/master.m3u8?subtitles=burn&audioStreamID=12&subtitleStreamID=${subtitleStreamID}`)).text();
+    const q = burn ? `subtitles=burn&subtitleStreamID=${burn}` : "subtitleStreamID=0";
+    await (await fetch(`${origin}/api/plex/hls/900/${sid}/master.m3u8?${q}&audioStreamID=12`)).text();
     plexRoutes.markTranscodeStopped(sid);
     return decisions.at(-1)!;
   };
@@ -449,47 +460,38 @@ console.log("\n— through the routes —");
     const body = r.ok ? ((await r.json()) as { cues: unknown[]; complete?: boolean }) : null;
     return { status: r.status, cues: body?.cues.length ?? 0, complete: body?.complete };
   };
-  const cues = async (id: number) => {
-    const a = await answer(id);
-    return [a.status, a.cues];
-  };
-  const lost: string[] = [];
-  embeddedSubs.onEmbeddedSubtitleLost((id) => lost.push(id));
 
-  const embedded = await start(21);
-  check("a text subtitle inside the file isn't burned, so the video can still be copied",
-    [embedded.subtitles, embedded.directStream], ["none", "1"]);
-  check("the player gets it as text to draw", await answer(21), { status: 200, cues: 2, complete: true });
-  check("read out of the file once, for the start and the player both", subtitleReads, 1);
+  const drawn = await start(0);
+  check("a stream for people drawing their own subtitles is copied, with no subtitle in it",
+    [drawn.subtitles, drawn.directStream], ["none", "1"]);
+  check("nothing is read out of the file for it", subtitleReads, 0);
+
+  check("the player gets a text subtitle inside the file as text to draw",
+    await answer(21), { status: 200, cues: 2, complete: true });
+  check("read out of the file once", [subtitleReads, (await answer(21)).cues, subtitleReads], [1, 2, 1]);
   check("through Plex's subtitle-only transcode, never the one that sends the film", wrongEndpointReads, 0);
   const kept = new Database(path.join(process.env.THUMB_CACHE_DIR!, "subtitles.sqlite"), { readonly: true });
   check("and kept on disk, so a restart doesn't read the file again",
     kept.prepare("SELECT COUNT(*) AS n FROM embedded_subtitles WHERE stream_id = '21'").get(), { n: 1 });
   kept.close();
-  check("a picture subtitle (PGS) is burned in as before", (await start(22)).subtitles, "burn");
-  check("a text one Plex can't read out is burned in instead", (await start(23)).subtitles, "burn");
-  check("and the player is told it's not there, so it isn't shown twice", (await cues(23))[0], 404);
-  check("a separate subtitle file is drawn as before", [(await start(24)).subtitles, await cues(24)], ["none", [200, 2]]);
+  check("a separate subtitle file is drawn as before", await answer(24), { status: 200, cues: 2, complete: true });
+
+  check("one Plex can't read out is refused, so the player asks for it burned in",
+    (await answer(23)).status, 404);
+  check("one Plex answers with video is refused too", (await answer(27)).status, 404);
+  check("a picture subtitle (PGS) is burned in when asked", (await start(22)).subtitles, "burn");
+  check("and so is text that couldn't be drawn", (await start(23)).subtitles, "burn");
 
   let began = Date.now();
-  const video = await start(27);
-  check("one Plex answers with video is burned in, and found out at once",
-    [video.subtitles, Date.now() - began < 2000], ["burn", true]);
-
-  began = Date.now();
-  const slow = await start(25);
-  check("a big file's start doesn't wait for the whole read",
-    [slow.subtitles, slow.directStream, Date.now() - began < 2000], ["none", "1", true]);
-  check("the player gets the lines read so far, and is told there's more",
-    await answer(25), { status: 200, cues: 1, complete: false });
+  check("a big file's first ask answers within seconds, with the lines read so far and word there's more",
+    [await answer(25), Date.now() - began < 5000], [{ status: 200, cues: 1, complete: false }, true]);
   await until(() => embeddedSubs.embeddedSubtitleState("25")?.state === "ready", 10_000);
   check("and all of them once Plex is done", await answer(25), { status: 200, cues: 2, complete: true });
 
-  const broken = await start(26);
-  check("one that breaks off partway starts drawn by the player", broken.subtitles, "none");
-  await until(() => lost.includes("26"));
-  check("its failure is reported, so the streams drawing it restart with it burned in", lost, ["26"]);
-  check("which the restart does", (await start(26)).subtitles, "burn");
+  check("one that breaks off partway starts out readable", (await answer(26)).status, 200);
+  await until(() => embeddedSubs.embeddedSubtitleState("26")?.state === "unreadable", 8_000);
+  check("and is refused once it has failed, so the player asks for it burned in",
+    (await answer(26)).status, 404);
 
   await plexRoutes.stopAllActiveSessions();
   api.close();

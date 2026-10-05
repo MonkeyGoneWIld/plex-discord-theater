@@ -271,8 +271,9 @@ export interface StreamTrack {
   languageCode?: string | null;
   selected: boolean;
   /**
-   * Subtitles only: this one is a sidecar text file, so the player draws it
-   * itself instead of Plex burning it into the picture.
+   * Subtitles only: this one is text — a sidecar file, or text inside the media
+   * file that Plex reads out — so the player draws it itself instead of Plex
+   * burning it into the picture. Everyone drawing their own shares one stream.
    *
    * Which is the same thing as saying it can be re-timed. Burned subtitles are
    * pixels in the video frames by the time they arrive; a drawn one is a list

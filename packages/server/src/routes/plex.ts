@@ -19,13 +19,11 @@ import {
 import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
-import { sessionHostUserId, sessionHasOtherWatchers, roomPlaysHevc, restartStreams } from "../services/sync.js";
+import { sessionHostUserId, sessionHasOtherWatchers, roomPlaysHevc } from "../services/sync.js";
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
 import { parseSubtitles, type Cue } from "../services/subtitles.js";
-import {
-  decodeSubtitle, embeddedSubtitleState, onEmbeddedSubtitleLost, readEmbeddedSubtitle, type EmbeddedSubtitle,
-} from "../services/embedded-subtitles.js";
+import { decodeSubtitle, readEmbeddedSubtitle, type EmbeddedSubtitle } from "../services/embedded-subtitles.js";
 import { mapPlexRatings } from "../services/ratings.js";
 import {
   DETAIL_MAX_AGE_MS,
@@ -132,6 +130,18 @@ const HEVC_TRANSCODE = process.env.HEVC_TRANSCODE === "1";
  */
 const DIRECT_STREAM = process.env.DIRECT_STREAM === "1";
 
+/**
+ * The highest bitrate a file may have and still be copied, in kbps. Above it
+ * the file is re-encoded at VIDEO_BITRATE_KBPS instead. 0 (unset) is no limit
+ * beyond Plex's own.
+ *
+ * A copy is the file's own bitrate, and every viewer pulls all of it from this
+ * server: a 30 Mbps remux watched by two people is 60 Mbps of upload. A home
+ * connection that can't carry that stalls the stream, where a re-encode at a
+ * bitrate it can carry only looks slightly softer.
+ */
+const DIRECT_STREAM_MAX_KBPS = envInt("DIRECT_STREAM_MAX_KBPS", 0);
+
 // ─── Types ──────────────────────────────────────────────────────
 
 interface PlexDirectory {
@@ -215,6 +225,8 @@ interface MediaVersion {
   /** The file's own picture size, for sizing its transcode — see transcodeFrame. */
   width: number | null;
   height: number | null;
+  /** The file's overall bitrate in kbps, for DIRECT_STREAM_MAX_KBPS. */
+  bitrate: number | null;
   previewThumbs: boolean;
   audioTracks: ReturnType<typeof mapAudioTracks>;
   subtitleTracks: ReturnType<typeof mapSubtitleTracks>;
@@ -240,6 +252,7 @@ function mapVersions(media: PlexMedia[] | undefined): MediaVersion[] {
       resolution: resolutionLabel(m),
       width: m.width ?? null,
       height: m.height ?? null,
+      bitrate: m.bitrate ?? null,
       previewThumbs: part?.indexes === "sd",
       audioTracks: mapAudioTracks(streams),
       subtitleTracks: mapSubtitleTracks(streams),
@@ -1060,9 +1073,9 @@ function rememberDuration(ratingKey: string, payload: Record<string, unknown>): 
  * is next read, instead of answering without the field for up to a week. It is
  * still the answer if that rebuild fails. 2 added originallyAvailableAt; 3
  * added each version's width and height; 4 made embedded text subtitles
- * drawable and added `sidecar`.
+ * drawable and added `sidecar`; 5 added each version's bitrate.
  */
-export const META_PAYLOAD_VERSION = 4;
+export const META_PAYLOAD_VERSION = 5;
 
 const metaCache = new LruMap<string, { payload: Record<string, unknown>; at: number }>(2_000);
 const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -1157,9 +1170,9 @@ function mapSubtitleTracks(streams: PlexStream[]) {
        * subtitles are pixels in the video frames by the time anyone sees them,
        * and no amount of asking moves them. See the /subtitles route.
        *
-       * Text inside the file counts too. If it then can't be read, the server
-       * burns it after all and the /subtitles route refuses it, so the two
-       * ends still never both show it — see subtitleIsDrawnByClient.
+       * Text inside the file counts too. If it then can't be read, the
+       * /subtitles route refuses it and the player asks for a stream with it
+       * burned in instead, so it is never shown twice or not at all.
        */
       external: isSidecarText(s) || isEmbeddedText(s),
       /** A file of its own, as opposed to a track inside the media file. */
@@ -2708,46 +2721,20 @@ const SUBTITLE_CACHE_TTL_MS = 30 * 60 * 1000;
 /**
  * Text subtitles inside the media file, read out by Plex and drawn by the
  * player, so subtitles being on no longer means re-encoding the video to burn
- * them in — see services/embedded-subtitles.ts.
- *
- * `lockHeld` is for the transcode start, which already holds the item lock and
- * has selected the track. Everyone else selects it under the lock here.
+ * them in — see services/embedded-subtitles.ts. Plex reads whichever subtitle
+ * the item has selected, so it is selected under the item lock.
  */
-function embeddedSubtitle(
-  ratingKey: string, mediaIndex: number, streamId: string, lockHeld: boolean,
-): Promise<EmbeddedSubtitle> {
+function embeddedSubtitle(ratingKey: string, mediaIndex: number, streamId: string): Promise<EmbeddedSubtitle> {
   return readEmbeddedSubtitle({
     streamId,
     ratingKey,
     mediaIndex,
-    lockHeld,
-    withTrackSelected: lockHeld
-      ? (start) => start()
-      : (start) => withItemLock(ratingKey, async () => {
-          await selectTracksForStart(ratingKey, mediaIndex, null, Number(streamId));
-          return start();
-        }),
+    withTrackSelected: (start) => withItemLock(ratingKey, async () => {
+      await selectTracksForStart(ratingKey, mediaIndex, null, Number(streamId));
+      return start();
+    }),
   });
 }
-
-/**
- * Streams started without their subtitle burned in while it was still being
- * read out, by session, with the subtitle's stream id. If the read then fails,
- * these are the ones left with no subtitle at all, and they are restarted —
- * the new start finds it unreadable and burns it in.
- */
-const drawingEmbedded = new Map<string, string>();
-
-onEmbeddedSubtitleLost((streamId) => {
-  const sessions = new Set<string>();
-  for (const [sessionId, id] of drawingEmbedded) if (id === streamId) sessions.add(sessionId);
-  for (const sessionId of sessions) drawingEmbedded.delete(sessionId);
-  if (sessions.size === 0) return;
-  const restarted = restartStreams(sessions, "its subtitle couldn't be read out of the file");
-  logEvent("Subtitles", "burning in a subtitle Plex couldn't read out after all", {
-    streamId, sessions: sessions.size, restarted,
-  });
-});
 
 /** Guard against a "subtitle" that is really a video file. Comfortably larger
  *  than any real subtitle: a three-hour ASS with full typesetting is ~1 MB. */
@@ -2767,8 +2754,8 @@ const MAX_SUBTITLE_BYTES = 8 * 1024 * 1024;
  * `?ratingKey=` (and `mediaIndex=` for a second version) and is read out through
  * Plex — see embeddedSubtitle. That takes a while the first time, so the answer
  * carries `complete: false` and the cues so far until it is done, and the
- * player asks again. One that couldn't be read is refused, because the stream
- * will have burned it in instead.
+ * player asks again. One that couldn't be read is refused, and the player then
+ * asks for a stream with it burned in.
  */
 router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
   const streamId = req.params.streamId as string;
@@ -2779,7 +2766,7 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
 
   const hit = subtitleCache.get(streamId);
   if (hit && Date.now() - hit.at < SUBTITLE_CACHE_TTL_MS) {
-    res.json({ cues: hit.cues });
+    res.json({ cues: hit.cues, complete: true });
     return;
   }
 
@@ -2791,7 +2778,7 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
     const mediaIndex = Number.isInteger(requested) && requested >= 0 ? requested : await defaultMediaIndex(ratingKey);
     const track = await subtitleTrackOf(ratingKey, mediaIndex, Number(streamId));
     if (track?.external && track.sidecar === false) {
-      const sub = await embeddedSubtitle(ratingKey, mediaIndex, streamId, false);
+      const sub = await embeddedSubtitle(ratingKey, mediaIndex, streamId);
       if (sub.state === "unreadable") {
         res.status(404).json({ error: "Subtitle not available" });
         return;
@@ -2836,7 +2823,7 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
     logEvent("Subtitles", "sidecar ready to draw", {
       streamId, format: parsed.format, cues: parsed.cues.length,
     });
-    res.json({ cues: parsed.cues });
+    res.json({ cues: parsed.cues, complete: true });
   } catch (err) {
     console.error("[Subtitles] fetch error:", err);
     res.status(502).json({ error: "Failed to fetch subtitle" });
@@ -3323,7 +3310,6 @@ export function markTranscodeStopped(sessionId: string): void {
   sessionRatingKeys.delete(sessionId);
   sessionMediaIndex.delete(sessionId);
   sessionVideoCodec.delete(sessionId);
-  drawingEmbedded.delete(sessionId);
   manifestCache.delete(sessionId);
   hostPingInfo.delete(sessionId);
   // DIAGNOSTIC: should trend back toward 0 between watch sessions.
@@ -3963,38 +3949,6 @@ async function selectTracksForStart(
   }
 }
 
-/**
- * Whether the subtitle this transcode was asked for is one the client draws
- * itself, and so must NOT also be burned into the picture.
- *
- * Decided here rather than by the client, deliberately. Both ends would reach
- * the same answer from the same metadata, but only one of them can be the one
- * that decides without a round of agreeing: the client would have to hold the
- * stream back until metadata arrived, and getting it wrong in either direction
- * shows — burned *and* drawn is every line twice, neither is no subtitles at
- * all. The request already names the stream, so the server can answer for it.
- *
- * Unknown counts as "burn". A subtitle burned in when it needn't have been is
- * one nobody can re-time; a subtitle neither burned nor drawn is missing.
- */
-async function subtitleIsDrawnByClient(
-  ratingKey: string,
-  mediaIndex: number,
-  subtitleStreamID: number | null,
-): Promise<boolean> {
-  if (subtitleStreamID == null || subtitleStreamID === 0) return false;
-  const track = await subtitleTrackOf(ratingKey, mediaIndex, subtitleStreamID);
-  if (!track?.external) return false;
-  // A sidecar is a file that is simply there. Entries cached before `sidecar`
-  // existed only ever marked sidecars as drawable.
-  if (track.sidecar !== false) return true;
-  // Text inside the file: drawn unless Plex can't read it out, which a start
-  // finds out within a few seconds. The reading itself carries on afterwards —
-  // see embeddedSubtitle. Called with the item lock held and the track selected.
-  const sub = await embeddedSubtitle(ratingKey, mediaIndex, String(subtitleStreamID), true);
-  return sub.state !== "unreadable";
-}
-
 /** One subtitle track from a title's metadata, as mapSubtitleTracks made it. */
 async function subtitleTrackOf(
   ratingKey: string, mediaIndex: number, streamId: number,
@@ -4022,6 +3976,23 @@ async function subtitleTrackOf(
  * Plex nothing when the title is cached. A version the list doesn't offer (a
  * hidden 4K copy) or a lookup that fails gets the old fixed 1920x1080.
  */
+/**
+ * Whether a file is too big to copy under DIRECT_STREAM_MAX_KBPS. A version
+ * whose bitrate Plex doesn't report is let through: the cap is there for the
+ * remuxes, and Plex always knows theirs.
+ */
+async function overCopyCap(ratingKey: string, mediaIndex: number): Promise<number | null> {
+  if (DIRECT_STREAM_MAX_KBPS <= 0) return null;
+  try {
+    const meta = await buildMeta(ratingKey);
+    const versions = meta?.versions as Array<{ mediaIndex?: number; bitrate?: number | null }> | undefined;
+    const kbps = versions?.find((v) => v.mediaIndex === mediaIndex)?.bitrate ?? null;
+    return kbps !== null && kbps > DIRECT_STREAM_MAX_KBPS ? kbps : null;
+  } catch {
+    return null;
+  }
+}
+
 async function outputFrame(ratingKey: string, mediaIndex: number): Promise<string> {
   try {
     const meta = await buildMeta(ratingKey);
@@ -4110,9 +4081,10 @@ router.get(
       return;
     }
 
-    // What the client asked for: "none" when subtitles are off, otherwise
-    // "burn". Whether burning is what actually happens is settled at start time
-    // — see subtitleIsDrawnByClient.
+    // "burn" when the stream is to have a subtitle burned into its picture,
+    // otherwise "none". A subtitle the player draws itself is never asked for
+    // here — the player decides which kind it has, and a stream carries only
+    // the burned kind, so that everyone drawing their own can share it.
     const requestedSubtitleMode = req.query.subtitles === "burn" ? "burn" : "none";
 
     // The tracks this session wants. Present once a room can hold more than one
@@ -4380,24 +4352,17 @@ router.get(
     // needs, and the decision + start that captures it.
     const promise = withItemLock(ratingKey, async () => {
       await selectTracksForStart(ratingKey, mediaIndex, audioStreamID, subtitleStreamID);
-      // A sidecar goes to the client as text instead, so that it can be timed
-      // against the audio. Burning it here as well would draw every line twice.
-      const drawnByClient =
-        requestedSubtitleMode === "burn" &&
-        (await subtitleIsDrawnByClient(ratingKey, mediaIndex, subtitleStreamID));
-      if (drawnByClient) {
-        const stillReading = embeddedSubtitleState(String(subtitleStreamID))?.state === "reading";
-        if (stillReading) drawingEmbedded.set(sessionId, String(subtitleStreamID));
-        logEvent("Subtitles", "leaving this one to the client to draw", {
-          ratingKey, subtitleStreamID, session: sessionId.substring(0, 8),
-          ...(stillReading ? { stillReading } : {}),
-        });
-      }
       // Decided per start, so a room that has gained someone who can't decode
       // HEVC gets H.264 from its next transcode on.
       const roomHevc = userId !== null && roomPlaysHevc(userId);
-      const copy = DIRECT_STREAM && !directStreamRefused(ratingKey);
-      return fetchManifest(drawnByClient ? "none" : requestedSubtitleMode, {
+      const overCap = DIRECT_STREAM ? await overCopyCap(ratingKey, mediaIndex) : null;
+      if (overCap !== null) {
+        logEvent("DirectStream", "re-encoding a file above DIRECT_STREAM_MAX_KBPS", {
+          ratingKey, session: sessionId.substring(0, 8), kbps: overCap, capKbps: DIRECT_STREAM_MAX_KBPS,
+        });
+      }
+      const copy = DIRECT_STREAM && overCap === null && !directStreamRefused(ratingKey);
+      return fetchManifest(requestedSubtitleMode, {
         videoResolution: await outputFrame(ratingKey, mediaIndex),
         hevc: roomHevc && HEVC_TRANSCODE ? "encode" : roomHevc && copy ? "copy" : false,
         copy,

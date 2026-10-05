@@ -7,19 +7,19 @@
  * /subtitles/:/transcode/universal/start, which answers with the item's
  * selected subtitle track as text. Getting it means Plex reading the whole file,
  * because the track is spread across all of it: seconds for a small file, a
- * minute or two for a big one. So nothing waits for it. A start waits only to
- * hear that Plex is sending a subtitle at all (a few seconds at most), the
- * player draws cues as they arrive and polls for the rest, and the result is kept
- * on disk, so each title is only ever read once.
+ * minute or two for a big one, though Plex has managed most in one to three
+ * seconds. Nothing waits for it: the player's first ask waits a few seconds at
+ * most to hear that Plex is sending a subtitle at all, the player draws cues as
+ * they arrive and polls for the rest, and the result is kept on disk, so each
+ * title is only ever read once.
  *
  * The first version asked /video/:/transcode/universal/subtitles instead. Plex
  * answers that by starting a second transcode of the whole film, video and all,
  * and sending it — a real deployment downloaded 2 GB of Matroska from it, and
  * timed out on two others while Plex re-encoded them.
  *
- * When a read fails after the stream has started without the subtitle burned
- * in, listeners registered with onEmbeddedSubtitleLost are told, so the stream
- * can be restarted with it burned in instead.
+ * One Plex can't read out is reported unreadable, and the player then asks for
+ * a stream with it burned in instead.
  */
 
 import Database from "better-sqlite3";
@@ -31,8 +31,12 @@ import { parseSubtitles, type Cue } from "./subtitles.js";
 import { logEvent } from "./logger.js";
 import { LruMap } from "./lru.js";
 
-/** How long a start waits to hear whether Plex is sending a subtitle. */
-export const VERDICT_MS = 4_000;
+/**
+ * How long an ask waits for a read to finish before answering with the lines
+ * read so far. Most finish well inside it; the player asks again for the rest.
+ * Also how long the item stays locked waiting for Plex to start answering.
+ */
+export const ANSWER_WAIT_MS = 4_000;
 /** How long a whole read may take: a big remux on spinning disks. */
 const READ_TIMEOUT_MS = 15 * 60_000;
 /** Remembered as unreadable for this long before it is tried again. */
@@ -78,22 +82,10 @@ interface Reading {
   ratingKey: string;
   /** Cues parsed from what has arrived so far. */
   cues: Cue[];
-  /** Inside the item lock, track selected — see withTrackSelected. */
-  started: boolean;
-  /** Settles true once Plex is sending a subtitle, false if it refused. */
-  verdict: Promise<boolean>;
-  settle: (ok: boolean) => void;
-  settled: boolean;
+  /** Settles when the read is over, whichever way it went. */
+  done: Promise<void>;
 }
 const reading = new Map<string, Reading>();
-
-type LostListener = (streamId: string) => void;
-const lostListeners: LostListener[] = [];
-
-/** Told when a read fails after Plex had said it was sending the subtitle. */
-export function onEmbeddedSubtitleLost(listener: LostListener): void {
-  lostListeners.push(listener);
-}
 
 export type EmbeddedSubtitle =
   | { state: "ready"; cues: Cue[] }
@@ -132,12 +124,9 @@ export interface ReadOptions {
   /**
    * Runs the start of the request with the subtitle selected on the item and
    * nothing else allowed to change that until it returns: Plex takes no stream
-   * id here, and reads whichever subtitle the item has selected. A caller that
-   * already holds the item lock with the track selected passes `(start) => start()`.
+   * id here, and reads whichever subtitle the item has selected.
    */
   withTrackSelected: <T>(start: () => Promise<T>) => Promise<T>;
-  /** Already holding the item lock — so a read queued behind it can't be waited for. */
-  lockHeld?: boolean;
   /** How long to wait for Plex's answer. */
   waitMs?: number;
 }
@@ -145,25 +134,18 @@ export interface ReadOptions {
 /**
  * Where a subtitle stands, starting a read if there isn't one: "ready" with all
  * its cues, "reading" while Plex is sending it (or hasn't answered within the
- * wait — assumed to be coming, and taken back through onEmbeddedSubtitleLost if
- * not), or "unreadable".
+ * wait — the player asks again, and hears "unreadable" then if it failed), or
+ * "unreadable".
  */
 export async function readEmbeddedSubtitle(opts: ReadOptions): Promise<EmbeddedSubtitle> {
   const known = embeddedSubtitleState(opts.streamId);
   if (known && known.state !== "reading") return known;
 
-  let r = reading.get(opts.streamId);
-  if (!r) {
-    r = begin(opts);
-  } else if (opts.lockHeld && !r.started) {
-    // Queued behind the lock this caller holds: waiting for it would be
-    // waiting for ourselves.
-    return { state: "reading", cues: r.cues };
-  }
-  const waitMs = opts.waitMs ?? VERDICT_MS;
+  const r = reading.get(opts.streamId) ?? begin(opts);
+  const waitMs = opts.waitMs ?? ANSWER_WAIT_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([
-    r.verdict,
+    r.done,
     new Promise<void>((resolve) => { timer = setTimeout(resolve, waitMs); }),
   ]);
   clearTimeout(timer);
@@ -171,22 +153,16 @@ export async function readEmbeddedSubtitle(opts: ReadOptions): Promise<EmbeddedS
 }
 
 function begin(opts: ReadOptions): Reading {
-  let settle!: (ok: boolean) => void;
-  const verdict = new Promise<boolean>((resolve) => { settle = resolve; });
   const r: Reading = {
     streamId: opts.streamId,
     ratingKey: opts.ratingKey,
     cues: [],
-    started: false,
-    verdict,
-    settle: (ok) => { if (!r.settled) { r.settled = true; settle(ok); } },
-    settled: false,
+    done: Promise.resolve(),
   };
-  reading.set(opts.streamId, r);
-  void run(r, opts).finally(() => {
-    r.settle(false);
+  r.done = run(r, opts).finally(() => {
     if (reading.get(r.streamId) === r) reading.delete(r.streamId);
   });
+  reading.set(opts.streamId, r);
   return r;
 }
 
@@ -277,18 +253,15 @@ async function run(r: Reading, opts: ReadOptions): Promise<void> {
     failed = true;
     controller.abort();
     unreadable.set(r.streamId, Date.now());
-    const wasSending = r.settled;
     logEvent("Subtitles", "couldn't read an embedded subtitle out of the file", {
       ...details, why, ...extra, ms: Date.now() - startedAt,
     });
-    if (wasSending) for (const listener of lostListeners) listener(r.streamId);
   };
 
   try {
     // Plex answers once it has started, and has read which subtitle is
     // selected by then; waiting longer than that holds the item for nothing.
     const { pending } = await opts.withTrackSelected(async () => {
-      r.started = true;
       details.decision = await subtitleDecision(params, headers);
       const pending = fetch(plexUrl("/subtitles/:/transcode/universal/start", params), {
         headers: { ...headers, Accept: "text/srt, application/x-subrip, text/vtt, text/plain;q=0.9, */*;q=0.1" },
@@ -298,7 +271,7 @@ async function run(r: Reading, opts: ReadOptions): Promise<void> {
       let hold: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
         pending.catch(() => {}),
-        new Promise<void>((resolve) => { hold = setTimeout(resolve, VERDICT_MS); }),
+        new Promise<void>((resolve) => { hold = setTimeout(resolve, ANSWER_WAIT_MS); }),
       ]);
       clearTimeout(hold);
       return { pending };
@@ -320,7 +293,6 @@ async function run(r: Reading, opts: ReadOptions): Promise<void> {
     logEvent("Subtitles", "Plex is reading an embedded subtitle out of the file", {
       ...details, ms: Date.now() - startedAt,
     });
-    r.settle(true);
 
     const chunks: Uint8Array[] = [];
     let bytes = 0;

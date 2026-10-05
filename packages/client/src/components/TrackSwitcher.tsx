@@ -162,7 +162,17 @@ export function TrackSwitcher({
                   onClick={() => handleSelect("subtitle", t.id)}
                   style={on ? styles.trackSelected : styles.track}
                 >
-                  <div style={{ color: on ? "#f0f0f0" : "#ccc", fontSize: 13 }}>{t.title}</div>
+                  <div>
+                    <div style={{ color: on ? "#f0f0f0" : "#ccc", fontSize: 13 }}>{t.title}</div>
+                    {/* A picture subtitle can only be burned in, which means
+                        re-encoding the video for whoever picks it. Said here so
+                        a text one, where there is one, is the obvious choice. */}
+                    {!t.external && (
+                      <div style={{ color: on ? "#888" : "#666", fontSize: 11 }}>
+                        Picture subtitle · burned in, re-encodes the video
+                      </div>
+                    )}
+                  </div>
                   {on && <span style={styles.checkmark}>{"\u2713"}</span>}
                 </button>
               );
@@ -181,7 +191,11 @@ export function TrackSwitcher({
         )}
 
         <div style={styles.disclaimer}>
-          {tab === "zoom" ? "Saved for this movie or show. Only affects your view." : "Changing tracks briefly restarts the stream at your current position."}
+          {tab === "zoom"
+            ? "Saved for this movie or show. Only affects your view."
+            : tab === "subtitles"
+              ? "Only affects your view. Text subtitles switch instantly; a picture subtitle restarts the stream."
+              : "Changing tracks briefly restarts the stream at your current position."}
         </div>
       </div>
     </div>

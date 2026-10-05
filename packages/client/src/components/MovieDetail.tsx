@@ -969,12 +969,22 @@ const styles: Record<string, React.CSSProperties> = {
    * and the synopsis, tracks and buttons run beneath both. They are the film
    * page's own controls in the same order, just moved below.
    *
+   * Narrower than the film layout and centred. A film's column runs the full
+   * width beside its poster; an episode's heading is short and stops well
+   * short of the right edge, so at full width with the controls under it at
+   * the film column's 776px, everything sat left of centre with the right
+   * third of the page empty. At 860px centred, the controls under the still
+   * span the same width as the row above them and the page balances around
+   * its middle, as a film page does.
+   *
    * A grid rather than moving markup: the info column turns `display:
    * contents`, so its two halves (headSplit and bodySplit) become cells here.
    */
   layoutEpisode: {
     display: "grid",
-    gridTemplateColumns: "min(420px, 46%) minmax(0, 1fr)",
+    maxWidth: "860px",
+    margin: "0 auto",
+    gridTemplateColumns: "min(440px, 52%) minmax(0, 1fr)",
     gridTemplateAreas: '"still head" "body body"',
     // Rows then columns. One shorthand, as the flex layout it replaces uses:
     // mixing gap with rowGap/columnGap across a re-render makes React warn.
@@ -1000,10 +1010,6 @@ const styles: Record<string, React.CSSProperties> = {
   bodySplit: {
     gridArea: "body",
     alignSelf: "start",
-    // The film page's info column is 1100 - 2 x 24 padding - 240 poster -
-    // 36 gap = 776px, so the dropdowns and buttons are the same size here as
-    // on a film.
-    maxWidth: "776px",
     minWidth: 0,
   },
   info: {

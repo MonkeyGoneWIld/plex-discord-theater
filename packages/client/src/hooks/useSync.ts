@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { getSessionToken } from "../lib/api";
+import { canPlayHevcTranscode } from "../lib/hevc";
 
 const MAX_RECONNECT_ATTEMPTS = 20;
 /** Suggestions held for the host. Bounded so a viewer holding the button down
@@ -284,6 +285,9 @@ export interface SyncActions {
   /** Move onto whatever the host is watching, whatever its tracks are. Used by
    *  the offer shown when this client's own stream can't keep up. */
   sendRejoinHost: () => void;
+  /** Withdraw the HEVC support reported on joining, after an HEVC stream
+   *  failed to decode here. The room's streams move back to H.264. */
+  sendHevcUnsupported: () => void;
   /** Co-host: ask the host to advance to the next item. */
   sendPlayItem: (ratingKey: string) => void;
   /**
@@ -516,6 +520,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       sendVariantSession: (hlsSessionId: string, sessionOffset: number) =>
         send({ type: "variant-session", hlsSessionId, sessionOffset }),
       sendRejoinHost: () => send({ type: "rejoin-host" }),
+      sendHevcUnsupported: () => send({ type: "caps", hevc: false }),
       sendPlayItem: (ratingKey: string) => send({ type: "play-item", ratingKey }),
       sendWatching: (value: boolean) => send({ type: "watching", value }),
       retryConnection: () => {
@@ -551,6 +556,8 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             instanceId,
             userId,
             username: usernameRef.current,
+            // Whether the room may be sent HEVC — see roomPlaysHevc.
+            hevc: canPlayHevcTranscode(),
           }),
         );
         setState((prev) => ({ ...prev, connected: true, hostDisconnected: false }));

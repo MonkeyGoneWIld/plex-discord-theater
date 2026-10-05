@@ -85,6 +85,27 @@ export function resolutionLabel(media: VersionSource): string {
   return "Unknown";
 }
 
+/**
+ * The largest picture a transcode of this file may come out at, as Plex's
+ * `videoResolution` takes it: "1920x1080" unless the file is only just bigger.
+ *
+ * A flat 1920x1080 shrinks every file that is a few rows over it. A 1920x1088
+ * encode — common for x265, which pads to a multiple of 16 — came out at
+ * 1906x1080: every pixel resampled to lose eight rows, softening the whole
+ * picture for nothing. So a file up to 2K DCI wide (2048) and 16:10 tall (1200)
+ * is let through at its own size. Anything larger still comes down to 1080p —
+ * 1440p and 4K cost far more to encode and carry than they give back at these
+ * bitrates — and nothing is ever made larger, since the box only grows.
+ */
+export function transcodeFrame(media: { width?: number | null; height?: number | null }): string {
+  const w = media.width ?? 0;
+  const h = media.height ?? 0;
+  if (w > 0 && h > 0 && w <= 2048 && h <= 1200) {
+    return `${Math.max(1920, w)}x${Math.max(1080, h)}`;
+  }
+  return "1920x1080";
+}
+
 /** "5.1", "7.1", "Stereo", "Mono" — channel counts as people say them. */
 export function channelLabel(channels: number | undefined | null): string | null {
   if (!channels || channels < 1) return null;

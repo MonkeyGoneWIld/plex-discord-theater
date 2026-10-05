@@ -3,7 +3,7 @@ import type { Server } from "http";
 import { isValidSession, getSessionUserId } from "../middleware/auth.js";
 import { instanceHosts, updateInstanceHost, touchInstance } from "../routes/discord.js";
 import { plexFetch } from "./plex.js";
-import { getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode, stopTranscodeSession, protectSession, releaseSession } from "../routes/plex.js";
+import { isHevcSession, getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode, stopTranscodeSession, protectSession, releaseSession } from "../routes/plex.js";
 import { createTracker, handleTrackerSocket, destroyTracker } from "./tracker.js";
 import { recordProgress, shouldRecordHistory } from "./watch-history.js";
 import { pushProgressToPlex } from "./plex-accounts.js";
@@ -158,6 +158,12 @@ interface RoomClient {
   joinedAt: number;
   /** Which stream this client is watching. Null before playback starts. */
   variantKey: string | null;
+  /**
+   * Whether this client's player can decode an HEVC transcode. Reported on
+   * joining, and withdrawn ("caps") if a stream it was told it could play
+   * turns out not to decode. A client that never says counts as no.
+   */
+  hevc: boolean;
 }
 
 /**
@@ -427,6 +433,54 @@ export function sessionHasOtherWatchers(sessionId: string, userId: string | null
     }
   }
   return false;
+}
+
+/**
+ * Whether a transcode started by this user may be HEVC: true only when every
+ * client in their room has said it can decode it.
+ *
+ * The whole room rather than the stream being started, because anyone can be
+ * moved onto any stream — a host's track change, "rejoin-host", a new title —
+ * and every one of those moves would otherwise need its own codec check. A user
+ * in no room gets H.264; there is nobody to ask.
+ */
+export function roomPlaysHevc(userId: string): boolean {
+  let found = false;
+  for (const room of rooms.values()) {
+    const clients = [...room.clients];
+    if (!clients.some((c) => c.userId === userId)) continue;
+    found = true;
+    if (!clients.every((c) => c.hevc)) return false;
+  }
+  return found;
+}
+
+/**
+ * Put a room's HEVC streams back on H.264, because someone in it can't decode
+ * HEVC.
+ *
+ * Each such stream's driver is told it has no transcode — exactly what the
+ * driver of a fresh fork is told — so it starts a new one where playback is.
+ * That start asks roomPlaysHevc, gets no, and comes up as H.264, and announcing
+ * it moves everyone on the stream across. Until then the HEVC transcode keeps
+ * serving the people who can play it, rather than the whole stream going dark
+ * while its driver catches up.
+ */
+function moveRoomOffHevc(room: Room, roomId: string, cause: RoomClient, why: string): void {
+  for (const v of room.state.variants.values()) {
+    if (!v.hlsSessionId || !isHevcSession(v.hlsSessionId)) continue;
+    const owner = [...room.clients].find((c) => c.userId === v.ownerUserId);
+    if (!owner) continue;
+    sendTo(owner.ws, { ...variantMessage(v, true, room.state.ratingKey), hlsSessionId: null });
+    logEvent("Sync", "moving a stream off HEVC", {
+      room: roomId.substring(0, 8),
+      variant: v.key,
+      session: v.hlsSessionId.substring(0, 8),
+      driver: owner.username ?? owner.userId,
+      because: cause.username ?? cause.userId,
+      why,
+    });
+  }
 }
 
 export function sessionHostUserId(sessionId: string): string | null {
@@ -1074,6 +1128,7 @@ export function attachWebSocketServer(server: Server): void {
           // A joiner watches what the host watches. Choosing otherwise is a
           // deliberate act ("set-tracks"), never the starting position.
           variantKey: room.state.hostVariantKey,
+          hevc: msg.hevc === true,
         };
         roomId = instanceId;
         room.clients.add(client);
@@ -1122,6 +1177,11 @@ export function attachWebSocketServer(server: Server): void {
         // Everyone else needs to see the new arrival in their roster
         broadcastParticipants(room);
 
+        // Arriving in a room that is playing HEVC without being able to decode
+        // it. The state above still points at the HEVC stream; the H.264 one
+        // replaces it as soon as its driver has brought it up.
+        if (!client.hevc) moveRoomOffHevc(room, instanceId, client, "joined");
+
         return;
       }
 
@@ -1133,6 +1193,19 @@ export function attachWebSocketServer(server: Server): void {
 
       const room = rooms.get(roomId);
       if (!room) return;
+
+      /**
+       * "I can't decode HEVC after all" — sent by a player whose stream failed
+       * with a codec error. Anyone may send it, about themselves only. Only
+       * the withdrawal does anything: a client can't talk the room into HEVC,
+       * because that is decided when each transcode starts.
+       */
+      if (type === "caps") {
+        if (msg.hevc !== false || !client.hevc) return;
+        client.hevc = false;
+        moveRoomOffHevc(room, roomId, client, "codec error");
+        return;
+      }
 
       // Am I in the player? Allowed for anyone, and deliberately not part of
       // the roster broadcast — it exists to order host succession, and pushing

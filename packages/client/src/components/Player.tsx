@@ -18,6 +18,7 @@ import { ZoomPanel } from "./ZoomPanel";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchPlayedThreshold, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
+import { isHevcCodec, markHevcUnplayable } from "../lib/hevc";
 import { loadVolume, saveVolume } from "../lib/volume";
 import { getLevel, setLevel, MAX_LEVEL } from "../lib/audioBoost";
 import { describeWatched, loadAudioPref, loadSubtitlePref, mergeTrackPrefs, saveTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
@@ -2471,6 +2472,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
         hlsRef.current = hls;
 
+        // Whether this stream's video is HEVC, from the codec hls.js finds in
+        // the segments — Plex's manifest doesn't declare one.
+        let hevcStream = false;
+        hls.on(Hls.Events.BUFFER_CODECS, (_e, data) => {
+          if (data.video) hevcStream = isHevcCodec(data.video.codec);
+        });
+
         hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
           if (!mounted) return;
           // The room as it stands at the instant the manifest lands, which is
@@ -2794,6 +2802,21 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             url: data.frag?.url ?? data.url,
             ...snapshot(videoRef.current),
           });
+
+          // A media error on an HEVC stream is this device failing to decode
+          // what it said it could. HEVC is only ever offered because every
+          // player in the room said yes, so withdrawing that is the fix: the
+          // room's next transcode is H.264 and this player moves onto it. The
+          // recovery below still runs in the meantime, and is remembered so the
+          // next room isn't offered HEVC on this device's word either.
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && hevcStream) {
+            hevcStream = false;
+            logWarn("HLS", "HEVC won't decode on this device — asking the room for H.264", {
+              details: data.details,
+            });
+            markHevcUnplayable();
+            syncActionsRef.current?.sendHevcUnsupported();
+          }
 
           // A minute without a fatal error is a fresh episode of trouble, and
           // earns the rebuild budgets back.

@@ -71,6 +71,9 @@ services:
       # is if your upload is tight.
       - VIDEO_BITRATE_KBPS=${VIDEO_BITRATE_KBPS}
       - VIDEO_PEAK_BITRATE_KBPS=${VIDEO_PEAK_BITRATE_KBPS}
+      # 1 = HEVC transcodes when every player in the room can decode them.
+      # Needs Plex Pass and hardware HEVC encoding enabled in Plex.
+      - HEVC_TRANSCODE=${HEVC_TRANSCODE:-}
       - THUMB_CACHE_TTL_MS=${THUMB_CACHE_TTL_MS}
       # Image cache size, with a unit: 500M, 10G (the default), 2T.
       - THUMB_CACHE_MAX_SIZE=${THUMB_CACHE_MAX_SIZE}

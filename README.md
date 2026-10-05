@@ -303,6 +303,11 @@ services:
       VIDEO_BITRATE_KBPS: ""
       VIDEO_PEAK_BITRATE_KBPS: ""
 
+      # "1" = HEVC transcodes when every player in the room can decode them:
+      # a better picture at the same bitrate. Needs Plex Pass and hardware
+      # HEVC encoding enabled in Plex; otherwise Plex keeps sending H.264.
+      HEVC_TRANSCODE: ""
+
       # Guards the "stop every transcode" endpoint.
       ADMIN_SECRET: ""
 

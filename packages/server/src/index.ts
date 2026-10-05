@@ -299,6 +299,7 @@ function reportIntegrations(): void {
       on("Requests", !!process.env.SEERR_URL, "Seerr request flow off"),
       on("Discover", !!process.env.PLEX_ACCOUNT_TOKEN, "online search detail may 401"),
       on("VPS relay", !!(process.env.VPS_RELAY_URL && process.env.VPS_RELAY_KEY), "P2P mode"),
+      on("HEVC", process.env.HEVC_TRANSCODE === "1", "H.264 only"),
       on("Guild allowlist", allowedGuildCount > 0, "open to any Discord server"),
     ].join("   "),
   );

@@ -5,12 +5,12 @@ import { pipeline } from "node:stream/promises";
 import sharp from "sharp";
 import { progressivePreview } from "../services/preview-stream.js";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
-import { playableVersionOrder, resolutionLabel, channelLabel } from "../services/media-versions.js";
+import { playableVersionOrder, resolutionLabel, channelLabel, transcodeFrame } from "../services/media-versions.js";
 import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition } from "../services/segment-prefetch.js";
 import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
-import { sessionHostUserId, sessionHasOtherWatchers } from "../services/sync.js";
+import { sessionHostUserId, sessionHasOtherWatchers, roomPlaysHevc } from "../services/sync.js";
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
 import { parseSubtitles, type Cue } from "../services/subtitles.js";
@@ -96,6 +96,19 @@ const VIDEO_PEAK_BITRATE_KBPS = envInt(
   Math.max(20000, VIDEO_BITRATE_KBPS),
 );
 
+/**
+ * Offer Plex HEVC as well as H.264 when everyone in the room can decode it.
+ *
+ * HEVC looks as good as H.264 at about two thirds of the bitrate, so at the
+ * same setting the picture is simply better. It needs Plex Pass, hardware
+ * encoding on Intel or NVIDIA, and "Enable HEVC video encoding" in Plex; a
+ * server without those just answers with H.264. Off unless set, because the
+ * decode happens in each viewer's Discord, which is the part nobody has tried
+ * on every device yet — see roomPlaysHevc for how a room that can't is kept on
+ * H.264.
+ */
+const HEVC_TRANSCODE = process.env.HEVC_TRANSCODE === "1";
+
 // ─── Types ──────────────────────────────────────────────────────
 
 interface PlexDirectory {
@@ -176,6 +189,9 @@ interface MediaVersion {
   partId: number | null;
   label: string;
   resolution: string;
+  /** The file's own picture size, for sizing its transcode — see transcodeFrame. */
+  width: number | null;
+  height: number | null;
   previewThumbs: boolean;
   audioTracks: ReturnType<typeof mapAudioTracks>;
   subtitleTracks: ReturnType<typeof mapSubtitleTracks>;
@@ -199,6 +215,8 @@ function mapVersions(media: PlexMedia[] | undefined): MediaVersion[] {
       partId: part?.id ?? null,
       label: m.title?.trim() || described,
       resolution: resolutionLabel(m),
+      width: m.width ?? null,
+      height: m.height ?? null,
       previewThumbs: part?.indexes === "sd",
       audioTracks: mapAudioTracks(streams),
       subtitleTracks: mapSubtitleTracks(streams),
@@ -1017,9 +1035,10 @@ function rememberDuration(ratingKey: string, payload: Record<string, unknown>): 
  * The shape of a saved /meta payload. Raise it when the payload gains a field
  * the client relies on. A saved row from an older shape is then rebuilt when it
  * is next read, instead of answering without the field for up to a week. It is
- * still the answer if that rebuild fails. 2 added originallyAvailableAt.
+ * still the answer if that rebuild fails. 2 added originallyAvailableAt; 3
+ * added each version's width and height.
  */
-export const META_PAYLOAD_VERSION = 2;
+export const META_PAYLOAD_VERSION = 3;
 
 const metaCache = new LruMap<string, { payload: Record<string, unknown>; at: number }>(2_000);
 const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -3051,6 +3070,16 @@ const sessionRatingKeys = new Map<string, string>();
  * plays one file for its whole life, which makes this a safe thing to cache.
  */
 const sessionMediaIndex = new Map<string, number>();
+/**
+ * Maps our session UUID → the video codec Plex said it would send.
+ *
+ * Only HEVC matters: it is the one a newcomer might not be able to decode, and
+ * the sync server asks isHevcSession to find out whether a room has to be moved
+ * back to H.264. "unknown" means HEVC was offered and the decision couldn't be
+ * read, which has to be treated as HEVC — guessing wrong the other way leaves
+ * someone with no picture.
+ */
+const sessionVideoCodec = new Map<string, string>();
 /** Maps ratingKey → duration in ms, for the timeline updates we send Plex. Filled
  *  by buildMeta; read through durationFor, which fills it on a miss. */
 const mediaDurations = new LruMap<string, number>(5_000);
@@ -3059,6 +3088,17 @@ const PLEX_SESSION_KEY_RE = /session\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 /** Look up the Plex internal transcode key for one of our session UUIDs. */
 export function getPlexTranscodeKey(sessionId: string): string | undefined {
   return plexTranscodeKeys.get(sessionId);
+}
+
+/** Record the video codec a session's decision settled on. */
+export function recordSessionVideoCodec(sessionId: string, codec: string): void {
+  sessionVideoCodec.set(sessionId, codec.toLowerCase());
+}
+
+/** Whether this session's video is (or may be) HEVC. */
+export function isHevcSession(sessionId: string): boolean {
+  const codec = sessionVideoCodec.get(sessionId);
+  return codec !== undefined && codec !== "h264";
 }
 
 /** Look up the ratingKey for one of our session UUIDs. */
@@ -3178,6 +3218,7 @@ export function markTranscodeStopped(sessionId: string): void {
   plexTranscodeKeys.delete(sessionId);
   sessionRatingKeys.delete(sessionId);
   sessionMediaIndex.delete(sessionId);
+  sessionVideoCodec.delete(sessionId);
   manifestCache.delete(sessionId);
   hostPingInfo.delete(sessionId);
   // DIAGNOSTIC: should trend back toward 0 between watch sessions.
@@ -3188,10 +3229,11 @@ export function markTranscodeStopped(sessionId: string): void {
 /**
  * Call `ping` or `stop` under /video/:/transcode/universal.
  *
- * These two take a `session` parameter, and it means the session identifier
- * *we* supplied at decision / start.m3u8 time — our own HLS session UUID — not
- * the transcode GUID Plex allocated in reply. Passing `transcodeSessionId`
- * instead gets a bare 400 and, only in Plex's own log:
+ * These two take a `session` parameter. Which identifier goes in it is
+ * settled under transcodeControl — it is the transcode key Plex allocated, not
+ * our UUID, whatever the teardown line below suggests. The parameter *name* is
+ * what this comment is for: passing `transcodeSessionId` instead gets a bare
+ * 400 and, only in Plex's own log:
  *
  *     ERROR - [Req#…/Transcode] Missing required query parameter session
  *
@@ -3245,9 +3287,11 @@ const transcodeControlKey = new Map<string, string>();
  * was ever cleanly stopped, so abandoned encoders piled up until Plex timed
  * them out.
  *
- * Rather than swap one guess for another, this tries ours and falls back to the
- * mapped Plex key on a 404, then remembers whichever answered. The log says
- * which, so the next person reading it doesn't have to guess either.
+ * Settled since: scripts/diagnose-direct-stream.mjs stops its own session both
+ * ways against a real server, and it is Plex's key that works — our id gets
+ * 404, the key gets 200, every time. So the key goes first now and our id is
+ * only the fallback, for the moment before the key is known. Whichever answers
+ * is still remembered and logged, in case some other Plex version disagrees.
  */
 async function transcodeControl(
   action: "ping" | "stop",
@@ -3259,7 +3303,7 @@ async function transcodeControl(
   const candidates = remembered
     ? [remembered]
     : plexKey && plexKey !== sessionId
-      ? [sessionId, plexKey]
+      ? [plexKey, sessionId]
       : [sessionId];
 
   let last = { ok: false, status: 0 };
@@ -3850,6 +3894,25 @@ async function subtitleIsDrawnByClient(
   }
 }
 
+/**
+ * The largest picture to ask Plex for — see transcodeFrame.
+ *
+ * Through buildMeta, so a start that already knows its version still costs
+ * Plex nothing when the title is cached. A version the list doesn't offer (a
+ * hidden 4K copy) or a lookup that fails gets the old fixed 1920x1080.
+ */
+async function outputFrame(ratingKey: string, mediaIndex: number): Promise<string> {
+  try {
+    const meta = await buildMeta(ratingKey);
+    const versions = meta?.versions as
+      | Array<{ mediaIndex?: number; width?: number | null; height?: number | null }>
+      | undefined;
+    return transcodeFrame(versions?.find((v) => v.mediaIndex === mediaIndex) ?? {});
+  } catch {
+    return transcodeFrame({});
+  }
+}
+
 // ─── HLS streaming ──────────────────────────────────────────────
 
 /**
@@ -3862,6 +3925,7 @@ router.get(
   async (req: Request, res: Response) => {
     const ratingKey = req.params.ratingKey as string;
     const sessionId = req.params.sessionId as string;
+    const userId = sessionUserId(req);
 
     if (!NUMERIC_RE.test(ratingKey)) {
       res.status(400).json({ error: "Invalid rating key" });
@@ -3946,7 +4010,10 @@ router.get(
     console.log("[HLS] Master manifest requested for ratingKey:", ratingKey, "session:", sessionId.substring(0, 8), offset ? `offset:${offset}s` : "");
 
     // Core manifest fetch logic — wrapped in a promise for in-flight deduplication
-    const fetchManifest = async (subtitleMode: "burn" | "none"): Promise<string> => {
+    const fetchManifest = async (
+      subtitleMode: "burn" | "none",
+      { videoResolution, hevc }: { videoResolution: string; hevc: boolean },
+    ): Promise<string> => {
       const params: Record<string, string> = {
         hasMDE: "1",
         path: `/library/metadata/${ratingKey}`,
@@ -3966,7 +4033,7 @@ router.get(
         // AAC passthrough is cheap and reliable.
         directStream: "0",
         directStreamAudio: "1",
-        videoResolution: "1920x1080",
+        videoResolution,
         videoBitrate: String(VIDEO_BITRATE_KBPS),
         peakBitrate: String(VIDEO_PEAK_BITRATE_KBPS),
         videoQuality: "99",
@@ -3989,24 +4056,25 @@ router.get(
       const hlsHeaders = {
         "X-Plex-Session-Identifier": sessionId,
         /**
-         * What we can play, in Plex's profile language.
+         * What we can play, in Plex's profile language: HLS in MPEG-TS, H.264
+         * (and HEVC, first, when the room can decode it — see HEVC_TRANSCODE),
+         * AAC audio. Plex encodes to the first codec listed.
          *
-         * The first directive is the transcode target: deliver HLS as h264 in
-         * MPEG-TS. The second says which audio codecs that target supports, and
-         * it has to be said separately — the `audioCodec` in the first names the
-         * target's default, not the profile's capability, so without the second
-         * Plex fell back to mp3 for anything it had to re-encode. Every stream
-         * in a session came out as 151 kbps stereo mp3 from an 8-channel Atmos
-         * source, which is the worst audio Plex knows how to make.
+         * `replace=true` is what makes Plex read any of it. Without it this
+         * target is added *behind* the HLS target Plex's own Chrome profile
+         * already has, and Plex takes the first match — so neither our codecs
+         * nor our audio were ever used. Every TrueHD, DTS or AC3 film came out
+         * as stereo mp3 (Deadpool, TrueHD 7.1: mp3 2.0), including after an
+         * extra add-transcode-target-audio-codec meant to fix exactly that, and
+         * offering HEVC changed nothing. scripts/diagnose-direct-stream.mjs puts
+         * each wording to a real server; this is the one that took.
          *
-         * AAC in MPEG-TS is the ordinary case for HLS and what hls.js expects;
-         * mp3 was the unusual choice here. Audio that is already playable is
-         * still copied untouched — see directStreamAudio.
+         * Audio that is already AAC is still copied untouched — see
+         * directStreamAudio.
          */
-        "X-Plex-Client-Profile-Extra": [
-          "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=h264&audioCodec=aac)",
-          "add-transcode-target-audio-codec(type=videoProfile&context=streaming&protocol=hls&audioCodec=aac)",
-        ].join("+"),
+        "X-Plex-Client-Profile-Extra":
+          "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts" +
+          `&videoCodec=${hevc ? "hevc,h264" : "h264"}&audioCodec=aac&replace=true)`,
         "X-Plex-Client-Identifier": OUR_CLIENT_ID,
         "X-Plex-Product": "Plex Discord Theater",
         "X-Plex-Platform": "Chrome",
@@ -4017,6 +4085,8 @@ router.get(
       // Without this, Plex can reject start.m3u8 with 400 if it has stale per-client
       // state from a previous session (even though the transcode itself was stopped).
       const decisionPath = "/video/:/transcode/universal/decision";
+      // Whatever an earlier start of this session was, this one is decided anew.
+      sessionVideoCodec.delete(sessionId);
       try {
         const decisionRes = await plexFetch(decisionPath, { ...params, transcodeSessionId: sessionId }, hlsHeaders);
         // Log the decision body — contains generalDecisionCode that tells us
@@ -4033,9 +4103,20 @@ router.get(
             (mc?.Metadata as Array<Record<string, unknown>> | undefined)?.[0]
               ?.Media as Array<Record<string, unknown>> | undefined
           )?.[0];
+          // The stream's own entry is the more specific of the two; the
+          // media-level field is the fallback.
+          const videoStream = (
+            (media?.Part as Array<Record<string, unknown>> | undefined)?.[0]
+              ?.Stream as Array<Record<string, unknown>> | undefined
+          )?.find((st) => st.streamType === 1);
+          const videoCodec = videoStream?.codec ?? media?.videoCodec;
+          if (typeof videoCodec === "string" && videoCodec) {
+            recordSessionVideoCodec(sessionId, videoCodec);
+          }
           console.log("[HLS] Decision:", decisionRes.status,
             "code:", mc?.generalDecisionCode, mc?.generalDecisionText,
-            "→", media?.videoCodec ?? "?", "+", media?.audioCodec ?? "?");
+            "→", videoCodec ?? "?", "+", media?.audioCodec ?? "?",
+            "| frame", videoResolution, hevc ? "| HEVC offered" : "");
         } catch {
           console.log("[HLS] Decision:", decisionRes.status, "(no body)");
         }
@@ -4045,6 +4126,10 @@ router.get(
         }
       } catch (err) {
         console.log("[HLS] Decision failed (non-fatal):", err);
+      }
+      // No readable answer: assume the worst of what was offered.
+      if (!sessionVideoCodec.has(sessionId)) {
+        recordSessionVideoCodec(sessionId, hevc ? "unknown" : "h264");
       }
 
       // Pass session as both a query param and header (matching plex-mpv-shim behavior)
@@ -4151,7 +4236,12 @@ router.get(
           ratingKey, subtitleStreamID, session: sessionId.substring(0, 8),
         });
       }
-      return fetchManifest(drawnByClient ? "none" : requestedSubtitleMode);
+      return fetchManifest(drawnByClient ? "none" : requestedSubtitleMode, {
+        videoResolution: await outputFrame(ratingKey, mediaIndex),
+        // Decided per start, so a room that has gained someone who can't
+        // decode HEVC gets H.264 from its next transcode on.
+        hevc: HEVC_TRANSCODE && userId !== null && roomPlaysHevc(userId),
+      });
     });
     manifestInFlight.set(sessionId, promise);
 

@@ -134,10 +134,16 @@ const OUT_DIR = path.resolve(
 const SECONDS_PER_SEGMENT = 3;
 const VIDEO_BITRATE_KBPS = process.env.VIDEO_BITRATE_KBPS || "12000";
 const VIDEO_PEAK_BITRATE_KBPS = process.env.VIDEO_PEAK_BITRATE_KBPS || "20000";
-const APP_PROFILE_EXTRA = [
-  "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=h264&audioCodec=aac)",
-  "add-transcode-target-audio-codec(type=videoProfile&context=streaming&protocol=hls&audioCodec=aac)",
-].join("+");
+/** The client profile the app sends, with the video codecs it offers. */
+const appProfile = (videoCodec = "h264") =>
+  "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts" +
+  `&videoCodec=${videoCodec}&audioCodec=aac&replace=true)`;
+/** media-versions.ts transcodeFrame: the file's own size when only just over 1080p. */
+function transcodeFrame(m) {
+  const w = m?.width ?? 0;
+  const h = m?.height ?? 0;
+  return w > 0 && h > 0 && w <= 2048 && h <= 1200 ? `${Math.max(1920, w)}x${Math.max(1080, h)}` : "1920x1080";
+}
 
 // A client identifier of its own, so Plex keeps this run's per-client state
 // apart from the app's ("plex-discord-theater").
@@ -411,42 +417,20 @@ function summariseDecision(body) {
   };
 }
 
-const target = (protocol, container, videoCodec) =>
-  `add-transcode-target(type=videoProfile&context=streaming&protocol=${protocol}&container=${container}&videoCodec=${videoCodec}&audioCodec=aac)`;
-const audioTarget = (protocol) =>
-  `add-transcode-target-audio-codec(type=videoProfile&context=streaming&protocol=${protocol}&audioCodec=aac)`;
-const replaceTarget = (videoCodec) =>
-  `add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts&videoCodec=${videoCodec}&audioCodec=aac&replace=true)`;
-const aacCodec = (protocol) =>
-  `add-transcode-target-codec(type=videoProfile&context=streaming&protocol=${protocol}&audioCodec=aac)`;
-const hevcCodec = (protocol) =>
-  `add-transcode-target-codec(type=videoProfile&context=streaming&protocol=${protocol}&videoCodec=hevc)`;
-
 async function decisionProbes(item) {
   heading("3. Decision probes (nothing is started)");
   out("What Plex says it would do for each client profile. 'copy' is Direct Stream.");
   const version = item.versions.find((v) => v.index === item.mediaIndex);
+  const frame = transcodeFrame(version);
+  // What the app sends now, then what Direct Stream would need. Earlier rounds
+  // (the wordings Plex ignored) are in this file's history.
   const probes = [
-    { name: "app today (re-encode, H.264)", directStream: false, extra: APP_PROFILE_EXTRA },
-    { name: "app today, but sized to the source instead of 1920x1080", directStream: false, extra: APP_PROFILE_EXTRA,
-      videoResolution: version?.width && version?.height ? `${version.width}x${version.height}` : "1920x1080" },
-    { name: "copy allowed, H.264-only client", directStream: true, extra: APP_PROFILE_EXTRA },
-    { name: "re-encode, client says HEVC first", directStream: false, extra: [target("hls", "mpegts", "hevc,h264"), audioTarget("hls")].join("+") },
-    { name: "re-encode, HEVC as an extra codec", directStream: false, extra: [APP_PROFILE_EXTRA, hevcCodec("hls")].join("+") },
-    { name: "copy allowed, client says HEVC first", directStream: true, extra: [target("hls", "mpegts", "hevc,h264"), audioTarget("hls")].join("+") },
-    { name: "copy allowed, client says H.264 first, HEVC too", directStream: true, extra: [target("hls", "mpegts", "h264,hevc"), audioTarget("hls")].join("+") },
-    { name: "HLS in fMP4, HEVC", directStream: false, extra: [target("hls", "mp4", "hevc,h264"), audioTarget("hls")].join("+") },
-    { name: "DASH (what Plex Web uses in Chrome), HEVC", directStream: false, protocol: "dash", extra: [target("dash", "mp4", "hevc,h264"), audioTarget("dash")].join("+") },
-    // Round two. add-transcode-target turned out to be ignored: Plex keeps the
-    // HLS target its own Chrome profile already has (H.264 + mp3), so neither
-    // the codec list nor the AAC in ours ever applied. These try replacing that
-    // target outright, and widening it in place.
-    { name: "replace Plex's target: H.264 + AAC", directStream: false, extra: replaceTarget("h264") },
-    { name: "replace Plex's target: re-encode to HEVC + AAC", directStream: false, extra: replaceTarget("hevc,h264") },
-    { name: "replace Plex's target: copy allowed, H.264 or HEVC", directStream: true, extra: replaceTarget("h264,hevc") },
-    { name: "copy allowed, HEVC as an extra codec", directStream: true, extra: [APP_PROFILE_EXTRA, hevcCodec("hls")].join("+") },
-    { name: "AAC as an extra codec on Plex's target", directStream: false, extra: [APP_PROFILE_EXTRA, aacCodec("hls")].join("+") },
-    { name: "copy allowed, bitrate cap raised to 60 Mbps", directStream: true, extra: replaceTarget("h264,hevc"), videoBitrate: 60000, peakBitrate: 80000 },
+    { name: "app today", directStream: false, extra: appProfile(), videoResolution: frame },
+    { name: "app with HEVC_TRANSCODE=1", directStream: false, extra: appProfile("hevc,h264"), videoResolution: frame },
+    { name: "copy allowed, H.264 or HEVC, old 1920x1080 box", directStream: true, extra: appProfile("h264,hevc") },
+    { name: "copy allowed, H.264 or HEVC, sized to the file", directStream: true, extra: appProfile("h264,hevc"), videoResolution: frame },
+    { name: "copy allowed, sized to the file, 60 Mbps cap", directStream: true, extra: appProfile("h264,hevc"), videoResolution: frame,
+      videoBitrate: 60000, peakBitrate: 80000 },
   ];
   if (args["profile-extra"]) {
     probes.push({ name: "--profile-extra", directStream: MODE === "copy", extra: args["profile-extra"] });
@@ -629,13 +613,15 @@ async function walkSegments(item) {
 
   const sessionId = randomUUID();
   live.sessionId = sessionId;
-  const params = { ...sessionParams(item.mediaIndex, { directStream: MODE === "copy", offset: FROM }), transcodeSessionId: sessionId };
+  const version = item.versions.find((v) => v.index === item.mediaIndex);
+  const params = {
+    ...sessionParams(item.mediaIndex, { directStream: MODE === "copy", offset: FROM, videoResolution: transcodeFrame(version) }),
+    transcodeSessionId: sessionId,
+  };
   // Copy mode accepts HEVC too, or an HEVC source would be re-encoded and there
   // would be nothing copied to look at. Whether the room can decode it is a
   // separate question; this is about what Plex's segments look like.
-  const profileExtra = MODE === "copy"
-    ? [target("hls", "mpegts", "h264,hevc"), audioTarget("hls")].join("+")
-    : APP_PROFILE_EXTRA;
+  const profileExtra = appProfile(MODE === "copy" ? "h264,hevc" : "h264");
   const headers = plexHeaders(sessionId, { "X-Plex-Client-Profile-Extra": profileExtra });
   out(`Client profile: ${profileExtra}`);
 

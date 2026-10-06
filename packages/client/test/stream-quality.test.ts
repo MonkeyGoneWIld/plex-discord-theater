@@ -67,6 +67,8 @@ check("on a 12 Mbps re-encode, the next one down: 10 Mbps, as Plex offers", lowe
 check("the lowest when even that is more than the connection has carried",
   lowerQualityFor(12000, 2_000_000), 4000);
 check("nothing when already at the lowest", lowerQualityFor(4000, 0), null);
+check("not a level barely under the file: 10 Mbps for a 12.5 Mbps one, not 12",
+  lowerQualityFor(12559, 44_000_000), 10000);
 
 console.log("\n— naming them —");
 check("no setting is the original", qualityLabel(0), "Original");

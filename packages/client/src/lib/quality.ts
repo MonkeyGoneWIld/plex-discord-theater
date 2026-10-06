@@ -130,9 +130,12 @@ export function qualityLabel(kbps: number): string {
  * highest one under three quarters of what their connection has been measured
  * at — the lowest, if even that is more — or, with nothing measured, simply the
  * next one down. Null when there is nothing lower.
+ *
+ * "Lower" means at least a tenth lower: 12 Mbps offered for a 12.5 Mbps file
+ * is a re-encode for nothing, and was being offered.
  */
 export function lowerQualityFor(nowKbps: number, measuredBps: number): number | null {
-  const below = QUALITY_LEVELS_KBPS.filter((l) => l < nowKbps);
+  const below = QUALITY_LEVELS_KBPS.filter((l) => l <= nowKbps * 0.9);
   if (below.length === 0) return null;
   if (!(measuredBps > 0)) return below[0];
   return below.find((l) => l * 1000 <= measuredBps * 0.75) ?? below[below.length - 1];

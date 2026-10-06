@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useLayoutEffect, useRef, lazy, Suspense } from "react";
 import { useDiscord } from "./hooks/useDiscord";
+import { useFittedTrail } from "./lib/useFittedTrail";
 import { useSync, roomPositionNow } from "./hooks/useSync";
 import { Library } from "./components/Library";
 import { MovieDetail } from "./components/MovieDetail";
@@ -896,8 +897,15 @@ export function App() {
    *
    * crumbs[0] is always the library, and always clickable here: the header shows
    * the logo instead of any trail when the library is the view on screen.
+   *
+   * Anywhere else the trail is as much of itself as fits, and never a label cut
+   * short: "Ho… › The Apothecary Diarie… › Seaso…" was all three crumbs and
+   * none of them readable. Each step leaves one out — the page's own crumb
+   * first, since its title is the page's heading anyway, then the ancestors
+   * furthest from it — down to Home alone, as on an upright phone.
    */
-  const shownCrumbs = phonePortrait ? crumbs.slice(0, 1) : crumbs;
+  const fittedCrumbs = useFittedTrail(crumbs, crumbs.map((c) => c.label).join("\u203a"));
+  const shownCrumbs = phonePortrait ? crumbs.slice(0, 1) : fittedCrumbs.shown;
 
   const activePlayerView: PlayerView | null = view.kind === "player" ? view : minimizedPlayer;
   const handleActivePlayerBack = useCallback(() => {
@@ -941,7 +949,7 @@ export function App() {
             /* Breadcrumb trail — every ancestor is clickable. Home is a full
                reset (goHome); other crumbs jump back within the stack, keeping
                the library and any saved scroll positions intact. */
-            <nav style={styles.breadcrumbs}>
+            <nav ref={fittedCrumbs.ref} style={styles.breadcrumbs}>
               {shownCrumbs.map((c, i) => (
                 <span key={i} style={styles.crumbWrap}>
                   {i > 0 && <span style={styles.crumbSep}>&rsaquo;</span>}
@@ -1376,7 +1384,9 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     gap: "2px",
-    minWidth: 0,
+    // Whole or not at all: a crumb that doesn't fit is left out (see
+    // crumbSteps), never squeezed down to a stub.
+    flexShrink: 0,
   },
   crumbSep: {
     color: "#555",
@@ -1390,15 +1400,10 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "6px",
     fontSize: "14px",
     fontWeight: 600,
-    maxWidth: "220px",
-    minWidth: 0,
     fontFamily: "inherit",
   },
   crumbText: {
     whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    minWidth: 0,
   },
   crumbLink: {
     padding: "6px 10px",

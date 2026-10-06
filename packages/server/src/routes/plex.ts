@@ -2827,11 +2827,18 @@ function subtitlePrefetchOn(): boolean {
   return process.env.SUBTITLE_PREFETCH !== "0";
 }
 
-/** How long after a stream starts its subtitles are read ahead: long enough
- *  for the player's own ask for the one it draws to arrive first. */
+/**
+ * How long after a stream starts its other subtitles are read ahead.
+ *
+ * Long enough for the player's own ask for the one it draws to arrive first,
+ * and for the stream to be well under way: each read is Plex going through the
+ * whole file, and two of those in the first seconds of an episode slowed Plex
+ * making its first segments — The Apothecary Diaries, 2s waits on segments
+ * that otherwise take a tenth of that.
+ */
 function subtitlePrefetchDelayMs(): number {
   const n = Number(process.env.SUBTITLE_PREFETCH_DELAY_MS);
-  return Number.isFinite(n) && n >= 0 ? n : 5_000;
+  return Number.isFinite(n) && n >= 0 ? n : 30_000;
 }
 
 /**
@@ -3041,10 +3048,13 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
     const mediaIndex = Number.isInteger(requested) && requested >= 0 ? requested : await defaultMediaIndex(ratingKey);
     // Whatever this one is, its title's others are read next, so that
     // switching to one of them finds it ready. Behind this one: it is begun
-    // below, and the queue waits for reads already going.
+    // below, and the queue waits for reads already going. Not at once, though:
+    // this is asked as a stream starts, and the stream comes first.
     const readTheRest = () => {
-      void prefetchSubtitles(ratingKey, mediaIndex, Number(streamId)).catch((err) =>
-        console.warn("[Subtitles] couldn't read ahead:", err));
+      setTimeout(() => {
+        void prefetchSubtitles(ratingKey, mediaIndex, Number(streamId)).catch((err) =>
+          console.warn("[Subtitles] couldn't read ahead:", err));
+      }, subtitlePrefetchDelayMs()).unref?.();
     };
     const track = await subtitleTrackOf(ratingKey, mediaIndex, Number(streamId));
     if (track?.external && track.sidecar === false) {

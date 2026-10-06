@@ -2796,7 +2796,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // the two or it makes no sense — keep it ≥ high-demand.
                 httpDownloadTimeWindow: 150,
                 simultaneousP2PDownloads: 3,
-                simultaneousHttpDownloads: 2,
+                // One at a time, as hls.js on its own would. Two in parallel
+                // split the bandwidth between the segment playback is waiting
+                // for and one further ahead, and with a second viewer doing
+                // the same that was four downloads sharing the bot's upload.
+                // On a 12.5 Mbps file whose segments reach 25 MB, the segment
+                // a viewer was stopped on took 30–40s to arrive while later
+                // ones kept landing beside it — then everything played at
+                // once. Sequential, the one wanted next always has this
+                // viewer's whole share; P2P still fills from a peer meanwhile.
+                simultaneousHttpDownloads: 1,
                 rtcConfig: {
                   // Multiple STUN servers improve NAT traversal odds — every
                   // peer pair that fails to connect falls back to HTTP, costing

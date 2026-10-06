@@ -42,6 +42,7 @@ import {
 import { findIndexedLibraryItem } from "../services/library-index.js";
 import { playedThreshold } from "../services/played-state.js";
 import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
+import { markOriginalAudio } from "../services/original-language.js";
 
 const router = Router();
 
@@ -1108,9 +1109,10 @@ function rememberDuration(ratingKey: string, payload: Record<string, unknown>): 
  * still the answer if that rebuild fails. 2 added originallyAvailableAt; 3
  * added each version's width and height; 4 made embedded text subtitles
  * drawable and added `sidecar`; 5 added each version's bitrate; 6 its video
- * codec and bit depth; 7 its file size; 8 each audio track's default flag.
+ * codec and bit depth; 7 its file size; 8 each audio track's default flag; 9
+ * which audio tracks are in the title's original language.
  */
-export const META_PAYLOAD_VERSION = 8;
+export const META_PAYLOAD_VERSION = 9;
 
 const metaCache = new LruMap<string, { payload: Record<string, unknown>; at: number }>(2_000);
 const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -1238,6 +1240,9 @@ async function buildMetaUncached(ratingKey: string): Promise<Record<string, unkn
     const tmdbId = await resolveTmdbId(m);
     // IMDb id (when Plex stored one) — the preferred key for external ratings.
     const imdbId = imdbIdFromGuids(m.Guid);
+    // The tracks the player's "Original language" means: see original-language.
+    const originalLanguage = await originalLanguageOf(m, tmdbId);
+    for (const v of versions) markOriginalAudio(v.audioTracks, originalLanguage);
 
     return {
       payloadVersion: META_PAYLOAD_VERSION,
@@ -1415,6 +1420,51 @@ async function tmdbMovieCollection(tmdbId: number): Promise<{ id: number; name: 
   const coll = data?.belongs_to_collection ?? null;
   tmdbMovieCollectionCache.set(tmdbId, coll);
   return coll;
+}
+
+/**
+ * A film's or show's original language, as TMDB has it ("ja", "en"). Cached;
+ * a request that failed outright isn't, so TMDB being down doesn't stick.
+ */
+const tmdbOriginalLanguageCache = new LruMap<string, string | null>(5_000);
+async function tmdbOriginalLanguage(kind: "movie" | "tv", tmdbId: number): Promise<string | null> {
+  const key = `${kind}:${tmdbId}`;
+  if (tmdbOriginalLanguageCache.has(key)) return tmdbOriginalLanguageCache.get(key)!;
+  const data = await tmdbGet<{ original_language?: string }>(`/${kind}/${tmdbId}`);
+  if (!data) return null;
+  const lang = typeof data.original_language === "string" && /^[a-z]{2,3}$/.test(data.original_language)
+    ? data.original_language
+    : null;
+  tmdbOriginalLanguageCache.set(key, lang);
+  return lang;
+}
+
+/** An episode's show's original language, by the show's rating key. */
+const showOriginalLanguageCache = new LruMap<string, string | null>(5_000);
+
+/**
+ * The language a title was made in: a film's own, an episode's show's. Null
+ * without TMDB, or when it has no TMDB id — the player then goes by the file.
+ */
+async function originalLanguageOf(m: PlexMetadataItem, tmdbId: number | null): Promise<string | null> {
+  try {
+    if (m.type === "movie") return tmdbId != null ? await tmdbOriginalLanguage("movie", tmdbId) : null;
+    if (m.type !== "episode" || !m.grandparentRatingKey) return null;
+    const showKey = String(m.grandparentRatingKey);
+    if (showOriginalLanguageCache.has(showKey)) return showOriginalLanguageCache.get(showKey)!;
+    // An episode's own TMDB id is the episode's; the language is the show's.
+    const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+      `/library/metadata/${showKey}`,
+      { includeGuids: "1" },
+    );
+    const show = data.MediaContainer.Metadata?.[0];
+    const showTmdbId = show ? await resolveTmdbId(show) : null;
+    const lang = showTmdbId != null ? await tmdbOriginalLanguage("tv", showTmdbId) : null;
+    if (lang != null || showTmdbId == null) showOriginalLanguageCache.set(showKey, lang);
+    return lang;
+  } catch {
+    return null;
+  }
 }
 
 /** Every film in a TMDB collection, or null on failure. Cached, misses included. */

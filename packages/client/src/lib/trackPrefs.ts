@@ -421,19 +421,25 @@ export function matchAudioTrack(
 }
 
 /**
- * The audio a title was made in, as near as a file says.
+ * The audio a title was made in.
  *
- * Plex has no field for a title's original language, so this goes by the file:
- * the track it marks as its default, which a release makes the original almost
- * always — unless that track calls itself a dub. Failing a default, the first
- * track, which is where a release puts the original when it doesn't say.
- * Commentary is never it.
+ * The server marks the tracks in the title's original language, from TMDB —
+ * the one marked default as well, if there are two. Without that, the file is
+ * all there is to go by: the track it marks as its default, unless that calls
+ * itself a dub, then the first track. A file's default is often a dub, so the
+ * mark is what makes this right; the rest is a fallback. Commentary is never
+ * it.
  */
 export function originalAudioTrack(tracks: StreamTrack[]): StreamTrack | null {
   const feature = tracks.filter((t) => !isCommentary(t.title));
   const pool = feature.length ? feature : tracks;
   const dub = (t: StreamTrack) => /\bdub(bed)?\b/i.test(t.title);
-  return pool.find((t) => t.default && !dub(t)) ?? pool.find((t) => !dub(t)) ?? pool[0] ?? null;
+  return pool.find((t) => t.original && t.default)
+    ?? pool.find((t) => t.original)
+    ?? pool.find((t) => t.default && !dub(t))
+    ?? pool.find((t) => !dub(t))
+    ?? pool[0]
+    ?? null;
 }
 
 /**

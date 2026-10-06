@@ -161,6 +161,8 @@ console.log("\n— original language —");
     prefs.matchAudioTrack([t(1, "English (AC3 5.1)", "eng"), t(2, "Japanese (AAC)", "jpn", { selected: true })] as never, pref)?.id, 1);
   check("unless the default calls itself a dub",
     prefs.matchAudioTrack([t(1, "English Dub (AC3)", "eng", { default: true }), t(2, "Japanese (AAC)", "jpn")] as never, pref)?.id, 2);
+  check("the track in the title's original language, when the server knows it, over the file's default",
+    prefs.matchAudioTrack([t(1, "English 2.0 FLAC", "eng", { default: true }), t(2, "Japanese 2.0 FLAC", "jpn", { original: true })] as never, pref)?.id, 2);
   check("and never a commentary",
     prefs.matchAudioTrack([t(1, "Director's Commentary", "eng", { default: true }), t(2, "English (AC3)", "eng")] as never, pref)?.id, 2);
   prefs.saveAudioPref(t(1, "English (AC3)", "eng") as never);

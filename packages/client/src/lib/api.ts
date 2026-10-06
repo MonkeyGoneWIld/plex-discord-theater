@@ -278,6 +278,11 @@ export interface StreamTrack {
    */
   default?: boolean;
   /**
+   * Audio only: in the language the title was made in, as TMDB has it — what
+   * "Original language" picks. Absent when that isn't known.
+   */
+  original?: boolean;
+  /**
    * Subtitles only: this one is text — a sidecar file, or text inside the media
    * file that Plex reads out — so the player draws it itself instead of Plex
    * burning it into the picture. Everyone drawing their own shares one stream.

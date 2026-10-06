@@ -1554,15 +1554,7 @@ export function Controls({
       )}
 
       {/* Top bar: back + title */}
-      <div style={styles.topBar} data-scrim="">
-        <button onClick={onBack} className="btn" style={styles.backBtn}>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style={{ marginRight: 4 }}>
-            <path d="M10 12L6 8L10 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-          Back
-        </button>
-        <span style={styles.title}>{title}</span>
-      </div>
+      <PlayerTopBar title={title} onBack={onBack} />
 
       {/* Bottom bar */}
       <div
@@ -1921,6 +1913,28 @@ export function Controls({
         </div>
       </div>
     </>
+  );
+}
+
+/**
+ * Back and the title, as the top of the controls has them.
+ *
+ * Also drawn by the player over the screens that cover the controls while a
+ * stream is rebuilt — switching quality, audio or subtitles, reconnecting — in
+ * the same place, so it reads as the controls' own top staying put. Those can
+ * take a while, and without it there was no way out but to wait.
+ */
+export function PlayerTopBar({ title, onBack }: { title: string; onBack: () => void }) {
+  return (
+    <div style={styles.topBar} data-scrim="">
+      <button onClick={onBack} className="btn" style={styles.backBtn}>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style={{ marginRight: 4 }}>
+          <path d="M10 12L6 8L10 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+        Back
+      </button>
+      <span style={styles.title}>{title}</span>
+    </div>
   );
 }
 

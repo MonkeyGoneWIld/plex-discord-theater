@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback, type CSSProperties, type Mous
 import { createPortal } from "react-dom";
 import Hls from "hls.js";
 import { HlsJsP2PEngine } from "p2p-media-loader-hlsjs";
-import { Controls, type ControlsHandle } from "./Controls";
+import { Controls, PlayerTopBar, type ControlsHandle } from "./Controls";
 import { StatsOverlay } from "./StatsOverlay";
 import type { P2PStats } from "./StatsOverlay";
 import { TrackSwitcher } from "./TrackSwitcher";
@@ -5593,6 +5593,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               style={{ ...styles.trackSwitchCanvas, ...zoomPictureStyle }}
             />
           )}
+          <div style={styles.coverTop}>
+            <PlayerTopBar title={displayTitle} onBack={handleBack} />
+          </div>
           <div style={styles.trackSwitchMessage}>
             <div style={styles.bufferingSpinner} />
             <span style={styles.bufferingText}>
@@ -5619,6 +5622,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               style={{ ...styles.trackSwitchCanvas, ...zoomPictureStyle }}
             />
           )}
+          <div style={styles.coverTop}>
+            <PlayerTopBar title={displayTitle} onBack={handleBack} />
+          </div>
           <div style={styles.trackSwitchMessage}>
             <div style={styles.bufferingSpinner} />
             <span style={styles.bufferingText}>Stream interrupted — Reconnecting...</span>
@@ -6242,6 +6248,14 @@ const styles: Record<string, React.CSSProperties> = {
     height: "100%",
     objectFit: "cover",
     filter: "brightness(0.5)",
+  },
+  /** Back, over a cover that hides the controls — see PlayerTopBar. */
+  coverTop: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 2,
   },
   trackSwitchMessage: {
     position: "relative",

@@ -14,7 +14,7 @@ import {
   subtitlesOnlyForForeignAudio,
 } from "../lib/trackPrefs";
 import { chooseVolume as rememberVolume, loadVolume } from "../lib/volume";
-import { subtitleTextStyle } from "./SubtitleLayer";
+import { SUBTITLE_FONT_SCALE, subtitleBottomPercent, subtitleTextStyle } from "./SubtitleLayer";
 import { SubtitleLookControls } from "./SubtitleLook";
 
 /**
@@ -155,7 +155,9 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const offHere = !!(subtitle?.off && subtitle.pinned);
   const boosted = volume > 100;
 
-  const sample = subtitleTextStyle(look, 22);
+  // Sized and placed as on a picture this size, so Size and Position show
+  // here as they will over a film. (cqh: a hundredth of the preview's height.)
+  const sample = subtitleTextStyle(look, `max(11px, ${(SUBTITLE_FONT_SCALE * 100).toFixed(1)}cqh)`);
 
   return (
     <div style={styles.backdrop} onMouseDown={onClose}>
@@ -252,7 +254,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
           {/* A line in the chosen look over something like a picture, since
               there is no film here to judge it against. */}
           <div style={styles.preview} aria-hidden="true">
-            <div style={{ ...styles.sampleLine, ...sample }}>
+            <div style={{ ...styles.sampleLine, ...sample, bottom: `${subtitleBottomPercent(look.raise)}%` }}>
               {look.background === "box"
                 ? <span style={styles.sampleBox}>This is how subtitles will look.</span>
                 : "This is how subtitles will look."}
@@ -381,20 +383,20 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "inherit",
   },
   selectOff: { opacity: 0.45, cursor: "not-allowed" },
+  // A widescreen picture in miniature, for the sample line to sit on.
   preview: {
-    height: "110px",
+    position: "relative",
+    width: "min(100%, 420px)",
+    aspectRatio: "16 / 9",
+    containerType: "size",
+    margin: "0 auto 14px",
     borderRadius: "10px",
-    marginBottom: "14px",
-    display: "flex",
-    alignItems: "flex-end",
-    justifyContent: "center",
-    padding: "0 12px 14px",
     // Bright in places and dark in others, as a picture is: an outline has to
     // read against both.
     background: "linear-gradient(120deg, #2b4a5a 0%, #8a9a6a 45%, #e8dcc0 62%, #3a3226 100%)",
     overflow: "hidden",
   },
-  sampleLine: { textAlign: "center", lineHeight: 1.22 },
+  sampleLine: { position: "absolute", left: "5%", right: "5%", textAlign: "center", lineHeight: 1.22 },
   sampleBox: {
     background: "rgba(0,0,0,0.72)",
     padding: "0.05em 0.35em",

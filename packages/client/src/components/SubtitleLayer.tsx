@@ -39,6 +39,16 @@ import { SUBTITLE_COLORS, SUBTITLE_FONTS, useSubtitleStyle, type SubtitleStyle }
 const FONT_SCALE = 0.062;
 /** And how far it sits above the bottom of the picture, in the same units. */
 const BOTTOM_SCALE = 0.055;
+
+/** The text size, as a share of the picture's height — for Settings' preview,
+ *  a picture in miniature. */
+export const SUBTITLE_FONT_SCALE = FONT_SCALE;
+
+/** How far up the picture a bottom line sits, in percent of its height, with
+ *  the viewer's raise. */
+export function subtitleBottomPercent(raise: number): number {
+  return BOTTOM_SCALE * 100 + raise;
+}
 /** How often to ask again for a subtitle Plex is still reading out of the file. */
 const STILL_READING_POLL_MS = 4_000;
 /** Bounds for absurd geometry — a sliver of a window, or a wall-sized display. */
@@ -282,8 +292,8 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
     ? Math.min(MAX_FONT_PX, Math.max(MIN_FONT_PX, box.height * FONT_SCALE))
     : `clamp(${MIN_FONT_PX}px, ${(FONT_SCALE * 100).toFixed(1)}vh, ${MAX_FONT_PX}px)`;
   const edge = (raise: number) => box
-    ? box.bottomInset + box.height * (BOTTOM_SCALE + raise / 100)
-    : `${(BOTTOM_SCALE * 100 + raise).toFixed(1)}%`;
+    ? box.bottomInset + box.height * subtitleBottomPercent(raise) / 100
+    : `${subtitleBottomPercent(raise).toFixed(1)}%`;
   const bottom = edge(style.raise);
 
   if (shown.length === 0) {

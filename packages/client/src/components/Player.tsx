@@ -284,27 +284,32 @@ const HEALTH_SAMPLE_MS = 10_000;
 const BACK_BUFFER_S = 30;
 const FORWARD_BUFFER_FLUSH_S = 120;
 /**
- * How far ahead the P2P engine fetches from the bot itself, as opposed to
- * waiting for another player to share a segment.
+ * How far ahead a player fetches segments from the bot itself, rather than
+ * leave them to be shared.
  *
- * Normally everything the buffer can hold (see the hlsConfig note on
- * highDemandTimeWindow). Only once this player's own buffer is full, with
- * another player connected, does it leave the far end of the buffer to
- * sharing: past SHARED_FETCH_AHEAD_S a segment is then fetched once, by
- * whichever player gets to it first, and the others take it from that player.
- * The moment the buffer falls below SHARE_UNTIL_BUFFER_S — the other player is
- * slow to pass segments on, or a firewall lets them connect but not much
- * through — it goes back to fetching everything itself until full again. So
- * sharing can save the bot's upload, but never costs a viewer their buffer.
+ * Alone, everything the buffer can hold (see the hlsConfig note on
+ * highDemandTimeWindow). With another player connected, from the first
+ * segment on, only the next SHARED_FETCH_AHEAD_S: past that, the players split
+ * the fetching — each segment fetched from the bot once, by whichever player
+ * gets to it first — and pass segments to each other. Two players starting
+ * together each fetch half of what they need, which is what speeds up the
+ * start and a heavy stream, not only someone joining late.
+ *
+ * Sharing is dropped for this player the moment it lets them down — segments
+ * from another player failing (P2P_FAILURES_TO_STOP), arriving slower than
+ * they play, or playback stalling while waiting on one — and they fetch
+ * everything themselves for SHARE_COOLDOWN_S, doubling each time, before it is
+ * tried again. A player whose connection can't reach the others never sees a
+ * peer and never shares. So a firewall costs a viewer nothing more than a
+ * moment, once, rather than their buffer.
  */
 const SOLO_FETCH_AHEAD_S = 150;
-const SHARED_FETCH_AHEAD_S = 60;
-/** Buffered this far ahead, with a peer connected, it starts sharing. */
-const SHARE_FROM_BUFFER_S = 100;
-/** Below this it stops sharing and fetches everything itself again. */
-const SHARE_UNTIL_BUFFER_S = 80;
-/** How often the buffer is checked for that. */
-const SHARE_CHECK_MS = 2_000;
+const SHARED_FETCH_AHEAD_S = 20;
+const SHARE_CHECK_MS = 1_000;
+const P2P_FAILURES_TO_STOP = 3;
+const P2P_FAILURE_WINDOW_MS = 60_000;
+const SHARE_COOLDOWN_S = 60;
+const SHARE_COOLDOWN_MAX_S = 600;
 // Don't bother flushing slivers — avoids issuing a remove on every tick for a
 // second or two of overshoot.
 const BUFFER_TRIM_SLACK_S = 10;
@@ -2811,13 +2816,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // viewer pulled the whole stream from the bot — two viewers of a
                 // 12.5 Mbps film stalled on the bot's upload. So this is only the
                 // window while alone: with a peer connected it narrows to
-                // SHARED_FETCH_AHEAD_S, but only while this player's own buffer
-                // is full (see shareWhileFull below), and widens again the
-                // moment it isn't — so a peer that is slow or half-blocked can
-                // never leave a viewer short. Nor can it hang the way the edge
-                // case above did: with peers the engine also fetches segments
-                // nobody has yet at random over HTTP, the one hls.js is waiting
-                // on among the first it considers.
+                // SHARED_FETCH_AHEAD_S, and widens again for a while the moment
+                // sharing lets this player down (see the sharing block below) —
+                // so a peer that is slow or half-blocked can't leave a viewer
+                // short. Nor can it hang the way the edge case above did: with
+                // peers the engine also fetches segments nobody has yet at
+                // random over HTTP, the one hls.js is waiting on among the
+                // first it considers.
                 highDemandTimeWindow: SOLO_FETCH_AHEAD_S,
                 p2pDownloadTimeWindow: 150,
                 // Was 6, i.e. inverted below high-demand (library default is 3000).
@@ -2910,25 +2915,42 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 hls.p2pEngine.addEventListener("onChunkUploaded", (bytesLength) => {
                   stats.uploadBytes += bytesLength;
                 });
-                // Leave the far end of the buffer to sharing only while the
-                // buffer is full and another player is connected; otherwise
-                // fetch everything from the bot, as when watching alone. See
-                // SHARED_FETCH_AHEAD_S.
+                // ---- Sharing with other players: see SHARED_FETCH_AHEAD_S. ----
                 let sharing = false;
-                const shareWhileFull = () => {
-                  const video = videoRef.current;
-                  const ahead = video ? bufferAheadSeconds(video) : 0;
-                  const want = stats.peers.size > 0
-                    && ahead >= (sharing ? SHARE_UNTIL_BUFFER_S : SHARE_FROM_BUFFER_S);
+                let soloUntil = 0;
+                let strikes = 0;
+                const p2pFailures: number[] = [];
+                // When each download from another player started, by segment,
+                // to see whether it came as fast as it plays.
+                const p2pStarted = new Map<string, { at: number; segS: number }>();
+                // What this player last started fetching for each stretch of the
+                // picture, and from where — to tell a stall that was waiting on
+                // the bot from one that was waiting on another player.
+                const lastFetch: Array<{ from: number; to: number; source: string }> = [];
+                const setSharing = (want: boolean, why: string, extra: Record<string, unknown> = {}) => {
                   if (want === sharing) return;
                   sharing = want;
                   hls.p2pEngine.applyDynamicConfig({
                     core: { highDemandTimeWindow: want ? SHARED_FETCH_AHEAD_S : SOLO_FETCH_AHEAD_S },
                   });
-                  logEvent("P2P", want ? "buffer full, sharing the rest with other players" : "fetching everything from the bot", {
-                    peers: stats.peers.size,
-                    bufAheadS: Math.round(ahead),
+                  logEvent("P2P", want ? "sharing segments with other players" : "fetching everything from the bot", {
+                    why, peers: stats.peers.size, ...extra,
                   });
+                };
+                // Sharing let this player down: fetch everything from the bot
+                // for a while, longer each time.
+                const stopSharing = (why: string, extra: Record<string, unknown> = {}) => {
+                  if (!sharing) return;
+                  strikes++;
+                  const forS = Math.min(SHARE_COOLDOWN_MAX_S, SHARE_COOLDOWN_S * 2 ** (strikes - 1));
+                  soloUntil = Date.now() + forS * 1000;
+                  setSharing(false, why, { ...extra, forS });
+                };
+                const reviewSharing = () => {
+                  if (stats.peers.size === 0) setSharing(false, "no other players");
+                  else if (Date.now() >= soloUntil) {
+                    setSharing(true, strikes ? "trying again" : "another player connected");
+                  }
                 };
                 const shareCheck = window.setInterval(() => {
                   // This stream torn down or replaced: stop checking for it.
@@ -2936,16 +2958,65 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                     window.clearInterval(shareCheck);
                     return;
                   }
-                  shareWhileFull();
+                  reviewSharing();
+                  // Stalled — playing, not seeking, nothing left to play —
+                  // while waiting on a stretch this player didn't fetch from the
+                  // bot itself: another player was meant to.
+                  const video = videoRef.current;
+                  if (!sharing || !video || video.paused || video.ended || video.seeking || video.played.length === 0) return;
+                  if (video.readyState >= 3 || bufferAheadSeconds(video) > 0.5) return;
+                  const needAt = video.currentTime + bufferAheadSeconds(video);
+                  const fetch = [...lastFetch].reverse().find((f) => f.from <= needAt + 0.1 && needAt < f.to);
+                  if (fetch?.source !== "http") {
+                    stopSharing("playback stalled waiting on another player", {
+                      posS: Math.round(video.currentTime), source: fetch?.source ?? "none",
+                    });
+                  }
                 }, SHARE_CHECK_MS);
+                hls.p2pEngine.addEventListener("onSegmentStart", ({ segment, downloadSource }) => {
+                  lastFetch.push({ from: segment.startTime, to: segment.endTime, source: downloadSource });
+                  if (lastFetch.length > 40) lastFetch.shift();
+                  if (downloadSource === "p2p") {
+                    p2pStarted.set(segment.url, { at: Date.now(), segS: segment.endTime - segment.startTime });
+                  }
+                });
+                hls.p2pEngine.addEventListener("onSegmentLoaded", ({ segmentUrl, downloadSource }) => {
+                  const started = p2pStarted.get(segmentUrl);
+                  p2pStarted.delete(segmentUrl);
+                  if (downloadSource !== "p2p" || !started) return;
+                  // Much slower than it plays — twice its length, since up to
+                  // three come at once — and sharing can't keep this player
+                  // going.
+                  const tookS = (Date.now() - started.at) / 1000;
+                  if (tookS > 5 && tookS > started.segS * 2) {
+                    stopSharing("another player sent a segment much slower than it plays", {
+                      tookS: Math.round(tookS), segmentS: Math.round(started.segS),
+                    });
+                  }
+                });
+                hls.p2pEngine.addEventListener("onSegmentAbort", ({ segment }) => {
+                  p2pStarted.delete(segment.url);
+                });
+                hls.p2pEngine.addEventListener("onSegmentError", ({ segment, downloadSource, error }) => {
+                  p2pStarted.delete(segment.url);
+                  if (downloadSource !== "p2p" || (error as { type?: string } | null)?.type === "abort") return;
+                  const now = Date.now();
+                  p2pFailures.push(now);
+                  while (p2pFailures.length && now - p2pFailures[0] > P2P_FAILURE_WINDOW_MS) p2pFailures.shift();
+                  if (p2pFailures.length >= P2P_FAILURES_TO_STOP) {
+                    p2pFailures.length = 0;
+                    stopSharing("segments from another player keep failing", {
+                      error: (error as { type?: string } | null)?.type ?? "unknown",
+                    });
+                  }
+                });
                 hls.p2pEngine.addEventListener("onPeerConnect", ({ peerId }) => {
                   stats.peers.add(peerId);
+                  reviewSharing();
                 });
                 hls.p2pEngine.addEventListener("onPeerClose", ({ peerId }) => {
                   stats.peers.delete(peerId);
-                  // The last one gone: back to fetching everything at once,
-                  // not at the next check.
-                  shareWhileFull();
+                  reviewSharing();
                 });
                 hls.p2pEngine.addEventListener("onTrackerError", ({ error }) => {
                   console.error("[P2P] Tracker error:", error);

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback, type CSSProperties, type Mous
 import { createPortal } from "react-dom";
 import Hls from "hls.js";
 import { HlsJsP2PEngine } from "p2p-media-loader-hlsjs";
+import { installSharing, setSharing as setLoaderSharing } from "../lib/p2pSharing";
 import { Controls, PlayerTopBar, type ControlsHandle } from "./Controls";
 import { StatsOverlay } from "./StatsOverlay";
 import type { P2PStats } from "./StatsOverlay";
@@ -284,27 +285,18 @@ const HEALTH_SAMPLE_MS = 10_000;
 const BACK_BUFFER_S = 30;
 const FORWARD_BUFFER_FLUSH_S = 120;
 /**
- * How far ahead a player fetches segments from the bot itself, rather than
- * leave them to be shared.
+ * Players dividing a stream between them: see lib/p2pSharing. Every player
+ * keeps buffering as far ahead as it would alone; what changes is who fetches
+ * what — a segment another player has, or is fetching, is left to them unless
+ * it is about to play.
  *
- * Alone, everything the buffer can hold (see the hlsConfig note on
- * highDemandTimeWindow). With another player connected, from the first
- * segment on, only the next SHARED_FETCH_AHEAD_S: past that, the players split
- * the fetching — each segment fetched from the bot once, by whichever player
- * gets to it first — and pass segments to each other. Two players starting
- * together each fetch half of what they need, which is what speeds up the
- * start and a heavy stream, not only someone joining late.
- *
- * Sharing is dropped for this player the moment it lets them down — segments
- * from another player failing (P2P_FAILURES_TO_STOP), arriving slower than
+ * Dropped for this player the moment it lets them down — segments from
+ * another player failing (P2P_FAILURES_TO_STOP), arriving far slower than
  * they play, or playback stalling while waiting on one — and they fetch
  * everything themselves for SHARE_COOLDOWN_S, doubling each time, before it is
  * tried again. A player whose connection can't reach the others never sees a
- * peer and never shares. So a firewall costs a viewer nothing more than a
- * moment, once, rather than their buffer.
+ * peer, so nothing changes for them.
  */
-const SOLO_FETCH_AHEAD_S = 150;
-const SHARED_FETCH_AHEAD_S = 20;
 const SHARE_CHECK_MS = 1_000;
 const P2P_FAILURES_TO_STOP = 3;
 const P2P_FAILURE_WINDOW_MS = 60_000;
@@ -2811,35 +2803,23 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // still 120s — maxBufferLength binds the append; high-demand only
                 // guarantees the next fragment is already fetched.
                 //
-                // Trade-off: high-demand segments prefer HTTP over P2P, so with this
-                // covering the whole buffer, peers contributed little and every
-                // viewer pulled the whole stream from the bot — two viewers of a
-                // 12.5 Mbps film stalled on the bot's upload. So this is only the
-                // window while alone: with a peer connected it narrows to
-                // SHARED_FETCH_AHEAD_S, and widens again for a while the moment
-                // sharing lets this player down (see the sharing block below) —
-                // so a peer that is slow or half-blocked can't leave a viewer
-                // short. Nor can it hang the way the edge case above did: with
-                // peers the engine also fetches segments nobody has yet at
-                // random over HTTP, the one hls.js is waiting on among the
-                // first it considers.
-                highDemandTimeWindow: SOLO_FETCH_AHEAD_S,
+                // Left to itself the engine fetches every high-demand segment
+                // from the bot, even one another player has — so with this
+                // covering the whole buffer, players shared next to nothing.
+                // Narrowing it capped every buffer at the window instead. What
+                // fixes it is who fetches what within it: see lib/p2pSharing.
+                highDemandTimeWindow: 150,
                 p2pDownloadTimeWindow: 150,
                 // Was 6, i.e. inverted below high-demand (library default is 3000).
                 // Only consulted when peers exist, but it must not be the smaller of
                 // the two or it makes no sense — keep it ≥ high-demand.
                 httpDownloadTimeWindow: 150,
                 simultaneousP2PDownloads: 3,
-                // One at a time, as hls.js on its own would. Two in parallel
-                // split the bandwidth between the segment playback is waiting
-                // for and one further ahead, and with a second viewer doing
-                // the same that was four downloads sharing the bot's upload.
-                // On a 12.5 Mbps file whose segments reach 25 MB, the segment
-                // a viewer was stopped on took 30–40s to arrive while later
-                // ones kept landing beside it — then everything played at
-                // once. Sequential, the one wanted next always has this
-                // viewer's whole share; P2P still fills from a peer meanwhile.
-                simultaneousHttpDownloads: 1,
+                // Two at once. A single download from the bot, through
+                // Discord's proxy, runs anywhere from ~7 to ~25 Mbps, and the
+                // total grows with how many run together; one at a time held
+                // a 30 Mbps film to whatever one download managed.
+                simultaneousHttpDownloads: 2,
                 rtcConfig: {
                   // Multiple STUN servers improve NAT traversal odds — every
                   // peer pair that fails to connect falls back to HTTP, costing
@@ -2915,8 +2895,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 hls.p2pEngine.addEventListener("onChunkUploaded", (bytesLength) => {
                   stats.uploadBytes += bytesLength;
                 });
-                // ---- Sharing with other players: see SHARED_FETCH_AHEAD_S. ----
+                // ---- Sharing with other players: see lib/p2pSharing. ----
                 let sharing = false;
+                // The engine's loader exists once it has been asked for a
+                // segment; until then there is nothing to change.
+                let sharingHandle: object | null = null;
                 let soloUntil = 0;
                 let strikes = 0;
                 const p2pFailures: number[] = [];
@@ -2930,9 +2913,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 const setSharing = (want: boolean, why: string, extra: Record<string, unknown> = {}) => {
                   if (want === sharing) return;
                   sharing = want;
-                  hls.p2pEngine.applyDynamicConfig({
-                    core: { highDemandTimeWindow: want ? SHARED_FETCH_AHEAD_S : SOLO_FETCH_AHEAD_S },
-                  });
+                  if (sharingHandle) setLoaderSharing(sharingHandle, want);
                   logEvent("P2P", want ? "sharing segments with other players" : "fetching everything from the bot", {
                     why, peers: stats.peers.size, ...extra,
                   });
@@ -2974,6 +2955,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   }
                 }, SHARE_CHECK_MS);
                 hls.p2pEngine.addEventListener("onSegmentStart", ({ segment, downloadSource }) => {
+                  if (!sharingHandle) {
+                    sharingHandle = installSharing(hls.p2pEngine);
+                    if (sharingHandle) setLoaderSharing(sharingHandle, sharing);
+                  }
                   lastFetch.push({ from: segment.startTime, to: segment.endTime, source: downloadSource });
                   if (lastFetch.length > 40) lastFetch.shift();
                   if (downloadSource === "p2p") {

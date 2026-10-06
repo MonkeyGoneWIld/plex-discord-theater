@@ -271,6 +271,13 @@ export interface StreamTrack {
   languageCode?: string | null;
   selected: boolean;
   /**
+   * Audio only: the track the file itself marks as its default — what it plays
+   * when nobody has chosen, and so the original language for most releases.
+   * Unlike `selected`, which a choice made through Plex changes, this is part
+   * of the file.
+   */
+  default?: boolean;
+  /**
    * Subtitles only: this one is text — a sidecar file, or text inside the media
    * file that Plex reads out — so the player draws it itself instead of Plex
    * burning it into the picture. Everyone drawing their own shares one stream.

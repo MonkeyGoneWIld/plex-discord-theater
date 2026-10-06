@@ -1,4 +1,4 @@
-import { AUDIO_PREF_KEY, SUBTITLE_PREF_KEY } from "./trackPrefs";
+import { AUDIO_PREF_KEY, SUBTITLE_PREF_KEY, SUBTITLE_WHEN_KEY } from "./trackPrefs";
 import { ZOOM_PREFS_KEY } from "./videoZoom";
 import { VOLUME_KEY } from "./volume";
 import { DEFAULT_QUALITY_KEY, setDefaultQuality } from "./quality";
@@ -16,6 +16,7 @@ import { SUBTITLE_STYLE_KEY, forgetSubtitleStyle } from "./subtitleStyle";
  */
 export const SAVED_SETTINGS: Array<{ key: string; label: string }> = [
   { key: SUBTITLE_PREF_KEY, label: "subtitle choice" },
+  { key: SUBTITLE_WHEN_KEY, label: "when subtitles show" },
   { key: AUDIO_PREF_KEY, label: "audio language" },
   { key: SUBTITLE_STYLE_KEY, label: "subtitle look" },
   { key: DEFAULT_QUALITY_KEY, label: "default quality" },

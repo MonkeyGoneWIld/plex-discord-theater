@@ -1,5 +1,12 @@
 import { apiPost, fetchMeta, versionOf } from "./api";
-import { loadSubtitlePref, matchSubtitleTrack, type SubtitlePref } from "./trackPrefs";
+import {
+  matchAudioTrack,
+  startingAudioPref,
+  startingSubtitle,
+  startingSubtitlePref,
+  type AudioPref,
+  type SubtitlePref,
+} from "./trackPrefs";
 
 /**
  * Have the server read a title's subtitle out of the file before anyone plays
@@ -12,18 +19,22 @@ import { loadSubtitlePref, matchSubtitleTrack, type SubtitlePref } from "./track
  *   "all"   — the episode coming up next: every subtitle it has, soon.
  *
  * The subtitle is the one this viewer would get — their saved choice, matched
- * against the title's own tracks. Nothing is asked for when that is none, or a
- * picture subtitle (which is burned in, not read out). Never throws: this is a
+ * against the title's own tracks, with the audio they would get. Nothing is
+ * asked for when that is none, or a picture subtitle (which is burned in, not
+ * read out). Never throws: this is a
  * head start, and failing to get one changes nothing else.
  */
 export async function readSubtitlesAhead(
   ratingKey: string,
   scope: "first" | "all",
-  opts: { mediaIndex?: number; pref?: SubtitlePref | null } = {},
+  opts: { mediaIndex?: number; pref?: SubtitlePref | null; audio?: AudioPref | null } = {},
 ): Promise<void> {
   try {
     const version = versionOf(await fetchMeta(ratingKey), opts.mediaIndex);
-    const track = matchSubtitleTrack(version.subtitleTracks ?? [], opts.pref ?? loadSubtitlePref());
+    const audioTracks = version.audioTracks ?? [];
+    const audio = matchAudioTrack(audioTracks, opts.audio ?? startingAudioPref())
+      ?? audioTracks.find((t) => t.selected);
+    const track = startingSubtitle(version.subtitleTracks ?? [], opts.pref ?? startingSubtitlePref(), audio);
     if (scope === "first" && !track?.external) return;
     await apiPost("/api/plex/subtitles/prefetch", {
       ratingKey,

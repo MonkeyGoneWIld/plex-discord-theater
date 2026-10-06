@@ -178,6 +178,9 @@ interface PlexStream {
   extendedDisplayTitle?: string;
   title?: string;
   selected?: boolean;
+  /** The file's own default flag for this stream, unlike `selected`, which
+   *  follows whatever was last chosen through Plex. */
+  default?: boolean;
   /**
    * Present only on a stream Plex can serve as a file of its own — a sidecar
    * subtitle sitting next to the video, rather than a track muxed inside it.
@@ -1105,9 +1108,9 @@ function rememberDuration(ratingKey: string, payload: Record<string, unknown>): 
  * still the answer if that rebuild fails. 2 added originallyAvailableAt; 3
  * added each version's width and height; 4 made embedded text subtitles
  * drawable and added `sidecar`; 5 added each version's bitrate; 6 its video
- * codec and bit depth.
+ * codec and bit depth; 7 its file size; 8 each audio track's default flag.
  */
-export const META_PAYLOAD_VERSION = 7;
+export const META_PAYLOAD_VERSION = 8;
 
 const metaCache = new LruMap<string, { payload: Record<string, unknown>; at: number }>(2_000);
 const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -1152,6 +1155,7 @@ function mapAudioTracks(streams: PlexStream[]) {
       language: s.language ?? null,
       languageCode: s.languageCode ?? null,
       selected: !!s.selected,
+      default: !!s.default,
     }));
 }
 

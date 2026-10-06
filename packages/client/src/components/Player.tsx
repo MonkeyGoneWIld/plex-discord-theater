@@ -19,7 +19,7 @@ import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, f
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { isHevcCodec, markHevcUnplayable } from "../lib/hevc";
-import { loadVolume, saveVolume } from "../lib/volume";
+import { loadVolume, saveVolume, VOLUME_CHOSEN_EVENT } from "../lib/volume";
 import { readSubtitlesAhead } from "../lib/subtitleReadAhead";
 import {
   beginQualitySession,
@@ -33,7 +33,7 @@ import {
 } from "../lib/quality";
 import { readStreamNotes, type StreamNotes } from "../lib/streamNotes";
 import { getLevel, setLevel, MAX_LEVEL } from "../lib/audioBoost";
-import { describeWatched, loadAudioPref, loadSubtitlePref, mergeTrackPrefs, saveTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
+import { carryTrackPrefs, describeWatched, endTrackSitting, mergeTrackPrefs, saveTrackPrefs, startingAudioPref, startingSubtitlePref, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
@@ -1847,7 +1847,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
          * the fallback for the first episode of a sitting, where there is no
          * previous one to read.
          */
-        const saved = { audio: loadAudioPref(), subtitle: loadSubtitlePref() };
+        const saved = { audio: startingAudioPref(), subtitle: startingSubtitlePref() };
         let source = saved;
         if (was) {
           if (observedBeforeAdvance?.ratingKey === was.ratingKey) {
@@ -2012,8 +2012,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (!video) return;
     setLevel(video, loadVolume());
     const onVolumeChange = () => saveVolume(getLevel(video));
+    // Settings, opened over a minimised player.
+    const onChosen = (e: Event) => {
+      const level = (e as CustomEvent<number>).detail;
+      if (Number.isFinite(level)) setLevel(video, level);
+    };
     video.addEventListener("volumechange", onVolumeChange);
-    return () => video.removeEventListener("volumechange", onVolumeChange);
+    window.addEventListener(VOLUME_CHOSEN_EVENT, onChosen);
+    return () => {
+      video.removeEventListener("volumechange", onVolumeChange);
+      window.removeEventListener(VOLUME_CHOSEN_EVENT, onChosen);
+    };
   }, []);
 
   // Fetch VPS relay config once on mount — HLS init waits for this
@@ -2181,10 +2190,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   }, [itemMeta, item.ratingKey]);
   // A player starts at this viewer's default quality — Settings — and closing
   // it is the end of whatever was changed while watching: the next one starts
-  // there again. (Volume is different: the last one used is remembered.)
+  // there again. So with tracks carried past a language chosen in Settings.
+  // (Volume is different: the last one used is remembered.)
   useEffect(() => {
     beginQualitySession();
-    return () => resetPreferredQuality();
+    return () => {
+      resetPreferredQuality();
+      endTrackSitting();
+    };
   }, []);
 
   useEffect(() => {
@@ -2280,12 +2293,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       if (video.currentTime < runtime * NEXT_EPISODE_READ_AHEAD_AT) return;
       readAheadForRef.current = next.ratingKey;
       const watched = watchedTrackPrefsRef.current;
-      const pref = watched?.ratingKey === itemRef.current.ratingKey ? watched.prefs.subtitle : null;
+      const current = watched?.ratingKey === itemRef.current.ratingKey ? watched.prefs : null;
       logEvent("Subtitles", "reading the next episode's subtitles ahead", {
         next: next.ratingKey,
         atS: Math.round(video.currentTime),
       });
-      void readSubtitlesAhead(next.ratingKey, "all", pref ? { pref } : {});
+      void readSubtitlesAhead(next.ratingKey, "all", {
+        ...(current?.subtitle && { pref: current.subtitle }),
+        ...(current?.audio && { audio: current.audio }),
+      });
     }, 5000);
     return () => clearInterval(timer);
   }, []);
@@ -5096,9 +5112,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // handlePlayNext resolves the new file from saved portable preferences.
     // Refresh those from what the host is demonstrably playing now, rather
     // than trusting the last picker interaction from this or another show.
+    // A language chosen in Settings isn't overwritten by that, so what is
+    // being watched is also carried to the next title directly.
     const observed = watchedTrackPrefsRef.current;
     if (observed?.ratingKey === itemRef.current.ratingKey) {
       saveTrackPrefs(observed.prefs);
+      carryTrackPrefs(observed.prefs);
     }
     if (fromQueue) syncActionsRef.current?.sendQueueRemove(target.ratingKey);
     onPlayNext?.(target);

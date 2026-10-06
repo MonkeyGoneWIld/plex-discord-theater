@@ -98,6 +98,9 @@ console.log("\n— what a player starts at —");
   volume.saveVolume(1.5);
   check("a boost above 100% is remembered too", volume.loadVolume(), 1.5);
 
+  volume.chooseVolume(1.8);
+  check("a volume chosen in Settings is remembered, boost and all", volume.loadVolume(), 1.8);
+
   prefs.chooseSubtitleLanguage({ code: "ja", name: "Japanese" });
   const tracks = [
     { id: 1, title: "English (SRT)", language: "English", languageCode: "eng", codec: "srt", selected: true },
@@ -107,10 +110,105 @@ console.log("\n— what a player starts at —");
     prefs.matchSubtitleTrack(tracks as never, prefs.loadSubtitlePref())?.id, 2);
   prefs.chooseSubtitleLanguage("off");
   check("off is off", prefs.matchSubtitleTrack(tracks as never, prefs.loadSubtitlePref()), null);
-  prefs.chooseSubtitleLanguage(null);
-  check("and no choice leaves each title to its own", prefs.loadSubtitlePref(), null);
   prefs.chooseAudioLanguage({ code: "en", name: "English" });
   check("an audio language too", prefs.matchAudioTrack(tracks as never, prefs.loadAudioPref())?.id, 1);
+}
+
+console.log("\n— a language chosen in Settings stays —");
+{
+  const english = { id: 1, title: "English (SRT)", language: "English", languageCode: "eng", codec: "srt", selected: false };
+  const signs = { id: 3, title: "English Signs (ASS)", language: "English", languageCode: "eng", codec: "ass", selected: false };
+  const japanese = { id: 2, title: "Japanese (AAC Stereo)", language: "Japanese", languageCode: "jpn", codec: "aac", selected: false };
+
+  prefs.chooseSubtitleLanguage({ code: "en", name: "English" });
+  prefs.saveSubtitlePref(signs as never);
+  prefs.saveSubtitlePref(null);
+  check("subtitles picked while watching don't replace it", prefs.loadSubtitlePref()?.language, "English");
+  check("nor does turning them off", prefs.loadSubtitlePref()?.off, false);
+  prefs.saveTrackPrefs({ audio: null, subtitle: { off: true } });
+  check("nor what the host was watching when they moved on", prefs.loadSubtitlePref()?.off, false);
+
+  prefs.chooseSubtitleLanguage("last");
+  check("going back to the last pick keeps it as the start", prefs.loadSubtitlePref()?.language, "English");
+  prefs.saveSubtitlePref(signs as never);
+  check("and then follows the player again", prefs.loadSubtitlePref()?.title, "English Signs (ASS)");
+
+  prefs.chooseAudioLanguage({ code: "ja", name: "Japanese" });
+  prefs.saveAudioPref(english as never);
+  check("an audio language chosen in Settings stays too", prefs.loadAudioPref()?.language, "Japanese");
+  prefs.carryTrackPrefs({ audio: { languageCode: "eng", language: "English", title: "English (AC3)" }, subtitle: null });
+  check("but a switch made while watching still carries to the next episode", prefs.startingAudioPref()?.language, "English");
+  check("with the subtitle side left to the saved one", prefs.startingSubtitlePref()?.title, "English Signs (ASS)");
+  prefs.endTrackSitting();
+  check("until the player closes", prefs.startingAudioPref()?.language, "Japanese");
+  check("japanese is picked where a file has it", prefs.matchAudioTrack([english, japanese] as never, prefs.loadAudioPref())?.id, 2);
+
+  prefs.chooseAudioLanguage("last");
+  prefs.saveAudioPref(english as never);
+  check("last picked follows the player", prefs.loadAudioPref()?.language, "English");
+}
+
+console.log("\n— original language —");
+{
+  const t = (id: number, title: string, code: string, extra: object = {}) =>
+    ({ id, title, languageCode: code, language: null, codec: "aac", selected: false, ...extra });
+  prefs.chooseAudioLanguage("original");
+  const pref = prefs.loadAudioPref();
+  check("is kept as a choice of its own", [pref?.original, pref?.pinned], [true, true]);
+  check("the track the file marks as its default",
+    prefs.matchAudioTrack([t(1, "English (AC3 5.1)", "eng", { selected: true }), t(2, "Japanese (AAC)", "jpn", { default: true })] as never, pref)?.id, 2);
+  check("not what was last selected through Plex",
+    prefs.matchAudioTrack([t(1, "English (AC3 5.1)", "eng"), t(2, "Japanese (AAC)", "jpn", { selected: true })] as never, pref)?.id, 1);
+  check("unless the default calls itself a dub",
+    prefs.matchAudioTrack([t(1, "English Dub (AC3)", "eng", { default: true }), t(2, "Japanese (AAC)", "jpn")] as never, pref)?.id, 2);
+  check("and never a commentary",
+    prefs.matchAudioTrack([t(1, "Director's Commentary", "eng", { default: true }), t(2, "English (AC3)", "eng")] as never, pref)?.id, 2);
+  prefs.saveAudioPref(t(1, "English (AC3)", "eng") as never);
+  check("picking a dub while watching doesn't undo it", prefs.loadAudioPref()?.original, true);
+  prefs.chooseAudioLanguage("last");
+  check("going back to the last pick starts from each title's own", prefs.loadAudioPref(), null);
+}
+
+console.log("\n— subtitles only for foreign audio —");
+{
+  const subs = [
+    { id: 11, title: "English (SRT)", language: "English", languageCode: "eng", codec: "srt", selected: false },
+    { id: 12, title: "Spanish (SRT)", language: "Spanish", languageCode: "spa", codec: "srt", selected: false },
+  ];
+  const engAudio = { id: 21, title: "English (AC3 5.1)", language: "English", languageCode: "eng", selected: false };
+  const jpnAudio = { id: 22, title: "Japanese (AAC Stereo)", language: "Japanese", languageCode: "jpn", selected: false };
+  // Tagged English, and Japanese only by its title — a real file's mistake.
+  const mistagged = { id: 23, title: "Japanese (English AC3 Stereo)", language: "English", languageCode: "eng", selected: false };
+
+  prefs.chooseSubtitleLanguage({ code: "en", name: "English" });
+  check("off by default", prefs.subtitlesOnlyForForeignAudio(), false);
+  check("so English audio still gets English subtitles",
+    prefs.startingSubtitle(subs as never, prefs.loadSubtitlePref(), engAudio as never)?.id, 11);
+  prefs.setSubtitlesOnlyForForeignAudio(true);
+  check("with it on, English audio gets none",
+    prefs.startingSubtitle(subs as never, prefs.loadSubtitlePref(), engAudio as never), null);
+  check("and Japanese audio gets English",
+    prefs.startingSubtitle(subs as never, prefs.loadSubtitlePref(), jpnAudio as never)?.id, 11);
+  check("going by a track's title over its tag",
+    prefs.startingSubtitle(subs as never, prefs.loadSubtitlePref(), mistagged as never)?.id, 11);
+  check("a new episode for a viewer follows it too",
+    prefs.tracksForNewItem({ audioTracks: [engAudio, jpnAudio] as never, subtitleTracks: subs as never },
+      { audio: { languageCode: "eng", language: "English" }, subtitle: prefs.loadSubtitlePref() },
+      { audioStreamId: 22, subtitleStreamId: 11 }),
+    { audioStreamId: 21, subtitleStreamId: 0 });
+
+  prefs.chooseSubtitleLanguage("last");
+  prefs.saveSubtitlePref(null, engAudio as never);
+  check("subtitles off over English audio is the rule, not a choice to remember", prefs.loadSubtitlePref()?.off, false);
+  check("so it isn't carried as one either",
+    prefs.describeWatched({ audioTracks: [engAudio] as never, subtitleTracks: subs as never }, { audioStreamId: 21, subtitleStreamId: 0 }).subtitle,
+    null);
+  check("while off over Japanese audio is somebody's choice",
+    prefs.describeWatched({ audioTracks: [jpnAudio] as never, subtitleTracks: subs as never }, { audioStreamId: 22, subtitleStreamId: 0 }).subtitle,
+    { off: true });
+  prefs.saveSubtitlePref(null, jpnAudio as never);
+  check("and is remembered", prefs.loadSubtitlePref()?.off, true);
+  prefs.setSubtitlesOnlyForForeignAudio(false);
 }
 
 console.log("\n— resetting saved settings —");
@@ -123,7 +221,8 @@ console.log("\n— resetting saved settings —");
   store.set("plex-presence-details", "false");
   setSubtitleStyle({ color: "cyan" });
   store.set("pdt:defaultQuality", "8000");
-  check("every saved player setting is cleared, and counted", resetSavedSettings(), 6);
+  store.set("pdt:subtitleWhen", "foreign");
+  check("every saved player setting is cleared, and counted", resetSavedSettings(), 7);
   check("none of them is left", SAVED_SETTINGS.filter(({ key }) => store.has(key)), []);
   check("the subtitle look in use goes back to the default too", subtitleStyle().color, "white");
   check("and so does the quality the next player starts at", quality.preferredQuality(), 0);

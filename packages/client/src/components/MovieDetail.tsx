@@ -3,7 +3,7 @@ import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, backdropThumb
 import { formatAirDate, formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
-import { loadAudioPref, loadSubtitlePref, saveAudioPref, saveSubtitlePref, matchAudioTrack, matchSubtitleTrack } from "../lib/trackPrefs";
+import { loadAudioPref, loadSubtitlePref, saveAudioPref, saveSubtitlePref, matchAudioTrack, startingSubtitle, subtitlesOnlyForForeignAudio } from "../lib/trackPrefs";
 import { readSubtitleAhead } from "../lib/subtitleReadAhead";
 import { RatingsRow } from "./RatingsRow";
 import { RelatedRows } from "./RelatedRows";
@@ -269,8 +269,9 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
     setSelectedAudio(defaultAudio ? defaultAudio.id : null);
     // Re-apply the viewer's remembered subtitle choice — matched by language
     // and flavour, since stream ids differ from episode to episode. With no
-    // stored preference this resolves to null, the previous "off" default.
-    const match = matchSubtitleTrack(subtitleTracks, loadSubtitlePref());
+    // stored preference this resolves to null, the previous "off" default; so
+    // does subtitles being only for foreign audio, with audio in their language.
+    const match = startingSubtitle(subtitleTracks, loadSubtitlePref(), defaultAudio);
     setSelectedSubtitle(match ? match.id : null);
     // audioTracks/subtitleTracks are derived from exactly these two.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -328,8 +329,9 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
        * this is the pair the viewer chose to watch, whether they went looking
        * for it or simply left it alone.
        */
-      saveAudioPref(audioTracks.find((t) => t.id === selectedAudio) ?? null);
-      saveSubtitlePref(subtitleTracks.find((t) => t.id === selectedSubtitle) ?? null);
+      const audio = audioTracks.find((t) => t.id === selectedAudio) ?? null;
+      saveAudioPref(audio);
+      saveSubtitlePref(subtitleTracks.find((t) => t.id === selectedSubtitle) ?? null, audio);
       if (selectedAudio != null) {
         await setStreams(partId, {
           audioStreamID: selectedAudio,
@@ -627,10 +629,16 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
                       options={audioTracks.map((t) => ({ value: String(t.id), label: t.title }))}
                       onChange={(v) => {
                         const id = Number(v);
+                        const audio = audioTracks.find((t) => t.id === id) ?? null;
                         setSelectedAudio(id);
                         // Remembered by language, so the next episode comes up
                         // on the same one.
-                        saveAudioPref(audioTracks.find((t) => t.id === id) ?? null);
+                        saveAudioPref(audio);
+                        // Subtitles only for foreign audio follow the audio:
+                        // on for the Japanese track, off for the English one.
+                        if (subtitlesOnlyForForeignAudio()) {
+                          setSelectedSubtitle(startingSubtitle(subtitleTracks, loadSubtitlePref(), audio)?.id ?? null);
+                        }
                       }}
                     />
                   </div>
@@ -650,7 +658,10 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
                         setSelectedSubtitle(id);
                         // Remember it so the next episode starts with the same
                         // kind of track already selected.
-                        saveSubtitlePref(subtitleTracks.find((t) => t.id === id) ?? null);
+                        saveSubtitlePref(
+                          subtitleTracks.find((t) => t.id === id) ?? null,
+                          audioTracks.find((t) => t.id === selectedAudio),
+                        );
                       }}
                     />
                   </div>

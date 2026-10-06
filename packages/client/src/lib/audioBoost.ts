@@ -27,6 +27,9 @@
 /** 200%. The point past which amplifying a normal mix is mostly clipping. */
 export const MAX_LEVEL = 2;
 
+/** A volume slider's colour above 100%, where it is amplifying. */
+export const BOOST_ACCENT = "#ff6b35";
+
 /** What each element is set to, including the part `video.volume` cannot hold. */
 const levels = new WeakMap<HTMLMediaElement, number>();
 const gains = new WeakMap<HTMLMediaElement, GainNode>();

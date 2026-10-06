@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchHistorySettings, updateHistorySettings, type HistorySaveMode } from "../lib/api";
+import { BOOST_ACCENT, MAX_LEVEL, boostAvailable } from "../lib/audioBoost";
 import { LANGUAGES, languageName, shortLanguageCode } from "../lib/languages";
 import { QUALITY_LEVELS_KBPS, defaultQuality, qualityLabel, setDefaultQuality } from "../lib/quality";
 import { SAVED_SETTINGS, resetSavedSettings } from "../lib/savedSettings";
@@ -9,52 +10,83 @@ import {
   chooseSubtitleLanguage,
   loadAudioPref,
   loadSubtitlePref,
+  setSubtitlesOnlyForForeignAudio,
+  subtitlesOnlyForForeignAudio,
 } from "../lib/trackPrefs";
-import { loadVolume, saveVolume } from "../lib/volume";
+import { chooseVolume as rememberVolume, loadVolume } from "../lib/volume";
 import { subtitleTextStyle } from "./SubtitleLayer";
 import { SubtitleLookControls } from "./SubtitleLook";
 
 /**
- * This viewer's own settings, from the home page.
+ * This viewer's own settings, from the header.
  *
  * Everything here is what a player starts with — the quality, the volume, the
  * subtitle and audio language, how subtitles look — and is saved on this
  * device (watch history is the exception: it is saved to the Discord account,
  * and only changes what gets recorded from now on). Quality changed while
  * watching lasts for that sitting, so this is where its default is kept; the
- * volume is simply the last one used, here or in the player. None of it
- * reaches anyone else in the room.
+ * volume is simply the last one used, here or in the player. A language
+ * chosen here is kept until it is changed here; "last picked" follows the
+ * player. None of it reaches anyone else in the room.
  */
 interface SettingsPanelProps {
   onClose: () => void;
 }
 
-/** A select's value for a stored subtitle or audio preference. */
-function prefValue(pref: { off?: boolean; languageCode?: string | null; language?: string | null } | null): string {
-  if (!pref) return "";
-  if (pref.off) return "off";
-  const code = shortLanguageCode(pref.languageCode);
-  if (code) return `lang:${code}`;
-  const byName = LANGUAGES.find((l) => l.name.toLowerCase() === (pref.language ?? "").toLowerCase());
-  return byName ? `lang:${byName.code}` : "";
+interface StoredPref {
+  off?: boolean;
+  original?: boolean;
+  pinned?: boolean;
+  languageCode?: string | null;
+  language?: string | null;
+  title?: string | null;
 }
 
-/** How a stored preference reads when it names more than a language: a
- *  particular track picked while watching ("English — Signs & Songs"). */
-function prefDetail(pref: { off?: boolean; title?: string | null; language?: string | null } | null): string | null {
-  if (!pref || pref.off || !pref.title) return null;
-  const title = pref.title.replace(/\s*\([^)]*\)\s*/g, " ").trim();
-  if (!title || title.toLowerCase() === (pref.language ?? "").toLowerCase()) return null;
-  return title;
+/** A select's value for a language chosen in Settings, or "last" for one that
+ *  follows whatever is picked while watching. */
+function prefValue(pref: StoredPref | null): string {
+  if (!pref?.pinned) return "last";
+  if (pref.off) return "off";
+  if (pref.original) return "original";
+  const code = shortLanguageCode(pref.languageCode);
+  if (code && LANGUAGES.some((l) => l.code === code)) return `lang:${code}`;
+  const byName = LANGUAGES.find((l) => l.name.toLowerCase() === (pref.language ?? "").toLowerCase());
+  return byName ? `lang:${byName.code}` : "last";
+}
+
+/** The language a stored preference names, by name. */
+function prefLanguage(pref: StoredPref | null): string | null {
+  if (!pref || pref.off || pref.original) return null;
+  if (pref.language) return pref.language;
+  const code = shortLanguageCode(pref.languageCode);
+  return code ? languageName(code) : null;
+}
+
+/**
+ * The "last picked" option, saying what that is at the moment: "Last picked —
+ * English (Signs & Songs)", for a particular track picked while watching.
+ */
+function lastPickedLabel(pref: StoredPref | null): string {
+  if (!pref || pref.pinned) return "Last picked while watching";
+  if (pref.off) return "Last picked — off";
+  const language = prefLanguage(pref);
+  if (!language) return "Last picked while watching";
+  const title = (pref.title ?? "").replace(/\s*\([^)]*\)\s*/g, " ").trim();
+  const detail = title && title.toLowerCase() !== language.toLowerCase() ? ` (${title})` : "";
+  return `Last picked — ${language}${detail}`;
 }
 
 export function SettingsPanel({ onClose }: SettingsPanelProps) {
   const look = useSubtitleStyle();
   // Re-read from storage after anything that changes it underneath — a reset.
   const [epoch, setEpoch] = useState(0);
+  // As far as the player's own slider goes: 200%, where the boost can be had.
+  const maxVolume = Math.round((boostAvailable() ? MAX_LEVEL : 1) * 100);
+  const readVolume = () => Math.round(Math.min(maxVolume / 100, loadVolume()) * 100);
   const [quality, setQuality] = useState(defaultQuality);
-  const [volume, setVolume] = useState(() => Math.round(Math.min(1, loadVolume()) * 100));
+  const [volume, setVolume] = useState(readVolume);
   const [subtitle, setSubtitle] = useState(() => loadSubtitlePref());
+  const [foreignOnly, setForeignOnly] = useState(subtitlesOnlyForForeignAudio);
   const [audio, setAudio] = useState(() => loadAudioPref());
   const [historyMode, setHistoryMode] = useState<HistorySaveMode | null>(null);
   const [historyNote, setHistoryNote] = useState<string | null>(null);
@@ -62,9 +94,12 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
 
   useEffect(() => {
     setQuality(defaultQuality());
-    setVolume(Math.round(Math.min(1, loadVolume()) * 100));
+    setVolume(readVolume());
     setSubtitle(loadSubtitlePref());
+    setForeignOnly(subtitlesOnlyForForeignAudio());
     setAudio(loadAudioPref());
+    // readVolume reads storage, and maxVolume doesn't change while this is open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [epoch]);
 
   useEffect(() => {
@@ -87,19 +122,19 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
   };
   const chooseVolume = (percent: number) => {
     setVolume(percent);
-    saveVolume(percent / 100);
+    rememberVolume(percent / 100);
   };
+  const language = (value: string) => ({ code: value.slice(5), name: languageName(value.slice(5)) });
   const chooseSubtitle = (value: string) => {
-    if (value === "current") return;
-    chooseSubtitleLanguage(value === "" ? null : value === "off" ? "off" : (() => {
-      const code = value.slice(5);
-      return { code, name: languageName(code) };
-    })());
+    chooseSubtitleLanguage(value === "last" || value === "off" ? value : language(value));
     setSubtitle(loadSubtitlePref());
   };
+  const chooseWhen = (value: string) => {
+    setSubtitlesOnlyForForeignAudio(value === "foreign");
+    setForeignOnly(subtitlesOnlyForForeignAudio());
+  };
   const chooseAudio = (value: string) => {
-    if (value === "current") return;
-    chooseAudioLanguage(value === "" ? null : { code: value.slice(5), name: languageName(value.slice(5)) });
+    chooseAudioLanguage(value === "last" || value === "original" ? value : language(value));
     setAudio(loadAudioPref());
   };
   const chooseHistory = (mode: HistorySaveMode) => {
@@ -114,12 +149,11 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
       });
   };
 
-  const subtitleDetail = prefDetail(subtitle);
-  const audioDetail = prefDetail(audio);
-  // A track picked while watching names more than its language; it stays the
-  // selected option, described, until something else is chosen.
-  const subtitleValue = subtitleDetail ? "current" : prefValue(subtitle);
-  const audioValue = audioDetail ? "current" : prefValue(audio);
+  const subtitleLanguage = prefLanguage(subtitle);
+  // Subtitles turned off here: there is no "when" to them. (Off as the last
+  // pick is different — the next pick while watching turns them back on.)
+  const offHere = !!(subtitle?.off && subtitle.pinned);
+  const boosted = volume > 100;
 
   const sample = subtitleTextStyle(look, 22);
 
@@ -165,39 +199,51 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
         <section style={styles.section}>
           <h3 style={styles.sectionTitle}>Volume</h3>
           <div style={styles.volumeRow}>
-            <input type="range" min={5} max={100} step={5} value={volume} aria-label="Volume"
-              onChange={(e) => chooseVolume(Number(e.target.value))} style={styles.range} />
-            <span style={styles.reading}>{volume}%</span>
+            <input type="range" min={5} max={maxVolume} step={5} value={volume} aria-label="Volume"
+              onChange={(e) => chooseVolume(Number(e.target.value))}
+              style={{ ...styles.range, accentColor: boosted ? BOOST_ACCENT : "#e5a00d" }} />
+            <span style={{ ...styles.reading, ...(boosted ? { color: BOOST_ACCENT } : {}) }}>{volume}%</span>
           </div>
-          <p style={styles.note}>The last volume you used while watching is remembered, so this is where the next stream starts.</p>
+          <p style={styles.note}>
+            The last volume you used while watching is remembered, so this is where the next stream starts. Above
+            100% makes a quiet film louder, as in the player.
+          </p>
         </section>
 
         <section style={styles.section}>
           <h3 style={styles.sectionTitle}>Subtitles and audio</h3>
           <label style={styles.field}>
             <span style={styles.fieldLabel}>Subtitles</span>
-            <select value={subtitleValue} onChange={(e) => chooseSubtitle(e.target.value)} style={styles.select}>
-              <option value="">Each title's own default</option>
+            <select value={prefValue(subtitle)} onChange={(e) => chooseSubtitle(e.target.value)} style={styles.select}>
+              <option value="last">{lastPickedLabel(subtitle)}</option>
               <option value="off">Off</option>
-              {subtitleDetail && (
-                <option value="current">{`${subtitle?.language ?? "Your last choice"} — ${subtitleDetail}`}</option>
-              )}
               {LANGUAGES.map((l) => <option key={l.code} value={`lang:${l.code}`}>{l.name}</option>)}
             </select>
           </label>
           <label style={styles.field}>
+            <span style={styles.fieldLabel}>Show them</span>
+            <select value={foreignOnly ? "foreign" : "always"} onChange={(e) => chooseWhen(e.target.value)}
+              disabled={offHere} style={{ ...styles.select, ...(offHere ? styles.selectOff : {}) }}>
+              <option value="always">Always</option>
+              <option value="foreign">
+                {subtitleLanguage
+                  ? `Only when the audio isn't ${subtitleLanguage}`
+                  : "Only when the audio is in another language"}
+              </option>
+            </select>
+          </label>
+          <label style={styles.field}>
             <span style={styles.fieldLabel}>Audio</span>
-            <select value={audioValue} onChange={(e) => chooseAudio(e.target.value)} style={styles.select}>
-              <option value="">Each title's own default</option>
-              {audioDetail && (
-                <option value="current">{`${audio?.language ?? "Your last choice"} — ${audioDetail}`}</option>
-              )}
+            <select value={prefValue(audio)} onChange={(e) => chooseAudio(e.target.value)} style={styles.select}>
+              <option value="original">Original language</option>
+              <option value="last">{lastPickedLabel(audio)}</option>
               {LANGUAGES.map((l) => <option key={l.code} value={`lang:${l.code}`}>{l.name}</option>)}
             </select>
           </label>
           <p style={styles.note}>
-            Picked when a title starts, wherever it has that language. Choosing a track while watching updates these
-            too.
+            Picked when a title starts, wherever it has them. A language chosen here stays until you change it here;
+            "last picked" follows whatever you choose while watching. Original language is the audio each file starts
+            on by itself.
           </p>
         </section>
 
@@ -322,7 +368,7 @@ const styles: Record<string, React.CSSProperties> = {
   range: { flex: 1, accentColor: "#e5a00d", cursor: "pointer" },
   reading: { minWidth: "44px", textAlign: "right", fontWeight: 700, fontVariantNumeric: "tabular-nums" },
   field: { display: "flex", alignItems: "center", gap: "12px", marginBottom: "8px" },
-  fieldLabel: { width: "72px", flexShrink: 0, color: "#aaa", fontSize: "13px" },
+  fieldLabel: { width: "78px", flexShrink: 0, color: "#aaa", fontSize: "13px" },
   select: {
     flex: 1,
     minWidth: 0,
@@ -334,6 +380,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "13px",
     fontFamily: "inherit",
   },
+  selectOff: { opacity: 0.45, cursor: "not-allowed" },
   preview: {
     height: "110px",
     borderRadius: "10px",

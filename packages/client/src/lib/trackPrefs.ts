@@ -1,7 +1,10 @@
 import type { StreamTrack } from "./api";
+import { LANGUAGES } from "./languages";
 
 export const SUBTITLE_PREF_KEY = "pdt:subtitlePref";
 export const AUDIO_PREF_KEY = "pdt:audioPref";
+/** "foreign" when subtitles are only wanted for audio in another language. */
+export const SUBTITLE_WHEN_KEY = "pdt:subtitleWhen";
 
 /**
  * A remembered track choice, stored by *description* rather than by stream id.
@@ -19,6 +22,9 @@ interface TrackPref {
    *  only place they appear — kept so "English Forced" doesn't match plain
    *  "English", and so a commentary track isn't mistaken for the feature. */
   title?: string | null;
+  /** Chosen in Settings rather than while watching: kept until it is changed
+   *  there, whatever gets picked in a player in the meantime. */
+  pinned?: boolean;
 }
 
 export interface TrackPrefs {
@@ -37,6 +43,9 @@ export interface AudioPref extends TrackPref {
    *  than the original, so this separates "the Japanese 5.1" from "the Japanese
    *  stereo" when a file carries both. */
   channels?: number | null;
+  /** Whatever language each title was made in, rather than a particular one —
+   *  see originalAudioTrack. Always pinned. */
+  original?: boolean;
 }
 
 /** Forced/SDH/CC flavour flags parsed out of a track title. */
@@ -162,8 +171,20 @@ export function loadSubtitlePref(): SubtitlePref | null {
   return read<SubtitlePref>(SUBTITLE_PREF_KEY, (p) => typeof (p as SubtitlePref)?.off === "boolean");
 }
 
-/** Remember the subtitle just chosen. Pass `null` for the "None" option. */
-export function saveSubtitlePref(track: StreamTrack | null): void {
+/**
+ * Remember the subtitle just chosen. Pass `null` for the "None" option, and the
+ * audio it was chosen with when that is known.
+ *
+ * Nothing is written over a choice made in Settings. Nor is "None" written when
+ * subtitles are only wanted for foreign audio and this audio is already in
+ * their language: that is the rule at work rather than somebody deciding
+ * against subtitles, and writing it down would turn them off for the next
+ * title, foreign audio or not.
+ */
+export function saveSubtitlePref(track: StreamTrack | null, audio?: StreamTrack | null): void {
+  const kept = loadSubtitlePref();
+  if (kept?.pinned) return;
+  if (!track && audio && kept && ruleTurnsOff(kept, audio)) return;
   write(SUBTITLE_PREF_KEY, track ? { off: false, ...describe(track) } : { off: true });
 }
 
@@ -171,19 +192,81 @@ export function loadAudioPref(): AudioPref | null {
   return read<AudioPref>(AUDIO_PREF_KEY, (p) => !!p && typeof p === "object");
 }
 
-/** Remember the audio track just chosen. There is no "off" — every file has audio. */
+/** Remember the audio track just chosen. There is no "off" — every file has
+ *  audio. Not over a choice made in Settings. */
 export function saveAudioPref(track: StreamTrack | null): void {
-  if (!track) return;
+  if (!track || loadAudioPref()?.pinned) return;
   write(AUDIO_PREF_KEY, { ...describe(track), channels: track.channels ?? null });
 }
 
 /**
  * Persist a pair already described from tracks that were actually playing.
  * Missing sides are left alone; `{ off: true }` is not missing and is saved.
+ * Neither side is written over a choice made in Settings.
  */
 export function saveTrackPrefs(prefs: TrackPrefs): void {
-  if (prefs.audio) write(AUDIO_PREF_KEY, prefs.audio);
-  if (prefs.subtitle) write(SUBTITLE_PREF_KEY, prefs.subtitle);
+  if (prefs.audio && !loadAudioPref()?.pinned) write(AUDIO_PREF_KEY, prefs.audio);
+  if (prefs.subtitle && !loadSubtitlePref()?.pinned) write(SUBTITLE_PREF_KEY, prefs.subtitle);
+}
+
+/**
+ * Whether subtitles are wanted only when the audio is in another language —
+ * English subtitles for a Japanese film, and none for an English one.
+ */
+export function subtitlesOnlyForForeignAudio(): boolean {
+  try {
+    return localStorage.getItem(SUBTITLE_WHEN_KEY) === "foreign";
+  } catch {
+    return false;
+  }
+}
+
+export function setSubtitlesOnlyForForeignAudio(on: boolean): void {
+  try {
+    if (on) localStorage.setItem(SUBTITLE_WHEN_KEY, "foreign");
+    else localStorage.removeItem(SUBTITLE_WHEN_KEY);
+  } catch {
+    // Storage unavailable — subtitles follow the language alone.
+  }
+}
+
+/** A language name as LANGUAGES spells it, lower-cased, to its code. */
+const LANGUAGE_BY_NAME = new Map(LANGUAGES.map((l) => [l.name.toLowerCase(), l.code]));
+
+/**
+ * The language an audio track is spoken in, judged against a subtitle choice.
+ *
+ * A title that starts with a language's name says it most reliably. Some
+ * anime files tag the Japanese track "eng" and say Japanese only in its title
+ * ("Japanese (English AC3 Stereo)"), and going by the tag would decide English
+ * subtitles weren't needed for it.
+ */
+function spokenIn(audio: StreamTrack, pref: TrackPref): boolean {
+  const named = LANGUAGE_BY_NAME.get(titleLanguageHint(audio.title)) ?? null;
+  const wanted = canonicalLanguageCode(pref.languageCode)
+    ?? LANGUAGE_BY_NAME.get(normalizedText(pref.language))
+    ?? null;
+  if (named && wanted) return named === wanted;
+  return sameLanguage(audio, pref);
+}
+
+/** Subtitles are only for foreign audio, and this audio is in their language. */
+function ruleTurnsOff(pref: SubtitlePref, audio: StreamTrack): boolean {
+  return !pref.off && subtitlesOnlyForForeignAudio() && spokenIn(audio, pref);
+}
+
+/**
+ * The subtitle a title should start on, given the audio it will play with:
+ * the saved choice matched against its tracks, unless subtitles are only
+ * wanted for foreign audio and this audio is already in their language.
+ */
+export function startingSubtitle(
+  tracks: StreamTrack[],
+  pref: SubtitlePref | null,
+  audio: StreamTrack | null | undefined,
+): StreamTrack | null {
+  if (pref && audio && ruleTurnsOff(pref, audio)) return null;
+  return matchSubtitleTrack(tracks, pref);
 }
 
 /**
@@ -234,7 +317,9 @@ export function matchSubtitleTrack(
  * more reliable of the two: a stored preference is one global slot, shared by
  * every show and overwritten by whoever touched a picker last.
  *
- * A subtitle id of 0 is "none", and is described as a deliberate opt-out.
+ * A subtitle id of 0 is "none", and is described as a deliberate opt-out —
+ * unless it is what the foreign-audio rule did with this audio, in which case
+ * nobody opted out of anything and the saved choice still stands.
  */
 export function describeWatched(
   available: { audioTracks: StreamTrack[]; subtitleTracks: StreamTrack[] },
@@ -242,10 +327,11 @@ export function describeWatched(
 ): TrackPrefs {
   const audio = available.audioTracks.find((t) => t.id === watching.audioStreamId);
   const subtitle = available.subtitleTracks.find((t) => t.id === watching.subtitleStreamId);
+  const saved = watching.subtitleStreamId === 0 && audio ? loadSubtitlePref() : null;
   return {
     audio: audio ? { ...describe(audio), channels: audio.channels ?? null } : null,
     subtitle: watching.subtitleStreamId === 0
-      ? { off: true }
+      ? (saved && audio && ruleTurnsOff(saved, audio) ? null : { off: true })
       : subtitle ? { off: false, ...describe(subtitle) } : null,
   };
 }
@@ -268,17 +354,20 @@ export function mergeTrackPrefs(primary: TrackPrefs | null, fallback: TrackPrefs
  *
  * The one case that isn't a fallback is a remembered "None" for subtitles. That
  * is an answer, not a failed match, and it survives into the next episode
- * however many subtitle tracks the new file happens to have.
+ * however many subtitle tracks the new file happens to have. So is subtitles
+ * being only for foreign audio, when the audio landed on is in their language.
  */
 export function tracksForNewItem(
   available: { audioTracks: StreamTrack[]; subtitleTracks: StreamTrack[] },
   prefs: TrackPrefs,
   fallback: { audioStreamId: number; subtitleStreamId: number },
 ): { audioStreamId: number; subtitleStreamId: number } {
+  const audioStreamId =
+    matchAudioTrack(available.audioTracks, prefs.audio)?.id ?? fallback.audioStreamId;
+  const audio = available.audioTracks.find((t) => t.id === audioStreamId);
   return {
-    audioStreamId:
-      matchAudioTrack(available.audioTracks, prefs.audio)?.id ?? fallback.audioStreamId,
-    subtitleStreamId: prefs.subtitle?.off
+    audioStreamId,
+    subtitleStreamId: prefs.subtitle?.off || (prefs.subtitle && audio && ruleTurnsOff(prefs.subtitle, audio))
       ? 0
       : matchSubtitleTrack(available.subtitleTracks, prefs.subtitle)?.id
         ?? fallback.subtitleStreamId,
@@ -303,6 +392,7 @@ export function matchAudioTrack(
   pref: AudioPref | null,
 ): StreamTrack | null {
   if (!pref || tracks.length === 0) return null;
+  if (pref.original) return originalAudioTrack(tracks);
 
   const wantCommentary = isCommentary(pref.title);
   const sameLang = tracks.filter((t) => sameLanguage(t, pref));
@@ -331,27 +421,59 @@ export function matchAudioTrack(
 }
 
 /**
- * Choose a subtitle language ahead of time, from Settings: by language alone,
- * with no particular file's track to describe. `"off"` is no subtitles; null
- * forgets the choice, so each title starts on its own default.
+ * The audio a title was made in, as near as a file says.
+ *
+ * Plex has no field for a title's original language, so this goes by the file:
+ * the track it marks as its default, which a release makes the original almost
+ * always — unless that track calls itself a dub. Failing a default, the first
+ * track, which is where a release puts the original when it doesn't say.
+ * Commentary is never it.
  */
-export function chooseSubtitleLanguage(choice: { code: string; name: string } | "off" | null): void {
-  if (choice === null) {
-    forget(SUBTITLE_PREF_KEY);
+export function originalAudioTrack(tracks: StreamTrack[]): StreamTrack | null {
+  const feature = tracks.filter((t) => !isCommentary(t.title));
+  const pool = feature.length ? feature : tracks;
+  const dub = (t: StreamTrack) => /\bdub(bed)?\b/i.test(t.title);
+  return pool.find((t) => t.default && !dub(t)) ?? pool.find((t) => !dub(t)) ?? pool[0] ?? null;
+}
+
+/**
+ * Choose a subtitle language from Settings: by language alone, with no
+ * particular file's track to describe, and kept until it is changed there.
+ * `"off"` is no subtitles. `"last"` is whatever gets picked while watching —
+ * the choice already saved stays as where that starts.
+ */
+export function chooseSubtitleLanguage(choice: { code: string; name: string } | "off" | "last"): void {
+  if (choice === "last") {
+    const kept = loadSubtitlePref();
+    if (kept?.pinned) {
+      const { pinned: _, ...rest } = kept;
+      write(SUBTITLE_PREF_KEY, rest);
+    }
     return;
   }
   write(SUBTITLE_PREF_KEY, choice === "off"
-    ? { off: true }
-    : { off: false, languageCode: choice.code, language: choice.name, codec: null, title: null });
+    ? { off: true, pinned: true }
+    : { off: false, languageCode: choice.code, language: choice.name, codec: null, title: null, pinned: true });
 }
 
-/** The same, for audio. There is no "off": null goes back to each title's own. */
-export function chooseAudioLanguage(choice: { code: string; name: string } | null): void {
-  if (choice === null) {
-    forget(AUDIO_PREF_KEY);
+/**
+ * The same, for audio: a language, `"original"` for whatever each title was
+ * made in, or `"last"` for whatever gets picked while watching. A language
+ * that is chosen but missing from a file leaves that file on its default.
+ */
+export function chooseAudioLanguage(choice: { code: string; name: string } | "original" | "last"): void {
+  if (choice === "last") {
+    const kept = loadAudioPref();
+    if (kept?.original) forget(AUDIO_PREF_KEY);
+    else if (kept?.pinned) {
+      const { pinned: _, ...rest } = kept;
+      write(AUDIO_PREF_KEY, rest);
+    }
     return;
   }
-  write(AUDIO_PREF_KEY, { languageCode: choice.code, language: choice.name, codec: null, title: null, channels: null });
+  write(AUDIO_PREF_KEY, choice === "original"
+    ? { original: true, pinned: true }
+    : { languageCode: choice.code, language: choice.name, codec: null, title: null, channels: null, pinned: true });
 }
 
 function forget(key: string): void {
@@ -360,4 +482,33 @@ function forget(key: string): void {
   } catch {
     // Storage unavailable — nothing was kept to forget.
   }
+}
+
+/**
+ * Tracks carried from one title to the next within a sitting.
+ *
+ * A choice made in Settings isn't overwritten by what gets picked in a player,
+ * so the saved preference can't be what carries a switch made mid-episode on
+ * to the next one. This does, for as long as the player is open.
+ */
+let sitting: TrackPrefs | null = null;
+
+/** What the player is on now, for whatever it plays next. */
+export function carryTrackPrefs(prefs: TrackPrefs): void {
+  sitting = mergeTrackPrefs(prefs, sitting ?? { audio: null, subtitle: null });
+}
+
+/** The player closed: the next one starts from the saved choices. */
+export function endTrackSitting(): void {
+  sitting = null;
+}
+
+/** The audio choice the next title starts from. */
+export function startingAudioPref(): AudioPref | null {
+  return sitting?.audio ?? loadAudioPref();
+}
+
+/** The subtitle choice the next title starts from. */
+export function startingSubtitlePref(): SubtitlePref | null {
+  return sitting?.subtitle ?? loadSubtitlePref();
 }

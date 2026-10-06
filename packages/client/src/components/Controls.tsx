@@ -7,7 +7,7 @@ import {
 } from "../lib/previewFrames";
 import { createPreviewMotion, type SpeedTier } from "../lib/previewMotion";
 import { loadVolume } from "../lib/volume";
-import { getLevel, setLevel, boostAvailable, MAX_LEVEL } from "../lib/audioBoost";
+import { getLevel, setLevel, boostAvailable, BOOST_ACCENT, MAX_LEVEL } from "../lib/audioBoost";
 import { useMediaQuery, COMPACT_CONTROLS_QUERY, PHONE_QUERY } from "../lib/useMediaQuery";
 import { QUIET_SURFACE } from "../lib/surface";
 
@@ -246,7 +246,6 @@ const TAP_SIDE_ZONE = 0.35;
  * exact figure is in the tooltip and in the phone popover for anyone who wants
  * it.
  */
-const BOOST_ACCENT = "#ff6b35";
 
 /**
  * How long the request button stays acknowledged after a press.

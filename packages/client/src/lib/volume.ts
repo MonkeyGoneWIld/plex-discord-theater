@@ -1,6 +1,8 @@
 import { MAX_LEVEL } from "./audioBoost";
 
 export const VOLUME_KEY = "pdt:volume";
+/** Fired on window when Settings changes the volume, for an open player. */
+export const VOLUME_CHOSEN_EVENT = "pdt:volume-chosen";
 
 /** Starting volume when nothing has been stored yet. */
 export const DEFAULT_VOLUME = 0.5;
@@ -41,5 +43,19 @@ export function saveVolume(v: number): void {
     localStorage.setItem(VOLUME_KEY, String(v));
   } catch {
     // Storage unavailable — volume simply won't persist.
+  }
+}
+
+/**
+ * A volume chosen in Settings: remembered like any other, and handed to a
+ * player that is open behind the panel — minimised, still playing — so the
+ * slider is heard rather than only saved.
+ */
+export function chooseVolume(v: number): void {
+  saveVolume(v);
+  try {
+    window.dispatchEvent(new CustomEvent(VOLUME_CHOSEN_EVENT, { detail: v }));
+  } catch {
+    // No window to tell: nothing is playing.
   }
 }

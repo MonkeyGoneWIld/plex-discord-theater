@@ -93,7 +93,10 @@ export function TrackSwitcher({
     } else {
       // Remember the choice (streamId 0 is the "None" row) so the next episode
       // comes up with the same kind of subtitle already on.
-      saveSubtitlePref(subtitleTracks.find((t) => t.id === streamId) ?? null);
+      saveSubtitlePref(
+        subtitleTracks.find((t) => t.id === streamId) ?? null,
+        audioTracks.find((t) => t.id === activeAudio),
+      );
       onTrackChange(partId, undefined, streamId);
     }
     onClose();

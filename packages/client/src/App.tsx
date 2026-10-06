@@ -14,7 +14,7 @@ import { PlexAccountButton } from "./components/PlexAccountButton";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { formatMediaTitle } from "./lib/format";
 import { apiPost, authUrl, fetchMeta, invalidateMeta, setStreams, versionOf } from "./lib/api";
-import { loadAudioPref, loadSubtitlePref, matchAudioTrack, matchSubtitleTrack } from "./lib/trackPrefs";
+import { matchAudioTrack, startingAudioPref, startingSubtitle, startingSubtitlePref } from "./lib/trackPrefs";
 import { useMediaQuery, MOBILE_LANDSCAPE_QUERY, NARROW_QUERY, PHONE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem, SuggestionItem } from "./hooks/useSync";
@@ -764,15 +764,16 @@ export function App() {
       // The version, not the title: a second file has its own part and its own
       // stream ids, and `meta`'s top-level fields describe only the first.
       const version = versionOf(meta);
-      const subtitlePref = loadSubtitlePref();
-      const audioMatch = matchAudioTrack(version.audioTracks, loadAudioPref());
+      const subtitlePref = startingSubtitlePref();
+      const audioMatch = matchAudioTrack(version.audioTracks, startingAudioPref());
       // Null means this episode doesn't carry the language they were listening
       // to, and there is no sensible substitute — leave Plex's own choice.
-      audioStreamId = audioMatch?.id ?? version.audioTracks.find((t) => t.selected)?.id;
+      const audio = audioMatch ?? version.audioTracks.find((t) => t.selected);
+      audioStreamId = audio?.id;
 
       if (maySelect && version.partId != null && (subtitlePref || audioMatch)) {
         const subtitleMatch = subtitlePref
-          ? matchSubtitleTrack(version.subtitleTracks, subtitlePref)
+          ? startingSubtitle(version.subtitleTracks, subtitlePref, audio)
           : null;
         if (subtitlePref) {
           subtitles = subtitleMatch != null;
@@ -1008,24 +1009,22 @@ export function App() {
               </button>
             )}
             {/* This viewer's own settings — what every stream starts with.
-                The home page only: while a stream is playing, the player's own
-                settings are the ones that apply. */}
-            {view.kind === "library" && !activePlayerView && (
-              <button className="btn"
-                type="button"
-                onClick={() => setShowSettings(true)}
-                style={{ ...styles.settingsBtn, ...(mobileLandscape ? styles.peopleBtnLandscape : {}) }}
-                title="Settings"
-                aria-label="Settings"
-              >
-                <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                  <path d="M3 5h8M15 5h2M3 10h2M9 10h8M3 15h6M13 15h4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-                  <circle cx="13" cy="5" r="2" stroke="currentColor" strokeWidth="1.6" />
-                  <circle cx="7" cy="10" r="2" stroke="currentColor" strokeWidth="1.6" />
-                  <circle cx="11" cy="15" r="2" stroke="currentColor" strokeWidth="1.6" />
-                </svg>
-              </button>
-            )}
+                Wherever the header is; a stream full-screen has none, and the
+                player's own settings are the ones that apply there. */}
+            <button className="btn"
+              type="button"
+              onClick={() => setShowSettings(true)}
+              style={{ ...styles.settingsBtn, ...(mobileLandscape ? styles.peopleBtnLandscape : {}) }}
+              title="Settings"
+              aria-label="Settings"
+            >
+              <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                <path d="M3 5h8M15 5h2M3 10h2M9 10h8M3 15h6M13 15h4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                <circle cx="13" cy="5" r="2" stroke="currentColor" strokeWidth="1.6" />
+                <circle cx="7" cy="10" r="2" stroke="currentColor" strokeWidth="1.6" />
+                <circle cx="11" cy="15" r="2" stroke="currentColor" strokeWidth="1.6" />
+              </svg>
+            </button>
           </span>
         </header>
       )}

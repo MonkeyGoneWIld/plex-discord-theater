@@ -6,7 +6,7 @@ import {
   type Credit, type HistoryEntry, type PlexItem, type PlexMeta, type SeerrSeason,
 } from "../lib/api";
 import {
-  loadAudioPref, loadSubtitlePref, matchAudioTrack, matchSubtitleTrack,
+  loadAudioPref, loadSubtitlePref, matchAudioTrack, startingSubtitle,
   saveAudioPref, saveSubtitlePref,
 } from "../lib/trackPrefs";
 import { formatTimecode } from "../lib/format";
@@ -332,7 +332,7 @@ export function ShowDetail({
         ?? audioTracks.find((t) => t.selected)
         ?? audioTracks[0]
         ?? null;
-      const subtitle = matchSubtitleTrack(version.subtitleTracks ?? [], loadSubtitlePref());
+      const subtitle = startingSubtitle(version.subtitleTracks ?? [], loadSubtitlePref(), audio);
 
       // What you pressed play on is what you want to keep watching — the same
       // reasoning as the movie page, which records the pair on play rather than

@@ -43,9 +43,10 @@ interface ControlsProps {
   /** Where the title really ends, when its stream stops short of the runtime
    *  the element reports. The scrub bar ends there. */
   endsAtS?: number | null;
-  /** The title's full runtime, for a stream whose element doesn't know it yet:
-   *  a copied stream's playlist only reaches as far as the server has measured,
-   *  so the element's duration grows as it plays. The scrub bar spans this. */
+  /** The title's full runtime. The scrub bar spans this, or the element's own
+   *  duration when that is longer: a stream only knows as much of the title as
+   *  it has loaded — a copy's playlist reaches as far as the server has
+   *  measured — and a bar measured against that runs off its end. */
   runtimeS?: number | null;
   onSyncPause?: (position: number) => void;
   onSyncResume?: (position: number) => void;
@@ -580,7 +581,9 @@ export function Controls({
   const previousVolumeRef = useRef(volume);
   // Shown only while the level is being changed — see VOLUME_READOUT_MS.
   const [volumeReadout, setVolumeReadout] = useState(false);
-  const [bufferedEnd, setBufferedEnd] = useState(0);
+  /** The loaded stretch the playhead is in, in seconds; null when it is in
+   *  none — mid-seek, or before anything has arrived. */
+  const [bufferedRange, setBufferedRange] = useState<{ start: number; end: number } | null>(null);
 
   // Mirror the element's volume, whoever changed it. Without this the slider
   // and mute icon go stale when the keyboard shortcuts adjust volume, since
@@ -688,10 +691,22 @@ export function Controls({
       setVisible(true);
       if (hideTimer.current) clearTimeout(hideTimer.current);
     };
+    // Only the stretch the playhead is in. Drawing from 0:00 to the end of the
+    // last range filled the bar up to wherever a seek had gone, as if all of
+    // it were loaded — and a range left behind from before a seek isn't where
+    // anyone is.
     const onBuffer = () => {
-      if (video.buffered.length > 0) {
-        setBufferedEnd(video.buffered.end(video.buffered.length - 1));
+      const at = video.currentTime;
+      let found: { start: number; end: number } | null = null;
+      for (let i = 0; i < video.buffered.length; i++) {
+        const start = video.buffered.start(i);
+        const end = video.buffered.end(i);
+        if (start <= at + 0.5 && at <= end) { found = { start, end }; break; }
       }
+      setBufferedRange((prev) =>
+        found && prev && Math.abs(prev.start - found.start) < 0.25 && Math.abs(prev.end - found.end) < 0.25
+          ? prev
+          : found);
     };
     const onTime = () => {
       setCurrentTime(video.currentTime);
@@ -1312,8 +1327,16 @@ export function Controls({
       : skipPreview != null
         ? skipPreview.target
         : restartingTo;
-  const fillPct = pendingTime != null && duration > 0 ? (pendingTime / duration) * 100 : progress;
-  const buffered = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
+  // Never past either end, whatever the element is saying mid-restart.
+  const pct = (s: number) => Math.max(0, Math.min(100, s));
+  const fillPct = pct(pendingTime != null && duration > 0 ? (pendingTime / duration) * 100 : progress);
+  // Where a restart is heading, shown to everyone: the room sees the host's
+  // seek land there while it loads, rather than guessing from the time.
+  const seekingTo = restartingTo != null && scrubPct == null && skipPreview == null;
+  const bufferedLeft = bufferedRange && duration > 0 ? pct((bufferedRange.start / duration) * 100) : 0;
+  const bufferedWidth = bufferedRange && duration > 0
+    ? Math.max(0, pct((bufferedRange.end / duration) * 100) - bufferedLeft)
+    : 0;
   const barHeight = hoveringProgress || scrubPct != null ? 8 : 5;
 
   // Hoisted out of the tree below because a phone wraps it in a row with the
@@ -1365,7 +1388,7 @@ export function Controls({
         </div>
       )}
       <div style={{ ...styles.progressTrack, height: barHeight, transition: "height 0.15s ease" }}>
-        <div style={{ ...styles.progressBuffer, width: `${buffered}%` }} />
+        <div style={{ ...styles.progressBuffer, left: `${bufferedLeft}%`, width: `${bufferedWidth}%` }} />
         <div style={{ ...styles.progressFill, width: `${fillPct}%` }} />
         {/* Redundant with the handle while dragging — the handle is already
             sitting exactly here, and two markers on one spot reads as a bug. */}
@@ -1387,7 +1410,7 @@ export function Controls({
             boxShadow: scrubPct != null
               ? "0 0 0 5px rgba(229,160,13,0.25), 0 0 10px rgba(229,160,13,0.6)"
               : "0 0 8px rgba(229,160,13,0.5)",
-            opacity: canControl && (hoveringProgress || scrubPct != null) ? 1 : 0,
+            opacity: seekingTo || (canControl && (hoveringProgress || scrubPct != null)) ? 1 : 0,
             transition: "opacity 0.15s ease, width 0.12s ease, height 0.12s ease",
             pointerEvents: "none",
           }}
@@ -1780,8 +1803,8 @@ export function Controls({
                   ...(compact ? styles.gearBtnCompact : {}),
                   ...(subtitleTimingOpen ? styles.gearBtnActive : {}),
                 }}
-                title="Subtitle timing"
-                aria-label="Subtitle timing"
+                title="Subtitle settings"
+                aria-label="Subtitle settings"
                 aria-pressed={subtitleTimingOpen}
               >
                 <svg width="17" height="17" viewBox="0 0 20 20" fill="none" aria-hidden="true">

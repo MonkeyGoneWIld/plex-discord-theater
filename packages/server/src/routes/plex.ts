@@ -23,7 +23,13 @@ import { sessionHostUserId, sessionHasOtherWatchers, roomPlaysHevc } from "../se
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
 import { parseSubtitles, type Cue } from "../services/subtitles.js";
-import { decodeSubtitle, readEmbeddedSubtitle, type EmbeddedSubtitle } from "../services/embedded-subtitles.js";
+import {
+  decodeSubtitle,
+  prefetchEmbeddedSubtitles,
+  readEmbeddedSubtitle,
+  type EmbeddedSubtitle,
+  type ReadOptions,
+} from "../services/embedded-subtitles.js";
 import { mapPlexRatings } from "../services/ratings.js";
 import {
   DETAIL_MAX_AGE_MS,
@@ -190,6 +196,8 @@ interface PlexStream {
 
 interface PlexPart {
   id: number;
+  /** Bytes. With the part's id, what tells a replaced file from the old one. */
+  size?: number;
   /**
    * "sd" when Plex has generated BIF video preview thumbnails for this part,
    * i.e. when /library/parts/<id>/indexes/sd/<offsetMs> will resolve. Absent
@@ -244,6 +252,9 @@ interface MediaVersion {
    *  ("h264", "hevc", "vc1"…) and bit depth. */
   videoCodec: string | null;
   bitDepth: number | null;
+  /** The file's size in bytes, for telling a replaced file from the one a
+   *  subtitle was read out of — see subtitleFingerprint. */
+  fileSize: number | null;
   previewThumbs: boolean;
   audioTracks: ReturnType<typeof mapAudioTracks>;
   subtitleTracks: ReturnType<typeof mapSubtitleTracks>;
@@ -272,6 +283,7 @@ function mapVersions(media: PlexMedia[] | undefined): MediaVersion[] {
       bitrate: m.bitrate ?? null,
       videoCodec: m.videoCodec ?? null,
       bitDepth: streams.find((s) => s.streamType === 1)?.bitDepth ?? null,
+      fileSize: part?.size ?? null,
       previewThumbs: part?.indexes === "sd",
       audioTracks: mapAudioTracks(streams),
       subtitleTracks: mapSubtitleTracks(streams),
@@ -1095,7 +1107,7 @@ function rememberDuration(ratingKey: string, payload: Record<string, unknown>): 
  * drawable and added `sidecar`; 5 added each version's bitrate; 6 its video
  * codec and bit depth.
  */
-export const META_PAYLOAD_VERSION = 6;
+export const META_PAYLOAD_VERSION = 7;
 
 const metaCache = new LruMap<string, { payload: Record<string, unknown>; at: number }>(2_000);
 const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -2744,11 +2756,14 @@ const SUBTITLE_CACHE_TTL_MS = 30 * 60 * 1000;
  * them in — see services/embedded-subtitles.ts. Plex reads whichever subtitle
  * the item has selected, so it is selected under the item lock.
  */
-function embeddedSubtitle(ratingKey: string, mediaIndex: number, streamId: string): Promise<EmbeddedSubtitle> {
+function embeddedSubtitle(
+  ratingKey: string, mediaIndex: number, streamId: string, fingerprint: string | null,
+): Promise<EmbeddedSubtitle> {
   return readEmbeddedSubtitle({
     streamId,
     ratingKey,
     mediaIndex,
+    fingerprint,
     withTrackSelected: (start) => withItemLock(ratingKey, async () => {
       await selectTracksForStart(ratingKey, mediaIndex, null, Number(streamId));
       return start();
@@ -2757,8 +2772,192 @@ function embeddedSubtitle(ratingKey: string, mediaIndex: number, streamId: strin
 }
 
 /** Guard against a "subtitle" that is really a video file. Comfortably larger
- *  than any real subtitle: a three-hour ASS with full typesetting is ~1 MB. */
-const MAX_SUBTITLE_BYTES = 8 * 1024 * 1024;
+ *  than any real subtitle, typeset anime included — see embedded-subtitles.ts,
+ *  where an 8 MB limit turned Kaguya-sama's away. */
+const MAX_SUBTITLE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * A sidecar's cues, from the cache or from Plex — the file it is, fetched and
+ * parsed. On failure, the status the route answers with and why.
+ */
+async function loadSidecar(
+  streamId: string,
+): Promise<{ cues: Cue[] } | { status: number; error: string }> {
+  const hit = subtitleCache.get(streamId);
+  if (hit && Date.now() - hit.at < SUBTITLE_CACHE_TTL_MS) return { cues: hit.cues };
+
+  const plexRes = await plexFetch(`/library/streams/${streamId}`);
+  if (!plexRes.ok) return { status: plexRes.status === 404 ? 404 : 502, error: "Subtitle not available" };
+
+  // Plex does not always send a length for these, so the cap is enforced on
+  // what actually arrived rather than on what was promised.
+  const raw = await plexRes.arrayBuffer();
+  if (raw.byteLength > MAX_SUBTITLE_BYTES) {
+    logEvent("Subtitles", "sidecar too large to be a subtitle", {
+      streamId, bytes: raw.byteLength,
+    });
+    return { status: 413, error: "Subtitle too large" };
+  }
+
+  // Sidecars are UTF-8 far more often than not, and the ones that are not are
+  // usually Latin-1. Decoding strictly first means a mis-encoded file is
+  // detected rather than silently filled with replacement characters.
+  const parsed = parseSubtitles(decodeSubtitle(raw));
+  if (!parsed || parsed.cues.length === 0) {
+    logEvent("Subtitles", "sidecar could not be read as text", {
+      streamId, bytes: raw.byteLength, cues: parsed?.cues.length ?? "unparsed",
+    });
+    return { status: 415, error: "Unsupported subtitle format" };
+  }
+
+  subtitleCache.set(streamId, { cues: parsed.cues, at: Date.now() });
+  logEvent("Subtitles", "sidecar ready to draw", {
+    streamId, format: parsed.format, cues: parsed.cues.length,
+  });
+  return { cues: parsed.cues };
+}
+
+/** Whether to read a title's other subtitles ahead of anyone asking — on unless
+ *  SUBTITLE_PREFETCH=0. Read per call, so a test can turn it on and off. */
+function subtitlePrefetchOn(): boolean {
+  return process.env.SUBTITLE_PREFETCH !== "0";
+}
+
+/** How long after a stream starts its subtitles are read ahead: long enough
+ *  for the player's own ask for the one it draws to arrive first. */
+function subtitlePrefetchDelayMs(): number {
+  const n = Number(process.env.SUBTITLE_PREFETCH_DELAY_MS);
+  return Number.isFinite(n) && n >= 0 ? n : 5_000;
+}
+
+/**
+ * At most this many of a title's subtitles inside the file are read ahead.
+ *
+ * Each read is Plex going through the whole file, and a film with every
+ * language on the disc has dozens: reading them all would keep the disks busy
+ * for an hour under whatever is playing. A series' episode has a handful,
+ * which this covers.
+ */
+const PREFETCH_EMBEDDED_MAX = 8;
+
+/** Titles whose subtitles have been read ahead lately: once is enough. */
+const subtitlesPrefetched = new LruMap<string, number>(200);
+const SUBTITLE_PREFETCH_AGAIN_MS = 30 * 60_000;
+
+/**
+ * The subtitle an item has selected right now, from Plex rather than the
+ * metadata cache, whose `selected` flags are as old as the cache entry. Null
+ * when it can't be told.
+ */
+async function currentSubtitleSelection(ratingKey: string, mediaIndex: number): Promise<number | null> {
+  try {
+    const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(
+      `/library/metadata/${ratingKey}`,
+    );
+    const streams = data.MediaContainer.Metadata?.[0]?.Media?.[mediaIndex]?.Part?.[0]?.Stream;
+    if (!streams) return null;
+    return streams.find((s) => s.streamType === 3 && s.selected)?.id ?? 0;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read a title's text subtitles ahead of anyone switching to them.
+ *
+ * Switching to one used to mean waiting while Plex went through the film for
+ * it. Sidecars are fetched at once — they are small files. Tracks inside the
+ * file are queued behind whatever is being read (prefetchEmbeddedSubtitles),
+ * `first` leading, then the ones likeliest to be wanted: the same language as
+ * it, the languages of the title's audio, English, then the rest in order —
+ * up to PREFETCH_EMBEDDED_MAX.
+ *
+ * Reading one means selecting it on the item, which Plex keeps (and shows in
+ * its own apps, and this server reads back as a title's default). So each read
+ * puts back whatever was selected before it, once Plex has seen it.
+ */
+async function prefetchSubtitles(ratingKey: string, mediaIndex: number, first: number | null): Promise<void> {
+  if (!subtitlePrefetchOn()) return;
+  const key = `${ratingKey}:${mediaIndex}`;
+  const last = subtitlesPrefetched.get(key);
+  if (last !== undefined && Date.now() - last < SUBTITLE_PREFETCH_AGAIN_MS) return;
+  subtitlesPrefetched.set(key, Date.now());
+
+  let version: MediaVersion | null = null;
+  try {
+    const meta = await buildMeta(ratingKey);
+    const versions = meta?.versions as MediaVersion[] | undefined;
+    version = versions?.find((v) => v.mediaIndex === mediaIndex) ?? null;
+  } catch {
+    // Nothing to go on; nothing is read ahead.
+  }
+  if (!version) return;
+
+  const text = version.subtitleTracks.filter((t) => t.external);
+  for (const t of text.filter((t) => t.sidecar)) {
+    try {
+      await loadSidecar(String(t.id));
+    } catch {
+      // Fetched again when someone picks it, and reported then.
+    }
+  }
+
+  const embedded = text.filter((t) => !t.sidecar);
+  if (embedded.length === 0) return;
+  const lead = embedded.find((t) => t.id === first) ?? embedded.find((t) => t.selected) ?? null;
+  const lang = (t: { languageCode: string | null; language: string | null }) =>
+    (t.languageCode ?? t.language ?? "").toLowerCase();
+  const audioLangs = new Set(version.audioTracks.map(lang).filter(Boolean));
+  const rank = (t: typeof embedded[number]): number => {
+    if (t === lead) return 0;
+    if (lead && lang(t) && lang(t) === lang(lead)) return 1;
+    if (audioLangs.has(lang(t))) return 2;
+    if (/^(en|eng|english)$/.test(lang(t))) return 3;
+    return 4;
+  };
+  const ordered = embedded
+    .map((t, i) => ({ t, i }))
+    .sort((a, b) => rank(a.t) - rank(b.t) || a.i - b.i)
+    .slice(0, PREFETCH_EMBEDDED_MAX)
+    .map(({ t }) => t);
+
+  const fingerprint = subtitleFingerprint(version);
+  const reads: ReadOptions[] = ordered.map((t) => {
+    let before: number | null = null;
+    return {
+      streamId: String(t.id),
+      ratingKey,
+      mediaIndex,
+      fingerprint,
+      withTrackSelected: (start) => withItemLock(ratingKey, async () => {
+        before = await currentSubtitleSelection(ratingKey, mediaIndex);
+        await selectTracksForStart(ratingKey, mediaIndex, null, t.id);
+        return start();
+      }),
+      afterAnswer: async () => {
+        if (before !== null && before !== t.id) {
+          await selectTracksForStart(ratingKey, mediaIndex, null, before);
+        }
+      },
+    };
+  });
+  const queued = prefetchEmbeddedSubtitles(reads);
+  if (queued > 0) {
+    logEvent("Subtitles", "reading a title's other subtitles ahead", {
+      ratingKey, queued, sidecars: text.length - embedded.length,
+      skipped: Math.max(0, embedded.length - PREFETCH_EMBEDDED_MAX),
+    });
+  }
+}
+
+/**
+ * Which file a subtitle inside it was read from: the media part, and its size.
+ * A file replaced since — a better release, a repack — reads again.
+ */
+function subtitleFingerprint(version: { partId: number | null; fileSize?: number | null }): string | null {
+  if (version.partId == null) return null;
+  return `${version.partId}:${version.fileSize ?? "?"}`;
+}
 
 /**
  * GET /api/plex/subtitles/:streamId
@@ -2784,21 +2983,23 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
     return;
   }
 
-  const hit = subtitleCache.get(streamId);
-  if (hit && Date.now() - hit.at < SUBTITLE_CACHE_TTL_MS) {
-    res.json({ cues: hit.cues, complete: true });
-    return;
-  }
-
   const ratingKey = typeof req.query.ratingKey === "string" && NUMERIC_RE.test(req.query.ratingKey)
     ? req.query.ratingKey
     : null;
   if (ratingKey) {
     const requested = Number(req.query.mediaIndex);
     const mediaIndex = Number.isInteger(requested) && requested >= 0 ? requested : await defaultMediaIndex(ratingKey);
+    // Whatever this one is, its title's others are read next, so that
+    // switching to one of them finds it ready. Behind this one: it is begun
+    // below, and the queue waits for reads already going.
+    const readTheRest = () => {
+      void prefetchSubtitles(ratingKey, mediaIndex, Number(streamId)).catch((err) =>
+        console.warn("[Subtitles] couldn't read ahead:", err));
+    };
     const track = await subtitleTrackOf(ratingKey, mediaIndex, Number(streamId));
     if (track?.external && track.sidecar === false) {
-      const sub = await embeddedSubtitle(ratingKey, mediaIndex, streamId);
+      const sub = await embeddedSubtitle(ratingKey, mediaIndex, streamId, track.fingerprint);
+      readTheRest();
       if (sub.state === "unreadable") {
         res.status(404).json({ error: "Subtitle not available" });
         return;
@@ -2807,43 +3008,16 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
       res.json({ cues: sub.cues, complete: sub.state === "ready" });
       return;
     }
+    readTheRest();
   }
 
   try {
-    const plexRes = await plexFetch(`/library/streams/${streamId}`);
-    if (!plexRes.ok) {
-      res.status(plexRes.status === 404 ? 404 : 502).json({ error: "Subtitle not available" });
+    const loaded = await loadSidecar(streamId);
+    if ("status" in loaded) {
+      res.status(loaded.status).json({ error: loaded.error });
       return;
     }
-
-    // Plex does not always send a length for these, so the cap is enforced on
-    // what actually arrived rather than on what was promised.
-    const raw = await plexRes.arrayBuffer();
-    if (raw.byteLength > MAX_SUBTITLE_BYTES) {
-      logEvent("Subtitles", "sidecar too large to be a subtitle", {
-        streamId, bytes: raw.byteLength,
-      });
-      res.status(413).json({ error: "Subtitle too large" });
-      return;
-    }
-
-    // Sidecars are UTF-8 far more often than not, and the ones that are not are
-    // usually Latin-1. Decoding strictly first means a mis-encoded file is
-    // detected rather than silently filled with replacement characters.
-    const parsed = parseSubtitles(decodeSubtitle(raw));
-    if (!parsed || parsed.cues.length === 0) {
-      logEvent("Subtitles", "sidecar could not be read as text", {
-        streamId, bytes: raw.byteLength, cues: parsed?.cues.length ?? "unparsed",
-      });
-      res.status(415).json({ error: "Unsupported subtitle format" });
-      return;
-    }
-
-    subtitleCache.set(streamId, { cues: parsed.cues, at: Date.now() });
-    logEvent("Subtitles", "sidecar ready to draw", {
-      streamId, format: parsed.format, cues: parsed.cues.length,
-    });
-    res.json({ cues: parsed.cues, complete: true });
+    res.json({ cues: loaded.cues, complete: true });
   } catch (err) {
     console.error("[Subtitles] fetch error:", err);
     res.status(502).json({ error: "Failed to fetch subtitle" });
@@ -3972,18 +4146,17 @@ async function selectTracksForStart(
 /** One subtitle track from a title's metadata, as mapSubtitleTracks made it. */
 async function subtitleTrackOf(
   ratingKey: string, mediaIndex: number, streamId: number,
-): Promise<{ id: number; external?: boolean; sidecar?: boolean } | null> {
+): Promise<{ id: number; external?: boolean; sidecar?: boolean; fingerprint: string | null } | null> {
   try {
     const meta = await buildMeta(ratingKey);
     type Sub = { id: number; external?: boolean; sidecar?: boolean };
     const versions = meta?.versions as
-      | Array<{ mediaIndex?: number; subtitleTracks?: Sub[] }>
+      | Array<{ mediaIndex?: number; partId: number | null; fileSize?: number | null; subtitleTracks?: Sub[] }>
       | undefined;
-    const tracks =
-      versions?.find((v) => v.mediaIndex === mediaIndex)?.subtitleTracks ??
-      (meta?.subtitleTracks as Sub[] | undefined) ??
-      [];
-    return tracks.find((t) => t.id === streamId) ?? null;
+    const version = versions?.find((v) => v.mediaIndex === mediaIndex);
+    const tracks = version?.subtitleTracks ?? (meta?.subtitleTracks as Sub[] | undefined) ?? [];
+    const track = tracks.find((t) => t.id === streamId);
+    return track ? { ...track, fingerprint: version ? subtitleFingerprint(version) : null } : null;
   } catch {
     return null;
   }
@@ -4481,7 +4654,14 @@ router.get(
       // what does is the reason the player shows.
       let notCopied: string | null = null;
       if (!DIRECT_STREAM) notCopied = "Direct Stream is off on this server";
-      else if (requestedSubtitleMode === "burn") notCopied = "a picture subtitle is burned into it";
+      else if (requestedSubtitleMode === "burn") {
+        // Picture subtitles (PGS, VobSub) can only be burned in. A text one is
+        // burned in when it couldn't be drawn — Plex failed to read it out.
+        const burned = subtitleStreamID ? await subtitleTrackOf(ratingKey, mediaIndex, subtitleStreamID) : null;
+        notCopied = burned?.external
+          ? "its subtitle couldn't be read out for the player to draw, so it is burned in"
+          : "a picture subtitle is burned into it";
+      }
       else if (quality && kbps !== null && kbps > quality) {
         notCopied = `the file is ${mbpsText(kbps)}, over your ${mbpsText(quality)} quality setting`;
       } else if (DIRECT_STREAM_MAX_KBPS > 0 && kbps !== null && kbps > DIRECT_STREAM_MAX_KBPS) {
@@ -4510,6 +4690,15 @@ router.get(
       const manifest = await promise;
       res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
       res.send(manifest);
+      // Its subtitles, read ahead so switching to one is instant. A little
+      // later, so the one the player draws — which it asks for as it starts —
+      // is read first.
+      if (subtitlePrefetchOn()) {
+        setTimeout(() => {
+          void prefetchSubtitles(ratingKey, mediaIndex, null).catch((err) =>
+            console.warn("[Subtitles] couldn't read ahead:", err));
+        }, subtitlePrefetchDelayMs()).unref?.();
+      }
     } catch (err) {
       console.error("HLS start error:", err);
       res.status(502).json({ error: "Failed to start HLS session" });

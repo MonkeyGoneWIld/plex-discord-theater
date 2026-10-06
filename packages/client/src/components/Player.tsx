@@ -13,14 +13,22 @@ import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
 import { TransportRequestCard } from "./TransportRequestCard";
 import { SubtitleLayer } from "./SubtitleLayer";
-import { SubtitleOffset } from "./SubtitleOffset";
+import { SubtitleSettings } from "./SubtitleOffset";
 import { ZoomPanel } from "./ZoomPanel";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchPlayedThreshold, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { isHevcCodec, markHevcUnplayable } from "../lib/hevc";
 import { loadVolume, saveVolume } from "../lib/volume";
-import { lowerQualityFor, preferredQuality, qualityLabel, setPreferredQuality, usePreferredQuality } from "../lib/quality";
+import {
+  carryQualityTo,
+  lowerQualityFor,
+  preferredQuality,
+  qualityLabel,
+  resetPreferredQuality,
+  setPreferredQuality,
+  usePreferredQuality,
+} from "../lib/quality";
 import { readStreamNotes, type StreamNotes } from "../lib/streamNotes";
 import { getLevel, setLevel, MAX_LEVEL } from "../lib/audioBoost";
 import { describeWatched, loadAudioPref, loadSubtitlePref, mergeTrackPrefs, saveTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
@@ -187,6 +195,15 @@ const REBUFFER_OFFER_S = 12;
 const REBUFFER_STARTUP_MS = 10_000;
 /** How long "not now" holds. */
 const REBUFFER_SNOOZE_MS = 10 * 60_000;
+/**
+ * When the "buffering a lot?" hint takes itself down again: the connection has
+ * caught up. Either this long without a stall and a few seconds in hand, or a
+ * buffer so full there is plainly nothing to fix. It used to stay up until it
+ * was answered, long after the buffering that raised it had stopped.
+ */
+const REBUFFER_CALM_MS = 20_000;
+const REBUFFER_CALM_BUFFER_S = 10;
+const REBUFFER_HEALTHY_BUFFER_S = 30;
 
 /** Clean playback for this long means the next media error starts a fresh budget. */
 const MEDIA_ERROR_RESET_MS = 60_000;
@@ -661,6 +678,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const quality = usePreferredQuality();
   /** A lower quality to suggest, after a lot of buffering; null when not. */
   const [offerLowerQuality, setOfferLowerQuality] = useState<number | null>(null);
+  const offerLowerQualityRef = useRef<number | null>(null);
+  offerLowerQualityRef.current = offerLowerQuality;
+  /** When this player last stalled for want of data, for taking the hint down
+   *  once it has stopped — see REBUFFER_CALM_MS. */
+  const lastStarvedAtRef = useRef(0);
   /** The seconds this player spent starved, recently — see REBUFFER_WINDOW_MS. */
   const starvedSecondsRef = useRef<number[]>([]);
   /** Until when starving isn't counted: a stream starting, or "not now". */
@@ -1158,6 +1180,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // re-resolved without refetching (and without blanking the skip markers)
   // when the session's file turns out to be a different one.
   const [itemMeta, setItemMeta] = useState<PlexMeta | null>(null);
+  const itemMetaRef = useRef<PlexMeta | null>(null);
+  itemMetaRef.current = itemMeta;
   /**
    * How far this client's own subtitles are shifted, in milliseconds.
    *
@@ -1319,10 +1343,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * Whether the stream is a copied one — Plex's original video, played through
    * a playlist the server builds as it measures the segments, which therefore
    * grows as it plays (services/direct-stream.ts). Known from the playlist's
-   * EVENT type; Plex's own playlists have none. State as well as a ref because
-   * the scrub bar needs the title's runtime instead of the element's duration.
+   * EVENT type; Plex's own playlists have none.
    */
-  const [copiedStream, setCopiedStream] = useState(false);
   const copiedStreamRef = useRef(false);
   /** Where that playlist ends for now, in film time; null once it is complete. */
   const playlistEdgeRef = useRef<number | null>(null);
@@ -2129,8 +2151,31 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * assignment, the burn-in has to be the one the server hears last.
    */
   const qualityAskedRef = useRef<string | null>(null);
+  // The show a title belongs to, for carrying a quality into its next episode.
+  const showOf = (meta: { grandparentRatingKey?: string } | null | undefined): string | null =>
+    meta?.grandparentRatingKey ?? null;
+  /**
+   * Whether this title keeps the quality chosen before it — see carryQualityTo.
+   * Settled once its metadata says what show it is from; until then nothing
+   * is asked for, so a stream at the wrong quality is never started and thrown
+   * away.
+   */
+  const [qualityCheckedFor, setQualityCheckedFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (itemMeta?.ratingKey !== item.ratingKey) return;
+    const before = preferredQuality();
+    const kept = carryQualityTo(item.ratingKey, showOf(itemMeta));
+    if (before !== kept) {
+      logEvent("Player", "quality back to Original for a different title", { from: before, ratingKey: item.ratingKey });
+    }
+    setQualityCheckedFor(item.ratingKey);
+  }, [itemMeta, item.ratingKey]);
+  // Closing the player is the end of it: the next one starts at Original.
+  useEffect(() => () => resetPreferredQuality(), []);
+
   useEffect(() => {
     const v = variantRef.current;
+    if (qualityCheckedFor !== item.ratingKey) return;
     if (!v || v.ratingKey !== item.ratingKey || v.quality === quality) return;
     const key = `${v.variantKey}>${quality}`;
     if (qualityAskedRef.current === key) return;
@@ -2147,7 +2192,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       v.subtitleStreamId !== 0 && v.burnedSubtitleId === 0,
       quality,
     );
-  }, [variant?.seq, quality, item.ratingKey]);
+  }, [variant?.seq, quality, item.ratingKey, qualityCheckedFor]);
 
   /**
    * Notice a connection that can't keep up, and offer a lower quality.
@@ -2161,14 +2206,29 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const timer = setInterval(() => {
       const video = videoRef.current;
       const sync = syncStateRef.current;
-      if (!video || !sync?.playing || video.paused || video.seeking) return;
       const now = Date.now();
+      // Up, and no longer needed: the buffer has caught up. Checked whatever the
+      // room is doing — a pause is exactly when a slow connection fills it.
+      if (video && offerLowerQualityRef.current !== null) {
+        const ahead = bufferAheadSeconds(video);
+        const calm = now - lastStarvedAtRef.current >= REBUFFER_CALM_MS && ahead >= REBUFFER_CALM_BUFFER_S;
+        if (calm || ahead >= REBUFFER_HEALTHY_BUFFER_S) {
+          logEvent("Player", "buffering has stopped, taking the lower quality offer down", {
+            bufferAheadS: Number(ahead.toFixed(1)),
+            sinceStallS: Math.round((now - lastStarvedAtRef.current) / 1000),
+          });
+          starvedSecondsRef.current = [];
+          setOfferLowerQuality(null);
+        }
+      }
+      if (!video || !sync?.playing || video.paused || video.seeking) return;
       const recent = starvedSecondsRef.current.filter((t) => now - t < REBUFFER_WINDOW_MS);
       starvedSecondsRef.current = recent;
       if (now < rebufferQuietUntilRef.current) return;
       const starved = bufferAheadSeconds(video) < 0.5 &&
         video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA;
       if (!starved) return;
+      lastStarvedAtRef.current = now;
       recent.push(now);
       if (recent.length < REBUFFER_OFFER_S) return;
       const notes = streamNotesRef.current;
@@ -2183,6 +2243,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         suggestKbps: suggest,
       });
       starvedSecondsRef.current = [];
+      if (offerLowerQualityRef.current === suggest) return;
       setOfferLowerQuality(suggest);
     }, 1000);
     return () => clearInterval(timer);
@@ -2206,7 +2267,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
       setTrackSwitching("quality");
     }
-    setPreferredQuality(kbps);
+    const meta = itemMetaRef.current?.ratingKey === itemRef.current.ratingKey ? itemMetaRef.current : null;
+    // Chosen for this title, so nothing is left to settle before asking — even
+    // if its metadata never arrived to settle it.
+    setQualityCheckedFor(itemRef.current.ratingKey);
+    setPreferredQuality(kbps, {
+      ratingKey: itemRef.current.ratingKey,
+      show: showOf(meta) ?? itemRef.current.grandparentRatingKey ?? null,
+    });
   }, []);
 
   const burnAskedRef = useRef<string | null>(null);
@@ -2497,15 +2565,26 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     });
 
     const chosenSubtitle = currentSubtitleStreamRef.current ?? subtitleStreamId ?? 0;
-    // The ceiling this stream is made at: the assigned stream's own when this
-    // client drives it, otherwise this viewer's choice — a host starting a
-    // title, which has no assignment yet. A follower's URL starts nothing.
-    const assigned = variantRef.current;
-    const streamQuality = assigned && assigned.ratingKey === item.ratingKey && assigned.isOwner
-      ? assigned.quality
-      : preferredQuality();
-    if (sessionOwner) sessionQualityRef.current = streamQuality;
-    const urlFor = (burned: number) => hlsMasterUrl(item.ratingKey, sessionId, {
+    /**
+     * The ceiling this stream is made at: the assigned stream's own when this
+     * client drives it, otherwise this viewer's choice — a host starting a
+     * title, which has no assignment yet. A follower's URL starts nothing.
+     *
+     * A choice made on another title only carries to another episode of the
+     * same show (carryQualityTo), which takes its metadata to tell — nearly
+     * always cached by now.
+     */
+    async function qualityForStart(): Promise<number> {
+      const assigned = variantRef.current;
+      if (assigned && assigned.ratingKey === item.ratingKey && assigned.isOwner) return assigned.quality;
+      if (!preferredQuality()) return 0;
+      try {
+        return carryQualityTo(item.ratingKey, showOf(await fetchMeta(item.ratingKey)));
+      } catch {
+        return preferredQuality();
+      }
+    }
+    const urlFor = (burned: number, streamQuality: number) => hlsMasterUrl(item.ratingKey, sessionId, {
       quality: streamQuality,
       subtitles: burned !== 0,
       offset: startOffset > 0 ? startOffset : undefined,
@@ -2530,12 +2609,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       }
 
       const burned = await subtitleToBurn(item.ratingKey, chosenSubtitle);
+      const streamQuality = await qualityForStart();
       if (!mounted) return;
       if (sessionOwner) {
         sessionBurnedRef.current = burned;
         setStartedBurnedSubtitle(burned);
+        sessionQualityRef.current = streamQuality;
       }
-      const url = urlFor(burned);
+      const url = urlFor(burned, streamQuality);
 
       const video = videoRef.current;
       if (!mounted || !video) return;
@@ -2765,7 +2846,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // LEVEL_LOADED fires on every reload, which is how the edge keeps up.
         copiedStreamRef.current = false;
         playlistEdgeRef.current = null;
-        setCopiedStream(false);
         // What the server says about this stream — copied or re-encoded, and
         // why — for Stats for nerds and the buffering hint. A new stream also
         // starts the buffering count over: its first seconds are loading.
@@ -2795,7 +2875,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           }
           copiedStreamRef.current = copied;
           playlistEdgeRef.current = copied && data.details.live ? data.details.edge : null;
-          setCopiedStream(copied);
         });
 
         hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
@@ -2899,6 +2978,27 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               // actually arrive.
               joinSettleRef.current = true;
             }
+          } else if (
+            // The same, into a room that is paused: on the stream someone else
+            // started, the element begins at 0, and the room is sitting
+            // somewhere else. A host switching back to Original while paused
+            // moved onto the room's stream at 0:00, then dragged everyone back
+            // there when it resumed. Not for a stream this client started,
+            // which began at its own offset — the room's position, or the seek
+            // that rebuilt it.
+            !!sync &&
+            !sync.playing &&
+            sync.ratingKey === itemRef.current.ratingKey &&
+            !(sessionOwner && !didAdoptRef.current) &&
+            sync.position > 0.5 &&
+            Math.abs(video.currentTime - sync.position) > 0.5
+          ) {
+            logEvent("Sync", "landing on the paused room's position after a rebuild", {
+              fromS: video.currentTime,
+              toS: sync.position,
+              role: isHostRef.current ? "host" : "viewer",
+            });
+            video.currentTime = sync.position;
           }
 
           // Pre-fetch cache ensures segments arrive instantly — play as soon as
@@ -5532,7 +5632,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           !canControl && syncActions ? syncActions.sendTransportRequest : undefined
         }
         endsAtS={contentEndsAtS}
-        runtimeS={copiedStream ? itemDurationS() : null}
+        // The title's runtime, always. A stream only knows as much of it as it
+        // has loaded — a copy started mid-film reaches a few segments past
+        // where it began — and while a seek restart loads, the bar measured
+        // against that ran off its end.
+        runtimeS={itemDurationS() || null}
         onSyncPause={canControl && syncActions ? sendPauseForControls : undefined}
         onSyncResume={canControl && syncActions ? sendResumeForControls : undefined}
         onSyncSeek={canControl ? syncActions?.sendSeek : undefined}
@@ -5801,7 +5905,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             />
           )}
       {showSubtitleOffset && drawnSubtitleId !== null && !sidecarFailed && (
-        <SubtitleOffset
+        <SubtitleSettings
           offsetMs={subtitleOffsetMs}
           onChange={setSubtitleOffsetMs}
           onClose={() => setShowSubtitleOffset(false)}

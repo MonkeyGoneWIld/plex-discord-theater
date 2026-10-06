@@ -6,7 +6,14 @@
  * hands over as one attribute list per DATA-ID — built here in that shape.
  */
 import { M3U8Parser } from "hls.js";
-import { lowerQualityFor, qualityLabel } from "../src/lib/quality";
+import {
+  carryQualityTo,
+  lowerQualityFor,
+  preferredQuality,
+  qualityLabel,
+  resetPreferredQuality,
+  setPreferredQuality,
+} from "../src/lib/quality";
 import { readStreamNotes } from "../src/lib/streamNotes";
 
 let pass = 0;
@@ -62,9 +69,27 @@ check("the lowest when even that is more than the connection has carried",
 check("nothing when already at the lowest", lowerQualityFor(4000, 0), null);
 
 console.log("\n— naming them —");
-check("no setting", qualityLabel(0), "Auto");
+check("no setting is the original", qualityLabel(0), "Original");
 check("a level", qualityLabel(8000), "8 Mbps");
 check("the 720p one says so", qualityLabel(4000), "4 Mbps · 720p");
+
+console.log("\n— how long a choice lasts —");
+check("a player starts at Original", preferredQuality(), 0);
+setPreferredQuality(8000, { ratingKey: "s1e1", show: "s1" });
+check("the next episode keeps it", carryQualityTo("s1e2", "s1"), 8000);
+check("and the one after", carryQualityTo("s1e3", "s1"), 8000);
+check("the title it was chosen on keeps it, through a restart", carryQualityTo("s1e3", "s1"), 8000);
+check("a film is something else, and starts at Original", carryQualityTo("film", null), 0);
+check("which sticks", preferredQuality(), 0);
+setPreferredQuality(4000, { ratingKey: "film", show: null });
+check("a film keeps its own", carryQualityTo("film", null), 4000);
+check("but not into a show", carryQualityTo("s2e1", "s2"), 0);
+setPreferredQuality(12000, { ratingKey: "s1e1", show: "s1" });
+check("an episode of another show starts at Original", carryQualityTo("s2e1", "s2"), 0);
+setPreferredQuality(12000, { ratingKey: "s1e1", show: "s1" });
+resetPreferredQuality();
+check("closing the player goes back to Original", preferredQuality(), 0);
+check("and starting the same show again starts there", carryQualityTo("s1e2", "s1"), 0);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

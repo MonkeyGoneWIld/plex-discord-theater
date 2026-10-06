@@ -20,14 +20,22 @@
  *
  * One Plex can't read out is reported unreadable, and the player then asks for
  * a stream with it burned in instead.
+ *
+ * A title's other text subtitles are read too, one at a time behind whatever
+ * someone is actually waiting on (prefetchEmbeddedSubtitles), so switching to
+ * one later finds it ready. What is kept is the file Plex sent as well as the
+ * cues made from it: a better parser re-reads the kept text rather than the
+ * film, and a file that has changed since — told apart by a fingerprint of the
+ * media part it came from — is read again.
  */
 
 import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { randomUUID } from "node:crypto";
 import { plexFetch, plexUrl } from "./plex.js";
-import { parseSubtitles, type Cue } from "./subtitles.js";
+import { parseSubtitles, SUBTITLE_PARSER_VERSION, type Cue } from "./subtitles.js";
 import { logEvent } from "./logger.js";
 import { LruMap } from "./lru.js";
 
@@ -41,10 +49,18 @@ export const ANSWER_WAIT_MS = 4_000;
 const READ_TIMEOUT_MS = 15 * 60_000;
 /** Remembered as unreadable for this long before it is tried again. */
 const RETRY_AFTER_MS = 60 * 60_000;
-/** Bigger than any real subtitle: a three-hour ASS with full typesetting is ~1 MB. */
-const MAX_BYTES = 8 * 1024 * 1024;
-/** How often cues are re-parsed from what has arrived so far. */
+/**
+ * Bigger than any real subtitle. Most are well under a megabyte, but fansubbed
+ * anime with heavy typesetting is not: every sign redrawn each frame, with its
+ * masks as vector drawings, made Kaguya-sama's 8.4 MB — over the 8 MB this used
+ * to allow, so it was burned in instead. A video file is gigabytes.
+ */
+const MAX_BYTES = 64 * 1024 * 1024;
+/** How often cues are re-parsed from what has arrived so far, at the least.
+ *  A big file is re-parsed less often: each pass reads all of it again. */
 const PARTIAL_PARSE_MS = 1_000;
+/** Bytes a partial parse costs a millisecond of wait for. */
+const PARTIAL_PARSE_BYTES_PER_MS = 4_000;
 
 const dbDir = process.env.THUMB_CACHE_DIR
   ? path.resolve(process.env.THUMB_CACHE_DIR)
@@ -64,16 +80,41 @@ db.exec(`
     cached_at INTEGER NOT NULL
   );
 `);
-const readStmt = db.prepare<[string], { cues_json: string }>(
-  "SELECT cues_json FROM embedded_subtitles WHERE stream_id = ?",
+// Added later. A row from before has none of them: its cues were made by an
+// older parser, from text that wasn't kept, so it is read again.
+for (const column of [
+  "parser_version INTEGER NOT NULL DEFAULT 0",
+  "raw BLOB",
+  "fingerprint TEXT",
+]) {
+  try {
+    db.exec(`ALTER TABLE embedded_subtitles ADD COLUMN ${column}`);
+  } catch {
+    // Already there.
+  }
+}
+interface Row {
+  rating_key: string;
+  cues_json: string;
+  parser_version: number;
+  raw: Buffer | null;
+  fingerprint: string | null;
+}
+const readStmt = db.prepare<[string], Row>(
+  "SELECT rating_key, cues_json, parser_version, raw, fingerprint FROM embedded_subtitles WHERE stream_id = ?",
 );
 const writeStmt = db.prepare(`
-  INSERT OR REPLACE INTO embedded_subtitles (stream_id, rating_key, format, cues_json, cached_at)
-  VALUES (?, ?, ?, ?, ?)
+  INSERT OR REPLACE INTO embedded_subtitles
+    (stream_id, rating_key, format, cues_json, cached_at, parser_version, raw, fingerprint)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `);
+const reparsedStmt = db.prepare(
+  "UPDATE embedded_subtitles SET format = ?, cues_json = ?, parser_version = ? WHERE stream_id = ?",
+);
 
-/** Finished reads, in front of the table. Keyed by stream id, unique per file. */
-const ready = new LruMap<string, Cue[]>(100);
+/** Finished reads, in front of the table. Keyed by stream id, unique per file,
+ *  with the fingerprint of the file they were read from. */
+const ready = new LruMap<string, { cues: Cue[]; fingerprint: string | null }>(100);
 /** Stream ids Plex couldn't read out, with when. */
 const unreadable = new LruMap<string, number>(500);
 
@@ -92,9 +133,12 @@ export type EmbeddedSubtitle =
   | { state: "reading"; cues: Cue[] }
   | { state: "unreadable" };
 
-/** What is known about one, without starting anything. Null: never tried. */
-export function embeddedSubtitleState(streamId: string): EmbeddedSubtitle | null {
-  const cues = readyCues(streamId);
+/**
+ * What is known about one, without starting anything. Null: never tried — or
+ * read from a file that has since changed, when `fingerprint` says so.
+ */
+export function embeddedSubtitleState(streamId: string, fingerprint?: string | null): EmbeddedSubtitle | null {
+  const cues = readyCues(streamId, fingerprint ?? null);
   if (cues) return { state: "ready", cues };
   const r = reading.get(streamId);
   if (r) return { state: "reading", cues: r.cues };
@@ -103,14 +147,32 @@ export function embeddedSubtitleState(streamId: string): EmbeddedSubtitle | null
   return null;
 }
 
-function readyCues(streamId: string): Cue[] | null {
+/** Whether cues kept for a file still describe it: a caller that knows the
+ *  file's fingerprint, against a read that recorded one, must match it. */
+function sameFile(kept: string | null, now: string | null): boolean {
+  return kept === null || now === null || kept === now;
+}
+
+function readyCues(streamId: string, fingerprint: string | null): Cue[] | null {
   const hit = ready.get(streamId);
-  if (hit) return hit;
+  if (hit) return sameFile(hit.fingerprint, fingerprint) ? hit.cues : null;
   try {
     const row = readStmt.get(streamId);
-    if (!row) return null;
-    const cues = JSON.parse(row.cues_json) as Cue[];
-    ready.set(streamId, cues);
+    if (!row || !sameFile(row.fingerprint, fingerprint)) return null;
+    let cues: Cue[];
+    if (row.parser_version === SUBTITLE_PARSER_VERSION) {
+      cues = JSON.parse(row.cues_json) as Cue[];
+    } else {
+      // Made by an older parser. The text it came from was kept, so it is
+      // parsed again here rather than read out of the film again — unless it
+      // is a row from before the text was kept, which has to be.
+      if (!row.raw) return null;
+      const parsed = parseSubtitles(gunzipSync(row.raw).toString("utf-8"));
+      if (!parsed || parsed.cues.length === 0) return null;
+      cues = parsed.cues;
+      reparsedStmt.run(parsed.format, JSON.stringify(cues), SUBTITLE_PARSER_VERSION, streamId);
+    }
+    ready.set(streamId, { cues, fingerprint: row.fingerprint });
     return cues;
   } catch {
     return null;
@@ -121,6 +183,9 @@ export interface ReadOptions {
   streamId: string;
   ratingKey: string;
   mediaIndex: number;
+  /** Which file the subtitle is inside, so cues kept from an earlier version of
+   *  it aren't served for this one. Null when it isn't known. */
+  fingerprint?: string | null;
   /**
    * Runs the start of the request with the subtitle selected on the item and
    * nothing else allowed to change that until it returns: Plex takes no stream
@@ -129,6 +194,15 @@ export interface ReadOptions {
   withTrackSelected: <T>(start: () => Promise<T>) => Promise<T>;
   /** How long to wait for Plex's answer. */
   waitMs?: number;
+  /**
+   * Runs inside the hold on the item's selection once Plex has answered — has
+   * read which subtitle is selected — to put back what selecting this one
+   * changed. A read nobody asked for (prefetchEmbeddedSubtitles) must not leave
+   * the item set to some other language. Not run when Plex was too slow to
+   * answer within the hold: changing the selection then could have it read the
+   * wrong subtitle.
+   */
+  afterAnswer?: () => Promise<void>;
 }
 
 /**
@@ -138,7 +212,7 @@ export interface ReadOptions {
  * "unreadable".
  */
 export async function readEmbeddedSubtitle(opts: ReadOptions): Promise<EmbeddedSubtitle> {
-  const known = embeddedSubtitleState(opts.streamId);
+  const known = embeddedSubtitleState(opts.streamId, opts.fingerprint);
   if (known && known.state !== "reading") return known;
 
   const r = reading.get(opts.streamId) ?? begin(opts);
@@ -149,7 +223,58 @@ export async function readEmbeddedSubtitle(opts: ReadOptions): Promise<EmbeddedS
     new Promise<void>((resolve) => { timer = setTimeout(resolve, waitMs); }),
   ]);
   clearTimeout(timer);
-  return embeddedSubtitleState(opts.streamId) ?? { state: "reading", cues: r.cues };
+  return embeddedSubtitleState(opts.streamId, opts.fingerprint) ?? { state: "reading", cues: r.cues };
+}
+
+/**
+ * Reads nobody is waiting on yet, in the order they were asked for: a title's
+ * other text subtitles, so switching to one finds it ready instead of waiting
+ * a minute for Plex to go through the film.
+ */
+const prefetchQueue: ReadOptions[] = [];
+let prefetching = false;
+
+/**
+ * Read these in the background, one at a time.
+ *
+ * Each read is Plex going through the whole film, so they are never run side by
+ * side — with each other or with a read someone is waiting on, which goes
+ * first. Any already read, being read, queued or known unreadable are left
+ * alone. Returns how many were queued.
+ */
+export function prefetchEmbeddedSubtitles(reads: ReadOptions[]): number {
+  let queued = 0;
+  for (const r of reads) {
+    if (embeddedSubtitleState(r.streamId, r.fingerprint)) continue;
+    if (prefetchQueue.some((q) => q.streamId === r.streamId)) continue;
+    prefetchQueue.push(r);
+    queued++;
+  }
+  if (queued > 0) void pumpPrefetch();
+  return queued;
+}
+
+async function pumpPrefetch(): Promise<void> {
+  if (prefetching) return;
+  prefetching = true;
+  try {
+    for (;;) {
+      // Behind anything already reading: someone switched to it, or opened a
+      // title with it on.
+      while (reading.size > 0) {
+        await Promise.race([...reading.values()].map((r) => r.done));
+      }
+      const next = prefetchQueue.shift();
+      if (!next) break;
+      if (embeddedSubtitleState(next.streamId, next.fingerprint)) continue;
+      logEvent("Subtitles", "reading a subtitle ahead, for switching to", {
+        ratingKey: next.ratingKey, streamId: next.streamId, queued: prefetchQueue.length,
+      });
+      await begin(next).done;
+    }
+  } finally {
+    prefetching = false;
+  }
 }
 
 function begin(opts: ReadOptions): Reading {
@@ -269,11 +394,18 @@ async function run(r: Reading, opts: ReadOptions): Promise<void> {
       });
       pending.catch(() => {});
       let hold: ReturnType<typeof setTimeout> | undefined;
-      await Promise.race([
-        pending.catch(() => {}),
-        new Promise<void>((resolve) => { hold = setTimeout(resolve, ANSWER_WAIT_MS); }),
+      const answered = await Promise.race([
+        pending.then(() => true, () => false),
+        new Promise<boolean>((resolve) => { hold = setTimeout(() => resolve(false), ANSWER_WAIT_MS); }),
       ]);
       clearTimeout(hold);
+      if (answered && opts.afterAnswer) {
+        try {
+          await opts.afterAnswer();
+        } catch (err) {
+          console.warn("[Subtitles] couldn't put the item's subtitle back:", err);
+        }
+      }
       return { pending };
     });
 
@@ -319,7 +451,7 @@ async function run(r: Reading, opts: ReadOptions): Promise<void> {
         return;
       }
       // Cues so far, cut at the last blank line so a half-arrived one waits.
-      if (Date.now() - parsedAt >= PARTIAL_PARSE_MS) {
+      if (Date.now() - parsedAt >= Math.max(PARTIAL_PARSE_MS, bytes / PARTIAL_PARSE_BYTES_PER_MS)) {
         parsedAt = Date.now();
         const text = new TextDecoder("utf-8").decode(Buffer.concat(chunks));
         const cut = text.lastIndexOf("\n\n");
@@ -337,9 +469,13 @@ async function run(r: Reading, opts: ReadOptions): Promise<void> {
       });
       return;
     }
-    ready.set(r.streamId, parsed.cues);
+    const fingerprint = opts.fingerprint ?? null;
+    ready.set(r.streamId, { cues: parsed.cues, fingerprint });
     try {
-      writeStmt.run(r.streamId, r.ratingKey, parsed.format, JSON.stringify(parsed.cues), Date.now());
+      writeStmt.run(
+        r.streamId, r.ratingKey, parsed.format, JSON.stringify(parsed.cues), Date.now(),
+        SUBTITLE_PARSER_VERSION, gzipSync(raw), fingerprint,
+      );
     } catch (err) {
       console.warn("[Subtitles] couldn't keep a read-out subtitle:", err);
     }
@@ -358,5 +494,6 @@ async function run(r: Reading, opts: ReadOptions): Promise<void> {
 export function resetEmbeddedSubtitles(): void {
   ready.clear();
   unreadable.clear();
+  prefetchQueue.length = 0;
   db.exec("DELETE FROM embedded_subtitles");
 }

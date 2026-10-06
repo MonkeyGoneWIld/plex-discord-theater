@@ -222,7 +222,7 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
     ["Buffer health", snap?.bufferHealth ?? "—"],
     ["Video", videoPath],
     ...(notes?.video === "transcode" && notes.reason ? [["Re-encoded because", notes.reason] as [string, string]] : []),
-    ["Your quality", quality ? `Up to ${qualityLabel(quality)}` : "Auto"],
+    ["Your quality", quality ? `Up to ${qualityLabel(quality)}` : qualityLabel(0)],
     ["Codecs", `${snap?.videoCodec ?? "—"} / ${snap?.audioCodec ?? "—"}`],
     ["Last segment", snap?.lastFrag ?? "—"],
     ["Delivery", vpsRelay ? "VPS relay (nginx cache)" : "P2P mesh (WebRTC)"],

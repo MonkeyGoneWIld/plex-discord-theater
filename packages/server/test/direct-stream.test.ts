@@ -23,6 +23,9 @@ import Database from "better-sqlite3";
 process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "direct-stream-"));
 process.env.PLEX_TOKEN = "test-token";
 process.env.DIRECT_STREAM = "1";
+// Reading a title's other subtitles ahead is checked on its own, at the end:
+// everywhere else it would race the counts.
+process.env.SUBTITLE_PREFETCH = "0";
 // Remuxes above this are re-encoded rather than copied. Title 950 is one.
 process.env.DIRECT_STREAM_MAX_KBPS = "20000";
 
@@ -176,6 +179,10 @@ const fileKbps = (ratingKey: string) =>
 /** The subtitle the item has selected, as Plex keeps it — per item, not per request. */
 let selectedSubtitle: string | null = null;
 let subtitleReads = 0;
+/** Reads of 910's subtitles going at once, and the most there ever were. */
+let readsInFlight = 0;
+let mostReadsInFlight = 0;
+let sidecarFetches = 0;
 /** Asks of the endpoint the first version used, which Plex answers with the film. */
 let wrongEndpointReads = 0;
 const SRT_FIRST = "1\n00:00:01,000 --> 00:00:02,500\nHello\n\n";
@@ -189,6 +196,21 @@ const plex = http.createServer((req, res) => {
     res.end(JSON.stringify({ MediaContainer: body }));
   };
   const meta = url.pathname.match(/^\/library\/metadata\/(\d+)$/);
+  if (meta && meta[1] === "910") {
+    // A title for reading subtitles ahead: three inside the file and one
+    // beside it. Its selection is the item's, as Plex reports it.
+    const sub = (id: number, language: string, extra: Record<string, unknown> = {}) =>
+      ({ id, streamType: 3, codec: "srt", language, selected: selectedSubtitle === String(id), ...extra });
+    return send({ Metadata: [{
+      ratingKey: "910", title: "Series", type: "movie", duration: FILM_END * 1000,
+      Media: [{ id: 1, width: 1920, height: 1080, videoCodec: "h264", bitrate: 8000, Part: [{ id: 1, size: 1000, file: "/tv/Series.mkv", Stream: [
+        { id: 11, streamType: 1, codec: "h264" },
+        { id: 12, streamType: 2, codec: "aac", selected: true, language: "Japanese", languageCode: "jpn" },
+        sub(31, "English"), sub(32, "Spanish"), sub(33, "English", { title: "Signs" }),
+        sub(34, "German", { key: "/library/streams/34", format: "srt" }),
+      ] }] }],
+    }] });
+  }
   if (meta) {
     return send({ Metadata: [{
       ratingKey: meta[1], title: "Film", type: "movie", duration: FILM_END * 1000,
@@ -220,6 +242,14 @@ const plex = http.createServer((req, res) => {
     subtitleReads++;
     // Reads whatever the item has selected, at the moment it is asked.
     const selected = selectedSubtitle;
+    if (selected === "31" || selected === "32" || selected === "33") {
+      readsInFlight++;
+      mostReadsInFlight = Math.max(mostReadsInFlight, readsInFlight);
+      res.writeHead(200, { "Content-Type": "text/srt" });
+      res.write(SRT_FIRST);
+      setTimeout(() => { readsInFlight--; res.end(SRT.slice(SRT_FIRST.length)); }, 300);
+      return;
+    }
     // 23: one Plex can't read out.
     if (selected === "23") { res.writeHead(500); return res.end(); }
     // 27: one it answers with video anyway.
@@ -238,6 +268,11 @@ const plex = http.createServer((req, res) => {
       else res.destroy();
     }, selected === "25" ? 6_000 : 5_000);
     return;
+  }
+  if (url.pathname === "/library/streams/34") {
+    sidecarFetches++;
+    res.writeHead(200, { "Content-Type": "text/srt" });
+    return res.end(SRT);
   }
   if (url.pathname === "/library/streams/24") {
     res.writeHead(200, { "Content-Type": "text/srt" });
@@ -602,6 +637,30 @@ console.log("\n— through the routes —");
   await until(() => embeddedSubs.embeddedSubtitleState("26")?.state === "unreadable", 8_000);
   check("and is refused once it has failed, so the player asks for it burned in",
     (await answer(26)).status, 404);
+
+  console.log("\n— a title's other subtitles, read ahead for switching to —");
+  process.env.SUBTITLE_PREFETCH = "1";
+  process.env.SUBTITLE_PREFETCH_DELAY_MS = "0";
+  const readsBefore = subtitleReads;
+  const firstAsk = await fetch(`${origin}/api/plex/subtitles/31?ratingKey=910`);
+  check("the one asked for is answered as before", firstAsk.status, 200);
+  await until(() => ["31", "32", "33"].every((id) => embeddedSubs.embeddedSubtitleState(id)?.state === "ready"), 10_000);
+  check("asking for one reads the title's others too, each once", subtitleReads - readsBefore, 3);
+  check("one at a time: each is Plex going through the whole film", mostReadsInFlight, 1);
+  check("the file beside it is fetched as well", sidecarFetches, 1);
+  check("the item is left on the subtitle that was asked for, not the last one read ahead", selectedSubtitle, "31");
+  began = Date.now();
+  const switched = await fetch(`${origin}/api/plex/subtitles/32?ratingKey=910`);
+  const switchedBody = (await switched.json()) as { cues: unknown[]; complete?: boolean };
+  check("so switching to another is answered at once, complete",
+    [switchedBody.cues.length, switchedBody.complete, Date.now() - began < 1000], [2, true, true]);
+  check("and reads nothing more", subtitleReads - readsBefore, 3);
+  const keptRaw = new Database(path.join(process.env.THUMB_CACHE_DIR!, "subtitles.sqlite"), { readonly: true });
+  check("what Plex sent is kept with the cues, for a better parser to read again",
+    keptRaw.prepare("SELECT raw IS NOT NULL AS raw, fingerprint, parser_version AS v FROM embedded_subtitles WHERE stream_id = '32'").get(),
+    { raw: 1, fingerprint: "1:1000", v: 2 });
+  keptRaw.close();
+  process.env.SUBTITLE_PREFETCH = "0";
 
   await plexRoutes.stopAllActiveSessions();
   api.close();

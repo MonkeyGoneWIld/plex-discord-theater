@@ -1,7 +1,7 @@
 import type { StreamTrack } from "./api";
 
-const SUBTITLE_KEY = "pdt:subtitlePref";
-const AUDIO_KEY = "pdt:audioPref";
+export const SUBTITLE_PREF_KEY = "pdt:subtitlePref";
+export const AUDIO_PREF_KEY = "pdt:audioPref";
 
 /**
  * A remembered track choice, stored by *description* rather than by stream id.
@@ -159,22 +159,22 @@ function write(key: string, value: unknown): void {
 }
 
 export function loadSubtitlePref(): SubtitlePref | null {
-  return read<SubtitlePref>(SUBTITLE_KEY, (p) => typeof (p as SubtitlePref)?.off === "boolean");
+  return read<SubtitlePref>(SUBTITLE_PREF_KEY, (p) => typeof (p as SubtitlePref)?.off === "boolean");
 }
 
 /** Remember the subtitle just chosen. Pass `null` for the "None" option. */
 export function saveSubtitlePref(track: StreamTrack | null): void {
-  write(SUBTITLE_KEY, track ? { off: false, ...describe(track) } : { off: true });
+  write(SUBTITLE_PREF_KEY, track ? { off: false, ...describe(track) } : { off: true });
 }
 
 export function loadAudioPref(): AudioPref | null {
-  return read<AudioPref>(AUDIO_KEY, (p) => !!p && typeof p === "object");
+  return read<AudioPref>(AUDIO_PREF_KEY, (p) => !!p && typeof p === "object");
 }
 
 /** Remember the audio track just chosen. There is no "off" — every file has audio. */
 export function saveAudioPref(track: StreamTrack | null): void {
   if (!track) return;
-  write(AUDIO_KEY, { ...describe(track), channels: track.channels ?? null });
+  write(AUDIO_PREF_KEY, { ...describe(track), channels: track.channels ?? null });
 }
 
 /**
@@ -182,8 +182,8 @@ export function saveAudioPref(track: StreamTrack | null): void {
  * Missing sides are left alone; `{ off: true }` is not missing and is saved.
  */
 export function saveTrackPrefs(prefs: TrackPrefs): void {
-  if (prefs.audio) write(AUDIO_KEY, prefs.audio);
-  if (prefs.subtitle) write(SUBTITLE_KEY, prefs.subtitle);
+  if (prefs.audio) write(AUDIO_PREF_KEY, prefs.audio);
+  if (prefs.subtitle) write(SUBTITLE_PREF_KEY, prefs.subtitle);
 }
 
 /**

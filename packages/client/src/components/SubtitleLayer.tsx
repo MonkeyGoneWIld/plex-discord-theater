@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchSubtitleCues, type SubtitleCue } from "../lib/api";
 import { logEvent, logWarn } from "../lib/log";
+import { activeCues, longestCue, sameCues } from "../lib/subtitleCues";
+import { SUBTITLE_COLORS, useSubtitleStyle, type SubtitleStyle } from "../lib/subtitleStyle";
 
 /**
  * Subtitles this client draws itself, from a sidecar file.
@@ -20,7 +22,12 @@ import { logEvent, logWarn } from "../lib/log";
  * The offset itself is per viewer and lives only as long as the player does. It
  * is a property of one badly-timed release rather than of the person watching,
  * and a remembered offset silently applying to a different show later is
- * exactly the kind of stale global setting worth not building.
+ * exactly the kind of stale global setting worth not building. How the text
+ * looks — size, colour, a box behind it, how high it sits — is the opposite, a
+ * property of the person, and is saved: see lib/subtitleStyle.ts.
+ *
+ * Several cues can be up at once (see lib/subtitleCues.ts): overlapping
+ * dialogue at the bottom, and the signs a typeset release places at the top.
  */
 
 /** Cue text as a share of the picture's height, matching a burned-in subtitle. */
@@ -32,6 +39,9 @@ const STILL_READING_POLL_MS = 4_000;
 /** Bounds for absurd geometry — a sliver of a window, or a wall-sized display. */
 const MIN_FONT_PX = 13;
 const MAX_FONT_PX = 56;
+/** More than this many lines at one end of the picture is a typesetting effect
+ *  this renderer can't draw, not something to read; the earliest are kept. */
+const MAX_CUES_PER_EDGE = 4;
 
 /**
  * Where the picture actually is inside the video element.
@@ -42,6 +52,8 @@ const MAX_FONT_PX = 56;
  * means working out the same rectangle.
  */
 function usePictureBox(videoRef: React.RefObject<HTMLVideoElement | null>) {
+  // Letterboxing is symmetrical, so the inset at the bottom is the inset at the
+  // top as well.
   const [box, setBox] = useState<{ bottomInset: number; height: number } | null>(null);
 
   useEffect(() => {
@@ -81,45 +93,46 @@ function usePictureBox(videoRef: React.RefObject<HTMLVideoElement | null>) {
 }
 
 /**
- * Which cue belongs on screen.
+ * Which cues belong on screen.
  *
  * `timeupdate` fires about four times a second, which is enough to be a quarter
  * of a second late putting a line up — visible, and the wrong thing to be
  * imprecise about in a component whose entire job is timing. An animation frame
- * is nearly free when nothing changes, because the work is a comparison and
- * React is only touched when the answer differs.
+ * is nearly free when nothing changes, because the work is a binary search and
+ * a comparison, and React is only touched when the answer differs.
  */
-function useActiveCue(
+const NONE: SubtitleCue[] = [];
+
+function useActiveCues(
   videoRef: React.RefObject<HTMLVideoElement | null>,
   cues: SubtitleCue[],
   offsetMs: number,
-): SubtitleCue | null {
-  const [active, setActive] = useState<SubtitleCue | null>(null);
+): SubtitleCue[] {
+  const [active, setActive] = useState<SubtitleCue[]>(NONE);
   // Read inside the frame loop, which is started once and would otherwise close
   // over the first value of each forever.
   const cuesRef = useRef(cues);
   cuesRef.current = cues;
   const offsetRef = useRef(offsetMs);
   offsetRef.current = offsetMs;
-  // What is on screen, so the common case — the same cue still showing — costs
-  // one comparison and no React work at all.
-  const shownRef = useRef<SubtitleCue | null>(null);
-  // Index of the last cue found, so a scan starts from where it left off rather
-  // than from the beginning of a two-thousand-line file every frame.
-  const hintRef = useRef(0);
+  // How far back a cue still showing can have started — per list, not per frame.
+  const longest = useRef({ list: cues, s: longestCue(cues) });
+  if (longest.current.list !== cues) longest.current = { list: cues, s: longestCue(cues) };
+  // What is on screen, so the common case — the same cues still showing — costs
+  // a comparison and no React work at all.
+  const shownRef = useRef<SubtitleCue[]>(NONE);
   // Nothing loaded means nothing to time, and a frame loop that wakes up sixty
   // times a second to decide it has no work is worth not starting.
   const hasCues = cues.length > 0;
 
   useEffect(() => {
     if (!hasCues) {
-      // Switching a sidecar track to None empties the cue list. Clear the
-      // previously active cue as part of that transition; otherwise the old
-      // React state remains rendered for the rest of playback because there is
-      // no animation frame left to discover that the list is empty.
-      hintRef.current = 0;
-      shownRef.current = null;
-      setActive(null);
+      // Switching a sidecar track to None empties the cue list. Clear what was
+      // showing as part of that transition; otherwise the old React state
+      // remains rendered for the rest of playback because there is no
+      // animation frame left to discover that the list is empty.
+      shownRef.current = NONE;
+      setActive(NONE);
       return;
     }
     let frame = 0;
@@ -127,26 +140,14 @@ function useActiveCue(
       frame = requestAnimationFrame(tick);
       const video = videoRef.current;
       const list = cuesRef.current;
-      if (!video || list.length === 0) {
-        if (shownRef.current !== null) { shownRef.current = null; setActive(null); }
-        return;
-      }
       // A positive offset means "show the text later", which is the direction
       // Plex's own control moves in: +100ms delays the subtitle.
-      const at = video.currentTime - offsetRef.current / 1000;
-
-      // Walk from the hint. Playback moves forward a frame at a time, so this is
-      // one step in the ordinary case; a seek is the only thing that makes it
-      // long, and even then it is bounded by the file.
-      let i = Math.min(hintRef.current, list.length - 1);
-      while (i > 0 && list[i].start > at) i--;
-      while (i < list.length - 1 && list[i].end < at) i++;
-      hintRef.current = i;
-
-      const cue = list[i] && at >= list[i].start && at <= list[i].end ? list[i] : null;
-      if (cue !== shownRef.current) {
-        shownRef.current = cue;
-        setActive(cue);
+      const now = video && list.length > 0
+        ? activeCues(list, video.currentTime - offsetRef.current / 1000, longest.current.s) as SubtitleCue[]
+        : NONE;
+      if (!sameCues(now, shownRef.current)) {
+        shownRef.current = now.length ? now : NONE;
+        setActive(shownRef.current);
       }
     };
     frame = requestAnimationFrame(tick);
@@ -154,6 +155,25 @@ function useActiveCue(
   }, [videoRef, hasCues]);
 
   return active;
+}
+
+/** The text's own look, from the viewer's style. */
+function cueTextStyle(style: SubtitleStyle, fontSize: number | string): React.CSSProperties {
+  const color = SUBTITLE_COLORS[style.color].css;
+  const scaled = typeof fontSize === "number"
+    ? fontSize * style.size / 100
+    : `calc(${fontSize} * ${style.size / 100})`;
+  return {
+    fontSize: scaled,
+    color,
+    fontWeight: style.bold ? 700 : 400,
+    fontFamily: style.font === "serif" ? 'Georgia, "Times New Roman", serif' : undefined,
+    textShadow: style.background === "outline"
+      ? styles.cue.textShadow
+      : style.background === "shadow"
+        ? "0.06em 0.08em 0.12em rgba(0,0,0,0.95), 0 0 0.3em rgba(0,0,0,0.45)"
+        : "none",
+  };
 }
 
 interface SubtitleLayerProps {
@@ -173,6 +193,7 @@ interface SubtitleLayerProps {
 }
 
 export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offsetMs, onUnavailable }: SubtitleLayerProps) {
+  const style = useSubtitleStyle();
   const [cues, setCues] = useState<SubtitleCue[]>([]);
   // Plex is still reading this one out of the media file: cues so far are
   // drawn, and the rest is asked for again shortly.
@@ -221,13 +242,13 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
     return () => { cancelled = true; clearTimeout(poll); };
   }, [streamId]);
 
-  const cue = useActiveCue(videoRef, cues, offsetMs);
+  const shown = useActiveCues(videoRef, cues, offsetMs);
   const box = usePictureBox(videoRef);
   // While Plex is still reading it out, say so wherever there is no line yet —
   // a film that starts with no subtitles otherwise looks like a broken track.
   const lastEnd = cues.length > 0 ? cues[cues.length - 1].end : -1;
-  const waiting = stillReading && !cue && (videoRef.current?.currentTime ?? 0) >= lastEnd;
-  if (!cue && !waiting) return null;
+  const waiting = stillReading && shown.length === 0 && (videoRef.current?.currentTime ?? 0) >= lastEnd;
+  if (shown.length === 0 && !waiting) return null;
 
   // Before the intrinsic size is known there is no picture to measure against.
   // The fallbacks say the same thing about the player instead, so a cue landing
@@ -235,9 +256,12 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
   const fontSize = box
     ? Math.min(MAX_FONT_PX, Math.max(MIN_FONT_PX, box.height * FONT_SCALE))
     : `clamp(${MIN_FONT_PX}px, 4.3vh, ${MAX_FONT_PX}px)`;
-  const bottom = box ? box.bottomInset + box.height * BOTTOM_SCALE : "5.5%";
+  const edge = (raise: number) => box
+    ? box.bottomInset + box.height * (BOTTOM_SCALE + raise / 100)
+    : `${(BOTTOM_SCALE * 100 + raise).toFixed(1)}%`;
+  const bottom = edge(style.raise);
 
-  if (!cue) {
+  if (shown.length === 0) {
     return (
       <div style={{ ...styles.layer, bottom }} aria-live="polite">
         <div style={{ ...styles.cue, ...styles.waiting }}>Loading subtitles…</div>
@@ -245,14 +269,35 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
     );
   }
 
-  return (
-    <div style={{ ...styles.layer, bottom }} aria-live="off">
-      <div style={{ ...styles.cue, fontSize }}>
-        {cue.text.split("\n").map((line, i) => (
-          <div key={i}>{line}</div>
-        ))}
-      </div>
+  const text = cueTextStyle(style, fontSize);
+  const boxed = style.background === "box";
+  const draw = (list: SubtitleCue[]) => (
+    <div style={{ ...styles.cue, ...text }}>
+      {list.slice(0, MAX_CUES_PER_EDGE).map((cue, n) => (
+        <div key={n} style={cue.italic ? styles.italic : undefined}>
+          {cue.text.split("\n").map((line, i) => (
+            <div key={i}>
+              {boxed ? <span style={styles.box}>{line}</span> : line}
+            </div>
+          ))}
+        </div>
+      ))}
     </div>
+  );
+  const low = shown.filter((c) => !c.top);
+  const high = shown.filter((c) => c.top);
+
+  return (
+    <>
+      {low.length > 0 && (
+        <div style={{ ...styles.layer, bottom }} aria-live="off">{draw(low)}</div>
+      )}
+      {/* Signs and notes the subtitle places up top. The viewer's raise is for
+          the dialogue; these keep to the edge they were put at. */}
+      {high.length > 0 && (
+        <div style={{ ...styles.layer, top: edge(0) }} aria-live="off">{draw(high)}</div>
+      )}
+    </>
   );
 }
 
@@ -294,5 +339,14 @@ const styles: Record<string, React.CSSProperties> = {
   waiting: {
     fontSize: 13,
     opacity: 0.7,
+  },
+  italic: { fontStyle: "italic" },
+  /** A plate behind each line, for a viewer who finds an outline hard to read. */
+  box: {
+    background: "rgba(0,0,0,0.72)",
+    padding: "0.05em 0.35em",
+    borderRadius: "0.15em",
+    boxDecorationBreak: "clone",
+    WebkitBoxDecorationBreak: "clone",
   },
 };

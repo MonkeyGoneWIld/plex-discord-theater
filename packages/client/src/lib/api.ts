@@ -785,6 +785,10 @@ export interface SubtitleCue {
   start: number;
   end: number;
   text: string;
+  /** Drawn at the top of the picture: a sign, mostly. */
+  top?: boolean;
+  /** The whole line is in italics. */
+  italic?: boolean;
 }
 
 /**

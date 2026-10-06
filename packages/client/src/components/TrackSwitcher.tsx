@@ -145,15 +145,8 @@ export function TrackSwitcher({
                   onClick={() => { onQualityChange(kbps); onClose(); }}
                   style={on ? styles.trackSelected : styles.track}
                 >
-                  <div>
-                    <div style={{ color: on ? "#f0f0f0" : "#ccc", fontSize: 13 }}>
-                      {kbps ? `Up to ${qualityLabel(kbps)}` : "Auto"}
-                    </div>
-                    {!kbps && (
-                      <div style={{ color: on ? "#888" : "#666", fontSize: 11 }}>
-                        The original video when it can be, the same stream as everyone else
-                      </div>
-                    )}
+                  <div style={{ color: on ? "#f0f0f0" : "#ccc", fontSize: 13 }}>
+                    {kbps ? `Up to ${qualityLabel(kbps)}` : qualityLabel(0)}
                   </div>
                   {on && <span style={styles.checkmark}>{"\u2713"}</span>}
                 </button>
@@ -234,7 +227,7 @@ export function TrackSwitcher({
           {tab === "zoom"
             ? "Saved for this movie or show. Only affects your view."
             : tab === "quality"
-              ? `If the video keeps stopping to buffer, a lower quality gives you a stream of your own that your connection can keep up with.${streamNow ? ` Now: ${streamNow}.` : ""}`
+              ? `If the video keeps stopping to buffer, a lower quality gives you a stream your connection can keep up with. Kept for the next episode; back to Original when you close the player.${streamNow ? ` Now: ${streamNow}.` : ""}`
             : tab === "subtitles"
               ? "Only affects your view. Text subtitles switch instantly; a picture subtitle restarts the stream."
               : "Changing tracks briefly restarts the stream at your current position."}

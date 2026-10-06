@@ -1,6 +1,6 @@
 import { MAX_LEVEL } from "./audioBoost";
 
-const STORAGE_KEY = "pdt:volume";
+export const VOLUME_KEY = "pdt:volume";
 
 /** Starting volume when nothing has been stored yet. */
 export const DEFAULT_VOLUME = 0.5;
@@ -15,7 +15,7 @@ export const DEFAULT_VOLUME = 0.5;
  */
 export function loadVolume(): number {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(VOLUME_KEY);
     if (raw === null) return DEFAULT_VOLUME;
     const v = parseFloat(raw);
     // Up to MAX_LEVEL, not 1: the level above 100% is a boost the player has
@@ -38,7 +38,7 @@ export function loadVolume(): number {
 export function saveVolume(v: number): void {
   if (!(v > 0)) return;
   try {
-    localStorage.setItem(STORAGE_KEY, String(v));
+    localStorage.setItem(VOLUME_KEY, String(v));
   } catch {
     // Storage unavailable — volume simply won't persist.
   }

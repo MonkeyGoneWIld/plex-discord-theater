@@ -227,12 +227,32 @@ export async function readEmbeddedSubtitle(opts: ReadOptions): Promise<EmbeddedS
 }
 
 /**
- * Reads nobody is waiting on yet, in the order they were asked for: a title's
- * other text subtitles, so switching to one finds it ready instead of waiting
- * a minute for Plex to go through the film.
+ * Reads nobody is waiting on yet: a title's other text subtitles, so switching
+ * to one finds it ready instead of waiting a minute for Plex to go through the
+ * film — and the one someone is likely to want next, for a title they are
+ * looking at or the episode after this one.
  */
-const prefetchQueue: ReadOptions[] = [];
+interface Queued {
+  read: ReadOptions;
+  /** For the stream playing or the episode about to: ahead of anything that
+   *  is only a guess. */
+  soon: boolean;
+  /** What asked, for a guess: a newer one from the same place replaces it. */
+  from: string | null;
+}
+const prefetchQueue: Queued[] = [];
 let prefetching = false;
+
+export interface PrefetchOptions {
+  /** Wanted soon — read before anything that is only browsing. */
+  soon?: boolean;
+  /**
+   * Where a guess came from, e.g. the page someone has open. A newer guess
+   * from the same place drops the older one's reads that haven't started:
+   * browsing past ten titles shouldn't queue ten titles' worth of reads.
+   */
+  from?: string;
+}
 
 /**
  * Read these in the background, one at a time.
@@ -242,12 +262,31 @@ let prefetching = false;
  * first. Any already read, being read, queued or known unreadable are left
  * alone. Returns how many were queued.
  */
-export function prefetchEmbeddedSubtitles(reads: ReadOptions[]): number {
+export function prefetchEmbeddedSubtitles(reads: ReadOptions[], opts: PrefetchOptions = {}): number {
+  const soon = opts.soon ?? true;
+  const from = soon ? null : opts.from ?? null;
+  if (from !== null) {
+    for (let i = prefetchQueue.length - 1; i >= 0; i--) {
+      if (prefetchQueue[i].from === from) prefetchQueue.splice(i, 1);
+    }
+  }
   let queued = 0;
-  for (const r of reads) {
-    if (embeddedSubtitleState(r.streamId, r.fingerprint)) continue;
-    if (prefetchQueue.some((q) => q.streamId === r.streamId)) continue;
-    prefetchQueue.push(r);
+  for (const read of reads) {
+    if (embeddedSubtitleState(read.streamId, read.fingerprint)) continue;
+    const existing = prefetchQueue.findIndex((q) => q.read.streamId === read.streamId);
+    if (existing !== -1) {
+      // Already waiting — as a guess, perhaps, and now wanted soon.
+      if (soon && !prefetchQueue[existing].soon) prefetchQueue.splice(existing, 1);
+      else continue;
+    }
+    const entry: Queued = { read, soon, from };
+    if (soon) {
+      // After the other reads wanted soon, ahead of every guess.
+      const firstGuess = prefetchQueue.findIndex((q) => !q.soon);
+      prefetchQueue.splice(firstGuess === -1 ? prefetchQueue.length : firstGuess, 0, entry);
+    } else {
+      prefetchQueue.push(entry);
+    }
     queued++;
   }
   if (queued > 0) void pumpPrefetch();
@@ -266,11 +305,12 @@ async function pumpPrefetch(): Promise<void> {
       }
       const next = prefetchQueue.shift();
       if (!next) break;
-      if (embeddedSubtitleState(next.streamId, next.fingerprint)) continue;
-      logEvent("Subtitles", "reading a subtitle ahead, for switching to", {
-        ratingKey: next.ratingKey, streamId: next.streamId, queued: prefetchQueue.length,
+      if (embeddedSubtitleState(next.read.streamId, next.read.fingerprint)) continue;
+      logEvent("Subtitles", "reading a subtitle ahead", {
+        ratingKey: next.read.ratingKey, streamId: next.read.streamId,
+        why: next.soon ? "playing or up next" : "a title being looked at", queued: prefetchQueue.length,
       });
-      await begin(next).done;
+      await begin(next.read).done;
     }
   } finally {
     prefetching = false;

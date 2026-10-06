@@ -666,7 +666,15 @@ export function Controls({
     const onReveal = (event: Event) => {
       // A pinch has no picture click to consume its reveal flag. Start each
       // new pointer interaction with fresh state, and discard multi-touch.
-      if (event.type === "pointerdown") revealTapRef.current = !visibleRef.current;
+      //
+      // Touch only. A mouse has a hover that brings the bar up before anyone
+      // clicks, so a click is always meant for the picture — except when no
+      // hover came first: tabbing back to Discord and clicking straight onto
+      // the video found the bar hidden, and the click that should have paused
+      // only revealed it.
+      if (event.type === "pointerdown") {
+        revealTapRef.current = (event as PointerEvent).pointerType !== "mouse" && !visibleRef.current;
+      }
       if (event.type === "touchstart" && (event as TouchEvent).touches.length > 1) revealTapRef.current = false;
       resetHideTimer();
     };

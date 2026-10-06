@@ -183,6 +183,11 @@ let subtitleReads = 0;
 let readsInFlight = 0;
 let mostReadsInFlight = 0;
 let sidecarFetches = 0;
+/** Titles 930-933, for the order reads ahead are done in: their subtitles. */
+const aheadTitles: Record<string, number[]> = { "930": [51, 52], "931": [61], "932": [71], "933": [81] };
+const aheadIds = new Set(Object.values(aheadTitles).flat().map(String));
+/** The subtitles Plex was asked to read, in order. */
+const readOrder: string[] = [];
 /** Asks of the endpoint the first version used, which Plex answers with the film. */
 let wrongEndpointReads = 0;
 const SRT_FIRST = "1\n00:00:01,000 --> 00:00:02,500\nHello\n\n";
@@ -196,6 +201,16 @@ const plex = http.createServer((req, res) => {
     res.end(JSON.stringify({ MediaContainer: body }));
   };
   const meta = url.pathname.match(/^\/library\/metadata\/(\d+)$/);
+  if (meta && aheadTitles[meta[1]]) {
+    return send({ Metadata: [{
+      ratingKey: meta[1], title: "Episode", type: "episode", duration: FILM_END * 1000,
+      Media: [{ id: 1, width: 1920, height: 1080, videoCodec: "h264", bitrate: 8000, Part: [{ id: 1, size: 2000, file: "/tv/Ep.mkv", Stream: [
+        { id: 11, streamType: 1, codec: "h264" },
+        { id: 12, streamType: 2, codec: "aac", selected: true },
+        ...aheadTitles[meta[1]].map((id) => ({ id, streamType: 3, codec: "ass", language: "English" })),
+      ] }] }],
+    }] });
+  }
   if (meta && meta[1] === "910") {
     // A title for reading subtitles ahead: three inside the file and one
     // beside it. Its selection is the item's, as Plex reports it.
@@ -242,6 +257,13 @@ const plex = http.createServer((req, res) => {
     subtitleReads++;
     // Reads whatever the item has selected, at the moment it is asked.
     const selected = selectedSubtitle;
+    if (selected && aheadIds.has(selected)) {
+      readOrder.push(selected);
+      res.writeHead(200, { "Content-Type": "text/srt" });
+      res.write(SRT_FIRST);
+      setTimeout(() => res.end(SRT.slice(SRT_FIRST.length)), 600);
+      return;
+    }
     if (selected === "31" || selected === "32" || selected === "33") {
       readsInFlight++;
       mostReadsInFlight = Math.max(mostReadsInFlight, readsInFlight);
@@ -503,6 +525,7 @@ console.log("\n— through the routes —");
   const plexRoutes = await import("../src/routes/plex.js");
   const express = (await import("express")).default;
   const app = express();
+  app.use(express.json());
   app.use("/api/plex", plexRoutes.default);
   const api = http.createServer(app);
   await new Promise<void>((r) => api.listen(0, "127.0.0.1", r));
@@ -660,6 +683,29 @@ console.log("\n— through the routes —");
     keptRaw.prepare("SELECT raw IS NOT NULL AS raw, fingerprint, parser_version AS v FROM embedded_subtitles WHERE stream_id = '32'").get(),
     { raw: 1, fingerprint: "1:1000", v: 2 });
   keptRaw.close();
+
+  console.log("\n— what is read ahead first —");
+  const ahead = (body: Record<string, unknown>) => fetch(`${origin}/api/plex/subtitles/prefetch`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  // An episode about to be reached: everything, soon.
+  check("asking answers at once", (await ahead({ ratingKey: "930", first: 52, scope: "all" })).status, 200);
+  await pause(60);
+  // Someone browsing, past one title and on to the next.
+  await ahead({ ratingKey: "931", first: 61, scope: "first" });
+  await pause(60);
+  await ahead({ ratingKey: "932", first: 71, scope: "first" });
+  await pause(60);
+  // Another episode coming up, after the browsing.
+  await ahead({ ratingKey: "933", scope: "all" });
+  await until(() => ["51", "52", "71", "81"].every((id) => embeddedSubs.embeddedSubtitleState(id)?.state === "ready"), 15_000);
+  check("the one the viewer would start on first, everything wanted soon before a guess, and only the latest guess",
+    readOrder, ["52", "51", "81", "71"]);
+  check("the title browsed past isn't read at all", embeddedSubs.embeddedSubtitleState("61"), null);
+  check("a title someone is looking at without a subtitle chosen reads nothing",
+    await (await ahead({ ratingKey: "931", scope: "first" })).json(), { ok: true, queued: false });
+  check("a key that isn't one is refused", (await ahead({ ratingKey: "../x" })).status, 400);
   process.env.SUBTITLE_PREFETCH = "0";
 
   await plexRoutes.stopAllActiveSessions();

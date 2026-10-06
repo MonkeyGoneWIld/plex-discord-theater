@@ -34,7 +34,6 @@ import {
 } from "../lib/api";
 import { formatWhen } from "../lib/format";
 import { QUIET_SURFACE } from "../lib/surface";
-import { SAVED_SETTINGS, resetSavedSettings } from "../lib/savedSettings";
 
 const PAGE_SIZE = 200;
 const HISTORY_PAGE_SIZE = 100;
@@ -108,9 +107,6 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   const [historySettingsSaving, setHistorySettingsSaving] = useState(false);
   const [historySettingsError, setHistorySettingsError] = useState<string | null>(null);
   const [historySaveMode, setHistorySaveMode] = useState<HistorySaveMode>("all");
-  /** The saved-settings reset in the same dialog: asked, confirmed, or done
-   *  (with how many there were). */
-  const [settingsReset, setSettingsReset] = useState<"idle" | "confirm" | number>("idle");
   // null while the account check is unresolved. Local-history navigation and
   // destructive controls stay hidden in that state so a linked account never
   // sees them flash briefly before its status request finishes.
@@ -153,7 +149,6 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
 
   const openHistorySettings = useCallback(() => {
     setHistorySettingsOpen(true);
-    setSettingsReset("idle");
     setHistorySettingsLoading(true);
     setHistorySettingsError(null);
     fetchHistorySettings()
@@ -796,12 +791,11 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
 
       <div style={styles.wideWrap}>
 
-      {/* Keep settings reachable when either personal tab has no list header.
-          With content present, the button lives in that header below. */}
-      {!searchResults && (
-        (isHistoryTab && (historyLoading || !!historyError || historyItems.length === 0))
-        || (isWatchlistTab && (watchlistLoading || !!watchlistError || watchlistItems.length === 0))
-      ) && (
+      {/* Keep settings reachable when History has no list header. With
+          content present, the button lives in that header below. Not on
+          Watchlist: what is recorded to history has nothing to do with it, and
+          the same setting is in Settings on the home page. */}
+      {!searchResults && isHistoryTab && (historyLoading || !!historyError || historyItems.length === 0) && (
         <div style={styles.historySettingsRow}>
           {historySettingsButton}
         </div>
@@ -835,7 +829,6 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
               <span style={styles.historyCount}>
                 {watchlistItems.length} {watchlistItems.length === 1 ? "title" : "titles"}
               </span>
-              {historySettingsButton}
             </div>
             <div style={gridStyle}>
               {watchlistItems.map((item) => (
@@ -1250,37 +1243,6 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                 only. It must not delete old rows or send playback commands. */}
             <div style={styles.settingsPersonalNote}>Personal to your Discord account.</div>
 
-            {/* Everything the player has remembered on this device, cleared in
-                one go — for after a round of trying settings out. Local only:
-                it changes nothing for anyone else, and nothing in history. */}
-            <div style={styles.settingsDivider} />
-            <div style={styles.settingsSectionTitle}>Saved player settings</div>
-            <p style={styles.settingsDescription}>
-              Your remembered {SAVED_SETTINGS.map((s) => s.label).join(", ").replace(/, ([^,]*)$/, " and $1")}.
-              Resetting puts them all back to their defaults on this device.
-            </p>
-            {settingsReset === "idle" ? (
-              <button className="btn" type="button" style={styles.settingsCancelBtn}
-                onClick={() => setSettingsReset("confirm")}>
-                Reset saved settings
-              </button>
-            ) : settingsReset === "confirm" ? (
-              <div style={styles.settingsResetRow} role="group" aria-label="Confirm reset">
-                <span style={styles.settingsResetAsk}>Reset everything to the defaults?</span>
-                <button className="btn" type="button" style={styles.settingsCancelBtn}
-                  onClick={() => setSettingsReset("idle")}>
-                  Keep
-                </button>
-                <button className="btn" type="button" style={styles.settingsSaveBtn}
-                  onClick={() => setSettingsReset(resetSavedSettings())}>
-                  Reset
-                </button>
-              </div>
-            ) : (
-              <div role="status" style={styles.settingsResetDone}>
-                {settingsReset > 0 ? "Done — everything is back to its default." : "Nothing was saved — everything is already at its default."}
-              </div>
-            )}
             {historySettingsError && <div role="alert" style={styles.settingsError}>{historySettingsError}</div>}
 
             <div style={styles.settingsActions}>
@@ -1550,10 +1512,6 @@ const styles: Record<string, React.CSSProperties> = {
   settingsChoiceLabel: { fontSize: "14px", fontWeight: 700 },
   settingsChoiceDescription: { color: "#aaa", fontSize: "12px", lineHeight: 1.45 },
   settingsPersonalNote: { marginTop: "18px", color: "#888", fontSize: "12px" },
-  settingsDivider: { height: "1px", background: "rgba(255,255,255,0.08)", margin: "20px 0 18px" },
-  settingsResetRow: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" },
-  settingsResetAsk: { color: "#ddd", fontSize: "13px", marginRight: "auto" },
-  settingsResetDone: { color: "#9fd49f", fontSize: "13px" },
   settingsError: { marginTop: "12px", color: "#ef7770", fontSize: "12px" },
   settingsActions: { display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "24px" },
   settingsCancelBtn: {

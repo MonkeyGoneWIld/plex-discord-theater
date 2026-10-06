@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { QUIET_SURFACE } from "../lib/surface";
+import { HEADER_PILL, QUIET_SURFACE } from "../lib/surface";
 import plexMark from "../assets/plex-mark.svg";
 import {
   fetchPlexAccountStatus,
@@ -273,9 +273,10 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
 const styles: Record<string, React.CSSProperties> = {
   trigger: {
     ...QUIET_SURFACE,
-    display: "inline-flex", alignItems: "center", gap: "6px", padding: "5px 9px",
+    ...HEADER_PILL,
+    display: "inline-flex", alignItems: "center", gap: "6px",
     borderRadius: "999px", color: "#9a9a9a", cursor: "pointer",
-    fontFamily: "inherit", fontSize: "12px", fontWeight: 600, whiteSpace: "nowrap",
+    fontFamily: "inherit", fontWeight: 600, whiteSpace: "nowrap",
     transition: "border-color 0.15s ease, color 0.15s ease, background 0.15s ease",
   },
   /** Linked: the same surface, wearing the accent on its edge. Only the
@@ -286,7 +287,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   plexMark: {
     display: "inline-flex", alignItems: "center", justifyContent: "center",
-    width: "17px", height: "17px", borderRadius: "4px", background: "#111",
+    width: "15px", height: "15px", borderRadius: "4px", background: "#111",
     border: "1px solid rgba(229,160,13,0.38)", boxSizing: "border-box", overflow: "hidden",
   },
   plexMarkUnlinked: { borderColor: "rgba(255,255,255,0.16)" },

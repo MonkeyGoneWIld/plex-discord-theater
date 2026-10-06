@@ -19,8 +19,10 @@ import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, f
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { isHevcCodec, markHevcUnplayable } from "../lib/hevc";
-import { loadVolume, saveVolume } from "../lib/volume";
+import { endVolumeSession, loadVolume, saveVolume } from "../lib/volume";
+import { readSubtitlesAhead } from "../lib/subtitleReadAhead";
 import {
+  beginQualitySession,
   carryQualityTo,
   lowerQualityFor,
   preferredQuality,
@@ -204,6 +206,13 @@ const REBUFFER_SNOOZE_MS = 10 * 60_000;
 const REBUFFER_CALM_MS = 20_000;
 const REBUFFER_CALM_BUFFER_S = 10;
 const REBUFFER_HEALTHY_BUFFER_S = 30;
+
+/**
+ * How far into an episode the next one's subtitles are read ahead, as a share
+ * of its runtime: late enough that it is probably being watched through, early
+ * enough to leave Plex the minutes a big file takes.
+ */
+const NEXT_EPISODE_READ_AHEAD_AT = 0.75;
 
 /** Clean playback for this long means the next media error starts a fresh budget. */
 const MEDIA_ERROR_RESET_MS = 60_000;
@@ -2170,8 +2179,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     }
     setQualityCheckedFor(item.ratingKey);
   }, [itemMeta, item.ratingKey]);
-  // Closing the player is the end of it: the next one starts at Original.
-  useEffect(() => () => resetPreferredQuality(), []);
+  // A player starts at this viewer's defaults — Settings — and closing it is
+  // the end of whatever was changed while watching: the next one starts there
+  // again. Quality and volume alike.
+  useEffect(() => {
+    beginQualitySession();
+    return () => {
+      resetPreferredQuality();
+      endVolumeSession();
+    };
+  }, []);
 
   useEffect(() => {
     const v = variantRef.current;
@@ -2246,6 +2263,33 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       if (offerLowerQualityRef.current === suggest) return;
       setOfferLowerQuality(suggest);
     }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  /**
+   * Past three quarters of an episode, read the next one's subtitles ahead, so
+   * moving on to it doesn't start with Plex reading through the file. Matched
+   * to the subtitle being watched now, which goes first. Asked for once per
+   * episode, by whoever could press Next.
+   */
+  const readAheadForRef = useRef<string | null>(null);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const next = nextEpisodeRef.current;
+      const video = videoRef.current;
+      const runtime = runtimeRef.current;
+      if (!next || !video || !canControlRef.current || !(runtime > 0)) return;
+      if (readAheadForRef.current === next.ratingKey) return;
+      if (video.currentTime < runtime * NEXT_EPISODE_READ_AHEAD_AT) return;
+      readAheadForRef.current = next.ratingKey;
+      const watched = watchedTrackPrefsRef.current;
+      const pref = watched?.ratingKey === itemRef.current.ratingKey ? watched.prefs.subtitle : null;
+      logEvent("Subtitles", "reading the next episode's subtitles ahead", {
+        next: next.ratingKey,
+        atS: Math.round(video.currentTime),
+      });
+      void readSubtitlesAhead(next.ratingKey, "all", pref ? { pref } : {});
+    }, 5000);
     return () => clearInterval(timer);
   }, []);
 
@@ -2577,7 +2621,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     async function qualityForStart(): Promise<number> {
       const assigned = variantRef.current;
       if (assigned && assigned.ratingKey === item.ratingKey && assigned.isOwner) return assigned.quality;
-      if (!preferredQuality()) return 0;
       try {
         return carryQualityTo(item.ratingKey, showOf(await fetchMeta(item.ratingKey)));
       } catch {

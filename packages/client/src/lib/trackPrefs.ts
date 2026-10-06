@@ -329,3 +329,35 @@ export function matchAudioTrack(
   scored.sort((a, b) => b.score - a.score);
   return scored[0].t;
 }
+
+/**
+ * Choose a subtitle language ahead of time, from Settings: by language alone,
+ * with no particular file's track to describe. `"off"` is no subtitles; null
+ * forgets the choice, so each title starts on its own default.
+ */
+export function chooseSubtitleLanguage(choice: { code: string; name: string } | "off" | null): void {
+  if (choice === null) {
+    forget(SUBTITLE_PREF_KEY);
+    return;
+  }
+  write(SUBTITLE_PREF_KEY, choice === "off"
+    ? { off: true }
+    : { off: false, languageCode: choice.code, language: choice.name, codec: null, title: null });
+}
+
+/** The same, for audio. There is no "off": null goes back to each title's own. */
+export function chooseAudioLanguage(choice: { code: string; name: string } | null): void {
+  if (choice === null) {
+    forget(AUDIO_PREF_KEY);
+    return;
+  }
+  write(AUDIO_PREF_KEY, { languageCode: choice.code, language: choice.name, codec: null, title: null, channels: null });
+}
+
+function forget(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // Storage unavailable — nothing was kept to forget.
+  }
+}

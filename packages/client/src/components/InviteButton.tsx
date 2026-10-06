@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { QUIET_SURFACE } from "../lib/surface";
+import { HEADER_PILL, QUIET_SURFACE } from "../lib/surface";
 import type { InviteResult } from "../hooks/useDiscord";
 
 interface InviteButtonProps {
@@ -105,8 +105,7 @@ const styles: Record<string, React.CSSProperties> = {
   wrap: { position: "relative", display: "inline-flex" },
   button: {
     ...base,
-    padding: "3px 9px",
-    fontSize: "12px",
+    ...HEADER_PILL,
   },
   note: {
     position: "absolute",

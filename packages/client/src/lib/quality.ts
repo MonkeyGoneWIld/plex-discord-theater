@@ -10,16 +10,33 @@ import { useSyncExternalStore } from "react";
  * file fits under it, a re-encode at it when it doesn't. 0 is no ceiling,
  * "Original": whatever the server sends everyone.
  *
- * Not saved anywhere. A connection that struggled with one film says nothing
- * about the next, and a ceiling nobody remembers setting quietly costs them
- * picture quality from then on. So it lasts while the player stays open on the
- * same show — the next episode keeps it, for everyone who set one — and goes
- * back to Original when the player closes or moves to something else (see
- * carryQualityTo).
+ * Two values. The default, chosen in Settings and saved on this device, is
+ * where every player starts — Original unless someone on a slow connection
+ * has said otherwise. A choice made while watching is not saved: a connection
+ * that struggled with one film says nothing about the next, and a ceiling
+ * nobody remembers setting quietly costs them picture quality from then on.
+ * It lasts while the player stays open on the same show — the next episode
+ * keeps it, for everyone who set one — and goes back to the default when the
+ * player closes or moves to something else (see carryQualityTo).
  */
 export const QUALITY_LEVELS_KBPS = [20000, 12000, 8000, 4000];
 
-let current = 0;
+export const DEFAULT_QUALITY_KEY = "pdt:defaultQuality";
+
+/** The ceiling players start at — see setDefaultQuality. */
+export function defaultQuality(): number {
+  try {
+    const n = Number(localStorage.getItem(DEFAULT_QUALITY_KEY));
+    return QUALITY_LEVELS_KBPS.includes(n) ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** A player is open: a default changed meanwhile waits for the next one. */
+let playerOpen = false;
+
+let current = defaultQuality();
 /** Where the current ceiling was chosen: the title, and the show it is an
  *  episode of (null for a film). */
 let chosenFor: { ratingKey: string; show: string | null } | null = null;
@@ -27,7 +44,7 @@ const listeners = new Set<() => void>();
 
 function set(kbps: number, where: { ratingKey: string; show: string | null } | null): void {
   const next = QUALITY_LEVELS_KBPS.includes(kbps) ? kbps : 0;
-  chosenFor = next ? where : null;
+  chosenFor = where;
   if (next === current) return;
   current = next;
   for (const fn of listeners) fn();
@@ -48,9 +65,29 @@ export function setPreferredQuality(
   set(kbps, where);
 }
 
-/** Back to Original: the player closed. */
+/** Choose the ceiling players start at. Saved; applies from the next player
+ *  on, rather than restarting one already playing. */
+export function setDefaultQuality(kbps: number): void {
+  const level = QUALITY_LEVELS_KBPS.includes(kbps) ? kbps : 0;
+  try {
+    if (level) localStorage.setItem(DEFAULT_QUALITY_KEY, String(level));
+    else localStorage.removeItem(DEFAULT_QUALITY_KEY);
+  } catch {
+    // Storage unavailable: it lasts as long as the page does.
+  }
+  if (!playerOpen) set(level, null);
+}
+
+/** A player opened: it starts at the default. */
+export function beginQualitySession(): void {
+  playerOpen = true;
+  set(defaultQuality(), null);
+}
+
+/** Back to the default: the player closed. */
 export function resetPreferredQuality(): void {
-  set(0, null);
+  playerOpen = false;
+  set(defaultQuality(), null);
 }
 
 /**
@@ -58,17 +95,18 @@ export function resetPreferredQuality(): void {
  *
  * Kept for the title it was chosen on and for other episodes of the same show —
  * moving on to the next one is still the same evening with the same connection.
- * Anything else is a fresh start, and starts at Original. Returns what applies.
+ * Anything else is a fresh start, and starts at the default. Returns what
+ * applies.
  */
 export function carryQualityTo(ratingKey: string, show: string | null): number {
-  if (!current || !chosenFor) return current;
+  if (!chosenFor) return current;
   if (chosenFor.ratingKey === ratingKey) return current;
   if (show !== null && chosenFor.show === show) {
     chosenFor = { ratingKey, show };
     return current;
   }
-  set(0, null);
-  return 0;
+  set(defaultQuality(), null);
+  return current;
 }
 
 function subscribe(fn: () => void): () => void {

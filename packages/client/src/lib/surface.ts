@@ -25,6 +25,20 @@ export const QUIET_SURFACE = {
 } as const;
 
 /**
+ * The size of a pill in the header's right-hand row — Link Plex, Invite, the
+ * roster count and Settings. One height, so the row reads as a row: Link Plex
+ * carried a bigger logo and more padding than its neighbours, and stood a
+ * head taller than them.
+ */
+export const HEADER_PILL = {
+  height: "26px",
+  boxSizing: "border-box",
+  padding: "0 10px",
+  fontSize: "12px",
+  lineHeight: 1,
+} as const;
+
+/**
  * The surface for a secondary standing next to the primary.
  *
  * Start Over, Watchlist and Mark watched are the three controls that share a

@@ -20,6 +20,7 @@ import { SeasonRequestGrid } from "./SeasonRequestGrid";
 import { DetailLoading } from "./DetailLoading";
 import { PlexMediaActions } from "./PlexMediaActions";
 import { QUIET_SURFACE } from "../lib/surface";
+import { readSubtitlesAhead } from "../lib/subtitleReadAhead";
 
 interface ShowDetailProps {
   item: PlexItem;
@@ -289,6 +290,14 @@ export function ShowDetail({
    * without moving the seasons grid. It goes false either when there is
    * something to play or when we know there is nothing.
    */
+  // The episode the play button would start: read its subtitle ahead while the
+  // host is here, as the episode page does — see MovieDetail.
+  useEffect(() => {
+    if (!canPlay || !startFrom) return;
+    const timer = setTimeout(() => void readSubtitlesAhead(startFrom.ratingKey, "first"), 1500);
+    return () => clearTimeout(timer);
+  }, [canPlay, startFrom?.ratingKey]);
+
   const startPending = !startFrom
     && (!nextUpLoaded || loading || (seasons.length > 0 && !firstEpisodeTried));
 

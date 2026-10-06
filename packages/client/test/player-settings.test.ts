@@ -1,6 +1,7 @@
 /**
- * Drawing subtitles here: which lines are up at a moment, the viewer's own look
- * for them, and clearing everything the player has remembered.
+ * This viewer's own settings: which subtitle lines are up at a moment and how
+ * they look, what a player starts at (quality, volume, languages), and
+ * clearing everything the player has remembered.
  */
 
 // Storage as the browser has it, before anything below reads it.
@@ -18,6 +19,9 @@ const { activeCues, longestCue, sameCues } = await import("../src/lib/subtitleCu
 const { DEFAULT_SUBTITLE_STYLE, normaliseSubtitleStyle, setSubtitleStyle, subtitleStyle, SUBTITLE_STYLE_KEY } =
   await import("../src/lib/subtitleStyle");
 const { resetSavedSettings, SAVED_SETTINGS } = await import("../src/lib/savedSettings");
+const quality = await import("../src/lib/quality");
+const volume = await import("../src/lib/volume");
+const prefs = await import("../src/lib/trackPrefs");
 
 let pass = 0;
 let fail = 0;
@@ -60,10 +64,56 @@ console.log("\n— the viewer's own look —");
   setSubtitleStyle({ size: 999 });
   check("a size past the end stops at it", subtitleStyle().size, 200);
   check("anything stored that isn't a choice is the default",
-    normaliseSubtitleStyle({ size: "huge", color: "plaid", background: 3, raise: 11, bold: "yes", font: "comic" }),
-    { size: 100, color: "white", background: "outline", raise: 12, bold: false, font: "sans" });
+    normaliseSubtitleStyle({ size: "huge", color: "plaid", background: 3, raise: 11, bold: "yes", italic: 1, font: "comic" }),
+    { size: 100, color: "white", background: "outline", raise: 12, bold: false, italic: false, font: "sans" });
+  setSubtitleStyle({ color: "gray", font: "mono", italic: true });
+  check("grey, red, a monospaced font and italics are choices too",
+    [subtitleStyle().color, subtitleStyle().font, subtitleStyle().italic], ["gray", "mono", true]);
   setSubtitleStyle(DEFAULT_SUBTITLE_STYLE);
   check("going back to the default saves nothing", store.has(SUBTITLE_STYLE_KEY), false);
+}
+
+console.log("\n— what a player starts at —");
+{
+  check("Original, until a default is chosen", [quality.defaultQuality(), quality.preferredQuality()], [0, 0]);
+  quality.setDefaultQuality(8000);
+  check("a default chosen with no player open is what the next one starts at", quality.preferredQuality(), 8000);
+  quality.beginQualitySession();
+  quality.setPreferredQuality(20000, { ratingKey: "s1e1", show: "s1" });
+  check("changing it while watching isn't saved as the default", quality.defaultQuality(), 8000);
+  check("but carries into the next episode", quality.carryQualityTo("s1e2", "s1"), 20000);
+  check("and something else starts at the default", quality.carryQualityTo("film", null), 8000);
+  quality.setPreferredQuality(0, { ratingKey: "s2e1", show: "s2" });
+  check("Original chosen over a lower default carries into the next episode too", quality.carryQualityTo("s2e2", "s2"), 0);
+  quality.setDefaultQuality(4000);
+  check("a default changed while a player is open doesn't restart it", quality.preferredQuality(), 0);
+  quality.resetPreferredQuality();
+  check("closing the player goes back to the default", quality.preferredQuality(), 4000);
+
+  check("volume starts at half until a default is chosen", volume.loadVolume(), 0.5);
+  volume.setDefaultVolume(0.8);
+  check("then at the default", volume.loadVolume(), 0.8);
+  volume.saveVolume(0.3);
+  check("a change while watching lasts the sitting", volume.loadVolume(), 0.3);
+  check("without becoming the default", volume.defaultVolume(), 0.8);
+  volume.saveVolume(0);
+  check("muting isn't kept as a level", volume.loadVolume(), 0.3);
+  volume.endVolumeSession();
+  check("and the next player starts at the default again", volume.loadVolume(), 0.8);
+
+  prefs.chooseSubtitleLanguage({ code: "ja", name: "Japanese" });
+  const tracks = [
+    { id: 1, title: "English (SRT)", language: "English", languageCode: "eng", codec: "srt", selected: true },
+    { id: 2, title: "Japanese (ASS)", language: "Japanese", languageCode: "jpn", codec: "ass", selected: false },
+  ];
+  check("a subtitle language chosen ahead of time picks that language in a file",
+    prefs.matchSubtitleTrack(tracks as never, prefs.loadSubtitlePref())?.id, 2);
+  prefs.chooseSubtitleLanguage("off");
+  check("off is off", prefs.matchSubtitleTrack(tracks as never, prefs.loadSubtitlePref()), null);
+  prefs.chooseSubtitleLanguage(null);
+  check("and no choice leaves each title to its own", prefs.loadSubtitlePref(), null);
+  prefs.chooseAudioLanguage({ code: "en", name: "English" });
+  check("an audio language too", prefs.matchAudioTrack(tracks as never, prefs.loadAudioPref())?.id, 1);
 }
 
 console.log("\n— resetting saved settings —");
@@ -75,9 +125,11 @@ console.log("\n— resetting saved settings —");
   store.set("pdt:hevc-failed", "1");
   store.set("plex-presence-details", "false");
   setSubtitleStyle({ color: "cyan" });
-  check("every saved player setting is cleared, and counted", resetSavedSettings(), 5);
+  store.set("pdt:defaultQuality", "8000");
+  check("every saved player setting is cleared, and counted", resetSavedSettings(), 6);
   check("none of them is left", SAVED_SETTINGS.filter(({ key }) => store.has(key)), []);
   check("the subtitle look in use goes back to the default too", subtitleStyle().color, "white");
+  check("and so does the quality the next player starts at", quality.preferredQuality(), 0);
   check("what the device can play, and what you share, are not settings to reset",
     [store.get("pdt:hevc-failed"), store.get("plex-presence-details")], ["1", "false"]);
   check("a second reset finds nothing", resetSavedSettings(), 0);

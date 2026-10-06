@@ -2840,8 +2840,9 @@ function subtitlePrefetchDelayMs(): number {
  */
 const PREFETCH_EMBEDDED_MAX = 8;
 
-/** Titles whose subtitles have been read ahead lately: once is enough. */
-const subtitlesPrefetched = new LruMap<string, number>(200);
+/** Titles whose subtitles have been read ahead lately — all of them, or only
+ *  the one somebody looking at the title would get: once is enough. */
+const subtitlesPrefetched = new LruMap<string, number>(400);
 const SUBTITLE_PREFETCH_AGAIN_MS = 30 * 60_000;
 
 /**
@@ -2876,9 +2877,20 @@ async function currentSubtitleSelection(ratingKey: string, mediaIndex: number): 
  * its own apps, and this server reads back as a title's default). So each read
  * puts back whatever was selected before it, once Plex has seen it.
  */
-async function prefetchSubtitles(ratingKey: string, mediaIndex: number, first: number | null): Promise<void> {
+async function prefetchSubtitles(
+  ratingKey: string,
+  mediaIndex: number,
+  first: number | null,
+  /**
+   * "all" for a title playing or up next. "first" for one somebody is only
+   * looking at: just the subtitle they would get, behind everything wanted
+   * sooner, and dropped if they move on to another before it starts.
+   */
+  scope: "all" | "first" = "all",
+  from?: string,
+): Promise<void> {
   if (!subtitlePrefetchOn()) return;
-  const key = `${ratingKey}:${mediaIndex}`;
+  const key = `${ratingKey}:${mediaIndex}${scope === "first" ? `:first:${first}` : ""}`;
   const last = subtitlesPrefetched.get(key);
   if (last !== undefined && Date.now() - last < SUBTITLE_PREFETCH_AGAIN_MS) return;
   subtitlesPrefetched.set(key, Date.now());
@@ -2893,7 +2905,7 @@ async function prefetchSubtitles(ratingKey: string, mediaIndex: number, first: n
   }
   if (!version) return;
 
-  const text = version.subtitleTracks.filter((t) => t.external);
+  const text = version.subtitleTracks.filter((t) => t.external && (scope === "all" || t.id === first));
   for (const t of text.filter((t) => t.sidecar)) {
     try {
       await loadSidecar(String(t.id));
@@ -2941,14 +2953,48 @@ async function prefetchSubtitles(ratingKey: string, mediaIndex: number, first: n
       },
     };
   });
-  const queued = prefetchEmbeddedSubtitles(reads);
+  const queued = prefetchEmbeddedSubtitles(reads, { soon: scope === "all", from });
   if (queued > 0) {
-    logEvent("Subtitles", "reading a title's other subtitles ahead", {
+    logEvent("Subtitles", scope === "all"
+      ? "reading a title's subtitles ahead"
+      : "reading ahead the subtitle a title being looked at would start with", {
       ratingKey, queued, sidecars: text.length - embedded.length,
       skipped: Math.max(0, embedded.length - PREFETCH_EMBEDDED_MAX),
     });
   }
 }
+
+/**
+ * POST /api/plex/subtitles/prefetch
+ *
+ * Read a title's subtitles before anyone plays it. `{ ratingKey, mediaIndex?,
+ * first?, scope? }` — `first` the subtitle this viewer would start on, which
+ * goes first. "all" (the default) for the episode coming up next: everything,
+ * soon. "first" for a title someone has open: only that one, and only if
+ * nothing wanted sooner is waiting. Answers at once; the reading happens
+ * behind it, one subtitle at a time across the whole server.
+ */
+router.post("/subtitles/prefetch", async (req: Request, res: Response) => {
+  const { ratingKey, mediaIndex, first, scope } = (req.body ?? {}) as Record<string, unknown>;
+  if (typeof ratingKey !== "string" || !NUMERIC_RE.test(ratingKey)) {
+    res.status(400).json({ error: "Invalid rating key" });
+    return;
+  }
+  const index = Number.isInteger(mediaIndex) && (mediaIndex as number) >= 0
+    ? (mediaIndex as number)
+    : await defaultMediaIndex(ratingKey);
+  const firstId = Number.isInteger(first) && (first as number) > 0 ? (first as number) : null;
+  const range = scope === "first" ? "first" : "all";
+  if (range === "first" && firstId === null) {
+    res.json({ ok: true, queued: false });
+    return;
+  }
+  // Who is browsing, so their next page replaces this one's guess.
+  const from = range === "first" ? `user:${sessionUserId(req) ?? "?"}` : undefined;
+  void prefetchSubtitles(ratingKey, index, firstId, range, from).catch((err) =>
+    console.warn("[Subtitles] couldn't read ahead:", err));
+  res.json({ ok: true, queued: true });
+});
 
 /**
  * Which file a subtitle inside it was read from: the media part, and its size.

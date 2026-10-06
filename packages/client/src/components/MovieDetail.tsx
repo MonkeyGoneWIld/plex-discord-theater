@@ -4,6 +4,7 @@ import { formatAirDate, formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
 import { loadAudioPref, loadSubtitlePref, saveAudioPref, saveSubtitlePref, matchAudioTrack, matchSubtitleTrack } from "../lib/trackPrefs";
+import { readSubtitleAhead } from "../lib/subtitleReadAhead";
 import { RatingsRow } from "./RatingsRow";
 import { RelatedRows } from "./RelatedRows";
 import { CastRow } from "./CastRow";
@@ -274,6 +275,26 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
     // audioTracks/subtitleTracks are derived from exactly these two.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meta, selectedVersion]);
+
+  /**
+   * Start reading the subtitle this page would play with, while the host
+   * decides — a subtitle inside the file takes Plex a while to read out, and
+   * this way the stream doesn't start without it. After a moment on the page,
+   * so browsing past titles doesn't ask for each; and the server drops this
+   * ask if the host moves on to another title before it is reached. The host
+   * only: they are the one who can press Play.
+   */
+  useEffect(() => {
+    if (!isHost || selectedSubtitle == null) return;
+    if (!subtitleTracks.find((t) => t.id === selectedSubtitle)?.external) return;
+    const timer = setTimeout(
+      () => readSubtitleAhead(item.ratingKey, selectedSubtitle, selectedVersion ?? undefined),
+      1500,
+    );
+    return () => clearTimeout(timer);
+    // subtitleTracks follows meta and selectedVersion, both here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isHost, item.ratingKey, meta, selectedVersion, selectedSubtitle]);
 
   // Deliberately not cached (unlike fetchMeta): this changes every time the item
   // is watched, and a stale resume point is worse than an extra request.

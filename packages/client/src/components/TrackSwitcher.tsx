@@ -227,7 +227,7 @@ export function TrackSwitcher({
           {tab === "zoom"
             ? "Saved for this movie or show. Only affects your view."
             : tab === "quality"
-              ? `If the video keeps stopping to buffer, a lower quality gives you a stream your connection can keep up with. Kept for the next episode; back to Original when you close the player.${streamNow ? ` Now: ${streamNow}.` : ""}`
+              ? `If the video keeps stopping to buffer, a lower quality gives you a stream your connection can keep up with. Kept for the next episode; back to your default when you close the player — set that in Settings on the home page.${streamNow ? ` Now: ${streamNow}.` : ""}`
             : tab === "subtitles"
               ? "Only affects your view. Text subtitles switch instantly; a picture subtitle restarts the stream."
               : "Changing tracks briefly restarts the stream at your current position."}

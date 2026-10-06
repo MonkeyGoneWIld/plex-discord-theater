@@ -11,13 +11,14 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PeoplePanel } from "./components/PeoplePanel";
 import { InviteButton } from "./components/InviteButton";
 import { PlexAccountButton } from "./components/PlexAccountButton";
+import { SettingsPanel } from "./components/SettingsPanel";
 import { formatMediaTitle } from "./lib/format";
 import { apiPost, authUrl, fetchMeta, invalidateMeta, setStreams, versionOf } from "./lib/api";
 import { loadAudioPref, loadSubtitlePref, matchAudioTrack, matchSubtitleTrack } from "./lib/trackPrefs";
 import { useMediaQuery, MOBILE_LANDSCAPE_QUERY, NARROW_QUERY, PHONE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem, SuggestionItem } from "./hooks/useSync";
-import { QUIET_SURFACE } from "./lib/surface";
+import { HEADER_PILL, QUIET_SURFACE } from "./lib/surface";
 
 /**
  * The player, and everything only it needs, in a separate chunk.
@@ -189,6 +190,7 @@ export function App() {
   // Roster/roles panel, reachable from the header while browsing. The player has
   // its own copy for use during playback (the header is hidden there).
   const [showPeoplePanel, setShowPeoplePanel] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   // Phone held sideways, where Discord overlays its own controls on the corners
   // of the Activity. See the header below.
@@ -1005,6 +1007,25 @@ export function App() {
                   : `Host: ${syncState.hostUsername ?? "\u2014"}`}
               </button>
             )}
+            {/* This viewer's own settings — what every stream starts with.
+                The home page only: while a stream is playing, the player's own
+                settings are the ones that apply. */}
+            {view.kind === "library" && !activePlayerView && (
+              <button className="btn"
+                type="button"
+                onClick={() => setShowSettings(true)}
+                style={{ ...styles.settingsBtn, ...(mobileLandscape ? styles.peopleBtnLandscape : {}) }}
+                title="Settings"
+                aria-label="Settings"
+              >
+                <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                  <path d="M3 5h8M15 5h2M3 10h2M9 10h8M3 15h6M13 15h4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                  <circle cx="13" cy="5" r="2" stroke="currentColor" strokeWidth="1.6" />
+                  <circle cx="7" cy="10" r="2" stroke="currentColor" strokeWidth="1.6" />
+                  <circle cx="11" cy="15" r="2" stroke="currentColor" strokeWidth="1.6" />
+                </svg>
+              </button>
+            )}
           </span>
         </header>
       )}
@@ -1039,6 +1060,8 @@ export function App() {
           )}
         </div>
       )}
+
+      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
 
       {/* People & roles — role controls inside are host-gated */}
       {showPeoplePanel && (
@@ -1409,19 +1432,32 @@ const styles: Record<string, React.CSSProperties> = {
     minWidth: 0,
   },
   peopleBtn: {
+    ...HEADER_PILL,
     display: "inline-flex",
     alignItems: "center",
     gap: "5px",
-    padding: "3px 9px",
     borderRadius: "999px",
     border: "1px solid rgba(229,160,13,0.35)",
     background: "rgba(229,160,13,0.08)",
     color: "#e5a00d",
-    fontSize: "12px",
     fontWeight: 600,
     cursor: "pointer",
     fontFamily: "inherit",
     verticalAlign: "middle",
+    flexShrink: 0,
+  },
+  /** The same pill as its neighbours, holding only an icon. */
+  settingsBtn: {
+    ...HEADER_PILL,
+    ...QUIET_SURFACE,
+    width: "26px",
+    padding: 0,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: "999px",
+    color: "#9a9a9a",
+    cursor: "pointer",
     flexShrink: 0,
   },
   peopleBtnLandscape: {

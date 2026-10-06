@@ -10,9 +10,9 @@ import { useSyncExternalStore } from "react";
  * here: inside a Discord Activity iframe it can be unavailable or throw, and
  * then the choice lasts as long as the page does.
  */
-export type SubtitleColor = "white" | "yellow" | "cyan" | "green" | "pink";
+export type SubtitleColor = "white" | "yellow" | "cyan" | "green" | "pink" | "gray" | "red";
 export type SubtitleBackground = "outline" | "shadow" | "box";
-export type SubtitleFont = "sans" | "serif";
+export type SubtitleFont = "sans" | "serif" | "mono";
 
 export interface SubtitleStyle {
   /** Text size, percent of the default — which matches a burned-in subtitle. */
@@ -24,6 +24,8 @@ export interface SubtitleStyle {
    *  picture's height. Negative lowers them. */
   raise: number;
   bold: boolean;
+  /** Every line in italics, not only the ones the subtitle italicises. */
+  italic: boolean;
   font: SubtitleFont;
 }
 
@@ -33,6 +35,7 @@ export const DEFAULT_SUBTITLE_STYLE: SubtitleStyle = {
   background: "outline",
   raise: 0,
   bold: false,
+  italic: false,
   font: "sans",
 };
 
@@ -45,6 +48,15 @@ export const SUBTITLE_COLORS: Record<SubtitleColor, { label: string; css: string
   cyan: { label: "Cyan", css: "#6fe7ff" },
   green: { label: "Green", css: "#7dff8a" },
   pink: { label: "Pink", css: "#ff9de2" },
+  gray: { label: "Grey", css: "#c4c4c4" },
+  red: { label: "Red", css: "#ff6161" },
+};
+
+export const SUBTITLE_FONTS: Record<SubtitleFont, { label: string; css: string | undefined }> = {
+  // The page's own: what the rest of the app is set in.
+  sans: { label: "Sans", css: undefined },
+  serif: { label: "Serif", css: 'Georgia, "Times New Roman", "Noto Serif", serif' },
+  mono: { label: "Mono", css: 'ui-monospace, "Cascadia Mono", Consolas, Menlo, "Roboto Mono", monospace' },
 };
 
 export const SUBTITLE_STYLE_KEY = "pdt:subtitleStyle:v1";
@@ -66,7 +78,8 @@ export function normaliseSubtitleStyle(raw: unknown): SubtitleStyle {
     background: s.background === "shadow" || s.background === "box" || s.background === "outline" ? s.background : d.background,
     raise: clamp(s.raise, SUBTITLE_RAISE, d.raise),
     bold: typeof s.bold === "boolean" ? s.bold : d.bold,
-    font: s.font === "serif" || s.font === "sans" ? s.font : d.font,
+    italic: typeof s.italic === "boolean" ? s.italic : d.italic,
+    font: typeof s.font === "string" && s.font in SUBTITLE_FONTS ? s.font as SubtitleFont : d.font,
   };
 }
 
@@ -114,7 +127,7 @@ export function forgetSubtitleStyle(): void {
 export function isDefaultSubtitleStyle(s: SubtitleStyle): boolean {
   const d = DEFAULT_SUBTITLE_STYLE;
   return s.size === d.size && s.color === d.color && s.background === d.background &&
-    s.raise === d.raise && s.bold === d.bold && s.font === d.font;
+    s.raise === d.raise && s.bold === d.bold && s.italic === d.italic && s.font === d.font;
 }
 
 function subscribe(fn: () => void): () => void {

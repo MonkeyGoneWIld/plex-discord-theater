@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { fetchSubtitleCues, type SubtitleCue } from "../lib/api";
 import { logEvent, logWarn } from "../lib/log";
 import { activeCues, longestCue, sameCues } from "../lib/subtitleCues";
-import { SUBTITLE_COLORS, useSubtitleStyle, type SubtitleStyle } from "../lib/subtitleStyle";
+import { SUBTITLE_COLORS, SUBTITLE_FONTS, useSubtitleStyle, type SubtitleStyle } from "../lib/subtitleStyle";
 
 /**
  * Subtitles this client draws itself, from a sidecar file.
@@ -30,15 +30,20 @@ import { SUBTITLE_COLORS, useSubtitleStyle, type SubtitleStyle } from "../lib/su
  * dialogue at the bottom, and the signs a typeset release places at the top.
  */
 
-/** Cue text as a share of the picture's height, matching a burned-in subtitle. */
-const FONT_SCALE = 0.043;
+/**
+ * Cue text as a share of the picture's height: Plex's own player at its
+ * default size, measured side by side on the same frame. This used to match a
+ * subtitle Plex burns in, which is drawn smaller — about two thirds the size —
+ * and next to Plex's own app it read as small and thin.
+ */
+const FONT_SCALE = 0.062;
 /** And how far it sits above the bottom of the picture, in the same units. */
 const BOTTOM_SCALE = 0.055;
 /** How often to ask again for a subtitle Plex is still reading out of the file. */
 const STILL_READING_POLL_MS = 4_000;
 /** Bounds for absurd geometry — a sliver of a window, or a wall-sized display. */
 const MIN_FONT_PX = 13;
-const MAX_FONT_PX = 56;
+const MAX_FONT_PX = 80;
 /** More than this many lines at one end of the picture is a typesetting effect
  *  this renderer can't draw, not something to read; the earliest are kept. */
 const MAX_CUES_PER_EDGE = 4;
@@ -157,8 +162,27 @@ function useActiveCues(
   return active;
 }
 
-/** The text's own look, from the viewer's style. */
-function cueTextStyle(style: SubtitleStyle, fontSize: number | string): React.CSSProperties {
+/**
+ * A solid black outline, the way Plex's player draws one: a ring of shadows
+ * all the way round each letter, about a sixteenth of the letter's size, with
+ * a soft edge outside it. In em, so it grows with the text.
+ *
+ * A ring of shadows rather than -webkit-text-stroke: a stroke is drawn over the
+ * letter's own edge and eats into it unless paint-order puts it behind, which
+ * not every webview Discord runs in honours for HTML text. Shadows are drawn
+ * behind the text everywhere.
+ */
+const OUTLINE_SHADOW = (() => {
+  const ring = (radius: number, steps: number) => Array.from({ length: steps }, (_, i) => {
+    const a = (i / steps) * Math.PI * 2;
+    return `${(Math.cos(a) * radius).toFixed(3)}em ${(Math.sin(a) * radius).toFixed(3)}em 0 #000`;
+  });
+  return [...ring(0.06, 16), ...ring(0.03, 8), "0 0 0.14em rgba(0,0,0,0.55)"].join(", ");
+})();
+
+/** The text's own look, from the viewer's style — also what Settings shows as
+ *  its sample line. */
+export function subtitleTextStyle(style: SubtitleStyle, fontSize: number | string): React.CSSProperties {
   const color = SUBTITLE_COLORS[style.color].css;
   const scaled = typeof fontSize === "number"
     ? fontSize * style.size / 100
@@ -166,10 +190,11 @@ function cueTextStyle(style: SubtitleStyle, fontSize: number | string): React.CS
   return {
     fontSize: scaled,
     color,
-    fontWeight: style.bold ? 700 : 400,
-    fontFamily: style.font === "serif" ? 'Georgia, "Times New Roman", serif' : undefined,
+    fontWeight: style.bold ? 700 : 500,
+    fontStyle: style.italic ? "italic" : undefined,
+    fontFamily: SUBTITLE_FONTS[style.font].css,
     textShadow: style.background === "outline"
-      ? styles.cue.textShadow
+      ? OUTLINE_SHADOW
       : style.background === "shadow"
         ? "0.06em 0.08em 0.12em rgba(0,0,0,0.95), 0 0 0.3em rgba(0,0,0,0.45)"
         : "none",
@@ -255,7 +280,7 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
   // in that window is approximately placed rather than missing.
   const fontSize = box
     ? Math.min(MAX_FONT_PX, Math.max(MIN_FONT_PX, box.height * FONT_SCALE))
-    : `clamp(${MIN_FONT_PX}px, 4.3vh, ${MAX_FONT_PX}px)`;
+    : `clamp(${MIN_FONT_PX}px, ${(FONT_SCALE * 100).toFixed(1)}vh, ${MAX_FONT_PX}px)`;
   const edge = (raise: number) => box
     ? box.bottomInset + box.height * (BOTTOM_SCALE + raise / 100)
     : `${(BOTTOM_SCALE * 100 + raise).toFixed(1)}%`;
@@ -269,7 +294,7 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
     );
   }
 
-  const text = cueTextStyle(style, fontSize);
+  const text = subtitleTextStyle(style, fontSize);
   const boxed = style.background === "box";
   const draw = (list: SubtitleCue[]) => (
     <div style={{ ...styles.cue, ...text }}>
@@ -323,15 +348,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   cue: {
     textAlign: "center",
-    lineHeight: 1.25,
-    // Burned-in subtitles are rendered at a normal weight. Anything heavier
-    // reads as a different track rather than the same one delivered differently.
-    fontWeight: 400,
+    lineHeight: 1.22,
     color: "#fff",
-    // An outline rather than a plate: it reads on white and on black alike, and
-    // it is close to what the burned ones carry, so the two match.
-    textShadow:
-      "0 0 3px rgba(0,0,0,0.85), 0 1px 2px rgba(0,0,0,0.95), 0 0 10px rgba(0,0,0,0.5)",
     whiteSpace: "pre-wrap",
     textWrap: "balance",
   },

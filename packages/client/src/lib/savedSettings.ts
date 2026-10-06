@@ -19,7 +19,7 @@ export const SAVED_SETTINGS: Array<{ key: string; label: string }> = [
   { key: AUDIO_PREF_KEY, label: "audio language" },
   { key: SUBTITLE_STYLE_KEY, label: "subtitle look" },
   { key: DEFAULT_QUALITY_KEY, label: "default quality" },
-  { key: VOLUME_KEY, label: "default volume" },
+  { key: VOLUME_KEY, label: "volume" },
   { key: ZOOM_PREFS_KEY, label: "zoom for each show and film" },
 ];
 

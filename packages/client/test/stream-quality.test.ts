@@ -61,9 +61,9 @@ check("nor from notes it doesn't recognise", readStreamNotes(sessionData({ video
 
 console.log("\n— which quality to offer someone buffering —");
 check("on a 30 Mbps remux over a 14 Mbps connection: the highest under three quarters of it",
-  lowerQualityFor(30660, 14_000_000), 8000);
+  lowerQualityFor(30660, 14_000_000), 10000);
 check("with nothing measured, the next level down", lowerQualityFor(30660, 0), 20000);
-check("on a 12 Mbps re-encode, something under it", lowerQualityFor(12000, 0), 8000);
+check("on a 12 Mbps re-encode, the next one down: 10 Mbps, as Plex offers", lowerQualityFor(12000, 0), 10000);
 check("the lowest when even that is more than the connection has carried",
   lowerQualityFor(12000, 2_000_000), 4000);
 check("nothing when already at the lowest", lowerQualityFor(4000, 0), null);

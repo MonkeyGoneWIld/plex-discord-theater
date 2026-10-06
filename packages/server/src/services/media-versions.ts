@@ -103,7 +103,7 @@ export function resolutionLabel(media: VersionSource): string {
  * it — a copy when the file fits, a re-encode at it when it doesn't — for a
  * connection that can't keep up with what everyone else is watching.
  */
-export const QUALITY_LEVELS_KBPS = [20000, 12000, 8000, 4000];
+export const QUALITY_LEVELS_KBPS = [20000, 12000, 10000, 8000, 4000];
 
 /** A quality ceiling from a request or a message: one of the levels, else 0 —
  *  no ceiling. */

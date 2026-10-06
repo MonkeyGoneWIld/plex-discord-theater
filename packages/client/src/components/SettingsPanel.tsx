@@ -10,7 +10,7 @@ import {
   loadAudioPref,
   loadSubtitlePref,
 } from "../lib/trackPrefs";
-import { defaultVolume, setDefaultVolume } from "../lib/volume";
+import { loadVolume, saveVolume } from "../lib/volume";
 import { subtitleTextStyle } from "./SubtitleLayer";
 import { SubtitleLookControls } from "./SubtitleLook";
 
@@ -20,9 +20,10 @@ import { SubtitleLookControls } from "./SubtitleLook";
  * Everything here is what a player starts with — the quality, the volume, the
  * subtitle and audio language, how subtitles look — and is saved on this
  * device (watch history is the exception: it is saved to the Discord account,
- * and only changes what gets recorded from now on). Changing any of these
- * while watching lasts for that sitting; this is where the defaults are kept.
- * None of it reaches anyone else in the room.
+ * and only changes what gets recorded from now on). Quality changed while
+ * watching lasts for that sitting, so this is where its default is kept; the
+ * volume is simply the last one used, here or in the player. None of it
+ * reaches anyone else in the room.
  */
 interface SettingsPanelProps {
   onClose: () => void;
@@ -52,7 +53,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
   // Re-read from storage after anything that changes it underneath — a reset.
   const [epoch, setEpoch] = useState(0);
   const [quality, setQuality] = useState(defaultQuality);
-  const [volume, setVolume] = useState(() => Math.round(defaultVolume() * 100));
+  const [volume, setVolume] = useState(() => Math.round(Math.min(1, loadVolume()) * 100));
   const [subtitle, setSubtitle] = useState(() => loadSubtitlePref());
   const [audio, setAudio] = useState(() => loadAudioPref());
   const [historyMode, setHistoryMode] = useState<HistorySaveMode | null>(null);
@@ -61,7 +62,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
 
   useEffect(() => {
     setQuality(defaultQuality());
-    setVolume(Math.round(defaultVolume() * 100));
+    setVolume(Math.round(Math.min(1, loadVolume()) * 100));
     setSubtitle(loadSubtitlePref());
     setAudio(loadAudioPref());
   }, [epoch]);
@@ -86,7 +87,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
   };
   const chooseVolume = (percent: number) => {
     setVolume(percent);
-    setDefaultVolume(percent / 100);
+    saveVolume(percent / 100);
   };
   const chooseSubtitle = (value: string) => {
     if (value === "current") return;
@@ -141,7 +142,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
           </button>
         </div>
         <p style={styles.intro}>
-          What every stream starts with for you. Changing these while watching lasts until you close the player.
+          What every stream starts with for you. Quality changed while watching lasts until you close the player.
         </p>
 
         <section style={styles.section}>
@@ -162,12 +163,13 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
         </section>
 
         <section style={styles.section}>
-          <h3 style={styles.sectionTitle}>Default volume</h3>
+          <h3 style={styles.sectionTitle}>Volume</h3>
           <div style={styles.volumeRow}>
-            <input type="range" min={5} max={100} step={5} value={volume} aria-label="Default volume"
+            <input type="range" min={5} max={100} step={5} value={volume} aria-label="Volume"
               onChange={(e) => chooseVolume(Number(e.target.value))} style={styles.range} />
             <span style={styles.reading}>{volume}%</span>
           </div>
+          <p style={styles.note}>The last volume you used while watching is remembered, so this is where the next stream starts.</p>
         </section>
 
         <section style={styles.section}>

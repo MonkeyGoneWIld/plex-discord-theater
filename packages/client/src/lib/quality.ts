@@ -19,7 +19,7 @@ import { useSyncExternalStore } from "react";
  * keeps it, for everyone who set one — and goes back to the default when the
  * player closes or moves to something else (see carryQualityTo).
  */
-export const QUALITY_LEVELS_KBPS = [20000, 12000, 8000, 4000];
+export const QUALITY_LEVELS_KBPS = [20000, 12000, 10000, 8000, 4000];
 
 export const DEFAULT_QUALITY_KEY = "pdt:defaultQuality";
 

@@ -609,6 +609,9 @@ console.log("\n— through the routes —");
   check("a file under it is still copied, asked for at it",
     [fits.asked.directStream, fits.asked.videoBitrate, fits.notes.video], ["1", "12000", "copy"]);
   check("a setting that isn't one of the levels is no setting", (await startNotes("100", "?quality=123")).asked.videoBitrate, "20000");
+  const ten = await startNotes("960", "?quality=10000");
+  check("10 Mbps, the level Plex itself offers between 8 and 12, is one",
+    [ten.asked.directStream, ten.asked.videoBitrate, ten.notes.quality], ["0", "10000", "10000"]);
 
   console.log("\n— subtitles, which used to force a re-encode —");
   /** A stream start, burning in `burn` (the player asks for that only when it

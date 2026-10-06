@@ -19,7 +19,7 @@ import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, f
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { isHevcCodec, markHevcUnplayable } from "../lib/hevc";
-import { endVolumeSession, loadVolume, saveVolume } from "../lib/volume";
+import { loadVolume, saveVolume } from "../lib/volume";
 import { readSubtitlesAhead } from "../lib/subtitleReadAhead";
 import {
   beginQualitySession,
@@ -2179,15 +2179,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     }
     setQualityCheckedFor(item.ratingKey);
   }, [itemMeta, item.ratingKey]);
-  // A player starts at this viewer's defaults — Settings — and closing it is
-  // the end of whatever was changed while watching: the next one starts there
-  // again. Quality and volume alike.
+  // A player starts at this viewer's default quality — Settings — and closing
+  // it is the end of whatever was changed while watching: the next one starts
+  // there again. (Volume is different: the last one used is remembered.)
   useEffect(() => {
     beginQualitySession();
-    return () => {
-      resetPreferredQuality();
-      endVolumeSession();
-    };
+    return () => resetPreferredQuality();
   }, []);
 
   useEffect(() => {

@@ -90,16 +90,13 @@ console.log("\n— what a player starts at —");
   quality.resetPreferredQuality();
   check("closing the player goes back to the default", quality.preferredQuality(), 4000);
 
-  check("volume starts at half until a default is chosen", volume.loadVolume(), 0.5);
-  volume.setDefaultVolume(0.8);
-  check("then at the default", volume.loadVolume(), 0.8);
+  check("volume starts at half until one is chosen", volume.loadVolume(), 0.5);
   volume.saveVolume(0.3);
-  check("a change while watching lasts the sitting", volume.loadVolume(), 0.3);
-  check("without becoming the default", volume.defaultVolume(), 0.8);
+  check("the last volume used is remembered", volume.loadVolume(), 0.3);
   volume.saveVolume(0);
   check("muting isn't kept as a level", volume.loadVolume(), 0.3);
-  volume.endVolumeSession();
-  check("and the next player starts at the default again", volume.loadVolume(), 0.8);
+  volume.saveVolume(1.5);
+  check("a boost above 100% is remembered too", volume.loadVolume(), 1.5);
 
   prefs.chooseSubtitleLanguage({ code: "ja", name: "Japanese" });
   const tracks = [

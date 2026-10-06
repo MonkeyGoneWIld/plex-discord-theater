@@ -298,6 +298,8 @@ const FORWARD_BUFFER_FLUSH_S = 120;
  * peer, so nothing changes for them.
  */
 const SHARE_CHECK_MS = 1_000;
+/** Without data to play for this long, the loading screen goes up. */
+const LOADING_SCREEN_AFTER_MS = 500;
 const P2P_FAILURES_TO_STOP = 3;
 const P2P_FAILURE_WINDOW_MS = 60_000;
 const SHARE_COOLDOWN_S = 60;
@@ -2044,6 +2046,29 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     };
   }, []);
 
+  /**
+   * The loading screen whenever the picture should be moving and isn't.
+   *
+   * The element's `waiting` event raises it, but a stream that never gets
+   * going sends one `waiting` at the very start and nothing after — so once
+   * anything else took the screen down, a player could sit on black with no
+   * sign it was doing anything. Checked here as well: playing, not ended, and
+   * without the data to go on, for more than a moment.
+   */
+  useEffect(() => {
+    let starvingSince = 0;
+    const id = window.setInterval(() => {
+      const v = videoRef.current;
+      if (!v || v.paused || v.ended || v.readyState >= 3) {
+        starvingSince = 0;
+        return;
+      }
+      if (!starvingSince) starvingSince = Date.now();
+      else if (Date.now() - starvingSince >= LOADING_SCREEN_AFTER_MS) setBuffering(true);
+    }, 250);
+    return () => window.clearInterval(id);
+  }, []);
+
   // Fetch VPS relay config once on mount — HLS init waits for this
   useEffect(() => {
     fetchConfig()
@@ -3180,6 +3205,26 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               role: isHostRef.current ? "host" : "viewer",
             });
             video.currentTime = sync.position;
+          } else if (
+            // A stream this client started part-way in — resuming, a seek
+            // restart, a quality change. hls.js would move the element there
+            // itself, but only once the first segment is in, and until then
+            // the element says 0:00. The P2P engine takes its idea of where
+            // playback is from the element, so it saw the segments being asked
+            // for as fourteen minutes away and fetched everything but them:
+            // the host of a resumed Deadpool sat on a black screen for half a
+            // minute while the viewer, who lands on the room's clock here
+            // already, was playing. Land on it here too.
+            sessionOwner &&
+            !didAdoptRef.current &&
+            startOffset > 1 &&
+            Math.abs(video.currentTime - startOffset) > 1
+          ) {
+            logEvent("HLS", "starting at the point the stream was started from", {
+              fromS: video.currentTime,
+              toS: startOffset,
+            });
+            video.currentTime = startOffset;
           }
 
           // Pre-fetch cache ensures segments arrive instantly — play as soon as
@@ -3241,6 +3286,35 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           announceStream(sessionId!, startOffset, sessionOwner, !holding);
         });
 
+        /**
+         * Start where the picture starts.
+         *
+         * A stream copied from part-way into a film can only show from its
+         * first keyframe, and in some files that comes several seconds after
+         * the point it was started from: Deadpool resumed at 14:26 had nothing
+         * to show until 14:33. The element sits in front of that gap,
+         * "playing" nothing, until the wedge watchdog jumps it — eight seconds
+         * later for one player, thirty for another. Once the first segment is
+         * in, the gap is plain to see, so it is jumped then. Once per stream:
+         * after that a gap is the watchdog's business.
+         */
+        let startGapChecked = false;
+        hls.on(Hls.Events.FRAG_BUFFERED, () => {
+          if (!mounted || startGapChecked) return;
+          if (isPositionBuffered(video, video.currentTime)) {
+            startGapChecked = true;
+            return;
+          }
+          const pictureFrom = nextBufferedStart(video, video.currentTime);
+          if (pictureFrom === null || pictureFrom - video.currentTime > MAX_HOLE_JUMP_S) return;
+          startGapChecked = true;
+          logEvent("HLS", "the picture starts a little after the start point, starting there", {
+            fromS: Number(video.currentTime.toFixed(2)),
+            toS: Number(pictureFrom.toFixed(2)),
+          });
+          video.currentTime = pictureFrom + 0.05;
+        });
+
         // Clear the error banner once fragments flow again. Only the network
         // budget refills here: a fragment arriving is exactly what a network
         // retry was waiting for, but says nothing about whether it decodes —
@@ -3250,7 +3324,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         hls.on(Hls.Events.FRAG_LOADED, () => {
           if (mounted) {
             setError(null);
-            setBuffering(false);
+            // Not the loading screen: a segment arriving isn't the picture
+            // moving. Taking it down here left a black screen for as long as
+            // playback then took to start — half a minute, once. The `playing`
+            // event takes it down when frames really do move.
             networkRetryRef.current = 0;
             hlsDeadRef.current = false;
           }

@@ -13,8 +13,9 @@
  *   - a segment another player is fetching is left to them, and this player's
  *     own downloads go to the next one nobody is fetching;
  *
- * unless it is URGENT_S or less from being played, when it is fetched from the
- * bot as before — so a slow peer delays nothing that is needed now. Everything
+ * unless it is URGENT_S or less from being played, or the very segment the
+ * player is waiting on, when it is fetched from the bot as before — so a slow
+ * peer delays nothing that is needed now. Everything
  * else is the library's own logic, copied as it stands in the installed
  * version; when a player isn't sharing (see setSharing), the library's own
  * method runs untouched.
@@ -116,6 +117,9 @@ function sharedProcessQueue(this: AnyLoader): void {
   }
   const peers = this.p2pLoaders.currentLoader;
   const position: number = this.playback.position;
+  // What hls.js is waiting on right now: urgent whatever the clock says, since
+  // the clock comes from the element, which can be wrong while a stream starts.
+  const waitingOn = this.engineRequest?.status === "pending" ? this.engineRequest.segment : null;
   for (const item of queue) {
     const { statuses, segment } = item;
     const request = this.requests.get(segment);
@@ -125,7 +129,7 @@ function sharedProcessQueue(this: AnyLoader): void {
         && (request?.failedAttempts.httpAttemptsCount ?? 0) < httpErrorRetries;
       // Changed: how soon it plays decides whether another player may
       // provide it.
-      const urgent = segment.startTime - position <= URGENT_S;
+      const urgent = segment === waitingOn || segment.startTime - position <= URGENT_S;
       if (request?.status === "loading") {
         // Changed: a segment coming from another player is only taken over
         // by the bot once it's urgent, not whenever a download slot is free.

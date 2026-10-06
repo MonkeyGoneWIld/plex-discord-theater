@@ -23,7 +23,7 @@ type Seg = { id: string; startTime: number };
 type Req = { status: string; downloadSource?: string; failedAttempts: { httpAttemptsCount: number }; abortFromProcessQueue: () => void };
 
 /** A loader as the library has it, reduced to what its queue touches. */
-function makeLoader(opts: { position: number; segments: Seg[]; peerHas: string[]; peerLoading: string[]; loading?: Record<string, "http" | "p2p"> }) {
+function makeLoader(opts: { position: number; segments: Seg[]; peerHas: string[]; peerLoading: string[]; loading?: Record<string, "http" | "p2p">; waitingOn?: string }) {
   const actions: string[] = [];
   const requests = new Map<string, Req>();
   for (const [id, source] of Object.entries(opts.loading ?? {})) {
@@ -40,7 +40,9 @@ function makeLoader(opts: { position: number; segments: Seg[]; peerHas: string[]
   class HybridLoader {
     config = { simultaneousHttpDownloads: 2, simultaneousP2PDownloads: 3, httpErrorRetries: 3, httpDownloadInitialTimeoutMs: 0 };
     createdAt = 0;
-    engineRequest = undefined;
+    engineRequest = opts.waitingOn
+      ? { status: "pending", shouldBeStartedImmediately: false, segment: opts.segments.find((s) => s.id === opts.waitingOn) }
+      : undefined;
     playback = { position: opts.position, rate: 1 };
     requests = {
       get: (s: Seg) => requests.get(s.id),
@@ -129,6 +131,16 @@ console.log("— dividing the stream —");
       second.loader.processQueue();
       return second.actions;
     })(), ["http s120", "http s125"]);
+}
+
+{
+  // The element still at 0:00 while a stream started at 14:27 loads: by the
+  // clock everything is far off, but the player is waiting on this one now.
+  const far = [867, 870, 873].map((t) => ({ id: `s${t}`, startTime: t }));
+  const { loader, engine, actions } = makeLoader({ position: 0, segments: far, peerHas: [], peerLoading: ["s867", "s870"], waitingOn: "s867" });
+  setSharing(installSharing(engine)!, true);
+  loader.processQueue();
+  check("the segment the player is waiting on comes from the bot, whatever the clock says", actions, ["http s867", "http s873"]);
 }
 
 console.log("\n— the installed library —");

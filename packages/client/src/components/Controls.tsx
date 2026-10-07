@@ -54,7 +54,14 @@ interface ControlsProps {
    *  it has loaded — a copy's playlist reaches as far as the server has
    *  measured — and a bar measured against that runs off its end. */
   runtimeS?: number | null;
+  /**
+   * Paused only to wait for the room, which is still playing — see
+   * SyncState.hostWaiting. Shown as playing, and pressing the button pauses.
+   */
+  held?: boolean;
   onSyncPause?: (position: number) => void;
+  /** Resumes the room, which starts the picture itself when everybody is
+   *  ready — so the button leaves the element alone when this is given. */
   onSyncResume?: (position: number) => void;
   onSyncSeek?: (position: number) => void;
   onSeekRestart?: (position: number) => void;
@@ -453,6 +460,7 @@ export function Controls({
   onBack,
   endsAtS,
   runtimeS,
+  held = false,
   onSyncPause,
   onSyncResume,
   onSyncSeek,
@@ -475,7 +483,9 @@ export function Controls({
   onNextEpisode,
   previewPartId,
 }: ControlsProps) {
-  const [playing, setPlaying] = useState(false);
+  const [elementPlaying, setPlaying] = useState(false);
+  // Held for the room is playing, from here — see `held`.
+  const playing = elementPlaying || held;
   // Latched on the first play, and never cleared: the preview prefetch below
   // wants "this stream has begun", not "playing right now". Keying it on
   // `playing` would throw the frames away on every pause and fetch them again
@@ -779,14 +789,14 @@ export function Controls({
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video || !canControl) return;
-    if (video.paused) {
-      video.play();
-      onSyncResume?.(video.currentTime);
+    if (video.paused && !held) {
+      if (onSyncResume) onSyncResume(video.currentTime);
+      else video.play();
     } else {
       video.pause();
       onSyncPause?.(video.currentTime);
     }
-  }, [videoRef, canControl, onSyncPause, onSyncResume]);
+  }, [videoRef, canControl, held, onSyncPause, onSyncResume]);
 
   /** Where along the bar a client X coordinate falls, 0-1. Null if unmeasurable. */
   const pctFromClientX = useCallback((clientX: number): number | null => {

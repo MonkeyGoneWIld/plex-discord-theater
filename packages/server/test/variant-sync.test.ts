@@ -43,12 +43,12 @@ class Client {
   seen: Msg[] = [];
   constructor(readonly userId: string, readonly name: string) {}
 
-  async connect(instanceId: string) {
+  async connect(instanceId: string, join: Msg = {}) {
     const token = createSession(this.userId, null);
     this.ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${token}`);
     await new Promise<void>((r, j) => { this.ws.once("open", () => r()); this.ws.once("error", j); });
     this.ws.on("message", (d) => this.seen.push(JSON.parse(String(d))));
-    this.send({ type: "join", sessionToken: token, instanceId, userId: this.userId, username: this.name });
+    this.send({ type: "join", sessionToken: token, instanceId, userId: this.userId, username: this.name, ...join });
     await sleep(60);
   }
   send(m: Msg) { this.ws.send(JSON.stringify(m)); }
@@ -896,6 +896,150 @@ console.log("\n— the room waits for the host's picture —");
   check("a new host starts the room unwaited", afterHandover.last("state")?.waiting, false);
   afterHandover.close();
   [host, a].forEach((c) => c.close());
+}
+
+console.log("\n— everybody starts together —");
+{
+  instanceHosts.set("inst-gather", { hostUserId: "u-host", guildId: null, channelId: null, createdAt: Date.now() });
+  const host = new Client("u-host", "host");
+  await host.connect("inst-gather", { gather: true });
+  const a = new Client("u-a", "a");
+  const b = new Client("u-b", "b");
+  await a.connect("inst-gather", { gather: true });
+  await b.connect("inst-gather", { gather: true });
+  for (const c of [host, a, b]) c.send({ type: "watching", value: true });
+  await sleep(60);
+  const rev = () => host.last("transport-state")?.transportRevision;
+  const ready = (c: Client) => c.send({ type: "ready", gather: c.last("room-waiting")?.gather });
+
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: uuid(), position: 600, sessionOffset: 600,
+    audioStreamId: 1, subtitleStreamId: 0, waiting: true,
+  });
+  await sleep(60);
+  check("a starting stream has everybody waiting, host included",
+    [host.last("room-waiting")?.waiting, a.last("room-waiting")?.waiting], [true, true]);
+  const g1 = a.last("room-waiting")?.gather;
+
+  // The host's picture is ready; the viewers' aren't yet.
+  host.send({ type: "heartbeat", position: 600, playing: true, waiting: false, transportRevision: rev() });
+  await sleep(60);
+  check("the host being ready isn't enough while the others load", host.last("room-waiting")?.waiting, true);
+  await sleep(1000);
+  check("and nobody's clock runs meanwhile", near(await clockOf("inst-gather"), 600, 0.2), "ok");
+  ready(a);
+  await sleep(60);
+  check("one of two ready: still waiting", host.last("room-waiting")?.waiting, true);
+  b.send({ type: "ready", gather: g1 - 1 });
+  await sleep(60);
+  check("a ready for an earlier moment counts for nothing", host.last("room-waiting")?.waiting, true);
+  ready(b);
+  await sleep(60);
+  check("everybody ready: the room runs, for everybody at once",
+    [host.last("room-waiting")?.waiting, a.last("room-waiting")?.waiting, b.last("room-waiting")?.waiting], [false, false, false]);
+  check("from where it waited", near(a.last("room-waiting")?.position, 600, 0.05), "ok");
+  await sleep(1000);
+  check("and the clock runs from there", near(await clockOf("inst-gather"), 601, 0.5), "ok");
+
+  // A skip: everybody has to load the new place.
+  host.clear(); a.clear(); b.clear();
+  host.send({ type: "seek", position: 900 });
+  await sleep(60);
+  check("a seek has everybody wait for everybody", [host.last("room-waiting")?.waiting, a.last("room-waiting")?.waiting], [true, true]);
+  check("at the new place", near(a.last("room-waiting")?.position, 900, 0.05), "ok");
+  ready(a); ready(b);
+  await sleep(60);
+  check("and runs once they have it", host.last("room-waiting")?.waiting, false);
+
+  // Somebody who can't be ready doesn't hold the room for ever.
+  host.clear();
+  host.send({ type: "seek", position: 1200 });
+  await sleep(60);
+  ready(a);
+  const gaveUpAt = Date.now();
+  for (let i = 0; i < 140 && host.last("room-waiting")?.waiting !== false; i++) await sleep(100);
+  check("one who never gets there is left to catch up after ten seconds",
+    [host.last("room-waiting")?.waiting, Math.round((Date.now() - gaveUpAt) / 1000)], [false, 10]);
+
+  // Leaving the player releases the wait at once.
+  host.clear();
+  host.send({ type: "seek", position: 1500 });
+  await sleep(60);
+  ready(a);
+  b.send({ type: "watching", value: false });
+  await sleep(60);
+  check("somebody who leaves the player isn't waited for", host.last("room-waiting")?.waiting, false);
+  b.send({ type: "watching", value: true });
+
+  // Nor somebody nobody is looking at: Discord minimised, a phone that has
+  // put it away.
+  host.clear();
+  host.send({ type: "seek", position: 1600 });
+  await sleep(60);
+  ready(a);
+  b.send({ type: "visible", value: false });
+  await sleep(60);
+  check("somebody with the player hidden isn't waited for", host.last("room-waiting")?.waiting, false);
+  b.send({ type: "visible", value: true });
+  await sleep(40);
+
+  // Arriving in the middle of one doesn't hold it up.
+  host.clear();
+  host.send({ type: "seek", position: 1800 });
+  await sleep(60);
+  const late = new Client("u-late-gather", "late");
+  await late.connect("inst-gather", { gather: true });
+  late.send({ type: "watching", value: true });
+  await sleep(40);
+  ready(a); ready(b);
+  await sleep(60);
+  check("a joiner mid-wait isn't waited for", host.last("room-waiting")?.waiting, false);
+  late.close();
+
+  // The host's own stall: everybody holds, and starts again with it.
+  host.clear(); a.clear();
+  host.send({ type: "heartbeat", position: 1810, playing: true, waiting: true, transportRevision: rev() });
+  await sleep(60);
+  check("the host stalling has everybody wait", a.last("room-waiting")?.waiting, true);
+  ready(a); ready(b);
+  await sleep(60);
+  check("still, until the host's picture is back", a.last("room-waiting")?.waiting, true);
+  host.send({ type: "heartbeat", position: 1810, playing: true, waiting: false, transportRevision: rev() });
+  await sleep(60);
+  check("then together", a.last("room-waiting")?.waiting, false);
+
+  // Pausing in the middle of a wait: the pause says so, nothing starts first.
+  host.send({ type: "seek", position: 2100 });
+  await sleep(60);
+  a.clear();
+  host.send({ type: "pause", position: 2100 });
+  await sleep(60);
+  check("a pause mid-wait sends no 'run' ahead of it", [a.count("room-waiting"), a.count("pause")], [0, 1]);
+  host.clear(); a.clear();
+  host.send({ type: "resume", position: 2100, waiting: false });
+  await sleep(60);
+  check("a resume has everybody start together too", a.last("room-waiting")?.waiting, true);
+  ready(a); ready(b);
+  await sleep(60);
+  check("and goes once they can", host.last("room-waiting")?.waiting, false);
+  [host, a, b].forEach((c) => c.close());
+}
+
+console.log("\n— a host on its own is answered at once —");
+{
+  instanceHosts.set("inst-alone", { hostUserId: "u-host", guildId: null, channelId: null, createdAt: Date.now() });
+  const host = new Client("u-host", "host");
+  await host.connect("inst-alone", { gather: true });
+  host.send({ type: "watching", value: true });
+  await startPlayback(host);
+  host.send({ type: "heartbeat", position: 1, playing: true, waiting: false, transportRevision: host.last("transport-state")?.transportRevision });
+  await sleep(60);
+  host.clear();
+  host.send({ type: "seek", position: 300 });
+  await sleep(60);
+  check("a seek is answered even when nobody has to be waited for", host.last("room-waiting")?.waiting, false);
+  host.close();
 }
 
 console.log("\n— a stream rebuilt while paused is announced paused —");

@@ -144,16 +144,24 @@ export interface SyncState {
    */
   positionAt: number;
   /**
-   * The host's picture isn't moving: the stream it just announced hasn't shown
-   * a frame yet, or it has stalled waiting for data.
+   * The room is waiting: its clock stands still and everybody — the host
+   * included — holds where they are, because somebody's picture isn't ready.
+   * The host's, whose stream has just started or has stalled; or anybody's at
+   * a moment the room starts again together, a seek or a resume or a new
+   * stream, until they say it is (sendReady) or the server stops waiting for
+   * them. The server decides, and says so with "room-waiting".
    *
-   * The room is the host, so while this holds the room's clock stands still
-   * and everyone else holds where they are, and starts again with the host.
-   * Viewers used to start a film before the host had, whenever their segments
-   * arrived first, and to play on through every stall of the host's — and then
-   * get sent back to it, and see the same seconds again.
+   * Viewers used to start a film before the host whenever their segments
+   * arrived first, then — held for the host alone — up to twenty seconds
+   * after it whenever their own were slower, and skip what they had missed.
    */
   hostWaiting: boolean;
+  /**
+   * The moment the room is gathering everybody for, from the server. A
+   * viewer's "ready" names it, so a late answer to an earlier one can't start
+   * the room.
+   */
+  gatherSeq: number;
   /** True if the WebSocket closed due to authentication failure (code 1008) */
   authFailed: boolean;
   /** True if max reconnect attempts exhausted. `retryConnection` clears it. */
@@ -276,12 +284,21 @@ export interface SyncActions {
     waiting?: boolean,
   ) => void;
   sendPause: (position: number) => void;
-  /** `waiting`: resumed onto a picture that isn't ready yet — SyncState.hostWaiting. */
-  sendResume: (position: number, waiting?: boolean) => void;
-  sendSeek: (position: number) => void;
+  /**
+   * `waiting`: resumed onto a picture that isn't ready yet — the host's
+   * readiness, for the room. `hold`: this player holds until the room says it
+   * runs, which a resume always answers — SyncState.hostWaiting.
+   */
+  sendResume: (position: number, waiting?: boolean, hold?: boolean) => void;
+  /** `hold`: as for sendResume. Only while the room is playing, since only
+   *  then does a seek get an answer. */
+  sendSeek: (position: number, hold?: boolean) => void;
   sendStop: () => void;
-  /** `waiting`: the host's picture isn't moving — SyncState.hostWaiting. */
+  /** `waiting`: the host's picture isn't ready — SyncState.hostWaiting. */
   sendHeartbeat: (position: number, playing: boolean, waiting?: boolean) => void;
+  /** This player's picture is ready for the room to start again — see
+   *  SyncState.gatherSeq. */
+  sendReady: (gather: number) => void;
   acknowledgeTransport: (revision: number) => void;
   sendBrowse: (context: string) => void;
   sendQueueAdd: (item: QueueItem) => void;
@@ -377,6 +394,7 @@ const INITIAL_STATE: SyncState = {
   lastCommandAt: 0,
   positionAt: 0,
   hostWaiting: false,
+  gatherSeq: 0,
   authFailed: false,
   reconnectFailed: false,
   browseContext: null,
@@ -387,6 +405,10 @@ const INITIAL_STATE: SyncState = {
   playItemRequest: null,
 };
 
+/** How long after holding for the room's answer a heartbeat reply is not
+ *  taken as one — see heldForAnswerAtRef. */
+const HOLD_ANSWER_GRACE_MS = 3000;
+
 export function useSync({ instanceId, userId, username, enabled }: UseSyncOptions): {
   state: SyncState;
   actions: SyncActions;
@@ -394,6 +416,12 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
   const [state, setState] = useState<SyncState>(INITIAL_STATE);
   const wsRef = useRef<WebSocket | null>(null);
   const appliedTransportRevision = useRef<number | undefined>(undefined);
+  /**
+   * When this client last started holding for an answer from the room — a
+   * play, seek or resume of its own. A heartbeat reply sent before the room
+   * heard it would otherwise say "not waiting" and let the picture go early.
+   */
+  const heldForAnswerAtRef = useRef(0);
   const retryRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Bumped by retryConnection. It is a dependency of the connect effect, so a
@@ -455,6 +483,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           type: "play", ratingKey, title, subtitles, hlsSessionId, position, sessionOffset,
           audioStreamId, subtitleStreamId, playing, subtitleDrawn, quality, waiting,
         });
+        if (playing) heldForAnswerAtRef.current = Date.now();
         setState((prev) => {
           // Restarting what is already running — a track change, or a seek that
           // needed a new transcode — rather than starting something. A rebuild
@@ -488,7 +517,10 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             // "don't extrapolate". Mirrors the server's positionConfirmed.
             positionAt: restart ? prev.positionAt : 0,
             sessionOffset: sessionOffset ?? position ?? 0,
-            hostWaiting: waiting,
+            // A stream the room is to run starts with everybody together: the
+            // room always answers whether it is waiting, and this player holds
+            // until it does.
+            hostWaiting: playing || waiting,
           };
         });
       },
@@ -496,19 +528,24 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         send({ type: "pause", position });
         setState((prev) => ({ ...prev, playing: false, position, positionAt: Date.now(), hostWaiting: false }));
       },
-      sendResume: (position: number, waiting?: boolean) => {
+      sendResume: (position: number, waiting?: boolean, hold = false) => {
         send({ type: "resume", position, waiting: waiting === true });
+        if (hold) heldForAnswerAtRef.current = Date.now();
         setState((prev) => ({
           ...prev, playing: true, position, positionAt: Date.now(),
-          // Only the host knows about its own picture; a co-host's resume
-          // (which passes nothing) leaves the room's word on it alone.
-          hostWaiting: waiting ?? prev.hostWaiting,
+          // The room answers a resume with whether it is waiting; until then,
+          // whoever asked to hold does.
+          hostWaiting: hold || prev.hostWaiting,
         }));
       },
       // Deliberately does not touch `playing`: a seek says where, not whether.
-      sendSeek: (position: number) => {
+      sendSeek: (position: number, hold = false) => {
         send({ type: "seek", position });
-        setState((prev) => ({ ...prev, position, positionAt: Date.now() }));
+        if (hold) heldForAnswerAtRef.current = Date.now();
+        setState((prev) => ({
+          ...prev, position, positionAt: Date.now(),
+          hostWaiting: (hold && prev.playing) || prev.hostWaiting,
+        }));
       },
       sendStop: () => {
         send({ type: "stop" });
@@ -547,9 +584,12 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           const now = Date.now();
           const elapsed = prev.positionAt ? (now - prev.positionAt) / 1000 : 0;
           const stalled = looksStalled(position - prev.position, elapsed);
-          return { ...prev, position, playing, positionAt: stalled ? 0 : now, hostWaiting: waiting };
+          // Whether the room waits is the room's to say ("room-waiting"): the
+          // host's own picture being ready doesn't mean everybody's is.
+          return { ...prev, position, playing, positionAt: stalled || prev.hostWaiting ? 0 : now };
         });
       },
+      sendReady: (gather: number) => send({ type: "ready", gather }),
       sendBrowse: (context: string) => send({ type: "browse", context }),
       sendQueueAdd: (item: QueueItem) => send({ type: "queue-add", item }),
       sendQueueRemove: (ratingKey: string) => send({ type: "queue-remove", ratingKey }),
@@ -611,6 +651,12 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             username: usernameRef.current,
             // Whether the room may be sent HEVC — see roomPlaysHevc.
             hevc: canPlayHevcTranscode(),
+            // This player says when its picture is ready, so the room can
+            // wait for it — see SyncState.hostWaiting — and whether anybody
+            // is looking at it, since the room doesn't wait for a player
+            // nobody is watching.
+            gather: true,
+            visible: !document.hidden,
           }),
         );
         setState((prev) => ({ ...prev, connected: true, hostDisconnected: false }));
@@ -630,7 +676,15 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         }
         switch (msg.type) {
           case "transport-state":
-            setState((prev) => ({ ...prev, playing: Boolean(msg.playing) }));
+            setState((prev) => ({
+              ...prev,
+              playing: Boolean(msg.playing),
+              // The reply to a heartbeat says whether the room is waiting too,
+              // which mends a "room-waiting" that went missing.
+              ...(typeof msg.waiting === "boolean" && Date.now() - heldForAnswerAtRef.current > HOLD_ANSWER_GRACE_MS
+                ? { hostWaiting: msg.waiting }
+                : {}),
+            }));
             break;
           case "state":
             setState((prev) => ({
@@ -642,6 +696,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               position: (msg.position as number) ?? 0,
               positionAt: Date.now(),
               hostWaiting: msg.waiting === true,
+              gatherSeq: typeof msg.gather === "number" ? msg.gather : prev.gatherSeq,
               hlsSessionId: (msg.hlsSessionId as string) || null,
               sessionOffset: (msg.sessionOffset as number) ?? 0,
               commandSeq: prev.commandSeq + 1,
@@ -742,8 +797,9 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               // regardless, it started everyone else's picture while the host's
               // sat still. Absent, from an older server, it means playing.
               playing: msg.playing !== false,
-              // The host's own picture hasn't started yet — see hostWaiting.
+              // Somebody's picture hasn't started yet — see hostWaiting.
               hostWaiting: msg.waiting === true,
+              gatherSeq: typeof msg.gather === "number" ? msg.gather : prev.gatherSeq,
               // Non-zero when the host resumed from history or restarted the
               // transcode at a seek target; 0 for a plain start.
               position: (msg.position as number) ?? 0,
@@ -779,9 +835,24 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               position: (msg.position as number) ?? prev.position,
               positionAt: Date.now(),
               hostWaiting: msg.waiting === true,
+              gatherSeq: typeof msg.gather === "number" ? msg.gather : prev.gatherSeq,
               commandSeq: prev.commandSeq + 1,
             }));
             break;
+          case "room-waiting": {
+            // The room stopping for somebody's picture, or starting again —
+            // see hostWaiting. The position is where it stands still, or where
+            // it starts from; the clock runs from now.
+            const waiting = msg.waiting === true;
+            setState((prev) => ({
+              ...prev,
+              hostWaiting: waiting,
+              gatherSeq: typeof msg.gather === "number" ? msg.gather : prev.gatherSeq,
+              position: typeof msg.position === "number" ? msg.position : prev.position,
+              positionAt: waiting ? 0 : Date.now(),
+            }));
+            break;
+          }
           case "seek":
             setState((prev) => ({
               ...prev,
@@ -974,8 +1045,14 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
 
     connect();
 
+    // Discord minimised, or another app in front: say so — see "visible" on
+    // the server.
+    const onVisibility = () => send({ type: "visible", value: !document.hidden });
+    document.addEventListener("visibilitychange", onVisibility);
+
     return () => {
       active = false;
+      document.removeEventListener("visibilitychange", onVisibility);
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;

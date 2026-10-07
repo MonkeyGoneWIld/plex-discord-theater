@@ -11,12 +11,15 @@
 // — at the start, and in the middle — which is what a struggling host looks
 // like.
 //
-// What must hold, because the room is the host:
-//   - the viewer doesn't start before the host does;
+// What must hold, because the room is the host and starts together:
+//   - the viewer and the host start at the same moment, whichever of them is
+//     slower to get its first picture — up to ten seconds, after which the
+//     room starts without the slow one;
 //   - while the host's picture is stopped, the viewer's is too, and never gets
 //     more than a moment ahead of it;
 //   - the viewer is never sent back: nobody sees the same seconds twice;
-//   - once the host goes on, they are back together within a few seconds.
+//   - once the host goes on, they are back together within a few seconds;
+//   - the loading screen says "Loading…" or "Buffering…" and nothing else.
 // With P2P on, the viewer's segments should carry the host through instead.
 import React, { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -125,6 +128,53 @@ function Runner() {
     }
   }
 
+  /**
+   * The viewer slow to get its first picture: the host waits for it, and they
+   * start together — or, past ten seconds, the host starts without it.
+   */
+  async function runSlowViewer(stallMs: number) {
+    setRunning(true);
+    const out: string[] = [`— the viewer's first segments held back ${stallMs / 1000}s —`];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    latest.clear();
+    events.clear();
+    try {
+      await api("/api/test/reset?p2p=0");
+      setHostOn(false);
+      setFrames((n) => n + 1);
+      await waitFor(() => latest.get("u-viewer")?.joined, 60_000, "the viewer to join");
+      // Held from the moment the host starts the film.
+      await api(`/api/test/stall?user=u-viewer&ms=${stallMs}`);
+      const began = Date.now();
+      setHostOn(true);
+      const hostStarted = await waitFor(() => firstPlay("u-host"), 45_000, "the host to start");
+      const viewerStarted = await waitFor(() => firstPlay("u-viewer"), 45_000, "the viewer to start");
+      const hostAfterS = (hostStarted - began) / 1000;
+      if (stallMs <= 8000) {
+        say(`${Math.abs(viewerStarted - hostStarted) < 700 ? "PASS" : "FAIL"} they start together (viewer ${viewerStarted - hostStarted} ms after the host)`);
+        say(`${hostAfterS >= stallMs / 1000 - 1 ? "PASS" : "FAIL"} because the host waited for the viewer (host started ${hostAfterS.toFixed(1)}s in)`);
+        const skipped = (events.get("u-viewer") ?? []).filter((e) => /settling onto the room|going to where the room/.test(e.msg));
+        say(`${skipped.length === 0 ? "PASS" : "FAIL"} and the viewer skipped nothing to catch up (${skipped.length})`);
+      } else {
+        say(`${hostAfterS < 16 ? "PASS" : "FAIL"} the host doesn't wait for ever (started ${hostAfterS.toFixed(1)}s in)`);
+        say(`${hostAfterS >= 9 ? "PASS" : "FAIL"} but it does wait about ten seconds first`);
+        say(`${viewerStarted > hostStarted ? "PASS" : "FAIL"} and the viewer follows once it can (${((viewerStarted - hostStarted) / 1000).toFixed(1)}s later)`);
+      }
+      await pause(6_000);
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      const apart = Math.abs(v.pos - h.pos);
+      say(`${apart < 1 && !v.paused && !h.paused ? "PASS" : "FAIL"} and they play on together (${apart.toFixed(2)}s apart)`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
   async function run(p2p: boolean) {
     setRunning(true);
     const out: string[] = [`— ${p2p ? "with" : "without"} P2P —`];
@@ -154,9 +204,11 @@ function Runner() {
 
       const hostStarted = await waitFor(() => firstPlay("u-host"), 45_000, "the host to start");
       const viewerStarted = await waitFor(() => firstPlay("u-viewer"), 45_000, "the viewer to start");
-      say(`${viewerStarted >= hostStarted - 300 ? "PASS" : "FAIL"} the viewer starts with the host, not before it (viewer ${viewerStarted - hostStarted} ms after)`);
-      const heldBeforeStart = samples.some((s) => s.viewer.waiting && s.viewer.text.includes("Waiting for Host"));
-      say(`${heldBeforeStart ? "PASS" : "FAIL"} and says it is waiting for the host while it does`);
+      say(`${Math.abs(viewerStarted - hostStarted) < 700 ? "PASS" : "FAIL"} the viewer and the host start together (viewer ${viewerStarted - hostStarted} ms after)`);
+      const heldBeforeStart = samples.some((s) => s.viewer.waiting && s.viewer.text.includes("Loading…"));
+      say(`${heldBeforeStart ? "PASS" : "FAIL"} and the viewer's screen says "Loading…" while it waits`);
+      const wordy = samples.filter((s) => /Waiting for|Downloading at|Everyone starts|connection is/.test(s.viewer.text + s.host.text)).length;
+      say(`${wordy === 0 ? "PASS" : "FAIL"} and nothing more than that (${wordy} samples said more)`);
 
       await pause(12_000);
       say("… holding the host's stream back for 8s");
@@ -184,8 +236,8 @@ function Runner() {
       if (!p2p) {
         const held = during.some((s) => s.viewer.paused && s.viewer.waiting);
         say(`${held ? "PASS" : "FAIL"} the viewer holds while the host's picture is stopped`);
-        const toldWhy = during.some((s) => s.viewer.text.includes("Waiting for Host"));
-        say(`${toldWhy ? "PASS" : "FAIL"} and the viewer is told why`);
+        const toldWhy = during.some((s) => /Loading…|Buffering…/.test(s.viewer.text));
+        say(`${toldWhy ? "PASS" : "FAIL"} and the viewer's screen says it is buffering`);
       }
 
       const back = samples.slice(1)
@@ -215,6 +267,8 @@ function Runner() {
         <button disabled={running} onClick={() => void run(false)}>{running ? "Running…" : "Run"}</button>
         <button disabled={running} onClick={() => void run(true)}>Run with P2P</button>
         <button disabled={running} onClick={() => void runSeeks()}>Seeks and pauses</button>
+        <button disabled={running} onClick={() => void runSlowViewer(5000)}>Slow viewer</button>
+        <button disabled={running} onClick={() => void runSlowViewer(20000)}>Very slow viewer</button>
         <pre id="results">{lines.join("\n")}</pre>
       </div>
       {frames > 0 && (

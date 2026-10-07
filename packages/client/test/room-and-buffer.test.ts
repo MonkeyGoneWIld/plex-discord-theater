@@ -5,13 +5,15 @@
  *   for it, and only a seek sends anybody back (lib/roomWait).
  * - The buffer counts what the P2P engine holds past the browser's own
  *   (lib/bufferAhead).
- * - The loading screen says what it is waiting for (lib/loadingMessage).
+ * - The loading screen says only "Loading…" or "Buffering…" (lib/loadingMessage).
+ * - A cut behind the playhead never reaches the picture (lib/bufferTrim).
  * - The room's clock stands still while the host's picture does
  *   (roomPositionNow).
  */
 import { MAX_WAIT_FOR_ROOM_S, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, heldRanges } from "../src/lib/bufferAhead";
-import { arrivingKbps, loadingMessage, type LoadingFacts } from "../src/lib/loadingMessage";
+import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
+import { safeBackCutS } from "../src/lib/bufferTrim";
 import { roomPositionNow } from "../src/hooks/useSync";
 
 let pass = 0;
@@ -63,35 +65,33 @@ const held = new Map<string, readonly [number, number]>([["a", [10, 20]], ["b", 
 check("the engine's long-passed segments are let go", heldRanges(held, 200).length, 2);
 check("and dropped from what is tracked", [...held.keys()], ["b", "c"]);
 
-console.log("\n— the room stands still while the host's picture does —");
+console.log("\n— the room stands still while it waits —");
 const t = Date.now() - 4000;
 check("a running room runs", Math.round(roomPositionNow({ position: 100, playing: true, positionAt: t })), 104);
-check("a room waiting for the host doesn't",
+check("a waiting room doesn't",
   roomPositionNow({ position: 100, playing: true, positionAt: t, hostWaiting: true }), 100);
 check("nor does a paused one", roomPositionNow({ position: 100, playing: false, positionAt: t }), 100);
 
-console.log("\n— the loading screen says what it is waiting for —");
-const facts = (f: Partial<LoadingFacts>): LoadingFacts => ({
-  phase: "stalled", waitingForHost: null, forS: 0, downloadKbps: null, streamKbps: null, failing: false, copied: false, ...f,
-});
-check("holding for the host names them", loadingMessage(facts({ waitingForHost: "monkey26" })).title, "Waiting for monkey26…");
-check("and after a while says why",
-  loadingMessage(facts({ waitingForHost: "monkey26", forS: 6 })).detail, "Everyone starts together once their video is ready");
-check("starting a copy", loadingMessage(facts({ phase: "starting", forS: 6, copied: true })),
-  { title: "Starting the stream…", detail: "Plex is reading the file" });
-check("starting, slowly", loadingMessage(facts({ phase: "starting", forS: 20 })).detail,
-  "Plex is taking longer than usual to start this one");
-check("a connection slower than the video says so",
-  loadingMessage(facts({ forS: 5, downloadKbps: 21400, streamKbps: 30660 })),
-  { title: "Buffering…", detail: "Your connection is bringing in 21 Mbps; this video needs about 31 Mbps" });
-check("one that keeps up says how fast it is going",
-  loadingMessage(facts({ phase: "first-frames", forS: 5, downloadKbps: 46000, streamKbps: 30660 })).detail,
-  "Downloading at 46 Mbps");
-check("nothing arriving at the start", loadingMessage(facts({ phase: "first-frames", forS: 9 })).detail,
-  "Waiting for the server to send the first part");
-check("failing downloads say so", loadingMessage(facts({ failing: true })).detail,
-  "Having trouble reaching the server — retrying");
-check("the first moments say only what is happening", loadingMessage(facts({ forS: 1, downloadKbps: 100, streamKbps: 30000 })).detail, null);
+console.log("\n— the loading screen says loading or buffering, and nothing else —");
+check("before the picture has moved", loadingTitle(false), "Loading…");
+check("once it has", loadingTitle(true), "Buffering…");
+
+console.log("\n— a cut behind the playhead stops short of the segment before it —");
+// Pressure, 04:50:08: playing at 393.63 in a segment that ran 387.4–396.65,
+// keyframes only at segment starts. A cut to 388.63 was carried on to 396.65,
+// took the picture with it, and the picture froze three seconds later.
+const frags = [
+  { start: 369.37, duration: 9.2 },
+  { start: 378.57, duration: 8.83 },
+  { start: 387.4, duration: 9.25 },
+  { start: 396.65, duration: 6.1 },
+];
+check("stops at the start of the segment before the one playing", safeBackCutS(frags, 393.63, 388.63), 378.57);
+check("further back is cut as asked", safeBackCutS(frags, 393.63, 371), 371);
+check("just into the next segment, the one before is the limit", safeBackCutS(frags, 396.7, 395.7), 387.4);
+check("in the first segment, nothing behind can go", safeBackCutS(frags, 372, 371), null);
+check("in the second, up to the first", safeBackCutS(frags, 380, 379), 369.37);
+check("without segments, nothing", safeBackCutS(null, 393, 390), null);
 
 console.log("\n— what is arriving —");
 const samples: Array<[number, number]> = [[0, 1_000_000], [5_000, 2_000_000], [9_000, 1_000_000]];

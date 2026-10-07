@@ -26,6 +26,12 @@ HTMLMediaElement.prototype.play = function (this: HTMLMediaElement) {
   return play.call(this);
 };
 
+// Looked at, as two people's players are, even when the browser running the
+// checks is in the background: the room doesn't wait for a player nobody is
+// looking at.
+Object.defineProperty(Document.prototype, "hidden", { configurable: true, get: () => false });
+Object.defineProperty(Document.prototype, "visibilityState", { configurable: true, get: () => "visible" });
+
 // This player's own account of itself, for the runner to read.
 const events: Array<{ t: number; tag: string; msg: string; data: Record<string, unknown> }> = [];
 for (const level of ["log", "warn", "error"] as const) {

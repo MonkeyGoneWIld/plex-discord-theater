@@ -197,6 +197,22 @@ interface RoomClient {
    * turns out not to decode. A client that never says counts as no.
    */
   hevc: boolean;
+  /**
+   * Whether this client says when its picture is ready ("ready"), so the room
+   * can wait for it — see RoomState.waiting. Said on joining; a client that
+   * never says isn't waited for, since it would never answer.
+   */
+  gathers: boolean;
+  /** The gather this client last said its picture was ready for. */
+  readyFor: number;
+  /**
+   * Whether anybody is looking at this client's player. One that is hidden —
+   * Discord minimised, another app in front, a phone that has put it in the
+   * background and stopped it — is not waited for: holding everybody for
+   * ten seconds on every skip for somebody who isn't watching helps nobody.
+   * It catches up once it is looked at again.
+   */
+  visible: boolean;
 }
 
 /**
@@ -287,16 +303,36 @@ interface RoomState {
    */
   positionConfirmed: boolean;
   /**
-   * The host's picture isn't moving: the stream it has just announced hasn't
-   * shown a frame yet, or it has stalled waiting for data.
-   *
-   * The room is the host. While it waits the clock stands still, and everyone
-   * else holds where they are and starts again with it. Without this a viewer
-   * whose segments arrived first started the film before the host did, and
-   * anyone still playing when the host stalled ran on ahead of it — then got
-   * sent back, and saw the same seconds twice.
+   * The host's picture isn't ready: the stream it has just announced hasn't
+   * shown a frame yet, or it has stalled waiting for data. One of the things
+   * the room waits for — see `waiting`.
    */
   hostWaiting: boolean;
+  /**
+   * The room's clock is stopped and everybody holds where they are: the
+   * host's picture isn't ready, or somebody else's isn't at a moment the room
+   * starts again together — a stream starting, a seek, a resume, a stall of
+   * the host's. See openGather.
+   *
+   * The room is the host. Viewers used to start a film before it whenever
+   * their segments arrived first, and run on through its stalls and get sent
+   * back. Then, held for the host alone, they started up to twenty seconds
+   * after it whenever their own first segment was slower, and skipped what
+   * they had missed to catch up. Now nobody starts until everybody can, for
+   * up to GATHER_MAX_MS once the host is ready.
+   */
+  waiting: boolean;
+  /** Names the latest moment everybody starts again from together, so a
+   *  viewer's "ready" counts for that one and no other. */
+  gatherSeq: number;
+  /** Whether the room is waiting on viewers' "ready" for gatherSeq. */
+  gatherOpen: boolean;
+  gatherOpenedAt: number;
+  /** When the room starts without whoever still isn't ready — set once the
+   *  host is. */
+  gatherDeadline: number | null;
+  /** The gather everybody was last told about — see updateWaiting. */
+  gatherAnnounced: number;
   updatedAt: number;
   transportRevision: number;
   transportChangedAt: number;
@@ -347,6 +383,8 @@ interface Room {
   coHostIds: Set<string>;
   /** Last forced history write for this room — see persistProgress. */
   lastForcedPersistAt: number;
+  /** Ends a gather that has waited GATHER_MAX_MS — see updateWaiting. */
+  gatherTimer?: ReturnType<typeof setTimeout>;
 }
 
 /** Ceiling on remembered co-host grants, so a room can't accumulate them without
@@ -368,22 +406,119 @@ function setTransport(room: Room, playing: boolean): void {
 }
 
 /**
- * Whether the room is waiting for the host's picture — see hostWaiting. The
- * clock is anchored where it stands as it starts or stops waiting, so the
- * time spent waiting is never counted as played.
+ * How long the room waits for a viewer's picture once the host's is ready. A
+ * first segment that is slow to arrive is the usual reason, and it is nearly
+ * always in within a few seconds; somebody who is never going to be ready
+ * holds everyone for no longer than this, then catches up on their own.
+ */
+const GATHER_MAX_MS = 10_000;
+
+/** Viewers the room is still waiting on in the open gather. */
+function gatherPending(room: Room): RoomClient[] {
+  const s = room.state;
+  if (!s.gatherOpen) return [];
+  return [...room.clients].filter((c) =>
+    !c.isHost && c.gathers && c.isWatching && c.visible &&
+    c.ws.readyState === WebSocket.OPEN &&
+    // Somebody arriving in the middle of it starts as anyone joining does,
+    // rather than holding up everybody who was already here.
+    c.joinedAt <= s.gatherOpenedAt &&
+    c.readyFor !== s.gatherSeq);
+}
+
+const namesOf = (clients: RoomClient[]) => clients.map((c) => c.username ?? c.userId).join(", ");
+
+function closeGather(room: Room): void {
+  room.state.gatherOpen = false;
+  room.state.gatherDeadline = null;
+  if (room.gatherTimer) {
+    clearTimeout(room.gatherTimer);
+    room.gatherTimer = undefined;
+  }
+}
+
+/**
+ * A moment the room starts again from together: everybody watching has to
+ * say their picture is ready before the clock runs — see RoomState.waiting.
+ */
+function openGather(room: Room): void {
+  closeGather(room);
+  room.state.gatherSeq++;
+  room.state.gatherOpen = true;
+  room.state.gatherOpenedAt = Date.now();
+}
+
+/**
+ * Whether the room is waiting, worked out again; and everybody told when that
+ * changes, or there is a new gather for them to answer. The clock is anchored
+ * where it stands as it stops and as it starts again, so the time spent
+ * waiting is never counted as played.
+ */
+function updateWaiting(room: Room, roomId: string | null, why: string): void {
+  const s = room.state;
+  const running = s.playing && !!s.ratingKey;
+  if (!running) closeGather(room);
+  let pending = gatherPending(room);
+  if (s.gatherOpen && !s.hostWaiting) {
+    if (pending.length === 0) {
+      closeGather(room);
+    } else if (s.gatherDeadline === null) {
+      // The host is ready; the others get GATHER_MAX_MS from here.
+      s.gatherDeadline = Date.now() + GATHER_MAX_MS;
+      const seq = s.gatherSeq;
+      room.gatherTimer = setTimeout(() => {
+        room.gatherTimer = undefined;
+        if (room.state.gatherSeq !== seq || !room.state.gatherOpen) return;
+        logEvent("Sync", "starting without the players still loading", {
+          room: roomId?.substring(0, 8) ?? "?",
+          waitedS: GATHER_MAX_MS / 1000,
+          still: namesOf(gatherPending(room)),
+        });
+        closeGather(room);
+        updateWaiting(room, roomId, "gave up waiting");
+      }, GATHER_MAX_MS);
+      room.gatherTimer.unref?.();
+    }
+    pending = gatherPending(room);
+  }
+  const waiting = running && (s.hostWaiting || pending.length > 0);
+  const changed = waiting !== s.waiting;
+  if (changed) {
+    // Before the flag flips, so the clock is read as it was running.
+    if (waiting) s.position = interpolatedPosition(s);
+    s.updatedAt = Date.now();
+    s.waiting = waiting;
+    logEvent("Sync", waiting ? "room waiting" : "room running", {
+      room: roomId?.substring(0, 8) ?? "?",
+      ...(waiting ? { why, for: s.hostWaiting ? "the host" : namesOf(pending) } : {}),
+      posS: Number(s.position.toFixed(2)),
+    });
+  }
+  // Not while paused or stopped: the pause or stop says so itself, and a
+  // "running" sent ahead of it would start everybody for a moment.
+  if (running && (changed || s.gatherAnnounced !== s.gatherSeq)) {
+    s.gatherAnnounced = s.gatherSeq;
+    sendToAll(room, { type: "room-waiting", waiting, position: s.position, gather: s.gatherSeq });
+  }
+}
+
+/**
+ * Whether the host's picture is ready — see RoomState.hostWaiting. Its
+ * stalling is a moment everybody starts again from together too: anybody
+ * whose own picture stopped with it gets the chance to catch up first.
  */
 function setHostWaiting(room: Room, roomId: string | null, waiting: boolean, why: string): void {
-  if (room.state.hostWaiting === waiting) return;
-  if (waiting) {
-    room.state.position = interpolatedPosition(room.state);
-    room.state.updatedAt = Date.now();
+  if (room.state.hostWaiting !== waiting) {
+    room.state.hostWaiting = waiting;
+    if (waiting && !room.state.gatherOpen && room.state.playing) openGather(room);
+    if (!waiting && room.state.gatherOpen) {
+      logEvent("Sync", "host's picture ready", {
+        room: roomId?.substring(0, 8) ?? "?",
+        waitingFor: namesOf(gatherPending(room)) || "nobody",
+      });
+    }
   }
-  room.state.hostWaiting = waiting;
-  logEvent("Sync", waiting ? "room waiting for the host" : "room running with the host", {
-    room: roomId?.substring(0, 8) ?? "?",
-    ...(waiting ? { why } : {}),
-    posS: Number(room.state.position.toFixed(2)),
-  });
+  updateWaiting(room, roomId, why);
 }
 
 /**
@@ -582,6 +717,12 @@ function getOrCreateRoom(instanceId: string): Room {
         position: 0,
         positionConfirmed: false,
         hostWaiting: false,
+        waiting: false,
+        gatherSeq: 0,
+        gatherOpen: false,
+        gatherOpenedAt: 0,
+        gatherDeadline: null,
+        gatherAnnounced: 0,
         updatedAt: Date.now(),
         transportRevision: 0,
         transportChangedAt: performance.now(),
@@ -901,8 +1042,8 @@ function interpolatedPosition(state: RoomState): number {
   // Running the clock through a load the host hasn't finished is how the room
   // ends up permanently ahead of the person it is supposed to be following.
   if (!state.positionConfirmed) return state.position;
-  // The host's picture isn't moving, so neither is the room's — see hostWaiting.
-  if (state.hostWaiting) return state.position;
+  // Somebody's picture isn't ready, so the room's isn't moving — see waiting.
+  if (state.waiting) return state.position;
   const elapsed = (Date.now() - state.updatedAt) / 1000;
   if (elapsed > MAX_EXTRAPOLATION_S) return state.position;
   return state.position + Math.max(0, elapsed);
@@ -1227,6 +1368,9 @@ export function attachWebSocketServer(server: Server): void {
           // have one; until then they watch what the host does.
           quality: 0,
           hevc: msg.hevc === true,
+          gathers: msg.gather === true,
+          readyFor: 0,
+          visible: msg.visible !== false,
         };
         roomId = instanceId;
         room.clients.add(client);
@@ -1252,7 +1396,8 @@ export function attachWebSocketServer(server: Server): void {
           subtitles: room.state.subtitles,
           playing: room.state.playing,
           position: interpolatedPosition(room.state),
-          waiting: room.state.hostWaiting,
+          waiting: room.state.waiting,
+          gather: room.state.gatherSeq,
           hlsSessionId: room.state.hlsSessionId,
           sessionOffset: room.state.sessionOffset,
           lastCommandAt: room.state.updatedAt,
@@ -1319,6 +1464,27 @@ export function attachWebSocketServer(server: Server): void {
           const v = room.state.variants.get(client.variantKey);
           if (v) v.idleSince = null;
         }
+        // Somebody the room was waiting for has left the player.
+        if (!client.isWatching && room.state.gatherOpen) updateWaiting(room, roomId, "a player closed");
+        return;
+      }
+
+      // Whether anybody is looking at this player — see RoomClient.visible.
+      if (type === "visible") {
+        client.visible = msg.value !== false;
+        if (!client.visible && room.state.gatherOpen) updateWaiting(room, roomId, "a player was hidden");
+        return;
+      }
+
+      /**
+       * "My picture is ready" — for the gather named, and only that one. Anyone
+       * may say it about themselves; the host's own readiness comes with its
+       * heartbeat instead. See RoomState.waiting.
+       */
+      if (type === "ready") {
+        if (msg.gather !== room.state.gatherSeq || client.readyFor === room.state.gatherSeq) return;
+        client.readyFor = room.state.gatherSeq;
+        if (room.state.gatherOpen) updateWaiting(room, roomId, "a player is ready");
         return;
       }
 
@@ -1653,8 +1819,10 @@ export function attachWebSocketServer(server: Server): void {
           room.state.positionConfirmed = restartOfLiveItem && room.state.positionConfirmed;
           // A stream announced before it has shown a frame — which is every
           // start, since the host announces as soon as the playlist is in. The
-          // host's next heartbeat says when its picture is moving.
-          setHostWaiting(room, roomId, msg.waiting === true, "the host's stream is starting");
+          // host's next heartbeat says when its picture is ready, and every
+          // viewer's "ready" when theirs is: everybody starts it together.
+          if (room.state.playing) openGather(room);
+          setHostWaiting(room, roomId, msg.waiting === true, "a stream is starting");
           // Where Plex was asked to start transcoding. Usually the same as the
           // position, and deliberately a separate field because it isn't when a
           // host re-announces a session it has already played some of: the room
@@ -1726,7 +1894,8 @@ export function attachWebSocketServer(server: Server): void {
             // Whether to run it: a stream rebuilt while paused is announced
             // paused, and has to reach everyone that way.
             playing: room.state.playing,
-            waiting: room.state.hostWaiting,
+            waiting: room.state.waiting,
+            gather: room.state.gatherSeq,
           });
           sendTo(ws, { type: "transport-state", playing: room.state.playing, transportRevision: room.state.transportRevision });
           // Everyone on the host's stream — which for a new title is everyone —
@@ -1741,7 +1910,8 @@ export function attachWebSocketServer(server: Server): void {
           // served from the room's own clock and so confirms nothing.
           if (client.isHost) room.state.positionConfirmed = true;
           // Paused is not waiting: the host's resume says whether it is.
-          if (client.isHost) setHostWaiting(room, roomId, false, "the host paused");
+          if (client.isHost) room.state.hostWaiting = false;
+          updateWaiting(room, roomId, "paused");
           room.state.updatedAt = Date.now();
           persistProgress(room, undefined, true);
           room.state.awaitingHostTransport = !client.isHost;
@@ -1753,16 +1923,18 @@ export function attachWebSocketServer(server: Server): void {
           setTransport(room, true);
           room.state.position = positionForCommand(room, client, msg.position);
           if (client.isHost) room.state.positionConfirmed = true;
-          // A host resuming onto a picture it hasn't got yet — pressed play
-          // straight after a seek — is waiting until it has. A co-host's resume
-          // says nothing about the host's picture.
-          if (client.isHost) setHostWaiting(room, roomId, msg.waiting === true, "the host resumed before its picture was ready");
           room.state.updatedAt = Date.now();
+          // Everybody starts again together. A host resuming onto a picture it
+          // hasn't got yet — pressed play straight after a seek — is waiting
+          // until it has; a co-host's resume says nothing about the host's.
+          openGather(room);
+          if (client.isHost) setHostWaiting(room, roomId, msg.waiting === true, "resumed");
+          else updateWaiting(room, roomId, "resumed");
           room.state.awaitingHostTransport = !client.isHost;
           sendTo(ws, { type: "transport-state", playing: room.state.playing, transportRevision: room.state.transportRevision });
           broadcast(room, ws, {
             type: "resume", position: room.state.position, transportRevision: room.state.transportRevision,
-            waiting: room.state.hostWaiting,
+            waiting: room.state.waiting, gather: room.state.gatherSeq,
           });
           break;
         }
@@ -1776,6 +1948,13 @@ export function attachWebSocketServer(server: Server): void {
           room.state.updatedAt = Date.now();
           persistProgress(room, undefined, true);
           broadcast(room, ws, { type: "seek", position: room.state.position });
+          // Everybody starts from the new place together, whoever has to load
+          // it. Answered with "room-waiting" even when nobody does, which is
+          // what a host holding for it is waiting to hear.
+          if (room.state.playing) {
+            openGather(room);
+            updateWaiting(room, roomId, "a seek");
+          }
           break;
         }
         case "play-item": {
@@ -1809,7 +1988,8 @@ export function attachWebSocketServer(server: Server): void {
           room.state.sessionOffset = 0;
           setTransport(room, false);
           room.state.position = 0;
-          setHostWaiting(room, roomId, false, "stopped");
+          room.state.hostWaiting = false;
+          updateWaiting(room, roomId, "stopped");
           room.state.updatedAt = Date.now();
           // The queue deliberately survives.
           //
@@ -1884,16 +2064,19 @@ export function attachWebSocketServer(server: Server): void {
               toS: Number(reported.toFixed(2)),
             });
           }
-          // Whether the host's picture is moving — see hostWaiting. Absent, from
-          // a client that predates it, means it is. Before the position below,
-          // which is the host's own word on where its picture stopped and
-          // replaces whatever the clock had run on to since the last report.
-          setHostWaiting(room, roomId, msg.waiting === true, "the host is waiting for its stream");
+          // The host's own word on where its picture is, replacing whatever the
+          // clock had run on to since the last report — first, so a stop is
+          // anchored where its picture stopped.
           room.state.position = reported;
           room.state.positionConfirmed = true;
-          setTransport(room, msg.playing !== false);
           room.state.updatedAt = Date.now();
-          sendTo(ws, { type: "transport-state", playing: room.state.playing, transportRevision: room.state.transportRevision });
+          setTransport(room, msg.playing !== false);
+          // Whether the host's picture is ready — see hostWaiting. Absent, from
+          // a client that predates it, means it is.
+          setHostWaiting(room, roomId, msg.waiting === true, "the host is waiting for its stream");
+          // With whether the room is waiting, so a host that missed the word it
+          // was holding for hears it within a heartbeat.
+          sendTo(ws, { type: "transport-state", playing: room.state.playing, transportRevision: room.state.transportRevision, waiting: room.state.waiting });
           // Throttled inside the history service — this fires every 5s per room.
           persistProgress(room, undefined, false);
           broadcast(room, ws, {
@@ -1901,7 +2084,7 @@ export function attachWebSocketServer(server: Server): void {
             transportRevision: room.state.transportRevision,
             position: room.state.position,
             playing: room.state.playing,
-            waiting: room.state.hostWaiting,
+            waiting: room.state.waiting,
             // Carry the "what's playing" snapshot so a viewer whose ratingKey
             // got cleared (e.g. a stray stop during a host handoff) can self-heal
             // from the next heartbeat instead of being stuck with no way to rejoin.
@@ -2245,11 +2428,14 @@ export function attachWebSocketServer(server: Server): void {
         // duplicate-connection eviction clears isHost, so the last client out
         // isn't always flagged as one, and the interval then pinged Plex every
         // 30s for a room that no longer existed.
+        closeGather(room);
         destroyAllVariants(room);
         rooms.delete(closingRoomId);
       } else {
         // Someone left — refresh everyone's roster
         broadcastParticipants(room);
+        // The room may have been waiting for them.
+        if (room.state.gatherOpen) updateWaiting(room, closingRoomId, "a player left");
       }
       };
 

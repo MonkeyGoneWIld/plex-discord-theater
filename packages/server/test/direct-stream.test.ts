@@ -709,6 +709,16 @@ console.log("\n— through the routes —");
   check("a title someone is looking at without a subtitle chosen reads nothing",
     await (await ahead({ ratingKey: "931", scope: "first" })).json(), { ok: true, queued: false });
   check("a key that isn't one is refused", (await ahead({ ratingKey: "../x" })).status, 400);
+  // A title's other subtitles, queued while it played and reached after it stopped.
+  const startedWith = selectedSubtitle;
+  check("a read nobody wants any more by its turn is dropped unread",
+    embeddedSubs.prefetchEmbeddedSubtitles([{
+      streamId: "61", ratingKey: "931", mediaIndex: 0,
+      withTrackSelected: (start) => start(),
+    }], { stillWanted: () => false }), 1);
+  await pause(300);
+  check("and Plex isn't asked to go through the film for it",
+    [embeddedSubs.embeddedSubtitleState("61"), selectedSubtitle], [null, startedWith]);
   process.env.SUBTITLE_PREFETCH = "0";
 
   await plexRoutes.stopAllActiveSessions();

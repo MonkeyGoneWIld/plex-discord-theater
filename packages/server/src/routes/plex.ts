@@ -2949,6 +2949,8 @@ async function prefetchSubtitles(
    */
   scope: "all" | "first" = "all",
   from?: string,
+  /** Asked before each read starts; false drops it. */
+  stillWanted?: () => boolean,
 ): Promise<void> {
   if (!subtitlePrefetchOn()) return;
   const key = `${ratingKey}:${mediaIndex}${scope === "first" ? `:first:${first}` : ""}`;
@@ -3014,7 +3016,7 @@ async function prefetchSubtitles(
       },
     };
   });
-  const queued = prefetchEmbeddedSubtitles(reads, { soon: scope === "all", from });
+  const queued = prefetchEmbeddedSubtitles(reads, { soon: scope === "all", from, stillWanted });
   if (queued > 0) {
     logEvent("Subtitles", scope === "all"
       ? "reading a title's subtitles ahead"
@@ -3100,9 +3102,14 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
     // switching to one of them finds it ready. Behind this one: it is begun
     // below, and the queue waits for reads already going. Not at once, though:
     // this is asked as a stream starts, and the stream comes first.
+    // Only while the title is still playing: left within the delay, or before
+    // its turn in the queue, there is nothing to switch to.
     const readTheRest = () => {
+      const streaming = titleIsStreaming(ratingKey);
+      const watched = () => !streaming || titleIsStreaming(ratingKey);
       setTimeout(() => {
-        void prefetchSubtitles(ratingKey, mediaIndex, Number(streamId)).catch((err) =>
+        if (!watched()) return;
+        void prefetchSubtitles(ratingKey, mediaIndex, Number(streamId), "all", undefined, watched).catch((err) =>
           console.warn("[Subtitles] couldn't read ahead:", err));
       }, subtitlePrefetchDelayMs()).unref?.();
     };
@@ -3454,6 +3461,12 @@ const OUR_CLIENT_ID = "plex-discord-theater";
 const plexTranscodeKeys = new Map<string, string>();
 /** Maps our session UUID → the ratingKey being played (needed for timeline stopped). */
 const sessionRatingKeys = new Map<string, string>();
+
+/** Whether any stream of this title is running now. */
+function titleIsStreaming(ratingKey: string): boolean {
+  for (const key of sessionRatingKeys.values()) if (key === ratingKey) return true;
+  return false;
+}
 /**
  * Maps our session UUID → which of the item's files it is playing.
  *
@@ -4804,8 +4817,10 @@ router.get(
       // later, so the one the player draws — which it asks for as it starts —
       // is read first.
       if (subtitlePrefetchOn()) {
+        const watched = () => titleIsStreaming(ratingKey);
         setTimeout(() => {
-          void prefetchSubtitles(ratingKey, mediaIndex, null).catch((err) =>
+          if (!watched()) return;
+          void prefetchSubtitles(ratingKey, mediaIndex, null, "all", undefined, watched).catch((err) =>
             console.warn("[Subtitles] couldn't read ahead:", err));
         }, subtitlePrefetchDelayMs()).unref?.();
       }

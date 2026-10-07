@@ -239,6 +239,8 @@ interface Queued {
   soon: boolean;
   /** What asked, for a guess: a newer one from the same place replaces it. */
   from: string | null;
+  /** Asked again when its turn comes; false drops it unread. */
+  stillWanted?: () => boolean;
 }
 const prefetchQueue: Queued[] = [];
 let prefetching = false;
@@ -252,6 +254,13 @@ export interface PrefetchOptions {
    * browsing past ten titles shouldn't queue ten titles' worth of reads.
    */
   from?: string;
+  /**
+   * Whether these are still worth reading when their turn comes. A title's
+   * other subtitles are read for switching to while it plays; once nobody is
+   * watching it they would be Plex going through the whole film, again and
+   * again, under whatever is playing next.
+   */
+  stillWanted?: () => boolean;
 }
 
 /**
@@ -279,7 +288,7 @@ export function prefetchEmbeddedSubtitles(reads: ReadOptions[], opts: PrefetchOp
       if (soon && !prefetchQueue[existing].soon) prefetchQueue.splice(existing, 1);
       else continue;
     }
-    const entry: Queued = { read, soon, from };
+    const entry: Queued = { read, soon, from, ...(opts.stillWanted && { stillWanted: opts.stillWanted }) };
     if (soon) {
       // After the other reads wanted soon, ahead of every guess.
       const firstGuess = prefetchQueue.findIndex((q) => !q.soon);
@@ -306,6 +315,12 @@ async function pumpPrefetch(): Promise<void> {
       const next = prefetchQueue.shift();
       if (!next) break;
       if (embeddedSubtitleState(next.read.streamId, next.read.fingerprint)) continue;
+      if (next.stillWanted && !next.stillWanted()) {
+        logEvent("Subtitles", "not reading a subtitle ahead: nobody is watching it now", {
+          ratingKey: next.read.ratingKey, streamId: next.read.streamId, queued: prefetchQueue.length,
+        });
+        continue;
+      }
       logEvent("Subtitles", "reading a subtitle ahead", {
         ratingKey: next.read.ratingKey, streamId: next.read.streamId,
         why: next.soon ? "playing or up next" : "a title being looked at", queued: prefetchQueue.length,

@@ -286,6 +286,17 @@ interface RoomState {
    * own pause — confirms it.
    */
   positionConfirmed: boolean;
+  /**
+   * The host's picture isn't moving: the stream it has just announced hasn't
+   * shown a frame yet, or it has stalled waiting for data.
+   *
+   * The room is the host. While it waits the clock stands still, and everyone
+   * else holds where they are and starts again with it. Without this a viewer
+   * whose segments arrived first started the film before the host did, and
+   * anyone still playing when the host stalled ran on ahead of it — then got
+   * sent back, and saw the same seconds twice.
+   */
+  hostWaiting: boolean;
   updatedAt: number;
   transportRevision: number;
   transportChangedAt: number;
@@ -354,6 +365,25 @@ function setTransport(room: Room, playing: boolean): void {
     });
   }
   room.state.playing = playing;
+}
+
+/**
+ * Whether the room is waiting for the host's picture — see hostWaiting. The
+ * clock is anchored where it stands as it starts or stops waiting, so the
+ * time spent waiting is never counted as played.
+ */
+function setHostWaiting(room: Room, roomId: string | null, waiting: boolean, why: string): void {
+  if (room.state.hostWaiting === waiting) return;
+  if (waiting) {
+    room.state.position = interpolatedPosition(room.state);
+    room.state.updatedAt = Date.now();
+  }
+  room.state.hostWaiting = waiting;
+  logEvent("Sync", waiting ? "room waiting for the host" : "room running with the host", {
+    room: roomId?.substring(0, 8) ?? "?",
+    ...(waiting ? { why } : {}),
+    posS: Number(room.state.position.toFixed(2)),
+  });
 }
 
 /**
@@ -551,6 +581,7 @@ function getOrCreateRoom(instanceId: string): Room {
         playing: false,
         position: 0,
         positionConfirmed: false,
+        hostWaiting: false,
         updatedAt: Date.now(),
         transportRevision: 0,
         transportChangedAt: performance.now(),
@@ -870,6 +901,8 @@ function interpolatedPosition(state: RoomState): number {
   // Running the clock through a load the host hasn't finished is how the room
   // ends up permanently ahead of the person it is supposed to be following.
   if (!state.positionConfirmed) return state.position;
+  // The host's picture isn't moving, so neither is the room's — see hostWaiting.
+  if (state.hostWaiting) return state.position;
   const elapsed = (Date.now() - state.updatedAt) / 1000;
   if (elapsed > MAX_EXTRAPOLATION_S) return state.position;
   return state.position + Math.max(0, elapsed);
@@ -1219,6 +1252,7 @@ export function attachWebSocketServer(server: Server): void {
           subtitles: room.state.subtitles,
           playing: room.state.playing,
           position: interpolatedPosition(room.state),
+          waiting: room.state.hostWaiting,
           hlsSessionId: room.state.hlsSessionId,
           sessionOffset: room.state.sessionOffset,
           lastCommandAt: room.state.updatedAt,
@@ -1617,6 +1651,10 @@ export function attachWebSocketServer(server: Server): void {
           // transcode was asked to begin, and no frame of it exists yet. The
           // host's first heartbeat confirms it, within five seconds.
           room.state.positionConfirmed = restartOfLiveItem && room.state.positionConfirmed;
+          // A stream announced before it has shown a frame — which is every
+          // start, since the host announces as soon as the playlist is in. The
+          // host's next heartbeat says when its picture is moving.
+          setHostWaiting(room, roomId, msg.waiting === true, "the host's stream is starting");
           // Where Plex was asked to start transcoding. Usually the same as the
           // position, and deliberately a separate field because it isn't when a
           // host re-announces a session it has already played some of: the room
@@ -1685,6 +1723,10 @@ export function attachWebSocketServer(server: Server): void {
             // acts on this beyond picking up the new session id.
             position: room.state.position,
             sessionOffset: room.state.sessionOffset,
+            // Whether to run it: a stream rebuilt while paused is announced
+            // paused, and has to reach everyone that way.
+            playing: room.state.playing,
+            waiting: room.state.hostWaiting,
           });
           sendTo(ws, { type: "transport-state", playing: room.state.playing, transportRevision: room.state.transportRevision });
           // Everyone on the host's stream — which for a new title is everyone —
@@ -1698,6 +1740,8 @@ export function attachWebSocketServer(server: Server): void {
           // Only the host's pause carries an observed playhead; a co-host's is
           // served from the room's own clock and so confirms nothing.
           if (client.isHost) room.state.positionConfirmed = true;
+          // Paused is not waiting: the host's resume says whether it is.
+          if (client.isHost) setHostWaiting(room, roomId, false, "the host paused");
           room.state.updatedAt = Date.now();
           persistProgress(room, undefined, true);
           room.state.awaitingHostTransport = !client.isHost;
@@ -1709,10 +1753,17 @@ export function attachWebSocketServer(server: Server): void {
           setTransport(room, true);
           room.state.position = positionForCommand(room, client, msg.position);
           if (client.isHost) room.state.positionConfirmed = true;
+          // A host resuming onto a picture it hasn't got yet — pressed play
+          // straight after a seek — is waiting until it has. A co-host's resume
+          // says nothing about the host's picture.
+          if (client.isHost) setHostWaiting(room, roomId, msg.waiting === true, "the host resumed before its picture was ready");
           room.state.updatedAt = Date.now();
           room.state.awaitingHostTransport = !client.isHost;
           sendTo(ws, { type: "transport-state", playing: room.state.playing, transportRevision: room.state.transportRevision });
-          broadcast(room, ws, { type: "resume", position: room.state.position, transportRevision: room.state.transportRevision });
+          broadcast(room, ws, {
+            type: "resume", position: room.state.position, transportRevision: room.state.transportRevision,
+            waiting: room.state.hostWaiting,
+          });
           break;
         }
         case "seek": {
@@ -1758,6 +1809,7 @@ export function attachWebSocketServer(server: Server): void {
           room.state.sessionOffset = 0;
           setTransport(room, false);
           room.state.position = 0;
+          setHostWaiting(room, roomId, false, "stopped");
           room.state.updatedAt = Date.now();
           // The queue deliberately survives.
           //
@@ -1832,6 +1884,11 @@ export function attachWebSocketServer(server: Server): void {
               toS: Number(reported.toFixed(2)),
             });
           }
+          // Whether the host's picture is moving — see hostWaiting. Absent, from
+          // a client that predates it, means it is. Before the position below,
+          // which is the host's own word on where its picture stopped and
+          // replaces whatever the clock had run on to since the last report.
+          setHostWaiting(room, roomId, msg.waiting === true, "the host is waiting for its stream");
           room.state.position = reported;
           room.state.positionConfirmed = true;
           setTransport(room, msg.playing !== false);
@@ -1844,6 +1901,7 @@ export function attachWebSocketServer(server: Server): void {
             transportRevision: room.state.transportRevision,
             position: room.state.position,
             playing: room.state.playing,
+            waiting: room.state.hostWaiting,
             // Carry the "what's playing" snapshot so a viewer whose ratingKey
             // got cleared (e.g. a stray stop during a host handoff) can self-heal
             // from the next heartbeat instead of being stuck with no way to rejoin.
@@ -1932,6 +1990,8 @@ export function attachWebSocketServer(server: Server): void {
           // Host outranks co-host, so the grant is spent rather than remembered
           // — otherwise handing the role back would silently restore it.
           room.coHostIds.delete(target.userId);
+          // The new host's picture is its own, and its heartbeat says.
+          setHostWaiting(room, roomId, false, "new host");
 
           // "The host's stream" follows the host. Without this the room went on
           // treating the *previous* host's stream as the one a host track change
@@ -2101,6 +2161,9 @@ export function attachWebSocketServer(server: Server): void {
           newHost.isHost = true;
           newHost.isCoHost = false;
           room.coHostIds.delete(newHost.userId);
+          // Whatever the old host was waiting for went with it. The new host's
+          // picture is its own, and its heartbeat says.
+          setHostWaiting(room, closingRoomId, false, "new host");
 
           // "The host's stream" is by definition the one the host is watching.
           // A successor who was on another stream keeps it, and nobody is moved

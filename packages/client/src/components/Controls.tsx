@@ -31,6 +31,12 @@ export interface ControlsHandle {
 
 interface ControlsProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  /**
+   * Seconds downloaded past the playhead, counting what the P2P engine holds
+   * beyond the browser's own buffer — see lib/bufferAhead. The bar shows that,
+   * since a skip into it plays straight away.
+   */
+  downloadedAheadS?: () => number;
   /** Imperative handle — see ControlsHandle. */
   handleRef?: React.Ref<ControlsHandle>;
   /** Host-only affordances: queue, track switcher, people panel. */
@@ -439,6 +445,7 @@ function SeekIndicator({
 
 export function Controls({
   videoRef,
+  downloadedAheadS,
   handleRef,
   isHost,
   canControl = isHost,
@@ -583,6 +590,9 @@ export function Controls({
   /** The loaded stretch the playhead is in, in seconds; null when it is in
    *  none — mid-seek, or before anything has arrived. */
   const [bufferedRange, setBufferedRange] = useState<{ start: number; end: number } | null>(null);
+  // Read by the listeners below, which are attached once.
+  const downloadedAheadRef = useRef(downloadedAheadS);
+  downloadedAheadRef.current = downloadedAheadS;
 
   // Mirror the element's volume, whoever changed it. Without this the slider
   // and mute icon go stale when the keyboard shortcuts adjust volume, since
@@ -709,6 +719,13 @@ export function Controls({
         const start = video.buffered.start(i);
         const end = video.buffered.end(i);
         if (start <= at + 0.5 && at <= end) { found = { start, end }; break; }
+      }
+      // On through what is downloaded past the browser's own buffer.
+      const ahead = downloadedAheadRef.current?.() ?? 0;
+      if (ahead > 0) {
+        found = found
+          ? { start: found.start, end: Math.max(found.end, at + ahead) }
+          : { start: at, end: at + ahead };
       }
       setBufferedRange((prev) =>
         found && prev && Math.abs(prev.start - found.start) < 0.25 && Math.abs(prev.end - found.end) < 0.25

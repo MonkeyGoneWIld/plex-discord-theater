@@ -304,11 +304,12 @@ const plex = http.createServer((req, res) => {
     // A subtitle read's own decision isn't one of the stream's.
     if (url.searchParams.get("protocol") === "http") return send({});
     const ratingKey = (url.searchParams.get("path") ?? "").split("/").pop()!;
-    // As the real one does: a copy only of a file within the bitrate asked
-    // for. 970 stands for one it won't copy at any bitrate (a codec the room
-    // can't play, say).
+    // As the real one does: a copy only of a file whose *peaks* are within the
+    // bitrate asked for — taken here as three times its average, which is
+    // what a Blu-ray's can be. 970 stands for one it won't copy at any bitrate
+    // (a codec the room can't play, say).
     const copy = url.searchParams.get("directStream") === "1" &&
-      Number(url.searchParams.get("videoBitrate")) >= fileKbps(ratingKey) && ratingKey !== "970";
+      Number(url.searchParams.get("videoBitrate")) >= fileKbps(ratingKey) * 3 && ratingKey !== "970";
     decisions.push({
       ratingKey,
       directStream: url.searchParams.get("directStream"),
@@ -562,23 +563,24 @@ console.log("\n— through the routes —");
   const big = crypto.randomUUID();
   await (await fetch(`${origin}/api/plex/hls/950/${big}/master.m3u8`)).text();
   plexRoutes.markTranscodeStopped(big);
-  check("a file above DIRECT_STREAM_MAX_KBPS is re-encoded instead of copied",
+  check("a file averaging above DIRECT_STREAM_MAX_KBPS is re-encoded instead of copied",
     [decisions.at(-1)?.ratingKey, decisions.at(-1)?.directStream], ["950", "0"]);
 
-  // Over VIDEO_BITRATE_KBPS but under the cap: Plex has to be asked at the cap,
-  // or it re-encodes it down to the transcode bitrate whatever the cap says.
+  // Averaging over VIDEO_BITRATE_KBPS but under the limit, with peaks well
+  // over the limit: judged on its average, so copied — and Plex, which judges
+  // on peaks, has to be asked at a bitrate they don't reach, or it re-encodes.
   const mid = crypto.randomUUID();
   await (await fetch(`${origin}/api/plex/hls/960/${mid}/master.m3u8`)).text();
-  check("a file under DIRECT_STREAM_MAX_KBPS is asked for at it, and copied",
+  check("a file averaging under DIRECT_STREAM_MAX_KBPS is copied, whatever its peaks",
     [decisions.at(-1)?.ratingKey, decisions.at(-1)?.videoBitrate, ds.isDirectStreamKey(plexRoutes.getPlexTranscodeKey(mid) ?? "")],
-    ["960", "20000", true]);
+    ["960", "200000", true]);
   plexRoutes.markTranscodeStopped(mid);
 
   const before = decisions.length;
   const wont = crypto.randomUUID();
   await (await fetch(`${origin}/api/plex/hls/970/${wont}/master.m3u8`)).text();
   check("one Plex won't copy anyway is asked again at the transcode bitrate",
-    decisions.slice(before).map((d) => [d.ratingKey, d.videoBitrate]), [["970", "20000"], ["970", "12000"]]);
+    decisions.slice(before).map((d) => [d.ratingKey, d.videoBitrate]), [["970", "200000"], ["970", "12000"]]);
   check("and played as the re-encode it is", ds.isDirectStreamKey(plexRoutes.getPlexTranscodeKey(wont) ?? ""), false);
   plexRoutes.markTranscodeStopped(wont);
 
@@ -595,20 +597,21 @@ console.log("\n— through the routes —");
   check("a copy says so, and how heavy it is", (await startNotes("100")).notes, { video: "copy", kbps: "8000" });
   check("a file over the copy limit says that is why, and what it is re-encoded at",
     (await startNotes("950")).notes,
-    { video: "transcode", reason: "the file is 31 Mbps, over this server's 20 Mbps copy limit", kbps: "12000" });
-  check("one Plex declined to copy says so, against the file's average",
+    { video: "transcode", reason: "the file averages 31 Mbps, over this server's 20 Mbps copy limit", kbps: "12000" });
+  check("one Plex declined to copy says so, without blaming a bitrate it was asked well over",
     (await startNotes("970")).notes.reason,
-    "Plex wouldn't copy it at 20 Mbps: the file averages 15 Mbps, and its peaks are likely higher");
+    "Plex declined to copy it");
 
   console.log("\n— a viewer's own quality setting —");
   const capped = await startNotes("960", "?quality=8000");
-  check("a file over it is re-encoded at it, without asking for a copy first, and the player told why",
+  check("a file averaging over it is re-encoded at it, without asking for a copy first, and the player told why",
     [capped.asked.directStream, capped.asked.videoBitrate, capped.notes],
-    ["0", "8000", { video: "transcode", reason: "the file is 15 Mbps, over your 8 Mbps quality setting", kbps: "8000", quality: "8000" }]);
+    ["0", "8000", { video: "transcode", reason: "the file averages 15 Mbps, over your 8 Mbps quality setting", kbps: "8000", quality: "8000" }]);
   const fits = await startNotes("100", "?quality=12000");
-  check("a file under it is still copied, asked for at it",
-    [fits.asked.directStream, fits.asked.videoBitrate, fits.notes.video], ["1", "12000", "copy"]);
-  check("a setting that isn't one of the levels is no setting", (await startNotes("100", "?quality=123")).asked.videoBitrate, "20000");
+  check("a file averaging under it is still copied, its peaks left to the buffer",
+    [fits.asked.directStream, fits.asked.videoBitrate, fits.notes.video], ["1", "200000", "copy"]);
+  check("a setting that isn't one of the levels is no setting",
+    [(await startNotes("100", "?quality=123")).notes.quality], [undefined]);
   const ten = await startNotes("960", "?quality=10000");
   check("10 Mbps, the level Plex itself offers between 8 and 12, is one",
     [ten.asked.directStream, ten.asked.videoBitrate, ten.notes.quality], ["0", "10000", "10000"]);

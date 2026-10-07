@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, useCallback, type CSSProperties, type Mous
 import { createPortal } from "react-dom";
 import Hls from "hls.js";
 import { HlsJsP2PEngine } from "p2p-media-loader-hlsjs";
-import { installSharing, setSharing as setLoaderSharing } from "../lib/p2pSharing";
 import { Controls, PlayerTopBar, type ControlsHandle } from "./Controls";
 import { StatsOverlay } from "./StatsOverlay";
 import type { P2PStats } from "./StatsOverlay";
@@ -38,6 +37,9 @@ import { carryTrackPrefs, describeWatched, endTrackSitting, mergeTrackPrefs, sav
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
+import { resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
+import { bufferedRanges, coveredAheadS, heldRanges } from "../lib/bufferAhead";
+import { arrivingKbps, loadingMessage } from "../lib/loadingMessage";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
 import { useVideoZoom } from "../lib/useVideoZoom";
 import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -126,6 +128,21 @@ const SOFT_SYNC_FULL_SCALE_S = HARD_SYNC_DRIFT_S;
 const MAX_RATE_ADJUST = 0.08;
 /** Never speed up into a buffer thinner than this: catching up is what drains it. */
 const SOFT_SYNC_MIN_BUFFER_S = 6;
+/**
+ * How long the host's picture has to be stopped before the room is told to
+ * wait for it. Long enough to let a seek inside the buffer or a decoder hiccup
+ * pass without stopping everyone, short enough that nobody gets more than a
+ * moment ahead of the host.
+ */
+const HOST_WAIT_AFTER_MS = 300;
+/** How often a follower waiting for the room checks whether it has arrived. */
+const WAIT_FOR_ROOM_POLL_MS = 250;
+/**
+ * How long after a seek a rebuild still counts as part of it. A follower is
+ * only ever put back where it was before a rebuild when nothing has sent the
+ * room anywhere — see `aheadAtRebuildRef`.
+ */
+const SEEK_REBUILD_WINDOW_MS = 10_000;
 // Minimum spacing between viewer drift corrections. Heartbeats land every 5s,
 // and a correction that fires faster than the media can service it cancels the
 // fragment load that would have satisfied the previous one.
@@ -178,6 +195,27 @@ const MAX_HOLE_JUMP_S = 10;
  * "seeking" for twenty-five seconds while segments it couldn't use came in.
  */
 const WEDGE_DOWNLOAD_GRACE_MS = 15_000;
+/**
+ * How long a stream that has not shown its first frame yet is left alone.
+ *
+ * A stream starting from 0:00 never counted, but one resuming part-way in
+ * starts with the playhead already there, and looked wedged from the first
+ * tick: a resumed film whose first two copied segments took half a minute to
+ * arrive had its loader restarted three times while they were still coming,
+ * one more and the host would have thrown the transcode away and started
+ * another. Nothing is wedged before anything has arrived; it is loading.
+ */
+const WEDGE_COLD_START_GRACE_MS = 45_000;
+/**
+ * A playhead that stops with plenty buffered in front of it.
+ *
+ * hls.js only nudges a stall that sits at a hole in the buffer; with one
+ * unbroken range ahead it reports the stall and leaves it. A host sat frozen
+ * for ten seconds like that with half a minute of picture loaded, and every
+ * viewer with it. A small step forward — the same step hls.js takes at a
+ * hole — gets the decoder going again.
+ */
+const STUCK_WITH_BUFFER_NUDGE_S = 0.1;
 /**
  * How long a playhead sits in front of a hole — with what comes after it
  * already buffered — before it is jumped, downloads or not. No download fills
@@ -295,26 +333,8 @@ const HEALTH_SAMPLE_MS = 10_000;
 // actively trying to fill.
 const BACK_BUFFER_S = 30;
 const FORWARD_BUFFER_FLUSH_S = 120;
-/**
- * Players dividing a stream between them: see lib/p2pSharing. Every player
- * keeps buffering as far ahead as it would alone; what changes is who fetches
- * what — a segment another player has, or is fetching, is left to them unless
- * it is about to play.
- *
- * Dropped for this player the moment it lets them down — segments from
- * another player failing (P2P_FAILURES_TO_STOP), arriving far slower than
- * they play, or playback stalling while waiting on one — and they fetch
- * everything themselves for SHARE_COOLDOWN_S, doubling each time, before it is
- * tried again. A player whose connection can't reach the others never sees a
- * peer, so nothing changes for them.
- */
-const SHARE_CHECK_MS = 1_000;
 /** Without data to play for this long, the loading screen goes up. */
 const LOADING_SCREEN_AFTER_MS = 500;
-const P2P_FAILURES_TO_STOP = 3;
-const P2P_FAILURE_WINDOW_MS = 60_000;
-const SHARE_COOLDOWN_S = 60;
-const SHARE_COOLDOWN_MAX_S = 600;
 // Don't bother flushing slivers — avoids issuing a remove on every tick for a
 // second or two of overshoot.
 const BUFFER_TRIM_SLACK_S = 10;
@@ -340,6 +360,14 @@ function backBufferFor(kbps: number | null | undefined): number {
   if (!kbps || !(kbps > 0)) return BACK_BUFFER_S;
   const bytesPerS = (kbps * 1000 * BITRATE_PEAK_FACTOR) / 8;
   return Math.round(Math.min(BACK_BUFFER_S, Math.max(MIN_BACK_BUFFER_S, MSE_BACK_BUDGET_BYTES / bytesPerS)));
+}
+
+/**
+ * Whether the picture is actually moving: playing, with the data to go on.
+ * What the host reports to the room as not waiting — see SyncState.hostWaiting.
+ */
+function pictureMoving(video: HTMLVideoElement | null): boolean {
+  return !!video && !video.paused && !video.ended && video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
 }
 
 /** Put playback back to normal speed. Safe to call on anything, including null. */
@@ -448,17 +476,6 @@ function nextBufferedStart(video: HTMLVideoElement, t: number): number | null {
   return null;
 }
 
-/** Where the buffered range around the playhead starts — the playhead itself
- *  when it is in none. */
-function bufferedRangeStart(video: HTMLVideoElement): number {
-  const { buffered, currentTime } = video;
-  for (let i = 0; i < buffered.length; i++) {
-    if (currentTime >= buffered.start(i) - 0.1 && currentTime <= buffered.end(i) + 0.1) {
-      return Math.min(buffered.start(i), currentTime);
-    }
-  }
-  return currentTime;
-}
 
 /** Seconds of contiguous buffer ahead of the current playhead (0 if none). */
 function bufferAheadSeconds(video: HTMLVideoElement): number {
@@ -542,9 +559,13 @@ function trimMediaBuffer(hls: Hls, video: HTMLVideoElement): Record<string, unkn
   const { buffered } = video;
   if (buffered.length === 0) return null;
   const now = video.currentTime;
-  // This stream's windows — see backBufferFor, and makeRoom for the forward one.
+  // This stream's back window — see backBufferFor. The front one is always
+  // the full two minutes: whatever the browser has managed to buffer ahead
+  // inside it stays. Trimming it to a heavy stream's lowered target threw away
+  // twenty-five seconds of picture at a time, which then had to be appended
+  // all over again.
   const backTarget = now - (Number.isFinite(hls.config.backBufferLength) ? hls.config.backBufferLength : BACK_BUFFER_S);
-  const frontTarget = now + (hls.config.maxBufferLength || FORWARD_BUFFER_FLUSH_S);
+  const frontTarget = now + FORWARD_BUFFER_FLUSH_S;
   const start = buffered.start(0);
   const end = buffered.end(buffered.length - 1);
 
@@ -1172,7 +1193,28 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // When the last bytes of any segment arrived. A playhead waiting on a big
     // segment that is still coming in is slow, not wedged.
     lastChunkAt: 0,
+    /** When a download last failed, other than by being called off. */
+    lastErrorAt: 0,
   });
+  /** Bytes arriving, as [when, bytes] per chunk — see arrivingKbps. */
+  const downloadSamplesRef = useRef<Array<[number, number]>>([]);
+  /** When this stream's playlist came in, 0 before; and whether its picture
+   *  has moved since — for what the loading screen says. */
+  const manifestParsedAtRef = useRef(0);
+  const pictureShownRef = useRef(false);
+  /**
+   * The segments the P2P engine holds, by URL, as [start, end] in film time:
+   * everything it has fetched, which it keeps until the playhead has passed
+   * it, whatever the browser's own buffer can take. See downloadedAheadS.
+   */
+  const engineHeldRef = useRef(new Map<string, readonly [number, number]>());
+  /** Seconds downloaded past the playhead — see lib/bufferAhead. */
+  const downloadedAheadS = useCallback((): number => {
+    const video = videoRef.current;
+    if (!video || video.readyState === HTMLMediaElement.HAVE_NOTHING) return 0;
+    const now = video.currentTime;
+    return coveredAheadS(now, [...bufferedRanges(video.buffered), ...heldRanges(engineHeldRef.current, now)]);
+  }, []);
   // Stall-watchdog bookkeeping: currentTime at the previous health tick, and
   // whether the current stall episode has already been logged — a multi-minute
   // freeze must produce one diagnostic, not one per tick.
@@ -1436,6 +1478,83 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // stop the heartbeat from cancelling its own seek every 5s.
   const stalledSeekSinceRef = useRef<number | null>(null);
   const lastDriftCorrectionRef = useRef(0);
+  /**
+   * A follower stopped to let the room catch up — see lib/roomWait.
+   * `atS` is where it stopped and `roomAtS` where the room was at the time.
+   */
+  const roomWaitRef = useRef<{ atS: number; roomAtS: number; since: number } | null>(null);
+  const [waitingForRoom, setWaitingForRoom] = useState(false);
+  /**
+   * Where a follower was when its stream was torn down, if that was ahead of
+   * the room. Read once by the next manifest, so following the host onto a
+   * restarted transcode — most often one restarted because it froze — puts
+   * this player back where it was, rather than on the room's clock behind it.
+   */
+  const aheadAtRebuildRef = useRef<{ ratingKey: string; atS: number; roomAtS: number } | null>(null);
+  /** When anything last sent this player, or the room, somewhere by seeking. */
+  const lastSeekAtRef = useRef(0);
+  /** Host: what the room was last told about this player's picture — see
+   *  SyncState.hostWaiting and reportHostPicture. */
+  const hostToldWaitingRef = useRef(false);
+  /**
+   * Host: tell the room, the moment it changes, whether this player's picture
+   * is moving. The room's clock stops and everybody holds while it isn't, so
+   * nobody is ever ahead of the host — see SyncState.hostWaiting.
+   */
+  const reportHostPicture = useCallback((waiting: boolean) => {
+    if (hostToldWaitingRef.current === waiting) return;
+    hostToldWaitingRef.current = waiting;
+    const v = videoRef.current;
+    if (!v) return;
+    const position = v.readyState >= HTMLMediaElement.HAVE_METADATA && v.currentTime > 0
+      ? v.currentTime
+      : positionForRoom();
+    logEvent("Sync", waiting ? "host's picture stopped, the room waits for it" : "host's picture moving, the room runs", {
+      ...snapshot(v),
+      posS: Number(position.toFixed(2)),
+    });
+    syncActionsRef.current?.sendHeartbeat(position, !v.paused, waiting);
+  }, [positionForRoom]);
+  /**
+   * Resume the room. A host says whether its own picture is ready to go on —
+   * after a seek it often isn't yet — so nobody starts before it does.
+   */
+  const sendRoomResume = useCallback((position: number) => {
+    if (!isHostRef.current) {
+      syncActionsRef.current?.sendResume(position);
+      return;
+    }
+    const waiting = !pictureMoving(videoRef.current);
+    hostToldWaitingRef.current = waiting;
+    syncActionsRef.current?.sendResume(position, waiting);
+  }, []);
+  /** Stop here until the room gets here. Safe to call again while waiting. */
+  const waitForRoom = useCallback((video: HTMLVideoElement, roomS: number, why: string) => {
+    resetPlaybackRate(video);
+    if (!roomWaitRef.current) {
+      logEvent("Sync", "ahead of the room, waiting for it here instead of going back", {
+        why,
+        aheadS: Number((video.currentTime - roomS).toFixed(2)),
+        roomPosS: Number(roomS.toFixed(2)),
+        ...snapshot(video),
+      });
+      roomWaitRef.current = { atS: video.currentTime, roomAtS: roomS, since: Date.now() };
+      setWaitingForRoom(true);
+    }
+    if (!video.paused) video.pause();
+  }, []);
+  /** End a wait for the room. Whether to play again is the caller's to decide. */
+  const stopWaitingForRoom = useCallback((why: string) => {
+    const wait = roomWaitRef.current;
+    if (!wait) return;
+    roomWaitRef.current = null;
+    setWaitingForRoom(false);
+    logEvent("Sync", "done waiting for the room", {
+      why,
+      waitedMs: Date.now() - wait.since,
+      atS: Number(wait.atS.toFixed(2)),
+    });
+  }, []);
   // Pending debounce for a seek-driven transcode restart, and whether one has
   // been committed but not yet produced a manifest. Both mean the video element
   // is not describing a live transcode.
@@ -1982,12 +2101,24 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // Keeping the transcode alive belongs to whoever drives it, which is a
     // separate question from hosting now — see the stream-assignment effect.
 
+    // A viewer holding for the old host — its picture had stopped, or this
+    // one was ahead of it — is the one everybody follows now, so it plays.
+    // Its picture is reported fresh from here: see reportHostPicture.
+    hostToldWaitingRef.current = false;
+    stopWaitingForRoom("this player is the host now");
+    {
+      const v = videoRef.current;
+      if (v && v.paused && syncStateRef.current?.playing && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        v.play().catch(() => {});
+      }
+    }
+
     // Start heartbeating to sync remaining viewers
     if (heartbeatIntervalRef.current === null) {
       heartbeatIntervalRef.current = setInterval(() => {
         const v = videoRef.current;
         if (v && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-          syncActionsRef.current?.sendHeartbeat(v.currentTime, !v.paused);
+          syncActionsRef.current?.sendHeartbeat(v.currentTime, !v.paused, hostToldWaitingRef.current);
         }
       }, HEARTBEAT_INTERVAL_MS);
     }
@@ -2094,18 +2225,70 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * anything else took the screen down, a player could sit on black with no
    * sign it was doing anything. Checked here as well: playing, not ended, and
    * without the data to go on, for more than a moment.
+   *
+   * The host's picture stopping or starting is told to the room from here too
+   * — see reportHostPicture — so everybody holds with the host within a
+   * fraction of a second of its picture stopping.
    */
   useEffect(() => {
     let starvingSince = 0;
     const id = window.setInterval(() => {
       const v = videoRef.current;
-      if (!v || v.paused || v.ended || v.readyState >= 3) {
-        starvingSince = 0;
+      const starved = !!v && !v.paused && !v.ended && v.readyState < HTMLMediaElement.HAVE_FUTURE_DATA;
+      if (!starved) starvingSince = 0;
+      else if (!starvingSince) starvingSince = Date.now();
+      const starvedMs = starvingSince ? Date.now() - starvingSince : 0;
+      if (starved && starvedMs >= LOADING_SCREEN_AFTER_MS) setBuffering(true);
+
+      if (isHostRef.current && syncStateRef.current?.ratingKey && sessionIdRef.current) {
+        if (pictureMoving(v)) reportHostPicture(false);
+        else if (starved && starvedMs >= HOST_WAIT_AFTER_MS) reportHostPicture(true);
+        // Paused on purpose: the pause itself told the room, waiting included.
+        else if (v?.paused) hostToldWaitingRef.current = false;
+      }
+    }, 250);
+    return () => window.clearInterval(id);
+  }, [reportHostPicture]);
+
+  /**
+   * What the loading screen says, worked out once a second — see
+   * lib/loadingMessage — and whether there is a picture at all.
+   *
+   * No picture is reason enough for the loading screen, playing or not: a
+   * follower holding for the host before its first frame, or landing on a
+   * paused room, used to sit on plain black with nothing to say it was doing
+   * anything.
+   */
+  const [loadingInfo, setLoadingInfo] = useState<{ title: string; detail: string | null }>({ title: "Starting the stream…", detail: null });
+  const [noPicture, setNoPicture] = useState(true);
+  const loadingSinceRef = useRef(0);
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const v = videoRef.current;
+      const sync = syncStateRef.current;
+      const missing = !v || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA;
+      setNoPicture(missing);
+      const starved = !!v && !v.paused && !v.ended && v.readyState < HTMLMediaElement.HAVE_FUTURE_DATA;
+      const holdingForHost = !isHostRef.current && !!sync?.playing && !!sync.hostWaiting;
+      if (!missing && !starved && !holdingForHost) {
+        loadingSinceRef.current = 0;
         return;
       }
-      if (!starvingSince) starvingSince = Date.now();
-      else if (Date.now() - starvingSince >= LOADING_SCREEN_AFTER_MS) setBuffering(true);
-    }, 250);
+      const now = Date.now();
+      if (!loadingSinceRef.current) loadingSinceRef.current = now;
+      const notes = streamNotesRef.current;
+      setLoadingInfo(loadingMessage({
+        phase: !sessionIdRef.current || !manifestParsedAtRef.current
+          ? "starting"
+          : pictureShownRef.current ? "stalled" : "first-frames",
+        waitingForHost: holdingForHost ? sync?.hostUsername ?? "the host" : null,
+        forS: (now - loadingSinceRef.current) / 1000,
+        downloadKbps: arrivingKbps(downloadSamplesRef.current, now),
+        streamKbps: notes?.kbps ?? null,
+        failing: now - engineLoaderRef.current.lastErrorAt < 10_000,
+        copied: notes?.video === "copy" || copiedStreamRef.current,
+      }));
+    }, 1000);
     return () => window.clearInterval(id);
   }, []);
 
@@ -2345,12 +2528,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       const notes = streamNotesRef.current;
       const ceiling = preferredQuality();
       const nowKbps = Math.min(notes?.kbps ?? Infinity, ceiling || Infinity);
-      const suggest = lowerQualityFor(nowKbps, hlsRef.current?.bandwidthEstimate ?? 0);
+      // What is really arriving. hls.js's own estimate times fragments the
+      // P2P engine hands over from memory, and read 5000 kbps — its default —
+      // through whole evenings of stalls.
+      const measuredKbps = arrivingKbps(downloadSamplesRef.current, now) ?? 0;
+      const suggest = lowerQualityFor(nowKbps, measuredKbps * 1000);
       if (suggest === null) return;
       logEvent("Player", "buffering a lot, offering a lower quality", {
         starvedS: recent.length,
         streamKbps: notes?.kbps ?? "unknown",
-        measuredKbps: Math.round((hlsRef.current?.bandwidthEstimate ?? 0) / 1000),
+        measuredKbps,
         suggestKbps: suggest,
       });
       starvedSecondsRef.current = [];
@@ -2739,6 +2926,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       vpsRelay,
       roomPosS: syncStateRef.current?.position ?? "none",
     });
+    // A new stream: the loading screen starts over from "Starting the stream".
+    manifestParsedAtRef.current = 0;
+    pictureShownRef.current = false;
+    downloadSamplesRef.current = [];
 
     const chosenSubtitle = currentSubtitleStreamRef.current ?? subtitleStreamId ?? 0;
     /**
@@ -2870,12 +3061,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // media element's own buffer didn't touch this, because this
                 // cache is separate from the SourceBuffer.
                 //
-                // 512 MiB sits comfortably above the ~300 MB the 120s
-                // high-demand window needs at our 20 Mbps peak — segments ahead
-                // of the playhead are never evicted, so the limit has to clear
-                // that or eviction runs on every append for nothing — while
-                // capping the whole cache eight times lower than the default.
-                segmentMemoryStorageLimit: 512,
+                // 1 GiB clears the 150s high-demand window at the 40 Mbps a
+                // copied Blu-ray can run to (~750 MB) — segments ahead of the
+                // playhead are never evicted, so the limit has to clear that or
+                // eviction runs on every append for nothing — while capping the
+                // whole cache four times lower than the default, well clear of
+                // where the renderer dies. It was 512 MiB, sized for re-encodes
+                // that peaked at 20 Mbps.
+                segmentMemoryStorageLimit: 1024,
                 // This engine owns the fragment loader, so hls.js's buffer targets
                 // are only advisory. With no peers connected, high-demand is the
                 // *only* thing that triggers an HTTP fetch: p2p-downloadable is
@@ -2903,11 +3096,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // still 120s — maxBufferLength binds the append; high-demand only
                 // guarantees the next fragment is already fetched.
                 //
-                // Left to itself the engine fetches every high-demand segment
-                // from the bot, even one another player has — so with this
-                // covering the whole buffer, players shared next to nothing.
-                // Narrowing it capped every buffer at the window instead. What
-                // fixes it is who fetches what within it: see lib/p2pSharing.
+                // Inside this window the engine fetches from the bot whenever it
+                // has a download free, and from another player only when it
+                // hasn't — so other players add speed and never take it away.
+                // Players that took segments from each other instead, to share
+                // more, filled their buffers only as fast as the slowest link
+                // between them, which is the opposite of what a buffer is for.
                 highDemandTimeWindow: 150,
                 p2pDownloadTimeWindow: 150,
                 // Was 6, i.e. inverted below high-demand (library default is 3000).
@@ -2915,11 +3109,21 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // the two or it makes no sense — keep it ≥ high-demand.
                 httpDownloadTimeWindow: 150,
                 simultaneousP2PDownloads: 3,
-                // Two at once. A single download from the bot, through
+                // Three at once. A single download from the bot, through
                 // Discord's proxy, runs anywhere from ~7 to ~25 Mbps, and the
-                // total grows with how many run together; one at a time held
-                // a 30 Mbps film to whatever one download managed.
-                simultaneousHttpDownloads: 2,
+                // total grows with how many run together; two held a 30 Mbps
+                // copy to filling its buffer barely faster than it played, and
+                // sometimes slower. The next segment due is always first in
+                // line: the engine takes a download from the furthest-ahead
+                // one to start it.
+                simultaneousHttpDownloads: 3,
+                // How long a download from the bot may go without a byte before
+                // the engine calls it off and asks again. Its default, 3s, is
+                // shorter than Plex can take over the first bytes of a segment
+                // it is still making — and asking again only starts that same
+                // wait over, three times, before giving up on it. A request
+                // that has really died is still caught, after this.
+                httpNotReceivingBytesTimeoutMs: 15_000,
                 rtcConfig: {
                   // Multiple STUN servers improve NAT traversal odds — every
                   // peer pair that fails to connect falls back to HTTP, costing
@@ -2976,11 +3180,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   eng.lastErrorSeg = segment.externalId ?? segIndexFromUrl(segment.url);
                   // The engine's RequestError isn't an Error; its type is what
                   // says what happened ("http-error", "aborted"…).
-                  eng.lastError = error instanceof Error
-                    ? error.message
-                    : (error as { type?: string } | null)?.type ?? String(error);
+                  // It is an Error, with the message left empty: the type is
+                  // the whole story.
+                  eng.lastError = (error as { type?: string } | null)?.type ??
+                    (error instanceof Error ? error.message : String(error));
                   eng.lastEventAt = Date.now();
                   eng.errors++;
+                  if ((error as { type?: string } | null)?.type !== "abort") eng.lastErrorAt = eng.lastEventAt;
                   logWarn("P2P", "segment error", {
                     seg: eng.lastErrorSeg, source: downloadSource, error: eng.lastError,
                   });
@@ -2989,119 +3195,36 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   eng.aborts++;
                   eng.lastEventAt = Date.now();
                 });
-                hls.p2pEngine.addEventListener("onChunkDownloaded", () => {
+                hls.p2pEngine.addEventListener("onChunkDownloaded", (bytesLength) => {
                   eng.lastChunkAt = Date.now();
+                  // What is arriving, for the loading screen and the quality
+                  // hint — see lib/loadingMessage.
+                  if ((hlsRef.current as unknown) === hls) downloadSamplesRef.current.push([eng.lastChunkAt, bytesLength]);
                 });
                 hls.p2pEngine.addEventListener("onChunkUploaded", (bytesLength) => {
                   stats.uploadBytes += bytesLength;
                 });
-                // ---- Sharing with other players: see lib/p2pSharing. ----
-                let sharing = false;
-                // The engine's loader exists once it has been asked for a
-                // segment; until then there is nothing to change.
-                let sharingHandle: object | null = null;
-                let soloUntil = 0;
-                let strikes = 0;
-                const p2pFailures: number[] = [];
-                // When each download from another player started, by segment,
-                // to see whether it came as fast as it plays.
-                const p2pStarted = new Map<string, { at: number; segS: number }>();
-                // What this player last started fetching for each stretch of the
-                // picture, and from where — to tell a stall that was waiting on
-                // the bot from one that was waiting on another player.
-                const lastFetch: Array<{ from: number; to: number; source: string }> = [];
-                const setSharing = (want: boolean, why: string, extra: Record<string, unknown> = {}) => {
-                  if (want === sharing) return;
-                  sharing = want;
-                  if (sharingHandle) setLoaderSharing(sharingHandle, want);
-                  logEvent("P2P", want ? "sharing segments with other players" : "fetching everything from the bot", {
-                    why, peers: stats.peers.size, ...extra,
-                  });
-                };
-                // Sharing let this player down: fetch everything from the bot
-                // for a while, longer each time.
-                const stopSharing = (why: string, extra: Record<string, unknown> = {}) => {
-                  if (!sharing) return;
-                  strikes++;
-                  const forS = Math.min(SHARE_COOLDOWN_MAX_S, SHARE_COOLDOWN_S * 2 ** (strikes - 1));
-                  soloUntil = Date.now() + forS * 1000;
-                  setSharing(false, why, { ...extra, forS });
-                };
-                const reviewSharing = () => {
-                  if (stats.peers.size === 0) setSharing(false, "no other players");
-                  else if (Date.now() >= soloUntil) {
-                    setSharing(true, strikes ? "trying again" : "another player connected");
-                  }
-                };
-                const shareCheck = window.setInterval(() => {
-                  // This stream torn down or replaced: stop checking for it.
-                  if ((hlsRef.current as unknown) !== hls) {
-                    window.clearInterval(shareCheck);
-                    return;
-                  }
-                  reviewSharing();
-                  // Stalled — playing, not seeking, nothing left to play —
-                  // while waiting on a stretch this player didn't fetch from the
-                  // bot itself: another player was meant to.
-                  const video = videoRef.current;
-                  if (!sharing || !video || video.paused || video.ended || video.seeking || video.played.length === 0) return;
-                  if (video.readyState >= 3 || bufferAheadSeconds(video) > 0.5) return;
-                  const needAt = video.currentTime + bufferAheadSeconds(video);
-                  const fetch = [...lastFetch].reverse().find((f) => f.from <= needAt + 0.1 && needAt < f.to);
-                  if (fetch?.source !== "http") {
-                    stopSharing("playback stalled waiting on another player", {
-                      posS: Math.round(video.currentTime), source: fetch?.source ?? "none",
-                    });
-                  }
-                }, SHARE_CHECK_MS);
-                hls.p2pEngine.addEventListener("onSegmentStart", ({ segment, downloadSource }) => {
-                  if (!sharingHandle) {
-                    sharingHandle = installSharing(hls.p2pEngine);
-                    if (sharingHandle) setLoaderSharing(sharingHandle, sharing);
-                  }
-                  lastFetch.push({ from: segment.startTime, to: segment.endTime, source: downloadSource });
-                  if (lastFetch.length > 40) lastFetch.shift();
-                  if (downloadSource === "p2p") {
-                    p2pStarted.set(segment.url, { at: Date.now(), segS: segment.endTime - segment.startTime });
-                  }
+                // What the engine holds, by film time — see downloadedAheadS.
+                // Everything it fetches ahead stays in its memory until the
+                // playhead has passed it, whatever the browser's own buffer can
+                // take, so this is the buffer a skip forward lands in.
+                const segmentTimes = new Map<string, [number, number]>();
+                const held = engineHeldRef.current;
+                held.clear();
+                hls.p2pEngine.addEventListener("onSegmentStart", ({ segment }) => {
+                  segmentTimes.set(segment.url, [segment.startTime, segment.endTime]);
                 });
-                hls.p2pEngine.addEventListener("onSegmentLoaded", ({ segmentUrl, downloadSource }) => {
-                  const started = p2pStarted.get(segmentUrl);
-                  p2pStarted.delete(segmentUrl);
-                  if (downloadSource !== "p2p" || !started) return;
-                  // Much slower than it plays — twice its length, since up to
-                  // three come at once — and sharing can't keep this player
-                  // going.
-                  const tookS = (Date.now() - started.at) / 1000;
-                  if (tookS > 5 && tookS > started.segS * 2) {
-                    stopSharing("another player sent a segment much slower than it plays", {
-                      tookS: Math.round(tookS), segmentS: Math.round(started.segS),
-                    });
-                  }
-                });
-                hls.p2pEngine.addEventListener("onSegmentAbort", ({ segment }) => {
-                  p2pStarted.delete(segment.url);
-                });
-                hls.p2pEngine.addEventListener("onSegmentError", ({ segment, downloadSource, error }) => {
-                  p2pStarted.delete(segment.url);
-                  if (downloadSource !== "p2p" || (error as { type?: string } | null)?.type === "abort") return;
-                  const now = Date.now();
-                  p2pFailures.push(now);
-                  while (p2pFailures.length && now - p2pFailures[0] > P2P_FAILURE_WINDOW_MS) p2pFailures.shift();
-                  if (p2pFailures.length >= P2P_FAILURES_TO_STOP) {
-                    p2pFailures.length = 0;
-                    stopSharing("segments from another player keep failing", {
-                      error: (error as { type?: string } | null)?.type ?? "unknown",
-                    });
-                  }
+                hls.p2pEngine.addEventListener("onSegmentLoaded", ({ segmentUrl }) => {
+                  if ((hlsRef.current as unknown) !== hls) return;
+                  const times = segmentTimes.get(segmentUrl);
+                  segmentTimes.delete(segmentUrl);
+                  if (times) held.set(segmentUrl, times);
                 });
                 hls.p2pEngine.addEventListener("onPeerConnect", ({ peerId }) => {
                   stats.peers.add(peerId);
-                  reviewSharing();
                 });
                 hls.p2pEngine.addEventListener("onPeerClose", ({ peerId }) => {
                   stats.peers.delete(peerId);
-                  reviewSharing();
                 });
                 hls.p2pEngine.addEventListener("onTrackerError", ({ error }) => {
                   console.error("[P2P] Tracker error:", error);
@@ -3170,6 +3293,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           // condition the code no longer used, and reading a night of logs on
           // that basis hid a host that never landed at all.
           const atParse = syncStateRef.current;
+          manifestParsedAtRef.current = Date.now();
           logEvent("HLS", "manifest parsed", {
             session: sessionId?.substring(0, 8),
             levels: data?.levels?.length,
@@ -3236,7 +3360,35 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             sync.playing &&
             sync.ratingKey === itemRef.current.ratingKey &&
             sync.position > DRIFT_THRESHOLD_S;
-          if (rejoiningLiveRoom) {
+          /**
+           * Except for a follower that was ahead of the room when its stream
+           * went: the room's clock is behind what it has already shown, so it
+           * goes back to where it was and waits there. Following a host whose
+           * transcode froze and was restarted is the usual way here — the
+           * restart begins where the host froze, which is exactly the part
+           * everybody else has already watched.
+           */
+          const carried = aheadAtRebuildRef.current;
+          aheadAtRebuildRef.current = null;
+          const roomS = sync ? (sync.playing ? roomPositionNow(sync) : sync.position) : 0;
+          const backAheadAt = isHostRef.current || !sync ? null : resumeAheadAt(carried, {
+            ratingKey: itemRef.current.ratingKey,
+            roomRatingKey: sync.ratingKey,
+            roomS,
+            streamStartS: sessionStartOffsetRef.current,
+            toleranceS: JOIN_SETTLE_TOLERANCE_S,
+            seekedBackS: DRIFT_THRESHOLD_S,
+          });
+          const waitHereForRoom = backAheadAt !== null && !!sync?.playing;
+          if (backAheadAt !== null) {
+            logEvent("Sync", "back where this player was, ahead of the room", {
+              fromS: video.currentTime,
+              toS: backAheadAt,
+              roomPosS: Number(roomS.toFixed(2)),
+              roomPlaying: !!sync?.playing,
+            });
+            video.currentTime = backAheadAt;
+          } else if (rejoiningLiveRoom) {
             const syncPos = roomPositionNow(sync);
             if (syncPos > DRIFT_THRESHOLD_S) {
               logEvent("Sync", "landing on the room clock after a rebuild", {
@@ -3344,6 +3496,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             !roomSaysPlaying && pausedBeforeRebuildRef.current === true;
           pausedBeforeRebuildRef.current = null;
           const holding = roomPaused || rebuildPaused;
+          // And a room whose host has no picture yet — its stream is starting
+          // too, or it has stalled. Everyone starts with the host, never before
+          // it: see SyncState.hostWaiting.
+          const hostNotReady = !isHostRef.current && roomSaysPlaying && sync?.hostWaiting === true;
           if (holding) {
             logEvent("HLS", "manifest ready but playback is paused — holding", {
               session: sessionId?.substring(0, 8),
@@ -3351,6 +3507,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               roomPosS: syncStateRef.current?.position ?? "none",
             });
             setBuffering(false);
+          } else if (hostNotReady) {
+            logEvent("HLS", "manifest ready, waiting for the host's picture before playing", {
+              session: sessionId?.substring(0, 8),
+              roomPosS: syncStateRef.current?.position ?? "none",
+            });
+          } else if (waitHereForRoom) {
+            waitForRoom(video, roomS, "rebuild");
           } else {
             video.play().catch((err) => console.warn("Autoplay prevented:", err));
           }
@@ -3529,11 +3692,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
          * been watched goes at once, the rest as it is watched.
          *
          * Then the forward target, two ways. Refused with a good deal ahead,
-         * this stream evidently fills the browser's buffer at about that much,
-         * and is held a little under it from then on. Refused with little
-         * ahead, it was one outsized segment — a copied segment can run to
-         * 30 seconds and 100 MB — and the target is squeezed only until that
-         * one is in, then goes back to what it was.
+         * this stream evidently fills the browser's buffer at about that much
+         * — all it held, less the little that is kept behind the playhead — and
+         * is held a little under it from then on. Refused with little ahead,
+         * it was one outsized segment — a copied segment can run to 30 seconds
+         * and 100 MB — and the target is squeezed only until that one is in,
+         * then goes back to what it was.
+         *
+         * Only what is *fetched into* the browser's buffer is held back. What
+         * is already in it stays (frontBufferFlushThreshold is left at the full
+         * two minutes, or hls.js would flush past the lowered target), and the
+         * P2P engine goes on downloading its full window ahead into its own
+         * memory regardless — see lib/bufferAhead — so the picture is there
+         * for a skip forward either way.
          */
         let bufferFullCount = 0;
         let fitsS = FORWARD_BUFFER_FLUSH_S;
@@ -3541,19 +3712,21 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         const holdAhead = (s: number) => {
           hls.config.maxBufferLength = s;
           hls.config.maxMaxBufferLength = s;
-          hls.config.frontBufferFlushThreshold = Math.max(s, MIN_FORWARD_BUFFER_S);
         };
         const makeRoom = () => {
           const v = videoRef.current;
           if (!v) return;
           bufferFullCount++;
+          const held = v.buffered.length > 0 ? (bufferedEnd(v) ?? 0) - v.buffered.start(0) : 0;
           const behind = v.currentTime - 1;
           if (v.buffered.length > 0 && v.buffered.start(0) < behind - 0.5) {
             hls.trigger(Hls.Events.BUFFER_FLUSHING, { startOffset: 0, endOffset: behind, type: null });
           }
           const ahead = bufferAheadSeconds(v);
           if (ahead >= MIN_FORWARD_BUFFER_S) {
-            fitsS = Math.min(fitsS, Math.max(MIN_FORWARD_BUFFER_S, Math.floor(ahead * 0.9)));
+            const keptBehind = Number.isFinite(hls.config.backBufferLength) ? hls.config.backBufferLength : BACK_BUFFER_S;
+            const fits = Math.max(ahead, held - keptBehind);
+            fitsS = Math.min(fitsS, Math.max(MIN_FORWARD_BUFFER_S, Math.floor(fits * 0.9)));
             squeezedForOne = false;
             holdAhead(fitsS);
           } else {
@@ -3829,6 +4002,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         const onPlaying = () => {
           logEvent("Video", "playing", snapshot(video));
           noteGoodPosition(video);
+          pictureShownRef.current = true;
           setBuffering(false);
           // First frames after joining a stream in progress. Everything between
           // the seek above and this moment — manifest, segments, decode — the
@@ -3848,20 +4022,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               // there for twenty-five seconds. Whatever is left over the
               // ordinary drift handling closes.
               //
-              // Nor back out of it: a room behind this player is reached only
-              // as far as the start of what is buffered here. Going all the way
-              // undid a jump over a hole the player had just made, and put it
-              // back in front of the same hole for another stall.
-              const reachable = Math.max(
-                bufferedRangeStart(video) + 0.1,
-                Math.min(target, video.currentTime + bufferAheadSeconds(video) - 0.5),
-              );
-              const behind = reachable - video.currentTime;
-              if (target > DRIFT_THRESHOLD_S && Math.abs(behind) > JOIN_SETTLE_TOLERANCE_S) {
+              // And only ever forward. A room behind this player is waited
+              // for, by the drift handling, rather than gone back to: going
+              // back replays what was just shown — and once undid a jump over
+              // a hole, putting the player in front of it again.
+              const reachable = target > DRIFT_THRESHOLD_S
+                ? settleForward(video.currentTime, bufferAheadSeconds(video), target, JOIN_SETTLE_TOLERANCE_S)
+                : null;
+              if (reachable !== null) {
                 logEvent("Sync", "settling onto the room after joining", {
                   fromS: video.currentTime,
                   toS: reachable,
-                  behindS: behind,
+                  behindS: reachable - video.currentTime,
                   ...(reachable < target ? { roomS: target } : {}),
                 });
                 resetPlaybackRate(video);
@@ -3991,7 +4163,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         heartbeatIntervalRef.current = setInterval(() => {
           const v = videoRef.current;
           if (v && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-            syncActionsRef.current?.sendHeartbeat(v.currentTime, !v.paused);
+            syncActionsRef.current?.sendHeartbeat(v.currentTime, !v.paused, hostToldWaitingRef.current);
           }
         }, HEARTBEAT_INTERVAL_MS);
       }
@@ -4040,6 +4212,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           // perfectly healthy stream, which is noise in exactly the log you go
           // to when something is wrong.
           driftS: !amHost && roomPos != null ? v.currentTime - roomPos : "n/a(host)",
+          // The browser's buffer and the engine's memory together — the
+          // buffer a skip forward lands in. bufAheadS below is the browser's
+          // alone, which a heavy stream fills long before this.
+          downloadedAheadS: Number(downloadedAheadS().toFixed(1)),
+          ...(sync?.hostWaiting ? { roomWaitingForHost: true } : {}),
           peers: stats.peers.size,
           p2pMB: stats.p2pBytes / 1e6,
           httpMB: stats.httpBytes / 1e6,
@@ -4115,6 +4292,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
        * starts the wait over. A seek that never completes counts, though —
        * that was the frozen Deadpool: "seeking" for six minutes.
        */
+      let stepsOverStall = 0;
       wedgeIntervalRef.current = setInterval(() => {
         const v = videoRef.current;
         const hls = hlsRef.current;
@@ -4122,6 +4300,34 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
         const moved = v.currentTime !== wedgeLastPosRef.current;
         wedgeLastPosRef.current = v.currentTime;
+        if (moved) stepsOverStall = 0;
+
+        // Stopped with the picture buffered in front of it — see
+        // STUCK_WITH_BUFFER_NUDGE_S. Acted on at the first look: not having
+        // moved since the last one is already two seconds, and with a second
+        // or more of picture in hand there is no innocent reason for it. A
+        // step a little longer each time it doesn't take, as hls.js does at a
+        // hole.
+        const stuckWithBuffer = !v.paused && !v.seeking && !moved && v.currentTime > 0 &&
+          v.readyState < HTMLMediaElement.HAVE_FUTURE_DATA && bufferAheadSeconds(v) >= 1;
+        if (stuckWithBuffer) {
+          wedgeStuckSinceRef.current = 0;
+          wedgeTicksRef.current = 0;
+          const step = Math.min(1, STUCK_WITH_BUFFER_NUDGE_S * ++stepsOverStall);
+          logWarn("Stall", "stopped with the picture buffered ahead, stepping it on", {
+            stepS: Number(step.toFixed(2)),
+            attempt: stepsOverStall,
+            ...snapshot(v),
+          });
+          try {
+            v.currentTime += step;
+            wedgeLastPosRef.current = v.currentTime;
+          } catch (err) {
+            logWarn("Stall", "stepping on threw", { error: err instanceof Error ? err.message : String(err) });
+          }
+          return;
+        }
+
         // currentTime > 1 excludes cold start, where sitting at zero while the
         // first segments arrive is buffering rather than a wedge.
         const stuck = v.currentTime > 1 && !v.paused
@@ -4133,6 +4339,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         }
         if (!wedgeStuckSinceRef.current) wedgeStuckSinceRef.current = Date.now();
         const stuckMs = Date.now() - wedgeStuckSinceRef.current;
+        // And a stream resumed part-way in, which starts with the playhead
+        // already there: nothing has arrived to be wedged on yet. See
+        // WEDGE_COLD_START_GRACE_MS.
+        if (v.buffered.length === 0 && stuckMs < WEDGE_COLD_START_GRACE_MS) {
+          wedgeTicksRef.current = 0;
+          return;
+        }
         // A hole with the rest already buffered behind it waits for nothing —
         // see HOLE_JUMP_AFTER_MS — so neither the download grace nor the
         // second look applies to it.
@@ -4228,6 +4441,25 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // a rebuild of what was already here, so it should come back the way it
       // went away. Read at manifest-ready above.
       pausedBeforeRebuildRef.current = videoRef.current?.paused ?? null;
+      // And where this player had got to, if that was ahead of the room — so
+      // the rebuild doesn't put it back on the room's clock and show it the
+      // same seconds again. Not across a seek: then going back was the point.
+      {
+        const sync = syncStateRef.current;
+        const at = positionForRoom();
+        const room = sync ? (sync.playing ? roomPositionNow(sync) : sync.position) : 0;
+        aheadAtRebuildRef.current =
+          !isHostRef.current &&
+          // A rebuild of this title, not the move to another one.
+          item.ratingKey === itemRef.current.ratingKey &&
+          sync?.ratingKey === item.ratingKey &&
+          Date.now() - lastSeekAtRef.current > SEEK_REBUILD_WINDOW_MS &&
+          room > 0 &&
+          at > room
+            ? { ratingKey: itemRef.current.ratingKey, atS: at, roomAtS: room }
+            : null;
+      }
+      stopWaitingForRoom("the stream is being rebuilt");
       destroyLocal();
       if (restartTimerRef.current !== null) {
         clearTimeout(restartTimerRef.current);
@@ -4336,9 +4568,36 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // same seek can't be re-applied by the next unrelated command.
     const isNewSeek = syncState.seekSeq !== appliedSeekSeqRef.current;
     appliedSeekSeqRef.current = syncState.seekSeq;
+    if (isNewSeek) lastSeekAtRef.current = Date.now();
+
+    // Correction against where the room is *now*. `position` is the last
+    // report, up to a heartbeat old; correcting to it is how a client ends up
+    // permanently a couple of seconds behind.
+    const roomNow = roomPositionNow(syncState);
+    /**
+     * A follower ahead of the room stays ahead: it waits there, rather than
+     * going back over what it has already shown. Only a seek sends anybody
+     * back — that is somebody choosing to rewatch — and a pause or resume
+     * carries the room's position without meaning "go there". See
+     * lib/roomWait.
+     */
+    const aheadS = roomNow > 0 &&
+      video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+      syncState.ratingKey === itemRef.current.ratingKey
+      ? video.currentTime - roomNow
+      : 0;
+    const staysAhead = !amHost && !isNewSeek && waitsForRoom(aheadS);
+    if (isNewSeek) stopWaitingForRoom("the room was sent somewhere");
+    else if (!syncState.playing) stopWaitingForRoom("the room paused");
+    // The room is the host: while its picture isn't moving, nobody else's is.
+    const holdForHost = !amHost && syncState.playing && syncState.hostWaiting;
 
     // Sync play/pause state
-    if (syncState.playing && video.paused) {
+    if (holdForHost) {
+      if (!video.paused) video.pause();
+    } else if (syncState.playing && staysAhead && aheadS > DRIFT_THRESHOLD_S) {
+      waitForRoom(video, roomNow, "command");
+    } else if (syncState.playing && video.paused && !roomWaitRef.current) {
       video.play().catch(() => {});
     } else if (!syncState.playing && !video.paused) {
       video.pause();
@@ -4358,13 +4617,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       ...snapshot(video),
     });
 
-    // Correction against where the room is *now*. `position` is the last
-    // report, up to a heartbeat old; correcting to it is how a client ends up
-    // permanently a couple of seconds behind.
-    const roomNow = roomPositionNow(syncState);
     if (roomNow > 0) {
       const drift = Math.abs(video.currentTime - roomNow);
-      if (drift > DRIFT_THRESHOLD_S) {
+      if (drift > DRIFT_THRESHOLD_S && staysAhead) {
+        logEvent("Sync", "ahead of the room, not going back to it", {
+          aheadS: Number(aheadS.toFixed(2)),
+          roomPlaying: syncState.playing,
+        });
+      } else if (drift > DRIFT_THRESHOLD_S) {
         if (amHost) {
           // The host is the authority on position rather than a follower of it,
           // so it acts only on a real seek. pause/resume are rebroadcast with the
@@ -4472,7 +4732,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // because it is the pause the room most likely missed — it is the one that
     // happened while the socket was down.
     if (video.paused) syncActionsRef.current?.sendPause(video.currentTime);
-    else syncActionsRef.current?.sendResume(video.currentTime);
+    else sendRoomResume(video.currentTime);
   }, [syncState?.stateSeq]);
 
   /**
@@ -4493,9 +4753,40 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    */
   useEffect(() => {
     if (isHostRef.current || !syncState) return;
+    if (!syncState.playing) stopWaitingForRoom("the room paused");
     const video = videoRef.current;
-    if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+    if (!video) return;
+    /**
+     * Holding with the host: its picture has stopped, or hasn't started. The
+     * room's clock stands still with it, so going on here would only put this
+     * player ahead of the host — see SyncState.hostWaiting. Before there is
+     * any picture here too: an element told to play starts the moment its
+     * first segment lands, which is how viewers used to start films first.
+     */
+    if (syncState.playing && syncState.hostWaiting) {
+      if (!video.paused) {
+        logEvent("Sync", "holding for the host's picture", snapshot(video));
+        resetPlaybackRate(video);
+        video.pause();
+      }
+      return;
+    }
+    if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      // Nothing to show yet; play as soon as there is, if the room is.
+      if (syncState.playing && video.paused && !roomWaitRef.current) video.play().catch(() => {});
+      return;
+    }
+    // Stopped on purpose, for the room to catch up — see waitForRoom.
+    if (syncState.playing && video.paused && roomWaitRef.current) return;
     if (syncState.playing && video.paused) {
+      // The host has started again from behind where this player stopped:
+      // wait for it there, rather than run on ahead of it.
+      const room = roomPositionNow(syncState);
+      const ahead = syncState.ratingKey === itemRef.current.ratingKey ? video.currentTime - room : 0;
+      if (ahead > HARD_SYNC_DRIFT_S && waitsForRoom(ahead)) {
+        waitForRoom(video, room, "the host started again behind this player");
+        return;
+      }
       logEvent("Sync", "following room into play", snapshot(video));
       video.play().catch(() => {});
     } else if (!syncState.playing && !video.paused) {
@@ -4503,7 +4794,34 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       resetPlaybackRate(video);
       video.pause();
     }
-  }, [syncState?.playing, syncState?.commandSeq, isHost]);
+  }, [syncState?.playing, syncState?.commandSeq, syncState?.hostWaiting, isHost]);
+
+  /**
+   * Nobody else's picture starts while the host's hasn't, whatever starts it.
+   *
+   * The effects above decide play and pause from the room, but other things
+   * start the element too: a co-host's own play button, the space bar, the
+   * stream coming up. Caught here, at the element, so that none of them can
+   * put a follower ahead of the host — see SyncState.hostWaiting — or start
+   * one that is stopped for the room to catch up with it.
+   */
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const onPlay = () => {
+      if (isHostRef.current) return;
+      const sync = syncStateRef.current;
+      const forHost = !!sync?.playing && sync.hostWaiting;
+      if (!forHost && !roomWaitRef.current) return;
+      logEvent("Sync", forHost ? "holding for the host's picture" : "still waiting for the room", {
+        why: "something started this player",
+        ...snapshot(video),
+      });
+      video.pause();
+    };
+    video.addEventListener("play", onPlay);
+    return () => video.removeEventListener("play", onPlay);
+  }, []);
 
   // Viewer status: flash "Host is seeking…" for a moment after each seek command.
   // seekSeq bumps once per host seek; the flag auto-clears so it reads as a brief
@@ -4568,7 +4886,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       return;
     }
     if (!video) return;
-    if (!syncState.playing || video.paused || syncState.position <= 0) {
+    // Holding with the host — see the play-state effect above.
+    if (!syncState.playing || syncState.hostWaiting || video.paused || syncState.position <= 0) {
       resetPlaybackRate(video);
       return;
     }
@@ -4644,6 +4963,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       return;
     }
 
+    // Ahead of the room — nearly always because the host's picture froze and
+    // this one didn't. Going back to it replays what was just shown; waiting
+    // here doesn't. See lib/roomWait.
+    const aheadS = video.currentTime - target;
+    if (waitsForRoom(aheadS) && syncState.ratingKey === itemRef.current.ratingKey) {
+      waitForRoom(video, target, "heartbeat");
+      return;
+    }
+
     // Don't re-issue the same correction faster than the media can service it.
     const sinceLast = Date.now() - lastDriftCorrectionRef.current;
     if (sinceLast < DRIFT_CORRECTION_COOLDOWN_MS) {
@@ -4695,6 +5023,57 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     });
     video.currentTime = target;
   }, [syncState?.position]);
+
+  /**
+   * Play again once the room reaches where this follower stopped for it.
+   *
+   * Polled, because between heartbeats the room's position is worked out from
+   * the clock rather than reported, so nothing arrives at the moment it passes.
+   */
+  useEffect(() => {
+    if (!waitingForRoom) return;
+    const timer = setInterval(() => {
+      const wait = roomWaitRef.current;
+      const video = videoRef.current;
+      const sync = syncStateRef.current;
+      if (!wait) {
+        setWaitingForRoom(false);
+        return;
+      }
+      if (!video || !sync?.ratingKey) {
+        stopWaitingForRoom("playback ended");
+        return;
+      }
+      if (isHostRef.current) {
+        // The room's clock is this player's now; there is nobody to wait for.
+        stopWaitingForRoom("this player is the host now");
+        if (sync.playing) video.play().catch(() => {});
+        return;
+      }
+      if (!sync.playing) {
+        stopWaitingForRoom("the room paused");
+        return;
+      }
+      const room = roomPositionNow(sync);
+      const here = video.readyState >= HTMLMediaElement.HAVE_METADATA ? video.currentTime : wait.atS;
+      const outcome = roomWaitOutcome(here, room, SOFT_SYNC_DEAD_ZONE_S);
+      if (outcome === "play") {
+        stopWaitingForRoom("the room caught up");
+        // Unless the host's picture has stopped meanwhile: then this holds
+        // with it instead — the play-state effect resumes it with the host.
+        if (!sync.hostWaiting) video.play().catch(() => {});
+      } else if (outcome === "follow") {
+        // Not a freeze any more: the room is somewhere else. Followed, the
+        // way any other correction this large is.
+        stopWaitingForRoom("the room is too far behind to wait for");
+        lastDriftCorrectionRef.current = Date.now();
+        if (ownsSessionRef.current) handleHostSeekRef.current(room, false);
+        else video.currentTime = room;
+        video.play().catch(() => {});
+      }
+    }, WAIT_FOR_ROOM_POLL_MS);
+    return () => clearInterval(timer);
+  }, [waitingForRoom]);
 
   /**
    * Watch for a stream that cannot keep up, and offer the way out.
@@ -4795,6 +5174,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // restart. Without it "play" resets everyone to 0:00 until the next
       // heartbeat drags them back.
       const subtitle = currentSubtitleStreamRef.current ?? subtitleStreamId ?? 0;
+      // Announced as soon as the playlist is in, so the picture is nearly
+      // always still to come: the room waits for it — see
+      // SyncState.hostWaiting — and this player's first frames say when.
+      const waiting = playing && !pictureMoving(videoRef.current);
+      hostToldWaitingRef.current = waiting;
       syncActionsRef.current?.sendPlay(
         item.ratingKey, displayTitleRef.current, subtitlesOnRef.current, sessionId,
         offset, undefined,
@@ -4804,6 +5188,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // Drawn by this player unless the stream just started burns it in.
         subtitle !== 0 && sessionBurnedRef.current !== subtitle,
         sessionQualityRef.current,
+        waiting,
       );
       return;
     }
@@ -4918,6 +5303,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   //    within SEEK_STALL_TIMEOUT_MS, fall back to a transcode restart.
   //  - Target before the session's start offset: segments can't exist — restart.
   const handleHostSeek = useCallback((positionSeconds: number, broadcast = true) => {
+    // Somewhere new on purpose: any wait for the room was about where we were.
+    lastSeekAtRef.current = Date.now();
+    stopWaitingForRoom("seeking");
     const video = videoRef.current;
     if (!video) {
       logWarn("Seek", "no video element, going straight to restart", { targetS: positionSeconds });
@@ -5031,7 +5419,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         logEvent("Seek", "in-place seek satisfied", snapshot(v));
       }
     }, SEEK_STALL_TIMEOUT_MS);
-  }, [handleSeekRestart]);
+  }, [handleSeekRestart, stopWaitingForRoom]);
 
   // Live ref so the command-handling effect (declared above) can reach the
   // current handleHostSeek without listing it as a dep — naming it directly in a
@@ -5087,8 +5475,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     syncActionsRef.current?.sendPause(positionForRoom());
   }, [positionForRoom]);
   const sendResumeForControls = useCallback(() => {
-    syncActionsRef.current?.sendResume(positionForRoom());
-  }, [positionForRoom]);
+    sendRoomResume(positionForRoom());
+  }, [positionForRoom, sendRoomResume]);
 
   /**
    * Toggle playback and announce it to the room. Shared by the spacebar shortcut
@@ -5108,7 +5496,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const resuming = video.paused;
     if (resuming) {
       video.play();
-      syncActionsRef.current?.sendResume(positionForRoom());
+      sendRoomResume(positionForRoom());
     } else {
       video.pause();
       syncActionsRef.current?.sendPause(positionForRoom());
@@ -5668,9 +6056,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // Only for pure viewers, and never over an error/disconnect/recovery banner.
   const streamActive = !!syncState?.ratingKey && !error && !recovering;
   const hostPaused = !canControl && streamActive && syncState?.playing === false;
-  const viewerStatus = !canControl && streamActive
-    ? (hostSeeking ? "Host is seeking…" : hostPaused ? "Host paused the video" : null)
-    : null;
+  // Waiting for the room shows to co-hosts too: they follow the room's clock
+  // like anyone else, and a picture that stops by itself needs a reason.
+  // So does holding for the host's picture, which is the same thing from where
+  // the viewer sits: the film has stopped because the host's has.
+  const roomWaitShown = !isHost && streamActive && syncState?.playing === true &&
+    (waitingForRoom || syncState.hostWaiting);
+  const loadingShown = !isPip && (buffering || (noPicture && !!syncState?.ratingKey)) && !error;
+  const viewerStatus = roomWaitShown
+    ? `Waiting for ${syncState?.hostUsername ?? "the host"}…`
+    : !canControl && streamActive
+      ? (hostSeeking ? "Host is seeking…" : hostPaused ? "Host paused the video" : null)
+      : null;
 
   const playerContainerStyle: CSSProperties = isPip
     ? {
@@ -5751,10 +6148,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           {zoomNotice}
         </div>
       )}
-      {/* Viewer status — what the host is doing to shared playback */}
-      {!isPip && viewerStatus && (
+      {/* Viewer status — what the host is doing to shared playback. Not while
+          the loading screen already says the same thing in the middle. */}
+      {!isPip && viewerStatus && !(roomWaitShown && loadingShown) && (
         <div style={styles.viewerStatus} role="status" aria-live="polite">
-          {hostSeeking ? (
+          {hostSeeking || roomWaitShown ? (
             <span style={styles.viewerStatusSpinner} />
           ) : (
             <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style={{ flexShrink: 0 }}>
@@ -5766,11 +6164,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         </div>
       )}
 
-      {/* Buffering indicator */}
-      {!isPip && buffering && !error && (
-        <div style={styles.bufferingOverlay}>
+      {/* Loading screen — whenever the picture should be moving and isn't, or
+          there is no picture yet — saying what it is waiting for. */}
+      {loadingShown && (
+        <div style={styles.bufferingOverlay} role="status" aria-live="polite">
           <div style={styles.bufferingSpinner} />
-          <span style={styles.bufferingText}>Loading...</span>
+          <span style={styles.bufferingText}>{loadingInfo.title}</span>
+          {loadingInfo.detail && <span style={styles.bufferingDetail}>{loadingInfo.detail}</span>}
         </div>
       )}
 
@@ -6021,12 +6421,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           p2pStatsRef={p2pStatsRef}
           notes={streamNotes}
           quality={quality}
+          downloadedAheadS={downloadedAheadS}
           onClose={() => setShowStats(false)}
         />
       )}
 
       {!isPip && <Controls
         videoRef={videoRef}
+        downloadedAheadS={downloadedAheadS}
         handleRef={controlsRef}
         isHost={isHost}
         title={displayTitle}
@@ -6287,7 +6689,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   syncActions?.sendPause(positionForRoom());
                 } else if (video && !wantPause && video.paused) {
                   void video.play();
-                  syncActions?.sendResume(positionForRoom());
+                  sendRoomResume(positionForRoom());
                 }
                 syncActions?.clearTransportRequest();
               }}
@@ -6574,6 +6976,14 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "13px",
     fontWeight: 500,
     marginTop: "14px",
+  },
+  bufferingDetail: {
+    color: "rgba(255,255,255,0.55)",
+    fontSize: "12px",
+    marginTop: "6px",
+    maxWidth: "min(420px, calc(100% - 32px))",
+    textAlign: "center",
+    lineHeight: 1.4,
   },
   trackSwitchOverlay: {
     position: "absolute",

@@ -50,15 +50,29 @@ import { plexFetchSegment } from "./plex.js";
 import { videoSpan } from "./ts-timestamps.js";
 import { logEvent } from "./logger.js";
 
-/** How far past the playhead to measure — over the player's 120s buffer target,
- *  the same lead the re-encode prefetcher keeps. */
-const LEAD_S = 150;
+/**
+ * How far past the playhead to measure. The player fetches 150s ahead of
+ * itself (Player.tsx, highDemandTimeWindow), and the playhead here comes from
+ * a keep-alive ping that can be ten seconds old, so this has to clear both or
+ * the player's own buffer stops short of what it asks for.
+ */
+const LEAD_S = 180;
 /** How long a segment's bytes are kept once the playhead has passed it, so a
  *  short step back is served rather than restarted. The player restarts for
  *  anything further back than COPY_BACK_WINDOW_S (Player.tsx), which is less. */
 const BACK_S = 180;
-/** Memory for every copied session together; each gets an equal share. */
-const GLOBAL_BUDGET_BYTES = 512 * 1024 * 1024;
+/**
+ * Memory for every copied session together.
+ *
+ * A copy is the file's own bitrate — 30 Mbps and more for a Blu-ray — so
+ * LEAD_S of one is over 600 MB. This used to be 512 MB shared equally between
+ * sessions, which held a 30 Mbps film to about two minutes ahead on its own,
+ * one minute with a second stream running, and the players' buffers stopped
+ * there however fast they could fetch. Now what is ahead of a playhead is
+ * only ever limited by LEAD_S; the budget is met by letting go of what has
+ * already been watched, across every session, oldest first.
+ */
+const GLOBAL_BUDGET_BYTES = 2048 * 1024 * 1024;
 /** How far Plex's MPEG-TS clock runs ahead of the film. Measured at 10s on a
  *  real server, for sessions started at the beginning and mid-film alike. */
 const PLEX_TS_OFFSET_S = 10;
@@ -172,8 +186,11 @@ function rest(s: CopySession, ms: number): Promise<void> {
   });
 }
 
-function share(): number {
-  return Math.floor(GLOBAL_BUDGET_BYTES / Math.max(1, sessions.size));
+/** What every copied session holds together, bytes. */
+function totalCached(): number {
+  let total = 0;
+  for (const s of sessions.values()) total += s.cachedBytes;
+  return total;
 }
 
 function drop(s: CopySession, seg: Measured): void {
@@ -183,19 +200,21 @@ function drop(s: CopySession, seg: Measured): void {
 }
 
 /**
- * Let go of what the watcher is done with: anything BACK_S behind them, then —
- * only if this session is over its share — the oldest of what is behind them at
- * all. Nothing ahead of the playhead is ever dropped; when memory is short the
- * pump stops fetching ahead instead.
+ * Let go of what the watchers are done with: anything BACK_S behind them, then
+ * — only while everything together is over budget — what is behind a playhead
+ * at all, oldest first, from every session. Nothing ahead of a playhead is
+ * ever dropped; when memory is short the pumps stop fetching ahead instead.
  */
 function evict(s: CopySession): void {
   for (const seg of s.segments) {
     if (seg.end < s.positionS - BACK_S) drop(s, seg);
   }
-  const limit = share();
-  for (const seg of s.segments) {
-    if (s.cachedBytes <= limit) break;
-    if (seg.end < s.positionS) drop(s, seg);
+  if (totalCached() <= GLOBAL_BUDGET_BYTES) return;
+  for (const other of sessions.values()) {
+    for (const seg of other.segments) {
+      if (totalCached() <= GLOBAL_BUDGET_BYTES) return;
+      if (seg.end < other.positionS) drop(other, seg);
+    }
   }
 }
 
@@ -205,7 +224,7 @@ function wantsMore(s: CopySession): boolean {
   const last = s.segments[s.segments.length - 1];
   const measuredTo = last ? last.end : s.offsetS;
   if (measuredTo >= s.positionS + LEAD_S) return false;
-  return s.cachedBytes < share();
+  return totalCached() < GLOBAL_BUDGET_BYTES;
 }
 
 /** Segments whose length is settled: all but the newest, until the end is known. */

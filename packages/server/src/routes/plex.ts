@@ -138,23 +138,35 @@ const HEVC_TRANSCODE = process.env.HEVC_TRANSCODE === "1";
 const DIRECT_STREAM = process.env.DIRECT_STREAM === "1";
 
 /**
- * The highest bitrate a file may have and still be copied, in kbps. Above it
- * the file is re-encoded at VIDEO_BITRATE_KBPS instead. Unset, it is
- * VIDEO_BITRATE_KBPS itself, which is what Plex holds a copy to on its own.
+ * The highest *average* bitrate a file may have and still be copied, in kbps.
+ * Above it the file is re-encoded at VIDEO_BITRATE_KBPS instead. Unset, it is
+ * VIDEO_BITRATE_KBPS itself.
  *
  * A copy is the file's own bitrate, and every viewer pulls all of it from this
  * server: a 30 Mbps remux watched by two people is 60 Mbps of upload. A home
  * connection that can't carry that stalls the stream, where a re-encode at a
  * bitrate it can carry only looks slightly softer.
  *
- * It has to be told to Plex as well as checked here: Plex reads the bitrate it
- * is asked for as the limit on copying too, and re-encodes anything over it —
- * the first version only checked, so with VIDEO_BITRATE_KBPS at 12000 every
- * file over about 11 Mbps was re-encoded whatever this was set to.
+ * The average, because that is what a connection has to carry. Peaks are what
+ * the players' buffers are for: a film averaging 18 Mbps can run past 60 for a
+ * few seconds at a time, and judging it on those would rule out nearly every
+ * Blu-ray. See COPY_ASK_KBPS for how Plex is kept from judging it on them.
  */
 const DIRECT_STREAM_MAX_KBPS = envInt("DIRECT_STREAM_MAX_KBPS", 0);
-/** What a stream that may be copied is asked for — see DIRECT_STREAM_MAX_KBPS. */
-const COPY_REQUEST_KBPS = Math.max(VIDEO_BITRATE_KBPS, DIRECT_STREAM_MAX_KBPS);
+/** The average-bitrate limit on copying in force — see DIRECT_STREAM_MAX_KBPS. */
+const COPY_LIMIT_KBPS = DIRECT_STREAM_MAX_KBPS > 0 ? DIRECT_STREAM_MAX_KBPS : VIDEO_BITRATE_KBPS;
+/**
+ * What a copy is asked of Plex at, once this server has decided by the file's
+ * average that it may be copied.
+ *
+ * Plex judges a copy on the file's peaks against the bitrate it is asked for,
+ * and re-encodes anything over it: a film averaging 18.4 Mbps was refused at
+ * every ask from 25 to 50 Mbps. So it is asked at a bitrate no film's peaks
+ * reach, and the decision stays the average's. If Plex re-encodes anyway — a
+ * codec the room can't play — it is asked again at the re-encode's own
+ * bitrate, so this never becomes the size of a re-encode.
+ */
+const COPY_ASK_KBPS = 200_000;
 
 /** A viewer's quality ceiling (QUALITY_LEVELS_KBPS) at or under which a
  *  re-encode is 720p: 1080p at 4 Mbps is mostly blocks. */
@@ -4310,6 +4322,8 @@ function refusedCopyReason(version: VersionFacts | null, askedKbps: number, room
   if (codec === "hevc" && !roomHevc) return "HEVC video, and not everyone here can play HEVC";
   if (codec === "h264" && (version?.bitDepth ?? 8) > 8) return `${version!.bitDepth}-bit H.264, which browsers can't play`;
   if ((version?.width ?? 0) > 2048 || (version?.height ?? 0) > 1200) return "larger than 1080p, so it is scaled down";
+  // Asked above any peak, the bitrate wasn't it — see COPY_ASK_KBPS.
+  if (askedKbps >= COPY_ASK_KBPS) return "Plex declined to copy it";
   if (version?.bitrate) {
     return `Plex wouldn't copy it at ${mbpsText(askedKbps)}: the file averages ${mbpsText(version.bitrate)}, and its peaks are likely higher`;
   }
@@ -4738,10 +4752,17 @@ router.get(
       const roomHevc = userId !== null && roomPlaysHevc(userId);
       const version = await versionFacts(ratingKey, mediaIndex);
       const kbps = version?.bitrate ?? null;
-      // A viewer's ceiling is what their stream is, copied or re-encoded,
+      // A viewer's ceiling is what a re-encode of their stream is made at,
       // within what this server would send anyone: its copy limit.
-      const copyKbps = quality ? Math.min(COPY_REQUEST_KBPS, quality) : COPY_REQUEST_KBPS;
-      const transcodeKbps = quality ? copyKbps : VIDEO_BITRATE_KBPS;
+      const ceilingKbps = Math.max(VIDEO_BITRATE_KBPS, COPY_LIMIT_KBPS);
+      const transcodeKbps = quality ? Math.min(ceilingKbps, quality) : VIDEO_BITRATE_KBPS;
+      // A copy is judged here on the file's average, against the limit and
+      // the viewer's ceiling, and Plex asked at what no peak reaches — see
+      // COPY_ASK_KBPS. A file whose bitrate Plex doesn't know can't be judged
+      // here, and is left to Plex at the limit, as before.
+      const copyKbps = kbps !== null
+        ? COPY_ASK_KBPS
+        : quality ? Math.min(ceilingKbps, quality) : ceilingKbps;
       const peakKbps = Math.max(
         transcodeKbps,
         Math.round(transcodeKbps * VIDEO_PEAK_BITRATE_KBPS / VIDEO_BITRATE_KBPS),
@@ -4759,11 +4780,11 @@ router.get(
           : "a picture subtitle is burned into it";
       }
       else if (quality && kbps !== null && kbps > quality) {
-        notCopied = `the file is ${mbpsText(kbps)}, over your ${mbpsText(quality)} quality setting`;
-      } else if (DIRECT_STREAM_MAX_KBPS > 0 && kbps !== null && kbps > DIRECT_STREAM_MAX_KBPS) {
-        notCopied = `the file is ${mbpsText(kbps)}, over this server's ${mbpsText(DIRECT_STREAM_MAX_KBPS)} copy limit`;
-        logEvent("DirectStream", "re-encoding a file above DIRECT_STREAM_MAX_KBPS", {
-          ratingKey, session: sessionId.substring(0, 8), kbps, capKbps: DIRECT_STREAM_MAX_KBPS,
+        notCopied = `the file averages ${mbpsText(kbps)}, over your ${mbpsText(quality)} quality setting`;
+      } else if (kbps !== null && kbps > COPY_LIMIT_KBPS) {
+        notCopied = `the file averages ${mbpsText(kbps)}, over this server's ${mbpsText(COPY_LIMIT_KBPS)} copy limit`;
+        logEvent("DirectStream", "re-encoding a file whose average is above DIRECT_STREAM_MAX_KBPS", {
+          ratingKey, session: sessionId.substring(0, 8), kbps, capKbps: COPY_LIMIT_KBPS,
         });
       } else if (directStreamRefused(ratingKey)) notCopied = "copying this title failed earlier";
       const copy = notCopied === null;

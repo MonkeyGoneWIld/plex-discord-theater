@@ -302,7 +302,7 @@ function reportIntegrations(): void {
       on("HEVC", process.env.HEVC_TRANSCODE === "1", "H.264 only"),
       on(
         Number(process.env.DIRECT_STREAM_MAX_KBPS) > 0
-          ? `Direct Stream up to ${Number(process.env.DIRECT_STREAM_MAX_KBPS)} kbps`
+          ? `Direct Stream for files averaging up to ${Number(process.env.DIRECT_STREAM_MAX_KBPS)} kbps`
           : "Direct Stream",
         process.env.DIRECT_STREAM === "1",
         "every title re-encoded",

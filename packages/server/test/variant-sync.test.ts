@@ -833,6 +833,88 @@ console.log("\n— going back to the host's stream keeps your quality —");
   [host, a].forEach((c) => c.close());
 }
 
+console.log("\n— the room waits for the host's picture —");
+{
+  const [host, a] = await room("inst-host-waiting", ["host", "a"]);
+  const sid = uuid();
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: sid, position: 600, sessionOffset: 600,
+    audioStreamId: 1, subtitleStreamId: 0, waiting: true,
+  });
+  await sleep(60);
+  check("viewers hear the stream is starting, not playing yet",
+    [a.last("play")?.playing, a.last("play")?.waiting], [true, true]);
+  await sleep(1200);
+  check("and the clock stands still while the host has no picture", near(await clockOf("inst-host-waiting"), 600, 0.2), "ok");
+
+  // The host's first frames: its picture is moving from 601.3.
+  host.send({ type: "heartbeat", position: 601.3, playing: true, waiting: false, transportRevision: host.last("transport-state")?.transportRevision });
+  await sleep(60);
+  check("everyone hears the host is playing", a.last("heartbeat")?.waiting, false);
+  await sleep(1000);
+  check("and the clock runs from where the host's picture is", near(await clockOf("inst-host-waiting"), 602.3, 0.5), "ok");
+
+  // A stall: the host's picture stops at 640.
+  host.send({ type: "heartbeat", position: 640, playing: true, waiting: true, transportRevision: host.last("transport-state")?.transportRevision });
+  await sleep(60);
+  check("everyone hears the host is waiting", a.last("heartbeat")?.waiting, true);
+  await sleep(1200);
+  check("the clock stops where the host's picture did", near(await clockOf("inst-host-waiting"), 640, 0.2), "ok");
+  const joiner = new Client("u-late", "late");
+  await joiner.connect("inst-host-waiting");
+  check("someone joining now is told the room is waiting", joiner.last("state")?.waiting, true);
+  joiner.close();
+
+  // A co-host's resume says nothing about the host's picture.
+  host.send({ type: "set-cohost", userId: "u-a", value: true });
+  await sleep(60);
+  a.send({ type: "resume", position: 650 });
+  await sleep(60);
+  check("a co-host's resume leaves the room waiting for the host", host.last("resume")?.waiting, true);
+
+  host.send({ type: "pause", position: 640 });
+  await sleep(60);
+  check("a pause is not waiting", (await (async () => { await sleep(10); return a.last("pause") !== undefined; })()), true);
+  const afterPause = new Client("u-late2", "late2");
+  await afterPause.connect("inst-host-waiting");
+  check("and the room says so", afterPause.last("state")?.waiting, false);
+  afterPause.close();
+
+  host.send({ type: "resume", position: 640, waiting: true });
+  await sleep(60);
+  check("a host resuming onto a picture it hasn't got yet keeps the room waiting",
+    a.last("resume")?.waiting, true);
+  await sleep(1000);
+  check("with the clock still", near(await clockOf("inst-host-waiting"), 640, 0.2), "ok");
+
+  // Handing the host role on: the new host's picture is its own.
+  host.send({ type: "promote-host", userId: "u-a" });
+  await sleep(80);
+  const afterHandover = new Client("u-late3", "late3");
+  await afterHandover.connect("inst-host-waiting");
+  check("a new host starts the room unwaited", afterHandover.last("state")?.waiting, false);
+  afterHandover.close();
+  [host, a].forEach((c) => c.close());
+}
+
+console.log("\n— a stream rebuilt while paused is announced paused —");
+{
+  const [host, a] = await room("inst-paused-rebuild", ["host", "a"]);
+  await startPlayback(host);
+  host.send({ type: "pause", position: 30 });
+  await sleep(60);
+  a.clear();
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: uuid(), position: 90, sessionOffset: 90,
+    audioStreamId: 1, subtitleStreamId: 0, playing: false,
+  });
+  await sleep(60);
+  check("viewers are told it is paused, so they don't start without the host", a.last("play")?.playing, false);
+  [host, a].forEach((c) => c.close());
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 closeWebSocketServer();
 server.close();

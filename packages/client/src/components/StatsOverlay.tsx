@@ -27,6 +27,9 @@ interface StatsOverlayProps {
   notes: StreamNotes | null;
   /** This viewer's quality ceiling, kbps, 0 for none. */
   quality: number;
+  /** Seconds downloaded past the playhead, the browser's buffer and the P2P
+   *  engine's together — see lib/bufferAhead. */
+  downloadedAheadS?: () => number;
   onClose: () => void;
 }
 
@@ -59,7 +62,10 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRef, notes, quality, onClose }: StatsOverlayProps) {
+export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRef, notes, quality, downloadedAheadS, onClose }: StatsOverlayProps) {
+  // Read by the poll, which is set up once.
+  const downloadedAheadRef = useRef(downloadedAheadS);
+  downloadedAheadRef.current = downloadedAheadS;
   const [snap, setSnap] = useState<Snapshot | null>(null);
   // Force a re-render each tick so P2P counters (read from a ref) stay live.
   const [, setTick] = useState(0);
@@ -138,15 +144,23 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
       }
       prevFramesRef.current = { frames: totalFrames, t: now };
 
-      // Buffer health (seconds ahead of the playhead)
-      let bufferHealth = "—";
+      // Buffer health: seconds ahead of the playhead — downloaded in all, and
+      // of that how much the browser itself holds, which for a heavy stream is
+      // capped well short of the rest by its own size limit.
+      let inPlayer = 0;
       const { buffered, currentTime } = video;
       for (let i = 0; i < buffered.length; i++) {
         if (currentTime >= buffered.start(i) - 0.1 && currentTime <= buffered.end(i) + 0.1) {
-          bufferHealth = `${(buffered.end(i) - currentTime).toFixed(1)} s`;
+          inPlayer = buffered.end(i) - currentTime;
           break;
         }
       }
+      const downloaded = Math.max(inPlayer, downloadedAheadRef.current?.() ?? 0);
+      const bufferHealth = video.readyState === 0
+        ? "—"
+        : downloaded - inPlayer >= 1
+          ? `${downloaded.toFixed(0)} s downloaded (${inPlayer.toFixed(1)} s in the player)`
+          : `${inPlayer.toFixed(1)} s`;
 
       // Current level: resolution, bitrate, codecs
       let streamResolution = "—";

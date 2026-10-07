@@ -143,6 +143,17 @@ export interface SyncState {
    * this. See roomPositionNow.
    */
   positionAt: number;
+  /**
+   * The host's picture isn't moving: the stream it just announced hasn't shown
+   * a frame yet, or it has stalled waiting for data.
+   *
+   * The room is the host, so while this holds the room's clock stands still
+   * and everyone else holds where they are, and starts again with the host.
+   * Viewers used to start a film before the host had, whenever their segments
+   * arrived first, and to play on through every stall of the host's — and then
+   * get sent back to it, and see the same seconds again.
+   */
+  hostWaiting: boolean;
   /** True if the WebSocket closed due to authentication failure (code 1008) */
   authFailed: boolean;
   /** True if max reconnect attempts exhausted. `retryConnection` clears it. */
@@ -209,8 +220,11 @@ function looksStalled(advancedS: number, elapsedS: number): boolean {
  * buffering, or gone — and elapsed wall time stops describing it, so the last
  * confirmed position is the more honest answer.
  */
-export function roomPositionNow(state: Pick<SyncState, "position" | "playing" | "positionAt">): number {
-  if (!state.playing || !state.positionAt) return state.position;
+export function roomPositionNow(
+  state: Pick<SyncState, "position" | "playing" | "positionAt"> & { hostWaiting?: boolean },
+): number {
+  // Waiting for the host's picture is the room standing still — see hostWaiting.
+  if (!state.playing || !state.positionAt || state.hostWaiting) return state.position;
   const elapsed = (Date.now() - state.positionAt) / 1000;
   if (elapsed < 0 || elapsed > 30) return state.position;
   return state.position + elapsed;
@@ -258,12 +272,16 @@ export interface SyncActions {
     subtitleDrawn?: boolean,
     /** The quality ceiling the stream was started at — StreamVariant.quality. */
     quality?: number,
+    /** The stream has no picture moving yet — see SyncState.hostWaiting. */
+    waiting?: boolean,
   ) => void;
   sendPause: (position: number) => void;
-  sendResume: (position: number) => void;
+  /** `waiting`: resumed onto a picture that isn't ready yet — SyncState.hostWaiting. */
+  sendResume: (position: number, waiting?: boolean) => void;
   sendSeek: (position: number) => void;
   sendStop: () => void;
-  sendHeartbeat: (position: number, playing: boolean) => void;
+  /** `waiting`: the host's picture isn't moving — SyncState.hostWaiting. */
+  sendHeartbeat: (position: number, playing: boolean, waiting?: boolean) => void;
   acknowledgeTransport: (revision: number) => void;
   sendBrowse: (context: string) => void;
   sendQueueAdd: (item: QueueItem) => void;
@@ -358,6 +376,7 @@ const INITIAL_STATE: SyncState = {
   seekSeq: 0,
   lastCommandAt: 0,
   positionAt: 0,
+  hostWaiting: false,
   authFailed: false,
   reconnectFailed: false,
   browseContext: null,
@@ -430,10 +449,11 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         playing = true,
         subtitleDrawn = false,
         quality = preferredQuality(),
+        waiting = false,
       ) => {
         send({
           type: "play", ratingKey, title, subtitles, hlsSessionId, position, sessionOffset,
-          audioStreamId, subtitleStreamId, playing, subtitleDrawn, quality,
+          audioStreamId, subtitleStreamId, playing, subtitleDrawn, quality, waiting,
         });
         setState((prev) => {
           // Restarting what is already running — a track change, or a seek that
@@ -468,16 +488,22 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             // "don't extrapolate". Mirrors the server's positionConfirmed.
             positionAt: restart ? prev.positionAt : 0,
             sessionOffset: sessionOffset ?? position ?? 0,
+            hostWaiting: waiting,
           };
         });
       },
       sendPause: (position: number) => {
         send({ type: "pause", position });
-        setState((prev) => ({ ...prev, playing: false, position, positionAt: Date.now() }));
+        setState((prev) => ({ ...prev, playing: false, position, positionAt: Date.now(), hostWaiting: false }));
       },
-      sendResume: (position: number) => {
-        send({ type: "resume", position });
-        setState((prev) => ({ ...prev, playing: true, position, positionAt: Date.now() }));
+      sendResume: (position: number, waiting?: boolean) => {
+        send({ type: "resume", position, waiting: waiting === true });
+        setState((prev) => ({
+          ...prev, playing: true, position, positionAt: Date.now(),
+          // Only the host knows about its own picture; a co-host's resume
+          // (which passes nothing) leaves the room's word on it alone.
+          hostWaiting: waiting ?? prev.hostWaiting,
+        }));
       },
       // Deliberately does not touch `playing`: a seek says where, not whether.
       sendSeek: (position: number) => {
@@ -505,8 +531,8 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         }));
       },
       acknowledgeTransport: (revision: number) => { appliedTransportRevision.current = revision; },
-      sendHeartbeat: (position: number, playing: boolean) => {
-        send({ type: "heartbeat", position, playing, transportRevision: appliedTransportRevision.current });
+      sendHeartbeat: (position: number, playing: boolean, waiting = false) => {
+        send({ type: "heartbeat", position, playing, waiting, transportRevision: appliedTransportRevision.current });
         // Kept locally too. The server excludes a sender from its own
         // broadcast, and the host is the only client that heartbeats — so the
         // host's copy of the room's position stopped updating the moment it
@@ -521,7 +547,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           const now = Date.now();
           const elapsed = prev.positionAt ? (now - prev.positionAt) / 1000 : 0;
           const stalled = looksStalled(position - prev.position, elapsed);
-          return { ...prev, position, playing, positionAt: stalled ? 0 : now };
+          return { ...prev, position, playing, positionAt: stalled ? 0 : now, hostWaiting: waiting };
         });
       },
       sendBrowse: (context: string) => send({ type: "browse", context }),
@@ -615,6 +641,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               playing: Boolean(msg.playing),
               position: (msg.position as number) ?? 0,
               positionAt: Date.now(),
+              hostWaiting: msg.waiting === true,
               hlsSessionId: (msg.hlsSessionId as string) || null,
               sessionOffset: (msg.sessionOffset as number) ?? 0,
               commandSeq: prev.commandSeq + 1,
@@ -710,7 +737,13 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               subtitles: Boolean(msg.subtitles),
               hlsSessionId: (msg.hlsSessionId as string) || null,
               sessionOffset: (msg.sessionOffset as number) ?? 0,
-              playing: true,
+              // An announcement isn't always "run it": a host that rebuilds while
+              // paused announces the new stream paused. Taken as playing
+              // regardless, it started everyone else's picture while the host's
+              // sat still. Absent, from an older server, it means playing.
+              playing: msg.playing !== false,
+              // The host's own picture hasn't started yet — see hostWaiting.
+              hostWaiting: msg.waiting === true,
               // Non-zero when the host resumed from history or restarted the
               // transcode at a seek target; 0 for a plain start.
               position: (msg.position as number) ?? 0,
@@ -735,6 +768,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               playing: false,
               position: (msg.position as number) ?? prev.position,
               positionAt: Date.now(),
+              hostWaiting: false,
               commandSeq: prev.commandSeq + 1,
             }));
             break;
@@ -744,6 +778,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               playing: true,
               position: (msg.position as number) ?? prev.position,
               positionAt: Date.now(),
+              hostWaiting: msg.waiting === true,
               commandSeq: prev.commandSeq + 1,
             }));
             break;
@@ -768,6 +803,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               sessionOffset: 0,
               playing: false,
               position: 0,
+              hostWaiting: false,
               commandSeq: prev.commandSeq + 1,
               browseContext: null,
               // `queue` is deliberately left alone — the server keeps it across
@@ -782,13 +818,17 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               const reported = (msg.position as number) ?? prev.position;
               const elapsed = prev.positionAt ? (now - prev.positionAt) / 1000 : 0;
               const stalled = looksStalled(reported - prev.position, elapsed);
+              const waiting = msg.waiting === true;
               return {
                 ...prev,
                 position: reported,
                 // 0 means "don't carry this forward" — see roomPositionNow and
                 // looksStalled. Every heartbeat decides again, so a stall costs
-                // the extrapolation only for as long as it lasts.
-                positionAt: stalled ? 0 : now,
+                // the extrapolation only for as long as it lasts. The first
+                // report after the host stops waiting runs from here, though it
+                // is bound to look stalled: the room stood still on purpose.
+                positionAt: waiting || (stalled && !prev.hostWaiting) ? 0 : now,
+                hostWaiting: waiting,
                 playing: msg.playing !== false,
                 // Self-heal: if our "what's playing" state was cleared (e.g. a stray
                 // stop during a host handoff), recover it from the heartbeat so the

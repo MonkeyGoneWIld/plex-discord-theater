@@ -307,6 +307,35 @@ const SHARE_COOLDOWN_MAX_S = 600;
 // Don't bother flushing slivers — avoids issuing a remove on every tick for a
 // second or two of overshoot.
 const BUFFER_TRIM_SLACK_S = 10;
+/**
+ * How much of a stream the browser's video buffer is asked to hold, in bytes.
+ *
+ * Chromium refuses appends past about 150 MB of video, and BACK_BUFFER_S and
+ * FORWARD_BUFFER_FLUSH_S were seconds: two minutes of a 26 Mbps Blu-ray is
+ * nearer 400 MB. Pirates of the Caribbean hit the limit sixteen seconds in;
+ * hls.js retried the same segment three times a second until the picture ran
+ * out, and stalled there. So the windows are worked out from the stream's
+ * bitrate — with room left for the next segment, which on a copied stream can
+ * be 40 MB. Holding less here costs nothing: the P2P engine fetches its own
+ * 150 seconds ahead into memory, and a segment already there is appended in
+ * no time.
+ */
+const MSE_FORWARD_BUDGET_BYTES = 80_000_000;
+const MSE_BACK_BUDGET_BYTES = 15_000_000;
+/** Peaks run well over a stream's average; the windows are sized for them. */
+const BITRATE_PEAK_FACTOR = 1.5;
+const MIN_FORWARD_BUFFER_S = 20;
+const MIN_BACK_BUFFER_S = 5;
+
+/** The buffer windows for a stream of `kbps`; the fixed ones when unknown. */
+function bufferWindowsFor(kbps: number | null | undefined): { forwardS: number; backS: number } {
+  if (!kbps || !(kbps > 0)) return { forwardS: FORWARD_BUFFER_FLUSH_S, backS: BACK_BUFFER_S };
+  const bytesPerS = (kbps * 1000 * BITRATE_PEAK_FACTOR) / 8;
+  return {
+    forwardS: Math.round(Math.min(FORWARD_BUFFER_FLUSH_S, Math.max(MIN_FORWARD_BUFFER_S, MSE_FORWARD_BUDGET_BYTES / bytesPerS))),
+    backS: Math.round(Math.min(BACK_BUFFER_S, Math.max(MIN_BACK_BUFFER_S, MSE_BACK_BUDGET_BYTES / bytesPerS))),
+  };
+}
 
 /** Put playback back to normal speed. Safe to call on anything, including null. */
 function resetPlaybackRate(video: HTMLVideoElement | null): void {
@@ -508,8 +537,9 @@ function trimMediaBuffer(hls: Hls, video: HTMLVideoElement): Record<string, unkn
   const { buffered } = video;
   if (buffered.length === 0) return null;
   const now = video.currentTime;
-  const backTarget = now - BACK_BUFFER_S;
-  const frontTarget = now + FORWARD_BUFFER_FLUSH_S;
+  // This stream's windows — see bufferWindowsFor.
+  const backTarget = now - (Number.isFinite(hls.config.backBufferLength) ? hls.config.backBufferLength : BACK_BUFFER_S);
+  const frontTarget = now + (hls.config.maxBufferLength || FORWARD_BUFFER_FLUSH_S);
   const start = buffered.start(0);
   const end = buffered.end(buffered.length - 1);
 
@@ -3069,6 +3099,20 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           const notes = readStreamNotes(data.sessionData);
           streamNotesRef.current = notes;
           setStreamNotes(notes);
+          // As much as the browser's buffer can hold of a stream this heavy.
+          const windows = bufferWindowsFor(notes?.kbps);
+          hls.config.maxBufferLength = windows.forwardS;
+          hls.config.maxMaxBufferLength = windows.forwardS;
+          hls.config.frontBufferFlushThreshold = windows.forwardS;
+          hls.config.backBufferLength = windows.backS;
+          if (windows.forwardS < FORWARD_BUFFER_FLUSH_S) {
+            logEvent("HLS", "buffer sized for this stream's bitrate", {
+              session: sessionId?.substring(0, 8),
+              kbps: notes?.kbps,
+              aheadS: windows.forwardS,
+              behindS: windows.backS,
+            });
+          }
           if (notes?.video === "transcode") {
             logEvent("HLS", "the server re-encoded this stream", {
               session: sessionId?.substring(0, 8),
@@ -3446,12 +3490,53 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // Non-fatal errors are the early warning: a run of fragment timeouts or
         // gap-jumps usually precedes the fatal one by several seconds, and
         // without them the log shows a stream dying with no run-up.
+        /**
+         * The browser's buffer refused a segment: make room for it.
+         *
+         * hls.js answers by retrying the same append three times a second and
+         * lowering its target, but frees nothing — and at the start of a stream
+         * there is nothing behind the playhead for its own eviction to take —
+         * so the retries go on until the picture runs out. What has already
+         * been watched goes at once, the rest as it is watched, and the
+         * forward target comes down to what evidently fits.
+         */
+        let bufferFullCount = 0;
+        const makeRoom = () => {
+          const v = videoRef.current;
+          if (!v) return;
+          bufferFullCount++;
+          const behind = v.currentTime - 1;
+          if (v.buffered.length > 0 && v.buffered.start(0) < behind - 0.5) {
+            hls.trigger(Hls.Events.BUFFER_FLUSHING, { startOffset: 0, endOffset: behind, type: null });
+          }
+          const ahead = bufferAheadSeconds(v);
+          const fits = Math.max(MIN_FORWARD_BUFFER_S / 2, Math.floor(ahead * 0.75));
+          if (fits < hls.config.maxBufferLength) {
+            hls.config.maxBufferLength = fits;
+            hls.config.maxMaxBufferLength = fits;
+            hls.config.frontBufferFlushThreshold = Math.max(fits, MIN_FORWARD_BUFFER_S);
+          }
+          if (bufferFullCount === 1) {
+            logWarn("HLS", "the browser's buffer is full, making room", {
+              session: sessionId?.substring(0, 8),
+              aheadS: Number(ahead.toFixed(1)),
+              nowHoldsS: hls.config.maxBufferLength,
+              ...snapshot(v),
+            });
+          }
+        };
+
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (data.fatal) return;
           // A copied stream's playlist marks everything before the session's
           // start as a gap, and hls.js reports each one it passes over. That is
           // the playlist working, not trouble.
           if (data.details === Hls.ErrorDetails.FRAG_GAP) return;
+          if (data.details === Hls.ErrorDetails.BUFFER_FULL_ERROR) {
+            makeRoom();
+            // Logged once above; hls.js raises it on every retry.
+            if (bufferFullCount > 1) return;
+          }
           const fragStart = data.frag?.start;
           // Past a known break is the blank tail; it has been said once.
           if (breakAtS !== null && typeof fragStart === "number" && fragStart >= breakAtS) return;

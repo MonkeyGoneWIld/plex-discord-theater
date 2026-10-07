@@ -2878,28 +2878,16 @@ function subtitlePrefetchOn(): boolean {
 }
 
 /**
- * How long after a stream starts its other subtitles are read ahead.
+ * At most this many of a title's subtitles are read ahead: the one someone
+ * watches, and others in its language.
  *
- * Long enough for the player's own ask for the one it draws to arrive first,
- * and for the stream to be well under way: each read is Plex going through the
- * whole file, and two of those in the first seconds of an episode slowed Plex
- * making its first segments — The Apothecary Diaries, 2s waits on segments
- * that otherwise take a tenth of that.
+ * Each read is Plex going through the whole file. Eight of them, every
+ * language a title had, kept the disks busy for minutes under whatever played
+ * next — Hot Fuzz's took 20-56 seconds apiece. The ones worth having ready are
+ * the alternatives to the subtitle being watched: full and signs-only, SDH and
+ * not, in the same language.
  */
-function subtitlePrefetchDelayMs(): number {
-  const n = Number(process.env.SUBTITLE_PREFETCH_DELAY_MS);
-  return Number.isFinite(n) && n >= 0 ? n : 30_000;
-}
-
-/**
- * At most this many of a title's subtitles inside the file are read ahead.
- *
- * Each read is Plex going through the whole file, and a film with every
- * language on the disc has dozens: reading them all would keep the disks busy
- * for an hour under whatever is playing. A series' episode has a handful,
- * which this covers.
- */
-const PREFETCH_EMBEDDED_MAX = 8;
+const SUBTITLE_READ_AHEAD_MAX = 3;
 
 /** Titles whose subtitles have been read ahead lately — all of them, or only
  *  the one somebody looking at the title would get: once is enough. */
@@ -2953,7 +2941,7 @@ async function prefetchSubtitles(
   stillWanted?: () => boolean,
 ): Promise<void> {
   if (!subtitlePrefetchOn()) return;
-  const key = `${ratingKey}:${mediaIndex}${scope === "first" ? `:first:${first}` : ""}`;
+  const key = `${ratingKey}:${mediaIndex}:${scope}:${first ?? "selected"}`;
   const last = subtitlesPrefetched.get(key);
   if (last !== undefined && Date.now() - last < SUBTITLE_PREFETCH_AGAIN_MS) return;
   subtitlesPrefetched.set(key, Date.now());
@@ -2968,8 +2956,19 @@ async function prefetchSubtitles(
   }
   if (!version) return;
 
-  const text = version.subtitleTracks.filter((t) => t.external && (scope === "all" || t.id === first));
-  for (const t of text.filter((t) => t.sidecar)) {
+  // The subtitle being watched (or about to be), and for "all" the others in
+  // its language — up to SUBTITLE_READ_AHEAD_MAX in all. Nothing without one:
+  // with subtitles off there is nothing to have ready.
+  const text = version.subtitleTracks.filter((t) => t.external);
+  const lead = text.find((t) => t.id === first) ?? (scope === "all" ? text.find((t) => t.selected) : undefined) ?? null;
+  if (!lead) return;
+  const lang = (t: { languageCode: string | null; language: string | null }) =>
+    (t.languageCode ?? t.language ?? "").toLowerCase();
+  const sameLanguage = scope === "all"
+    ? text.filter((t) => t !== lead && lang(t) !== "" && lang(t) === lang(lead))
+    : [];
+  const picked = [lead, ...sameLanguage].slice(0, SUBTITLE_READ_AHEAD_MAX);
+  for (const t of picked.filter((t) => t.sidecar)) {
     try {
       await loadSidecar(String(t.id));
     } catch {
@@ -2977,24 +2976,8 @@ async function prefetchSubtitles(
     }
   }
 
-  const embedded = text.filter((t) => !t.sidecar);
-  if (embedded.length === 0) return;
-  const lead = embedded.find((t) => t.id === first) ?? embedded.find((t) => t.selected) ?? null;
-  const lang = (t: { languageCode: string | null; language: string | null }) =>
-    (t.languageCode ?? t.language ?? "").toLowerCase();
-  const audioLangs = new Set(version.audioTracks.map(lang).filter(Boolean));
-  const rank = (t: typeof embedded[number]): number => {
-    if (t === lead) return 0;
-    if (lead && lang(t) && lang(t) === lang(lead)) return 1;
-    if (audioLangs.has(lang(t))) return 2;
-    if (/^(en|eng|english)$/.test(lang(t))) return 3;
-    return 4;
-  };
-  const ordered = embedded
-    .map((t, i) => ({ t, i }))
-    .sort((a, b) => rank(a.t) - rank(b.t) || a.i - b.i)
-    .slice(0, PREFETCH_EMBEDDED_MAX)
-    .map(({ t }) => t);
+  const ordered = picked.filter((t) => !t.sidecar);
+  if (ordered.length === 0) return;
 
   const fingerprint = subtitleFingerprint(version);
   const reads: ReadOptions[] = ordered.map((t) => {
@@ -3019,10 +3002,11 @@ async function prefetchSubtitles(
   const queued = prefetchEmbeddedSubtitles(reads, { soon: scope === "all", from, stillWanted });
   if (queued > 0) {
     logEvent("Subtitles", scope === "all"
-      ? "reading a title's subtitles ahead"
+      ? "reading a title's subtitles in one language ahead"
       : "reading ahead the subtitle a title being looked at would start with", {
-      ratingKey, queued, sidecars: text.length - embedded.length,
-      skipped: Math.max(0, embedded.length - PREFETCH_EMBEDDED_MAX),
+      ratingKey, queued, language: lang(lead) || "unknown",
+      sidecars: picked.length - ordered.length,
+      left: text.length - picked.length,
     });
   }
 }
@@ -3054,7 +3038,11 @@ router.post("/subtitles/prefetch", async (req: Request, res: Response) => {
   }
   // Who is browsing, so their next page replaces this one's guess.
   const from = range === "first" ? `user:${sessionUserId(req) ?? "?"}` : undefined;
-  void prefetchSubtitles(ratingKey, index, firstId, range, from).catch((err) =>
+  // For the title someone is watching: not worth reading once it stops.
+  const stillWanted = (req.body as Record<string, unknown>)?.watching === true && titleIsStreaming(ratingKey)
+    ? () => titleIsStreaming(ratingKey)
+    : undefined;
+  void prefetchSubtitles(ratingKey, index, firstId, range, from, stillWanted).catch((err) =>
     console.warn("[Subtitles] couldn't read ahead:", err));
   res.json({ ok: true, queued: true });
 });
@@ -3098,25 +3086,11 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
   if (ratingKey) {
     const requested = Number(req.query.mediaIndex);
     const mediaIndex = Number.isInteger(requested) && requested >= 0 ? requested : await defaultMediaIndex(ratingKey);
-    // Whatever this one is, its title's others are read next, so that
-    // switching to one of them finds it ready. Behind this one: it is begun
-    // below, and the queue waits for reads already going. Not at once, though:
-    // this is asked as a stream starts, and the stream comes first.
-    // Only while the title is still playing: left within the delay, or before
-    // its turn in the queue, there is nothing to switch to.
-    const readTheRest = () => {
-      const streaming = titleIsStreaming(ratingKey);
-      const watched = () => !streaming || titleIsStreaming(ratingKey);
-      setTimeout(() => {
-        if (!watched()) return;
-        void prefetchSubtitles(ratingKey, mediaIndex, Number(streamId), "all", undefined, watched).catch((err) =>
-          console.warn("[Subtitles] couldn't read ahead:", err));
-      }, subtitlePrefetchDelayMs()).unref?.();
-    };
+    // Only this one. The title's others in its language are read once the
+    // player has a buffer to spare for it, and asks (readSameLanguageAhead).
     const track = await subtitleTrackOf(ratingKey, mediaIndex, Number(streamId));
     if (track?.external && track.sidecar === false) {
       const sub = await embeddedSubtitle(ratingKey, mediaIndex, streamId, track.fingerprint);
-      readTheRest();
       if (sub.state === "unreadable") {
         res.status(404).json({ error: "Subtitle not available" });
         return;
@@ -3125,7 +3099,6 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
       res.json({ cues: sub.cues, complete: sub.state === "ready" });
       return;
     }
-    readTheRest();
   }
 
   try {
@@ -4813,17 +4786,8 @@ router.get(
       const manifest = await promise;
       res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
       res.send(manifest);
-      // Its subtitles, read ahead so switching to one is instant. A little
-      // later, so the one the player draws — which it asks for as it starts —
-      // is read first.
-      if (subtitlePrefetchOn()) {
-        const watched = () => titleIsStreaming(ratingKey);
-        setTimeout(() => {
-          if (!watched()) return;
-          void prefetchSubtitles(ratingKey, mediaIndex, null, "all", undefined, watched).catch((err) =>
-            console.warn("[Subtitles] couldn't read ahead:", err));
-        }, subtitlePrefetchDelayMs()).unref?.();
-      }
+      // Its other subtitles aren't read here: the player asks for those in the
+      // language it draws, once its buffer can spare Plex the time.
     } catch (err) {
       console.error("HLS start error:", err);
       res.status(502).json({ error: "Failed to start HLS session" });

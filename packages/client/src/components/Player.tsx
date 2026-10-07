@@ -21,7 +21,7 @@ import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { isHevcCodec, markHevcUnplayable } from "../lib/hevc";
 import { loadVolume, saveVolume, VOLUME_CHOSEN_EVENT } from "../lib/volume";
-import { readSubtitlesAhead } from "../lib/subtitleReadAhead";
+import { readSameLanguageAhead, readSubtitlesAhead } from "../lib/subtitleReadAhead";
 import {
   beginQualitySession,
   carryQualityTo,
@@ -214,6 +214,17 @@ const REBUFFER_HEALTHY_BUFFER_S = 30;
  * enough to leave Plex the minutes a big file takes.
  */
 const NEXT_EPISODE_READ_AHEAD_AT = 0.75;
+/**
+ * A buffer in good enough shape to spare Plex for reading subtitles out of a
+ * file — the title's other ones in the same language, or the next episode's:
+ * this far ahead (or three quarters of the stream's whole window, for a heavy
+ * one held to less — see bufferWindowsFor), for DECENT_BUFFER_FOR_MS, with no
+ * stall for DECENT_BUFFER_AFTER_STALL_MS. Each read is Plex going through the
+ * whole film, and doing it while the stream struggles made the struggle worse.
+ */
+const DECENT_BUFFER_S = 30;
+const DECENT_BUFFER_FOR_MS = 10_000;
+const DECENT_BUFFER_AFTER_STALL_MS = 30_000;
 
 /** Clean playback for this long means the next media error starts a fresh budget. */
 const MEDIA_ERROR_RESET_MS = 60_000;
@@ -2356,18 +2367,53 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   }, []);
 
   /**
-   * Past three quarters of an episode, read the next one's subtitles ahead, so
-   * moving on to it doesn't start with Plex reading through the file. Matched
-   * to the subtitle being watched now, which goes first. Asked for once per
-   * episode, by whoever could press Next.
+   * Subtitles read ahead, once this player's buffer is in good shape (see
+   * DECENT_BUFFER_S) and not before:
+   *
+   *   - this title's other subtitles in the same language as the one drawn
+   *     here, up to three in all, so switching between them is instant;
+   *   - past three quarters of an episode, the next one's — the subtitle that
+   *     would be watched there and the others in its language — so moving on
+   *     doesn't start with Plex reading through the file. Once per episode, by
+   *     whoever could press Next.
    */
   const readAheadForRef = useRef<string | null>(null);
+  const sameLanguageReadForRef = useRef<string | null>(null);
+  const decentSinceRef = useRef(0);
+  const drawnSubtitleIdRef = useRef<number | null>(null);
+  drawnSubtitleIdRef.current = drawnSubtitleId;
+  const readAheadMediaIndexRef = useRef(effectiveMediaIndex);
+  readAheadMediaIndexRef.current = effectiveMediaIndex;
   useEffect(() => {
     const timer = setInterval(() => {
-      const next = nextEpisodeRef.current;
       const video = videoRef.current;
+      if (!video) return;
+      // Whether the buffer is in good shape, and has been for a while. Paused,
+      // it stays as it was: nothing drains.
+      if (!video.paused) {
+        const window = hlsRef.current?.config.maxBufferLength || FORWARD_BUFFER_FLUSH_S;
+        const healthy = bufferAheadSeconds(video) >= Math.min(DECENT_BUFFER_S, window * 0.75)
+          && Date.now() - lastStarvedAtRef.current >= DECENT_BUFFER_AFTER_STALL_MS;
+        if (!healthy) decentSinceRef.current = 0;
+        else if (!decentSinceRef.current) decentSinceRef.current = Date.now();
+      }
+      if (!decentSinceRef.current || Date.now() - decentSinceRef.current < DECENT_BUFFER_FOR_MS) return;
+
+      const drawn = drawnSubtitleIdRef.current;
+      const here = itemRef.current.ratingKey;
+      if (drawn !== null && sameLanguageReadForRef.current !== `${here}:${drawn}`) {
+        sameLanguageReadForRef.current = `${here}:${drawn}`;
+        logEvent("Subtitles", "buffer in good shape, reading this title's other subtitles in the same language", {
+          ratingKey: here,
+          streamId: drawn,
+          bufAheadS: Math.round(bufferAheadSeconds(video)),
+        });
+        readSameLanguageAhead(here, drawn, readAheadMediaIndexRef.current);
+      }
+
+      const next = nextEpisodeRef.current;
       const runtime = runtimeRef.current;
-      if (!next || !video || !canControlRef.current || !(runtime > 0)) return;
+      if (!next || !canControlRef.current || !(runtime > 0)) return;
       if (readAheadForRef.current === next.ratingKey) return;
       if (video.currentTime < runtime * NEXT_EPISODE_READ_AHEAD_AT) return;
       readAheadForRef.current = next.ratingKey;
@@ -2381,7 +2427,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         ...(current?.subtitle && { pref: current.subtitle }),
         ...(current?.audio && { audio: current.audio }),
       });
-    }, 5000);
+    }, 2500);
     return () => clearInterval(timer);
   }, []);
 

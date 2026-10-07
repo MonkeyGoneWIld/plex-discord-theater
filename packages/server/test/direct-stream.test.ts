@@ -184,7 +184,7 @@ let readsInFlight = 0;
 let mostReadsInFlight = 0;
 let sidecarFetches = 0;
 /** Titles 930-933, for the order reads ahead are done in: their subtitles. */
-const aheadTitles: Record<string, number[]> = { "930": [51, 52], "931": [61], "932": [71], "933": [81] };
+const aheadTitles: Record<string, number[]> = { "930": [51, 52], "931": [61], "932": [71], "933": [81], "934": [91, 92, 93, 94] };
 const aheadIds = new Set(Object.values(aheadTitles).flat().map(String));
 /** The subtitles Plex was asked to read, in order. */
 const readOrder: string[] = [];
@@ -670,20 +670,31 @@ console.log("\n— through the routes —");
   const readsBefore = subtitleReads;
   const firstAsk = await fetch(`${origin}/api/plex/subtitles/31?ratingKey=910`);
   check("the one asked for is answered as before", firstAsk.status, 200);
-  await until(() => ["31", "32", "33"].every((id) => embeddedSubs.embeddedSubtitleState(id)?.state === "ready"), 10_000);
-  check("asking for one reads the title's others too, each once", subtitleReads - readsBefore, 3);
+  await until(() => embeddedSubs.embeddedSubtitleState("31")?.state === "ready", 10_000);
+  await new Promise((r) => setTimeout(r, 200));
+  check("asking for one reads that one and nothing else: the rest wait for the player",
+    [subtitleReads - readsBefore, embeddedSubs.embeddedSubtitleState("33")], [1, null]);
+  // The player, its buffer in good shape: the others in the language it draws.
+  const rest = await fetch(`${origin}/api/plex/subtitles/prefetch`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ratingKey: "910", first: 31, scope: "all", watching: true }),
+  });
+  check("the player asking for the rest is answered at once", rest.status, 200);
+  await until(() => embeddedSubs.embeddedSubtitleState("33")?.state === "ready", 10_000);
+  await new Promise((r) => setTimeout(r, 200));
+  check("then only the other English one is read: not the Spanish, not the German file beside it",
+    [subtitleReads - readsBefore, embeddedSubs.embeddedSubtitleState("32"), sidecarFetches], [2, null, 0]);
   check("one at a time: each is Plex going through the whole film", mostReadsInFlight, 1);
-  check("the file beside it is fetched as well", sidecarFetches, 1);
   check("the item is left on the subtitle that was asked for, not the last one read ahead", selectedSubtitle, "31");
   began = Date.now();
-  const switched = await fetch(`${origin}/api/plex/subtitles/32?ratingKey=910`);
+  const switched = await fetch(`${origin}/api/plex/subtitles/33?ratingKey=910`);
   const switchedBody = (await switched.json()) as { cues: unknown[]; complete?: boolean };
-  check("so switching to another is answered at once, complete",
+  check("so switching to it is answered at once, complete",
     [switchedBody.cues.length, switchedBody.complete, Date.now() - began < 1000], [2, true, true]);
-  check("and reads nothing more", subtitleReads - readsBefore, 3);
+  check("and reads nothing more", subtitleReads - readsBefore, 2);
   const keptRaw = new Database(path.join(process.env.THUMB_CACHE_DIR!, "subtitles.sqlite"), { readonly: true });
   check("what Plex sent is kept with the cues, for a better parser to read again",
-    keptRaw.prepare("SELECT raw IS NOT NULL AS raw, fingerprint, parser_version AS v FROM embedded_subtitles WHERE stream_id = '32'").get(),
+    keptRaw.prepare("SELECT raw IS NOT NULL AS raw, fingerprint, parser_version AS v FROM embedded_subtitles WHERE stream_id = '33'").get(),
     { raw: 1, fingerprint: "1:1000", v: 2 });
   keptRaw.close();
 
@@ -703,8 +714,15 @@ console.log("\n— through the routes —");
   // Another episode coming up, after the browsing.
   await ahead({ ratingKey: "933", scope: "all" });
   await until(() => ["51", "52", "71", "81"].every((id) => embeddedSubs.embeddedSubtitleState(id)?.state === "ready"), 15_000);
-  check("the one the viewer would start on first, everything wanted soon before a guess, and only the latest guess",
-    readOrder, ["52", "51", "81", "71"]);
+  check("the one the viewer would start on first, everything wanted soon before a guess, only the latest guess — and nothing for an episode no subtitle was picked for",
+    readOrder, ["52", "51", "71"]);
+  check("four English ones: three are read, the one watched first", await (async () => {
+    readOrder.length = 0;
+    await ahead({ ratingKey: "934", first: 93, scope: "all" });
+    await until(() => ["91", "92", "93"].every((id) => embeddedSubs.embeddedSubtitleState(id)?.state === "ready"), 15_000);
+    await pause(200);
+    return [readOrder, embeddedSubs.embeddedSubtitleState("94")];
+  })(), [["93", "91", "92"], null]);
   check("the title browsed past isn't read at all", embeddedSubs.embeddedSubtitleState("61"), null);
   check("a title someone is looking at without a subtitle chosen reads nothing",
     await (await ahead({ ratingKey: "931", scope: "first" })).json(), { ok: true, queued: false });

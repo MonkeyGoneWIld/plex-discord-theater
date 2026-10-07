@@ -17,7 +17,8 @@ import {
  *   "first" — a title someone is looking at: only the subtitle they would start
  *             on, read when nothing more pressing is, and dropped if they move
  *             on to another title first.
- *   "all"   — the episode coming up next: every subtitle it has, soon.
+ *   "all"   — the episode coming up next: that subtitle and the others in its
+ *             language, up to three, soon.
  *
  * The subtitle is the one this viewer would get — their saved choice, matched
  * against the title's own tracks, with the audio they would get. Nothing is
@@ -42,7 +43,9 @@ export async function readSubtitlesAhead(
       opts.pref ?? own.subtitle ?? startingSubtitlePref(),
       audio,
     );
-    if (scope === "first" && !track?.external) return;
+    // Nothing to read ahead for a viewer who'd start with subtitles off, or on
+    // a picture subtitle (burned in, not read out).
+    if (!track?.external) return;
     await apiPost("/api/plex/subtitles/prefetch", {
       ratingKey,
       ...(opts.mediaIndex != null && { mediaIndex: opts.mediaIndex }),
@@ -62,5 +65,22 @@ export function readSubtitleAhead(ratingKey: string, streamId: number, mediaInde
     ...(mediaIndex != null && { mediaIndex }),
     first: streamId,
     scope: "first",
+  }).catch(() => { /* A head start, nothing more. */ });
+}
+
+/**
+ * The title being watched: the other subtitles in the same language as the
+ * one this player draws, up to three in all — so switching between them finds
+ * them ready. Asked once this player's buffer is in good shape: each is Plex
+ * going through the whole film, which is no time to be doing it while the
+ * stream is struggling. Dropped by the server if the title stops first.
+ */
+export function readSameLanguageAhead(ratingKey: string, streamId: number, mediaIndex?: number): void {
+  apiPost("/api/plex/subtitles/prefetch", {
+    ratingKey,
+    ...(mediaIndex != null && { mediaIndex }),
+    first: streamId,
+    scope: "all",
+    watching: true,
   }).catch(() => { /* A head start, nothing more. */ });
 }

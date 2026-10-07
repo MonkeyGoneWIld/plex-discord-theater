@@ -218,7 +218,7 @@ const NEXT_EPISODE_READ_AHEAD_AT = 0.75;
  * A buffer in good enough shape to spare Plex for reading subtitles out of a
  * file — the title's other ones in the same language, or the next episode's:
  * this far ahead (or three quarters of the stream's whole window, for a heavy
- * one held to less — see bufferWindowsFor), for DECENT_BUFFER_FOR_MS, with no
+ * one held to less — see makeRoom), for DECENT_BUFFER_FOR_MS, with no
  * stall for DECENT_BUFFER_AFTER_STALL_MS. Each read is Plex going through the
  * whole film, and doing it while the stream struggles made the struggle worse.
  */
@@ -319,33 +319,27 @@ const SHARE_COOLDOWN_MAX_S = 600;
 // second or two of overshoot.
 const BUFFER_TRIM_SLACK_S = 10;
 /**
- * How much of a stream the browser's video buffer is asked to hold, in bytes.
- *
- * Chromium refuses appends past about 150 MB of video, and BACK_BUFFER_S and
- * FORWARD_BUFFER_FLUSH_S were seconds: two minutes of a 26 Mbps Blu-ray is
- * nearer 400 MB. Pirates of the Caribbean hit the limit sixteen seconds in;
- * hls.js retried the same segment three times a second until the picture ran
- * out, and stalled there. So the windows are worked out from the stream's
- * bitrate — with room left for the next segment, which on a copied stream can
- * be 40 MB. Holding less here costs nothing: the P2P engine fetches its own
- * 150 seconds ahead into memory, and a segment already there is appended in
- * no time.
+ * How much has been watched the browser's buffer keeps, in bytes rather than
+ * seconds: the buffer has a size limit, and what is behind the playhead takes
+ * from what can be ahead of it — thirty seconds of a 30 Mbps Blu-ray is over
+ * 100 MB. A light stream keeps its thirty; a heavy one, a few seconds.
  */
-const MSE_FORWARD_BUDGET_BYTES = 80_000_000;
 const MSE_BACK_BUDGET_BYTES = 15_000_000;
-/** Peaks run well over a stream's average; the windows are sized for them. */
+/** Peaks run well over a stream's average; the back buffer is sized for them. */
 const BITRATE_PEAK_FACTOR = 1.5;
-const MIN_FORWARD_BUFFER_S = 20;
 const MIN_BACK_BUFFER_S = 5;
+/**
+ * The least the forward buffer is held to when the browser refuses more of a
+ * stream. Only a stream that fills the browser's buffer is ever held below
+ * FORWARD_BUFFER_FLUSH_S — see makeRoom.
+ */
+const MIN_FORWARD_BUFFER_S = 30;
 
-/** The buffer windows for a stream of `kbps`; the fixed ones when unknown. */
-function bufferWindowsFor(kbps: number | null | undefined): { forwardS: number; backS: number } {
-  if (!kbps || !(kbps > 0)) return { forwardS: FORWARD_BUFFER_FLUSH_S, backS: BACK_BUFFER_S };
+/** The back buffer for a stream of `kbps`; the fixed one when unknown. */
+function backBufferFor(kbps: number | null | undefined): number {
+  if (!kbps || !(kbps > 0)) return BACK_BUFFER_S;
   const bytesPerS = (kbps * 1000 * BITRATE_PEAK_FACTOR) / 8;
-  return {
-    forwardS: Math.round(Math.min(FORWARD_BUFFER_FLUSH_S, Math.max(MIN_FORWARD_BUFFER_S, MSE_FORWARD_BUDGET_BYTES / bytesPerS))),
-    backS: Math.round(Math.min(BACK_BUFFER_S, Math.max(MIN_BACK_BUFFER_S, MSE_BACK_BUDGET_BYTES / bytesPerS))),
-  };
+  return Math.round(Math.min(BACK_BUFFER_S, Math.max(MIN_BACK_BUFFER_S, MSE_BACK_BUDGET_BYTES / bytesPerS)));
 }
 
 /** Put playback back to normal speed. Safe to call on anything, including null. */
@@ -548,7 +542,7 @@ function trimMediaBuffer(hls: Hls, video: HTMLVideoElement): Record<string, unkn
   const { buffered } = video;
   if (buffered.length === 0) return null;
   const now = video.currentTime;
-  // This stream's windows — see bufferWindowsFor.
+  // This stream's windows — see backBufferFor, and makeRoom for the forward one.
   const backTarget = now - (Number.isFinite(hls.config.backBufferLength) ? hls.config.backBufferLength : BACK_BUFFER_S);
   const frontTarget = now + (hls.config.maxBufferLength || FORWARD_BUFFER_FLUSH_S);
   const start = buffered.start(0);
@@ -3145,20 +3139,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           const notes = readStreamNotes(data.sessionData);
           streamNotesRef.current = notes;
           setStreamNotes(notes);
-          // As much as the browser's buffer can hold of a stream this heavy.
-          const windows = bufferWindowsFor(notes?.kbps);
-          hls.config.maxBufferLength = windows.forwardS;
-          hls.config.maxMaxBufferLength = windows.forwardS;
-          hls.config.frontBufferFlushThreshold = windows.forwardS;
-          hls.config.backBufferLength = windows.backS;
-          if (windows.forwardS < FORWARD_BUFFER_FLUSH_S) {
-            logEvent("HLS", "buffer sized for this stream's bitrate", {
-              session: sessionId?.substring(0, 8),
-              kbps: notes?.kbps,
-              aheadS: windows.forwardS,
-              behindS: windows.backS,
-            });
-          }
+          // What has been watched takes room from what is ahead; a heavy
+          // stream keeps less of it.
+          hls.config.backBufferLength = backBufferFor(notes?.kbps);
           if (notes?.video === "transcode") {
             logEvent("HLS", "the server re-encoded this stream", {
               session: sessionId?.substring(0, 8),
@@ -3540,13 +3523,26 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
          * The browser's buffer refused a segment: make room for it.
          *
          * hls.js answers by retrying the same append three times a second and
-         * lowering its target, but frees nothing — and at the start of a stream
+         * halving its target, but frees nothing — and at the start of a stream
          * there is nothing behind the playhead for its own eviction to take —
-         * so the retries go on until the picture runs out. What has already
-         * been watched goes at once, the rest as it is watched, and the
-         * forward target comes down to what evidently fits.
+         * so the retries went on until the picture ran out. What has already
+         * been watched goes at once, the rest as it is watched.
+         *
+         * Then the forward target, two ways. Refused with a good deal ahead,
+         * this stream evidently fills the browser's buffer at about that much,
+         * and is held a little under it from then on. Refused with little
+         * ahead, it was one outsized segment — a copied segment can run to
+         * 30 seconds and 100 MB — and the target is squeezed only until that
+         * one is in, then goes back to what it was.
          */
         let bufferFullCount = 0;
+        let fitsS = FORWARD_BUFFER_FLUSH_S;
+        let squeezedForOne = false;
+        const holdAhead = (s: number) => {
+          hls.config.maxBufferLength = s;
+          hls.config.maxMaxBufferLength = s;
+          hls.config.frontBufferFlushThreshold = Math.max(s, MIN_FORWARD_BUFFER_S);
+        };
         const makeRoom = () => {
           const v = videoRef.current;
           if (!v) return;
@@ -3556,11 +3552,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             hls.trigger(Hls.Events.BUFFER_FLUSHING, { startOffset: 0, endOffset: behind, type: null });
           }
           const ahead = bufferAheadSeconds(v);
-          const fits = Math.max(MIN_FORWARD_BUFFER_S / 2, Math.floor(ahead * 0.75));
-          if (fits < hls.config.maxBufferLength) {
-            hls.config.maxBufferLength = fits;
-            hls.config.maxMaxBufferLength = fits;
-            hls.config.frontBufferFlushThreshold = Math.max(fits, MIN_FORWARD_BUFFER_S);
+          if (ahead >= MIN_FORWARD_BUFFER_S) {
+            fitsS = Math.min(fitsS, Math.max(MIN_FORWARD_BUFFER_S, Math.floor(ahead * 0.9)));
+            squeezedForOne = false;
+            holdAhead(fitsS);
+          } else {
+            squeezedForOne = true;
+            holdAhead(Math.max(5, Math.floor(ahead * 0.75)));
           }
           if (bufferFullCount === 1) {
             logWarn("HLS", "the browser's buffer is full, making room", {
@@ -3571,6 +3569,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             });
           }
         };
+        // The outsized segment is in: back to the stream's own target. (Also
+        // undoes hls.js's halving, which nothing here asked for.)
+        hls.on(Hls.Events.FRAG_BUFFERED, () => {
+          if (!squeezedForOne) return;
+          squeezedForOne = false;
+          holdAhead(fitsS);
+        });
 
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (data.fatal) return;

@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 (globalThis as unknown as { window: unknown }).window = globalThis;
-const { installSharing, setSharing, URGENT_S } = await import("../src/lib/p2pSharing");
+const { installSharing, setSharing, URGENT_S, PEER_GRACE_MS } = await import("../src/lib/p2pSharing");
 
 let pass = 0;
 let fail = 0;
@@ -19,7 +19,7 @@ function check(name: string, actual: unknown, expected: unknown) {
   else { fail++; console.log(`  FAIL ${name}\n         expected ${e}\n         actual   ${a}`); }
 }
 
-type Seg = { id: string; startTime: number };
+type Seg = { id: string; runtimeId?: string; startTime: number };
 type Req = { status: string; downloadSource?: string; failedAttempts: { httpAttemptsCount: number }; abortFromProcessQueue: () => void };
 
 /** A loader as the library has it, reduced to what its queue touches. */
@@ -87,24 +87,24 @@ function makeLoader(opts: { position: number; segments: Seg[]; peerHas: string[]
   return { loader, engine, actions };
 }
 
-// Playing from 100s: 100 and 105 are about to play; the rest are further out.
-const segments = [100, 105, 120, 125, 130, 135].map((t) => ({ id: `s${t}`, startTime: t }));
+// Playing from 100s: 100 and 105 are about to play; the rest, 50s+ on, are not.
+const segments = [100, 105, 150, 155, 160, 165].map((t) => ({ id: `s${t}`, runtimeId: `s${t}`, startTime: t }));
 
 console.log("— dividing the stream —");
 {
-  const { loader, engine, actions } = makeLoader({ position: 100, segments, peerHas: ["s125"], peerLoading: ["s120"] });
+  const { loader, engine, actions } = makeLoader({ position: 100, segments, peerHas: ["s155"], peerLoading: ["s150"] });
   const handle = installSharing(engine);
   check("the library is changed once it has a loader", handle !== null, true);
   setSharing(handle!, true);
   loader.processQueue();
   check("what is about to play comes from the bot; what another player has comes from them; what they're fetching is left to them",
-    actions, ["http s100", "http s105", "p2p s125"]);
+    actions, ["http s100", "http s105", "p2p s155"]);
 }
 {
-  const { loader, engine, actions } = makeLoader({ position: 100, segments: segments.slice(2), peerHas: [], peerLoading: ["s120"] });
+  const { loader, engine, actions } = makeLoader({ position: 100, segments: segments.slice(2), peerHas: [], peerLoading: ["s150"] });
   setSharing(installSharing(engine)!, true);
   loader.processQueue();
-  check("this player's downloads go to the segments nobody is fetching", actions, ["http s125", "http s130"]);
+  check("this player's downloads go to the segments nobody is fetching", actions, ["http s155", "http s160"]);
 }
 {
   const { loader, engine, actions } = makeLoader({ position: 100, segments, peerHas: ["s105"], peerLoading: ["s100"] });
@@ -113,34 +113,53 @@ console.log("— dividing the stream —");
   check(`within ${URGENT_S}s of playing, the bot, whoever else has it`, actions.slice(0, 2), ["http s100", "http s105"]);
 }
 {
-  const { loader, engine, actions } = makeLoader({ position: 100, segments: segments.slice(0, 1).concat(segments.slice(4)), peerHas: [], peerLoading: [], loading: { s100: "p2p", s130: "p2p" } });
+  const { loader, engine, actions } = makeLoader({ position: 100, segments: segments.slice(0, 1).concat(segments.slice(4)), peerHas: [], peerLoading: [], loading: { s100: "p2p", s160: "p2p" } });
   setSharing(installSharing(engine)!, true);
   loader.processQueue();
   check("a segment coming from another player is taken over by the bot once it's about to play, and not before",
-    actions, ["abort s100", "http s100", "http s135"]);
+    actions, ["abort s100", "http s100", "http s165"]);
 }
 {
-  const { loader, engine, actions } = makeLoader({ position: 100, segments, peerHas: ["s125"], peerLoading: ["s120"] });
+  const { loader, engine, actions } = makeLoader({ position: 100, segments, peerHas: ["s155"], peerLoading: ["s150"] });
   setSharing(installSharing(engine)!, false);
   loader.processQueue();
-  check("not sharing: the library's own choices, untouched", actions, ["http s100", "http s105", "p2p s125"]);
+  check("not sharing: the library's own choices, untouched", actions, ["http s100", "http s105", "p2p s155"]);
   check("which fetch the segment another player is fetching too, given a free slot",
     (() => {
-      const second = makeLoader({ position: 100, segments: segments.slice(2), peerHas: [], peerLoading: ["s120"] });
+      const second = makeLoader({ position: 100, segments: segments.slice(2), peerHas: [], peerLoading: ["s150"] });
       setSharing(installSharing(second.engine)!, false);
       second.loader.processQueue();
       return second.actions;
-    })(), ["http s120", "http s125"]);
+    })(), ["http s150", "http s155"]);
 }
 
 {
   // The element still at 0:00 while a stream started at 14:27 loads: by the
   // clock everything is far off, but the player is waiting on this one now.
-  const far = [867, 870, 873].map((t) => ({ id: `s${t}`, startTime: t }));
+  const far = [867, 870, 873].map((t) => ({ id: `s${t}`, runtimeId: `s${t}`, startTime: t }));
   const { loader, engine, actions } = makeLoader({ position: 0, segments: far, peerHas: [], peerLoading: ["s867", "s870"], waitingOn: "s867" });
   setSharing(installSharing(engine)!, true);
   loader.processQueue();
   check("the segment the player is waiting on comes from the bot, whatever the clock says", actions, ["http s867", "http s873"]);
+}
+{
+  // Another player is fetching 150 and is slow about it.
+  const realNow = Date.now;
+  let now = 1_000_000;
+  Date.now = () => now;
+  try {
+    const { loader, engine, actions } = makeLoader({ position: 100, segments: segments.slice(2, 3), peerHas: [], peerLoading: ["s150"] });
+    setSharing(installSharing(engine)!, true);
+    loader.processQueue();
+    now += PEER_GRACE_MS - 1000;
+    loader.processQueue();
+    check("a segment another player is fetching is left to them for a while", actions, []);
+    now += 2000;
+    loader.processQueue();
+    check(`and fetched from the bot after ${PEER_GRACE_MS / 1000}s of waiting on them`, actions, ["http s150"]);
+  } finally {
+    Date.now = realNow;
+  }
 }
 
 console.log("\n— the installed library —");

@@ -6,7 +6,7 @@ import {
   type Credit, type HistoryEntry, type PlexItem, type PlexMeta, type SeerrSeason,
 } from "../lib/api";
 import {
-  loadAudioPref, loadSubtitlePref, matchAudioTrack, startingSubtitle,
+  loadAudioPref, loadSubtitlePref, matchAudioTrack, startingSubtitle, titleTrackPrefs,
   saveAudioPref, saveSubtitlePref,
 } from "../lib/trackPrefs";
 import { formatTimecode } from "../lib/format";
@@ -327,12 +327,14 @@ export function ShowDetail({
       // resolves to something; subtitles resolve to nothing when the remembered
       // kind is absent, which is the "off" this app defaults to.
       const audioTracks = version.audioTracks ?? [];
+      // What was picked for this show comes first, whatever Settings say.
+      const own = titleTrackPrefs(episodeMeta);
       const audio =
-        matchAudioTrack(audioTracks, loadAudioPref())
+        matchAudioTrack(audioTracks, own.audio ?? loadAudioPref())
         ?? audioTracks.find((t) => t.selected)
         ?? audioTracks[0]
         ?? null;
-      const subtitle = startingSubtitle(version.subtitleTracks ?? [], loadSubtitlePref(), audio);
+      const subtitle = startingSubtitle(version.subtitleTracks ?? [], own.subtitle ?? loadSubtitlePref(), audio);
 
       // What you pressed play on is what you want to keep watching — the same
       // reasoning as the movie page, which records the pair on play rather than

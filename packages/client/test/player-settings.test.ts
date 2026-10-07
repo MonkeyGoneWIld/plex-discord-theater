@@ -213,6 +213,41 @@ console.log("\n— subtitles only for foreign audio —");
   prefs.setSubtitlesOnlyForForeignAudio(false);
 }
 
+console.log("\n— tracks picked for a title —");
+{
+  const english = { id: 1, title: "English (SRT)", language: "English", languageCode: "eng", codec: "srt", selected: false };
+  const signs = { id: 3, title: "English Signs (ASS)", language: "English", languageCode: "eng", codec: "ass", selected: false };
+  const engAudio = { id: 21, title: "English (AC3 5.1)", language: "English", languageCode: "eng", selected: false };
+  const film = { ratingKey: "20509", type: "movie" };
+  const episode4 = { ratingKey: "55257", type: "episode", grandparentRatingKey: "55227" };
+  const episode5 = { ratingKey: "55258", type: "episode", grandparentRatingKey: "55227" };
+
+  prefs.chooseSubtitleLanguage("off");
+  check("nothing picked for a title: nothing to go by", prefs.titleTrackPrefs(film), { audio: null, subtitle: null });
+  prefs.saveSubtitlePref(signs as never);
+  prefs.rememberTitleTracks(film, { subtitle: signs as never });
+  check("subtitles turned off in Settings don't stop a pick for one film being kept",
+    prefs.titleTrackPrefs(film).subtitle?.title, "English Signs (ASS)");
+  check("and that film starts on it", prefs.matchSubtitleTrack([english, signs] as never, prefs.titleTrackPrefs(film).subtitle)?.id, 3);
+  check("while Settings stay as they were for everything else", prefs.loadSubtitlePref()?.off, true);
+
+  prefs.rememberTitleTracks(episode4, { subtitle: null });
+  check("a show's episodes share one choice — None, here", prefs.titleTrackPrefs(episode5).subtitle?.off, true);
+  prefs.rememberTitleTracks(episode5, { audio: engAudio as never });
+  check("picking the audio leaves the subtitle choice alone",
+    [prefs.titleTrackPrefs(episode4).audio?.language, prefs.titleTrackPrefs(episode4).subtitle?.off], ["English", true]);
+
+  prefs.chooseSubtitleLanguage({ code: "en", name: "English" });
+  prefs.setSubtitlesOnlyForForeignAudio(true);
+  prefs.rememberTitleTracks(film, { subtitle: english as never });
+  check("English subtitles picked for an English film stay on, whatever the foreign-audio rule says",
+    prefs.startingSubtitle([english] as never, prefs.titleTrackPrefs(film).subtitle, engAudio as never)?.id, 1);
+  check("while the rule still applies to titles nobody picked for",
+    prefs.startingSubtitle([english] as never, prefs.loadSubtitlePref(), engAudio as never), null);
+  prefs.setSubtitlesOnlyForForeignAudio(false);
+  prefs.chooseSubtitleLanguage("last");
+}
+
 console.log("\n— resetting saved settings —");
 {
   store.set("pdt:subtitlePref", JSON.stringify({ off: false, languageCode: "eng" }));
@@ -224,7 +259,8 @@ console.log("\n— resetting saved settings —");
   setSubtitleStyle({ color: "cyan" });
   store.set("pdt:defaultQuality", "8000");
   store.set("pdt:subtitleWhen", "foreign");
-  check("every saved player setting is cleared, and counted", resetSavedSettings(), 7);
+  // Seven set here, and the tracks picked for titles above.
+  check("every saved player setting is cleared, and counted", resetSavedSettings(), 8);
   check("none of them is left", SAVED_SETTINGS.filter(({ key }) => store.has(key)), []);
   check("the subtitle look in use goes back to the default too", subtitleStyle().color, "white");
   check("and so does the quality the next player starts at", quality.preferredQuality(), 0);

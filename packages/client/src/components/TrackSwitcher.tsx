@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { fetchMeta, versionOf, type StreamTrack } from "../lib/api";
-import { saveAudioPref, saveSubtitlePref } from "../lib/trackPrefs";
+import { rememberTitleTracks, saveAudioPref, saveSubtitlePref, type TitleRef } from "../lib/trackPrefs";
 import { QUALITY_LEVELS_KBPS, qualityLabel } from "../lib/quality";
 
 import type { ZoomMode } from "../lib/videoZoom";
@@ -63,6 +63,8 @@ export function TrackSwitcher({
   const [audioTracks, setAudioTracks] = useState<StreamTrack[]>([]);
   const [subtitleTracks, setSubtitleTracks] = useState<StreamTrack[]>([]);
   const [partId, setPartId] = useState<number | null>(null);
+  // The film or show a pick here is remembered for.
+  const [title, setTitle] = useState<TitleRef | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -72,6 +74,7 @@ export function TrackSwitcher({
         setAudioTracks(version.audioTracks);
         setSubtitleTracks(version.subtitleTracks);
         setPartId(version.partId);
+        setTitle({ ratingKey: meta.ratingKey, type: meta.type, grandparentRatingKey: meta.grandparentRatingKey });
       })
       .catch(console.error)
       .finally(() => setLoading(false));
@@ -88,15 +91,17 @@ export function TrackSwitcher({
     if (type === "audio") {
       // Remembered by language, like the subtitle below, so the next episode
       // starts on the same one rather than the file's default.
-      saveAudioPref(audioTracks.find((t) => t.id === streamId) ?? null);
+      const audio = audioTracks.find((t) => t.id === streamId) ?? null;
+      saveAudioPref(audio);
+      // And for this title in particular, whatever Settings say.
+      if (title) rememberTitleTracks(title, { audio });
       onTrackChange(partId, streamId, undefined);
     } else {
       // Remember the choice (streamId 0 is the "None" row) so the next episode
       // comes up with the same kind of subtitle already on.
-      saveSubtitlePref(
-        subtitleTracks.find((t) => t.id === streamId) ?? null,
-        audioTracks.find((t) => t.id === activeAudio),
-      );
+      const subtitle = subtitleTracks.find((t) => t.id === streamId) ?? null;
+      saveSubtitlePref(subtitle, audioTracks.find((t) => t.id === activeAudio));
+      if (title) rememberTitleTracks(title, { subtitle });
       onTrackChange(partId, undefined, streamId);
     }
     onClose();

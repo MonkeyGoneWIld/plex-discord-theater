@@ -284,16 +284,14 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
   const lastEnd = cues.length > 0 ? cues[cues.length - 1].end : -1;
   const waiting = stillReading && shown.length === 0 && (videoRef.current?.currentTime ?? 0) >= lastEnd;
   if (shown.length === 0 && !waiting) return null;
+  // Nothing until there is a picture to size and place it against. Lines used
+  // to go up over the black loading screen sized from the window instead, at
+  // up to twice the size they then shrank to when the picture arrived — and a
+  // subtitle over nothing isn't something anyone was waiting to read.
+  if (!box) return null;
 
-  // Before the intrinsic size is known there is no picture to measure against.
-  // The fallbacks say the same thing about the player instead, so a cue landing
-  // in that window is approximately placed rather than missing.
-  const fontSize = box
-    ? Math.min(MAX_FONT_PX, Math.max(MIN_FONT_PX, box.height * FONT_SCALE))
-    : `clamp(${MIN_FONT_PX}px, ${(FONT_SCALE * 100).toFixed(1)}vh, ${MAX_FONT_PX}px)`;
-  const edge = (raise: number) => box
-    ? box.bottomInset + box.height * subtitleBottomPercent(raise) / 100
-    : `${subtitleBottomPercent(raise).toFixed(1)}%`;
+  const fontSize = Math.min(MAX_FONT_PX, Math.max(MIN_FONT_PX, box.height * FONT_SCALE));
+  const edge = (raise: number) => box.bottomInset + box.height * subtitleBottomPercent(raise) / 100;
   const bottom = edge(style.raise);
 
   if (shown.length === 0) {

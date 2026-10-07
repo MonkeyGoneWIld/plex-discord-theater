@@ -4,6 +4,7 @@ import {
   startingAudioPref,
   startingSubtitle,
   startingSubtitlePref,
+  titleTrackPrefs,
   type AudioPref,
   type SubtitlePref,
 } from "./trackPrefs";
@@ -30,11 +31,17 @@ export async function readSubtitlesAhead(
   opts: { mediaIndex?: number; pref?: SubtitlePref | null; audio?: AudioPref | null } = {},
 ): Promise<void> {
   try {
-    const version = versionOf(await fetchMeta(ratingKey), opts.mediaIndex);
+    const meta = await fetchMeta(ratingKey);
+    const version = versionOf(meta, opts.mediaIndex);
+    const own = titleTrackPrefs(meta);
     const audioTracks = version.audioTracks ?? [];
-    const audio = matchAudioTrack(audioTracks, opts.audio ?? startingAudioPref())
+    const audio = matchAudioTrack(audioTracks, opts.audio ?? own.audio ?? startingAudioPref())
       ?? audioTracks.find((t) => t.selected);
-    const track = startingSubtitle(version.subtitleTracks ?? [], opts.pref ?? startingSubtitlePref(), audio);
+    const track = startingSubtitle(
+      version.subtitleTracks ?? [],
+      opts.pref ?? own.subtitle ?? startingSubtitlePref(),
+      audio,
+    );
     if (scope === "first" && !track?.external) return;
     await apiPost("/api/plex/subtitles/prefetch", {
       ratingKey,

@@ -11,7 +11,8 @@
  *
  *   - a segment another player already has is taken from them;
  *   - a segment another player is fetching is left to them, and this player's
- *     own downloads go to the next one nobody is fetching;
+ *     own downloads go to the next one nobody is fetching — for up to
+ *     PEER_GRACE_MS, after which this player stops waiting on them;
  *
  * unless it is URGENT_S or less from being played, or the very segment the
  * player is waiting on, when it is fetched from the bot as before — so a slow
@@ -26,10 +27,22 @@
  * broken.
  */
 
-/** Closer to playback than this, a segment comes from the bot whoever else has it. */
-export const URGENT_S = 15;
+/**
+ * Closer to playback than this, a segment comes from the bot whoever else has
+ * it. Thirty seconds, not fifteen: a copied segment can be 10s and 20 MB, and
+ * at the 15-25 Mbps a player gets from the bot, two of those take most of
+ * fifteen seconds — two players each waiting on the other's slow download
+ * reached the edge of it together and both stalled.
+ */
+export const URGENT_S = 30;
+
+/** Longest this player leaves a segment to another player still fetching it. */
+export const PEER_GRACE_MS = 8_000;
 
 type AnyLoader = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+
+/** When this loader first left each segment to another player, by segment. */
+const leftToPeers = new WeakMap<object, Map<string, number>>();
 
 /** Per stream config object (one per player's engine): whether it shares. */
 const sharingFor = new WeakMap<object, boolean>();
@@ -152,8 +165,15 @@ function sharedProcessQueue(this: AnyLoader): void {
           continue;
         }
         // Changed: another player is fetching it — leave it to them, and
-        // fetch the next one nobody is.
-        if (peers.isSegmentLoadingOrLoadedBySomeone(segment)) continue;
+        // fetch the next one nobody is. For a while: past PEER_GRACE_MS
+        // their download is evidently slow, and this player fetches it too.
+        if (peers.isSegmentLoadingOrLoadedBySomeone(segment)) {
+          let waits = leftToPeers.get(this);
+          if (!waits) leftToPeers.set(this, (waits = new Map()));
+          const since = waits.get(segment.runtimeId);
+          if (since === undefined) waits.set(segment.runtimeId, Date.now());
+          if (since === undefined || Date.now() - since < PEER_GRACE_MS) continue;
+        }
       }
       const shouldLoadThroughHttp = canLoadThroughHttp
         && (this.requests.executingHttpCount < simultaneousHttpDownloads

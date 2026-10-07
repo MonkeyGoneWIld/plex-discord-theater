@@ -3,7 +3,7 @@ import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, backdropThumb
 import { formatAirDate, formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
-import { loadAudioPref, loadSubtitlePref, saveAudioPref, saveSubtitlePref, matchAudioTrack, startingSubtitle, subtitlesOnlyForForeignAudio } from "../lib/trackPrefs";
+import { loadAudioPref, loadSubtitlePref, saveAudioPref, saveSubtitlePref, matchAudioTrack, rememberTitleTracks, startingSubtitle, subtitlesOnlyForForeignAudio, titleTrackPrefs } from "../lib/trackPrefs";
 import { readSubtitleAhead } from "../lib/subtitleReadAhead";
 import { RatingsRow } from "./RatingsRow";
 import { RelatedRows } from "./RelatedRows";
@@ -262,8 +262,10 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
     // same way subtitles are — a viewer who watches everything in Japanese
     // should not have to say so on every episode. Falls back to the file's
     // choice when it doesn't carry that language at all.
+    // What was picked for this film or show comes first, whatever Settings say.
+    const own = titleTrackPrefs(meta ?? item);
     const defaultAudio =
-      matchAudioTrack(audioTracks, loadAudioPref())
+      matchAudioTrack(audioTracks, own.audio ?? loadAudioPref())
       ?? audioTracks.find((t) => t.selected)
       ?? audioTracks[0];
     setSelectedAudio(defaultAudio ? defaultAudio.id : null);
@@ -271,7 +273,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
     // and flavour, since stream ids differ from episode to episode. With no
     // stored preference this resolves to null, the previous "off" default; so
     // does subtitles being only for foreign audio, with audio in their language.
-    const match = startingSubtitle(subtitleTracks, loadSubtitlePref(), defaultAudio);
+    const match = startingSubtitle(subtitleTracks, own.subtitle ?? loadSubtitlePref(), defaultAudio);
     setSelectedSubtitle(match ? match.id : null);
     // audioTracks/subtitleTracks are derived from exactly these two.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -632,11 +634,13 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
                         const audio = audioTracks.find((t) => t.id === id) ?? null;
                         setSelectedAudio(id);
                         // Remembered by language, so the next episode comes up
-                        // on the same one.
+                        // on the same one — and for this title, over Settings.
                         saveAudioPref(audio);
+                        rememberTitleTracks(meta ?? item, { audio });
                         // Subtitles only for foreign audio follow the audio:
                         // on for the Japanese track, off for the English one.
-                        if (subtitlesOnlyForForeignAudio()) {
+                        // Not once subtitles have been picked for this title.
+                        if (subtitlesOnlyForForeignAudio() && !titleTrackPrefs(meta ?? item).subtitle) {
                           setSelectedSubtitle(startingSubtitle(subtitleTracks, loadSubtitlePref(), audio)?.id ?? null);
                         }
                       }}
@@ -657,11 +661,11 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
                         const id = v === "" ? null : Number(v);
                         setSelectedSubtitle(id);
                         // Remember it so the next episode starts with the same
-                        // kind of track already selected.
-                        saveSubtitlePref(
-                          subtitleTracks.find((t) => t.id === id) ?? null,
-                          audioTracks.find((t) => t.id === selectedAudio),
-                        );
+                        // kind of track already selected — and this title
+                        // starts on it next time, whatever Settings say.
+                        const subtitle = subtitleTracks.find((t) => t.id === id) ?? null;
+                        saveSubtitlePref(subtitle, audioTracks.find((t) => t.id === selectedAudio));
+                        rememberTitleTracks(meta ?? item, { subtitle });
                       }}
                     />
                   </div>

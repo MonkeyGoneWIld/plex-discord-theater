@@ -15,7 +15,7 @@ import { PlexAccountButton } from "./components/PlexAccountButton";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { formatMediaTitle } from "./lib/format";
 import { apiPost, authUrl, fetchMeta, invalidateMeta, setStreams, versionOf } from "./lib/api";
-import { matchAudioTrack, startingAudioPref, startingSubtitle, startingSubtitlePref } from "./lib/trackPrefs";
+import { matchAudioTrack, startingAudioPref, startingSubtitle, startingSubtitlePref, titleTrackPrefs } from "./lib/trackPrefs";
 import { useMediaQuery, MOBILE_LANDSCAPE_QUERY, NARROW_QUERY, PHONE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem, SuggestionItem } from "./hooks/useSync";
@@ -765,8 +765,10 @@ export function App() {
       // The version, not the title: a second file has its own part and its own
       // stream ids, and `meta`'s top-level fields describe only the first.
       const version = versionOf(meta);
-      const subtitlePref = startingSubtitlePref();
-      const audioMatch = matchAudioTrack(version.audioTracks, startingAudioPref());
+      // What was picked for this show or film comes first, whatever Settings say.
+      const own = titleTrackPrefs(meta);
+      const subtitlePref = own.subtitle ?? startingSubtitlePref();
+      const audioMatch = matchAudioTrack(version.audioTracks, own.audio ?? startingAudioPref());
       // Null means this episode doesn't carry the language they were listening
       // to, and there is no sensible substitute — leave Plex's own choice.
       const audio = audioMatch ?? version.audioTracks.find((t) => t.selected);

@@ -5,6 +5,8 @@ export const SUBTITLE_PREF_KEY = "pdt:subtitlePref";
 export const AUDIO_PREF_KEY = "pdt:audioPref";
 /** "foreign" when subtitles are only wanted for audio in another language. */
 export const SUBTITLE_WHEN_KEY = "pdt:subtitleWhen";
+/** Tracks chosen for particular films and shows: see rememberTitleTracks. */
+export const TITLE_TRACKS_KEY = "pdt:titleTracks:v1";
 
 /**
  * A remembered track choice, stored by *description* rather than by stream id.
@@ -36,6 +38,9 @@ export interface SubtitlePref extends TrackPref {
   /** `true` means the user explicitly chose "None" — remembered, so an opt-out
    *  isn't undone by a later episode that happens to have a default track. */
   off: boolean;
+  /** Chosen for this film or show in particular, which no general rule — the
+   *  foreign-audio one included — overrides. */
+  forTitle?: boolean;
 }
 
 export interface AudioPref extends TrackPref {
@@ -250,9 +255,10 @@ function spokenIn(audio: StreamTrack, pref: TrackPref): boolean {
   return sameLanguage(audio, pref);
 }
 
-/** Subtitles are only for foreign audio, and this audio is in their language. */
+/** Subtitles are only for foreign audio, and this audio is in their language —
+ *  unless they were chosen for this title, which nothing general overrides. */
 function ruleTurnsOff(pref: SubtitlePref, audio: StreamTrack): boolean {
-  return !pref.off && subtitlesOnlyForForeignAudio() && spokenIn(audio, pref);
+  return !pref.off && !pref.forTitle && subtitlesOnlyForForeignAudio() && spokenIn(audio, pref);
 }
 
 /**
@@ -517,4 +523,65 @@ export function startingAudioPref(): AudioPref | null {
 /** The subtitle choice the next title starts from. */
 export function startingSubtitlePref(): SubtitlePref | null {
   return sitting?.subtitle ?? loadSubtitlePref();
+}
+
+/** Enough of a film or episode to say which title a track choice belongs to. */
+export interface TitleRef {
+  ratingKey: string;
+  type?: string;
+  grandparentRatingKey?: string | null;
+}
+
+/** A show's episodes share one choice; a film has its own. */
+function titleKey(title: TitleRef): string {
+  return title.type === "episode" && title.grandparentRatingKey
+    ? `show:${title.grandparentRatingKey}`
+    : `title:${title.ratingKey}`;
+}
+
+/** How many films and shows keep a choice; the longest unused go first. */
+const TITLE_TRACKS_MAX = 500;
+
+type TitleTracks = Record<string, { audio?: AudioPref; subtitle?: SubtitlePref; at: number }>;
+
+function readTitleTracks(): TitleTracks {
+  const all = read<TitleTracks>(TITLE_TRACKS_KEY, (p) => !!p && typeof p === "object" && !Array.isArray(p));
+  return all ?? {};
+}
+
+/**
+ * Remember a track picked for one film or show — on its page, or while
+ * watching it — so that it starts on that track next time, whatever Settings
+ * say. A choice made in Settings is everything else's default; this is the
+ * exception someone made for this title, and it is kept as one. `subtitle`
+ * null is "None". A side left out is left as it was.
+ */
+export function rememberTitleTracks(
+  title: TitleRef,
+  chosen: { audio?: StreamTrack | null; subtitle?: StreamTrack | null },
+): void {
+  const all = readTitleTracks();
+  const key = titleKey(title);
+  const entry = { ...(all[key] ?? {}), at: Date.now() };
+  if (chosen.audio) entry.audio = { ...describe(chosen.audio), channels: chosen.audio.channels ?? null };
+  if (chosen.subtitle !== undefined) {
+    entry.subtitle = chosen.subtitle ? { off: false, ...describe(chosen.subtitle) } : { off: true };
+  }
+  all[key] = entry;
+  const keys = Object.keys(all);
+  if (keys.length > TITLE_TRACKS_MAX) {
+    keys.sort((a, b) => all[a].at - all[b].at);
+    for (const old of keys.slice(0, keys.length - TITLE_TRACKS_MAX)) delete all[old];
+  }
+  write(TITLE_TRACKS_KEY, all);
+}
+
+/** What was chosen for this film or show, if anything — see rememberTitleTracks. */
+export function titleTrackPrefs(title: TitleRef | null | undefined): { audio: AudioPref | null; subtitle: SubtitlePref | null } {
+  if (!title?.ratingKey) return { audio: null, subtitle: null };
+  const entry = readTitleTracks()[titleKey(title)];
+  return {
+    audio: entry?.audio ?? null,
+    subtitle: entry?.subtitle ? { ...entry.subtitle, forTitle: true } : null,
+  };
 }

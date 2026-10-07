@@ -34,7 +34,7 @@ import {
 } from "../lib/quality";
 import { readStreamNotes, type StreamNotes } from "../lib/streamNotes";
 import { getLevel, setLevel, MAX_LEVEL } from "../lib/audioBoost";
-import { carryTrackPrefs, describeWatched, endTrackSitting, mergeTrackPrefs, saveTrackPrefs, startingAudioPref, startingSubtitlePref, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
+import { carryTrackPrefs, describeWatched, endTrackSitting, mergeTrackPrefs, saveTrackPrefs, startingAudioPref, startingSubtitlePref, titleTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
@@ -1855,7 +1855,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // No media index: the host's tracks for this episode were resolved from
         // the same default version, so matching against any other file would be
         // comparing against streams nobody is playing.
-        const version = versionOf(await fetchMeta(item.ratingKey));
+        const newMeta = await fetchMeta(item.ratingKey);
+        const version = versionOf(newMeta);
 
         /**
          * What this client was watching, described so it can be looked for here.
@@ -1868,7 +1869,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
          * the fallback for the first episode of a sitting, where there is no
          * previous one to read.
          */
-        const saved = { audio: startingAudioPref(), subtitle: startingSubtitlePref() };
+        const own = titleTrackPrefs(newMeta);
+        const saved = {
+          audio: own.audio ?? startingAudioPref(),
+          subtitle: own.subtitle ?? startingSubtitlePref(),
+        };
         let source = saved;
         if (was) {
           if (observedBeforeAdvance?.ratingKey === was.ratingKey) {

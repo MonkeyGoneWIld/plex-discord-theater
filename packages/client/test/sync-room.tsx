@@ -21,6 +21,15 @@
 //   - once the host goes on, they are back together within a few seconds;
 //   - the loading screen says "Loading…" or "Buffering…" and nothing else.
 // With P2P on, the viewer's segments should carry the host through instead.
+//
+// "Start-up" and "Host's downloads crawl" play a copied film instead (see
+// sync-room-server.ts), every download held to a speed as Discord's proxy
+// holds them: its first segment, ~10 MB, comes in parts and is in within a
+// few seconds, and a host whose downloads crawl takes it from the viewer.
+//
+// Open the page as /test/sync-room.html?whisper when the browser running it
+// is hidden: a muted video in a page nobody can see is paused a few seconds
+// in, and ?whisper plays the players unmuted at a whisper instead.
 import React, { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -31,21 +40,32 @@ type Sample = { t: number; host: Report; viewer: Report };
 const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const api = (path: string) => fetch(path).then((r) => r.json());
 
-// What each player last reported, and everything it has logged.
+// What each player last reported, and everything it has logged — the current
+// frames only: a frame being replaced can still report for a moment.
 const latest = new Map<string, Report>();
 const events = new Map<string, Event[]>();
+let currentGen = 0;
+/** New frames for a run, and nothing kept from the last one's. */
+const nextFrames = (n: number) => {
+  currentGen = n + 1;
+  latest.clear();
+  events.clear();
+  return currentGen;
+};
 window.addEventListener("message", (e: MessageEvent) => {
-  const m = e.data as Report & { kind?: string; events?: Event[] };
-  if (m?.kind !== "sample") return;
+  const m = e.data as Report & { kind?: string; events?: Event[]; gen?: string | null };
+  if (m?.kind !== "sample" || m.gen !== String(currentGen)) return;
   latest.set(m.user, m);
   events.set(m.user, [...(events.get(m.user) ?? []), ...(m.events ?? [])]);
 });
 
 const port = location.port;
-const SRC = {
-  viewer: `http://localhost:${Number(port) + 1}/test/sync-player.html?user=u-viewer&autojoin`,
-  host: `http://localhost:${port}/test/sync-player.html?user=u-host`,
-};
+// ?whisper on this page is passed on to the players — see sync-player.tsx.
+const extra = new URLSearchParams(location.search).has("whisper") ? "&whisper" : "";
+const src = (gen: number) => ({
+  viewer: `http://localhost:${Number(port) + 1}/test/sync-player.html?user=u-viewer&autojoin${extra}&gen=${gen}`,
+  host: `http://localhost:${port}/test/sync-player.html?user=u-host${extra}&gen=${gen}`,
+});
 
 function Runner() {
   const [frames, setFrames] = useState(0);
@@ -92,7 +112,7 @@ function Runner() {
     try {
       await api("/api/test/reset?p2p=0");
       setHostOn(false);
-      setFrames((n) => n + 1);
+      setFrames(nextFrames);
       await waitFor(() => latest.get("u-viewer")?.joined, 60_000, "the viewer to join");
       setHostOn(true);
       await waitFor(() => firstPlay("u-host") && firstPlay("u-viewer"), 45_000, "both to start");
@@ -142,7 +162,7 @@ function Runner() {
     try {
       await api("/api/test/reset?p2p=0");
       setHostOn(false);
-      setFrames((n) => n + 1);
+      setFrames(nextFrames);
       await waitFor(() => latest.get("u-viewer")?.joined, 60_000, "the viewer to join");
       // Held from the moment the host starts the film.
       await api(`/api/test/stall?user=u-viewer&ms=${stallMs}`);
@@ -175,6 +195,102 @@ function Runner() {
     }
   }
 
+  /** When the room started after the host pressed play, and how much each had buffered by then. */
+  async function startOnce(query: string, flows: Record<string, number>) {
+    latest.clear();
+    events.clear();
+    await api(`/api/test/reset?${query}`);
+    for (const [user, kbps] of Object.entries(flows)) await api(`/api/test/flow?user=${user}&kbps=${kbps}`);
+    setHostOn(false);
+    setFrames(nextFrames);
+    await waitFor(() => latest.get("u-viewer")?.joined, 60_000, "the viewer to join");
+    const began = Date.now();
+    setHostOn(true);
+    const hostStarted = await waitFor(() => firstPlay("u-host"), 90_000, "the host to start");
+    const viewerStarted = await waitFor(() => firstPlay("u-viewer"), 30_000, "the viewer to start");
+    const aheadAt = (user: string) => Number(events.get(user)?.find((e) => e.tag === "Video" && e.msg === "playing")?.data.bufAheadS ?? NaN);
+    // What the server sent the host before it started: each download, when it began and ended.
+    const sent = (await api("/api/test/served") as Array<{ user: string; seg: string; at: number; ms: number; part?: string }>)
+      .filter((x) => x.user === "u-host" && x.at - x.ms >= began - 1000 && x.at <= hostStarted + 500)
+      .sort((a, b) => a.at - a.ms - (b.at - b.ms))
+      .map((x) => `${x.seg}${x.part ? ` ${x.part}` : ""} ${((x.at - x.ms - began) / 1000).toFixed(1)}–${((x.at - began) / 1000).toFixed(1)}s`);
+    return {
+      sent,
+      startS: (hostStarted - began) / 1000,
+      apartMs: viewerStarted - hostStarted,
+      hostAheadS: aheadAt("u-host"),
+      viewerAheadS: aheadAt("u-viewer"),
+      // Only this start's: the last one's players can still be reporting as they go.
+      segments: (events.get("u-host") ?? []).filter((e) => e.tag === "Load" && e.t >= began),
+    };
+  }
+
+  /**
+   * Starting a copied film, every download held to 6 Mbps as Discord's proxy
+   * holds them: its first segment, ~10 MB, fetched in parts and as one.
+   */
+  async function runStartup() {
+    setRunning(true);
+    const out: string[] = ["— starting a copied film, each download at 6 Mbps —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      const flows = { "u-host": 6000, "u-viewer": 6000 };
+      const inParts = await startOnce("p2p=0&stream=copy", flows);
+      say(`in parts: started ${inParts.startS.toFixed(1)}s after play, host ${inParts.hostAheadS.toFixed(1)}s buffered, viewer ${inParts.viewerAheadS.toFixed(1)}s, ${inParts.apartMs} ms apart`);
+      for (const e of inParts.segments) say(`    segment ${e.data.seg}: ${e.data.MB} MB from ${e.data.from} in ${e.data.tookS}s (${e.data.Mbps} Mbps)`);
+      say(`    sent: ${inParts.sent.join(", ")}`);
+      const whole = await startOnce("p2p=0&stream=copy&parts=0", flows);
+      say(`whole: started ${whole.startS.toFixed(1)}s after play, host ${whole.hostAheadS.toFixed(1)}s buffered, viewer ${whole.viewerAheadS.toFixed(1)}s, ${whole.apartMs} ms apart`);
+      for (const e of whole.segments) say(`    segment ${e.data.seg}: ${e.data.MB} MB from ${e.data.from} in ${e.data.tookS}s (${e.data.Mbps} Mbps)`);
+      const shared = await startOnce("p2p=1&stream=copy", flows);
+      const took = (events.get("u-host") ?? []).concat(events.get("u-viewer") ?? []).filter((e) => e.tag === "P2P" && /taking the segment/.test(e.msg));
+      say(`in parts, with P2P: started ${shared.startS.toFixed(1)}s after play, ${shared.apartMs} ms apart, ${took.length} segments taken from the other player`);
+      say(`${inParts.startS < whole.startS / 2 ? "PASS" : "FAIL"} in parts it starts in under half the time`);
+      say(`${shared.startS < inParts.startS + 1.5 ? "PASS" : "FAIL"} and players sharing segments start no later`);
+      say(`${inParts.startS < 8 ? "PASS" : "FAIL"} and within eight seconds`);
+      say(`${Math.abs(inParts.apartMs) < 700 ? "PASS" : "FAIL"} both start together`);
+      say(`${inParts.hostAheadS < 15 ? "PASS" : "FAIL"} without a pile of buffer it waited for first (${inParts.hostAheadS.toFixed(1)}s)`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
+   * The host's downloads crawling at 0.8 Mbps each while the viewer's run at
+   * 8: the host takes the first segment from the viewer instead of waiting on
+   * its own, as the Count of Monte Cristo's host should have.
+   */
+  async function runHostCrawls() {
+    setRunning(true);
+    const out: string[] = ["— the host's downloads crawl, the viewer's don't —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      const r = await startOnce("p2p=1&stream=copy", { "u-host": 800, "u-viewer": 8000 });
+      say(`started ${r.startS.toFixed(1)}s after play, ${r.apartMs} ms apart`);
+      for (const e of r.segments) say(`    host's segment ${e.data.seg}: ${e.data.MB} MB from ${e.data.from} in ${e.data.tookS}s`);
+      const took = (events.get("u-host") ?? []).filter((e) => e.tag === "P2P" && /taking the segment/.test(e.msg));
+      say(`${took.length > 0 ? "PASS" : "FAIL"} the host takes the segment it waits on from the viewer (${took.map((e) => `seg ${e.data.seg} after ${e.data.afterS}s`).join(", ") || "never"})`);
+      say(`${r.startS < 12 ? "PASS" : "FAIL"} so the room starts within twelve seconds, not the ~30 its own downloads would take`);
+      say(`${Math.abs(r.apartMs) < 700 ? "PASS" : "FAIL"} both start together`);
+      await pause(8_000);
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      say(`${Math.abs(v.pos - h.pos) < 1 && !h.paused && !v.paused ? "PASS" : "FAIL"} and play on together (${Math.abs(v.pos - h.pos).toFixed(2)}s apart)`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
   async function run(p2p: boolean) {
     setRunning(true);
     const out: string[] = [`— ${p2p ? "with" : "without"} P2P —`];
@@ -191,7 +307,7 @@ function Runner() {
       await api("/api/test/pace?user=u-host&ms=2600");
       await api("/api/test/stall?user=u-host&ms=5000");
       setHostOn(false);
-      setFrames((n) => n + 1);
+      setFrames(nextFrames);
       say("… click Join in the viewer's frame");
       await waitFor(() => latest.get("u-viewer")?.joined, 60_000, "the viewer to join");
       setHostOn(true);
@@ -269,13 +385,15 @@ function Runner() {
         <button disabled={running} onClick={() => void runSeeks()}>Seeks and pauses</button>
         <button disabled={running} onClick={() => void runSlowViewer(5000)}>Slow viewer</button>
         <button disabled={running} onClick={() => void runSlowViewer(20000)}>Very slow viewer</button>
+        <button disabled={running} onClick={() => void runStartup()}>Start-up</button>
+        <button disabled={running} onClick={() => void runHostCrawls()}>Host's downloads crawl</button>
         <pre id="results">{lines.join("\n")}</pre>
       </div>
       {frames > 0 && (
         <div className="frames" key={frames}>
           {/* The viewer first, so it is in the room when the host starts. */}
-          <iframe title="viewer" src={SRC.viewer} allow="autoplay" />
-          {hostOn ? <iframe ref={hostFrame} title="host" src={SRC.host} allow="autoplay" /> : <div />}
+          <iframe title="viewer" src={src(frames).viewer} allow="autoplay" />
+          {hostOn ? <iframe ref={hostFrame} title="host" src={src(frames).host} allow="autoplay" /> : <div />}
         </div>
       )}
     </>

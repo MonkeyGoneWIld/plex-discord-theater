@@ -552,6 +552,23 @@ console.log("\n— through the routes —");
   check("exactly as Plex copied them", bytes.equals(copiedSegment(plexSessions.get(key)!, 0)), true);
   check("one it hasn't measured isn't fetched from Plex for anyone",
     (await fetch(origin + first.uri.replace("00000.ts", "00500.ts"))).status, 404);
+
+  console.log("\n— a segment in parts, for a player fetching it several ways at once —");
+  check("the playlist gives each segment's size", first.uri.endsWith(`&n=${bytes.length}`), true);
+  const parts = await Promise.all([0, 1, 2].map(async (i) => {
+    const r = await fetch(`${origin}${first.uri}&part=${i}&parts=3`);
+    return { status: r.status, body: Buffer.from(await r.arrayBuffer()) };
+  }));
+  check("each part is its share", parts.map((p) => [p.status, p.body.length]),
+    [0, 1, 2].map((i) => [200, Math.floor((bytes.length * (i + 1)) / 3) - Math.floor((bytes.length * i) / 3)]));
+  check("and together they are the segment", Buffer.concat(parts.map((p) => p.body)).equals(bytes), true);
+  check("a part that doesn't exist is refused", (await fetch(`${origin}${first.uri}&part=3&parts=3`)).status, 400);
+  check("as is a split past the most there is", (await fetch(`${origin}${first.uri}&part=0&parts=99`)).status, 400);
+  const resumed = await fetch(origin + first.uri, { headers: { Range: "bytes=1000-" } });
+  check("the rest of one from where another download stopped",
+    [resumed.status, resumed.headers.get("content-range"), Buffer.from(await resumed.arrayBuffer()).equals(bytes.subarray(1000))],
+    [206, `bytes 1000-${bytes.length - 1}/${bytes.length}`, true]);
+  check("past its end, nothing", (await fetch(origin + first.uri, { headers: { Range: `bytes=${bytes.length}-` } })).status, 416);
   check("Plex was never asked for anything out of order", plexSessions.get(key)!.outOfOrder, []);
 
   plexRoutes.markTranscodeStopped(sid);

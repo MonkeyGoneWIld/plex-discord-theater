@@ -125,6 +125,9 @@ interface Measured {
   /** Where its picture starts, and its sound (null with none), film time. */
   videoStart: number;
   audioStart: number | null;
+  /** Its size, kept after the bytes are let go: it is part of the segment's
+   *  URL in the playlist, which mustn't change between reloads. */
+  bytes: number;
   /** Null once let go. */
   data: Buffer | null;
 }
@@ -419,6 +422,7 @@ async function pump(s: CopySession): Promise<void> {
       end: span.end - s.clockOffset,
       videoStart,
       audioStart,
+      bytes: data.length,
       data,
     };
     s.segments.push(seg);
@@ -510,11 +514,13 @@ export function updateDirectStreamPosition(sessionId: string, positionS: number)
  * than an empty list it would only reload in twelve seconds.
  *
  * `urlFor` turns a Plex segment path into the URL clients fetch it from, which
- * is routes/plex.ts's business (the proxy, or the VPS relay).
+ * is routes/plex.ts's business (the proxy, or the VPS relay). It is given the
+ * segment's size too, which the player uses to fetch it in parts — see
+ * segmentPart.
  */
 export async function directStreamPlaylist(
   plexKey: string,
-  urlFor: (plexPath: string) => string,
+  urlFor: (plexPath: string, bytes: number) => string,
 ): Promise<string | "retry" | null> {
   const s = byPlexKey.get(plexKey);
   if (!s) return null;
@@ -551,7 +557,7 @@ export async function directStreamPlaylist(
     const next = s.segments[i + 1];
     const duration = round3((next ? round3(next.start) : round3(seg.end)) - round3(seg.start));
     longest = Math.max(longest, duration);
-    lines.push(`#EXTINF:${duration.toFixed(3)},`, urlFor(seg.path));
+    lines.push(`#EXTINF:${duration.toFixed(3)},`, urlFor(seg.path, seg.bytes));
   }
   // Raised when a segment needs it and never lowered: a target duration that
   // shrank between reloads would be a different playlist as far as the spec goes.
@@ -575,6 +581,26 @@ export async function directStreamPlaylist(
   head.push(`#EXT-X-START:TIME-OFFSET=${round3(Math.max(s.offsetS, playable)).toFixed(3)},PRECISE=YES`);
   const tail = s.ended ? ["#EXT-X-ENDLIST"] : [];
   return [...head, ...lines, ...tail].join("\n") + "\n";
+}
+
+/** The most parts a segment is served in — see segmentPart. */
+export const MAX_SEGMENT_PARTS = 8;
+
+/**
+ * Part `part` of `parts` of a segment: the bytes from ⌊size × part / parts⌋ up
+ * to ⌊size × (part + 1) / parts⌋, the split the player's lib/segmentParts.ts
+ * makes too. Null for a part that doesn't exist.
+ *
+ * A copied segment is a whole keyframe interval at the film's own bitrate —
+ * 7 MB for a DVD-quality film, 28 MB for a Blu-ray — and a single download of
+ * it through Discord's proxy runs at its own pace, 7 to 25 Mbps however many
+ * others run beside it. The first segment of a stream took up to half a
+ * minute that way. Asked for in parts, all at once, it takes a fraction of it.
+ */
+export function segmentPart(data: Buffer, part: number, parts: number): Buffer | null {
+  if (!Number.isInteger(part) || !Number.isInteger(parts)) return null;
+  if (parts < 1 || parts > MAX_SEGMENT_PARTS || part < 0 || part >= parts) return null;
+  return data.subarray(Math.floor((data.length * part) / parts), Math.floor((data.length * (part + 1)) / parts));
 }
 
 /**

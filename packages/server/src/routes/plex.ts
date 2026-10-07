@@ -14,6 +14,7 @@ import {
   directStreamRefused,
   directStreamPlaylist,
   directStreamSegment,
+  segmentPart,
   updateDirectStreamPosition,
 } from "../services/direct-stream.js";
 import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
@@ -3221,6 +3222,9 @@ router.get("/preview/:partId/index", async (req: Request, res: Response) => {
     // measured in megabytes rather than kilobytes, and it needs no inspection.
     await pipeBody(plexRes.body, res);
   } catch (err) {
+    // The player going away mid-transfer — leaving the title, switching to
+    // another — closes the stream under it. Nothing failed.
+    if (res.destroyed || (err as NodeJS.ErrnoException | null)?.code === "ERR_STREAM_PREMATURE_CLOSE") return;
     console.error("Preview index error:", err);
     if (res.headersSent) res.end();
     else res.status(502).end();
@@ -4866,7 +4870,12 @@ async function isTranscodeSessionAlive(plexKey: string): Promise<boolean> {
 async function serveDirectStream(req: Request, res: Response, plexKey: string, segPath: string): Promise<void> {
   if (segPath.endsWith(".m3u8")) {
     const authToken = req.query.token as string | undefined;
-    const playlist = await directStreamPlaylist(plexKey, (path) => segProxyUrl(path, authToken));
+    // Each segment's size rides on its URL, for the player to fetch it in
+    // parts — see segmentPart. Only through here: the relay serves whole files.
+    const playlist = await directStreamPlaylist(plexKey, (path, bytes) => {
+      const url = segProxyUrl(path, authToken);
+      return url.startsWith("/api/") ? `${url}&n=${bytes}` : url;
+    });
     if (playlist === null) {
       res.status(410).end();
       return;
@@ -4894,6 +4903,34 @@ async function serveDirectStream(req: Request, res: Response, plexKey: string, s
   }
   setSegmentCacheHeaders(res, segPath);
   res.setHeader("Content-Type", "video/MP2T");
+  // One of the parts the player asked for at once. Its own URL, so a cache
+  // between here and the player keeps each part apart.
+  if (req.query.parts !== undefined) {
+    const part = segmentPart(segment, Number(req.query.part), Number(req.query.parts));
+    if (!part) {
+      res.status(400).end();
+      return;
+    }
+    res.send(part);
+    return;
+  }
+  // The rest of one the P2P engine began elsewhere: it resumes from where the
+  // other download stopped, and a whole segment back would start it over.
+  const range = typeof req.headers.range === "string"
+    ? req.headers.range.match(/^bytes=(\d+)-(\d*)$/)
+    : null;
+  if (range) {
+    const from = Number(range[1]);
+    const to = range[2] ? Math.min(Number(range[2]), segment.length - 1) : segment.length - 1;
+    if (from > to) {
+      res.setHeader("Content-Range", `bytes */${segment.length}`);
+      res.status(416).end();
+      return;
+    }
+    res.setHeader("Content-Range", `bytes ${from}-${to}/${segment.length}`);
+    res.status(206).send(segment.subarray(from, to + 1));
+    return;
+  }
   res.send(segment);
 }
 

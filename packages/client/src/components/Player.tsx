@@ -41,6 +41,8 @@ import { resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../
 import { bufferedRanges, coveredAheadS, heldRanges } from "../lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
+import { fetchInPartsLater, installSegmentParts, partsFor, segmentBytesOf } from "../lib/segmentParts";
+import { installTakeFromPeer } from "../lib/takeFromPeer";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
 import { useVideoZoom } from "../lib/useVideoZoom";
 import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -642,7 +644,7 @@ function trimMediaBuffer(hls: Hls, video: HTMLVideoElement, backS: number): Reco
  */
 function segIndexFromUrl(url: string | undefined | null): number {
   if (!url) return -1;
-  const m = url.match(/(\d+)\.ts(?:[?#]|$)/);
+  const m = url.match(/(\d+)\.ts(?:[?#&]|$)/);
   return m ? parseInt(m[1], 10) : -1;
 }
 
@@ -3197,9 +3199,24 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         };
 
         let hls: Hls;
+        /** This stream's P2P engine, in P2P mode. */
+        let p2pEngine: HlsJsP2PEngine | null = null;
 
         if (!vpsRelay) {
-          // P2P mode — peers share segments via WebRTC
+          // P2P mode — peers share segments via WebRTC. Copied segments come
+          // in parts (lib/segmentParts), and the one the picture waits on is
+          // taken from another player when our own download of it crawls
+          // (p2pCorePatch.ts, lib/takeFromPeer).
+          installSegmentParts();
+          installTakeFromPeer((took) => logEvent("P2P", took.started
+            ? "taking the segment the picture waits on from another player, our own download of it is crawling"
+            : "no other player could send the segment the picture waits on after all, back to the bot", {
+            seg: took.segment,
+            gotMB: (took.received / 1e6).toFixed(2),
+            ofMB: took.total === undefined ? "?" : (took.total / 1e6).toFixed(2),
+            afterS: (took.ms / 1000).toFixed(1),
+            peerMbps: took.peerBitsPerS > 0 ? (took.peerBitsPerS / 1e6).toFixed(1) : "unmeasured",
+          }));
           const HlsWithP2P = HlsJsP2PEngine.injectMixin(Hls);
           hls = new HlsWithP2P({
             ...hlsConfig,
@@ -3276,6 +3293,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // sometimes slower. The next segment due is always first in
                 // line: the engine takes a download from the furthest-ahead
                 // one to start it.
+                //
+                // Two, for a copied stream, whose segments each come in up to
+                // four parts (lib/segmentParts) — set when its playlist loads.
+                // Three whole ones at once was the same number of downloads,
+                // but the first segment of a stream, the one the picture waits
+                // on, shared them with the two after it and came in last: a
+                // copy started with 20s already buffered, having waited for
+                // all of it.
                 simultaneousHttpDownloads: 3,
                 // How long a download from the bot may go without a byte before
                 // the engine calls it off and asks again. Its default, 3s, is
@@ -3298,10 +3323,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   const headers: Record<string, string> = {};
                   if (token) headers["Authorization"] = `Bearer ${token}`;
                   if (requestByteRange) {
+                    // The rest of a segment begun elsewhere, in one piece.
                     const end = requestByteRange.end != null ? requestByteRange.end : "";
                     headers["Range"] = `bytes=${requestByteRange.start}-${end}`;
+                    return new Request(url, { headers, signal });
                   }
-                  return new Request(url, { headers, signal });
+                  // A copied segment, whose size its URL carries, comes in parts.
+                  const request = new Request(url, { headers, signal });
+                  const bytes = segmentBytesOf(url);
+                  return bytes ? fetchInPartsLater(request, url, bytes) : request;
                 },
               },
               onHlsJsCreated: (hls) => {
@@ -3380,6 +3410,30 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   segmentTimes.delete(segmentUrl);
                   if (times) held.set(segmentUrl, times);
                 });
+                p2pEngine = hls.p2pEngine;
+                // The first few segments of a stream, timed: what its start
+                // waited on, and where each came from.
+                const streamAskedAt = performance.now();
+                const firstAsked = new Map<string, number>();
+                let timedSegments = 0;
+                hls.p2pEngine.addEventListener("onSegmentStart", ({ segment }) => {
+                  if (timedSegments < 4 && !firstAsked.has(segment.url)) firstAsked.set(segment.url, performance.now());
+                });
+                hls.p2pEngine.addEventListener("onSegmentLoaded", ({ segmentUrl, bytesLength, downloadSource }) => {
+                  if ((hlsRef.current as unknown) !== hls || timedSegments >= 4) return;
+                  timedSegments++;
+                  const now = performance.now();
+                  const asked = firstAsked.get(segmentUrl);
+                  const bytes = segmentBytesOf(segmentUrl);
+                  logEvent("Load", "segment in", {
+                    seg: segIndexFromUrl(segmentUrl),
+                    MB: (bytesLength / 1e6).toFixed(2),
+                    from: downloadSource === "p2p" ? "another player" : bytes ? `the bot, in ${partsFor(bytes)}` : "the bot",
+                    tookS: asked === undefined ? "?" : ((now - asked) / 1000).toFixed(1),
+                    Mbps: asked === undefined ? "?" : ((bytesLength * 8) / ((now - asked) * 1000)).toFixed(1),
+                    sinceStreamS: ((now - streamAskedAt) / 1000).toFixed(1),
+                  });
+                });
                 hls.p2pEngine.addEventListener("onPeerConnect", ({ peerId }) => {
                   stats.peers.add(peerId);
                 });
@@ -3433,7 +3487,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             });
           }
         });
+        let inParts: boolean | null = null;
         hls.on(Hls.Events.LEVEL_LOADED, (_e, data) => {
+          // Two segments at once when they come in parts — see
+          // simultaneousHttpDownloads.
+          const parts = data.details.fragments.some((f) => segmentBytesOf(f.url) !== null);
+          if (p2pEngine && parts !== inParts) {
+            inParts = parts;
+            p2pEngine.applyDynamicConfig({ core: { simultaneousHttpDownloads: parts ? 2 : 3 } });
+          }
           const copied = data.details.type === "EVENT";
           if (copied && !copiedStreamRef.current) {
             logEvent("HLS", "playing the original video (Direct Stream)", {
@@ -3674,8 +3736,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             });
           } else if (waitHereForRoom) {
             waitForRoom(video, roomS, "rebuild");
-          } else {
-            video.play().catch((err) => console.warn("Autoplay prevented:", err));
           }
 
           // Host: broadcast play with sessionId when manifest is ready. Skip it
@@ -3684,7 +3744,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           //
           // The room is told whether to run it, not just what it is: announcing
           // a rebuild we are deliberately holding must not start everyone else.
-          announceStream(sessionId!, startOffset, sessionOwner, !holding);
+          const startsRoom = announceStream(sessionId!, startOffset, sessionOwner, !holding);
+          if (!holding && !hostNotReady && !waitHereForRoom) {
+            // A stream this host has just started the room on starts with
+            // everybody's picture, its own included: the room says when, as it
+            // does for a resume. Playing it here only had the hold pause it
+            // again at once.
+            if (startsRoom && syncStateRef.current?.connected) hostHeldRef.current = true;
+            else video.play().catch((err) => console.warn("Autoplay prevented:", err));
+          }
         });
 
         /**
@@ -5329,11 +5397,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     /** False when this stream was rebuilt without being started — see the
      *  manifest-ready branch that holds a paused rebuild. */
     playing = true,
-  ) => {
+  ): boolean => {
     // `startedAsOwner` is captured by the HLS start. It stays authoritative if
     // a late assignment for the preceding title lands while the new manifest
     // is loading and briefly writes the old `isOwner=false` back into the ref.
-    if (!ownsSessionRef.current && !startedAsOwner) return;
+    if (!ownsSessionRef.current && !startedAsOwner) return false;
     const offset = startOffset > 0 ? startOffset : undefined;
     /**
      * Adopting means the room is already on this stream and knows what it is,
@@ -5380,9 +5448,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         sessionQualityRef.current,
         waiting,
       );
-      return;
+      return playing;
     }
     syncActionsRef.current?.sendVariantSession(sessionId, startOffset);
+    return false;
   }, [item, audioStreamId, subtitleStreamId]);
 
   /**

@@ -8,21 +8,35 @@ import { useSync } from "../src/hooks/useSync";
 import { setSessionToken, type PlexItem } from "../src/lib/api";
 
 const user = new URLSearchParams(location.search).get("user") ?? "u-viewer";
+/** Which run of the checks this frame belongs to: a frame being replaced can still report. */
+const gen = new URLSearchParams(location.search).get("gen");
 const isHost = user === "u-host";
 const item: PlexItem = { ratingKey: "4242", title: "Sync Test", type: "movie", thumb: null, duration: 120_000 } as PlexItem;
 
 // Muted for good, so the browser lets it play without anyone clicking in this
 // frame — and keeps letting it: un-muting a video that started muted without
 // a click pauses it, and the player restores its saved volume as it starts.
+// ?whisper plays it unmuted at a whisper instead, where the browser allows
+// that: a muted video in a page nobody can see is paused a few seconds in.
+const whisper = new URLSearchParams(location.search).has("whisper");
 const mutedProp = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "muted")!;
+const volumeProp = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "volume")!;
 Object.defineProperty(HTMLMediaElement.prototype, "muted", {
   configurable: true,
   get(this: HTMLMediaElement) { return mutedProp.get!.call(this); },
-  set(this: HTMLMediaElement) { mutedProp.set!.call(this, true); },
+  set(this: HTMLMediaElement) { mutedProp.set!.call(this, !whisper); },
 });
+if (whisper) {
+  Object.defineProperty(HTMLMediaElement.prototype, "volume", {
+    configurable: true,
+    get(this: HTMLMediaElement) { return volumeProp.get!.call(this); },
+    set(this: HTMLMediaElement) { volumeProp.set!.call(this, 0.001); },
+  });
+}
 const play = HTMLMediaElement.prototype.play;
 HTMLMediaElement.prototype.play = function (this: HTMLMediaElement) {
   this.muted = true;
+  if (whisper) this.volume = 0.001;
   return play.call(this);
 };
 
@@ -61,7 +75,7 @@ setInterval(() => {
   const v = document.querySelector("video");
   const sync = fixture.sync as { hostWaiting?: boolean } | undefined;
   parent.postMessage({
-    kind: "sample", user, t: Date.now(),
+    kind: "sample", user, gen, t: Date.now(),
     pos: v?.currentTime ?? 0, paused: v?.paused ?? true, ready: v?.readyState ?? 0,
     waiting: !!sync?.hostWaiting, text: document.body.innerText, joined: !!fixture.joined,
     events: events.slice(sent),

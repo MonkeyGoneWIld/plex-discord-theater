@@ -7,7 +7,7 @@ import {
   MAX_PARTS, fetchInParts, fetchInPartsLater, installSegmentParts, partBounds, partUrl, partsFor,
   segmentBytesOf, segmentProgress,
 } from "../src/lib/segmentParts";
-import { keepOnPeer, shouldTakeFromPeer } from "../src/lib/takeFromPeer";
+import { cooperating, keepOnPeer, sameNetworkKnown, samePlace, shouldTakeFromPeer } from "../src/lib/takeFromPeer";
 
 let pass = 0;
 let fail = 0;
@@ -199,6 +199,42 @@ console.log("\n— the segment the picture waits on, from another player or the 
     keepOnPeer({ received: 4 * MB, remaining: 1 * MB, startedAt: 0 }, 4000), true);
   check("but goes back to the bot if the peer is no faster",
     keepOnPeer({ received: 0.5 * MB, remaining: 6 * MB, startedAt: 0 }, 4000), false);
+}
+
+console.log("\n— leaving segments to the other player —");
+check("not to a peer nobody has measured, at first", [cooperating(0), sameNetworkKnown()], [false, false]);
+check("nor to one elsewhere", cooperating(0, false, true), false);
+check("a slow peer proves nothing either way", cooperating(20_000_000), false);
+check("to one on the same network, 225 Mbps away", cooperating(225_000_000), true);
+check("and, remembered, from the start of the next stream", [sameNetworkKnown(), cooperating(0)], [true, true]);
+check("a peer that's merely slow doesn't make it forget", cooperating(12_000_000), true);
+check("until every connected peer is elsewhere, by its connection", [cooperating(0, false, true), cooperating(0)], [false, false]);
+check("to one whose connection says it is on this network, before anything has passed",
+  [cooperating(0, true), sameNetworkKnown()], [true, true]);
+cooperating(0, false, true);
+
+console.log("\n— telling a peer on this network from its connection —");
+{
+  /** A connection's stats, settled on a pair of candidates of these kinds. */
+  const pc = (local: string, remote: string, remoteAddress = "", via: "transport" | "pair" = "transport", rttS = 0.03) => {
+    const report = new Map<string, Record<string, unknown>>([
+      ["L", { type: "local-candidate", candidateType: local }],
+      ["R", { type: "remote-candidate", candidateType: remote, address: remoteAddress }],
+      ["P", { type: "candidate-pair", localCandidateId: "L", remoteCandidateId: "R", state: "succeeded", nominated: true, currentRoundTripTime: rttS }],
+    ]);
+    if (via === "transport") report.set("T", { type: "transport", selectedCandidatePairId: "P" });
+    return { getStats: async () => report } as unknown as RTCPeerConnection;
+  };
+  check("both on their own addresses: the same network", await samePlace(pc("host", "host")), true);
+  check("found by the pair alone, too", await samePlace(pc("host", "host", "", "pair")), true);
+  check("theirs learned on the wire, private: the same", await samePlace(pc("host", "prflx", "192.168.1.40")), true);
+  check("theirs learned on the wire, public: elsewhere", await samePlace(pc("host", "prflx", "81.2.69.160")), false);
+  check("theirs learned on the wire, address hidden, a millisecond away: the same",
+    await samePlace(pc("host", "prflx", "", "transport", 0.001)), true);
+  check("address hidden, thirty milliseconds away: elsewhere", await samePlace(pc("host", "prflx", "", "transport", 0.03)), false);
+  check("through a router's address: elsewhere", await samePlace(pc("srflx", "srflx", "81.2.69.160")), false);
+  check("no connection to ask: can't say", await samePlace(undefined), null);
+  check("not settled yet: can't say", await samePlace({ getStats: async () => new Map() } as unknown as RTCPeerConnection), null);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

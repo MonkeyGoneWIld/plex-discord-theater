@@ -42,7 +42,7 @@ import { bufferedRanges, coveredAheadS, heldRanges } from "../lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
 import { fetchInPartsLater, installSegmentParts, partsFor, segmentBytesOf } from "../lib/segmentParts";
-import { installTakeFromPeer } from "../lib/takeFromPeer";
+import { PEER_CONNECT_WAIT_MS, installTakeFromPeer, sameNetworkKnown } from "../lib/takeFromPeer";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
 import { useVideoZoom } from "../lib/useVideoZoom";
 import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -1444,6 +1444,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // so restarts begin at 0 unless a seek sets it again.
   const resumeAtS = resumePosition && resumePosition > 0 ? resumePosition : null;
   const seekOffsetRef = useRef<number | null>(resumeAtS);
+  /** Where the stream being brought up starts, once seekOffsetRef is spent —
+   *  see hostPositionForRoom. */
+  const restartTargetRef = useRef<number | null>(null);
   // Last position this client is confident playback actually reached for the
   // current item. Updated only from a video that is genuinely playing, so it is
   // never polluted by the transient 0 a torn-down element reports mid-restart.
@@ -1565,25 +1568,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     [],
   );
   /**
-   * Host: tell the room, the moment it changes, whether this player's picture
-   * is moving. The room's clock stops and everybody holds while it isn't, so
-   * nobody is ever ahead of the host — see SyncState.hostWaiting.
-   */
-  const reportHostPicture = useCallback((waiting: boolean) => {
-    if (hostToldWaitingRef.current === waiting) return;
-    hostToldWaitingRef.current = waiting;
-    const v = videoRef.current;
-    if (!v) return;
-    const position = v.readyState >= HTMLMediaElement.HAVE_METADATA && v.currentTime > 0
-      ? v.currentTime
-      : positionForRoom();
-    logEvent("Sync", waiting ? "host's picture not ready, the room waits for it" : "host's picture ready", {
-      ...snapshot(v),
-      posS: Number(position.toFixed(2)),
-    });
-    syncActionsRef.current?.sendHeartbeat(position, !v.paused || hostHeldRef.current, waiting);
-  }, [positionForRoom]);
-  /**
    * Resume the room, and start this picture when the room does.
    *
    * Everybody starts again together (SyncState.hostWaiting), so the picture
@@ -1664,6 +1648,44 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     restartPendingRef.current = pending;
     if (pending) restartPendingSinceRef.current = Date.now();
   }, []);
+  /**
+   * Where the host tells the room its picture is.
+   *
+   * Mid-rebuild — a skip past what a copied stream has measured, a track
+   * change, a recovery — that is where the rebuild goes, not where the element
+   * is: it still shows the old stream, or nothing, and its last good position
+   * is the one being left. Reported, the room took it for the host's playhead
+   * and went back there. Backrooms skipped to 25:54, the host told the room it
+   * was at 0:59, and the rebuilt stream, which starts at 25:54, then waited at
+   * 0:59 for a picture that was never coming. The server counts on this
+   * (services/sync.ts, the heartbeat).
+   */
+  const hostPositionForRoom = useCallback((): number => {
+    if (restartTimerRef.current !== null || isRestartPending()) {
+      return seekOffsetRef.current ?? restartTargetRef.current ?? positionForRoom();
+    }
+    const v = videoRef.current;
+    // A seek in place is already where it is going, with or without frames.
+    if (v?.seeking && v.readyState >= HTMLMediaElement.HAVE_METADATA) return v.currentTime;
+    return positionForRoom();
+  }, [isRestartPending, positionForRoom]);
+  /**
+   * Host: tell the room, the moment it changes, whether this player's picture
+   * is moving. The room's clock stops and everybody holds while it isn't, so
+   * nobody is ever ahead of the host — see SyncState.hostWaiting.
+   */
+  const reportHostPicture = useCallback((waiting: boolean) => {
+    if (hostToldWaitingRef.current === waiting) return;
+    hostToldWaitingRef.current = waiting;
+    const v = videoRef.current;
+    if (!v) return;
+    const position = hostPositionForRoom();
+    logEvent("Sync", waiting ? "host's picture not ready, the room waits for it" : "host's picture ready", {
+      ...snapshot(v),
+      posS: Number(position.toFixed(2)),
+    });
+    syncActionsRef.current?.sendHeartbeat(position, !v.paused || hostHeldRef.current, waiting);
+  }, [hostPositionForRoom]);
   // Set once the master manifest for the current session actually goes out, so
   // teardown can tell a real session from an id the server never heard about.
   const sessionRegisteredRef = useRef(false);
@@ -2198,7 +2220,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       heartbeatIntervalRef.current = setInterval(() => {
         const v = videoRef.current;
         if (v && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-          syncActionsRef.current?.sendHeartbeat(v.currentTime, !v.paused || hostHeldRef.current, hostToldWaitingRef.current);
+          syncActionsRef.current?.sendHeartbeat(hostPositionForRoom(), !v.paused || hostHeldRef.current, hostToldWaitingRef.current);
         }
       }, HEARTBEAT_INTERVAL_MS);
     }
@@ -3072,6 +3094,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       }
     }
     const startOffset = offset ?? 0;
+    restartTargetRef.current = startOffset;
 
     // The offset is the single most useful number in a restart: a transcode
     // starting somewhere other than where playback was is the signature of a
@@ -3201,6 +3224,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         let hls: Hls;
         /** This stream's P2P engine, in P2P mode. */
         let p2pEngine: HlsJsP2PEngine | null = null;
+        // Downloads from the bot at once — see simultaneousHttpDownloads.
+        let inParts = false;
+        let firstSegmentIn = false;
+        let httpSlots = 3;
+        const applyHttpSlots = () => {
+          const slots = !inParts ? 3 : firstSegmentIn ? 2 : 1;
+          if (!p2pEngine || slots === httpSlots) return;
+          httpSlots = slots;
+          p2pEngine.applyDynamicConfig({ core: { simultaneousHttpDownloads: slots } });
+        };
 
         if (!vpsRelay) {
           // P2P mode — peers share segments via WebRTC. Copied segments come
@@ -3216,7 +3249,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             ofMB: took.total === undefined ? "?" : (took.total / 1e6).toFixed(2),
             afterS: (took.ms / 1000).toFixed(1),
             peerMbps: took.peerBitsPerS > 0 ? (took.peerBitsPerS / 1e6).toFixed(1) : "unmeasured",
-          }));
+          }), () => logEvent("P2P", "the other player is on this network, sharing segments with it rather than fetching each twice", {
+            session: sessionId?.substring(0, 8),
+          }), () => !isHostRef.current && !!syncStateRef.current?.playing && !!syncStateRef.current.hostWaiting);
+          // A viewer joining a stream as it starts, with a host on its own
+          // network, gives the host a moment to appear as a peer before
+          // fetching anything from the bot: whatever the host is already
+          // fetching, it then takes from the host (lib/takeFromPeer).
+          const joiningStart = !isHostRef.current && sameNetworkKnown() &&
+            !!syncStateRef.current?.playing && !!syncStateRef.current.hostWaiting;
           const HlsWithP2P = HlsJsP2PEngine.injectMixin(Hls);
           hls = new HlsWithP2P({
             ...hlsConfig,
@@ -3294,13 +3335,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // line: the engine takes a download from the furthest-ahead
                 // one to start it.
                 //
-                // Two, for a copied stream, whose segments each come in up to
-                // four parts (lib/segmentParts) — set when its playlist loads.
-                // Three whole ones at once was the same number of downloads,
-                // but the first segment of a stream, the one the picture waits
-                // on, shared them with the two after it and came in last: a
-                // copy started with 20s already buffered, having waited for
-                // all of it.
+                // For a copied stream, whose segments each come in up to four
+                // parts (lib/segmentParts): one until its first segment is in,
+                // then two — set when its playlist loads. A copy's first
+                // segment is a whole keyframe interval, 7 to 36 MB, and it is
+                // the one the picture waits on: sharing the connection with the
+                // segments after it, it came in last, and the stream started
+                // with 20s buffered, having waited for all of it.
                 simultaneousHttpDownloads: 3,
                 // How long a download from the bot may go without a byte before
                 // the engine calls it off and asks again. Its default, 3s, is
@@ -3309,6 +3350,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // wait over, three times, before giving up on it. A request
                 // that has really died is still caught, after this.
                 httpNotReceivingBytesTimeoutMs: 15_000,
+                httpDownloadInitialTimeoutMs: joiningStart ? PEER_CONNECT_WAIT_MS : 0,
                 rtcConfig: {
                   // Multiple STUN servers improve NAT traversal odds — every
                   // peer pair that fails to connect falls back to HTTP, costing
@@ -3411,6 +3453,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   if (times) held.set(segmentUrl, times);
                 });
                 p2pEngine = hls.p2pEngine;
+                hls.p2pEngine.addEventListener("onSegmentLoaded", () => {
+                  if (firstSegmentIn) return;
+                  firstSegmentIn = true;
+                  applyHttpSlots();
+                });
                 // The first few segments of a stream, timed: what its start
                 // waited on, and where each came from.
                 const streamAskedAt = performance.now();
@@ -3436,6 +3483,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 });
                 hls.p2pEngine.addEventListener("onPeerConnect", ({ peerId }) => {
                   stats.peers.add(peerId);
+                  // The host is here: no more waiting for it before fetching
+                  // whatever it isn't — see joiningStart.
+                  if (joiningStart) hls.p2pEngine.applyDynamicConfig({ core: { httpDownloadInitialTimeoutMs: 0 } });
                 });
                 hls.p2pEngine.addEventListener("onPeerClose", ({ peerId }) => {
                   stats.peers.delete(peerId);
@@ -3487,15 +3537,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             });
           }
         });
-        let inParts: boolean | null = null;
         hls.on(Hls.Events.LEVEL_LOADED, (_e, data) => {
-          // Two segments at once when they come in parts — see
-          // simultaneousHttpDownloads.
-          const parts = data.details.fragments.some((f) => segmentBytesOf(f.url) !== null);
-          if (p2pEngine && parts !== inParts) {
-            inParts = parts;
-            p2pEngine.applyDynamicConfig({ core: { simultaneousHttpDownloads: parts ? 2 : 3 } });
-          }
+          inParts = data.details.fragments.some((f) => segmentBytesOf(f.url) !== null);
+          applyHttpSlots();
           const copied = data.details.type === "EVENT";
           if (copied && !copiedStreamRef.current) {
             logEvent("HLS", "playing the original video (Direct Stream)", {
@@ -3611,7 +3655,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             });
             video.currentTime = backAheadAt;
           } else if (rejoiningLiveRoom) {
-            const syncPos = roomPositionNow(sync);
+            let syncPos = roomPositionNow(sync);
+            // Never before a stream this client started: there is nothing
+            // there, and the picture would wait for ever. The room's clock
+            // behind it is the room being wrong — see hostPositionForRoom.
+            if (sessionOwner && !didAdoptRef.current && syncPos < startOffset - 1) {
+              logWarn("Sync", "the room's clock is before this stream begins, starting where it does", {
+                roomPosS: Number(syncPos.toFixed(2)),
+                startS: startOffset,
+              });
+              syncPos = startOffset;
+            }
             if (syncPos > DRIFT_THRESHOLD_S) {
               logEvent("Sync", "landing on the room clock after a rebuild", {
                 fromS: video.currentTime,
@@ -4393,7 +4447,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         heartbeatIntervalRef.current = setInterval(() => {
           const v = videoRef.current;
           if (v && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-            syncActionsRef.current?.sendHeartbeat(v.currentTime, !v.paused || hostHeldRef.current, hostToldWaitingRef.current);
+            syncActionsRef.current?.sendHeartbeat(hostPositionForRoom(), !v.paused || hostHeldRef.current, hostToldWaitingRef.current);
           }
         }, HEARTBEAT_INTERVAL_MS);
       }
@@ -5738,14 +5792,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   }, [handleHostSeek]);
 
   // The control bar's play/pause. It reports the element's own currentTime,
-  // which reads 0 while the element has no media — see positionForRoom.
+  // which reads 0 while the element has no media, and the place being left
+  // while a skip rebuilds the stream — see hostPositionForRoom.
   const sendPauseForControls = useCallback(() => {
     hostHeldRef.current = false;
-    syncActionsRef.current?.sendPause(positionForRoom());
-  }, [positionForRoom]);
+    syncActionsRef.current?.sendPause(hostPositionForRoom());
+  }, [hostPositionForRoom]);
   const sendResumeForControls = useCallback(() => {
-    sendRoomResume(positionForRoom());
-  }, [positionForRoom, sendRoomResume]);
+    sendRoomResume(hostPositionForRoom());
+  }, [hostPositionForRoom, sendRoomResume]);
 
   /**
    * Toggle playback and announce it to the room. Shared by the spacebar shortcut
@@ -5768,11 +5823,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const resuming = video.paused && !(sync?.playing && sync.hostWaiting);
     if (resuming) {
       // Started when the room is — see sendRoomResume.
-      sendRoomResume(positionForRoom());
+      sendRoomResume(hostPositionForRoom());
     } else {
       hostHeldRef.current = false;
       video.pause();
-      syncActionsRef.current?.sendPause(positionForRoom());
+      syncActionsRef.current?.sendPause(hostPositionForRoom());
     }
     // Acknowledge the input. Clicking the picture otherwise gives no feedback
     // until the frame moves, which on a paused-to-playing transition can be
@@ -6955,10 +7010,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // an already-paused video would broadcast a spurious command.
                 if (video && wantPause && !video.paused) {
                   video.pause();
-                  syncActions?.sendPause(positionForRoom());
+                  syncActions?.sendPause(hostPositionForRoom());
                 } else if (video && !wantPause && video.paused) {
                   void video.play();
-                  sendRoomResume(positionForRoom());
+                  sendRoomResume(hostPositionForRoom());
                 }
                 syncActions?.clearTransportRequest();
               }}

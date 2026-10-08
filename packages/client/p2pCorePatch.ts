@@ -1,7 +1,7 @@
 /**
- * Two changes to how the P2P engine (p2p-media-loader-core 2.3) picks where a
- * segment comes from, made as it is bundled — the engine has no setting for
- * either.
+ * Three changes to how the P2P engine (p2p-media-loader-core 2.3) picks where
+ * a segment comes from, made as it is bundled — the engine has no setting for
+ * any of them.
  *
  * Left to itself it fetches every segment near the playhead from the bot, and
  * from another player only when its own downloads are all busy; and it moves
@@ -19,12 +19,23 @@
  *     crawling, and whether a peer download is doing better, is for the player
  *     to say: globalThis.__pdtP2P (src/lib/takeFromPeer.ts). Without that, the
  *     engine behaves as it always has.
- *  2. The queue is looked at every second or two even when nothing happens,
- *     so a download that is merely slow — which raises no event — is noticed.
+ *  2. A player on the same network as its peer — which its WebRTC connection
+ *     says — leaves a segment to the peer already fetching it, and takes it
+ *     from the peer once it's in, rather than fetching it from the bot too;
+ *     and while the room waits on the host's picture, a viewer fetches nothing
+ *     from the bot at all (holdForPeer). That covers the engine's own random
+ *     fetches as well. Two players in one house fetched every segment twice
+ *     through the same connection: Backrooms, copied at 28-36 MB a segment,
+ *     took 22s to start with each player getting half of it, the other player
+ *     225 Mbps away.
+ *  3. The queue is looked at every second or two even when nothing happens,
+ *     so a download that is merely slow — which raises no event — is noticed,
+ *     and each peer's connection is asked where it is.
  *
  * Applied to the engine's source as text: if a new version moves what this
  * looks for, the build fails here rather than quietly doing without.
  */
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { Plugin } from "vite";
 
@@ -32,6 +43,35 @@ const TARGET = /p2p-media-loader-core[\\/]lib[\\/]hybrid-loader\.js$/;
 const MARK = "plex-discord-theater: p2pCorePatch";
 
 const edits: Array<[string, string]> = [
+  [
+    `            if (!statuses.isHttpDownloadable ||
+                statuses.isP2PDownloadable ||
+                this.segmentStorage.hasSegment(swarmId, streamSwarmId, segment.externalId)) {
+                continue;
+            }`,
+    `            if (!statuses.isHttpDownloadable ||
+                statuses.isP2PDownloadable ||
+                this.segmentStorage.hasSegment(swarmId, streamSwarmId, segment.externalId)) {
+                continue;
+            }
+            // ${MARK}: what is left to a peer isn't fetched at random either.
+            if (this.requests.get(segment)?.status !== "loading" && this.pdtLeaveToPeer(segment)) continue;`,
+  ],
+  [
+    `            if (shouldStartLoadImmediatelyEngineRequest) {
+                // Don't abort requests when processing engine request`,
+    `            // ${MARK}
+            if (shouldStartLoadImmediatelyEngineRequest && !this.pdtLeaveToPeer(segment)) {
+                // Don't abort requests when processing engine request`,
+  ],
+  [
+    `                // High-demand request is not loading
+                const shouldLoadThroughHttp = canLoadThroughHttp &&`,
+    `                // High-demand request is not loading
+                // ${MARK}
+                if (this.pdtLeaveToPeer(segment)) continue;
+                const shouldLoadThroughHttp = canLoadThroughHttp &&`,
+  ],
   [
     `                if (request?.status === "loading") {
                     // High-demand request is loading
@@ -51,6 +91,7 @@ const edits: Array<[string, string]> = [
     `        this.randomHttpDownloadTimeout = window.setTimeout(() => {
             this.loadRandomThroughHttp();
             // ${MARK}
+            for (const peer of this.p2pLoaders.currentLoader.trackerClient.peers()) this.pdtSamePlace(peer);
             this.requestProcessQueueMicrotask(false);
             this.setIntervalLoading();`,
   ],
@@ -103,6 +144,67 @@ const edits: Array<[string, string]> = [
         if (request.status !== "loading") this.loadThroughHttp(segment);
         return true;
     }
+    // ${MARK}: a segment a peer is fetching, or has, is left to that peer.
+    pdtLeaveToPeer(segment) {
+        const hooks = globalThis.__pdtP2P;
+        if (!hooks?.cooperating) return false;
+        let holder;
+        let fetching = false;
+        let best = 0;
+        let samePlace = false;
+        let peers = 0;
+        let elsewhere = 0;
+        for (const peer of this.p2pLoaders.currentLoader.trackerClient.peers()) {
+            peers++;
+            best = Math.max(best, peer.downloadBandwidth);
+            const place = this.pdtSamePlace(peer);
+            if (place === true) samePlace = true;
+            else if (place === false) elsewhere++;
+            const status = peer.getSegmentStatus(segment);
+            if (status === "loaded" && !peer.downloadingSegment) holder ??= peer;
+            else if (status) fetching = true;
+        }
+        // Nobody has it or is fetching it: ours to fetch — unless the player
+        // is holding everything for the peer, as a viewer does while the room
+        // waits on the host's picture (holdForPeer).
+        if (!holder && !fetching && !(peers > 0 && hooks.holdForPeer?.())) return false;
+        if (!hooks.cooperating({ peerBitsPerS: best, samePlace, elsewhere: peers > 0 && elsewhere === peers })) return false;
+        const now = performance.now();
+        this.pdtWaitSince ??= new Map();
+        if (holder && this.requests.executingP2PCount < this.config.simultaneousP2PDownloads) {
+            this.pdtWaitSince.delete(segment.externalId);
+            const request = this.requests.getOrCreateRequest(segment);
+            request.pdtFromPeer = true;
+            this.loadThroughP2P(segment);
+            if (request.status === "loading" || request.status === "succeed") return true;
+        }
+        // Held for the peer, which nobody is fetching it from yet: for as long
+        // as the room waits, which ends it.
+        if (!holder && !fetching) return true;
+        // Waited on so long and no longer: a peer whose download has died says nothing.
+        const since = this.pdtWaitSince.get(segment.externalId) ?? now;
+        this.pdtWaitSince.set(segment.externalId, since);
+        if (this.pdtWaitSince.size > 200) this.pdtWaitSince.clear();
+        return now - since < hooks.peerWaitMs;
+    }
+    // ${MARK}: whether a peer is on this player's network, as its connection says.
+    // True, false, or undefined while it can't say yet.
+    pdtSamePlace(peer) {
+        const hooks = globalThis.__pdtP2P;
+        if (!hooks?.samePlace) return undefined;
+        // Asked again every few seconds until it says so: just after it
+        // connects, a connection is still trying out routes, and its first
+        // answer can be no.
+        const now = performance.now();
+        if (peer.pdtSamePlace !== true && !peer.pdtSamePlaceAsking && now - (peer.pdtSamePlaceAt ?? -Infinity) >= 3000) {
+            peer.pdtSamePlaceAsking = true;
+            peer.pdtSamePlaceAt = now;
+            hooks.samePlace(peer.connection?._pc).then((same) => {
+                if (same === true || same === false) peer.pdtSamePlace = same;
+            }, () => {}).finally(() => { peer.pdtSamePlaceAsking = false; });
+        }
+        return peer.pdtSamePlace;
+    }
     // ${MARK}: a segment taken from a peer stays there while it is doing well.
     pdtKeepOnPeer(request) {
         const hooks = globalThis.__pdtP2P;
@@ -142,6 +244,10 @@ export function p2pCorePatch(): Plugin {
     config: () => ({
       optimizeDeps: {
         esbuildOptions: {
+          // Part of what the dev server names its pre-bundled engine by, so a
+          // change to this patch is a new file to the browser rather than the
+          // old one from its cache.
+          define: { __PDT_P2P_CORE_PATCH__: JSON.stringify(createHash("sha256").update(JSON.stringify(edits)).digest("hex").slice(0, 12)) },
           plugins: [{
             name: "p2p-core-patch",
             setup(build) {

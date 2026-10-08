@@ -196,11 +196,12 @@ function Runner() {
   }
 
   /** When the room started after the host pressed play, and how much each had buffered by then. */
-  async function startOnce(query: string, flows: Record<string, number>) {
+  async function startOnce(query: string, flows: Record<string, number>, uploadKbps = 0) {
     latest.clear();
     events.clear();
     await api(`/api/test/reset?${query}`);
     for (const [user, kbps] of Object.entries(flows)) await api(`/api/test/flow?user=${user}&kbps=${kbps}`);
+    if (uploadKbps) await api(`/api/test/upload?kbps=${uploadKbps}`);
     setHostOn(false);
     setFrames(nextFrames);
     await waitFor(() => latest.get("u-viewer")?.joined, 60_000, "the viewer to join");
@@ -285,6 +286,110 @@ function Runner() {
     } catch (err) {
       say(`FAIL ${String(err)}`);
     } finally {
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
+   * Both players on one connection to the bot, 20 Mbps for the two of them, as
+   * at one house. Once they have found each other close (the first stream
+   * shows it), a skip that rebuilds the stream has the host fetch the new
+   * place with the whole connection and the viewer take it from the host,
+   * instead of each fetching it at half.
+   */
+  async function runSharedStart() {
+    setRunning(true);
+    const out: string[] = ["— a copied film, both players on one 20 Mbps connection to the bot —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    /** Play a while, then skip past what is measured: how long until both play again, and where the viewer's segment came from. */
+    const skipAfterPlaying = async (query: string) => {
+      const first = await startOnce(query, {}, 20_000);
+      await pause(15_000);
+      const from = latest.get("u-host")!.pos;
+      const loadsBefore = (events.get("u-viewer") ?? []).filter((e) => e.tag === "Load").length;
+      const asked = Date.now();
+      for (let i = 0; i < 6; i++) hostKey("ArrowRight");
+      const target = from + 60;
+      await waitFor(() => {
+        const h = latest.get("u-host");
+        const v = latest.get("u-viewer");
+        return h && v && !h.paused && !v.paused && h.pos > target - 3 && v.pos > target - 3;
+      }, 60_000, "both to play from where the host skipped to");
+      // The segment the picture waited on: the one the skip landed in.
+      const viewerLoad = (events.get("u-viewer") ?? []).filter((e) => e.tag === "Load").slice(loadsBefore)
+        .find((e) => Number(e.data.seg) === Math.floor(target / 10));
+      return { startS: first.startS, skipS: (Date.now() - asked) / 1000, viewerFrom: viewerLoad?.data.from };
+    };
+    try {
+      const alone = await skipAfterPlaying("p2p=0&stream=copy&event=1");
+      say(`each fetching its own: started in ${alone.startS.toFixed(1)}s; a skip played again in ${alone.skipS.toFixed(1)}s`);
+      const shared = await skipAfterPlaying("p2p=1&stream=copy&event=1");
+      say(`sharing: started in ${shared.startS.toFixed(1)}s; a skip played again in ${shared.skipS.toFixed(1)}s, the viewer's segment from ${shared.viewerFrom ?? "?"}`);
+      say(`${shared.viewerFrom === "another player" ? "PASS" : "FAIL"} after the skip the viewer takes the segment from the host, not the bot`);
+      say(`${shared.skipS < alone.skipS * 0.85 ? "PASS" : "FAIL"} so the room plays again sooner than with each fetching its own`);
+      await pause(5_000);
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      say(`${Math.abs(v.pos - h.pos) < 1 && !h.paused && !v.paused ? "PASS" : "FAIL"} and they play on together (${Math.abs(v.pos - h.pos).toFixed(2)}s apart)`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
+   * The host skipping a minute ahead in a copied film, past what the bot has
+   * measured, so the stream is rebuilt there — Backrooms skipped to 25:54, and
+   * the room went back to 0:59 and waited there for ever.
+   */
+  async function runCopySkip() {
+    setRunning(true);
+    const out: string[] = ["— the host skipping past what a copied film has measured —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    const samples: Sample[] = [];
+    let sampler = 0;
+    try {
+      await startOnce("p2p=1&stream=copy&event=1", {}, 60_000);
+      await pause(4_000);
+      const from = latest.get("u-host")!.pos;
+      sampler = window.setInterval(() => {
+        const host = latest.get("u-host");
+        const viewer = latest.get("u-viewer");
+        if (host && viewer) samples.push({ t: Date.now(), host, viewer });
+      }, 200);
+      for (let i = 0; i < 6; i++) hostKey("ArrowRight");
+      const target = from + 60;
+      say(`… skipping from ${from.toFixed(1)}s to about ${target.toFixed(0)}s`);
+      await waitFor(() => {
+        const h = latest.get("u-host");
+        const v = latest.get("u-viewer");
+        return h && v && !h.paused && !v.paused && h.pos > target - 3 && v.pos > target - 3;
+      }, 40_000, "both to play from where the host skipped to");
+      const restarted = (events.get("u-host") ?? []).some((e) => e.tag === "Seek" && /restarting transcode/.test(e.msg));
+      say(`${restarted ? "PASS" : "FAIL"} the stream was rebuilt at the new place, as a skip past a copy's end is`);
+      await pause(5_000);
+      window.clearInterval(sampler);
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      say(`PASS both play from where the host skipped to (host at ${h.pos.toFixed(1)}s, viewer at ${v.pos.toFixed(1)}s)`);
+      const wentBack = samples.filter((x, i) => i > 0 &&
+        ((x.host.pos < target - 10 && samples[i - 1].host.pos >= target - 10) ||
+         (x.viewer.pos < target - 10 && samples[i - 1].viewer.pos >= target - 10))).length;
+      say(`${wentBack === 0 ? "PASS" : "FAIL"} and nobody goes back to where they skipped from (${wentBack})`);
+      say(`${Math.abs(v.pos - h.pos) < 1 ? "PASS" : "FAIL"} together (${Math.abs(v.pos - h.pos).toFixed(2)}s apart)`);
+    } catch (err) {
+      const h = latest.get("u-host");
+      const v = latest.get("u-viewer");
+      say(`FAIL ${String(err)} (host at ${h?.pos.toFixed(1)}s ${h?.paused ? "paused" : "playing"}, viewer at ${v?.pos.toFixed(1)}s)`);
+    } finally {
+      window.clearInterval(sampler);
       (window as unknown as { results?: string[]; events?: typeof events }).results = out;
       (window as unknown as { events?: typeof events }).events = events;
       setRunning(false);
@@ -387,6 +492,8 @@ function Runner() {
         <button disabled={running} onClick={() => void runSlowViewer(20000)}>Very slow viewer</button>
         <button disabled={running} onClick={() => void runStartup()}>Start-up</button>
         <button disabled={running} onClick={() => void runHostCrawls()}>Host's downloads crawl</button>
+        <button disabled={running} onClick={() => void runSharedStart()}>Shared connection</button>
+        <button disabled={running} onClick={() => void runCopySkip()}>Skip in a copy</button>
         <pre id="results">{lines.join("\n")}</pre>
       </div>
       {frames > 0 && (

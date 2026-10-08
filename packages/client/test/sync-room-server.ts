@@ -15,10 +15,17 @@
 // Discord's proxy is, however many run beside it:
 //   POST /api/test/flow?user=u-host&kbps=6000
 //
+// and all of them together held to one connection's speed, as the bot's own
+// upload holds every player's downloads at once:
+//   POST /api/test/upload?kbps=40000
+//
 // /api/test/reset?stream=copy plays a stream shaped like a copied film instead
 // — one segment per ten-second keyframe interval, ~10 MB each, made once with
 // ffmpeg — whose playlist gives each segment's size, as the bot's does, so the
 // players fetch them in parts (lib/segmentParts). &parts=0 leaves the sizes out.
+// &event=1 lists it as the bot lists a copy: from where the stream was asked
+// to start, the next 40s, still growing, so a skip past that rebuilds the
+// stream there.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
@@ -66,6 +73,13 @@ const paceMs = new Map<string, number>();
 const nextSlot = new Map<string, number>();
 /** Each user's speed per download, kbps — unset is as fast as the disk. */
 const flowKbps = new Map<string, number>();
+/** Every download's together, kbps, and when the shared connection is next free. */
+let uploadKbps = 0;
+let uploadFreeAt = 0;
+/** Whether a copy is listed the way the bot lists one — see &event=1. */
+let eventList = false;
+/** Where each session was asked to start: its owner says, everyone else joins it. */
+const sessionStart = new Map<string, number>();
 /** Segments served, per user, for the checks to read. */
 const served: Array<{ user: string; seg: string; at: number; heldMs: number; part?: string; bytes?: number; ms?: number }> = [];
 
@@ -110,6 +124,11 @@ const server = http.createServer(async (req, res) => {
     else flowKbps.delete(who);
     return json(res, { ok: true });
   }
+  if (p === "/api/test/upload") {
+    uploadKbps = Number(url.searchParams.get("kbps") ?? 0);
+    uploadFreeAt = 0;
+    return json(res, { ok: true });
+  }
   if (p === "/api/test/pace") {
     const who = url.searchParams.get("user") ?? "u-host";
     const ms = Number(url.searchParams.get("ms") ?? 0);
@@ -119,6 +138,10 @@ const server = http.createServer(async (req, res) => {
   }
   if (p === "/api/test/reset") {
     stallUntil.clear(); paceMs.clear(); nextSlot.clear(); flowKbps.clear(); served.length = 0;
+    uploadKbps = 0;
+    uploadFreeAt = 0;
+    eventList = url.searchParams.get("event") === "1";
+    sessionStart.clear();
     p2pOn = url.searchParams.get("p2p") !== "0";
     streamDir = url.searchParams.get("stream") === "copy" ? COPY_STREAM : SMALL_STREAM;
     partsOn = url.searchParams.get("parts") !== "0";
@@ -132,6 +155,26 @@ const server = http.createServer(async (req, res) => {
   if (p.startsWith("/api/plex/siblings/")) return json(res, { episode: false, prev: null, next: null });
 
   // The stream: a media playlist straight away, as a copy of Plex's would be.
+  if (/^\/api\/plex\/hls\/[^/]+\/[^/]+\/master\.m3u8$/.test(p) && eventList && streamDir === COPY_STREAM) {
+    // As the bot lists a copy (services/direct-stream.ts): gaps up to where the
+    // stream starts, then what it has measured from there — 40s — at each
+    // segment's length, an EVENT playlist that says where to begin.
+    const sid = p.split("/")[5];
+    if (!sessionStart.has(sid)) sessionStart.set(sid, Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0));
+    const offset = sessionStart.get(sid)!;
+    const names = fs.readdirSync(COPY_STREAM).filter((f) => /^seg\d+\.ts$/.test(f)).sort();
+    const first = Math.min(Math.floor(offset / 10), names.length - 1);
+    const lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-TARGETDURATION:12",
+      "#EXT-X-MEDIA-SEQUENCE:0", `#EXT-X-START:TIME-OFFSET=${offset.toFixed(3)},PRECISE=YES`];
+    for (let filled = 0; filled < first * 10; filled += 60) {
+      lines.push(`#EXTINF:${Math.min(60, first * 10 - filled).toFixed(3)},`, "#EXT-X-GAP", "gap.ts");
+    }
+    for (const name of names.slice(first, first + 4)) {
+      lines.push("#EXTINF:10.000,", `/api/test/stream/${name}?n=${fs.statSync(path.join(COPY_STREAM, name)).size}`);
+    }
+    res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
+    return res.end(lines.join("\n") + "\n");
+  }
   if (/^\/api\/plex\/hls\/[^/]+\/[^/]+\/master\.m3u8$/.test(p)) {
     const playlist = fs.readFileSync(path.join(streamDir, "index.m3u8"), "utf8")
       .replace(/^(seg\d+\.ts)$/gm, (name) => partsOn
@@ -183,12 +226,22 @@ const server = http.createServer(async (req, res) => {
     // At this user's speed per download, if they have one.
     const kbps = flowKbps.get(who);
     const sentFrom = Date.now();
-    const chunk = 16_384;
+    // Bigger with a shared connection: each turn on it costs a timer, and
+    // small turns waste what one download alone could have used.
+    const chunk = uploadKbps ? 65_536 : 16_384;
     for (let at = 0; at < body.length && !res.destroyed; at += chunk) {
       const piece = body.subarray(at, at + chunk);
       if (kbps) {
         const due = sentFrom + ((at + piece.length) * 8) / kbps;
         if (due > Date.now()) await new Promise((r) => setTimeout(r, due - Date.now()));
+      }
+      // Its turn on the one connection everybody's downloads share: sent at
+      // the start of its slot, the next slot starting where this one ends, so
+      // one download alone has the whole of it.
+      if (uploadKbps) {
+        const start = Math.max(Date.now(), uploadFreeAt);
+        uploadFreeAt = start + (piece.length * 8) / uploadKbps;
+        if (start > Date.now()) await new Promise((r) => setTimeout(r, start - Date.now()));
       }
       if (!res.write(piece)) await new Promise((r) => res.once("drain", r));
     }

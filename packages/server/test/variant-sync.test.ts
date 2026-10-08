@@ -1026,6 +1026,75 @@ console.log("\n— everybody starts together —");
   [host, a, b].forEach((c) => c.close());
 }
 
+console.log("\n— a skip that rebuilds the host's stream —");
+{
+  // Backrooms: the host skipped from 0:59 to 25:54, past what its copy had
+  // measured, and while it rebuilt its stream it reported 0:59 — the place it
+  // was leaving. The room went back there, and the rebuilt stream, which
+  // starts at 25:54, waited at 0:59 for a picture it was never going to have.
+  instanceHosts.set("inst-skip", { hostUserId: "u-host", guildId: null, channelId: null, createdAt: Date.now() });
+  const host = new Client("u-host", "host");
+  await host.connect("inst-skip", { gather: true });
+  const a = new Client("u-a", "a");
+  await a.connect("inst-skip", { gather: true });
+  for (const c of [host, a]) c.send({ type: "watching", value: true });
+  await sleep(60);
+  const rev = () => host.last("transport-state")?.transportRevision;
+  const ready = () => a.send({ type: "ready", gather: a.last("room-waiting")?.gather });
+  const sid = uuid();
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: sid, position: 0, sessionOffset: 0,
+    audioStreamId: 1, subtitleStreamId: 0, waiting: true,
+  });
+  await sleep(60);
+  host.send({ type: "heartbeat", position: 0.08, playing: true, waiting: false, transportRevision: rev() });
+  ready();
+  await sleep(60);
+  host.send({ type: "heartbeat", position: 58.95, playing: true, waiting: false, transportRevision: rev() });
+  await sleep(60);
+
+  host.send({ type: "seek", position: 1553.78 });
+  await sleep(60);
+  host.send({ type: "heartbeat", position: 58.95, playing: true, waiting: true, transportRevision: rev() });
+  await sleep(60);
+  check("the host's report of where it was, mid-rebuild, doesn't take the room back",
+    near(await clockOf("inst-skip"), 1553.78, 0.2), "ok");
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: uuid(), position: 1553.78, sessionOffset: 1553.78,
+    audioStreamId: 1, subtitleStreamId: 0, waiting: true,
+  });
+  await sleep(60);
+  check("and the rebuilt stream starts the room where it skipped to",
+    near(a.last("play")?.position ?? a.last("room-waiting")?.position, 1553.78, 0.2), "ok");
+  host.send({ type: "heartbeat", position: 1553.8, playing: true, waiting: false, transportRevision: rev() });
+  ready();
+  await sleep(60);
+  check("which runs once the pictures are there", host.last("room-waiting")?.waiting, false);
+  host.send({ type: "heartbeat", position: 1560, playing: true, waiting: false, transportRevision: rev() });
+  await sleep(60);
+  check("and the host is followed again from then on", near(await clockOf("inst-skip"), 1560, 0.3), "ok");
+
+  // A room clock that has been dragged behind where a rebuilt stream begins
+  // — the skip forgotten — is moved to the stream rather than left there.
+  host.send({ type: "seek", position: 3000 });
+  await sleep(60);
+  host.send({ type: "pause", position: 100 });
+  await sleep(60);
+  host.send({ type: "resume", position: 100, waiting: true, hold: true });
+  await sleep(60);
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: uuid(), position: 3000, sessionOffset: 3000,
+    audioStreamId: 1, subtitleStreamId: 0, waiting: true,
+  });
+  await sleep(60);
+  check("a restart's stream that begins past the room's clock moves the room to it",
+    near(await clockOf("inst-skip"), 3000, 0.3), "ok");
+  [host, a].forEach((c) => c.close());
+}
+
 console.log("\n— a host on its own is answered at once —");
 {
   instanceHosts.set("inst-alone", { hostUserId: "u-host", guildId: null, channelId: null, createdAt: Date.now() });

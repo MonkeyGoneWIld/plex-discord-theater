@@ -333,6 +333,15 @@ interface RoomState {
   gatherDeadline: number | null;
   /** The gather everybody was last told about — see updateWaiting. */
   gatherAnnounced: number;
+  /**
+   * Where the host has just skipped to, while its picture gets there — see
+   * the heartbeat. A host that has to rebuild its stream for a skip still
+   * shows the place it is leaving until the new one is in, and the room took
+   * a report of that for the host's playhead: it went back, and the rebuilt
+   * stream waited there for a picture it doesn't have. Null once the host's
+   * picture is at the new place, or SEEK_HOLD_MS after the skip.
+   */
+  seekHold: { target: number; at: number; logged: boolean } | null;
   updatedAt: number;
   transportRevision: number;
   transportChangedAt: number;
@@ -412,6 +421,11 @@ function setTransport(room: Room, playing: boolean): void {
  * holds everyone for no longer than this, then catches up on their own.
  */
 const GATHER_MAX_MS = 10_000;
+/** How long after a skip the room keeps to where it went, whatever the host
+ *  says — see RoomState.seekHold. A rebuild for a skip takes seconds. */
+const SEEK_HOLD_MS = 30_000;
+/** A host report this far from where it skipped to is the place it left. */
+const SEEK_HOLD_SLACK_S = 10;
 
 /** Viewers the room is still waiting on in the open gather. */
 function gatherPending(room: Room): RoomClient[] {
@@ -723,6 +737,7 @@ function getOrCreateRoom(instanceId: string): Room {
         gatherOpenedAt: 0,
         gatherDeadline: null,
         gatherAnnounced: 0,
+        seekHold: null,
         updatedAt: Date.now(),
         transportRevision: 0,
         transportChangedAt: performance.now(),
@@ -1809,9 +1824,20 @@ export function attachWebSocketServer(server: Server): void {
           // A different title, or a room that wasn't playing, is a real start
           // and does set the clock.
           const restartOfLiveItem = !itemChanged && wasPlaying;
-          room.state.position = restartOfLiveItem
-            ? interpolatedPosition(room.state)
-            : startPosition;
+          // Except a clock behind where the restarted stream even begins:
+          // nothing exists there, and everybody would wait on it for ever. That
+          // is the clock being wrong, not the restart.
+          const clock = interpolatedPosition(room.state);
+          const clockBeforeStream = startPosition > clock + SEEK_HOLD_SLACK_S;
+          if (restartOfLiveItem && clockBeforeStream) {
+            logEvent("Sync", "the room's clock is before the restarted stream begins, moving it there", {
+              room: roomId.substring(0, 8),
+              clockS: Number(clock.toFixed(2)),
+              streamStartS: startPosition,
+            });
+          }
+          room.state.position = restartOfLiveItem && !clockBeforeStream ? clock : startPosition;
+          if (itemChanged) room.state.seekHold = null;
           // A restart carries the clock forward, so whatever confirmed it still
           // does. A genuine start is only a request: `startPosition` is where a
           // transcode was asked to begin, and no frame of it exists yet. The
@@ -1946,6 +1972,7 @@ export function attachWebSocketServer(server: Server): void {
           // truth by construction — nothing has to observe it first.
           room.state.positionConfirmed = true;
           room.state.updatedAt = Date.now();
+          room.state.seekHold = { target: room.state.position, at: performance.now(), logged: false };
           persistProgress(room, undefined, true);
           broadcast(room, ws, { type: "seek", position: room.state.position });
           // Everybody starts from the new place together, whoever has to load
@@ -1988,6 +2015,7 @@ export function attachWebSocketServer(server: Server): void {
           room.state.sessionOffset = 0;
           setTransport(room, false);
           room.state.position = 0;
+          room.state.seekHold = null;
           room.state.hostWaiting = false;
           updateWaiting(room, roomId, "stopped");
           room.state.updatedAt = Date.now();
@@ -2050,7 +2078,28 @@ export function attachWebSocketServer(server: Server): void {
            * by the restarting client landing on the clock once its manifest is
            * ready.
            */
-          const reported = safePosition(msg.position, room.state.position);
+          let reported = safePosition(msg.position, room.state.position);
+          // Except a host still getting to where it skipped: its report is the
+          // place it is leaving — see RoomState.seekHold.
+          const hold = room.state.seekHold;
+          if (hold) {
+            const far = Math.abs(reported - hold.target) > SEEK_HOLD_SLACK_S;
+            if (performance.now() - hold.at > SEEK_HOLD_MS) {
+              room.state.seekHold = null;
+            } else if (far) {
+              if (!hold.logged) {
+                hold.logged = true;
+                logEvent("Sync", "keeping the room where the host skipped to, its report is the place it left", {
+                  room: roomId.substring(0, 8),
+                  reportedS: Number(reported.toFixed(2)),
+                  skippedToS: Number(hold.target.toFixed(2)),
+                });
+              }
+              reported = interpolatedPosition(room.state);
+            } else if (msg.waiting !== true) {
+              room.state.seekHold = null;
+            }
+          }
           // Silent while playback is ordinary — the room and the host agree to
           // within the half-second of network between them. A gap this size is
           // the host having restarted, stalled or seeked, and it is the first

@@ -225,9 +225,12 @@ interface SubtitleLayerProps {
   /** Told when a sidecar can't be read, so the player can say so rather than
    *  leaving somebody staring at a film with no subtitles and no explanation. */
   onUnavailable?: () => void;
+  /** Draw nothing for now — over the loading screen, a line belongs to a
+   *  picture nobody can see. The cues stay loaded. */
+  hidden?: boolean;
 }
 
-export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offsetMs, onUnavailable }: SubtitleLayerProps) {
+export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offsetMs, onUnavailable, hidden = false }: SubtitleLayerProps) {
   const style = useSubtitleStyle();
   const [cues, setCues] = useState<SubtitleCue[]>([]);
   // Plex is still reading this one out of the media file: cues so far are
@@ -283,6 +286,7 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
   // a film that starts with no subtitles otherwise looks like a broken track.
   const lastEnd = cues.length > 0 ? cues[cues.length - 1].end : -1;
   const waiting = stillReading && shown.length === 0 && (videoRef.current?.currentTime ?? 0) >= lastEnd;
+  if (hidden) return null;
   if (shown.length === 0 && !waiting) return null;
   // Nothing until there is a picture to size and place it against. Lines used
   // to go up over the black loading screen sized from the window instead, at

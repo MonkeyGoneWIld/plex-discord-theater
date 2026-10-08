@@ -141,6 +141,8 @@ const HOST_WAIT_AFTER_MS = 300;
 /** Seconds of picture past the playhead a player has before it says it is
  *  ready for the room to start — see pictureReady. */
 const READY_AHEAD_S = 3;
+/** How long "Host is seeking…" shows, at least, for a skip that needs no loading. */
+const HOST_SEEKING_FLASH_MS = 1400;
 /**
  * How far behind where the room waits a player may be and still start from
  * where it is. Further back than this, it goes to the room's place first;
@@ -778,9 +780,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [retryKey, setRetryKey] = useState(0);
   const [vpsRelay, setVpsRelay] = useState<boolean | null>(null); // null = not yet loaded
   const [buffering, setBuffering] = useState(true);
-  // Viewers-only: transient "host is seeking" flag, raised on each seek command
-  // and auto-cleared shortly after (see effect below).
+  // Viewers-only: "host is seeking", raised on each seek command and cleared
+  // once the picture is back (see effect below).
   const [hostSeeking, setHostSeeking] = useState(false);
+  /** Whether the loading screen came up for the seek hostSeeking is about. */
+  const seekLoadingSeenRef = useRef(false);
+  const hostSeekingAtRef = useRef(0);
   const [showTrackSwitcher, setShowTrackSwitcher] = useState(false);
   const [trackSwitching, setTrackSwitching] = useState<"audio" | "subtitle" | "quality" | null>(null);
   // Transient play/pause acknowledgement. `at` is part of the key so a rapid
@@ -2416,6 +2421,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       else if (!starvingSince) starvingSince = Date.now();
       const starvedMs = starvingSince ? Date.now() - starvingSince : 0;
       if (starved && starvedMs >= LOADING_SCREEN_AFTER_MS) setBuffering(true);
+      // Paused on purpose — the room is — with a picture in front of it:
+      // whatever put the loading screen up, a skip's load or a rebuild, is
+      // over, and no `playing` is coming to say so. A host who skipped and
+      // paused before the new place was in sat on "Loading…" for good, and
+      // everybody else on "Host is seeking…".
+      if (v && v.paused && !v.seeking && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && !sync?.playing) {
+        setBuffering(false);
+      }
 
       const holding = !!sync?.playing && !!sync.ratingKey &&
         (sync.hostWaiting || (!isHostRef.current && !!roomWaitRef.current));
@@ -5133,12 +5146,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     return () => video.removeEventListener("play", onPlay);
   }, []);
 
-  // Viewer status: flash "Host is seeking…" for a moment after each seek command.
-  // seekSeq bumps once per host seek; the flag auto-clears so it reads as a brief
-  // transient rather than a stuck state. Host/co-hosts (who can control) skip it.
+  // Viewer status: "Host is seeking…" after each seek command, on the loading
+  // screen for as long as the new place takes to load — everybody waits for
+  // everybody's picture after a skip, so a viewer otherwise just saw
+  // "Buffering…" and took it for their own connection. A skip that needs no
+  // loading flashes it in the status pill instead. seekSeq bumps once per host
+  // seek. Host/co-hosts (who can control) skip it.
   useEffect(() => {
     if (!syncState || syncState.seekSeq === 0 || canControl) return;
     setHostSeeking(true);
+    seekLoadingSeenRef.current = false;
+    hostSeekingAtRef.current = Date.now();
     // Hold the bar at where the host is heading. A host seek that restarts the
     // transcode mints a new session id, which tears down and rebuilds every
     // viewer's HLS too — so viewers watched their own scrub bar drop to 0:00
@@ -5149,9 +5167,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // the same 1.4s timer put the bar back to 0:00 partway through, which is
     // the very thing it exists to prevent. `playing` clears it; this is only a
     // backstop for a reload that never completes.
-    const badge = setTimeout(() => setHostSeeking(false), 1400);
+    // A seek with no loading is over in a moment; one with loading ends when
+    // the loading screen does (below), or at the backstop.
+    const badge = setTimeout(() => {
+      if (!seekLoadingSeenRef.current) setHostSeeking(false);
+    }, HOST_SEEKING_FLASH_MS);
+    const backstop = setTimeout(() => setHostSeeking(false), 30_000);
     const held = setTimeout(() => setRestartingTo(null), 20_000);
-    return () => { clearTimeout(badge); clearTimeout(held); };
+    return () => { clearTimeout(badge); clearTimeout(backstop); clearTimeout(held); };
   }, [syncState?.seekSeq, canControl]);
 
   // A received revision is acknowledged only after the element agrees. This
@@ -6390,6 +6413,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const viewerStatus = !canControl && streamActive
     ? (hostSeeking ? "Host is seeking…" : hostPaused ? "Host paused the video" : null)
     : null;
+  // The loading screen says why while the host's skip loads, and the skip is
+  // over when it goes — not a moment earlier, which put "Buffering…" back.
+  const seekLoading = hostSeeking && !canControl && loadingShown;
+  if (seekLoading) seekLoadingSeenRef.current = true;
+  useEffect(() => {
+    if (!hostSeeking || loadingShown || !seekLoadingSeenRef.current) return;
+    const left = Math.max(0, HOST_SEEKING_FLASH_MS - (Date.now() - hostSeekingAtRef.current));
+    const done = setTimeout(() => setHostSeeking(false), left);
+    return () => clearTimeout(done);
+  }, [hostSeeking, loadingShown]);
   // Paused only to wait for the room, which is still playing.
   const heldForRoom = !!syncState?.playing && (syncState.hostWaiting || (!isHost && waitingForRoom));
 
@@ -6493,7 +6526,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       {loadingShown && (
         <div style={styles.bufferingOverlay} role="status" aria-live="polite">
           <div style={styles.bufferingSpinner} />
-          <span style={styles.bufferingText}>{loadingText}</span>
+          <span style={styles.bufferingText}>{seekLoading ? "Host is seeking…" : loadingText}</span>
         </div>
       )}
 
@@ -6815,6 +6848,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         videoRef={videoRef}
         offsetMs={subtitleOffsetMs}
         onUnavailable={() => setSidecarFailed(true)}
+        hidden={loadingShown}
       />
       {!isPip && showTrackSwitcher && (
         <TrackSwitcher

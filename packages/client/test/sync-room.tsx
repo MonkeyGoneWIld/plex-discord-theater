@@ -384,12 +384,58 @@ function Runner() {
          (x.viewer.pos < target - 10 && samples[i - 1].viewer.pos >= target - 10))).length;
       say(`${wentBack === 0 ? "PASS" : "FAIL"} and nobody goes back to where they skipped from (${wentBack})`);
       say(`${Math.abs(v.pos - h.pos) < 1 ? "PASS" : "FAIL"} together (${Math.abs(v.pos - h.pos).toFixed(2)}s apart)`);
+      // What the viewer was told while the skip loaded.
+      const told = samples.filter((x) => /Host is seeking…/.test(x.viewer.text)).length;
+      const buffering = samples.filter((x) => /Buffering…/.test(x.viewer.text)).length;
+      say(`${told > 0 && buffering === 0 ? "PASS" : "FAIL"} the viewer's screen says the host is seeking, not buffering (${told} and ${buffering} samples)`);
     } catch (err) {
       const h = latest.get("u-host");
       const v = latest.get("u-viewer");
       say(`FAIL ${String(err)} (host at ${h?.pos.toFixed(1)}s ${h?.paused ? "paused" : "playing"}, viewer at ${v?.pos.toFixed(1)}s)`);
     } finally {
       window.clearInterval(sampler);
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
+   * The host skipping past what a copied film has measured and pausing a
+   * moment later, before the new place has loaded: once it has, both pictures
+   * sit paused there, with no loading screen over them.
+   */
+  async function runSkipThenPause() {
+    setRunning(true);
+    const out: string[] = ["— the host skipping and pausing at once —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      await startOnce("p2p=0&stream=copy&event=1", {}, 60_000);
+      await pause(4_000);
+      const from = latest.get("u-host")!.pos;
+      for (let i = 0; i < 6; i++) hostKey("ArrowRight");
+      const target = from + 60;
+      await pause(1_900);
+      hostKey(" ");
+      say(`… skipped from ${from.toFixed(1)}s to about ${target.toFixed(0)}s and paused`);
+      await pause(15_000);
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      const screen = (r: Report) => (r.text.match(/Loading…|Buffering…|Host is seeking…/) ?? ["nothing"])[0];
+      say(`${h.paused && v.paused ? "PASS" : "FAIL"} both paused (host ${h.paused ? "paused" : "playing"}, viewer ${v.paused ? "paused" : "playing"})`);
+      say(`${Math.abs(h.pos - target) < 3 && Math.abs(v.pos - target) < 3 ? "PASS" : "FAIL"} where the host skipped to (host at ${h.pos.toFixed(1)}s, viewer at ${v.pos.toFixed(1)}s)`);
+      say(`${h.ready >= 2 && v.ready >= 2 ? "PASS" : "FAIL"} with their pictures in (readyState ${h.ready} and ${v.ready})`);
+      say(`${screen(h) === "nothing" && screen(v) === "nothing" ? "PASS" : "FAIL"} and no loading screen over them (host: ${screen(h)}, viewer: ${screen(v)})`);
+      hostKey(" ");
+      await waitFor(() => !latest.get("u-host")!.paused && !latest.get("u-viewer")!.paused, 15_000, "both to play on");
+      await pause(3_000);
+      const h2 = latest.get("u-host")!;
+      const v2 = latest.get("u-viewer")!;
+      say(`${Math.abs(v2.pos - h2.pos) < 1 ? "PASS" : "FAIL"} and they play on together when the host resumes (${Math.abs(v2.pos - h2.pos).toFixed(2)}s apart)`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
       (window as unknown as { results?: string[]; events?: typeof events }).results = out;
       (window as unknown as { events?: typeof events }).events = events;
       setRunning(false);
@@ -494,6 +540,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runHostCrawls()}>Host's downloads crawl</button>
         <button disabled={running} onClick={() => void runSharedStart()}>Shared connection</button>
         <button disabled={running} onClick={() => void runCopySkip()}>Skip in a copy</button>
+        <button disabled={running} onClick={() => void runSkipThenPause()}>Skip then pause</button>
         <pre id="results">{lines.join("\n")}</pre>
       </div>
       {frames > 0 && (

@@ -22,6 +22,12 @@
  *     behaves as it always has.
  *  2. The queue is looked at every second or two even when nothing happens,
  *     so a download that is merely slow — which raises no event — is noticed.
+ *  3. What has been watched stays in memory until the memory limit is
+ *     reached, for a copied film as for a re-encoded one (segment storage, not
+ *     the loader). A copy's playlist grows as the bot measures it, so the
+ *     engine takes it for a live stream, and let go of everything more than
+ *     150 seconds behind the playhead whatever room there was: a rewind past
+ *     that loaded again from the bot.
  *
  * There used to be a third: a player on the same network as its peer left
  * segments to it rather than fetch them from the bot too, and a viewer fetched
@@ -38,6 +44,7 @@ import { readFile } from "node:fs/promises";
 import type { Plugin } from "vite";
 
 const TARGET = /p2p-media-loader-core[\\/]lib[\\/]hybrid-loader\.js$/;
+const STORAGE_TARGET = /p2p-media-loader-core[\\/]lib[\\/]segment-storage[\\/]segment-memory-storage\.js$/;
 const MARK = "plex-discord-theater: p2pCorePatch";
 
 const edits: Array<[string, string]> = [
@@ -126,15 +133,33 @@ const edits: Array<[string, string]> = [
   ],
 ];
 
+const storageEdits: Array<[string, string]> = [
+  [
+    `    clear(isLiveStream, newSegmentSize) {`,
+    `    // ${MARK}: every stream is kept like a recorded one — see change 3.
+    clear(_isLiveStream, newSegmentSize) {
+        const isLiveStream = false;`,
+  ],
+];
+
 /** The engine's hybrid-loader.js with its changes made; throws if it doesn't fit. */
 export function patchHybridLoader(code: string): string {
+  return applyEdits(code, edits, "hybrid-loader.js");
+}
+
+/** The engine's segment-memory-storage.js with its change made; throws if it doesn't fit. */
+export function patchSegmentStorage(code: string): string {
+  return applyEdits(code, storageEdits, "segment-memory-storage.js");
+}
+
+function applyEdits(code: string, list: Array<[string, string]>, file: string): string {
   if (code.includes(MARK)) return code;
   let out = code;
-  for (const [from, to] of edits) {
+  for (const [from, to] of list) {
     const at = out.indexOf(from);
     if (at < 0 || out.indexOf(from, at + 1) >= 0) {
       throw new Error(
-        "p2pCorePatch: p2p-media-loader-core's hybrid-loader.js isn't the one this patch was written " +
+        `p2pCorePatch: p2p-media-loader-core's ${file} isn't the one this patch was written ` +
         `for (looked for:\n${from.trim().split("\n")[0]}\n). Check the patch against the new version.`,
       );
     }
@@ -154,12 +179,16 @@ export function p2pCorePatch(): Plugin {
           // Part of what the dev server names its pre-bundled engine by, so a
           // change to this patch is a new file to the browser rather than the
           // old one from its cache.
-          define: { __PDT_P2P_CORE_PATCH__: JSON.stringify(createHash("sha256").update(JSON.stringify(edits)).digest("hex").slice(0, 12)) },
+          define: { __PDT_P2P_CORE_PATCH__: JSON.stringify(createHash("sha256").update(JSON.stringify([edits, storageEdits])).digest("hex").slice(0, 12)) },
           plugins: [{
             name: "p2p-core-patch",
             setup(build) {
               build.onLoad({ filter: TARGET }, async (args) => ({
                 contents: patchHybridLoader(await readFile(args.path, "utf8")),
+                loader: "js",
+              }));
+              build.onLoad({ filter: STORAGE_TARGET }, async (args) => ({
+                contents: patchSegmentStorage(await readFile(args.path, "utf8")),
                 loader: "js",
               }));
             },
@@ -168,7 +197,9 @@ export function p2pCorePatch(): Plugin {
       },
     }),
     transform(code, id) {
-      if (TARGET.test(id.split("?")[0])) return { code: patchHybridLoader(code), map: null };
+      const file = id.split("?")[0];
+      if (TARGET.test(file)) return { code: patchHybridLoader(code), map: null };
+      if (STORAGE_TARGET.test(file)) return { code: patchSegmentStorage(code), map: null };
       return null;
     },
   };

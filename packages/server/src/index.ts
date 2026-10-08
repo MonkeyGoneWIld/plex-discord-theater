@@ -26,6 +26,8 @@ import { closeHistoryDb } from "./services/watch-history.js";
 import { closePlexAccountsDb } from "./services/plex-accounts.js";
 import { closeDetailCache } from "./services/detail-cache.js";
 import { anyRoomPlaying, attachWebSocketServer, closeWebSocketServer } from "./services/sync.js";
+import { directStreamCacheDir, directStreamMemoryBytes } from "./services/direct-stream.js";
+import { transcodeCacheBytes } from "./services/segment-prefetch.js";
 
 const required = ["DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET", "PLEX_URL", "PLEX_TOKEN", "REDIRECT_URI"] as const;
 for (const name of required) {
@@ -309,6 +311,13 @@ function reportIntegrations(): void {
       ),
       on("Guild allowlist", allowedGuildCount > 0, "open to any Discord server"),
     ].join("   "),
+  );
+  const mb = (bytes: number) => `${Math.round(bytes / 1024 / 1024)} MB`;
+  console.log(
+    "[Config] films being played:",
+    `copied ones kept until the stream ends, ${mb(directStreamMemoryBytes())} in memory (DIRECT_STREAM_MEMORY_MB)`,
+    `and the rest on disk at ${directStreamCacheDir()} (STREAM_CACHE_DIR);`,
+    `re-encoded ones ${mb(transcodeCacheBytes())} in memory (TRANSCODE_CACHE_MB), the rest on Plex's disk`,
   );
 }
 

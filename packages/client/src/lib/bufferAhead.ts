@@ -37,19 +37,29 @@ export function bufferedRanges(buffered: TimeRanges): Array<[number, number]> {
   return out;
 }
 
+/** A segment the engine holds: [start, end] in film time, and its size in bytes. */
+export type HeldSegment = readonly [number, number, number];
+
+/** What the engine holds, as ranges. */
+export function heldRanges(held: Map<string, HeldSegment>): Array<readonly [number, number]> {
+  return [...held.values()].map(([start, end]) => [start, end] as const);
+}
+
 /**
- * What the engine holds, without what the playhead left behind a while ago —
- * the engine lets those go itself, so they are dropped from `held` as well.
+ * Let go of what the engine lets go of: once everything together is over
+ * `limitBytes`, what the playhead at `nowS` has passed, earliest first, until
+ * it isn't — what its memory does (p2p-media-loader-core's
+ * segment-memory-storage, patched to treat every stream alike: see
+ * p2pCorePatch.ts). Nothing the playhead hasn't reached goes.
  */
-export function heldRanges(
-  held: Map<string, readonly [number, number]>,
-  nowS: number,
-  keepBehindS = 60,
-): Array<readonly [number, number]> {
-  const out: Array<readonly [number, number]> = [];
-  for (const [key, range] of held) {
-    if (range[1] < nowS - keepBehindS) held.delete(key);
-    else out.push(range);
+export function forgetEvicted(held: Map<string, HeldSegment>, nowS: number, limitBytes: number): void {
+  let total = 0;
+  for (const [, , bytes] of held.values()) total += bytes;
+  if (total <= limitBytes) return;
+  const passed = [...held.entries()].filter(([, [, end]]) => end < nowS).sort((a, b) => a[1][0] - b[1][0]);
+  for (const [key, [, , bytes]] of passed) {
+    if (total <= limitBytes) return;
+    held.delete(key);
+    total -= bytes;
   }
-  return out;
 }

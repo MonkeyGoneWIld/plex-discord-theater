@@ -373,6 +373,10 @@ function entries(m3u8: string) {
   return out;
 }
 const sum = (xs: number[]) => Math.round(xs.reduce((a, b) => a + b, 0) * 1000) / 1000;
+/** A copied segment's bytes as hex, wherever the server keeps it; or what it said instead. */
+async function hexOf(seg: ReturnType<typeof ds.directStreamSegment>) {
+  return seg && seg !== "gone" ? (await seg.read(0, seg.bytes)).toString("hex") : seg;
+}
 
 console.log("\n— a copy from the start —");
 {
@@ -393,7 +397,7 @@ console.log("\n— a copy from the start —");
   check("each segment is as long as its keyframe interval",
     later.slice(0, 6).every((e, i) => Math.abs(e.d - gopLength(i)) < 0.0015), true);
   check("named as Plex names them", list[0].uri, `/seg?p=${pathOf(key, 0)}`);
-  check("and served from here", ds.directStreamSegment(key, pathOf(key, 0))?.toString("hex"), copiedSegment(plexSide, 0).toString("hex"));
+  check("and served from here", await hexOf(ds.directStreamSegment(key, pathOf(key, 0))), copiedSegment(plexSide, 0).toString("hex"));
   check("a segment it hasn't measured is nobody's business", ds.directStreamSegment(key, pathOf(key, 999)), null);
 
   // Nobody has moved, so it measures LEAD_S ahead and then waits.
@@ -408,10 +412,36 @@ console.log("\n— a copy from the start —");
   const all = entries(done);
   check("once the watcher gets there it runs to the end of the film", [all.length, done.includes("#EXT-X-ENDLIST")], [keyframes.length, true]);
   check("and the lengths add up to the film", sum(all.map((e) => e.d)).toFixed(1), FILM_END.toFixed(1));
-  check("with the playhead at the end, the start has been let go", ds.directStreamSegment(key, pathOf(key, 0)), "gone");
+  check("with the playhead at the end and memory to spare, the start is still here to go back to",
+    await hexOf(ds.directStreamSegment(key, pathOf(key, 0))), copiedSegment(plexSide, 0).toString("hex"));
   check("Plex was never asked for anything out of order", plexSide.outOfOrder, []);
   ds.stopDirectStream("s-from-start");
   check("stopped, it is forgotten", ds.isDirectStreamKey(key), false);
+}
+
+console.log("\n— past its memory, a copy is kept on disk —");
+{
+  // Memory for a few segments only: what is watched goes to disk, and is
+  // served from there, until the stream ends.
+  ds.setDirectStreamMemoryBytes(3 * copiedSegment(plexSession(crypto.randomUUID(), 0), 0).length);
+  const key = crypto.randomUUID();
+  const plexSide = plexSession(key, 0);
+  ds.startDirectStream("s-disk", key, "500", 0);
+  await ds.directStreamPlaylist(key, (p) => p);
+  ds.updateDirectStreamPosition("s-disk", FILM_END);
+  await until(() => plexSide.produced - plexSide.firstIndex >= keyframes.length);
+  await sleep(300);
+  const dir = path.join(ds.directStreamCacheDir(), "s-disk");
+  const onDisk = fs.existsSync(dir) ? fs.readdirSync(dir).length : 0;
+  check("the segments memory can't hold are written to disk", onDisk >= keyframes.length - 3, true);
+  check("and served from there, the same bytes", await hexOf(ds.directStreamSegment(key, pathOf(key, 0))), copiedSegment(plexSide, 0).toString("hex"));
+  const seg = ds.directStreamSegment(key, pathOf(key, 1));
+  const tail = seg && seg !== "gone" ? (await seg.read(seg.bytes - 100, seg.bytes)).toString("hex") : seg;
+  check("a part of one, too", tail, copiedSegment(plexSide, 1).subarray(-100).toString("hex"));
+  ds.stopDirectStream("s-disk");
+  await sleep(200);
+  check("and taken off the disk when the stream ends", fs.existsSync(dir), false);
+  ds.setDirectStreamMemoryBytes(6144 * 1024 * 1024);
 }
 
 console.log("\n— a copy started mid-film, as a seek starts one —");

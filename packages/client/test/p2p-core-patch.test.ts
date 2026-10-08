@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { transformSync } from "esbuild";
-import { patchHybridLoader } from "../p2pCorePatch";
+import { patchHybridLoader, patchSegmentStorage } from "../p2pCorePatch";
 
 let pass = 0;
 let fail = 0;
@@ -31,6 +31,13 @@ check("a segment loading from a peer is asked about before being moved to the bo
 check("the segment playback waits on is looked at before anything else in the queue",
   /if \(this\.pdtTakeFromPeer\(request, segment\)\) continue;/.test(patched), true);
 check("applying it twice changes nothing", patchHybridLoader(patched), patched);
+
+console.log("\n— its memory —");
+const storageFile = fileURLToPath(new URL("./segment-storage/segment-memory-storage.js", import.meta.resolve("p2p-media-loader-core")));
+const storage = patchSegmentStorage(readFileSync(storageFile, "utf8"));
+check("what has been watched is kept until the memory is full, a copy's growing playlist too",
+  /clear\(_isLiveStream, newSegmentSize\) \{\s+const isLiveStream = false;/.test(storage), true);
+check("and it is still JavaScript", (() => { try { transformSync(storage, { loader: "js", format: "esm" }); return true; } catch { return false; } })(), true);
 
 console.log("\n— an engine it wasn't written for —");
 let refused: unknown = null;

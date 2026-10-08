@@ -39,7 +39,7 @@ import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThroug
 import { roomPositionNow } from "../hooks/useSync";
 import { resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, enoughToStart, nextSegmentInS, pictureStartFor } from "../lib/copyStart";
-import { bufferedRanges, coveredAheadS, heldRanges } from "../lib/bufferAhead";
+import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
 import { fetchInPartsLater, installSegmentParts, partsFor, segmentBytesOf } from "../lib/segmentParts";
@@ -316,13 +316,13 @@ const SEEK_STALL_TIMEOUT_MS = 6_000;
 // what hls.js has buffered, and the stall timeout recovers if it hasn't.
 const FAR_SEEK_THRESHOLD_S = 120;
 /**
- * How far back a copied stream (DIRECT_STREAM) can be sought without a restart.
- * The server keeps a copied segment's bytes for 180s after the playhead passes
- * it (services/direct-stream.ts) and answers 410 for anything older; a seek
- * further back than this restarts at the target straight away rather than
- * finding that out one failed fragment at a time.
+ * How far back a copied stream (DIRECT_STREAM) can be sought without a restart,
+ * when this player doesn't hold the picture there itself: anywhere in it. The
+ * server keeps every segment of a copy until the stream ends
+ * (services/direct-stream.ts) — unless DIRECT_STREAM_CACHE_MB limits it, when
+ * one it has let go answers 410 and the player restarts there.
  */
-const COPY_BACK_WINDOW_S = 120;
+const COPY_BACK_WINDOW_S = Infinity;
 // Quiet window before a seek actually tears the transcode down. Long enough to
 // swallow a burst of scrub clicks, short enough that a single deliberate seek
 // still feels immediate. The room is told about the seek straight away — only
@@ -361,6 +361,19 @@ const BACK_BUFFER_S = 30;
 const FORWARD_BUFFER_FLUSH_S = 120;
 /** Without data to play for this long, the loading screen goes up. */
 const LOADING_SCREEN_AFTER_MS = 500;
+/**
+ * The P2P engine's memory, MiB: what has been downloaded, ahead of the
+ * playhead and behind it, kept here as well as in the browser's own buffer,
+ * which Chrome holds to about 150 MB of video whatever a page asks. Anything
+ * in here goes into that buffer in milliseconds, so this is what a skip or a
+ * rewind plays from without loading.
+ *
+ * Discord's desktop window dies around 3 GB, so 2 GB leaves about a gigabyte
+ * for everything else — the browser's buffer, the page, the artwork. A phone
+ * has less to give, and keeps 1 GB, as the engine itself would there. At 10
+ * Mbps 2 GB is about 25 minutes of film; at 25 Mbps about 10.
+ */
+const ENGINE_MEMORY_MIB = /Android|iPhone|iPad|iPod/i.test(typeof navigator === "undefined" ? "" : navigator.userAgent) ? 1024 : 2048;
 // Don't bother flushing slivers — avoids issuing a remove on every tick for a
 // second or two of overshoot.
 const BUFFER_TRIM_SLACK_S = 10;
@@ -1313,7 +1326,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * everything it has fetched, which it keeps until the playhead has passed
    * it, whatever the browser's own buffer can take. See downloadedAheadS.
    */
-  const engineHeldRef = useRef(new Map<string, readonly [number, number]>());
+  const engineHeldRef = useRef(new Map<string, HeldSegment>());
   /**
    * Whether the picture at `t` is held here: in the browser's buffer, or in
    * the engine's memory, which hands it over the moment it is asked — a
@@ -1322,11 +1335,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    */
   const pictureHeldAt = useCallback((video: HTMLVideoElement, t: number): boolean => {
     if (isPositionBuffered(video, t)) return true;
-    return heldRanges(engineHeldRef.current, video.currentTime).some(([start, end]) => t >= start - 0.1 && t < end - 0.3);
+    return heldRanges(engineHeldRef.current).some(([start, end]) => t >= start - 0.1 && t < end - 0.3);
   }, []);
   /** Whether enough picture is held here from `t` to start on — see pictureHeldAt. */
   const enoughHeldAt = useCallback((video: HTMLVideoElement, t: number): boolean => {
-    const ranges = [...bufferedRanges(video.buffered), ...heldRanges(engineHeldRef.current, video.currentTime)];
+    const ranges = [...bufferedRanges(video.buffered), ...heldRanges(engineHeldRef.current)];
     const left = Number.isFinite(video.duration) ? video.duration - t - 0.25 : Infinity;
     return enoughToStart(coveredAheadS(t, ranges), left);
   }, []);
@@ -1335,7 +1348,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const video = videoRef.current;
     if (!video || video.readyState === HTMLMediaElement.HAVE_NOTHING) return 0;
     const now = video.currentTime;
-    return coveredAheadS(now, [...bufferedRanges(video.buffered), ...heldRanges(engineHeldRef.current, now)]);
+    return coveredAheadS(now, [...bufferedRanges(video.buffered), ...heldRanges(engineHeldRef.current)]);
   }, []);
   // Stall-watchdog bookkeeping: currentTime at the previous health tick, and
   // whether the current stall episode has already been logged — a multi-minute
@@ -3379,14 +3392,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // media element's own buffer didn't touch this, because this
                 // cache is separate from the SourceBuffer.
                 //
-                // 1 GiB clears the 150s high-demand window at the 40 Mbps a
-                // copied Blu-ray can run to (~750 MB) — segments ahead of the
-                // playhead are never evicted, so the limit has to clear that or
-                // eviction runs on every append for nothing — while capping the
-                // whole cache four times lower than the default, well clear of
-                // where the renderer dies. It was 512 MiB, sized for re-encodes
-                // that peaked at 20 Mbps.
-                segmentMemoryStorageLimit: 1024,
+                // ENGINE_MEMORY_MIB clears the 150s high-demand window at the
+                // 40 Mbps a copied Blu-ray can run to (~750 MB) — segments ahead
+                // of the playhead are never evicted, so the limit has to clear
+                // that or eviction runs on every append for nothing — and the
+                // rest is what has been watched, kept for going back to. It was
+                // 1 GiB, and before that 512 MiB, sized for re-encodes that
+                // peaked at 20 Mbps.
+                segmentMemoryStorageLimit: ENGINE_MEMORY_MIB,
                 // This engine owns the fragment loader, so hls.js's buffer targets
                 // are only advisory. With no peers connected, high-demand is the
                 // *only* thing that triggers an HTTP fetch: p2p-downloadable is
@@ -3545,11 +3558,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 hls.p2pEngine.addEventListener("onSegmentStart", ({ segment }) => {
                   segmentTimes.set(segment.url, [segment.startTime, segment.endTime]);
                 });
-                hls.p2pEngine.addEventListener("onSegmentLoaded", ({ segmentUrl }) => {
+                hls.p2pEngine.addEventListener("onSegmentLoaded", ({ segmentUrl, bytesLength }) => {
                   if ((hlsRef.current as unknown) !== hls) return;
                   const times = segmentTimes.get(segmentUrl);
                   segmentTimes.delete(segmentUrl);
-                  if (times) held.set(segmentUrl, times);
+                  if (!times) return;
+                  held.set(segmentUrl, [times[0], times[1], bytesLength]);
+                  // What the engine has let go to make room, it no longer has.
+                  forgetEvicted(held, video.currentTime, ENGINE_MEMORY_MIB * 1024 * 1024);
                 });
                 p2pEngine = hls.p2pEngine;
                 hls.p2pEngine.addEventListener("onSegmentLoaded", () => {
@@ -5864,7 +5880,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (copiedStreamRef.current && !isPositionBuffered(video, positionSeconds)) {
       const edge = playlistEdgeRef.current;
       const pastEnd = edge !== null && positionSeconds > edge - 1;
-      const farBack = positionSeconds < video.currentTime - COPY_BACK_WINDOW_S;
+      const farBack = positionSeconds < video.currentTime - COPY_BACK_WINDOW_S && !pictureHeldAt(video, positionSeconds);
       if (pastEnd || farBack) {
         logEvent("Seek", "copied stream can't serve this in place → restart", {
           targetS: positionSeconds,

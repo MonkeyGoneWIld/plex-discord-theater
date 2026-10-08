@@ -319,6 +319,16 @@ services:
       # Empty = VIDEO_BITRATE_KBPS.
       DIRECT_STREAM_MAX_KBPS: ""
 
+      # How much of a copied film is kept in memory, MB, for every stream
+      # together (empty = 6144). The rest is kept on disk in STREAM_CACHE_DIR
+      # (empty = /data/stream-cache) until the stream ends, with no limit but
+      # the disk: up to 13.5 GB an hour for a 30 Mbps Blu-ray, so point it at
+      # an SSD with room. Re-encoded films keep TRANSCODE_CACHE_MB in memory
+      # (empty = 2048); Plex keeps the rest on its own disk.
+      DIRECT_STREAM_MEMORY_MB: ""
+      STREAM_CACHE_DIR: ""
+      TRANSCODE_CACHE_MB: ""
+
       # Guards the "stop every transcode" endpoint.
       ADMIN_SECRET: ""
 

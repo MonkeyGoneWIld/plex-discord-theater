@@ -44,8 +44,17 @@
  * player waited at 3:39 on a picture that began at 3:49, and once hls.js had
  * corrected its own idea of where segments were, a playlist reload put that
  * back and it skipped a segment, leaving a second hole.
+ *
+ * Every segment a session measures is kept until the stream ends, so going
+ * back anywhere in it is served from here: in memory up to
+ * DIRECT_STREAM_MEMORY_MB for every session together, and past that on disk,
+ * in STREAM_CACHE_DIR, with no limit but the disk. Plex can't be asked for an
+ * old segment again (see the two rules above), so letting one go means
+ * restarting the stream there.
  */
 
+import fs from "node:fs";
+import path from "node:path";
 import { plexFetchSegment } from "./plex.js";
 import { videoSpan } from "./ts-timestamps.js";
 import { logEvent } from "./logger.js";
@@ -57,22 +66,52 @@ import { logEvent } from "./logger.js";
  * the player's own buffer stops short of what it asks for.
  */
 const LEAD_S = 180;
-/** How long a segment's bytes are kept once the playhead has passed it, so a
- *  short step back is served rather than restarted. The player restarts for
- *  anything further back than COPY_BACK_WINDOW_S (Player.tsx), which is less. */
-const BACK_S = 180;
 /**
- * Memory for every copied session together.
+ * Memory for every copied session together, from DIRECT_STREAM_MEMORY_MB: 6 GB
+ * unless set. Past it segments go to disk (STREAM_CACHE_DIR) — what has been
+ * watched first, oldest first, then what is furthest ahead — and are served
+ * from there.
  *
- * A copy is the file's own bitrate — 30 Mbps and more for a Blu-ray — so
- * LEAD_S of one is over 600 MB. This used to be 512 MB shared equally between
- * sessions, which held a 30 Mbps film to about two minutes ahead on its own,
- * one minute with a second stream running, and the players' buffers stopped
- * there however fast they could fetch. Now what is ahead of a playhead is
- * only ever limited by LEAD_S; the budget is met by letting go of what has
- * already been watched, across every session, oldest first.
+ * It was 2 GB with no disk behind it, and kept only the last three minutes
+ * behind each playhead whatever room there was: sized like the player's
+ * memory, which has Discord's 3 GB to stay inside. A copy is the file's own
+ * bitrate — 30 Mbps and more for a Blu-ray, 13.5 GB an hour.
  */
-const GLOBAL_BUDGET_BYTES = 2048 * 1024 * 1024;
+let memoryBudgetBytes = (() => {
+  const mb = Number(process.env.DIRECT_STREAM_MEMORY_MB?.trim() || 6144);
+  return (Number.isFinite(mb) && mb > 0 ? mb : 6144) * 1024 * 1024;
+})();
+/** The memory every copied session together may hold — see memoryBudgetBytes. */
+export function directStreamMemoryBytes(): number {
+  return memoryBudgetBytes;
+}
+/** For the tests: a memory budget small enough to see segments go to disk. */
+export function setDirectStreamMemoryBytes(bytes: number): void {
+  memoryBudgetBytes = bytes;
+}
+/**
+ * Where segments past the memory budget are kept, one folder per session,
+ * removed when its stream ends: STREAM_CACHE_DIR, or stream-cache in the data
+ * folder. Best on an SSD: a skip back reads from it.
+ */
+const CACHE_DIR = process.env.STREAM_CACHE_DIR?.trim()
+  ? path.resolve(process.env.STREAM_CACHE_DIR.trim())
+  : path.join(
+      process.env.THUMB_CACHE_DIR
+        ? path.resolve(process.env.THUMB_CACHE_DIR)
+        : path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), "../../data"),
+      "stream-cache",
+    );
+/** Where segments past the memory budget go — see CACHE_DIR. */
+export function directStreamCacheDir(): string {
+  return CACHE_DIR;
+}
+// Whatever a server that stopped without ending its streams left behind.
+try {
+  fs.rmSync(CACHE_DIR, { recursive: true, force: true });
+} catch {
+  // Not there, or not ours to clear: segments are written per session anyway.
+}
 /** How far Plex's MPEG-TS clock runs ahead of the film. Measured at 10s on a
  *  real server, for sessions started at the beginning and mid-film alike. */
 const PLEX_TS_OFFSET_S = 10;
@@ -128,8 +167,12 @@ interface Measured {
   /** Its size, kept after the bytes are let go: it is part of the segment's
    *  URL in the playlist, which mustn't change between reloads. */
   bytes: number;
-  /** Null once let go. */
+  /** In memory; null once on disk, or let go. */
   data: Buffer | null;
+  /** On disk, once moved there. */
+  file: string | null;
+  /** Being written to disk. */
+  spilling: boolean;
 }
 
 interface CopySession {
@@ -157,6 +200,8 @@ interface CopySession {
   readyWaiters: Array<() => void>;
   /** Segments whose audio and video start far apart, logged — a few, not all. */
   skewLogged: number;
+  /** A segment the disk refused, logged — once. */
+  spillFailedLogged: boolean;
 }
 
 const sessions = new Map<string, CopySession>();
@@ -189,35 +234,79 @@ function rest(s: CopySession, ms: number): Promise<void> {
   });
 }
 
-/** What every copied session holds together, bytes. */
+/** What every copied session holds in memory together, bytes. */
 function totalCached(): number {
   let total = 0;
   for (const s of sessions.values()) total += s.cachedBytes;
   return total;
 }
+/** Of that, what is on its way to disk. */
+let spillingBytes = 0;
 
+/** Let a segment go altogether — its stream has ended, or the disk refused it. */
 function drop(s: CopySession, seg: Measured): void {
-  if (!seg.data) return;
-  s.cachedBytes -= seg.data.length;
+  if (seg.data) s.cachedBytes -= seg.data.length;
   seg.data = null;
+  seg.file = null;
+}
+
+function sessionDir(s: CopySession): string {
+  return path.join(CACHE_DIR, s.sessionId.replace(/[^\w-]/g, "_"));
+}
+
+/** Move a segment from memory to disk; it is served from memory until it is there. */
+async function spill(s: CopySession, seg: Measured): Promise<void> {
+  if (!seg.data || seg.spilling) return;
+  const data = seg.data;
+  seg.spilling = true;
+  spillingBytes += data.length;
+  const file = path.join(sessionDir(s), `${seg.index}.ts`);
+  try {
+    await fs.promises.mkdir(sessionDir(s), { recursive: true });
+    await fs.promises.writeFile(file, data);
+    if (sessions.get(s.sessionId) !== s) {
+      await fs.promises.rm(file, { force: true });
+      return;
+    }
+    if (seg.data === data) {
+      s.cachedBytes -= data.length;
+      seg.data = null;
+      seg.file = file;
+    }
+  } catch (err) {
+    // A full or missing disk: memory can't hold it either, so it goes, and a
+    // player that wants it again restarts there.
+    if (sessions.get(s.sessionId) === s && !s.spillFailedLogged) {
+      s.spillFailedLogged = true;
+      logEvent("DirectStream", "couldn't keep a segment on disk, letting it go", {
+        session: s.sessionId.substring(0, 8),
+        dir: CACHE_DIR,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (seg.data === data) drop(s, seg);
+  } finally {
+    seg.spilling = false;
+    spillingBytes -= data.length;
+  }
 }
 
 /**
- * Let go of what the watchers are done with: anything BACK_S behind them, then
- * — only while everything together is over budget — what is behind a playhead
- * at all, oldest first, from every session. Nothing ahead of a playhead is
- * ever dropped; when memory is short the pumps stop fetching ahead instead.
+ * Keep memory within its budget by moving segments to disk: what a playhead
+ * has passed first, oldest first, from every session; then, only if that
+ * isn't enough, what is furthest ahead. Nothing is let go.
  */
-function evict(s: CopySession): void {
-  for (const seg of s.segments) {
-    if (seg.end < s.positionS - BACK_S) drop(s, seg);
-  }
-  if (totalCached() <= GLOBAL_BUDGET_BYTES) return;
-  for (const other of sessions.values()) {
-    for (const seg of other.segments) {
-      if (totalCached() <= GLOBAL_BUDGET_BYTES) return;
-      if (seg.end < other.positionS) drop(other, seg);
-    }
+function evict(_s: CopySession): void {
+  const over = () => totalCached() - spillingBytes > memoryBudgetBytes;
+  if (!over()) return;
+  const inMemory = [...sessions.values()].flatMap((s) =>
+    s.segments.filter((seg) => seg.data && !seg.spilling).map((seg) => ({ s, seg })));
+  const behind = inMemory.filter(({ s, seg }) => seg.end < s.positionS).sort((a, b) => a.seg.start - b.seg.start);
+  const ahead = inMemory.filter(({ s, seg }) => seg.end >= s.positionS)
+    .sort((a, b) => (b.seg.start - b.s.positionS) - (a.seg.start - a.s.positionS));
+  for (const { s, seg } of [...behind, ...ahead]) {
+    if (!over()) return;
+    void spill(s, seg);
   }
 }
 
@@ -226,8 +315,7 @@ function wantsMore(s: CopySession): boolean {
   if (s.ended || s.failed) return false;
   const last = s.segments[s.segments.length - 1];
   const measuredTo = last ? last.end : s.offsetS;
-  if (measuredTo >= s.positionS + LEAD_S) return false;
-  return totalCached() < GLOBAL_BUDGET_BYTES;
+  return measuredTo < s.positionS + LEAD_S;
 }
 
 /** Segments whose length is settled: all but the newest, until the end is known. */
@@ -424,6 +512,8 @@ async function pump(s: CopySession): Promise<void> {
       audioStart,
       bytes: data.length,
       data,
+      file: null,
+      spilling: false,
     };
     s.segments.push(seg);
     s.byPath.set(path, seg);
@@ -461,6 +551,7 @@ export function startDirectStream(sessionId: string, plexKey: string, ratingKey:
     wake: null,
     readyWaiters: [],
     skewLogged: 0,
+    spillFailedLogged: false,
   };
   sessions.set(sessionId, s);
   byPlexKey.set(plexKey, s);
@@ -486,6 +577,8 @@ export function stopDirectStream(sessionId: string): void {
   for (const seg of s.segments) drop(s, seg);
   sessions.delete(sessionId);
   if (byPlexKey.get(s.plexKey) === s) byPlexKey.delete(s.plexKey);
+  // What it put on disk goes with it.
+  void fs.promises.rm(sessionDir(s), { recursive: true, force: true }).catch(() => {});
 }
 
 /** Whether this Plex transcode key is a copied stream measured here. */
@@ -598,20 +691,49 @@ export const MAX_SEGMENT_PARTS = 8;
  * minute that way. Asked for in parts, all at once, it takes a fraction of it.
  */
 export function segmentPart(data: Buffer, part: number, parts: number): Buffer | null {
+  const bounds = partBounds(data.length, part, parts);
+  return bounds ? data.subarray(bounds[0], bounds[1]) : null;
+}
+
+/** Where part `part` of `parts` of a segment of `size` bytes begins and ends — see segmentPart. */
+export function partBounds(size: number, part: number, parts: number): [number, number] | null {
   if (!Number.isInteger(part) || !Number.isInteger(parts)) return null;
   if (parts < 1 || parts > MAX_SEGMENT_PARTS || part < 0 || part >= parts) return null;
-  return data.subarray(Math.floor((data.length * part) / parts), Math.floor((data.length * (part + 1)) / parts));
+  return [Math.floor((size * part) / parts), Math.floor((size * (part + 1)) / parts)];
+}
+
+/** A copied segment, wherever it is kept: its size, and its bytes from `start` up to `end`. */
+export interface CopiedSegment {
+  bytes: number;
+  read(start: number, end: number): Promise<Buffer>;
 }
 
 /**
- * A copied segment's bytes, for a client. "gone" when it was measured but has
- * since been let go — the client restarts where it is — and null when it isn't
- * one this session has measured at all, which a client following the playlist
+ * A copied segment, for a client — from memory or from disk. "gone" when it
+ * was measured but has since been let go (its stream ended, or the disk
+ * refused it) — the client restarts where it is — and null when it isn't one
+ * this session has measured at all, which a client following the playlist
  * never asks for.
  */
-export function directStreamSegment(plexKey: string, plexPath: string): Buffer | "gone" | null {
+export function directStreamSegment(plexKey: string, plexPath: string): CopiedSegment | "gone" | null {
   const s = byPlexKey.get(plexKey);
   const seg = s?.byPath.get(plexPath);
   if (!seg) return null;
-  return seg.data ?? "gone";
+  const data = seg.data;
+  if (data) return { bytes: data.length, read: async (start, end) => data.subarray(start, end) };
+  const file = seg.file;
+  if (!file) return "gone";
+  return {
+    bytes: seg.bytes,
+    read: async (start, end) => {
+      const handle = await fs.promises.open(file, "r");
+      try {
+        const out = Buffer.alloc(Math.max(0, end - start));
+        const { bytesRead } = await handle.read(out, 0, out.length, start);
+        return out.subarray(0, bytesRead);
+      } finally {
+        await handle.close();
+      }
+    },
+  };
 }

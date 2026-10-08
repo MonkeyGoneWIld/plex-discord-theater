@@ -50,8 +50,9 @@ interface PrefetchSession {
 
 const POLL_INTERVAL_MS = 2_000;
 const MAX_CONCURRENT_FETCHES = 3;
-/** Entry-count bound, secondary to the byte budget below. */
-const EVICTION_THRESHOLD = 50;
+/** Entry-count bound, secondary to the byte budget below: only for the
+ *  unlikely case of very small segments. */
+const EVICTION_THRESHOLD = 5000;
 /**
  * Memory ceiling for *all* prefetch caches together.
  *
@@ -64,13 +65,23 @@ const EVICTION_THRESHOLD = 50;
  *
  * Global rather than per-session, so raising the session cap (see
  * MAX_CONCURRENT_SESSIONS) cannot raise the memory ceiling with it. Each session
- * gets an equal share of this: 384 MB alone, 192 MB each with two rooms running,
- * 96 MB each with four. Even the smallest share holds ~13-21 segments — 40-60s
- * of lead at 3s each — which is still more than a client consumes between polls.
- * EVICTION_THRESHOLD stays as a second bound for the (unlikely) case of very
- * small segments.
+ * gets an equal share of this: all of it alone, half each with two rooms
+ * running, a quarter each with four.
  */
-const GLOBAL_CACHE_BUDGET_BYTES = 384 * 1024 * 1024;
+const GLOBAL_CACHE_BUDGET_BYTES = (() => {
+  // From TRANSCODE_CACHE_MB: 2 GB of memory unless set. It was 384 MB with at
+  // most 50 segments a session, which is the lead alone, so a segment already
+  // watched went the moment the next came in; room beyond the lead is what has
+  // been watched, kept for going back to. Nothing past it needs a disk of its
+  // own: Plex keeps a re-encode's segments on its disk for the whole session,
+  // and one let go here is fetched from there again.
+  const mb = Number(process.env.TRANSCODE_CACHE_MB?.trim() || 2048);
+  return (Number.isFinite(mb) && mb > 0 ? mb : 2048) * 1024 * 1024;
+})();
+/** The memory every transcode's prefetch cache together may hold — see GLOBAL_CACHE_BUDGET_BYTES. */
+export function transcodeCacheBytes(): number {
+  return GLOBAL_CACHE_BUDGET_BYTES;
+}
 /**
  * How far past the *playhead* to keep requesting — ×3s ≈ 150s, comfortably over
  * the client's 120s buffer target.

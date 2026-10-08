@@ -14,7 +14,7 @@ import {
   directStreamRefused,
   directStreamPlaylist,
   directStreamSegment,
-  segmentPart,
+  partBounds,
   updateDirectStreamPosition,
 } from "../services/direct-stream.js";
 import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
@@ -4891,8 +4891,9 @@ async function serveDirectStream(req: Request, res: Response, plexKey: string, s
     return;
   }
   const segment = directStreamSegment(plexKey, segPath);
-  // Measured, then let go to stay within memory. The player restarts where it
-  // is, which beats asking Plex for an old segment and having it renumber.
+  // Measured, then let go — its stream ended, or the disk refused it. The
+  // player restarts where it is, which beats asking Plex for an old segment
+  // and having it renumber.
   if (segment === "gone") {
     res.status(410).end();
     return;
@@ -4905,13 +4906,24 @@ async function serveDirectStream(req: Request, res: Response, plexKey: string, s
   res.setHeader("Content-Type", "video/MP2T");
   // One of the parts the player asked for at once. Its own URL, so a cache
   // between here and the player keeps each part apart.
+  // From memory, or from disk once memory was full; a file gone from under a
+  // stream that has just ended is that stream's segment gone.
+  const read = async (start: number, end: number): Promise<Buffer | null> => {
+    try {
+      return await segment.read(start, end);
+    } catch {
+      res.status(410).end();
+      return null;
+    }
+  };
   if (req.query.parts !== undefined) {
-    const part = segmentPart(segment, Number(req.query.part), Number(req.query.parts));
-    if (!part) {
+    const bounds = partBounds(segment.bytes, Number(req.query.part), Number(req.query.parts));
+    if (!bounds) {
       res.status(400).end();
       return;
     }
-    res.send(part);
+    const part = await read(bounds[0], bounds[1]);
+    if (part) res.send(part);
     return;
   }
   // The rest of one the P2P engine began elsewhere: it resumes from where the
@@ -4921,17 +4933,20 @@ async function serveDirectStream(req: Request, res: Response, plexKey: string, s
     : null;
   if (range) {
     const from = Number(range[1]);
-    const to = range[2] ? Math.min(Number(range[2]), segment.length - 1) : segment.length - 1;
+    const to = range[2] ? Math.min(Number(range[2]), segment.bytes - 1) : segment.bytes - 1;
     if (from > to) {
-      res.setHeader("Content-Range", `bytes */${segment.length}`);
+      res.setHeader("Content-Range", `bytes */${segment.bytes}`);
       res.status(416).end();
       return;
     }
-    res.setHeader("Content-Range", `bytes ${from}-${to}/${segment.length}`);
-    res.status(206).send(segment.subarray(from, to + 1));
+    const piece = await read(from, to + 1);
+    if (!piece) return;
+    res.setHeader("Content-Range", `bytes ${from}-${to}/${segment.bytes}`);
+    res.status(206).send(piece);
     return;
   }
-  res.send(segment);
+  const whole = await read(0, segment.bytes);
+  if (whole) res.send(whole);
 }
 
 router.get("/hls/seg", async (req: Request, res: Response) => {

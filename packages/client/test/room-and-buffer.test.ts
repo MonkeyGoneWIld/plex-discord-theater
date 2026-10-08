@@ -13,7 +13,7 @@
  *   ends too soon after the start point to start on (lib/copyStart).
  */
 import { MAX_WAIT_FOR_ROOM_S, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
-import { coveredAheadS, heldRanges } from "../src/lib/bufferAhead";
+import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS } from "../src/lib/bufferTrim";
 import { roomPositionNow } from "../src/hooks/useSync";
@@ -64,9 +64,13 @@ check("a gap ends it", coveredAheadS(100, [[90, 140], [150, 220]]), 40);
 check("segment edges a hair apart still join", coveredAheadS(100, [[90, 140], [140.3, 160]]), 60);
 check("out of order and overlapping", coveredAheadS(100, [[150, 220], [95, 130], [120, 152]]), 120);
 check("nothing at the playhead is nothing", coveredAheadS(100, [[105, 200]]), 0);
-const held = new Map<string, readonly [number, number]>([["a", [10, 20]], ["b", [190, 200]], ["c", [200, 210]]]);
-check("the engine's long-passed segments are let go", heldRanges(held, 200).length, 2);
-check("and dropped from what is tracked", [...held.keys()], ["b", "c"]);
+const held = new Map<string, HeldSegment>([["a", [10, 20, 100]], ["b", [190, 200, 100]], ["c", [200, 210, 100]], ["d", [220, 230, 100]]]);
+forgetEvicted(held, 205, 400);
+check("what the engine holds, within its memory, is all kept", heldRanges(held).length, 4);
+forgetEvicted(held, 205, 250);
+check("over it, the earliest watched goes first", [...held.keys()], ["c", "d"]);
+forgetEvicted(held, 205, 50);
+check("but never what the playhead hasn't passed", [...held.keys()], ["c", "d"]);
 
 console.log("\n— the room stands still while it waits —");
 const t = Date.now() - 4000;

@@ -366,11 +366,18 @@ const LOADING_SCREEN_AFTER_MS = 500;
 const BUFFER_TRIM_SLACK_S = 10;
 /**
  * How much has been watched the browser's buffer keeps, in bytes rather than
- * seconds: the buffer has a size limit, and what is behind the playhead takes
- * from what can be ahead of it — thirty seconds of a 30 Mbps Blu-ray is over
- * 100 MB. A light stream keeps its thirty; a heavy one, a few seconds.
+ * seconds: the buffer has a size limit, around 150 MB of video, and what is
+ * behind the playhead takes from what can be ahead of it — thirty seconds of a
+ * 30 Mbps Blu-ray is over 100 MB. A stream up to about 10 Mbps keeps its
+ * thirty, a 20 Mbps one fifteen, a 30 Mbps one ten.
+ *
+ * It was 15 MB, which kept eight seconds of Spider-Man: Far from Home, and in
+ * practice three to six once the buffer filled — so every press of the back
+ * key loaded again, and the room waited for it. Ahead gives the room up: the
+ * P2P engine keeps fetching its own 150 seconds ahead into memory whatever
+ * the browser's buffer holds (lib/bufferAhead).
  */
-const MSE_BACK_BUDGET_BYTES = 15_000_000;
+const MSE_BACK_BUDGET_BYTES = 60_000_000;
 /** Peaks run well over a stream's average; the back buffer is sized for them. */
 const BITRATE_PEAK_FACTOR = 1.5;
 const MIN_BACK_BUFFER_S = 5;
@@ -421,18 +428,19 @@ function enoughAheadAt(video: HTMLVideoElement, t: number): boolean {
 }
 
 /**
- * How long a seek inside the buffer is taken to be just that — the last frame
- * still on screen while the new one decodes — before it counts as a stall.
+ * How long a seek to a picture held here is taken to be just that — the last
+ * frame still on screen while the new one decodes — before it counts as a
+ * stall.
  */
 const BUFFERED_SEEK_GRACE_MS = 3000;
 
 /**
- * Whether the element is in the middle of a seek inside its buffer, and has
- * been for less than BUFFERED_SEEK_GRACE_MS. `seekingSince` is when it began.
+ * Whether the element is in the middle of a seek to a picture held here —
+ * `heldAt` says, see pictureHeldAt — and has been for less than
+ * BUFFERED_SEEK_GRACE_MS. `seekingSince` is when it began.
  */
-function seekingInBuffer(video: HTMLVideoElement, seekingSince: number): boolean {
-  return video.seeking && isPositionBuffered(video, video.currentTime) &&
-    Date.now() - seekingSince < BUFFERED_SEEK_GRACE_MS;
+function seekingInBuffer(video: HTMLVideoElement, seekingSince: number, heldAt: (t: number) => boolean): boolean {
+  return video.seeking && heldAt(video.currentTime) && Date.now() - seekingSince < BUFFERED_SEEK_GRACE_MS;
 }
 
 /** The stretch of buffered picture that holds `t`, or null. */
@@ -1306,6 +1314,22 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * it, whatever the browser's own buffer can take. See downloadedAheadS.
    */
   const engineHeldRef = useRef(new Map<string, readonly [number, number]>());
+  /**
+   * Whether the picture at `t` is held here: in the browser's buffer, or in
+   * the engine's memory, which hands it over the moment it is asked — a
+   * rewind past what the browser kept plays from there in a moment, without
+   * loading anything (lib/bufferAhead).
+   */
+  const pictureHeldAt = useCallback((video: HTMLVideoElement, t: number): boolean => {
+    if (isPositionBuffered(video, t)) return true;
+    return heldRanges(engineHeldRef.current, video.currentTime).some(([start, end]) => t >= start - 0.1 && t < end - 0.3);
+  }, []);
+  /** Whether enough picture is held here from `t` to start on — see pictureHeldAt. */
+  const enoughHeldAt = useCallback((video: HTMLVideoElement, t: number): boolean => {
+    const ranges = [...bufferedRanges(video.buffered), ...heldRanges(engineHeldRef.current, video.currentTime)];
+    const left = Number.isFinite(video.duration) ? video.duration - t - 0.25 : Infinity;
+    return enoughToStart(coveredAheadS(t, ranges), left);
+  }, []);
   /** Seconds downloaded past the playhead — see lib/bufferAhead. */
   const downloadedAheadS = useCallback((): number => {
     const video = videoRef.current;
@@ -2422,6 +2446,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (!v || !sync?.playing || !sync.hostWaiting || !sync.gatherSeq) return;
     if (readySentForRef.current === sync.gatherSeq) return;
     if (sync.ratingKey !== itemRef.current.ratingKey || !sessionIdRef.current) return;
+    // Not before the seek this gather is for has been acted on: the word
+    // that the room waits and the seek itself come together, and this ran
+    // first — a viewer told the room it was ready where it was, the room ran,
+    // and then it went back ten seconds and loaded with everybody playing.
+    if (sync.seekSeq !== appliedSeekSeqRef.current) return;
     const behindS = sync.position - v.currentTime;
     // And a stream this player hasn't shown anything of yet starts exactly
     // where the room does, a little before as well as after: the host may
@@ -2476,7 +2505,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // and a skip of ten seconds put the loading screen over it for half a
       // second — see seekingInBuffer.
       const starved = !!v && !v.paused && !v.ended && v.readyState < HTMLMediaElement.HAVE_FUTURE_DATA &&
-        !seekingInBuffer(v, seekingSince);
+        !(v && seekingInBuffer(v, seekingSince, (t) => pictureHeldAt(v, t)));
       if (!starved) starvingSince = 0;
       else if (!starvingSince) starvingSince = Date.now();
       const starvedMs = starvingSince ? Date.now() - starvingSince : 0;
@@ -2545,7 +2574,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       if (!v?.seeking) seekingSince = 0;
       else if (!seekingSince) seekingSince = Date.now();
       // A seek inside the buffer leaves the last frame up — see seekingInBuffer.
-      if (!v || !seekingInBuffer(v, seekingSince)) setNoPicture(!v || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA);
+      if (!v || !seekingInBuffer(v, seekingSince, (t) => pictureHeldAt(v, t))) {
+        setNoPicture(!v || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA);
+      }
       setLoadingText(loadingTitle(pictureShownRef.current));
     }, 250);
     return () => window.clearInterval(id);
@@ -4097,13 +4128,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           if (!v) return;
           bufferFullCount++;
           const held = v.buffered.length > 0 ? (bufferedEnd(v) ?? 0) - v.buffered.start(0) : 0;
-          // Everything watched, up to the segment before the one playing —
-          // no closer, or the cut takes the picture with it (lib/bufferTrim).
-          const behind = backCutS(hls, v.currentTime, v.currentTime - 1);
+          const ahead = bufferAheadSeconds(v);
+          // What has been watched beyond the back window goes at once, and the
+          // window itself only once what is ahead is down to
+          // MIN_FORWARD_BUFFER_S: going back a little is the commonest thing
+          // anybody does, and kept, it plays at once. This used to cut to the
+          // segment playing every time, and the buffer filled every minute.
+          // Never closer than the segment before the one playing, or the cut
+          // takes the picture with it (lib/bufferTrim).
+          const keepBehind = ahead >= MIN_FORWARD_BUFFER_S ? backWindowRef.current : 1;
+          const behind = backCutS(hls, v.currentTime, v.currentTime - keepBehind);
           if (behind !== null && v.buffered.length > 0 && v.buffered.start(0) < behind - 0.5) {
             hls.trigger(Hls.Events.BUFFER_FLUSHING, { startOffset: 0, endOffset: behind, type: null });
           }
-          const ahead = bufferAheadSeconds(v);
           if (ahead >= MIN_FORWARD_BUFFER_S) {
             const keptBehind = backWindowRef.current;
             const fits = Math.max(ahead, held - keptBehind);
@@ -4381,7 +4418,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           // Not for a seek inside the buffer, which is over in a moment: its
           // `waiting` flashed the loading screen over every such skip. One
           // that doesn't get going is caught by the poll's starved check.
-          if (!video.paused && !(video.seeking && isPositionBuffered(video, video.currentTime))) setBuffering(true);
+          if (!video.paused && !(video.seeking && pictureHeldAt(video, video.currentTime))) setBuffering(true);
         };
         const onPlaying = () => {
           logEvent("Video", "playing", snapshot(video));
@@ -5096,7 +5133,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // straight on from: somewhere this player hasn't got, it says so, and the
     // room waits for it there after all — see SyncState.seekReady.
     if (isNewSeek && syncState.seekReady && !amHost && syncState.playing && roomNow > 0 &&
-        video.readyState >= HTMLMediaElement.HAVE_METADATA && !enoughAheadAt(video, roomNow)) {
+        video.readyState >= HTMLMediaElement.HAVE_METADATA && !enoughHeldAt(video, roomNow)) {
       logEvent("Sync", "the skip is somewhere this player hasn't got, asking the room to wait for it", {
         toS: Number(roomNow.toFixed(2)),
         ...snapshot(video),
@@ -5194,6 +5231,24 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       }
       return;
     }
+    // A stream nothing has been shown of here starts where the room does,
+    // even a little behind where this player was put: the host may have
+    // started a copy on its keyframe (see the start-gap check) after this
+    // player had said it was ready, and it played three seconds ahead. With
+    // its picture in or not.
+    if (syncState.playing && video.paused && !roomWaitRef.current && !streamShownRef.current &&
+        syncState.ratingKey === itemRef.current.ratingKey) {
+      const room = roomPositionNow(syncState);
+      const ahead = video.currentTime - room;
+      if (room > 0 && ahead > 0.3 && ahead <= MAX_START_BACK_S + 0.5) {
+        logEvent("Sync", "starting where the room does, a little before where this player was", {
+          fromS: Number(video.currentTime.toFixed(2)),
+          toS: Number(room.toFixed(2)),
+        });
+        resetPlaybackRate(video);
+        video.currentTime = room;
+      }
+    }
     if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
       // Nothing to show yet; play as soon as there is, if the room is.
       if (syncState.playing && video.paused && !roomWaitRef.current) video.play().catch(() => {});
@@ -5206,18 +5261,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // wait for it there, rather than run on ahead of it.
       const room = roomPositionNow(syncState);
       const ahead = syncState.ratingKey === itemRef.current.ratingKey ? video.currentTime - room : 0;
-      // A stream nothing has been shown of here starts where the room does,
-      // even a little behind where this player was put: the host may have
-      // started a copy on its keyframe (see the start-gap check) after this
-      // player had said it was ready, and it played three seconds ahead.
-      if (!streamShownRef.current && ahead > 0.3 && ahead <= MAX_START_BACK_S + 0.5) {
-        logEvent("Sync", "starting where the room does, a little before where this player was", {
-          fromS: Number(video.currentTime.toFixed(2)),
-          toS: Number(room.toFixed(2)),
-        });
-        resetPlaybackRate(video);
-        video.currentTime = room;
-      } else if (ahead > HARD_SYNC_DRIFT_S && waitsForRoom(ahead)) {
+      if (ahead > HARD_SYNC_DRIFT_S && waitsForRoom(ahead)) {
         waitForRoom(video, room, "the host started again behind this player");
         return;
       }
@@ -5869,7 +5913,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // Waiting for everybody's word that they had it too put a second of
       // loading screen over every such skip; anybody who hasn't got it says so
       // and the room waits for them after all (SyncState.seekReady).
-      const ready = wasBuffered && enoughAheadAt(video, positionSeconds);
+      const ready = pictureHeldAt(video, positionSeconds) && enoughHeldAt(video, positionSeconds);
       const hold = holdsForSeek() && !ready;
       if (hold && !video.paused) {
         hostHeldRef.current = true;
@@ -5878,8 +5922,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       syncActionsRef.current?.sendSeek(positionSeconds, hold, ready);
     }
     if (wasBuffered) return;
-
-    setBuffering(true);
+    // In the engine's memory: the picture is a moment away, and the loading
+    // screen goes up only if it isn't (the starved check in the loading poll).
+    if (!pictureHeldAt(video, positionSeconds)) setBuffering(true);
     seekStallTimerRef.current = setTimeout(() => {
       seekStallTimerRef.current = null;
       const v = videoRef.current;
@@ -5894,7 +5939,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         logEvent("Seek", "in-place seek satisfied", snapshot(v));
       }
     }, SEEK_STALL_TIMEOUT_MS);
-  }, [handleSeekRestart, stopWaitingForRoom]);
+  }, [handleSeekRestart, stopWaitingForRoom, pictureHeldAt, enoughHeldAt]);
 
   // Live ref so the command-handling effect (declared above) can reach the
   // current handleHostSeek without listing it as a dep — naming it directly in a

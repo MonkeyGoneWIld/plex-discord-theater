@@ -461,6 +461,10 @@ function Runner() {
       say(`${snap && Math.abs(hostAt - 40) < 0.5 && Math.abs(viewerAt - 40) < 0.5 ? "PASS" : "FAIL"} both start on the keyframe the copy begins at, 0:40`);
       say(`${late.startS < covered.startS + 1 ? "PASS" : "FAIL"} as soon as from a point the first segment covers (${late.startS.toFixed(1)}s against ${covered.startS.toFixed(1)}s)`);
       say(`${Math.abs(late.apartMs) < 700 ? "PASS" : "FAIL"} together`);
+      await pause(1_000);
+      const h2 = latest.get("u-host")!;
+      const v2 = latest.get("u-viewer")!;
+      say(`${Math.abs(v2.pos - h2.pos) < 0.5 ? "PASS" : "FAIL"} and together a moment later (${(v2.pos - h2.pos).toFixed(2)}s apart)`);
       const fastStops = await stopsAfterStart();
       say(`${fastStops === 0 ? "PASS" : "FAIL"} and neither stops in the five seconds after (${fastStops} samples)`);
 
@@ -520,6 +524,59 @@ function Runner() {
       say(`FAIL ${String(err)}`);
     } finally {
       sampler?.stop();
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
+   * The host going back, in a copied film: twenty seconds, which the browser
+   * keeps, and fifty, which the P2P engine still holds in its memory. Both
+   * play straight on — no loading screen, nobody stopping, the room not
+   * waiting — as a skip inside the buffer does.
+   */
+  async function runRewind() {
+    setRunning(true);
+    const out: string[] = ["— going back a little —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    let sampler: ReturnType<typeof sampleBoth> | null = null;
+    const backBuffer = (user: string) => {
+      const health = (events.get(user) ?? []).filter((e) => e.tag === "Health").pop();
+      return health ? Number(health.data.posS) - Number(health.data.bufStartS) : NaN;
+    };
+    const rewind = async (presses: number) => {
+      const from = latest.get("u-host")!.pos;
+      sampler = sampleBoth();
+      for (let i = 0; i < presses; i++) hostKey("ArrowLeft");
+      await pause(4_000);
+      sampler.stop();
+      const x = sampler.samples;
+      const loadingHost = x.filter((y) => y.host.loading !== null).length;
+      const loadingViewer = x.filter((y) => y.viewer.loading !== null).length;
+      const stopped = x.filter((y) => y.host.paused || y.viewer.paused).length;
+      const waited = x.filter((y) => y.viewer.waiting || y.host.waiting).length;
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      say(`back ${presses * 10}s from ${from.toFixed(1)}s: 4s later the host is at ${h.pos.toFixed(1)}s, the viewer at ${v.pos.toFixed(1)}s`);
+      say(`${h.pos < from - presses * 10 + 6 ? "PASS" : "FAIL"} the host went back`);
+      say(`${loadingHost + loadingViewer === 0 ? "PASS" : "FAIL"} no loading screen on either (host ${loadingHost}, viewer ${loadingViewer} of ${x.length} samples)`);
+      say(`${stopped === 0 ? "PASS" : "FAIL"} neither picture stopped (${stopped})`);
+      say(`${waited === 0 ? "PASS" : "FAIL"} the room didn't wait for anybody (${waited})`);
+      say(`${Math.abs(v.pos - h.pos) < 0.5 ? "PASS" : "FAIL"} together (${Math.abs(v.pos - h.pos).toFixed(2)}s apart)`);
+    };
+    try {
+      await startOnce("p2p=0&stream=copy", {});
+      await pause(34_000);
+      say(`after half a minute, kept behind the playhead: host ${backBuffer("u-host").toFixed(0)}s, viewer ${backBuffer("u-viewer").toFixed(0)}s`);
+      await rewind(2);
+      await pause(40_000);
+      await rewind(5);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      (sampler as ReturnType<typeof sampleBoth> | null)?.stop();
       (window as unknown as { results?: string[]; events?: typeof events }).results = out;
       (window as unknown as { events?: typeof events }).events = events;
       setRunning(false);
@@ -679,6 +736,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runSkipThenPause()}>Skip then pause</button>
         <button disabled={running} onClick={() => void runKeyframeStart()}>Keyframe start</button>
         <button disabled={running} onClick={() => void runBufferedSkip()}>Skip in the buffer</button>
+        <button disabled={running} onClick={() => void runRewind()}>Rewind</button>
         <button disabled={running} onClick={() => void runSeekingWords()}>Seeking words</button>
         <pre id="results">{lines.join("\n")}</pre>
       </div>

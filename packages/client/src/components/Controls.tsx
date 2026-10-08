@@ -774,7 +774,10 @@ export function Controls({
     // The buffer on its own, so the bar keeps filling while paused or stalled:
     // on progress, and on a poll for when a media-source stream sends none.
     video.addEventListener("progress", onBuffer);
-    const bufferPoll = setInterval(onBuffer, BUFFER_POLL_MS);
+    // The time too: a stream rebuilt for a skip is put at its new place
+    // before it has any picture, and nothing sends a `timeupdate` for that,
+    // so the bar read 0:00 until frames came.
+    const bufferPoll = setInterval(onTime, BUFFER_POLL_MS);
     return () => {
       video.removeEventListener("play", onPlay);
       video.removeEventListener("pause", onPause);
@@ -1423,7 +1426,7 @@ export function Controls({
       )}
       <div style={{ ...styles.progressTrack, height: barHeight, transition: "height 0.15s ease" }}>
         <div style={{ ...styles.progressBuffer, left: `${bufferedLeft}%`, width: `${bufferedWidth}%` }} />
-        <div style={{ ...styles.progressFill, width: `${fillPct}%` }} />
+        <div style={{ ...styles.progressFill, width: `${fillPct}%` }} data-progress-fill={fillPct.toFixed(2)} />
         {/* Redundant with the handle while dragging — the handle is already
             sitting exactly here, and two markers on one spot reads as a bug. */}
         {hoverPct != null && scrubPct == null && (

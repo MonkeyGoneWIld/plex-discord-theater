@@ -38,12 +38,12 @@ import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
 import { resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
-import { enoughToStart, pictureStartFor } from "../lib/copyStart";
+import { MAX_START_BACK_S, enoughToStart, nextSegmentInS, pictureStartFor } from "../lib/copyStart";
 import { bufferedRanges, coveredAheadS, heldRanges } from "../lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
 import { fetchInPartsLater, installSegmentParts, partsFor, segmentBytesOf } from "../lib/segmentParts";
-import { PEER_CONNECT_WAIT_MS, installTakeFromPeer, sameNetworkKnown } from "../lib/takeFromPeer";
+import { installTakeFromPeer } from "../lib/takeFromPeer";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
 import { useVideoZoom } from "../lib/useVideoZoom";
 import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -141,6 +141,14 @@ const SOFT_SYNC_MIN_BUFFER_S = 6;
 const HOST_WAIT_AFTER_MS = 300;
 /** How long "Host is seeking…" shows, at least, for a skip that needs no loading. */
 const HOST_SEEKING_FLASH_MS = 1400;
+/**
+ * How long a skip's target is held on the bar, and "Host is seeking…" on the
+ * loading screen, when nothing says the picture has got there — a backstop
+ * for a load that never completes. The picture arriving ends both sooner. At
+ * twenty seconds, a viewer whose skip took thirty-eight watched its bar go
+ * back to 0:00 and its screen say "Buffering…" for the second half.
+ */
+const SEEK_TARGET_HOLD_MS = 90_000;
 /**
  * How far behind where the room waits a player may be and still start from
  * where it is. Further back than this, it goes to the room's place first;
@@ -410,6 +418,21 @@ function enoughAheadAt(video: HTMLVideoElement, t: number): boolean {
   const range = bufferedRangeAt(video, t);
   const left = Number.isFinite(video.duration) ? video.duration - t - 0.25 : Infinity;
   return enoughToStart(range ? Math.max(0, range.end - t) : 0, left);
+}
+
+/**
+ * How long a seek inside the buffer is taken to be just that — the last frame
+ * still on screen while the new one decodes — before it counts as a stall.
+ */
+const BUFFERED_SEEK_GRACE_MS = 3000;
+
+/**
+ * Whether the element is in the middle of a seek inside its buffer, and has
+ * been for less than BUFFERED_SEEK_GRACE_MS. `seekingSince` is when it began.
+ */
+function seekingInBuffer(video: HTMLVideoElement, seekingSince: number): boolean {
+  return video.seeking && isPositionBuffered(video, video.currentTime) &&
+    Date.now() - seekingSince < BUFFERED_SEEK_GRACE_MS;
 }
 
 /** The stretch of buffered picture that holds `t`, or null. */
@@ -1533,9 +1556,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const copiedStreamRef = useRef(false);
   /** Where that playlist ends for now, in film time; null once it is complete. */
   const playlistEdgeRef = useRef<number | null>(null);
-  /** Where this stream was started from, and the copy's keyframe it started on
-   *  instead — see the start-gap check and lib/copyStart. */
-  const startSnapRef = useRef<{ fromS: number; toS: number } | null>(null);
+  /** Whether the current stream has shown a frame here yet. */
+  const streamShownRef = useRef(false);
   /** The title's runtime, kept current every render — see itemDurationS. */
   const runtimeRef = useRef(0);
   // seekSeq of the last seek this client has already acted on. Seeded from the
@@ -2400,19 +2422,23 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (!v || !sync?.playing || !sync.hostWaiting || !sync.gatherSeq) return;
     if (readySentForRef.current === sync.gatherSeq) return;
     if (sync.ratingKey !== itemRef.current.ratingKey || !sessionIdRef.current) return;
-    // A copy everybody starts on its keyframe instead of where it was started
-    // from: there, whether or not the host's word on it is here yet.
-    const snap = startSnapRef.current;
-    const startsFromS = snap && Math.abs(sync.position - snap.fromS) < 0.5 ? snap.toS : sync.position;
-    const behindS = startsFromS - v.currentTime;
-    if (behindS > GATHER_BEHIND_TOLERANCE_S && startsFromS > 0 &&
+    const behindS = sync.position - v.currentTime;
+    // And a stream this player hasn't shown anything of yet starts exactly
+    // where the room does, a little before as well as after: the host may
+    // start a copy on its keyframe, a few seconds before the point it was
+    // started from (see the start-gap check), and nothing of it has been seen
+    // here to be seen twice. Not for a player waiting ahead of the room on
+    // purpose, which has seen it — in the stream before this one.
+    const startsHere = !streamShownRef.current && !roomWaitRef.current &&
+      behindS < -0.3 && behindS >= -MAX_START_BACK_S - 0.5;
+    if ((behindS > GATHER_BEHIND_TOLERANCE_S || startsHere) && sync.position > 0 &&
         v.readyState >= HTMLMediaElement.HAVE_METADATA && !v.seeking) {
       logEvent("Sync", "going to where the room starts from", {
         fromS: Number(v.currentTime.toFixed(2)),
-        toS: Number(startsFromS.toFixed(2)),
+        toS: Number(sync.position.toFixed(2)),
       });
       resetPlaybackRate(v);
-      v.currentTime = startsFromS;
+      v.currentTime = sync.position;
       return;
     }
     if (!pictureReady(v)) return;
@@ -2437,13 +2463,20 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [roomHolding, setRoomHolding] = useState(false);
   useEffect(() => {
     let starvingSince = 0;
+    let seekingSince = 0;
     let holdingSince = 0;
     let heldStuckSince = 0;
     let heldNudges = 0;
     const id = window.setInterval(() => {
       const v = videoRef.current;
       const sync = syncStateRef.current;
-      const starved = !!v && !v.paused && !v.ended && v.readyState < HTMLMediaElement.HAVE_FUTURE_DATA;
+      if (!v?.seeking) seekingSince = 0;
+      else if (!seekingSince) seekingSince = Date.now();
+      // Not a seek inside the buffer: the last frame stays up while it lands,
+      // and a skip of ten seconds put the loading screen over it for half a
+      // second — see seekingInBuffer.
+      const starved = !!v && !v.paused && !v.ended && v.readyState < HTMLMediaElement.HAVE_FUTURE_DATA &&
+        !seekingInBuffer(v, seekingSince);
       if (!starved) starvingSince = 0;
       else if (!starvingSince) starvingSince = Date.now();
       const starvedMs = starvingSince ? Date.now() - starvingSince : 0;
@@ -2506,9 +2539,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [noPicture, setNoPicture] = useState(true);
   const [loadingText, setLoadingText] = useState(() => loadingTitle(false));
   useEffect(() => {
+    let seekingSince = 0;
     const id = window.setInterval(() => {
       const v = videoRef.current;
-      setNoPicture(!v || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA);
+      if (!v?.seeking) seekingSince = 0;
+      else if (!seekingSince) seekingSince = Date.now();
+      // A seek inside the buffer leaves the last frame up — see seekingInBuffer.
+      if (!v || !seekingInBuffer(v, seekingSince)) setNoPicture(!v || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA);
       setLoadingText(loadingTitle(pictureShownRef.current));
     }, 250);
     return () => window.clearInterval(id);
@@ -3289,15 +3326,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             ofMB: took.total === undefined ? "?" : (took.total / 1e6).toFixed(2),
             afterS: (took.ms / 1000).toFixed(1),
             peerMbps: took.peerBitsPerS > 0 ? (took.peerBitsPerS / 1e6).toFixed(1) : "unmeasured",
-          }), () => logEvent("P2P", "the other player is on this network, sharing segments with it rather than fetching each twice", {
-            session: sessionId?.substring(0, 8),
-          }), () => !isHostRef.current && !!syncStateRef.current?.playing && !!syncStateRef.current.hostWaiting);
-          // A viewer joining a stream as it starts, with a host on its own
-          // network, gives the host a moment to appear as a peer before
-          // fetching anything from the bot: whatever the host is already
-          // fetching, it then takes from the host (lib/takeFromPeer).
-          const joiningStart = !isHostRef.current && sameNetworkKnown() &&
-            !!syncStateRef.current?.playing && !!syncStateRef.current.hostWaiting;
+          }));
           const HlsWithP2P = HlsJsP2PEngine.injectMixin(Hls);
           hls = new HlsWithP2P({
             ...hlsConfig,
@@ -3390,7 +3419,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // wait over, three times, before giving up on it. A request
                 // that has really died is still caught, after this.
                 httpNotReceivingBytesTimeoutMs: 15_000,
-                httpDownloadInitialTimeoutMs: joiningStart ? PEER_CONNECT_WAIT_MS : 0,
                 rtcConfig: {
                   // Multiple STUN servers improve NAT traversal odds — every
                   // peer pair that fails to connect falls back to HTTP, costing
@@ -3523,9 +3551,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 });
                 hls.p2pEngine.addEventListener("onPeerConnect", ({ peerId }) => {
                   stats.peers.add(peerId);
-                  // The host is here: no more waiting for it before fetching
-                  // whatever it isn't — see joiningStart.
-                  if (joiningStart) hls.p2pEngine.applyDynamicConfig({ core: { httpDownloadInitialTimeoutMs: 0 } });
                 });
                 hls.p2pEngine.addEventListener("onPeerClose", ({ peerId }) => {
                   stats.peers.delete(peerId);
@@ -3554,7 +3579,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // LEVEL_LOADED fires on every reload, which is how the edge keeps up.
         copiedStreamRef.current = false;
         playlistEdgeRef.current = null;
-        startSnapRef.current = null;
+        streamShownRef.current = false;
         // What the server says about this stream — copied or re-encoded, and
         // why — for Stats for nerds and the buffering hint. A new stream also
         // starts the buffering count over: its first seconds are loading.
@@ -3863,26 +3888,40 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
          * after that a gap is the watchdog's business.
          */
         let startGapChecked = false;
-        hls.on(Hls.Events.FRAG_BUFFERED, () => {
+        hls.on(Hls.Events.FRAG_BUFFERED, (_e, data) => {
           if (!mounted || startGapChecked) return;
-          // And a copy everybody is starting together starts on its keyframe
+          // And a copy the room is starting together starts on its keyframe
           // when the point it was started from is in the last moments of its
-          // first segment, so that segment is enough to start on — see
-          // lib/copyStart. Every player gets the same segment and does the
-          // same, and the host's report moves the room there.
+          // first segment, so that segment is enough to start on — if the next
+          // will be in before it has played (lib/copyStart). The host decides;
+          // its report moves the room there, and everybody else goes too (see
+          // reportViewerReady).
           const range = bufferedRangeAt(video, video.currentTime);
           if (range) {
             startGapChecked = true;
-            const gathering = hostHeldRef.current || !!syncStateRef.current?.hostWaiting;
-            if (!copiedStreamRef.current || !gathering || !video.paused) return;
-            const startS = pictureStartFor(video.currentTime, range);
-            if (startS >= video.currentTime) return;
-            logEvent("HLS", "starting on the copy's keyframe, so its first segment is enough to start on", {
+            if (!isHostRef.current || !copiedStreamRef.current || !hostHeldRef.current || !video.paused) return;
+            if (pictureStartFor(video.currentTime, range) >= video.currentTime) return;
+            const stats = data.frag.stats;
+            const loadMs = stats.loading.end - stats.loading.start;
+            const bitsPerS = loadMs > 0 ? (stats.loaded * 8 * 1000) / loadMs : 0;
+            const next = hls.levels[data.frag.level]?.details?.fragments
+              .find((f) => f.sn === (data.frag.sn as number) + 1);
+            const nextBytes = (next && segmentBytesOf(next.url)) ?? stats.loaded;
+            const nextInS = nextSegmentInS(nextBytes, bitsPerS);
+            const startS = pictureStartFor(video.currentTime, range, nextInS);
+            const facts = {
               fromS: Number(video.currentTime.toFixed(2)),
-              toS: Number(startS.toFixed(2)),
+              keyframeS: Number(range.start.toFixed(2)),
               segmentEndS: Number(range.end.toFixed(2)),
-            });
-            startSnapRef.current = { fromS: video.currentTime, toS: startS };
+              firstMbps: Number((bitsPerS / 1e6).toFixed(1)),
+              nextMB: Number((nextBytes / 1e6).toFixed(2)),
+              nextInS: Number.isFinite(nextInS) ? Number(nextInS.toFixed(1)) : "unknown",
+            };
+            if (startS >= video.currentTime) {
+              logEvent("HLS", "not starting on the copy's keyframe: its next segment wouldn't be in before the first had played", facts);
+              return;
+            }
+            logEvent("HLS", "starting on the copy's keyframe, so its first segment is enough to start on", facts);
             video.currentTime = startS;
             return;
           }
@@ -4346,6 +4385,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         };
         const onPlaying = () => {
           logEvent("Video", "playing", snapshot(video));
+          streamShownRef.current = true;
           noteGoodPosition(video);
           pictureShownRef.current = true;
           setBuffering(false);
@@ -5166,7 +5206,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // wait for it there, rather than run on ahead of it.
       const room = roomPositionNow(syncState);
       const ahead = syncState.ratingKey === itemRef.current.ratingKey ? video.currentTime - room : 0;
-      if (ahead > HARD_SYNC_DRIFT_S && waitsForRoom(ahead)) {
+      // A stream nothing has been shown of here starts where the room does,
+      // even a little behind where this player was put: the host may have
+      // started a copy on its keyframe (see the start-gap check) after this
+      // player had said it was ready, and it played three seconds ahead.
+      if (!streamShownRef.current && ahead > 0.3 && ahead <= MAX_START_BACK_S + 0.5) {
+        logEvent("Sync", "starting where the room does, a little before where this player was", {
+          fromS: Number(video.currentTime.toFixed(2)),
+          toS: Number(room.toFixed(2)),
+        });
+        resetPlaybackRate(video);
+        video.currentTime = room;
+      } else if (ahead > HARD_SYNC_DRIFT_S && waitsForRoom(ahead)) {
         waitForRoom(video, room, "the host started again behind this player");
         return;
       }
@@ -5245,8 +5296,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const badge = setTimeout(() => {
       if (!seekLoadingSeenRef.current) setHostSeeking(false);
     }, HOST_SEEKING_FLASH_MS);
-    const backstop = setTimeout(() => setHostSeeking(false), 30_000);
-    const held = setTimeout(() => setRestartingTo(null), 20_000);
+    const backstop = setTimeout(() => setHostSeeking(false), SEEK_TARGET_HOLD_MS);
+    const held = setTimeout(() => setRestartingTo(null), SEEK_TARGET_HOLD_MS);
     return () => { clearTimeout(badge); clearTimeout(backstop); clearTimeout(held); };
   }, [syncState?.seekSeq]);
 
@@ -5887,7 +5938,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         coHostSeekHoldRef.current = setTimeout(() => {
           coHostSeekHoldRef.current = null;
           setRestartingTo(null);
-        }, 20_000);
+        }, SEEK_TARGET_HOLD_MS);
       }
     }
     syncActionsRef.current?.sendSeek(positionSeconds, holdsForSeek());

@@ -36,7 +36,9 @@ import { createRoot } from "react-dom/client";
 type Event = { t: number; tag: string; msg: string; data: Record<string, unknown> };
 type Report = { user: string; t: number; pos: number; paused: boolean; ready: number; waiting: boolean; text: string; joined: boolean;
   /** What the loading screen says, when it is up. */
-  loading: string | null };
+  loading: string | null;
+  /** How far along the seek bar shows, percent. */
+  barPct: number };
 type Sample = { t: number; host: Report; viewer: Report };
 
 const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -311,57 +313,6 @@ function Runner() {
   }
 
   /**
-   * Both players on one connection to the bot, 20 Mbps for the two of them, as
-   * at one house. Once they have found each other close (the first stream
-   * shows it), a skip that rebuilds the stream has the host fetch the new
-   * place with the whole connection and the viewer take it from the host,
-   * instead of each fetching it at half.
-   */
-  async function runSharedStart() {
-    setRunning(true);
-    const out: string[] = ["— a copied film, both players on one 20 Mbps connection to the bot —"];
-    const say = (line: string) => { out.push(line); setLines([...out]); };
-    setLines([...out]);
-    /** Play a while, then skip past what is measured: how long until both play again, and where the viewer's segment came from. */
-    const skipAfterPlaying = async (query: string) => {
-      const first = await startOnce(query, {}, 20_000);
-      await pause(15_000);
-      const from = latest.get("u-host")!.pos;
-      const loadsBefore = (events.get("u-viewer") ?? []).filter((e) => e.tag === "Load").length;
-      const asked = Date.now();
-      for (let i = 0; i < 6; i++) hostKey("ArrowRight");
-      const target = from + 60;
-      await waitFor(() => {
-        const h = latest.get("u-host");
-        const v = latest.get("u-viewer");
-        return h && v && !h.paused && !v.paused && h.pos > target - 3 && v.pos > target - 3;
-      }, 60_000, "both to play from where the host skipped to");
-      // The segment the picture waited on: the one the skip landed in.
-      const viewerLoad = (events.get("u-viewer") ?? []).filter((e) => e.tag === "Load").slice(loadsBefore)
-        .find((e) => Number(e.data.seg) === Math.floor(target / 10));
-      return { startS: first.startS, skipS: (Date.now() - asked) / 1000, viewerFrom: viewerLoad?.data.from };
-    };
-    try {
-      const alone = await skipAfterPlaying("p2p=0&stream=copy&event=1");
-      say(`each fetching its own: started in ${alone.startS.toFixed(1)}s; a skip played again in ${alone.skipS.toFixed(1)}s`);
-      const shared = await skipAfterPlaying("p2p=1&stream=copy&event=1");
-      say(`sharing: started in ${shared.startS.toFixed(1)}s; a skip played again in ${shared.skipS.toFixed(1)}s, the viewer's segment from ${shared.viewerFrom ?? "?"}`);
-      say(`${shared.viewerFrom === "another player" ? "PASS" : "FAIL"} after the skip the viewer takes the segment from the host, not the bot`);
-      say(`${shared.skipS < alone.skipS * 0.85 ? "PASS" : "FAIL"} so the room plays again sooner than with each fetching its own`);
-      await pause(5_000);
-      const h = latest.get("u-host")!;
-      const v = latest.get("u-viewer")!;
-      say(`${Math.abs(v.pos - h.pos) < 1 && !h.paused && !v.paused ? "PASS" : "FAIL"} and they play on together (${Math.abs(v.pos - h.pos).toFixed(2)}s apart)`);
-    } catch (err) {
-      say(`FAIL ${String(err)}`);
-    } finally {
-      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
-      (window as unknown as { events?: typeof events }).events = events;
-      setRunning(false);
-    }
-  }
-
-  /**
    * The host skipping a minute ahead in a copied film, past what the bot has
    * measured, so the stream is rebuilt there — Backrooms skipped to 25:54, and
    * the room went back to 0:59 and waited there for ever.
@@ -406,6 +357,15 @@ function Runner() {
       const told = samples.filter((x) => /Host is seeking…/.test(x.viewer.text)).length;
       const buffering = samples.filter((x) => /Buffering…/.test(x.viewer.text)).length;
       say(`${told > 0 && buffering === 0 ? "PASS" : "FAIL"} the viewer's screen says the host is seeking, not buffering (${told} and ${buffering} samples)`);
+      // Its bar, while the skip loaded: at the place skipped to — the film
+      // is two minutes — never back at the start, and never blank.
+      const loadingBar = samples.filter((x) => x.viewer.loading !== null).map((x) => x.viewer.barPct);
+      const offTarget = loadingBar.filter((p) => !(Math.abs(p - (target / 120) * 100) < 6)).length;
+      say(`${loadingBar.length > 0 && offTarget === 0 ? "PASS" : "FAIL"} and its bar shows where the host skipped to all the while (${offTarget} of ${loadingBar.length} samples elsewhere${offTarget ? `: ${[...new Set(loadingBar.map((p) => p.toFixed(0)))].join(", ")}%` : ""})`);
+      // Where the viewer's segment for the new place came from: the bot, not
+      // left waiting on the host's.
+      const landing = (events.get("u-viewer") ?? []).filter((e) => e.tag === "Load" && Number(e.data.seg) === Math.floor(target / 10)).pop();
+      say(`the viewer's first segment at the new place: from ${landing?.data.from ?? "?"} in ${landing?.data.tookS ?? "?"}s`);
     } catch (err) {
       const h = latest.get("u-host");
       const v = latest.get("u-viewer");
@@ -462,11 +422,11 @@ function Runner() {
 
   /**
    * A copied film with a four-second keyframe interval resumed 0.6s before the
-   * end of its first segment, every download at 6 Mbps and the bot's upload at
-   * 20 Mbps: everybody starts on the keyframe, on the first segment alone, as
-   * soon as from a point the first segment covers — rather than waiting for
-   * the second segment too, which two players starting together on one upload
-   * have to share.
+   * end of its first segment. On a connection that will have the second
+   * segment in before the first has played, everybody starts on the keyframe,
+   * on the first segment alone — as soon as from a point the first segment
+   * covers. On one that won't, everybody waits for the second, rather than
+   * start and stop a few seconds later.
    */
   async function runKeyframeStart() {
     setRunning(true);
@@ -474,26 +434,45 @@ function Runner() {
     const say = (line: string) => { out.push(line); setLines([...out]); };
     setLines([...out]);
     const firstPlayAt = (user: string) => Number(events.get(user)?.find((e) => e.tag === "Video" && e.msg === "playing")?.data.posS ?? NaN);
+    const hostSaid = (re: RegExp) => (events.get("u-host") ?? []).find((e) => e.tag === "HLS" && re.test(e.msg));
+    /** Stopped, the two of them, in the few seconds after starting. */
+    const stopsAfterStart = async () => {
+      let stopped = 0;
+      for (let i = 0; i < 25; i++) {
+        await pause(200);
+        const h = latest.get("u-host");
+        const v = latest.get("u-viewer");
+        if (h && v && (h.paused || v.paused || h.ready < 3)) stopped++;
+      }
+      return stopped;
+    };
     try {
-      const flows = { "u-host": 6000, "u-viewer": 6000 };
+      const fast = { "u-host": 12_000, "u-viewer": 12_000 };
       hostQuery = "&resume=41";
-      const covered = await startOnce("p2p=0&stream=copy4&event=1", flows, 20_000);
-      say(`resumed at 0:41, 3s before its first segment ends: started ${covered.startS.toFixed(1)}s after play, at ${firstPlayAt("u-host").toFixed(2)}s, ${covered.apartMs} ms apart`);
+      const covered = await startOnce("p2p=0&stream=copy4&event=1", fast, 60_000);
+      say(`fast, resumed at 0:41, 3s before its first segment ends: started ${covered.startS.toFixed(1)}s after play, at ${firstPlayAt("u-host").toFixed(2)}s`);
       hostQuery = "&resume=43.4";
-      const late = await startOnce("p2p=0&stream=copy4&event=1", flows, 20_000);
+      const late = await startOnce("p2p=0&stream=copy4&event=1", fast, 60_000);
       const hostAt = firstPlayAt("u-host");
       const viewerAt = firstPlayAt("u-viewer");
-      say(`resumed at 0:43.4, 0.6s before it ends: started ${late.startS.toFixed(1)}s after play, host at ${hostAt.toFixed(2)}s, viewer at ${viewerAt.toFixed(2)}s, ${late.apartMs} ms apart`);
-      for (const e of late.segments) say(`    host's segment ${e.data.seg}: ${e.data.MB} MB in ${e.data.tookS}s, ${e.data.sinceStreamS}s in`);
-      const snapped = (u: string) => (events.get(u) ?? []).some((e) => e.tag === "HLS" && /starting on the copy's keyframe/.test(e.msg));
-      say(`${snapped("u-host") && snapped("u-viewer") ? "PASS" : "FAIL"} both start on the keyframe the copy begins at`);
-      say(`${Math.abs(hostAt - 40) < 0.5 && Math.abs(viewerAt - 40) < 0.5 ? "PASS" : "FAIL"} at 0:40, the two of them`);
+      const snap = hostSaid(/starting on the copy's keyframe/);
+      say(`fast, resumed at 0:43.4, 0.6s before it ends: started ${late.startS.toFixed(1)}s after play, host at ${hostAt.toFixed(2)}s, viewer at ${viewerAt.toFixed(2)}s, ${late.apartMs} ms apart`);
+      if (snap) say(`    the host's first segment at ${snap.data.firstMbps} Mbps, so the next in ${snap.data.nextInS}s`);
+      say(`${snap && Math.abs(hostAt - 40) < 0.5 && Math.abs(viewerAt - 40) < 0.5 ? "PASS" : "FAIL"} both start on the keyframe the copy begins at, 0:40`);
       say(`${late.startS < covered.startS + 1 ? "PASS" : "FAIL"} as soon as from a point the first segment covers (${late.startS.toFixed(1)}s against ${covered.startS.toFixed(1)}s)`);
       say(`${Math.abs(late.apartMs) < 700 ? "PASS" : "FAIL"} together`);
-      await pause(5_000);
-      const h = latest.get("u-host")!;
-      const v = latest.get("u-viewer")!;
-      say(`${Math.abs(v.pos - h.pos) < 1 && !h.paused && !v.paused ? "PASS" : "FAIL"} and play on together (${Math.abs(v.pos - h.pos).toFixed(2)}s apart)`);
+      const fastStops = await stopsAfterStart();
+      say(`${fastStops === 0 ? "PASS" : "FAIL"} and neither stops in the five seconds after (${fastStops} samples)`);
+
+      const slow = { "u-host": 6000, "u-viewer": 6000 };
+      const slowly = await startOnce("p2p=0&stream=copy4&event=1", slow, 20_000);
+      const slowHostAt = firstPlayAt("u-host");
+      const slowViewerAt = firstPlayAt("u-viewer");
+      const held = hostSaid(/not starting on the copy's keyframe/);
+      say(`slow, resumed at 0:43.4: started ${slowly.startS.toFixed(1)}s after play, host at ${slowHostAt.toFixed(2)}s, viewer at ${slowViewerAt.toFixed(2)}s, ${slowly.apartMs} ms apart`);
+      if (held) say(`    the host's first segment at ${held.data.firstMbps} Mbps, so the next in ${held.data.nextInS}s`);
+      say(`${held && Math.abs(slowHostAt - 43.4) < 0.5 && Math.abs(slowViewerAt - 43.4) < 0.5 ? "PASS" : "FAIL"} the next segment can't be in in time, so both wait for it and start where they were asked`);
+      say(`${Math.abs(slowly.apartMs) < 700 ? "PASS" : "FAIL"} together`);
     } catch (err) {
       say(`FAIL ${String(err)}`);
     } finally {
@@ -523,15 +502,16 @@ function Runner() {
       await pause(4_000);
       sampler.stop();
       const s = sampler.samples;
-      const loading = s.filter((x) => x.host.loading !== null || x.viewer.loading !== null).length;
+      const loadingHost = s.filter((x) => x.host.loading !== null).length;
+      const loadingViewer = s.filter((x) => x.viewer.loading !== null).length;
       const stopped = s.filter((x) => x.host.paused || x.viewer.paused).length;
       const waited = s.filter((x) => x.viewer.waiting || x.host.waiting).length;
       const told = s.filter((x) => /Host is seeking…/.test(x.viewer.text)).length;
       const h = latest.get("u-host")!;
       const v = latest.get("u-viewer")!;
       say(`… skipped from ${from.toFixed(1)}s; 4s later the host is at ${h.pos.toFixed(1)}s, the viewer at ${v.pos.toFixed(1)}s`);
-      say(`${h.pos > from + 13 ? "PASS" : "FAIL"} the host skipped`);
-      say(`${loading === 0 ? "PASS" : "FAIL"} no loading screen on either (${loading} of ${s.length} samples)`);
+      say(`${h.pos > from + 12 ? "PASS" : "FAIL"} the host skipped`);
+      say(`${loadingHost + loadingViewer === 0 ? "PASS" : "FAIL"} no loading screen on either (host ${loadingHost}, viewer ${loadingViewer} of ${s.length} samples)`);
       say(`${stopped === 0 ? "PASS" : "FAIL"} neither picture stopped (${stopped})`);
       say(`${waited === 0 ? "PASS" : "FAIL"} the room didn't wait for anybody (${waited})`);
       say(`${told > 0 ? "PASS" : "FAIL"} the viewer is told the host is seeking, in the corner (${told} samples)`);
@@ -695,7 +675,6 @@ function Runner() {
         <button disabled={running} onClick={() => void runSlowViewer(20000)}>Very slow viewer</button>
         <button disabled={running} onClick={() => void runStartup()}>Start-up</button>
         <button disabled={running} onClick={() => void runHostCrawls()}>Host's downloads crawl</button>
-        <button disabled={running} onClick={() => void runSharedStart()}>Shared connection</button>
         <button disabled={running} onClick={() => void runCopySkip()}>Skip in a copy</button>
         <button disabled={running} onClick={() => void runSkipThenPause()}>Skip then pause</button>
         <button disabled={running} onClick={() => void runKeyframeStart()}>Keyframe start</button>

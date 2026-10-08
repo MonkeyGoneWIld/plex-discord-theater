@@ -24,7 +24,7 @@ const source = readFileSync(file, "utf8");
 
 console.log("\n— the engine as installed —");
 const patched = patchHybridLoader(source);
-check("all its changes are made", patched.split("plex-discord-theater: p2pCorePatch").length - 1, 9);
+check("all its changes are made", patched.split("plex-discord-theater: p2pCorePatch").length - 1, 4);
 check("it is still JavaScript", (() => { try { transformSync(patched, { loader: "js", format: "esm" }); return true; } catch { return false; } })(), true);
 check("a segment loading from a peer is asked about before being moved to the bot",
   /request\.downloadSource === "p2p" && !this\.pdtKeepOnPeer\(request\) &&/.test(patched), true);

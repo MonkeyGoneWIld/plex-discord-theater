@@ -17,7 +17,7 @@ import { coveredAheadS, heldRanges } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS } from "../src/lib/bufferTrim";
 import { roomPositionNow } from "../src/hooks/useSync";
-import { enoughToStart, pictureStartFor } from "../src/lib/copyStart";
+import { enoughToStart, nextSegmentInS, pictureStartFor } from "../src/lib/copyStart";
 
 let pass = 0;
 let fail = 0;
@@ -115,6 +115,12 @@ check("too far back from where it was asked: where it was asked",
   pictureStartFor(68, { start: 60, end: 70 }), 68);
 check("outside the segment: where it was asked", pictureStartFor(50, { start: 60, end: 70 }), 50);
 check("nothing in: where it was asked", pictureStartFor(50, null), 50);
+// The host's first segment came at these speeds, and the next is this big.
+check("the next segment in two seconds: the keyframe",
+  pictureStartFor(910.25, { start: 906.91, end: 910.83 }, nextSegmentInS(2.6e6, 21e6)), 906.91);
+check("the next one 23 MB, the first at 27 Mbps: where it was asked, waiting for the next",
+  pictureStartFor(1414.86, { start: 1412.49, end: 1415.63 }, nextSegmentInS(23.35e6, 27.4e6)), 1414.86);
+check("no speed to go on: where it was asked", pictureStartFor(910.25, { start: 906.91, end: 910.83 }, nextSegmentInS(2.6e6, 0)), 910.25);
 check("three seconds ahead is enough to start on", enoughToStart(3), true);
 check("and 2.98", enoughToStart(2.98), true);
 check("but not two", enoughToStart(2), false);

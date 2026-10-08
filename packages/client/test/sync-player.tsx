@@ -81,6 +81,7 @@ setInterval(() => {
     pos: v?.currentTime ?? 0, paused: v?.paused ?? true, ready: v?.readyState ?? 0,
     waiting: !!sync?.hostWaiting, text: document.body.innerText, joined: !!fixture.joined,
     loading: document.querySelector("[data-loading-screen]")?.textContent ?? null,
+    barPct: Number(document.querySelector("[data-progress-fill]")?.getAttribute("data-progress-fill") ?? NaN),
     events: events.slice(sent),
   }, "*");
   sent = events.length;

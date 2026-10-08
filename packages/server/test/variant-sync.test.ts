@@ -1095,6 +1095,84 @@ console.log("\n— a skip that rebuilds the host's stream —");
   [host, a].forEach((c) => c.close());
 }
 
+console.log("\n— a skip inside the buffer —");
+{
+  // The host skipping somewhere it already has the picture for: the room goes
+  // straight on, rather than waiting a second for everybody to say they have
+  // it too, with a loading screen over it.
+  instanceHosts.set("inst-inbuf", { hostUserId: "u-host", guildId: null, channelId: null, createdAt: Date.now() });
+  const host = new Client("u-host", "host");
+  await host.connect("inst-inbuf", { gather: true });
+  const a = new Client("u-a", "a");
+  await a.connect("inst-inbuf", { gather: true });
+  const b = new Client("u-b", "b");
+  await b.connect("inst-inbuf", { gather: true });
+  for (const c of [host, a, b]) c.send({ type: "watching", value: true });
+  await sleep(60);
+  const rev = () => host.last("transport-state")?.transportRevision;
+  const ready = (c: Client) => c.send({ type: "ready", gather: c.last("room-waiting")?.gather });
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: uuid(), position: 0, sessionOffset: 0,
+    audioStreamId: 1, subtitleStreamId: 0, waiting: true,
+  });
+  await sleep(60);
+  host.send({ type: "heartbeat", position: 0.1, playing: true, waiting: false, transportRevision: rev() });
+  ready(a);
+  ready(b);
+  await sleep(60);
+  check("the room runs", host.last("room-waiting")?.waiting, false);
+
+  for (const c of [host, a, b]) c.clear();
+  host.send({ type: "seek", position: 200, ready: true });
+  await sleep(60);
+  check("viewers are told it is a skip the host has the picture for", a.last("seek")?.ready, true);
+  check("and that it is the host's", a.last("seek")?.byHost, true);
+  check("the room doesn't wait for anybody", a.last("room-waiting"), undefined);
+  check("its clock goes on from where the host skipped to", near(await clockOf("inst-inbuf"), 200.1, 0.3), "ok");
+
+  // One of them hasn't got that far: the room waits for it there after all.
+  a.send({ type: "seek-loading" });
+  await sleep(60);
+  check("a viewer that hasn't got it holds the room", host.last("room-waiting")?.waiting, true);
+  check("everybody", b.last("room-waiting")?.waiting, true);
+  host.send({ type: "heartbeat", position: 200.2, playing: true, waiting: false, transportRevision: rev() });
+  ready(b);
+  await sleep(60);
+  check("still waiting for the one loading it", host.last("room-waiting")?.waiting, true);
+  ready(a);
+  await sleep(60);
+  check("and runs once it has it", host.last("room-waiting")?.waiting, false);
+  a.send({ type: "seek-loading" });
+  await sleep(60);
+  check("asked again, it doesn't wait again", host.last("room-waiting")?.waiting, false);
+
+  // Any other skip waits for everybody, as before, and nobody can make a
+  // later one wait by saying this.
+  for (const c of [host, a, b]) c.clear();
+  host.send({ type: "seek", position: 900 });
+  await sleep(60);
+  check("a skip the host hasn't got waits for everybody", a.last("room-waiting")?.waiting, true);
+  check("and isn't one the room goes straight on from", a.last("seek")?.ready, false);
+  host.send({ type: "heartbeat", position: 900, playing: true, waiting: false, transportRevision: rev() });
+  ready(a);
+  ready(b);
+  await sleep(60);
+  a.send({ type: "seek-loading" });
+  await sleep(60);
+  check("and saying it after one of those does nothing", host.last("room-waiting")?.waiting, false);
+
+  // A co-host's word that it has the picture is no word on the host's.
+  host.send({ type: "set-cohost", userId: "u-b", value: true });
+  await sleep(60);
+  for (const c of [host, a, b]) c.clear();
+  b.send({ type: "seek", position: 950, ready: true });
+  await sleep(60);
+  check("a co-host's skip waits for everybody, the host included", host.last("room-waiting")?.waiting, true);
+  check("and the host is told it was a co-host's", host.last("seek")?.byHost, false);
+  [host, a, b].forEach((c) => c.close());
+}
+
 console.log("\n— a host on its own is answered at once —");
 {
   instanceHosts.set("inst-alone", { hostUserId: "u-host", guildId: null, channelId: null, createdAt: Date.now() });

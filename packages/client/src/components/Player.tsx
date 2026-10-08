@@ -38,6 +38,7 @@ import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
 import { resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
+import { enoughToStart, pictureStartFor } from "../lib/copyStart";
 import { bufferedRanges, coveredAheadS, heldRanges } from "../lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
@@ -138,9 +139,6 @@ const SOFT_SYNC_MIN_BUFFER_S = 6;
  * moment ahead of the host.
  */
 const HOST_WAIT_AFTER_MS = 300;
-/** Seconds of picture past the playhead a player has before it says it is
- *  ready for the room to start — see pictureReady. */
-const READY_AHEAD_S = 3;
 /** How long "Host is seeking…" shows, at least, for a skip that needs no loading. */
 const HOST_SEEKING_FLASH_MS = 1400;
 /**
@@ -399,8 +397,28 @@ function pictureMoving(video: HTMLVideoElement | null): boolean {
  */
 function pictureReady(video: HTMLVideoElement | null): boolean {
   if (!video || video.seeking || video.ended || video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) return false;
-  const left = Number.isFinite(video.duration) ? video.duration - video.currentTime - 0.25 : Infinity;
-  return bufferAheadSeconds(video) >= Math.min(READY_AHEAD_S, Math.max(0, left));
+  return enoughAhead(video);
+}
+
+/** Whether there is enough picture in front of the playhead to start on, seeking or not — see lib/copyStart. */
+function enoughAhead(video: HTMLVideoElement): boolean {
+  return enoughAheadAt(video, video.currentTime);
+}
+
+/** The same, from `t`. */
+function enoughAheadAt(video: HTMLVideoElement, t: number): boolean {
+  const range = bufferedRangeAt(video, t);
+  const left = Number.isFinite(video.duration) ? video.duration - t - 0.25 : Infinity;
+  return enoughToStart(range ? Math.max(0, range.end - t) : 0, left);
+}
+
+/** The stretch of buffered picture that holds `t`, or null. */
+function bufferedRangeAt(video: HTMLVideoElement, t: number): { start: number; end: number } | null {
+  const { buffered } = video;
+  for (let i = 0; i < buffered.length; i++) {
+    if (t >= buffered.start(i) - 0.1 && t <= buffered.end(i) + 0.1) return { start: buffered.start(i), end: buffered.end(i) };
+  }
+  return null;
 }
 
 /** Put playback back to normal speed. Safe to call on anything, including null. */
@@ -780,9 +798,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [retryKey, setRetryKey] = useState(0);
   const [vpsRelay, setVpsRelay] = useState<boolean | null>(null); // null = not yet loaded
   const [buffering, setBuffering] = useState(true);
-  // Viewers-only: "host is seeking", raised on each seek command and cleared
+  // "Host is seeking…", raised on each seek somebody else makes and cleared
   // once the picture is back (see effect below).
   const [hostSeeking, setHostSeeking] = useState(false);
+  /** The last seek this player has heard of — see the effect below. */
+  const seenSeekSeqRef = useRef(syncState?.seekSeq ?? 0);
   /** Whether the loading screen came up for the seek hostSeeking is about. */
   const seekLoadingSeenRef = useRef(false);
   const hostSeekingAtRef = useRef(0);
@@ -1513,6 +1533,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const copiedStreamRef = useRef(false);
   /** Where that playlist ends for now, in film time; null once it is complete. */
   const playlistEdgeRef = useRef<number | null>(null);
+  /** Where this stream was started from, and the copy's keyframe it started on
+   *  instead — see the start-gap check and lib/copyStart. */
+  const startSnapRef = useRef<{ fromS: number; toS: number } | null>(null);
   /** The title's runtime, kept current every render — see itemDurationS. */
   const runtimeRef = useRef(0);
   // seekSeq of the last seek this client has already acted on. Seeded from the
@@ -2377,15 +2400,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (!v || !sync?.playing || !sync.hostWaiting || !sync.gatherSeq) return;
     if (readySentForRef.current === sync.gatherSeq) return;
     if (sync.ratingKey !== itemRef.current.ratingKey || !sessionIdRef.current) return;
-    const behindS = sync.position - v.currentTime;
-    if (behindS > GATHER_BEHIND_TOLERANCE_S && sync.position > 0 &&
+    // A copy everybody starts on its keyframe instead of where it was started
+    // from: there, whether or not the host's word on it is here yet.
+    const snap = startSnapRef.current;
+    const startsFromS = snap && Math.abs(sync.position - snap.fromS) < 0.5 ? snap.toS : sync.position;
+    const behindS = startsFromS - v.currentTime;
+    if (behindS > GATHER_BEHIND_TOLERANCE_S && startsFromS > 0 &&
         v.readyState >= HTMLMediaElement.HAVE_METADATA && !v.seeking) {
       logEvent("Sync", "going to where the room starts from", {
         fromS: Number(v.currentTime.toFixed(2)),
-        toS: Number(sync.position.toFixed(2)),
+        toS: Number(startsFromS.toFixed(2)),
       });
       resetPlaybackRate(v);
-      v.currentTime = sync.position;
+      v.currentTime = startsFromS;
       return;
     }
     if (!pictureReady(v)) return;
@@ -3527,6 +3554,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // LEVEL_LOADED fires on every reload, which is how the edge keeps up.
         copiedStreamRef.current = false;
         playlistEdgeRef.current = null;
+        startSnapRef.current = null;
         // What the server says about this stream — copied or re-encoded, and
         // why — for Stats for nerds and the buffering hint. A new stream also
         // starts the buffering count over: its first seconds are loading.
@@ -3837,8 +3865,25 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         let startGapChecked = false;
         hls.on(Hls.Events.FRAG_BUFFERED, () => {
           if (!mounted || startGapChecked) return;
-          if (isPositionBuffered(video, video.currentTime)) {
+          // And a copy everybody is starting together starts on its keyframe
+          // when the point it was started from is in the last moments of its
+          // first segment, so that segment is enough to start on — see
+          // lib/copyStart. Every player gets the same segment and does the
+          // same, and the host's report moves the room there.
+          const range = bufferedRangeAt(video, video.currentTime);
+          if (range) {
             startGapChecked = true;
+            const gathering = hostHeldRef.current || !!syncStateRef.current?.hostWaiting;
+            if (!copiedStreamRef.current || !gathering || !video.paused) return;
+            const startS = pictureStartFor(video.currentTime, range);
+            if (startS >= video.currentTime) return;
+            logEvent("HLS", "starting on the copy's keyframe, so its first segment is enough to start on", {
+              fromS: Number(video.currentTime.toFixed(2)),
+              toS: Number(startS.toFixed(2)),
+              segmentEndS: Number(range.end.toFixed(2)),
+            });
+            startSnapRef.current = { fromS: video.currentTime, toS: startS };
+            video.currentTime = startS;
             return;
           }
           const pictureFrom = nextBufferedStart(video, video.currentTime);
@@ -4294,7 +4339,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // Buffering indicator events
         const onWaiting = () => {
           logWarn("Video", "waiting (buffer starved)", snapshot(video));
-          if (!video.paused) setBuffering(true);
+          // Not for a seek inside the buffer, which is over in a moment: its
+          // `waiting` flashed the loading screen over every such skip. One
+          // that doesn't get going is caught by the poll's starved check.
+          if (!video.paused && !(video.seeking && isPositionBuffered(video, video.currentTime))) setBuffering(true);
         };
         const onPlaying = () => {
           logEvent("Video", "playing", snapshot(video));
@@ -4347,6 +4395,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           logEvent("Video", "seeked", snapshot(video));
           noteGoodPosition(video);
           if (!video.paused) setBuffering(false);
+          // Landed, with a picture: the bar can go by the element again, as
+          // it does on `playing` — which a skip inside the buffer that never
+          // stopped playing doesn't send.
+          if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && isPositionBuffered(video, video.currentTime)) {
+            setRestartingTo(null);
+          }
         };
         // Cheap and frequent — this is what keeps the resume fallback current
         // between the coarser events above.
@@ -4997,6 +5051,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         }
       }
     }
+
+    // A skip the host already had the picture for, which the room goes
+    // straight on from: somewhere this player hasn't got, it says so, and the
+    // room waits for it there after all — see SyncState.seekReady.
+    if (isNewSeek && syncState.seekReady && !amHost && syncState.playing && roomNow > 0 &&
+        video.readyState >= HTMLMediaElement.HAVE_METADATA && !enoughAheadAt(video, roomNow)) {
+      logEvent("Sync", "the skip is somewhere this player hasn't got, asking the room to wait for it", {
+        toS: Number(roomNow.toFixed(2)),
+        ...snapshot(video),
+      });
+      syncActionsRef.current?.sendSeekLoading();
+    }
   }, [syncState?.commandSeq]);
 
   /**
@@ -5146,14 +5212,21 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     return () => video.removeEventListener("play", onPlay);
   }, []);
 
-  // Viewer status: "Host is seeking…" after each seek command, on the loading
-  // screen for as long as the new place takes to load — everybody waits for
-  // everybody's picture after a skip, so a viewer otherwise just saw
-  // "Buffering…" and took it for their own connection. A skip that needs no
-  // loading flashes it in the status pill instead. seekSeq bumps once per host
-  // seek. Host/co-hosts (who can control) skip it.
+  // "Host is seeking…" after each seek, on the loading screen for as long as
+  // the new place takes to load — everybody waits for everybody's picture
+  // after a skip, so a viewer otherwise just saw "Buffering…" and took it for
+  // their own connection. A skip that needs no loading flashes it in the
+  // status pill instead. seekSeq bumps for every seek this player is told of,
+  // which is every seek but its own, so a co-host hears of the host's too.
+  //
+  // Only a seek heard while this player is up. The count runs on across
+  // titles, and acting on it as it stood when the player mounted put "Host is
+  // seeking…" over the start of every film after a seek.
   useEffect(() => {
-    if (!syncState || syncState.seekSeq === 0 || canControl) return;
+    const seq = syncState?.seekSeq ?? 0;
+    const seen = seenSeekSeqRef.current;
+    seenSeekSeqRef.current = seq;
+    if (!syncState || seq <= seen) return;
     setHostSeeking(true);
     seekLoadingSeenRef.current = false;
     hostSeekingAtRef.current = Date.now();
@@ -5175,7 +5248,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const backstop = setTimeout(() => setHostSeeking(false), 30_000);
     const held = setTimeout(() => setRestartingTo(null), 20_000);
     return () => { clearTimeout(badge); clearTimeout(backstop); clearTimeout(held); };
-  }, [syncState?.seekSeq, canControl]);
+  }, [syncState?.seekSeq]);
 
   // A received revision is acknowledged only after the element agrees. This
   // runs after command application, preventing a queued host heartbeat from
@@ -5739,13 +5812,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     video.currentTime = positionSeconds;
     if (broadcast) {
       // Everybody starts from the new place together: held here until the
-      // room, which answers every seek, says it runs.
-      const hold = holdsForSeek();
+      // room, which answers every seek, says it runs. Unless the picture is
+      // already here, with enough of it to start on — a skip inside the
+      // buffer — when the room goes straight on and so does this player.
+      // Waiting for everybody's word that they had it too put a second of
+      // loading screen over every such skip; anybody who hasn't got it says so
+      // and the room waits for them after all (SyncState.seekReady).
+      const ready = wasBuffered && enoughAheadAt(video, positionSeconds);
+      const hold = holdsForSeek() && !ready;
       if (hold && !video.paused) {
         hostHeldRef.current = true;
         video.pause();
       }
-      syncActionsRef.current?.sendSeek(positionSeconds, hold);
+      syncActionsRef.current?.sendSeek(positionSeconds, hold, ready);
     }
     if (wasBuffered) return;
 
@@ -6403,19 +6482,21 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   }, [socketDown]);
 
   // Viewer status pill: what the host is doing to shared playback. Seeking is a
-  // brief flash (takes precedence); paused persists while the stream sits paused.
-  // Only for pure viewers, and never over an error/disconnect/recovery banner.
+  // brief flash (takes precedence), for anybody who didn't make the seek;
+  // paused persists while the stream sits paused, for pure viewers. Never over
+  // an error/disconnect/recovery banner.
   const streamActive = !!syncState?.ratingKey && !error && !recovering;
   const hostPaused = !canControl && streamActive && syncState?.playing === false;
   // Holding for the room — anybody's picture not ready, or this one ahead of
   // the room — is the loading screen, like any other wait for a picture.
   const loadingShown = !isPip && (buffering || roomHolding || (noPicture && !!syncState?.ratingKey)) && !error;
-  const viewerStatus = !canControl && streamActive
-    ? (hostSeeking ? "Host is seeking…" : hostPaused ? "Host paused the video" : null)
-    : null;
-  // The loading screen says why while the host's skip loads, and the skip is
-  // over when it goes — not a moment earlier, which put "Buffering…" back.
-  const seekLoading = hostSeeking && !canControl && loadingShown;
+  // Whoever seeked — this player never hears of its own.
+  const seekingText = syncState?.seekByHost === false ? "Co-host is seeking…" : "Host is seeking…";
+  const seekingStatus = hostSeeking && streamActive ? seekingText : null;
+  const viewerStatus = seekingStatus ?? (hostPaused ? "Host paused the video" : null);
+  // The loading screen says why while the skip loads, and the skip is over
+  // when it goes — not a moment earlier, which put "Buffering…" back.
+  const seekLoading = hostSeeking && loadingShown;
   if (seekLoading) seekLoadingSeenRef.current = true;
   useEffect(() => {
     if (!hostSeeking || loadingShown || !seekLoadingSeenRef.current) return;
@@ -6509,7 +6590,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           the loading screen already says the same thing in the middle. */}
       {!isPip && viewerStatus && !loadingShown && (
         <div style={styles.viewerStatus} role="status" aria-live="polite">
-          {hostSeeking ? (
+          {seekingStatus ? (
             <span style={styles.viewerStatusSpinner} />
           ) : (
             <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style={{ flexShrink: 0 }}>
@@ -6524,9 +6605,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       {/* Loading screen — whenever the picture should be moving and isn't, or
           there is no picture yet. "Loading…" or "Buffering…", nothing more. */}
       {loadingShown && (
-        <div style={styles.bufferingOverlay} role="status" aria-live="polite">
+        <div style={styles.bufferingOverlay} role="status" aria-live="polite" data-loading-screen="">
           <div style={styles.bufferingSpinner} />
-          <span style={styles.bufferingText}>{seekLoading ? "Host is seeking…" : loadingText}</span>
+          <span style={styles.bufferingText}>{seekLoading ? seekingText : loadingText}</span>
         </div>
       )}
 

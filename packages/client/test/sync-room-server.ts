@@ -25,7 +25,8 @@
 // players fetch them in parts (lib/segmentParts). &parts=0 leaves the sizes out.
 // &event=1 lists it as the bot lists a copy: from where the stream was asked
 // to start, the next 40s, still growing, so a skip past that rebuilds the
-// stream there.
+// stream there. stream=copy4 is the same with a four-second keyframe
+// interval, ~4 MB a segment.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
@@ -40,21 +41,26 @@ const { instanceHosts } = await import("../../server/src/routes/discord.js");
 const PORT = 3000;
 const SMALL_STREAM = path.join(os.tmpdir(), "plex-theater-media-errors");
 const COPY_STREAM = path.join(os.tmpdir(), "plex-theater-copy-stream");
+const COPY4_STREAM = path.join(os.tmpdir(), "plex-theater-copy4-stream");
+/** Each copied stream's keyframe interval, which is its segments' length. */
+const SEGMENT_S = new Map([[COPY_STREAM, 10], [COPY4_STREAM, 4]]);
 const INSTANCE = "sync-room";
 if (!fs.existsSync(path.join(SMALL_STREAM, "index.m3u8"))) {
   console.error(`No test stream in ${SMALL_STREAM} — run media-errors-server.mjs once to generate it.`);
   process.exit(1);
 }
-if (!fs.existsSync(path.join(COPY_STREAM, "index.m3u8"))) {
-  fs.mkdirSync(COPY_STREAM, { recursive: true });
-  console.log("generating the copied-film stream in", COPY_STREAM);
+for (const [dir, segmentS] of SEGMENT_S) {
+  if (fs.existsSync(path.join(dir, "index.m3u8"))) continue;
+  fs.mkdirSync(dir, { recursive: true });
+  console.log("generating a copied-film stream in", dir);
+  const gop = String(segmentS * 24);
   const made = spawnSync("ffmpeg", [
     "-hide_banner", "-loglevel", "error", "-y",
     "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
     "-t", "120", "-c:v", "libx264", "-preset", "veryfast", "-b:v", "8M", "-maxrate", "8M", "-bufsize", "16M",
-    "-g", "240", "-keyint_min", "240", "-sc_threshold", "0", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
-    "-f", "hls", "-hls_time", "10", "-hls_list_size", "0", "-hls_playlist_type", "vod",
-    "-hls_segment_filename", path.join(COPY_STREAM, "seg%03d.ts"), path.join(COPY_STREAM, "index.m3u8"),
+    "-g", gop, "-keyint_min", gop, "-sc_threshold", "0", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+    "-f", "hls", "-hls_time", String(segmentS), "-hls_list_size", "0", "-hls_playlist_type", "vod",
+    "-hls_segment_filename", path.join(dir, "seg%03d.ts"), path.join(dir, "index.m3u8"),
   ], { stdio: "inherit" });
   if (made.status !== 0) { console.error("ffmpeg failed — is it on the PATH?"); process.exit(1); }
 }
@@ -143,7 +149,8 @@ const server = http.createServer(async (req, res) => {
     eventList = url.searchParams.get("event") === "1";
     sessionStart.clear();
     p2pOn = url.searchParams.get("p2p") !== "0";
-    streamDir = url.searchParams.get("stream") === "copy" ? COPY_STREAM : SMALL_STREAM;
+    const stream = url.searchParams.get("stream");
+    streamDir = stream === "copy" ? COPY_STREAM : stream === "copy4" ? COPY4_STREAM : SMALL_STREAM;
     partsOn = url.searchParams.get("parts") !== "0";
     return json(res, { ok: true, p2p: p2pOn, stream: path.basename(streamDir), parts: partsOn });
   }
@@ -155,22 +162,23 @@ const server = http.createServer(async (req, res) => {
   if (p.startsWith("/api/plex/siblings/")) return json(res, { episode: false, prev: null, next: null });
 
   // The stream: a media playlist straight away, as a copy of Plex's would be.
-  if (/^\/api\/plex\/hls\/[^/]+\/[^/]+\/master\.m3u8$/.test(p) && eventList && streamDir === COPY_STREAM) {
+  const segmentS = SEGMENT_S.get(streamDir);
+  if (/^\/api\/plex\/hls\/[^/]+\/[^/]+\/master\.m3u8$/.test(p) && eventList && segmentS) {
     // As the bot lists a copy (services/direct-stream.ts): gaps up to where the
     // stream starts, then what it has measured from there — 40s — at each
     // segment's length, an EVENT playlist that says where to begin.
     const sid = p.split("/")[5];
     if (!sessionStart.has(sid)) sessionStart.set(sid, Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0));
     const offset = sessionStart.get(sid)!;
-    const names = fs.readdirSync(COPY_STREAM).filter((f) => /^seg\d+\.ts$/.test(f)).sort();
-    const first = Math.min(Math.floor(offset / 10), names.length - 1);
+    const names = fs.readdirSync(streamDir).filter((f) => /^seg\d+\.ts$/.test(f)).sort();
+    const first = Math.min(Math.floor(offset / segmentS), names.length - 1);
     const lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-PLAYLIST-TYPE:EVENT", "#EXT-X-TARGETDURATION:12",
       "#EXT-X-MEDIA-SEQUENCE:0", `#EXT-X-START:TIME-OFFSET=${offset.toFixed(3)},PRECISE=YES`];
-    for (let filled = 0; filled < first * 10; filled += 60) {
-      lines.push(`#EXTINF:${Math.min(60, first * 10 - filled).toFixed(3)},`, "#EXT-X-GAP", "gap.ts");
+    for (let filled = 0; filled < first * segmentS; filled += 60) {
+      lines.push(`#EXTINF:${Math.min(60, first * segmentS - filled).toFixed(3)},`, "#EXT-X-GAP", "gap.ts");
     }
-    for (const name of names.slice(first, first + 4)) {
-      lines.push("#EXTINF:10.000,", `/api/test/stream/${name}?n=${fs.statSync(path.join(COPY_STREAM, name)).size}`);
+    for (const name of names.slice(first, first + Math.ceil(40 / segmentS))) {
+      lines.push(`#EXTINF:${segmentS.toFixed(3)},`, `/api/test/stream/${name}?n=${fs.statSync(path.join(streamDir, name)).size}`);
     }
     res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
     return res.end(lines.join("\n") + "\n");
@@ -268,4 +276,4 @@ server.prependListener("upgrade", (req, socket) => {
   if (!p2pOn && (req.url ?? "").startsWith("/tracker")) socket.destroy();
 });
 attachWebSocketServer(server);
-server.listen(PORT, () => console.log(`sync-room server on http://localhost:${PORT} (streams in ${SMALL_STREAM} and ${COPY_STREAM})`));
+server.listen(PORT, () => console.log(`sync-room server on http://localhost:${PORT} (streams in ${SMALL_STREAM}, ${COPY_STREAM} and ${COPY4_STREAM})`));

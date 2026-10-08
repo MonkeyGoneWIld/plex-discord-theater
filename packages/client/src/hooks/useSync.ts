@@ -128,9 +128,18 @@ export interface SyncState {
    * way to know.
    */
   sessionOffset: number;
-  /** Increments each time the host issues a seek — lets viewers surface a
-   *  transient "seeking" status without inferring it from position jumps. */
+  /** Increments for each seek this client is told of — anybody's but its own
+   *  — so it can say somebody is seeking without inferring it from position
+   *  jumps. */
   seekSeq: number;
+  /** Whether that seek was the host's, rather than a co-host's. */
+  seekByHost: boolean;
+  /**
+   * Whether the host made it somewhere it already had the picture for, which
+   * the room goes straight on from instead of waiting for everybody's picture
+   * there. A player that hasn't got it says so (sendSeekLoading).
+   */
+  seekReady: boolean;
   /** Timestamp of the last host command — used to detect stale state on reconnect */
   lastCommandAt: number;
   /**
@@ -291,8 +300,12 @@ export interface SyncActions {
    */
   sendResume: (position: number, waiting?: boolean, hold?: boolean) => void;
   /** `hold`: as for sendResume. Only while the room is playing, since only
-   *  then does a seek get an answer. */
-  sendSeek: (position: number, hold?: boolean) => void;
+   *  then does a seek get an answer. `ready`: the host has the picture there
+   *  already — see SyncState.seekReady. */
+  sendSeek: (position: number, hold?: boolean, ready?: boolean) => void;
+  /** This player hasn't got the picture a ready seek went to: the room waits
+   *  for it there after all — see SyncState.seekReady. */
+  sendSeekLoading: () => void;
   sendStop: () => void;
   /** `waiting`: the host's picture isn't ready — SyncState.hostWaiting. */
   sendHeartbeat: (position: number, playing: boolean, waiting?: boolean) => void;
@@ -391,6 +404,8 @@ const INITIAL_STATE: SyncState = {
   stateSeq: 0,
   sessionOffset: 0,
   seekSeq: 0,
+  seekByHost: true,
+  seekReady: false,
   lastCommandAt: 0,
   positionAt: 0,
   hostWaiting: false,
@@ -539,8 +554,8 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         }));
       },
       // Deliberately does not touch `playing`: a seek says where, not whether.
-      sendSeek: (position: number, hold = false) => {
-        send({ type: "seek", position });
+      sendSeek: (position: number, hold = false, ready = false) => {
+        send({ type: "seek", position, ...(ready ? { ready: true } : {}) });
         if (hold) heldForAnswerAtRef.current = Date.now();
         setState((prev) => ({
           ...prev, position, positionAt: Date.now(),
@@ -590,6 +605,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         });
       },
       sendReady: (gather: number) => send({ type: "ready", gather }),
+      sendSeekLoading: () => send({ type: "seek-loading" }),
       sendBrowse: (context: string) => send({ type: "browse", context }),
       sendQueueAdd: (item: QueueItem) => send({ type: "queue-add", item }),
       sendQueueRemove: (ratingKey: string) => send({ type: "queue-remove", ratingKey }),
@@ -860,6 +876,8 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               positionAt: Date.now(),
               commandSeq: prev.commandSeq + 1,
               seekSeq: prev.seekSeq + 1,
+              seekByHost: msg.byHost !== false,
+              seekReady: msg.ready === true,
             }));
             break;
           case "stop":

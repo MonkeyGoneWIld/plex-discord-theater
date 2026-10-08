@@ -9,12 +9,15 @@
  * - A cut behind the playhead never reaches the picture (lib/bufferTrim).
  * - The room's clock stands still while the host's picture does
  *   (roomPositionNow).
+ * - A copy started together starts on its keyframe when its first segment
+ *   ends too soon after the start point to start on (lib/copyStart).
  */
 import { MAX_WAIT_FOR_ROOM_S, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, heldRanges } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS } from "../src/lib/bufferTrim";
 import { roomPositionNow } from "../src/hooks/useSync";
+import { enoughToStart, pictureStartFor } from "../src/lib/copyStart";
 
 let pass = 0;
 let fail = 0;
@@ -98,6 +101,24 @@ const samples: Array<[number, number]> = [[0, 1_000_000], [5_000, 2_000_000], [9
 check("over the last eight seconds", arrivingKbps(samples, 10_000), 3000);
 check("old downloads drop out", samples.length, 2);
 check("nothing arriving is unmeasured", arrivingKbps([], 10_000), null);
+
+console.log("\n— a copy started together starts on its keyframe —");
+// From the night of 8 October: a start point, and the first segment it fell in.
+check("0.58s from the end of a 3.9s first segment: its keyframe",
+  pictureStartFor(910.25, { start: 906.91, end: 910.83 }), 906.91);
+check("0.77s from the end of a 3.1s one", pictureStartFor(1414.86, { start: 1412.49, end: 1415.63 }), 1412.49);
+check("a three-second keyframe interval is enough", pictureStartFor(1443.17, { start: 1441.44, end: 1444.42 }), 1441.44);
+check("with enough ahead already, where it was asked", pictureStartFor(2915, { start: 2910.06, end: 2919.02 }), 2915);
+check("a first segment too short to start on either: where it was asked",
+  pictureStartFor(100.33, { start: 100, end: 102.31 }), 100.33);
+check("too far back from where it was asked: where it was asked",
+  pictureStartFor(68, { start: 60, end: 70 }), 68);
+check("outside the segment: where it was asked", pictureStartFor(50, { start: 60, end: 70 }), 50);
+check("nothing in: where it was asked", pictureStartFor(50, null), 50);
+check("three seconds ahead is enough to start on", enoughToStart(3), true);
+check("and 2.98", enoughToStart(2.98), true);
+check("but not two", enoughToStart(2), false);
+check("at the end of the film, what is left is enough", enoughToStart(1, 1), true);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

@@ -342,6 +342,15 @@ interface RoomState {
    * picture is at the new place, or SEEK_HOLD_MS after the skip.
    */
   seekHold: { target: number; at: number; logged: boolean } | null;
+  /**
+   * When the host last skipped somewhere it already had the picture for, which
+   * the room went straight on from rather than opening a gather — a gather
+   * there put a second of loading screen over every skip inside the buffer,
+   * while everybody said they had it too. Anybody who hasn't got it says so
+   * ("seek-loading") within READY_SEEK_LOADING_MS, and the room waits for them
+   * after all. Null after any other seek.
+   */
+  lastReadySeekAt: number | null;
   updatedAt: number;
   transportRevision: number;
   transportChangedAt: number;
@@ -426,6 +435,9 @@ const GATHER_MAX_MS = 10_000;
 const SEEK_HOLD_MS = 30_000;
 /** A host report this far from where it skipped to is the place it left. */
 const SEEK_HOLD_SLACK_S = 10;
+/** How long after a skip the room went straight on from a player may still
+ *  ask it to wait — see RoomState.lastReadySeekAt. */
+const READY_SEEK_LOADING_MS = 5_000;
 
 /** Viewers the room is still waiting on in the open gather. */
 function gatherPending(room: Room): RoomClient[] {
@@ -738,6 +750,7 @@ function getOrCreateRoom(instanceId: string): Room {
         gatherDeadline: null,
         gatherAnnounced: 0,
         seekHold: null,
+        lastReadySeekAt: null,
         updatedAt: Date.now(),
         transportRevision: 0,
         transportChangedAt: performance.now(),
@@ -1504,6 +1517,22 @@ export function attachWebSocketServer(server: Server): void {
       }
 
       /**
+       * "I haven't got the place the host just skipped to" — after a skip the
+       * room went straight on from. Everybody starts from there together after
+       * all, as for any other skip. See RoomState.lastReadySeekAt.
+       */
+      if (type === "seek-loading") {
+        const s = room.state;
+        const since = s.lastReadySeekAt;
+        if (since === null || performance.now() - since > READY_SEEK_LOADING_MS) return;
+        if (!s.playing || !s.ratingKey || s.waiting) return;
+        s.lastReadySeekAt = null;
+        openGather(room);
+        updateWaiting(room, roomId, `a skip ${client.username ?? client.userId} has to load`);
+        return;
+      }
+
+      /**
        * "I want these tracks."
        *
        * Allowed for anyone, because it no longer speaks for the room: it moves
@@ -1837,7 +1866,10 @@ export function attachWebSocketServer(server: Server): void {
             });
           }
           room.state.position = restartOfLiveItem && !clockBeforeStream ? clock : startPosition;
-          if (itemChanged) room.state.seekHold = null;
+          if (itemChanged) {
+            room.state.seekHold = null;
+            room.state.lastReadySeekAt = null;
+          }
           // A restart carries the clock forward, so whatever confirmed it still
           // does. A genuine start is only a request: `startPosition` is where a
           // transcode was asked to begin, and no frame of it exists yet. The
@@ -1974,11 +2006,17 @@ export function attachWebSocketServer(server: Server): void {
           room.state.updatedAt = Date.now();
           room.state.seekHold = { target: room.state.position, at: performance.now(), logged: false };
           persistProgress(room, undefined, true);
-          broadcast(room, ws, { type: "seek", position: room.state.position });
-          // Everybody starts from the new place together, whoever has to load
-          // it. Answered with "room-waiting" even when nobody does, which is
-          // what a host holding for it is waiting to hear.
-          if (room.state.playing) {
+          // The host's skip to somewhere it already has the picture for, with
+          // the room running: the room goes straight on — see
+          // RoomState.lastReadySeekAt. Only the host's, since the room is the
+          // host: a co-host's buffer says nothing about whether it has it.
+          const ready = msg.ready === true && client.isHost && room.state.playing && !room.state.waiting;
+          room.state.lastReadySeekAt = ready ? performance.now() : null;
+          broadcast(room, ws, { type: "seek", position: room.state.position, byHost: client.isHost, ready });
+          // Otherwise everybody starts from the new place together, whoever has
+          // to load it. Answered with "room-waiting" even when nobody does,
+          // which is what a host holding for it is waiting to hear.
+          if (room.state.playing && !ready) {
             openGather(room);
             updateWaiting(room, roomId, "a seek");
           }
@@ -2016,6 +2054,7 @@ export function attachWebSocketServer(server: Server): void {
           setTransport(room, false);
           room.state.position = 0;
           room.state.seekHold = null;
+          room.state.lastReadySeekAt = null;
           room.state.hostWaiting = false;
           updateWaiting(room, roomId, "stopped");
           room.state.updatedAt = Date.now();

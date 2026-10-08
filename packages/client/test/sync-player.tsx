@@ -11,6 +11,8 @@ const user = new URLSearchParams(location.search).get("user") ?? "u-viewer";
 /** Which run of the checks this frame belongs to: a frame being replaced can still report. */
 const gen = new URLSearchParams(location.search).get("gen");
 const isHost = user === "u-host";
+/** Where the host's player resumes the film from, if anywhere. */
+const resume = Number(new URLSearchParams(location.search).get("resume")) || undefined;
 const item: PlexItem = { ratingKey: "4242", title: "Sync Test", type: "movie", thumb: null, duration: 120_000 } as PlexItem;
 
 // Muted for good, so the browser lets it play without anyone clicking in this
@@ -78,6 +80,7 @@ setInterval(() => {
     kind: "sample", user, gen, t: Date.now(),
     pos: v?.currentTime ?? 0, paused: v?.paused ?? true, ready: v?.readyState ?? 0,
     waiting: !!sync?.hostWaiting, text: document.body.innerText, joined: !!fixture.joined,
+    loading: document.querySelector("[data-loading-screen]")?.textContent ?? null,
     events: events.slice(sent),
   }, "*");
   sent = events.length;
@@ -94,6 +97,14 @@ function Room() {
   const { state, actions } = useSync({ instanceId, userId: user, username: isHost ? "Host" : "Viewer", enabled: joined });
   fixture.sync = state;
   fixture.actions = actions;
+  // The host stopping the film and starting it again, as a new stream.
+  const [stopped, setStopped] = React.useState(false);
+  const [mount, setMount] = React.useState(0);
+  fixture.newStream = () => {
+    setStopped(true);
+    actions.sendStop();
+    setTimeout(() => { setStopped(false); setMount((n) => n + 1); }, 1500);
+  };
   if (!joined) {
     return (
       <button style={{ width: "100%", height: "100%", font: "600 24px system-ui", background: "#222", color: "#fff", border: 0 }}
@@ -102,8 +113,10 @@ function Room() {
   }
   // A viewer opens the player when the room has something playing, as the app does.
   if (!isHost && state.ratingKey !== item.ratingKey) return <p style={{ color: "#aaa" }}>Viewer: waiting for the host to start…</p>;
+  if (stopped) return <p style={{ color: "#aaa" }}>Host: stopped</p>;
   return (
-    <Player item={item} isHost={isHost} selfUserId={user} subtitles={false}
+    <Player key={mount} item={item} isHost={isHost} selfUserId={user} subtitles={false}
+      resumePosition={mount === 0 ? resume : undefined}
       sharePresenceDetails={false} onSharePresenceDetails={() => {}} onBack={() => {}}
       syncState={state} syncActions={actions} presentation="full" />
   );

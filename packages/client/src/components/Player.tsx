@@ -44,6 +44,7 @@ import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
 import { fetchInPartsLater, installSegmentParts, partsFor, segmentBytesOf } from "../lib/segmentParts";
 import { installTakeFromPeer } from "../lib/takeFromPeer";
+import { watchPeerConnections } from "../lib/peerConnections";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
 import { useVideoZoom } from "../lib/useVideoZoom";
 import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -400,6 +401,12 @@ const MIN_BACK_BUFFER_S = 5;
  * FORWARD_BUFFER_FLUSH_S — see makeRoom.
  */
 const MIN_FORWARD_BUFFER_S = 30;
+
+/** What the screen says while a stream is rebuilt for other tracks. */
+function switchingText(kind: "audio" | "subtitle" | "quality", byHost: boolean): string {
+  const what = kind === "audio" ? "audio" : kind === "quality" ? "quality" : "subtitles";
+  return byHost ? `Host is switching ${what}…` : `Switching ${what}…`;
+}
 
 /** The back buffer for a stream of `kbps`; the fixed one when unknown. */
 function backBufferFor(kbps: number | null | undefined): number {
@@ -852,6 +859,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const hostSeekingAtRef = useRef(0);
   const [showTrackSwitcher, setShowTrackSwitcher] = useState(false);
   const [trackSwitching, setTrackSwitching] = useState<"audio" | "subtitle" | "quality" | null>(null);
+  /** The switch is the host's, which took this player with it. */
+  const [trackSwitchByHost, setTrackSwitchByHost] = useState(false);
+  /**
+   * The switch the stream is being rebuilt for, said on the loading screen
+   * until the picture is back. The freeze-frame above goes as soon as the new
+   * stream's playlist is in — for a player following the host that is almost
+   * at once — and the rest of the wait read "Loading…", with nothing to say
+   * the host had switched anything.
+   */
+  const [switchingFor, setSwitchingFor] = useState<{ kind: "audio" | "subtitle" | "quality"; byHost: boolean } | null>(null);
   // Transient play/pause acknowledgement. `at` is part of the key so a rapid
   // second toggle restarts the animation instead of being swallowed by React
   // seeing the same value.
@@ -2052,6 +2069,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       });
       canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
       setTrackSwitching(audioChanged ? "audio" : "subtitle");
+      setTrackSwitchByHost(true);
     }
 
     if (v.isOwner) {
@@ -2932,6 +2950,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (v && v.ratingKey === itemRef.current.ratingKey && v.quality !== kbps) {
       canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
       setTrackSwitching("quality");
+      setTrackSwitchByHost(false);
     }
     const meta = itemMetaRef.current?.ratingKey === itemRef.current.ratingKey ? itemMetaRef.current : null;
     // Chosen for this title, so nothing is left to settle before asking — even
@@ -3362,6 +3381,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           // taken from another player when our own download of it crawls
           // (p2pCorePatch.ts, lib/takeFromPeer).
           installSegmentParts();
+          // Whether this player reaches the others, and why not — see lib/peerConnections.
+          watchPeerConnections();
           installTakeFromPeer((took) => logEvent("P2P", took.started
             ? "taking the segment the picture waits on from another player, our own download of it is crawling"
             : "no other player could send the segment the picture waits on after all, back to the bot", {
@@ -3598,12 +3619,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 });
                 hls.p2pEngine.addEventListener("onPeerConnect", ({ peerId }) => {
                   stats.peers.add(peerId);
+                  logEvent("P2P", "another player joined this stream", { players: stats.peers.size + 1 });
                 });
                 hls.p2pEngine.addEventListener("onPeerClose", ({ peerId }) => {
-                  stats.peers.delete(peerId);
+                  if (stats.peers.delete(peerId)) {
+                    logEvent("P2P", "another player left this stream", { players: stats.peers.size + 1 });
+                  }
                 });
+                // Said where it can be read: in the bot's log, not this console.
                 hls.p2pEngine.addEventListener("onTrackerError", ({ error }) => {
-                  console.error("[P2P] Tracker error:", error);
+                  logWarn("P2P", "the connection that introduces players failed", {
+                    error: error instanceof Error ? error.message : String(error),
+                  });
                 });
               },
             },
@@ -3946,6 +3973,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           const range = bufferedRangeAt(video, video.currentTime);
           if (range) {
             startGapChecked = true;
+            // A moment in front of its first frame — a re-encode's is at
+            // 0.02s, and a viewer lands on 0.00 exactly. Near enough to count
+            // as in it here, but the element has nothing to show there, and
+            // played into a stall that hls.js only stepped over a second
+            // later, every time a viewer started a re-encode.
+            if (range.start > video.currentTime && !video.seeking) video.currentTime = range.start;
             if (!isHostRef.current || !copiedStreamRef.current || !hostHeldRef.current || !video.paused) return;
             if (pictureStartFor(video.currentTime, range) >= video.currentTime) return;
             const stats = data.frag.stats;
@@ -6322,6 +6355,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (streamChanges) {
       canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
       setTrackSwitching(audioStreamID !== undefined ? "audio" : "subtitle");
+      setTrackSwitchByHost(false);
     }
     setShowTrackSwitcher(false);
 
@@ -6616,6 +6650,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const done = setTimeout(() => setHostSeeking(false), left);
     return () => clearTimeout(done);
   }, [hostSeeking, loadingShown]);
+  // The switch is said until the picture is back — see switchingFor.
+  useEffect(() => {
+    if (trackSwitching) setSwitchingFor({ kind: trackSwitching, byHost: trackSwitchByHost });
+    else if (!loadingShown) setSwitchingFor(null);
+  }, [trackSwitching, trackSwitchByHost, loadingShown]);
   // Paused only to wait for the room, which is still playing.
   const heldForRoom = !!syncState?.playing && (syncState.hostWaiting || (!isHost && waitingForRoom));
 
@@ -6719,7 +6758,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       {loadingShown && (
         <div style={styles.bufferingOverlay} role="status" aria-live="polite" data-loading-screen="">
           <div style={styles.bufferingSpinner} />
-          <span style={styles.bufferingText}>{seekLoading ? seekingText : loadingText}</span>
+          <span style={styles.bufferingText}>
+            {seekLoading ? seekingText : switchingFor ? switchingText(switchingFor.kind, switchingFor.byHost) : loadingText}
+          </span>
         </div>
       )}
 
@@ -6890,11 +6931,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           </div>
           <div style={styles.trackSwitchMessage}>
             <div style={styles.bufferingSpinner} />
-            <span style={styles.bufferingText}>
-              {trackSwitching === "audio"
-                ? "Switching audio..."
-                : trackSwitching === "quality" ? "Switching quality..." : "Switching subtitles..."}
-            </span>
+            <span style={styles.bufferingText}>{switchingText(trackSwitching, trackSwitchByHost)}</span>
           </div>
         </div>
       )}

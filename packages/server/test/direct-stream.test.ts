@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import Database from "better-sqlite3";
+import { NAL, matroska, type Frame } from "./mkv-fixture.js";
 
 process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "direct-stream-"));
 process.env.PLEX_TOKEN = "test-token";
@@ -57,8 +58,9 @@ function writePts(b: Buffer, at: number, pts: number) {
   b[at + 4] = ((lo & 0x7f) << 1) | 1;
 }
 
-/** One packet opening a PES with a PTS, optionally behind an adaptation field. */
-function pesPacket(streamId: number, seconds: number, adaptation = false): Buffer {
+/** One packet opening a PES with a PTS, optionally behind an adaptation field,
+ *  and optionally with the start of a frame in it. */
+function pesPacket(streamId: number, seconds: number, adaptation = false, es: number[] = []): Buffer {
   const p = Buffer.alloc(188, 0xff);
   p[0] = 0x47;
   p[1] = 0x40 | 0x01; // payload unit start, PID 0x100
@@ -74,6 +76,7 @@ function pesPacket(streamId: number, seconds: number, adaptation = false): Buffe
   }
   p.set([0, 0, 1, streamId, 0, 0, 0x80, 0x80, 5], o);
   writePts(p, o + 9, Math.round(seconds * 90_000));
+  p.set(es, o + 14);
   return p;
 }
 
@@ -87,8 +90,9 @@ function continuation(): Buffer {
 const FRAME = 1001 / 24000;
 
 /** A segment of video frames from `start` for `frames`, in B-frame decode order,
- *  with its audio starting `audioLead` seconds before the picture (null: none). */
-function segment(start: number, frames: number, audioLead: number | null = 0): Buffer {
+ *  with its audio starting `audioLead` seconds before the picture (null: none),
+ *  and its first frame's slice written out when `first` says what it is. */
+function segment(start: number, frames: number, audioLead: number | null = 0, first?: Frame): Buffer {
   const order: number[] = [];
   for (let i = 0; i < frames; i += 3) {
     order.push(i);
@@ -96,7 +100,8 @@ function segment(start: number, frames: number, audioLead: number | null = 0): B
     if (i + 1 < frames) order.push(i + 1);
   }
   const packets = audioLead === null ? [] : [pesPacket(0xc0, start - audioLead)];
-  order.forEach((f, n) => packets.push(pesPacket(0xe0, start + f * FRAME, n % 4 === 0), continuation()));
+  const opening = first ? [0, 0, 1, 0x09, 0xf0, 0, 0, 1, ...NAL[first]] : [];
+  order.forEach((f, n) => packets.push(pesPacket(0xe0, start + f * FRAME, n % 4 === 0, n === 0 ? opening : []), continuation()));
   if (audioLead !== null) packets.push(pesPacket(0xc0, start - audioLead + frames * FRAME / 2));
   return Buffer.concat(packets);
 }
@@ -134,6 +139,8 @@ interface PlexSession {
   firstAudioLead: number;
   /** When its playlist was first asked for — copying starts then, not before. */
   startedAt: number | null;
+  /** An open-GOP film: only its first keyframe is an IDR frame. */
+  openGop?: boolean;
 }
 const plexSessions = new Map<string, PlexSession>();
 /** Paths answered with something unreadable instead of a segment. */
@@ -154,7 +161,8 @@ function copiedSegment(s: PlexSession, index: number): Buffer {
   const gop = s.firstGop + (index - s.firstIndex);
   if (gop >= keyframes.length) return STUB;
   const endFrame = gop + 1 < keyframes.length ? keyframes[gop + 1] : Math.round(FILM_END / FRAME);
-  return segment(keyframes[gop] * FRAME + CLOCK, endFrame - keyframes[gop], index === s.firstIndex ? s.firstAudioLead : 0);
+  return segment(keyframes[gop] * FRAME + CLOCK, endFrame - keyframes[gop], index === s.firstIndex ? s.firstAudioLead : 0,
+    s.openGop ? (gop === 0 ? "idr" : "i") : undefined);
 }
 
 /** Segment `index` as a request for it would get it: 404 until copied. */
@@ -192,6 +200,14 @@ const readOrder: string[] = [];
 let wrongEndpointReads = 0;
 const SRT_FIRST = "1\n00:00:01,000 --> 00:00:02,500\nHello\n\n";
 const SRT = SRT_FIRST + "2\n00:00:03,000 --> 00:00:04,000\nAgain\n";
+/** Titles whose file Plex serves, for reading its keyframes from: 980 an
+ *  open-GOP Blu-ray, 981 a file whose keyframes are all IDR frames. */
+const PART_FILES: Record<string, Buffer> = {
+  "980": matroska(["idr", "p", "p", "i", "p", "p", "i", "p"]),
+  "981": matroska(["idr", "p", "p", "idr", "p", "p", "idr", "p"]),
+};
+/** What reading them asked for. */
+const partRanges: string[] = [];
 /** The first bytes of a Matroska file. */
 const MKV = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x23, 0x42, 0x86]);
 const plex = http.createServer((req, res) => {
@@ -229,7 +245,8 @@ const plex = http.createServer((req, res) => {
   if (meta) {
     return send({ Metadata: [{
       ratingKey: meta[1], title: "Film", type: "movie", duration: FILM_END * 1000,
-      Media: [{ id: 1, width: 1920, height: 1080, videoCodec: "h264", bitrate: fileKbps(meta[1]), Part: [{ id: 1, file: "/movies/Film.mkv", Stream: [
+      Media: [{ id: 1, width: 1920, height: 1080, videoCodec: "h264", bitrate: fileKbps(meta[1]), Part: [{ id: 1, file: "/movies/Film.mkv",
+        ...(PART_FILES[meta[1]] ? { key: `/library/parts/${meta[1]}/1/file.mkv` } : {}), Stream: [
         { id: 11, streamType: 1, codec: "h264" },
         { id: 12, streamType: 2, codec: "aac", selected: true },
         { id: 21, streamType: 3, codec: "srt", language: "English" },
@@ -241,6 +258,13 @@ const plex = http.createServer((req, res) => {
         { id: 27, streamType: 3, codec: "srt", language: "Dutch" },
       ] }] }],
     }] });
+  }
+  const partFile = url.pathname.match(/^\/library\/parts\/(\d+)\/1\/file\.mkv$/);
+  if (partFile && PART_FILES[partFile[1]]) {
+    partRanges.push(String(req.headers.range ?? "none"));
+    const file = PART_FILES[partFile[1]];
+    res.writeHead(206, { "Content-Type": "video/x-matroska", "Content-Range": `bytes 0-${file.length - 1}/${file.length}` });
+    return res.end(file);
   }
   if (url.pathname === "/library/parts/1" && req.method === "PUT") {
     selectedSubtitle = url.searchParams.get("subtitleStreamID") ?? selectedSubtitle;
@@ -323,6 +347,7 @@ const plex = http.createServer((req, res) => {
   if (url.pathname === "/video/:/transcode/universal/start.m3u8") {
     const key = crypto.randomUUID();
     plexSession(key, Number(url.searchParams.get("offset") ?? 0));
+    if ((url.searchParams.get("path") ?? "").endsWith("/990")) plexSessions.get(key)!.openGop = true;
     res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
     return res.end(`#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1920x1080\nsession/${key}/base/index.m3u8\n`);
   }
@@ -631,6 +656,33 @@ console.log("\n— through the routes —");
   check("and played as the re-encode it is", ds.isDirectStreamKey(plexRoutes.getPlexTranscodeKey(wont) ?? ""), false);
   plexRoutes.markTranscodeStopped(wont);
 
+  // An open-GOP Blu-ray: only the first frame is an IDR one, and a browser
+  // starts from and cuts at no other (Inglourious Basterds, 8 October).
+  const openGop = crypto.randomUUID();
+  await (await fetch(`${origin}/api/plex/hls/980/${openGop}/master.m3u8`)).text();
+  plexRoutes.markTranscodeStopped(openGop);
+  check("a film whose keyframes after the first aren't IDR frames is re-encoded, never copied",
+    [decisions.at(-1)?.ratingKey, decisions.at(-1)?.directStream], ["980", "0"]);
+  check("told from the start of its file, read through Plex — the first few megabytes, not the film",
+    partRanges, [`bytes=0-${12 * 1024 * 1024 - 1}`]);
+  const plain = crypto.randomUUID();
+  await (await fetch(`${origin}/api/plex/hls/981/${plain}/master.m3u8`)).text();
+  check("one whose keyframes are all IDR frames is copied",
+    [decisions.at(-1)?.ratingKey, decisions.at(-1)?.directStream, ds.isDirectStreamKey(plexRoutes.getPlexTranscodeKey(plain) ?? "")],
+    ["981", "1", true]);
+  plexRoutes.markTranscodeStopped(plain);
+  await (await fetch(`${origin}/api/plex/hls/980/${crypto.randomUUID()}/master.m3u8`)).text();
+  check("and a file is read once", partRanges.length, 2);
+
+  // One the file couldn't tell — its segments say it instead.
+  const unseen = crypto.randomUUID();
+  await (await fetch(`${origin}/api/plex/hls/990/${unseen}/master.m3u8`)).text();
+  const unseenKey = plexRoutes.getPlexTranscodeKey(unseen) ?? "";
+  check("a copy whose segments open on plain I-frames is given up before anyone is handed it",
+    await ds.directStreamPlaylist(unseenKey, (p) => p), null);
+  check("and the title is re-encoded from its next start", ds.directStreamRefused("990"), true);
+  plexRoutes.markTranscodeStopped(unseen);
+
   console.log("\n— what the player is told about the stream, for Stats for nerds —");
   /** The notes a master playlist carries, as hls.js would read them. */
   const notesOf = (m3u8: string) => Object.fromEntries(
@@ -642,6 +694,8 @@ console.log("\n— through the routes —");
     return { notes: notesOf(text), asked: decisions.at(-1)! };
   };
   check("a copy says so, and how heavy it is", (await startNotes("100")).notes, { video: "copy", kbps: "8000" });
+  check("an open-GOP Blu-ray says why it was re-encoded",
+    (await startNotes("980")).notes.reason, "its keyframes aren't ones every player can start from (an open-GOP Blu-ray)");
   check("a file over the copy limit says that is why, and what it is re-encoded at",
     (await startNotes("950")).notes,
     { video: "transcode", reason: "the file averages 31 Mbps, over this server's 20 Mbps copy limit", kbps: "12000" });

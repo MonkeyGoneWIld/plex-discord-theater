@@ -20,6 +20,7 @@ import {
 import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
+import { fileKeyframes } from "../services/keyframes.js";
 import { sessionHostUserId, sessionHasOtherWatchers, roomPlaysHevc } from "../services/sync.js";
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
@@ -213,6 +214,8 @@ interface PlexStream {
 
 interface PlexPart {
   id: number;
+  /** Where Plex serves the file itself: "/library/parts/<id>/<time>/file.mkv". */
+  key?: string;
   /** Bytes. With the part's id, what tells a replaced file from the old one. */
   size?: number;
   /**
@@ -272,6 +275,9 @@ interface MediaVersion {
   /** The file's size in bytes, for telling a replaced file from the one a
    *  subtitle was read out of — see subtitleFingerprint. */
   fileSize: number | null;
+  /** Where Plex serves the file — its first bytes say whether it can be
+   *  copied (services/keyframes.ts). */
+  partKey: string | null;
   previewThumbs: boolean;
   audioTracks: ReturnType<typeof mapAudioTracks>;
   subtitleTracks: ReturnType<typeof mapSubtitleTracks>;
@@ -301,6 +307,7 @@ function mapVersions(media: PlexMedia[] | undefined): MediaVersion[] {
       videoCodec: m.videoCodec ?? null,
       bitDepth: streams.find((s) => s.streamType === 1)?.bitDepth ?? null,
       fileSize: part?.size ?? null,
+      partKey: part?.key ?? null,
       previewThumbs: part?.indexes === "sd",
       audioTracks: mapAudioTracks(streams),
       subtitleTracks: mapSubtitleTracks(streams),
@@ -1123,9 +1130,12 @@ function rememberDuration(ratingKey: string, payload: Record<string, unknown>): 
  * added each version's width and height; 4 made embedded text subtitles
  * drawable and added `sidecar`; 5 added each version's bitrate; 6 its video
  * codec and bit depth; 7 its file size; 8 each audio track's default flag; 9
- * which audio tracks are in the title's original language.
+ * which audio tracks are in the title's original language; 10 left out
+ * subtitles Plex can't read, counted every file beside the media as a
+ * sidecar, not only the ones in a text format, and added each version's part
+ * key.
  */
-export const META_PAYLOAD_VERSION = 9;
+export const META_PAYLOAD_VERSION = 10;
 
 const metaCache = new LruMap<string, { payload: Record<string, unknown>; at: number }>(2_000);
 const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -1204,9 +1214,23 @@ function isEmbeddedText(s: PlexStream): boolean {
   return TEXT_SUBTITLE_FORMATS.has((s.codec || "").toLowerCase());
 }
 
+/**
+ * Whether Plex can do nothing at all with this subtitle: a track inside the
+ * file whose codec it doesn't know. It reports those as "none" — Foil Arms and
+ * Hog: Swines has one, an SDH track nothing here can decode. It can't be read
+ * out as text, and it can't be burned in either: asked for, it took down every
+ * transcode Plex started ("no decoder found for: none"), Plex started it over
+ * and over, and the film never loaded. Such a track isn't offered.
+ */
+function isUnreadableSubtitle(s: PlexStream): boolean {
+  if (s.key) return false;
+  const codec = (s.codec || "").toLowerCase();
+  return !codec || codec === "none" || codec === "unknown";
+}
+
 function mapSubtitleTracks(streams: PlexStream[]) {
   return streams
-    .filter((s) => s.streamType === 3)
+    .filter((s) => s.streamType === 3 && !isUnreadableSubtitle(s))
     .map((s) => ({
       id: s.id,
       title: s.extendedDisplayTitle || s.displayTitle || s.title || "Unknown",
@@ -1226,8 +1250,14 @@ function mapSubtitleTracks(streams: PlexStream[]) {
        * burned in instead, so it is never shown twice or not at all.
        */
       external: isSidecarText(s) || isEmbeddedText(s),
-      /** A file of its own, as opposed to a track inside the media file. */
-      sidecar: isSidecarText(s),
+      /**
+       * A file of its own, as opposed to a track inside the media file —
+       * fetched from somewhere else, most often, and so not necessarily timed
+       * to this cut of the film. A starting subtitle is one of these only when
+       * the file has nothing in the language itself (see the client's
+       * matchSubtitleTrack).
+       */
+      sidecar: !!s.key,
     }));
 }
 
@@ -4255,6 +4285,27 @@ async function selectTracksForStart(
   }
 }
 
+/**
+ * Whether a title's metadata is known and doesn't offer this subtitle for this
+ * version — one Plex can't read (see isUnreadableSubtitle), named by a player
+ * that picked it before it stopped being offered. False when that can't be
+ * told: a version the list leaves out, or metadata that didn't load.
+ */
+async function subtitleNotOffered(ratingKey: string, mediaIndex: number, streamId: number): Promise<boolean> {
+  try {
+    const meta = await buildMeta(ratingKey);
+    if (!meta) return false;
+    type Sub = { id: number };
+    const versions = meta.versions as Array<{ mediaIndex?: number; subtitleTracks?: Sub[] }> | undefined;
+    const tracks = versions
+      ? versions.find((v) => v.mediaIndex === mediaIndex)?.subtitleTracks
+      : mediaIndex === 0 ? (meta.subtitleTracks as Sub[] | undefined) : undefined;
+    return !!tracks && !tracks.some((t) => t.id === streamId);
+  } catch {
+    return false;
+  }
+}
+
 /** One subtitle track from a title's metadata, as mapSubtitleTracks made it. */
 async function subtitleTrackOf(
   ratingKey: string, mediaIndex: number, streamId: number,
@@ -4288,6 +4339,8 @@ interface VersionFacts {
   bitrate: number | null;
   videoCodec: string | null;
   bitDepth: number | null;
+  partKey: string | null;
+  fileSize: number | null;
 }
 
 /** The version a start plays, from buildMeta; null when that can't be had. */
@@ -4303,6 +4356,8 @@ async function versionFacts(ratingKey: string, mediaIndex: number): Promise<Vers
       bitrate: v.bitrate ?? null,
       videoCodec: v.videoCodec ?? null,
       bitDepth: v.bitDepth ?? null,
+      partKey: v.partKey ?? null,
+      fileSize: v.fileSize ?? null,
     };
   } catch {
     return null;
@@ -4750,7 +4805,18 @@ router.get(
     // The item lock wraps the pair below it: the track selection this variant
     // needs, and the decision + start that captures it.
     const promise = withItemLock(ratingKey, async () => {
-      await selectTracksForStart(ratingKey, mediaIndex, audioStreamID, subtitleStreamID);
+      // Never a subtitle Plex can't read: the film plays without it rather than
+      // not at all — see isUnreadableSubtitle.
+      let subtitleId = subtitleStreamID;
+      let subtitleMode: "burn" | "none" = requestedSubtitleMode;
+      if (subtitleId && await subtitleNotOffered(ratingKey, mediaIndex, subtitleId)) {
+        logEvent("HLS", "leaving out a subtitle Plex can't read", {
+          ratingKey, session: sessionId.substring(0, 8), subtitle: subtitleId,
+        });
+        subtitleId = 0;
+        subtitleMode = "none";
+      }
+      await selectTracksForStart(ratingKey, mediaIndex, audioStreamID, subtitleId);
       // Decided per start, so a room that has gained someone who can't decode
       // HEVC gets H.264 from its next transcode on.
       const roomHevc = userId !== null && roomPlaysHevc(userId);
@@ -4775,10 +4841,10 @@ router.get(
       // what does is the reason the player shows.
       let notCopied: string | null = null;
       if (!DIRECT_STREAM) notCopied = "Direct Stream is off on this server";
-      else if (requestedSubtitleMode === "burn") {
+      else if (subtitleMode === "burn") {
         // Picture subtitles (PGS, VobSub) can only be burned in. A text one is
         // burned in when it couldn't be drawn — Plex failed to read it out.
-        const burned = subtitleStreamID ? await subtitleTrackOf(ratingKey, mediaIndex, subtitleStreamID) : null;
+        const burned = subtitleId ? await subtitleTrackOf(ratingKey, mediaIndex, subtitleId) : null;
         notCopied = burned?.external
           ? "its subtitle couldn't be read out for the player to draw, so it is burned in"
           : "a picture subtitle is burned into it";
@@ -4791,8 +4857,15 @@ router.get(
           ratingKey, session: sessionId.substring(0, 8), kbps, capKbps: COPY_LIMIT_KBPS,
         });
       } else if (directStreamRefused(ratingKey)) notCopied = "copying this title failed earlier";
+      else if (
+        version?.videoCodec?.toLowerCase() === "h264" && version.partKey &&
+        (await fileKeyframes(version.partKey, version.fileSize)) === "not-idr"
+      ) {
+        // An open-GOP Blu-ray: see services/keyframes.ts.
+        notCopied = "its keyframes aren't ones every player can start from (an open-GOP Blu-ray)";
+      }
       const copy = notCopied === null;
-      return fetchManifest(requestedSubtitleMode, {
+      return fetchManifest(subtitleMode, {
         videoResolution: quality && quality <= QUALITY_720P_KBPS ? "1280x720" : transcodeFrame(version ?? {}),
         hevc: roomHevc && HEVC_TRANSCODE ? "encode" : roomHevc && copy ? "copy" : false,
         copy,

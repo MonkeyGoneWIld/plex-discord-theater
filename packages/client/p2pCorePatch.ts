@@ -1,7 +1,7 @@
 /**
- * Two changes to how the P2P engine (p2p-media-loader-core 2.3) picks where a
+ * Changes to how the P2P engine (p2p-media-loader-core 2.3) picks where a
  * segment comes from, made as it is bundled — the engine has no setting for
- * either.
+ * any of them.
  *
  * Left to itself it fetches every segment near the playhead from the bot, and
  * from another player only when its own downloads are all busy; and it moves
@@ -28,6 +28,20 @@
  *     engine takes it for a live stream, and let go of everything more than
  *     150 seconds behind the playhead whatever room there was: a rewind past
  *     that loaded again from the bot.
+ *  4. A segment well ahead of the playhead that another player already has
+ *     comes from that player — whether the engine is fetching ahead or
+ *     playback has asked for it — and one half a minute or more ahead that
+ *     another player has, is fetching, or is the one to fetch (the players
+ *     divide such segments between them, each knowing which are whose without
+ *     a word said) is left to them, instead of every player fetching
+ *     everything from the bot. The engine itself goes to another player only
+ *     when all its downloads from the bot are busy — about one segment in
+ *     twenty — and two players starting together shared nothing at all.
+ *     Nothing playback needs soon waits on another player: within 20 seconds
+ *     of the playhead the bot comes first, within 30 nothing is left to
+ *     anybody, and a shared segment that wouldn't be in well before it is
+ *     needed goes back to the bot, from the byte it got to (lib/takeFromPeer:
+ *     shareChoice, ownerOf, keepSharedOnPeer).
  *
  * There used to be a third: a player on the same network as its peer left
  * segments to it rather than fetch them from the bot too, and a viewer fetched
@@ -58,7 +72,31 @@ const edits: Array<[string, string]> = [
                     // ${MARK}
                     if (this.pdtTakeFromPeer(request, segment)) continue;
                     const shouldSwitchFromP2PToHttp = canLoadThroughHttp &&
-                        request.downloadSource === "p2p" && !this.pdtKeepOnPeer(request) &&`,
+                        request.downloadSource === "p2p" && !this.pdtKeepOnPeer(request, segment) &&`,
+  ],
+  [
+    `                if (canLoadThroughHttp) {
+                    this.loadThroughHttp(segment);
+                }
+                else {
+                    const canLoadThroughP2P = this.p2pLoaders.currentLoader.isSegmentLoadedBySomeone(segment) &&`,
+    `                // ${MARK}
+                if (this.pdtShareFromPeer(request, segment)) {
+                    // From another player, or left to the one whose it is.
+                }
+                else if (canLoadThroughHttp) {
+                    this.loadThroughHttp(segment);
+                }
+                else {
+                    const canLoadThroughP2P = this.p2pLoaders.currentLoader.isSegmentLoadedBySomeone(segment) &&`,
+  ],
+  [
+    `                // High-demand request is not loading
+                const shouldLoadThroughHttp = canLoadThroughHttp &&`,
+    `                // High-demand request is not loading
+                // ${MARK}
+                if (this.pdtShareFromPeer(request, segment)) continue;
+                const shouldLoadThroughHttp = canLoadThroughHttp &&`,
   ],
   [
     `        this.randomHttpDownloadTimeout = window.setTimeout(() => {
@@ -120,14 +158,66 @@ const edits: Array<[string, string]> = [
         return true;
     }
     // ${MARK}: a segment taken from a peer stays there while it is doing well.
-    pdtKeepOnPeer(request) {
+    pdtKeepOnPeer(request, segment) {
         const hooks = globalThis.__pdtP2P;
-        if (!hooks || !request.pdtFromPeer || !request.progress) return false;
-        return hooks.keepOnPeer({
+        if (!hooks || !request.progress) return false;
+        const progress = {
             received: request.progress.loadedBytes,
             remaining: request.totalBytes === undefined ? undefined : request.totalBytes - request.loadedBytes,
             startedAt: request.progress.startTimestamp,
-        }, performance.now());
+        };
+        if (request.pdtFromPeer) return hooks.keepOnPeer(progress, performance.now());
+        if (!request.pdtShared || !hooks.keepSharedOnPeer) return false;
+        const keep = hooks.keepSharedOnPeer({ ...progress, aheadS: segment.startTime - this.playback.position }, performance.now());
+        // Back to the bot, and not offered to a player again.
+        if (!keep) request.pdtNoShare = true;
+        return keep;
+    }
+    // ${MARK}: a segment another player has, from them, or left to the one
+    // whose it is — see change 4. True when the bot isn't to be asked now.
+    pdtShareFromPeer(request, segment) {
+        const hooks = globalThis.__pdtP2P;
+        if (!hooks?.shareChoice) return false;
+        if (request && (request.pdtNoShare || request.failedAttempts.p2pAttemptsCount > 0)) return false;
+        let free = false;
+        let busy = false;
+        let fetching = false;
+        const ids = [];
+        const trackerClient = this.p2pLoaders.currentLoader.trackerClient;
+        for (const peer of trackerClient.peers()) {
+            ids.push(peer.id);
+            const status = peer.getSegmentStatus(segment);
+            if (status === "loaded") {
+                if (peer.downloadingSegment) busy = true;
+                else free = true;
+            } else if (status === "http-loading") {
+                fetching = true;
+            }
+        }
+        // Whose it is to fetch, of everybody watching — see ownerOf.
+        let theirs = false;
+        const ownHex = trackerClient.client?.peerId;
+        if (hooks.ownerOf && typeof ownHex === "string" && ids.length > 0) {
+            const self = Utils.hexToUtf8(ownHex);
+            const owner = hooks.ownerOf(segment.externalId, [self, ...ids]);
+            theirs = owner !== null && owner !== self;
+        }
+        if (!free && !busy && !fetching && !theirs) return false;
+        const choice = hooks.shareChoice({
+            aheadS: segment.startTime - this.playback.position,
+            free,
+            busy,
+            fetching,
+            theirs,
+            slotFree: this.requests.executingP2PCount < this.config.simultaneousP2PDownloads,
+        });
+        if (choice === "wait") return true;
+        if (choice !== "peer") return false;
+        this.loadThroughP2P(segment);
+        const started = this.requests.get(segment);
+        if (started?.status !== "loading" || started.downloadSource !== "p2p") return false;
+        started.pdtShared = true;
+        return true;
     }
     loadThroughHttp(segment) {`,
   ],

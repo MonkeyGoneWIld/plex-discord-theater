@@ -7,7 +7,7 @@ import {
   MAX_PARTS, fetchInParts, fetchInPartsLater, installSegmentParts, partBounds, partUrl, partsFor,
   segmentBytesOf, segmentProgress,
 } from "../src/lib/segmentParts";
-import { keepOnPeer, shouldTakeFromPeer } from "../src/lib/takeFromPeer";
+import { keepOnPeer, keepSharedOnPeer, ownerOf, shareChoice, shouldTakeFromPeer } from "../src/lib/takeFromPeer";
 
 let pass = 0;
 let fail = 0;
@@ -199,6 +199,51 @@ console.log("\n— the segment the picture waits on, from another player or the 
     keepOnPeer({ received: 4 * MB, remaining: 1 * MB, startedAt: 0 }, 4000), true);
   check("but goes back to the bot if the peer is no faster",
     keepOnPeer({ received: 0.5 * MB, remaining: 6 * MB, startedAt: 0 }, 4000), false);
+}
+
+console.log("\n— a segment well ahead, from another player that has it —");
+{
+  const MB = 1_000_000;
+  const holds = { aheadS: 45, free: true, busy: false, fetching: false, theirs: false, slotFree: true };
+  check("one another player has, 45 seconds ahead, comes from them",
+    shareChoice(holds), "peer");
+  check("but never one playback needs within 20 seconds",
+    shareChoice({ ...holds, aheadS: 15 }), "bot");
+  check("nor, under half a minute ahead, when we are already taking as many as we can from players",
+    shareChoice({ ...holds, aheadS: 25, slotFree: false }), "bot");
+  check("one the player is busy sending another, half a minute and more ahead, is left to them",
+    shareChoice({ ...holds, aheadS: 40, free: false, busy: true }), "wait");
+  check("as is one a player is fetching from the bot",
+    shareChoice({ ...holds, aheadS: 40, free: false, fetching: true }), "wait");
+  check("or another player's to fetch, before anyone has started it",
+    shareChoice({ ...holds, aheadS: 140, free: false, theirs: true }), "wait");
+  check("or that we can take no more from players just now",
+    shareChoice({ ...holds, aheadS: 40, slotFree: false }), "wait");
+  check("but nothing under half a minute ahead is left to anybody",
+    [shareChoice({ ...holds, aheadS: 28, free: false, theirs: true }), shareChoice({ ...holds, aheadS: 28, free: false, fetching: true })],
+    ["bot", "bot"]);
+  check("and with nobody having it nor anybody's it is, the bot",
+    shareChoice({ ...holds, aheadS: 140, free: false }), "bot");
+
+  // Two players, and every segment of a film: each is somebody's, the same
+  // somebody's whoever asks, and they get about half each.
+  const players = ["-PDT10-a8Kx3m2Q9z", "-PDT10-Zq81LbW0cY"];
+  const owners = Array.from({ length: 200 }, (_, i) => ownerOf(i, players));
+  check("every segment is one player's to fetch", owners.every((o) => o !== null && players.includes(o)), true);
+  check("the same one whichever order the players are listed in",
+    Array.from({ length: 200 }, (_, i) => ownerOf(i, [...players].reverse())), owners);
+  const first = owners.filter((o) => o === players[0]).length;
+  check("about half each", first > 70 && first < 130, true);
+  check("alone, every one is your own", ownerOf(7, ["-PDT10-solo"]), "-PDT10-solo");
+  check("with nobody at all, nobody's", ownerOf(7, []), null);
+  check("a shared segment stays with the player while it settles",
+    keepSharedOnPeer({ received: 0, remaining: 9 * MB, startedAt: 0, aheadS: 40 }, 1000), true);
+  check("and while it will be in well before it is needed",
+    keepSharedOnPeer({ received: 3 * MB, remaining: 6 * MB, startedAt: 0, aheadS: 40 }, 4000), true);
+  check("but goes to the bot when it wouldn't be",
+    keepSharedOnPeer({ received: 0.3 * MB, remaining: 9 * MB, startedAt: 0, aheadS: 40 }, 4000), false);
+  check("and when playback is about to reach it, however it is going",
+    keepSharedOnPeer({ received: 8 * MB, remaining: 1 * MB, startedAt: 0, aheadS: 8 }, 4000), false);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

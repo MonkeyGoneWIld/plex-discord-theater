@@ -56,7 +56,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { plexFetchSegment } from "./plex.js";
-import { videoSpan } from "./ts-timestamps.js";
+import { firstKeyframe, videoSpan } from "./ts-timestamps.js";
 import { logEvent } from "./logger.js";
 
 /**
@@ -202,6 +202,10 @@ interface CopySession {
   skewLogged: number;
   /** A segment the disk refused, logged — once. */
   spillFailedLogged: boolean;
+  /** A playlist has been handed out. */
+  handedOut: boolean;
+  /** Its keyframes turned out not to be IDR frames — see keyframes.ts. */
+  openGop: boolean;
 }
 
 const sessions = new Map<string, CopySession>();
@@ -501,6 +505,24 @@ async function pump(s: CopySession): Promise<void> {
         audioLeadS: round3(span.start - span.audioStart),
       });
     }
+    // A segment opening on a plain I-frame: a film to re-encode from its next
+    // start (services/keyframes.ts reads most such files before they are
+    // copied; this is for the rest). One nobody has been given yet is given
+    // up on now, and the player starts over on the re-encode.
+    if (!s.openGop && firstKeyframe(data) === "not-idr") {
+      s.openGop = true;
+      refused.add(s.ratingKey);
+      logEvent("DirectStream", "this copy's keyframes aren't IDR frames; it will be re-encoded from its next start", {
+        session: s.sessionId.substring(0, 8),
+        ratingKey: s.ratingKey,
+        index: s.nextIndex,
+        handedOut: s.handedOut,
+      });
+      if (!s.handedOut) {
+        fail(s, "its keyframes aren't IDR frames (an open-GOP Blu-ray)");
+        return;
+      }
+    }
     const videoStart = span.start - s.clockOffset;
     const audioStart = span.audioStart === null ? null : span.audioStart - s.clockOffset;
     const seg: Measured = {
@@ -552,6 +574,8 @@ export function startDirectStream(sessionId: string, plexKey: string, ratingKey:
     readyWaiters: [],
     skewLogged: 0,
     spillFailedLogged: false,
+    handedOut: false,
+    openGop: false,
   };
   sessions.set(sessionId, s);
   byPlexKey.set(plexKey, s);
@@ -623,6 +647,9 @@ export async function directStreamPlaylist(
       sleep(READY_TIMEOUT_MS),
     ]);
   }
+  // Given up on before anyone had it: gone, so the player starts over — on a
+  // re-encode, since the title is refused now.
+  if (s.openGop && !s.handedOut) return null;
 
   const list = published(s);
   // Nothing measured yet: say so, and hls.js asks again shortly. An empty
@@ -673,6 +700,7 @@ export async function directStreamPlaylist(
     : fillTo;
   head.push(`#EXT-X-START:TIME-OFFSET=${round3(Math.max(s.offsetS, playable)).toFixed(3)},PRECISE=YES`);
   const tail = s.ended ? ["#EXT-X-ENDLIST"] : [];
+  s.handedOut = true;
   return [...head, ...lines, ...tail].join("\n") + "\n";
 }
 

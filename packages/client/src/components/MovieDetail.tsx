@@ -594,7 +594,11 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
 
               {/* Audio & Subtitle selectors — these need the stream list, so they
                   can't be drawn from the card. The row holds its height while
-                  the metadata is in flight so the Play button doesn't move. */}
+                  the metadata is in flight so the Play button doesn't move, and
+                  isn't there at all once it is known to have nothing to offer:
+                  one file, one audio track and no subtitles left a blank band
+                  the height of a picker between the synopsis and Play. */}
+              {(trackPickers > 0 || (!meta && !metaFailed)) && (
               <div
                 style={{
                   ...styles.trackRow,
@@ -671,6 +675,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
                   </div>
                 )}
               </div>
+              )}
 
               {error && <p style={styles.errorText}>{error}</p>}
               {/* The page still shows everything the card knew, so this is a

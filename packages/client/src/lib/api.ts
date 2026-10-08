@@ -292,6 +292,11 @@ export interface StreamTrack {
    * of cues with numbers on them, and numbers can have an offset added.
    */
   external?: boolean;
+  /**
+   * Subtitles only: a file beside the media file rather than a track inside
+   * it — downloaded, usually, and not always timed to this cut of the film.
+   */
+  sidecar?: boolean;
 }
 
 /**

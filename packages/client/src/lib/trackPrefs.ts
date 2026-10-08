@@ -275,6 +275,22 @@ export function startingSubtitle(
   return matchSubtitleTrack(tracks, pref);
 }
 
+/** Subtitle codecs that are text — drawn by the player, never burned in. */
+const TEXT_SUBTITLE_CODECS = new Set(["srt", "subrip", "vtt", "webvtt", "ass", "ssa", "text", "mov_text", "tx3g"]);
+
+/**
+ * Where a subtitle comes from, best first: 2 for text inside the file, which
+ * the player draws and which was made for this cut of the film; 1 for a
+ * picture subtitle inside it (PGS, VobSub), which is just as well timed but
+ * has to be burned into the picture, re-encoding it; 0 for a file beside it,
+ * which is usually downloaded and not always in time with the film.
+ */
+function subtitleSource(track: StreamTrack): number {
+  if (track.sidecar) return 0;
+  const drawn = track.external ?? TEXT_SUBTITLE_CODECS.has((track.codec ?? "").toLowerCase());
+  return drawn ? 2 : 1;
+}
+
 /**
  * Best match for the stored preference among a new episode's subtitle tracks.
  *
@@ -285,6 +301,10 @@ export function startingSubtitle(
  * same language in a different container (SRT vs PGS) or without the forced
  * flag, and falling back to "English anything" is far closer to what the viewer
  * asked for than silently turning subtitles off.
+ *
+ * Among tracks that fit equally, one inside the file beats a file beside it —
+ * see subtitleSource. A language chosen in Settings says nothing else, and the
+ * downloaded sidecar used to win whenever Plex listed it first.
  */
 export function matchSubtitleTrack(
   tracks: StreamTrack[],
@@ -298,13 +318,16 @@ export function matchSubtitleTrack(
   if (sameLang.length === 0) return null;
 
   // Rank within the language: the explicit label identifies tracks like
-  // Signs/Song versus full dialogue; flavour and codec remain fallbacks for
-  // files whose titles are generic or change between episodes.
+  // Signs/Song versus full dialogue; forced or not is the next thing that
+  // makes one the wrong track; then where it comes from, ahead of SDH and
+  // codec, which remain fallbacks for files whose titles are generic or
+  // change between episodes.
   const scored = sameLang.map((t) => {
     const f = flavour(t.title);
     let score = 0;
-    if (wantedTitle && titleIdentity(t.title) === wantedTitle) score += 16;
-    if (f.forced === wantFlavour.forced) score += 4;
+    if (wantedTitle && titleIdentity(t.title) === wantedTitle) score += 64;
+    if (f.forced === wantFlavour.forced) score += 32;
+    score += subtitleSource(t) * 8;
     if (f.sdh === wantFlavour.sdh) score += 2;
     if (pref.codec && t.codec === pref.codec) score += 1;
     return { t, score };

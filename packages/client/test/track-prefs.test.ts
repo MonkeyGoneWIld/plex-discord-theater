@@ -28,6 +28,8 @@ function track(p: Partial<StreamTrack> & { title: string }): StreamTrack {
     language: p.language ?? null,
     languageCode: p.languageCode ?? null,
     selected: p.selected ?? false,
+    ...(p.external !== undefined ? { external: p.external } : {}),
+    ...(p.sidecar !== undefined ? { sidecar: p.sidecar } : {}),
   };
 }
 
@@ -204,6 +206,35 @@ console.log("\n— subtitles still behave —");
       languageCode: "eng",
       codec: "ass",
     })?.id, 57);
+}
+
+console.log("\n— inside the file before a file beside it —");
+{
+  // English chosen in Settings: a language and nothing else.
+  const settings: SubtitlePref = { off: false, languageCode: "eng", language: "English", codec: null, title: null, pinned: true };
+  const sidecar = track({ id: 60, title: "English (SRT External)", language: "English", languageCode: "eng", codec: "srt", external: true, sidecar: true });
+  const insideSrt = track({ id: 61, title: "English (SRT)", language: "English", languageCode: "eng", codec: "srt", external: true });
+  const insideAss = track({ id: 62, title: "English (ASS)", language: "English", languageCode: "eng", codec: "ass", external: true });
+  const insidePgs = track({ id: 63, title: "English (PGS)", language: "English", languageCode: "eng", codec: "pgs", external: false });
+  const forcedInside = track({ id: 64, title: "English Forced (SRT)", language: "English", languageCode: "eng", codec: "srt", external: true });
+  const sdhInside = track({ id: 65, title: "English SDH (SRT)", language: "English", languageCode: "eng", codec: "srt", external: true });
+
+  check("the subtitle inside the file, though Plex lists the downloaded one first",
+    matchSubtitleTrack([sidecar, insideSrt], settings)?.id, 61);
+  check("ASS inside it as much as SRT",
+    matchSubtitleTrack([sidecar, insideAss], settings)?.id, 62);
+  check("text inside it before a picture subtitle that would be burned in",
+    matchSubtitleTrack([insidePgs, sidecar, insideSrt], settings)?.id, 61);
+  check("a picture subtitle inside it before the downloaded one",
+    matchSubtitleTrack([sidecar, insidePgs], settings)?.id, 63);
+  check("the downloaded one when it is all there is in the language",
+    matchSubtitleTrack([sidecar, track({ id: 66, title: "French (SRT)", language: "French", languageCode: "fra", codec: "srt", external: true })], settings)?.id, 60);
+  check("but never the forced pair in place of full subtitles",
+    matchSubtitleTrack([forcedInside, sidecar], settings)?.id, 60);
+  check("SDH inside the file before plain subtitles beside it",
+    matchSubtitleTrack([sidecar, sdhInside], settings)?.id, 65);
+  check("and the same from the last pick, the downloaded one",
+    matchSubtitleTrack([sidecar, insideSrt], { off: false, languageCode: "eng", language: "English", codec: "srt", title: "English (SRT External)" })?.id, 61);
 }
 
 console.log("\n— carrying a viewer's own tracks into the next episode —");

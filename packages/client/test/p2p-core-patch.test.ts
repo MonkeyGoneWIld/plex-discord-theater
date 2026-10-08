@@ -24,10 +24,14 @@ const source = readFileSync(file, "utf8");
 
 console.log("\n— the engine as installed —");
 const patched = patchHybridLoader(source);
-check("all its changes are made", patched.split("plex-discord-theater: p2pCorePatch").length - 1, 4);
+check("all its changes are made", patched.split("plex-discord-theater: p2pCorePatch").length - 1, 7);
 check("it is still JavaScript", (() => { try { transformSync(patched, { loader: "js", format: "esm" }); return true; } catch { return false; } })(), true);
 check("a segment loading from a peer is asked about before being moved to the bot",
-  /request\.downloadSource === "p2p" && !this\.pdtKeepOnPeer\(request\) &&/.test(patched), true);
+  /request\.downloadSource === "p2p" && !this\.pdtKeepOnPeer\(request, segment\) &&/.test(patched), true);
+check("one playback asks for is offered to another player before the bot is asked",
+  /if \(this\.pdtShareFromPeer\(request, segment\)\) \{[^}]*\}\s+else if \(canLoadThroughHttp\) \{\s+this\.loadThroughHttp\(segment\);/.test(patched), true);
+check("one not loading yet is offered to another player before the bot",
+  /\/\/ High-demand request is not loading\s+\/\/ plex-discord-theater: p2pCorePatch\s+if \(this\.pdtShareFromPeer\(request, segment\)\) continue;\s+const shouldLoadThroughHttp/.test(patched), true);
 check("the segment playback waits on is looked at before anything else in the queue",
   /if \(this\.pdtTakeFromPeer\(request, segment\)\) continue;/.test(patched), true);
 check("applying it twice changes nothing", patchHybridLoader(patched), patched);

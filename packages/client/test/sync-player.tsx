@@ -68,6 +68,50 @@ HTMLMediaElement.prototype.pause = function (this: HTMLMediaElement) {
 const fixture: Record<string, unknown> = { events, user, isHost };
 (window as unknown as { fixture: typeof fixture }).fixture = fixture;
 
+// Each of the media source's buffers on its own — the element's `buffered` is
+// only where they all overlap, so a picture with no sound reads as nothing.
+const sourceBuffers: Array<{ mime: string; sb: SourceBuffer }> = [];
+const addSourceBuffer = MediaSource.prototype.addSourceBuffer;
+MediaSource.prototype.addSourceBuffer = function (this: MediaSource, mime: string) {
+  const sb = addSourceBuffer.call(this, mime);
+  sourceBuffers.push({ mime, sb });
+  return sb;
+};
+fixture.sourceBuffers = sourceBuffers;
+// Every append and removal, with what each buffer held after it.
+const bufferOps: Array<Record<string, unknown>> = [];
+fixture.bufferOps = bufferOps;
+const rangesOf = (sb: SourceBuffer) => {
+  try {
+    return Array.from({ length: sb.buffered.length }, (_, i) => `${sb.buffered.start(i).toFixed(3)}-${sb.buffered.end(i).toFixed(3)}`).join(" ");
+  } catch {
+    return "removed";
+  }
+};
+for (const op of ["appendBuffer", "remove"] as const) {
+  const native = SourceBuffer.prototype[op] as (...args: unknown[]) => void;
+  (SourceBuffer.prototype as unknown as Record<string, unknown>)[op] = function (this: SourceBuffer, ...args: unknown[]) {
+    const mime = sourceBuffers.find((x) => x.sb === this)?.mime.split(";")[0] ?? "?";
+    const entry: Record<string, unknown> = {
+      op, mime, at: Number((document.querySelector("video")?.currentTime ?? 0).toFixed(3)),
+      offset: this.timestampOffset, before: rangesOf(this),
+      ...(op === "remove" ? { range: args.map((a) => Number(a).toFixed(3)).join("-") } : { bytes: (args[0] as ArrayBufferView | ArrayBuffer).byteLength }),
+    };
+    bufferOps.push(entry);
+    this.addEventListener("updateend", () => { entry.after = rangesOf(this); }, { once: true });
+    return native.apply(this, args);
+  };
+}
+fixture.sourceBufferRanges = () => sourceBuffers.map(({ mime, sb }) => {
+  const out: string[] = [];
+  try {
+    for (let i = 0; i < sb.buffered.length; i++) out.push(`${sb.buffered.start(i).toFixed(2)}-${sb.buffered.end(i).toFixed(2)}`);
+  } catch {
+    out.push("removed");
+  }
+  return `${mime.split(";")[0]} ${out.join(" ") || "empty"}`;
+});
+
 // Reported to the runner, which can't reach in: the two players are on
 // different origins (two ports), as two people's are on
 // different machines. On one origin they share the browser's six connections

@@ -44,7 +44,7 @@ import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
 import { fetchInPartsLater, installSegmentParts, partsFor, segmentBytesOf } from "../lib/segmentParts";
 import { installTakeFromPeer } from "../lib/takeFromPeer";
-import { watchPeerConnections } from "../lib/peerConnections";
+import { connectionsSeen, watchPeerConnections } from "../lib/peerConnections";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
 import { useVideoZoom } from "../lib/useVideoZoom";
 import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -869,6 +869,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * the host had switched anything.
    */
   const [switchingFor, setSwitchingFor] = useState<{ kind: "audio" | "subtitle" | "quality"; byHost: boolean } | null>(null);
+  /** When the stream playing first showed a picture — the moment the switch is over. */
+  const [streamShownAt, setStreamShownAt] = useState(0);
   // Transient play/pause acknowledgement. `at` is part of the key so a rapid
   // second toggle restarts the animation instead of being swallowed by React
   // seeing the same value.
@@ -1940,6 +1942,26 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [followSessionId, setFollowSessionId] = useState<string | null>(
     isHost ? null : roomSessionId,
   );
+  /**
+   * A switch the host made that took this player along, heard before the
+   * host's stream for it was up. The room says so in two steps: the new tracks
+   * first, while the host is still starting the stream, and that stream a
+   * moment later. Said at the first, the switch was gone again by the second —
+   * nothing was being rebuilt yet, so it was lifted at once — and the rebuild
+   * itself read "Loading…". It is said when the rebuild starts instead.
+   */
+  const pendingHostSwitchRef = useRef<{ kind: "audio" | "subtitle"; ratingKey: string; at: number } | null>(null);
+  /** The connection watcher's blind spot has been reported — see onPeerConnect. */
+  const peerWatchReportedRef = useRef(false);
+  const showPendingHostSwitch = () => {
+    const pending = pendingHostSwitchRef.current;
+    pendingHostSwitchRef.current = null;
+    // For this title, and not one whose stream never came.
+    if (!pending || pending.ratingKey !== itemRef.current.ratingKey || Date.now() - pending.at > 60_000) return;
+    canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
+    setTrackSwitching(pending.kind);
+    setTrackSwitchByHost(true);
+  };
   // Read inside the stream-assignment effect, which must not re-run when this
   // changes — it is the thing doing the changing.
   const followSessionIdRef = useRef(followSessionId);
@@ -1954,6 +1976,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       from: sessionIdRef.current?.substring(0, 8) ?? "none",
       to: roomSessionId.substring(0, 8),
     });
+    showPendingHostSwitch();
     setFollowSessionId((prev) => (prev === roomSessionId ? prev : roomSessionId));
   }, [roomSessionId, isHost]);
 
@@ -2070,9 +2093,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
       setTrackSwitching(audioChanged ? "audio" : "subtitle");
       setTrackSwitchByHost(true);
+      pendingHostSwitchRef.current = { kind: audioChanged ? "audio" : "subtitle", ratingKey: itemRef.current.ratingKey, at: Date.now() };
     }
 
     if (v.isOwner) {
+      // Said already, above, and this player brings the stream up itself.
+      pendingHostSwitchRef.current = null;
       if (!v.hlsSessionId) {
         // A fork inherits the room's clock and nothing else — see the server's
         // assignVariant. Start the new transcode where playback actually is.
@@ -2145,6 +2171,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // return to an abandoned stream. Never both.
         asking: alreadyBuiltForThis ? "forced" : "state",
       });
+      showPendingHostSwitch();
       setFollowSessionId(v.hlsSessionId);
       if (alreadyBuiltForThis) setRetryKey((k) => k + 1);
       return;
@@ -3620,6 +3647,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 hls.p2pEngine.addEventListener("onPeerConnect", ({ peerId }) => {
                   stats.peers.add(peerId);
                   logEvent("P2P", "another player joined this stream", { players: stats.peers.size + 1 });
+                  // Connected, and lib/peerConnections never saw it: say what
+                  // this window's WebRTC is, once, so the next log says why.
+                  if (connectionsSeen() === 0 && !peerWatchReportedRef.current) {
+                    peerWatchReportedRef.current = true;
+                    const Rtc = (window as { RTCPeerConnection?: { name?: string; prototype?: object } }).RTCPeerConnection;
+                    logWarn("P2P", "the connection watcher saw nothing of this connection", {
+                      rtc: Rtc?.name ?? typeof Rtc,
+                      hooked: !!(Rtc?.prototype as { pdtWatched?: boolean } | undefined)?.pdtWatched,
+                      native: /\[native code\]/.test(String(Rtc)),
+                    });
+                  }
                 });
                 hls.p2pEngine.addEventListener("onPeerClose", ({ peerId }) => {
                   if (stats.peers.delete(peerId)) {
@@ -4471,6 +4509,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         };
         const onPlaying = () => {
           logEvent("Video", "playing", snapshot(video));
+          if (!streamShownRef.current) setStreamShownAt(Date.now());
           streamShownRef.current = true;
           noteGoodPosition(video);
           pictureShownRef.current = true;
@@ -6650,11 +6689,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const done = setTimeout(() => setHostSeeking(false), left);
     return () => clearTimeout(done);
   }, [hostSeeking, loadingShown]);
-  // The switch is said until the picture is back — see switchingFor.
+  // The switch is said until the picture is back — see switchingFor: until
+  // the new stream has shown a frame, not merely until the loading screen is
+  // down. Between the freeze-frame lifting and the loading screen coming up
+  // there is a moment with neither, and the switch was forgotten in it.
   useEffect(() => {
     if (trackSwitching) setSwitchingFor({ kind: trackSwitching, byHost: trackSwitchByHost });
-    else if (!loadingShown) setSwitchingFor(null);
-  }, [trackSwitching, trackSwitchByHost, loadingShown]);
+    else if (streamShownRef.current && !loadingShown) setSwitchingFor(null);
+  }, [trackSwitching, trackSwitchByHost, loadingShown, streamShownAt]);
   // Paused only to wait for the room, which is still playing.
   const heldForRoom = !!syncState?.playing && (syncState.hostWaiting || (!isHost && waitingForRoom));
 

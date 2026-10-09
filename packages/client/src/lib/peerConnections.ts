@@ -37,6 +37,17 @@ interface Watch {
 }
 
 const watches = new WeakMap<RTCPeerConnection, Watch>();
+/** Connections seen negotiating — see connectionsSeen. */
+let seen = 0;
+
+/**
+ * How many connections this has seen negotiate. None while the engine reports
+ * players connected means the browser hands the engine a WebRTC of its own
+ * that this never hooked — Discord's window can wrap it.
+ */
+export function connectionsSeen(): number {
+  return seen;
+}
 
 function countLine(line: string | undefined | null, into: Kinds): void {
   const kind = line?.match(/ typ (\w+)/)?.[1];
@@ -86,7 +97,14 @@ function connected(pc: RTCPeerConnection, w: Watch): void {
   if (w.settled) return;
   w.settled = true;
   const afterS = Number(((performance.now() - w.startedAt) / 1000).toFixed(1));
-  pc.getStats().then((stats) => {
+  let stats: Promise<RTCStatsReport>;
+  try {
+    stats = pc.getStats();
+  } catch {
+    logEvent("P2P", "connected to another player", { afterS });
+    return;
+  }
+  stats.then((stats) => {
     let pair: Record<string, unknown> | undefined;
     stats.forEach((s: Record<string, unknown>) => {
       if (s.type === "candidate-pair" && s.state === "succeeded" && (s.nominated || !pair)) pair = s;
@@ -110,11 +128,17 @@ function watchOf(pc: RTCPeerConnection): Watch {
   if (known) return known;
   const w: Watch = { ours: {}, theirs: {}, startedAt: performance.now(), settled: false, heard: false };
   watches.set(pc, w);
+  seen++;
   pc.addEventListener("icecandidate", (event) => countLine(event.candidate?.candidate, w.ours));
-  pc.addEventListener("connectionstatechange", () => {
-    if (pc.connectionState === "connected") connected(pc, w);
-    else if (pc.connectionState === "failed") failed(w, "the connection failed");
-  });
+  // Both: a browser that reports one and not the other still says it.
+  const onState = () => {
+    const state = pc.connectionState ?? pc.iceConnectionState;
+    const ice = pc.iceConnectionState;
+    if (state === "connected" || ice === "connected" || ice === "completed") connected(pc, w);
+    else if (state === "failed" || ice === "failed") failed(w, "the connection failed");
+  };
+  pc.addEventListener("connectionstatechange", onState);
+  pc.addEventListener("iceconnectionstatechange", onState);
   return w;
 }
 

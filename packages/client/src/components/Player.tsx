@@ -42,14 +42,14 @@ import { MAX_START_BACK_S, enoughToStart, nextSegmentInS, pictureStartFor } from
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
-import { fetchInPartsLater, installSegmentParts, partsFor, segmentBytesOf } from "../lib/segmentParts";
+import { MAX_PARTS, MAX_PARTS_ALONE, fetchInPartsLater, installSegmentParts, partsFor, segmentBytesOf } from "../lib/segmentParts";
 import { installTakeFromPeer } from "../lib/takeFromPeer";
 import { connectionsSeen, watchPeerConnections } from "../lib/peerConnections";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
 import { useVideoZoom } from "../lib/useVideoZoom";
 import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
 import { clampPipRect, pipDockForRect, releasePipDock, startPipMotion, samplePipMotion, PIP_MARGIN, PIP_DRAG_SLOP, type PipDock, type PipRect } from "../lib/pipMotion";
-import type { SyncState, SyncActions, QueueItem } from "../hooks/useSync";
+import type { SyncState, SyncActions, QueueItem, Switching } from "../hooks/useSync";
 import type { InviteResult } from "../hooks/useDiscord";
 
 const PING_INTERVAL_MS = 10_000; // 10s — matches Plex API recommendation for LAN timeline updates
@@ -401,6 +401,9 @@ const MIN_BACK_BUFFER_S = 5;
  * FORWARD_BUFFER_FLUSH_S — see makeRoom.
  */
 const MIN_FORWARD_BUFFER_S = 30;
+
+/** The longest a switch is said for — see switchingFor. */
+const SWITCH_SAID_MAX_MS = 60_000;
 
 /** What the screen says while a stream is rebuilt for other tracks. */
 function switchingText(kind: "audio" | "subtitle" | "quality", byHost: boolean): string {
@@ -862,15 +865,34 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /** The switch is the host's, which took this player with it. */
   const [trackSwitchByHost, setTrackSwitchByHost] = useState(false);
   /**
-   * The switch the stream is being rebuilt for, said on the loading screen
-   * until the picture is back. The freeze-frame above goes as soon as the new
-   * stream's playlist is in — for a player following the host that is almost
-   * at once — and the rest of the wait read "Loading…", with nothing to say
-   * the host had switched anything.
+   * The switch the stream is being rebuilt for, and when it began: said on the
+   * loading screen until a stream built since then has shown a picture. The
+   * freeze-frame above goes as soon as the new stream's playlist is in — for
+   * a player following the host that is almost at once — and the rest of the
+   * wait read "Loading…", with nothing to say the host had switched anything.
+   *
+   * From when it began, because a switch is often heard in two steps — the
+   * new tracks, then the stream for them once whoever drives it has it up —
+   * and in between the old stream is still on screen. Lifted when "the
+   * picture is back", it was lifted in that gap, by the picture it replaces.
    */
-  const [switchingFor, setSwitchingFor] = useState<{ kind: "audio" | "subtitle" | "quality"; byHost: boolean } | null>(null);
-  /** When the stream playing first showed a picture — the moment the switch is over. */
+  const [switchingFor, setSwitchingFor] = useState<{ kind: "audio" | "subtitle" | "quality"; byHost: boolean; since: number } | null>(null);
+  /** The same, for the effects that act on it in the commit that set it. */
+  const switchingForRef = useRef<typeof switchingFor>(null);
+  const sayingSwitch = (next: typeof switchingFor) => {
+    switchingForRef.current = next;
+    setSwitchingFor(next);
+  };
+  /** A switch begun, here or by the host: the frame held over it, and said. */
+  const beginSwitch = (kind: "audio" | "subtitle" | "quality", byHost: boolean) => {
+    canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
+    setTrackSwitching(kind);
+    setTrackSwitchByHost(byHost);
+    sayingSwitch({ kind, byHost, since: Date.now() });
+  };
+  /** When the stream that last showed a picture was built — see switchingFor. */
   const [streamShownAt, setStreamShownAt] = useState(0);
+  const streamBuiltAtRef = useRef(0);
   // Transient play/pause acknowledgement. `at` is part of the key so a rapid
   // second toggle restarts the animation instead of being swallowed by React
   // seeing the same value.
@@ -1414,6 +1436,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // The variant this client has already acted on, so an assignment that moves it
   // somewhere new can be told from a re-announcement of the same stream.
   const appliedVariantKeyRef = useRef<string | null>(null);
+  /** The title that variant was for: another title's tracks are another file's. */
+  const appliedVariantTitleRef = useRef<string | null>(null);
   // The title this player opened on, and the last one whose tracks were restored
   // — see the track-restore effect. Both are per-mount, and the player is not
   // remounted between episodes, so "opened on" really does mean the episode this
@@ -1862,6 +1886,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     currentSubtitleStreamRef.current = subtitleStreamId ?? null;
     subtitlesOnRef.current = subtitles;
     appliedVariantKeyRef.current = null;
+    // A new title loads as a new title, whatever was being switched on the last.
+    setTrackSwitching(null);
+    sayingSwitch(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [item.ratingKey]);
   if (subtitlesItemRef.current !== item.ratingKey) {
@@ -1942,25 +1969,20 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [followSessionId, setFollowSessionId] = useState<string | null>(
     isHost ? null : roomSessionId,
   );
-  /**
-   * A switch the host made that took this player along, heard before the
-   * host's stream for it was up. The room says so in two steps: the new tracks
-   * first, while the host is still starting the stream, and that stream a
-   * moment later. Said at the first, the switch was gone again by the second —
-   * nothing was being rebuilt yet, so it was lifted at once — and the rebuild
-   * itself read "Loading…". It is said when the rebuild starts instead.
-   */
-  const pendingHostSwitchRef = useRef<{ kind: "audio" | "subtitle"; ratingKey: string; at: number } | null>(null);
   /** The connection watcher's blind spot has been reported — see onPeerConnect. */
   const peerWatchReportedRef = useRef(false);
-  const showPendingHostSwitch = () => {
-    const pending = pendingHostSwitchRef.current;
-    pendingHostSwitchRef.current = null;
-    // For this title, and not one whose stream never came.
-    if (!pending || pending.ratingKey !== itemRef.current.ratingKey || Date.now() - pending.at > 60_000) return;
+  /**
+   * A switch heard before its stream was up — the new tracks first, the
+   * stream a moment later, once whoever drives it has it running — and so
+   * lifted from the picture at the first, which went on playing. Its frame is
+   * held again as this player moves onto that stream.
+   */
+  const holdFrameForSwitch = () => {
+    const switching = switchingForRef.current;
+    if (!switching) return;
     canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
-    setTrackSwitching(pending.kind);
-    setTrackSwitchByHost(true);
+    setTrackSwitching(switching.kind);
+    setTrackSwitchByHost(switching.byHost);
   };
   // Read inside the stream-assignment effect, which must not re-run when this
   // changes — it is the thing doing the changing.
@@ -1976,7 +1998,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       from: sessionIdRef.current?.substring(0, 8) ?? "none",
       to: roomSessionId.substring(0, 8),
     });
-    showPendingHostSwitch();
+    holdFrameForSwitch();
     setFollowSessionId((prev) => (prev === roomSessionId ? prev : roomSessionId));
   }, [roomSessionId, isHost]);
 
@@ -2060,9 +2082,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const prevAudio = currentAudioStreamRef.current;
     const prevSubtitle = currentSubtitleStreamRef.current;
     const hadTracks = appliedVariantKeyRef.current !== null;
+    // On the same title. A new title comes with its own file's tracks, ids and
+    // all, so its assignment always differs from the last title's — and the
+    // host starting Avatar after Toy Story read as the host switching audio.
+    const sameTitle = appliedVariantTitleRef.current === v.ratingKey;
     const movedBysomeoneElse =
-      hadTracks && appliedVariantKeyRef.current !== v.variantKey && !askedForTracksRef.current;
+      hadTracks && sameTitle && appliedVariantKeyRef.current !== v.variantKey && !askedForTracksRef.current;
     appliedVariantKeyRef.current = v.variantKey;
+    appliedVariantTitleRef.current = v.ratingKey;
     askedForTracksRef.current = false;
 
     currentAudioStreamRef.current = v.audioStreamId || null;
@@ -2090,15 +2117,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         audioChanged,
         subtitleChanged: prevSubtitle !== v.subtitleStreamId,
       });
-      canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
-      setTrackSwitching(audioChanged ? "audio" : "subtitle");
-      setTrackSwitchByHost(true);
-      pendingHostSwitchRef.current = { kind: audioChanged ? "audio" : "subtitle", ratingKey: itemRef.current.ratingKey, at: Date.now() };
+      beginSwitch(audioChanged ? "audio" : "subtitle", true);
     }
 
     if (v.isOwner) {
-      // Said already, above, and this player brings the stream up itself.
-      pendingHostSwitchRef.current = null;
       if (!v.hlsSessionId) {
         // A fork inherits the room's clock and nothing else — see the server's
         // assignVariant. Start the new transcode where playback actually is.
@@ -2171,7 +2193,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // return to an abandoned stream. Never both.
         asking: alreadyBuiltForThis ? "forced" : "state",
       });
-      showPendingHostSwitch();
+      holdFrameForSwitch();
       setFollowSessionId(v.hlsSessionId);
       if (alreadyBuiltForThis) setRetryKey((k) => k + 1);
       return;
@@ -2181,6 +2203,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // every assignment keeps it up for the whole of a real swap — the rebuild
     // clears it when frames actually resume.
     setTrackSwitching(null);
+    // On the stream this player was already playing when the switch began,
+    // nothing is rebuilt and the switch is over. Without a stream yet,
+    // whoever drives it is still bringing it up, and the switch is said until
+    // this player is on it — as it is through a rebuild already under way.
+    const switching = switchingForRef.current;
+    if (v.hlsSessionId && switching && streamBuiltAtRef.current < switching.since) sayingSwitch(null);
   }, [variant?.seq]);
 
   /**
@@ -2974,11 +3002,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // ask below goes out (see the quality effect above), or the overlay would
     // wait on a stream that never comes.
     const v = variantRef.current;
-    if (v && v.ratingKey === itemRef.current.ratingKey && v.quality !== kbps) {
-      canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
-      setTrackSwitching("quality");
-      setTrackSwitchByHost(false);
-    }
+    if (v && v.ratingKey === itemRef.current.ratingKey && v.quality !== kbps) beginSwitch("quality", false);
     const meta = itemMetaRef.current?.ratingKey === itemRef.current.ratingKey ? itemMetaRef.current : null;
     // Chosen for this title, so nothing is left to settle before asking — even
     // if its metadata never arrived to settle it.
@@ -3003,6 +3027,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       streamId: activeSubtitleId,
       why: activeSubtitleTrack.external ? "it couldn't be loaded here" : "a picture subtitle",
     });
+    // The stream is rebuilt for it, and that is a subtitle switch to whoever
+    // is watching — not the "Buffering…" it read as. Before the first picture
+    // it is still the title loading.
+    if (streamShownRef.current) beginSwitch("subtitle", false);
     askedForTracksRef.current = true;
     syncActionsRef.current?.sendSetTracks(
       variantRef.current?.audioStreamId ?? currentAudioStreamRef.current ?? 0,
@@ -3393,14 +3421,22 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         let p2pEngine: HlsJsP2PEngine | null = null;
         // Downloads from the bot at once — see simultaneousHttpDownloads.
         let inParts = false;
-        let firstSegmentIn = false;
+        /** There is picture enough at the playhead to start on. */
+        let startCovered = false;
         let httpSlots = 3;
         const applyHttpSlots = () => {
-          const slots = !inParts ? 3 : firstSegmentIn ? 2 : 1;
+          const slots = !inParts ? 3 : startCovered ? 2 : 1;
           if (!p2pEngine || slots === httpSlots) return;
           httpSlots = slots;
           p2pEngine.applyDynamicConfig({ core: { simultaneousHttpDownloads: slots } });
         };
+        const coverStart = () => {
+          if (startCovered) return;
+          startCovered = true;
+          applyHttpSlots();
+        };
+        /** How many parts each segment was asked for in, for the log. */
+        const partsAsked = new Map<string, number>();
 
         if (!vpsRelay) {
           // P2P mode — peers share segments via WebRTC. Copied segments come
@@ -3497,12 +3533,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // one to start it.
                 //
                 // For a copied stream, whose segments each come in up to four
-                // parts (lib/segmentParts): one until its first segment is in,
-                // then two — set when its playlist loads. A copy's first
-                // segment is a whole keyframe interval, 7 to 36 MB, and it is
-                // the one the picture waits on: sharing the connection with the
-                // segments after it, it came in last, and the stream started
-                // with 20s buffered, having waited for all of it.
+                // parts (lib/segmentParts): one until there is picture enough
+                // to start on, then two — set when its playlist loads. A
+                // copy's first segment is a whole keyframe interval, 7 to 36
+                // MB, and it is the one the picture waits on: sharing the
+                // connection with the segments after it, it came in last, and
+                // the stream started with 20s buffered, having waited for all
+                // of it. Often the start needs the second as well, and that
+                // one shared too: Avatar's second segment, 8 MB, took nine
+                // seconds beside the two after it while its first, 21 MB on
+                // its own, had taken five. Alone, a segment comes in eight
+                // parts rather than four — as many downloads as two at once.
                 simultaneousHttpDownloads: 3,
                 // How long a download from the bot may go without a byte before
                 // the engine calls it off and asks again. Its default, 3s, is
@@ -3533,7 +3574,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   // A copied segment, whose size its URL carries, comes in parts.
                   const request = new Request(url, { headers, signal });
                   const bytes = segmentBytesOf(url);
-                  return bytes ? fetchInPartsLater(request, url, bytes) : request;
+                  if (!bytes) return request;
+                  const most = httpSlots === 1 ? MAX_PARTS_ALONE : MAX_PARTS;
+                  partsAsked.set(url, partsFor(bytes, most));
+                  return fetchInPartsLater(request, url, bytes, most);
                 },
               },
               onHlsJsCreated: (hls) => {
@@ -3616,11 +3660,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   forgetEvicted(held, video.currentTime, ENGINE_MEMORY_MIB * 1024 * 1024);
                 });
                 p2pEngine = hls.p2pEngine;
-                hls.p2pEngine.addEventListener("onSegmentLoaded", () => {
-                  if (firstSegmentIn) return;
-                  firstSegmentIn = true;
-                  applyHttpSlots();
-                });
                 // The first few segments of a stream, timed: what its start
                 // waited on, and where each came from.
                 const streamAskedAt = performance.now();
@@ -3635,10 +3674,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   const now = performance.now();
                   const asked = firstAsked.get(segmentUrl);
                   const bytes = segmentBytesOf(segmentUrl);
+                  const parts = partsAsked.get(segmentUrl) ?? (bytes ? partsFor(bytes) : 1);
                   logEvent("Load", "segment in", {
                     seg: segIndexFromUrl(segmentUrl),
                     MB: (bytesLength / 1e6).toFixed(2),
-                    from: downloadSource === "p2p" ? "another player" : bytes ? `the bot, in ${partsFor(bytes)}` : "the bot",
+                    from: downloadSource === "p2p" ? "another player" : parts > 1 ? `the bot, in ${parts}` : "the bot",
                     tookS: asked === undefined ? "?" : ((now - asked) / 1000).toFixed(1),
                     Mbps: asked === undefined ? "?" : ((bytesLength * 8) / ((now - asked) * 1000)).toFixed(1),
                     sinceStreamS: ((now - streamAskedAt) / 1000).toFixed(1),
@@ -3692,6 +3732,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         copiedStreamRef.current = false;
         playlistEdgeRef.current = null;
         streamShownRef.current = false;
+        streamBuiltAtRef.current = Date.now();
         // What the server says about this stream — copied or re-encoded, and
         // why — for Stats for nerds and the buffering hint. A new stream also
         // starts the buffering count over: its first seconds are loading.
@@ -3985,6 +4026,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             if (startsRoom && syncStateRef.current?.connected) hostHeldRef.current = true;
             else video.play().catch((err) => console.warn("Autoplay prevented:", err));
           }
+        });
+
+        // Picture enough to start on: what comes after it may download two at
+        // a time now — see simultaneousHttpDownloads.
+        hls.on(Hls.Events.FRAG_BUFFERED, () => {
+          if (mounted && enoughAhead(video)) coverStart();
         });
 
         /**
@@ -4509,8 +4556,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         };
         const onPlaying = () => {
           logEvent("Video", "playing", snapshot(video));
-          if (!streamShownRef.current) setStreamShownAt(Date.now());
+          if (!streamShownRef.current) setStreamShownAt(streamBuiltAtRef.current);
           streamShownRef.current = true;
+          coverStart();
           noteGoodPosition(video);
           pictureShownRef.current = true;
           setBuffering(false);
@@ -5780,6 +5828,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         subtitle !== 0 && sessionBurnedRef.current !== subtitle,
         sessionQualityRef.current,
         waiting,
+        // What this host restarted it for, for whoever waits for it.
+        switchingForRef.current && !switchingForRef.current.byHost ? switchingForRef.current.kind : null,
       );
       return playing;
     }
@@ -6391,11 +6441,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // Hold the last frame over the swap, as before — a fork tears this client's
     // transcode down and waits out a new one. Nothing to hold when only the
     // subtitle drawn over the picture changes.
-    if (streamChanges) {
-      canvasRef.current = captureFrame(videoRef.current) ?? canvasRef.current;
-      setTrackSwitching(audioStreamID !== undefined ? "audio" : "subtitle");
-      setTrackSwitchByHost(false);
-    }
+    if (streamChanges) beginSwitch(audioStreamID !== undefined ? "audio" : "subtitle", false);
     setShowTrackSwitcher(false);
 
     // The cached track list carries `selected` flags, which describe whichever
@@ -6675,6 +6721,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // Holding for the room — anybody's picture not ready, or this one ahead of
   // the room — is the loading screen, like any other wait for a picture.
   const loadingShown = !isPip && (buffering || roomHolding || (noPicture && !!syncState?.ratingKey)) && !error;
+  // Held for the host's stream, which is coming back for a switch of the
+  // host's own — see SyncState.hostSwitching. Said until the loading screen
+  // is down: the room runs again a moment before this player's picture
+  // moves, and that moment read "Buffering…".
+  const [heldForHostSwitch, setHeldForHostSwitch] = useState<Switching | null>(null);
+  const hostSwitching = !isHost && roomHolding ? syncState?.hostSwitching ?? null : null;
+  useEffect(() => {
+    if (hostSwitching) setHeldForHostSwitch(hostSwitching);
+    else if (!loadingShown) setHeldForHostSwitch(null);
+  }, [hostSwitching, loadingShown]);
+  // And a new title loads as a new title.
+  useEffect(() => setHeldForHostSwitch(null), [item.ratingKey]);
   // Whoever seeked — this player never hears of its own.
   const seekingText = syncState?.seekByHost === false ? "Co-host is seeking…" : "Host is seeking…";
   const seekingStatus = hostSeeking && streamActive ? seekingText : null;
@@ -6689,14 +6747,23 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const done = setTimeout(() => setHostSeeking(false), left);
     return () => clearTimeout(done);
   }, [hostSeeking, loadingShown]);
-  // The switch is said until the picture is back — see switchingFor: until
-  // the new stream has shown a frame, not merely until the loading screen is
-  // down. Between the freeze-frame lifting and the loading screen coming up
-  // there is a moment with neither, and the switch was forgotten in it.
+  // The switch is said until the picture is back — see switchingFor: until a
+  // stream built since it began has shown a frame and the loading screen is
+  // down, not merely until the loading screen is. Between the freeze-frame
+  // lifting and the loading screen coming up there is a moment with neither.
   useEffect(() => {
-    if (trackSwitching) setSwitchingFor({ kind: trackSwitching, byHost: trackSwitchByHost });
-    else if (streamShownRef.current && !loadingShown) setSwitchingFor(null);
-  }, [trackSwitching, trackSwitchByHost, loadingShown, streamShownAt]);
+    if (switchingFor && streamShownAt >= switchingFor.since && !loadingShown) sayingSwitch(null);
+  }, [switchingFor, streamShownAt, loadingShown]);
+  // A switch whose stream never comes says so for a minute, no longer — and
+  // its frame is not held over the picture for ever.
+  useEffect(() => {
+    if (!switchingFor) return;
+    const done = setTimeout(() => {
+      sayingSwitch(null);
+      setTrackSwitching(null);
+    }, Math.max(0, SWITCH_SAID_MAX_MS - (Date.now() - switchingFor.since)));
+    return () => clearTimeout(done);
+  }, [switchingFor]);
   // Paused only to wait for the room, which is still playing.
   const heldForRoom = !!syncState?.playing && (syncState.hostWaiting || (!isHost && waitingForRoom));
 
@@ -6801,7 +6868,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         <div style={styles.bufferingOverlay} role="status" aria-live="polite" data-loading-screen="">
           <div style={styles.bufferingSpinner} />
           <span style={styles.bufferingText}>
-            {seekLoading ? seekingText : switchingFor ? switchingText(switchingFor.kind, switchingFor.byHost) : loadingText}
+            {seekLoading ? seekingText
+              : switchingFor ? switchingText(switchingFor.kind, switchingFor.byHost)
+              : heldForHostSwitch ? switchingText(heldForHostSwitch, true)
+              : loadingText}
           </span>
         </div>
       )}

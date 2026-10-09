@@ -1567,16 +1567,19 @@ export function attachWebSocketServer(server: Server): void {
           hostVariant.audioStreamId !== audioStreamId ||
           hostVariant.subtitleStreamId !== burned ||
           hostSees !== subtitleStreamId;
-        const movers = client.isHost && hostVariant && tracksChange
+        const audience = client.isHost && hostVariant && tracksChange
           ? [...room.clients].filter((m) => {
               const v = m.variantKey ? room.state.variants.get(m.variantKey) : undefined;
-              return v !== undefined &&
+              return m !== client && v !== undefined &&
                 v.audioStreamId === hostVariant.audioStreamId &&
                 v.subtitleStreamId === hostVariant.subtitleStreamId &&
                 m.subtitleStreamId === hostSees;
             })
-          : [client];
-        if (!movers.includes(client)) movers.push(client);
+          : [];
+        // Whoever asked first, so that a stream nobody has yet is theirs to
+        // bring up. In the room's order, the host's new stream went to
+        // whoever had joined first — a viewer drove it, and the host followed.
+        const movers = [client, ...audience];
         client.quality = quality;
         const keyFor = (m: RoomClient) => variantKeyOf(audioStreamId, burned, m.quality);
         if (movers.every((m) => m.variantKey === keyFor(m) && m.subtitleStreamId === subtitleStreamId)) return;
@@ -1866,6 +1869,14 @@ export function attachWebSocketServer(server: Server): void {
             });
           }
           room.state.position = restartOfLiveItem && !clockBeforeStream ? clock : startPosition;
+          // Anchored now, with the position — before anything below reads the
+          // clock. The waiting that a start opens stops the clock where it
+          // stands, and it stood at `clock` plus the time since the last
+          // anchor again: the time since the host's last heartbeat counted
+          // twice. On a host's audio switch the room waited seven seconds
+          // ahead of the host, everybody else loaded that place, and then
+          // went back to meet the host.
+          room.state.updatedAt = Date.now();
           if (itemChanged) {
             room.state.seekHold = null;
             room.state.lastReadySeekAt = null;
@@ -1893,7 +1904,6 @@ export function attachWebSocketServer(server: Server): void {
             msg.sessionOffset >= 0
               ? msg.sessionOffset
               : startPosition;
-          room.state.updatedAt = Date.now();
           room.state.browseContext = null;
 
           // A different title replaces every stream the room was running; the
@@ -1937,9 +1947,16 @@ export function attachWebSocketServer(server: Server): void {
             }
           }
           attachSession(room, hostVariant, sid, room.state.sessionOffset, roomId);
+          // What the host restarted it for — their own quality, say — for
+          // whoever is held waiting for it without having been moved: see the
+          // client's SyncState.hostSwitching. Only for a restart.
+          const switching = restartOfLiveItem && ["audio", "subtitle", "quality"].includes(msg.switching as string)
+            ? msg.switching as string
+            : null;
 
           broadcast(room, ws, {
             type: "play",
+            switching,
             transportRevision: room.state.transportRevision,
             ratingKey: room.state.ratingKey,
             title: room.state.title,

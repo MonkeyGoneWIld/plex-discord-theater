@@ -4,7 +4,7 @@
  * server's segmentPart does, at a pace per download.
  */
 import {
-  MAX_PARTS, fetchInParts, fetchInPartsLater, installSegmentParts, partBounds, partUrl, partsFor,
+  MAX_PARTS, MAX_PARTS_ALONE, fetchInParts, fetchInPartsLater, installSegmentParts, partBounds, partUrl, partsFor,
   segmentBytesOf, segmentProgress,
 } from "../src/lib/segmentParts";
 import { keepOnPeer, keepSharedOnPeer, ownerOf, shareChoice, shouldTakeFromPeer } from "../src/lib/takeFromPeer";
@@ -79,6 +79,8 @@ check("a 2.4 MB one in three", partsFor(2_400_000), 3);
 check("never more than four", partsFor(28_000_000), MAX_PARTS);
 check("a small one in one", partsFor(600_000), 1);
 check("nothing known, one", partsFor(NaN), 1);
+check("fetched on its own, a Blu-ray's segment goes in eight", partsFor(21_400_000, MAX_PARTS_ALONE), 8);
+check("and a small one still in as many as its size calls for", partsFor(2_400_000, MAX_PARTS_ALONE), 3);
 check("the parts cover it end to end, the server's split",
   partBounds(10, 3), [[0, 3], [3, 6], [6, 10]]);
 check("the size comes off the URL", segmentBytesOf(URL0), SEGMENT.length);

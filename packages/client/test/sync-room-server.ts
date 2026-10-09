@@ -89,9 +89,28 @@ const sessionStart = new Map<string, number>();
 /** Segments served, per user, for the checks to read. */
 const served: Array<{ user: string; seg: string; at: number; heldMs: number; part?: string; bytes?: number; ms?: number }> = [];
 
+/**
+ * Each title's tracks, as Plex has them: two audio, a subtitle the player
+ * draws and a picture one that has to be burned in. Stream ids belong to a
+ * file, so every title has its own — a new title's assignment always differs
+ * from the last one's, as it does in the app. Every set plays the same video.
+ */
+const tracksOf = (ratingKey: string) => {
+  const base = (Number(ratingKey) % 100) * 10;
+  return {
+    audioTracks: [
+      { id: base + 1, title: "English (AAC Stereo)", language: "English", languageCode: "eng", selected: true, default: true },
+      { id: base + 2, title: "Français (AAC Stereo)", language: "Français", languageCode: "fra", selected: false },
+    ],
+    subtitleTracks: [
+      { id: base + 3, title: "English (SRT)", language: "English", languageCode: "eng", selected: false, external: true },
+      { id: base + 4, title: "English (PGS)", language: "English", languageCode: "eng", selected: false, external: false },
+    ],
+  };
+};
 const meta = (ratingKey: string) => ({
-  ratingKey, title: "Sync Test", type: "movie", thumb: null, duration: 120_000,
-  partId: null, markers: [], genres: [], versions: [], audioTracks: [], subtitleTracks: [],
+  ratingKey, title: `Sync Test ${ratingKey}`, type: "movie", thumb: null, duration: 120_000,
+  partId: Number(ratingKey), markers: [], genres: [], versions: [], ...tracksOf(ratingKey),
 });
 
 function userOf(req: http.IncomingMessage, url: URL): string | null {
@@ -160,6 +179,11 @@ const server = http.createServer(async (req, res) => {
   if (p === "/api/plex/played-threshold") return json(res, { threshold: 0.9 });
   if (p.startsWith("/api/plex/meta/")) return json(res, meta(p.split("/").pop()!));
   if (p.startsWith("/api/plex/siblings/")) return json(res, { episode: false, prev: null, next: null });
+  // The drawn subtitle: a line every few seconds.
+  if (p.startsWith("/api/plex/subtitles/")) {
+    const cues = Array.from({ length: 40 }, (_, i) => ({ start: i * 3, end: i * 3 + 2, text: `Line ${i + 1}` }));
+    return json(res, { cues, complete: true });
+  }
 
   // The stream: a media playlist straight away, as a copy of Plex's would be.
   const segmentS = SEGMENT_S.get(streamDir);

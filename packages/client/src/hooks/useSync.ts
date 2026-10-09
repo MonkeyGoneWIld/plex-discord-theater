@@ -65,6 +65,11 @@ export interface SuggestionItem {
  * a seek it can't serve in place, and keeps it alive. It says nothing about
  * control of the room.
  */
+/** A switch a stream is rebuilt for. */
+export type Switching = "audio" | "subtitle" | "quality";
+const switchingOf = (v: unknown): Switching | null =>
+  v === "audio" || v === "subtitle" || v === "quality" ? v : null;
+
 export interface StreamVariant {
   /** The title this assignment is for. Lets anything acting on a change of
    *  title tell a fresh assignment from the one left over from the last one —
@@ -165,6 +170,13 @@ export interface SyncState {
    * after it whenever their own were slower, and skip what they had missed.
    */
   hostWaiting: boolean;
+  /**
+   * What the host is switching, while the room waits for the host's stream to
+   * come back for it: their own quality, or tracks this player wasn't moved
+   * onto — what a player holding for the room says, rather than "Buffering…"
+   * as if the wait were its own. Null otherwise, and once the room runs.
+   */
+  hostSwitching: Switching | null;
   /**
    * The moment the room is gathering everybody for, from the server. A
    * viewer's "ready" names it, so a late answer to an earlier one can't start
@@ -291,6 +303,8 @@ export interface SyncActions {
     quality?: number,
     /** The stream has no picture moving yet — see SyncState.hostWaiting. */
     waiting?: boolean,
+    /** What the host restarted it for — see SyncState.hostSwitching. */
+    switching?: Switching | null,
   ) => void;
   sendPause: (position: number) => void;
   /**
@@ -409,6 +423,7 @@ const INITIAL_STATE: SyncState = {
   lastCommandAt: 0,
   positionAt: 0,
   hostWaiting: false,
+  hostSwitching: null,
   gatherSeq: 0,
   authFailed: false,
   reconnectFailed: false,
@@ -493,10 +508,11 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         subtitleDrawn = false,
         quality = preferredQuality(),
         waiting = false,
+        switching: Switching | null = null,
       ) => {
         send({
           type: "play", ratingKey, title, subtitles, hlsSessionId, position, sessionOffset,
-          audioStreamId, subtitleStreamId, playing, subtitleDrawn, quality, waiting,
+          audioStreamId, subtitleStreamId, playing, subtitleDrawn, quality, waiting, switching,
         });
         if (playing) heldForAnswerAtRef.current = Date.now();
         setState((prev) => {
@@ -712,6 +728,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               position: (msg.position as number) ?? 0,
               positionAt: Date.now(),
               hostWaiting: msg.waiting === true,
+              hostSwitching: null,
               gatherSeq: typeof msg.gather === "number" ? msg.gather : prev.gatherSeq,
               hlsSessionId: (msg.hlsSessionId as string) || null,
               sessionOffset: (msg.sessionOffset as number) ?? 0,
@@ -815,6 +832,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               playing: msg.playing !== false,
               // Somebody's picture hasn't started yet — see hostWaiting.
               hostWaiting: msg.waiting === true,
+              hostSwitching: switchingOf(msg.switching),
               gatherSeq: typeof msg.gather === "number" ? msg.gather : prev.gatherSeq,
               // Non-zero when the host resumed from history or restarted the
               // transcode at a seek target; 0 for a plain start.
@@ -863,6 +881,8 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             setState((prev) => ({
               ...prev,
               hostWaiting: waiting,
+              // The room running again is the host's stream back.
+              hostSwitching: waiting ? prev.hostSwitching : null,
               gatherSeq: typeof msg.gather === "number" ? msg.gather : prev.gatherSeq,
               position: typeof msg.position === "number" ? msg.position : prev.position,
               positionAt: waiting ? 0 : Date.now(),
@@ -878,6 +898,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               seekSeq: prev.seekSeq + 1,
               seekByHost: msg.byHost !== false,
               seekReady: msg.ready === true,
+              hostSwitching: null,
             }));
             break;
           case "stop":
@@ -893,6 +914,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               playing: false,
               position: 0,
               hostWaiting: false,
+              hostSwitching: null,
               commandSeq: prev.commandSeq + 1,
               browseContext: null,
               // `queue` is deliberately left alone — the server keeps it across

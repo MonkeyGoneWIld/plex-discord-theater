@@ -380,6 +380,25 @@ console.log("\n— the scenario end to end —");
   [v1, v2, v3, odd].forEach((c) => c.close());
 }
 
+console.log("\n— the host drives its new stream, whoever joined first —");
+{
+  // The viewer is in the room before the host, as somebody waiting for the
+  // host to start is.
+  instanceHosts.set("inst-9b", { hostUserId: "u-host", guildId: null, channelId: null, createdAt: Date.now() });
+  const early = new Client("u-early", "early");
+  await early.connect("inst-9b");
+  const host = new Client("u-host", "host");
+  await host.connect("inst-9b");
+  await startPlayback(host);
+  [host, early].forEach((c) => c.clear());
+  host.send({ type: "set-tracks", audioStreamId: 2, subtitleStreamId: 0 });
+  await sleep(60);
+  check("the viewer comes along", early.stream()?.key, "2:0");
+  check("the host drives the stream it asked for", host.stream()?.owner, true);
+  check("and the viewer follows it", early.stream()?.owner, false);
+  [host, early].forEach((c) => c.close());
+}
+
 console.log("\n— the room follows the host's playhead, both ways —");
 {
   const [host, a] = await room("inst-10", ["host", "a"]);
@@ -482,6 +501,27 @@ console.log("\n— a restart does not move the room —");
   const told = a.last("play")?.position as number;
   check("the re-announce carries the clock, not the stale snapshot",
     told >= 2001 ? "ok" : `told ${told}, clock had moved past 2001`, "ok");
+  // And the clock as it stood, once, with somebody's picture to wait for: the
+  // room waits for it there, and it stood 2001.5 — the time since the last
+  // anchor counted twice put it at 2003, ahead of the host, and everybody
+  // else loaded that place.
+  a.send({ type: "watching", value: true });
+  // A skip the host already has the picture for: the room goes straight on.
+  host.send({ type: "seek", position: 3000, ready: true });
+  await sleep(60);
+  a.clear();
+  await sleep(1500);
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: uuid(), position: 3000, sessionOffset: 3000,
+    audioStreamId: 1, subtitleStreamId: 0, waiting: true,
+  });
+  await sleep(60);
+  const waitedAt = a.last("room-waiting");
+  check("the room waits for the restarted stream", waitedAt?.waiting, true);
+  check("where the clock stood, the reload counted once",
+    near(waitedAt?.position ?? NaN, 3001.5, 0.4), "ok");
+  check("and that is what everybody is told", near(a.last("play")?.position ?? NaN, 3001.5, 0.4), "ok");
 
   // A different title is a real start and does set the clock.
   host.send({
@@ -1187,6 +1227,35 @@ console.log("\n— a host on its own is answered at once —");
   await sleep(60);
   check("a seek is answered even when nobody has to be waited for", host.last("room-waiting")?.waiting, false);
   host.close();
+}
+
+console.log("\n— the room is told what the host restarted for —");
+{
+  const [host, a] = await room("inst-switching", ["host", "a"]);
+  await startPlayback(host);
+  a.clear();
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: uuid(), position: 30, sessionOffset: 30,
+    audioStreamId: 1, subtitleStreamId: 0, quality: 8000, switching: "quality",
+  });
+  await sleep(60);
+  check("a restart for the host's own quality says so", a.last("play")?.switching, "quality");
+  host.send({
+    type: "play", ratingKey: "200", title: "Another", subtitles: false,
+    hlsSessionId: uuid(), position: 0, sessionOffset: 0,
+    audioStreamId: 1, subtitleStreamId: 0, switching: "audio",
+  });
+  await sleep(60);
+  check("another title is no switch, whatever the host says", a.last("play")?.switching, null);
+  host.send({
+    type: "play", ratingKey: "200", title: "Another", subtitles: false,
+    hlsSessionId: uuid(), position: 10, sessionOffset: 10,
+    audioStreamId: 1, subtitleStreamId: 0, switching: "anything",
+  });
+  await sleep(60);
+  check("nor is anything but a switch", a.last("play")?.switching, null);
+  [host, a].forEach((c) => c.close());
 }
 
 console.log("\n— a stream rebuilt while paused is announced paused —");

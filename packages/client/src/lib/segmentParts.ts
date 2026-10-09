@@ -18,10 +18,17 @@
 const PART_BYTES = 1_000_000;
 /** Parts per segment at most; the engine runs two segments at once. */
 export const MAX_PARTS = 4;
+/**
+ * Parts for a segment fetched on its own — the one a stream's picture waits on
+ * before it can start, when nothing else is downloading beside it (see
+ * Player's simultaneousHttpDownloads): as many downloads as two segments' worth
+ * would be, and as many as the bot will split one into (MAX_SEGMENT_PARTS).
+ */
+export const MAX_PARTS_ALONE = 8;
 
-export function partsFor(bytes: number): number {
+export function partsFor(bytes: number, most = MAX_PARTS): number {
   if (!Number.isFinite(bytes) || bytes <= 0) return 1;
-  return Math.max(1, Math.min(MAX_PARTS, Math.ceil(bytes / PART_BYTES)));
+  return Math.max(1, Math.min(most, Math.ceil(bytes / PART_BYTES)));
 }
 
 /** Where each part starts and ends: the split the server's segmentPart makes. */
@@ -54,7 +61,7 @@ export interface PartsProgress {
   startedAt: number;
 }
 
-const marked = new WeakMap<Request, { key: string; bytes: number }>();
+const marked = new WeakMap<Request, { key: string; bytes: number; parts: number }>();
 const progress = new Map<string, PartsProgress>();
 
 /**
@@ -62,8 +69,9 @@ const progress = new Map<string, PartsProgress>();
  * in parts. `key` names the segment for segmentProgress; the engine's own name
  * for it, its URL, is what the P2P engine patch looks it up by.
  */
-export function fetchInPartsLater(request: Request, key: string, bytes: number): Request {
-  if (partsFor(bytes) > 1) marked.set(request, { key, bytes });
+export function fetchInPartsLater(request: Request, key: string, bytes: number, most = MAX_PARTS): Request {
+  const parts = partsFor(bytes, most);
+  if (parts > 1) marked.set(request, { key, bytes, parts });
   return request;
 }
 
@@ -85,7 +93,7 @@ export function installSegmentParts(target: { fetch: Fetch } = window): void {
   const wrapped = ((input: RequestInfo | URL, init?: RequestInit) => {
     const mark = input instanceof Request ? marked.get(input) : undefined;
     if (!mark || init) return native(input, init);
-    return fetchInParts(native, input as Request, mark.bytes, partsFor(mark.bytes), mark.key);
+    return fetchInParts(native, input as Request, mark.bytes, mark.parts, mark.key);
   }) as Fetch & { segmentParts?: true };
   wrapped.segmentParts = true;
   target.fetch = wrapped;

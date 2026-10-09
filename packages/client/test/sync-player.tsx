@@ -13,7 +13,9 @@ const gen = new URLSearchParams(location.search).get("gen");
 const isHost = user === "u-host";
 /** Where the host's player resumes the film from, if anywhere. */
 const resume = Number(new URLSearchParams(location.search).get("resume")) || undefined;
-const item: PlexItem = { ratingKey: "4242", title: "Sync Test", type: "movie", thumb: null, duration: 120_000 } as PlexItem;
+const titled = (ratingKey: string): PlexItem =>
+  ({ ratingKey, title: `Sync Test ${ratingKey}`, type: "movie", thumb: null, duration: 120_000 }) as PlexItem;
+const firstItem = titled("4242");
 
 // Muted for good, so the browser lets it play without anyone clicking in this
 // frame — and keeps letting it: un-muting a video that started muted without
@@ -131,6 +133,26 @@ setInterval(() => {
   sent = events.length;
 }, 200);
 
+// The runner can't reach into a player on another origin, so it asks: press
+// these buttons, in order, as somebody would — the track menu's, say.
+const buttonFor = (label: string) => {
+  const all = [...document.querySelectorAll("button")];
+  const text = (b: Element) => b.textContent?.trim() ?? "";
+  return all.find((b) => b.title === label || text(b) === label) ?? all.find((b) => text(b).startsWith(label));
+};
+window.addEventListener("message", async (e: MessageEvent) => {
+  const m = e.data as { kind?: string; press?: string[] };
+  if (m?.kind !== "press" || !m.press) return;
+  for (const label of m.press) {
+    let button: HTMLButtonElement | undefined;
+    for (let i = 0; i < 50 && !(button = buttonFor(label)); i++) await new Promise((r) => setTimeout(r, 100));
+    events.push({ t: Date.now(), tag: "Fixture", msg: button ? "pressed" : "no such button", data: { label } });
+    if (!button) return;
+    button.click();
+    await new Promise((r) => setTimeout(r, 200));
+  }
+});
+
 const { token, instanceId } = await (await fetch(`/api/test/session?user=${user}`)).json() as { token: string; instanceId: string };
 setSessionToken(token);
 
@@ -150,14 +172,21 @@ function Room() {
     actions.sendStop();
     setTimeout(() => { setStopped(false); setMount((n) => n + 1); }, 1500);
   };
+  // The host starting another title from the player, as Next or the queue
+  // does: the same player, handed another item.
+  const [hostItem, setHostItem] = React.useState(firstItem);
+  fixture.playTitle = (ratingKey: string) => setHostItem(titled(ratingKey));
+  const roomItem = React.useMemo(() => (state.ratingKey ? titled(state.ratingKey) : null), [state.ratingKey]);
   if (!joined) {
     return (
       <button style={{ width: "100%", height: "100%", font: "600 24px system-ui", background: "#222", color: "#fff", border: 0 }}
         onClick={() => setJoined(true)}>Join</button>
     );
   }
-  // A viewer opens the player when the room has something playing, as the app does.
-  if (!isHost && state.ratingKey !== item.ratingKey) return <p style={{ color: "#aaa" }}>Viewer: waiting for the host to start…</p>;
+  // A viewer opens the player when the room has something playing, and is
+  // handed whatever the room moves on to, as the app does.
+  if (!isHost && !roomItem) return <p style={{ color: "#aaa" }}>Viewer: waiting for the host to start…</p>;
+  const item = isHost ? hostItem : roomItem!;
   if (stopped) return <p style={{ color: "#aaa" }}>Host: stopped</p>;
   return (
     <Player key={mount} item={item} isHost={isHost} selfUserId={user} subtitles={false}

@@ -27,6 +27,11 @@
 // holds them: its first segment, ~10 MB, comes in parts and is in within a
 // few seconds, and a host whose downloads crawl takes it from the viewer.
 //
+// "Messages" goes through everything the two are told while a film plays —
+// switches of tracks and quality, a skip, a pause, another title — each
+// pressed in that player's own menus, and checks each is told what it should
+// be and nothing else.
+//
 // Open the page as /test/sync-room.html?whisper when the browser running it
 // is hidden: a muted video in a page nobody can see is paused a few seconds
 // in, and ?whisper plays the players unmuted at a whisper instead.
@@ -90,6 +95,7 @@ function Runner() {
   }
   const firstPlay = (user: string) => events.get(user)?.find((e) => e.tag === "Video" && e.msg === "playing")?.t;
   const hostFrame = useRef<HTMLIFrameElement>(null);
+  const viewerFrame = useRef<HTMLIFrameElement>(null);
   /** The host's player, on this page's own origin: its fixture, to drive it. */
   const hostFixture = () => (hostFrame.current?.contentWindow as unknown as {
     fixture?: { newStream?: () => void; actions?: { sendSetCoHost: (id: string, v: boolean) => void } };
@@ -636,6 +642,122 @@ function Runner() {
     }
   }
 
+  /**
+   * Everything the two players say while a film plays — on the loading
+   * screen, over the held frame of a switch, in the corner — through each
+   * thing the host or the viewer does, pressed in their own menus: what each
+   * must be told, and nothing else, and nothing left up once the picture is
+   * back. Each player's downloads are held back a moment at every change, so
+   * what is said while it loads is up long enough to be seen.
+   */
+  async function runMessages() {
+    setRunning(true);
+    const out: string[] = ["— what each player is told —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    const SAID = /Host is switching (?:audio|subtitles|quality)…|Switching (?:audio|subtitles|quality)…|(?:Co-host|Host) is seeking…|Host paused the video|Loading…|Buffering…|Stream interrupted — Reconnecting\.\.\.|Stream lost|Reconnecting to the watch party…|Connection lost|Playback error[^\n]*/g;
+    const saidIn = (r: Report) => r.text.match(SAID) ?? [];
+    const press = (who: "host" | "viewer", labels: string[]) =>
+      (who === "host" ? hostFrame : viewerFrame).current?.contentWindow?.postMessage({ kind: "press", press: labels }, "*");
+    const hold = (ms: number) => Promise.all([api(`/api/test/stall?user=u-host&ms=${ms}`), api(`/api/test/stall?user=u-viewer&ms=${ms + 1000}`)]);
+    const quiet = (r: Report | undefined) => !!r && !r.paused && r.ready >= 3 && saidIn(r).length === 0;
+    /** Both playing, with nothing said, for two seconds on end. */
+    const settled = async (what: string) => {
+      let since = 0;
+      await waitFor(() => {
+        if (!quiet(latest.get("u-host")) || !quiet(latest.get("u-viewer"))) since = 0;
+        else if (!since) since = Date.now();
+        return since && Date.now() - since > 2000;
+      }, 45_000, `both to play on with nothing on screen after ${what}`);
+    };
+    const list = (s: Set<string>) => [...s].join(", ") || "nothing";
+    /**
+     * One thing done, and what each player said from then until both play
+     * on: only what is allowed, and the one it is about, when there is one.
+     */
+    const phase = async (what: string, act: () => unknown, allowed: { host: string[]; viewer: string[] }) => {
+      const sampler = sampleBoth();
+      try {
+        await act();
+        await pause(1_500);
+        await settled(what);
+      } catch (err) {
+        const h = latest.get("u-host");
+        const v = latest.get("u-viewer");
+        say(`FAIL ${what}: ${String(err)} — host says ${list(new Set(h ? saidIn(h) : []))}, viewer says ${list(new Set(v ? saidIn(v) : []))}`);
+      } finally {
+        sampler.stop();
+      }
+      const seen = { host: new Set<string>(), viewer: new Set<string>() };
+      for (const x of sampler.samples) {
+        for (const m of saidIn(x.host)) seen.host.add(m);
+        for (const m of saidIn(x.viewer)) seen.viewer.add(m);
+      }
+      for (const who of ["host", "viewer"] as const) {
+        const extra = [...seen[who]].filter((m) => !allowed[who].includes(m));
+        const main = allowed[who][0];
+        const ok = extra.length === 0 && (!main || seen[who].has(main));
+        say(`${ok ? "PASS" : "FAIL"} ${what}: the ${who} is told ${list(seen[who])}${allowed[who].length ? "" : " (should be nothing)"}${!ok && main && !seen[who].has(main) ? ` — never "${main}"` : ""}`);
+        if (ok) continue;
+        // What it said when, and what it was doing: each change.
+        const t0 = sampler.samples[0]?.t ?? 0;
+        let last = "";
+        const changes: string[] = [];
+        for (const x of sampler.samples) {
+          const r = x[who];
+          const now = `${saidIn(r).join("+") || "-"}${r.paused ? " paused" : ""}${r.waiting ? " waiting" : ""}`;
+          if (now !== last) changes.push(`${((x.t - t0) / 1000).toFixed(1)}s ${now}`);
+          last = now;
+        }
+        say(`    ${changes.slice(0, 24).join(" → ")}`);
+      }
+    };
+    try {
+      await phase("starting the film", () => startOnce("p2p=0&stream=copy4&event=1", {}), { host: ["Loading…"], viewer: ["Loading…"] });
+      await pause(3_000);
+      await phase("the host switches audio", async () => { await hold(2_000); press("host", ["Audio & Subtitles", "Audio", "Français (AAC Stereo)"]); },
+        { host: ["Switching audio…"], viewer: ["Host is switching audio…"] });
+      await phase("the host turns on a subtitle the players draw", () => press("host", ["Audio & Subtitles", "Subtitles", "English (SRT)"]),
+        { host: [], viewer: [] });
+      await phase("the host skips past what the copy has measured", async () => { await hold(2_000); for (let i = 0; i < 4; i++) hostKey("ArrowRight"); },
+        { host: ["Loading…", "Buffering…"], viewer: ["Host is seeking…"] });
+      await phase("the host picks a subtitle that is burned in", async () => { await hold(2_000); press("host", ["Audio & Subtitles", "Subtitles", "English (PGS)"]); },
+        { host: ["Switching subtitles…"], viewer: ["Host is switching subtitles…"] });
+      await phase("the host turns subtitles off", async () => { await hold(2_000); press("host", ["Audio & Subtitles", "Subtitles", "None"]); },
+        { host: ["Switching subtitles…"], viewer: ["Host is switching subtitles…"] });
+      await phase("the host pauses and plays on", async () => {
+        hostKey(" ");
+        await pause(2_500);
+        hostKey(" ");
+      }, { host: [], viewer: ["Host paused the video"] });
+      await phase("the viewer switches its own audio", async () => { await hold(2_000); press("viewer", ["Audio & Subtitles", "Audio", "English (AAC Stereo)"]); },
+        { host: [], viewer: ["Switching audio…"] });
+      // Quality is everyone's own, the host's too — but the room is the
+      // host's, and waits for the host's stream to come back.
+      await phase("the host picks a lower quality", async () => { await hold(2_000); press("host", ["Audio & Subtitles", "Quality", "Up to 8 Mbps"]); },
+        { host: ["Switching quality…"], viewer: ["Host is switching quality…"] });
+      await phase("the host starts another title", async () => {
+        await hold(2_000);
+        (hostFrame.current?.contentWindow as unknown as { fixture?: { playTitle?: (k: string) => void } } | null)?.fixture?.playTitle?.("4343");
+      }, { host: ["Loading…"], viewer: ["Loading…"] });
+      await pause(3_000);
+      await phase("the viewer picks a lower quality", async () => { await hold(2_000); press("viewer", ["Audio & Subtitles", "Quality", "Up to 8 Mbps"]); },
+        { host: [], viewer: ["Switching quality…"] });
+      await phase("the host goes back to the first title", async () => {
+        await hold(2_000);
+        (hostFrame.current?.contentWindow as unknown as { fixture?: { playTitle?: (k: string) => void } } | null)?.fixture?.playTitle?.("4242");
+      }, { host: ["Loading…"], viewer: ["Loading…"] });
+      const missing = [...(events.get("u-host") ?? []), ...(events.get("u-viewer") ?? [])].filter((e) => e.tag === "Fixture" && e.msg === "no such button");
+      if (missing.length) say(`FAIL buttons not found: ${missing.map((e) => e.data.label).join(", ")}`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
   async function run(p2p: boolean) {
     setRunning(true);
     const out: string[] = [`— ${p2p ? "with" : "without"} P2P —`];
@@ -738,12 +860,13 @@ function Runner() {
         <button disabled={running} onClick={() => void runBufferedSkip()}>Skip in the buffer</button>
         <button disabled={running} onClick={() => void runRewind()}>Rewind</button>
         <button disabled={running} onClick={() => void runSeekingWords()}>Seeking words</button>
+        <button disabled={running} onClick={() => void runMessages()}>Messages</button>
         <pre id="results">{lines.join("\n")}</pre>
       </div>
       {frames > 0 && (
         <div className="frames" key={frames}>
           {/* The viewer first, so it is in the room when the host starts. */}
-          <iframe title="viewer" src={src(frames).viewer} allow="autoplay" />
+          <iframe ref={viewerFrame} title="viewer" src={src(frames).viewer} allow="autoplay" />
           {hostOn ? <iframe ref={hostFrame} title="host" src={src(frames).host} allow="autoplay" /> : <div />}
         </div>
       )}

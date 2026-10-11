@@ -245,6 +245,35 @@ console.log("\n— tracks picked for a title —");
   check("while the rule still applies to titles nobody picked for",
     prefs.startingSubtitle([english] as never, prefs.loadSubtitlePref(), engAudio as never), null);
   prefs.setSubtitlesOnlyForForeignAudio(false);
+
+  // A commentary picked by hand, as the track menu keeps it: in the saved
+  // choice that every title starts from, and for this title in particular.
+  const feature = { id: 30, title: "English (EAC3 Stereo)", language: "English", languageCode: "eng", codec: "eac3", channels: 2, selected: false };
+  const talk = { id: 31, title: "Commentary by film critic/author John Fawell (English AC3 Stereo)", language: "English", languageCode: "eng", codec: "ac3", channels: 2, selected: false };
+  const sdh = { id: 34, title: "SDH (English PGS)", language: "English", languageCode: "eng", codec: "pgs", selected: false };
+  const talkSubs = { id: 62, title: "Commentary (English PGS)", language: "English", languageCode: "eng", codec: "pgs", selected: false };
+  const rearWindow = { ratingKey: "16520", type: "movie" };
+  const another = { ratingKey: "16521", type: "movie" };
+  prefs.chooseAudioLanguage("last");
+  prefs.chooseSubtitleLanguage("last");
+  prefs.saveAudioPref(talk as never);
+  prefs.saveSubtitlePref(talkSubs as never);
+  prefs.rememberTitleTracks(rearWindow, { audio: talk as never, subtitle: talkSubs as never });
+  check("a commentary picked for a film starts that film on it again, audio and subtitles",
+    [prefs.matchAudioTrack([feature, talk] as never, prefs.titleTrackPrefs(rearWindow).audio)?.id,
+     prefs.matchSubtitleTrack([sdh, talkSubs] as never, prefs.titleTrackPrefs(rearWindow).subtitle)?.id],
+    [31, 62]);
+  check("and any other film on its feature",
+    [prefs.matchAudioTrack([talk, feature] as never, prefs.titleTrackPrefs(another).audio ?? prefs.loadAudioPref())?.id,
+     prefs.matchSubtitleTrack([talkSubs, sdh] as never, prefs.titleTrackPrefs(another).subtitle ?? prefs.loadSubtitlePref())?.id],
+    [30, 34]);
+  prefs.rememberTitleTracks(episode4, { audio: talk as never });
+  check("one picked on an episode carries to the show's next one",
+    prefs.matchAudioTrack([feature, talk] as never, prefs.titleTrackPrefs(episode5).audio)?.id, 31);
+  check("but not to another show's",
+    prefs.matchAudioTrack([talk, feature] as never,
+      prefs.titleTrackPrefs({ ratingKey: "9", type: "episode", grandparentRatingKey: "8" }).audio ?? prefs.loadAudioPref())?.id,
+    30);
   prefs.chooseSubtitleLanguage("last");
 }
 

@@ -51,6 +51,9 @@ export interface AudioPref extends TrackPref {
   /** Whatever language each title was made in, rather than a particular one —
    *  see originalAudioTrack. Always pinned. */
   original?: boolean;
+  /** Chosen for this film or show in particular — the one choice a
+   *  commentary is ever kept as (see isCommentary). */
+  forTitle?: boolean;
 }
 
 /** Forced/SDH/CC flavour flags parsed out of a track title. */
@@ -67,8 +70,10 @@ function flavour(title?: string | null): { forced: boolean; sdh: boolean } {
  * will happily land on one — and a viewer who asked for Japanese audio does not
  * mean the director talking over it. Nor English subtitles a critic's words:
  * Rear Window's "Commentary (English PGS)" was chosen over its "SDH (English
- * PGS)" for being the one not marked SDH. No title starts on one; one is only
- * ever picked by hand.
+ * PGS)" for being the one not marked SDH. No title starts on one unless it was
+ * picked for that title by hand: then that title — a film, or a show's
+ * episodes — starts on it again (titleTrackPrefs, forTitle), and nothing else
+ * does.
  */
 export function isCommentary(title?: string | null): boolean {
   return /\b(commentary|descriptive|audio description)\b/i.test(title ?? "");
@@ -335,8 +340,9 @@ export function matchSubtitleTrack(
 
   const wantFlavour = flavour(pref.title);
   const wantedTitle = titleIdentity(pref.title);
-  // Never a commentary's — see isCommentary.
-  const sameLang = tracks.filter((t) => !isCommentary(t.title) && sameLanguage(t, pref));
+  // Never a commentary's, unless one was chosen for this title — see isCommentary.
+  const allowCommentary = !!pref.forTitle && isCommentary(pref.title);
+  const sameLang = tracks.filter((t) => (allowCommentary || !isCommentary(t.title)) && sameLanguage(t, pref));
   if (sameLang.length === 0) return null;
 
   // Rank within the language: the explicit label identifies tracks like
@@ -435,8 +441,8 @@ export function tracksForNewItem(
  *
  * Never a commentary: a dub and its director's commentary share a language,
  * and landing on the wrong one is the difference between watching the film and
- * not. Not even for somebody who was listening to one — one is picked by hand,
- * for the title it is on, and isn't carried to the next.
+ * not. Not even for somebody who was listening to one elsewhere — unless it was
+ * chosen for this title, which starts on it again (see isCommentary).
  */
 export function matchAudioTrack(
   tracks: StreamTrack[],
@@ -445,7 +451,8 @@ export function matchAudioTrack(
   if (!pref || tracks.length === 0) return null;
   if (pref.original) return originalAudioTrack(tracks);
 
-  const sameLang = tracks.filter((t) => !isCommentary(t.title) && sameLanguage(t, pref));
+  const wantCommentary = !!pref.forTitle && isCommentary(pref.title);
+  const sameLang = tracks.filter((t) => (wantCommentary || !isCommentary(t.title)) && sameLanguage(t, pref));
   if (sameLang.length === 0) return null;
   // Some anime files tag *both* the Japanese and English streams as English,
   // leaving the real distinction only in the title: e.g. Plex reports
@@ -459,6 +466,7 @@ export function matchAudioTrack(
   const scored = sameLang.map((t) => {
     let score = 0;
     if (wantedTitleHint && titleLanguageHint(t.title) === wantedTitleHint) score += 16;
+    if (isCommentary(t.title) === wantCommentary) score += 8;
     if (pref.channels != null && t.channels === pref.channels) score += 4;
     if (pref.codec && t.codec === pref.codec) score += 1;
     return { t, score };
@@ -624,7 +632,7 @@ export function titleTrackPrefs(title: TitleRef | null | undefined): { audio: Au
   if (!title?.ratingKey) return { audio: null, subtitle: null };
   const entry = readTitleTracks()[titleKey(title)];
   return {
-    audio: entry?.audio ?? null,
+    audio: entry?.audio ? { ...entry.audio, forTitle: true } : null,
     subtitle: entry?.subtitle ? { ...entry.subtitle, forTitle: true } : null,
   };
 }

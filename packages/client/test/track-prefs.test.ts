@@ -63,6 +63,10 @@ console.log("\n— commentary is not the film —");
     matchAudioTrack([commentary, feature], audioPref({}))?.id, 20);
   check("even somebody who was listening to commentary starts the next title on the film",
     matchAudioTrack([feature, commentary], audioPref({ title: "Japanese Commentary" }))?.id, 20);
+  check("but one chosen for this title starts this title on it again",
+    matchAudioTrack([feature, commentary], audioPref({ title: "Japanese Director's Commentary (AAC Stereo)", forTitle: true }))?.id, 21);
+  check("while the feature chosen for it stays the feature",
+    matchAudioTrack([commentary, feature], audioPref({ title: "Japanese (AAC Stereo)", forTitle: true }))?.id, 20);
   check("and a language only a commentary is in leaves Plex's choice instead",
     matchAudioTrack([commentary], audioPref({})), null);
   check("which isn't a commentary either, even when Plex has one selected",
@@ -91,6 +95,10 @@ console.log("\n— nor are a commentary's subtitles —");
     matchSubtitleTrack([commentary, beside, sdh], english())?.id, 304534);
   check("somebody who last picked a commentary's subtitles gets the film's",
     matchSubtitleTrack([sdh, commentary, beside], english({ title: "Commentary (English PGS)", codec: "pgs" }))?.id, 304534);
+  check("but a commentary's chosen for this title starts this title on it again",
+    matchSubtitleTrack([sdh, commentary, beside], english({ title: "Commentary (English PGS)", codec: "pgs", forTitle: true }))?.id, 304562);
+  check("and a film with none falls back to its own English",
+    matchSubtitleTrack([beside, sdh], english({ title: "Commentary (English PGS)", codec: "pgs", forTitle: true }))?.id, 304534);
   check("and only a commentary's in that language is none",
     matchSubtitleTrack([commentary], english()), null);
   check("Plex's own selection, a commentary's, is none",
@@ -103,6 +111,12 @@ console.log("\n— nor are a commentary's subtitles —");
       { audio: null, subtitle: english({ title: "Commentary (English PGS)" }) },
       { audioStreamId: 0, subtitleStreamId: 0 },
     ).subtitleStreamId, 304534);
+  check("unless it was chosen for the show",
+    tracksForNewItem(
+      { audioTracks: [], subtitleTracks: [commentary, sdh] },
+      { audio: null, subtitle: english({ title: "Commentary (English PGS)", forTitle: true }) },
+      { audioStreamId: 0, subtitleStreamId: 0 },
+    ).subtitleStreamId, 304562);
 }
 
 console.log("\n— within a language, the closest match —");

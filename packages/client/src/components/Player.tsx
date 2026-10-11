@@ -33,7 +33,7 @@ import {
 } from "../lib/quality";
 import { readStreamNotes, type StreamNotes } from "../lib/streamNotes";
 import { getLevel, setLevel, MAX_LEVEL } from "../lib/audioBoost";
-import { carryTrackPrefs, describeWatched, endTrackSitting, mergeTrackPrefs, saveTrackPrefs, startingAudioPref, startingSubtitlePref, titleTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
+import { carryTrackPrefs, describeWatched, endTrackSitting, isCommentary, mergeTrackPrefs, saveTrackPrefs, startingAudioPref, startingSubtitlePref, titleTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
@@ -2319,6 +2319,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           outcome = "from saved preference";
         }
 
+        // A commentary picked for this show carries to its next episode as
+        // that choice, which is the only way one carries at all — what the
+        // last episode was on would be just a commentary, and not taken up.
+        if (own.audio && isCommentary(own.audio.title)) source = { ...source, audio: own.audio };
+        if (own.subtitle && !own.subtitle.off && isCommentary(own.subtitle.title)) source = { ...source, subtitle: own.subtitle };
         want = tracksForNewItem(version, source, v);
         wantDrawn = want.subtitleStreamId !== 0 &&
           version.subtitleTracks.find((t) => t.id === want.subtitleStreamId)?.external === true &&

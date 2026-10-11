@@ -46,6 +46,7 @@ import { findIndexedLibraryItem } from "../services/library-index.js";
 import { playedThreshold } from "../services/played-state.js";
 import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
 import { markOriginalAudio } from "../services/original-language.js";
+import { audioNotes, type AudioDecision, type SourceAudio } from "../services/stream-audio.js";
 
 const router = Router();
 
@@ -4415,6 +4416,8 @@ interface VersionFacts {
   bitDepth: number | null;
   partKey: string | null;
   fileSize: number | null;
+  /** Its audio tracks as the file has them, for what Plex does with one. */
+  audioTracks: SourceAudio[];
 }
 
 /** The version a start plays, from buildMeta; null when that can't be had. */
@@ -4432,6 +4435,7 @@ async function versionFacts(ratingKey: string, mediaIndex: number): Promise<Vers
       bitDepth: v.bitDepth ?? null,
       partKey: v.partKey ?? null,
       fileSize: v.fileSize ?? null,
+      audioTracks: (v.audioTracks ?? []).map((t) => ({ id: t.id, codec: t.codec ?? null, channels: t.channels ?? null })),
     };
   } catch {
     return null;
@@ -4579,7 +4583,7 @@ router.get(
     // Core manifest fetch logic — wrapped in a promise for in-flight deduplication
     const fetchManifest = async (
       subtitleMode: "burn" | "none",
-      { videoResolution, hevc, copy, copyKbps, transcodeKbps, peakKbps, notCopied, refused, quality, fileKbps }: {
+      { videoResolution, hevc, copy, copyKbps, transcodeKbps, peakKbps, notCopied, refused, quality, fileKbps, audioTracks }: {
         videoResolution: string;
         /** Which way HEVC is offered: as what Plex encodes to, as something it
          *  may copy, or not at all. */
@@ -4599,6 +4603,8 @@ router.get(
         quality: number;
         /** The file's own bitrate, which is a copy's, when Plex knows it. */
         fileKbps: number | null;
+        /** The file's audio tracks, for what Plex does with the one playing. */
+        audioTracks: SourceAudio[];
       },
     ): Promise<string> => {
       const params: Record<string, string> = {
@@ -4693,8 +4699,11 @@ router.get(
       // the measured playlist plays a re-encoded stream just as well, while
       // Plex's own playlist for a copied one is the thing that breaks.
       let videoCopied = false;
+      // And what it does with the audio — see services/stream-audio.ts.
+      let audioDecided: AudioDecision | null = null;
       const decide = async (): Promise<void> => {
         videoCopied = false;
+        audioDecided = null;
         try {
           const decisionRes = await plexFetch(decisionPath, { ...params, transcodeSessionId: sessionId }, hlsHeaders);
           // Log the decision body — contains generalDecisionCode that tells us
@@ -4718,6 +4727,20 @@ router.get(
                 ?.Stream as Array<Record<string, unknown>> | undefined
             )?.find((st) => st.streamType === 1);
             const videoCodec = videoStream?.codec ?? media?.videoCodec;
+            const audioStream = (
+              (media?.Part as Array<Record<string, unknown>> | undefined)?.[0]
+                ?.Stream as Array<Record<string, unknown>> | undefined
+            )?.find((st) => st.streamType === 2);
+            if (audioStream) {
+              const num = (v: unknown) => (Number.isFinite(Number(v)) && v !== null && v !== "" ? Number(v) : null);
+              audioDecided = {
+                id: num(audioStream.id),
+                decision: typeof audioStream.decision === "string" ? audioStream.decision : null,
+                codec: typeof audioStream.codec === "string" ? audioStream.codec : null,
+                channels: num(audioStream.channels),
+                bitrate: num(audioStream.bitrate),
+              };
+            }
             if (typeof videoCodec === "string" && videoCodec) {
               recordSessionVideoCodec(sessionId, videoCodec);
             }
@@ -4867,6 +4890,7 @@ router.get(
         // Roughly what each viewer pulls: the file's own rate for a copy.
         kbps: videoCopied ? fileKbps : Number(params.videoBitrate),
         quality: quality || null,
+        ...audioNotes(audioDecided, audioTracks),
       });
       const rewritten = rewriteManifestUrls(m3u8, authToken)
         .replace(/^#EXTM3U[^\n]*\n/, (head) => `${head}${notes.map((n) => `${n}\n`).join("")}`);
@@ -4950,6 +4974,7 @@ router.get(
         refused: (asked) => refusedCopyReason(version, asked, roomHevc),
         quality,
         fileKbps: kbps,
+        audioTracks: version?.audioTracks ?? [],
       });
     });
     manifestInFlight.set(sessionId, promise);

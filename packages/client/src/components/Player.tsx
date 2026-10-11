@@ -50,6 +50,8 @@ import { useVideoZoom } from "../lib/useVideoZoom";
 import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
 import { clampPipRect, pipDockForRect, releasePipDock, startPipMotion, samplePipMotion, PIP_MARGIN, PIP_DRAG_SLOP, type PipDock, type PipRect } from "../lib/pipMotion";
 import type { SyncState, SyncActions, QueueItem, Switching } from "../hooks/useSync";
+import type { PreviewStatus } from "../lib/previewStatus";
+import type { SubtitleLoadStatus, SubtitleShown } from "../lib/subtitleStatus";
 import type { InviteResult } from "../hooks/useDiscord";
 
 const PING_INTERVAL_MS = 10_000; // 10s — matches Plex API recommendation for LAN timeline updates
@@ -1419,6 +1421,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [activeMarker, setActiveMarker] = useState<SkipMarker | null>(null);
   // Plex part id for hover-preview frames, or null when this item has none.
   const [previewPartId, setPreviewPartId] = useState<number | null>(null);
+  // How far the preview frames and a drawn subtitle have come, kept up to
+  // date by the seek bar and the subtitle layer for Stats for nerds.
+  const previewStatusRef = useRef<PreviewStatus | null>(null);
+  const subtitleStatusRef = useRef<SubtitleLoadStatus | null>(null);
   /**
    * The player is going away, as opposed to rebuilding.
    *
@@ -2777,6 +2783,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     activeSubtitleId !== 0 && activeSubtitleId !== burnedSubtitleId && activeSubtitleTrack?.external
       ? activeSubtitleId
       : null;
+  // As Stats for nerds tells it.
+  const subtitleShown: SubtitleShown = activeSubtitleId === 0 ? "off"
+    : activeSubtitleId === burnedSubtitleId ? "burned"
+      : drawnSubtitleId !== null ? "drawn" : "switching";
 
   // A different subtitle file is a different set of timings, so an offset dialled
   // in for the last one means nothing here. The panel closes with it: it is only
@@ -7161,6 +7171,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           notes={streamNotes}
           quality={quality}
           downloadedAheadS={downloadedAheadS}
+          subtitle={{ track: activeSubtitleTrack, shown: subtitleShown, failed: sidecarFailed }}
+          subtitleStatusRef={subtitleStatusRef}
+          previewPartId={previewPartId}
+          previewStatusRef={previewStatusRef}
           onClose={() => setShowStats(false)}
         />
       )}
@@ -7211,6 +7225,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // Undefined when the library has no generated preview thumbnails, so
         // Controls shows a plain timestamp instead of chasing missing images.
         previewPartId={previewPartId ?? undefined}
+        previewStatusRef={previewStatusRef}
         // Only offered when there is a subtitle this client is drawing, which
         // is the only kind with any timing to change.
         onOpenSubtitleTiming={
@@ -7232,6 +7247,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         offsetMs={subtitleOffsetMs}
         onUnavailable={() => setSidecarFailed(true)}
         hidden={loadingShown}
+        statusRef={subtitleStatusRef}
       />
       {!isPip && showTrackSwitcher && (
         <TrackSwitcher

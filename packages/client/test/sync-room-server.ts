@@ -95,6 +95,12 @@ let eventList = false;
 let eventS = 40;
 /** Where each session was asked to start: its owner says, everyone else joins it. */
 const sessionStart = new Map<string, number>();
+/**
+ * &notes=1: the stream's master playlist carries the notes the bot writes
+ * into one (routes/plex.ts streamNotes) — the original video, its EAC3 5.1
+ * audio converted to AAC — for Stats for nerds to show.
+ */
+let notesOn = false;
 /** Whether titles have preview frames, and how long Plex takes to start sending them. */
 let previewsOn = false;
 let previewDelayMs = 0;
@@ -249,6 +255,7 @@ const server = http.createServer(async (req, res) => {
     uploadKbps = 0;
     uploadFreeAt = 0;
     previewsOn = url.searchParams.get("previews") === "1";
+    notesOn = url.searchParams.get("notes") === "1";
     previewDelayMs = Number(url.searchParams.get("previewDelayMs") ?? 0) || 0;
     previewsSent.length = 0;
     eventList = url.searchParams.get("event") === "1";
@@ -302,6 +309,23 @@ const server = http.createServer(async (req, res) => {
       return json(res, { cues, complete: true });
     }
     return subtitleRead(res, id, url);
+  }
+
+  if (/^\/api\/plex\/hls\/[^/]+\/[^/]+\/master\.m3u8$/.test(p) && notesOn && !url.searchParams.has("media")) {
+    const notes: Record<string, string> = {
+      video: "copy", kbps: "8000", audio: "transcode", audioFrom: "EAC3 5.1", audioTo: "AAC 5.1", audioKbps: "384",
+      audioReason: "the file's audio is EAC3, and the player takes AAC only",
+    };
+    const media = new URL(url);
+    media.searchParams.set("media", "1");
+    res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
+    return res.end([
+      "#EXTM3U",
+      ...Object.entries(notes).map(([k, v]) => `#EXT-X-SESSION-DATA:DATA-ID="com.pdt.${k}",VALUE="${v}"`),
+      "#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=1280x720",
+      `${media.pathname}${media.search}`,
+      "",
+    ].join("\n"));
   }
 
   // The stream: a media playlist straight away, as a copy of Plex's would be.

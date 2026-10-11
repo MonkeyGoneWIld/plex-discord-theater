@@ -15,7 +15,7 @@ import { PlexAccountButton } from "./components/PlexAccountButton";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { formatMediaTitle } from "./lib/format";
 import { apiPost, authUrl, fetchMeta, invalidateMeta, setStreams, versionOf } from "./lib/api";
-import { matchAudioTrack, startingAudioPref, startingSubtitle, startingSubtitlePref, titleTrackPrefs } from "./lib/trackPrefs";
+import { matchAudioTrack, plexAudioChoice, plexSubtitleChoice, startingAudioPref, startingSubtitle, startingSubtitlePref, titleTrackPrefs } from "./lib/trackPrefs";
 import { useMediaQuery, MOBILE_LANDSCAPE_QUERY, NARROW_QUERY, PHONE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem, SuggestionItem } from "./hooks/useSync";
@@ -770,11 +770,18 @@ export function App() {
       const subtitlePref = own.subtitle ?? startingSubtitlePref();
       const audioMatch = matchAudioTrack(version.audioTracks, own.audio ?? startingAudioPref());
       // Null means this episode doesn't carry the language they were listening
-      // to, and there is no sensible substitute — leave Plex's own choice.
-      const audio = audioMatch ?? version.audioTracks.find((t) => t.selected);
+      // to, and there is no sensible substitute — leave Plex's own choice,
+      // as long as that isn't a commentary (plexAudioChoice).
+      const fallbackAudio = audioMatch ? null : plexAudioChoice(version.audioTracks);
+      const audio = audioMatch ?? fallbackAudio ?? undefined;
       audioStreamId = audio?.id;
+      // Plex's own selection, put right where it was a commentary.
+      const plexAudio = version.audioTracks.find((t) => t.selected);
+      const audioToSet = audioMatch ?? (fallbackAudio && plexAudio && fallbackAudio !== plexAudio ? fallbackAudio : null);
+      const plexSubtitle = plexSubtitleChoice(version.subtitleTracks);
+      const subtitleOffCommentary = !subtitlePref && !plexSubtitle && version.subtitleTracks.some((t) => t.selected);
 
-      if (maySelect && version.partId != null && (subtitlePref || audioMatch)) {
+      if (maySelect && version.partId != null && (subtitlePref || audioToSet || subtitleOffCommentary)) {
         const subtitleMatch = subtitlePref
           ? startingSubtitle(version.subtitleTracks, subtitlePref, audio)
           : null;
@@ -782,19 +789,19 @@ export function App() {
           subtitles = subtitleMatch != null;
           subtitleStreamId = subtitleMatch?.id ?? 0;
         } else {
-          subtitleStreamId = version.subtitleTracks.find((t) => t.selected)?.id ?? 0;
+          subtitleStreamId = plexSubtitle?.id ?? 0;
           subtitles = subtitleStreamId !== 0;
         }
         // Selected before the player mounts: once the transcode has started,
         // changing it costs a restart. One call, so an episode that needs both
         // doesn't pay for two round trips before it can start.
         await setStreams(version.partId, {
-          ...(subtitlePref ? { subtitleStreamID: subtitleMatch?.id ?? 0 } : {}),
-          ...(audioMatch ? { audioStreamID: audioMatch.id } : {}),
+          ...(subtitlePref ? { subtitleStreamID: subtitleMatch?.id ?? 0 } : subtitleOffCommentary ? { subtitleStreamID: 0 } : {}),
+          ...(audioToSet ? { audioStreamID: audioToSet.id } : {}),
         });
         invalidateMeta(queueItem.ratingKey);
       } else {
-        subtitleStreamId = version.subtitleTracks.find((t) => t.selected)?.id ?? 0;
+        subtitleStreamId = plexSubtitle?.id ?? 0;
         subtitles = subtitleStreamId !== 0;
       }
     } catch (err) {

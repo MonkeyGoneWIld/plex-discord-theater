@@ -60,14 +60,35 @@ function flavour(title?: string | null): { forced: boolean; sdh: boolean } {
 }
 
 /**
- * Whether an audio track is a commentary or description rather than the film.
+ * Whether a track is a commentary or description rather than the film — an
+ * audio track, or the subtitles of one.
  *
  * These sit in the same language as the feature, so language matching alone
  * will happily land on one — and a viewer who asked for Japanese audio does not
- * mean the director talking over it.
+ * mean the director talking over it. Nor English subtitles a critic's words:
+ * Rear Window's "Commentary (English PGS)" was chosen over its "SDH (English
+ * PGS)" for being the one not marked SDH. No title starts on one; one is only
+ * ever picked by hand.
  */
-function isCommentary(title?: string | null): boolean {
+export function isCommentary(title?: string | null): boolean {
   return /\b(commentary|descriptive|audio description)\b/i.test(title ?? "");
+}
+
+/**
+ * Plex's own choice of audio, for a title nothing remembered says anything
+ * about: the track it has selected, unless that is a commentary — Plex keeps
+ * whatever was last played, and somebody may have picked one — then the
+ * file's default, then its first track, that isn't.
+ */
+export function plexAudioChoice(tracks: StreamTrack[]): StreamTrack | null {
+  const feature = tracks.filter((t) => !isCommentary(t.title));
+  return feature.find((t) => t.selected) ?? feature.find((t) => t.default) ?? feature[0] ?? tracks[0] ?? null;
+}
+
+/** Plex's own choice of subtitle, the same way: the one it has selected,
+ *  unless that is a commentary's — then none. */
+export function plexSubtitleChoice(tracks: StreamTrack[]): StreamTrack | null {
+  return tracks.find((t) => t.selected && !isCommentary(t.title)) ?? null;
 }
 
 function normalizedText(value?: string | null): string {
@@ -314,7 +335,8 @@ export function matchSubtitleTrack(
 
   const wantFlavour = flavour(pref.title);
   const wantedTitle = titleIdentity(pref.title);
-  const sameLang = tracks.filter((t) => sameLanguage(t, pref));
+  // Never a commentary's — see isCommentary.
+  const sameLang = tracks.filter((t) => !isCommentary(t.title) && sameLanguage(t, pref));
   if (sameLang.length === 0) return null;
 
   // Rank within the language: the explicit label identifies tracks like
@@ -411,10 +433,10 @@ export function tracksForNewItem(
  * subtitles, there is no sensible way to turn audio off, and picking some other
  * language because the wanted one is missing would be worse than the default.
  *
- * Ranks commentary above everything else it considers, in the sense that a
- * commentary track is only ever chosen for somebody who was listening to one:
- * a dub and its director's commentary share a language, and landing on the
- * wrong one is the difference between watching the film and not.
+ * Never a commentary: a dub and its director's commentary share a language,
+ * and landing on the wrong one is the difference between watching the film and
+ * not. Not even for somebody who was listening to one — one is picked by hand,
+ * for the title it is on, and isn't carried to the next.
  */
 export function matchAudioTrack(
   tracks: StreamTrack[],
@@ -423,8 +445,7 @@ export function matchAudioTrack(
   if (!pref || tracks.length === 0) return null;
   if (pref.original) return originalAudioTrack(tracks);
 
-  const wantCommentary = isCommentary(pref.title);
-  const sameLang = tracks.filter((t) => sameLanguage(t, pref));
+  const sameLang = tracks.filter((t) => !isCommentary(t.title) && sameLanguage(t, pref));
   if (sameLang.length === 0) return null;
   // Some anime files tag *both* the Japanese and English streams as English,
   // leaving the real distinction only in the title: e.g. Plex reports
@@ -438,7 +459,6 @@ export function matchAudioTrack(
   const scored = sameLang.map((t) => {
     let score = 0;
     if (wantedTitleHint && titleLanguageHint(t.title) === wantedTitleHint) score += 16;
-    if (isCommentary(t.title) === wantCommentary) score += 8;
     if (pref.channels != null && t.channels === pref.channels) score += 4;
     if (pref.codec && t.codec === pref.codec) score += 1;
     return { t, score };

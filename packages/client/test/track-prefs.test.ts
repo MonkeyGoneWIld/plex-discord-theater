@@ -6,7 +6,7 @@
  * file happens to hold. These are the cases where "same language" is not enough
  * to identify the right track.
  */
-import { describeWatched, matchAudioTrack, matchSubtitleTrack, mergeTrackPrefs, tracksForNewItem, type AudioPref, type SubtitlePref } from "../src/lib/trackPrefs";
+import { describeWatched, matchAudioTrack, matchSubtitleTrack, mergeTrackPrefs, plexAudioChoice, plexSubtitleChoice, tracksForNewItem, type AudioPref, type SubtitlePref } from "../src/lib/trackPrefs";
 import type { StreamTrack } from "../src/lib/api";
 
 let pass = 0;
@@ -61,14 +61,48 @@ console.log("\n— commentary is not the film —");
 
   check("the feature is chosen even when commentary is listed first",
     matchAudioTrack([commentary, feature], audioPref({}))?.id, 20);
-  check("somebody who was listening to commentary keeps it",
-    matchAudioTrack([feature, commentary], audioPref({ title: "Japanese Commentary" }))?.id, 21);
+  check("even somebody who was listening to commentary starts the next title on the film",
+    matchAudioTrack([feature, commentary], audioPref({ title: "Japanese Commentary" }))?.id, 20);
+  check("and a language only a commentary is in leaves Plex's choice instead",
+    matchAudioTrack([commentary], audioPref({})), null);
+  check("which isn't a commentary either, even when Plex has one selected",
+    plexAudioChoice([{ ...commentary, selected: true }, feature])?.id, 20);
+  check("the file's default, then its first track, when Plex has none selected",
+    [plexAudioChoice([commentary, feature, { ...feature, id: 24, default: true }])?.id, plexAudioChoice([commentary, feature])?.id],
+    [24, 20]);
   check("audio description is treated the same way",
     matchAudioTrack(
       [track({ id: 22, title: "English Audio Description", language: "English", languageCode: "eng" }),
        track({ id: 23, title: "English", language: "English", languageCode: "eng" })],
       audioPref({ languageCode: "eng", language: "English", codec: null, channels: null }),
     )?.id, 23);
+}
+
+console.log("\n— nor are a commentary's subtitles —");
+{
+  // Rear Window's English subtitles, as Plex lists them on 11 October.
+  const sdh = track({ id: 304534, title: "SDH (English PGS)", language: "English", languageCode: "eng", codec: "pgs", external: false });
+  const commentary = track({ id: 304562, title: "Commentary (English PGS)", language: "English", languageCode: "eng", codec: "pgs", external: false });
+  const beside = track({ id: 375250, title: "English (SRT External)", language: "English", languageCode: "eng", codec: "srt", external: true, sidecar: true });
+  const english = (t: Partial<SubtitlePref> = {}): SubtitlePref => ({ off: false, languageCode: "en", language: "English", ...t });
+  check("English from Settings: the SDH, not the commentary, which isn't marked SDH",
+    matchSubtitleTrack([sdh, commentary, beside], english())?.id, 304534);
+  check("whichever order Plex lists them in",
+    matchSubtitleTrack([commentary, beside, sdh], english())?.id, 304534);
+  check("somebody who last picked a commentary's subtitles gets the film's",
+    matchSubtitleTrack([sdh, commentary, beside], english({ title: "Commentary (English PGS)", codec: "pgs" }))?.id, 304534);
+  check("and only a commentary's in that language is none",
+    matchSubtitleTrack([commentary], english()), null);
+  check("Plex's own selection, a commentary's, is none",
+    plexSubtitleChoice([{ ...commentary, selected: true }, sdh]), null);
+  check("but its own selection otherwise stands",
+    plexSubtitleChoice([commentary, { ...sdh, selected: true }])?.id, 304534);
+  check("the next episode, after somebody watched one with a commentary's subtitles",
+    tracksForNewItem(
+      { audioTracks: [], subtitleTracks: [commentary, sdh] },
+      { audio: null, subtitle: english({ title: "Commentary (English PGS)" }) },
+      { audioStreamId: 0, subtitleStreamId: 0 },
+    ).subtitleStreamId, 304534);
 }
 
 console.log("\n— within a language, the closest match —");

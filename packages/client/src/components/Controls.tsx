@@ -8,6 +8,7 @@ import {
 import { createPreviewMotion, type SpeedTier } from "../lib/previewMotion";
 import { loadVolume } from "../lib/volume";
 import { previewPassPath, takePreviewStart } from "../lib/previewPrefetch";
+import type { PreviewPass, PreviewStatus } from "../lib/previewStatus";
 import { getLevel, setLevel, boostAvailable, BOOST_ACCENT, MAX_LEVEL } from "../lib/audioBoost";
 import { useMediaQuery, COMPACT_CONTROLS_QUERY, PHONE_QUERY } from "../lib/useMediaQuery";
 import { QUIET_SURFACE } from "../lib/surface";
@@ -113,6 +114,9 @@ interface ControlsProps {
   /** Plex part id for BIF hover-preview frames. Omitted when the item has no
    *  generated preview thumbnails — the tooltip then shows the timestamp alone. */
   previewPartId?: number;
+  /** Kept up to date with how far the preview frames have come, for Stats
+   *  for nerds. */
+  previewStatusRef?: React.MutableRefObject<PreviewStatus | null>;
 }
 
 /**
@@ -483,6 +487,7 @@ export function Controls({
   onPrevEpisode,
   onNextEpisode,
   previewPartId,
+  previewStatusRef,
 }: ControlsProps) {
   const [elementPlaying, setPlaying] = useState(false);
   // Held for the room is playing, from here — see `held`.
@@ -1167,6 +1172,13 @@ export function Controls({
     };
     const progressive = createProgressivePreviewReader(onTierReady);
     let reader: PreviewFrameReader = progressive;
+    // For Stats for nerds: how many have come, and when.
+    const status: PreviewStatus = {
+      partId: previewPartId, state: "downloading", transport: null, frames: 0, ready: 0, bytes: 0,
+      passes: [], waitingForBufferS: null,
+    };
+    if (previewStatusRef) previewStatusRef.current = status;
+    const sinceStart = () => (performance.now() - transferStartedAt) / 1000;
 
     /**
      * Seconds of video buffered past the playhead; unlimited once the buffer
@@ -1197,8 +1209,10 @@ export function Controls({
         const mark = PREVIEW_PASS_BUFFER_S[pass];
         // Before the request, not only between reads: opening the connection
         // at all is what starts the competition with the video.
+        if (headroom() < mark) Object.assign(status, { state: "waiting", waitingForBufferS: mark });
         await waitForHeadroom(mark);
         if (cancelled) return;
+        Object.assign(status, { state: "downloading", waitingForBufferS: null });
         if (pass > 0) {
           logEvent("Preview", "pass requested", {
             partId: previewPartId, pass, bufferS: Math.round(Math.min(headroom(), 999)),
@@ -1209,6 +1223,11 @@ export function Controls({
         // again beside the stream's first segments.
         const ahead = pass === 0 ? await takePreviewStart(previewPartId) : null;
         if (cancelled) return;
+        const entry: PreviewPass = {
+          pass, askedS: ahead ? null : sinceStart(), doneS: null, playheadS: null, bytes: 0, readyAfter: null,
+          fromTitlePage: !!ahead,
+        };
+        status.passes.push(entry);
         let contentType: string;
         let body: { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<void> };
         if (ahead) {
@@ -1220,13 +1239,17 @@ export function Controls({
           };
         } else {
           const res = await fetch(authUrl(previewPassPath(previewPartId, pass)), { signal: abort.signal });
-          if (!res.ok || !res.body) return;
+          if (!res.ok || !res.body) {
+            if (!cancelled) Object.assign(status, { state: "unavailable", httpStatus: res.status });
+            return;
+          }
           contentType = res.headers.get("content-type") ?? "";
           body = res.body.getReader();
         }
         const version = contentType.startsWith("application/x-plex-preview-v2") ? 2
           : contentType.startsWith("application/x-plex-preview-v1") ? 1 : 0;
         if (pass === 0) {
+          status.transport = version ? `progressive-v${version}` : "legacy-bif";
           logEvent("Preview", "transfer accepted", {
             partId: previewPartId, transport: version ? `progressive-v${version}` : "legacy-bif",
             ...(ahead ? { fetched: "on the title's page" } : {}),
@@ -1247,13 +1270,20 @@ export function Controls({
           if (done || cancelled) break;
           if (!value) continue;
           bytes += value.length;
+          entry.bytes += value.length;
+          status.bytes = bytes;
           reader.push(value);
           if (reader.rejected()) {
+            status.state = "unreadable";
             logEvent("Preview", "frame index unreadable", { partId: previewPartId, bytes });
             await body.cancel();
             return;
           }
           const frames = reader.frames();
+          if (frames) {
+            status.frames = frames.count;
+            status.ready = frames.ready;
+          }
           if (frames && !previewFramesRef.current) {
             previewFramesRef.current = frames;
             // Logged at the moment the index lands rather than at the end of the
@@ -1268,12 +1298,18 @@ export function Controls({
             selectPreview(activePct, speedTierRef.current);
           }
         }
+        if (!cancelled) {
+          entry.doneS = sinceStart();
+          entry.playheadS = videoRef.current?.currentTime ?? null;
+          entry.readyAfter = reader.frames()?.ready ?? 0;
+        }
         // A server without passes sends them all in the first response, and
         // so does a v1 or plain BIF one.
         const frames = reader.frames();
         if (cancelled || version !== 2 || !frames || frames.ready === frames.count) break;
       }
       if (!cancelled) {
+        status.state = reader.frames()?.ready === reader.frames()?.count ? "complete" : "incomplete";
         logEvent("Preview", reader.frames()?.ready === reader.frames()?.count ? "frames complete" : "frames incomplete", {
           partId: previewPartId, bytes, frames: reader.frames()?.count ?? 0,
           ready: reader.frames()?.ready ?? 0,
@@ -1281,7 +1317,10 @@ export function Controls({
       }
     };
 
-    read().catch(() => { /* the per-frame path is still there */ });
+    read().catch(() => {
+      // The per-frame path is still there.
+      if (!cancelled) status.state = "failed";
+    });
 
     return () => {
       cancelled = true;

@@ -3,7 +3,7 @@ import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, backdropThumb
 import { formatAirDate, formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
-import { loadAudioPref, loadSubtitlePref, saveAudioPref, saveSubtitlePref, matchAudioTrack, rememberTitleTracks, startingSubtitle, subtitlesOnlyForForeignAudio, titleTrackPrefs } from "../lib/trackPrefs";
+import { loadAudioPref, loadSubtitlePref, saveAudioPref, saveSubtitlePref, matchAudioTrack, plexAudioChoice, rememberTitleTracks, startingSubtitle, subtitlesOnlyForForeignAudio, titleTrackPrefs } from "../lib/trackPrefs";
 import { readSubtitleAhead } from "../lib/subtitleReadAhead";
 import { prefetchPreviewStart } from "../lib/previewPrefetch";
 import { RatingsRow } from "./RatingsRow";
@@ -267,8 +267,7 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
     const own = titleTrackPrefs(meta ?? item);
     const defaultAudio =
       matchAudioTrack(audioTracks, own.audio ?? loadAudioPref())
-      ?? audioTracks.find((t) => t.selected)
-      ?? audioTracks[0];
+      ?? plexAudioChoice(audioTracks);
     setSelectedAudio(defaultAudio ? defaultAudio.id : null);
     // Re-apply the viewer's remembered subtitle choice — matched by language
     // and flavour, since stream ids differ from episode to episode. With no

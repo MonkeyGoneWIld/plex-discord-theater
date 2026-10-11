@@ -184,6 +184,8 @@ const decisions: Array<{
  *  over VIDEO_BITRATE_KBPS's default of 12000 but under the cap. */
 const fileKbps = (ratingKey: string) =>
   ratingKey === "950" ? 31000 : ratingKey === "960" || ratingKey === "970" ? 15000 : 8000;
+/** 940's audio is EAC3 5.1, which Plex converts to AAC; everyone else's is AAC Stereo, copied. */
+const EAC3_TITLE = "940";
 /** The subtitle the item has selected, as Plex keeps it — per item, not per request. */
 let selectedSubtitle: string | null = null;
 let subtitleReads = 0;
@@ -248,7 +250,9 @@ const plex = http.createServer((req, res) => {
       Media: [{ id: 1, width: 1920, height: 1080, videoCodec: "h264", bitrate: fileKbps(meta[1]), Part: [{ id: 1, file: "/movies/Film.mkv",
         ...(PART_FILES[meta[1]] ? { key: `/library/parts/${meta[1]}/1/file.mkv` } : {}), Stream: [
         { id: 11, streamType: 1, codec: "h264" },
-        { id: 12, streamType: 2, codec: "aac", selected: true },
+        meta[1] === EAC3_TITLE
+          ? { id: 12, streamType: 2, codec: "eac3", channels: 6, selected: true }
+          : { id: 12, streamType: 2, codec: "aac", channels: 2, selected: true },
         { id: 21, streamType: 3, codec: "srt", language: "English" },
         { id: 22, streamType: 3, codec: "pgs", language: "English" },
         { id: 23, streamType: 3, codec: "srt", language: "French" },
@@ -342,7 +346,12 @@ const plex = http.createServer((req, res) => {
       videoBitrate: url.searchParams.get("videoBitrate"),
     });
     return send({ generalDecisionCode: 1001, Metadata: [{ Media: [{ selected: true, protocol: "hls", videoCodec: "h264", audioCodec: "aac",
-      Part: [{ Stream: [{ streamType: 1, codec: "h264", decision: copy ? "copy" : "transcode" }, { streamType: 2, codec: "aac", decision: "copy" }] }] }] }] });
+      Part: [{ Stream: [
+        { streamType: 1, codec: "h264", decision: copy ? "copy" : "transcode" },
+        // As the real one has it: the id a string, the codec what comes out.
+        { id: "12", streamType: 2, codec: "aac", channels: ratingKey === EAC3_TITLE ? 6 : 2, bitrate: ratingKey === EAC3_TITLE ? 384 : 160,
+          decision: ratingKey === EAC3_TITLE ? "transcode" : "copy" },
+      ] }] }] }] });
   }
   if (url.pathname === "/video/:/transcode/universal/start.m3u8") {
     const key = crypto.randomUUID();
@@ -686,19 +695,29 @@ console.log("\n— through the routes —");
   console.log("\n— what the player is told about the stream, for Stats for nerds —");
   /** The notes a master playlist carries, as hls.js would read them. */
   const notesOf = (m3u8: string) => Object.fromEntries(
-    [...m3u8.matchAll(/#EXT-X-SESSION-DATA:DATA-ID="com\.pdt\.([a-z]+)",VALUE="([^"]*)"/g)].map((m) => [m[1], m[2]]));
+    [...m3u8.matchAll(/#EXT-X-SESSION-DATA:DATA-ID="com\.pdt\.([A-Za-z]+)",VALUE="([^"]*)"/g)].map((m) => [m[1], m[2]]));
   const startNotes = async (ratingKey: string, query = "") => {
     const sid = crypto.randomUUID();
     const text = await (await fetch(`${origin}/api/plex/hls/${ratingKey}/${sid}/master.m3u8${query}`)).text();
     plexRoutes.markTranscodeStopped(sid);
     return { notes: notesOf(text), asked: decisions.at(-1)! };
   };
-  check("a copy says so, and how heavy it is", (await startNotes("100")).notes, { video: "copy", kbps: "8000" });
+  check("a copy says so, and how heavy it is, and that its audio is the file's",
+    (await startNotes("100")).notes, { video: "copy", kbps: "8000", audio: "copy", audioFrom: "AAC Stereo" });
+  check("audio Plex converts says from what, to what, and why",
+    (await startNotes(EAC3_TITLE)).notes,
+    {
+      video: "copy", kbps: "8000", audio: "transcode", audioFrom: "EAC3 5.1", audioTo: "AAC 5.1", audioKbps: "384",
+      audioReason: "the file's audio is EAC3, and the player takes AAC only",
+    });
   check("an open-GOP Blu-ray says why it was re-encoded",
     (await startNotes("980")).notes.reason, "its keyframes aren't ones every player can start from (an open-GOP Blu-ray)");
   check("a file over the copy limit says that is why, and what it is re-encoded at",
     (await startNotes("950")).notes,
-    { video: "transcode", reason: "the file averages 31 Mbps, over this server's 20 Mbps copy limit", kbps: "12000" });
+    {
+      video: "transcode", reason: "the file averages 31 Mbps, over this server's 20 Mbps copy limit", kbps: "12000",
+      audio: "copy", audioFrom: "AAC Stereo",
+    });
   check("one Plex declined to copy says so, without blaming a bitrate it was asked well over",
     (await startNotes("970")).notes.reason,
     "Plex declined to copy it");
@@ -707,7 +726,10 @@ console.log("\n— through the routes —");
   const capped = await startNotes("960", "?quality=8000");
   check("a file averaging over it is re-encoded at it, without asking for a copy first, and the player told why",
     [capped.asked.directStream, capped.asked.videoBitrate, capped.notes],
-    ["0", "8000", { video: "transcode", reason: "the file averages 15 Mbps, over your 8 Mbps quality setting", kbps: "8000", quality: "8000" }]);
+    ["0", "8000", {
+      video: "transcode", reason: "the file averages 15 Mbps, over your 8 Mbps quality setting", kbps: "8000", quality: "8000",
+      audio: "copy", audioFrom: "AAC Stereo",
+    }]);
   const fits = await startNotes("100", "?quality=12000");
   check("a file averaging under it is still copied, its peaks left to the buffer",
     [fits.asked.directStream, fits.asked.videoBitrate, fits.notes.video], ["1", "200000", "copy"]);

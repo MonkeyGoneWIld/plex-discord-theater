@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type Hls from "hls.js";
 import HlsPkg from "hls.js";
 import { qualityLabel } from "../lib/quality";
-import type { StreamNotes } from "../lib/streamNotes";
+import { playbackMode, type StreamNotes } from "../lib/streamNotes";
+import type { StreamTrack } from "../lib/api";
+import { describePreview, type PreviewStatus } from "../lib/previewStatus";
+import { describeSubtitle, type SubtitleLoadStatus, type SubtitleShown } from "../lib/subtitleStatus";
 
 /**
  * Cumulative P2P delivery counters, accumulated in the Player from the
@@ -30,6 +33,14 @@ interface StatsOverlayProps {
   /** Seconds downloaded past the playhead, the browser's buffer and the P2P
    *  engine's together — see lib/bufferAhead. */
   downloadedAheadS?: () => number;
+  /** The subtitle on screen, how it is shown, and whether drawing it failed. */
+  subtitle?: { track: StreamTrack | null; shown: SubtitleShown; failed: boolean };
+  /** How far a subtitle the player draws has loaded — see SubtitleLayer. */
+  subtitleStatusRef?: React.RefObject<SubtitleLoadStatus | null>;
+  /** The part whose preview frames the seek bar fetches; null when Plex has none. */
+  previewPartId?: number | null;
+  /** How far they have come — see Controls. */
+  previewStatusRef?: React.RefObject<PreviewStatus | null>;
   onClose: () => void;
 }
 
@@ -62,7 +73,10 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRef, notes, quality, downloadedAheadS, onClose }: StatsOverlayProps) {
+export function StatsOverlay({
+  videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRef, notes, quality, downloadedAheadS, subtitle, subtitleStatusRef,
+  previewPartId = null, previewStatusRef, onClose,
+}: StatsOverlayProps) {
   // Read by the poll, which is set up once.
   const downloadedAheadRef = useRef(downloadedAheadS);
   downloadedAheadRef.current = downloadedAheadS;
@@ -181,7 +195,7 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
         // The server marks the playlists it builds for copied streams as EVENT
         // playlists (services/direct-stream.ts); Plex's own have no type.
         if (level?.details) {
-          videoPath = level.details.type === "EVENT" ? "Original (Direct Stream)" : "Re-encoded by Plex";
+          videoPath = level.details.type === "EVENT" ? "Original" : "Re-encoded by Plex";
         }
       }
 
@@ -222,12 +236,32 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
   // say why or at what rate.
   const mbpsOf = (kbps: number | null) => (kbps ? ` · ${(kbps / 1000).toFixed(kbps % 1000 ? 1 : 0)} Mbps` : "");
   const videoPath = notes?.video === "copy"
-    ? `Original (Direct Stream)${mbpsOf(notes.kbps)}`
+    ? `Original${mbpsOf(notes.kbps)}`
     : notes?.video === "transcode"
       ? `Re-encoded by Plex${mbpsOf(notes.kbps)}`
       : snap?.videoPath ?? "—";
+  // Plex's words for the stream as a whole — see playbackMode.
+  const mode = playbackMode(notes);
+  const playback = mode === "Direct Play" ? "Direct Play · the file's video and audio, untouched"
+    : mode === "Direct Stream" ? `Direct Stream · the file's video${notes?.audio === "transcode" ? ", its audio converted" : ""}`
+      : mode === "Transcode" ? "Transcode · the video re-encoded by Plex"
+        : "—";
+  const audioPath = notes?.audio === "copy"
+    ? `Original${notes.audioFrom ? ` · ${notes.audioFrom}` : ""}`
+    : notes?.audio === "transcode"
+      ? `Converted · ${notes.audioFrom ?? "?"} → ${notes.audioTo ?? "?"}${notes.audioKbps ? `, ${notes.audioKbps} kbps` : ""}`
+      : "—";
+  const subtitleRows = subtitle
+    ? describeSubtitle(subtitle.track, subtitle.shown, subtitleStatusRef?.current ?? null, subtitle.failed)
+    : [];
+  const previewStatus = previewStatusRef?.current ?? null;
+  const previewRows = describePreview(
+    previewStatus && previewStatus.partId === previewPartId ? previewStatus : null,
+    previewPartId !== null,
+  );
 
   const rows: Array<[string, string]> = [
+    ["Playback", playback],
     ["Viewport / Frames", `${snap?.resolution ?? "—"} · dropped ${snap?.droppedFrames ?? 0} / ${snap?.totalFrames ?? 0}`],
     ["Stream resolution", snap?.streamResolution ?? "—"],
     ["Decode rate", snap?.fps ?? "—"],
@@ -236,6 +270,10 @@ export function StatsOverlay({ videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRe
     ["Buffer health", snap?.bufferHealth ?? "—"],
     ["Video", videoPath],
     ...(notes?.video === "transcode" && notes.reason ? [["Re-encoded because", notes.reason] as [string, string]] : []),
+    ["Audio", audioPath],
+    ...(notes?.audio === "transcode" && notes.audioReason ? [["Converted because", notes.audioReason] as [string, string]] : []),
+    ...subtitleRows,
+    ...previewRows,
     ["Your quality", quality ? `Up to ${qualityLabel(quality)}` : qualityLabel(0)],
     ["Codecs", `${snap?.videoCodec ?? "—"} / ${snap?.audioCodec ?? "—"}`],
     ["Last segment", snap?.lastFrag ?? "—"],
@@ -277,7 +315,7 @@ const styles: Record<string, React.CSSProperties> = {
     position: "absolute",
     top: "64px",
     left: "20px",
-    width: "340px",
+    width: "380px",
     maxWidth: "calc(100% - 40px)",
     background: "rgba(15,15,15,0.82)",
     backdropFilter: "blur(12px)",
@@ -316,6 +354,9 @@ const styles: Record<string, React.CSSProperties> = {
   },
   body: {
     padding: "6px 12px 10px",
+    // Rows enough to run past a small window: scroll rather than overflow.
+    maxHeight: "calc(100vh - 160px)",
+    overflowY: "auto",
   },
   row: {
     display: "flex",
@@ -325,7 +366,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   label: {
     color: "rgba(255,255,255,0.5)",
-    whiteSpace: "nowrap",
+    // Pre, so the rows under another one keep their indent.
+    whiteSpace: "pre",
   },
   value: {
     color: "#f0f0f0",

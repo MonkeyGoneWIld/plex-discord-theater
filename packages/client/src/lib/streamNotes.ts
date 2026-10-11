@@ -12,6 +12,15 @@ export interface StreamNotes {
   kbps: number | null;
   /** The viewer quality ceiling it was started under, if any. */
   quality: number | null;
+  /** What Plex does with the audio: copies it as it is, or converts it. Null
+   *  from a server that doesn't say. */
+  audio: "copy" | "transcode" | null;
+  /** The file's audio — "EAC3 Stereo" — and, converted, what it became. */
+  audioFrom: string | null;
+  audioTo: string | null;
+  audioKbps: number | null;
+  /** Why it was converted, in a sentence. */
+  audioReason: string | null;
 }
 
 /** StreamNotes from hls.js's parsed session data, or null when the server sent
@@ -30,5 +39,25 @@ export function readStreamNotes(
   };
   const video = value("video");
   if (video !== "copy" && video !== "transcode") return null;
-  return { video, reason: value("reason"), kbps: num("kbps"), quality: num("quality") };
+  const audio = value("audio");
+  return {
+    video, reason: value("reason"), kbps: num("kbps"), quality: num("quality"),
+    audio: audio === "copy" || audio === "transcode" ? audio : null,
+    audioFrom: value("audioFrom"), audioTo: value("audioTo"), audioKbps: num("audioKbps"),
+    audioReason: value("audioReason"),
+  };
+}
+
+/**
+ * The stream in Plex's words. Direct Play: the film's video and audio both
+ * as they are in the file. Direct Stream: its video as it is, its audio
+ * converted. Transcode: the video re-encoded. Both of the first are carried
+ * to the player in HLS segments rather than as the file itself, which Plex
+ * would call a Direct Stream too; what matters here is that nothing in it
+ * was converted.
+ */
+export function playbackMode(notes: StreamNotes | null): string | null {
+  if (!notes?.video) return null;
+  if (notes.video === "transcode") return "Transcode";
+  return notes.audio === "copy" ? "Direct Play" : "Direct Stream";
 }

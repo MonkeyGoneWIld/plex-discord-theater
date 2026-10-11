@@ -1,6 +1,7 @@
 import { apiPost, fetchMeta, versionOf } from "./api";
 import {
   matchAudioTrack,
+  plexAudioChoice,
   startingAudioPref,
   startingSubtitle,
   startingSubtitlePref,
@@ -37,7 +38,7 @@ export async function readSubtitlesAhead(
     const own = titleTrackPrefs(meta);
     const audioTracks = version.audioTracks ?? [];
     const audio = matchAudioTrack(audioTracks, opts.audio ?? own.audio ?? startingAudioPref())
-      ?? audioTracks.find((t) => t.selected);
+      ?? plexAudioChoice(audioTracks);
     const track = startingSubtitle(
       version.subtitleTracks ?? [],
       opts.pref ?? own.subtitle ?? startingSubtitlePref(),

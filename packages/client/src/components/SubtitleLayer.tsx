@@ -3,6 +3,7 @@ import { fetchSubtitleCues, type SubtitleCue } from "../lib/api";
 import { logEvent, logWarn } from "../lib/log";
 import { activeCues, coveredAhead, longestCue, sameCues, withStretch, type CoveredSpan } from "../lib/subtitleCues";
 import { SUBTITLE_COLORS, SUBTITLE_FONTS, useSubtitleStyle, type SubtitleStyle } from "../lib/subtitleStyle";
+import type { SubtitleLoadStatus } from "../lib/subtitleStatus";
 
 /**
  * Subtitles this client draws itself, from a sidecar file.
@@ -239,9 +240,11 @@ interface SubtitleLayerProps {
   /** Draw nothing for now — over the loading screen, a line belongs to a
    *  picture nobody can see. The cues stay loaded. */
   hidden?: boolean;
+  /** Kept up to date with how far this one has loaded, for Stats for nerds. */
+  statusRef?: React.MutableRefObject<SubtitleLoadStatus | null>;
 }
 
-export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offsetMs, onUnavailable, hidden = false }: SubtitleLayerProps) {
+export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offsetMs, onUnavailable, hidden = false, statusRef }: SubtitleLayerProps) {
   const style = useSubtitleStyle();
   const [cues, setCues] = useState<SubtitleCue[]>([]);
   // Plex is still reading this one out of the media file: where every line is
@@ -258,11 +261,16 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
   useEffect(() => {
     setCues([]);
     setCovered(null);
+    if (statusRef) statusRef.current = null;
     if (streamId == null) return;
     let cancelled = false;
     let next: ReturnType<typeof setTimeout> | undefined;
     let watch: ReturnType<typeof setInterval> | undefined;
     const startedAt = Date.now();
+    const status: SubtitleLoadStatus = {
+      streamId, state: "loading", lines: 0, covered: null, startedAt, firstLinesMs: null, completeMs: null,
+    };
+    if (statusRef) statusRef.current = status;
     // What has come so far, where it is all there, and the last answer's name.
     let known: SubtitleCue[] = [];
     let spans: CoveredSpan[] | null = null;
@@ -286,6 +294,9 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
             clearInterval(watch);
             setCues(r.cues);
             setCovered(null);
+            Object.assign(status, {
+              state: "complete", lines: r.cues.length, covered: null, completeMs: Date.now() - startedAt,
+            });
             logEvent("Subtitles", "drawing a sidecar here rather than burning it in", {
               streamId, cues: r.cues.length,
               ...(spans ? { waitedMs: Date.now() - startedAt } : {}),
@@ -303,6 +314,8 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
           spans = r.covered ?? [];
           setCovered(spans);
           const ahead = coveredAhead(spans, where());
+          Object.assign(status, { state: "reading", lines: known.length, covered: spans });
+          if (ahead !== null && status.firstLinesMs === null) status.firstLinesMs = Date.now() - startedAt;
           if (ahead !== null && !linesHere) {
             linesHere = true;
             logEvent("Subtitles", "lines for here while Plex is still reading the rest", {
@@ -316,6 +329,7 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
           if (cancelled) return;
           clearInterval(watch);
           setCovered(null);
+          status.state = "failed";
           // The stream is already running without burned-in subtitles, so there
           // is nothing to fall back to in place — say so instead of showing a
           // film that silently has no subtitles. (A subtitle inside the file

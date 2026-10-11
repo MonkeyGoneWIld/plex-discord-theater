@@ -14,7 +14,7 @@ import {
   resetPreferredQuality,
   setPreferredQuality,
 } from "../src/lib/quality";
-import { readStreamNotes } from "../src/lib/streamNotes";
+import { playbackMode, readStreamNotes } from "../src/lib/streamNotes";
 
 let pass = 0;
 let fail = 0;
@@ -30,13 +30,16 @@ const sessionData = (notes: Record<string, string>) => Object.fromEntries(
   Object.entries(notes).map(([k, v]) => [`com.pdt.${k}`, { "DATA-ID": `com.pdt.${k}`, VALUE: v }]),
 );
 
+/** What a server that says nothing about the audio leaves. */
+const NO_AUDIO = { audio: null, audioFrom: null, audioTo: null, audioKbps: null, audioReason: null };
+
 console.log("— what the server says about a stream —");
 check("a re-encode, with why and at what rate",
   readStreamNotes(sessionData({ video: "transcode", reason: "a picture subtitle is burned into it", kbps: "12000" })),
-  { video: "transcode", reason: "a picture subtitle is burned into it", kbps: 12000, quality: null });
+  { video: "transcode", reason: "a picture subtitle is burned into it", kbps: 12000, quality: null, ...NO_AUDIO });
 check("a copy, with the file's own rate",
   readStreamNotes(sessionData({ video: "copy", kbps: "30660" })),
-  { video: "copy", reason: null, kbps: 30660, quality: null });
+  { video: "copy", reason: null, kbps: 30660, quality: null, ...NO_AUDIO });
 check("a stream started under someone's quality setting says so",
   readStreamNotes(sessionData({ video: "transcode", kbps: "8000", quality: "8000" }))?.quality, 8000);
 check("nothing from a server that sends none", readStreamNotes(null), null);
@@ -55,9 +58,28 @@ const master = [
 ].join("\n");
 const parsed = M3U8Parser.parseMasterPlaylist(master, "http://localhost/master.m3u8");
 check("hls.js reads the server's notes out of the playlist intact",
-  readStreamNotes(parsed.sessionData), { video: "transcode", reason, kbps: 12000, quality: null });
+  readStreamNotes(parsed.sessionData), { video: "transcode", reason, kbps: 12000, quality: null, ...NO_AUDIO });
 check("and still finds the stream in it", parsed.levels.length, 1);
 check("nor from notes it doesn't recognise", readStreamNotes(sessionData({ video: "maybe" })), null);
+
+console.log("\n— its audio, and what Plex would call it —");
+const converted = readStreamNotes(sessionData({
+  video: "copy", kbps: "6274", audio: "transcode", audioFrom: "EAC3 Stereo", audioTo: "AAC Stereo",
+  audioKbps: "256", audioReason: "the file's audio is EAC3, and the player takes AAC only",
+}));
+check("audio converted, from what to what and why",
+  converted && [converted.audio, converted.audioFrom, converted.audioTo, converted.audioKbps, converted.audioReason],
+  ["transcode", "EAC3 Stereo", "AAC Stereo", 256, "the file's audio is EAC3, and the player takes AAC only"]);
+check("the original video with its audio converted is a Direct Stream", playbackMode(converted), "Direct Stream");
+const untouched = readStreamNotes(sessionData({ video: "copy", audio: "copy", audioFrom: "AAC 5.1" }));
+check("the original video and audio both is Direct Play", playbackMode(untouched), "Direct Play");
+check("a copy whose audio the server doesn't mention is still only a Direct Stream",
+  playbackMode(readStreamNotes(sessionData({ video: "copy" }))), "Direct Stream");
+check("a re-encode is a Transcode, whatever its audio",
+  playbackMode(readStreamNotes(sessionData({ video: "transcode", audio: "copy" }))), "Transcode");
+check("nothing to call a stream nobody has said anything about", playbackMode(null), null);
+check("an audio decision it doesn't recognise is none",
+  readStreamNotes(sessionData({ video: "copy", audio: "maybe" }))?.audio, null);
 
 console.log("\n— which quality to offer someone buffering —");
 check("on a 30 Mbps remux over a 14 Mbps connection: the highest under three quarters of it",

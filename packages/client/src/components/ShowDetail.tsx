@@ -6,7 +6,7 @@ import {
   type Credit, type HistoryEntry, type PlexItem, type PlexMeta, type SeerrSeason,
 } from "../lib/api";
 import {
-  loadAudioPref, loadSubtitlePref, matchAudioTrack, startingSubtitle, titleTrackPrefs,
+  loadAudioPref, loadSubtitlePref, matchAudioTrack, plexAudioChoice, startingSubtitle, titleTrackPrefs,
   saveAudioPref, saveSubtitlePref,
 } from "../lib/trackPrefs";
 import { formatTimecode } from "../lib/format";
@@ -349,9 +349,7 @@ export function ShowDetail({
       const own = titleTrackPrefs(episodeMeta);
       const audio =
         matchAudioTrack(audioTracks, own.audio ?? loadAudioPref())
-        ?? audioTracks.find((t) => t.selected)
-        ?? audioTracks[0]
-        ?? null;
+        ?? plexAudioChoice(audioTracks);
       const subtitle = startingSubtitle(version.subtitleTracks ?? [], own.subtitle ?? loadSubtitlePref(), audio);
 
       // What you pressed play on is what you want to keep watching — the same

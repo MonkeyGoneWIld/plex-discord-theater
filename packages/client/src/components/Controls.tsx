@@ -7,6 +7,7 @@ import {
 } from "../lib/previewFrames";
 import { createPreviewMotion, type SpeedTier } from "../lib/previewMotion";
 import { loadVolume } from "../lib/volume";
+import { previewPassPath, takePreviewStart } from "../lib/previewPrefetch";
 import { getLevel, setLevel, boostAvailable, BOOST_ACCENT, MAX_LEVEL } from "../lib/audioBoost";
 import { useMediaQuery, COMPACT_CONTROLS_QUERY, PHONE_QUERY } from "../lib/useMediaQuery";
 import { QUIET_SURFACE } from "../lib/surface";
@@ -1203,17 +1204,32 @@ export function Controls({
             partId: previewPartId, pass, bufferS: Math.round(Math.min(headroom(), 999)),
           });
         }
-        const res = await fetch(
-          authUrl(`/api/plex/preview/${previewPartId}/index?progressive=2&pass=${pass}`),
-          { signal: abort.signal },
-        );
-        if (!res.ok || !res.body) return;
-        const contentType = res.headers.get("content-type") ?? "";
+        // The first pass, fetched on the title's page before Play was pressed
+        // (lib/previewPrefetch), is taken from there rather than asked for
+        // again beside the stream's first segments.
+        const ahead = pass === 0 ? await takePreviewStart(previewPartId) : null;
+        if (cancelled) return;
+        let contentType: string;
+        let body: { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<void> };
+        if (ahead) {
+          contentType = ahead.contentType;
+          const chunks = [...ahead.chunks];
+          body = {
+            read: async () => (chunks.length ? { done: false, value: chunks.shift() } : { done: true }),
+            cancel: async () => { chunks.length = 0; },
+          };
+        } else {
+          const res = await fetch(authUrl(previewPassPath(previewPartId, pass)), { signal: abort.signal });
+          if (!res.ok || !res.body) return;
+          contentType = res.headers.get("content-type") ?? "";
+          body = res.body.getReader();
+        }
         const version = contentType.startsWith("application/x-plex-preview-v2") ? 2
           : contentType.startsWith("application/x-plex-preview-v1") ? 1 : 0;
         if (pass === 0) {
           logEvent("Preview", "transfer accepted", {
             partId: previewPartId, transport: version ? `progressive-v${version}` : "legacy-bif",
+            ...(ahead ? { fetched: "on the title's page" } : {}),
           });
           // Older servers still return an ordinary BIF.
           if (version !== 2) {
@@ -1223,7 +1239,6 @@ export function Controls({
         } else {
           progressive.nextResponse();
         }
-        const body = res.body.getReader();
         for (;;) {
           // Still giving way while it downloads: a seek empties the buffer, and
           // the video refills it before the pass carries on.

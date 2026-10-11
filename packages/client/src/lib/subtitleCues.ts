@@ -47,3 +47,28 @@ export function activeCues(cues: readonly TimedCue[], at: number, longest: numbe
 export function sameCues(a: readonly TimedCue[], b: readonly TimedCue[]): boolean {
   return a.length === b.length && a.every((c, i) => c === b[i]);
 }
+
+/** Seconds where every line has come: from, and to — null for the end. */
+export type CoveredSpan = [number, number | null];
+
+/**
+ * How far past `at` every line is known to have come: 0 or more when `at` is
+ * inside a stretch that has, null when it isn't — when no line there may yet
+ * mean one still on its way rather than a quiet moment in the film.
+ */
+export function coveredAhead(spans: readonly CoveredSpan[], at: number): number | null {
+  for (const [from, to] of spans) {
+    if (from <= at && (to === null || at < to)) return to === null ? Infinity : to - at;
+  }
+  return null;
+}
+
+/**
+ * What is known, with an answer for one stretch of the film in: the answer's
+ * cues replace whatever was known inside [from, to), and the rest is kept —
+ * for skipping back to, until the next answer for there. Sorted by start.
+ */
+export function withStretch<T extends TimedCue>(known: readonly T[], from: number, to: number, cues: readonly T[]): T[] {
+  const kept = known.filter((c) => c.end <= from || c.start >= to);
+  return [...kept, ...cues].sort((a, b) => a.start - b.start || a.end - b.end);
+}

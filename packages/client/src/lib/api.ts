@@ -808,6 +808,25 @@ export interface SubtitleCue {
   italic?: boolean;
 }
 
+/** Seconds where every line of a subtitle has come: from, and to — null for
+ *  the end of the film. */
+export type SubtitleSpan = [number, number | null];
+
+export interface SubtitleAnswer {
+  cues: SubtitleCue[];
+  complete?: boolean;
+  /** While a subtitle inside the file is still being read, for a player that
+   *  said where it is: the stretch `cues` is all of, and where every line is
+   *  known to be in. */
+  from?: number;
+  to?: number;
+  covered?: SubtitleSpan[];
+  /** Names this answer, so the next ask can be told nothing has changed. */
+  sig?: string;
+  /** Nothing has changed since the answer named `since`: `cues` is empty. */
+  unchanged?: boolean;
+}
+
 /**
  * Every cue of one sidecar subtitle.
  *
@@ -816,8 +835,10 @@ export interface SubtitleCue {
  * already unique across titles.
  *
  * A subtitle inside the media file is read out by Plex, which takes a while
- * the first time: until then the answer says `complete: false` with the cues
- * so far, and is asked for again with `fresh` rather than from the cache.
+ * the first time: until then the answer says `complete: false`. With `where`
+ * — where the player is, and the `sig` of its last answer — it is answered as
+ * soon as there are lines for there, with those around it (see SubtitleAnswer);
+ * those asks are never cached.
  */
 export function fetchSubtitleCues(
   streamId: number,
@@ -825,13 +846,18 @@ export function fetchSubtitleCues(
   ratingKey?: string,
   mediaIndex?: number,
   fresh = false,
-): Promise<{ cues: SubtitleCue[]; complete?: boolean }> {
+  where?: { at: number; since?: string },
+): Promise<SubtitleAnswer> {
   const params = new URLSearchParams();
   if (ratingKey) params.set("ratingKey", ratingKey);
   if (mediaIndex != null && mediaIndex > 0) params.set("mediaIndex", String(mediaIndex));
+  if (where) {
+    params.set("at", where.at.toFixed(1));
+    if (where.since) params.set("since", where.since);
+  }
   const qs = params.toString();
   const path = `/api/plex/subtitles/${encodeURIComponent(String(streamId))}${qs ? `?${qs}` : ""}`;
-  return fresh ? apiGet(path) : cachedGet(path);
+  return fresh || where ? apiGet(path) : cachedGet(path);
 }
 
 export function hlsMasterUrl(

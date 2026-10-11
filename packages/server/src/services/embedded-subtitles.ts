@@ -5,13 +5,27 @@
  *
  * Plex's own apps do this with a subtitle-only transcode,
  * /subtitles/:/transcode/universal/start, which answers with the item's
- * selected subtitle track as text. Getting it means Plex reading the whole file,
- * because the track is spread across all of it: seconds for a small file, a
- * minute or two for a big one, though Plex has managed most in one to three
- * seconds. Nothing waits for it: the player's first ask waits a few seconds at
- * most to hear that Plex is sending a subtitle at all, the player draws cues as
- * they arrive and polls for the rest, and the result is kept on disk, so each
- * title is only ever read once.
+ * selected subtitle track as text. Getting all of it means Plex reading the
+ * whole file, because the track is spread across all of it: a second or two for
+ * an episode, a minute for a big remux (American Honey, 17.7 GB: 66 seconds).
+ * Plex sends the lines as it goes, in the film's order, at over a hundred times
+ * the speed anyone watches — the first within a second or two — and the player
+ * draws them as they come. The finished read is kept on disk, so each subtitle
+ * is only ever read once.
+ *
+ * What had come was thrown away until the read was over, which is what started
+ * films on "Loading subtitles…" for as long as it took. It was made into cues
+ * up to the last blank line, so a half-arrived cue would wait; but Plex sends
+ * ASS, one line per event and Windows line ends, and no blank line ever came.
+ * It is cut into whole lines now (Lines), and made into cues every quarter of a
+ * second.
+ *
+ * Someone who starts, or skips, somewhere the read from the start hasn't got to
+ * is read the lines around them on their own (want): out of the file itself,
+ * through its index (mkv-subtitles.ts), or by Plex reading from there. Plex
+ * honours where to start for a subtitle it converts, though not for one it
+ * copies — see mkv-subtitles.ts. The player says where it is when it asks, and
+ * is answered as soon as there are lines for there.
  *
  * The first version asked /video/:/transcode/universal/subtitles instead. Plex
  * answers that by starting a second transcode of the whole film, video and all,
@@ -27,6 +41,9 @@
  * cues made from it: a better parser re-reads the kept text rather than the
  * film, and a file that has changed since — told apart by a fingerprint of the
  * media part it came from — is read again.
+ *
+ * Every read is stopped on Plex once it is over. Letting go of the answer isn't
+ * enough: Plex goes on reading the file to the end for nobody.
  */
 
 import Database from "better-sqlite3";
@@ -35,7 +52,7 @@ import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { randomUUID } from "node:crypto";
 import { plexFetch, plexUrl } from "./plex.js";
-import { parseSubtitles, SUBTITLE_PARSER_VERSION, type Cue } from "./subtitles.js";
+import { parseSubtitles, parseTimestamp, SUBTITLE_PARSER_VERSION, type Cue } from "./subtitles.js";
 import { logEvent } from "./logger.js";
 import { LruMap } from "./lru.js";
 
@@ -56,11 +73,29 @@ const RETRY_AFTER_MS = 60 * 60_000;
  * to allow, so it was burned in instead. A video file is gigabytes.
  */
 const MAX_BYTES = 64 * 1024 * 1024;
-/** How often cues are re-parsed from what has arrived so far, at the least.
- *  A big file is re-parsed less often: each pass reads all of it again. */
-const PARTIAL_PARSE_MS = 1_000;
-/** Bytes a partial parse costs a millisecond of wait for. */
-const PARTIAL_PARSE_BYTES_PER_MS = 4_000;
+/** How often lines that have come are made into cues, at the most. */
+const PARSE_EVERY_MS = 250;
+/**
+ * How far before a place lines around it are read from: one that started that
+ * long ago can still be up.
+ */
+const AROUND_BEFORE_S = 30;
+/** What is read out of the file first, to answer with. */
+const AROUND_FIRST_S = 120;
+/**
+ * How far past someone lines are kept ready while the read from the start is
+ * behind them. Asked again when they are within half of it of the end.
+ */
+const AROUND_AHEAD_S = 600;
+/** And how far past them a Plex read from somewhere goes before it stops. */
+const PLEX_AHEAD_S = 1200;
+/** No Plex read from somewhere this close ahead of the read from the start:
+ *  that is there within a second or so. */
+const PLEX_NOT_FOR_S = 120;
+/** Where someone said they were counts for this long. */
+const WANTED_FOR_MS = 30_000;
+/** How often a read is checked for whether it should stop, between lines. */
+const STOP_CHECK_MS = 1_000;
 
 const dbDir = process.env.THUMB_CACHE_DIR
   ? path.resolve(process.env.THUMB_CACHE_DIR)
@@ -118,19 +153,53 @@ const ready = new LruMap<string, { cues: Cue[]; fingerprint: string | null }>(10
 /** Stream ids Plex couldn't read out, with when. */
 const unreadable = new LruMap<string, number>(500);
 
+/** Seconds: where every line has come, from and to — to null for the end. */
+export type Span = [number, number | null];
+
+/** Lines from around one place, for someone the read from the start hasn't
+ *  reached. */
+interface Window {
+  from: number;
+  /** Every line starting from `from` up to this has come. */
+  to: number;
+  /** Where it is going: the end of what the file is read for, or where a Plex
+   *  read from `from` stops — moved on while someone watches inside it. */
+  until: number;
+  cues: Cue[];
+  /** Still coming. */
+  open: boolean;
+  /** A Plex read's: ends it now. */
+  stop?: () => void;
+}
+
+/** How the lines around a place are had: out of the file, by Plex reading
+ *  from there, or not at all (they wait for the read from the start). */
+type Around =
+  | { kind: "file"; read: (from: number, to: number) => Promise<string | null> }
+  | { kind: "plex" }
+  | { kind: "none" };
+
 interface Reading {
   streamId: string;
   ratingKey: string;
-  /** Cues parsed from what has arrived so far. */
+  /** Cues from the read from the start, so far. */
   cues: Cue[];
+  /** Every line starting before this has come in the read from the start. */
+  frontier: number;
   /** Settles when the read is over, whichever way it went. */
   done: Promise<void>;
+  windows: Window[];
+  around: Promise<Around> | null;
+  /** Where the players reading it said they were, and when. */
+  wanted: Array<{ at: number; t: number }>;
+  /** Told whenever what there is to draw changes. */
+  listeners: Set<() => void>;
 }
 const reading = new Map<string, Reading>();
 
 export type EmbeddedSubtitle =
   | { state: "ready"; cues: Cue[] }
-  | { state: "reading"; cues: Cue[] }
+  | { state: "reading"; cues: Cue[]; covered: Span[] }
   | { state: "unreadable" };
 
 /**
@@ -141,7 +210,7 @@ export function embeddedSubtitleState(streamId: string, fingerprint?: string | n
   const cues = readyCues(streamId, fingerprint ?? null);
   if (cues) return { state: "ready", cues };
   const r = reading.get(streamId);
-  if (r) return { state: "reading", cues: r.cues };
+  if (r) return { state: "reading", cues: linesSoFar(r), covered: covered(r) };
   const failedAt = unreadable.get(streamId);
   if (failedAt !== undefined && Date.now() - failedAt < RETRY_AFTER_MS) return { state: "unreadable" };
   return null;
@@ -203,6 +272,19 @@ export interface ReadOptions {
    * wrong subtitle.
    */
   afterAnswer?: () => Promise<void>;
+  /**
+   * How to read the lines around a place straight out of the file — through
+   * its index, mkv-subtitles.ts — or null when the file can't be read that
+   * way. Asked once, the first time someone is somewhere the read from the
+   * start hasn't got to.
+   */
+  fileLines?: () => Promise<((from: number, to: number) => Promise<string | null>) | null>;
+  /**
+   * Whether Plex can be asked to read it from somewhere other than the start.
+   * Not a subtitle it copies (ASS): a copy started mid-film holds every line
+   * back until the end of the file.
+   */
+  readsFromAnywhere?: boolean;
 }
 
 /**
@@ -210,20 +292,206 @@ export interface ReadOptions {
  * its cues, "reading" while Plex is sending it (or hasn't answered within the
  * wait — the player asks again, and hears "unreadable" then if it failed), or
  * "unreadable".
+ *
+ * `at` is where the player asking is, in seconds. Lines for there are read on
+ * their own if the read from the start hasn't got there (see want), and the
+ * answer comes as soon as they have: what is drawn there, and `covered`, the
+ * stretches where every line has come. Without it, the answer waits for the
+ * whole read, up to the wait.
  */
-export async function readEmbeddedSubtitle(opts: ReadOptions): Promise<EmbeddedSubtitle> {
+export async function readEmbeddedSubtitle(opts: ReadOptions, at?: number): Promise<EmbeddedSubtitle> {
   const known = embeddedSubtitleState(opts.streamId, opts.fingerprint);
   if (known && known.state !== "reading") return known;
 
   const r = reading.get(opts.streamId) ?? begin(opts);
   const waitMs = opts.waitMs ?? ANSWER_WAIT_MS;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([
-    r.done,
-    new Promise<void>((resolve) => { timer = setTimeout(resolve, waitMs); }),
-  ]);
-  clearTimeout(timer);
-  return embeddedSubtitleState(opts.streamId, opts.fingerprint) ?? { state: "reading", cues: r.cues };
+  if (at === undefined) {
+    await settled(r, () => false, waitMs);
+  } else {
+    want(r, opts, at);
+    await settled(r, () => covers(r, at), waitMs);
+  }
+  return embeddedSubtitleState(opts.streamId, opts.fingerprint)
+    ?? { state: "reading", cues: linesSoFar(r), covered: covered(r) };
+}
+
+/** Until `done` holds, the read is over, or `ms` have gone by. */
+function settled(r: Reading, done: () => boolean, ms: number): Promise<void> {
+  if (done()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const check = () => { if (done()) finish(); };
+    const finish = () => {
+      clearTimeout(timer);
+      r.listeners.delete(check);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    r.listeners.add(check);
+    void r.done.then(finish);
+  });
+}
+
+function changed(r: Reading): void {
+  for (const listener of [...r.listeners]) listener();
+}
+
+/** Everything there is to draw: the read from the start, and the lines read
+ *  around places it hasn't got to. */
+function linesSoFar(r: Reading): Cue[] {
+  const extra: Cue[] = [];
+  const seen = new Set<string>();
+  for (const w of r.windows) {
+    for (const c of w.cues) {
+      // The read from the start has its own copy of these.
+      if (c.start <= r.frontier) continue;
+      const key = `${c.start.toFixed(2)}|${c.end.toFixed(2)}|${c.text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      extra.push(c);
+    }
+  }
+  if (extra.length === 0) return r.cues;
+  return [...r.cues, ...extra].sort((a, b) => a.start - b.start || a.end - b.end);
+}
+
+/** Where every line has come, in time order, joined up. */
+function stretches(r: Reading): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  if (r.frontier > 0) spans.push([0, r.frontier]);
+  for (const w of r.windows) if (w.to > w.from) spans.push([w.from, w.to]);
+  spans.sort((a, b) => a[0] - b[0]);
+  const joined: Array<[number, number]> = [];
+  for (const [from, to] of spans) {
+    const last = joined.at(-1);
+    if (last && from <= last[1]) last[1] = Math.max(last[1], to);
+    else joined.push([from, to]);
+  }
+  return joined;
+}
+
+function covered(r: Reading): Span[] {
+  const round = (s: number) => Math.round(s * 100) / 100;
+  return stretches(r).map(([from, to]) => [round(from), Number.isFinite(to) ? round(to) : null]);
+}
+
+function covers(r: Reading, at: number): boolean {
+  return stretches(r).some(([from, to]) => from <= at && at < to);
+}
+
+/**
+ * Someone reading this subtitle is at `at`.
+ *
+ * If the read from the start is past there, nothing more is needed: it reads
+ * far faster than anyone watches. If not, the lines around them are read on
+ * their own, from AROUND_BEFORE_S before to AROUND_AHEAD_S after, and read on
+ * from there while they are within half of that of the end and the read from
+ * the start still hasn't caught up.
+ */
+function want(r: Reading, opts: ReadOptions, at: number): void {
+  const now = Date.now();
+  r.wanted = r.wanted.filter((w) => now - w.t < WANTED_FOR_MS);
+  r.wanted.push({ at, t: now });
+  // A Plex read from somewhere goes on while it is ahead of someone.
+  for (const w of r.windows) {
+    if (w.stop && w.open && w.from <= at && at <= w.to) w.until = Math.max(w.until, at + PLEX_AHEAD_S);
+  }
+  if (r.frontier > at) return;
+  const stretch = stretches(r).find(([from, to]) => from <= at && at < to);
+  if (stretch && stretch[1] - at >= AROUND_AHEAD_S / 2) return;
+  const from = stretch ? stretch[1] : Math.max(0, at - AROUND_BEFORE_S);
+  // Already on its way.
+  if (r.windows.some((w) => w.open && w.from <= from && from < w.until)) return;
+  readAround(r, opts, from, at);
+}
+
+function readAround(r: Reading, opts: ReadOptions, from: number, at: number): void {
+  const w: Window = { from, to: from, until: at + AROUND_AHEAD_S, cues: [], open: true };
+  r.windows.push(w);
+  r.around ??= howAround(opts);
+  void r.around
+    .then(async (around) => {
+      if (reading.get(r.streamId) !== r) return;
+      if (around.kind === "file") await fileWindow(r, opts, w, around.read, Math.max(from, at) + AROUND_FIRST_S);
+      // A second Plex read for somewhere the first is about to get to is the
+      // file read twice over for a second's head start.
+      else if (around.kind === "plex" && at - r.frontier > PLEX_NOT_FOR_S) {
+        w.until = at + PLEX_AHEAD_S;
+        await plexWindow(r, opts, w);
+      }
+    })
+    .catch((err) => console.warn("[Subtitles] couldn't read lines around a place:", err))
+    .finally(() => {
+      w.open = false;
+      // One nothing came of is no use to anyone.
+      const at = r.windows.indexOf(w);
+      if (w.to <= w.from && at !== -1) r.windows.splice(at, 1);
+      changed(r);
+    });
+}
+
+async function howAround(opts: ReadOptions): Promise<Around> {
+  try {
+    const read = await opts.fileLines?.();
+    if (read) return { kind: "file", read };
+  } catch {
+    // Plex, then, if it can.
+  }
+  return opts.readsFromAnywhere ? { kind: "plex" } : { kind: "none" };
+}
+
+/** Lines around a place out of the file: first what is needed to answer
+ *  with, then the rest. A file that can't be read is left for Plex. */
+async function fileWindow(
+  r: Reading, opts: ReadOptions, w: Window,
+  read: (from: number, to: number) => Promise<string | null>, firstUntil: number,
+): Promise<void> {
+  const startedAt = Date.now();
+  for (const until of firstUntil < w.until ? [firstUntil, w.until] : [w.until]) {
+    const text = await read(w.to, until);
+    if (reading.get(r.streamId) !== r) return;
+    if (text === null) {
+      logEvent("Subtitles", "couldn't read lines out of the file, so Plex reads them", {
+        ratingKey: r.ratingKey, streamId: r.streamId, from: Math.round(w.to), to: Math.round(until),
+      });
+      r.around = Promise.resolve(opts.readsFromAnywhere ? { kind: "plex" } : { kind: "none" });
+      return;
+    }
+    const lines = text ? parseSubtitles(text)?.cues ?? [] : [];
+    w.cues.push(...lines);
+    w.to = until;
+    changed(r);
+    if (until === firstUntil || firstUntil >= w.until) {
+      logEvent("Subtitles", "read the lines around a place out of the file", {
+        ratingKey: r.ratingKey, streamId: r.streamId, from: Math.round(w.from), to: Math.round(until),
+        cues: w.cues.length, ms: Date.now() - startedAt, behind: Math.round(r.frontier),
+      });
+    }
+  }
+}
+
+/** Lines around a place by Plex reading from there, until it has gone
+ *  `until`, the read from the start has caught it up, or that is over. */
+async function plexWindow(r: Reading, opts: ReadOptions, w: Window): Promise<void> {
+  const startedAt = Date.now();
+  let firstMs: number | null = null;
+  const details = { ratingKey: r.ratingKey, streamId: r.streamId, from: Math.round(w.from) };
+  const result = await plexRead(opts, w.from, {
+    lines: (cues, upTo) => {
+      if (firstMs === null && cues.length > 0) {
+        firstMs = Date.now() - startedAt;
+        logEvent("Subtitles", "Plex is reading a subtitle from where someone is", { ...details, firstLineMs: firstMs });
+      }
+      w.cues.push(...cues);
+      w.to = Math.max(w.to, upTo);
+      changed(r);
+    },
+    started: (stop) => { w.stop = stop; },
+    stopped: () => !w.open || reading.get(r.streamId) !== r || w.to >= w.until || r.frontier >= w.to + AROUND_BEFORE_S,
+  });
+  logEvent("Subtitles", "Plex read from where someone is", {
+    ...details, to: Math.round(w.to), cues: w.cues.length, firstLineMs: firstMs, ms: Date.now() - startedAt,
+    ...(result.failure ? { failed: result.failure.why } : {}),
+  });
 }
 
 /**
@@ -337,10 +605,20 @@ function begin(opts: ReadOptions): Reading {
     streamId: opts.streamId,
     ratingKey: opts.ratingKey,
     cues: [],
+    frontier: 0,
     done: Promise.resolve(),
+    windows: [],
+    around: null,
+    wanted: [],
+    listeners: new Set(),
   };
   r.done = run(r, opts).finally(() => {
     if (reading.get(r.streamId) === r) reading.delete(r.streamId);
+    for (const w of r.windows) {
+      w.open = false;
+      w.stop?.();
+    }
+    changed(r);
   });
   reading.set(opts.streamId, r);
   return r;
@@ -368,8 +646,9 @@ export function decodeSubtitle(raw: Uint8Array | ArrayBuffer): string {
   }
 }
 
-/** The common Plex params for one subtitle session. */
-function sessionParams(ratingKey: string, mediaIndex: number, session: string): Record<string, string> {
+/** The common Plex params for one subtitle session, reading from `offset`
+ *  seconds on. copyts keeps the times the film's own wherever it starts. */
+function sessionParams(ratingKey: string, mediaIndex: number, session: string, offset = 0): Record<string, string> {
   return {
     hasMDE: "1",
     path: `/library/metadata/${ratingKey}`,
@@ -383,7 +662,7 @@ function sessionParams(ratingKey: string, mediaIndex: number, session: string): 
     // ASS as text, which is how a sidecar ASS is drawn too.
     advancedSubtitles: "text",
     copyts: "1",
-    offset: "0",
+    offset: String(Math.max(0, Math.floor(offset))),
     session,
     location: "lan",
   };
@@ -418,31 +697,142 @@ async function subtitleDecision(params: Record<string, string>, headers: Record<
   }
 }
 
-async function run(r: Reading, opts: ReadOptions): Promise<void> {
+/** Ends a subtitle session on Plex, which otherwise reads the file to the end
+ *  whether anyone takes what it sends or not. */
+function stopOnPlex(session: string): void {
+  void plexFetch("/video/:/transcode/universal/stop", { session })
+    .then((res) => res.body?.cancel())
+    .catch(() => {});
+}
+
+/**
+ * Plex's text cut into whole lines as it comes: an ASS file's header, then one
+ * event to a line; or SRT and VTT, one cue to each block between blank lines.
+ * Windows line ends are made Unix ones on the way, a "\r" at the very end of
+ * what has come being half of one.
+ */
+class Lines {
+  /** What is there before the first event: an ASS file's script info, styles
+   *  and Format line, or VTT's heading. Null until it is all in. */
+  header: string | null = null;
+  /** Which of the two it is, once known. */
+  kind: "ass" | "blocks" | null = null;
+  private rest = "";
+  private head = "";
+  private cut: string[] = [];
+  private readonly decoder = new TextDecoder("utf-8");
+
+  push(chunk: Uint8Array): void {
+    this.split(this.decoder.decode(chunk, { stream: true }), false);
+  }
+
+  end(): void {
+    this.split(this.decoder.decode(), true);
+    if (this.header === null) this.header = this.head;
+  }
+
+  /** The lines cut since this was last asked. */
+  take(): string[] {
+    const lines = this.cut;
+    this.cut = [];
+    return lines;
+  }
+
+  private split(more: string, final: boolean): void {
+    let text = (this.rest + more).replace(/\r\n/g, "\n");
+    if (this.kind === null) {
+      const opening = text.trimStart();
+      if (opening.length < 16 && !final) {
+        this.rest = text;
+        return;
+      }
+      this.kind = /^\[(Script Info|V4\+? Styles)\]/i.test(opening) ? "ass" : "blocks";
+      if (this.kind === "blocks") this.header = /^WEBVTT/.test(opening) ? "WEBVTT\n\n" : "";
+    }
+    if (this.kind === "ass") {
+      const end = final ? text.length : text.lastIndexOf("\n") + 1;
+      this.rest = text.slice(end);
+      const whole = text.slice(0, end).split("\n");
+      if (whole.at(-1) === "") whole.pop();
+      for (const line of whole) {
+        const event = /^(Dialogue|Comment)\s*:/i.test(line);
+        if (this.header === null && !event) {
+          this.head += `${line}\n`;
+          continue;
+        }
+        if (this.header === null) this.header = this.head;
+        if (event) this.cut.push(line);
+      }
+      return;
+    }
+    const blocks = text.split(/\n{2,}/);
+    this.rest = final ? "" : blocks.pop() ?? "";
+    for (const block of blocks) if (block.trim()) this.cut.push(block.trim());
+  }
+}
+
+/** When a cut line starts, in seconds: an ASS event's Start, an SRT or VTT
+ *  cue's first time. Null for an ASS comment, which isn't on screen. */
+function startOf(line: string): number | null {
+  const event = /^Dialogue\s*:\s*[^,]*,\s*([^,]+),/i.exec(line);
+  if (event) return parseTimestamp(event[1]);
+  if (/^Comment\s*:/i.test(line)) return null;
+  const cue = /(\d{1,2}:\d{2}:\d{2}[.,]\d{1,3})\s*-->/.exec(line);
+  return cue ? parseTimestamp(cue[1]) : null;
+}
+
+/** What a Plex read is handed and asked as it goes. */
+interface Sink {
+  /** Lines that have come, as cues, and the latest start among them: every
+   *  line starting before it has come. */
+  lines(cues: Cue[], upTo: number): void;
+  /** Once Plex has answered: how to end the read. */
+  started?(stop: () => void): void;
+  /** Asked as it goes, and every STOP_CHECK_MS: true ends the read. */
+  stopped?(): boolean;
+}
+
+interface ReadResult {
+  /** All Plex sent, for keeping. */
+  raw: Buffer;
+  /** Why it failed — null when it was read to the end, or stopped. */
+  failure: { why: string; extra?: Record<string, unknown> } | null;
+  /** Ended early, by `stopped`. */
+  stopped: boolean;
+  firstByteMs: number | null;
+}
+
+/**
+ * One read of the subtitle from Plex, from `offset` seconds on, its lines
+ * handed to `sink` as they come — whole, and made into cues at most every
+ * PARSE_EVERY_MS. Stopped on Plex however it ends.
+ */
+async function plexRead(
+  opts: ReadOptions, offset: number, sink: Sink, announce?: Record<string, unknown>,
+): Promise<ReadResult> {
   const startedAt = Date.now();
   const session = randomUUID();
-  const params = sessionParams(opts.ratingKey, opts.mediaIndex, session);
+  const params = sessionParams(opts.ratingKey, opts.mediaIndex, session, offset);
   const headers = plexHeaders(session);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), READ_TIMEOUT_MS);
-  const details: Record<string, unknown> = { ratingKey: r.ratingKey, streamId: r.streamId };
-
-  let failed = false;
-  const fail = (why: string, extra: Record<string, unknown> = {}) => {
-    if (failed) return;
-    failed = true;
+  let stopped = false;
+  const stop = () => {
+    stopped = true;
     controller.abort();
-    unreadable.set(r.streamId, Date.now());
-    logEvent("Subtitles", "couldn't read an embedded subtitle out of the file", {
-      ...details, why, ...extra, ms: Date.now() - startedAt,
-    });
   };
+  const check = setInterval(() => { if (sink.stopped?.()) stop(); }, STOP_CHECK_MS);
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  let firstByteMs: number | null = null;
+  const result = (failure: ReadResult["failure"]): ReadResult =>
+    ({ raw: Buffer.concat(chunks), failure, stopped, firstByteMs });
 
   try {
     // Plex answers once it has started, and has read which subtitle is
     // selected by then; waiting longer than that holds the item for nothing.
-    const { pending } = await opts.withTrackSelected(async () => {
-      details.decision = await subtitleDecision(params, headers);
+    const { pending, decision } = await opts.withTrackSelected(async () => {
+      const decision = await subtitleDecision(params, headers);
       const pending = fetch(plexUrl("/subtitles/:/transcode/universal/start", params), {
         headers: { ...headers, Accept: "text/srt, application/x-subrip, text/vtt, text/plain;q=0.9, */*;q=0.1" },
         signal: controller.signal,
@@ -461,88 +851,132 @@ async function run(r: Reading, opts: ReadOptions): Promise<void> {
           console.warn("[Subtitles] couldn't put the item's subtitle back:", err);
         }
       }
-      return { pending };
+      return { pending, decision };
     });
 
     const res = await pending;
+    sink.started?.(stop);
     const type = res.headers.get("content-type") ?? "none";
-    details.status = res.status;
-    details.type = type;
+    const answer = { decision, status: res.status, type };
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => "");
-      fail("Plex refused", { start: JSON.stringify(text.slice(0, 120)) });
-      return;
+      return result({ why: "Plex refused", extra: { ...answer, start: JSON.stringify(text.slice(0, 120)) } });
     }
     if (isMediaType(type)) {
-      fail("Plex sent a media file rather than a subtitle");
-      return;
+      res.body.cancel().catch(() => {});
+      return result({ why: "Plex sent a media file rather than a subtitle", extra: answer });
     }
-    logEvent("Subtitles", "Plex is reading an embedded subtitle out of the file", {
-      ...details, ms: Date.now() - startedAt,
-    });
+    if (announce) {
+      logEvent("Subtitles", "Plex is reading an embedded subtitle out of the file", {
+        ...announce, ...answer, ms: Date.now() - startedAt,
+      });
+    }
 
-    const chunks: Uint8Array[] = [];
-    let bytes = 0;
-    let firstByteMs: number | null = null;
+    const lines = new Lines();
     let parsedAt = 0;
+    const hand = (final: boolean) => {
+      if (!final && Date.now() - parsedAt < PARSE_EVERY_MS) return;
+      parsedAt = Date.now();
+      const cut = lines.take();
+      if (cut.length === 0 || lines.header === null) return;
+      let upTo = -Infinity;
+      for (const line of cut) upTo = Math.max(upTo, startOf(line) ?? -Infinity);
+      const parsed = parseSubtitles(lines.header + cut.join(lines.kind === "ass" ? "\n" : "\n\n") + "\n");
+      sink.lines(parsed?.cues ?? [], Number.isFinite(upTo) ? upTo : offset);
+    };
     const reader = res.body.getReader();
     for (;;) {
+      if (sink.stopped?.()) {
+        stop();
+        break;
+      }
       const { done, value } = await reader.read();
       if (done) break;
       if (!value?.length) continue;
       if (firstByteMs === null) {
         firstByteMs = Date.now() - startedAt;
         if (looksBinary(value)) {
-          fail("Plex sent something other than text", {
-            start: JSON.stringify(decodeSubtitle(value.slice(0, 60))),
-          });
-          return;
+          return result({ why: "Plex sent something other than text", extra: {
+            ...answer, start: JSON.stringify(decodeSubtitle(value.slice(0, 60))),
+          } });
         }
       }
       chunks.push(value);
       bytes += value.length;
-      if (bytes > MAX_BYTES) {
-        fail("too large to be a subtitle", { bytes });
-        return;
-      }
-      // Cues so far, cut at the last blank line so a half-arrived one waits.
-      if (Date.now() - parsedAt >= Math.max(PARTIAL_PARSE_MS, bytes / PARTIAL_PARSE_BYTES_PER_MS)) {
-        parsedAt = Date.now();
-        const text = new TextDecoder("utf-8").decode(Buffer.concat(chunks));
-        const cut = text.lastIndexOf("\n\n");
-        const parsed = cut > 0 ? parseSubtitles(text.slice(0, cut + 1)) : null;
-        if (parsed) r.cues = parsed.cues;
-      }
+      if (bytes > MAX_BYTES) return result({ why: "too large to be a subtitle", extra: { ...answer, bytes } });
+      lines.push(value);
+      hand(false);
     }
-
-    const raw = Buffer.concat(chunks);
-    const parsed = parseSubtitles(decodeSubtitle(raw));
-    if (!parsed || parsed.cues.length === 0) {
-      fail(raw.length === 0 ? "Plex sent nothing" : "not a subtitle Plex sent", {
-        bytes: raw.length,
-        start: JSON.stringify(decodeSubtitle(raw.subarray(0, 120))),
-      });
-      return;
+    if (!stopped) {
+      lines.end();
+      hand(true);
     }
-    const fingerprint = opts.fingerprint ?? null;
-    ready.set(r.streamId, { cues: parsed.cues, fingerprint });
-    try {
-      writeStmt.run(
-        r.streamId, r.ratingKey, parsed.format, JSON.stringify(parsed.cues), Date.now(),
-        SUBTITLE_PARSER_VERSION, gzipSync(raw), fingerprint,
-      );
-    } catch (err) {
-      console.warn("[Subtitles] couldn't keep a read-out subtitle:", err);
-    }
-    logEvent("Subtitles", "read an embedded subtitle out of the file", {
-      ...details, format: parsed.format, cues: parsed.cues.length, bytes: raw.length,
-      firstByteMs, ms: Date.now() - startedAt,
-    });
+    return result(null);
   } catch (err) {
-    fail(controller.signal.aborted ? `timed out after ${READ_TIMEOUT_MS / 60_000} min` : String(err));
+    if (stopped) return result(null);
+    return result({
+      why: controller.signal.aborted ? `timed out after ${READ_TIMEOUT_MS / 60_000} min` : String(err),
+    });
   } finally {
     clearTimeout(timer);
+    clearInterval(check);
+    controller.abort();
+    stopOnPlex(session);
   }
+}
+
+/** The read from the start: what is drawn until it's done, and what is kept. */
+async function run(r: Reading, opts: ReadOptions): Promise<void> {
+  const startedAt = Date.now();
+  const details: Record<string, unknown> = { ratingKey: r.ratingKey, streamId: r.streamId };
+  let firstLineMs: number | null = null;
+
+  const fail = (why: string, extra: Record<string, unknown> = {}) => {
+    unreadable.set(r.streamId, Date.now());
+    logEvent("Subtitles", "couldn't read an embedded subtitle out of the file", {
+      ...details, why, ...extra, ms: Date.now() - startedAt,
+    });
+  };
+
+  const result = await plexRead(opts, 0, {
+    lines: (cues, upTo) => {
+      if (firstLineMs === null && cues.length > 0) firstLineMs = Date.now() - startedAt;
+      const last = r.cues.at(-1);
+      r.cues = last && cues.length > 0 && cues[0].start < last.start
+        ? [...r.cues, ...cues].sort((a, b) => a.start - b.start || a.end - b.end)
+        : r.cues.concat(cues);
+      r.frontier = Math.max(r.frontier, upTo);
+      changed(r);
+    },
+  }, details);
+  if (result.failure) {
+    fail(result.failure.why, result.failure.extra);
+    return;
+  }
+
+  const raw = result.raw;
+  const parsed = parseSubtitles(decodeSubtitle(raw));
+  if (!parsed || parsed.cues.length === 0) {
+    fail(raw.length === 0 ? "Plex sent nothing" : "not a subtitle Plex sent", {
+      bytes: raw.length,
+      start: JSON.stringify(decodeSubtitle(raw.subarray(0, 120))),
+    });
+    return;
+  }
+  const fingerprint = opts.fingerprint ?? null;
+  ready.set(r.streamId, { cues: parsed.cues, fingerprint });
+  try {
+    writeStmt.run(
+      r.streamId, r.ratingKey, parsed.format, JSON.stringify(parsed.cues), Date.now(),
+      SUBTITLE_PARSER_VERSION, gzipSync(raw), fingerprint,
+    );
+  } catch (err) {
+    console.warn("[Subtitles] couldn't keep a read-out subtitle:", err);
+  }
+  logEvent("Subtitles", "read an embedded subtitle out of the file", {
+    ...details, format: parsed.format, cues: parsed.cues.length, bytes: raw.length,
+    firstByteMs: result.firstByteMs, firstLineMs, ms: Date.now() - startedAt,
+  });
 }
 
 /** For tests: forget everything known, on disk too. */

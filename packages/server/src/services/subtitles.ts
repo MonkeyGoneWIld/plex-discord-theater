@@ -71,7 +71,7 @@ export function sniffFormat(body: string): SubtitleFormat | null {
 }
 
 /** "01:23:45,678", "01:23:45.678" or ASS's "1:23:45.67" → seconds. */
-function parseTimestamp(raw: string): number | null {
+export function parseTimestamp(raw: string): number | null {
   const m = /^(?:(\d+):)?(\d{1,2}):(\d{1,2})[.,](\d{1,3})$/.exec(raw.trim());
   if (!m) return null;
   const [, h, mm, ss, frac] = m;

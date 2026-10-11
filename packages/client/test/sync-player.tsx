@@ -23,6 +23,13 @@ const firstItem = titled("4242");
 // ?whisper plays it unmuted at a whisper instead, where the browser allows
 // that: a muted video in a page nobody can see is paused a few seconds in.
 const whisper = new URLSearchParams(location.search).has("whisper");
+// ?timerFrames: frame callbacks on a timer. A browser that isn't drawing the
+// page — its window behind another — runs none, and the subtitle layer times
+// its lines by them; the checks read the page's text, which this keeps true.
+if (new URLSearchParams(location.search).has("timerFrames")) {
+  window.requestAnimationFrame = (cb: FrameRequestCallback) => window.setTimeout(() => cb(performance.now()), 16) as unknown as number;
+  window.cancelAnimationFrame = (id: number) => window.clearTimeout(id);
+}
 const mutedProp = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "muted")!;
 const volumeProp = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "volume")!;
 Object.defineProperty(HTMLMediaElement.prototype, "muted", {

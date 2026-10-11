@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchSubtitleCues, type SubtitleCue } from "../lib/api";
 import { logEvent, logWarn } from "../lib/log";
-import { activeCues, longestCue, sameCues } from "../lib/subtitleCues";
+import { activeCues, coveredAhead, longestCue, sameCues, withStretch, type CoveredSpan } from "../lib/subtitleCues";
 import { SUBTITLE_COLORS, SUBTITLE_FONTS, useSubtitleStyle, type SubtitleStyle } from "../lib/subtitleStyle";
 
 /**
@@ -49,8 +49,19 @@ export const SUBTITLE_FONT_SCALE = FONT_SCALE;
 export function subtitleBottomPercent(raise: number): number {
   return BOTTOM_SCALE * 100 + raise;
 }
-/** How often to ask again for a subtitle Plex is still reading out of the file. */
-const STILL_READING_POLL_MS = 4_000;
+/**
+ * How soon to ask again for a subtitle Plex is still reading out of the file,
+ * by how far ahead of the picture every line is known to have come: not at
+ * all — the server holds that ask until there are lines, so this is only the
+ * gap between asks — less than AHEAD_ENOUGH_S, or more.
+ */
+const ASK_NOW_MS = 300;
+const ASK_SOON_MS = 2_000;
+const ASK_LATER_MS = 5_000;
+const AHEAD_ENOUGH_S = 120;
+/** How often the picture's place is looked at while that goes on, for a skip
+ *  somewhere nothing is known about, and for saying so on screen. */
+const WATCH_PLACE_MS = 400;
 /** Bounds for absurd geometry — a sliver of a window, or a wall-sized display. */
 const MIN_FONT_PX = 13;
 const MAX_FONT_PX = 80;
@@ -233,38 +244,78 @@ interface SubtitleLayerProps {
 export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offsetMs, onUnavailable, hidden = false }: SubtitleLayerProps) {
   const style = useSubtitleStyle();
   const [cues, setCues] = useState<SubtitleCue[]>([]);
-  // Plex is still reading this one out of the media file: cues so far are
-  // drawn, and the rest is asked for again shortly.
-  const [stillReading, setStillReading] = useState(false);
+  // Plex is still reading this one out of the media file: where every line is
+  // known to have come, so that nothing on screen there can be told apart from
+  // a line on its way. Null once all of it has, and for a sidecar.
+  const [covered, setCovered] = useState<CoveredSpan[] | null>(null);
+  // Where the picture is, looked at every WATCH_PLACE_MS while that lasts.
+  const [place, setPlace] = useState(0);
   const onUnavailableRef = useRef(onUnavailable);
   onUnavailableRef.current = onUnavailable;
+  const offsetRef = useRef(offsetMs);
+  offsetRef.current = offsetMs;
 
   useEffect(() => {
     setCues([]);
-    setStillReading(false);
+    setCovered(null);
     if (streamId == null) return;
     let cancelled = false;
-    let poll: ReturnType<typeof setTimeout> | undefined;
+    let next: ReturnType<typeof setTimeout> | undefined;
+    let watch: ReturnType<typeof setInterval> | undefined;
     const startedAt = Date.now();
-    const load = (fresh: boolean) => {
-      fetchSubtitleCues(streamId, ratingKey, mediaIndex, fresh)
+    // What has come so far, where it is all there, and the last answer's name.
+    let known: SubtitleCue[] = [];
+    let spans: CoveredSpan[] | null = null;
+    let sig: string | undefined;
+    let asking = false;
+    let linesHere = false;
+    // The film's own time for what is on screen: a line shown later by the
+    // viewer's offset is one the file has earlier.
+    const where = () => Math.max(0, (videoRef.current?.currentTime ?? 0) - offsetRef.current / 1000);
+
+    const ask = () => {
+      clearTimeout(next);
+      if (asking) return;
+      asking = true;
+      const at = where();
+      fetchSubtitleCues(streamId, ratingKey, mediaIndex, true, { at, since: sig })
         .then((r) => {
+          asking = false;
           if (cancelled) return;
-          setCues(r.cues);
-          if (r.complete === false) {
-            setStillReading(true);
-            poll = setTimeout(() => load(true), STILL_READING_POLL_MS);
+          if (r.complete !== false) {
+            clearInterval(watch);
+            setCues(r.cues);
+            setCovered(null);
+            logEvent("Subtitles", "drawing a sidecar here rather than burning it in", {
+              streamId, cues: r.cues.length,
+              ...(spans ? { waitedMs: Date.now() - startedAt } : {}),
+            });
             return;
           }
-          setStillReading(false);
-          logEvent("Subtitles", "drawing a sidecar here rather than burning it in", {
-            streamId, cues: r.cues.length,
-            ...(fresh ? { waitedMs: Date.now() - startedAt } : {}),
-          });
+          if (!r.unchanged) {
+            known = r.from !== undefined && r.to !== undefined
+              ? withStretch(known, r.from, r.to, r.cues)
+              // A server from before: everything so far.
+              : r.cues;
+            setCues(known);
+          }
+          sig = r.sig;
+          spans = r.covered ?? [];
+          setCovered(spans);
+          const ahead = coveredAhead(spans, where());
+          if (ahead !== null && !linesHere) {
+            linesHere = true;
+            logEvent("Subtitles", "lines for here while Plex is still reading the rest", {
+              streamId, at: Math.round(at), waitedMs: Date.now() - startedAt, cues: known.length,
+            });
+          }
+          next = setTimeout(ask, ahead === null ? ASK_NOW_MS : ahead < AHEAD_ENOUGH_S ? ASK_SOON_MS : ASK_LATER_MS);
         })
         .catch((err) => {
+          asking = false;
           if (cancelled) return;
-          setStillReading(false);
+          clearInterval(watch);
+          setCovered(null);
           // The stream is already running without burned-in subtitles, so there
           // is nothing to fall back to in place — say so instead of showing a
           // film that silently has no subtitles. (A subtitle inside the file
@@ -276,16 +327,25 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
           onUnavailableRef.current?.();
         });
     };
-    load(false);
-    return () => { cancelled = true; clearTimeout(poll); };
+    ask();
+    // A skip to somewhere nothing is known about is asked about at once, not
+    // at the next turn — and "Loading subtitles…" is shown or not by where
+    // the picture is now.
+    watch = setInterval(() => {
+      const at = where();
+      setPlace(at);
+      if (spans && coveredAhead(spans, at) === null) ask();
+    }, WATCH_PLACE_MS);
+    return () => { cancelled = true; clearTimeout(next); clearInterval(watch); };
   }, [streamId]);
 
   const shown = useActiveCues(videoRef, cues, offsetMs);
   const box = usePictureBox(videoRef);
-  // While Plex is still reading it out, say so wherever there is no line yet —
-  // a film that starts with no subtitles otherwise looks like a broken track.
-  const lastEnd = cues.length > 0 ? cues[cues.length - 1].end : -1;
-  const waiting = stillReading && shown.length === 0 && (videoRef.current?.currentTime ?? 0) >= lastEnd;
+  // While Plex is still reading it out, say so wherever its lines haven't all
+  // come yet — a film that starts with no subtitles otherwise looks like a
+  // broken track. A quiet stretch whose lines are all there says nothing.
+  const now = videoRef.current ? Math.max(0, videoRef.current.currentTime - offsetMs / 1000) : place;
+  const waiting = covered !== null && shown.length === 0 && coveredAhead(covered, now) === null;
   if (hidden) return null;
   if (shown.length === 0 && !waiting) return null;
   // Nothing until there is a picture to size and place it against. Lines used

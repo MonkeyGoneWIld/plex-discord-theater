@@ -105,9 +105,57 @@ const tracksOf = (ratingKey: string) => {
     subtitleTracks: [
       { id: base + 3, title: "English (SRT)", language: "English", languageCode: "eng", selected: false, external: true },
       { id: base + 4, title: "English (PGS)", language: "English", languageCode: "eng", selected: false, external: false },
+      // Text inside the file, which the bot reads out as the film plays.
+      { id: base + 5, title: "English (in the file)", language: "English", languageCode: "eng", selected: false, external: true, sidecar: false },
     ],
   };
 };
+/**
+ * A subtitle inside the file, answered the way the bot answers one it is still
+ * reading (services/embedded-subtitles.ts): read from the start at
+ * subtitleReadPace film seconds a second, and around anywhere a player says it
+ * is SUBTITLE_AROUND_MS after it first asks — the bot reading those lines out
+ * of the file's index. An ask is held until there are lines for where it is,
+ * up to two seconds, and answered with those around it and where every line
+ * has come. Never finished: the whole film is never needed here.
+ */
+const subtitleReads = new Map<number, { began: number; around: Array<{ from: number; to: number; at: number }> }>();
+let subtitleReadPace = 3;
+const SUBTITLE_AROUND_MS = 400;
+const LINES = Array.from({ length: 200 }, (_, i) => ({ start: i * 3, end: i * 3 + 2, text: `Line ${i + 1}` }));
+async function subtitleRead(res: http.ServerResponse, id: number, url: URL) {
+  const read = subtitleReads.get(id) ?? { began: Date.now(), around: [] };
+  subtitleReads.set(id, read);
+  const spans = () => {
+    const list: Array<[number, number]> = [[0, ((Date.now() - read.began) / 1000) * subtitleReadPace]];
+    for (const w of read.around) if (Date.now() >= w.at) list.push([w.from, w.to]);
+    list.sort((a, b) => a[0] - b[0]);
+    const joined: Array<[number, number]> = [];
+    for (const [a, b] of list) {
+      const last = joined.at(-1);
+      if (last && a <= last[1]) last[1] = Math.max(last[1], b);
+      else joined.push([a, b]);
+    }
+    return joined;
+  };
+  const covers = (at: number) => spans().some(([a, b]) => a <= at && at < b);
+  const lines = () => LINES.filter((l) => spans().some(([a, b]) => l.start >= a && l.start < b));
+  if (!url.searchParams.has("at")) return json(res, { cues: lines(), complete: false });
+  const at = Number(url.searchParams.get("at"));
+  if (!covers(at) && !read.around.some((w) => w.from <= at && at < w.to)) {
+    read.around.push({ from: Math.max(0, at - 30), to: at + 120, at: Date.now() + SUBTITLE_AROUND_MS });
+  }
+  for (const end = Date.now() + 2000; !covers(at) && Date.now() < end;) await new Promise((r) => setTimeout(r, 50));
+  const from = Math.max(0, at - 60);
+  const to = at + 600;
+  const cues = lines().filter((c) => c.end > from && c.start < to);
+  const covered = spans().map(([a, b]) => [Math.round(a * 100) / 100, Math.round(b * 100) / 100]);
+  const here = covered.filter(([a, b]) => b > from && a < to).map(([a, b]) => [Math.max(a, from), Math.min(b, to)]);
+  const sig = `${cues.length}:${cues.at(-1)?.start ?? -1}:${here.join(";")}`;
+  if (url.searchParams.get("since") === sig) return json(res, { unchanged: true, complete: false, covered, from, to, sig });
+  return json(res, { cues, complete: false, covered, from, to, sig });
+}
+
 const meta = (ratingKey: string) => ({
   ratingKey, title: `Sync Test ${ratingKey}`, type: "movie", thumb: null, duration: 120_000,
   partId: Number(ratingKey), markers: [], genres: [], versions: [], ...tracksOf(ratingKey),
@@ -171,6 +219,8 @@ const server = http.createServer(async (req, res) => {
     const stream = url.searchParams.get("stream");
     streamDir = stream === "copy" ? COPY_STREAM : stream === "copy4" ? COPY4_STREAM : SMALL_STREAM;
     partsOn = url.searchParams.get("parts") !== "0";
+    subtitleReads.clear();
+    subtitleReadPace = Number(url.searchParams.get("subPace") ?? 3) || 3;
     return json(res, { ok: true, p2p: p2pOn, stream: path.basename(streamDir), parts: partsOn });
   }
   if (p === "/api/test/served") return json(res, served);
@@ -181,8 +231,12 @@ const server = http.createServer(async (req, res) => {
   if (p.startsWith("/api/plex/siblings/")) return json(res, { episode: false, prev: null, next: null });
   // The drawn subtitle: a line every few seconds.
   if (p.startsWith("/api/plex/subtitles/")) {
-    const cues = Array.from({ length: 40 }, (_, i) => ({ start: i * 3, end: i * 3 + 2, text: `Line ${i + 1}` }));
-    return json(res, { cues, complete: true });
+    const id = Number(p.split("/").pop());
+    if (id % 10 !== 5) {
+      const cues = Array.from({ length: 40 }, (_, i) => ({ start: i * 3, end: i * 3 + 2, text: `Line ${i + 1}` }));
+      return json(res, { cues, complete: true });
+    }
+    return subtitleRead(res, id, url);
   }
 
   // The stream: a media playlist straight away, as a copy of Plex's would be.

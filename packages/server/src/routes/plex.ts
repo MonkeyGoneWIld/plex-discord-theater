@@ -32,6 +32,7 @@ import {
   type EmbeddedSubtitle,
   type ReadOptions,
 } from "../services/embedded-subtitles.js";
+import { indexesLines, mkvSubtitleIndex, mkvSubtitleText, subtitleTrackFor } from "../services/mkv-subtitles.js";
 import { mapPlexRatings } from "../services/ratings.js";
 import {
   DETAIL_MAX_AGE_MS,
@@ -210,6 +211,9 @@ interface PlexStream {
   format?: string;
   /** Bits per sample of a video stream. */
   bitDepth?: number;
+  /** Its place among the file's streams — which, for a subtitle inside the
+   *  file, says which of the file's tracks it is (mkv-subtitles.ts). */
+  index?: number;
 }
 
 interface PlexPart {
@@ -2846,16 +2850,28 @@ router.put("/streams/:partId", async (req: Request, res: Response) => {
  */
 const subtitleCache = new LruMap<string, { cues: Cue[]; at: number }>(200);
 const SUBTITLE_CACHE_TTL_MS = 30 * 60 * 1000;
+/** The stretch of lines a player that says where it is gets while a subtitle
+ *  inside the file is still being read: a little behind it, and well ahead. */
+const SUBTITLE_WINDOW_BEFORE_S = 60;
+const SUBTITLE_WINDOW_AHEAD_S = 600;
 
 /**
  * Text subtitles inside the media file, read out by Plex and drawn by the
  * player, so subtitles being on no longer means re-encoding the video to burn
  * them in — see services/embedded-subtitles.ts. Plex reads whichever subtitle
  * the item has selected, so it is selected under the item lock.
+ *
+ * `at` is where the player asking is: the lines around there are read on their
+ * own if the read from the start hasn't got there — out of the file through
+ * its index when it is a Matroska file that has one (fileLines), or by Plex
+ * reading from there for a subtitle it converts. An ASS track it copies, and a
+ * copy started mid-film holds every line back until the end.
  */
 function embeddedSubtitle(
   ratingKey: string, mediaIndex: number, streamId: string, fingerprint: string | null,
+  codec: string | null, at?: number,
 ): Promise<EmbeddedSubtitle> {
+  const copied = ["ass", "ssa"].includes((codec ?? "").toLowerCase());
   return readEmbeddedSubtitle({
     streamId,
     ratingKey,
@@ -2865,7 +2881,38 @@ function embeddedSubtitle(
       await selectTracksForStart(ratingKey, mediaIndex, null, Number(streamId));
       return start();
     }),
-  });
+    fileLines: () => fileLines(ratingKey, mediaIndex, Number(streamId)),
+    readsFromAnywhere: !copied,
+  }, at);
+}
+
+/**
+ * How to read one subtitle's lines around a place straight out of its file,
+ * or null when that can't be done for certain: not Matroska, an index that
+ * doesn't list the subtitle's lines, or tracks that don't line up with Plex's
+ * streams — see mkv-subtitles.ts.
+ */
+async function fileLines(
+  ratingKey: string, mediaIndex: number, streamId: number,
+): Promise<((from: number, to: number) => Promise<string | null>) | null> {
+  const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(`/library/metadata/${ratingKey}`);
+  const media = data.MediaContainer.Metadata?.[0]?.Media?.[mediaIndex];
+  const part = media?.Part?.[0];
+  if (!part?.key || !(media?.container === "mkv" || /\.mkv$/i.test(part.key))) return null;
+  const index = await mkvSubtitleIndex(part.key, part.size ?? null);
+  if (!index) return null;
+  const streams = (part.Stream ?? [])
+    .filter((s) => s.streamType === 3 && !s.key)
+    .map((s) => ({ id: s.id, codec: s.codec ?? null, index: s.index ?? null }));
+  const track = subtitleTrackFor(index, streams, streamId);
+  if (!track || !indexesLines(index, track)) {
+    logEvent("Subtitles", "this file's index doesn't say where its subtitle lines are; Plex reads them", {
+      ratingKey, streamId, tracks: index.tracks.length, plexStreams: streams.length,
+    });
+    return null;
+  }
+  const partKey = part.key;
+  return (from, to) => mkvSubtitleText(partKey, index, track, from, to);
 }
 
 /** Guard against a "subtitle" that is really a video file. Comfortably larger
@@ -3115,6 +3162,14 @@ function subtitleFingerprint(version: { partId: number | null; fileSize?: number
  * carries `complete: false` and the cues so far until it is done, and the
  * player asks again. One that couldn't be read is refused, and the player then
  * asks for a stream with it burned in.
+ *
+ * A player that says where it is (`at`, seconds) is answered as soon as there
+ * are lines for there, with those from SUBTITLE_WINDOW_BEFORE_S before it to
+ * SUBTITLE_WINDOW_AHEAD_S after (`from`, `to`, on whole minutes, so that the
+ * stretch stays put while it plays on), and `covered`: the stretches where
+ * every line has come, which tell a quiet moment in the film from one whose
+ * lines are still on their way. With `since`, the `sig` of its last answer,
+ * nothing changed there is answered with `unchanged`.
  */
 router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
   const streamId = req.params.streamId as string;
@@ -3133,13 +3188,32 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
     // player has a buffer to spare for it, and asks (readSameLanguageAhead).
     const track = await subtitleTrackOf(ratingKey, mediaIndex, Number(streamId));
     if (track?.external && track.sidecar === false) {
-      const sub = await embeddedSubtitle(ratingKey, mediaIndex, streamId, track.fingerprint);
+      const where = Number(req.query.at);
+      const at = typeof req.query.at === "string" && Number.isFinite(where) && where >= 0 ? where : undefined;
+      const sub = await embeddedSubtitle(ratingKey, mediaIndex, streamId, track.fingerprint, track.codec ?? null, at);
       if (sub.state === "unreadable") {
         res.status(404).json({ error: "Subtitle not available" });
         return;
       }
-      if (sub.state === "reading") res.setHeader("Cache-Control", "no-store");
-      res.json({ cues: sub.cues, complete: sub.state === "ready" });
+      if (sub.state === "ready" || at === undefined) {
+        if (sub.state === "reading") res.setHeader("Cache-Control", "no-store");
+        res.json({ cues: sub.cues, complete: sub.state === "ready" });
+        return;
+      }
+      res.setHeader("Cache-Control", "no-store");
+      const from = Math.max(0, Math.floor((at - SUBTITLE_WINDOW_BEFORE_S) / 60) * 60);
+      const to = Math.ceil((at + SUBTITLE_WINDOW_AHEAD_S) / 60) * 60;
+      const cues = sub.cues.filter((c) => c.end > from && c.start < to);
+      // What the player would draw here, and where it is known to be all of it.
+      const here = sub.covered
+        .filter(([a, b]) => (b === null || b > from) && a < to)
+        .map(([a, b]) => [Math.max(a, from), b === null ? to : Math.min(b, to)]);
+      const sig = `${cues.length}:${cues.at(-1)?.start ?? -1}:${here.join(";")}`;
+      if (req.query.since === sig) {
+        res.json({ unchanged: true, complete: false, covered: sub.covered, from, to, sig });
+        return;
+      }
+      res.json({ cues, complete: false, covered: sub.covered, from, to, sig });
       return;
     }
   }
@@ -4309,10 +4383,10 @@ async function subtitleNotOffered(ratingKey: string, mediaIndex: number, streamI
 /** One subtitle track from a title's metadata, as mapSubtitleTracks made it. */
 async function subtitleTrackOf(
   ratingKey: string, mediaIndex: number, streamId: number,
-): Promise<{ id: number; external?: boolean; sidecar?: boolean; fingerprint: string | null } | null> {
+): Promise<{ id: number; codec?: string | null; external?: boolean; sidecar?: boolean; fingerprint: string | null } | null> {
   try {
     const meta = await buildMeta(ratingKey);
-    type Sub = { id: number; external?: boolean; sidecar?: boolean };
+    type Sub = { id: number; codec?: string | null; external?: boolean; sidecar?: boolean };
     const versions = meta?.versions as
       | Array<{ mediaIndex?: number; partId: number | null; fileSize?: number | null; subtitleTracks?: Sub[] }>
       | undefined;

@@ -59,7 +59,14 @@ const nextFrames = (n: number) => {
   currentGen = n + 1;
   latest.clear();
   events.clear();
+  bothQuery = "";
   return currentGen;
+};
+/** New frames, with `query` for both players — see bothQuery. */
+const nextFramesWith = (query: string) => (n: number) => {
+  const gen = nextFrames(n);
+  bothQuery = query;
+  return gen;
 };
 window.addEventListener("message", (e: MessageEvent) => {
   const m = e.data as Report & { kind?: string; events?: Event[]; gen?: string | null };
@@ -73,9 +80,11 @@ const port = location.port;
 const extra = new URLSearchParams(location.search).has("whisper") ? "&whisper" : "";
 /** Anything more for the host's player — where it resumes from. */
 let hostQuery = "";
+/** And for both, for one run's frames — ?timerFrames, say: see sync-player.tsx. */
+let bothQuery = "";
 const src = (gen: number) => ({
-  viewer: `http://localhost:${Number(port) + 1}/test/sync-player.html?user=u-viewer&autojoin${extra}&gen=${gen}`,
-  host: `http://localhost:${port}/test/sync-player.html?user=u-host${extra}${hostQuery}&gen=${gen}`,
+  viewer: `http://localhost:${Number(port) + 1}/test/sync-player.html?user=u-viewer&autojoin${extra}${bothQuery}&gen=${gen}`,
+  host: `http://localhost:${port}/test/sync-player.html?user=u-host${extra}${hostQuery}${bothQuery}&gen=${gen}`,
 });
 
 function Runner() {
@@ -222,14 +231,14 @@ function Runner() {
   }
 
   /** When the room started after the host pressed play, and how much each had buffered by then. */
-  async function startOnce(query: string, flows: Record<string, number>, uploadKbps = 0) {
+  async function startOnce(query: string, flows: Record<string, number>, uploadKbps = 0, frameQuery = "") {
     latest.clear();
     events.clear();
     await api(`/api/test/reset?${query}`);
     for (const [user, kbps] of Object.entries(flows)) await api(`/api/test/flow?user=${user}&kbps=${kbps}`);
     if (uploadKbps) await api(`/api/test/upload?kbps=${uploadKbps}`);
     setHostOn(false);
-    setFrames(nextFrames);
+    setFrames(frameQuery ? nextFramesWith(frameQuery) : nextFrames);
     await waitFor(() => latest.get("u-viewer")?.joined, 60_000, "the viewer to join");
     const began = Date.now();
     setHostOn(true);
@@ -758,6 +767,87 @@ function Runner() {
     }
   }
 
+  /**
+   * A subtitle inside the file, drawn while it is still being read — the test
+   * server reads it from the start at three film seconds a second, and around
+   * anywhere a player is a moment after it asks, as the bot does (see
+   * subtitleRead in sync-room-server.ts). On each player, sample by sample:
+   * the line for wherever the picture is, from the start, after a skip to
+   * somewhere nothing has been read, and nothing in the quiet between lines;
+   * "Loading subtitles…" only where its lines haven't come, and briefly.
+   */
+  async function runSubtitleReads() {
+    setRunning(true);
+    const out: string[] = ["— a subtitle Plex is still reading —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    const press = (who: "host" | "viewer", labels: string[]) =>
+      (who === "host" ? hostFrame : viewerFrame).current?.contentWindow?.postMessage({ kind: "press", press: labels }, "*");
+    /** Each player's picture against the lines — one every three seconds, two
+     *  long — for `ms`, with "Loading subtitles…" allowed up for `loadingMs`. */
+    const watch = async (what: string, ms: number, loadingMs: number) => {
+      const sampler = sampleBoth();
+      await pause(ms);
+      sampler.stop();
+      for (const who of ["host", "viewer"] as const) {
+        let shown = 0;
+        let between = 0;
+        let loading = 0;
+        const missing: string[] = [];
+        const extra: string[] = [];
+        let last = 0;
+        for (const x of sampler.samples) {
+          const r = x[who];
+          const dt = last ? x.t - last : 0;
+          last = x.t;
+          if (r.paused || r.ready < 3 || r.loading) continue;
+          const waiting = r.text.includes("Loading subtitles…");
+          if (waiting) loading += dt;
+          const n = Math.floor(r.pos / 3);
+          const into = r.pos - n * 3;
+          if (into >= 0.35 && into <= 1.75) {
+            if (new RegExp(`\\bLine ${n + 1}\\b`).test(r.text)) shown++;
+            else if (!waiting) missing.push(`${r.pos.toFixed(1)}s`);
+          } else if (into >= 2.25 && into <= 2.75) {
+            between++;
+            const up = r.text.match(/\bLine \d+\b/);
+            if (up) extra.push(`${up[0]} at ${r.pos.toFixed(1)}s`);
+          }
+        }
+        const ok = shown > 0 && missing.length === 0 && extra.length === 0 && loading <= loadingMs;
+        say(`${ok ? "PASS" : "FAIL"} ${what}: the ${who} showed the right line ${shown} times, nothing between lines ${between - extra.length} of ${between}` +
+          `, "Loading subtitles…" for ${(loading / 1000).toFixed(1)}s (up to ${(loadingMs / 1000).toFixed(1)}s allowed)` +
+          (missing.length ? ` — no line at ${missing.slice(0, 8).join(", ")}` : "") +
+          (extra.length ? ` — up between lines: ${extra.slice(0, 5).join(", ")}` : ""));
+      }
+    };
+    try {
+      // From no subtitle, whatever the last run left chosen: the host's
+      // player keeps its choices where this page can reach them.
+      localStorage.removeItem("pdt:titleTracks:v1");
+      localStorage.setItem("pdt:subtitlePref", JSON.stringify({ off: true }));
+      // What is checked is the page's text, which the subtitle layer updates
+      // once a frame: kept going when the browser isn't drawing this one.
+      await startOnce("p2p=0&stream=copy4&event=1&subPace=3", {}, 0, "&timerFrames");
+      await pause(2_000);
+      press("host", ["Audio & Subtitles", "Subtitles", "English (in the file)"]);
+      await pause(1_500);
+      await watch("from the start, as it is read", 9_000, 0);
+      for (let i = 0; i < 5; i++) hostKey("ArrowRight");
+      await watch("after the host skips fifty seconds ahead, past what has been read", 16_000, 1_500);
+      press("host", ["Audio & Subtitles", "Subtitles", "None"]);
+      await pause(1_500);
+      const missing = [...(events.get("u-host") ?? []), ...(events.get("u-viewer") ?? [])].filter((e) => e.tag === "Fixture" && e.msg === "no such button");
+      if (missing.length) say(`FAIL buttons not found: ${missing.map((e) => e.data.label).join(", ")}`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
   async function run(p2p: boolean) {
     setRunning(true);
     const out: string[] = [`— ${p2p ? "with" : "without"} P2P —`];
@@ -861,6 +951,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runRewind()}>Rewind</button>
         <button disabled={running} onClick={() => void runSeekingWords()}>Seeking words</button>
         <button disabled={running} onClick={() => void runMessages()}>Messages</button>
+        <button disabled={running} onClick={() => void runSubtitleReads()}>Subtitles as read</button>
         <pre id="results">{lines.join("\n")}</pre>
       </div>
       {frames > 0 && (

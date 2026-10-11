@@ -82,8 +82,10 @@ const extra = new URLSearchParams(location.search).has("whisper") ? "&whisper" :
 let hostQuery = "";
 /** And for both, for one run's frames — ?timerFrames, say: see sync-player.tsx. */
 let bothQuery = "";
+/** And for the viewer's. */
+let viewerQuery = "";
 const src = (gen: number) => ({
-  viewer: `http://localhost:${Number(port) + 1}/test/sync-player.html?user=u-viewer&autojoin${extra}${bothQuery}&gen=${gen}`,
+  viewer: `http://localhost:${Number(port) + 1}/test/sync-player.html?user=u-viewer&autojoin${extra}${viewerQuery}${bothQuery}&gen=${gen}`,
   host: `http://localhost:${port}/test/sync-player.html?user=u-host${extra}${hostQuery}${bothQuery}&gen=${gen}`,
 });
 
@@ -332,6 +334,122 @@ function Runner() {
    * measured, so the stream is rebuilt there — Backrooms skipped to 25:54, and
    * the room went back to 0:59 and waited there for ever.
    */
+  /**
+   * The host skipping a minute ahead inside what a copied film lists, past
+   * what it holds, while the segments ahead of where it was are still coming
+   * in — every download sharing one 30 Mbps connection, as the bot's upload is
+   * shared. Played in place, the new place should be in within a few seconds;
+   * it once sat six seconds on nothing and then rebuilt the stream anyway
+   * (The Bourne Identity, 11 October).
+   */
+  async function runCopySkipInPlace(p2p: boolean, uploadKbps = 30_000) {
+    setRunning(true);
+    const slow = uploadKbps < 20_000;
+    const out: string[] = [`— the host skipping ahead inside a copy, ${p2p ? "with" : "without"} P2P, everything at ${uploadKbps / 1000} Mbps —`];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      await startOnce(`p2p=${p2p ? 1 : 0}&stream=copy4&event=1&eventS=120`, {}, uploadKbps);
+      await pause(slow ? 20_000 : 8_000);
+      const from = latest.get("u-host")!.pos;
+      const skippedAt = Date.now();
+      for (let i = 0; i < 6; i++) hostKey("ArrowRight");
+      const target = from + 60;
+      say(`… skipping from ${from.toFixed(1)}s to about ${target.toFixed(0)}s`);
+      const playing = (who: string) => {
+        const r = latest.get(who);
+        return !!r && !r.paused && r.ready >= 3 && r.pos > target - 3 && r.pos < target + 20;
+      };
+      await waitFor(() => playing("u-host") && playing("u-viewer"), 60_000, "both to play from where the host skipped to");
+      const tookS = (Date.now() - skippedAt) / 1000;
+      const host = events.get("u-host") ?? [];
+      const starved = host.some((e) => e.tag === "Seek" && /in-place seek starved/.test(e.msg));
+      const restarted = host.some((e) => e.tag === "Seek" && /restarting transcode|→ restart/.test(e.msg));
+      say(`${!starved && !restarted ? "PASS" : "FAIL"} the host's picture for the new place came in place, without the skip starving or the stream being rebuilt (${starved ? "starved" : "came"}${restarted ? ", rebuilt" : ""})`);
+      // Each player needs two four-second segments of about 4.4 MB to start
+      // there, on the one connection they share: 17.6 MB, 4.7s of it at 30
+      // Mbps and 17.6s at 8 — then the skip's own half second, and a little
+      // over. Sharing them as they did before, the 30 Mbps skip took nine.
+      const limitS = slow ? 21 : 7.5;
+      say(`${tookS < limitS ? "PASS" : "FAIL"} both playing there ${tookS.toFixed(1)}s after the skip (under ${limitS}s)`);
+      // What the test server sent the host from a little before the skip:
+      // which segment, which part, when it finished and how long it took.
+      const served = (await api("/api/test/served")) as Array<{ user: string; seg: string; at: number; part?: string; ms?: number; askedAt?: number; cut?: boolean }>;
+      const around = served.filter((x) => x.user === "u-host" && x.at >= skippedAt - 3000 && x.at <= skippedAt + tookS * 1000 + 500)
+        .map((x) => `${x.seg}${x.part ? ` part ${x.part}` : ""} asked ${(((x.askedAt ?? x.at) - skippedAt) / 1000).toFixed(1)}s, ${x.cut ? "cut off" : "done"} ${((x.at - skippedAt) / 1000).toFixed(1)}s`);
+      say(`    sent to the host: ${around.join(", ") || "nothing"}`);
+      const asked = host.filter((e) => e.tag === "Fetch" && e.t >= skippedAt - 3000 && e.t <= skippedAt + tookS * 1000)
+        .map((e) => `${((e.t - skippedAt) / 1000).toFixed(1)}s ${e.msg} ${String(e.data.seg)} ${String(e.data.part)}`);
+      say(`    the host asked: ${asked.join(", ") || "nothing"}`);
+      const seekLog = host.filter((e) => e.tag === "Seek" && e.t >= skippedAt - 500).map((e) => e.msg);
+      say(`    ${seekLog.join(" → ")}`);
+    } catch (err) {
+      const h = latest.get("u-host");
+      const v = latest.get("u-viewer");
+      say(`FAIL ${String(err)} (host at ${h?.pos.toFixed(1)}s ${h?.paused ? "paused" : "playing"}, viewer at ${v?.pos.toFixed(1)}s)`);
+    } finally {
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
+   * The start of a title's preview frames fetched on its page — by the host
+   * and the viewer alike, since either can look along the seek bar — and the
+   * seek bar taking it from there as the film starts, instead of asking for it
+   * beside the first segments. Plex takes two and a half seconds to start
+   * sending each pass, as it can on a big file. Then the same start straight
+   * from Play, the seek bar asking for it itself, as before.
+   */
+  async function runPreviewAhead() {
+    setRunning(true);
+    const out: string[] = ["— the preview frames' first pass, fetched on the title's page —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    type Sent = { user: string; pass: number | null; askedAt: number; at: number; bytes: number };
+    const said = (who: string, msg: RegExp) => (events.get(who) ?? []).find((e) => e.tag === "Preview" && msg.test(e.msg));
+    const playingAt = (who: string) => (events.get(who) ?? []).find((e) => e.tag === "Video" && e.msg === "playing")?.t ?? NaN;
+    try {
+      for (const ahead of [true, false]) {
+        hostQuery = ahead ? "&titlePage=4000" : "";
+        viewerQuery = ahead ? "&titlePage" : "";
+        await startOnce("p2p=0&previews=1&previewDelayMs=2500", {});
+        await waitFor(() => !!said("u-host", /^frame index ready$/) && !!said("u-viewer", /^frame index ready$/), 20_000, "both seek bars' frames");
+        say(ahead ? "on the title's page first:" : "straight to Play, as before:");
+        const firstSent = (await api("/api/test/previews")) as Sent[];
+        for (const who of ["u-host", "u-viewer"]) {
+          const accepted = said(who, /^transfer accepted$/);
+          const firsts = firstSent.filter((x) => x.user === who && x.pass === 0);
+          const lateMs = said(who, /^frame index ready$/)!.t - playingAt(who);
+          say(`    ${who}: pass 0 sent ${firsts.length}×, its frames ready ${lateMs <= 0 ? `${-lateMs} ms before` : `${lateMs} ms after`} the picture started${accepted?.data.fetched ? ` — ${String(accepted.data.fetched)}` : ""}`);
+          if (ahead) {
+            say(`${accepted?.data.fetched ? "PASS" : "FAIL"} ${who}'s seek bar took the first pass fetched on the title's page`);
+            say(`${firsts.length === 1 ? "PASS" : "FAIL"} which was sent once (${firsts.length})`);
+            say(`${lateMs < 1000 ? "PASS" : "FAIL"} and its frames were there as the picture started`);
+          } else {
+            // Twice, the first called off: the seek bar's frames effect runs
+            // again a moment after the picture starts.
+            say(`${firsts.length >= 1 && accepted && !accepted.data.fetched ? "PASS" : "FAIL"} ${who}'s seek bar asks for the first pass itself`);
+          }
+        }
+        // The later passes follow on from it as the buffer allows.
+        await waitFor(() => !!said("u-host", /^frames (in)?complete$/), 60_000, "the host's frames to finish");
+        const done = said("u-host", /^frames (in)?complete$/)!;
+        const passes = ((await api("/api/test/previews")) as Sent[]).filter((x) => x.user === "u-host").map((x) => x.pass);
+        say(`${done.msg === "frames complete" ? "PASS" : "FAIL"} the later passes follow: ${String(done.data.ready)} of ${String(done.data.frames)} frames (passes sent to the host: ${passes.join(", ")})`);
+      }
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      hostQuery = "";
+      viewerQuery = "";
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
   async function runCopySkip() {
     setRunning(true);
     const out: string[] = ["— the host skipping past what a copied film has measured —"];
@@ -945,6 +1063,10 @@ function Runner() {
         <button disabled={running} onClick={() => void runStartup()}>Start-up</button>
         <button disabled={running} onClick={() => void runHostCrawls()}>Host's downloads crawl</button>
         <button disabled={running} onClick={() => void runCopySkip()}>Skip in a copy</button>
+        <button disabled={running} onClick={() => void runCopySkipInPlace(false)}>Skip ahead inside a copy</button>
+        <button disabled={running} onClick={() => void runCopySkipInPlace(true)}>Skip ahead inside a copy, P2P</button>
+        <button disabled={running} onClick={() => void runCopySkipInPlace(false, 8_000)}>Skip ahead inside a copy, slow</button>
+        <button disabled={running} onClick={() => void runPreviewAhead()}>Preview frames from the title's page</button>
         <button disabled={running} onClick={() => void runSkipThenPause()}>Skip then pause</button>
         <button disabled={running} onClick={() => void runKeyframeStart()}>Keyframe start</button>
         <button disabled={running} onClick={() => void runBufferedSkip()}>Skip in the buffer</button>

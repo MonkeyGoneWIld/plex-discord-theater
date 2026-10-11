@@ -27,6 +27,11 @@
 // to start, the next 40s, still growing, so a skip past that rebuilds the
 // stream there. stream=copy4 is the same with a four-second keyframe
 // interval, ~4 MB a segment.
+//
+// &previews=1 gives the title preview frames, as Plex has them for most
+// films: /api/plex/preview/<part>/index sends them a pass at a time as the
+// bot does, each after &previewDelayMs= (Plex reading the file out), and
+// /api/test/previews lists who was sent which pass.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
@@ -37,6 +42,7 @@ process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "sync-room-"
 const { attachWebSocketServer } = await import("../../server/src/services/sync.js");
 const { createSession, getSessionUserId } = await import("../../server/src/middleware/auth.js");
 const { instanceHosts } = await import("../../server/src/routes/discord.js");
+const { progressivePreview } = await import("../../server/src/services/preview-stream.js");
 
 const PORT = 3000;
 const SMALL_STREAM = path.join(os.tmpdir(), "plex-theater-media-errors");
@@ -84,10 +90,38 @@ let uploadKbps = 0;
 let uploadFreeAt = 0;
 /** Whether a copy is listed the way the bot lists one — see &event=1. */
 let eventList = false;
+/** How much of a copy the playlist lists from where it starts: 40s, or
+ *  &eventS= — a longer list keeps a skip inside it in place. */
+let eventS = 40;
 /** Where each session was asked to start: its owner says, everyone else joins it. */
 const sessionStart = new Map<string, number>();
+/** Whether titles have preview frames, and how long Plex takes to start sending them. */
+let previewsOn = false;
+let previewDelayMs = 0;
+/** Preview passes sent, per user: which, when asked, when the last byte went. */
+const previewsSent: Array<{ user: string; pass: number | null; askedAt: number; at: number; bytes: number }> = [];
+/**
+ * A two-minute title's preview index, one frame every two seconds: a BIF
+ * whose images are JPEG-headed runs of 30 KB — the size of Plex's — which
+ * is all the seek bar's reader looks at.
+ */
+const previewBif = (() => {
+  const count = 60;
+  const imageBytes = 30_000;
+  const start = 64 + (count + 1) * 8;
+  const bytes = Buffer.alloc(start + count * imageBytes);
+  bytes.set([0x89, 0x42, 0x49, 0x46, 13, 10, 26, 10]);
+  bytes.writeUInt32LE(count, 12);
+  bytes.writeUInt32LE(2000, 16);
+  for (let i = 0; i <= count; i++) {
+    bytes.writeUInt32LE(i === count ? 0xffffffff : i, 64 + i * 8);
+    bytes.writeUInt32LE(start + i * imageBytes, 68 + i * 8);
+    if (i < count) { bytes.set([0xff, 0xd8], start + i * imageBytes); bytes.writeUInt32LE(i, start + i * imageBytes + 2); }
+  }
+  return bytes;
+})();
 /** Segments served, per user, for the checks to read. */
-const served: Array<{ user: string; seg: string; at: number; heldMs: number; part?: string; bytes?: number; ms?: number }> = [];
+const served: Array<{ user: string; seg: string; at: number; heldMs: number; part?: string; bytes?: number; ms?: number; sent?: number; cut?: boolean; askedAt?: number }> = [];
 
 /**
  * Each title's tracks, as Plex has them: two audio, a subtitle the player
@@ -159,6 +193,7 @@ async function subtitleRead(res: http.ServerResponse, id: number, url: URL) {
 const meta = (ratingKey: string) => ({
   ratingKey, title: `Sync Test ${ratingKey}`, type: "movie", thumb: null, duration: 120_000,
   partId: Number(ratingKey), markers: [], genres: [], versions: [], ...tracksOf(ratingKey),
+  previewThumbs: previewsOn,
 });
 
 function userOf(req: http.IncomingMessage, url: URL): string | null {
@@ -213,7 +248,11 @@ const server = http.createServer(async (req, res) => {
     stallUntil.clear(); paceMs.clear(); nextSlot.clear(); flowKbps.clear(); served.length = 0;
     uploadKbps = 0;
     uploadFreeAt = 0;
+    previewsOn = url.searchParams.get("previews") === "1";
+    previewDelayMs = Number(url.searchParams.get("previewDelayMs") ?? 0) || 0;
+    previewsSent.length = 0;
     eventList = url.searchParams.get("event") === "1";
+    eventS = Number(url.searchParams.get("eventS") ?? 40) || 40;
     sessionStart.clear();
     p2pOn = url.searchParams.get("p2p") !== "0";
     const stream = url.searchParams.get("stream");
@@ -224,6 +263,32 @@ const server = http.createServer(async (req, res) => {
     return json(res, { ok: true, p2p: p2pOn, stream: path.basename(streamDir), parts: partsOn });
   }
   if (p === "/api/test/served") return json(res, served);
+  if (p === "/api/test/previews") return json(res, previewsSent);
+
+  if (/^\/api\/plex\/preview\/\d+\/index$/.test(p)) {
+    if (!previewsOn) { res.writeHead(404).end(); return; }
+    const askedAt = Date.now();
+    const pass = url.searchParams.has("pass") ? Number(url.searchParams.get("pass")) : null;
+    await new Promise((r) => setTimeout(r, previewDelayMs));
+    if (res.destroyed) return;
+    res.writeHead(200, { "Content-Type": "application/x-plex-preview-v2", "Access-Control-Allow-Origin": "*" });
+    const whole = previewBif;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let at = 0; at < whole.length; at += 64 * 1024) controller.enqueue(whole.subarray(at, at + 64 * 1024));
+        controller.close();
+      },
+    });
+    let bytes = 0;
+    for await (const piece of progressivePreview(body, undefined, undefined, 2, pass ?? undefined)) {
+      if (res.destroyed) return;
+      bytes += piece.length;
+      if (!res.write(piece)) await new Promise((r) => res.once("drain", r));
+    }
+    res.end();
+    previewsSent.push({ user: user ?? "?", pass, askedAt, at: Date.now(), bytes });
+    return;
+  }
 
   if (p === "/api/plex/config") return json(res, { vpsRelay: false });
   if (p === "/api/plex/played-threshold") return json(res, { threshold: 0.9 });
@@ -255,7 +320,7 @@ const server = http.createServer(async (req, res) => {
     for (let filled = 0; filled < first * segmentS; filled += 60) {
       lines.push(`#EXTINF:${Math.min(60, first * segmentS - filled).toFixed(3)},`, "#EXT-X-GAP", "gap.ts");
     }
-    for (const name of names.slice(first, first + Math.ceil(40 / segmentS))) {
+    for (const name of names.slice(first, first + Math.ceil(eventS / segmentS))) {
       lines.push(`#EXTINF:${segmentS.toFixed(3)},`, `/api/test/stream/${name}?n=${fs.statSync(path.join(streamDir, name)).size}`);
     }
     res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
@@ -315,6 +380,7 @@ const server = http.createServer(async (req, res) => {
     // Bigger with a shared connection: each turn on it costs a timer, and
     // small turns waste what one download alone could have used.
     const chunk = uploadKbps ? 65_536 : 16_384;
+    let sent = 0;
     for (let at = 0; at < body.length && !res.destroyed; at += chunk) {
       const piece = body.subarray(at, at + chunk);
       if (kbps) {
@@ -329,11 +395,14 @@ const server = http.createServer(async (req, res) => {
         uploadFreeAt = start + (piece.length * 8) / uploadKbps;
         if (start > Date.now()) await new Promise((r) => setTimeout(r, start - Date.now()));
       }
+      if (res.destroyed) break;
+      sent += piece.length;
       if (!res.write(piece)) await new Promise((r) => res.once("drain", r));
     }
+    const cut = res.destroyed;
     res.end();
     served.push({
-      user: who, seg: seg[1], at: Date.now(), heldMs: held,
+      user: who, seg: seg[1], at: Date.now(), heldMs: held, sent, cut, askedAt: asked,
       part: parts ? `${url.searchParams.get("part")}/${parts}` : range ? `from ${range[1]}` : undefined,
       bytes: body.length, ms: Date.now() - sentFrom,
     });

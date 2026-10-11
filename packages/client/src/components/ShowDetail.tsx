@@ -21,6 +21,7 @@ import { DetailLoading } from "./DetailLoading";
 import { PlexMediaActions } from "./PlexMediaActions";
 import { QUIET_SURFACE } from "../lib/surface";
 import { readSubtitlesAhead } from "../lib/subtitleReadAhead";
+import { prefetchPreviewStart } from "../lib/previewPrefetch";
 
 interface ShowDetailProps {
   item: PlexItem;
@@ -297,6 +298,23 @@ export function ShowDetail({
     const timer = setTimeout(() => void readSubtitlesAhead(startFrom.ratingKey, "first"), 1500);
     return () => clearTimeout(timer);
   }, [canPlay, startFrom?.ratingKey]);
+
+  // And the first of its preview frames, for everyone here — see MovieDetail.
+  useEffect(() => {
+    if (!startFrom) return;
+    const ratingKey = startFrom.ratingKey;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      fetchMeta(ratingKey)
+        .then((episodeMeta) => {
+          if (cancelled) return;
+          const version = versionOf(episodeMeta);
+          if (version.previewThumbs && version.partId != null) prefetchPreviewStart(version.partId);
+        })
+        .catch(() => {});
+    }, 1500);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [startFrom?.ratingKey]);
 
   const startPending = !startFrom
     && (!nextUpLoaded || loading || (seasons.length > 0 && !firstEpisodeTried));

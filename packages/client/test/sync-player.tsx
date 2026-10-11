@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { Player } from "../src/components/Player";
 import { useSync } from "../src/hooks/useSync";
 import { setSessionToken, type PlexItem } from "../src/lib/api";
+import { prefetchPreviewStart } from "../src/lib/previewPrefetch";
 
 const user = new URLSearchParams(location.search).get("user") ?? "u-viewer";
 /** Which run of the checks this frame belongs to: a frame being replaced can still report. */
@@ -16,6 +17,13 @@ const resume = Number(new URLSearchParams(location.search).get("resume")) || und
 const titled = (ratingKey: string): PlexItem =>
   ({ ratingKey, title: `Sync Test ${ratingKey}`, type: "movie", thumb: null, duration: 120_000 }) as PlexItem;
 const firstItem = titled("4242");
+/**
+ * ?titlePage=<ms>: this player has been on the first title's page — fetching
+ * the start of its preview frames there, as MovieDetail does for everyone —
+ * and the host stays on it that long before pressing Play.
+ */
+const titlePageMs = new URLSearchParams(location.search).has("titlePage")
+  ? Number(new URLSearchParams(location.search).get("titlePage")) || 0 : null;
 
 // Muted for good, so the browser lets it play without anyone clicking in this
 // frame — and keeps letting it: un-muting a video that started muted without
@@ -74,6 +82,22 @@ HTMLMediaElement.prototype.pause = function (this: HTMLMediaElement) {
   events.push({ t: Date.now(), tag: "Fixture", msg: "pause() called", data: { stack: new Error().stack?.split("\n").slice(2, 6).join(" | ") } });
   return pauseFn.call(this);
 };
+// Every request for a segment of the test stream, part by part: when it was
+// asked for, and when it came in or was called off — what the player asked
+// for, which the server's own list can't tell apart from what it got.
+const fetchFn = window.fetch.bind(window);
+window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  const seg = /\/api\/test\/stream\/(seg\d+)\.ts/.exec(url)?.[1];
+  if (!seg) return fetchFn(input, init);
+  const part = /[?&]part=(\d+)&parts=(\d+)/.exec(url);
+  const data = { seg, part: part ? `${part[1]}/${part[2]}` : "whole" };
+  const began = Date.now();
+  events.push({ t: began, tag: "Fetch", msg: "asked", data });
+  const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+  signal?.addEventListener("abort", () => events.push({ t: Date.now(), tag: "Fetch", msg: "called off", data: { ...data, afterMs: Date.now() - began } }), { once: true });
+  return fetchFn(input, init);
+}) as typeof window.fetch;
 const fixture: Record<string, unknown> = { events, user, isHost };
 (window as unknown as { fixture: typeof fixture }).fixture = fixture;
 
@@ -162,6 +186,7 @@ window.addEventListener("message", async (e: MessageEvent) => {
 
 const { token, instanceId } = await (await fetch(`/api/test/session?user=${user}`)).json() as { token: string; instanceId: string };
 setSessionToken(token);
+if (titlePageMs != null) prefetchPreviewStart(Number(firstItem.ratingKey));
 
 function Room() {
   // A viewer joins with a click, as one does in Discord — and the browser
@@ -182,6 +207,12 @@ function Room() {
   // The host starting another title from the player, as Next or the queue
   // does: the same player, handed another item.
   const [hostItem, setHostItem] = React.useState(firstItem);
+  const [onTitlePage, setOnTitlePage] = React.useState(isHost && !!titlePageMs);
+  React.useEffect(() => {
+    if (!onTitlePage) return;
+    const timer = setTimeout(() => setOnTitlePage(false), titlePageMs!);
+    return () => clearTimeout(timer);
+  }, [onTitlePage]);
   fixture.playTitle = (ratingKey: string) => setHostItem(titled(ratingKey));
   const roomItem = React.useMemo(() => (state.ratingKey ? titled(state.ratingKey) : null), [state.ratingKey]);
   if (!joined) {
@@ -195,6 +226,7 @@ function Room() {
   if (!isHost && !roomItem) return <p style={{ color: "#aaa" }}>Viewer: waiting for the host to start…</p>;
   const item = isHost ? hostItem : roomItem!;
   if (stopped) return <p style={{ color: "#aaa" }}>Host: stopped</p>;
+  if (onTitlePage) return <p style={{ color: "#aaa" }}>Host: on the title's page</p>;
   return (
     <Player key={mount} item={item} isHost={isHost} selfUserId={user} subtitles={false}
       resumePosition={mount === 0 ? resume : undefined}

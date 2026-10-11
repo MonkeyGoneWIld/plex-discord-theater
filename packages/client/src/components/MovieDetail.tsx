@@ -5,6 +5,7 @@ import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
 import { loadAudioPref, loadSubtitlePref, saveAudioPref, saveSubtitlePref, matchAudioTrack, rememberTitleTracks, startingSubtitle, subtitlesOnlyForForeignAudio, titleTrackPrefs } from "../lib/trackPrefs";
 import { readSubtitleAhead } from "../lib/subtitleReadAhead";
+import { prefetchPreviewStart } from "../lib/previewPrefetch";
 import { RatingsRow } from "./RatingsRow";
 import { RelatedRows } from "./RelatedRows";
 import { CastRow } from "./CastRow";
@@ -298,6 +299,20 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
     // subtitleTracks follows meta and selectedVersion, both here.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isHost, item.ratingKey, meta, selectedVersion, selectedSubtitle]);
+
+  /**
+   * Fetch the first of this file's preview frames while somebody is here, so
+   * the seek bar has them as the film starts instead of fetching them beside
+   * its first segments — see lib/previewPrefetch. Everyone, not only the
+   * host: anyone in the room can look along the seek bar. After the same
+   * moment on the page as the subtitle above.
+   */
+  const previewPart = resolved?.previewThumbs ? resolved.partId : null;
+  useEffect(() => {
+    if (previewPart == null) return;
+    const timer = setTimeout(() => prefetchPreviewStart(previewPart), 1500);
+    return () => clearTimeout(timer);
+  }, [previewPart]);
 
   // Deliberately not cached (unlike fetchMeta): this changes every time the item
   // is watched, and a stale resume point is worse than an extra request.

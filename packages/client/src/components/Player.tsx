@@ -309,6 +309,14 @@ const PICTURE_END_SLACK_S = 10;
 // After an in-place seek to an unbuffered position, how long to wait for
 // segments before giving up and restarting the transcode at the target.
 const SEEK_STALL_TIMEOUT_MS = 6_000;
+/**
+ * Past it, a copied stream whose segments are still coming in — bytes within
+ * SEEK_STILL_ARRIVING_MS — waits on, looked at again every SEEK_RECHECK_MS,
+ * for up to SEEK_ARRIVING_MAX_MS in all: its segment is big, not missing.
+ */
+const SEEK_STILL_ARRIVING_MS = 1_500;
+const SEEK_RECHECK_MS = 1_000;
+const SEEK_ARRIVING_MAX_MS = 20_000;
 // How far past the delivered buffer an unbuffered forward seek may reach before
 // we skip the in-place attempt and restart the transcode outright. Plex
 // transcodes linearly, so a large forward jump lands past the transcode head —
@@ -4604,6 +4612,25 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           setRestartingTo(null);
           setHoldingFrame(false);
         };
+        /**
+         * A skip to somewhere this player holds nothing of is a start over,
+         * as far as downloads go: the segment the picture waits on comes
+         * alone, in as many parts as it will go, until there is picture enough
+         * to go on with — then those after it two at a time again
+         * (coverStart, on FRAG_BUFFERED). Left at two, it shared the
+         * connection with the one after it: a minute's skip inside The Bourne
+         * Identity sat six seconds on nothing on 11 October, and the player
+         * gave up and rebuilt the stream; the test page's took nine.
+         */
+        const onSeeking = () => {
+          if (!mounted || !inParts || !startCovered) return;
+          if (pictureHeldAt(video, video.currentTime)) return;
+          logEvent("Load", "a skip to somewhere not held here: its segment downloads alone", {
+            atS: Number(video.currentTime.toFixed(2)),
+          });
+          startCovered = false;
+          applyHttpSlots();
+        };
         const onSeeked = () => {
           logEvent("Video", "seeked", snapshot(video));
           noteGoodPosition(video);
@@ -4633,6 +4660,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
         video.addEventListener("waiting", onWaiting);
         video.addEventListener("playing", onPlaying);
+        video.addEventListener("seeking", onSeeking);
         video.addEventListener("seeked", onSeeked);
         video.addEventListener("timeupdate", onTimeUpdate);
         video.addEventListener("stalled", onStalled);
@@ -4645,6 +4673,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         bufferCleanupRef.current = () => {
           video.removeEventListener("waiting", onWaiting);
           video.removeEventListener("playing", onPlaying);
+          video.removeEventListener("seeking", onSeeking);
           video.removeEventListener("seeked", onSeeked);
           video.removeEventListener("timeupdate", onTimeUpdate);
           video.removeEventListener("stalled", onStalled);
@@ -6063,20 +6092,32 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // In the engine's memory: the picture is a moment away, and the loading
     // screen goes up only if it isn't (the starved check in the loading poll).
     if (!pictureHeldAt(video, positionSeconds)) setBuffering(true);
-    seekStallTimerRef.current = setTimeout(() => {
+    const waitingSince = Date.now();
+    const check = () => {
       seekStallTimerRef.current = null;
       const v = videoRef.current;
       if (!v) return;
-      if (!isPositionBuffered(v, v.currentTime)) {
-        logWarn("Seek", "in-place seek starved, falling back to restart", {
-          waitedMs: SEEK_STALL_TIMEOUT_MS,
-          ...snapshot(v),
-        });
-        handleSeekRestart(v.currentTime);
-      } else {
-        logEvent("Seek", "in-place seek satisfied", snapshot(v));
+      if (isPositionBuffered(v, v.currentTime)) {
+        logEvent("Seek", "in-place seek satisfied", { waitedMs: Date.now() - waitingSince, ...snapshot(v) });
+        return;
       }
-    }, SEEK_STALL_TIMEOUT_MS);
+      // A copy's segment still coming in is slow, not missing. Rebuilding the
+      // stream only starts the same download over: The Bourne Identity's skip
+      // gave up on its segment after six seconds on 11 October, and the
+      // rebuilt stream took four more to fetch it again.
+      const arriving = copiedStreamRef.current &&
+        Date.now() - engineLoaderRef.current.lastChunkAt < SEEK_STILL_ARRIVING_MS;
+      if (arriving && Date.now() - waitingSince < SEEK_ARRIVING_MAX_MS) {
+        seekStallTimerRef.current = setTimeout(check, SEEK_RECHECK_MS);
+        return;
+      }
+      logWarn("Seek", "in-place seek starved, falling back to restart", {
+        waitedMs: Date.now() - waitingSince,
+        ...snapshot(v),
+      });
+      handleSeekRestart(v.currentTime);
+    };
+    seekStallTimerRef.current = setTimeout(check, SEEK_STALL_TIMEOUT_MS);
   }, [handleSeekRestart, stopWaitingForRoom, pictureHeldAt, enoughHeldAt]);
 
   // Live ref so the command-handling effect (declared above) can reach the

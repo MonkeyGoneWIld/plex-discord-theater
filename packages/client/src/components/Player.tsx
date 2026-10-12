@@ -180,8 +180,13 @@ const SEEK_REBUILD_WINDOW_MS = 10_000;
 const DRIFT_CORRECTION_COOLDOWN_MS = 8_000;
 /** A host catching up with a playing room drives it once this close to its clock, */
 const HOST_CATCH_UP_STEP_S = 0.75;
-/** or after this long regardless. */
+/** or after this long regardless — from where the room is, never pulling it back. */
 const HOST_CATCH_UP_MAX_MS = 20_000;
+/** How often a catching-up host may move its picture, and how long what is
+ *  coming in has to reach the room's place before it goes past it instead. */
+const HOST_CATCH_UP_ACT_MS = 2_000;
+/** Ahead of the room a held jump lands, for the seek's own moment. */
+const HOST_CATCH_UP_JUMP_S = 0.3;
 // How long a viewer may sit seeking with no buffer progress before we stop
 // re-seeking and rebuild the HLS pipeline instead.
 const SEEK_STALL_REBUILD_MS = 15_000;
@@ -1742,6 +1747,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    */
   const hostCatchUpRef = useRef(false);
   const hostCatchUpSinceRef = useRef(0);
+  /** When a catch-up last moved the picture, and since when it has been
+   *  playing behind the room without the room's place held — see steerHost. */
+  const hostCatchUpActedAtRef = useRef(0);
+  const hostCatchUpBehindSinceRef = useRef(0);
   /** The gather this player last told the room it was ready for. */
   const readySentForRef = useRef(0);
   /** Frames shown and dropped at the last health sample — see there. */
@@ -2575,20 +2584,67 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (!v || !sync?.ratingKey || !sessionIdRef.current) return;
     if (hostCatchUpRef.current) {
       // Following the room's clock until this picture plays in step with it.
-      const offS = v.currentTime - roomPositionNow(sync);
-      const inStep = sync.playing && pictureMoving(v) && Math.abs(offS) < HOST_CATCH_UP_STEP_S;
-      const tooLong = Date.now() - hostCatchUpSinceRef.current > HOST_CATCH_UP_MAX_MS;
-      if (!inStep && !tooLong && sync.playing) return;
-      hostCatchUpRef.current = false;
-      logEvent("Sync", inStep ? "caught up with the room, driving it from here" : "not caught up with the room, driving it from here anyway", {
-        offS: Number(offS.toFixed(2)),
-        tookMs: Date.now() - hostCatchUpSinceRef.current,
-        ...snapshot(v),
-      });
+      const roomS = sync.playing ? roomPositionNow(sync) : sync.position;
+      const offS = v.currentTime - roomS;
+      const moving = pictureMoving(v);
+      const inStep = sync.playing && !sync.hostWaiting && moving && Math.abs(offS) < HOST_CATCH_UP_STEP_S;
+      const tookMs = Date.now() - hostCatchUpSinceRef.current;
       if (inStep) {
+        hostCatchUpRef.current = false;
+        logEvent("Sync", "caught up with the room, driving it from here", { offS: Number(offS.toFixed(2)), tookMs, ...snapshot(v) });
         syncActionsRef.current?.sendHeartbeat(v.currentTime, true, false);
         return;
       }
+      /**
+       * Not in step, and out of time, or the room stopped running — paused,
+       * or gathering everybody after a co-host's seek: go to where the room
+       * is, and drive from there. Never the other way round — on 12 October
+       * monkey26's catch-up ran out 4.75 seconds behind, drove the room back
+       * to its own picture, and blah0391, who had played on, was left five
+       * seconds ahead and stopped to wait for it. A wait just ahead of the
+       * room isn't cut short: the room is on its way (catchUpLeadS).
+       */
+      const stopped = !sync.playing || !!sync.hostWaiting;
+      if (stopped || (tookMs > HOST_CATCH_UP_MAX_MS && !roomWaitRef.current)) {
+        hostCatchUpRef.current = false;
+        stopWaitingForRoom(stopped ? "the room stopped" : "catching up took too long");
+        logEvent("Sync", stopped ? "the room stopped while catching up, driving it from where it stopped" : "not caught up with the room in time, driving it from where it is", {
+          offS: Number(offS.toFixed(2)), tookMs, ...snapshot(v),
+        });
+        if (Math.abs(offS) >= HOST_CATCH_UP_STEP_S && !v.seeking && !isRestartPending()) v.currentTime = roomS;
+        if (!sync.playing && !v.paused) v.pause();
+        return;
+      }
+      /**
+       * Playing, but off the room's clock — it came in late, so it started
+       * behind. Once the room's place is held here, it goes there: after a
+       * slow segment the next ones often come fast, so they are given a
+       * moment to reach it. If they don't, it goes a little past the room, to
+       * wait there while that part comes, as a viewer joining does. Ahead, it
+       * waits. Once a moment, not on every tick.
+       */
+      const behind = moving && !roomWaitRef.current && offS <= -HOST_CATCH_UP_STEP_S;
+      if (!behind) hostCatchUpBehindSinceRef.current = 0;
+      else if (!hostCatchUpBehindSinceRef.current) hostCatchUpBehindSinceRef.current = Date.now();
+      if (moving && !roomWaitRef.current && Date.now() - hostCatchUpActedAtRef.current > HOST_CATCH_UP_ACT_MS) {
+        if (behind && pictureHeldAt(v, roomS + HOST_CATCH_UP_JUMP_S)) {
+          hostCatchUpActedAtRef.current = Date.now();
+          hostCatchUpBehindSinceRef.current = 0;
+          logEvent("Sync", "catching up: the room's place is held here, going to it", { offS: Number(offS.toFixed(2)), ...snapshot(v) });
+          v.currentTime = roomS + HOST_CATCH_UP_JUMP_S;
+        } else if (behind && Date.now() - hostCatchUpBehindSinceRef.current > HOST_CATCH_UP_ACT_MS) {
+          hostCatchUpActedAtRef.current = Date.now();
+          hostCatchUpBehindSinceRef.current = 0;
+          const leadS = catchUpLeadS(lastSegmentRef.current?.ms ?? recentSegmentMs());
+          logEvent("Sync", "catching up: behind the room, going past it to wait there", { offS: Number(offS.toFixed(2)), leadS, ...snapshot(v) });
+          v.currentTime = roomS + leadS;
+          waitForRoom(v, roomS, "catching up: gone past the room");
+        } else if (offS >= HOST_CATCH_UP_STEP_S) {
+          hostCatchUpActedAtRef.current = Date.now();
+          waitForRoom(v, roomS, "catching up: ahead of the room");
+        }
+      }
+      return;
     }
     if (!sync.playing) {
       // Paused on purpose: the pause itself told the room, waiting included.
@@ -2615,7 +2671,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     }
     if (pictureMoving(v)) reportHostPicture(false);
     else if (starved && starvedMs >= HOST_WAIT_AFTER_MS) reportHostPicture(true);
-  }, [reportHostPicture]);
+  }, [reportHostPicture, pictureHeldAt, waitForRoom, stopWaitingForRoom, isRestartPending]);
 
   /**
    * Everyone but the host: tell the room when this picture is ready to start
@@ -3348,6 +3404,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         !!room?.playing && !room.hostWaiting && room.ratingKey === item.ratingKey && room.position > DRIFT_THRESHOLD_S;
       if (hostCatchUpRef.current) {
         hostCatchUpSinceRef.current = Date.now();
+        hostCatchUpActedAtRef.current = 0;
+        hostCatchUpBehindSinceRef.current = 0;
         logEvent("Sync", "taking over a room that is playing: following its clock until in step", {
           roomPosS: Number(roomPositionNow(room!).toFixed(2)),
           adopted: didAdoptRef.current,

@@ -512,17 +512,25 @@ function Runner() {
    * the room it was at 0:00 and had it wait there. Now nobody else stops, and
    * the one that popped out is back in step within a few seconds.
    */
-  async function runPopOut(who: "host" | "viewer") {
+  /**
+   * `slowBack`: the popped player's first segments back come nine seconds
+   * late, as monkey26's did on 12 October — the room is past where it landed
+   * before it has anything to show there.
+   */
+  async function runPopOut(who: "host" | "viewer", slowBack = false) {
     setRunning(true);
-    const out: string[] = [`— the ${who} popping the activity out mid-film —`];
+    const out: string[] = [`— the ${who} popping the activity out mid-film${slowBack ? ", its stream slow to come back" : ""} —`];
     const say = (line: string) => { out.push(line); setLines([...out]); };
     setLines([...out]);
     const popped = who === "host" ? "u-host" : "u-viewer";
     const other = who === "host" ? "u-viewer" : "u-host";
     try {
-      await startOnce("p2p=1&stream=copy4&event=1&eventS=200", {}, 40_000);
+      // Without peers when slow, or the other player would hand it what the
+      // server holds back.
+      await startOnce(`p2p=${slowBack ? 0 : 1}&stream=copy4&event=1&eventS=200`, {}, 40_000);
       await pause(15_000);
       const before = latest.get(popped)!.pos;
+      if (slowBack) await api(`/api/test/stall?user=${popped}&ms=9000`);
       const poppedAt = Date.now();
       if (who === "host") {
         const win = hostFrame.current?.contentWindow as (Window & typeof globalThis) | null | undefined;
@@ -536,7 +544,7 @@ function Runner() {
       let otherStoppedMs = 0;
       let inStepAt = 0;
       let last = Date.now();
-      while (Date.now() - poppedAt < 30_000) {
+      while (Date.now() - poppedAt < (slowBack ? 40_000 : 30_000)) {
         await pause(200);
         const now = Date.now();
         const o = latest.get(other);
@@ -550,12 +558,16 @@ function Runner() {
       }
       const o = latest.get(other)!;
       const p = latest.get(popped)!;
-      const said = (events.get(popped) ?? []).filter((e) => e.t >= poppedAt && /taking over a room|caught up with the room|driving it from here anyway|ahead of the room, waiting/.test(e.msg)).map((e) => e.msg);
+      const said = (events.get(popped) ?? []).filter((e) => e.t >= poppedAt && /taking over a room|caught up with the room|catching up|driving it from|ahead of the room, waiting/.test(e.msg)).map((e) => e.msg);
       say(`    ${said.join(" → ") || "—"}`);
       say(`${otherStoppedMs < 1500 ? "PASS" : "FAIL"} the ${who === "host" ? "viewer" : "host"} played on (stopped ${(otherStoppedMs / 1000).toFixed(1)}s in all)`);
-      say(`${inStepAt && inStepAt - poppedAt < 15_000 ? "PASS" : "FAIL"} the ${who} was back, playing in step, ${inStepAt ? `${((inStepAt - poppedAt) / 1000).toFixed(1)}s after it reloaded` : "never"}`);
+      const backWithinMs = slowBack ? 30_000 : 15_000;
+      say(`${inStepAt && inStepAt - poppedAt < backWithinMs ? "PASS" : "FAIL"} the ${who} was back, playing in step, ${inStepAt ? `${((inStepAt - poppedAt) / 1000).toFixed(1)}s after it reloaded` : "never"}`);
       say(`${Math.abs(p.pos - o.pos) < 1 && !p.paused && !o.paused ? "PASS" : "FAIL"} and they play on together (${(p.pos - o.pos).toFixed(2)}s apart)`);
-      if (who === "host") say(`${said.some((m) => /caught up with the room, driving it from here/.test(m)) ? "PASS" : "FAIL"} the host drives the room again once in step`);
+      if (who === "host") {
+        say(`${said.some((m) => /caught up with the room, driving it from here/.test(m)) ? "PASS" : "FAIL"} the host drives the room again once in step`);
+        say(`${said.some((m) => /not caught up with the room in time/.test(m)) ? "FAIL" : "PASS"} and never from out of step`);
+      }
     } catch (err) {
       say(`FAIL ${String(err)}`);
     } finally {
@@ -1200,6 +1212,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runLateJoin()}>Late joiner</button>
         <button disabled={running} onClick={() => void runPopOut("host")}>Host pops out</button>
         <button disabled={running} onClick={() => void runPopOut("viewer")}>Viewer pops out</button>
+        <button disabled={running} onClick={() => void runPopOut("host", true)}>Host pops out, slow back</button>
         <button disabled={running} onClick={() => void runPreviewAhead()}>Preview frames from the title's page</button>
         <button disabled={running} onClick={() => void runSkipThenPause()}>Skip then pause</button>
         <button disabled={running} onClick={() => void runKeyframeStart()}>Keyframe start</button>

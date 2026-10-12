@@ -1297,6 +1297,10 @@ console.log("\n— a host alone popping out keeps the room —");
   check("on the same stream", state?.hlsSessionId, sid);
   check("held where it was left", near(state?.position ?? -1, 500, 0.5), "ok");
   check("waiting for the host's picture", state?.waiting, true);
+  // Its page pings the stream, which keeps a copy measuring ahead: told it
+  // didn't drive it, blah0391's never did, and the room starved three minutes
+  // later at the end of what had been measured (12 October).
+  check("and it drives its stream again", state?.variant?.isOwner, true);
   back.send({ type: "heartbeat", position: 500, playing: true, waiting: false });
   await sleep(60);
   await sleep(1000);
@@ -1327,6 +1331,7 @@ console.log("\n— somebody else in, and the host not back: theirs —");
   const a = new Client("u-a", "a");
   await a.connect("inst-alone-3");
   check("the newcomer finds the room holding", a.last("state")?.waiting, true);
+  check("on a stream that isn't theirs to drive", a.last("state")?.variant?.isOwner, false);
   check("and not theirs yet", a.count("host-promoted"), 0);
   await sleep(HOLD_MS + 300);
   check("then it is", a.count("host-promoted"), 1);

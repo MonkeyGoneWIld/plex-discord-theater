@@ -9,6 +9,7 @@ import { recordProgress, shouldRecordHistory } from "./watch-history.js";
 import { pushProgressToPlex } from "./plex-accounts.js";
 import { episodesInSameFile } from "./episode-files.js";
 import { logEvent } from "./logger.js";
+import { updateDirectStreamPosition } from "./direct-stream.js";
 import { qualityKbps } from "./media-versions.js";
 
 /** Interval between WebSocket pings to detect dead connections. */
@@ -525,7 +526,8 @@ function updateWaiting(room: Room, roomId: string | null, why: string): void {
     if (waiting) s.position = interpolatedPosition(s);
     s.updatedAt = Date.now();
     s.waiting = waiting;
-    logEvent("Sync", waiting ? "room waiting" : "room running", {
+    // Not "running" for a room that has just stopped or paused: it isn't.
+    logEvent("Sync", waiting ? "room waiting" : running ? "room running" : "room no longer waiting", {
       room: roomId?.substring(0, 8) ?? "?",
       ...(waiting ? { why, for: s.hostWaiting ? "the host" : namesOf(pending) } : {}),
       posS: Number(s.position.toFixed(2)),
@@ -615,6 +617,14 @@ function startSessionPing(instanceId: string, hlsSessionId: string): void {
   stopSessionPing(hlsSessionId);
   let gone = 0;
   const interval = setInterval(() => {
+    // Where the room is, for a copy, which measures only so far past whoever
+    // is watching (direct-stream.ts, LEAD_S) and hears where that is from the
+    // ping of the page driving it — which a page coming back may not have
+    // started. The room's clock is always there.
+    const room = rooms.get(instanceId);
+    if (room?.state.ratingKey && room.state.playing) {
+      updateDirectStreamPosition(hlsSessionId, interpolatedPosition(room.state));
+    }
     pingPlexTranscode(hlsSessionId)
       .then((alive) => {
         // Plex has discarded this transcode. Nothing will bring it back, so the
@@ -1591,8 +1601,13 @@ export function attachWebSocketServer(server: Server): void {
           variant: room.state.hostVariantKey
             ? variantMessage(
                 room.state.variants.get(room.state.hostVariantKey)!,
-                // A joiner never drives the host's stream — the host does.
-                false,
+                // A joiner doesn't drive the host's stream — unless it is
+                // theirs, coming back to a room held for them (holdEmptyRoom).
+                // Told otherwise, the page that came back never pinged it, and
+                // a copy measures only so far past the last ping: on 12 October
+                // blah0391's stopped three minutes after the pop-out, and the
+                // room starved at its end until the stream was restarted.
+                room.state.variants.get(room.state.hostVariantKey)!.ownerUserId === client.userId,
                 room.state.ratingKey,
                 client.subtitleStreamId,
               )

@@ -101,6 +101,37 @@ export function catchUpLeadS(lastSegmentMs: number | null): number {
   return Math.round(Math.min(20, Math.max(3, s)) * 10) / 10;
 }
 
+/** Less of its segment than this past a landing, and it is a sliver — see landingFor. */
+export const LAND_MIN_LEFT_S = 3;
+/** How far into the next segment a landing moved there goes, so that it is
+ *  that segment the player fetches, not the end of the one before it. */
+export const LAND_INTO_SEGMENT_S = 0.1;
+
+/**
+ * Where a follower going a little past the room lands: at `targetS`, unless
+ * that leaves only a sliver of its segment to play — less than three seconds
+ * of it, and less than half — when it lands at the start of the next segment
+ * instead, if that is no further than `limitS`. A segment is fetched whole,
+ * so a landing at the end of one fetched all of it for a moment of picture,
+ * and stopped for the next: the test page's host, back from a pop-out,
+ * landed 0.82 seconds from the end of a four-second segment, played them,
+ * and stopped for two.
+ */
+export function landingFor(
+  targetS: number,
+  segments: ReadonlyArray<{ start: number; duration: number }> | null | undefined,
+  limitS: number,
+): number {
+  if (!segments?.length) return targetS;
+  const i = segments.findIndex((s) => targetS >= s.start && targetS < s.start + s.duration);
+  if (i < 0 || i + 1 >= segments.length) return targetS;
+  const here = segments[i];
+  const leftS = here.start + here.duration - targetS;
+  if (leftS >= LAND_MIN_LEFT_S || leftS >= here.duration / 2) return targetS;
+  const landS = segments[i + 1].start + LAND_INTO_SEGMENT_S;
+  return landS <= limitS ? landS : targetS;
+}
+
 /** Where the last segment's download time is kept across a reload. */
 const LAST_SEGMENT_KEY = "pdt:lastSegmentMs";
 /** How long it is worth anything: a connection changes. */

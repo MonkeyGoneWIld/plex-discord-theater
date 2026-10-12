@@ -11,8 +11,10 @@
  *   (roomPositionNow).
  * - A copy started together starts on its keyframe when its first segment
  *   ends too soon after the start point to start on (lib/copyStart).
+ * - A follower going past the room doesn't land on the last sliver of a
+ *   segment (lib/roomWait landingFor).
  */
-import { MAX_WAIT_FOR_ROOM_S, catchUpLeadS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
+import { LAND_INTO_SEGMENT_S, MAX_WAIT_FOR_ROOM_S, catchUpLeadS, landingFor, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS } from "../src/lib/bufferTrim";
@@ -138,6 +140,28 @@ check("at least three seconds", catchUpLeadS(400), 3);
 check("at most twenty", catchUpLeadS(30_000), 20);
 check("six with nothing to go on", [catchUpLeadS(null), catchUpLeadS(0)], [6, 6]);
 check("and no further than a follower waits for the room", catchUpLeadS(30_000) <= MAX_WAIT_FOR_ROOM_S, true);
+
+console.log("\n— a follower going past the room lands where its segment has picture to play —");
+{
+  const at = (t: number) => Math.round(t * 1000) / 1000;
+  // The test page's host back from a pop-out: four-second segments, and it
+  // landed 0.82s from the end of one.
+  const copy4 = [{ start: 20.139, duration: 3.925 }, { start: 24.064, duration: 3.925 }, { start: 27.989, duration: 4.011 }, { start: 32, duration: 4 }];
+  check("0.82s from the end of a four-second segment: the start of the next",
+    at(landingFor(27.167, copy4, Infinity)), at(27.989 + LAND_INTO_SEGMENT_S));
+  check("half of it left: where it was going", landingFor(26, copy4, Infinity), 26);
+  // monkey26's on 12 October: seg 185 ran 569.03–589.44, and it landed at 576.01.
+  const long = [{ start: 569.03, duration: 20.41 }, { start: 589.44, duration: 2.5 }];
+  check("thirteen seconds of a twenty-second segment left: where it was going", landingFor(576.01, long, Infinity), 576.01);
+  check("two and a half of it left: the next", at(landingFor(586.94, long, Infinity)), at(589.44 + LAND_INTO_SEGMENT_S));
+  const short = [{ start: 10, duration: 1 }, { start: 11, duration: 1 }, { start: 12, duration: 1 }];
+  check("one-second segments: only the last half second of one is a sliver", at(landingFor(10.6, short, Infinity)), at(11 + LAND_INTO_SEGMENT_S));
+  check("and more than that isn't", landingFor(10.4, short, Infinity), 10.4);
+  check("not past the limit", landingFor(27.167, copy4, 28), 27.167);
+  check("in the last segment: where it was going", landingFor(35, copy4, Infinity), 35);
+  check("outside the segments: where it was going", landingFor(50, copy4, Infinity), 50);
+  check("no segments yet: where it was going", [landingFor(27.167, null, Infinity), landingFor(27.167, [], Infinity)], [27.167, 27.167]);
+}
 
 console.log("\n— the last segment's time, kept across a reload —");
 {

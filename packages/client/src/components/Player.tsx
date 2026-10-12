@@ -37,7 +37,7 @@ import { carryTrackPrefs, describeWatched, endTrackSitting, isCommentary, mergeT
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
-import { catchUpLeadS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
+import { MAX_WAIT_FOR_ROOM_S, catchUpLeadS, landingFor, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, enoughToStart, nextSegmentInS, pictureStartFor } from "../lib/copyStart";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
@@ -2587,7 +2587,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       const roomS = sync.playing ? roomPositionNow(sync) : sync.position;
       const offS = v.currentTime - roomS;
       const moving = pictureMoving(v);
-      const inStep = sync.playing && !sync.hostWaiting && moving && Math.abs(offS) < HOST_CATCH_UP_STEP_S;
+      // In step, and with picture enough in front of it to start on, as any
+      // player says it is ready: a host that took the room over with half a
+      // second of it stopped at once, and the room — everybody — with it.
+      const inStep = sync.playing && !sync.hostWaiting && moving && Math.abs(offS) < HOST_CATCH_UP_STEP_S &&
+        enoughHeldAt(v, v.currentTime);
       const tookMs = Date.now() - hostCatchUpSinceRef.current;
       if (inStep) {
         hostCatchUpRef.current = false;
@@ -2608,7 +2612,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       if (stopped || (tookMs > HOST_CATCH_UP_MAX_MS && !roomWaitRef.current)) {
         hostCatchUpRef.current = false;
         stopWaitingForRoom(stopped ? "the room stopped" : "catching up took too long");
-        logEvent("Sync", stopped ? "the room stopped while catching up, driving it from where it stopped" : "not caught up with the room in time, driving it from where it is", {
+        logEvent("Sync", stopped
+          ? "the room stopped while catching up, driving it from where it stopped"
+          : Math.abs(offS) < HOST_CATCH_UP_STEP_S
+            ? "in step with the room but short of picture all this time, driving it from here"
+            : "not caught up with the room in time, driving it from where it is", {
           offS: Number(offS.toFixed(2)), tookMs, ...snapshot(v),
         });
         if (Math.abs(offS) >= HOST_CATCH_UP_STEP_S && !v.seeking && !isRestartPending()) v.currentTime = roomS;
@@ -2617,17 +2625,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       }
       /**
        * Playing, but off the room's clock — it came in late, so it started
-       * behind. Once the room's place is held here, it goes there: after a
-       * slow segment the next ones often come fast, so they are given a
-       * moment to reach it. If they don't, it goes a little past the room, to
-       * wait there while that part comes, as a viewer joining does. Ahead, it
-       * waits. Once a moment, not on every tick.
+       * behind. Once the room's place is held here, with picture enough after
+       * it to start on, it goes there: after a slow segment the next ones
+       * often come fast, so they are given a moment to reach it. If they
+       * don't, it goes a little past the room, to wait there while that part
+       * comes, as a viewer joining does. Ahead, it waits. Once a moment, not
+       * on every tick.
        */
       const behind = moving && !roomWaitRef.current && offS <= -HOST_CATCH_UP_STEP_S;
       if (!behind) hostCatchUpBehindSinceRef.current = 0;
       else if (!hostCatchUpBehindSinceRef.current) hostCatchUpBehindSinceRef.current = Date.now();
       if (moving && !roomWaitRef.current && Date.now() - hostCatchUpActedAtRef.current > HOST_CATCH_UP_ACT_MS) {
-        if (behind && pictureHeldAt(v, roomS + HOST_CATCH_UP_JUMP_S)) {
+        if (behind && enoughHeldAt(v, roomS + HOST_CATCH_UP_JUMP_S)) {
           hostCatchUpActedAtRef.current = Date.now();
           hostCatchUpBehindSinceRef.current = 0;
           logEvent("Sync", "catching up: the room's place is held here, going to it", { offS: Number(offS.toFixed(2)), ...snapshot(v) });
@@ -2636,8 +2645,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           hostCatchUpActedAtRef.current = Date.now();
           hostCatchUpBehindSinceRef.current = 0;
           const leadS = catchUpLeadS(lastSegmentRef.current?.ms ?? recentSegmentMs());
-          logEvent("Sync", "catching up: behind the room, going past it to wait there", { offS: Number(offS.toFixed(2)), leadS, ...snapshot(v) });
-          v.currentTime = roomS + leadS;
+          const end = v.seekable.length ? v.seekable.end(v.seekable.length - 1) : Infinity;
+          const landS = landingFor(roomS + leadS, hlsRef.current ? levelFragments(hlsRef.current) : null,
+            Math.min(end - 1, roomS + MAX_WAIT_FOR_ROOM_S - 5));
+          logEvent("Sync", "catching up: behind the room, going past it to wait there", {
+            offS: Number(offS.toFixed(2)), leadS, toS: Number(landS.toFixed(2)), ...snapshot(v),
+          });
+          v.currentTime = landS;
           waitForRoom(v, roomS, "catching up: gone past the room");
         } else if (offS >= HOST_CATCH_UP_STEP_S) {
           hostCatchUpActedAtRef.current = Date.now();
@@ -2671,7 +2685,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     }
     if (pictureMoving(v)) reportHostPicture(false);
     else if (starved && starvedMs >= HOST_WAIT_AFTER_MS) reportHostPicture(true);
-  }, [reportHostPicture, pictureHeldAt, waitForRoom, stopWaitingForRoom, isRestartPending]);
+  }, [reportHostPicture, enoughHeldAt, waitForRoom, stopWaitingForRoom, isRestartPending]);
 
   /**
    * Everyone but the host: tell the room when this picture is ready to start
@@ -3635,6 +3649,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         };
         /** How many parts each segment was asked for in, for the log. */
         const partsAsked = new Map<string, number>();
+        /**
+         * A follower's landing a little past the room, until its playlist
+         * says where the segments are — see the landing, and LEVEL_LOADED.
+         */
+        let landingAhead: { atS: number; roomAtS: number } | null = null;
 
         if (!vpsRelay) {
           // P2P mode — peers share segments via WebRTC. Copied segments come
@@ -4011,6 +4030,45 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           }
           copiedStreamRef.current = copied;
           playlistEdgeRef.current = copied && data.details.live ? data.details.edge : null;
+          /**
+           * A follower landing a little past the room, now that its segments
+           * are known: at the start of the next one instead, if where it was
+           * going leaves only a sliver of its own (lib/roomWait landingFor).
+           * The loading begun before they were known, at hlsConfig.startPosition,
+           * goes there too — and to the landing itself when that is in
+           * another segment than the one being fetched — rather than fetch a
+           * segment it will never show.
+           */
+          if (landingAhead) {
+            const { atS, roomAtS } = landingAhead;
+            landingAhead = null;
+            const wait = roomWaitRef.current;
+            const frags = data.details.fragments;
+            if (wait && Math.abs(wait.atS - atS) < 0.01 && video.readyState < HTMLMediaElement.HAVE_METADATA && frags.length > 0) {
+              const last = frags[frags.length - 1];
+              const landS = landingFor(atS, frags, Math.min(last.start + last.duration - 1, roomAtS + MAX_WAIT_FOR_ROOM_S - 5));
+              const segmentAt = (t: number) => frags.findIndex((f) => t >= f.start && t < f.start + f.duration);
+              const loadingFrom = hlsConfig.startPosition ?? -1;
+              if (landS !== atS || segmentAt(loadingFrom) !== segmentAt(landS)) {
+                if (landS !== atS) {
+                  const here = frags[segmentAt(atS)];
+                  logEvent("Sync", "landing at the start of the next segment instead", {
+                    fromS: Number(atS.toFixed(2)),
+                    toS: Number(landS.toFixed(2)),
+                    leftS: Number((here.start + here.duration - atS).toFixed(2)),
+                    roomPosS: Number(roomAtS.toFixed(2)),
+                  });
+                }
+                wait.atS = landS;
+                video.currentTime = landS;
+                // After everything else has had this playlist: the P2P engine
+                // learns its segments from it.
+                setTimeout(() => {
+                  if (mounted && hlsRef.current === hls) hls.startLoad(landS);
+                }, 0);
+              }
+            }
+          }
         });
 
         hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
@@ -4164,8 +4222,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               // Whatever is left is startup between here and the first frame,
               // which nothing can predict. Measured and closed once when frames
               // actually arrive — unless it is waited out ahead of the room.
-              if (leadS) joinAheadOf = syncPos;
-              else joinSettleRef.current = true;
+              if (leadS) {
+                joinAheadOf = syncPos;
+                landingAhead = { atS: syncPos + leadS, roomAtS: syncPos };
+              } else joinSettleRef.current = true;
             }
           } else if (
             // The same, into a room that is paused: on the stream someone else
@@ -5968,15 +6028,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         syncState.ratingKey === itemRef.current.ratingKey) {
       lastDriftCorrectionRef.current = Date.now();
       stalledSeekSinceRef.current = null;
+      const landS = landingFor(target + leadS, hlsRef.current ? levelFragments(hlsRef.current) : null,
+        Math.min(end - 1, target + MAX_WAIT_FOR_ROOM_S - 5));
       logWarn("Viewer", "behind the room, going past it to wait there", {
         driftS: drift,
         fromS: video.currentTime,
         roomS: target,
-        toS: target + leadS,
+        toS: landS,
         leadS,
         ...snapshot(video),
       });
-      video.currentTime = target + leadS;
+      video.currentTime = landS;
       waitForRoom(video, target, "gone past the room to wait for it");
       return;
     }

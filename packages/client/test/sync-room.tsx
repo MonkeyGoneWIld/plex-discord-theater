@@ -558,12 +558,20 @@ function Runner() {
       }
       const o = latest.get(other)!;
       const p = latest.get(popped)!;
-      const said = (events.get(popped) ?? []).filter((e) => e.t >= poppedAt && /taking over a room|caught up with the room|catching up|driving it from|ahead of the room, waiting/.test(e.msg)).map((e) => e.msg);
+      const said = (events.get(popped) ?? []).filter((e) => e.t >= poppedAt && /taking over a room|caught up with the room|catching up|driving it from|ahead of the room, waiting|start of the next segment/.test(e.msg)).map((e) => e.msg);
       say(`    ${said.join(" → ") || "—"}`);
+      // Stops once it is playing again, on the reloaded page.
+      const back = (events.get(popped) ?? []).filter((e) => e.t >= poppedAt);
+      const startedAt = back.find((e) => e.tag === "HLS" && e.msg === "starting session")?.t ?? Infinity;
+      const playingAt = back.find((e) => e.t >= startedAt && e.tag === "Video" && e.msg === "playing")?.t ?? Infinity;
+      // Not the moment a seek of its own takes: that is a jump, not a stop.
+      const stopsBack = back.filter((e) => e.t > playingAt && e.tag === "Video" && /buffer starved/.test(e.msg) &&
+        e.data.paused === false && e.data.seeking !== true);
       say(`${otherStoppedMs < 1500 ? "PASS" : "FAIL"} the ${who === "host" ? "viewer" : "host"} played on (stopped ${(otherStoppedMs / 1000).toFixed(1)}s in all)`);
       const backWithinMs = slowBack ? 30_000 : 15_000;
       say(`${inStepAt && inStepAt - poppedAt < backWithinMs ? "PASS" : "FAIL"} the ${who} was back, playing in step, ${inStepAt ? `${((inStepAt - poppedAt) / 1000).toFixed(1)}s after it reloaded` : "never"}`);
       say(`${Math.abs(p.pos - o.pos) < 1 && !p.paused && !o.paused ? "PASS" : "FAIL"} and they play on together (${(p.pos - o.pos).toFixed(2)}s apart)`);
+      say(`${stopsBack.length <= 1 ? "PASS" : "FAIL"} the ${who}, playing again, stops no more than once (${stopsBack.length})`);
       if (who === "host") {
         say(`${said.some((m) => /caught up with the room, driving it from here/.test(m)) ? "PASS" : "FAIL"} the host drives the room again once in step`);
         say(`${said.some((m) => /not caught up with the room in time/.test(m)) ? "FAIL" : "PASS"} and never from out of step`);

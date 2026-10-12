@@ -580,10 +580,6 @@ function Runner() {
         const viewerAgain = (events.get(other) ?? []).filter((e) => e.t >= poppedAt && e.tag === "Preview" && e.msg === "transfer accepted");
         say(`${viewerAgain.length === 0 ? "PASS" : "FAIL"} the viewer kept its preview frames through its turn as host (${viewerAgain.length} fetched again)`);
       }
-      // What the page before kept as it went, taken up by the one that came back.
-      const took = back.find((e) => e.msg === "took up the picture the page before this one kept");
-      const framesBack = back.find((e) => e.msg === "frames carried across the reload");
-      say(`    carried: ${took ? `${took.data.segments} segments, ${took.data.fromS}–${took.data.toS}s, ${took.data.MB} MB` : "no picture"}; ${framesBack ? `${framesBack.data.ready} preview frames` : "no preview frames"}`);
     } catch (err) {
       say(`FAIL ${String(err)}`);
     } finally {
@@ -599,8 +595,7 @@ function Runner() {
    * transcode was killed as its socket closed — it was the last one out — and
    * the page that came back found nothing playing. Now the room is held for it
    * (sync.ts, holdEmptyRoom), with its clock where it stopped, and the page
-   * that comes back goes on with the same stream, from there, with the
-   * picture the page before kept as it went (lib/popOutCarry).
+   * that comes back goes on with the same stream, from there.
    */
   async function runAlonePopOut() {
     setRunning(true);
@@ -636,19 +631,15 @@ function Runner() {
       }
       const back = (events.get("u-host") ?? []).filter((e) => e.t >= poppedAt);
       const started = back.find((e) => e.tag === "HLS" && e.msg === "starting session");
-      const took = back.find((e) => e.msg === "took up the picture the page before this one kept");
-      const framesBack = back.find((e) => e.msg === "frames carried across the reload");
       const landed = back.find((e) => /landing on the room clock/.test(e.msg));
       const afterBack = back.filter((e) => backAt && e.t > backAt);
       const stops = afterBack.filter((e) => e.tag === "Video" && /buffer starved/.test(e.msg) && e.data.paused === false && e.data.seeking !== true);
-      say(`    ${landed ? `landed at ${Number(landed.data.toS).toFixed(1)}s` : "no landing"}; carried: ${took ? `${took.data.segments} segments, ${took.data.fromS}–${took.data.toS}s, ${took.data.MB} MB` : "no picture"}; ${framesBack ? `${framesBack.data.ready} preview frames` : "no preview frames"}`);
+      say(`    ${landed ? `landed at ${Number(landed.data.toS).toFixed(1)}s` : "no landing"}`);
       // Within a few seconds: the room told the moment its picture is ready,
       // not at its next heartbeat, which kept it waiting five.
       say(`${backAt && backAt - poppedAt < 3_000 ? "PASS" : "FAIL"} the film went on: the host was playing again ${backAt ? `${((backAt - poppedAt) / 1000).toFixed(1)}s after it reloaded` : "never"}`);
       say(`${Number.isFinite(backPos) && Math.abs(backPos - before) < 3 ? "PASS" : "FAIL"} from where it left (${Number.isFinite(backPos) ? backPos.toFixed(1) : "—"}s, left at ${before.toFixed(1)}s)`);
       say(`${started?.data.adopted === true ? "PASS" : "FAIL"} on the stream it left, not a new one (adopted ${String(started?.data.adopted)})`);
-      say(`${took ? "PASS" : "FAIL"} with the picture it had kept as it went`);
-      say(`${framesBack ? "PASS" : "FAIL"} and its preview frames`);
       say(`${stops.length === 0 ? "PASS" : "FAIL"} and it plays on without stopping (${stops.length})`);
     } catch (err) {
       say(`FAIL ${String(err)}`);

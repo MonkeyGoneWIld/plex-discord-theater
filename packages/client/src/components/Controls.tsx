@@ -8,8 +8,7 @@ import {
 import { createPreviewMotion, type SpeedTier } from "../lib/previewMotion";
 import { loadVolume } from "../lib/volume";
 import { previewPassPath, takePreviewStart } from "../lib/previewPrefetch";
-import { dropParkedPreview, parkPreview, previewDone, previewInUse, takeParkedPreview, type KeptPreview } from "../lib/previewKeep";
-import { takeCarriedPreview } from "../lib/popOutCarry";
+import { dropParkedPreview, parkPreview, takeParkedPreview } from "../lib/previewKeep";
 import type { PreviewPass, PreviewStatus } from "../lib/previewStatus";
 import { getLevel, setLevel, boostAvailable, BOOST_ACCENT, MAX_LEVEL } from "../lib/audioBoost";
 import { useMediaQuery, COMPACT_CONTROLS_QUERY, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -1188,7 +1187,7 @@ export function Controls({
     // The frames these controls had before they went — the Activity PiP was
     // open — waiting for them in lib/previewKeep, rather than fetched again.
     const parked = takeParkedPreview(previewPartId);
-    let progressive = parked?.reader ?? createProgressivePreviewReader(onTierReady);
+    const progressive = parked?.reader ?? createProgressivePreviewReader(onTierReady);
     let reader: PreviewFrameReader = progressive;
     // For Stats for nerds: how many have come, and when.
     const status: PreviewStatus = parked?.status ?? {
@@ -1196,8 +1195,6 @@ export function Controls({
       passes: [], waitingForBufferS: null,
     };
     if (previewStatusRef) previewStatusRef.current = status;
-    let kept: KeptPreview = { partId: previewPartId, reader: progressive, status };
-    previewInUse(kept);
     const sinceStart = () => (performance.now() - transferStartedAt) / 1000;
 
     /**
@@ -1229,30 +1226,10 @@ export function Controls({
     const read = async () => {
       transferStartedAt = performance.now();
       let bytes = status.bytes;
-      // Taken up again: kept while the controls were away, or carried across
-      // Discord reloading the activity (lib/popOutCarry). Either way it goes
-      // on from the pass it was in.
-      let resumed = !!parked;
-      if (!parked) {
-        const carried = await takeCarriedPreview(previewPartId);
-        if (cancelled) return;
-        const restored = carried ? createProgressivePreviewReader(onTierReady, carried.version, carried) : null;
-        if (restored?.frames() && !restored.rejected()) {
-          progressive.dispose();
-          progressive = restored;
-          reader = restored;
-          kept = { ...kept, reader: restored };
-          previewInUse(kept);
-          resumed = true;
-          status.transport = `progressive-v${carried!.version}`;
-          logEvent("Preview", "frames carried across the reload", {
-            partId: previewPartId, ready: restored.frames()!.ready, frames: restored.frames()!.count,
-            passesDone: restored.passesDone(),
-          });
-        } else {
-          restored?.dispose();
-        }
-      } else {
+      // Taken up again, kept while the controls were away: it goes on from
+      // the pass it was in.
+      const resumed = !!parked;
+      if (parked) {
         logEvent("Preview", "frames kept while the controls were away", {
           partId: previewPartId, ready: progressive.frames()?.ready ?? 0, passesDone: progressive.passesDone(),
         });
@@ -1394,9 +1371,8 @@ export function Controls({
       // of these there. A file that isn't progressive has nothing to go on
       // from, and goes.
       if (reader === progressive && !progressive.rejected() && progressive.frames()) {
-        parkPreview(kept);
+        parkPreview({ partId: previewPartId, reader: progressive, status });
       } else {
-        previewDone(kept);
         reader.dispose();
       }
       previewFramesRef.current = null;

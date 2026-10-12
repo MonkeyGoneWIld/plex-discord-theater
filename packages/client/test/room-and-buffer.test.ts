@@ -13,8 +13,6 @@
  *   ends too soon after the start point to start on (lib/copyStart).
  * - A follower going past the room doesn't land on the last sliver of a
  *   segment (lib/roomWait landingFor).
- * - What is kept across Discord reloading the activity is the stretch just
- *   ahead of the playhead (lib/popOutCarry).
  */
 import { LAND_INTO_SEGMENT_S, MAX_WAIT_FOR_ROOM_S, catchUpLeadS, landingFor, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
@@ -22,7 +20,6 @@ import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS } from "../src/lib/bufferTrim";
 import { roomPositionNow } from "../src/hooks/useSync";
 import { enoughToStart, nextSegmentInS, pictureStartFor } from "../src/lib/copyStart";
-import { CARRY_MAX_BYTES, segmentsToCarry } from "../src/lib/popOutCarry";
 
 let pass = 0;
 let fail = 0;
@@ -164,22 +161,6 @@ console.log("\n— a follower going past the room lands where its segment has pi
   check("in the last segment: where it was going", landingFor(35, copy4, Infinity), 35);
   check("outside the segments: where it was going", landingFor(50, copy4, Infinity), 50);
   check("no segments yet: where it was going", [landingFor(27.167, null, Infinity), landingFor(27.167, [], Infinity)], [27.167, 27.167]);
-}
-
-console.log("\n— what is kept across a reload of the activity —");
-{
-  const seg = (startTime: number, endTime: number, mb = 4, main = true) => ({ startTime, endTime, bytes: mb * 1024 * 1024, main });
-  const held = [seg(80, 90), seg(90, 100), seg(100, 110), seg(110, 120), seg(120, 130), seg(130, 140), seg(140, 150), seg(100, 110, 1, false)];
-  const kept = segmentsToCarry(held, 105);
-  check("from just before the playhead to half a minute after it, in order",
-    kept.map((s) => [s.startTime, s.endTime]), [[100, 110], [110, 120], [120, 130], [130, 140]]);
-  check("the main stream's only", kept.every((s) => s.main), true);
-  check("the one that ended a moment before the playhead too, and not the one before it", segmentsToCarry(held, 101).map((s) => s.startTime), [90, 100, 110, 120, 130]);
-  const heavy = [seg(100, 110, 40), seg(110, 120, 40), seg(120, 130, 40)];
-  check("no more than the most it keeps, and no gap: nothing after one that doesn't fit",
-    segmentsToCarry(heavy, 101).map((s) => s.startTime), [100, 110]);
-  check("which is half a minute of a copied Blu-ray", CARRY_MAX_BYTES, 96 * 1024 * 1024);
-  check("nothing held, nothing kept", segmentsToCarry([], 100), []);
 }
 
 console.log("\n— the last segment's time, kept across a reload —");

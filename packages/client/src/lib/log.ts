@@ -200,8 +200,8 @@ export function initClientLogging(): void {
     if (document.visibilityState === "hidden") flushOnUnload();
   });
 
-  // Whether a page going away says so — Discord's pop-out reloads the
-  // activity, and what is carried across it is put down on the way out.
+  // A page going away says so: Discord's pop-out reloads the activity, and
+  // the log should show that it was that, not a crash.
   window.addEventListener("pagehide", () => {
     enqueue({ t: Date.now(), level: "log", tag: "Page", msg: "pagehide" });
     flushOnUnload();

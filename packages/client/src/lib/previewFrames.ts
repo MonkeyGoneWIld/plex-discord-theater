@@ -267,35 +267,20 @@ export interface ProgressivePreviewReader extends PreviewFrameReader {
   nextResponse(): void;
   /**
    * The pass under way is coming again, from its start, in a response of its
-   * own — it was cut off, or this reader was taken up again from a carry. Its
+   * own — it was cut off while the controls were away (lib/previewKeep). Its
    * frames already here are passed over rather than refused, and a record cut
    * off part way is let go.
    */
   resumePass(): void;
   /** How many passes are in whole, which is the one to ask for next. */
   passesDone(): number;
-  /** Everything here, to be taken up again by another reader (see `from`). */
-  exportFrames(): PreviewFramesCarry | null;
-}
-
-/** The frames a reader holds, to take up again elsewhere — a page reloaded. */
-export interface PreviewFramesCarry {
-  /** The file's head as first read: its index. */
-  head: Uint8Array;
-  /** The frames there are, and each one's size, in the order `blob` holds them. */
-  frames: number[];
-  sizes: number[];
-  /** Those frames' bytes, one after another. */
-  blob: Blob;
-  version: 1 | 2;
 }
 
 /** Reader for application/x-plex-preview-v2 (or the legacy v1 ordering). Only one incomplete record is
- * buffered; complete JPEGs become blobs and survive a truncated download. `from` takes up the frames
- * another reader held (exportFrames), to carry on from the pass after them. */
+ * buffered; complete JPEGs become blobs and survive a truncated download. */
 export function createProgressivePreviewReader(onTierReady?: (progress: {
   tier: PreviewDetail; frames: number; bytes: number; ready: number;
-}) => void, version: 1 | 2 = 2, from?: PreviewFramesCarry): ProgressivePreviewReader {
+}) => void, version: 1 | 2 = 2): ProgressivePreviewReader {
   let index: Index | null = null;
   // The head as first read, for checking the copy each later response repeats.
   let head: Uint8Array | null = null;
@@ -351,29 +336,6 @@ export function createProgressivePreviewReader(onTierReady?: (progress: {
     filled = 0;
   };
   const tierOf = (i: number) => PREVIEW_DETAILS.findIndex((level) => detailIndex(i, index!, level) === i);
-  if (from) {
-    const result = readIndex(from.head);
-    if (result && result !== REJECTED) {
-      index = result;
-      head = from.head;
-      index.tiers = previewTierIndices(index.frames.length, version);
-      const { coarse, medium, fine } = index.tiers;
-      expected = [coarse.length, medium.length - coarse.length, fine.length - medium.length,
-        index.frames.length - fine.length];
-      let at = 0;
-      from.frames.forEach((i, n) => {
-        if (index!.frames[i]) images.set(i, from.blob.slice(at, at + from.sizes[n], "image/jpeg"));
-        at += from.sizes[n];
-      });
-      const inTier = [0, 0, 0, 0];
-      for (const i of images.keys()) inTier[tierOf(i)]++;
-      while (tier < PREVIEW_DETAILS.length && inTier[tier] === expected[tier]) tier++;
-      tierFrames = tier < PREVIEW_DETAILS.length ? inTier[tier] : 0;
-      next("record", 8);
-    } else {
-      rejected = true;
-    }
-  }
   return {
     push(chunk) {
       if (rejected || disposed) return;
@@ -447,12 +409,6 @@ export function createProgressivePreviewReader(onTierReady?: (progress: {
       next("length", 4);
     },
     passesDone() { return tier; },
-    exportFrames() {
-      if (!index || !head || disposed || rejected) return null;
-      const frames = [...images.keys()];
-      const blobs = frames.map((i) => images.get(i)!);
-      return { head, frames, sizes: blobs.map((b) => b.size), blob: new Blob(blobs, { type: "image/jpeg" }), version };
-    },
     frames() { return index && !disposed ? view : null; },
     rejected() { return rejected; },
     dispose() { disposed = true; view.dispose(); index = null; head = null; buffer = new Uint8Array(0); },

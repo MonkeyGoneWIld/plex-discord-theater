@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type Hls from "hls.js";
 import HlsPkg from "hls.js";
 import { qualityLabel } from "../lib/quality";
+import { codecFamily, codecName } from "../lib/codecName";
 import { audioDetails, audioSummary, playbackMode, type StreamNotes } from "../lib/streamNotes";
 import type { StreamTrack } from "../lib/api";
 import { previewDetails, previewSummary, type PreviewStatus } from "../lib/previewStatus";
@@ -74,7 +75,7 @@ interface Snapshot {
 const POLL_INTERVAL_MS = 1000;
 
 /** The rows that open to more, each one line until opened. */
-type Section = "video" | "audio" | "subtitles" | "thumbnails";
+type Section = "playback" | "video" | "audio" | "subtitles" | "connection" | "peers" | "thumbnails";
 /** Which are open — the viewer's own, kept across streams. */
 const OPEN_KEY = "pdt:statsOpen";
 function loadOpen(): Set<Section> {
@@ -264,7 +265,7 @@ export function StatsOverlay({
     };
   }, [videoRef, hlsRef]);
 
-  // The few rows with more behind them stay one line until opened.
+  // What is behind a row stays out of the way until the row is opened.
   const [open, setOpen] = useState<Set<Section>>(loadOpen);
   const toggle = (section: Section) => setOpen((was) => {
     const next = new Set(was);
@@ -280,53 +281,77 @@ export function StatsOverlay({
 
   // The server's word on the stream beats the playlist-type guess, which can't
   // say why or at what rate.
-  const mbpsOf = (kbps: number | null) => (kbps ? ` · ${(kbps / 1000).toFixed(kbps % 1000 ? 1 : 0)} Mbps` : "");
+  const mbpsOf = (kbps: number | null) => (kbps ? `${(kbps / 1000).toFixed(kbps % 1000 ? 1 : 0)} Mbps` : null);
   const source = notes?.video === "copy"
-    ? `Original${mbpsOf(notes.kbps)}`
+    ? ["Original", mbpsOf(notes.kbps)].filter(Boolean).join(" · ")
     : notes?.video === "transcode"
-      ? `Transcoded${mbpsOf(notes.kbps)}`
+      ? ["Transcoded", mbpsOf(notes.kbps)].filter(Boolean).join(" · ")
       : snap?.videoPath ?? "—";
   // Plex's words for the stream — see playbackMode. Without the server's
   // notes, the playlist says only whether the video is the original.
   const mode = playbackMode(notes)
     ?? (snap?.videoPath === "Original" ? "Direct Stream" : snap?.videoPath === "Transcoded" ? "Transcode" : null);
+  const rawVideoCodec = snap && snap.videoCodec !== "—" ? snap.videoCodec : null;
+  const rawAudioCodec = snap && snap.audioCodec !== "—" ? snap.audioCodec : null;
+  const videoSummary = [
+    snap && snap.streamResolution !== "—" ? snap.streamResolution : null,
+    codecFamily(rawVideoCodec),
+    mbpsOf(notes?.kbps ?? null) ?? (snap && snap.videoBitrate !== "—" ? snap.videoBitrate : null),
+  ].filter(Boolean).join(" · ") || "—";
   const subtitleStatus = subtitleStatusRef?.current ?? null;
   const previewStatus = previewStatusRef?.current ?? null;
   const preview = previewStatus && previewStatus.partId === previewPartId ? previewStatus : null;
+  const lastSegment = lastSegmentText(lastSegmentRef?.current ?? null) ?? (snap && snap.lastFrag !== "—" ? snap.lastFrag : null);
+  const delivery = vpsRelay ? "VPS relay (nginx cache)" : "P2P mesh (WebRTC)";
 
+  // What is playing, then how it is arriving, then the seek bar's frames.
   const rows: Array<{ label: string; value: string; section?: Section; details?: Array<[string, string]> }> = [
-    { label: "Playback", value: mode ?? "—" },
-    { label: "Viewport / Frames", value: `${snap?.resolution ?? "—"} · ${snap?.droppedFrames ?? 0}/${snap?.totalFrames ?? 0} dropped` },
-    { label: "Stream resolution", value: snap?.streamResolution ?? "—" },
-    { label: "Decode rate", value: snap?.fps ?? "—" },
-    { label: "Video bitrate", value: snap?.videoBitrate ?? "—" },
-    { label: "Connection speed", value: snap?.bandwidth ?? "—" },
-    { label: "Buffer health", value: snap?.bufferHealth ?? "—" },
     {
-      label: "Video", value: source, section: "video",
-      details: notes?.video === "transcode" && notes.reason ? [["Reason", notes.reason]] : [],
+      label: "Playback", value: mode ?? "—", section: "playback",
+      details: [
+        ["Quality", quality ? `Up to ${qualityLabel(quality)}` : qualityLabel(0)],
+        ...(sessionId ? [["Session", sessionId.slice(0, 8)] as [string, string]] : []),
+      ],
     },
-    { label: "Audio", value: audioSummary(notes), section: "audio", details: audioDetails(notes) },
+    {
+      label: "Video", value: videoSummary, section: "video",
+      details: [
+        ["Source", source],
+        ...(notes?.video === "transcode" && notes.reason ? [["Reason", notes.reason] as [string, string]] : []),
+        ["Codec", codecName(rawVideoCodec) ?? "—"],
+        ["Frames", `${snap?.droppedFrames ?? 0}/${snap?.totalFrames ?? 0} dropped · ${snap?.fps ?? "—"}`],
+        ["Viewport", snap?.resolution ?? "—"],
+      ],
+    },
+    {
+      label: "Audio", value: audioSummary(notes), section: "audio",
+      details: [...(rawAudioCodec ? [["Codec", codecName(rawAudioCodec)!] as [string, string]] : []), ...audioDetails(notes)],
+    },
     {
       label: "Subtitles", section: "subtitles",
       value: subtitle ? subtitleSummary(subtitle.track, subtitle.shown, subtitleStatus, subtitle.failed) : "—",
       details: subtitle ? subtitleDetails(subtitle.track, subtitle.shown, subtitleStatus, subtitle.failed) : [],
     },
+    { label: "Buffer", value: snap?.bufferHealth ?? "—" },
+    {
+      label: "Connection", value: snap?.bandwidth ?? "—", section: "connection",
+      details: [
+        ...(lastSegment ? [["Last segment", lastSegment] as [string, string]] : []),
+        ["Delivery", delivery],
+      ],
+    },
+    ...(vpsRelay ? [] : [{
+      label: "Peers", value: `${p2p.peers.size} · ${p2pRatio}% from peers`, section: "peers" as Section,
+      details: [
+        ["Received", `${formatBytes(p2p.p2pBytes)} peers · ${formatBytes(p2p.httpBytes)} server`] as [string, string],
+        ["Uploaded", formatBytes(p2p.uploadBytes)] as [string, string],
+      ],
+    }]),
     {
       label: "Thumbnails", section: "thumbnails",
       value: previewSummary(preview, previewPartId !== null),
       details: previewDetails(preview),
     },
-    { label: "Your quality", value: quality ? `Up to ${qualityLabel(quality)}` : qualityLabel(0) },
-    { label: "Codecs", value: `${snap?.videoCodec ?? "—"} / ${snap?.audioCodec ?? "—"}` },
-    { label: "Last segment", value: lastSegmentText(lastSegmentRef?.current ?? null) ?? snap?.lastFrag ?? "—" },
-    { label: "Delivery", value: vpsRelay ? "VPS relay (nginx cache)" : "P2P mesh (WebRTC)" },
-    ...(vpsRelay ? [] : [
-      { label: "Peers connected", value: String(p2p.peers.size) },
-      { label: "From peers / server", value: `${formatBytes(p2p.p2pBytes)} / ${formatBytes(p2p.httpBytes)} (${p2pRatio}%)` },
-      { label: "Uploaded to peers", value: formatBytes(p2p.uploadBytes) },
-    ]),
-    ...(sessionId ? [{ label: "Session", value: sessionId.slice(0, 8) }] : []),
   ];
 
   return (
@@ -382,7 +407,7 @@ const styles: Record<string, React.CSSProperties> = {
     position: "absolute",
     top: "64px",
     left: "20px",
-    width: "370px",
+    width: "340px",
     maxWidth: "calc(100% - 40px)",
     background: "rgba(15,15,15,0.82)",
     backdropFilter: "blur(12px)",
@@ -421,8 +446,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   body: {
     padding: "4px 12px 8px 8px",
-    // An open row or two can run past a small window: scroll rather than
-    // overflow.
+    // Open rows can run past a small window: scroll rather than overflow.
     maxHeight: "calc(100vh - 160px)",
     overflowY: "auto",
   },

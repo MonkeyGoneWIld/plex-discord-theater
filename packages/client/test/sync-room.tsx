@@ -455,6 +455,56 @@ function Runner() {
     }
   }
 
+  /**
+   * A viewer joining a film already playing, its downloads only a little
+   * faster than the film — as monkey26 rejoining May at 3:03 on 12 October.
+   * It started on the first half second it had, stopped, fell nine seconds
+   * behind, was jumped into a segment it hadn't got, stopped again, and once
+   * more: three stops in twenty seconds. A viewer behind the room now goes a
+   * little past it and waits there for it while that part comes.
+   */
+  async function runLateJoin() {
+    setRunning(true);
+    const out: string[] = ["— a viewer joining a film already playing, on a modest connection —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      latest.clear();
+      events.clear();
+      await api("/api/test/reset?p2p=0&stream=copy4&event=1&eventS=120");
+      await api("/api/test/flow?user=u-viewer&kbps=3000");
+      viewerQuery = "&latejoin";
+      setHostOn(false);
+      setFrames(nextFrames(currentGen));
+      setHostOn(true);
+      await waitFor(() => { const h = latest.get("u-host"); return !!h && !h.paused && h.pos > 30; }, 90_000, "the host 30s in");
+      const joinedAt = Date.now();
+      (viewerFrame.current?.contentWindow as Window | null | undefined)?.postMessage({ kind: "press", press: ["Join"] }, "*");
+      const firstAt = await waitFor(() => firstPlay("u-viewer"), 60_000, "the viewer to play");
+      await pause(30_000);
+      const viewer = (events.get("u-viewer") ?? []).filter((e) => e.t >= firstAt);
+      // Stopped while playing — not paused on purpose, waiting for the room.
+      const stops = viewer.filter((e) => e.tag === "Video" && /buffer starved/.test(e.msg) && e.data.paused === false);
+      const past = viewer.filter((e) => /going past it/.test(e.msg));
+      const jumps = viewer.filter((e) => /heartbeat drift correction/.test(e.msg));
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      say(`joined with the host at ${(h.pos - (Date.now() - joinedAt) / 1000).toFixed(0)}s; first frame ${((firstAt - joinedAt) / 1000).toFixed(1)}s after joining`);
+      say(`    after it: ${stops.length} stop(s), ${past.length} wait(s) past the room, ${jumps.length} jump(s) to it`);
+      for (const e of [...past, ...jumps]) say(`    ${e.msg} ${JSON.stringify({ driftS: e.data.driftS, toS: e.data.toS, leadS: e.data.leadS, bufAheadS: e.data.bufAheadS })}`);
+      say(`${stops.length <= 1 ? "PASS" : "FAIL"} it stops no more than once after it starts (${stops.length})`);
+      say(`${jumps.length === 0 ? "PASS" : "FAIL"} and is never jumped into what it hasn't got (${jumps.length})`);
+      say(`${Math.abs(v.pos - h.pos) < 1 && !v.paused ? "PASS" : "FAIL"} together thirty seconds on (${(v.pos - h.pos).toFixed(2)}s apart${v.paused ? ", the viewer paused" : ""})`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      viewerQuery = "";
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
   async function runCopySkip() {
     setRunning(true);
     const out: string[] = ["— the host skipping past what a copied film has measured —"];
@@ -1086,6 +1136,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runCopySkipInPlace(false)}>Skip ahead inside a copy</button>
         <button disabled={running} onClick={() => void runCopySkipInPlace(true)}>Skip ahead inside a copy, P2P</button>
         <button disabled={running} onClick={() => void runCopySkipInPlace(false, 8_000)}>Skip ahead inside a copy, slow</button>
+        <button disabled={running} onClick={() => void runLateJoin()}>Late joiner</button>
         <button disabled={running} onClick={() => void runPreviewAhead()}>Preview frames from the title's page</button>
         <button disabled={running} onClick={() => void runSkipThenPause()}>Skip then pause</button>
         <button disabled={running} onClick={() => void runKeyframeStart()}>Keyframe start</button>

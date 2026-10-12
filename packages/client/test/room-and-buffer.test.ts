@@ -12,7 +12,7 @@
  * - A copy started together starts on its keyframe when its first segment
  *   ends too soon after the start point to start on (lib/copyStart).
  */
-import { MAX_WAIT_FOR_ROOM_S, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
+import { MAX_WAIT_FOR_ROOM_S, catchUpLeadS, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS } from "../src/lib/bufferTrim";
@@ -129,6 +129,15 @@ check("three seconds ahead is enough to start on", enoughToStart(3), true);
 check("and 2.98", enoughToStart(2.98), true);
 check("but not two", enoughToStart(2), false);
 check("at the end of the film, what is left is enough", enoughToStart(1, 1), true);
+
+console.log("\n— a follower behind the room goes past it to wait —");
+// May on 12 October: the viewer's last segment took 5.6s, and the room was
+// nine seconds on, in a segment it hadn't got.
+check("as far as its last segment took, half as long again and a second", catchUpLeadS(5600), 9.4);
+check("at least three seconds", catchUpLeadS(400), 3);
+check("at most twenty", catchUpLeadS(30_000), 20);
+check("six with nothing to go on", [catchUpLeadS(null), catchUpLeadS(0)], [6, 6]);
+check("and no further than a follower waits for the room", catchUpLeadS(30_000) <= MAX_WAIT_FOR_ROOM_S, true);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

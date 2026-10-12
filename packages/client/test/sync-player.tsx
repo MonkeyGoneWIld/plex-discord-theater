@@ -191,7 +191,9 @@ if (titlePageMs != null) prefetchPreviewStart(Number(firstItem.ratingKey));
 function Room() {
   // A viewer joins with a click, as one does in Discord — and the browser
   // will only keep a picture playing in a frame someone has clicked in.
-  const [joined, setJoined] = React.useState(isHost || new URLSearchParams(location.search).has("autojoin"));
+  // ?latejoin: not until told — someone joining a film already playing.
+  const [joined, setJoined] = React.useState(isHost ||
+    (new URLSearchParams(location.search).has("autojoin") && !new URLSearchParams(location.search).has("latejoin")));
   fixture.joined = joined;
   const { state, actions } = useSync({ instanceId, userId: user, username: isHost ? "Host" : "Viewer", enabled: joined });
   fixture.sync = state;

@@ -37,7 +37,7 @@ import { carryTrackPrefs, describeWatched, endTrackSitting, isCommentary, mergeT
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
-import { resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
+import { catchUpLeadS, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, enoughToStart, nextSegmentInS, pictureStartFor } from "../lib/copyStart";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
@@ -2979,11 +2979,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       const video = videoRef.current;
       if (!video) return;
       // Whether the buffer is in good shape, and has been for a while. Paused,
-      // it stays as it was: nothing drains.
-      if (!video.paused) {
-        const window = hlsRef.current?.config.maxBufferLength || FORWARD_BUFFER_FLUSH_S;
-        const healthy = bufferAheadSeconds(video) >= Math.min(DECENT_BUFFER_S, window * 0.75)
-          && Date.now() - lastStarvedAtRef.current >= DECENT_BUFFER_AFTER_STALL_MS;
+      // a good one stays as it was: nothing drains. Not one that has been
+      // emptied, by the stream being rebuilt under it — see the session start.
+      const window = hlsRef.current?.config.maxBufferLength || FORWARD_BUFFER_FLUSH_S;
+      const enough = bufferAheadSeconds(video) >= Math.min(DECENT_BUFFER_S, window * 0.75);
+      if (!video.paused || !enough) {
+        const healthy = enough && Date.now() - lastStarvedAtRef.current >= DECENT_BUFFER_AFTER_STALL_MS;
         if (!healthy) decentSinceRef.current = 0;
         else if (!decentSinceRef.current) decentSinceRef.current = Date.now();
       }
@@ -3327,6 +3328,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // The offset is the single most useful number in a restart: a transcode
     // starting somewhere other than where playback was is the signature of a
     // stale position having reached this client.
+    // A new stream's buffer is to be earned again before anything else asks
+    // Plex for work: the old one's good shape carried over, and picking a
+    // subtitle that rebuilt the stream had Plex reading the film's others
+    // beside its first segments (RED and Good Will Hunting, 12 October).
+    decentSinceRef.current = 0;
     logEvent("HLS", "starting session", {
       session: sessionId.substring(0, 8),
       owner: sessionOwner,
@@ -3448,6 +3454,21 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             }
           },
         };
+
+        /**
+         * A follower joining a film already playing starts loading where it
+         * will land — a little past the room, see the landing below — not at
+         * the start of the film. Left to the playlist, it fetched the film's
+         * first segments before going to the room: monkey26, rejoining May at
+         * 3:03 on 12 October, took two first, and the test page's late joiner
+         * spent eleven seconds on them.
+         */
+        const joining = syncStateRef.current;
+        if (!isHostRef.current && !(sessionOwner && !didAdoptRef.current) && aheadAtRebuildRef.current === null &&
+            !!joining && joining.playing && !joining.hostWaiting && joining.ratingKey === itemRef.current.ratingKey &&
+            joining.position > DRIFT_THRESHOLD_S) {
+          hlsConfig.startPosition = roomPositionNow(joining) + catchUpLeadS(lastSegmentRef.current?.ms ?? null);
+        }
 
         let hls: Hls;
         /** This stream's P2P engine, in P2P mode. */
@@ -3919,6 +3940,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             seekedBackS: DRIFT_THRESHOLD_S,
           });
           const waitHereForRoom = backAheadAt !== null && !!sync?.playing;
+          /** Where the room was, for a follower landing a little past it. */
+          let joinAheadOf: number | null = null;
           if (backAheadAt !== null) {
             logEvent("Sync", "back where this player was, ahead of the room", {
               fromS: video.currentTime,
@@ -3939,8 +3962,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               });
               syncPos = startOffset;
             }
+            /**
+             * A follower lands a little past the room — as far as its last
+             * segment took to come in, 6 seconds with none yet — and waits
+             * there for it while that part comes. Landed on it, it played the
+             * first half second it had and stopped: monkey26 rejoining May
+             * on 12 October stopped three times in twenty seconds.
+             */
+            const leadS = !isHostRef.current && !(sessionOwner && !didAdoptRef.current) && !sync.hostWaiting
+              ? catchUpLeadS(lastSegmentRef.current?.ms ?? null)
+              : 0;
             if (syncPos > DRIFT_THRESHOLD_S) {
               logEvent("Sync", "landing on the room clock after a rebuild", {
+                ...(leadS ? { aheadOfRoomS: leadS } : {}),
                 fromS: video.currentTime,
                 toS: syncPos,
                 // Only whoever asked Plex for this transcode knows what it cost
@@ -3957,11 +3991,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   : { joined: didAdoptRef.current ? "adopted" : "following" }),
                 role: isHostRef.current ? "host" : "viewer",
               });
-              video.currentTime = syncPos;
+              video.currentTime = syncPos + leadS;
               // Whatever is left is startup between here and the first frame,
               // which nothing can predict. Measured and closed once when frames
-              // actually arrive.
-              joinSettleRef.current = true;
+              // actually arrive — unless it is waited out ahead of the room.
+              if (leadS) joinAheadOf = syncPos;
+              else joinSettleRef.current = true;
             }
           } else if (
             // The same, into a room that is paused: on the stream someone else
@@ -4061,8 +4096,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               session: sessionId?.substring(0, 8),
               roomPosS: syncStateRef.current?.position ?? "none",
             });
-          } else if (waitHereForRoom) {
-            waitForRoom(video, roomS, "rebuild");
+          } else if (waitHereForRoom || joinAheadOf !== null) {
+            waitForRoom(video, joinAheadOf ?? roomS, joinAheadOf !== null ? "joining a little ahead of the room" : "rebuild");
           }
 
           // Host: broadcast play with sessionId when manifest is ready. Skip it
@@ -4072,7 +4107,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           // The room is told whether to run it, not just what it is: announcing
           // a rebuild we are deliberately holding must not start everyone else.
           const startsRoom = announceStream(sessionId!, startOffset, sessionOwner, !holding);
-          if (!holding && !hostNotReady && !waitHereForRoom) {
+          if (!holding && !hostNotReady && !waitHereForRoom && joinAheadOf === null) {
             // A stream this host has just started the room on starts with
             // everybody's picture, its own included: the room says when, as it
             // does for a resume. Playing it here only had the hold pause it
@@ -4859,7 +4894,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         const frameDeltas = frames && lastFrames && frames.shown >= lastFrames.shown
           ? { framesShown: frames.shown - lastFrames.shown, framesDropped: frames.dropped - lastFrames.dropped, playedS: Number((frames.at - lastFrames.at).toFixed(1)) }
           : {};
-        if (frames && lastFrames && !v.paused && !document.hidden &&
+        // Not across a rebuilt stream, whose count starts again from nothing:
+        // both players reported a frozen picture eight seconds after Good Will
+        // Hunting's was rebuilt on 12 October, playing fine.
+        if (frames && lastFrames && !v.paused && !document.hidden && frames.shown >= lastFrames.shown &&
             frames.at - lastFrames.at >= 3 && frames.at - lastFrames.at <= 12 &&
             frames.shown - lastFrames.shown < 2 * (frames.at - lastFrames.at)) {
           logWarn("Video", "the picture hardly moved while the time ran on", { ...frameDeltas, ...snapshot(v) });
@@ -5733,6 +5771,34 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       return;
     }
     starvedSinceRef.current = null;
+
+    /**
+     * Where the room is isn't here yet. Jumped to, it stops there until it
+     * comes, and stopped, falls behind again: a viewer that joined May at
+     * 3:03 on 12 October was jumped nine seconds into a segment it hadn't
+     * got, stopped for six, and was jumped again — three stops in twenty
+     * seconds. Gone a little past it instead — as far as its last segment
+     * took to come in — it waits there while that part comes, and the room
+     * arrives to it playing.
+     */
+    const leadS = catchUpLeadS(lastSegmentRef.current?.ms ?? null);
+    const end = video.seekable.length ? video.seekable.end(video.seekable.length - 1) : NaN;
+    if (video.currentTime < target && !pictureHeldAt(video, target) && Number.isFinite(end) && target + leadS < end - 1 &&
+        syncState.ratingKey === itemRef.current.ratingKey) {
+      lastDriftCorrectionRef.current = Date.now();
+      stalledSeekSinceRef.current = null;
+      logWarn("Viewer", "behind the room, going past it to wait there", {
+        driftS: drift,
+        fromS: video.currentTime,
+        roomS: target,
+        toS: target + leadS,
+        leadS,
+        ...snapshot(video),
+      });
+      video.currentTime = target + leadS;
+      waitForRoom(video, target, "gone past the room to wait for it");
+      return;
+    }
 
     lastDriftCorrectionRef.current = Date.now();
     stalledSeekSinceRef.current = null;

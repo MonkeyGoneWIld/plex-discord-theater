@@ -144,6 +144,15 @@ function titleIdentity(value?: string | null): string {
     .trim();
 }
 
+/** Whether a remembered subtitle's label says which track it was, beyond its
+ *  language and flavour: "Signs/Song", but not "English (SRT External)". */
+function labelNamesTrack(pref: TrackPref): boolean {
+  const hint = titleIdentity(pref.title);
+  if (!hint) return false;
+  const named = [normalizedText(pref.language), ...LANGUAGES.filter((l) => l.code === canonicalLanguageCode(pref.languageCode)).map((l) => normalizedText(l.name))];
+  return !named.includes(hint);
+}
+
 function sameLanguage(track: StreamTrack, pref: TrackPref): boolean {
   const trackCode = canonicalLanguageCode(track.languageCode);
   const prefCode = canonicalLanguageCode(pref.languageCode);
@@ -339,7 +348,13 @@ export function matchSubtitleTrack(
   if (!pref || pref.off || tracks.length === 0) return null;
 
   const wantFlavour = flavour(pref.title);
-  const wantedTitle = titleIdentity(pref.title);
+  // A label that is only the language — "English", of "English (SRT
+  // External)" — names no track in particular, where one like "Signs/Song"
+  // does. Taken as one, it sent Good Will Hunting to its file beside the film
+  // on 12 October, after The Electric State's "English (SRT External)" had
+  // been picked, over the subtitles in its own file, labelled "PGS ENG".
+  const wantedTitle = labelNamesTrack(pref) ? titleIdentity(pref.title) : "";
+  const wantedExactly = pref.forTitle && pref.title ? normalizedText(pref.title) : "";
   // Never a commentary's, unless one was chosen for this title — see isCommentary.
   const allowCommentary = !!pref.forTitle && isCommentary(pref.title);
   const sameLang = tracks.filter((t) => (allowCommentary || !isCommentary(t.title)) && sameLanguage(t, pref));
@@ -353,6 +368,9 @@ export function matchSubtitleTrack(
   const scored = sameLang.map((t) => {
     const f = flavour(t.title);
     let score = 0;
+    // Chosen for this title: the very track that was picked, by its whole
+    // name — the file beside it too, if that is what was picked.
+    if (wantedExactly && normalizedText(t.title) === wantedExactly) score += 128;
     if (wantedTitle && titleIdentity(t.title) === wantedTitle) score += 64;
     if (f.forced === wantFlavour.forced) score += 32;
     score += subtitleSource(t) * 8;

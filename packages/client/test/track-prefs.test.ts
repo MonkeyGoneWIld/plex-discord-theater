@@ -119,6 +119,28 @@ console.log("\n— nor are a commentary's subtitles —");
     ).subtitleStreamId, 304562);
 }
 
+console.log("\n— a label that is only the language says nothing about which track —");
+{
+  // Good Will Hunting's English subtitles, as Plex lists them on 12 October.
+  const pgs = track({ id: 1, title: "PGS ENG (English)", language: "English", languageCode: "eng", codec: "pgs", external: false });
+  const pgsSdh = track({ id: 2, title: "PGS ENG SDH (English)", language: "English", languageCode: "eng", codec: "pgs", external: false });
+  const beside = track({ id: 3, title: "English (SRT External)", language: "English", languageCode: "eng", codec: "srt", external: true, sidecar: true });
+  // The Electric State's file beside it, picked the film before.
+  const pickedBefore: SubtitlePref = { off: false, languageCode: "eng", language: "English", codec: "srt", title: "English (SRT External)" };
+  check("after a file beside the last film was picked, the next starts on the subtitles in its own file",
+    matchSubtitleTrack([pgs, pgsSdh, beside], pickedBefore)?.id, 1);
+  check("whichever order Plex lists them in", matchSubtitleTrack([beside, pgsSdh, pgs], pickedBefore)?.id, 1);
+  check("but the file beside it picked for this very film is kept for it",
+    matchSubtitleTrack([pgs, pgsSdh, beside], { ...pickedBefore, forTitle: true })?.id, 3);
+  check("as is the SDH one picked for it",
+    matchSubtitleTrack([pgs, pgsSdh, beside], { off: false, languageCode: "eng", language: "English", codec: "pgs", title: "PGS ENG SDH (English)", forTitle: true })?.id, 2);
+  // A label that does name a track still carries from one episode to the next.
+  const signs = track({ id: 4, title: "Signs/Song (English ASS)", language: "English", languageCode: "eng", codec: "ass", external: true });
+  const full = track({ id: 5, title: "Full (English ASS)", language: "English", languageCode: "eng", codec: "ass", external: true });
+  check("a label naming a track still finds that track",
+    matchSubtitleTrack([full, signs], { off: false, languageCode: "eng", language: "English", codec: "ass", title: "Signs/Song (English ASS)" })?.id, 4);
+}
+
 console.log("\n— within a language, the closest match —");
 {
   const stereo = track({ id: 30, title: "Japanese (AAC Stereo)", language: "Japanese", languageCode: "jpn", codec: "aac", channels: 2 });

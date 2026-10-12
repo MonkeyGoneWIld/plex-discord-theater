@@ -89,3 +89,14 @@ export function settleForward(
   const reachable = Math.min(roomS, hereS + bufferedAheadS - 0.5);
   return reachable - hereS > toleranceS ? reachable : null;
 }
+
+/**
+ * How far past the room a follower that has fallen behind it goes, to wait
+ * there for it: as long as its last segment took to come in, half as long
+ * again and a second more, so the part it lands in is in before the room
+ * gets there — between 3 and 20 seconds, 6 with nothing to go on.
+ */
+export function catchUpLeadS(lastSegmentMs: number | null): number {
+  const s = lastSegmentMs === null || !(lastSegmentMs > 0) ? 6 : (lastSegmentMs / 1000) * 1.5 + 1;
+  return Math.round(Math.min(20, Math.max(3, s)) * 10) / 10;
+}

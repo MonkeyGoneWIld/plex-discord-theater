@@ -3,7 +3,7 @@
  * words of its Sync line and of why a stream isn't Direct Play.
  */
 import {
-  bufferFalling, bufferHealth, framesHealth, modeHealth, playbackWhy, previewHealth, pushSample, sparkLines, speedHealth,
+  RUN_OUT_SOON_S, bufferFalling, bufferHealth, framesHealth, modeHealth, playbackWhy, previewHealth, pushSample, sparkLines, speedHealth,
   stallsHealth, subtitleHealth, syncSummary, type SyncInfo,
 } from "../src/lib/statsHealth";
 import type { StreamNotes } from "../src/lib/streamNotes";
@@ -46,12 +46,22 @@ check("speed with nothing to compare to, or none measured", [speedHealth(20e6, n
 // The buffer full: the player asks for what it plays, and the speed reads
 // about what the stream needs — which is nothing wrong.
 check("a full buffer holding: green, however close to the need the speed reads",
-  speedHealth(8.4e6, 8e6, { health: "ok", falling: false }), "ok");
-check("a middling buffer holding or growing: green too", speedHealth(6e6, 8e6, { health: "warn", falling: false }), "ok");
-check("a buffer going down: judged on its speed",
-  [speedHealth(9e6, 8e6, { health: "ok", falling: true }), speedHealth(5e6, 8e6, { health: "warn", falling: true }), speedHealth(20e6, 8e6, { health: "warn", falling: true })],
-  ["warn", "bad", "ok"]);
-check("a buffer nearly empty: judged on its speed even if not falling", speedHealth(5e6, 8e6, { health: "bad", falling: false }), "bad");
+  [speedHealth(8.4e6, 8e6, { aheadS: 149, falling: false }), speedHealth(3e6, 8e6, { aheadS: 149, falling: false })], ["ok", "ok"]);
+check("and downloaded to the end, green", speedHealth(2e6, 8e6, { aheadS: 5, toEnd: true, falling: true }), "ok");
+// Struggling to get the buffer up after joining: amber, not green.
+check("a short buffer filling only slowly: amber",
+  [speedHealth(9e6, 8e6, { aheadS: 20, falling: false }), speedHealth(11e6, 8e6, { aheadS: 12, falling: false }), speedHealth(7e6, 8e6, { aheadS: 25, falling: false })],
+  ["warn", "warn", "warn"]);
+check("a short buffer and a connection well ahead of the stream: green, it fills",
+  [speedHealth(13e6, 8e6, { aheadS: 6, falling: false }), speedHealth(20e6, 8e6, { aheadS: 15, falling: true })], ["ok", "ok"]);
+check("a full buffer going down: amber, there's plenty left",
+  [speedHealth(5e6, 8e6, { aheadS: 140, falling: true }), speedHealth(1e6, 8e6, { aheadS: 60, falling: true })], ["warn", "warn"]);
+check("nearly gone with the connection behind the stream: red",
+  [speedHealth(5e6, 8e6, { aheadS: 6, falling: false }), speedHealth(7.9e6, 8e6, { aheadS: 9.9, falling: true })], ["bad", "bad"]);
+check("nearly gone but keeping up: amber", speedHealth(9e6, 8e6, { aheadS: 6, falling: false }), "warn");
+check("going down fast enough to be gone in under twenty seconds: red",
+  [speedHealth(2e6, 8e6, { aheadS: 14, falling: true }), speedHealth(6e6, 8e6, { aheadS: 14, falling: true })], ["bad", "warn"]);
+check("which is RUN_OUT_SOON_S", RUN_OUT_SOON_S, 20);
 check("falling: down three seconds or more over the last ten",
   [bufferFalling([60, 58, 57, 56]), bufferFalling([60, 59.5, 59, 58]), bufferFalling([30, 40, 50]), bufferFalling([null, 20, null, 15])],
   [true, false, false, true]);

@@ -456,7 +456,9 @@ export function StatsOverlay({
       ? "to the end"
       : `${snap.aheadS < 10 ? snap.aheadS.toFixed(1) : snap.aheadS.toFixed(0)} s`;
 
-  const speedState = speedHealth(snap?.speedBps ?? null, streamBps, { health: bufferState, falling: bufferFalling(history.buffer) });
+  const speedState = speedHealth(snap?.speedBps ?? null, streamBps, {
+    aheadS: snap?.aheadS ?? null, toEnd: snap?.toEnd, falling: bufferFalling(history.buffer),
+  });
   const speedText = snap?.speedBps
     ? `${mbps(snap.speedBps)}${snap.speedEstimated ? " est." : ""}${streamBps ? ` · needs ${mbps(streamBps)}` : ""}`
     : "—";

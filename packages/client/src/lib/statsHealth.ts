@@ -39,25 +39,43 @@ export function bufferHealth(aheadS: number | null, toEnd = false): Health {
   return aheadS >= BUFFER_LOW_S ? "warn" : "bad";
 }
 
+/** A buffer that will run out within this long is about to stop playback. */
+export const RUN_OUT_SOON_S = 20;
+
 /**
- * A connection's speed against what the stream needs, both bits a second —
- * judged only when the buffer says it matters. With the buffer full, the
- * player asks for no more than it plays, so the speed it reads is about what
- * the stream needs: amber and red there said "your connection is the
- * problem" while nothing was wrong. So a buffer that isn't shrinking, and
- * isn't already nearly empty, makes the connection green whatever it reads;
- * it is judged on its speed only while the buffer is going down, or low.
+ * A connection's speed against what the stream needs, both bits a second,
+ * judged with the buffer it is filling:
+ *
+ *  - green: the buffer full and holding — the player then asks for no more
+ *    than it plays, so the speed reads about what the stream needs, which is
+ *    nothing wrong — or a connection well ahead of the stream
+ *    (SPEED_GOOD_RATIO), which fills a short buffer quickly;
+ *  - red: playback about to stop for it — the buffer nearly gone (under
+ *    BUFFER_LOW_S) with the connection slower than the stream, or going down
+ *    fast enough to be gone within RUN_OUT_SOON_S;
+ *  - amber, between: a buffer short of BUFFER_GOOD_S that the connection
+ *    fills only slowly, or a full one going down.
+ *
+ * It was green whenever the buffer wasn't shrinking, and so through every
+ * minute a joining player spent struggling to get its buffer up, and red the
+ * moment it shrank, whatever was left: amber hardly ever showed.
  */
 export function speedHealth(
   speedBps: number | null,
   needBps: number | null,
-  buffer?: { health: Health; falling: boolean },
+  buffer?: { aheadS: number | null; toEnd?: boolean; falling: boolean },
 ): Health {
   if (!speedBps) return "none";
-  if (buffer && !buffer.falling && buffer.health !== "bad") return "ok";
+  const full = !!buffer && (!!buffer.toEnd || (buffer.aheadS ?? 0) > BUFFER_GOOD_S);
+  if (full && !buffer!.falling) return "ok";
   if (!needBps) return "info";
   const ratio = speedBps / needBps;
-  return ratio >= SPEED_GOOD_RATIO ? "ok" : ratio >= 1 ? "warn" : "bad";
+  if (!buffer) return ratio >= SPEED_GOOD_RATIO ? "ok" : ratio >= 1 ? "warn" : "bad";
+  if (ratio >= SPEED_GOOD_RATIO || buffer.toEnd) return "ok";
+  const aheadS = buffer.aheadS ?? 0;
+  const runsOutInS = ratio < 1 ? aheadS / (1 - ratio) : Infinity;
+  if ((aheadS < BUFFER_LOW_S && ratio < 1) || (buffer.falling && runsOutInS < RUN_OUT_SOON_S)) return "bad";
+  return "warn";
 }
 
 /**

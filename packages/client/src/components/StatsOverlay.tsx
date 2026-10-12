@@ -562,7 +562,7 @@ export function StatsOverlay({
       </div>
       <div style={styles.body}>
         {BANDS.map((band) => (
-          <div key={band.label} style={{ ...styles.band, background: band.background }}>
+          <div key={band.label} style={{ ...styles.band, background: band.background, border: `1px solid ${band.border}` }}>
             <div style={{ ...styles.bandLabel, color: band.color }}>{band.label}</div>
             {rows.filter((row) => band.rows.includes(row.label)).map(renderRow)}
           </div>
@@ -620,14 +620,24 @@ export function StatsOverlay({
 }
 
 /**
- * The panel's bands: what is playing; where this player is against the room
- * and how the stream gets to it; the seek bar's frames — each on a faint
- * background of its own, so the eye finds a group before reading a line.
+ * The panel's sections: the media playing; where this player is against the
+ * room and how the stream reaches it; the seek bar's previews — each outlined
+ * on a faint background of its own, so the eye finds a group before reading
+ * a line.
  */
-const BANDS: Array<{ label: string; rows: string[]; background: string; color: string }> = [
-  { label: "What's playing", rows: ["Playback", "Video", "Frames", "Audio", "Subtitles"], background: "rgba(255,255,255,0.035)", color: "rgba(255,255,255,0.45)" },
-  { label: "Room and network", rows: ["Sync", "Buffer", "Connection", "Peers"], background: "rgba(106,162,232,0.08)", color: "#6aa2e8" },
-  { label: "Seek bar", rows: ["Thumbnails"], background: "rgba(217,164,65,0.08)", color: "#d9a441" },
+const BANDS: Array<{ label: string; rows: string[]; background: string; border: string; color: string }> = [
+  {
+    label: "Media", rows: ["Playback", "Video", "Frames", "Audio", "Subtitles"],
+    background: "rgba(255,255,255,0.035)", border: "rgba(255,255,255,0.16)", color: "rgba(255,255,255,0.55)",
+  },
+  {
+    label: "Sync and network", rows: ["Sync", "Buffer", "Connection", "Peers"],
+    background: "rgba(106,162,232,0.07)", border: "rgba(106,162,232,0.42)", color: "#6aa2e8",
+  },
+  {
+    label: "Previews", rows: ["Thumbnails"],
+    background: "rgba(217,164,65,0.07)", border: "rgba(217,164,65,0.42)", color: "#d9a441",
+  },
 ];
 
 /** "English (SRT) · reading (412)" as the part that may shorten and the state that stays. */
@@ -732,8 +742,11 @@ const styles: Record<string, React.CSSProperties> = {
     marginBottom: "4px",
   },
   bandLabel: {
-    fontSize: "11px",
-    padding: "1px 0 1px 12px",
+    fontSize: "10px",
+    fontWeight: 600,
+    letterSpacing: "0.8px",
+    textTransform: "uppercase",
+    padding: "2px 0 1px 12px",
   },
   body: {
     padding: "6px 8px 4px 6px",

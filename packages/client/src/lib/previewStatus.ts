@@ -51,8 +51,9 @@ export function clock(s: number): string {
   const ss = String(t % 60).padStart(2, "0");
   return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
 }
-const passCount = (status: PreviewStatus) => (status.transport === "progressive-v2" ? PASS_NAMES.length : 1);
-const count = (status: PreviewStatus) => `${status.ready}/${status.frames || "?"}`;
+// Asked for a pass at a time: four, until the answer says otherwise.
+const passCount = (status: PreviewStatus) => (status.transport === "progressive-v2" || status.transport === null ? PASS_NAMES.length : 1);
+const count = (status: PreviewStatus) => (status.frames ? `${status.ready}/${status.frames}` : "starting");
 
 /** The panel's one line for the preview frames. `hasFrames` is whether Plex
  *  has frames for this file at all. */
@@ -75,9 +76,9 @@ export function previewSummary(status: PreviewStatus | null, hasFrames: boolean)
 /** Its details, one line each: every pass, and when it came. */
 export function previewDetails(status: PreviewStatus | null): Array<[string, string]> {
   if (!status) return [];
-  const progressive = status.transport === "progressive-v2";
+  const progressive = status.transport === "progressive-v2" || status.transport === null;
   const rows: Array<[string, string]> = [
-    ["Transport", status.transport === null ? "—" : progressive ? "Progressive · 4 passes" : "Single index"],
+    ["Transport", status.transport === null ? "Progressive · asked" : progressive ? "Progressive · 4 passes" : "Single index"],
   ];
   for (const p of status.passes) {
     const name = progressive ? `Pass ${p.pass + 1} · ${PASS_NAMES[p.pass] ?? "?"}` : "Index";

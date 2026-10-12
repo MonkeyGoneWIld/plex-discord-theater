@@ -53,6 +53,7 @@ import type { SyncState, SyncActions, QueueItem, Switching } from "../hooks/useS
 import type { PreviewStatus } from "../lib/previewStatus";
 import type { LastSegment } from "./StatsOverlay";
 import type { SubtitleLoadStatus, SubtitleShown } from "../lib/subtitleStatus";
+import type { SyncInfo } from "../lib/statsHealth";
 import type { InviteResult } from "../hooks/useDiscord";
 
 const PING_INTERVAL_MS = 10_000; // 10s — matches Plex API recommendation for LAN timeline updates
@@ -1378,6 +1379,20 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /** The last segment in: how big, how long from the engine asking for it,
    *  and from where — for Stats for nerds. */
   const lastSegmentRef = useRef<LastSegment | null>(null);
+  /**
+   * What has come in, and for how long anything was coming in at all — the
+   * speed of the connection while it is in use, which Stats for nerds plots.
+   * hls.js's own estimate is the P2P engine's guess, handed over with every
+   * segment, and read 5 Mbps through whole evenings of stalls; and what
+   * arrives in a window drops to nothing whenever the buffer is full.
+   */
+  const downloadMeterRef = useRef({ bytes: 0, activeMs: 0, inFlight: 0, activeSince: 0 });
+  const downloadMeter = useCallback(() => {
+    const m = downloadMeterRef.current;
+    return { bytes: m.bytes, activeMs: m.activeMs + (m.inFlight > 0 ? performance.now() - m.activeSince : 0) };
+  }, []);
+  /** Stops while playing on this title — not a seek's wait — for Stats for nerds. */
+  const stallStatsRef = useRef({ key: "", count: 0, totalMs: 0, since: 0 });
   /** When this stream's playlist came in, 0 before; and whether its picture
    *  has moved since — for what the loading screen says. */
   const manifestParsedAtRef = useRef(0);
@@ -1859,6 +1874,27 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // The promoted host should keep the existing HLS stream, not tear it down.
   const isHostRef = useRef(isHost);
   isHostRef.current = isHost;
+  /** Where this player is against the room, for Stats for nerds — see SyncInfo. */
+  const statsSync = useCallback((): SyncInfo | null => {
+    const sync = syncStateRef.current;
+    const video = videoRef.current;
+    if (!sync?.ratingKey || !video) return null;
+    const host = isHostRef.current;
+    const sameTitle = sync.ratingKey === itemRef.current.ratingKey;
+    const roomS = sync.playing ? roomPositionNow(sync) : sync.position;
+    const stalls = stallStatsRef.current;
+    const live = stalls.key === itemRef.current.ratingKey;
+    return {
+      role: host ? "host" : sync.isCoHost ? "co-host" : "viewer",
+      driftS: host || !sameTitle ? null : video.currentTime - roomS,
+      rate: video.playbackRate,
+      waitingForRoom: !!roomWaitRef.current,
+      roomPlaying: sync.playing,
+      stalls: live
+        ? { count: stalls.count, totalMs: stalls.totalMs + (stalls.since ? performance.now() - stalls.since : 0) }
+        : { count: 0, totalMs: 0 },
+    };
+  }, []);
   const ownsSessionRef = useRef(isHost);
 
   // Whether the transcode should burn in subtitles.
@@ -3685,7 +3721,26 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   eng.aborts++;
                   eng.lastEventAt = Date.now();
                 });
+                // The download meter: bytes, and time with anything in flight.
+                const meter = downloadMeterRef.current;
+                if (meter.inFlight > 0) meter.activeMs += performance.now() - meter.activeSince;
+                meter.inFlight = 0;
+                const meterStart = () => {
+                  if ((hlsRef.current as unknown) !== hls) return;
+                  if (meter.inFlight === 0) meter.activeSince = performance.now();
+                  meter.inFlight++;
+                };
+                const meterEnd = () => {
+                  if ((hlsRef.current as unknown) !== hls || meter.inFlight === 0) return;
+                  meter.inFlight--;
+                  if (meter.inFlight === 0) meter.activeMs += performance.now() - meter.activeSince;
+                };
+                hls.p2pEngine.addEventListener("onSegmentStart", meterStart);
+                hls.p2pEngine.addEventListener("onSegmentLoaded", meterEnd);
+                hls.p2pEngine.addEventListener("onSegmentError", meterEnd);
+                hls.p2pEngine.addEventListener("onSegmentAbort", meterEnd);
                 hls.p2pEngine.addEventListener("onChunkDownloaded", (bytesLength) => {
+                  if ((hlsRef.current as unknown) === hls) meter.bytes += bytesLength;
                   eng.lastChunkAt = Date.now();
                   // What is arriving, for the loading screen and the quality
                   // hint — see lib/loadingMessage.
@@ -4645,6 +4700,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // Buffering indicator events
         const onWaiting = () => {
           logWarn("Video", "waiting (buffer starved)", snapshot(video));
+          // A stop while playing, for Stats for nerds — not a seek's wait.
+          const stalls = stallStatsRef.current;
+          if (stalls.key !== itemRef.current.ratingKey) Object.assign(stalls, { key: itemRef.current.ratingKey, count: 0, totalMs: 0, since: 0 });
+          if (!video.paused && !video.seeking && !stalls.since) {
+            stalls.count++;
+            stalls.since = performance.now();
+          }
           // Not for a seek inside the buffer, which is over in a moment: its
           // `waiting` flashed the loading screen over every such skip. One
           // that doesn't get going is caught by the poll's starved check.
@@ -4652,6 +4714,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         };
         const onPlaying = () => {
           logEvent("Video", "playing", snapshot(video));
+          const stalled = stallStatsRef.current;
+          if (stalled.since) {
+            stalled.totalMs += performance.now() - stalled.since;
+            stalled.since = 0;
+          }
           if (!streamShownRef.current) setStreamShownAt(streamBuiltAtRef.current);
           streamShownRef.current = true;
           coverStart();
@@ -7285,6 +7352,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           previewPartId={previewPartId}
           previewStatusRef={previewStatusRef}
           lastSegmentRef={lastSegmentRef}
+          downloadMeter={downloadMeter}
+          runtimeS={itemDurationS() || null}
+          syncInfo={statsSync}
           onClose={() => setShowStats(false)}
         />
       )}

@@ -20,6 +20,14 @@ export interface P2PStats {
   peers: Set<string>;
 }
 
+/** The last segment in, as the P2P engine timed it — see Player. */
+export interface LastSegment {
+  bytes: number;
+  /** From the engine first asking for it to its last byte. */
+  ms: number;
+  fromPeer: boolean;
+}
+
 interface StatsOverlayProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   hlsRef: React.RefObject<Hls | null>;
@@ -41,6 +49,9 @@ interface StatsOverlayProps {
   previewPartId?: number | null;
   /** How far they have come — see Controls. */
   previewStatusRef?: React.RefObject<PreviewStatus | null>;
+  /** The last segment in, timed by the engine. hls.js's own timing for it is
+   *  made up from the engine's bandwidth estimate, so it is only the fallback. */
+  lastSegmentRef?: React.RefObject<LastSegment | null>;
   onClose: () => void;
 }
 
@@ -87,6 +98,11 @@ function mbps(bitsPerSec: number): string {
   return `${(bitsPerSec / 1_000_000).toFixed(2)} Mbps`;
 }
 
+function lastSegmentText(seg: LastSegment | null): string | null {
+  if (!seg || !(seg.ms > 0)) return null;
+  return `${formatBytes(seg.bytes)} · ${Math.round(seg.ms)} ms · ${mbps((seg.bytes * 8 * 1000) / seg.ms)}${seg.fromPeer ? " · peer" : ""}`;
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
@@ -95,7 +111,7 @@ function formatBytes(bytes: number): string {
 
 export function StatsOverlay({
   videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRef, notes, quality, downloadedAheadS, subtitle, subtitleStatusRef,
-  previewPartId = null, previewStatusRef, onClose,
+  previewPartId = null, previewStatusRef, lastSegmentRef, onClose,
 }: StatsOverlayProps) {
   // Read by the poll, which is set up once.
   const downloadedAheadRef = useRef(downloadedAheadS);
@@ -303,7 +319,7 @@ export function StatsOverlay({
     },
     { label: "Your quality", value: quality ? `Up to ${qualityLabel(quality)}` : qualityLabel(0) },
     { label: "Codecs", value: `${snap?.videoCodec ?? "—"} / ${snap?.audioCodec ?? "—"}` },
-    { label: "Last segment", value: snap?.lastFrag ?? "—" },
+    { label: "Last segment", value: lastSegmentText(lastSegmentRef?.current ?? null) ?? snap?.lastFrag ?? "—" },
     { label: "Delivery", value: vpsRelay ? "VPS relay (nginx cache)" : "P2P mesh (WebRTC)" },
     ...(vpsRelay ? [] : [
       { label: "Peers connected", value: String(p2p.peers.size) },

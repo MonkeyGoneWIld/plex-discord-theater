@@ -240,7 +240,12 @@ function Runner() {
     for (const [user, kbps] of Object.entries(flows)) await api(`/api/test/flow?user=${user}&kbps=${kbps}`);
     if (uploadKbps) await api(`/api/test/upload?kbps=${uploadKbps}`);
     setHostOn(false);
-    setFrames(frameQuery ? nextFramesWith(frameQuery) : nextFrames);
+    // The new run's number now, not when the page next draws: until then the
+    // last run's players still report under the old one, and what they said
+    // counted for this run — Keyframe start after the slow skip took the old
+    // host's "playing" for its own start, and timed it at −12 s.
+    const gen = (frameQuery ? nextFramesWith(frameQuery) : nextFrames)(currentGen);
+    setFrames(gen);
     await waitFor(() => latest.get("u-viewer")?.joined, 60_000, "the viewer to join");
     const began = Date.now();
     setHostOn(true);
@@ -568,6 +573,19 @@ function Runner() {
     setLines([...out]);
     const firstPlayAt = (user: string) => Number(events.get(user)?.find((e) => e.tag === "Video" && e.msg === "playing")?.data.posS ?? NaN);
     const hostSaid = (re: RegExp) => (events.get("u-host") ?? []).find((e) => e.tag === "HLS" && re.test(e.msg));
+    /**
+     * Whether the speed the host went by is its first segment's as the engine
+     * timed it, from asking for it — what the "segment in" log gives — and
+     * not hls.js's, which starts later for a segment fetched in parts: on 11
+     * October that read 94 Mbps for a segment that came in at 24, and the
+     * film started on it and stalled.
+     */
+    const engineSpeed = (decided: { data: Record<string, unknown> } | undefined) => {
+      const loaded = (events.get("u-host") ?? []).find((e) => e.tag === "Load" && e.msg === "segment in");
+      const logged = Number(loaded?.data.Mbps);
+      const used = Number(decided?.data.firstMbps);
+      say(`${Math.abs(used - logged) <= Math.max(0.3, logged * 0.05) ? "PASS" : "FAIL"} going by the first segment's speed as the engine timed it (${used} against ${logged} Mbps)`);
+    };
     /** Stopped, the two of them, in the few seconds after starting. */
     const stopsAfterStart = async () => {
       let stopped = 0;
@@ -593,6 +611,7 @@ function Runner() {
       if (snap) say(`    the host's first segment at ${snap.data.firstMbps} Mbps, so the next in ${snap.data.nextInS}s`);
       say(`${snap && Math.abs(hostAt - 40) < 0.5 && Math.abs(viewerAt - 40) < 0.5 ? "PASS" : "FAIL"} both start on the keyframe the copy begins at, 0:40`);
       say(`${late.startS < covered.startS + 1 ? "PASS" : "FAIL"} as soon as from a point the first segment covers (${late.startS.toFixed(1)}s against ${covered.startS.toFixed(1)}s)`);
+      engineSpeed(snap);
       say(`${Math.abs(late.apartMs) < 700 ? "PASS" : "FAIL"} together`);
       await pause(1_000);
       const h2 = latest.get("u-host")!;
@@ -609,6 +628,7 @@ function Runner() {
       say(`slow, resumed at 0:43.4: started ${slowly.startS.toFixed(1)}s after play, host at ${slowHostAt.toFixed(2)}s, viewer at ${slowViewerAt.toFixed(2)}s, ${slowly.apartMs} ms apart`);
       if (held) say(`    the host's first segment at ${held.data.firstMbps} Mbps, so the next in ${held.data.nextInS}s`);
       say(`${held && Math.abs(slowHostAt - 43.4) < 0.5 && Math.abs(slowViewerAt - 43.4) < 0.5 ? "PASS" : "FAIL"} the next segment can't be in in time, so both wait for it and start where they were asked`);
+      engineSpeed(held);
       say(`${Math.abs(slowly.apartMs) < 700 ? "PASS" : "FAIL"} together`);
     } catch (err) {
       say(`FAIL ${String(err)}`);

@@ -51,6 +51,7 @@ import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
 import { clampPipRect, pipDockForRect, releasePipDock, startPipMotion, samplePipMotion, PIP_MARGIN, PIP_DRAG_SLOP, type PipDock, type PipRect } from "../lib/pipMotion";
 import type { SyncState, SyncActions, QueueItem, Switching } from "../hooks/useSync";
 import type { PreviewStatus } from "../lib/previewStatus";
+import type { LastSegment } from "./StatsOverlay";
 import type { SubtitleLoadStatus, SubtitleShown } from "../lib/subtitleStatus";
 import type { InviteResult } from "../hooks/useDiscord";
 
@@ -1368,6 +1369,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   });
   /** Bytes arriving, as [when, bytes] per chunk — see arrivingKbps. */
   const downloadSamplesRef = useRef<Array<[number, number]>>([]);
+  /**
+   * How fast each of a stream's first segments came, bits a second by URL,
+   * timed from when the engine asked for it — what the "segment in" log
+   * says, and what a copy's start goes by (see the keyframe start).
+   */
+  const firstSegmentSpeedRef = useRef(new Map<string, number>());
+  /** The last segment in: how big, how long from the engine asking for it,
+   *  and from where — for Stats for nerds. */
+  const lastSegmentRef = useRef<LastSegment | null>(null);
   /** When this stream's playlist came in, 0 before; and whether its picture
    *  has moved since — for what the loading screen says. */
   const manifestParsedAtRef = useRef(0);
@@ -3667,6 +3677,24 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // Everything it fetches ahead stays in its memory until the
                 // playhead has passed it, whatever the browser's own buffer can
                 // take, so this is the buffer a skip forward lands in.
+                // Every segment's real download time, from the engine first
+                // asking for it to its last byte. hls.js is handed a made-up
+                // one, worked out from the engine's bandwidth estimate (see
+                // the keyframe start), which is what Stats for nerds showed.
+                const askedAt = new Map<string, number>();
+                lastSegmentRef.current = null;
+                hls.p2pEngine.addEventListener("onSegmentStart", ({ segment }) => {
+                  if (!askedAt.has(segment.url)) askedAt.set(segment.url, performance.now());
+                });
+                hls.p2pEngine.addEventListener("onSegmentAbort", ({ segment }) => {
+                  askedAt.delete(segment.url);
+                });
+                hls.p2pEngine.addEventListener("onSegmentLoaded", ({ segmentUrl, bytesLength, downloadSource }) => {
+                  const asked = askedAt.get(segmentUrl);
+                  askedAt.delete(segmentUrl);
+                  if (asked === undefined || (hlsRef.current as unknown) !== hls) return;
+                  lastSegmentRef.current = { bytes: bytesLength, ms: performance.now() - asked, fromPeer: downloadSource === "p2p" };
+                });
                 const segmentTimes = new Map<string, [number, number]>();
                 const held = engineHeldRef.current;
                 held.clear();
@@ -3688,6 +3716,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 const streamAskedAt = performance.now();
                 const firstAsked = new Map<string, number>();
                 let timedSegments = 0;
+                const speeds = firstSegmentSpeedRef.current;
+                speeds.clear();
                 hls.p2pEngine.addEventListener("onSegmentStart", ({ segment }) => {
                   if (timedSegments < 4 && !firstAsked.has(segment.url)) firstAsked.set(segment.url, performance.now());
                 });
@@ -3698,6 +3728,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   const asked = firstAsked.get(segmentUrl);
                   const bytes = segmentBytesOf(segmentUrl);
                   const parts = partsAsked.get(segmentUrl) ?? (bytes ? partsFor(bytes) : 1);
+                  if (asked !== undefined && now > asked) speeds.set(segmentUrl, (bytesLength * 8 * 1000) / (now - asked));
                   logEvent("Load", "segment in", {
                     seg: segIndexFromUrl(segmentUrl),
                     MB: (bytesLength / 1e6).toFixed(2),
@@ -4091,7 +4122,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             if (pictureStartFor(video.currentTime, range) >= video.currentTime) return;
             const stats = data.frag.stats;
             const loadMs = stats.loading.end - stats.loading.start;
-            const bitsPerS = loadMs > 0 ? (stats.loaded * 8 * 1000) / loadMs : 0;
+            // How fast the engine fetched it, from when it asked for it.
+            // hls.js's own timing starts later, by most of the download for
+            // a segment fetched in parts: the film resumed at 7:37 on 11
+            // October timed its first segment at 94 Mbps from hls.js and 24
+            // from the engine, started on it expecting the next in 2.2s, and
+            // stopped for 2.7s when that took 7.4.
+            const bitsPerS = firstSegmentSpeedRef.current.get(data.frag.url)
+              ?? (loadMs > 0 ? (stats.loaded * 8 * 1000) / loadMs : 0);
             const next = hls.levels[data.frag.level]?.details?.fragments
               .find((f) => f.sn === (data.frag.sn as number) + 1);
             const nextBytes = (next && segmentBytesOf(next.url)) ?? stats.loaded;
@@ -7180,6 +7218,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           subtitleStatusRef={subtitleStatusRef}
           previewPartId={previewPartId}
           previewStatusRef={previewStatusRef}
+          lastSegmentRef={lastSegmentRef}
           onClose={() => setShowStats(false)}
         />
       )}

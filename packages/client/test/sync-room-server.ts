@@ -314,7 +314,7 @@ const server = http.createServer(async (req, res) => {
   if (/^\/api\/plex\/hls\/[^/]+\/[^/]+\/master\.m3u8$/.test(p) && notesOn && !url.searchParams.has("media")) {
     const notes: Record<string, string> = {
       video: "copy", kbps: "8000", audio: "transcode", audioFrom: "EAC3 5.1", audioTo: "AAC 5.1", audioKbps: "384",
-      audioReason: "the file's audio is EAC3, and the player takes AAC only",
+      audioReason: "Unsupported codec (EAC3)",
     };
     const media = new URL(url);
     media.searchParams.set("media", "1");

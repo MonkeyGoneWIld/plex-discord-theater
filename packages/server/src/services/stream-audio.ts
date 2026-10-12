@@ -63,11 +63,11 @@ export function audioNotes(decided: AudioDecision | null, tracks: readonly Sourc
   const sourceCodec = source?.codec?.toLowerCase() ?? null;
   let reason: string;
   if (sourceCodec && sourceCodec !== "aac") {
-    reason = `the file's audio is ${codecName(sourceCodec)}, and the player takes AAC only`;
+    reason = `Unsupported codec (${codecName(sourceCodec)})`;
   } else if (sourceCodec === "aac" && source?.channels && decided!.channels && decided!.channels < source.channels) {
-    reason = `Plex mixed it down from ${audioName(null, source.channels)} to ${audioName(null, decided!.channels)}`;
+    reason = `Downmixed from ${audioName(null, source.channels)} to ${audioName(null, decided!.channels)}`;
   } else {
-    reason = "Plex converted it, and doesn't say why";
+    reason = "Not stated by Plex";
   }
   return {
     audio: "transcode",

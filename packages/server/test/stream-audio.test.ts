@@ -30,20 +30,20 @@ check("converted: from what, to what, at what rate and why",
   audioNotes({ id: 304532, decision: "transcode", codec: "aac", channels: 2, bitrate: 256 }, rearWindow),
   {
     audio: "transcode", audioFrom: "EAC3 Stereo", audioTo: "AAC Stereo", audioKbps: 256,
-    audioReason: "the file's audio is EAC3, and the player takes AAC only",
+    audioReason: "Unsupported codec (EAC3)",
   });
 check("copied: as it is in the file",
   audioNotes({ id: 7, decision: "copy", codec: "aac", channels: 6, bitrate: 384 }, [{ id: 7, codec: "aac", channels: 6 }]),
   { audio: "copy", audioFrom: "AAC 5.1", audioTo: null, audioKbps: null, audioReason: null });
 check("AAC converted all the same: mixed down",
   audioNotes({ id: 7, decision: "transcode", codec: "aac", channels: 2, bitrate: 256 }, [{ id: 7, codec: "aac", channels: 8 }])?.audioReason,
-  "Plex mixed it down from 7.1 to Stereo");
+  "Downmixed from 7.1 to Stereo");
 check("AAC converted for no reason anyone can see says so",
   audioNotes({ id: 7, decision: "transcode", codec: "aac", channels: 2, bitrate: 256 }, [{ id: 7, codec: "aac", channels: 2 }])?.audioReason,
-  "Plex converted it, and doesn't say why");
+  "Not stated by Plex");
 check("a track not in the list: what came out, no reason to give but Plex's",
   audioNotes({ id: 99, decision: "transcode", codec: "aac", channels: 2, bitrate: null }, rearWindow),
-  { audio: "transcode", audioFrom: null, audioTo: "AAC Stereo", audioKbps: null, audioReason: "Plex converted it, and doesn't say why" });
+  { audio: "transcode", audioFrom: null, audioTo: "AAC Stereo", audioKbps: null, audioReason: "Not stated by Plex" });
 check("a copy of a track not in the list names what Plex sends",
   audioNotes({ id: 99, decision: "copy", codec: "aac", channels: 2, bitrate: null }, rearWindow)?.audioFrom, "AAC Stereo");
 check("no decision, nothing said",

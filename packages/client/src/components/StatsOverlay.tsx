@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type Hls from "hls.js";
 import HlsPkg from "hls.js";
 import { qualityLabel } from "../lib/quality";
-import { playbackMode, type StreamNotes } from "../lib/streamNotes";
+import { audioDetails, audioSummary, playbackMode, type StreamNotes } from "../lib/streamNotes";
 import type { StreamTrack } from "../lib/api";
-import { describePreview, type PreviewStatus } from "../lib/previewStatus";
-import { describeSubtitle, type SubtitleLoadStatus, type SubtitleShown } from "../lib/subtitleStatus";
+import { previewDetails, previewSummary, type PreviewStatus } from "../lib/previewStatus";
+import { subtitleDetails, subtitleSummary, type SubtitleLoadStatus, type SubtitleShown } from "../lib/subtitleStatus";
 
 /**
  * Cumulative P2P delivery counters, accumulated in the Player from the
@@ -62,6 +62,26 @@ interface Snapshot {
 
 const POLL_INTERVAL_MS = 1000;
 
+/** The rows that open to more, each one line until opened. */
+type Section = "video" | "audio" | "subtitles" | "thumbnails";
+/** Which are open — the viewer's own, kept across streams. */
+const OPEN_KEY = "pdt:statsOpen";
+function loadOpen(): Set<Section> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(OPEN_KEY) ?? "[]");
+    return new Set(Array.isArray(raw) ? raw : []);
+  } catch {
+    return new Set();
+  }
+}
+function saveOpen(open: Set<Section>): void {
+  try {
+    localStorage.setItem(OPEN_KEY, JSON.stringify([...open]));
+  } catch {
+    // Storage unavailable: they start closed next time.
+  }
+}
+
 function mbps(bitsPerSec: number): string {
   if (!bitsPerSec || !isFinite(bitsPerSec)) return "—";
   return `${(bitsPerSec / 1_000_000).toFixed(2)} Mbps`;
@@ -105,7 +125,7 @@ export function StatsOverlay({
       const ms = stats.loading.end - stats.loading.start;
       if (bytes > 0 && ms > 0) {
         const rate = (bytes * 8) / (ms / 1000);
-        lastFragRef.current = `${formatBytes(bytes)} in ${Math.round(ms)} ms (${mbps(rate)})`;
+        lastFragRef.current = `${formatBytes(bytes)} · ${Math.round(ms)} ms · ${mbps(rate)}`;
       }
     };
 
@@ -173,7 +193,7 @@ export function StatsOverlay({
       const bufferHealth = video.readyState === 0
         ? "—"
         : downloaded - inPlayer >= 1
-          ? `${downloaded.toFixed(0)} s downloaded (${inPlayer.toFixed(1)} s in the player)`
+          ? `${downloaded.toFixed(0)} s · ${inPlayer.toFixed(0)} s in player`
           : `${inPlayer.toFixed(1)} s`;
 
       // Current level: resolution, bitrate, codecs
@@ -195,7 +215,7 @@ export function StatsOverlay({
         // The server marks the playlists it builds for copied streams as EVENT
         // playlists (services/direct-stream.ts); Plex's own have no type.
         if (level?.details) {
-          videoPath = level.details.type === "EVENT" ? "Original" : "Re-encoded by Plex";
+          videoPath = level.details.type === "EVENT" ? "Original" : "Transcoded";
         }
       }
 
@@ -228,6 +248,16 @@ export function StatsOverlay({
     };
   }, [videoRef, hlsRef]);
 
+  // The few rows with more behind them stay one line until opened.
+  const [open, setOpen] = useState<Set<Section>>(loadOpen);
+  const toggle = (section: Section) => setOpen((was) => {
+    const next = new Set(was);
+    if (next.has(section)) next.delete(section);
+    else next.add(section);
+    saveOpen(next);
+    return next;
+  });
+
   const p2p = p2pStatsRef.current;
   const totalDelivered = p2p.p2pBytes + p2p.httpBytes;
   const p2pRatio = totalDelivered > 0 ? Math.round((p2p.p2pBytes / totalDelivered) * 100) : 0;
@@ -235,60 +265,53 @@ export function StatsOverlay({
   // The server's word on the stream beats the playlist-type guess, which can't
   // say why or at what rate.
   const mbpsOf = (kbps: number | null) => (kbps ? ` · ${(kbps / 1000).toFixed(kbps % 1000 ? 1 : 0)} Mbps` : "");
-  const videoPath = notes?.video === "copy"
+  const source = notes?.video === "copy"
     ? `Original${mbpsOf(notes.kbps)}`
     : notes?.video === "transcode"
-      ? `Re-encoded by Plex${mbpsOf(notes.kbps)}`
+      ? `Transcoded${mbpsOf(notes.kbps)}`
       : snap?.videoPath ?? "—";
-  // Plex's words for the stream as a whole — see playbackMode.
-  const mode = playbackMode(notes);
-  const playback = mode === "Direct Play" ? "Direct Play · the file's video and audio, untouched"
-    : mode === "Direct Stream" ? `Direct Stream · the file's video${notes?.audio === "transcode" ? ", its audio converted" : ""}`
-      : mode === "Transcode" ? "Transcode · the video re-encoded by Plex"
-        : "—";
-  const audioPath = notes?.audio === "copy"
-    ? `Original${notes.audioFrom ? ` · ${notes.audioFrom}` : ""}`
-    : notes?.audio === "transcode"
-      ? `Converted · ${notes.audioFrom ?? "?"} → ${notes.audioTo ?? "?"}${notes.audioKbps ? `, ${notes.audioKbps} kbps` : ""}`
-      : "—";
-  const subtitleRows = subtitle
-    ? describeSubtitle(subtitle.track, subtitle.shown, subtitleStatusRef?.current ?? null, subtitle.failed)
-    : [];
+  // Plex's words for the stream — see playbackMode. Without the server's
+  // notes, the playlist says only whether the video is the original.
+  const mode = playbackMode(notes)
+    ?? (snap?.videoPath === "Original" ? "Direct Stream" : snap?.videoPath === "Transcoded" ? "Transcode" : null);
+  const subtitleStatus = subtitleStatusRef?.current ?? null;
   const previewStatus = previewStatusRef?.current ?? null;
-  const previewRows = describePreview(
-    previewStatus && previewStatus.partId === previewPartId ? previewStatus : null,
-    previewPartId !== null,
-  );
+  const preview = previewStatus && previewStatus.partId === previewPartId ? previewStatus : null;
 
-  const rows: Array<[string, string]> = [
-    ["Playback", playback],
-    ["Viewport / Frames", `${snap?.resolution ?? "—"} · dropped ${snap?.droppedFrames ?? 0} / ${snap?.totalFrames ?? 0}`],
-    ["Stream resolution", snap?.streamResolution ?? "—"],
-    ["Decode rate", snap?.fps ?? "—"],
-    ["Video bitrate", snap?.videoBitrate ?? "—"],
-    ["Connection speed", snap?.bandwidth ?? "—"],
-    ["Buffer health", snap?.bufferHealth ?? "—"],
-    ["Video", videoPath],
-    ...(notes?.video === "transcode" && notes.reason ? [["Re-encoded because", notes.reason] as [string, string]] : []),
-    ["Audio", audioPath],
-    ...(notes?.audio === "transcode" && notes.audioReason ? [["Converted because", notes.audioReason] as [string, string]] : []),
-    ...subtitleRows,
-    ...previewRows,
-    ["Your quality", quality ? `Up to ${qualityLabel(quality)}` : qualityLabel(0)],
-    ["Codecs", `${snap?.videoCodec ?? "—"} / ${snap?.audioCodec ?? "—"}`],
-    ["Last segment", snap?.lastFrag ?? "—"],
-    ["Delivery", vpsRelay ? "VPS relay (nginx cache)" : "P2P mesh (WebRTC)"],
+  const rows: Array<{ label: string; value: string; section?: Section; details?: Array<[string, string]> }> = [
+    { label: "Playback", value: mode ?? "—" },
+    { label: "Viewport / Frames", value: `${snap?.resolution ?? "—"} · ${snap?.droppedFrames ?? 0}/${snap?.totalFrames ?? 0} dropped` },
+    { label: "Stream resolution", value: snap?.streamResolution ?? "—" },
+    { label: "Decode rate", value: snap?.fps ?? "—" },
+    { label: "Video bitrate", value: snap?.videoBitrate ?? "—" },
+    { label: "Connection speed", value: snap?.bandwidth ?? "—" },
+    { label: "Buffer health", value: snap?.bufferHealth ?? "—" },
+    {
+      label: "Video", value: source, section: "video",
+      details: notes?.video === "transcode" && notes.reason ? [["Reason", notes.reason]] : [],
+    },
+    { label: "Audio", value: audioSummary(notes), section: "audio", details: audioDetails(notes) },
+    {
+      label: "Subtitles", section: "subtitles",
+      value: subtitle ? subtitleSummary(subtitle.track, subtitle.shown, subtitleStatus, subtitle.failed) : "—",
+      details: subtitle ? subtitleDetails(subtitle.track, subtitle.shown, subtitleStatus, subtitle.failed) : [],
+    },
+    {
+      label: "Thumbnails", section: "thumbnails",
+      value: previewSummary(preview, previewPartId !== null),
+      details: previewDetails(preview),
+    },
+    { label: "Your quality", value: quality ? `Up to ${qualityLabel(quality)}` : qualityLabel(0) },
+    { label: "Codecs", value: `${snap?.videoCodec ?? "—"} / ${snap?.audioCodec ?? "—"}` },
+    { label: "Last segment", value: snap?.lastFrag ?? "—" },
+    { label: "Delivery", value: vpsRelay ? "VPS relay (nginx cache)" : "P2P mesh (WebRTC)" },
+    ...(vpsRelay ? [] : [
+      { label: "Peers connected", value: String(p2p.peers.size) },
+      { label: "From peers / server", value: `${formatBytes(p2p.p2pBytes)} / ${formatBytes(p2p.httpBytes)} (${p2pRatio}%)` },
+      { label: "Uploaded to peers", value: formatBytes(p2p.uploadBytes) },
+    ]),
+    ...(sessionId ? [{ label: "Session", value: sessionId.slice(0, 8) }] : []),
   ];
-
-  if (!vpsRelay) {
-    rows.push(
-      ["Peers connected", String(p2p.peers.size)],
-      ["From peers / server", `${formatBytes(p2p.p2pBytes)} / ${formatBytes(p2p.httpBytes)} (${p2pRatio}% P2P)`],
-      ["Uploaded to peers", formatBytes(p2p.uploadBytes)],
-    );
-  }
-
-  if (sessionId) rows.push(["Session", sessionId.slice(0, 8)]);
 
   return (
     <div style={styles.panel}>
@@ -299,12 +322,40 @@ export function StatsOverlay({
         </button>
       </div>
       <div style={styles.body}>
-        {rows.map(([label, value]) => (
-          <div key={label} style={styles.row}>
-            <span style={styles.label}>{label}</span>
-            <span style={styles.value}>{value}</span>
-          </div>
-        ))}
+        {rows.map((row) => {
+          const expandable = !!row.section && !!row.details?.length;
+          const isOpen = expandable && open.has(row.section!);
+          const line = (
+            <>
+              <span style={styles.label}>
+                <span style={styles.chevron}>{expandable ? (isOpen ? "▾" : "▸") : ""}</span>
+                {row.label}
+              </span>
+              <span style={styles.value} title={row.value}>{row.value}</span>
+            </>
+          );
+          return (
+            <div key={row.label}>
+              {expandable ? (
+                <button type="button" style={styles.toggleRow} onClick={() => toggle(row.section!)} aria-expanded={isOpen}>
+                  {line}
+                </button>
+              ) : (
+                <div style={styles.row}>{line}</div>
+              )}
+              {isOpen && (
+                <div style={styles.details}>
+                  {row.details!.map(([label, value]) => (
+                    <div key={label} style={styles.row}>
+                      <span style={styles.detailLabel}>{label}</span>
+                      <span style={label === "Reason" ? styles.wrappedValue : styles.value} title={value}>{value}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -315,7 +366,7 @@ const styles: Record<string, React.CSSProperties> = {
     position: "absolute",
     top: "64px",
     left: "20px",
-    width: "380px",
+    width: "370px",
     maxWidth: "calc(100% - 40px)",
     background: "rgba(15,15,15,0.82)",
     backdropFilter: "blur(12px)",
@@ -332,7 +383,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     justifyContent: "space-between",
-    padding: "8px 12px",
+    padding: "6px 12px",
     borderBottom: "1px solid rgba(255,255,255,0.1)",
     background: "rgba(255,255,255,0.04)",
   },
@@ -353,25 +404,67 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "inherit",
   },
   body: {
-    padding: "6px 12px 10px",
-    // Rows enough to run past a small window: scroll rather than overflow.
+    padding: "4px 12px 8px 8px",
+    // An open row or two can run past a small window: scroll rather than
+    // overflow.
     maxHeight: "calc(100vh - 160px)",
     overflowY: "auto",
   },
   row: {
     display: "flex",
     justifyContent: "space-between",
+    alignItems: "baseline",
     gap: "12px",
-    padding: "3px 0",
+    padding: "2px 0",
+  },
+  toggleRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "baseline",
+    gap: "12px",
+    width: "100%",
+    padding: "2px 0",
+    background: "none",
+    border: "none",
+    color: "inherit",
+    font: "inherit",
+    textAlign: "left",
+    cursor: "pointer",
+  },
+  chevron: {
+    display: "inline-block",
+    width: "12px",
+    color: "#e5a00d",
   },
   label: {
     color: "rgba(255,255,255,0.5)",
-    // Pre, so the rows under another one keep their indent.
-    whiteSpace: "pre",
+    whiteSpace: "nowrap",
+    flexShrink: 0,
+  },
+  details: {
+    margin: "0 0 4px 16px",
+    padding: "0 0 2px 8px",
+    borderLeft: "1px solid rgba(255,255,255,0.12)",
+  },
+  detailLabel: {
+    color: "rgba(255,255,255,0.4)",
+    whiteSpace: "nowrap",
+    flexShrink: 0,
   },
   value: {
     color: "#f0f0f0",
     textAlign: "right",
     fontVariantNumeric: "tabular-nums",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    minWidth: 0,
+  },
+  // A reason can run to a few words more than fit; it is the one thing
+  // allowed a second line, and only once its row is opened.
+  wrappedValue: {
+    color: "#f0f0f0",
+    textAlign: "right",
+    minWidth: 0,
   },
 };

@@ -138,10 +138,11 @@ const PREVIEW_THROTTLE_MS = 120;
 const PREVIEW_GAP_MS: Record<SpeedTier, number> = { still: 0, slow: 100, moderate: 140, fast: 170, sweep: 200 };
 
 /**
- * Seconds of video buffered past the playhead before each preview pass is
- * requested — 5% of the frames at once, 15% at 7s, 40% at 15s, the rest at
- * 30s — and kept while it downloads: a pass stops pulling whenever the buffer
- * drops back under its mark.
+ * Seconds of video downloaded past the playhead before each preview pass is
+ * requested — 5% of the frames at once, 15% at 10s, 40% at 25s, the rest at
+ * 45s — and kept while it downloads: a pass stops pulling whenever the buffer
+ * drops back under its mark. Later than they were (7, 15, 30), so a stream's
+ * early segments have the connection to themselves for longer.
  *
  * One client stalled at start-up once (its buffer ran from 5.97s down to 0.11s
  * while a 28.8MB index downloaded), which is why the passes wait on the video.
@@ -149,7 +150,7 @@ const PREVIEW_GAP_MS: Record<SpeedTier, number> = { still: 0, slow: 100, moderat
  * happens right after starting, and a transcode can take a while to build
  * much headroom.
  */
-const PREVIEW_PASS_BUFFER_S = [0, 7, 15, 30];
+const PREVIEW_PASS_BUFFER_S = [0, 10, 25, 45];
 
 /** How often to look again while the buffer is under a pass's mark. */
 const PREVIEW_BUFFER_POLL_MS = 500;
@@ -1181,8 +1182,11 @@ export function Controls({
     const sinceStart = () => (performance.now() - transferStartedAt) / 1000;
 
     /**
-     * Seconds of video buffered past the playhead; unlimited once the buffer
-     * reaches the end of the video, where there is no more to wait for.
+     * Seconds of video downloaded past the playhead; unlimited once the
+     * buffer reaches the end of the video, where there is no more to wait
+     * for. What the P2P engine holds beyond the browser's buffer counts too:
+     * the browser holds only so many megabytes, under 45 seconds of a heavy
+     * copy, and the last pass would otherwise never come.
      */
     const headroom = (): number => {
       const video = videoRef.current;
@@ -1191,7 +1195,8 @@ export function Controls({
       for (let i = 0; i < video.buffered.length; i++) {
         const end = video.buffered.end(i);
         if (video.buffered.start(i) <= at && at <= end) {
-          return isFinite(video.duration) && end >= video.duration - 0.5 ? Infinity : end - at;
+          if (isFinite(video.duration) && end >= video.duration - 0.5) return Infinity;
+          return Math.max(end - at, downloadedAheadRef.current?.() ?? 0);
         }
       }
       return 0;

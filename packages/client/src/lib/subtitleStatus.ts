@@ -27,42 +27,55 @@ export interface SubtitleLoadStatus {
 /** How the subtitle on screen is shown, as the player has it. */
 export type SubtitleShown = "off" | "drawn" | "burned" | "switching";
 
-function stretches(spans: readonly CoveredSpan[]): string {
-  if (!spans.length) return "none yet";
-  return spans.map(([from, to]) => `${clock(from)}–${to === null ? "end" : clock(to)}`).join(", ");
+const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
+const lines = (n: number) => `${n.toLocaleString("en-US")} cues`;
+
+/** This one's status, if the one the layer has is this one's. */
+function statusOf(track: StreamTrack, status: SubtitleLoadStatus | null, failed: boolean): SubtitleLoadStatus["state"] {
+  if (failed || (status?.streamId === track.id && status.state === "failed")) return "failed";
+  if (!status || status.streamId !== track.id) return "loading";
+  return status.state;
 }
 
-/** The panel's rows for the subtitle. */
-export function describeSubtitle(
+/** The panel's one line for the subtitle. */
+export function subtitleSummary(
+  track: StreamTrack | null,
+  shown: SubtitleShown,
+  status: SubtitleLoadStatus | null,
+  failed: boolean,
+): string {
+  if (shown === "off" || !track) return "Off";
+  if (shown === "switching") return `${track.title} · switching`;
+  if (shown === "burned") return `${track.title} · burned in`;
+  const state = statusOf(track, status, failed);
+  return `${track.title} · ${state === "complete" ? "loaded" : state === "reading" ? `reading (${status!.lines})` : state}`;
+}
+
+/** Its details, one line each. */
+export function subtitleDetails(
   track: StreamTrack | null,
   shown: SubtitleShown,
   status: SubtitleLoadStatus | null,
   failed: boolean,
   now = Date.now(),
 ): Array<[string, string]> {
-  if (shown === "off" || !track) return [["Subtitles", "Off"]];
-  if (shown === "switching") return [["Subtitles", `${track.title} · switching to it`]];
-  if (shown === "burned") {
-    return [
-      ["Subtitles", `${track.title} · burned into the picture by Plex`],
-      ["Subtitle loading", "Comes with the video, segment by segment"],
-    ];
+  if (shown === "off" || !track) return [];
+  const rows: Array<[string, string]> = [["Track", track.title]];
+  if (shown === "switching") return rows;
+  if (shown === "burned") return [...rows, ["Rendering", "Burned in by Plex"]];
+  rows.push(["Rendering", `Client · ${track.sidecar ? "sidecar file" : "embedded text"}`]);
+  const state = statusOf(track, status, failed);
+  if (state === "failed") return [...rows, ["Status", "Failed"]];
+  if (state === "loading" || !status) {
+    return [...rows, ["Status", status?.streamId === track.id ? `Loading · ${seconds(now - status.startedAt)}` : "Loading"]];
   }
-  const from = track.sidecar ? "from the file beside the film" : "read out of the film's own file";
-  const rows: Array<[string, string]> = [["Subtitles", `${track.title} · drawn by the player, ${from}`]];
-  const ms = (n: number) => `${(n / 1000).toFixed(1)} s`;
-  if (failed || status?.state === "failed") {
-    rows.push(["Subtitle loading", "Couldn't be loaded"]);
-  } else if (!status || status.streamId !== track.id || status.state === "loading") {
-    rows.push(["Subtitle loading", `Loading… ${status && status.streamId === track.id ? ms(now - status.startedAt) : ""}`.trim()]);
-  } else if (status.state === "complete") {
-    rows.push(["Subtitle loading", `Fully loaded · ${status.lines.toLocaleString("en-US")} lines${status.completeMs !== null ? ` in ${ms(status.completeMs)}` : ""}`]);
-  } else {
-    rows.push(
-      ["Subtitle loading", `Plex still reading it · ${status.lines.toLocaleString("en-US")} lines so far · ${ms(now - status.startedAt)} in`],
-      ["  Every line in", stretches(status.covered ?? [])],
-    );
-    if (status.firstLinesMs !== null) rows.push(["  Lines for here", `in ${ms(status.firstLinesMs)}`]);
+  if (state === "complete") {
+    return [...rows, ["Status", `Loaded · ${lines(status.lines)}${status.completeMs !== null ? ` · ${seconds(status.completeMs)}` : ""}`]];
   }
+  rows.push(
+    ["Status", `Reading · ${lines(status.lines)} · ${seconds(now - status.startedAt)}`],
+    ["Coverage", (status.covered ?? []).map(([from, to]) => `${clock(from)}–${to === null ? "end" : clock(to)}`).join(", ") || "none yet"],
+  );
+  if (status.firstLinesMs !== null) rows.push(["First cues", seconds(status.firstLinesMs)]);
   return rows;
 }

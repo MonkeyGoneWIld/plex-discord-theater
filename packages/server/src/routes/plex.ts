@@ -4454,17 +4454,17 @@ const mbpsText = (kbps: number) => `${(kbps / 1000).toFixed(kbps % 1000 ? 1 : 0)
 function refusedCopyReason(version: VersionFacts | null, askedKbps: number, roomHevc: boolean): string {
   const codec = version?.videoCodec?.toLowerCase() ?? null;
   if (codec && codec !== "h264" && codec !== "hevc") {
-    return `${codec.toUpperCase()} video, and only H.264 and HEVC can be copied`;
+    return `Unsupported video codec (${codec.toUpperCase()})`;
   }
-  if (codec === "hevc" && !roomHevc) return "HEVC video, and not everyone here can play HEVC";
-  if (codec === "h264" && (version?.bitDepth ?? 8) > 8) return `${version!.bitDepth}-bit H.264, which browsers can't play`;
-  if ((version?.width ?? 0) > 2048 || (version?.height ?? 0) > 1200) return "larger than 1080p, so it is scaled down";
+  if (codec === "hevc" && !roomHevc) return "HEVC not supported by every viewer";
+  if (codec === "h264" && (version?.bitDepth ?? 8) > 8) return `${version!.bitDepth}-bit H.264 not supported by browsers`;
+  if ((version?.width ?? 0) > 2048 || (version?.height ?? 0) > 1200) return "Above 1080p, downscaled";
   // Asked above any peak, the bitrate wasn't it — see COPY_ASK_KBPS.
-  if (askedKbps >= COPY_ASK_KBPS) return "Plex declined to copy it";
+  if (askedKbps >= COPY_ASK_KBPS) return "Declined by Plex";
   if (version?.bitrate) {
-    return `Plex wouldn't copy it at ${mbpsText(askedKbps)}: the file averages ${mbpsText(version.bitrate)}, and its peaks are likely higher`;
+    return `Peaks above ${mbpsText(askedKbps)} (${mbpsText(version.bitrate)} average)`;
   }
-  return `Plex wouldn't copy it at ${mbpsText(askedKbps)}`;
+  return `Declined by Plex at ${mbpsText(askedKbps)}`;
 }
 
 /**
@@ -4938,29 +4938,29 @@ router.get(
       // Copied unless something rules it out before Plex is even asked — and
       // what does is the reason the player shows.
       let notCopied: string | null = null;
-      if (!DIRECT_STREAM) notCopied = "Direct Stream is off on this server";
+      if (!DIRECT_STREAM) notCopied = "Direct Stream disabled on this server";
       else if (subtitleMode === "burn") {
         // Picture subtitles (PGS, VobSub) can only be burned in. A text one is
         // burned in when it couldn't be drawn — Plex failed to read it out.
         const burned = subtitleId ? await subtitleTrackOf(ratingKey, mediaIndex, subtitleId) : null;
         notCopied = burned?.external
-          ? "its subtitle couldn't be read out for the player to draw, so it is burned in"
-          : "a picture subtitle is burned into it";
+          ? "Subtitle burn-in (text unreadable)"
+          : "Subtitle burn-in (image-based)";
       }
       else if (quality && kbps !== null && kbps > quality) {
-        notCopied = `the file averages ${mbpsText(kbps)}, over your ${mbpsText(quality)} quality setting`;
+        notCopied = `${mbpsText(kbps)} average exceeds ${mbpsText(quality)} quality limit`;
       } else if (kbps !== null && kbps > COPY_LIMIT_KBPS) {
-        notCopied = `the file averages ${mbpsText(kbps)}, over this server's ${mbpsText(COPY_LIMIT_KBPS)} copy limit`;
+        notCopied = `${mbpsText(kbps)} average exceeds ${mbpsText(COPY_LIMIT_KBPS)} server limit`;
         logEvent("DirectStream", "re-encoding a file whose average is above DIRECT_STREAM_MAX_KBPS", {
           ratingKey, session: sessionId.substring(0, 8), kbps, capKbps: COPY_LIMIT_KBPS,
         });
-      } else if (directStreamRefused(ratingKey)) notCopied = "copying this title failed earlier";
+      } else if (directStreamRefused(ratingKey)) notCopied = "Direct Stream failed earlier";
       else if (
         version?.videoCodec?.toLowerCase() === "h264" && version.partKey &&
         (await fileKeyframes(version.partKey, version.fileSize)) === "not-idr"
       ) {
         // An open-GOP Blu-ray: see services/keyframes.ts.
-        notCopied = "its keyframes aren't ones every player can start from (an open-GOP Blu-ray)";
+        notCopied = "Open-GOP keyframes";
       }
       const copy = notCopied === null;
       return fetchManifest(subtitleMode, {

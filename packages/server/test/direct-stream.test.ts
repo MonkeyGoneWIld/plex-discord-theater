@@ -708,26 +708,26 @@ console.log("\n— through the routes —");
     (await startNotes(EAC3_TITLE)).notes,
     {
       video: "copy", kbps: "8000", audio: "transcode", audioFrom: "EAC3 5.1", audioTo: "AAC 5.1", audioKbps: "384",
-      audioReason: "the file's audio is EAC3, and the player takes AAC only",
+      audioReason: "Unsupported codec (EAC3)",
     });
   check("an open-GOP Blu-ray says why it was re-encoded",
-    (await startNotes("980")).notes.reason, "its keyframes aren't ones every player can start from (an open-GOP Blu-ray)");
+    (await startNotes("980")).notes.reason, "Open-GOP keyframes");
   check("a file over the copy limit says that is why, and what it is re-encoded at",
     (await startNotes("950")).notes,
     {
-      video: "transcode", reason: "the file averages 31 Mbps, over this server's 20 Mbps copy limit", kbps: "12000",
+      video: "transcode", reason: "31 Mbps average exceeds 20 Mbps server limit", kbps: "12000",
       audio: "copy", audioFrom: "AAC Stereo",
     });
   check("one Plex declined to copy says so, without blaming a bitrate it was asked well over",
     (await startNotes("970")).notes.reason,
-    "Plex declined to copy it");
+    "Declined by Plex");
 
   console.log("\n— a viewer's own quality setting —");
   const capped = await startNotes("960", "?quality=8000");
   check("a file averaging over it is re-encoded at it, without asking for a copy first, and the player told why",
     [capped.asked.directStream, capped.asked.videoBitrate, capped.notes],
     ["0", "8000", {
-      video: "transcode", reason: "the file averages 15 Mbps, over your 8 Mbps quality setting", kbps: "8000", quality: "8000",
+      video: "transcode", reason: "15 Mbps average exceeds 8 Mbps quality limit", kbps: "8000", quality: "8000",
       audio: "copy", audioFrom: "AAC Stereo",
     }]);
   const fits = await startNotes("100", "?quality=12000");

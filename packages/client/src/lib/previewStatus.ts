@@ -41,8 +41,9 @@ export interface PreviewStatus {
   httpStatus?: number;
 }
 
-const kb = (bytes: number) => (bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`);
-const secs = (s: number) => `${s.toFixed(1)} s`;
+export function size(bytes: number): string {
+  return bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 export function clock(s: number): string {
   const t = Math.max(0, Math.floor(s));
   const h = Math.floor(t / 3600);
@@ -50,39 +51,46 @@ export function clock(s: number): string {
   const ss = String(t % 60).padStart(2, "0");
   return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
 }
+const passCount = (status: PreviewStatus) => (status.transport === "progressive-v2" ? PASS_NAMES.length : 1);
+const count = (status: PreviewStatus) => `${status.ready}/${status.frames || "?"}`;
 
-/**
- * The panel's rows for the preview frames: a summary, then one per pass.
- * `hasFrames` is whether Plex has frames for this file at all.
- */
-export function describePreview(status: PreviewStatus | null, hasFrames: boolean): Array<[string, string]> {
-  if (!hasFrames) return [["Preview thumbnails", "None — Plex has none for this file"]];
-  if (!status) return [["Preview thumbnails", "Not asked for yet — they come once the film starts"]];
-  const total = status.frames ? ` of ${status.frames}` : "";
-  const sizes = status.bytes ? ` · ${kb(status.bytes)}` : "";
-  const progressive = status.transport === "progressive-v2";
-  const passCount = progressive ? PASS_NAMES.length : 1;
-  const current = status.passes.length;
-  let summary: string;
+/** The panel's one line for the preview frames. `hasFrames` is whether Plex
+ *  has frames for this file at all. */
+export function previewSummary(status: PreviewStatus | null, hasFrames: boolean): string {
+  if (!hasFrames) return "None";
+  if (!status) return "Waiting for playback";
+  const passes = passCount(status);
   switch (status.state) {
-    case "complete": summary = `All ${status.ready} ready${sizes}`; break;
-    case "incomplete": summary = `${status.ready}${total} ready, and no more coming${sizes}`; break;
-    case "unavailable": summary = `None — the server answered ${status.httpStatus ?? "with nothing"}; asked one at a time instead`; break;
-    case "unreadable": summary = `Their index couldn't be read; asked one at a time instead${sizes}`; break;
-    case "failed": summary = `${status.ready}${total} ready, then the download failed; the rest asked one at a time${sizes}`; break;
+    case "complete": return `${count(status)} · ${size(status.bytes)}`;
+    case "incomplete": return `${count(status)} · incomplete`;
+    case "unavailable": return `Unavailable (${status.httpStatus ?? "no answer"}) · per frame`;
+    case "unreadable": return "Index unreadable · per frame";
+    case "failed": return `${count(status)} · failed · per frame`;
     case "waiting":
-      summary = `${status.ready}${total} ready${sizes} · pass ${Math.min(current + 1, passCount)} of ${passCount} waits for ${status.waitingForBufferS ?? 0} s of buffer`;
-      break;
-    default: summary = `${status.ready}${total} ready${sizes} · downloading pass ${current} of ${passCount}`;
+      return `${count(status)} · pass ${Math.min(status.passes.length + 1, passes)}/${passes} at ${status.waitingForBufferS ?? 0} s buffer`;
+    default: return `${count(status)} · pass ${status.passes.length}/${passes}`;
   }
-  const rows: Array<[string, string]> = [["Preview thumbnails", summary]];
+}
+
+/** Its details, one line each: every pass, and when it came. */
+export function previewDetails(status: PreviewStatus | null): Array<[string, string]> {
+  if (!status) return [];
+  const progressive = status.transport === "progressive-v2";
+  const rows: Array<[string, string]> = [
+    ["Transport", status.transport === null ? "—" : progressive ? "Progressive · 4 passes" : "Single index"],
+  ];
   for (const p of status.passes) {
-    const name = progressive ? `${p.pass + 1} (${PASS_NAMES[p.pass] ?? "?"})` : "(all)";
-    const asked = p.fromTitlePage ? "fetched on the title's page" : `asked ${secs(p.askedS ?? 0)} in`;
-    const came = p.doneS === null
-      ? `coming in, ${kb(p.bytes)} so far`
-      : `${p.readyAfter ?? 0} ready ${secs(p.doneS)} in, at ${clock(p.playheadS ?? 0)} · ${kb(p.bytes)}`;
-    rows.push([`  Pass ${name}`, `${asked}; ${came}`]);
+    const name = progressive ? `Pass ${p.pass + 1} · ${PASS_NAMES[p.pass] ?? "?"}` : "Index";
+    const value = p.doneS === null
+      ? `asked ${p.askedS?.toFixed(1) ?? "0.0"} s · ${size(p.bytes)}…`
+      : p.fromTitlePage
+        ? `${p.readyAfter ?? 0} · title page · ${size(p.bytes)}`
+        : `${p.readyAfter ?? 0} · ${(p.askedS ?? 0).toFixed(1)}→${p.doneS.toFixed(1)} s @${clock(p.playheadS ?? 0)} · ${size(p.bytes)}`;
+    rows.push([name, value]);
+  }
+  if (status.state === "waiting" && progressive) {
+    const next = status.passes.length;
+    rows.push([`Pass ${next + 1} · ${PASS_NAMES[next] ?? "?"}`, `waiting for ${status.waitingForBufferS ?? 0} s buffer`]);
   }
   return rows;
 }

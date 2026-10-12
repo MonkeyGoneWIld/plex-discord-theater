@@ -61,3 +61,21 @@ export function playbackMode(notes: StreamNotes | null): string | null {
   if (notes.video === "transcode") return "Transcode";
   return notes.audio === "copy" ? "Direct Play" : "Direct Stream";
 }
+
+/** The panel's one line for the audio: what the file has, and what plays. */
+export function audioSummary(notes: StreamNotes | null): string {
+  if (notes?.audio === "copy") return `${notes.audioFrom ?? "Original"} · direct`;
+  if (notes?.audio === "transcode") return `${notes.audioFrom ?? "?"} → ${notes.audioTo ?? "?"}`;
+  return "—";
+}
+
+/** What the audio row opens to, one line each: nothing for audio played as
+ *  it is, which the row says all of. */
+export function audioDetails(notes: StreamNotes | null): Array<[string, string]> {
+  if (notes?.audio !== "transcode") return [];
+  return [
+    ["Source", notes.audioFrom ?? "—"],
+    ["Output", `${notes.audioTo ?? "—"}${notes.audioKbps ? ` · ${notes.audioKbps} kbps` : ""}`],
+    ...(notes.audioReason ? [["Reason", notes.audioReason] as [string, string]] : []),
+  ];
+}

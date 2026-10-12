@@ -21,6 +21,15 @@ const WS_PING_INTERVAL_MS = 30_000;
  */
 const HOST_RECONNECT_GRACE_MS = 15_000;
 
+/**
+ * How long a room everybody has left keeps its stream, and its place in it.
+ * Discord reloads an activity to pop it out of its window and back, and a
+ * host watching alone is everybody: on 12 October monkey26 popped out alone,
+ * the transcode was killed as the socket closed, and the page that came back
+ * 3.6 seconds later found nothing playing. Long enough for a slow reload.
+ */
+const EMPTY_ROOM_HOLD_MS = Number(process.env.PDT_EMPTY_ROOM_HOLD_MS) || 30_000;
+
 /** Messages one connection may send per MSG_WINDOW_MS before the rest are
  *  dropped. Sized well above anything a person can produce — see the budget
  *  check in the connection handler. */
@@ -403,6 +412,8 @@ interface Room {
   lastForcedPersistAt: number;
   /** Ends a gather that has waited GATHER_MAX_MS — see updateWaiting. */
   gatherTimer?: ReturnType<typeof setTimeout>;
+  /** Everybody has left, and the room is kept for them — see holdEmptyRoom. */
+  emptyHold?: ReturnType<typeof setTimeout>;
 }
 
 /** Ceiling on remembered co-host grants, so a room can't accumulate them without
@@ -1176,6 +1187,136 @@ function positionForCommand(
   return interpolatedPosition(room.state);
 }
 
+/**
+ * Hand the room to a successor when its host is gone and others are still in
+ * it: same stream first, then co-host, then whoever is watching — see
+ * pickSuccessor. The outgoing host's stream is the one to match, since that is
+ * what the room is mostly on.
+ */
+function handOverRoom(room: Room, roomId: string, leftVariantKey: string | null, leftName: string): void {
+  const newHost = pickSuccessor(room.clients, leftVariantKey)!;
+  newHost.isHost = true;
+  newHost.isCoHost = false;
+  room.coHostIds.delete(newHost.userId);
+  // Whatever the old host was waiting for went with it. The new host's
+  // picture is its own, and its heartbeat says.
+  setHostWaiting(room, roomId, false, "new host");
+
+  // "The host's stream" is by definition the one the host is watching.
+  // A successor who was on another stream keeps it, and nobody is moved
+  // to join them: their tracks are their own choice, and reaching for
+  // everyone else's picture on the way in would be the opposite of
+  // inheriting the room.
+  const inheritedKey = newHost.variantKey ?? leftVariantKey;
+  if (inheritedKey) {
+    room.state.hostVariantKey = inheritedKey;
+    const hv = room.state.variants.get(inheritedKey);
+    if (hv) {
+      ensureVariantOwner(room, hv);
+      if (hv.hlsSessionId) {
+        room.state.hlsSessionId = hv.hlsSessionId;
+        room.state.sessionOffset = hv.sessionOffset;
+      }
+      room.state.hostSubtitleId = newHost.subtitleStreamId;
+      room.state.subtitles = newHost.subtitleStreamId !== 0;
+      announceVariant(room, hv);
+    }
+  }
+  // The stream the outgoing host was driving, if they were the only one
+  // on it and it isn't the one inherited above, has nobody left.
+  if (leftVariantKey && leftVariantKey !== inheritedKey &&
+      membersOf(room, leftVariantKey).length === 0) {
+    destroyVariant(room, leftVariantKey);
+  }
+
+  const instance = instanceHosts.get(roomId);
+  if (instance) {
+    instance.hostUserId = newHost.userId;
+  }
+  updateInstanceHost(roomId, newHost.userId);
+
+  logEvent("Sync", "host left, promoting successor", {
+    room: roomId.substring(0, 8),
+    left: leftName,
+    promoted: newHost.username ?? newHost.userId,
+    // Which band they came from, so a surprising successor can be
+    // explained rather than guessed at.
+    because: newHost.variantKey === leftVariantKey ? "same-stream"
+      : newHost.isCoHost ? "co-host"
+      : newHost.isWatching ? "watching" : "only-candidate",
+    variant: newHost.variantKey ?? "none",
+    streams: room.state.variants.size,
+    remaining: room.clients.size,
+    roomPosS: room.state.position,
+    session: room.state.hlsSessionId?.substring(0, 8) ?? "none",
+  });
+
+  sendTo(newHost.ws, { type: "host-promoted", hostUsername: newHost.username });
+
+  for (const c of room.clients) {
+    if (c !== newHost) {
+      sendTo(c.ws, { type: "host-changed", hostUsername: newHost.username });
+    }
+  }
+}
+
+/** Whether a room everybody has just left has anything to keep for them. */
+function holdsWhenEmpty(room: Room): boolean {
+  return !!room.state.ratingKey && (!!room.state.hlsSessionId || room.state.variants.size > 0);
+}
+
+/**
+ * Everybody has left a room with something playing: keep it, stream and all,
+ * for EMPTY_ROOM_HOLD_MS — the time a reload of the activity takes, which is
+ * what a pop-out is. Its clock stops where it is, as for a host whose picture
+ * has (hostWaiting), so the one who comes back carries on from where they
+ * left, and starts it again when their picture is ready. Nobody back by then,
+ * and it ends as it always did; somebody else in instead, and they have it.
+ */
+function holdEmptyRoom(room: Room, roomId: string, leftName: string): void {
+  setHostWaiting(room, roomId, true, "everybody left");
+  logEvent("Sync", "last client left, holding the room for them to come back", {
+    room: roomId.substring(0, 8),
+    left: leftName,
+    session: room.state.hlsSessionId?.substring(0, 8) ?? "none",
+    roomPosS: Number(room.state.position.toFixed(2)),
+    holdS: EMPTY_ROOM_HOLD_MS / 1000,
+  });
+  room.emptyHold = setTimeout(() => {
+    room.emptyHold = undefined;
+    if (rooms.get(roomId) !== room) return;
+    if (room.clients.size > 0) {
+      if ([...room.clients].some((c) => c.isHost)) return;
+      handOverRoom(room, roomId, room.state.hostVariantKey, "nobody, in time");
+      broadcastParticipants(room);
+      return;
+    }
+    endRoomStream(room, roomId, "nobody came back, killing transcode", leftName);
+    closeGather(room);
+    destroyAllVariants(room);
+    rooms.delete(roomId);
+  }, EMPTY_ROOM_HOLD_MS);
+  room.emptyHold.unref?.();
+}
+
+/** The room's streams, stopped: every one, not only the host's — anyone
+ *  watching in another language had a transcode of their own, and it
+ *  outlives them otherwise. */
+function endRoomStream(room: Room, roomId: string, why: string, leftName: string): void {
+  const disconnectedSessionId = room.state.hlsSessionId;
+  logEvent("Sync", why, {
+    room: roomId.substring(0, 8),
+    left: leftName,
+    session: disconnectedSessionId?.substring(0, 8) ?? "none",
+    roomPosS: room.state.position,
+  });
+  setTransport(room, false);
+  room.state.hlsSessionId = null;
+  room.state.sessionOffset = 0;
+  destroyAllVariants(room);
+  killPlexTranscode(disconnectedSessionId).catch(() => {});
+}
+
 export function attachWebSocketServer(server: Server): void {
   wss = new WebSocketServer({ noServer: true });
 
@@ -1341,6 +1482,17 @@ export function attachWebSocketServer(server: Server): void {
         const reconnectingHost = room.hostReconnect;
         const reclaimingHost = reconnectingHost?.client.userId === userId;
         const isHost = instance.hostUserId === userId || reclaimingHost;
+        // The host back to a room held for them — see holdEmptyRoom. It
+        // waits for their picture, which they say when it is ready.
+        if (room.emptyHold && isHost) {
+          clearTimeout(room.emptyHold);
+          room.emptyHold = undefined;
+          logEvent("Sync", "the host came back to a room held for them", {
+            room: instanceId.substring(0, 8),
+            user: username ?? userId,
+            roomPosS: Number(room.state.position.toFixed(2)),
+          });
+        }
 
         // A host reconnecting during the grace window reclaims the role that
         // was immediately handed to the successor.
@@ -2440,95 +2592,15 @@ export function attachWebSocketServer(server: Server): void {
         persistProgress(room, closingClient.isWatching ? closingClient : undefined, "always");
 
         if (room.clients.size > 0) {
-          // Co-host, then whoever is actually watching, then anyone — see
-          // pickSuccessor.
-          // Same stream first, then co-host, then whoever is watching — see
-          // pickSuccessor. The outgoing host's stream is the one to match,
-          // since that is what the room is mostly on.
-          const newHost = pickSuccessor(room.clients, leftVariantKey)!;
-          newHost.isHost = true;
-          newHost.isCoHost = false;
-          room.coHostIds.delete(newHost.userId);
-          // Whatever the old host was waiting for went with it. The new host's
-          // picture is its own, and its heartbeat says.
-          setHostWaiting(room, closingRoomId, false, "new host");
-
-          // "The host's stream" is by definition the one the host is watching.
-          // A successor who was on another stream keeps it, and nobody is moved
-          // to join them: their tracks are their own choice, and reaching for
-          // everyone else's picture on the way in would be the opposite of
-          // inheriting the room.
-          const inheritedKey = newHost.variantKey ?? leftVariantKey;
-          if (inheritedKey) {
-            room.state.hostVariantKey = inheritedKey;
-            const hv = room.state.variants.get(inheritedKey);
-            if (hv) {
-              ensureVariantOwner(room, hv);
-              if (hv.hlsSessionId) {
-                room.state.hlsSessionId = hv.hlsSessionId;
-                room.state.sessionOffset = hv.sessionOffset;
-              }
-              room.state.hostSubtitleId = newHost.subtitleStreamId;
-              room.state.subtitles = newHost.subtitleStreamId !== 0;
-              announceVariant(room, hv);
-            }
-          }
-          // The stream the outgoing host was driving, if they were the only one
-          // on it and it isn't the one inherited above, has nobody left.
-          if (leftVariantKey && leftVariantKey !== inheritedKey &&
-              membersOf(room, leftVariantKey).length === 0) {
-            destroyVariant(room, leftVariantKey);
-          }
-
-          const instance = instanceHosts.get(closingRoomId);
-          if (instance) {
-            instance.hostUserId = newHost.userId;
-          }
-          updateInstanceHost(closingRoomId, newHost.userId);
-
-          logEvent("Sync", "host left, promoting successor", {
-            room: closingRoomId.substring(0, 8),
-            left: closingClient.username ?? closingClient.userId,
-            promoted: newHost.username ?? newHost.userId,
-            // Which band they came from, so a surprising successor can be
-            // explained rather than guessed at.
-            because: newHost.variantKey === leftVariantKey ? "same-stream"
-              : newHost.isCoHost ? "co-host"
-              : newHost.isWatching ? "watching" : "only-candidate",
-            variant: newHost.variantKey ?? "none",
-            streams: room.state.variants.size,
-            remaining: room.clients.size,
-            roomPosS: room.state.position,
-            session: room.state.hlsSessionId?.substring(0, 8) ?? "none",
-          });
-
-          sendTo(newHost.ws, { type: "host-promoted", hostUsername: newHost.username });
-
-          for (const c of room.clients) {
-            if (c !== newHost) {
-              sendTo(c.ws, { type: "host-changed", hostUsername: newHost.username });
-            }
-          }
+          handOverRoom(room, closingRoomId, leftVariantKey, closingClient.username ?? closingClient.userId);
+        } else if (holdsWhenEmpty(room)) {
+          holdEmptyRoom(room, closingRoomId, closingClient.username ?? closingClient.userId);
         } else {
-          const disconnectedSessionId = room.state.hlsSessionId;
-          logEvent("Sync", "last client left, killing transcode", {
-            room: closingRoomId.substring(0, 8),
-            left: closingClient.username ?? closingClient.userId,
-            session: disconnectedSessionId?.substring(0, 8) ?? "none",
-            roomPosS: room.state.position,
-          });
-          setTransport(room, false);
-          room.state.hlsSessionId = null;
-          room.state.sessionOffset = 0;
-          // Every stream, not only the host's — anyone watching in another
-          // language had a transcode of their own, and it outlives them
-          // otherwise.
-          destroyAllVariants(room);
-          killPlexTranscode(disconnectedSessionId).catch(() => {});
+          endRoomStream(room, closingRoomId, "last client left, killing transcode", closingClient.username ?? closingClient.userId);
         }
       }
 
-      if (room.clients.size === 0) {
+      if (room.clients.size === 0 && !room.emptyHold) {
         // Paired with rooms.delete everywhere, not just on the host's exit: a
         // duplicate-connection eviction clears isHost, so the last client out
         // isn't always flagged as one, and the interval then pinged Plex every

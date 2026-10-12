@@ -50,7 +50,13 @@ const COPY_STREAM = path.join(os.tmpdir(), "plex-theater-copy-stream");
 const COPY4_STREAM = path.join(os.tmpdir(), "plex-theater-copy4-stream");
 /** Each copied stream's keyframe interval, which is its segments' length. */
 const SEGMENT_S = new Map([[COPY_STREAM, 10], [COPY4_STREAM, 4]]);
-const INSTANCE = "sync-room";
+/**
+ * The room every player of a check joins. A new one for each check: the
+ * server keeps a room everybody has left for half a minute (holdEmptyRoom),
+ * and the next check would otherwise walk into the last one's.
+ */
+let instance = "sync-room";
+let resets = 0;
 if (!fs.existsSync(path.join(SMALL_STREAM, "index.m3u8"))) {
   console.error(`No test stream in ${SMALL_STREAM} — run media-errors-server.mjs once to generate it.`);
   process.exit(1);
@@ -219,8 +225,8 @@ const server = http.createServer(async (req, res) => {
 
   if (p === "/api/test/session") {
     const id = url.searchParams.get("user") ?? "u-viewer";
-    instanceHosts.set(INSTANCE, { hostUserId: "u-host", guildId: null, channelId: null, createdAt: Date.now() });
-    return json(res, { token: createSession(id, null), instanceId: INSTANCE });
+    instanceHosts.set(instance, { hostUserId: "u-host", guildId: null, channelId: null, createdAt: Date.now() });
+    return json(res, { token: createSession(id, null), instanceId: instance });
   }
   if (p === "/api/test/stall") {
     const who = url.searchParams.get("user") ?? "u-host";
@@ -251,6 +257,7 @@ const server = http.createServer(async (req, res) => {
     return json(res, { ok: true });
   }
   if (p === "/api/test/reset") {
+    instance = `sync-room-${++resets}`;
     stallUntil.clear(); paceMs.clear(); nextSlot.clear(); flowKbps.clear(); served.length = 0;
     uploadKbps = 0;
     uploadFreeAt = 0;

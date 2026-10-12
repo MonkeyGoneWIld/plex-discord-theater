@@ -12,6 +12,9 @@ import { WebSocket } from "ws";
 import type { AddressInfo } from "node:net";
 
 process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "variant-sync-"));
+// A room everybody has left is kept this long here, not half a minute.
+const HOLD_MS = 800;
+process.env.PDT_EMPTY_ROOM_HOLD_MS = String(HOLD_MS);
 
 // Imported only now: the session, instance and history stores open their
 // databases wherever THUMB_CACHE_DIR points as they load, and a static import
@@ -1273,6 +1276,61 @@ console.log("\n— a stream rebuilt while paused is announced paused —");
   await sleep(60);
   check("viewers are told it is paused, so they don't start without the host", a.last("play")?.playing, false);
   [host, a].forEach((c) => c.close());
+}
+
+console.log("\n— a host alone popping out keeps the room —");
+{
+  // monkey26 on 12 October: alone, popped out, and came back 3.6s later to
+  // nothing playing — the transcode had been killed as the socket closed.
+  const [host] = await room("inst-alone", ["host"]);
+  const sid = await startPlayback(host);
+  host.send({ type: "seek", position: 500 });
+  await sleep(60);
+  host.send({ type: "heartbeat", position: 500, playing: true });
+  await sleep(60);
+  host.close();
+  await sleep(300);
+  const back = new Client("u-host", "host");
+  await back.connect("inst-alone");
+  const state = back.last("state");
+  check("back within the hold, the film is still on", state?.ratingKey, "100");
+  check("on the same stream", state?.hlsSessionId, sid);
+  check("held where it was left", near(state?.position ?? -1, 500, 0.5), "ok");
+  check("waiting for the host's picture", state?.waiting, true);
+  back.send({ type: "heartbeat", position: 500, playing: true, waiting: false });
+  await sleep(60);
+  await sleep(1000);
+  check("and running from there once it is ready", near(await clockOf("inst-alone"), 501, 0.6), "ok");
+  back.close();
+}
+
+console.log("\n— nobody back, the room ends —");
+{
+  const [host] = await room("inst-alone-2", ["host"]);
+  await startPlayback(host);
+  host.close();
+  await sleep(HOLD_MS + 400);
+  const back = new Client("u-host", "host");
+  await back.connect("inst-alone-2");
+  check("after the hold, nothing is playing", back.last("state")?.ratingKey, null);
+  back.close();
+}
+
+console.log("\n— somebody else in, and the host not back: theirs —");
+{
+  const [host] = await room("inst-alone-3", ["host"]);
+  await startPlayback(host);
+  host.send({ type: "heartbeat", position: 200, playing: true });
+  await sleep(60);
+  host.close();
+  await sleep(100);
+  const a = new Client("u-a", "a");
+  await a.connect("inst-alone-3");
+  check("the newcomer finds the room holding", a.last("state")?.waiting, true);
+  check("and not theirs yet", a.count("host-promoted"), 0);
+  await sleep(HOLD_MS + 300);
+  check("then it is", a.count("host-promoted"), 1);
+  a.close();
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

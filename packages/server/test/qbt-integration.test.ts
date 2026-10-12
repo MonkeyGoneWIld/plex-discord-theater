@@ -16,6 +16,9 @@ process.env.DATA_DIR ||= mkdtempSync(join(tmpdir(), "theater-qbt-test-"));
 process.env.THUMB_CACHE_DIR = process.env.DATA_DIR;
 process.env.PLEX_URL = "http://plex.invalid";
 process.env.PLEX_TOKEN = "qbt-integration-test-plex-token";
+// A room everybody has left is kept a moment here, not half a minute
+// (holdEmptyRoom), so the streams of one the tests close go in time.
+process.env.PDT_EMPTY_ROOM_HOLD_MS = "300";
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async () => new Response(JSON.stringify({ MediaContainer: { machineIdentifier: "server-1" } }), {
   status: 200, headers: { "Content-Type": "application/json" },

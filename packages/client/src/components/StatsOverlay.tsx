@@ -8,7 +8,7 @@ import type { StreamTrack } from "../lib/api";
 import { previewDetails, previewSummary, type PreviewStatus } from "../lib/previewStatus";
 import { subtitleDetails, subtitleSummary, type SubtitleLoadStatus, type SubtitleShown } from "../lib/subtitleStatus";
 import {
-  HEALTH_COLORS, bufferHealth, framesHealth, modeHealth, playbackWhy, previewHealth, pushSample, sparkLines,
+  HEALTH_COLORS, bufferFalling, bufferHealth, framesHealth, modeHealth, playbackWhy, previewHealth, pushSample, sparkLines,
   speedHealth, stallsHealth, subtitleHealth, syncSummary, type Health, type SyncInfo,
 } from "../lib/statsHealth";
 
@@ -447,15 +447,16 @@ export function StatsOverlay({
   const syncLine = syncSummary(sync);
 
   const bufferState = bufferHealth(snap?.aheadS ?? null, snap?.toEnd);
+  // One number: everything downloaded ahead, in the browser's buffer or the
+  // P2P engine's. Where it is held makes no difference to anyone watching —
+  // a skip into either plays at once.
   const bufferText = snap?.aheadS == null
     ? "—"
     : snap.toEnd
-      ? `to the end · ${snap.inPlayerS.toFixed(0)} s in player`
-      : snap.aheadS - snap.inPlayerS >= 1
-        ? `${snap.aheadS.toFixed(0)} s · ${snap.inPlayerS.toFixed(0)} s in player`
-        : `${snap.inPlayerS.toFixed(1)} s`;
+      ? "to the end"
+      : `${snap.aheadS < 10 ? snap.aheadS.toFixed(1) : snap.aheadS.toFixed(0)} s`;
 
-  const speedState = speedHealth(snap?.speedBps ?? null, streamBps);
+  const speedState = speedHealth(snap?.speedBps ?? null, streamBps, { health: bufferState, falling: bufferFalling(history.buffer) });
   const speedText = snap?.speedBps
     ? `${mbps(snap.speedBps)}${snap.speedEstimated ? " est." : ""}${streamBps ? ` · needs ${mbps(streamBps)}` : ""}`
     : "—";
@@ -472,7 +473,8 @@ export function StatsOverlay({
 
   // What is playing, then where it is against the room and how it arrives,
   // then the seek bar's frames.
-  const rows: Array<{ label: string; value: string; health?: Health; section?: Section; details?: Array<[string, string, Health?]>; visual?: React.ReactNode; keep?: string }> = [
+  type Row = { label: string; value: string; health?: Health; section?: Section; details?: Array<[string, string, Health?]>; visual?: React.ReactNode; keep?: string };
+  const rows: Row[] = [
     {
       label: "Playback", value: mode ?? "—", health: modeHealth(mode), section: "playback",
       details: [
@@ -518,17 +520,7 @@ export function StatsOverlay({
     },
     {
       label: "Buffer", value: bufferText, health: bufferState,
-      visual: (
-        <>
-          <Graph values={history.buffer} max={graphMax(history.buffer, BUFFER_GRAPH_FLOOR_S)} health={bufferState} height={24} />
-          {snap?.aheadS ? (
-            <Bar parts={[
-              [(snap.inPlayerS / snap.aheadS) * 100, HEALTH_COLORS[bufferState === "none" ? "ok" : bufferState].line],
-              [100 - (snap.inPlayerS / snap.aheadS) * 100, HEALTH_COLORS[bufferState === "none" ? "ok" : bufferState].dim],
-            ]} />
-          ) : null}
-        </>
-      ),
+      visual: <Graph values={history.buffer} max={graphMax(history.buffer, BUFFER_GRAPH_FLOOR_S)} health={bufferState} height={24} />,
     },
     {
       label: "Connection", value: speedText, health: speedState, section: "connection",
@@ -569,7 +561,17 @@ export function StatsOverlay({
         </button>
       </div>
       <div style={styles.body}>
-        {rows.map((row) => {
+        {BANDS.map((band) => (
+          <div key={band.label} style={{ ...styles.band, background: band.background }}>
+            <div style={{ ...styles.bandLabel, color: band.color }}>{band.label}</div>
+            {rows.filter((row) => band.rows.includes(row.label)).map(renderRow)}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  function renderRow(row: Row) {
           const expandable = !!row.section && !!row.details?.length;
           const isOpen = expandable && open.has(row.section!);
           const line = (
@@ -614,11 +616,19 @@ export function StatsOverlay({
               )}
             </div>
           );
-        })}
-      </div>
-    </div>
-  );
+  }
 }
+
+/**
+ * The panel's bands: what is playing; where this player is against the room
+ * and how the stream gets to it; the seek bar's frames — each on a faint
+ * background of its own, so the eye finds a group before reading a line.
+ */
+const BANDS: Array<{ label: string; rows: string[]; background: string; color: string }> = [
+  { label: "What's playing", rows: ["Playback", "Video", "Frames", "Audio", "Subtitles"], background: "rgba(255,255,255,0.035)", color: "rgba(255,255,255,0.45)" },
+  { label: "Room and network", rows: ["Sync", "Buffer", "Connection", "Peers"], background: "rgba(106,162,232,0.08)", color: "#6aa2e8" },
+  { label: "Seek bar", rows: ["Thumbnails"], background: "rgba(217,164,65,0.08)", color: "#d9a441" },
+];
 
 /** "English (SRT) · reading (412)" as the part that may shorten and the state that stays. */
 function splitState(summary: string): { value: string; keep?: string } {
@@ -716,8 +726,17 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "2px 4px",
     fontFamily: "inherit",
   },
+  band: {
+    borderRadius: "6px",
+    padding: "2px 6px 4px 4px",
+    marginBottom: "4px",
+  },
+  bandLabel: {
+    fontSize: "11px",
+    padding: "1px 0 1px 12px",
+  },
   body: {
-    padding: "4px 12px 8px 8px",
+    padding: "6px 8px 4px 6px",
     // Open rows can run past a small window: scroll rather than overflow.
     maxHeight: "calc(100vh - 160px)",
     overflowY: "auto",

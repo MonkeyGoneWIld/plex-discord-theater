@@ -12,7 +12,7 @@
  * - A copy started together starts on its keyframe when its first segment
  *   ends too soon after the start point to start on (lib/copyStart).
  */
-import { MAX_WAIT_FOR_ROOM_S, catchUpLeadS, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
+import { MAX_WAIT_FOR_ROOM_S, catchUpLeadS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS } from "../src/lib/bufferTrim";
@@ -138,6 +138,20 @@ check("at least three seconds", catchUpLeadS(400), 3);
 check("at most twenty", catchUpLeadS(30_000), 20);
 check("six with nothing to go on", [catchUpLeadS(null), catchUpLeadS(0)], [6, 6]);
 check("and no further than a follower waits for the room", catchUpLeadS(30_000) <= MAX_WAIT_FOR_ROOM_S, true);
+
+console.log("\n— the last segment's time, kept across a reload —");
+{
+  const kept = new Map<string, string>();
+  (globalThis as unknown as { localStorage: Storage }).localStorage = {
+    getItem: (k: string) => kept.get(k) ?? null, setItem: (k: string, v: string) => void kept.set(k, v),
+    removeItem: (k: string) => void kept.delete(k), clear: () => kept.clear(), key: () => null, length: 0,
+  } as Storage;
+  check("nothing kept, nothing known", recentSegmentMs(), null);
+  rememberSegmentMs(5600, 1_000_000);
+  check("the page after a pop-out knows how long its last segment took", recentSegmentMs(1_000_000 + 4_000), 5600);
+  check("and leads the room by enough for one like it", catchUpLeadS(recentSegmentMs(1_000_000 + 4_000)), 9.4);
+  check("but not after ten minutes: the connection may have changed", recentSegmentMs(1_000_000 + 11 * 60_000), null);
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

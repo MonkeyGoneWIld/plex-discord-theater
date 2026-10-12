@@ -39,9 +39,22 @@ export function bufferHealth(aheadS: number | null, toEnd = false): Health {
   return aheadS >= BUFFER_LOW_S ? "warn" : "bad";
 }
 
-/** A connection's speed against what the stream needs, both bits a second. */
-export function speedHealth(speedBps: number | null, needBps: number | null): Health {
+/**
+ * A connection's speed against what the stream needs, both bits a second —
+ * judged only when the buffer says it matters. With the buffer full, the
+ * player asks for no more than it plays, so the speed it reads is about what
+ * the stream needs: amber and red there said "your connection is the
+ * problem" while nothing was wrong. So a buffer that isn't shrinking, and
+ * isn't already nearly empty, makes the connection green whatever it reads;
+ * it is judged on its speed only while the buffer is going down, or low.
+ */
+export function speedHealth(
+  speedBps: number | null,
+  needBps: number | null,
+  buffer?: { health: Health; falling: boolean },
+): Health {
   if (!speedBps) return "none";
+  if (buffer && !buffer.falling && buffer.health !== "bad") return "ok";
   if (!needBps) return "info";
   const ratio = speedBps / needBps;
   return ratio >= SPEED_GOOD_RATIO ? "ok" : ratio >= 1 ? "warn" : "bad";
@@ -112,6 +125,17 @@ export function playbackWhy(notes: StreamNotes | null, mode: string | null): Arr
 /** A playback mode's colour: green as it is, amber with audio converted, red re-encoded. */
 export function modeHealth(mode: string | null): Health {
   return mode === "Direct Play" ? "ok" : mode === "Direct Stream" ? "warn" : mode === "Transcode" ? "bad" : "none";
+}
+
+/** Seconds back a falling buffer is measured over, and by how much it must fall. */
+export const BUFFER_TREND_SAMPLES = 10;
+export const BUFFER_FALLING_S = 3;
+
+/** Whether the buffer has shrunk over the last few samples, playing. */
+export function bufferFalling(samples: Array<number | null>, back = BUFFER_TREND_SAMPLES, byS = BUFFER_FALLING_S): boolean {
+  const known = samples.slice(-(back + 1)).filter((v): v is number => v !== null);
+  if (known.length < 2) return false;
+  return known[0] - known[known.length - 1] >= byS;
 }
 
 /** Add a sample, keeping the last `max`. */

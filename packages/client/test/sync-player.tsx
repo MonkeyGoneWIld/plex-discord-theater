@@ -17,6 +17,14 @@ const resume = Number(new URLSearchParams(location.search).get("resume")) || und
 const titled = (ratingKey: string): PlexItem =>
   ({ ratingKey, title: `Sync Test ${ratingKey}`, type: "movie", thumb: null, duration: 120_000 }) as PlexItem;
 const firstItem = titled("4242");
+/** This page is a reload of one that was playing — see the runner's pop-out checks. */
+const poppedOut = (() => {
+  try {
+    return sessionStorage.getItem("pdt:test:poppedOut") === "1";
+  } catch {
+    return false;
+  }
+})();
 /**
  * ?titlePage=<ms>: this player has been on the first title's page — fetching
  * the start of its preview frames there, as MovieDetail does for everyone —
@@ -225,12 +233,16 @@ function Room() {
   }
   // A viewer opens the player when the room has something playing, and is
   // handed whatever the room moves on to, as the app does.
-  if (!isHost && !roomItem) return <p style={{ color: "#aaa" }}>Viewer: waiting for the host to start…</p>;
-  const item = isHost ? hostItem : roomItem!;
+  // Reloaded the way Discord's pop-out reloads it: its role and its film come
+  // from the room, as the app has them, not from which player this is.
+  const host = poppedOut ? state.isHost === true : isHost;
+  if (poppedOut && state.isHost === null) return <p style={{ color: "#aaa" }}>Back from a pop-out: joining…</p>;
+  if (!host && !roomItem) return <p style={{ color: "#aaa" }}>Viewer: waiting for the host to start…</p>;
+  const item = host ? (poppedOut && roomItem ? roomItem : hostItem) : roomItem!;
   if (stopped) return <p style={{ color: "#aaa" }}>Host: stopped</p>;
   if (onTitlePage) return <p style={{ color: "#aaa" }}>Host: on the title's page</p>;
   return (
-    <Player key={mount} item={item} isHost={isHost} selfUserId={user} subtitles={false}
+    <Player key={mount} item={item} isHost={host} selfUserId={user} subtitles={false}
       resumePosition={mount === 0 ? resume : undefined}
       sharePresenceDetails={false} onSharePresenceDetails={() => {}} onBack={() => {}}
       syncState={state} syncActions={actions} presentation="full" />

@@ -3,7 +3,7 @@
  * words of its Sync line and of why a stream isn't Direct Play.
  */
 import {
-  bufferHealth, framesHealth, modeHealth, playbackWhy, previewHealth, pushSample, sparkLines, speedHealth,
+  bufferFalling, bufferHealth, framesHealth, modeHealth, playbackWhy, previewHealth, pushSample, sparkLines, speedHealth,
   stallsHealth, subtitleHealth, syncSummary, type SyncInfo,
 } from "../src/lib/statsHealth";
 import type { StreamNotes } from "../src/lib/streamNotes";
@@ -43,6 +43,18 @@ check("downloaded to the end is fine however little is left", bufferHealth(4, tr
 check("speed: 1.5 times the stream green, 1 to 1.5 amber, under it red",
   [speedHealth(49e6, 10e6), speedHealth(15e6, 10e6), speedHealth(14e6, 10e6), speedHealth(10e6, 10e6), speedHealth(4e6, 8e6)], ["ok", "ok", "warn", "warn", "bad"]);
 check("speed with nothing to compare to, or none measured", [speedHealth(20e6, null), speedHealth(null, 8e6)], ["info", "none"]);
+// The buffer full: the player asks for what it plays, and the speed reads
+// about what the stream needs — which is nothing wrong.
+check("a full buffer holding: green, however close to the need the speed reads",
+  speedHealth(8.4e6, 8e6, { health: "ok", falling: false }), "ok");
+check("a middling buffer holding or growing: green too", speedHealth(6e6, 8e6, { health: "warn", falling: false }), "ok");
+check("a buffer going down: judged on its speed",
+  [speedHealth(9e6, 8e6, { health: "ok", falling: true }), speedHealth(5e6, 8e6, { health: "warn", falling: true }), speedHealth(20e6, 8e6, { health: "warn", falling: true })],
+  ["warn", "bad", "ok"]);
+check("a buffer nearly empty: judged on its speed even if not falling", speedHealth(5e6, 8e6, { health: "bad", falling: false }), "bad");
+check("falling: down three seconds or more over the last ten",
+  [bufferFalling([60, 58, 57, 56]), bufferFalling([60, 59.5, 59, 58]), bufferFalling([30, 40, 50]), bufferFalling([null, 20, null, 15])],
+  [true, false, false, true]);
 check("frames: none dropped at the usual rate is green", framesHealth({ shown: 240, dropped: 0 }, 24, 24), "ok");
 check("a few dropped is amber", framesHealth({ shown: 240, dropped: 2 }, 24, 24), "warn");
 check("two in a hundred is red", framesHealth({ shown: 200, dropped: 5 }, 23.5, 24), "bad");

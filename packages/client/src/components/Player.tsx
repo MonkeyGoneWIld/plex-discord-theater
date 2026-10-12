@@ -37,7 +37,7 @@ import { carryTrackPrefs, describeWatched, endTrackSitting, isCommentary, mergeT
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
-import { catchUpLeadS, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
+import { catchUpLeadS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, enoughToStart, nextSegmentInS, pictureStartFor } from "../lib/copyStart";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
@@ -178,6 +178,10 @@ const SEEK_REBUILD_WINDOW_MS = 10_000;
 // and a correction that fires faster than the media can service it cancels the
 // fragment load that would have satisfied the previous one.
 const DRIFT_CORRECTION_COOLDOWN_MS = 8_000;
+/** A host catching up with a playing room drives it once this close to its clock, */
+const HOST_CATCH_UP_STEP_S = 0.75;
+/** or after this long regardless. */
+const HOST_CATCH_UP_MAX_MS = 20_000;
 // How long a viewer may sit seeking with no buffer progress before we stop
 // re-seeking and rebuild the HLS pipeline instead.
 const SEEK_STALL_REBUILD_MS = 15_000;
@@ -1726,6 +1730,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * steerHost. The room is playing all the while, and the heartbeat says so.
    */
   const hostHeldRef = useRef(false);
+  /**
+   * Host: taking over a room that is already playing — back from a pop-out
+   * within the grace, say — and not yet playing in step with it. Until it is,
+   * it follows the room's clock as a viewer joining would (lands a little
+   * ahead and waits there) and tells the room nothing, so the clock runs on
+   * and nobody else stops. On 12 October monkey26 popped the activity out as
+   * host, came back to a stream that had played on under blah0391, reported
+   * 0:00 while it loaded, and the room went there and waited 21 seconds for
+   * it. See steerHost.
+   */
+  const hostCatchUpRef = useRef(false);
+  const hostCatchUpSinceRef = useRef(0);
   /** The gather this player last told the room it was ready for. */
   const readySentForRef = useRef(0);
   /** Frames shown and dropped at the last health sample — see there. */
@@ -2444,7 +2460,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (heartbeatIntervalRef.current === null) {
       heartbeatIntervalRef.current = setInterval(() => {
         const v = videoRef.current;
-        if (v && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        if (v && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && !hostCatchUpRef.current) {
           syncActionsRef.current?.sendHeartbeat(hostPositionForRoom(), !v.paused || hostHeldRef.current, hostToldWaitingRef.current);
         }
       }, HEARTBEAT_INTERVAL_MS);
@@ -2557,6 +2573,23 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const v = videoRef.current;
     const sync = syncStateRef.current;
     if (!v || !sync?.ratingKey || !sessionIdRef.current) return;
+    if (hostCatchUpRef.current) {
+      // Following the room's clock until this picture plays in step with it.
+      const offS = v.currentTime - roomPositionNow(sync);
+      const inStep = sync.playing && pictureMoving(v) && Math.abs(offS) < HOST_CATCH_UP_STEP_S;
+      const tooLong = Date.now() - hostCatchUpSinceRef.current > HOST_CATCH_UP_MAX_MS;
+      if (!inStep && !tooLong && sync.playing) return;
+      hostCatchUpRef.current = false;
+      logEvent("Sync", inStep ? "caught up with the room, driving it from here" : "not caught up with the room, driving it from here anyway", {
+        offS: Number(offS.toFixed(2)),
+        tookMs: Date.now() - hostCatchUpSinceRef.current,
+        ...snapshot(v),
+      });
+      if (inStep) {
+        syncActionsRef.current?.sendHeartbeat(v.currentTime, true, false);
+        return;
+      }
+    }
     if (!sync.playing) {
       // Paused on purpose: the pause itself told the room, waiting included.
       hostHeldRef.current = false;
@@ -3305,6 +3338,23 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       sessionId = sessionOwner ? crypto.randomUUID() : followSessionId;
     }
 
+    // A host coming onto a stream it didn't start, in a room already playing
+    // this title — back from a pop-out, adopting or following the stream the
+    // room went on with — catches up with the room before it drives it: see
+    // hostCatchUpRef.
+    {
+      const room = syncStateRef.current;
+      hostCatchUpRef.current = !!sessionId && isHostRef.current && !(sessionOwner && !didAdoptRef.current) &&
+        !!room?.playing && !room.hostWaiting && room.ratingKey === item.ratingKey && room.position > DRIFT_THRESHOLD_S;
+      if (hostCatchUpRef.current) {
+        hostCatchUpSinceRef.current = Date.now();
+        logEvent("Sync", "taking over a room that is playing: following its clock until in step", {
+          roomPosS: Number(roomPositionNow(room!).toFixed(2)),
+          adopted: didAdoptRef.current,
+        });
+      }
+    }
+
     if (!sessionId) {
       // Viewer doesn't have a session ID yet — wait for sync
       logEvent("HLS", "no session id yet, waiting for sync", { isHost: isHostRef.current });
@@ -3500,10 +3550,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
          * spent eleven seconds on them.
          */
         const joining = syncStateRef.current;
-        if (!isHostRef.current && !(sessionOwner && !didAdoptRef.current) && aheadAtRebuildRef.current === null &&
+        if ((!isHostRef.current || hostCatchUpRef.current) && !(sessionOwner && !didAdoptRef.current) && aheadAtRebuildRef.current === null &&
             !!joining && joining.playing && !joining.hostWaiting && joining.ratingKey === itemRef.current.ratingKey &&
             joining.position > DRIFT_THRESHOLD_S) {
-          hlsConfig.startPosition = roomPositionNow(joining) + catchUpLeadS(lastSegmentRef.current?.ms ?? null);
+          hlsConfig.startPosition = roomPositionNow(joining) + catchUpLeadS(lastSegmentRef.current?.ms ?? recentSegmentMs());
         }
 
         let hls: Hls;
@@ -3758,6 +3808,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // one, worked out from the engine's bandwidth estimate (see
                 // the keyframe start), which is what Stats for nerds showed.
                 const askedAt = new Map<string, number>();
+                let segmentKeptAt = 0;
                 lastSegmentRef.current = null;
                 hls.p2pEngine.addEventListener("onSegmentStart", ({ segment }) => {
                   if (!askedAt.has(segment.url)) askedAt.set(segment.url, performance.now());
@@ -3770,6 +3821,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   askedAt.delete(segmentUrl);
                   if (asked === undefined || (hlsRef.current as unknown) !== hls) return;
                   lastSegmentRef.current = { bytes: bytesLength, ms: performance.now() - asked, fromPeer: downloadSource === "p2p" };
+                  // For the page after this one, at most every ten seconds.
+                  if (Date.now() - segmentKeptAt > 10_000) {
+                    segmentKeptAt = Date.now();
+                    rememberSegmentMs(lastSegmentRef.current.ms);
+                  }
                 });
                 const segmentTimes = new Map<string, [number, number]>();
                 const held = engineHeldRef.current;
@@ -4024,8 +4080,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
              * first half second it had and stopped: monkey26 rejoining May
              * on 12 October stopped three times in twenty seconds.
              */
-            const leadS = !isHostRef.current && !(sessionOwner && !didAdoptRef.current) && !sync.hostWaiting
-              ? catchUpLeadS(lastSegmentRef.current?.ms ?? null)
+            const leadS = (!isHostRef.current || hostCatchUpRef.current) && !(sessionOwner && !didAdoptRef.current) && !sync.hostWaiting
+              ? catchUpLeadS(lastSegmentRef.current?.ms ?? recentSegmentMs())
               : 0;
             if (syncPos > DRIFT_THRESHOLD_S) {
               logEvent("Sync", "landing on the room clock after a rebuild", {
@@ -4910,7 +4966,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       if (isHostRef.current && heartbeatIntervalRef.current === null) {
         heartbeatIntervalRef.current = setInterval(() => {
           const v = videoRef.current;
-          if (v && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+          if (v && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && !hostCatchUpRef.current) {
             syncActionsRef.current?.sendHeartbeat(hostPositionForRoom(), !v.paused || hostHeldRef.current, hostToldWaitingRef.current);
           }
         }, HEARTBEAT_INTERVAL_MS);
@@ -5848,7 +5904,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
      * took to come in — it waits there while that part comes, and the room
      * arrives to it playing.
      */
-    const leadS = catchUpLeadS(lastSegmentRef.current?.ms ?? null);
+    const leadS = catchUpLeadS(lastSegmentRef.current?.ms ?? recentSegmentMs());
     const end = video.seekable.length ? video.seekable.end(video.seekable.length - 1) : NaN;
     if (video.currentTime < target && !pictureHeldAt(video, target) && Number.isFinite(end) && target + leadS < end - 1 &&
         syncState.ratingKey === itemRef.current.ratingKey) {
@@ -5898,7 +5954,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         stopWaitingForRoom("playback ended");
         return;
       }
-      if (isHostRef.current) {
+      if (isHostRef.current && !hostCatchUpRef.current) {
         // The room's clock is this player's now; there is nobody to wait for.
         stopWaitingForRoom("this player is the host now");
         if (sync.playing) video.play().catch(() => {});

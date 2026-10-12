@@ -100,3 +100,33 @@ export function catchUpLeadS(lastSegmentMs: number | null): number {
   const s = lastSegmentMs === null || !(lastSegmentMs > 0) ? 6 : (lastSegmentMs / 1000) * 1.5 + 1;
   return Math.round(Math.min(20, Math.max(3, s)) * 10) / 10;
 }
+
+/** Where the last segment's download time is kept across a reload. */
+const LAST_SEGMENT_KEY = "pdt:lastSegmentMs";
+/** How long it is worth anything: a connection changes. */
+const LAST_SEGMENT_FOR_MS = 10 * 60_000;
+
+/**
+ * Keep how long this player's last segment took, for the page that replaces
+ * this one — Discord's pop-out reloads the activity, and the new page knew
+ * nothing of the connection: blah0391 popped out on 12 October and landed six
+ * seconds ahead of the room, where a 29 MB segment needed 5.6 to come.
+ */
+export function rememberSegmentMs(ms: number, now = Date.now()): void {
+  try {
+    localStorage.setItem(LAST_SEGMENT_KEY, JSON.stringify({ ms: Math.round(ms), at: now }));
+  } catch {
+    // Storage unavailable: the next page guesses, as it did.
+  }
+}
+
+/** The last segment's download time from a page before this one, if recent. */
+export function recentSegmentMs(now = Date.now()): number | null {
+  try {
+    const kept = JSON.parse(localStorage.getItem(LAST_SEGMENT_KEY) ?? "null") as { ms?: number; at?: number } | null;
+    if (!kept || !(Number(kept.ms) > 0) || !(now - Number(kept.at) < LAST_SEGMENT_FOR_MS)) return null;
+    return Number(kept.ms);
+  } catch {
+    return null;
+  }
+}

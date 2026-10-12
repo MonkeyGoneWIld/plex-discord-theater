@@ -505,6 +505,67 @@ function Runner() {
     }
   }
 
+  /**
+   * One player popping the activity out mid-film, which Discord does by
+   * reloading it. On 12 October the host's pop-out stopped the whole room for
+   * 21 seconds: it came back as host, loaded the film from its start, told
+   * the room it was at 0:00 and had it wait there. Now nobody else stops, and
+   * the one that popped out is back in step within a few seconds.
+   */
+  async function runPopOut(who: "host" | "viewer") {
+    setRunning(true);
+    const out: string[] = [`— the ${who} popping the activity out mid-film —`];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    const popped = who === "host" ? "u-host" : "u-viewer";
+    const other = who === "host" ? "u-viewer" : "u-host";
+    try {
+      await startOnce("p2p=1&stream=copy4&event=1&eventS=200", {}, 40_000);
+      await pause(15_000);
+      const before = latest.get(popped)!.pos;
+      const poppedAt = Date.now();
+      if (who === "host") {
+        const win = hostFrame.current?.contentWindow as (Window & typeof globalThis) | null | undefined;
+        win?.sessionStorage.setItem("pdt:test:poppedOut", "1");
+        win?.location.reload();
+      } else {
+        const frame = viewerFrame.current;
+        if (frame) frame.src = frame.src;
+      }
+      say(`… ${who} reloaded at ${before.toFixed(1)}s`);
+      let otherStoppedMs = 0;
+      let inStepAt = 0;
+      let last = Date.now();
+      while (Date.now() - poppedAt < 30_000) {
+        await pause(200);
+        const now = Date.now();
+        const o = latest.get(other);
+        const p = latest.get(popped);
+        if (o && (o.paused || o.ready < 3)) otherStoppedMs += now - last;
+        last = now;
+        // Only once the reloaded page has a stream of its own: the old one goes on
+        // reporting for a moment after the reload is asked for.
+        const reloaded = (events.get(popped) ?? []).some((e) => e.t > poppedAt && e.tag === "HLS" && e.msg === "starting session");
+        if (!inStepAt && reloaded && p && o && !p.paused && p.ready >= 3 && Math.abs(p.pos - o.pos) < 1) inStepAt = now;
+      }
+      const o = latest.get(other)!;
+      const p = latest.get(popped)!;
+      const said = (events.get(popped) ?? []).filter((e) => e.t >= poppedAt && /taking over a room|caught up with the room|driving it from here anyway|ahead of the room, waiting/.test(e.msg)).map((e) => e.msg);
+      say(`    ${said.join(" → ") || "—"}`);
+      say(`${otherStoppedMs < 1500 ? "PASS" : "FAIL"} the ${who === "host" ? "viewer" : "host"} played on (stopped ${(otherStoppedMs / 1000).toFixed(1)}s in all)`);
+      say(`${inStepAt && inStepAt - poppedAt < 15_000 ? "PASS" : "FAIL"} the ${who} was back, playing in step, ${inStepAt ? `${((inStepAt - poppedAt) / 1000).toFixed(1)}s after it reloaded` : "never"}`);
+      say(`${Math.abs(p.pos - o.pos) < 1 && !p.paused && !o.paused ? "PASS" : "FAIL"} and they play on together (${(p.pos - o.pos).toFixed(2)}s apart)`);
+      if (who === "host") say(`${said.some((m) => /caught up with the room, driving it from here/.test(m)) ? "PASS" : "FAIL"} the host drives the room again once in step`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      try { (hostFrame.current?.contentWindow as (Window & typeof globalThis) | null | undefined)?.sessionStorage.removeItem("pdt:test:poppedOut"); } catch { /* gone */ }
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
   async function runCopySkip() {
     setRunning(true);
     const out: string[] = ["— the host skipping past what a copied film has measured —"];
@@ -1137,6 +1198,8 @@ function Runner() {
         <button disabled={running} onClick={() => void runCopySkipInPlace(true)}>Skip ahead inside a copy, P2P</button>
         <button disabled={running} onClick={() => void runCopySkipInPlace(false, 8_000)}>Skip ahead inside a copy, slow</button>
         <button disabled={running} onClick={() => void runLateJoin()}>Late joiner</button>
+        <button disabled={running} onClick={() => void runPopOut("host")}>Host pops out</button>
+        <button disabled={running} onClick={() => void runPopOut("viewer")}>Viewer pops out</button>
         <button disabled={running} onClick={() => void runPreviewAhead()}>Preview frames from the title's page</button>
         <button disabled={running} onClick={() => void runSkipThenPause()}>Skip then pause</button>
         <button disabled={running} onClick={() => void runKeyframeStart()}>Keyframe start</button>

@@ -42,6 +42,11 @@
  *     anybody, and a shared segment that wouldn't be in well before it is
  *     needed goes back to the bot, from the byte it got to (lib/takeFromPeer:
  *     shareChoice, ownerOf, keepSharedOnPeer).
+ *  5. The player has its hand on the segment memory: as the storage starts,
+ *     it is handed to globalThis.__pdtP2P.storageReady, which may give it
+ *     segments to begin with — the picture the page before this one kept as
+ *     Discord reloaded it (src/lib/popOutCarry.ts) — and reads from it what
+ *     to keep as this page goes.
  *
  * There used to be a third: a player on the same network as its peer left
  * segments to it rather than fetch them from the bot too, and a viewer fetched
@@ -229,6 +234,20 @@ const storageEdits: Array<[string, string]> = [
     `    // ${MARK}: every stream is kept like a recorded one — see change 3.
     clear(_isLiveStream, newSegmentSize) {
         const isLiveStream = false;`,
+  ],
+  [
+    `        this.setMemoryStorageLimit();
+        this.logger("initialized");`,
+    `        this.setMemoryStorageLimit();
+        this.logger("initialized");
+        // ${MARK}: the player's hand on this memory — see change 5.
+        const carried = await globalThis.__pdtP2P?.storageReady?.(this);
+        for (const item of carried ?? []) {
+            const storageId = getStorageItemId(item.streamId, item.segmentId);
+            if (this.cache.has(storageId)) continue;
+            this.cache.set(storageId, item);
+            this.increaseStorageUsage(item.data.byteLength);
+        }`,
   ],
 ];
 

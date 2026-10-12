@@ -42,6 +42,9 @@ const storage = patchSegmentStorage(readFileSync(storageFile, "utf8"));
 check("what has been watched is kept until the memory is full, a copy's growing playlist too",
   /clear\(_isLiveStream, newSegmentSize\) \{\s+const isLiveStream = false;/.test(storage), true);
 check("and it is still JavaScript", (() => { try { transformSync(storage, { loader: "js", format: "esm" }); return true; } catch { return false; } })(), true);
+check("the player is handed the memory as it starts, and may give it segments",
+  /const carried = await globalThis\.__pdtP2P\?\.storageReady\?\.\(this\);/.test(storage), true);
+check("applying it twice changes nothing", patchSegmentStorage(storage), storage);
 
 console.log("\n— an engine it wasn't written for —");
 let refused: unknown = null;

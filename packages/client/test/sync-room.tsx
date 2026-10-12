@@ -527,7 +527,7 @@ function Runner() {
     try {
       // Without peers when slow, or the other player would hand it what the
       // server holds back.
-      await startOnce(`p2p=${slowBack ? 0 : 1}&stream=copy4&event=1&eventS=200`, {}, 40_000);
+      await startOnce(`p2p=${slowBack ? 0 : 1}&stream=copy4&event=1&eventS=200&previews=1`, {}, 40_000);
       await pause(15_000);
       const before = latest.get(popped)!.pos;
       if (slowBack) await api(`/api/test/stall?user=${popped}&ms=9000`);
@@ -575,10 +575,85 @@ function Runner() {
       if (who === "host") {
         say(`${said.some((m) => /caught up with the room, driving it from here/.test(m)) ? "PASS" : "FAIL"} the host drives the room again once in step`);
         say(`${said.some((m) => /not caught up with the room in time/.test(m)) ? "FAIL" : "PASS"} and never from out of step`);
+        // The viewer was the host while it was away, and its seek bar's frames
+        // went with that on 12 October: none were left, and none came again.
+        const viewerAgain = (events.get(other) ?? []).filter((e) => e.t >= poppedAt && e.tag === "Preview" && e.msg === "transfer accepted");
+        say(`${viewerAgain.length === 0 ? "PASS" : "FAIL"} the viewer kept its preview frames through its turn as host (${viewerAgain.length} fetched again)`);
       }
+      // What the page before kept as it went, taken up by the one that came back.
+      const took = back.find((e) => e.msg === "took up the picture the page before this one kept");
+      const framesBack = back.find((e) => e.msg === "frames carried across the reload");
+      say(`    carried: ${took ? `${took.data.segments} segments, ${took.data.fromS}–${took.data.toS}s, ${took.data.MB} MB` : "no picture"}; ${framesBack ? `${framesBack.data.ready} preview frames` : "no preview frames"}`);
     } catch (err) {
       say(`FAIL ${String(err)}`);
     } finally {
+      try { (hostFrame.current?.contentWindow as (Window & typeof globalThis) | null | undefined)?.sessionStorage.removeItem("pdt:test:poppedOut"); } catch { /* gone */ }
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
+   * The host, alone in the room, popping the activity out. On 12 October the
+   * transcode was killed as its socket closed — it was the last one out — and
+   * the page that came back found nothing playing. Now the room is held for it
+   * (sync.ts, holdEmptyRoom), with its clock where it stopped, and the page
+   * that comes back goes on with the same stream, from there, with the
+   * picture the page before kept as it went (lib/popOutCarry).
+   */
+  async function runAlonePopOut() {
+    setRunning(true);
+    const out: string[] = ["— the host popping the activity out with nobody else in the room —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      latest.clear();
+      events.clear();
+      await api("/api/test/reset?p2p=0&stream=copy4&event=1&eventS=200&previews=1");
+      // The viewer's frame waits to be told to join, and never is.
+      viewerQuery = "&latejoin";
+      setHostOn(false);
+      setFrames(nextFrames(currentGen));
+      setHostOn(true);
+      await waitFor(() => { const h = latest.get("u-host"); return !!h && !h.paused && h.pos > 20; }, 90_000, "the host 20s in");
+      // Some way into the preview frames' passes as well.
+      await pause(8_000);
+      const before = latest.get("u-host")!.pos;
+      const poppedAt = Date.now();
+      const win = hostFrame.current?.contentWindow as (Window & typeof globalThis) | null | undefined;
+      win?.sessionStorage.setItem("pdt:test:poppedOut", "1");
+      win?.location.reload();
+      say(`… the host reloaded at ${before.toFixed(1)}s, alone`);
+      let backAt = 0;
+      let backPos = NaN;
+      while (Date.now() - poppedAt < 30_000) {
+        await pause(200);
+        const reloaded = (events.get("u-host") ?? []).some((e) => e.t > poppedAt && e.tag === "HLS" && e.msg === "starting session");
+        const h = latest.get("u-host");
+        if (!backAt && reloaded && h && !h.paused && h.ready >= 3) { backAt = Date.now(); backPos = h.pos; }
+        if (backAt && Date.now() - backAt > 3_000) break;
+      }
+      const back = (events.get("u-host") ?? []).filter((e) => e.t >= poppedAt);
+      const started = back.find((e) => e.tag === "HLS" && e.msg === "starting session");
+      const took = back.find((e) => e.msg === "took up the picture the page before this one kept");
+      const framesBack = back.find((e) => e.msg === "frames carried across the reload");
+      const landed = back.find((e) => /landing on the room clock/.test(e.msg));
+      const afterBack = back.filter((e) => backAt && e.t > backAt);
+      const stops = afterBack.filter((e) => e.tag === "Video" && /buffer starved/.test(e.msg) && e.data.paused === false && e.data.seeking !== true);
+      say(`    ${landed ? `landed at ${Number(landed.data.toS).toFixed(1)}s` : "no landing"}; carried: ${took ? `${took.data.segments} segments, ${took.data.fromS}–${took.data.toS}s, ${took.data.MB} MB` : "no picture"}; ${framesBack ? `${framesBack.data.ready} preview frames` : "no preview frames"}`);
+      // Within a few seconds: the room told the moment its picture is ready,
+      // not at its next heartbeat, which kept it waiting five.
+      say(`${backAt && backAt - poppedAt < 3_000 ? "PASS" : "FAIL"} the film went on: the host was playing again ${backAt ? `${((backAt - poppedAt) / 1000).toFixed(1)}s after it reloaded` : "never"}`);
+      say(`${Number.isFinite(backPos) && Math.abs(backPos - before) < 3 ? "PASS" : "FAIL"} from where it left (${Number.isFinite(backPos) ? backPos.toFixed(1) : "—"}s, left at ${before.toFixed(1)}s)`);
+      say(`${started?.data.adopted === true ? "PASS" : "FAIL"} on the stream it left, not a new one (adopted ${String(started?.data.adopted)})`);
+      say(`${took ? "PASS" : "FAIL"} with the picture it had kept as it went`);
+      say(`${framesBack ? "PASS" : "FAIL"} and its preview frames`);
+      say(`${stops.length === 0 ? "PASS" : "FAIL"} and it plays on without stopping (${stops.length})`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      viewerQuery = "";
       try { (hostFrame.current?.contentWindow as (Window & typeof globalThis) | null | undefined)?.sessionStorage.removeItem("pdt:test:poppedOut"); } catch { /* gone */ }
       (window as unknown as { results?: string[]; events?: typeof events }).results = out;
       (window as unknown as { events?: typeof events }).events = events;
@@ -1221,6 +1296,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runPopOut("host")}>Host pops out</button>
         <button disabled={running} onClick={() => void runPopOut("viewer")}>Viewer pops out</button>
         <button disabled={running} onClick={() => void runPopOut("host", true)}>Host pops out, slow back</button>
+        <button disabled={running} onClick={() => void runAlonePopOut()}>Host alone pops out</button>
         <button disabled={running} onClick={() => void runPreviewAhead()}>Preview frames from the title's page</button>
         <button disabled={running} onClick={() => void runSkipThenPause()}>Skip then pause</button>
         <button disabled={running} onClick={() => void runKeyframeStart()}>Keyframe start</button>

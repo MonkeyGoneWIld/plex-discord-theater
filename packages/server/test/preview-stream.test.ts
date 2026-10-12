@@ -218,4 +218,83 @@ for (const count of [1, 7, 385, 3214]) {
   reader.dispose();
 }
 
+// The frames a reader holds, taken up by another — the seek bar's previews
+// carried across Discord reloading the activity — which carries on from the
+// pass after them, ending where one reader alone would.
+{
+  const pass = async (n: number) => {
+    const out: Buffer[] = [];
+    for await (const chunk of progressivePreview(stream(bif(3214)), undefined, undefined, 2, n)) out.push(chunk);
+    return Buffer.concat(out);
+  };
+  const first = createProgressivePreviewReader();
+  first.push(await pass(0));
+  first.nextResponse();
+  first.push(await pass(1));
+  const carried = first.exportFrames()!;
+  assert.equal(carried.frames.length, 483);
+  assert.equal(first.passesDone(), 2);
+  first.dispose();
+  const received: PreviewTierProgress[] = [];
+  const taken = createProgressivePreviewReader((p) => received.push(p), 2, carried);
+  assert.equal(taken.passesDone(), 2, "two passes came with it");
+  assert.equal(taken.frames()!.ready, 483);
+  assert.equal(await identity(taken.frames()!.frameAt(160_000, 3214_000, "medium")), atOrBefore(160, previewTierIndices(3214).medium));
+  taken.nextResponse();
+  taken.push(await pass(2));
+  taken.nextResponse();
+  taken.push(await pass(3));
+  assert.equal(taken.rejected(), false);
+  assert.equal(taken.frames()!.ready, 3214);
+  assert.deepEqual(received.map((p) => p.tier), ["fine", "full"]);
+  assert.equal(await identity(taken.frames()!.frameAt(191_000, 3214_000)), 191);
+  taken.dispose();
+}
+
+// A pass cut off part way comes again from its start: what is already here
+// is passed over, not refused, and the pass completes — kept while the
+// controls were away, or carried across a reload part way through it.
+{
+  const pass = async (n: number) => {
+    const out: Buffer[] = [];
+    for await (const chunk of progressivePreview(stream(bif(3214)), undefined, undefined, 2, n)) out.push(chunk);
+    return Buffer.concat(out);
+  };
+  const reader = createProgressivePreviewReader();
+  reader.push(await pass(0));
+  reader.nextResponse();
+  const second = await pass(1);
+  // Its head repeats the index, so most of it is that: cut part way through the records.
+  reader.push(second.subarray(0, second.length - 2000));
+  const partway = reader.frames()!.ready;
+  assert.ok(partway > 161 && partway < 483, "part of the second pass is in");
+  assert.equal(reader.passesDone(), 1);
+  const carried = reader.exportFrames()!;
+  reader.resumePass();
+  reader.push(second);
+  assert.equal(reader.rejected(), false, "the repeated frames are passed over");
+  assert.equal(reader.frames()!.ready, 483);
+  assert.equal(reader.passesDone(), 2);
+  reader.nextResponse();
+  reader.push(await pass(2));
+  assert.equal(reader.frames()!.ready, 1286);
+  reader.dispose();
+  // The same, taken up from a carry made part way through the pass.
+  const taken = createProgressivePreviewReader(undefined, 2, carried);
+  assert.equal(taken.passesDone(), 1);
+  assert.equal(taken.frames()!.ready, partway);
+  taken.resumePass();
+  taken.push(second);
+  assert.equal(taken.rejected(), false);
+  assert.equal(taken.frames()!.ready, 483);
+  taken.dispose();
+  // Outside a resumed pass a repeated frame is still refused.
+  const strict = createProgressivePreviewReader();
+  strict.push(await pass(0));
+  strict.nextResponse();
+  strict.push(await pass(0));
+  assert.equal(strict.rejected(), true);
+  strict.dispose();
+}
+
 console.log("Progressive preview transfer tests passed");

@@ -39,6 +39,8 @@ import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThroug
 import { roomPositionNow } from "../hooks/useSync";
 import { MAX_WAIT_FOR_ROOM_S, catchUpLeadS, landingFor, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, enoughToStart, nextSegmentInS, pictureStartFor } from "../lib/copyStart";
+import { carriedRanges, carryReady, carrySession, carrySettled, carrySource, segmentsToCarry, startCarry, takeCarriedSegments, type EngineSegment } from "../lib/popOutCarry";
+import { dropParkedPreview } from "../lib/previewKeep";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
@@ -396,6 +398,26 @@ const LOADING_SCREEN_AFTER_MS = 500;
  * Mbps 2 GB is about 25 minutes of film; at 25 Mbps about 10.
  */
 const ENGINE_MEMORY_MIB = /Android|iPhone|iPad|iPod/i.test(typeof navigator === "undefined" ? "" : navigator.userAgent) ? 1024 : 2048;
+
+/** The P2P engine's segment memory, as the patched engine hands it over (p2pCorePatch, change 5). */
+interface EngineMemory {
+  cache: Map<string, EngineSegment>;
+}
+
+// What the page before this one kept as Discord reloaded the activity, taken
+// up as the page starts — and from now on, what this one keeps as it goes.
+// See lib/popOutCarry.
+startCarry();
+
+/**
+ * How far past the room a follower lands, to wait for it there: nowhere when
+ * the picture there is already here — carried across Discord reloading the
+ * activity — and otherwise as far as its next segment will take to come in.
+ */
+function landingLeadS(sessionId: string | null, roomS: number, lastSegmentMs: number | null): number {
+  if (enoughToStart(coveredAheadS(roomS, carriedRanges(sessionId)))) return 0;
+  return catchUpLeadS(lastSegmentMs);
+}
 // Don't bother flushing slivers — avoids issuing a remove on every tick for a
 // second or two of overshoot.
 const BUFFER_TRIM_SLACK_S = 10;
@@ -872,6 +894,20 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
   const [vpsRelay, setVpsRelay] = useState<boolean | null>(null); // null = not yet loaded
+  /**
+   * Whether it is known what the page before this one kept as Discord
+   * reloaded the activity (lib/popOutCarry) — before the stream is built, so
+   * that it lands on it. At once on an ordinary start; a moment after a
+   * pop-out. Landed on before it was known, a host coming back sat a few
+   * seconds past the room, waiting for it, with the picture already here.
+   */
+  const [carryKnown, setCarryKnown] = useState(carrySettled);
+  useEffect(() => {
+    if (carryKnown) return;
+    let live = true;
+    void carryReady().then(() => { if (live) setCarryKnown(true); });
+    return () => { live = false; };
+  }, [carryKnown]);
   const [buffering, setBuffering] = useState(true);
   // "Host is seeking…", raised on each seek somebody else makes and cleared
   // once the picture is back (see effect below).
@@ -1412,6 +1448,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * it, whatever the browser's own buffer can take. See downloadedAheadS.
    */
   const engineHeldRef = useRef(new Map<string, HeldSegment>());
+  /** The engine's segment memory, and the stream it is for — read from as the page goes (lib/popOutCarry). */
+  const engineMemoryRef = useRef<{ memory: EngineMemory; sessionId: string | null } | null>(null);
   /**
    * Whether the picture at `t` is held here: in the browser's buffer, or in
    * the engine's memory, which hands it over the moment it is asked — a
@@ -1890,6 +1928,39 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // Stable refs so the HLS effect doesn't re-run when these change
   const itemRef = useRef(item);
   itemRef.current = item;
+
+  /**
+   * What this player keeps as the page goes, in case Discord is reloading it
+   * (lib/popOutCarry): the stretch just ahead of the playhead that the engine
+   * holds. And the seek bar's frames kept while the controls are away go with
+   * the player — a moment after it, so controls mounting again in its place
+   * can take them first (lib/previewKeep).
+   */
+  useEffect(() => {
+    const stop = carrySource("segments", () => {
+      const engine = engineMemoryRef.current;
+      const v = videoRef.current;
+      if (!engine?.sessionId || !v || engine.sessionId !== sessionIdRef.current) return null;
+      const at = v.currentTime;
+      const chosen = segmentsToCarry([...engine.memory.cache.values()].map((s) => ({
+        s, startTime: s.startTime, endTime: s.endTime, bytes: s.data.byteLength, main: s.streamType === "main",
+      })), at);
+      return {
+        sessionId: engine.sessionId,
+        ratingKey: itemRef.current.ratingKey,
+        positionS: at,
+        segments: chosen.map(({ s }) => ({
+          streamId: s.streamId, segmentId: s.segmentId, startTime: s.startTime, endTime: s.endTime,
+          streamType: s.streamType, data: s.data,
+        })),
+      };
+    });
+    return () => {
+      stop();
+      setTimeout(dropParkedPreview, 0);
+    };
+  }, []);
+
   const syncActionsRef = useRef(syncActions);
   syncActionsRef.current = syncActions;
   const syncStateRef = useRef(syncState);
@@ -2855,12 +2926,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
   // Per-item metadata: intro/credits markers, and the part id for hover-preview
   // frames. The request runs for everyone — scrubbing previews are read-only, so
-  // viewers get them — but markers stay gated, since the skip button is a control.
+  // viewers get them — and the markers too, though only someone who can
+  // control playback is offered the skip they drive (showSkip, showNextUp).
   //
   // Deliberately its own effect rather than part of the main HLS effect: that one
   // depends on retryKey, which handleSeekRestart bumps, so markers and the preview
   // part id would be refetched and blanked on every restart-seek. Keying on
   // item.ratingKey also covers queue auto-advance, which reuses this same Player.
+  // Not on the role: blah0391, made host for the five seconds monkey26 was
+  // popping the activity out on 12 October, lost the seek bar's preview frames
+  // to the blanking this does, and was left with none.
   useEffect(() => {
     setMarkers([]);
     setActiveMarker(null);
@@ -2870,7 +2945,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     fetchMeta(item.ratingKey)
       .then((meta) => {
         if (cancelled) return;
-        if (canControl) setMarkers(meta.markers ?? []);
+        setMarkers(meta.markers ?? []);
         // Everything that depends on *which file* is playing is resolved in the
         // effect below instead, so it can be redone when that answer changes
         // without refetching this or blanking the markers.
@@ -2878,7 +2953,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       })
       .catch(() => { /* both are optional — never surface an error over a working stream */ });
     return () => { cancelled = true; };
-  }, [item.ratingKey, canControl]);
+  }, [item.ratingKey]);
 
   /**
    * Ask the server which file this session is playing.
@@ -3333,6 +3408,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // It also avoids a double HLS start: initializing on the false default and
     // then tearing down and re-initializing when the real config lands.
     if (vpsRelay === null) return;
+    // And for what the page before this one kept, the same way.
+    if (!carryKnown) return;
 
     let mounted = true;
     // Where this stream stops being the title — set by endAtBreak, below, once
@@ -3403,6 +3480,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       sessionId = adoptSessionIdRef.current;
       adoptSessionIdRef.current = null;
       didAdoptRef.current = true;
+      // A room holding for this host, which has heard nothing from this page —
+      // kept for it while it was away (sync.ts, holdEmptyRoom) — is told the
+      // moment its picture is ready, rather than at its next heartbeat: back
+      // from a pop-out with the picture it had kept, the host waited five
+      // seconds on that with it ready to go.
+      if (syncStateRef.current?.hostWaiting) hostToldWaitingRef.current = true;
     } else {
       didAdoptRef.current = false;
       sessionId = sessionOwner ? crypto.randomUUID() : followSessionId;
@@ -3434,6 +3517,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     }
 
     sessionIdRef.current = sessionId;
+    carrySession(sessionId);
     // Mirrored into state so the version lookup above can key on it. Not a
     // dependency of this effect, so it can't restart the stream.
     setActiveSessionId(sessionId);
@@ -3625,7 +3709,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         if ((!isHostRef.current || hostCatchUpRef.current) && !(sessionOwner && !didAdoptRef.current) && aheadAtRebuildRef.current === null &&
             !!joining && joining.playing && !joining.hostWaiting && joining.ratingKey === itemRef.current.ratingKey &&
             joining.position > DRIFT_THRESHOLD_S) {
-          hlsConfig.startPosition = roomPositionNow(joining) + catchUpLeadS(lastSegmentRef.current?.ms ?? recentSegmentMs());
+          const roomS = roomPositionNow(joining);
+          hlsConfig.startPosition = roomS + landingLeadS(sessionId, roomS, lastSegmentRef.current?.ms ?? recentSegmentMs());
         }
 
         let hls: Hls;
@@ -3672,6 +3757,29 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             afterS: (took.ms / 1000).toFixed(1),
             peerMbps: took.peerBitsPerS > 0 ? (took.peerBitsPerS / 1e6).toFixed(1) : "unmeasured",
           }));
+          // The engine's segment memory as it starts: what the page before
+          // this one kept as Discord reloaded it goes in first, and what this
+          // page keeps as it goes is read from it (lib/popOutCarry).
+          const hooks = (globalThis as { __pdtP2P?: { storageReady?: (memory: EngineMemory) => Promise<EngineSegment[]> } }).__pdtP2P;
+          if (hooks) {
+            const forSession = sessionId;
+            hooks.storageReady = async (memory) => {
+              engineMemoryRef.current = { memory, sessionId: forSession };
+              const carried = forSession ? await takeCarriedSegments(forSession) : [];
+              if (carried.length > 0) {
+                for (const s of carried) {
+                  engineHeldRef.current.set(`carried:${s.streamId}:${s.segmentId}`, [s.startTime, s.endTime, s.data.byteLength]);
+                }
+                logEvent("Carry", "took up the picture the page before this one kept", {
+                  segments: carried.length,
+                  fromS: Number(Math.min(...carried.map((s) => s.startTime)).toFixed(2)),
+                  toS: Number(Math.max(...carried.map((s) => s.endTime)).toFixed(2)),
+                  MB: Number((carried.reduce((n, s) => n + s.data.byteLength, 0) / 1e6).toFixed(1)),
+                });
+              }
+              return carried;
+            };
+          }
           const HlsWithP2P = HlsJsP2PEngine.injectMixin(Hls);
           hls = new HlsWithP2P({
             ...hlsConfig,
@@ -4197,7 +4305,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
              * on 12 October stopped three times in twenty seconds.
              */
             const leadS = (!isHostRef.current || hostCatchUpRef.current) && !(sessionOwner && !didAdoptRef.current) && !sync.hostWaiting
-              ? catchUpLeadS(lastSegmentRef.current?.ms ?? recentSegmentMs())
+              ? landingLeadS(sessionId, syncPos, lastSegmentRef.current?.ms ?? recentSegmentMs())
               : 0;
             if (syncPos > DRIFT_THRESHOLD_S) {
               logEvent("Sync", "landing on the room clock after a rebuild", {
@@ -5460,7 +5568,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     };
     // setRestartPending is a stable useCallback with no deps; listing it keeps
     // the lint rule honest without changing when this effect runs.
-  }, [item.ratingKey, subtitles, destroyLocal, followSessionId, retryKey, vpsRelay, setRestartPending]);
+  }, [item.ratingKey, subtitles, destroyLocal, followSessionId, retryKey, vpsRelay, carryKnown, setRestartPending]);
 
   // Viewer: respond to explicit host commands (play/pause/resume/seek)
   // Does NOT fire on heartbeats — both clients share the same HLS stream

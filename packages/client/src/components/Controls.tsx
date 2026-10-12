@@ -8,6 +8,8 @@ import {
 import { createPreviewMotion, type SpeedTier } from "../lib/previewMotion";
 import { loadVolume } from "../lib/volume";
 import { previewPassPath, takePreviewStart } from "../lib/previewPrefetch";
+import { dropParkedPreview, parkPreview, previewDone, previewInUse, takeParkedPreview, type KeptPreview } from "../lib/previewKeep";
+import { takeCarriedPreview } from "../lib/popOutCarry";
 import type { PreviewPass, PreviewStatus } from "../lib/previewStatus";
 import { getLevel, setLevel, boostAvailable, BOOST_ACCENT, MAX_LEVEL } from "../lib/audioBoost";
 import { useMediaQuery, COMPACT_CONTROLS_QUERY, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -1048,6 +1050,13 @@ export function Controls({
       if (latest && latest !== url) setPreviewSrc(latest);
     }, PREVIEW_THROTTLE_MS);
   }, [previewPartId, duration]);
+  /**
+   * For the frames' download, which outlives the bar's length changing: kept
+   * to its part, not to how long the bar says the title is — that moves as a
+   * copy's playlist grows, and each move started the download over.
+   */
+  const selectPreviewRef = useRef(selectPreview);
+  selectPreviewRef.current = selectPreview;
 
   const noteSpeedTier = useCallback((tier: SpeedTier) => {
     if (tier !== speedTierRef.current) {
@@ -1161,7 +1170,12 @@ export function Controls({
    * this one lands.
    */
   useEffect(() => {
-    if (previewPartId == null || !started) return;
+    // No frames for this item: none kept for the last one are coming back.
+    if (previewPartId == null) {
+      dropParkedPreview();
+      return;
+    }
+    if (!started) return;
     let cancelled = false;
     const abort = new AbortController();
     let transferStartedAt = 0;
@@ -1171,14 +1185,19 @@ export function Controls({
         elapsedMs: Math.round(performance.now() - transferStartedAt),
       });
     };
-    const progressive = createProgressivePreviewReader(onTierReady);
+    // The frames these controls had before they went — the Activity PiP was
+    // open — waiting for them in lib/previewKeep, rather than fetched again.
+    const parked = takeParkedPreview(previewPartId);
+    let progressive = parked?.reader ?? createProgressivePreviewReader(onTierReady);
     let reader: PreviewFrameReader = progressive;
     // For Stats for nerds: how many have come, and when.
-    const status: PreviewStatus = {
+    const status: PreviewStatus = parked?.status ?? {
       partId: previewPartId, state: "downloading", transport: null, frames: 0, ready: 0, bytes: 0,
       passes: [], waitingForBufferS: null,
     };
     if (previewStatusRef) previewStatusRef.current = status;
+    let kept: KeptPreview = { partId: previewPartId, reader: progressive, status };
+    previewInUse(kept);
     const sinceStart = () => (performance.now() - transferStartedAt) / 1000;
 
     /**
@@ -1209,8 +1228,45 @@ export function Controls({
 
     const read = async () => {
       transferStartedAt = performance.now();
-      let bytes = 0;
-      for (let pass = 0; pass < PREVIEW_PASS_BUFFER_S.length; pass++) {
+      let bytes = status.bytes;
+      // Taken up again: kept while the controls were away, or carried across
+      // Discord reloading the activity (lib/popOutCarry). Either way it goes
+      // on from the pass it was in.
+      let resumed = !!parked;
+      if (!parked) {
+        const carried = await takeCarriedPreview(previewPartId);
+        if (cancelled) return;
+        const restored = carried ? createProgressivePreviewReader(onTierReady, carried.version, carried) : null;
+        if (restored?.frames() && !restored.rejected()) {
+          progressive.dispose();
+          progressive = restored;
+          reader = restored;
+          kept = { ...kept, reader: restored };
+          previewInUse(kept);
+          resumed = true;
+          status.transport = `progressive-v${carried!.version}`;
+          logEvent("Preview", "frames carried across the reload", {
+            partId: previewPartId, ready: restored.frames()!.ready, frames: restored.frames()!.count,
+            passesDone: restored.passesDone(),
+          });
+        } else {
+          restored?.dispose();
+        }
+      } else {
+        logEvent("Preview", "frames kept while the controls were away", {
+          partId: previewPartId, ready: progressive.frames()?.ready ?? 0, passesDone: progressive.passesDone(),
+        });
+      }
+      const firstPass = resumed ? progressive.passesDone() : 0;
+      if (resumed) {
+        const frames = progressive.frames();
+        if (frames) {
+          previewFramesRef.current = frames;
+          status.frames = frames.count;
+          status.ready = frames.ready;
+        }
+      }
+      for (let pass = firstPass; pass < PREVIEW_PASS_BUFFER_S.length; pass++) {
         const mark = PREVIEW_PASS_BUFFER_S[pass];
         // Before the request, not only between reads: opening the connection
         // at all is what starts the competition with the video.
@@ -1226,7 +1282,7 @@ export function Controls({
         // The first pass, fetched on the title's page before Play was pressed
         // (lib/previewPrefetch), is taken from there rather than asked for
         // again beside the stream's first segments.
-        const ahead = pass === 0 ? await takePreviewStart(previewPartId) : null;
+        const ahead = pass === 0 && !resumed ? await takePreviewStart(previewPartId) : null;
         if (cancelled) return;
         const entry: PreviewPass = {
           pass, askedS: ahead ? null : sinceStart(), doneS: null, playheadS: null, bytes: 0, readyAfter: null,
@@ -1253,7 +1309,10 @@ export function Controls({
         }
         const version = contentType.startsWith("application/x-plex-preview-v2") ? 2
           : contentType.startsWith("application/x-plex-preview-v1") ? 1 : 0;
-        if (pass === 0) {
+        if (resumed && pass === firstPass) {
+          // The pass it was in comes again from its start; what is here is passed over.
+          progressive.resumePass();
+        } else if (pass === 0) {
           status.transport = version ? `progressive-v${version}` : "legacy-bif";
           logEvent("Preview", "transfer accepted", {
             partId: previewPartId, transport: version ? `progressive-v${version}` : "legacy-bif",
@@ -1300,7 +1359,7 @@ export function Controls({
           }
           const activePct = previewPositionRef.current;
           if (activePct !== null && frames) {
-            selectPreview(activePct, speedTierRef.current);
+            selectPreviewRef.current(activePct, speedTierRef.current);
           }
         }
         if (!cancelled) {
@@ -1330,12 +1389,19 @@ export function Controls({
     return () => {
       cancelled = true;
       abort.abort();
-      // The blob URLs point into this part's bytes; the next item's frames
-      // are a different file entirely.
-      reader.dispose();
+      // Kept for the controls coming back to this part (lib/previewKeep); the
+      // next item's frames are a different file entirely, and take the place
+      // of these there. A file that isn't progressive has nothing to go on
+      // from, and goes.
+      if (reader === progressive && !progressive.rejected() && progressive.frames()) {
+        parkPreview(kept);
+      } else {
+        previewDone(kept);
+        reader.dispose();
+      }
       previewFramesRef.current = null;
     };
-  }, [previewPartId, started, selectPreview]);
+  }, [previewPartId, started]);
 
   // Load the wanted frame, promoting it to the display only once decoded.
   //

@@ -6,7 +6,7 @@
  * file happens to hold. These are the cases where "same language" is not enough
  * to identify the right track.
  */
-import { describeWatched, matchAudioTrack, matchSubtitleTrack, mergeTrackPrefs, plexAudioChoice, plexSubtitleChoice, tracksForNewItem, type AudioPref, type SubtitlePref } from "../src/lib/trackPrefs";
+import { describeWatched, isPartialSubtitle, matchAudioTrack, matchSubtitleTrack, mergeTrackPrefs, plexAudioChoice, plexSubtitleChoice, tracksForNewItem, type AudioPref, type SubtitlePref } from "../src/lib/trackPrefs";
 import type { StreamTrack } from "../src/lib/api";
 
 let pass = 0;
@@ -137,8 +137,11 @@ console.log("\n— a label that is only the language says nothing about which tr
   // A label that does name a track still carries from one episode to the next.
   const signs = track({ id: 4, title: "Signs/Song (English ASS)", language: "English", languageCode: "eng", codec: "ass", external: true });
   const full = track({ id: 5, title: "Full (English ASS)", language: "English", languageCode: "eng", codec: "ass", external: true });
+  const sdhAss = track({ id: 6, title: "SDH (English ASS)", language: "English", languageCode: "eng", codec: "ass", external: true });
   check("a label naming a track still finds that track",
-    matchSubtitleTrack([full, signs], { off: false, languageCode: "eng", language: "English", codec: "ass", title: "Signs/Song (English ASS)" })?.id, 4);
+    matchSubtitleTrack([full, sdhAss], { off: false, languageCode: "eng", language: "English", codec: "ass", title: "SDH (English ASS)" })?.id, 6);
+  check("and a partial one, picked for this title",
+    matchSubtitleTrack([full, signs], { off: false, languageCode: "eng", language: "English", codec: "ass", title: "Signs/Song (English ASS)", forTitle: true })?.id, 4);
 }
 
 console.log("\n— within a language, the closest match —");
@@ -268,14 +271,45 @@ console.log("\n— subtitles still behave —");
       languageCode: "eng",
       codec: "ass",
     })?.id, 58);
-  check("Signs/Song still carries when that is what was selected",
+  check("Signs/Song carries when it was picked for the show",
     matchSubtitleTrack([dialogue, signs], {
       off: false,
       title: "Signs/Song for Dub (English ASS)",
       language: "English",
       languageCode: "eng",
       codec: "ass",
+      forTitle: true,
     })?.id, 57);
+  check("but not as the general choice, to other titles",
+    matchSubtitleTrack([signs, dialogue], {
+      off: false,
+      title: "Signs/Song for Dub (English ASS)",
+      language: "English",
+      languageCode: "eng",
+      codec: "ass",
+    })?.id, 58);
+}
+
+console.log("\n— full subtitles before a dub's signs and songs —");
+{
+  // Attack on Titan S1E2 on 12 October: both English ASS, signs listed first.
+  const songsSigns = track({ id: 70, title: "Songs & Signs Subtitles [Baal/SCY] (English ASS)", language: "English", languageCode: "eng", codec: "ass", external: true });
+  const fullSubs = track({ id: 71, title: "Full Subtitles [Baal/SCY] (English ASS)", language: "English", languageCode: "eng", codec: "ass", external: true });
+  const settings: SubtitlePref = { off: false, languageCode: "eng", language: "English", codec: null, title: null, pinned: true };
+  check("English chosen in Settings starts on the full subtitles", matchSubtitleTrack([songsSigns, fullSubs], settings)?.id, 71);
+  check("as does English picked last time from another film",
+    matchSubtitleTrack([songsSigns, fullSubs], { off: false, languageCode: "eng", language: "English", codec: "srt", title: "English (SRT)" })?.id, 71);
+  check("and after the signs and songs played last, the next episode is on full subtitles",
+    matchSubtitleTrack([songsSigns, fullSubs], { off: false, languageCode: "eng", language: "English", codec: "ass", title: "Songs & Signs Subtitles [Baal/SCY] (English ASS)" })?.id, 71);
+  check("unless they were picked for the show",
+    matchSubtitleTrack([songsSigns, fullSubs], { off: false, languageCode: "eng", language: "English", codec: "ass", title: "Songs & Signs Subtitles [Baal/SCY] (English ASS)", forTitle: true })?.id, 70);
+  check("signs and songs when they are all the language has", matchSubtitleTrack([songsSigns], settings)?.id, 70);
+  check("partial: signs and songs, songs and signs, forced",
+    ["Songs & Signs Subtitles [Baal/SCY] (English ASS)", "Signs/Song for Dub (English ASS)", "English Forced (SRT)", "Signs (English)"].map(isPartialSubtitle),
+    [true, true, true, true]);
+  check("not partial: full, dialogue, SDH, plain",
+    ["Full Subtitles [Baal/SCY] (English ASS)", "Dialogue & Signs (English ASS)", "SDH (English PGS)", "English (SRT)", null].map(isPartialSubtitle),
+    [false, false, false, false, false]);
 }
 
 console.log("\n— inside the file before a file beside it —");

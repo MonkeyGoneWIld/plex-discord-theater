@@ -56,10 +56,22 @@ export interface AudioPref extends TrackPref {
   forTitle?: boolean;
 }
 
-/** Forced/SDH/CC flavour flags parsed out of a track title. */
+/**
+ * Whether a subtitle track carries only part of what is said: the signs and
+ * songs a dub leaves untranslated, or the forced lines of a film's foreign
+ * dialogue — "Songs & Signs Subtitles [Baal/SCY] (English ASS)" beside Attack
+ * on Titan's full subtitles, which it was chosen over on 12 October for being
+ * listed first. One that says it is full, or dialogue, is not.
+ */
+export function isPartialSubtitle(title?: string | null): boolean {
+  const t = title ?? "";
+  return /\b(forced|signs?|songs?)\b/i.test(t) && !/\b(full|dialog(ue)?)\b/i.test(t);
+}
+
+/** Partial (forced, signs and songs) and SDH/CC flavour flags parsed out of a track title. */
 function flavour(title?: string | null): { forced: boolean; sdh: boolean } {
   const t = (title ?? "").toLowerCase();
-  return { forced: t.includes("forced"), sdh: t.includes("sdh") || t.includes("cc") };
+  return { forced: isPartialSubtitle(title), sdh: t.includes("sdh") || t.includes("cc") };
 }
 
 /**
@@ -347,13 +359,19 @@ export function matchSubtitleTrack(
 ): StreamTrack | null {
   if (!pref || pref.off || tracks.length === 0) return null;
 
-  const wantFlavour = flavour(pref.title);
+  // A partial track remembered generally, rather than for this title, is a
+  // language and no more: whatever played last becomes the general choice,
+  // and a dub's signs and songs, played once, would otherwise follow the
+  // viewer from title to title in place of full subtitles. Chosen for a film
+  // or show, it is kept for that one (forTitle).
+  const generalPartial = !pref.forTitle && isPartialSubtitle(pref.title);
+  const wantFlavour = generalPartial ? { ...flavour(pref.title), forced: false } : flavour(pref.title);
   // A label that is only the language — "English", of "English (SRT
   // External)" — names no track in particular, where one like "Signs/Song"
   // does. Taken as one, it sent Good Will Hunting to its file beside the film
   // on 12 October, after The Electric State's "English (SRT External)" had
   // been picked, over the subtitles in its own file, labelled "PGS ENG".
-  const wantedTitle = labelNamesTrack(pref) ? titleIdentity(pref.title) : "";
+  const wantedTitle = !generalPartial && labelNamesTrack(pref) ? titleIdentity(pref.title) : "";
   const wantedExactly = pref.forTitle && pref.title ? normalizedText(pref.title) : "";
   // Never a commentary's, unless one was chosen for this title — see isCommentary.
   const allowCommentary = !!pref.forTitle && isCommentary(pref.title);
@@ -361,10 +379,10 @@ export function matchSubtitleTrack(
   if (sameLang.length === 0) return null;
 
   // Rank within the language: the explicit label identifies tracks like
-  // Signs/Song versus full dialogue; forced or not is the next thing that
-  // makes one the wrong track; then where it comes from, ahead of SDH and
-  // codec, which remain fallbacks for files whose titles are generic or
-  // change between episodes.
+  // Signs/Song versus full dialogue; partial or not — forced, or signs and
+  // songs — is the next thing that makes one the wrong track; then where it
+  // comes from, ahead of SDH and codec, which remain fallbacks for files whose
+  // titles are generic or change between episodes.
   const scored = sameLang.map((t) => {
     const f = flavour(t.title);
     let score = 0;

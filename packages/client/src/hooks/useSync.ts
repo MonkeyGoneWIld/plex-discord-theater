@@ -320,6 +320,9 @@ export interface SyncActions {
   /** This player hasn't got the picture a ready seek went to: the room waits
    *  for it there after all — see SyncState.seekReady. */
   sendSeekLoading: () => void;
+  /** Not the host: this player's picture has stopped for want of data, and
+   *  the room waits for it to be ready again — see SyncState.gatherSeq. */
+  sendStalled: () => void;
   sendStop: () => void;
   /** `waiting`: the host's picture isn't ready — SyncState.hostWaiting. */
   sendHeartbeat: (position: number, playing: boolean, waiting?: boolean) => void;
@@ -622,6 +625,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       },
       sendReady: (gather: number) => send({ type: "ready", gather }),
       sendSeekLoading: () => send({ type: "seek-loading" }),
+      sendStalled: () => send({ type: "stalled" }),
       sendBrowse: (context: string) => send({ type: "browse", context }),
       sendQueueAdd: (item: QueueItem) => send({ type: "queue-add", item }),
       sendQueueRemove: (ratingKey: string) => send({ type: "queue-remove", ratingKey }),

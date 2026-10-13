@@ -20,6 +20,7 @@ import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS } from "../src/lib/bufferTrim";
 import { roomPositionNow } from "../src/hooks/useSync";
 import { enoughToStart, nextSegmentInS, pictureStartFor } from "../src/lib/copyStart";
+import { AFTER_STOPS_S, MAX_EXTRA_WAIT_S, MAX_READY_CUSHION_S, afterStopsS, comingInBytesPerS, lateByS, readiness } from "../src/lib/readyCushion";
 
 let pass = 0;
 let fail = 0;
@@ -175,6 +176,61 @@ console.log("\n— the last segment's time, kept across a reload —");
   check("the page after a pop-out knows how long its last segment took", recentSegmentMs(1_000_000 + 4_000), 5600);
   check("and leads the room by enough for one like it", catchUpLeadS(recentSegmentMs(1_000_000 + 4_000)), 9.4);
   check("but not after ten minutes: the connection may have changed", recentSegmentMs(1_000_000 + 11 * 60_000), null);
+}
+
+console.log("\n— picture enough in hand to go —");
+{
+  const MB = 1_000_000;
+  /** Four-second segments from `fromS`, sizes in MB. */
+  const segs = (fromS: number, mb: number[]) => mb.map((m, i) => ({ start: fromS + 4 * i, duration: 4, bytes: m * MB }));
+  const base = { nowS: 100, leftS: 3600, bytesPerFilmS: null, stops: 0, fallbackS: 6, skip: false, waitedS: 0 };
+  // A film of 10 Mbps, coming in at 40.
+  const fast = readiness({ ...base, heldToS: 103.5, upcoming: segs(103.5, Array(14).fill(5)), bytesPerS: 5 * MB });
+  check("well ahead of the film, three seconds in hand is enough, as it always was", [fast.ready, fast.why], [true, "the next minute comes in time"]);
+  // blah0391 back from a pop-out on 13 October: 3.02 s in hand, segments coming
+  // at about 28 Mbps, and one of 23 MB eleven seconds on.
+  const back = readiness({ ...base, nowS: 1870.68, heldToS: 1873.7, upcoming: segs(1873.7, [4.95, 7, 23.36, 3.7, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]), bytesPerS: 3.5 * MB });
+  check("with a heavy stretch coming that won't be in in time, it waits", [back.ready, back.why], [false, "the next minute won't come in time"]);
+  check("and says by how much it would have been late", back.lateS !== null && back.lateS > 1, true);
+  const backLater = readiness({ ...base, nowS: 1870.68, heldToS: 1886.2, upcoming: segs(1886.2, Array(11).fill(6)), bytesPerS: 3.5 * MB });
+  check("once that stretch is in, it goes", backLater.ready, true);
+  const backWaited = readiness({ ...base, nowS: 1870.68, heldToS: 1876.2, upcoming: segs(1876.2, [7, 23.36, 3.7, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]), bytesPerS: 1.4 * MB, waitedS: MAX_EXTRA_WAIT_S });
+  check("but a connection that won't catch the film up isn't waited on for ever", [backWaited.ready, backWaited.why], [true, "waited long enough for more"]);
+  check("a skip goes as soon as it has picture enough to start on, as it always has",
+    [readiness({ ...base, nowS: 1870.68, heldToS: 1873.7, upcoming: segs(1873.7, [4.95, 7, 23.36]), bytesPerS: 3.5 * MB, skip: true }).ready], [true]);
+  check("having stopped lately too: a stop's wait is for starting again after it, not for a skip",
+    readiness({ ...base, heldToS: 103.5, upcoming: segs(103.5, [5]), bytesPerS: 1 * MB, stops: 2, skip: true }).why, "a skip, with picture enough to start on");
+  check("after a stop, with what the stops ask for in hand, it waits for the next minute as a start does, for a while",
+    [readiness({ ...base, heldToS: 108, upcoming: segs(108, Array(13).fill(30)), bytesPerS: 1 * MB, stops: 1 }).ready,
+      readiness({ ...base, heldToS: 108, upcoming: segs(108, Array(13).fill(30)), bytesPerS: 1 * MB, stops: 1, waitedS: MAX_EXTRA_WAIT_S }).ready],
+    [false, true]);
+  check("having stopped once lately, not with less than eight seconds, however fast things come",
+    readiness({ ...base, heldToS: 105, upcoming: segs(105, Array(14).fill(5)), bytesPerS: 50 * MB, stops: 1 }).ready, false);
+  check("eight is enough then", readiness({ ...base, heldToS: 108, upcoming: segs(108, Array(13).fill(5)), bytesPerS: 50 * MB, stops: 1 }).ready, true);
+  check("more each time it has stopped", [afterStopsS(0), afterStopsS(1), afterStopsS(2), afterStopsS(3), afterStopsS(7)], [0, ...AFTER_STOPS_S, AFTER_STOPS_S[2]]);
+  const slow = readiness({ ...base, heldToS: 100 + MAX_READY_CUSHION_S, upcoming: segs(130, Array(8).fill(30)), bytesPerS: 1 * MB });
+  check("with twenty seconds in hand it goes, whatever is coming", [slow.ready, slow.why], [true, "enough in hand"]);
+  check("but not after stopping three times lately: then it holds out for more",
+    [readiness({ ...base, heldToS: 100 + MAX_READY_CUSHION_S, upcoming: segs(120, Array(10).fill(30)), bytesPerS: 1 * MB, stops: 3 }).ready,
+      readiness({ ...base, heldToS: 100 + AFTER_STOPS_S[2], upcoming: segs(125, Array(9).fill(30)), bytesPerS: 1 * MB, stops: 3 }).ready],
+    [false, true]);
+  check("near the end of the film, what is left is enough",
+    readiness({ ...base, heldToS: 102, leftS: 2, upcoming: [], bytesPerS: 1 * MB, stops: 2 }).ready, true);
+  check("never with less than three seconds in hand",
+    readiness({ ...base, heldToS: 101, upcoming: [], bytesPerS: 50 * MB }).why, "short of the least in hand");
+  check("with no speed to go by, what the last segment's time says (catchUpLeadS)",
+    [readiness({ ...base, heldToS: 104, upcoming: segs(104, [5]), bytesPerS: null }).ready, readiness({ ...base, heldToS: 106.1, upcoming: segs(106.1, [5]), bytesPerS: null }).ready],
+    [false, true]);
+  check("a segment whose size isn't given is taken at what the held ones weigh",
+    lateByS(100, [{ start: 103, duration: 4, bytes: null }], 1 * MB, 1.5 * MB), 3);
+  check("with neither, no telling", lateByS(100, [{ start: 103, duration: 4, bytes: null }], 1 * MB, null), null);
+  check("nothing coming is never late", lateByS(100, [], 1 * MB, null), 0);
+  // The download meter: [when, bytes, ms with something in flight].
+  check("the speed while anything comes in, over the last ten seconds",
+    comingInBytesPerS([[0, 0, 0], [5_000, 10 * MB, 4_000], [20_000, 20 * MB, 6_000], [25_000, 30 * MB, 8_000]], 25_000), 5 * MB);
+  check("over everything, with too little in the last ten seconds",
+    comingInBytesPerS([[0, 0, 0], [5_000, 10 * MB, 4_000], [20_000, 11 * MB, 4_500], [25_000, 12 * MB, 5_000]], 25_000), 2.4 * MB);
+  check("nothing to go by yet", [comingInBytesPerS([], 0), comingInBytesPerS([[0, 0, 0], [500, 1 * MB, 400]], 500)], [null, null]);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

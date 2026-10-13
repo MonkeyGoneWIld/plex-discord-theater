@@ -40,6 +40,7 @@ import { roomPositionNow } from "../hooks/useSync";
 import { MAX_WAIT_FOR_ROOM_S, catchUpLeadS, landingFor, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, nextSegmentInS, pictureStartFor } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
+import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
@@ -145,6 +146,13 @@ const SOFT_SYNC_MIN_BUFFER_S = 6;
  * moment ahead of the host.
  */
 const HOST_WAIT_AFTER_MS = 300;
+/**
+ * How long a viewer's picture is stopped before it asks the room to wait for
+ * it: a hiccup shorter than this it gets over on its own, a moment behind the
+ * room, which it closes unseen (the soft sync below) — every one of them the
+ * room's to wait for would have stopped everybody for it.
+ */
+const VIEWER_STALL_AFTER_MS = 1_000;
 /** How long "Host is seeking…" shows, at least, for a skip that needs no loading. */
 const HOST_SEEKING_FLASH_MS = 1400;
 /**
@@ -331,6 +339,13 @@ const SEEK_STALL_TIMEOUT_MS = 6_000;
 const SEEK_STILL_ARRIVING_MS = 1_500;
 const SEEK_RECHECK_MS = 1_000;
 const SEEK_ARRIVING_MAX_MS = 20_000;
+/**
+ * And while the segment the skip went to is itself one of them, up to this
+ * long: its download is the skip's, and a rebuild would start it over. Two
+ * players skipping on one 8 Mbps connection, with a copy of 8 between them,
+ * had theirs in 21 seconds — and rebuilt at 20, the skip took 50.
+ */
+const SEEK_TARGET_ARRIVING_MAX_MS = 60_000;
 // How far past the delivered buffer an unbuffered forward seek may reach before
 // we skip the in-place attempt and restart the transcode outright. Plex
 // transcodes linearly, so a large forward jump lands past the transcode head —
@@ -1381,6 +1396,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   });
   /** Bytes arriving, as [when, bytes] per chunk — see arrivingKbps. */
   const downloadSamplesRef = useRef<Array<[number, number]>>([]);
+  /** The segments the engine is fetching, by URL, as [start, end] in film
+   *  time — see the in-place seek's watchdog. */
+  const inFlightRef = useRef(new Map<string, [number, number]>());
   /**
    * How fast each of a stream's first segments came, bits a second by URL,
    * timed from when the engine asked for it — what the "segment in" log
@@ -1402,6 +1420,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const m = downloadMeterRef.current;
     return { bytes: m.bytes, activeMs: m.activeMs + (m.inFlight > 0 ? performance.now() - m.activeSince : 0) };
   }, []);
+  /** The download meter read every quarter second, [when, bytes, ms with
+   *  anything in flight], the last fifteen seconds of it: the speed things
+   *  come in at, which readyToGo goes by. */
+  const meterReadingsRef = useRef<Array<[number, number, number]>>([]);
+  /** When the picture has stopped for want of data while playing, lately —
+   *  each stop asks for more in hand before going on (lib/readyCushion). */
+  const stopsRef = useRef<number[]>([]);
   /** Stops while playing on this title — not a seek's wait — for Stats for nerds. */
   const stallStatsRef = useRef({ key: "", count: 0, totalMs: 0, since: 0 });
   /** When this stream's playlist came in, 0 before; and whether its picture
@@ -1436,6 +1461,99 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (!video || video.readyState === HTMLMediaElement.HAVE_NOTHING) return 0;
     const now = video.currentTime;
     return coveredAheadS(now, [...bufferedRanges(video.buffered), ...heldRanges(engineHeldRef.current)]);
+  }, []);
+  /**
+   * Whether this player has picture enough in hand to go — to start, to start
+   * again after it stopped, or back from a pop-out — and the room with it:
+   * the next minute's segments in before the picture gets to them at the
+   * speed things come in at, or plenty in hand whatever is coming, and more
+   * for having stopped lately. See lib/readyCushion. Null while the picture
+   * at the playhead, and a few seconds of it, isn't in the browser yet.
+   */
+  const readyToGo = useCallback((video: HTMLVideoElement | null): Readiness | null => {
+    const now = Date.now();
+    // A wait is looked at every quarter second while it lasts; a gap is a new one.
+    const wait = cushionWaitRef.current;
+    if (now - wait.lastAt > 1_000) wait.since = 0;
+    wait.lastAt = now;
+    if (!video || !pictureReady(video)) {
+      wait.since = 0;
+      return null;
+    }
+    const nowS = video.currentTime;
+    const held = engineHeldRef.current;
+    const ranges = [...bufferedRanges(video.buffered), ...heldRanges(held)];
+    const heldToS = nowS + coveredAheadS(nowS, ranges);
+    const holds = (start: number, end: number) => ranges.some(([a, b]) => a <= start + 0.1 && b >= end - 0.3);
+    const fragments = hlsRef.current ? levelFragments(hlsRef.current) : null;
+    const upcoming = fragments
+      ? fragments
+        .filter((f) => f.start + f.duration > heldToS + 0.05 && f.start < nowS + LOOK_AHEAD_S && !holds(f.start, f.start + f.duration))
+        .map((f) => ({ start: f.start, duration: f.duration, bytes: segmentBytesOf((f as { url?: string }).url ?? "") }))
+      : null;
+    let heldBytes = 0;
+    let heldS = 0;
+    for (const [start, end, bytes] of held.values()) {
+      if (end > start) {
+        heldBytes += bytes;
+        heldS += end - start;
+      }
+    }
+    stopsRef.current = stopsRef.current.filter((t) => now - t < RECENT_STOPS_MS);
+    const r = readiness({
+      nowS,
+      heldToS,
+      leftS: Number.isFinite(video.duration) ? video.duration - nowS - 0.25 : Infinity,
+      upcoming,
+      bytesPerS: comingInBytesPerS(meterReadingsRef.current, now),
+      bytesPerFilmS: heldS > 0 ? heldBytes / heldS : null,
+      stops: stopsRef.current.length,
+      fallbackS: catchUpLeadS(lastSegmentRef.current?.ms ?? recentSegmentMs()),
+      skip: skipWaitRef.current,
+      waitedS: wait.since ? (now - wait.since) / 1000 : 0,
+    });
+    // Waiting for more than the least, from when it had the least — and once
+    // gone on, gone on: a player that said it was ready after waiting its
+    // longest, and the next moment that it wasn't, held the room as long again.
+    if (r.why === "short of the least in hand") wait.since = 0;
+    else if (!wait.since) wait.since = now;
+    return r;
+  }, []);
+  /** Since when this player has had the least in hand and waited for more, and
+   *  when that was last looked at — see readyToGo. */
+  const cushionWaitRef = useRef({ since: 0, lastAt: 0 });
+  /**
+   * Whether the picture being waited for is a skip's: from a skip — the
+   * host's own, or the room's — until the picture moves at the place it went
+   * to, however long that takes to load (see lib/readyCushion). On 8 Mbps a
+   * skip took long enough that it was taken for a stop's wait, and waited for
+   * a stop's worth in hand.
+   */
+  const skipWaitRef = useRef(false);
+  /** What a wait for more in hand was last said to be for — said once a wait. */
+  const cushionSaidRef = useRef<Readiness | null>(null);
+  /** Say when a player with its picture in waits for more before going on, and when it has enough. */
+  const noteReadiness = useCallback((r: Readiness | null) => {
+    const waiting = cushionSaidRef.current;
+    if (r && !r.ready && !waiting) {
+      cushionSaidRef.current = r;
+      logEvent("Load", "picture in, waiting for more in hand before going on", {
+        why: r.why,
+        inHandS: Number(r.inHandS.toFixed(1)),
+        leastS: r.leastS,
+        ...(r.lateS !== null ? { nextMinuteLateS: Number(r.lateS.toFixed(1)) } : {}),
+        stops: stopsRef.current.length,
+      });
+    } else if (r?.ready && waiting) {
+      cushionSaidRef.current = null;
+      logEvent("Load", "enough in hand to go on", {
+        why: r.why,
+        inHandS: Number(r.inHandS.toFixed(1)),
+        ...(r.lateS !== null ? { nextMinuteLateS: Number(r.lateS.toFixed(1)) } : {}),
+      });
+    } else if (!r) {
+      cushionSaidRef.current = null;
+    }
   }, []);
   // Stall-watchdog bookkeeping: currentTime at the previous health tick, and
   // whether the current stall episode has already been logged — a multi-minute
@@ -1780,7 +1898,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       syncActionsRef.current?.sendResume(position, undefined, hold);
       return;
     }
-    const waiting = !pictureReady(video);
+    const r = readyToGo(video);
+    noteReadiness(r);
+    const waiting = !r?.ready;
     hostToldWaitingRef.current = waiting;
     if (hold) hostHeldRef.current = true;
     syncActionsRef.current?.sendResume(position, waiting, hold);
@@ -2686,7 +2806,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         v.pause();
       }
       hostHeldRef.current = true;
-      reportHostPicture(!pictureReady(v));
+      const r = readyToGo(v);
+      noteReadiness(r);
+      reportHostPicture(!r?.ready);
       return;
     }
     if (hostHeldRef.current) {
@@ -2699,7 +2821,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     }
     if (pictureMoving(v)) reportHostPicture(false);
     else if (starved && starvedMs >= HOST_WAIT_AFTER_MS) reportHostPicture(true);
-  }, [reportHostPicture, enoughHeldAt, downloadedAheadS, waitForRoom, stopWaitingForRoom, isRestartPending]);
+  }, [reportHostPicture, enoughHeldAt, downloadedAheadS, readyToGo, noteReadiness, waitForRoom, stopWaitingForRoom, isRestartPending]);
 
   /**
    * Everyone but the host: tell the room when this picture is ready to start
@@ -2738,10 +2860,38 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       v.currentTime = sync.position;
       return;
     }
-    if (!pictureReady(v)) return;
+    const r = readyToGo(v);
+    noteReadiness(r);
+    if (!r?.ready) return;
     readySentForRef.current = sync.gatherSeq;
-    logEvent("Sync", "picture ready, telling the room", { gather: sync.gatherSeq, ...snapshot(v) });
+    logEvent("Sync", "picture ready, telling the room", { gather: sync.gatherSeq, inHandS: Number(r.inHandS.toFixed(1)), ...snapshot(v) });
     syncActionsRef.current?.sendReady(sync.gatherSeq);
+  }, []);
+
+  /**
+   * Everyone but the host: tell the room this picture has stopped for want of
+   * data. The room waits for it, everybody holding where they are, until it
+   * has enough in hand to go on, and they go on together (services/sync.ts,
+   * "stalled") — as for the host's. Left to play on, the room left it behind,
+   * and it was jumped forward to where the room had got to, past what it
+   * hadn't seen yet. Buffering is better than that. Once a stop.
+   */
+  const stallToldRef = useRef(false);
+  const reportViewerStall = useCallback((starved: boolean, starvedMs: number) => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (!starved) {
+      if (pictureMoving(v)) stallToldRef.current = false;
+      return;
+    }
+    const sync = syncStateRef.current;
+    if (stallToldRef.current || starvedMs < VIEWER_STALL_AFTER_MS || v.seeking) return;
+    if (!sync?.playing || sync.hostWaiting || !sync.connected || sync.ratingKey !== itemRef.current.ratingKey) return;
+    // Its first frames, or a wait ahead of the room on purpose, are no stop.
+    if (!sessionIdRef.current || !streamShownRef.current || roomWaitRef.current) return;
+    stallToldRef.current = true;
+    logEvent("Sync", "picture stopped, asking the room to wait for it", snapshot(v));
+    syncActionsRef.current?.sendStalled();
   }, []);
 
   /**
@@ -2760,6 +2910,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [roomHolding, setRoomHolding] = useState(false);
   useEffect(() => {
     let starvingSince = 0;
+    let stopCounted = false;
     let seekingSince = 0;
     let holdingSince = 0;
     let heldStuckSince = 0;
@@ -2778,6 +2929,22 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       else if (!starvingSince) starvingSince = Date.now();
       const starvedMs = starvingSince ? Date.now() - starvingSince : 0;
       if (starved && starvedMs >= LOADING_SCREEN_AFTER_MS) setBuffering(true);
+      // A skip is over once the picture moves where it went — see skipWaitRef.
+      if (v && !v.seeking && pictureMoving(v)) skipWaitRef.current = false;
+      // The meter's reading, for the speed things come in at — see readyToGo.
+      const meter = downloadMeter();
+      const readings = meterReadingsRef.current;
+      const at = Date.now();
+      readings.push([at, meter.bytes, meter.activeMs]);
+      while (readings.length > 1 && at - readings[0][0] > 15_000) readings.shift();
+      // A stop while playing, for want of data — not a skip's load, nor a
+      // stream's first frames — asks for more in hand before going on again.
+      const stopped = starved && starvedMs >= HOST_WAIT_AFTER_MS && !v!.seeking && streamShownRef.current && !skipWaitRef.current;
+      if (!stopped) stopCounted = false;
+      else if (!stopCounted) {
+        stopCounted = true;
+        stopsRef.current.push(at);
+      }
       // Paused on purpose — the room is — with a picture in front of it:
       // whatever put the loading screen up, a skip's load or a rebuild, is
       // over, and no `playing` is coming to say so. A host who skipped and
@@ -2815,10 +2982,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       }
 
       if (isHostRef.current) steerHost(starved, starvedMs);
-      else reportViewerReady();
+      else {
+        reportViewerStall(starved, starvedMs);
+        reportViewerReady();
+      }
     }, 250);
     return () => window.clearInterval(id);
-  }, [steerHost, reportViewerReady]);
+  }, [steerHost, reportViewerReady, reportViewerStall, downloadMeter]);
 
   // The room starting or stopping is acted on as soon as it is heard, not on
   // the next tick of the poll above.
@@ -3646,10 +3816,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
          * spent eleven seconds on them.
          */
         const joining = syncStateRef.current;
-        if ((!isHostRef.current || hostCatchUpRef.current) && !(sessionOwner && !didAdoptRef.current) && aheadAtRebuildRef.current === null &&
-            !!joining && joining.playing && !joining.hostWaiting && joining.ratingKey === itemRef.current.ratingKey &&
-            joining.position > DRIFT_THRESHOLD_S) {
+        const joinsRoom = !(sessionOwner && !didAdoptRef.current) && aheadAtRebuildRef.current === null &&
+          !!joining && joining.ratingKey === itemRef.current.ratingKey && joining.position > DRIFT_THRESHOLD_S;
+        if (joinsRoom && joining && joining.playing && !joining.hostWaiting && (!isHostRef.current || hostCatchUpRef.current)) {
           hlsConfig.startPosition = roomPositionNow(joining) + catchUpLeadS(lastSegmentRef.current?.ms ?? recentSegmentMs());
+        } else if (joinsRoom && joining && (joining.hostWaiting || !joining.playing)) {
+          /**
+           * And one coming onto a room standing still — held for this host
+           * while it was away, waiting for somebody, or paused — starts
+           * loading where the room stands. blah0391, back from a pop-out alone
+           * on 13 October, fetched the copy's first two segments first, 12 MB
+           * from two and a half minutes back, before the one it went on from.
+           */
+          hlsConfig.startPosition = joining.position;
         }
 
         let hls: Hls;
@@ -3931,6 +4110,21 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 const segmentTimes = new Map<string, [number, number]>();
                 const held = engineHeldRef.current;
                 held.clear();
+                // What is being fetched, by film time — see SEEK_TARGET_ARRIVING_MAX_MS.
+                const inFlight = inFlightRef.current;
+                inFlight.clear();
+                hls.p2pEngine.addEventListener("onSegmentStart", ({ segment }) => {
+                  if ((hlsRef.current as unknown) === hls) inFlight.set(segment.url, [segment.startTime, segment.endTime]);
+                });
+                hls.p2pEngine.addEventListener("onSegmentAbort", ({ segment }) => {
+                  if ((hlsRef.current as unknown) === hls) inFlight.delete(segment.url);
+                });
+                hls.p2pEngine.addEventListener("onSegmentError", ({ segment }) => {
+                  if ((hlsRef.current as unknown) === hls) inFlight.delete(segment.url);
+                });
+                hls.p2pEngine.addEventListener("onSegmentLoaded", ({ segmentUrl }) => {
+                  if ((hlsRef.current as unknown) === hls) inFlight.delete(segmentUrl);
+                });
                 hls.p2pEngine.addEventListener("onSegmentStart", ({ segment }) => {
                   segmentTimes.set(segment.url, [segment.startTime, segment.endTime]);
                 });
@@ -5555,7 +5749,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // same seek can't be re-applied by the next unrelated command.
     const isNewSeek = syncState.seekSeq !== appliedSeekSeqRef.current;
     appliedSeekSeqRef.current = syncState.seekSeq;
-    if (isNewSeek) lastSeekAtRef.current = Date.now();
+    if (isNewSeek) {
+      lastSeekAtRef.current = Date.now();
+      skipWaitRef.current = true;
+    }
 
     // Correction against where the room is *now*. `position` is the last
     // report, up to a heartbeat old; correcting to it is how a client ends up
@@ -5729,8 +5926,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // Then the position and play state. A pause goes out as a real pause rather
     // than a heartbeat, because "play" above optimistically marks us playing and
     // because it is the pause the room most likely missed — it is the one that
-    // happened while the socket was down.
-    if (video.paused) syncActionsRef.current?.sendPause(video.currentTime);
+    // happened while the socket was down. Not a picture held for the room,
+    // which is playing as far as the room is concerned: a host whose join was
+    // answered only once its picture was in and holding for the room to start
+    // paused the room, and the film never started.
+    if (video.paused && !hostHeldRef.current) syncActionsRef.current?.sendPause(video.currentTime);
     else sendRoomResume(video.currentTime);
   }, [syncState?.stateSeq]);
 
@@ -6380,6 +6580,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const handleHostSeek = useCallback((positionSeconds: number, broadcast = true) => {
     // Somewhere new on purpose: any wait for the room was about where we were.
     lastSeekAtRef.current = Date.now();
+    skipWaitRef.current = true;
     stopWaitingForRoom("seeking");
     const video = videoRef.current;
     if (!video) {
@@ -6511,7 +6712,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // rebuilt stream took four more to fetch it again.
       const arriving = copiedStreamRef.current &&
         Date.now() - engineLoaderRef.current.lastChunkAt < SEEK_STILL_ARRIVING_MS;
-      if (arriving && Date.now() - waitingSince < SEEK_ARRIVING_MAX_MS) {
+      // The skip's own segment — the one it landed in, or the next when it
+      // landed near that one's end — coming in, given longer still.
+      const forIt = [...inFlightRef.current.values()].some(([start, end]) =>
+        end > v.currentTime && start < v.currentTime + READY_AHEAD_S + 1);
+      if (arriving && Date.now() - waitingSince < (forIt ? SEEK_TARGET_ARRIVING_MAX_MS : SEEK_ARRIVING_MAX_MS)) {
         seekStallTimerRef.current = setTimeout(check, SEEK_RECHECK_MS);
         return;
       }

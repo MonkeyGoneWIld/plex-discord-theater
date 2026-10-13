@@ -15,6 +15,9 @@ process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "variant-syn
 // A room everybody has left is kept this long here, not half a minute.
 const HOLD_MS = 800;
 process.env.PDT_EMPTY_ROOM_HOLD_MS = String(HOLD_MS);
+// And one waits this long for a viewer whose picture stopped, not half a minute.
+const STALL_WAIT_MS = 1500;
+process.env.PDT_STALL_GATHER_MAX_MS = String(STALL_WAIT_MS);
 
 // Imported only now: the session, instance and history stores open their
 // databases wherever THUMB_CACHE_DIR points as they load, and a static import
@@ -1066,6 +1069,74 @@ console.log("\n— everybody starts together —");
   ready(a); ready(b);
   await sleep(60);
   check("and goes once they can", host.last("room-waiting")?.waiting, false);
+
+  // A viewer's picture stopping mid-film: everybody holds for it, and they
+  // go on together — rather than the room playing on without it, and it being
+  // jumped forward past what it hadn't seen to catch up.
+  host.send({ type: "heartbeat", position: 2110, playing: true, waiting: false, transportRevision: rev() });
+  await sleep(60);
+  host.clear(); a.clear(); b.clear();
+  a.send({ type: "stalled" });
+  await sleep(60);
+  check("a viewer's picture stopping has everybody wait for it",
+    [host.last("room-waiting")?.waiting, b.last("room-waiting")?.waiting, a.last("room-waiting")?.waiting], [true, true, true]);
+  const stoppedAt = await clockOf("inst-gather");
+  ready(b);
+  await sleep(600);
+  check("the clock standing where it stopped meanwhile", near(await clockOf("inst-gather"), stoppedAt, 0.1), "ok");
+  ready(a);
+  await sleep(60);
+  check("and everybody goes on together once it is ready",
+    [host.last("room-waiting")?.waiting, a.last("room-waiting")?.waiting, b.last("room-waiting")?.waiting], [false, false, false]);
+
+  // The host's picture stopping is said with its heartbeat; nor does a stop
+  // said while the room already waits start a new wait.
+  host.clear(); a.clear();
+  host.send({ type: "stalled" });
+  await sleep(60);
+  check("the host's \"stalled\" changes nothing — its heartbeat says that", host.count("room-waiting"), 0);
+  host.send({ type: "seek", position: 2400 });
+  await sleep(60);
+  const seekGather = a.last("room-waiting")?.gather;
+  b.send({ type: "stalled" });
+  await sleep(60);
+  check("a viewer stopping while the room already waits starts no new wait", a.last("room-waiting")?.gather, seekGather);
+  ready(a); ready(b);
+  await sleep(60);
+
+  // Nobody waits for a player nobody is looking at.
+  host.clear();
+  b.send({ type: "visible", value: false });
+  await sleep(40);
+  b.send({ type: "stalled" });
+  await sleep(60);
+  check("a hidden player's picture stopping holds nobody", host.count("room-waiting"), 0);
+  b.send({ type: "visible", value: true });
+  await sleep(40);
+
+  // One whose picture never comes back holds the room for STALL_GATHER_MAX_MS
+  // at most — longer than a start's ten seconds, and then it goes on.
+  host.clear();
+  a.send({ type: "stalled" });
+  await sleep(60);
+  ready(b);
+  const stallSince = Date.now();
+  for (let i = 0; i < 100 && host.last("room-waiting")?.waiting !== false; i++) await sleep(50);
+  const waitedMs = Date.now() - stallSince;
+  check("one whose picture doesn't come back is waited for, then left to catch up",
+    [host.last("room-waiting")?.waiting, waitedMs > STALL_WAIT_MS - 300 && waitedMs < STALL_WAIT_MS + 700], [false, true]);
+  // Its connection won't carry the film just now: the room doesn't spend the
+  // evening waiting for it, half a minute at a time.
+  host.clear();
+  a.send({ type: "stalled" });
+  await sleep(60);
+  check("and its next stop, soon after, holds nobody", host.count("room-waiting"), 0);
+  b.send({ type: "stalled" });
+  await sleep(60);
+  check("though anybody else's still does", host.last("room-waiting")?.waiting, true);
+  ready(a); ready(b);
+  await sleep(60);
+  check("and goes on once they are ready", host.last("room-waiting")?.waiting, false);
   [host, a, b].forEach((c) => c.close());
 }
 

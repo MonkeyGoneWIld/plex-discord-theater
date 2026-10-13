@@ -215,6 +215,9 @@ interface RoomClient {
   gathers: boolean;
   /** The gather this client last said its picture was ready for. */
   readyFor: number;
+  /** Until when its picture stopping holds nobody: it didn't come back in
+   *  time the last time it did — see STALL_IGNORE_MS. */
+  stallsIgnoredUntil?: number;
   /**
    * Whether anybody is looking at this client's player. One that is hidden —
    * Discord minimised, another app in front, a phone that has put it in the
@@ -341,6 +344,11 @@ interface RoomState {
   /** When the room starts without whoever still isn't ready — set once the
    *  host is. */
   gatherDeadline: number | null;
+  /** How long this gather waits for them: GATHER_MAX_MS, or for a viewer's
+   *  picture that stopped, STALL_GATHER_MAX_MS. */
+  gatherMaxMs: number;
+  /** Whether this gather is for a viewer's picture that stopped. */
+  gatherForStall: boolean;
   /** The gather everybody was last told about — see updateWaiting. */
   gatherAnnounced: number;
   /**
@@ -442,6 +450,21 @@ function setTransport(room: Room, playing: boolean): void {
  * holds everyone for no longer than this, then catches up on their own.
  */
 const GATHER_MAX_MS = 10_000;
+/**
+ * How long the room waits for a viewer whose picture stopped mid-film ("stalled")
+ * to have enough in hand to go on. Longer than for a start: everybody else is
+ * in step and playing, the one who stopped is getting going again, and the
+ * room going on without it leaves it behind, to be jumped forward past what it
+ * hasn't seen. Buffering is better than that.
+ */
+const STALL_GATHER_MAX_MS = Number(process.env.PDT_STALL_GATHER_MAX_MS) || 30_000;
+/**
+ * A viewer whose picture didn't come back in STALL_GATHER_MAX_MS has a
+ * connection that won't carry the film just now, and every room it is in
+ * would spend the evening waiting for it, half a minute at a time. For this
+ * long after, its picture stopping holds nobody; it catches up on its own.
+ */
+const STALL_IGNORE_MS = 5 * 60_000;
 /** How long after a skip the room keeps to where it went, whatever the host
  *  says — see RoomState.seekHold. A rebuild for a skip takes seconds. */
 const SEEK_HOLD_MS = 30_000;
@@ -479,11 +502,13 @@ function closeGather(room: Room): void {
  * A moment the room starts again from together: everybody watching has to
  * say their picture is ready before the clock runs — see RoomState.waiting.
  */
-function openGather(room: Room): void {
+function openGather(room: Room, maxMs = GATHER_MAX_MS, forStall = false): void {
   closeGather(room);
   room.state.gatherSeq++;
   room.state.gatherOpen = true;
   room.state.gatherOpenedAt = Date.now();
+  room.state.gatherMaxMs = maxMs;
+  room.state.gatherForStall = forStall;
 }
 
 /**
@@ -502,19 +527,30 @@ function updateWaiting(room: Room, roomId: string | null, why: string): void {
       closeGather(room);
     } else if (s.gatherDeadline === null) {
       // The host is ready; the others get GATHER_MAX_MS from here.
-      s.gatherDeadline = Date.now() + GATHER_MAX_MS;
+      s.gatherDeadline = Date.now() + s.gatherMaxMs;
       const seq = s.gatherSeq;
       room.gatherTimer = setTimeout(() => {
         room.gatherTimer = undefined;
         if (room.state.gatherSeq !== seq || !room.state.gatherOpen) return;
+        const still = gatherPending(room);
         logEvent("Sync", "starting without the players still loading", {
           room: roomId?.substring(0, 8) ?? "?",
-          waitedS: GATHER_MAX_MS / 1000,
-          still: namesOf(gatherPending(room)),
+          waitedS: room.state.gatherMaxMs / 1000,
+          still: namesOf(still),
         });
+        if (room.state.gatherForStall) {
+          for (const c of still) c.stallsIgnoredUntil = Date.now() + STALL_IGNORE_MS;
+          if (still.length) {
+            logEvent("Sync", "a picture that stopped didn't come back in time; its stops hold nobody for a while", {
+              room: roomId?.substring(0, 8) ?? "?",
+              who: namesOf(still),
+              forMin: STALL_IGNORE_MS / 60_000,
+            });
+          }
+        }
         closeGather(room);
         updateWaiting(room, roomId, "gave up waiting");
-      }, GATHER_MAX_MS);
+      }, s.gatherMaxMs);
       room.gatherTimer.unref?.();
     }
     pending = gatherPending(room);
@@ -769,6 +805,8 @@ function getOrCreateRoom(instanceId: string): Room {
         gatherOpen: false,
         gatherOpenedAt: 0,
         gatherDeadline: null,
+        gatherMaxMs: GATHER_MAX_MS,
+        gatherForStall: false,
         gatherAnnounced: 0,
         seekHold: null,
         lastReadySeekAt: null,
@@ -1680,6 +1718,23 @@ export function attachWebSocketServer(server: Server): void {
         if (msg.gather !== room.state.gatherSeq || client.readyFor === room.state.gatherSeq) return;
         client.readyFor = room.state.gatherSeq;
         if (room.state.gatherOpen) updateWaiting(room, roomId, "a player is ready");
+        return;
+      }
+
+      /**
+       * "My picture has stopped" — a viewer's, mid-film, for want of data.
+       * Everybody waits for it, holding where they are, until it says it has
+       * enough in hand to go on, for up to STALL_GATHER_MAX_MS — as everybody
+       * waits for the host's. Played on without it, the room left it behind,
+       * and it was jumped forward to catch up, past what it hadn't seen.
+       */
+      if (type === "stalled") {
+        const s = room.state;
+        if (client.isHost || !s.playing || !s.ratingKey || s.waiting) return;
+        if (!client.gathers || !client.isWatching || !client.visible) return;
+        if ((client.stallsIgnoredUntil ?? 0) > Date.now()) return;
+        openGather(room, STALL_GATHER_MAX_MS, true);
+        updateWaiting(room, roomId, `${client.username ?? client.userId}'s picture stopped`);
         return;
       }
 

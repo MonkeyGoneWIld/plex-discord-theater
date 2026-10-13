@@ -1168,13 +1168,21 @@ export function Controls({
    * covers a part with no index, a request that fails, and the window before
    * this one lands.
    */
+  /**
+   * The first pass fetched on the title's page is already in hand, and taking
+   * it costs the stream nothing: the seek bar shows its frames while the
+   * picture is still loading. Waiting for the picture to play left them unseen
+   * until the room ran, since a player now holds its picture until then.
+   */
+  const firstPassInHand = previewPartId != null && takePreviewStart(previewPartId) !== null;
+  const beginFrames = started || firstPassInHand;
   useEffect(() => {
     // No frames for this item: none kept for the last one are coming back.
     if (previewPartId == null) {
       dropParkedPreview();
       return;
     }
-    if (!started) return;
+    if (!beginFrames) return;
     let cancelled = false;
     const abort = new AbortController();
     let transferStartedAt = 0;
@@ -1377,7 +1385,7 @@ export function Controls({
       }
       previewFramesRef.current = null;
     };
-  }, [previewPartId, started]);
+  }, [previewPartId, beginFrames]);
 
   // Load the wanted frame, promoting it to the display only once decoded.
   //

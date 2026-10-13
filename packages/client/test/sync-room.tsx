@@ -423,7 +423,10 @@ function Runner() {
       for (const ahead of [true, false]) {
         hostQuery = ahead ? "&titlePage=4000" : "";
         viewerQuery = ahead ? "&titlePage" : "";
-        await startOnce("p2p=0&previews=1&previewDelayMs=2500", {});
+        // Downloads slow enough that the picture takes a few seconds to start,
+        // as it does on a real connection: the frames from the title's page
+        // are on the seek bar meanwhile.
+        await startOnce("p2p=0&previews=1&previewDelayMs=2500", ahead ? { "u-host": 1200, "u-viewer": 1200 } : {});
         await waitFor(() => !!said("u-host", /^frame index ready$/) && !!said("u-viewer", /^frame index ready$/), 20_000, "both seek bars' frames");
         say(ahead ? "on the title's page first:" : "straight to Play, as before:");
         const firstSent = (await api("/api/test/previews")) as Sent[];
@@ -435,7 +438,7 @@ function Runner() {
           if (ahead) {
             say(`${accepted?.data.fetched ? "PASS" : "FAIL"} ${who}'s seek bar took the first pass fetched on the title's page`);
             say(`${firsts.length === 1 ? "PASS" : "FAIL"} which was sent once (${firsts.length})`);
-            say(`${lateMs < 1000 ? "PASS" : "FAIL"} and its frames were there as the picture started`);
+            say(`${lateMs <= -1000 ? "PASS" : "FAIL"} and its frames were there while the picture was still loading`);
           } else {
             // Twice, the first called off: the seek bar's frames effect runs
             // again a moment after the picture starts.

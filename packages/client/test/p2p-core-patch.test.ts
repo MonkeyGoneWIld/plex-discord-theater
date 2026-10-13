@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { transformSync } from "esbuild";
-import { patchHybridLoader, patchSegmentStorage } from "../p2pCorePatch";
+import { patchHybridLoader, patchSegmentStorage, patchTrackerClient } from "../p2pCorePatch";
 
 let pass = 0;
 let fail = 0;
@@ -43,6 +43,16 @@ check("what has been watched is kept until the memory is full, a copy's growing 
   /clear\(_isLiveStream, newSegmentSize\) \{\s+const isLiveStream = false;/.test(storage), true);
 check("and it is still JavaScript", (() => { try { transformSync(storage, { loader: "js", format: "esm" }); return true; } catch { return false; } })(), true);
 check("applying it twice changes nothing", patchSegmentStorage(storage), storage);
+
+console.log("\n— its connection to the tracker —");
+// What the engine imports it through: p2p-media-loader-core's "bittorrent-tracker".
+const trackerFile = fileURLToPath(new URL("./lib/client/websocket-tracker.js", import.meta.resolve("bittorrent-tracker")));
+const tracker = patchTrackerClient(readFileSync(trackerFile, "utf8"));
+check("a dropped connection is tried again within seconds, not minutes",
+  [/const RECONNECT_MINIMUM = 2 \* 1000/.test(tracker), /const RECONNECT_VARIANCE = 3 \* 1000/.test(tracker), /const RECONNECT_MAXIMUM = 60 \* 1000/.test(tracker)],
+  [true, true, true]);
+check("and it is still JavaScript", (() => { try { transformSync(tracker, { loader: "js", format: "esm" }); return true; } catch { return false; } })(), true);
+check("applying it twice changes nothing", patchTrackerClient(tracker), tracker);
 
 console.log("\n— an engine it wasn't written for —");
 let refused: unknown = null;

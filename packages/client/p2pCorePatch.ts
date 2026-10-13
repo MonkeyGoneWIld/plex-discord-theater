@@ -43,6 +43,17 @@
  *     needed goes back to the bot, from the byte it got to (lib/takeFromPeer:
  *     shareChoice, ownerOf, keepSharedOnPeer).
  *
+ *  5. A player whose connection to the tracker — the bot's, which introduces
+ *     players in one stream to each other — drops is back on it within
+ *     seconds (the tracker library's websocket-tracker.js, not the engine).
+ *     The library waited ten seconds and up to five minutes more, at random,
+ *     before trying again, and a player is out of its stream's swarm all
+ *     that time: on 13 October blah0391's connection dropped two minutes
+ *     after it joined one, and monkey26, joining in that time, found nobody
+ *     to share with. The two met 85 seconds later, when it came back. Now two
+ *     seconds and up to three more, doubling each time it fails again, to a
+ *     minute at most.
+ *
  * There used to be a third: a player on the same network as its peer left
  * segments to it rather than fetch them from the bot too, and a viewer fetched
  * nothing from the bot while the room waited on the host. A transfer from the
@@ -59,6 +70,7 @@ import type { Plugin } from "vite";
 
 const TARGET = /p2p-media-loader-core[\\/]lib[\\/]hybrid-loader\.js$/;
 const STORAGE_TARGET = /p2p-media-loader-core[\\/]lib[\\/]segment-storage[\\/]segment-memory-storage\.js$/;
+const TRACKER_TARGET = /bittorrent-tracker[\\/]lib[\\/]client[\\/]websocket-tracker\.js$/;
 const MARK = "plex-discord-theater: p2pCorePatch";
 
 const edits: Array<[string, string]> = [
@@ -232,6 +244,18 @@ const storageEdits: Array<[string, string]> = [
   ],
 ];
 
+const trackerEdits: Array<[string, string]> = [
+  [
+    `const RECONNECT_MINIMUM = 10 * 1000
+const RECONNECT_MAXIMUM = 60 * 60 * 1000
+const RECONNECT_VARIANCE = 5 * 60 * 1000`,
+    `// ${MARK}: back in the swarm within seconds — see change 5.
+const RECONNECT_MINIMUM = 2 * 1000
+const RECONNECT_MAXIMUM = 60 * 1000
+const RECONNECT_VARIANCE = 3 * 1000`,
+  ],
+];
+
 /** The engine's hybrid-loader.js with its changes made; throws if it doesn't fit. */
 export function patchHybridLoader(code: string): string {
   return applyEdits(code, edits, "hybrid-loader.js");
@@ -240,6 +264,11 @@ export function patchHybridLoader(code: string): string {
 /** The engine's segment-memory-storage.js with its change made; throws if it doesn't fit. */
 export function patchSegmentStorage(code: string): string {
   return applyEdits(code, storageEdits, "segment-memory-storage.js");
+}
+
+/** The tracker library's websocket-tracker.js with its change made; throws if it doesn't fit. */
+export function patchTrackerClient(code: string): string {
+  return applyEdits(code, trackerEdits, "websocket-tracker.js");
 }
 
 function applyEdits(code: string, list: Array<[string, string]>, file: string): string {
@@ -269,7 +298,7 @@ export function p2pCorePatch(): Plugin {
           // Part of what the dev server names its pre-bundled engine by, so a
           // change to this patch is a new file to the browser rather than the
           // old one from its cache.
-          define: { __PDT_P2P_CORE_PATCH__: JSON.stringify(createHash("sha256").update(JSON.stringify([edits, storageEdits])).digest("hex").slice(0, 12)) },
+          define: { __PDT_P2P_CORE_PATCH__: JSON.stringify(createHash("sha256").update(JSON.stringify([edits, storageEdits, trackerEdits])).digest("hex").slice(0, 12)) },
           plugins: [{
             name: "p2p-core-patch",
             setup(build) {
@@ -281,6 +310,10 @@ export function p2pCorePatch(): Plugin {
                 contents: patchSegmentStorage(await readFile(args.path, "utf8")),
                 loader: "js",
               }));
+              build.onLoad({ filter: TRACKER_TARGET }, async (args) => ({
+                contents: patchTrackerClient(await readFile(args.path, "utf8")),
+                loader: "js",
+              }));
             },
           }],
         },
@@ -290,6 +323,7 @@ export function p2pCorePatch(): Plugin {
       const file = id.split("?")[0];
       if (TARGET.test(file)) return { code: patchHybridLoader(code), map: null };
       if (STORAGE_TARGET.test(file)) return { code: patchSegmentStorage(code), map: null };
+      if (TRACKER_TARGET.test(file)) return { code: patchTrackerClient(code), map: null };
       return null;
     },
   };

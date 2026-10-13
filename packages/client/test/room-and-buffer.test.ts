@@ -14,7 +14,7 @@
  * - A follower going past the room doesn't land on the last sliver of a
  *   segment (lib/roomWait landingFor).
  */
-import { LAND_INTO_SEGMENT_S, MAX_WAIT_FOR_ROOM_S, catchUpLeadS, landingFor, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
+import { LAND_INTO_SEGMENT_S, MAX_WAIT_FOR_ROOM_S, cameFromCache, catchUpLeadS, landingBySize, landingFor, recentSegmentBytesPerS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS } from "../src/lib/bufferTrim";
@@ -164,6 +164,42 @@ console.log("\n— a follower going past the room lands where its segment has pi
   check("no segments yet: where it was going", [landingFor(27.167, null, Infinity), landingFor(27.167, [], Infinity)], [27.167, 27.167]);
 }
 
+console.log("\n— and far enough past it for what it lands in to come first —");
+{
+  const MB = 1_000_000;
+  const at = (t: number) => Math.round(t * 100) / 100;
+  // blah0391 back from a pop-out on 13 October: 3.7 s past the room, in seg
+  // 906 — 26.21 MB, 2721.4 to 2732.3 — its last page's segments coming at
+  // about 26 Mbps.
+  const segs = [{ start: 2715, duration: 6.4, bytes: 8 * MB }, { start: 2721.4, duration: 10.9, bytes: 26.21 * MB },
+    { start: 2732.3, duration: 3, bytes: 3 * MB }, { start: 2735.3, duration: 4, bytes: 20 * MB }];
+  const bps = 26e6 / 8;
+  const landS = landingBySize(2725.08, 2721.38, segs, bps, 2721.38 + 25);
+  check(`26 MB at 26 Mbps would come after the room got there: it lands past it, at the start of the next (${at(landS - 2721.38)}s past the room)`,
+    at(landS), at(2732.3 + LAND_INTO_SEGMENT_S));
+  check("a fast connection: where it was going", landingBySize(2725.08, 2721.38, segs, 100 * MB, Infinity), 2725.08);
+  // A heavy segment just after the one it would land in is needed when the
+  // room gets to it, wherever before it the landing is: it lands beyond it.
+  const heavy = [{ start: 100, duration: 4, bytes: 2 * MB }, { start: 104, duration: 4, bytes: 30 * MB }, { start: 108, duration: 30, bytes: 3 * MB }];
+  check("a heavy segment just after: it lands beyond that, at the start of the next",
+    at(landingBySize(101, 99, heavy, 4 * MB, 99 + 25)), at(108 + LAND_INTO_SEGMENT_S));
+  // A heavy one it lands in: further into it, for it to be in by then.
+  const long = [{ start: 0, duration: 20, bytes: 10 * MB }, { start: 20, duration: 4, bytes: 1 * MB }];
+  check("a heavy segment it lands in: further into it, in by the time the room gets there",
+    at(landingBySize(3, 0, long, 1 * MB, 25)), at(10 / 0.8 + 1));
+  check("never past the limit", landingBySize(2725.08, 2721.38, segs, 1 * MB, 2721.38 + 10), 2721.38 + 10);
+  check("no speed, no size: where it was going",
+    [landingBySize(2725.08, 2721.38, segs, null, Infinity), landingBySize(2725.08, 2721.38, [{ start: 2721.4, duration: 10.9, bytes: null }], bps, Infinity), landingBySize(2725.08, 2721.38, null, bps, Infinity)],
+    [2725.08, 2725.08, 2725.08]);
+}
+
+console.log("\n— a segment out of the browser's cache says nothing of the connection —");
+check("4.7 MB in 10 ms came out of the cache", cameFromCache(4_730_000, 10), true);
+check("3 MB in a tenth of a second did too", cameFromCache(3_010_000, 100), true);
+check("28 MB in 8.5 s came over the connection", cameFromCache(28_130_000, 8500), false);
+check("as did 25.7 MB at 48 Mbps", cameFromCache(25_740_000, 4200), false);
+check("nothing in no time is nothing", cameFromCache(0, 0), false);
+
 console.log("\n— the last segment's time, kept across a reload —");
 {
   const kept = new Map<string, string>();
@@ -176,6 +212,10 @@ console.log("\n— the last segment's time, kept across a reload —");
   check("the page after a pop-out knows how long its last segment took", recentSegmentMs(1_000_000 + 4_000), 5600);
   check("and leads the room by enough for one like it", catchUpLeadS(recentSegmentMs(1_000_000 + 4_000)), 9.4);
   check("but not after ten minutes: the connection may have changed", recentSegmentMs(1_000_000 + 11 * 60_000), null);
+  check("no speed kept with it, none known", recentSegmentBytesPerS(1_000_000 + 4_000), null);
+  rememberSegmentMs(5600, 2_000_000, 3_250_000);
+  check("and with the speed segments came at, that too", [recentSegmentMs(2_000_000 + 4_000), recentSegmentBytesPerS(2_000_000 + 4_000)], [5600, 3_250_000]);
+  check("for ten minutes", recentSegmentBytesPerS(2_000_000 + 11 * 60_000), null);
 }
 
 console.log("\n— picture enough in hand to go —");

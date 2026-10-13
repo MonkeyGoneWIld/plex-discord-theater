@@ -37,14 +37,14 @@ import { carryTrackPrefs, describeWatched, endTrackSitting, isCommentary, mergeT
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
-import { MAX_WAIT_FOR_ROOM_S, catchUpLeadS, landingFor, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
+import { MAX_WAIT_FOR_ROOM_S, cameFromCache, catchUpLeadS, landingBySize, landingFor, recentSegmentBytesPerS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, nextSegmentInS, pictureStartFor } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
-import { MAX_PARTS, MAX_PARTS_ALONE, fetchInPartsLater, installSegmentParts, partsFor, segmentBytesOf } from "../lib/segmentParts";
+import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, installSegmentParts, partsFor, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
 import { installTakeFromPeer } from "../lib/takeFromPeer";
 import { connectionsSeen, watchPeerConnections } from "../lib/peerConnections";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
@@ -211,6 +211,24 @@ const VIEWER_SETTLED_MS = 30_000;
  * it keeps, when the skip lands outside it — see freeRoomFor.
  */
 const SKIP_KEEP_AHEAD_S = 20;
+/**
+ * In hand, under which a player is short of picture — joining, back from a
+ * pop-out, its picture stopped — and tells the room, for the others to ease
+ * off the bot meanwhile (easingOffRef); and from which it is not any more.
+ */
+const SHORT_OF_PICTURE_S = 15;
+const PICTURE_ENOUGH_S = 25;
+/** The longest a player says it is short at a stretch: one whose connection
+ *  never gets ahead of the film doesn't hold the others' downloads back for
+ *  ever. Once it has had picture enough, it may say so again. */
+const SHORT_FOR_AT_MOST_MS = 60_000;
+/** In hand, from which a player eases off the bot for another that is short
+ *  of picture, and under which it stops, whoever is short. */
+const EASE_OFF_FROM_S = 45;
+const EASE_OFF_UNTIL_S = 30;
+/** Picture enough in hand for a segment beside the one the picture needs next
+ *  to download at full speed beside it — see partsAtOnce. */
+const TWO_AT_FULL_SPEED_FROM_S = 12;
 /** How often a catching-up host may move its picture, and how long what is
  *  coming in has to reach the room's place before it goes past it instead. */
 const HOST_CATCH_UP_ACT_MS = 2_000;
@@ -712,6 +730,13 @@ function heapSample(): Record<string, unknown> {
 function levelFragments(hls: Hls): Array<{ start: number; duration: number }> | null {
   const level = hls.levels[hls.currentLevel] ?? hls.levels[hls.loadLevel] ?? hls.levels[0];
   return level?.details?.fragments ?? null;
+}
+
+/** Segments with the sizes a copy's playlist gives them (n=), for lib/roomWait's landingBySize. */
+function sizedSegments(
+  fragments: ReadonlyArray<{ start: number; duration: number; url?: string }> | null,
+): Array<{ start: number; duration: number; bytes: number | null }> | null {
+  return fragments ? fragments.map((f) => ({ start: f.start, duration: f.duration, bytes: segmentBytesOf(f.url ?? "") })) : null;
 }
 
 /**
@@ -1429,6 +1454,29 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    *  and from where — for Stats for nerds. */
   const lastSegmentRef = useRef<LastSegment | null>(null);
   /**
+   * How long the last segment to come over the connection took, and how fast
+   * things were coming in then — not one out of the browser's cache, which
+   * says nothing of the connection (lib/roomWait cameFromCache) — for how far
+   * past the room a follower lands (catchUpLeadS, landingBySize).
+   */
+  const networkSegmentMsRef = useRef<number | null>(null);
+  const networkBytesPerSRef = useRef<number | null>(null);
+  /**
+   * While another player in the room is short of picture — joining, back from
+   * a pop-out, its picture stopped (SyncState.othersLoading) — this one, with
+   * plenty in hand, eases off the bot: one download at a time, a part at a
+   * time. Every player's downloads come out of the bot's one upload; on 13
+   * October, every time somebody joined or came back, the other went on
+   * filling its buffer up to two minutes ahead at full speed beside them, and
+   * they had a third to half of it — 6 to 30 Mbps, where alone they'd had 48 —
+   * and took 12 to 34 seconds to be back in the film.
+   */
+  const easingOffRef = useRef(false);
+  /** Whether this player has told the room it is short of picture — see SHORT_OF_PICTURE_S. */
+  const shortToldRef = useRef(false);
+  /** The stream's way of putting its downloads to the mode easingOffRef says. */
+  const applyDownloadsRef = useRef<(() => void) | null>(null);
+  /**
    * What has come in, and for how long anything was coming in at all — the
    * speed of the connection while it is in use, which Stats for nerds plots.
    * hls.js's own estimate is the P2P engine's guess, handed over with every
@@ -1528,7 +1576,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       bytesPerS: comingInBytesPerS(meterReadingsRef.current, now),
       bytesPerFilmS: heldS > 0 ? heldBytes / heldS : null,
       stops: stopsRef.current.length,
-      fallbackS: catchUpLeadS(lastSegmentRef.current?.ms ?? recentSegmentMs()),
+      fallbackS: catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs()),
       skip: skipWaitRef.current,
       waitedS: wait.since ? (now - wait.since) / 1000 : 0,
     });
@@ -1891,8 +1939,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    *  playing behind the room without the room's place held — see steerHost. */
   const hostCatchUpActedAtRef = useRef(0);
   const hostCatchUpBehindSinceRef = useRef(0);
-  /** The gather this player last told the room it was ready for. */
-  const readySentForRef = useRef(0);
+  /** The gather this player last told the room it was ready for, and with
+   *  which title's picture — see reportViewerReady. */
+  const readySentForRef = useRef("");
   /** Frames shown and dropped at the last health sample — see there. */
   const frameCountRef = useRef<{ shown: number; dropped: number; at: number } | null>(null);
   /** Whether a seek sent from here holds this player until the room says it
@@ -2764,7 +2813,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // everybody — with it; blah0391, back on 12 October with 2.9 s and
       // segments taking six to come, stopped it three seconds later.
       const leftS = Number.isFinite(v.duration) ? Math.max(0, v.duration - v.currentTime - 0.25) : Infinity;
-      const cushionS = Math.min(Math.max(READY_AHEAD_S, catchUpLeadS(lastSegmentRef.current?.ms ?? recentSegmentMs())), leftS);
+      const cushionS = Math.min(Math.max(READY_AHEAD_S, catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs())), leftS);
       const inStep = sync.playing && !sync.hostWaiting && moving && Math.abs(offS) < HOST_CATCH_UP_STEP_S &&
         enoughHeldAt(v, v.currentTime) && downloadedAheadS() + READY_TOLERANCE_S >= cushionS;
       const tookMs = Date.now() - hostCatchUpSinceRef.current;
@@ -2819,10 +2868,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         } else if (behind && Date.now() - hostCatchUpBehindSinceRef.current > HOST_CATCH_UP_ACT_MS) {
           hostCatchUpActedAtRef.current = Date.now();
           hostCatchUpBehindSinceRef.current = 0;
-          const leadS = catchUpLeadS(lastSegmentRef.current?.ms ?? recentSegmentMs());
+          const leadS = catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs());
           const end = v.seekable.length ? v.seekable.end(v.seekable.length - 1) : Infinity;
-          const landS = landingFor(roomS + leadS, hlsRef.current ? levelFragments(hlsRef.current) : null,
-            Math.min(end - 1, roomS + MAX_WAIT_FOR_ROOM_S - 5));
+          const frags = hlsRef.current ? levelFragments(hlsRef.current) : null;
+          const limitS = Math.min(end - 1, roomS + MAX_WAIT_FOR_ROOM_S - 5);
+          // Far enough for what it lands in to come first — lib/roomWait landingBySize.
+          const speed = comingInBytesPerS(meterReadingsRef.current, Date.now()) ?? networkBytesPerSRef.current;
+          const landS = landingFor(landingBySize(roomS + leadS, roomS, sizedSegments(frags), speed, limitS), frags, limitS);
           logEvent("Sync", "catching up: behind the room, going past it to wait there", {
             offS: Number(offS.toFixed(2)), leadS, toS: Number(landS.toFixed(2)), ...snapshot(v),
           });
@@ -2875,7 +2927,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const v = videoRef.current;
     const sync = syncStateRef.current;
     if (!v || !sync?.playing || !sync.hostWaiting || !sync.gatherSeq) return;
-    if (readySentForRef.current === sync.gatherSeq) return;
+    // Once a gather, for each title: the word that the room waits for a new
+    // title comes before the title, and an answer from the last one's
+    // picture counts for nothing (services/sync.ts) — this one's is said too.
+    const readyKey = `${sync.gatherSeq}:${itemRef.current.ratingKey}`;
+    if (readySentForRef.current === readyKey) return;
     if (sync.ratingKey !== itemRef.current.ratingKey || !sessionIdRef.current) return;
     // Not before the seek this gather is for has been acted on: the word
     // that the room waits and the seek itself come together, and this ran
@@ -2904,9 +2960,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const r = readyToGo(v);
     noteReadiness(r);
     if (!r?.ready) return;
-    readySentForRef.current = sync.gatherSeq;
+    readySentForRef.current = readyKey;
     logEvent("Sync", "picture ready, telling the room", { gather: sync.gatherSeq, inHandS: Number(r.inHandS.toFixed(1)), ...snapshot(v) });
-    syncActionsRef.current?.sendReady(sync.gatherSeq);
+    syncActionsRef.current?.sendReady(sync.gatherSeq, itemRef.current.ratingKey);
   }, []);
 
   /**
@@ -3037,6 +3093,67 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     }, 250);
     return () => window.clearInterval(id);
   }, [steerHost, reportViewerReady, reportViewerStall, downloadMeter]);
+
+  /**
+   * Short of picture, or with plenty to spare while somebody else is: told to
+   * the room, and acted on — see SHORT_OF_PICTURE_S and easingOffRef. Twice a
+   * second, and the downloads in parts given what they may now have.
+   */
+  useEffect(() => {
+    let shortSince = 0;
+    // Said it was short for SHORT_FOR_AT_MOST_MS: not again until it has had picture enough.
+    let spent = false;
+    const id = window.setInterval(() => {
+      const v = videoRef.current;
+      const sync = syncStateRef.current;
+      const streaming = !!v && !!hlsRef.current && !!sessionIdRef.current && !!sync?.ratingKey &&
+        sync.ratingKey === itemRef.current.ratingKey;
+      const inHandS = streaming ? downloadedAheadS() : 0;
+      // Near the end there is no more to have.
+      const leftS = v && v.readyState >= HTMLMediaElement.HAVE_METADATA && Number.isFinite(v.duration)
+        ? v.duration - v.currentTime
+        : Infinity;
+      let short = shortToldRef.current;
+      if (!streaming || inHandS >= Math.min(PICTURE_ENOUGH_S, leftS - 1)) {
+        short = false;
+        spent = false;
+      } else if (!short && !spent && inHandS < Math.min(SHORT_OF_PICTURE_S, leftS - 1)) {
+        short = true;
+        shortSince = Date.now();
+      }
+      if (short && Date.now() - shortSince > SHORT_FOR_AT_MOST_MS) {
+        short = false;
+        spent = true;
+      }
+      if (short !== shortToldRef.current) {
+        shortToldRef.current = short;
+        syncActionsRef.current?.sendLoading(short);
+        logEvent("Load", short ? "short of picture, the others ease off the bot for it" : "no longer short of picture, as far as the others know", {
+          inHandS: Number(inHandS.toFixed(1)),
+          ...(spent ? { why: "a minute of it already" } : {}),
+        });
+      }
+      let ease = easingOffRef.current;
+      if (!sync?.othersLoading || !streaming || inHandS < EASE_OFF_UNTIL_S) ease = false;
+      else if (inHandS >= EASE_OFF_FROM_S) ease = true;
+      if (ease !== easingOffRef.current) {
+        easingOffRef.current = ease;
+        applyDownloadsRef.current?.();
+        logEvent("Load", ease ? "easing off the bot for another player short of picture" : "back to downloading at full speed", {
+          inHandS: Number(inHandS.toFixed(1)),
+        });
+      }
+      pumpSegmentParts();
+    }, 500);
+    return () => {
+      window.clearInterval(id);
+      // Gone from the player: nobody need ease off for it.
+      if (shortToldRef.current) {
+        shortToldRef.current = false;
+        syncActionsRef.current?.sendLoading(false);
+      }
+    };
+  }, [downloadedAheadS]);
 
   // The room starting or stopping is acted on as soon as it is heard, not on
   // the next tick of the poll above.
@@ -3867,7 +3984,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         const joinsRoom = !(sessionOwner && !didAdoptRef.current) && aheadAtRebuildRef.current === null &&
           !!joining && joining.ratingKey === itemRef.current.ratingKey && joining.position > DRIFT_THRESHOLD_S;
         if (joinsRoom && joining && joining.playing && !joining.hostWaiting && (!isHostRef.current || hostCatchUpRef.current)) {
-          hlsConfig.startPosition = roomPositionNow(joining) + catchUpLeadS(lastSegmentRef.current?.ms ?? recentSegmentMs());
+          hlsConfig.startPosition = roomPositionNow(joining) + catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs());
         } else if (joinsRoom && joining && (joining.hostWaiting || !joining.playing)) {
           /**
            * And one coming onto a room standing still — held for this host
@@ -3888,10 +4005,39 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         let startCovered = false;
         let httpSlots = 3;
         const applyHttpSlots = () => {
-          const slots = !inParts ? 3 : startCovered ? 2 : 1;
-          if (!p2pEngine || slots === httpSlots) return;
+          // Easing off the bot for another player short of picture: one.
+          const slots = easingOffRef.current ? 1 : !inParts ? 3 : startCovered ? 2 : 1;
+          if (!mounted || !p2pEngine || slots === httpSlots) return;
           httpSlots = slots;
           p2pEngine.applyDynamicConfig({ core: { simultaneousHttpDownloads: slots } });
+        };
+        applyDownloadsRef.current = applyHttpSlots;
+        /** Seconds held from `t` without a gap: the browser's buffer and the engine's memory. */
+        const heldFromS = (t: number) => coveredAheadS(t, [...bufferedRanges(video.buffered), ...heldRanges(engineHeldRef.current)]);
+        /** The URL of the first segment not held from the playhead, once there is one. */
+        const nextNeededUrl = (): string | null => {
+          if ((hlsRef.current as unknown) !== hls || video.readyState < HTMLMediaElement.HAVE_METADATA) return null;
+          const frags = levelFragments(hls) as Array<{ start: number; duration: number; url?: string }> | null;
+          if (!frags?.length) return null;
+          const heldTo = video.currentTime + heldFromS(video.currentTime);
+          return frags.find((f) => f.start + f.duration > heldTo + 0.05)?.url ?? null;
+        };
+        /**
+         * How many of a segment's parts download at once (lib/segmentParts).
+         * All of them for the one the picture needs next — the first not held
+         * from the playhead — and for one fetched on its own; beside it, four
+         * once there is picture enough in hand (TWO_AT_FULL_SPEED_FROM_S), and
+         * one until then, so that the one it needs has the connection: on 13
+         * October the first start's second segment, beside the three after it,
+         * came in after them, and the picture stopped 3.6 s in. And one at a
+         * time, whatever it is, while easing off for another player.
+         */
+        const partsAtOnce = (url: string): number => {
+          if (easingOffRef.current) return 1;
+          if (httpSlots === 1 || url === nextNeededUrl()) return MAX_PARTS;
+          return video.readyState >= HTMLMediaElement.HAVE_METADATA && heldFromS(video.currentTime) >= TWO_AT_FULL_SPEED_FROM_S
+            ? PARTS_AT_ONCE_BESIDE
+            : 1;
         };
         const coverStart = () => {
           if (startCovered) return;
@@ -3904,7 +4050,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
          * A follower's landing a little past the room, until its playlist
          * says where the segments are — see the landing, and LEVEL_LOADED.
          */
-        let landingAhead: { atS: number; roomAtS: number } | null = null;
+        let landingAhead: { atS: number; roomAtS: number; at: number } | null = null;
 
         if (!vpsRelay) {
           // P2P mode — peers share segments via WebRTC. Copied segments come
@@ -4039,13 +4185,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                     headers["Range"] = `bytes=${requestByteRange.start}-${end}`;
                     return new Request(url, { headers, signal });
                   }
-                  // A copied segment, whose size its URL carries, comes in parts.
+                  // A copied segment, whose size its URL carries, comes in
+                  // parts — always the same ones, for a page after this one
+                  // to find in the browser's cache (lib/segmentParts) — as
+                  // many of them at once as partsAtOnce says.
                   const request = new Request(url, { headers, signal });
                   const bytes = segmentBytesOf(url);
                   if (!bytes) return request;
-                  const most = httpSlots === 1 ? MAX_PARTS_ALONE : MAX_PARTS;
-                  partsAsked.set(url, partsFor(bytes, most));
-                  return fetchInPartsLater(request, url, bytes, most);
+                  partsAsked.set(url, partsFor(bytes));
+                  return fetchInPartsLater(request, url, bytes, () => partsAtOnce(url));
                 },
               },
               onHlsJsCreated: (hls) => {
@@ -4148,11 +4296,23 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   const asked = askedAt.get(segmentUrl);
                   askedAt.delete(segmentUrl);
                   if (asked === undefined || (hlsRef.current as unknown) !== hls) return;
-                  lastSegmentRef.current = { bytes: bytesLength, ms: performance.now() - asked, fromPeer: downloadSource === "p2p" };
+                  const ms = performance.now() - asked;
+                  lastSegmentRef.current = { bytes: bytesLength, ms, fromPeer: downloadSource === "p2p" };
+                  // Out of the browser's cache: nothing to go by for the
+                  // connection, and not for the meter either, which would
+                  // have it coming in at a few Gbps.
+                  if (downloadSource !== "p2p" && cameFromCache(bytesLength, ms)) {
+                    downloadMeterRef.current.bytes = Math.max(0, downloadMeterRef.current.bytes - bytesLength);
+                    return;
+                  }
+                  // Nor while easing off for another player: slow on purpose.
+                  if (easingOffRef.current) return;
+                  networkSegmentMsRef.current = ms;
+                  networkBytesPerSRef.current = comingInBytesPerS(meterReadingsRef.current, Date.now()) ?? (bytesLength * 1000) / Math.max(1, ms);
                   // For the page after this one, at most every ten seconds.
                   if (Date.now() - segmentKeptAt > 10_000) {
                     segmentKeptAt = Date.now();
-                    rememberSegmentMs(lastSegmentRef.current.ms);
+                    rememberSegmentMs(ms, Date.now(), networkBytesPerSRef.current);
                   }
                 });
                 const segmentTimes = new Map<string, [number, number]>();
@@ -4184,6 +4344,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   held.set(segmentUrl, [times[0], times[1], bytesLength]);
                   // What the engine has let go to make room, it no longer has.
                   forgetEvicted(held, video.currentTime, ENGINE_MEMORY_MIB * 1024 * 1024);
+                  // The segment beside it may be the one the picture needs now:
+                  // the rest of its parts at once (partsAtOnce).
+                  pumpSegmentParts();
                 });
                 p2pEngine = hls.p2pEngine;
                 // The first few segments of a stream, timed: what its start
@@ -4211,6 +4374,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                     tookS: asked === undefined ? "?" : ((now - asked) / 1000).toFixed(1),
                     Mbps: asked === undefined ? "?" : ((bytesLength * 8) / ((now - asked) * 1000)).toFixed(1),
                     sinceStreamS: ((now - streamAskedAt) / 1000).toFixed(1),
+                    ...(downloadSource !== "p2p" && asked !== undefined && cameFromCache(bytesLength, now - asked) ? { cache: "the browser's" } : {}),
                   });
                 });
                 hls.p2pEngine.addEventListener("onPeerConnect", ({ peerId }) => {
@@ -4325,22 +4489,38 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
            * segment it will never show.
            */
           if (landingAhead) {
-            const { atS, roomAtS } = landingAhead;
+            const { atS, roomAtS, at: landedAt } = landingAhead;
             landingAhead = null;
             const wait = roomWaitRef.current;
             const frags = data.details.fragments;
             if (wait && Math.abs(wait.atS - atS) < 0.01 && video.readyState < HTMLMediaElement.HAVE_METADATA && frags.length > 0) {
               const last = frags[frags.length - 1];
-              const landS = landingFor(atS, frags, Math.min(last.start + last.duration - 1, roomAtS + MAX_WAIT_FOR_ROOM_S - 5));
+              const limitS = Math.min(last.start + last.duration - 1, roomAtS + MAX_WAIT_FOR_ROOM_S - 5);
+              // Far enough past the room for what it lands in to come first,
+              // by the segments' sizes — lib/roomWait landingBySize — at the
+              // speed this player's segments came at, here or on the page
+              // before this one.
+              const roomNowS = roomAtS + (Date.now() - landedAt) / 1000;
+              const speed = networkBytesPerSRef.current ?? recentSegmentBytesPerS();
+              const bySizeS = landingBySize(atS, roomNowS, sizedSegments(frags), speed, limitS);
+              if (bySizeS > atS + 0.01) {
+                logEvent("Sync", "landing further past the room, for what it lands in to come first", {
+                  fromS: Number(atS.toFixed(2)),
+                  toS: Number(bySizeS.toFixed(2)),
+                  roomPosS: Number(roomNowS.toFixed(2)),
+                  Mbps: speed ? Number(((speed * 8) / 1e6).toFixed(1)) : "?",
+                });
+              }
+              const landS = landingFor(bySizeS, frags, limitS);
               const segmentAt = (t: number) => frags.findIndex((f) => t >= f.start && t < f.start + f.duration);
               const loadingFrom = hlsConfig.startPosition ?? -1;
               if (landS !== atS || segmentAt(loadingFrom) !== segmentAt(landS)) {
-                if (landS !== atS) {
-                  const here = frags[segmentAt(atS)];
+                if (landS !== bySizeS) {
+                  const here = frags[segmentAt(bySizeS)];
                   logEvent("Sync", "landing at the start of the next segment instead", {
-                    fromS: Number(atS.toFixed(2)),
+                    fromS: Number(bySizeS.toFixed(2)),
                     toS: Number(landS.toFixed(2)),
-                    leftS: Number((here.start + here.duration - atS).toFixed(2)),
+                    leftS: Number((here.start + here.duration - bySizeS).toFixed(2)),
                     roomPosS: Number(roomAtS.toFixed(2)),
                   });
                 }
@@ -4482,11 +4662,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
              * on 12 October stopped three times in twenty seconds.
              */
             const leadS = (!isHostRef.current || hostCatchUpRef.current) && !(sessionOwner && !didAdoptRef.current) && !sync.hostWaiting
-              ? catchUpLeadS(lastSegmentRef.current?.ms ?? recentSegmentMs())
+              ? catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs())
               : 0;
             if (syncPos > DRIFT_THRESHOLD_S) {
               logEvent("Sync", "landing on the room clock after a rebuild", {
-                ...(leadS ? { aheadOfRoomS: leadS } : {}),
+                ...(leadS ? {
+                  aheadOfRoomS: leadS,
+                  // What the lead went by: a segment's time here, or the page before's.
+                  leadBy: networkSegmentMsRef.current !== null ? `${Math.round(networkSegmentMsRef.current)} ms here` : recentSegmentMs() !== null ? `${recentSegmentMs()} ms the page before` : "nothing",
+                } : {}),
                 fromS: video.currentTime,
                 toS: syncPos,
                 // Only whoever asked Plex for this transcode knows what it cost
@@ -4510,7 +4694,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               // actually arrive — unless it is waited out ahead of the room.
               if (leadS) {
                 joinAheadOf = syncPos;
-                landingAhead = { atS: syncPos + leadS, roomAtS: syncPos };
+                landingAhead = { atS: syncPos + leadS, roomAtS: syncPos, at: Date.now() };
               } else joinSettleRef.current = true;
             }
           } else if (
@@ -6338,14 +6522,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
      * took to come in — it waits there while that part comes, and the room
      * arrives to it playing.
      */
-    const leadS = catchUpLeadS(lastSegmentRef.current?.ms ?? recentSegmentMs());
+    const leadS = catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs());
     const end = video.seekable.length ? video.seekable.end(video.seekable.length - 1) : NaN;
     if (video.currentTime < target && !pictureHeldAt(video, target) && Number.isFinite(end) && target + leadS < end - 1 &&
         syncState.ratingKey === itemRef.current.ratingKey) {
       lastDriftCorrectionRef.current = Date.now();
       stalledSeekSinceRef.current = null;
-      const landS = landingFor(target + leadS, hlsRef.current ? levelFragments(hlsRef.current) : null,
-        Math.min(end - 1, target + MAX_WAIT_FOR_ROOM_S - 5));
+      const frags = hlsRef.current ? levelFragments(hlsRef.current) : null;
+      const limitS = Math.min(end - 1, target + MAX_WAIT_FOR_ROOM_S - 5);
+      // Far enough for what it lands in to come first — lib/roomWait landingBySize.
+      const speed = comingInBytesPerS(meterReadingsRef.current, Date.now()) ?? networkBytesPerSRef.current;
+      const landS = landingFor(landingBySize(target + leadS, target, sizedSegments(frags), speed, limitS), frags, limitS);
       logWarn("Viewer", "behind the room, going past it to wait there", {
         driftS: drift,
         fromS: video.currentTime,

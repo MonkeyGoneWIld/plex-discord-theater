@@ -226,6 +226,14 @@ interface RoomClient {
    * It catches up once it is looked at again.
    */
   visible: boolean;
+  /**
+   * Whether this client's player is short of picture — joining, back from a
+   * pop-out, its picture stopped: under fifteen seconds in hand — and needs
+   * the bot's upload more than a player well ahead does. See "loading".
+   */
+  loading?: boolean;
+  /** What this client was last told of everybody else: whether anybody is short. */
+  toldOthersLoading?: boolean;
 }
 
 /**
@@ -878,6 +886,23 @@ function broadcastParticipants(room: Room): void {
 
 function sendTo(ws: WebSocket, msg: object): void {
   safeSend(ws, JSON.stringify(msg));
+}
+
+/**
+ * Tell each client whether anybody else in the room is short of picture, when
+ * that changes for them. A player well ahead eases off the bot while somebody
+ * is (Player's easingOffRef): every player's downloads come out of the bot's
+ * one upload, and on 13 October everybody joining or coming back from a
+ * pop-out had a third to half of it, beside a player filling its buffer two
+ * minutes ahead at full speed.
+ */
+function tellLoading(room: Room): void {
+  for (const c of room.clients) {
+    const others = [...room.clients].some((o) => o !== c && o.loading === true);
+    if (others === (c.toldOthersLoading ?? false)) continue;
+    c.toldOthersLoading = others;
+    sendTo(c.ws, { type: "others-loading", value: others });
+  }
 }
 
 /** Everyone currently watching one stream. */
@@ -1654,6 +1679,8 @@ export function attachWebSocketServer(server: Server): void {
 
         // Everyone else needs to see the new arrival in their roster
         broadcastParticipants(room);
+        // And the new arrival whether anybody is short of picture.
+        tellLoading(room);
 
         // Arriving in a room that is playing HEVC without being able to decode
         // it. The state above still points at the HEVC stream; the H.264 one
@@ -1702,6 +1729,18 @@ export function attachWebSocketServer(server: Server): void {
         return;
       }
 
+      /**
+       * "My picture is short" — under fifteen seconds in hand — or "not any
+       * more". Anyone may say it, about themselves; everybody else hears
+       * whether anybody is ("others-loading"), and those well ahead ease off
+       * the bot meanwhile.
+       */
+      if (type === "loading") {
+        client.loading = msg.value === true;
+        tellLoading(room);
+        return;
+      }
+
       // Whether anybody is looking at this player — see RoomClient.visible.
       if (type === "visible") {
         client.visible = msg.value !== false;
@@ -1716,6 +1755,12 @@ export function attachWebSocketServer(server: Server): void {
        */
       if (type === "ready") {
         if (msg.gather !== room.state.gatherSeq || client.readyFor === room.state.gatherSeq) return;
+        // A picture of another title is no picture of this one: the room's
+        // "waiting" for a new title goes out before its "play", and a player
+        // still on the last one answered from that one's buffer. On 13
+        // October monkey26 did, with 32 s of the last film in hand; the room
+        // started without it, and it came in 2.5 s late with 0.4 s in hand.
+        if (typeof msg.ratingKey === "string" && msg.ratingKey !== room.state.ratingKey) return;
         client.readyFor = room.state.gatherSeq;
         if (room.state.gatherOpen) updateWaiting(room, roomId, "a player is ready");
         return;
@@ -2681,6 +2726,8 @@ export function attachWebSocketServer(server: Server): void {
       } else {
         // Someone left — refresh everyone's roster
         broadcastParticipants(room);
+        // They may have been the one short of picture.
+        tellLoading(room);
         // The room may have been waiting for them.
         if (room.state.gatherOpen) updateWaiting(room, closingRoomId, "a player left");
       }

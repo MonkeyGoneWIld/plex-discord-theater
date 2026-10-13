@@ -4,7 +4,7 @@
  * server's segmentPart does, at a pace per download.
  */
 import {
-  MAX_PARTS, MAX_PARTS_ALONE, fetchInParts, fetchInPartsLater, installSegmentParts, partBounds, partUrl, partsFor,
+  MAX_PARTS, fetchInParts, fetchInPartsLater, installSegmentParts, partBounds, partUrl, partsFor, pumpSegmentParts,
   segmentBytesOf, segmentProgress,
 } from "../src/lib/segmentParts";
 import { keepOnPeer, keepSharedOnPeer, ownerOf, shareChoice, shouldTakeFromPeer } from "../src/lib/takeFromPeer";
@@ -33,15 +33,22 @@ interface Bot {
   breaks: Set<number>;
   /** When each part finished, ms since the fake started. */
   finished: Map<number, number>;
+  /** Downloads running now, and the most there have been at once. */
+  running: number;
+  mostAtOnce: number;
 }
 
 function bot(): Bot {
   const started = Date.now();
   const b: Bot = {
-    asked: [], paceMs: 0, ignoresParts: false, breaks: new Set(), finished: new Map(),
+    asked: [], paceMs: 0, ignoresParts: false, breaks: new Set(), finished: new Map(), running: 0, mostAtOnce: 0,
     fetch: async (input, init) => {
       const url = String(input instanceof Request ? input.url : input);
       b.asked.push(url);
+      b.running++;
+      b.mostAtOnce = Math.max(b.mostAtOnce, b.running);
+      let over = false;
+      const end = () => { if (!over) { over = true; b.running--; } };
       const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
       const q = new URL(url).searchParams;
       const parts = q.has("parts") ? Number(q.get("parts")) : 1;
@@ -50,14 +57,14 @@ function bot(): Bot {
         ? [0, SEGMENT.length]
         : [Math.floor((SEGMENT.length * part) / parts), Math.floor((SEGMENT.length * (part + 1)) / parts)];
       const bytes = SEGMENT.subarray(from, to);
-      if (signal?.aborted) throw new DOMException("aborted", "AbortError");
+      if (signal?.aborted) { end(); throw new DOMException("aborted", "AbortError"); }
       let at = 0;
       const body = new ReadableStream<Uint8Array>({
         async pull(c) {
           if (b.paceMs) await sleep(b.paceMs);
-          if (signal?.aborted) { c.error(new DOMException("aborted", "AbortError")); return; }
-          if (b.breaks.has(part) && at >= bytes.length / 2) { c.error(new TypeError("network error")); return; }
-          if (at >= bytes.length) { b.finished.set(part, Date.now() - started); c.close(); return; }
+          if (signal?.aborted) { end(); c.error(new DOMException("aborted", "AbortError")); return; }
+          if (b.breaks.has(part) && at >= bytes.length / 2) { end(); c.error(new TypeError("network error")); return; }
+          if (at >= bytes.length) { end(); b.finished.set(part, Date.now() - started); c.close(); return; }
           c.enqueue(bytes.slice(at, at + 65_536));
           at += 65_536;
         },
@@ -74,13 +81,11 @@ async function readAll(res: Response): Promise<Uint8Array> {
 const same = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((v, i) => v === b[i]);
 
 console.log("\n— how a segment is split —");
-check("a 7 MB segment goes in four parts", partsFor(7_200_400), 4);
+check("a 7 MB segment goes in eight parts", partsFor(7_200_400), 8);
 check("a 2.4 MB one in three", partsFor(2_400_000), 3);
-check("never more than four", partsFor(28_000_000), MAX_PARTS);
+check("never more than the bot splits one into, eight", [partsFor(28_000_000), MAX_PARTS], [8, 8]);
 check("a small one in one", partsFor(600_000), 1);
 check("nothing known, one", partsFor(NaN), 1);
-check("fetched on its own, a Blu-ray's segment goes in eight", partsFor(21_400_000, MAX_PARTS_ALONE), 8);
-check("and a small one still in as many as its size calls for", partsFor(2_400_000, MAX_PARTS_ALONE), 3);
 check("the parts cover it end to end, the server's split",
   partBounds(10, 3), [[0, 3], [3, 6], [6, 10]]);
 check("the size comes off the URL", segmentBytesOf(URL0), SEGMENT.length);
@@ -114,12 +119,51 @@ console.log("\n— the parts run side by side —");
   check(`in parts it takes well under half as long (${inParts}ms against ${alone}ms)`, inParts < alone / 2, true);
 }
 
+console.log("\n— a few parts at a time —");
+{
+  // Beside the segment the picture needs, a segment's parts go one or four
+  // at a time; its URLs are the same either way (see the top of segmentParts).
+  const b = bot();
+  b.paceMs = 1;
+  const got = await readAll(await fetchInParts(b.fetch, new Request(URL0), SEGMENT.length, 4, URL0, () => 1));
+  check("all of it, in order", same(got, SEGMENT), true);
+  check("one part at a time", b.mostAtOnce, 1);
+  check("every part asked for, in order, under the URLs four at once would use",
+    b.asked, [0, 1, 2, 3].map((i) => partUrl(URL0, i, 4)));
+  const two = bot();
+  two.paceMs = 1;
+  await readAll(await fetchInParts(two.fetch, new Request(URL0), SEGMENT.length, 4, URL0, () => 2));
+  check("two at a time", two.mostAtOnce, 2);
+}
+
+console.log("\n— more at once, once it may —");
+{
+  // A segment beside the one the picture needed, that has become the one it
+  // needs: the rest of its parts start at once, not one by one.
+  const b = bot();
+  b.paceMs = 3;
+  let atOnce = 1;
+  const reading = readAll(await fetchInParts(b.fetch, new Request(URL0), SEGMENT.length, 4, URL0, () => atOnce));
+  await sleep(20);
+  check("one under way to begin with", [b.asked.length, b.running], [1, 1]);
+  atOnce = 4;
+  pumpSegmentParts();
+  check("and the other three asked for the moment it may have four", b.asked.length, 4);
+  check("all of it, in order", same(await reading, SEGMENT), true);
+  pumpSegmentParts();
+  check("and nothing asked for again once it is in", b.asked.length, 4);
+}
+
 console.log("\n— a server that ignores the parts —");
 {
   const b = bot();
   b.ignoresParts = true;
   const got = await readAll(await fetchInParts(b.fetch, new Request(URL0), SEGMENT.length, 4));
   check("the first answer is taken as the whole, once", same(got, SEGMENT), true);
+  const slow = bot();
+  slow.ignoresParts = true;
+  const one = await readAll(await fetchInParts(slow.fetch, new Request(URL0), SEGMENT.length, 4, URL0, () => 1));
+  check("a part at a time, the rest are never asked for", [same(one, SEGMENT), slow.asked.length], [true, 1]);
 }
 
 console.log("\n— a part that fails —");
@@ -147,6 +191,18 @@ console.log("\n— the engine calling it off —");
   check("stops every part", await reading, "stopped");
   await sleep(40);
   check("none of them finishes after", b.finished.size, 0);
+  const one = bot();
+  one.paceMs = 5;
+  const stop = new AbortController();
+  const res1 = await fetchInParts(one.fetch, new Request(URL0, { signal: stop.signal }), SEGMENT.length, 4, URL0, () => 1);
+  const reading1 = readAll(res1).then(() => "finished", () => "stopped");
+  await sleep(30);
+  stop.abort();
+  check("a part at a time, it stops too", await reading1, "stopped");
+  const asked = one.asked.length;
+  pumpSegmentParts();
+  await sleep(40);
+  check("and asks for nothing more after", [one.asked.length === asked, one.running], [true, 0]);
 }
 
 console.log("\n— a bad answer to the first part —");

@@ -265,7 +265,7 @@ function Runner() {
       hostAheadS: aheadAt("u-host"),
       viewerAheadS: aheadAt("u-viewer"),
       // Only this start's: the last one's players can still be reporting as they go.
-      segments: (events.get("u-host") ?? []).filter((e) => e.tag === "Load" && e.t >= began),
+      segments: (events.get("u-host") ?? []).filter((e) => e.tag === "Load" && e.msg === "segment in" && e.t >= began),
     };
   }
 
@@ -1214,6 +1214,213 @@ function Runner() {
     }
   }
 
+  /** A download the test server answered — see /api/test/served. */
+  type Served = { user: string; seg: string; at: number; heldMs: number; part?: string; bytes?: number; ms?: number; sent?: number; cut?: boolean; askedAt?: number };
+
+  /**
+   * A viewer joining while the host is well ahead, everybody's downloads
+   * sharing one upload as they share the bot's. On 13 October each join, and
+   * each return from a pop-out, had a third to half of the bot's upload beside
+   * a player filling its buffer up to two minutes ahead at full speed, and took
+   * 12 to 34 seconds to be back in the film. The host eases off now while the
+   * viewer is short of picture.
+   */
+  async function runJoinWhileAhead() {
+    setRunning(true);
+    const out: string[] = ["— a viewer joining while the host is well ahead, on one shared upload —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      latest.clear();
+      events.clear();
+      await api("/api/test/reset?p2p=0&stream=copy4long&event=1&eventS=300");
+      // Twice the film's own speed, for everybody together.
+      await api("/api/test/upload?kbps=16000");
+      viewerQuery = "&latejoin";
+      setHostOn(false);
+      setFrames(nextFrames(currentGen));
+      setHostOn(true);
+      /** How far past its picture the host has had its segments, seconds. */
+      const hostAheadS = async () => {
+        const h = latest.get("u-host");
+        if (!h) return 0;
+        const got = new Set((await api("/api/test/served") as Served[]).filter((s) => s.user === "u-host" && !s.cut).map((s) => s.seg));
+        let i = Math.floor(h.pos / 4);
+        while (got.has(`seg${String(i).padStart(3, "0")}.ts`)) i++;
+        return i * 4 - h.pos;
+      };
+      // As players are, a while into a film: well over a minute ahead.
+      for (const end = Date.now() + 180_000; ; await pause(1000)) {
+        const h = latest.get("u-host");
+        if (h && !h.paused && h.pos > 20 && await hostAheadS() >= 80) break;
+        if (Date.now() > end) throw new Error("timed out waiting for the host to be 80s ahead");
+      }
+      const joinedAt = Date.now();
+      say(`… the host ${(await hostAheadS()).toFixed(0)}s ahead at ${latest.get("u-host")!.pos.toFixed(0)}s: the viewer joins`);
+      (viewerFrame.current?.contentWindow as Window | null | undefined)?.postMessage({ kind: "press", press: ["Join"] }, "*");
+      const firstAt = await waitFor(() => firstPlay("u-viewer"), 60_000, "the viewer to play");
+      // Until the viewer has picture enough again, or a minute.
+      const enoughAt = await waitFor(() => (events.get("u-viewer") ?? []).find((e) => e.t > joinedAt && /no longer short of picture/.test(e.msg))?.t, 60_000, "the viewer to have picture enough")
+        .catch(() => null);
+      await pause(5_000);
+      const served = await api("/api/test/served") as Served[];
+      const viewer = (events.get("u-viewer") ?? []).filter((e) => e.t >= joinedAt);
+      const host = (events.get("u-host") ?? []).filter((e) => e.t >= joinedAt);
+      const easedAt = host.find((e) => /easing off the bot/.test(e.msg))?.t ?? null;
+      // What each had of the upload until the viewer's first frame: each
+      // download's bytes, spread over its time.
+      const bytesOf = (user: string, from: number, to: number) => served.filter((s) => s.user === user && s.askedAt !== undefined).reduce((sum, s) => {
+        const start = s.askedAt! + s.heldMs;
+        const overlap = Math.max(0, Math.min(s.at, to) - Math.max(start, from));
+        return sum + (s.at > start ? ((s.sent ?? 0) * overlap) / (s.at - start) : 0);
+      }, 0);
+      const backAt = host.find((e) => /back to downloading at full speed/.test(e.msg))?.t ?? null;
+      const shareOf = (from: number, to: number) => {
+        const v = bytesOf("u-viewer", from, to);
+        return v / Math.max(1, v + bytesOf("u-host", from, to));
+      };
+      const firstShare = shareOf(joinedAt, firstAt);
+      // While the host eased off, once what it had under way was in.
+      const easedFrom = (easedAt ?? joinedAt) + 3000;
+      const easedTo = Math.min(enoughAt ?? Infinity, backAt ?? Infinity, Date.now());
+      const easedShare = easedTo > easedFrom ? shareOf(easedFrom, easedTo) : NaN;
+      say(`viewer's first frame ${((firstAt - joinedAt) / 1000).toFixed(1)}s after joining, with ${(firstShare * 100).toFixed(0)}% of the upload until then; picture enough ${enoughAt ? `${((enoughAt - joinedAt) / 1000).toFixed(1)}s after` : "never said"}`);
+      say(`${easedAt ? "PASS" : "FAIL"} the host eases off the bot while the viewer is short of picture`);
+      say(`${easedShare >= 0.8 ? "PASS" : "FAIL"} and the viewer has the upload meanwhile (${Number.isFinite(easedShare) ? (easedShare * 100).toFixed(0) : "—"}%, ${(firstShare * 100).toFixed(0)}% until its first frame)`);
+      const stops = viewer.filter((e) => e.t > firstAt && e.tag === "Video" && /buffer starved/.test(e.msg) && e.data.paused === false && e.data.seeking !== true);
+      const past = viewer.filter((e) => /going past it/.test(e.msg));
+      const jumps = viewer.filter((e) => /heartbeat drift correction/.test(e.msg));
+      say(`${past.length === 0 && jumps.length === 0 ? "PASS" : "FAIL"} the viewer is never jumped ahead (${past.length} past the room, ${jumps.length} to it)`);
+      say(`${stops.length <= 1 ? "PASS" : "FAIL"} and stops no more than once after it starts (${stops.length})`);
+      const hostStops = host.filter((e) => e.tag === "Video" && /buffer starved/.test(e.msg) && e.data.paused === false && e.data.seeking !== true);
+      say(`${hostStops.length === 0 ? "PASS" : "FAIL"} the host never stops (${hostStops.length})`);
+      // Once the viewer has picture enough — or its own is down to what it keeps whatever happens.
+      const backInHand = Number(host.find((e) => /back to downloading at full speed/.test(e.msg))?.data.inHandS ?? NaN);
+      say(`${easedAt && backAt && ((enoughAt && backAt >= enoughAt - 1000) || backInHand < 31) ? "PASS" : "FAIL"} and goes back to full speed once the viewer has picture enough, or its own needs it (${backAt ? `${((backAt - joinedAt) / 1000).toFixed(1)}s after the join, ${backInHand.toFixed(0)}s in hand` : "never"})`);
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      say(`${Math.abs(v.pos - h.pos) < 1 && !v.paused && !h.paused ? "PASS" : "FAIL"} together at the end (${(v.pos - h.pos).toFixed(2)}s apart)`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      viewerQuery = "";
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
+   * The host popping the activity out, the browser keeping what the bot sends
+   * for five minutes, as it does: the page that comes back finds there what the
+   * page before had, rather than having it all again from the bot. On 13
+   * October each page back from a pop-out asked for its first segment in eight
+   * parts where the page before had fetched it in four, and had all 26 to 28
+   * MB of it again from the bot before it could show anything.
+   */
+  async function runPopOutCache() {
+    setRunning(true);
+    const out: string[] = ["— the host popping out, with what the bot sent kept by the browser —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      await startOnce("p2p=0&stream=copy4&event=1&eventS=200&cache=1", {}, 40_000);
+      await pause(15_000);
+      // Every segment the host had whole before it popped out: all of one split's parts.
+      const before = (await api("/api/test/served") as Served[]).filter((s) => s.user === "u-host" && !s.cut);
+      const parts = new Map<string, Map<string, Set<string>>>();
+      const whole = new Set<string>();
+      for (const s of before) {
+        if (!s.part) { whole.add(s.seg); continue; }
+        const [i, n] = s.part.split("/");
+        if (n === undefined) continue;
+        const splits = parts.get(s.seg) ?? new Map<string, Set<string>>();
+        const got = splits.get(n) ?? new Set<string>();
+        got.add(i);
+        splits.set(n, got);
+        parts.set(s.seg, splits);
+        if (got.size === Number(n)) whole.add(s.seg);
+      }
+      const poppedAt = Date.now();
+      const win = hostFrame.current?.contentWindow as (Window & typeof globalThis) | null | undefined;
+      win?.sessionStorage.setItem("pdt:test:poppedOut", "1");
+      win?.location.reload();
+      say(`… the host reloaded at ${latest.get("u-host")?.pos.toFixed(1)}s, having had ${whole.size} segments whole`);
+      await waitFor(() => {
+        const h = latest.get("u-host");
+        const v = latest.get("u-viewer");
+        const reloaded = (events.get("u-host") ?? []).some((e) => e.t > poppedAt && e.tag === "HLS" && e.msg === "starting session");
+        return reloaded && h && v && !h.paused && h.ready >= 3 && Math.abs(h.pos - v.pos) < 1;
+      }, 30_000, "the host back in step");
+      const backS = (Date.now() - poppedAt) / 1000;
+      await pause(3_000);
+      const again = (await api("/api/test/served") as Served[])
+        .filter((s) => s.user === "u-host" && (s.askedAt ?? s.at) > poppedAt && whole.has(s.seg));
+      const againMB = again.reduce((sum, s) => sum + (s.sent ?? 0), 0) / 1e6;
+      const firstSegs = (events.get("u-host") ?? []).filter((e) => e.t > poppedAt && e.tag === "Load" && e.msg === "segment in");
+      say(`    back in step ${backS.toFixed(1)}s after the reload; its first segments ${firstSegs.map((e) => `${e.data.tookS}s${e.data.cache ? " (cache)" : ""}`).join(", ") || "—"}`);
+      say(`${again.length === 0 ? "PASS" : "FAIL"} the page back had nothing again from the bot that the page before had whole (${againMB.toFixed(1)} MB, ${new Set(again.map((s) => s.seg)).size} segment(s))`);
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      say(`${Math.abs(h.pos - v.pos) < 1 && !h.paused && !v.paused ? "PASS" : "FAIL"} and the two play on together (${(h.pos - v.pos).toFixed(2)}s apart)`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      try { (hostFrame.current?.contentWindow as (Window & typeof globalThis) | null | undefined)?.sessionStorage.removeItem("pdt:test:poppedOut"); } catch { /* gone */ }
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
+   * The host starting another title mid-film: everybody starts it together,
+   * with a picture of it. The room's word that it waits for the new title
+   * reaches a player before the title does, and on 13 October monkey26
+   * answered it from the last film's buffer, 32 s of it in hand: the room
+   * started without it, and it came in 2.5 s late with 0.4 s in hand.
+   */
+  async function runNextTitle() {
+    setRunning(true);
+    const out: string[] = ["— the host starting another title mid-film —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      await startOnce("p2p=0&stream=copy4&event=1&eventS=200", {}, 40_000);
+      // Both well into it, with plenty of it in hand.
+      await pause(15_000);
+      const switchedAt = Date.now();
+      (hostFrame.current?.contentWindow as unknown as { fixture?: { playTitle?: (k: string) => void } } | null)?.fixture?.playTitle?.("4343");
+      const startedAt = (user: string) => (events.get(user) ?? []).find((e) => e.t > switchedAt && e.tag === "HLS" && e.msg === "starting session")?.t;
+      const playsAt = (user: string) => {
+        const from = startedAt(user);
+        return from === undefined ? undefined : (events.get(user) ?? []).find((e) => e.t > from && e.tag === "Video" && e.msg === "playing");
+      };
+      const hostPlays = await waitFor(() => playsAt("u-host"), 45_000, "the host to start the new title");
+      const viewerPlays = await waitFor(() => playsAt("u-viewer"), 45_000, "the viewer to start the new title");
+      const viewerStream = startedAt("u-viewer")!;
+      const early = (events.get("u-viewer") ?? []).filter((e) => e.t > switchedAt && e.t < viewerStream && /picture ready, telling the room/.test(e.msg));
+      const apart = viewerPlays.t - hostPlays.t;
+      say(`host started ${((hostPlays.t - switchedAt) / 1000).toFixed(1)}s after the switch, the viewer ${apart} ms after it, with ${Number(viewerPlays.data.bufAheadS).toFixed(1)}s in hand`);
+      // Said, from the last film's picture, before the word of the new one came:
+      // the room counts it for nothing (services/sync.ts, "ready").
+      for (const e of early) say(`    before its new stream: ${e.msg} ${JSON.stringify({ gather: e.data.gather, inHandS: e.data.inHandS })}`);
+      say(`${Math.abs(apart) < 700 ? "PASS" : "FAIL"} the room waits for the viewer's picture of the new title: the two start it together (${apart} ms apart)`);
+      const inHandS = Number(viewerPlays.data.bufAheadS);
+      say(`${inHandS >= 2.5 ? "PASS" : "FAIL"} the viewer with picture enough to start on (${inHandS.toFixed(1)}s)`);
+      await pause(10_000);
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      say(`${Math.abs(h.pos - v.pos) < 1 && !h.paused && !v.paused ? "PASS" : "FAIL"} and play on together (${(v.pos - h.pos).toFixed(2)}s apart)`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
   /**
    * A viewer joining a film already playing, whose picture stops just after it
    * starts: getting going, it catches up on its own, and the host — the room —
@@ -1492,6 +1699,9 @@ function Runner() {
         <button disabled={running} onClick={() => void runPopOut("viewer")}>Viewer pops out</button>
         <button disabled={running} onClick={() => void runPopOut("host", "slow")}>Host pops out, slow back</button>
         <button disabled={running} onClick={() => void runPopOut("host", "long")}>Host pops out, long back</button>
+        <button disabled={running} onClick={() => void runPopOutCache()}>Pop out, from the cache</button>
+        <button disabled={running} onClick={() => void runJoinWhileAhead()}>Join while ahead</button>
+        <button disabled={running} onClick={() => void runNextTitle()}>Next title, together</button>
         <button disabled={running} onClick={() => void runJoinerStalls()}>Joiner stalls</button>
         <button disabled={running} onClick={() => void runAlonePopOut()}>Host alone pops out</button>
         <button disabled={running} onClick={() => void runPreviewAhead()}>Preview frames from the title's page</button>

@@ -132,6 +132,76 @@ export function landingFor(
   return landS <= limitS ? landS : targetS;
 }
 
+/** How far past where it lands a follower looks for a segment that would come too late — see landingBySize. */
+export const LAND_LOOK_AHEAD_S = 20;
+/** The share of the speed segments came at that a landing counts on, and the seconds it keeps to spare. */
+const LAND_SPEED_MARGIN = 0.8;
+const LAND_SPARE_S = 1;
+
+/**
+ * Where a follower going past the room lands, by the sizes of the segments it
+ * will play: at `targetS`, or further past the room `roomS` — no further than
+ * `limitS` — if, fetched one after another from now at `bytesPerS` (less a
+ * fifth), the segment it lands in or one in the LAND_LOOK_AHEAD_S after it
+ * would come in after the room got to it, and the picture with it. The lead
+ * before went by the time the last segment took, whatever its size: on 13
+ * October a page back from a pop-out landed 3.7 s past the room, the last
+ * page's last segment having taken 1.8 s, where the segment it landed in was
+ * 26 MB and took 9.5 s; the room went by it, and it was jumped ahead twice.
+ *
+ * A segment after the one it lands in is needed when the room gets to it,
+ * wherever before it the landing is, so a heavy one is only ever got past by
+ * landing beyond it, at the start of the next. Unchanged with no speed to go
+ * by, or no sizes; and where nothing within the limit would do, as far past
+ * the room as the segment it lands in needs alone (catchUpLeadS).
+ */
+export function landingBySize(
+  targetS: number,
+  roomS: number,
+  segments: ReadonlyArray<{ start: number; duration: number; bytes: number | null }> | null | undefined,
+  bytesPerS: number | null,
+  limitS: number,
+): number {
+  if (!segments?.length || !(bytesPerS && bytesPerS > 0)) return targetS;
+  const speed = bytesPerS * LAND_SPEED_MARGIN;
+  const first = segments.findIndex((s) => targetS >= s.start && targetS < s.start + s.duration);
+  if (first < 0 || !(Number(segments[first].bytes) > 0)) return targetS;
+  for (let i = first; i < segments.length; i++) {
+    const seg = segments[i];
+    const fromS = i === first ? targetS : seg.start + LAND_INTO_SEGMENT_S;
+    if (fromS > limitS) break;
+    if (!(seg.bytes && seg.bytes > 0)) break;
+    // The ones after it, each needed when the room gets to it.
+    const inS = seg.bytes / speed;
+    let doneS = inS;
+    let fits = true;
+    for (let j = i + 1; j < segments.length && segments[j].start < fromS + LAND_LOOK_AHEAD_S; j++) {
+      const bytes = segments[j].bytes;
+      if (!(bytes && bytes > 0)) break;
+      doneS += bytes / speed;
+      if (doneS > segments[j].start - roomS - LAND_SPARE_S) { fits = false; break; }
+    }
+    if (!fits) continue;
+    // And the one it lands in, by the time the room gets to the landing.
+    const landS = Math.max(fromS, roomS + inS + LAND_SPARE_S);
+    if (landS < seg.start + seg.duration && landS <= limitS) return landS;
+  }
+  const alone = roomS + catchUpLeadS((segments[first].bytes! / bytesPerS) * 1000);
+  return Math.max(targetS, Math.min(alone, limitS));
+}
+
+/**
+ * Whether a segment that came in `bytes` in `ms` came out of the browser's
+ * cache — faster than any player's connection to the bot — and so says
+ * nothing of how fast the next will come. A page back from a pop-out finds the
+ * last page's segments there (lib/segmentParts).
+ */
+export function cameFromCache(bytes: number, ms: number): boolean {
+  return bytes > 0 && (bytes * 8) / Math.max(1, ms) / 1000 > CACHE_MBPS;
+}
+/** Faster than this, a segment came out of the cache — see cameFromCache. */
+const CACHE_MBPS = 200;
+
 /** Where the last segment's download time is kept across a reload. */
 const LAST_SEGMENT_KEY = "pdt:lastSegmentMs";
 /** How long it is worth anything: a connection changes. */
@@ -143,9 +213,11 @@ const LAST_SEGMENT_FOR_MS = 10 * 60_000;
  * nothing of the connection: blah0391 popped out on 12 October and landed six
  * seconds ahead of the room, where a 29 MB segment needed 5.6 to come.
  */
-export function rememberSegmentMs(ms: number, now = Date.now()): void {
+export function rememberSegmentMs(ms: number, now = Date.now(), bytesPerS: number | null = null): void {
   try {
-    localStorage.setItem(LAST_SEGMENT_KEY, JSON.stringify({ ms: Math.round(ms), at: now }));
+    localStorage.setItem(LAST_SEGMENT_KEY, JSON.stringify({
+      ms: Math.round(ms), at: now, ...(bytesPerS && bytesPerS > 0 ? { bps: Math.round(bytesPerS) } : {}),
+    }));
   } catch {
     // Storage unavailable: the next page guesses, as it did.
   }
@@ -157,6 +229,17 @@ export function recentSegmentMs(now = Date.now()): number | null {
     const kept = JSON.parse(localStorage.getItem(LAST_SEGMENT_KEY) ?? "null") as { ms?: number; at?: number } | null;
     if (!kept || !(Number(kept.ms) > 0) || !(now - Number(kept.at) < LAST_SEGMENT_FOR_MS)) return null;
     return Number(kept.ms);
+  } catch {
+    return null;
+  }
+}
+
+/** How fast segments came in, bytes a second, on a page before this one, if recent — see landingBySize. */
+export function recentSegmentBytesPerS(now = Date.now()): number | null {
+  try {
+    const kept = JSON.parse(localStorage.getItem(LAST_SEGMENT_KEY) ?? "null") as { bps?: number; at?: number } | null;
+    if (!kept || !(Number(kept.bps) > 0) || !(now - Number(kept.at) < LAST_SEGMENT_FOR_MS)) return null;
+    return Number(kept.bps);
   } catch {
     return null;
   }

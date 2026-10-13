@@ -26,7 +26,10 @@
 // &event=1 lists it as the bot lists a copy: from where the stream was asked
 // to start, the next 40s, still growing, so a skip past that rebuilds the
 // stream there. stream=copy4 is the same with a four-second keyframe
-// interval, ~4 MB a segment.
+// interval, ~4 MB a segment, and stream=copy4long the same five minutes long.
+//
+// &cache=1 answers segments as the bot does, for the browser to keep five
+// minutes (Cache-Control) — and so for the page after a pop-out to find them.
 //
 // &previews=1 gives the title preview frames, as Plex has them for most
 // films: /api/plex/preview/<part>/index sends them a pass at a time as the
@@ -48,8 +51,12 @@ const PORT = 3000;
 const SMALL_STREAM = path.join(os.tmpdir(), "plex-theater-media-errors");
 const COPY_STREAM = path.join(os.tmpdir(), "plex-theater-copy-stream");
 const COPY4_STREAM = path.join(os.tmpdir(), "plex-theater-copy4-stream");
+const COPY4_LONG_STREAM = path.join(os.tmpdir(), "plex-theater-copy4long-stream");
 /** Each copied stream's keyframe interval, which is its segments' length. */
-const SEGMENT_S = new Map([[COPY_STREAM, 10], [COPY4_STREAM, 4]]);
+const SEGMENT_S = new Map([[COPY_STREAM, 10], [COPY4_STREAM, 4], [COPY4_LONG_STREAM, 4]]);
+/** How long each stream is, seconds: two minutes, but for the long one. */
+const LENGTH_S = new Map([[COPY4_LONG_STREAM, 300]]);
+const lengthOf = (dir: string) => LENGTH_S.get(dir) ?? 120;
 /**
  * The room every player of a check joins. A new one for each check: the
  * server keeps a room everybody has left for half a minute (holdEmptyRoom),
@@ -69,7 +76,7 @@ for (const [dir, segmentS] of SEGMENT_S) {
   const made = spawnSync("ffmpeg", [
     "-hide_banner", "-loglevel", "error", "-y",
     "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
-    "-t", "120", "-c:v", "libx264", "-preset", "veryfast", "-b:v", "8M", "-maxrate", "8M", "-bufsize", "16M",
+    "-t", String(lengthOf(dir)), "-c:v", "libx264", "-preset", "veryfast", "-b:v", "8M", "-maxrate", "8M", "-bufsize", "16M",
     "-g", gop, "-keyint_min", gop, "-sc_threshold", "0", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
     "-f", "hls", "-hls_time", String(segmentS), "-hls_list_size", "0", "-hls_playlist_type", "vod",
     "-hls_segment_filename", path.join(dir, "seg%03d.ts"), path.join(dir, "index.m3u8"),
@@ -79,6 +86,8 @@ for (const [dir, segmentS] of SEGMENT_S) {
 let streamDir = SMALL_STREAM;
 /** Whether the playlist gives segment sizes, for the players to fetch in parts. */
 let partsOn = true;
+/** Whether segments are answered for the browser to keep, as the bot's are — see &cache=1. */
+let cacheOn = false;
 
 /** Until when each user's segments are held back. */
 const stallUntil = new Map<string, number>();
@@ -203,7 +212,7 @@ async function subtitleRead(res: http.ServerResponse, id: number, url: URL) {
 }
 
 const meta = (ratingKey: string) => ({
-  ratingKey, title: `Sync Test ${ratingKey}`, type: "movie", thumb: null, duration: 120_000,
+  ratingKey, title: `Sync Test ${ratingKey}`, type: "movie", thumb: null, duration: lengthOf(streamDir) * 1000,
   partId: Number(ratingKey), markers: [], genres: [], versions: [], ...tracksOf(ratingKey),
   previewThumbs: previewsOn,
 });
@@ -270,8 +279,9 @@ const server = http.createServer(async (req, res) => {
     sessionStart.clear();
     p2pOn = url.searchParams.get("p2p") !== "0";
     const stream = url.searchParams.get("stream");
-    streamDir = stream === "copy" ? COPY_STREAM : stream === "copy4" ? COPY4_STREAM : SMALL_STREAM;
+    streamDir = stream === "copy" ? COPY_STREAM : stream === "copy4" ? COPY4_STREAM : stream === "copy4long" ? COPY4_LONG_STREAM : SMALL_STREAM;
     partsOn = url.searchParams.get("parts") !== "0";
+    cacheOn = url.searchParams.get("cache") === "1";
     subtitleReads.clear();
     subtitleReadPace = Number(url.searchParams.get("subPace") ?? 3) || 3;
     return json(res, { ok: true, p2p: p2pOn, stream: path.basename(streamDir), parts: partsOn });
@@ -390,6 +400,8 @@ const server = http.createServer(async (req, res) => {
     let body = whole;
     let status = 200;
     const headers: Record<string, string | number> = { "Content-Type": "video/mp2t" };
+    // As the bot's (routes/plex.ts setSegmentCacheHeaders).
+    if (cacheOn) headers["Cache-Control"] = "public, max-age=300, immutable";
     const parts = url.searchParams.get("parts");
     const range = req.headers.range?.match(/^bytes=(\d+)-(\d*)$/);
     if (parts) {
@@ -454,4 +466,4 @@ server.prependListener("upgrade", (req, socket) => {
   if (!p2pOn && (req.url ?? "").startsWith("/tracker")) socket.destroy();
 });
 attachWebSocketServer(server);
-server.listen(PORT, () => console.log(`sync-room server on http://localhost:${PORT} (streams in ${SMALL_STREAM}, ${COPY_STREAM} and ${COPY4_STREAM})`));
+server.listen(PORT, () => console.log(`sync-room server on http://localhost:${PORT} (streams in ${SMALL_STREAM}, ${COPY_STREAM}, ${COPY4_STREAM} and ${COPY4_LONG_STREAM})`));

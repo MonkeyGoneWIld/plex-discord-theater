@@ -1409,6 +1409,81 @@ console.log("\n— somebody else in, and the host not back: theirs —");
   a.close();
 }
 
+console.log("\n— a new title starts with everybody's picture of it, not of the last one —");
+{
+  instanceHosts.set("inst-next", { hostUserId: "u-host", guildId: null, channelId: null, createdAt: Date.now() });
+  const host = new Client("u-host", "host");
+  await host.connect("inst-next", { gather: true });
+  const a = new Client("u-a", "a");
+  await a.connect("inst-next", { gather: true });
+  for (const c of [host, a]) c.send({ type: "watching", value: true });
+  await sleep(60);
+  const rev = () => host.last("transport-state")?.transportRevision;
+  const play = (ratingKey: string, position: number) => host.send({
+    type: "play", ratingKey, title: "A Film", subtitles: false,
+    hlsSessionId: uuid(), position, sessionOffset: position,
+    audioStreamId: 1, subtitleStreamId: 0, waiting: true,
+  });
+  play("100", 600);
+  await sleep(60);
+  host.send({ type: "heartbeat", position: 600, playing: true, waiting: false, transportRevision: rev() });
+  a.send({ type: "ready", gather: a.last("room-waiting")?.gather, ratingKey: "100" });
+  await sleep(60);
+  check("the first title runs once both have it", host.last("room-waiting")?.waiting, false);
+  // The next: the word that the room waits comes before the word of the title.
+  play("200", 180);
+  await sleep(60);
+  host.send({ type: "heartbeat", position: 180, playing: true, waiting: false, transportRevision: rev() });
+  const g = a.last("room-waiting")?.gather;
+  a.send({ type: "ready", gather: g, ratingKey: "100" });
+  await sleep(60);
+  check("a player ready with the last title's picture isn't ready for this one", host.last("room-waiting")?.waiting, true);
+  a.send({ type: "ready", gather: g, ratingKey: "200" });
+  await sleep(60);
+  check("and once it has this one's, the room runs", host.last("room-waiting")?.waiting, false);
+  // A player that doesn't say which title is taken at its word, as before.
+  play("300", 60);
+  await sleep(60);
+  host.send({ type: "heartbeat", position: 60, playing: true, waiting: false, transportRevision: rev() });
+  a.send({ type: "ready", gather: a.last("room-waiting")?.gather });
+  await sleep(60);
+  check("one that doesn't say which title, as ever", host.last("room-waiting")?.waiting, false);
+  host.close();
+  a.close();
+}
+
+console.log("\n— somebody short of picture: the others are told, so they ease off the bot —");
+{
+  const [host, a, b] = await room("inst-short", ["host", "a", "b"]);
+  await startPlayback(host);
+  for (const c of [host, a, b]) c.clear();
+  a.send({ type: "loading", value: true });
+  await sleep(60);
+  check("everybody else hears somebody is", [host.last("others-loading")?.value, b.last("others-loading")?.value], [true, true]);
+  check("not the one that said it, about itself", a.count("others-loading"), 0);
+  a.send({ type: "loading", value: true });
+  await sleep(60);
+  check("and only once, however often it says so", [host.count("others-loading"), b.count("others-loading")], [1, 1]);
+  b.send({ type: "loading", value: true });
+  await sleep(60);
+  check("a second one short: the first hears it", a.last("others-loading")?.value, true);
+  check("and the host isn't told again what it knows", host.count("others-loading"), 1);
+  a.send({ type: "loading", value: false });
+  await sleep(60);
+  check("the first has enough: the host still hears somebody is, the second nobody else",
+    [host.count("others-loading"), b.last("others-loading")?.value], [1, false]);
+  const late = new Client("u-late", "late");
+  await late.connect("inst-short");
+  check("one joining hears it at once", late.last("others-loading")?.value, true);
+  b.close();
+  await sleep(100);
+  check("the one short leaving: nobody is any more",
+    [host.last("others-loading")?.value, a.last("others-loading")?.value, late.last("others-loading")?.value], [false, false, false]);
+  host.close();
+  a.close();
+  late.close();
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 closeWebSocketServer();
 server.close();

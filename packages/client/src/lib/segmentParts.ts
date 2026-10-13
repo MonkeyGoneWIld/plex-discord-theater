@@ -8,23 +8,34 @@
  * stream took 7 to 28 seconds, and it was the one the picture waited on.
  *
  * So a segment whose size the playlist states (`n=` on its URL — the server's
- * direct-stream.ts) is asked for in parts (`part=i&parts=k`), all at once, and
- * handed to the P2P engine as the single response it asked for: the parts in
- * order, each passed on as it arrives once those before it are in.
+ * direct-stream.ts) is asked for in parts (`part=i&parts=k`), and handed to the
+ * P2P engine as the single response it asked for: the parts in order, each
+ * passed on as it arrives once those before it are in.
+ *
+ * A segment is always split the same way, whatever else is downloading — its
+ * parts' URLs are the same however it is fetched — and what changes is how
+ * many of them download at once (`atOnce`). The bot's answers stay in the
+ * browser's cache for five minutes, and the page that comes after this one —
+ * Discord's pop-out reloads the activity — finds there what this one fetched,
+ * but only under the same URLs: on 13 October each page back from a pop-out
+ * asked for its first segment in eight parts where the page before had
+ * fetched it in four, and had all 26 to 28 MB of it again from the bot, while
+ * the segments after it came out of the cache in no time.
  */
 
 /** About how big each part is. Small enough that even a short segment is
  *  split, since every part runs at a download's pace. */
 const PART_BYTES = 1_000_000;
-/** Parts per segment at most; the engine runs two segments at once. */
-export const MAX_PARTS = 4;
 /**
- * Parts for a segment fetched on its own — the one a stream's picture waits on
- * before it can start, when nothing else is downloading beside it (see
- * Player's simultaneousHttpDownloads): as many downloads as two segments' worth
- * would be, and as many as the bot will split one into (MAX_SEGMENT_PARTS).
+ * Parts per segment at most: as many as the bot will split one into
+ * (MAX_SEGMENT_PARTS). All of them download at once for a segment fetched on
+ * its own — the one a stream's picture waits on — or the one the picture
+ * needs next (see Player's partsAtOnce).
  */
-export const MAX_PARTS_ALONE = 8;
+export const MAX_PARTS = 8;
+/** Parts of a segment downloading at once beside another segment: two
+ *  segments' worth is as many downloads as one on its own. */
+export const PARTS_AT_ONCE_BESIDE = 4;
 
 export function partsFor(bytes: number, most = MAX_PARTS): number {
   if (!Number.isFinite(bytes) || bytes <= 0) return 1;
@@ -61,18 +72,34 @@ export interface PartsProgress {
   startedAt: number;
 }
 
-const marked = new WeakMap<Request, { key: string; bytes: number; parts: number }>();
+/** How many of a download's parts may run at once — asked again whenever it
+ *  could start another. Anything over its parts is all of them. */
+export type PartsAtOnce = () => number;
+
+const marked = new WeakMap<Request, { key: string; bytes: number; parts: number; atOnce?: PartsAtOnce }>();
 const progress = new Map<string, PartsProgress>();
+/** Every download in parts under way: each one's way of starting more of its parts — see pumpSegmentParts. */
+const pumps = new Set<() => void>();
 
 /**
  * Have `fetch` — once installSegmentParts has wrapped it — fetch this request
- * in parts. `key` names the segment for segmentProgress; the engine's own name
- * for it, its URL, is what the P2P engine patch looks it up by.
+ * in parts, `atOnce` of them at a time (all of them, unless it says). `key`
+ * names the segment for segmentProgress; the engine's own name for it, its
+ * URL, is what the P2P engine patch looks it up by.
  */
-export function fetchInPartsLater(request: Request, key: string, bytes: number, most = MAX_PARTS): Request {
-  const parts = partsFor(bytes, most);
-  if (parts > 1) marked.set(request, { key, bytes, parts });
+export function fetchInPartsLater(request: Request, key: string, bytes: number, atOnce?: PartsAtOnce): Request {
+  const parts = partsFor(bytes);
+  if (parts > 1) marked.set(request, { key, bytes, parts, atOnce });
   return request;
+}
+
+/**
+ * Start more parts of the downloads under way, wherever one may now have more
+ * at once than it has — the segment beside the one the picture needed is the
+ * one it needs, say. Each also looks for itself whenever a part of it is in.
+ */
+export function pumpSegmentParts(): void {
+  for (const pump of [...pumps]) pump();
 }
 
 /** How the download of a segment in parts is going, while it runs. */
@@ -93,20 +120,21 @@ export function installSegmentParts(target: { fetch: Fetch } = window): void {
   const wrapped = ((input: RequestInfo | URL, init?: RequestInit) => {
     const mark = input instanceof Request ? marked.get(input) : undefined;
     if (!mark || init) return native(input, init);
-    return fetchInParts(native, input as Request, mark.bytes, mark.parts, mark.key);
+    return fetchInParts(native, input as Request, mark.bytes, mark.parts, mark.key, mark.atOnce);
   }) as Fetch & { segmentParts?: true };
   wrapped.segmentParts = true;
   target.fetch = wrapped;
 }
 
 /**
- * Fetch `request`, a segment of `bytes` bytes, as `parts` downloads at once,
- * and answer as if it had been one: status and headers from the first part,
- * the body every part's bytes in order.
+ * Fetch `request`, a segment of `bytes` bytes, as `parts` downloads, `atOnce`
+ * of them at a time — all of them unless it says, the next starting as one
+ * before it is in — and answer as if it had been one: status and headers from
+ * the first part, the body every part's bytes in order.
  *
  * A server that ignores the parts sends the whole segment to each. The first
  * part then runs past its share, and is taken as the whole: the others are
- * called off, whatever they had.
+ * called off, whatever they had, and the rest never asked for.
  */
 export async function fetchInParts(
   fetchFn: Fetch,
@@ -114,6 +142,7 @@ export async function fetchInParts(
   bytes: number,
   parts: number,
   key: string = request.url,
+  atOnce: PartsAtOnce = () => parts,
 ): Promise<Response> {
   if (parts <= 1) return fetchFn(request);
   const bounds = partBounds(bytes, parts);
@@ -128,16 +157,32 @@ export async function fetchInParts(
 
   const status: PartsProgress = { received: 0, total: bytes, startedAt: performance.now() };
   progress.set(key, status);
+  let pump = () => {};
   const finish = () => {
     request.signal.removeEventListener("abort", onAbort);
+    pumps.delete(pump);
     if (progress.get(key) === status) progress.delete(key);
   };
 
   const headers = new Headers(request.headers);
-  const responses = bounds.map((_, i) =>
-    fetchFn(partUrl(request.url, i, parts), { headers, signal: stops[i].signal, cache: request.cache }));
-  // Nothing from the first part's failure is waited on by the others.
-  for (const r of responses) r.catch(() => {});
+  /** The parts asked for so far, in order. */
+  const responses: Array<Promise<Response>> = [];
+  const allowed = () => {
+    const n = Math.floor(atOnce());
+    return n >= 1 ? Math.min(parts, n) : 1;
+  };
+  /** Ask for the next part not yet asked for; its number. */
+  const launch = () => {
+    const i = responses.length;
+    const pending = fetchFn(partUrl(request.url, i, parts), { headers, signal: stops[i].signal, cache: request.cache });
+    // Nothing from one part's failure is waited on by the others.
+    pending.catch(() => {});
+    responses.push(pending);
+    return i;
+  };
+  /** Parts asked for and not yet in. */
+  let running = 0;
+  for (const most = allowed(); responses.length < most; running++) launch();
 
   let first: Response;
   try {
@@ -204,19 +249,27 @@ export async function fetchInParts(
     const want = i === 0 && whole ? bytes : to - from;
     if (got !== want) throw new Error(`part ${i + 1} of ${parts}: ${got} bytes, expected ${want}`);
     done[i] = true;
+    running--;
+    pump();
     drain();
+  };
+  const follow = (i: number) => {
+    responses[i].then((response) => read(i, response)).catch((err) => {
+      // The parts after a first part that was the whole are called off.
+      if (whole && i !== 0) return;
+      fail(err);
+    });
+  };
+  pump = () => {
+    if (failed || whole) return;
+    for (const most = allowed(); responses.length < parts && running < most; running++) follow(launch());
   };
 
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
       out = controller;
-      responses.forEach((pending, i) => {
-        pending.then((response) => read(i, response)).catch((err) => {
-          // The parts after a first part that was the whole are called off.
-          if (whole && i !== 0) return;
-          fail(err);
-        });
-      });
+      responses.forEach((_, i) => follow(i));
+      pumps.add(pump);
     },
     cancel(reason) {
       failed = true;

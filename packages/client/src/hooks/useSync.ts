@@ -183,6 +183,12 @@ export interface SyncState {
    * the room.
    */
   gatherSeq: number;
+  /**
+   * Whether anybody else in the room is short of picture — joining, back from
+   * a pop-out, its picture stopped — as the server says ("others-loading"). A
+   * player well ahead eases off the bot meanwhile: see Player's easingOffRef.
+   */
+  othersLoading: boolean;
   /** True if the WebSocket closed due to authentication failure (code 1008) */
   authFailed: boolean;
   /** True if max reconnect attempts exhausted. `retryConnection` clears it. */
@@ -328,12 +334,15 @@ export interface SyncActions {
   /** Not the host: this player's picture has stopped for want of data, and
    *  the room waits for it to be ready again — see SyncState.gatherSeq. */
   sendStalled: () => void;
+  /** Whether this player is short of picture, for the others to ease off the
+   *  bot meanwhile — see SyncState.othersLoading. Said again on reconnecting. */
+  sendLoading: (short: boolean) => void;
   sendStop: () => void;
   /** `waiting`: the host's picture isn't ready — SyncState.hostWaiting. */
   sendHeartbeat: (position: number, playing: boolean, waiting?: boolean) => void;
   /** This player's picture is ready for the room to start again — see
    *  SyncState.gatherSeq. */
-  sendReady: (gather: number) => void;
+  sendReady: (gather: number, ratingKey?: string) => void;
   acknowledgeTransport: (revision: number) => void;
   sendBrowse: (context: string) => void;
   sendQueueAdd: (item: QueueItem) => void;
@@ -433,6 +442,7 @@ const INITIAL_STATE: SyncState = {
   hostWaiting: false,
   hostSwitching: null,
   gatherSeq: 0,
+  othersLoading: false,
   authFailed: false,
   reconnectFailed: false,
   browseContext: null,
@@ -460,6 +470,9 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
    * heard it would otherwise say "not waiting" and let the picture go early.
    */
   const heldForAnswerAtRef = useRef(0);
+  /** What this player last said of its picture being short — said again to a
+   *  new connection, which the server knows nothing of. */
+  const loadingRef = useRef(false);
   const retryRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Bumped by retryConnection. It is a dependency of the connect effect, so a
@@ -628,9 +641,16 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           return { ...prev, position, playing, positionAt: stalled || prev.hostWaiting ? 0 : now };
         });
       },
-      sendReady: (gather: number) => send({ type: "ready", gather }),
+      // With the title it is a picture of: the room's word that it waits for a
+      // new title comes before the title itself, and a picture of the last
+      // one counts for nothing (services/sync.ts, "ready").
+      sendReady: (gather: number, ratingKey?: string) => send({ type: "ready", gather, ...(ratingKey ? { ratingKey } : {}) }),
       sendSeekLoading: () => send({ type: "seek-loading" }),
       sendStalled: () => send({ type: "stalled" }),
+      sendLoading: (short: boolean) => {
+        loadingRef.current = short;
+        send({ type: "loading", value: short });
+      },
       sendBrowse: (context: string) => send({ type: "browse", context }),
       sendQueueAdd: (item: QueueItem) => send({ type: "queue-add", item }),
       sendQueueRemove: (ratingKey: string) => send({ type: "queue-remove", ratingKey }),
@@ -700,6 +720,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             visible: !document.hidden,
           }),
         );
+        if (loadingRef.current) ws.send(JSON.stringify({ type: "loading", value: true }));
         setState((prev) => ({ ...prev, connected: true, hostDisconnected: false }));
       });
 
@@ -779,6 +800,11 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
                   ?.isHost ?? prev.isHost,
             }));
             break;
+          case "others-loading": {
+            const othersLoading = msg.value === true;
+            setState((prev) => (prev.othersLoading === othersLoading ? prev : { ...prev, othersLoading }));
+            break;
+          }
           case "participants": {
             const participants = (msg.participants as Participant[]) || [];
             setState((prev) => ({
@@ -1056,7 +1082,8 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       ws.addEventListener("close", (event) => {
         if (!active) return;
         wsRef.current = null;
-        setState((prev) => ({ ...prev, connected: false }));
+        // Nobody to ease off the bot for, as far as this player can know.
+        setState((prev) => ({ ...prev, connected: false, othersLoading: false }));
 
         // Close code 1008 = policy violation (auth failure) — don't retry,
         // the session token is invalid and reconnecting will loop forever

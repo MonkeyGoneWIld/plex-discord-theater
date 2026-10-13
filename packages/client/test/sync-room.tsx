@@ -521,9 +521,10 @@ function Runner() {
    * late, as monkey26's did on 12 October — the room is past where it landed
    * before it has anything to show there.
    */
-  async function runPopOut(who: "host" | "viewer", slowBack = false) {
+  async function runPopOut(who: "host" | "viewer", comeBack: "fast" | "slow" | "long" = "fast") {
     setRunning(true);
-    const out: string[] = [`— the ${who} popping the activity out mid-film${slowBack ? ", its stream slow to come back" : ""} —`];
+    const slowBack = comeBack !== "fast";
+    const out: string[] = [`— the ${who} popping the activity out mid-film${comeBack === "slow" ? ", its stream slow to come back" : comeBack === "long" ? ", its stream away for 35 seconds" : ""} —`];
     const say = (line: string) => { out.push(line); setLines([...out]); };
     setLines([...out]);
     const popped = who === "host" ? "u-host" : "u-viewer";
@@ -534,7 +535,10 @@ function Runner() {
       await startOnce(`p2p=${slowBack ? 0 : 1}&stream=copy4&event=1&eventS=200&previews=1`, {}, 40_000);
       await pause(15_000);
       const before = latest.get(popped)!.pos;
-      if (slowBack) await api(`/api/test/stall?user=${popped}&ms=9000`);
+      // "long": longer than the room's clock used to run on without the
+      // host's word — thirty seconds — as blah0391's catch-up did on 13
+      // October, when the room went half a minute back.
+      if (slowBack) await api(`/api/test/stall?user=${popped}&ms=${comeBack === "long" ? 35_000 : 9000}`);
       const poppedAt = Date.now();
       if (who === "host") {
         const win = hostFrame.current?.contentWindow as (Window & typeof globalThis) | null | undefined;
@@ -548,13 +552,19 @@ function Runner() {
       let otherStoppedMs = 0;
       let inStepAt = 0;
       let last = Date.now();
-      while (Date.now() - poppedAt < (slowBack ? 40_000 : 30_000)) {
+      let otherLastPos = latest.get(other)?.pos ?? 0;
+      let otherBack = 0;
+      while (Date.now() - poppedAt < (comeBack === "long" ? 75_000 : slowBack ? 40_000 : 30_000)) {
         await pause(200);
         const now = Date.now();
         const o = latest.get(other);
         const p = latest.get(popped);
         if (o && (o.paused || o.ready < 3)) otherStoppedMs += now - last;
         last = now;
+        if (o) {
+          if (o.pos < otherLastPos - 0.3) otherBack = Math.max(otherBack, otherLastPos - o.pos);
+          otherLastPos = o.pos;
+        }
         // Only once the reloaded page has a stream of its own: the old one goes on
         // reporting for a moment after the reload is asked for.
         const reloaded = (events.get(popped) ?? []).some((e) => e.t > poppedAt && e.tag === "HLS" && e.msg === "starting session");
@@ -572,7 +582,8 @@ function Runner() {
       const stopsBack = back.filter((e) => e.t > playingAt && e.tag === "Video" && /buffer starved/.test(e.msg) &&
         e.data.paused === false && e.data.seeking !== true);
       say(`${otherStoppedMs < 1500 ? "PASS" : "FAIL"} the ${who === "host" ? "viewer" : "host"} played on (stopped ${(otherStoppedMs / 1000).toFixed(1)}s in all)`);
-      const backWithinMs = slowBack ? 30_000 : 15_000;
+      say(`${otherBack === 0 ? "PASS" : "FAIL"} and was never sent back${otherBack ? ` (${otherBack.toFixed(1)}s)` : ""}`);
+      const backWithinMs = comeBack === "long" ? 70_000 : slowBack ? 30_000 : 15_000;
       say(`${inStepAt && inStepAt - poppedAt < backWithinMs ? "PASS" : "FAIL"} the ${who} was back, playing in step, ${inStepAt ? `${((inStepAt - poppedAt) / 1000).toFixed(1)}s after it reloaded` : "never"}`);
       say(`${Math.abs(p.pos - o.pos) < 1 && !p.paused && !o.paused ? "PASS" : "FAIL"} and they play on together (${(p.pos - o.pos).toFixed(2)}s apart)`);
       say(`${stopsBack.length <= 1 ? "PASS" : "FAIL"} the ${who}, playing again, stops no more than once (${stopsBack.length})`);
@@ -583,6 +594,22 @@ function Runner() {
         // went with that on 12 October: none were left, and none came again.
         const viewerAgain = (events.get(other) ?? []).filter((e) => e.t >= poppedAt && e.tag === "Preview" && e.msg === "transfer accepted");
         say(`${viewerAgain.length === 0 ? "PASS" : "FAIL"} the viewer kept its preview frames through its turn as host (${viewerAgain.length} fetched again)`);
+      }
+      if (who === "host" && comeBack === "fast") {
+        // Back, it no longer drives the stream — the viewer went on driving
+        // it — and a rewind into what it has held the whole room on 13
+        // October, twice. It goes straight on, as the driver's own does.
+        await pause(5_000);
+        const from = latest.get("u-host")!.pos;
+        const rewoundAt = Date.now();
+        hostKey("ArrowLeft");
+        await waitFor(() => { const h = latest.get("u-host"); return !!h && h.pos < from - 5 && !h.paused && h.ready >= 3; }, 15_000, "the host's rewind");
+        await pause(3_000);
+        const held = ["u-host", "u-viewer"].flatMap((u) => (events.get(u) ?? []).filter((e) => e.t >= rewoundAt && /holding for the room/.test(e.msg)));
+        say(`${held.length === 0 ? "PASS" : "FAIL"} back and not driving the stream, its rewind into what it holds doesn't hold the room (${held.length})`);
+        const h = latest.get("u-host")!;
+        const v = latest.get("u-viewer")!;
+        say(`${Math.abs(h.pos - v.pos) < 1 && !h.paused && !v.paused ? "PASS" : "FAIL"} and the viewer goes back with it (${(h.pos - v.pos).toFixed(2)}s apart)`);
       }
     } catch (err) {
       say(`FAIL ${String(err)}`);
@@ -1188,6 +1215,61 @@ function Runner() {
   }
 
   /**
+   * A viewer joining a film already playing, whose picture stops just after it
+   * starts: getting going, it catches up on its own, and the host — the room —
+   * plays on. On 13 October monkey26 joined, stopped two seconds in, and the
+   * whole room waited nineteen seconds for it, the host with forty in hand.
+   */
+  async function runJoinerStalls() {
+    setRunning(true);
+    const out: string[] = ["— a viewer joining a film already playing, its picture stopping just after it starts —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      latest.clear();
+      events.clear();
+      await api("/api/test/reset?p2p=0");
+      viewerQuery = "&latejoin";
+      setHostOn(false);
+      setFrames(nextFrames(currentGen));
+      setHostOn(true);
+      await waitFor(() => { const h = latest.get("u-host"); return !!h && !h.paused && h.pos > 20; }, 90_000, "the host 20s in");
+      // Its connection a little faster than the film, so it has seconds in
+      // hand rather than the rest of the film, as a joiner on a real one does.
+      await api("/api/test/pace?user=u-viewer&ms=2600");
+      const joinedAt = Date.now();
+      (viewerFrame.current?.contentWindow as Window | null | undefined)?.postMessage({ kind: "press", press: ["Join"] }, "*");
+      await waitFor(() => firstPlay("u-viewer"), 60_000, "the viewer to play");
+      // Its next segments held back as soon as it plays.
+      await api("/api/test/stall?user=u-viewer&ms=12000");
+      await pause(25_000);
+      const host = events.get("u-host") ?? [];
+      const held = host.filter((e) => e.t > joinedAt && /holding for the room/.test(e.msg));
+      say(`${held.length === 0 ? "PASS" : "FAIL"} the host never holds for the joiner (${held.length})`);
+      const stopped = host.filter((e) => e.t > joinedAt && e.tag === "Video" && /buffer starved/.test(e.msg));
+      say(`${stopped.length === 0 ? "PASS" : "FAIL"} nor stops (${stopped.length})`);
+      const asked = (events.get("u-viewer") ?? []).filter((e) => /asking the room to wait for it/.test(e.msg));
+      say(`${asked.length === 0 ? "PASS" : "FAIL"} the joiner, getting going, doesn't ask the room to wait (${asked.length})`);
+      await pause(10_000);
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      // A few seconds behind after its stop, it closes the gap by playing a
+      // little faster once it has six seconds in hand (SOFT_SYNC_MIN_BUFFER_S),
+      // which on a connection this close to the film's own speed takes a while.
+      say(`${Math.abs(v.pos - h.pos) < 4 && !v.paused && !h.paused ? "PASS" : "FAIL"} and it plays on with the host, within the few seconds it closes unseen (${(v.pos - h.pos).toFixed(2)}s apart)`);
+      const jumped = (events.get("u-viewer") ?? []).filter((e) => e.t > joinedAt && /heartbeat drift correction|going past it/.test(e.msg));
+      say(`${jumped.length === 0 ? "PASS" : "FAIL"} without being jumped to catch up (${jumped.length})`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      viewerQuery = "";
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
    * The viewer's picture stopping mid-film for want of data, while the host's
    * plays on: the room waits for it, the host holding where it is, and they go
    * on together — the viewer never jumped forward past what it hadn't seen to
@@ -1408,7 +1490,9 @@ function Runner() {
         <button disabled={running} onClick={() => void runLateJoin()}>Late joiner</button>
         <button disabled={running} onClick={() => void runPopOut("host")}>Host pops out</button>
         <button disabled={running} onClick={() => void runPopOut("viewer")}>Viewer pops out</button>
-        <button disabled={running} onClick={() => void runPopOut("host", true)}>Host pops out, slow back</button>
+        <button disabled={running} onClick={() => void runPopOut("host", "slow")}>Host pops out, slow back</button>
+        <button disabled={running} onClick={() => void runPopOut("host", "long")}>Host pops out, long back</button>
+        <button disabled={running} onClick={() => void runJoinerStalls()}>Joiner stalls</button>
         <button disabled={running} onClick={() => void runAlonePopOut()}>Host alone pops out</button>
         <button disabled={running} onClick={() => void runPreviewAhead()}>Preview frames from the title's page</button>
         <button disabled={running} onClick={() => void runSkipThenPause()}>Skip then pause</button>

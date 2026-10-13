@@ -248,14 +248,19 @@ function looksStalled(advancedS: number, elapsedS: number): boolean {
  * seconds without a report the room isn't playing in any useful sense — stalled,
  * buffering, or gone — and elapsed wall time stops describing it, so the last
  * confirmed position is the more honest answer.
+ *
+ * Except to a host catching up with the room (Player's hostCatchUpRef), which
+ * hears no reports — it is the one who makes them — and keeps the room's
+ * clock itself meanwhile: `capS` Infinity.
  */
 export function roomPositionNow(
   state: Pick<SyncState, "position" | "playing" | "positionAt"> & { hostWaiting?: boolean },
+  capS = 30,
 ): number {
   // Waiting for the host's picture is the room standing still — see hostWaiting.
   if (!state.playing || !state.positionAt || state.hostWaiting) return state.position;
   const elapsed = (Date.now() - state.positionAt) / 1000;
-  if (elapsed < 0 || elapsed > 30) return state.position;
+  if (elapsed < 0 || elapsed > capS) return state.position;
   return state.position + elapsed;
 }
 

@@ -5,8 +5,9 @@
  */
 import {
   MAX_PARTS, fetchInParts, fetchInPartsLater, inBrowserCache, installSegmentParts, partBounds, partUrl, partsFor, pumpSegmentParts,
-  segmentBytesOf, segmentProgress,
+  keepLater, segmentBytesOf, segmentProgress,
 } from "../src/lib/segmentParts";
+import { keepingSegments, keptSegment, useCacheStorageForTests } from "../src/lib/segmentKeep";
 import { keepOnPeer, keepSharedOnPeer, ownerOf, shareChoice, shouldTakeFromPeer } from "../src/lib/takeFromPeer";
 
 let pass = 0;
@@ -256,6 +257,90 @@ console.log("\n— what the browser's cache holds of a segment —");
     await inBrowserCache(URL0, cache(all(Date.now() - 6 * 60_000), [])), false);
   check("a segment not fetched in parts: the segment itself",
     await inBrowserCache("https://bot.test/seg/00001.ts", cache(new Map([["https://bot.test/seg/00001.ts", Date.now()]]), [])), true);
+}
+
+console.log("\n— what is kept for the page after this one —");
+{
+  /** Cache Storage as a page sees it: caches by name, a match across all of them. */
+  const storage = () => {
+    const named = new Map<string, Map<string, Response>>();
+    const urlOf = (r: RequestInfo | URL) => String(r instanceof Request ? r.url : r);
+    const cacheOf = (m: Map<string, Response>) => ({
+      put: async (r: RequestInfo | URL, res: Response) => {
+        // As the browser does: the whole body read before the entry is there.
+        const body = await res.arrayBuffer();
+        m.set(urlOf(r), new Response(body, { status: res.status, headers: res.headers }));
+      },
+      match: async (r: RequestInfo | URL) => m.get(urlOf(r))?.clone(),
+    });
+    return {
+      named,
+      refuse: false,
+      async open(name: string) {
+        if (this.refuse) throw new DOMException("The operation is insecure.", "SecurityError");
+        if (!named.has(name)) named.set(name, new Map());
+        return cacheOf(named.get(name)!) as unknown as Cache;
+      },
+      async keys() { return [...named.keys()]; },
+      async delete(name: string) { return named.delete(name); },
+      async match(r: RequestInfo | URL) {
+        if (this.refuse) throw new DOMException("The operation is insecure.", "SecurityError");
+        for (const m of named.values()) { const hit = m.get(urlOf(r)); if (hit) return hit.clone(); }
+        return undefined;
+      },
+    };
+  };
+  const minute = Math.floor(Date.now() / 60_000);
+  const s = storage();
+  // Left by pages long gone: a minute past keeping, and one still within it.
+  s.named.set(`pdt-segments-${minute - 7}`, new Map());
+  s.named.set(`pdt-segments-${minute - 2}`, new Map());
+  useCacheStorageForTests(s);
+  const b = bot();
+  const target = { fetch: b.fetch };
+  installSegmentParts(target);
+  const asked = () => keepLater(fetchInPartsLater(new Request(URL0), URL0, SEGMENT.length));
+  check("a segment is handed on whole, as before", same(await readAll(await target.fetch(asked())), SEGMENT), true);
+  check("from the bot, in parts", b.asked.length, partsFor(SEGMENT.length));
+  await sleep(20);
+  check("and kept", (await keptSegment(URL0)) !== null, true);
+  check("minutes past keeping are let go, and the rest stay",
+    [s.named.has(`pdt-segments-${minute - 7}`), s.named.has(`pdt-segments-${minute - 2}`)], [false, true]);
+
+  // The page after: what it has of its own is nothing, Cache Storage the same.
+  useCacheStorageForTests(s);
+  b.asked.length = 0;
+  check("the page after has it whole", same(await readAll(await target.fetch(asked())), SEGMENT), true);
+  check("without asking the bot", b.asked.length, 0);
+  check("and counts it as held when it lands, with the browser's own cache empty",
+    await inBrowserCache(URL0, async () => { throw new TypeError("Failed to fetch"); }), true);
+
+  const URL1 = URL0.replace("00428", "00429");
+  b.breaks.add(2);
+  await target.fetch(keepLater(fetchInPartsLater(new Request(URL1), URL1, SEGMENT.length))).then(readAll).catch(() => null);
+  b.breaks.clear();
+  await sleep(20);
+  check("a download that fails isn't kept", await keptSegment(URL1), null);
+
+  const URL2 = URL0.replace("00428", "00430");
+  await readAll(await target.fetch(fetchInPartsLater(new Request(URL2), URL2, SEGMENT.length)));
+  await sleep(20);
+  check("nor a request not marked to be", await keptSegment(URL2), null);
+
+  const URL3 = URL0.replace("00428", "00431");
+  s.named.get(`pdt-segments-${minute - 2}`)!.set(URL3, new Response("x", { headers: { "x-kept-at": String(Date.now() - 6 * 60_000) } }));
+  check("one kept more than five minutes ago is as good as gone", await keptSegment(URL3), null);
+
+  // A device whose Cache Storage refuses — monkey26's first, on 14 October.
+  s.refuse = true;
+  useCacheStorageForTests(s);
+  const URL4 = URL0.replace("00428", "00432");
+  b.asked.length = 0;
+  check("refused, a segment comes from the bot as before",
+    same(await readAll(await target.fetch(keepLater(fetchInPartsLater(new Request(URL4), URL4, SEGMENT.length)))), SEGMENT), true);
+  check("whole", b.asked.length, partsFor(SEGMENT.length));
+  check("and nothing more is asked of Cache Storage", keepingSegments(), false);
+  useCacheStorageForTests(null);
 }
 
 console.log("\n— the segment the picture waits on, from another player or the bot —");

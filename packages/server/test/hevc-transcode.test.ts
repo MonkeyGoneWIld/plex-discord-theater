@@ -4,7 +4,7 @@
  * The sizing rule is pure. The HEVC half runs against a real sync server, the
  * same way variant-sync.test.ts does: real WebSockets and room state, no Plex.
  * What is checked is who gets told to rebuild their stream, and when — the
- * transcode that rebuild starts is decided by roomPlaysHevc, checked directly.
+ * transcode that rebuild starts is decided by mayStartHevc, checked directly.
  */
 import fs from "node:fs";
 import http from "node:http";
@@ -17,7 +17,7 @@ process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "hevc-transc
 
 // After THUMB_CACHE_DIR, for the same reason as variant-sync.test.ts: the stores
 // open their databases as they load.
-const { attachWebSocketServer, closeWebSocketServer, roomPlaysHevc } = await import("../src/services/sync.js");
+const { attachWebSocketServer, closeWebSocketServer, mayStartHevc } = await import("../src/services/sync.js");
 const { recordSessionVideoCodec, isHevcSession } = await import("../src/routes/plex.js");
 const { transcodeFrame } = await import("../src/services/media-versions.js");
 const { createSession } = await import("../src/middleware/auth.js");
@@ -99,14 +99,14 @@ console.log("\n— who may be sent HEVC —");
   newRoom("hevc-1");
   const host = await join("hevc-1", "u-host", "host", true);
   const a = await join("hevc-1", "u-a", "a", true);
-  check("a room where everyone can decode it gets HEVC", roomPlaysHevc("u-host"), true);
-  check("asked by any of them", roomPlaysHevc("u-a"), true);
+  check("a player that can decode it may start HEVC", mayStartHevc("u-host"), true);
+  check("asked by any of them", mayStartHevc("u-a"), true);
   const b = await join("hevc-1", "u-b", "b", false);
-  check("one viewer who can't puts the room on H.264", roomPlaysHevc("u-host"), false);
+  check("a viewer who can't leaves the others' answer alone", mayStartHevc("u-host"), true);
+  check("and is H.264 themselves", mayStartHevc("u-b"), false);
   b.close();
   await sleep(60);
-  check("and the room may go back to HEVC once they leave", roomPlaysHevc("u-host"), true);
-  check("somebody in no room gets H.264", roomPlaysHevc("u-nobody"), false);
+  check("somebody in no room gets H.264", mayStartHevc("u-nobody"), false);
   [host, a].forEach((c) => c.close());
 }
 
@@ -121,27 +121,51 @@ console.log("\n— someone who can't decode HEVC joins an HEVC room —");
 
   const b = await join("hevc-2", "u-b", "b", false);
   await sleep(60);
-  check("the host, who drives the stream, is told to rebuild it", host.toldToRebuild(), true);
-  check("the other viewer keeps watching meanwhile", a.seen.filter((m) => m.type === "variant").length, 0);
-  check("the newcomer is not the one asked to start anything", b.toldToRebuild(), false);
+  check("the host's stream is left as it is", host.toldToRebuild(), false);
+  check("the other viewer hears nothing", a.seen.filter((m) => m.type === "variant").length, 0);
+  const bState = b.seen.find((m) => m.type === "state")?.variant;
+  check("the newcomer lands on a stream of its own", bState?.variantKey, "1:0/h264");
+  check("which it brings up itself", [bState?.isOwner, bState?.hlsSessionId], [true, null]);
+  check("in H.264", mayStartHevc("u-b"), false);
 
-  // The host's rebuild — an H.264 transcode, since roomPlaysHevc is now false —
-  // is announced the way any restart is, and everyone follows it.
+  const twinSid = crypto.randomUUID();
+  recordSessionVideoCodec(twinSid, "h264");
+  b.send({ type: "variant-session", hlsSessionId: twinSid, sessionOffset: 30 });
+  await sleep(60);
+  check("bringing it up moves nobody else", [host.toldToRebuild(), a.seen.filter((m) => m.type === "variant").length], [false, 0]);
+
+  const c = await join("hevc-2", "u-c", "c", false);
+  await sleep(60);
+  const cState = c.seen.find((m) => m.type === "state")?.variant;
+  check("a second one who can't follows the first one's stream", [cState?.variantKey, cState?.hlsSessionId, cState?.isOwner], ["1:0/h264", twinSid, false]);
+
+  // The host restarts its stream — a far seek, say — and the ones who can't stay on theirs.
+  [b, c].forEach((x) => x.clear());
   const sid2 = crypto.randomUUID();
-  recordSessionVideoCodec(sid2, "h264");
+  recordSessionVideoCodec(sid2, "hevc");
   host.send({
     type: "play", ratingKey: "100", title: "A Film", subtitles: false,
-    hlsSessionId: sid2, position: 30, sessionOffset: 30,
+    hlsSessionId: sid2, position: 300, sessionOffset: 300,
     audioStreamId: 1, subtitleStreamId: 0,
   });
   await sleep(60);
-  check("the viewer is moved onto the new stream", a.seen.filter((m) => m.type === "play").at(-1)?.hlsSessionId, sid2);
-  check("and so is the newcomer", b.seen.filter((m) => m.type === "play").at(-1)?.hlsSessionId, sid2);
+  check("the viewer who can follows the host's restart", a.seen.filter((m) => m.type === "variant").at(-1)?.hlsSessionId, sid2);
+  check("the ones who can't aren't sent it", [b, c].map((x) => x.seen.some((m) => m.type === "variant" && m.hlsSessionId === sid2)), [false, false]);
 
-  host.clear();
-  const c = await join("hevc-2", "u-c", "c", false);
+  // A new title: everybody on the host's, and whoever can't play it a stream of their own again.
+  [a, b, c].forEach((x) => x.clear());
+  const sid3 = crypto.randomUUID();
+  recordSessionVideoCodec(sid3, "hevc");
+  host.send({
+    type: "play", ratingKey: "200", title: "Another Film", subtitles: false,
+    hlsSessionId: sid3, position: 0, sessionOffset: 0,
+    audioStreamId: 5, subtitleStreamId: 0,
+  });
   await sleep(60);
-  check("an H.264 room asks nothing of anyone", host.toldToRebuild(), false);
+  check("a new title puts the viewer who can on the host's stream", a.seen.filter((m) => m.type === "variant").at(-1)?.hlsSessionId, sid3);
+  const bNew = b.seen.filter((m) => m.type === "variant").at(-1);
+  check("and the ones who can't on one of their own for it", [bNew?.ratingKey, bNew?.variantKey, bNew?.hlsSessionId], ["200", "5:0/h264", null]);
+  check("one of them bringing it up", [b, c].filter((x) => x.seen.filter((m) => m.type === "variant").at(-1)?.isOwner).length, 1);
   [host, a, b, c].forEach((x) => x.close());
 }
 
@@ -154,6 +178,7 @@ console.log("\n— a joiner who can decode it changes nothing —");
   const a = await join("hevc-3", "u-a", "a", true);
   await sleep(60);
   check("no rebuild", host.toldToRebuild(), false);
+  check("on the host's stream", a.seen.find((m) => m.type === "state")?.variant?.variantKey, "1:0");
   [host, a].forEach((c) => c.close());
 }
 
@@ -164,21 +189,38 @@ console.log("\n— a viewer whose player fails to decode HEVC withdraws —");
   const a = await join("hevc-4", "u-a", "a", true);
   await startPlayback(host, "hevc");
   host.clear();
+  a.clear();
   a.send({ type: "caps", hevc: false });
   await sleep(60);
-  check("the host is told to rebuild", host.toldToRebuild(), true);
-  check("and the room is H.264 from now on", roomPlaysHevc("u-host"), false);
-  host.clear();
+  check("the host is left alone", host.toldToRebuild(), false);
+  check("the viewer is given a stream of its own to bring up", a.toldToRebuild(), true);
+  check("and the host may still start HEVC", mayStartHevc("u-host"), true);
+  a.clear();
   a.send({ type: "caps", hevc: false });
   await sleep(60);
-  check("saying it twice does nothing more", host.toldToRebuild(), false);
+  check("saying it twice does nothing more", a.seen.length, 0);
   a.send({ type: "caps", hevc: true });
   await sleep(60);
-  check("and a client can't talk the room back into HEVC", roomPlaysHevc("u-host"), false);
+  check("and a client can't talk itself back into HEVC", mayStartHevc("u-a"), false);
   [host, a].forEach((c) => c.close());
 }
 
-console.log("\n— a viewer's own stream is rebuilt by that viewer —");
+console.log("\n— a host who can't decode HEVC —");
+{
+  newRoom("hevc-6");
+  const host = await join("hevc-6", "u-host", "host", true);
+  const a = await join("hevc-6", "u-a", "a", true);
+  await startPlayback(host, "hevc");
+  [host, a].forEach((c) => c.clear());
+  host.send({ type: "caps", hevc: false });
+  await sleep(60);
+  check("the host's own stream is rebuilt", host.toldToRebuild(), true);
+  check("as H.264, whoever drives it", [mayStartHevc("u-host"), mayStartHevc("u-a")], [false, false]);
+  check("and nobody is split off it", a.seen.filter((m) => m.type === "variant").length, 0);
+  [host, a].forEach((c) => c.close());
+}
+
+console.log("\n— a viewer's own stream —");
 {
   newRoom("hevc-5");
   const host = await join("hevc-5", "u-host", "host", true);
@@ -195,8 +237,21 @@ console.log("\n— a viewer's own stream is rebuilt by that viewer —");
 
   const b = await join("hevc-5", "u-b", "b", false);
   await sleep(60);
-  check("the fork's driver is told to rebuild it", a.toldToRebuild(), true);
-  check("the host's H.264 stream is left alone", host.toldToRebuild(), false);
+  check("someone who can't, joining the host's H.264 stream, moves nobody", [a.toldToRebuild(), host.toldToRebuild()], [false, false]);
+  check("and shares it", b.seen.find((m) => m.type === "state")?.variant?.variantKey, "1:0");
+  b.clear();
+  b.send({ type: "set-tracks", audioStreamId: 2, subtitleStreamId: 0 });
+  await sleep(60);
+  const bOn = b.seen.filter((m) => m.type === "variant").at(-1);
+  check("choosing the HEVC fork's tracks gives them an H.264 one of those", [bOn?.variantKey, bOn?.isOwner, bOn?.hlsSessionId], ["2:0/h264", true, null]);
+  check("and leaves the fork's driver alone", a.toldToRebuild(), false);
+  b.clear();
+  b.send({ type: "set-tracks", audioStreamId: 2, subtitleStreamId: 0 });
+  await sleep(60);
+  check("asking again moves nothing", b.seen.length, 0);
+  b.send({ type: "rejoin-host" });
+  await sleep(60);
+  check("and back on the host's", b.seen.filter((m) => m.type === "variant").at(-1)?.variantKey, "1:0");
   [host, a, b].forEach((c) => c.close());
 }
 

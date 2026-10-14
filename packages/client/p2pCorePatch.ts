@@ -54,6 +54,16 @@
  *     seconds and up to three more, doubling each time it fails again, to a
  *     minute at most.
  *
+ *  6. A segment playback asks for that ends before where the engine thinks the
+ *     playhead is starts at once. The engine hears where the playhead is from
+ *     the video element's seeking and timeupdate, and a video that has nothing
+ *     loaded yet sends neither when it is moved: a page back from a pop-out
+ *     that lands on what the browser has kept moves back a few seconds before
+ *     anything is loaded, and the engine, still at the place the page first
+ *     went to, takes the segment playback asks for to be behind it — fetched
+ *     by nobody. On 14 October blah0391's page sat on it for a minute with the
+ *     segment in the browser's cache all along.
+ *
  * There used to be a third: a player on the same network as its peer left
  * segments to it rather than fetch them from the bot too, and a viewer fetched
  * nothing from the bot while the room waited on the host. A transfer from the
@@ -232,6 +242,14 @@ const edits: Array<[string, string]> = [
         return true;
     }
     loadThroughHttp(segment) {`,
+  ],
+  [
+    `            this.engineRequest?.abort();
+            this.engineRequest = engineRequest;`,
+    `            this.engineRequest?.abort();
+            this.engineRequest = engineRequest;
+            // ${MARK}: behind where the engine has playback — see change 6.
+            if (segment.endTime <= this.playback.position) engineRequest.markAsShouldBeStartedImmediately();`,
   ],
 ];
 

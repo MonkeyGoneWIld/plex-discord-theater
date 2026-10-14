@@ -24,7 +24,7 @@ const source = readFileSync(file, "utf8");
 
 console.log("\n— the engine as installed —");
 const patched = patchHybridLoader(source);
-check("all its changes are made", patched.split("plex-discord-theater: p2pCorePatch").length - 1, 7);
+check("all its changes are made", patched.split("plex-discord-theater: p2pCorePatch").length - 1, 8);
 check("it is still JavaScript", (() => { try { transformSync(patched, { loader: "js", format: "esm" }); return true; } catch { return false; } })(), true);
 check("a segment loading from a peer is asked about before being moved to the bot",
   /request\.downloadSource === "p2p" && !this\.pdtKeepOnPeer\(request, segment\) &&/.test(patched), true);
@@ -34,6 +34,8 @@ check("one not loading yet is offered to another player before the bot",
   /\/\/ High-demand request is not loading\s+\/\/ plex-discord-theater: p2pCorePatch\s+if \(this\.pdtShareFromPeer\(request, segment\)\) continue;\s+const shouldLoadThroughHttp/.test(patched), true);
 check("the segment playback waits on is looked at before anything else in the queue",
   /if \(this\.pdtTakeFromPeer\(request, segment\)\) continue;/.test(patched), true);
+check("a segment playback asks for behind where the engine has the playhead starts at once",
+  /this\.engineRequest = engineRequest;\s+\/\/ plex-discord-theater: p2pCorePatch.*\s+if \(segment\.endTime <= this\.playback\.position\) engineRequest\.markAsShouldBeStartedImmediately\(\);/.test(patched), true);
 check("applying it twice changes nothing", patchHybridLoader(patched), patched);
 
 console.log("\n— its memory —");

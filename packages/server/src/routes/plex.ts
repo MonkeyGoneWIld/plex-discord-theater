@@ -21,7 +21,7 @@ import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
 import { fileKeyframes } from "../services/keyframes.js";
-import { sessionHostUserId, sessionHasOtherWatchers, roomPlaysHevc, mayStartTranscode } from "../services/sync.js";
+import { sessionHostUserId, sessionHasOtherWatchers, mayStartHevc, mayStartTranscode } from "../services/sync.js";
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
 import { parseSubtitles, type Cue } from "../services/subtitles.js";
@@ -125,7 +125,7 @@ const VIDEO_PEAK_BITRATE_KBPS = envInt(
  * encoding on Intel or NVIDIA, and "Enable HEVC video encoding" in Plex; a
  * server without those just answers with H.264. Off unless set, because the
  * decode happens in each viewer's Discord, which is the part nobody has tried
- * on every device yet — see roomPlaysHevc for how a room that can't is kept on
+ * on every device yet — see mayStartHevc for how a viewer who can't is kept on
  * H.264.
  */
 const HEVC_TRANSCODE = process.env.HEVC_TRANSCODE === "1";
@@ -4460,7 +4460,7 @@ function refusedCopyReason(version: VersionFacts | null, askedKbps: number, room
   if (codec && codec !== "h264" && codec !== "hevc") {
     return `Unsupported video codec (${codec.toUpperCase()})`;
   }
-  if (codec === "hevc" && !roomHevc) return "HEVC not supported by every viewer";
+  if (codec === "hevc" && !roomHevc) return "HEVC not supported by everyone on this stream";
   if (codec === "h264" && (version?.bitDepth ?? 8) > 8) return `${version!.bitDepth}-bit H.264 not supported by browsers`;
   if ((version?.width ?? 0) > 2048 || (version?.height ?? 0) > 1200) return "Above 1080p, downscaled";
   // Asked above any peak, the bitrate wasn't it — see COPY_ASK_KBPS.
@@ -4941,7 +4941,7 @@ router.get(
       await selectTracksForStart(ratingKey, mediaIndex, audioStreamID, subtitleId);
       // Decided per start, so a room that has gained someone who can't decode
       // HEVC gets H.264 from its next transcode on.
-      const roomHevc = userId !== null && roomPlaysHevc(userId);
+      const roomHevc = userId !== null && mayStartHevc(userId);
       const version = await versionFacts(ratingKey, mediaIndex);
       const kbps = version?.bitrate ?? null;
       // A viewer's ceiling is what a re-encode of their stream is made at,

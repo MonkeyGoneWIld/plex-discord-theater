@@ -22,6 +22,7 @@
  * fetched it in four, and had all 26 to 28 MB of it again from the bot, while
  * the segments after it came out of the cache in no time.
  */
+import { keepSegment, keepingSegments, keptSegment } from "./segmentKeep";
 
 /** About how big each part is. Small enough that even a short segment is
  *  split, since every part runs at a download's pace. */
@@ -69,14 +70,20 @@ export function partUrl(url: string, part: number, parts: number): string {
 const KEPT_FOR_MS = 280_000;
 
 /**
- * Whether the browser's own cache holds the whole of `url`, a segment, as this
- * page would fetch it — every part of one fetched in parts — without asking
- * the bot for any of it. A page back from Discord's pop-out finds there what
- * the page before fetched, for five minutes, unless the cache has let some of
- * it go: on 14 October three pages back found their first 30 to 40 seconds
- * there, and one found nothing.
+ * Whether the browser holds the whole of `url`, a segment, without asking the
+ * bot for any of it: kept by this page or the one before (lib/segmentKeep),
+ * or in its own cache as this page would fetch it — every part of one fetched
+ * in parts. A page back from Discord's pop-out finds there what the page
+ * before fetched, for five minutes, unless the cache has let some of it go:
+ * on 14 October three pages back found their first 30 to 40 seconds there,
+ * and one found nothing.
  */
 export async function inBrowserCache(url: string, fetchFn: Fetch = (i, o) => fetch(i, o)): Promise<boolean> {
+  const kept = await keptSegment(url);
+  if (kept) {
+    kept.body?.cancel().catch(() => {});
+    return true;
+  }
   const bytes = segmentBytesOf(url);
   const parts = bytes === null ? 1 : partsFor(bytes);
   const urls = parts > 1 ? Array.from({ length: parts }, (_, i) => partUrl(url, i, parts)) : [url];
@@ -107,6 +114,8 @@ export interface PartsProgress {
 export type PartsAtOnce = () => number;
 
 const marked = new WeakMap<Request, { key: string; bytes: number; parts: number; atOnce?: PartsAtOnce }>();
+/** Requests for a whole segment, to be answered from what is kept and kept — see keepLater. */
+const keepable = new WeakSet<Request>();
 const progress = new Map<string, PartsProgress>();
 /** Every download in parts under way: each one's way of starting more of its parts — see pumpSegmentParts. */
 const pumps = new Set<() => void>();
@@ -120,6 +129,17 @@ const pumps = new Set<() => void>();
 export function fetchInPartsLater(request: Request, key: string, bytes: number, atOnce?: PartsAtOnce): Request {
   const parts = partsFor(bytes);
   if (parts > 1) marked.set(request, { key, bytes, parts, atOnce });
+  return request;
+}
+
+/**
+ * Have `fetch` — once installSegmentParts has wrapped it — answer this
+ * request, a whole segment, from what this page or the one before it kept
+ * (lib/segmentKeep), and keep what it fetches. Before fetchInPartsLater or
+ * without it: either way it is the request that is marked.
+ */
+export function keepLater(request: Request): Request {
+  keepable.add(request);
   return request;
 }
 
@@ -149,11 +169,32 @@ export function installSegmentParts(target: { fetch: Fetch } = window): void {
   const native = current.bind(target);
   const wrapped = ((input: RequestInfo | URL, init?: RequestInit) => {
     const mark = input instanceof Request ? marked.get(input) : undefined;
+    if (input instanceof Request && !init && keepable.has(input)) return fetchKeeping(native, input, mark);
     if (!mark || init) return native(input, init);
     return fetchInParts(native, input as Request, mark.bytes, mark.parts, mark.key, mark.atOnce);
   }) as Fetch & { segmentParts?: true };
   wrapped.segmentParts = true;
   target.fetch = wrapped;
+}
+
+/**
+ * A whole segment: what is kept of it, or fetched — in parts if it is marked
+ * so — and kept as it is handed on.
+ */
+async function fetchKeeping(
+  native: Fetch,
+  request: Request,
+  mark: { key: string; bytes: number; parts: number; atOnce?: PartsAtOnce } | undefined,
+): Promise<Response> {
+  const kept = await keptSegment(request.url);
+  if (kept) return kept;
+  const response = mark
+    ? await fetchInParts(native, request, mark.bytes, mark.parts, mark.key, mark.atOnce)
+    : await native(request);
+  if (response.status !== 200 || !response.body || !keepingSegments()) return response;
+  const [handedOn, toKeep] = response.body.tee();
+  void keepSegment(request.url, toKeep, response.headers.get("Content-Type"), mark?.bytes ?? segmentBytesOf(request.url));
+  return new Response(handedOn, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
 /**

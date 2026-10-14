@@ -716,7 +716,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             instanceId,
             userId,
             username: usernameRef.current,
-            // Whether the room may be sent HEVC — see roomPlaysHevc.
+            // Whether this player may be sent HEVC — see mayStartHevc.
             hevc: canPlayHevcTranscode(),
             // This player says when its picture is ready, so the room can
             // wait for it — see SyncState.hostWaiting — and whether anybody
@@ -833,7 +833,12 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             // Which stream to play. Arrives on assignment and again whenever
             // its owner repoints it at a new transcode, so `seq` moves even
             // when nothing but the session id has.
-            setState((prev) => ({
+            //
+            // Not one for a title while nothing plays here: that is the
+            // stream a stop has just ended, said again by the server in
+            // answer to something sent before the stop (see sendStop) — and
+            // the next title took it up, session, tracks and all.
+            setState((prev) => (prev.ratingKey === null && typeof msg.ratingKey === "string" ? prev : {
               ...prev,
               variant: {
                 ratingKey: (msg.ratingKey as string) ?? null,

@@ -44,7 +44,7 @@ import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readi
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
-import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, inBrowserCache, installSegmentParts, partsFor, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
+import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, inBrowserCache, installSegmentParts, keepLater, partsFor, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
 import { installTakeFromPeer } from "../lib/takeFromPeer";
 import { connectionsSeen, watchPeerConnections } from "../lib/peerConnections";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
@@ -204,8 +204,15 @@ const HOST_CATCH_UP_MAX_MS = 60_000;
  * joining always has. On 13 October monkey26 joined, stopped two seconds in,
  * and the whole room — blah0391 with forty seconds in hand — waited nineteen
  * seconds for it.
+ *
+ * At least that long, and until it has had picture enough in hand
+ * (PICTURE_ENOUGH_S) once — up to VIEWER_SETTLED_MAX_MS. On 14 October
+ * monkey26, back from a pop-out into Pirates of the Caribbean, never had more
+ * than five seconds in hand, stopped at 16 and 29 seconds, and at 33 asked the
+ * room to wait: blah0391 held thirty seconds with a minute in hand.
  */
 const VIEWER_SETTLED_MS = 30_000;
+const VIEWER_SETTLED_MAX_MS = 120_000;
 /**
  * How much of what the browser's buffer holds after the place a skip goes to
  * it keeps, when the skip lands outside it — see freeRoomFor.
@@ -2377,6 +2384,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   useEffect(() => {
     const v = variantRef.current;
     if (!v) return;
+    // A stream of another title is nothing to this one: the one the last
+    // title left, said again by the server after this player had stopped it.
+    // On 14 October blah0391 left a film and started Pirates of the Caribbean
+    // twenty seconds later, and the new title took up the old one's stream —
+    // its session, and its audio and subtitle, which Pirates doesn't have:
+    // no subtitle was ticked, and choosing one restarted the stream.
+    if (v.ratingKey && v.ratingKey !== item.ratingKey) return;
     // Bank what this client is on, per title. Rolled over rather than
     // overwritten, because the moment a new title arrives the previous pair is
     // the only record of what the person was actually watching.
@@ -2520,7 +2534,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // this player is on it — as it is through a rebuild already under way.
     const switching = switchingForRef.current;
     if (v.hlsSessionId && switching && streamBuiltAtRef.current < switching.since) sayingSwitch(null);
-  }, [variant?.seq]);
+  }, [variant?.seq, item.ratingKey]);
 
   /**
    * Take your own audio and subtitles into the next episode.
@@ -2982,6 +2996,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    *  its picture first moved — see VIEWER_SETTLED_MS. */
   const landedInPlayingRoomRef = useRef(false);
   const pictureSinceRef = useRef(0);
+  /** Whether this stream has had picture enough in hand yet — see VIEWER_SETTLED_MS. */
+  const hadPictureEnoughRef = useRef(false);
   const reportViewerStall = useCallback((starved: boolean, starvedMs: number) => {
     const v = videoRef.current;
     if (!v) return;
@@ -2996,7 +3012,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (!sessionIdRef.current || !streamShownRef.current || roomWaitRef.current) return;
     // Nor is one while it is still getting going in a room it came into
     // playing: see VIEWER_SETTLED_MS.
-    if (landedInPlayingRoomRef.current && Date.now() - pictureSinceRef.current < VIEWER_SETTLED_MS) return;
+    const sincePictureMs = Date.now() - pictureSinceRef.current;
+    if (landedInPlayingRoomRef.current && (sincePictureMs < VIEWER_SETTLED_MS ||
+        (!hadPictureEnoughRef.current && sincePictureMs < VIEWER_SETTLED_MAX_MS))) return;
     stallToldRef.current = true;
     logEvent("Sync", "picture stopped, asking the room to wait for it", snapshot(v));
     syncActionsRef.current?.sendStalled();
@@ -3118,6 +3136,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         ? v.duration - v.currentTime
         : Infinity;
       let short = shortToldRef.current;
+      if (streaming && inHandS >= Math.min(PICTURE_ENOUGH_S, leftS - 1)) hadPictureEnoughRef.current = true;
       if (!streaming || inHandS >= Math.min(PICTURE_ENOUGH_S, leftS - 1)) {
         short = false;
         spent = false;
@@ -4206,8 +4225,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   // A copied segment, whose size its URL carries, comes in
                   // parts — always the same ones, for a page after this one
                   // to find in the browser's cache (lib/segmentParts) — as
-                  // many of them at once as partsAtOnce says.
-                  const request = new Request(url, { headers, signal });
+                  // many of them at once as partsAtOnce says. Any whole
+                  // segment comes from what this page or the one before kept,
+                  // if it is there, and is kept (lib/segmentKeep).
+                  const request = keepLater(new Request(url, { headers, signal }));
                   const bytes = segmentBytesOf(url);
                   if (!bytes) return request;
                   partsAsked.set(url, partsFor(bytes));
@@ -4462,6 +4483,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         playlistEdgeRef.current = null;
         streamShownRef.current = false;
         landedInPlayingRoomRef.current = false;
+        hadPictureEnoughRef.current = false;
         streamBuiltAtRef.current = Date.now();
         // What the server says about this stream — copied or re-encoded, and
         // why — for Stats for nerds and the buffering hint. A new stream also

@@ -1327,15 +1327,23 @@ function Runner() {
    * their next 30 to 40 seconds there and landed 3, 7 and 11 seconds past the
    * room all the same, by the bot's speed, and waited that long for it.
    */
-  async function runPopOutCache(who: "host" | "viewer" = "host") {
+  /**
+   * `browserLetGo`: the browser's own cache keeps none of what the bot sends,
+   * as under a 20 to 38 Mbps film it often had let it go by the time a page
+   * came back — and what the page before kept for it (lib/segmentKeep) is
+   * all there is.
+   */
+  async function runPopOutCache(who: "host" | "viewer" = "host", browserLetGo = false) {
     setRunning(true);
-    const out: string[] = [`— the ${who} popping out, with what the bot sent kept by the browser —`];
+    const out: string[] = [browserLetGo
+      ? `— the ${who} popping out, the browser's cache keeping nothing of what the bot sent —`
+      : `— the ${who} popping out, with what the bot sent kept by the browser —`];
     const say = (line: string) => { out.push(line); setLines([...out]); };
     setLines([...out]);
     const popped = who === "host" ? "u-host" : "u-viewer";
     const other = who === "host" ? "u-viewer" : "u-host";
     try {
-      await startOnce("p2p=0&stream=copy4&event=1&eventS=200&cache=1", {}, 40_000);
+      await startOnce(`p2p=0&stream=copy4&event=1&eventS=200&cache=${browserLetGo ? "none" : "1"}`, {}, 40_000);
       await pause(15_000);
       // Every segment it had whole before it popped out: all of one split's parts.
       const before = (await api("/api/test/served") as Served[]).filter((s) => s.user === popped && !s.cut);
@@ -1522,10 +1530,16 @@ function Runner() {
    * starts: getting going, it catches up on its own, and the host — the room —
    * plays on. On 13 October monkey26 joined, stopped two seconds in, and the
    * whole room waited nineteen seconds for it, the host with forty in hand.
+   *
+   * `afterS`: stopping that long after it starts instead, never having had
+   * much in hand — on 14 October monkey26, back from a pop-out, stopped at 33
+   * seconds and the room held thirty for it, the host with a minute in hand.
    */
-  async function runJoinerStalls() {
+  async function runJoinerStalls(afterS = 0) {
     setRunning(true);
-    const out: string[] = ["— a viewer joining a film already playing, its picture stopping just after it starts —"];
+    const out: string[] = [afterS
+      ? `— a viewer joining a film already playing, its picture stopping ${afterS}s after it starts, little ever in hand —`
+      : "— a viewer joining a film already playing, its picture stopping just after it starts —"];
     const say = (line: string) => { out.push(line); setLines([...out]); };
     setLines([...out]);
     try {
@@ -1543,6 +1557,11 @@ function Runner() {
       const joinedAt = Date.now();
       (viewerFrame.current?.contentWindow as Window | null | undefined)?.postMessage({ kind: "press", press: ["Join"] }, "*");
       await waitFor(() => firstPlay("u-viewer"), 60_000, "the viewer to play");
+      if (afterS) {
+        await pause(afterS * 1000);
+        const most = Math.max(0, ...(events.get("u-viewer") ?? []).filter((e) => e.t > joinedAt && typeof e.data.inHandS === "number").map((e) => Number(e.data.inHandS)));
+        say(`    the joiner ${afterS}s in, the most it said it had in hand ${most.toFixed(1)}s`);
+      }
       // Its next segments held back as soon as it plays.
       await api("/api/test/stall?user=u-viewer&ms=12000");
       await pause(25_000);
@@ -1797,10 +1816,12 @@ function Runner() {
         <button disabled={running} onClick={() => void runPopOut("host", "long")}>Host pops out, long back</button>
         <button disabled={running} onClick={() => void runPopOutCache()}>Pop out, from the cache</button>
         <button disabled={running} onClick={() => void runPopOutCache("viewer")}>Viewer pops out, from the cache</button>
+        <button disabled={running} onClick={() => void runPopOutCache("viewer", true)}>Viewer pops out, browser's cache let go</button>
         <button disabled={running} onClick={() => void runPopOutOwnTracks()}>Viewer pops out, own tracks</button>
         <button disabled={running} onClick={() => void runJoinWhileAhead()}>Join while ahead</button>
         <button disabled={running} onClick={() => void runNextTitle()}>Next title, together</button>
         <button disabled={running} onClick={() => void runJoinerStalls()}>Joiner stalls</button>
+        <button disabled={running} onClick={() => void runJoinerStalls(35)}>Joiner stalls later</button>
         <button disabled={running} onClick={() => void runAlonePopOut()}>Host alone pops out</button>
         <button disabled={running} onClick={() => void runPreviewAhead()}>Preview frames from the title's page</button>
         <button disabled={running} onClick={() => void runSkipThenPause()}>Skip then pause</button>

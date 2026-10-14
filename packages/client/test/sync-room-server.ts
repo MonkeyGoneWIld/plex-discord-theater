@@ -30,6 +30,8 @@
 //
 // &cache=1 answers segments as the bot does, for the browser to keep five
 // minutes (Cache-Control) — and so for the page after a pop-out to find them.
+// &cache=none for it to keep none of them (no-store), as a browser that has
+// let them go has none.
 //
 // &previews=1 gives the title preview frames, as Plex has them for most
 // films: /api/plex/preview/<part>/index sends them a pass at a time as the
@@ -88,6 +90,7 @@ let streamDir = SMALL_STREAM;
 let partsOn = true;
 /** Whether segments are answered for the browser to keep, as the bot's are — see &cache=1. */
 let cacheOn = false;
+let cacheNone = false;
 
 /** Until when each user's segments are held back. */
 const stallUntil = new Map<string, number>();
@@ -282,6 +285,7 @@ const server = http.createServer(async (req, res) => {
     streamDir = stream === "copy" ? COPY_STREAM : stream === "copy4" ? COPY4_STREAM : stream === "copy4long" ? COPY4_LONG_STREAM : SMALL_STREAM;
     partsOn = url.searchParams.get("parts") !== "0";
     cacheOn = url.searchParams.get("cache") === "1";
+    cacheNone = url.searchParams.get("cache") === "none";
     subtitleReads.clear();
     subtitleReadPace = Number(url.searchParams.get("subPace") ?? 3) || 3;
     return json(res, { ok: true, p2p: p2pOn, stream: path.basename(streamDir), parts: partsOn });
@@ -402,6 +406,7 @@ const server = http.createServer(async (req, res) => {
     const headers: Record<string, string | number> = { "Content-Type": "video/mp2t" };
     // As the bot's (routes/plex.ts setSegmentCacheHeaders).
     if (cacheOn) headers["Cache-Control"] = "public, max-age=300, immutable";
+    if (cacheNone) headers["Cache-Control"] = "no-store";
     const parts = url.searchParams.get("parts");
     const range = req.headers.range?.match(/^bytes=(\d+)-(\d*)$/);
     if (parts) {

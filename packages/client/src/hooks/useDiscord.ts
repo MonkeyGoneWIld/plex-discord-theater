@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { DiscordSDK } from "@discord/embedded-app-sdk";
 import { apiPost, setSessionToken } from "../lib/api";
 import { initClientLogging, logEvent } from "../lib/log";
+import { checkCacheStorage } from "../lib/storageCheck";
 import { createPresenceSender } from "../lib/presence";
 import type { PresenceInput, PresenceSender } from "../lib/presence";
 
@@ -225,6 +226,9 @@ export function useDiscord(): DiscordState {
           // Only now can shipped logs authenticate, so this is the earliest
           // point worth starting the uploader.
           initClientLogging();
+          // Whether an activity may keep the film in Cache Storage across a
+          // pop-out — said in the log, nothing waits on it (lib/storageCheck).
+          void checkCacheStorage();
         } else {
           console.warn("No session token received from server");
         }

@@ -37,14 +37,14 @@ import { carryTrackPrefs, describeWatched, endTrackSitting, isCommentary, mergeT
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
-import { MAX_WAIT_FOR_ROOM_S, cameFromCache, catchUpLeadS, landingBySize, landingFor, recentSegmentBytesPerS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
+import { LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, cameFromCache, catchUpLeadS, landingBySize, landingFor, recentSegmentBytesPerS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, nextSegmentInS, pictureStartFor } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
-import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, installSegmentParts, partsFor, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
+import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, inBrowserCache, installSegmentParts, partsFor, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
 import { installTakeFromPeer } from "../lib/takeFromPeer";
 import { connectionsSeen, watchPeerConnections } from "../lib/peerConnections";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
@@ -437,6 +437,10 @@ const BACK_BUFFER_S = 30;
 const FORWARD_BUFFER_FLUSH_S = 120;
 /** Without data to play for this long, the loading screen goes up. */
 const LOADING_SCREEN_AFTER_MS = 500;
+/** The longest a player landing past the room looks in the browser's cache for
+ *  what it will play there — see the landing on LEVEL_LOADED. A look is a
+ *  moment; past this it lands as though nothing were held. */
+const CACHE_LOOK_MS = 300;
 /**
  * The P2P engine's memory, MiB: what has been downloaded, ahead of the
  * playhead and behind it, kept here as well as in the browser's own buffer,
@@ -4510,27 +4514,71 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             if (wait && Math.abs(wait.atS - atS) < 0.01 && video.readyState < HTMLMediaElement.HAVE_METADATA && frags.length > 0) {
               const last = frags[frags.length - 1];
               const limitS = Math.min(last.start + last.duration - 1, roomAtS + MAX_WAIT_FOR_ROOM_S - 5);
-              // Far enough past the room for what it lands in to come first,
-              // by the segments' sizes — lib/roomWait landingBySize — at the
-              // speed this player's segments came at, here or on the page
-              // before this one.
-              const roomNowS = roomAtS + (Date.now() - landedAt) / 1000;
-              const speed = networkBytesPerSRef.current ?? recentSegmentBytesPerS();
-              const bySizeS = landingBySize(atS, roomNowS, sizedSegments(frags), speed, limitS);
-              if (bySizeS > atS + 0.01) {
-                logEvent("Sync", "landing further past the room, for what it lands in to come first", {
-                  fromS: Number(atS.toFixed(2)),
-                  toS: Number(bySizeS.toFixed(2)),
-                  roomPosS: Number(roomNowS.toFixed(2)),
-                  Mbps: speed ? Number(((speed * 8) / 1e6).toFixed(1)) : "?",
-                });
-              }
-              const landS = landingFor(bySizeS, frags, limitS);
               const segmentAt = (t: number) => frags.findIndex((f) => t >= f.start && t < f.start + f.duration);
-              const loadingFrom = hlsConfig.startPosition ?? -1;
-              if (landS !== atS || segmentAt(loadingFrom) !== segmentAt(landS)) {
+              const roomNow = () => roomAtS + (Date.now() - landedAt) / 1000;
+              /**
+               * What of the stretch from the room's place the browser already
+               * holds: a page back from a pop-out finds the page before's
+               * segments in its cache (lib/segmentParts inBrowserCache), and
+               * those come in no time — so it lands a second past the room
+               * rather than by the bot's speed, and is playing with it in a
+               * moment. Looked at before anything is fetched, with loading
+               * stopped meanwhile, or the segment at the landing it leaves would
+               * come from the bot for nothing; a moment at most.
+               */
+              const firstLooked = Math.max(0, segmentAt(roomNow()));
+              const looked = frags.slice(firstLooked).filter((f) => f.start < roomNow() + LAND_LOOK_AHEAD_S + 1);
+              hls.stopLoad();
+              void (async () => {
+                const cached = new Set<number>();
+                try {
+                  const held = await Promise.race([
+                    Promise.all(looked.map((f) => inBrowserCache(f.url))),
+                    new Promise<null>((r) => setTimeout(() => r(null), CACHE_LOOK_MS)),
+                  ]);
+                  held?.forEach((inCache, k) => { if (inCache) cached.add(firstLooked + k); });
+                } catch {
+                  // Nothing is known to be held: it lands as it always did.
+                }
+                if (!mounted || hlsRef.current !== hls) return;
+                // Moved on meanwhile — a seek, the room — whatever moved it
+                // decides where it is.
+                if (roomWaitRef.current !== wait || Math.abs(wait.atS - atS) > 0.01 || video.readyState >= HTMLMediaElement.HAVE_METADATA) {
+                  hls.startLoad(video.currentTime);
+                  return;
+                }
+                // Far enough past the room for what it lands in to come first,
+                // by the segments' sizes — lib/roomWait landingBySize — at the
+                // speed this player's segments came at, here or on the page
+                // before this one; none at all for what is cached.
+                const roomNowS = roomNow();
+                const speed = networkBytesPerSRef.current ?? recentSegmentBytesPerS();
+                const sized = sizedSegments(frags)?.map((s, k) => (cached.has(k) ? { ...s, cached: true } : s)) ?? null;
+                const roomInCache = cached.has(segmentAt(roomNowS));
+                const bySizeS = landingBySize(roomInCache ? roomNowS : atS, roomNowS, sized, speed, limitS);
+                if (roomInCache) {
+                  let cachedToS = roomNowS;
+                  for (let k = segmentAt(roomNowS); cached.has(k); k++) cachedToS = frags[k].start + frags[k].duration;
+                  logEvent("Sync", "landing just past the room: what it plays from there is in the browser's cache", {
+                    fromS: Number(atS.toFixed(2)),
+                    toS: Number(bySizeS.toFixed(2)),
+                    roomPosS: Number(roomNowS.toFixed(2)),
+                    cachedAheadS: Number((cachedToS - roomNowS).toFixed(1)),
+                  });
+                } else if (bySizeS > atS + 0.01) {
+                  logEvent("Sync", "landing further past the room, for what it lands in to come first", {
+                    fromS: Number(atS.toFixed(2)),
+                    toS: Number(bySizeS.toFixed(2)),
+                    roomPosS: Number(roomNowS.toFixed(2)),
+                    Mbps: speed ? Number(((speed * 8) / 1e6).toFixed(1)) : "?",
+                  });
+                }
+                // A sliver of a segment is only worth getting past when the
+                // next has to be fetched: out of the cache it is there at once.
+                const at = segmentAt(bySizeS);
+                const landS = cached.has(at) && cached.has(at + 1) ? bySizeS : landingFor(bySizeS, frags, limitS);
                 if (landS !== bySizeS) {
-                  const here = frags[segmentAt(bySizeS)];
+                  const here = frags[at];
                   logEvent("Sync", "landing at the start of the next segment instead", {
                     fromS: Number(bySizeS.toFixed(2)),
                     toS: Number(landS.toFixed(2)),
@@ -4539,13 +4587,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   });
                 }
                 wait.atS = landS;
-                video.currentTime = landS;
+                if (Math.abs(video.currentTime - landS) > 0.01) video.currentTime = landS;
                 // After everything else has had this playlist: the P2P engine
                 // learns its segments from it.
-                setTimeout(() => {
-                  if (mounted && hlsRef.current === hls) hls.startLoad(landS);
-                }, 0);
-              }
+                hls.startLoad(landS);
+              })();
             }
           }
         });

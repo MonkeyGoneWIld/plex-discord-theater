@@ -1321,16 +1321,24 @@ function Runner() {
    * parts where the page before had fetched it in four, and had all 26 to 28
    * MB of it again from the bot before it could show anything.
    */
-  async function runPopOutCache() {
+  /**
+   * And where the page back lands: just past the room, when what it plays
+   * from there is in the browser's cache. On 14 October three pages back had
+   * their next 30 to 40 seconds there and landed 3, 7 and 11 seconds past the
+   * room all the same, by the bot's speed, and waited that long for it.
+   */
+  async function runPopOutCache(who: "host" | "viewer" = "host") {
     setRunning(true);
-    const out: string[] = ["— the host popping out, with what the bot sent kept by the browser —"];
+    const out: string[] = [`— the ${who} popping out, with what the bot sent kept by the browser —`];
     const say = (line: string) => { out.push(line); setLines([...out]); };
     setLines([...out]);
+    const popped = who === "host" ? "u-host" : "u-viewer";
+    const other = who === "host" ? "u-viewer" : "u-host";
     try {
       await startOnce("p2p=0&stream=copy4&event=1&eventS=200&cache=1", {}, 40_000);
       await pause(15_000);
-      // Every segment the host had whole before it popped out: all of one split's parts.
-      const before = (await api("/api/test/served") as Served[]).filter((s) => s.user === "u-host" && !s.cut);
+      // Every segment it had whole before it popped out: all of one split's parts.
+      const before = (await api("/api/test/served") as Served[]).filter((s) => s.user === popped && !s.cut);
       const parts = new Map<string, Map<string, Set<string>>>();
       const whole = new Set<string>();
       for (const s of before) {
@@ -1345,27 +1353,39 @@ function Runner() {
         if (got.size === Number(n)) whole.add(s.seg);
       }
       const poppedAt = Date.now();
-      const win = hostFrame.current?.contentWindow as (Window & typeof globalThis) | null | undefined;
-      win?.sessionStorage.setItem("pdt:test:poppedOut", "1");
-      win?.location.reload();
-      say(`… the host reloaded at ${latest.get("u-host")?.pos.toFixed(1)}s, having had ${whole.size} segments whole`);
+      if (who === "host") {
+        const win = hostFrame.current?.contentWindow as (Window & typeof globalThis) | null | undefined;
+        win?.sessionStorage.setItem("pdt:test:poppedOut", "1");
+        win?.location.reload();
+      } else {
+        const frame = viewerFrame.current;
+        if (frame) frame.src = frame.src;
+      }
+      say(`… the ${who} reloaded at ${latest.get(popped)?.pos.toFixed(1)}s, having had ${whole.size} segments whole`);
       await waitFor(() => {
-        const h = latest.get("u-host");
-        const v = latest.get("u-viewer");
-        const reloaded = (events.get("u-host") ?? []).some((e) => e.t > poppedAt && e.tag === "HLS" && e.msg === "starting session");
-        return reloaded && h && v && !h.paused && h.ready >= 3 && Math.abs(h.pos - v.pos) < 1;
-      }, 30_000, "the host back in step");
+        const p = latest.get(popped);
+        const o = latest.get(other);
+        const reloaded = (events.get(popped) ?? []).some((e) => e.t > poppedAt && e.tag === "HLS" && e.msg === "starting session");
+        return reloaded && p && o && !p.paused && p.ready >= 3 && Math.abs(p.pos - o.pos) < 1;
+      }, 30_000, `the ${who} back in step`);
       const backS = (Date.now() - poppedAt) / 1000;
       await pause(3_000);
       const again = (await api("/api/test/served") as Served[])
-        .filter((s) => s.user === "u-host" && (s.askedAt ?? s.at) > poppedAt && whole.has(s.seg));
+        .filter((s) => s.user === popped && (s.askedAt ?? s.at) > poppedAt && whole.has(s.seg));
       const againMB = again.reduce((sum, s) => sum + (s.sent ?? 0), 0) / 1e6;
-      const firstSegs = (events.get("u-host") ?? []).filter((e) => e.t > poppedAt && e.tag === "Load" && e.msg === "segment in");
+      const back = (events.get(popped) ?? []).filter((e) => e.t > poppedAt);
+      const firstSegs = back.filter((e) => e.tag === "Load" && e.msg === "segment in");
       say(`    back in step ${backS.toFixed(1)}s after the reload; its first segments ${firstSegs.map((e) => `${e.data.tookS}s${e.data.cache ? " (cache)" : ""}`).join(", ") || "—"}`);
       say(`${again.length === 0 ? "PASS" : "FAIL"} the page back had nothing again from the bot that the page before had whole (${againMB.toFixed(1)} MB, ${new Set(again.map((s) => s.seg)).size} segment(s))`);
-      const h = latest.get("u-host")!;
-      const v = latest.get("u-viewer")!;
-      say(`${Math.abs(h.pos - v.pos) < 1 && !h.paused && !v.paused ? "PASS" : "FAIL"} and the two play on together (${(h.pos - v.pos).toFixed(2)}s apart)`);
+      // Where it landed, and how long it waited there with its picture in.
+      const landed = back.filter((e) => e.tag === "Sync" && /^landing (just past|further past|on the room clock|at the start of the next)/.test(e.msg)).at(-1);
+      const pastS = landed ? Number(landed.data.toS) - Number(landed.data.roomPosS ?? landed.data.toS) : null;
+      const waitedMs = back.filter((e) => e.tag === "Sync" && e.msg === "done waiting for the room").reduce((sum, e) => sum + Number(e.data.waitedMs ?? 0), 0);
+      say(`${landed && /just past the room/.test(landed.msg) && pastS !== null && pastS < 2 ? "PASS" : "FAIL"} it lands just past the room, what it plays being in the browser's cache (${landed ? `${landed.msg}, ${pastS?.toFixed(1)}s past` : "no landing said"})`);
+      say(`${waitedMs < 3000 ? "PASS" : "FAIL"} and waits there no more than a moment for it (${(waitedMs / 1000).toFixed(1)}s)`);
+      const p = latest.get(popped)!;
+      const o = latest.get(other)!;
+      say(`${Math.abs(p.pos - o.pos) < 1 && !p.paused && !o.paused ? "PASS" : "FAIL"} and the two play on together (${(p.pos - o.pos).toFixed(2)}s apart)`);
     } catch (err) {
       say(`FAIL ${String(err)}`);
     } finally {
@@ -1776,6 +1796,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runPopOut("host", "slow")}>Host pops out, slow back</button>
         <button disabled={running} onClick={() => void runPopOut("host", "long")}>Host pops out, long back</button>
         <button disabled={running} onClick={() => void runPopOutCache()}>Pop out, from the cache</button>
+        <button disabled={running} onClick={() => void runPopOutCache("viewer")}>Viewer pops out, from the cache</button>
         <button disabled={running} onClick={() => void runPopOutOwnTracks()}>Viewer pops out, own tracks</button>
         <button disabled={running} onClick={() => void runJoinWhileAhead()}>Join while ahead</button>
         <button disabled={running} onClick={() => void runNextTitle()}>Next title, together</button>

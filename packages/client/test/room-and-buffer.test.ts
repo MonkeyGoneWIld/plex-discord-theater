@@ -20,7 +20,7 @@ import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS } from "../src/lib/bufferTrim";
 import { roomPositionNow } from "../src/hooks/useSync";
 import { enoughToStart, nextSegmentInS, pictureStartFor } from "../src/lib/copyStart";
-import { AFTER_STOPS_S, MAX_EXTRA_WAIT_S, MAX_READY_CUSHION_S, afterStopsS, comingInBytesPerS, lateByS, readiness } from "../src/lib/readyCushion";
+import { AFTER_STOPS_S, MAX_EXTRA_WAIT_S, MAX_READY_CUSHION_AFTER_STOPS_S, MAX_READY_CUSHION_S, afterStopsS, comingInBytesPerS, lateByS, readiness } from "../src/lib/readyCushion";
 
 let pass = 0;
 let fail = 0;
@@ -191,6 +191,20 @@ console.log("\n— and far enough past it for what it lands in to come first —
   check("no speed, no size: where it was going",
     [landingBySize(2725.08, 2721.38, segs, null, Infinity), landingBySize(2725.08, 2721.38, [{ start: 2721.4, duration: 10.9, bytes: null }], bps, Infinity), landingBySize(2725.08, 2721.38, null, bps, Infinity)],
     [2725.08, 2725.08, 2725.08]);
+  // blah0391 back from a pop-out on 14 October: its next 30 to 40 seconds in
+  // the browser's cache, and it landed 10.7 s past the room all the same.
+  const cached = segs.map((s) => ({ ...s, cached: true }));
+  check("what it lands in, and after, out of the browser's cache: a second past the room",
+    at(landingBySize(2721.38, 2721.38, cached, bps, 2721.38 + 25)), at(2721.38 + 1));
+  check("so with no speed to go by",
+    at(landingBySize(2721.38, 2721.38, cached, null, 2721.38 + 25)), at(2721.38 + 1));
+  // Cached up to the heavy one, which is fetched from the bot: far enough past
+  // the room for that to come in time, whatever else is cached.
+  const partly = segs.map((s, i) => (i < 1 ? { ...s, cached: true } : s));
+  check("cached only up to a heavy one still to come: past that, as before",
+    at(landingBySize(2716, 2716, partly, bps, 2716 + 25)), at(2732.3 + LAND_INTO_SEGMENT_S));
+  check("and with no speed to say it will come in time, not landed on the cached one",
+    landingBySize(2716, 2716, partly, null, 2716 + 25) > 2716 + 1, true);
 }
 
 console.log("\n— a segment out of the browser's cache says nothing of the connection —");
@@ -249,7 +263,19 @@ console.log("\n— picture enough in hand to go —");
   check("eight is enough then", readiness({ ...base, heldToS: 108, upcoming: segs(108, Array(13).fill(5)), bytesPerS: 50 * MB, stops: 1 }).ready, true);
   check("more each time it has stopped", [afterStopsS(0), afterStopsS(1), afterStopsS(2), afterStopsS(3), afterStopsS(7)], [0, ...AFTER_STOPS_S, AFTER_STOPS_S[2]]);
   const slow = readiness({ ...base, heldToS: 100 + MAX_READY_CUSHION_S, upcoming: segs(130, Array(8).fill(30)), bytesPerS: 1 * MB });
-  check("with twenty seconds in hand it goes, whatever is coming", [slow.ready, slow.why], [true, "enough in hand"]);
+  check("with eight seconds in hand it goes, whatever is coming", [slow.ready, slow.why], [true, "enough in hand"]);
+  // monkey26 starting a title on 14 October: its first segments came at
+  // 3 Mbps, then at 17 to 32 once it was playing; it went after waiting its
+  // longest with 7.5 s, and never stopped.
+  const firstSegments = segs(108.1, Array(13).fill(6.5));
+  check("a start with eight seconds in hand goes, whatever its first segments' speed says of the next minute",
+    [readiness({ ...base, heldToS: 108.1, upcoming: firstSegments, bytesPerS: 0.41 * MB }).ready,
+      readiness({ ...base, heldToS: 106, upcoming: segs(106, Array(14).fill(6.5)), bytesPerS: 0.41 * MB }).ready],
+    [true, false]);
+  check("but having stopped lately it holds out for the next minute as it did, up to twenty",
+    [readiness({ ...base, heldToS: 112, upcoming: segs(112, Array(12).fill(30)), bytesPerS: 1 * MB, stops: 1 }).ready,
+      readiness({ ...base, heldToS: 100 + MAX_READY_CUSHION_AFTER_STOPS_S, upcoming: segs(120, Array(10).fill(30)), bytesPerS: 1 * MB, stops: 1 }).ready],
+    [false, true]);
   check("but not after stopping three times lately: then it holds out for more",
     [readiness({ ...base, heldToS: 100 + MAX_READY_CUSHION_S, upcoming: segs(120, Array(10).fill(30)), bytesPerS: 1 * MB, stops: 3 }).ready,
       readiness({ ...base, heldToS: 100 + AFTER_STOPS_S[2], upcoming: segs(125, Array(9).fill(30)), bytesPerS: 1 * MB, stops: 3 }).ready],

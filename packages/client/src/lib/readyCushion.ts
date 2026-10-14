@@ -29,6 +29,16 @@
  * And after a skip, as in every player, the moment it has picture enough to
  * start on, as it always has: somebody who skipped is waiting to see the place
  * they skipped to. If it stops after that, its next wait is a stop's.
+ *
+ * MAX_READY_CUSHION_S was 20 seconds. A stream's first segments come slowest
+ * — on 14 October 2 to 8 Mbps for the first fifteen seconds, then 17 to 32 —
+ * so the next minute judged by them never came in time, and every start
+ * waited its MAX_EXTRA_WAIT_S with 7 to 9 seconds already in hand: four
+ * starts that evening went with 7.5, 10.5, 11.2 and 12.9 seconds, and none
+ * stopped after. Gone with 8 they'd each have played 3 or 4 seconds sooner,
+ * also without stopping, while the 3 and 5 seconds of 13 October stay too
+ * little to go on. Having stopped lately, it is 20 as it was
+ * (MAX_READY_CUSHION_AFTER_STOPS_S).
  */
 import { READY_AHEAD_S, READY_TOLERANCE_S } from "./copyStart";
 
@@ -41,8 +51,11 @@ export interface UpcomingSegment {
   bytes: number | null;
 }
 
-/** Whatever is coming, this much in hand is enough to go on. */
-export const MAX_READY_CUSHION_S = 20;
+/** Whatever is coming, this much in hand is enough to go on — see the top of this file. */
+export const MAX_READY_CUSHION_S = 8;
+/** And having stopped lately, as it was before: a stop is a sign the speed
+ *  won't hold, so it waits as long for the next minute as it always did. */
+export const MAX_READY_CUSHION_AFTER_STOPS_S = 20;
 /** How far past the playhead a player looks for a segment that would come in too late. */
 export const LOOK_AHEAD_S = 60;
 /** The share of the speed things are coming in at counted on — they won't always. */
@@ -128,7 +141,7 @@ export function readiness(o: ReadyInput): Readiness {
     return { ready: enough, why: enough ? "a skip, with picture enough to start on" : "short of the least in hand", lateS: null, inHandS, leastS };
   }
   const stopsS = afterStopsS(o.stops);
-  const capS = Math.min(Math.max(MAX_READY_CUSHION_S, stopsS), leftS);
+  const capS = Math.min(Math.max(stopsS > 0 ? MAX_READY_CUSHION_AFTER_STOPS_S : MAX_READY_CUSHION_S, stopsS), leftS);
   const leastS = Math.min(Math.max(READY_AHEAD_S, stopsS), capS);
   const base = { inHandS, leastS };
   if (inHandS + READY_TOLERANCE_S < leastS) return { ready: false, why: "short of the least in hand", lateS: null, ...base };

@@ -753,6 +753,33 @@ function stopSessionPing(hlsSessionId: string): void {
  * down with them — and so would a host handing over the role and closing the tab,
  * with the new host still on the stream they were both watching.
  */
+/**
+ * Whether a transcode may be started for `userId`, as `sessionId`, of
+ * `ratingKey` — see the master playlist route in routes/plex.ts.
+ *
+ * The session id is the player's own, made up before it asks, so anybody
+ * signed in could have a transcode started under any id they liked, one after
+ * another, without being in a room at all. Now only somebody in a room —
+ * connected to it, or in the grace a host or a viewer gets while their
+ * connection is made again — and only for what that room plays: a stream it
+ * already runs, whatever its host starts, and a stream of its title that this
+ * person drives.
+ */
+export function mayStartTranscode(userId: string | null, ratingKey: string, sessionId: string): boolean {
+  if (!userId) return false;
+  for (const room of rooms.values()) {
+    const client = [...room.clients].find((c) => c.userId === userId);
+    const hostComingBack = room.hostReconnect?.client.userId === userId;
+    if (!client && !hostComingBack && !room.away.has(userId)) continue;
+    const s = room.state;
+    const variants = [...s.variants.values()];
+    if (s.hlsSessionId === sessionId || variants.some((v) => v.hlsSessionId === sessionId)) return true;
+    if (client?.isHost || hostComingBack) return true;
+    if (ratingKey === s.ratingKey && variants.some((v) => v.ownerUserId === userId)) return true;
+  }
+  return false;
+}
+
 export function sessionHasOtherWatchers(sessionId: string, userId: string | null): boolean {
   for (const room of rooms.values()) {
     for (const v of room.state.variants.values()) {

@@ -4,7 +4,7 @@
  * server's segmentPart does, at a pace per download.
  */
 import {
-  MAX_PARTS, fetchInParts, fetchInPartsLater, installSegmentParts, partBounds, partUrl, partsFor, pumpSegmentParts,
+  MAX_PARTS, fetchInParts, fetchInPartsLater, inBrowserCache, installSegmentParts, partBounds, partUrl, partsFor, pumpSegmentParts,
   segmentBytesOf, segmentProgress,
 } from "../src/lib/segmentParts";
 import { keepOnPeer, keepSharedOnPeer, ownerOf, shareChoice, shouldTakeFromPeer } from "../src/lib/takeFromPeer";
@@ -232,6 +232,30 @@ console.log("\n— fetch, wrapped —");
   const small = fetchInPartsLater(new Request("https://bot.test/x?n=100"), "x", 100);
   await target.fetch(small);
   check("a segment too small to split goes as it is", b.asked.length, 1);
+}
+
+console.log("\n— what the browser's cache holds of a segment —");
+{
+  /** A cache holding these URLs, as the browser's answers only-if-cached. */
+  const cache = (held: Map<string, number>, asks: Array<RequestInit | undefined>) =>
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      asks.push(init);
+      const at = held.get(String(input));
+      if (at === undefined) throw new TypeError("Failed to fetch");
+      return new Response("x", { status: 200, headers: { Date: new Date(at).toUTCString() } });
+    };
+  const parts = partsFor(SEGMENT.length);
+  const all = (at: number) => new Map(Array.from({ length: parts }, (_, i) => [partUrl(URL0, i, parts), at]));
+  const asks: Array<RequestInit | undefined> = [];
+  check("every part of it, as this page would fetch them: held", await inBrowserCache(URL0, cache(all(Date.now()), asks)), true);
+  check("asked of the cache alone, never the bot", asks.every((o) => o?.cache === "only-if-cached" && o?.mode === "same-origin"), true);
+  const missing = all(Date.now());
+  missing.delete(partUrl(URL0, parts - 1, parts));
+  check("a part let go: not held", await inBrowserCache(URL0, cache(missing, [])), false);
+  check("kept past the five minutes the bot allows: not held, it would be asked for again",
+    await inBrowserCache(URL0, cache(all(Date.now() - 6 * 60_000), [])), false);
+  check("a segment not fetched in parts: the segment itself",
+    await inBrowserCache("https://bot.test/seg/00001.ts", cache(new Map([["https://bot.test/seg/00001.ts", Date.now()]]), [])), true);
 }
 
 console.log("\n— the segment the picture waits on, from another player or the bot —");

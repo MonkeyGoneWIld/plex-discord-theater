@@ -21,7 +21,7 @@ import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
 import { fileKeyframes } from "../services/keyframes.js";
-import { sessionHostUserId, sessionHasOtherWatchers, roomPlaysHevc } from "../services/sync.js";
+import { sessionHostUserId, sessionHasOtherWatchers, roomPlaysHevc, mayStartTranscode } from "../services/sync.js";
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
 import { parseSubtitles, type Cue } from "../services/subtitles.js";
@@ -4491,6 +4491,13 @@ function streamNotes(notes: Record<string, string | number | null>): string[] {
  * Start a Plex HLS transcode session and return rewritten manifest.
  * The client generates the sessionId (UUID) and passes it in the URL.
  */
+/** Whether a transcode may be started — mayStartTranscode, unless a test says otherwise. */
+let startAllowed: typeof mayStartTranscode = mayStartTranscode;
+/** For the tests about something else than who may start one: starts without a room. */
+export function allowStartsWithoutRoom(): void {
+  startAllowed = () => true;
+}
+
 router.get(
   "/hls/:ratingKey/:sessionId/master.m3u8",
   async (req: Request, res: Response) => {
@@ -4504,6 +4511,19 @@ router.get(
     }
     if (!UUID_RE.test(sessionId)) {
       res.status(400).json({ error: "Invalid session ID" });
+      return;
+    }
+    // Only for somebody in a room, and only for what it plays — see
+    // mayStartTranscode. Before anything here asks Plex for anything. A player
+    // refused while its connection to the room is being made again is told as
+    // for any failed load, and asks again.
+    if (!startAllowed(userId, ratingKey, sessionId)) {
+      logEvent("HLS", "refused a stream for somebody not playing it in a room", {
+        user: userId ?? "none",
+        ratingKey,
+        session: sessionId.substring(0, 8),
+      });
+      res.status(403).json({ error: "Not playing this in a room" });
       return;
     }
 

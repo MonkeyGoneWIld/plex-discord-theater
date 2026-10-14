@@ -154,31 +154,47 @@ const LAND_SPARE_S = 1;
  * landing beyond it, at the start of the next. Unchanged with no speed to go
  * by, or no sizes; and where nothing within the limit would do, as far past
  * the room as the segment it lands in needs alone (catchUpLeadS).
+ *
+ * A segment `cached` — out of the browser's cache, as a page back from a
+ * pop-out finds the page before's (lib/segmentParts inBrowserCache) — comes
+ * in no time, so a landing on what is cached can be the room's own place, a
+ * second past it. On 14 October three pages back had their next 30 to 40
+ * seconds there and landed 3, 7 and 11 seconds past the room all the same,
+ * by the speed of the bot, and waited that long for it with the picture in.
+ * With no speed to go by, one that isn't cached is taken to come too late.
  */
 export function landingBySize(
   targetS: number,
   roomS: number,
-  segments: ReadonlyArray<{ start: number; duration: number; bytes: number | null }> | null | undefined,
+  segments: ReadonlyArray<{ start: number; duration: number; bytes: number | null; cached?: boolean }> | null | undefined,
   bytesPerS: number | null,
   limitS: number,
 ): number {
-  if (!segments?.length || !(bytesPerS && bytesPerS > 0)) return targetS;
-  const speed = bytesPerS * LAND_SPEED_MARGIN;
+  if (!segments?.length) return targetS;
+  const speed = bytesPerS && bytesPerS > 0 ? bytesPerS * LAND_SPEED_MARGIN : null;
+  /** Seconds a segment takes to come in, fetched now; null when there is no telling. */
+  const takesS = (s: { bytes: number | null; cached?: boolean }): number | null =>
+    s.cached ? 0 : speed && s.bytes && s.bytes > 0 ? s.bytes / speed : null;
   const first = segments.findIndex((s) => targetS >= s.start && targetS < s.start + s.duration);
-  if (first < 0 || !(Number(segments[first].bytes) > 0)) return targetS;
+  if (first < 0 || takesS(segments[first]) === null) return targetS;
   for (let i = first; i < segments.length; i++) {
     const seg = segments[i];
     const fromS = i === first ? targetS : seg.start + LAND_INTO_SEGMENT_S;
     if (fromS > limitS) break;
-    if (!(seg.bytes && seg.bytes > 0)) break;
+    const inS = takesS(seg);
+    if (inS === null) break;
     // The ones after it, each needed when the room gets to it.
-    const inS = seg.bytes / speed;
     let doneS = inS;
     let fits = true;
     for (let j = i + 1; j < segments.length && segments[j].start < fromS + LAND_LOOK_AHEAD_S; j++) {
-      const bytes = segments[j].bytes;
-      if (!(bytes && bytes > 0)) break;
-      doneS += bytes / speed;
+      const s = takesS(segments[j]);
+      if (s === null) {
+        // A size not known goes as it always did; a speed not known can't
+        // say an uncached segment will come in time.
+        if (!speed && !segments[j].cached) fits = false;
+        break;
+      }
+      doneS += s;
       if (doneS > segments[j].start - roomS - LAND_SPARE_S) { fits = false; break; }
     }
     if (!fits) continue;
@@ -186,7 +202,10 @@ export function landingBySize(
     const landS = Math.max(fromS, roomS + inS + LAND_SPARE_S);
     if (landS < seg.start + seg.duration && landS <= limitS) return landS;
   }
-  const alone = roomS + catchUpLeadS((segments[first].bytes! / bytesPerS) * 1000);
+  const firstSeg = segments[first];
+  const alone = roomS + catchUpLeadS(
+    !firstSeg.cached && bytesPerS && firstSeg.bytes ? (firstSeg.bytes / bytesPerS) * 1000 : null,
+  );
   return Math.max(targetS, Math.min(alone, limitS));
 }
 

@@ -64,6 +64,36 @@ export function partUrl(url: string, part: number, parts: number): string {
   return `${base}${base.includes("?") ? "&" : "?"}part=${part}&parts=${parts}`;
 }
 
+/** How long the bot lets the browser keep a segment (its Cache-Control), less
+ *  a little: past it, a fetch asks the bot again whatever the cache holds. */
+const KEPT_FOR_MS = 280_000;
+
+/**
+ * Whether the browser's own cache holds the whole of `url`, a segment, as this
+ * page would fetch it — every part of one fetched in parts — without asking
+ * the bot for any of it. A page back from Discord's pop-out finds there what
+ * the page before fetched, for five minutes, unless the cache has let some of
+ * it go: on 14 October three pages back found their first 30 to 40 seconds
+ * there, and one found nothing.
+ */
+export async function inBrowserCache(url: string, fetchFn: Fetch = (i, o) => fetch(i, o)): Promise<boolean> {
+  const bytes = segmentBytesOf(url);
+  const parts = bytes === null ? 1 : partsFor(bytes);
+  const urls = parts > 1 ? Array.from({ length: parts }, (_, i) => partUrl(url, i, parts)) : [url];
+  const held = await Promise.all(urls.map(async (u) => {
+    try {
+      const r = await fetchFn(u, { cache: "only-if-cached", mode: "same-origin" });
+      r.body?.cancel().catch(() => {});
+      // Held, but kept past what the bot allows is asked for again.
+      const at = Date.parse(r.headers.get("date") ?? "");
+      return r.ok && !(Date.now() - at > KEPT_FOR_MS);
+    } catch {
+      return false;
+    }
+  }));
+  return held.every(Boolean);
+}
+
 /** How a download in parts is going, all parts together. */
 export interface PartsProgress {
   received: number;

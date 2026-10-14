@@ -29,12 +29,16 @@ process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "proxy-paths
 process.env.LOG_TO_FILE = "0";
 
 const express = (await import("express")).default;
+const { WebSocket } = await import("ws");
 const { requireAuth, createSession } = await import("../src/middleware/auth.js");
 const plexRoutes = (await import("../src/routes/plex.js")).default;
+const { attachWebSocketServer, closeWebSocketServer } = await import("../src/services/sync.js");
+const { instanceHosts } = await import("../src/routes/discord.js");
 
 const app = express();
 app.use("/api/plex", requireAuth, plexRoutes);
 const server = await new Promise<http.Server>((r) => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
+attachWebSocketServer(server);
 const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 const token = createSession("u-test", []);
 
@@ -89,6 +93,63 @@ console.log("\n— the thumbnail proxy —");
   check("a reply that isn't an image is not passed on", listing.status, 502);
   const again = await get("/api/plex/thumb/library/sections");
   check("nor kept to be served later", [again.status, again.asked], [502, ["/library/sections"]]);
+}
+
+console.log("\n— who may start a stream —");
+{
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  /** Somebody signed in, in the room `inst` if one is named. */
+  async function person(userId: string, inst?: string) {
+    const tok = createSession(userId, []);
+    let ws: InstanceType<typeof WebSocket> | null = null;
+    if (inst) {
+      ws = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/ws?token=${tok}`);
+      await new Promise<void>((r) => ws!.once("open", () => r()));
+      ws.send(JSON.stringify({ type: "join", sessionToken: tok, instanceId: inst, userId, username: userId }));
+      await sleep(80);
+    }
+    return {
+      send: (m: object) => ws?.send(JSON.stringify(m)),
+      close: () => ws?.close(),
+      /** Ask for a stream's playlist: refused, or let through to Plex. */
+      async start(ratingKey: string, sessionId: string) {
+        asked.length = 0;
+        const r = await fetch(`${base}/api/plex/hls/${ratingKey}/${sessionId}/master.m3u8?mediaIndex=0`, {
+          headers: { Authorization: `Bearer ${tok}` },
+        });
+        await r.arrayBuffer();
+        return r.status === 403 && asked.length === 0 ? "refused" : "let through";
+      },
+    };
+  }
+  const uuid = () => crypto.randomUUID();
+  instanceHosts.set("inst-start", { hostUserId: "u-host", guildId: null, channelId: null, createdAt: Date.now() });
+
+  const outsider = await person("u-outsider");
+  check("somebody signed in but in no room is refused, and Plex never asked", await outsider.start("100", uuid()), "refused");
+
+  const host = await person("u-host", "inst-start");
+  const hostSid = uuid();
+  check("the host of a room starts a title", await host.start("100", hostSid), "let through");
+  host.send({ type: "play", ratingKey: "100", title: "A Film", hlsSessionId: hostSid, position: 0, sessionOffset: 0, audioStreamId: 1, subtitleStreamId: 0 });
+  await sleep(80);
+  check("and anything else it likes — the next title", await host.start("200", uuid()), "let through");
+
+  const viewer = await person("u-viewer", "inst-start");
+  check("a viewer following the room takes up its stream", await viewer.start("100", hostSid), "let through");
+  check("but starts no stream of its own while it drives none", await viewer.start("100", uuid()), "refused");
+  viewer.send({ type: "set-tracks", audioStreamId: 2, subtitleStreamId: 0 });
+  await sleep(80);
+  check("driving its own stream of the title, it starts that", await viewer.start("100", uuid()), "let through");
+  check("but not one of another title", await viewer.start("200", uuid()), "refused");
+  check("and somebody else's room's stream is nobody else's to start", await outsider.start("100", hostSid), "refused");
+
+  viewer.close();
+  await sleep(150);
+  check("dropped and coming back in time, its own stream is still its to start", await viewer.start("100", uuid()), "let through");
+  host.close();
+  await sleep(150);
+  closeWebSocketServer();
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

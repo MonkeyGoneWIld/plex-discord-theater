@@ -588,6 +588,8 @@ console.log("\n— a copy that can't be read —");
 console.log("\n— through the routes —");
 {
   const plexRoutes = await import("../src/routes/plex.js");
+  // Who may start a stream is proxy-paths' business; these are about copying.
+  plexRoutes.allowStartsWithoutRoom();
   const express = (await import("express")).default;
   const app = express();
   app.use(express.json());

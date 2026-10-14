@@ -76,6 +76,8 @@ process.env.PLEX_URL = `http://127.0.0.1:${(plex.address() as AddressInfo).port}
 // Imported only now: the router reads PLEX_URL at module load.
 const express = (await import("express")).default;
 const plexRoutes = (await import("../src/routes/plex.js"));
+// Who may start a stream is proxy-paths' business; these are about timelines.
+plexRoutes.allowStartsWithoutRoom();
 const { writeDetailCache } = await import("../src/services/detail-cache.js");
 
 const app = express();

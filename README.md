@@ -9,7 +9,7 @@ For viewer-aware qBittorrent upload limits and Discord pause detection, see the
 
 A Discord Activity for synchronized watch parties from a Plex Media Server. One
 person hosts, playback stays in lockstep for everyone in the voice channel, and
-each viewer can independently select audio tracks and subtitles.
+each viewer can independently select audio tracks, subtitles and quality.
 
 > [!WARNING]
 > **This project was built with AI.** It was developed primarily with
@@ -73,11 +73,20 @@ connected.
 For TV shows, season pages show missing and unaired episodes with air dates, and
 available episodes can be played directly from the season view.
 
-### Per-viewer audio and subtitles
+### Per-viewer audio, subtitles and quality
 
-Each viewer selects their own audio and subtitle tracks without affecting other
-participants. Track selections persist into the next episode when the same
-tracks are available. Subtitles that are out of sync can be adjusted in the player bar.
+Each viewer selects their own audio track, subtitles and quality without
+affecting other participants. Track selections persist into the next episode
+when the same tracks are available. Subtitles are drawn by each player, styled
+the way Plex draws them; their size, position, colour, background and font can
+be changed, and subtitles that are out of sync can be adjusted in the player
+bar. A viewer on a slow connection can pick a lower quality and get a stream of
+their own, and a player that can't decode HEVC gets an H.264 stream of its own,
+so nobody else's picture is lowered for them.
+
+**Settings** sets what every title starts with for you: subtitle and audio
+languages (subtitles can be shown only when the audio is in another language),
+default quality, volume, the subtitle look, and your watch history setting.
 
 ### Playback features
 
@@ -93,8 +102,13 @@ tracks are available. Subtitles that are out of sync can be adjusted in the play
   frames.
 - **Video zoom:** choose Original, Fill Screen, Match Width, Match Height, Widescreen, Ultrawide, or Custom Zoom (50–200%), saved per movie or show on your device.
 - **Play Version:** choose between multiple versions of a title when available.
-- **Stats for nerds:** press `i` during playback to view codec, bitrate,
-  resolution, buffer health, and peer information.
+- **Original picture:** with Direct Stream on, Plex copies the original video
+  (H.264, and HEVC for players that can decode it) instead of re-encoding it,
+  converting only the audio where needed.
+- **Stats for nerds:** press `i` during playback to view whether the video is
+  copied or re-encoded and why, codec, bitrate, resolution, frames, audio,
+  subtitles, sync, buffer, connection and peers, with live graphs coloured by
+  health.
 - **Watched controls:** mark a title watched, or apply the change to a whole
   season or show. Works with or without a linked Plex account.
 
@@ -249,6 +263,9 @@ services:
       - "3000:3000"
     volumes:
       - app-data:/data
+      # Optional: keep copied films on an SSD, with STREAM_CACHE_DIR below
+      # set to "/cache/stream".
+      # - /path/to/ssd/theater-stream-cache:/cache/stream
     environment:
       # ── Required ─────────────────────────────────────────────────────────
       # From the Discord Developer Portal.
@@ -303,28 +320,31 @@ services:
       VIDEO_BITRATE_KBPS: ""
       VIDEO_PEAK_BITRATE_KBPS: ""
 
-      # "1" = HEVC transcodes when every player in the room can decode them:
-      # a better picture at the same bitrate. Needs Plex Pass and hardware
-      # HEVC encoding enabled in Plex; otherwise Plex keeps sending H.264.
+      # "1" = HEVC transcodes for players that can decode them: a better
+      # picture at the same bitrate. Anyone who can't gets an H.264 stream of
+      # their own. Needs Plex Pass and hardware HEVC encoding enabled in Plex;
+      # otherwise Plex keeps sending H.264.
       HEVC_TRANSCODE: ""
 
-      # "1" = play the original video instead of a re-encode whenever the room
-      # can decode it (Direct Stream). Audio is still converted where needed;
-      # files over VIDEO_BITRATE_KBPS are still re-encoded.
+      # "1" = play the original video instead of a re-encode whenever a
+      # player can decode it (Direct Stream). Audio is still converted where
+      # needed; files averaging over DIRECT_STREAM_MAX_KBPS are re-encoded.
       DIRECT_STREAM: ""
 
-      # The highest bitrate (kbps) a file may have and still be copied. Every
-      # viewer pulls a copy at the file's own bitrate, so keep this below your
-      # upload divided by how many usually watch; bigger files are re-encoded.
-      # Empty = VIDEO_BITRATE_KBPS.
+      # The highest average bitrate (kbps) a file may have and still be
+      # copied. Every viewer pulls a copy at the file's own bitrate, so keep
+      # this below your upload divided by how many usually watch; bigger
+      # files are re-encoded. Empty = VIDEO_BITRATE_KBPS.
       DIRECT_STREAM_MAX_KBPS: ""
 
       # How much of a copied film is kept in memory, MB, for every stream
       # together (empty = 6144). The rest is kept on disk in STREAM_CACHE_DIR
       # (empty = /data/stream-cache) until the stream ends, with no limit but
       # the disk: up to 13.5 GB an hour for a 30 Mbps Blu-ray, so point it at
-      # an SSD with room. Re-encoded films keep TRANSCODE_CACHE_MB in memory
-      # (empty = 2048); Plex keeps the rest on its own disk.
+      # an SSD with room (mount one under volumes above). Re-encoded films
+      # keep TRANSCODE_CACHE_MB in memory, for every re-encode together
+      # (empty = 2048); Plex keeps the rest on its own disk. Lower both on a
+      # server short of memory: the defaults can reach 8 GB while films play.
       DIRECT_STREAM_MEMORY_MB: ""
       STREAM_CACHE_DIR: ""
       TRANSCODE_CACHE_MB: ""
@@ -384,6 +404,9 @@ for up to 90 days and 10 GB by default; set `THUMB_CACHE_TTL_MS` and
 fills both caches for the newest 600 titles (`WARM_CACHE_MAX_ITEMS`, or `all`),
 their artwork and their shows' seasons and episodes included, and waits while a
 room is playing. Its other `WARM_CACHE_*` settings are in `.env.example`.
+Films being played are kept in memory, and copied ones past
+`DIRECT_STREAM_MEMORY_MB` on disk in `STREAM_CACHE_DIR`, only until their
+stream ends; anything left over is deleted when the server starts.
 
 ## License
 

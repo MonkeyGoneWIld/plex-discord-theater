@@ -71,18 +71,29 @@ services:
       # is if your upload is tight.
       - VIDEO_BITRATE_KBPS=${VIDEO_BITRATE_KBPS}
       - VIDEO_PEAK_BITRATE_KBPS=${VIDEO_PEAK_BITRATE_KBPS}
-      # 1 = HEVC transcodes when every player in the room can decode them.
-      # Needs Plex Pass and hardware HEVC encoding enabled in Plex.
+      # 1 = HEVC transcodes for players that can decode them; anyone who
+      # can't gets an H.264 stream of their own. Needs Plex Pass and hardware
+      # HEVC encoding enabled in Plex.
       - HEVC_TRANSCODE=${HEVC_TRANSCODE:-}
-      # 1 = copy the original video instead of re-encoding it, when the room
-      # can decode it. Files over VIDEO_BITRATE_KBPS are still re-encoded.
+      # 1 = copy the original video instead of re-encoding it, for players
+      # that can decode it. Files averaging over DIRECT_STREAM_MAX_KBPS are
+      # still re-encoded.
       - DIRECT_STREAM=${DIRECT_STREAM:-}
-      # Highest bitrate (kbps) still copied; bigger files are re-encoded so a
-      # home upload isn't asked for more than it has. Unset = VIDEO_BITRATE_KBPS.
+      # Highest average bitrate (kbps) still copied; bigger files are
+      # re-encoded so a home upload isn't asked for more than it has.
+      # Unset = VIDEO_BITRATE_KBPS.
       - DIRECT_STREAM_MAX_KBPS=${DIRECT_STREAM_MAX_KBPS:-}
+      # Films being played, kept so going back plays from here: copies in
+      # memory up to DIRECT_STREAM_MEMORY_MB (6144) and the rest on disk in
+      # STREAM_CACHE_DIR (/data/stream-cache) until the stream ends;
+      # re-encodes TRANSCODE_CACHE_MB (2048) in memory. Point STREAM_CACHE_DIR
+      # at an SSD — see the commented volume below.
       - DIRECT_STREAM_MEMORY_MB=${DIRECT_STREAM_MEMORY_MB:-}
       - STREAM_CACHE_DIR=${STREAM_CACHE_DIR:-}
       - TRANSCODE_CACHE_MB=${TRANSCODE_CACHE_MB:-}
+      # 0 = don't read a title's other subtitles out of the file ahead of
+      # anyone picking them. On unless set to 0.
+      - SUBTITLE_PREFETCH=${SUBTITLE_PREFETCH:-}
       - THUMB_CACHE_TTL_MS=${THUMB_CACHE_TTL_MS}
       # Image cache size, with a unit: 500M, 10G (the default), 2T.
       - THUMB_CACHE_MAX_SIZE=${THUMB_CACHE_MAX_SIZE}
@@ -116,10 +127,15 @@ services:
 
     volumes:
       # SQLite (sessions, watch history, linked Plex accounts, detail metadata,
-      # thumbnail cache) and logs. A named
-      # volume keeps them across rebuilds; swap for a host path (e.g.
-      # ./data:/data) if you'd rather have them somewhere you can browse.
+      # thumbnail cache), logs, and the stream cache of films being played
+      # unless STREAM_CACHE_DIR points elsewhere. A named volume keeps them
+      # across rebuilds; swap for a host path (e.g. ./data:/data) if you'd
+      # rather have them somewhere you can browse.
       - app-data:/data
+      # A copied film being played past DIRECT_STREAM_MEMORY_MB goes to disk,
+      # up to 13.5 GB an hour for a 30 Mbps Blu-ray. To keep that on an SSD,
+      # mount one here and set STREAM_CACHE_DIR=/cache/stream in .env.
+      # - /path/to/ssd/theater-stream-cache:/cache/stream
     restart: unless-stopped
     logging:
       driver: json-file

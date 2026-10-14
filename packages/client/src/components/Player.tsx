@@ -3367,6 +3367,20 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       endTrackSitting();
     };
   }, []);
+  // Back on a stream of its own after a reload — a pop-out — or a dropped
+  // connection, at the quality it was watching at. That is this player's
+  // quality now, not the default it opened at: asked for the default below, it
+  // was taken straight off the stream it had just been given back. After the
+  // effect above, which would otherwise put the default back on opening.
+  useEffect(() => {
+    const v = variantRef.current;
+    if (!v?.returning || v.ratingKey !== item.ratingKey || v.quality === preferredQuality()) return;
+    logEvent("Player", "back on its own stream, at the quality it was watching at", {
+      variant: v.variantKey,
+      quality: v.quality || "Original",
+    });
+    setPreferredQuality(v.quality, { ratingKey: item.ratingKey, show: item.grandparentRatingKey ?? null });
+  }, [variant?.seq, item.ratingKey]);
 
   useEffect(() => {
     const v = variantRef.current;

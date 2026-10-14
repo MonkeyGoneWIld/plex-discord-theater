@@ -3462,12 +3462,16 @@ async function fetchThumb({ imagePath, externalUrl, width, height }: ThumbReques
     plexRes.body?.cancel().catch(() => {});
     return { ok: false, status: plexRes.status };
   }
-  const contentType = plexRes.headers.get("content-type");
-  const normalizedContentType = contentType?.split(";")[0];
-  const resolvedType =
-    normalizedContentType && ALLOWED_IMAGE_TYPES.has(normalizedContentType)
-      ? normalizedContentType
-      : "application/octet-stream";
+  const normalizedContentType = plexRes.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+  // Only an image is passed on. Whatever else a path under /library/ answers
+  // with — a listing, a file — is not artwork, and is none of the caller's.
+  if (!normalizedContentType?.startsWith("image/")) {
+    plexRes.body?.cancel().catch(() => {});
+    return { ok: false, status: 502 };
+  }
+  const resolvedType = ALLOWED_IMAGE_TYPES.has(normalizedContentType)
+    ? normalizedContentType
+    : "application/octet-stream";
 
   const contentLength = plexRes.headers.get("content-length");
   if (contentLength && parseInt(contentLength, 10) > 10 * 1024 * 1024) {
@@ -5130,7 +5134,7 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
   }
   const segPath = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
 
-  if (segPath.length > MAX_PROXY_PATH_LENGTH || !isAllowedProxyPath(segPath)) {
+  if (segPath.length > MAX_PROXY_PATH_LENGTH || !isAllowedProxyPath(segPath) || !SEGMENT_PATH_RE.test(segPath)) {
     if (DEBUG) console.log("[HLS seg] Path rejected by validation");
     res.status(400).end();
     return;
@@ -5690,7 +5694,16 @@ function mapMarkers(markers: PlexMarker[] | undefined): SkipMarker[] {
     .sort((a, b) => a.start - b.start);
 }
 
-/** Reject paths with traversal sequences, double slashes, null bytes, or backslashes. */
+/**
+ * Reject paths with traversal sequences, double slashes, null bytes,
+ * backslashes, or a query or fragment of their own.
+ *
+ * The query matters because plexUrl takes a path as a URL: a `?` inside one
+ * starts a query Plex reads, with the bot's token beside it — an encoded `%3F`
+ * in a thumbnail's path reached Plex as `/library/sections/1/refresh?force=1`.
+ * No path the bot hands out has one; a thumbnail's size and an external
+ * image's address are parameters of the request, not of its path.
+ */
 function isAllowedProxyPath(p: string): boolean {
   let decoded = p;
   let prev: string;
@@ -5707,9 +5720,20 @@ function isAllowedProxyPath(p: string): boolean {
     !/\.\./.test(decoded) &&
     !/\/\//.test(decoded) &&
     !decoded.includes("\0") &&
-    !decoded.includes("\\")
+    !decoded.includes("\\") &&
+    !/[?#]/.test(decoded)
   );
 }
+
+/**
+ * What a segment request may ask Plex for: a playlist or a segment of one of
+ * Plex's own transcode sessions, the only thing the playlists the bot hands out
+ * ever name. Anything else was passed straight to Plex with the bot's token —
+ * its settings, who is watching what, a library scan — and the answer handed
+ * back to whoever asked.
+ */
+const SEGMENT_PATH_RE =
+  /^\/video\/:\/transcode\/universal\/session\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.(?:ts|m3u8)$/i;
 
 const ALLOWED_THUMB_PREFIXES = ["/library/", "/photo/"];
 

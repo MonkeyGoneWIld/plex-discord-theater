@@ -18,6 +18,9 @@ process.env.PDT_EMPTY_ROOM_HOLD_MS = String(HOLD_MS);
 // And one waits this long for a viewer whose picture stopped, not half a minute.
 const STALL_WAIT_MS = 1500;
 process.env.PDT_STALL_GATHER_MAX_MS = String(STALL_WAIT_MS);
+// And a viewer's own stream is kept this long for them to come back to.
+const AWAY_MS = 600;
+process.env.PDT_AWAY_HOLD_MS = String(AWAY_MS);
 
 // Imported only now: the session, instance and history stores open their
 // databases wherever THUMB_CACHE_DIR points as they load, and a static import
@@ -1482,6 +1485,104 @@ console.log("\n— somebody short of picture: the others are told, so they ease 
   host.close();
   a.close();
   late.close();
+}
+
+/** A viewer on a stream of their own: audio 2, a subtitle of their own drawn
+ *  over it, and a quality of their own. Its session id. */
+async function ownStream(a: Client): Promise<string> {
+  a.send({ type: "set-tracks", audioStreamId: 2, subtitleStreamId: 7, drawn: true, quality: 8000 });
+  await sleep(60);
+  const sid = uuid();
+  a.send({ type: "variant-session", hlsSessionId: sid, sessionOffset: 120 });
+  await sleep(60);
+  return sid;
+}
+
+console.log("\n— a viewer back from a pop-out is on their own stream again —");
+{
+  const [host, a, b] = await room("inst-back-popout", ["host", "a", "b"]);
+  await startPlayback(host);
+  const own = await ownStream(a);
+  // Discord's pop-out: the page that comes back joins before the old one has
+  // gone. The old connection used to be dropped without its stream being
+  // settled — the stream ran on with nobody on it until the room ended — and
+  // the page back was put on the host's.
+  const back = new Client("u-a", "a");
+  await back.connect("inst-back-popout");
+  const v = back.last("state")?.variant;
+  check("it lands on its own stream", [v?.variantKey, v?.hlsSessionId], ["2:0@8000", own]);
+  check("still driving it, with its own subtitle", [v?.isOwner, v?.subtitleStreamId], [true, 7]);
+  check("told it is its own coming back", v?.returning, true);
+  // Taking it up, the page back announces it again, not knowing where it began.
+  back.send({ type: "variant-session", hlsSessionId: own, sessionOffset: 0 });
+  await sleep(AWAY_MS + 200);
+  b.send({ type: "set-tracks", audioStreamId: 2, subtitleStreamId: 0, quality: 8000 });
+  await sleep(60);
+  check("and the stream is its, running, to anybody choosing the same", [b.stream()?.session, b.stream()?.owner], [own, false]);
+  check("still said to begin where it began", b.last("variant")?.sessionOffset, 120);
+  [host, back, b].forEach((x) => x.close());
+}
+
+console.log("\n— a viewer back from a dropped connection is on their own stream again —");
+{
+  const [host, a] = await room("inst-back-blip", ["host", "a"]);
+  await startPlayback(host);
+  const own = await ownStream(a);
+  a.close();
+  await sleep(150);
+  const back = new Client("u-a", "a");
+  await back.connect("inst-back-blip");
+  const v = back.last("state")?.variant;
+  check("back in time, it lands on its own stream", [v?.variantKey, v?.hlsSessionId, v?.isOwner], ["2:0@8000", own, true]);
+  check("with its own subtitle, and told it is its own", [v?.subtitleStreamId, v?.returning], [7, true]);
+  [host, back].forEach((x) => x.close());
+}
+
+console.log("\n— not back in time, their stream goes as it always did —");
+{
+  const [host, a, b] = await room("inst-back-late", ["host", "a", "b"]);
+  await startPlayback(host);
+  await ownStream(a);
+  a.close();
+  await sleep(AWAY_MS + 300);
+  b.send({ type: "set-tracks", audioStreamId: 2, subtitleStreamId: 0, quality: 8000 });
+  await sleep(60);
+  check("anybody choosing the same tracks starts a stream of their own", [b.stream()?.session, b.stream()?.owner], [null, true]);
+  const back = new Client("u-a", "a");
+  await back.connect("inst-back-late");
+  const v = back.last("state")?.variant;
+  check("and the one back is on the host's, like anybody joining", [v?.variantKey, v?.returning], ["1:0", undefined]);
+  [host, back, b].forEach((x) => x.close());
+}
+
+console.log("\n— a viewer following the host comes back to what the host is on by then —");
+{
+  const [host, a] = await room("inst-back-follow", ["host", "a"]);
+  await startPlayback(host);
+  a.close();
+  await sleep(100);
+  host.send({ type: "set-tracks", audioStreamId: 5, subtitleStreamId: 0 });
+  await sleep(60);
+  const back = new Client("u-a", "a");
+  await back.connect("inst-back-follow");
+  const v = back.last("state")?.variant;
+  check("on the host's new stream", [v?.variantKey, v?.returning], ["5:0", undefined]);
+  [host, back].forEach((x) => x.close());
+}
+
+console.log("\n— a message far bigger than any real one is refused —");
+{
+  const [host, a] = await room("inst-big", ["host", "a"]);
+  await startPlayback(host);
+  const closed = new Promise<number>((r) => a.ws.once("close", (code: number) => r(code)));
+  // Up to 100 MB was taken in, a few of which at once could run the bot out
+  // of memory and end every room.
+  a.send({ type: "suggest", item: { ratingKey: "1", title: "x".repeat(2 * 1024 * 1024) } });
+  check("the connection sending it is closed", await Promise.race([closed, sleep(2000).then(() => -1)]), 1009);
+  const b = new Client("u-b", "b");
+  await b.connect("inst-big");
+  check("and the room goes on", b.last("state")?.ratingKey, "100");
+  [host, b].forEach((x) => x.close());
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

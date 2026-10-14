@@ -94,6 +94,12 @@ export interface StreamVariant {
   hlsSessionId: string | null;
   sessionOffset: number;
   isOwner: boolean;
+  /**
+   * Set on the stream a viewer is given on joining when it is their own choice
+   * coming back to them — after a pop-out or a dropped connection — rather than
+   * the host's. Its quality is theirs, not the default a new player starts at.
+   */
+  returning?: boolean;
 }
 
 export interface SyncState {

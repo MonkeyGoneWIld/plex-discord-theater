@@ -23,6 +23,22 @@ const WS_PING_INTERVAL_MS = 30_000;
 const HOST_RECONNECT_GRACE_MS = 15_000;
 
 /**
+ * How long a viewer's own stream — their own audio, a subtitle burned in, their
+ * own quality — is kept for them once their connection has closed, for them to
+ * come back to rather than to the host's. A network blip, or Discord reloading
+ * the activity to pop it out, is back well inside it; see Room.away.
+ */
+const AWAY_HOLD_MS = Number(process.env.PDT_AWAY_HOLD_MS) || 15_000;
+
+/**
+ * The only thing a WebSocket message may be bigger than, and only a little: a
+ * queue of a hundred titles is about 50 KB, and a tracker announce with its
+ * offers a few. Left to the library it was 100 MB, which one signed-in client
+ * could send a few of at once and run the bot out of memory, ending every room.
+ */
+const WS_MAX_PAYLOAD_BYTES = 1024 * 1024;
+
+/**
  * How long a room everybody has left keeps its stream, and its place in it.
  * Discord reloads an activity to pop it out of its window and back, and a
  * host watching alone is everybody: on 12 October monkey26 popped out alone,
@@ -431,6 +447,27 @@ interface Room {
   gatherTimer?: ReturnType<typeof setTimeout>;
   /** Everybody has left, and the room is kept for them — see holdEmptyRoom. */
   emptyHold?: ReturnType<typeof setTimeout>;
+  /**
+   * Viewers whose connection closed while they were on a choice of their own,
+   * by Discord user id: what they were on, kept AWAY_HOLD_MS for them to come
+   * back to. Without it a viewer back from a blip or a pop-out was put on the
+   * host's stream, their own audio and quality gone, and had to pick them again
+   * mid-film.
+   */
+  away: Map<string, AwayViewer>;
+}
+
+/** A viewer's own choice of stream and subtitle — see ownChoiceOf. */
+interface OwnChoice {
+  /** The title it is a stream of. */
+  ratingKey: string | null;
+  variantKey: string;
+  subtitleStreamId: number;
+  quality: number;
+}
+
+interface AwayViewer extends OwnChoice {
+  timer: ReturnType<typeof setTimeout>;
 }
 
 /** Ceiling on remembered co-host grants, so a room can't accumulate them without
@@ -833,6 +870,7 @@ function getOrCreateRoom(instanceId: string): Room {
       },
       coHostIds: new Set(),
       lastForcedPersistAt: 0,
+      away: new Map(),
     };
     rooms.set(instanceId, room);
   }
@@ -1071,6 +1109,68 @@ function settleLeftStream(room: Room, key: string): void {
 }
 
 /**
+ * What a viewer chose for themselves, if anything: a stream other than the
+ * host's, or the host's with a subtitle of their own drawn over it. Null for
+ * the host, for somebody not on a stream, and for somebody simply following
+ * the host — who, coming back, follows the host as it is by then.
+ */
+function ownChoiceOf(room: Room, client: RoomClient): OwnChoice | null {
+  if (client.isHost || !client.variantKey) return null;
+  const s = room.state;
+  if (client.variantKey === s.hostVariantKey && client.subtitleStreamId === s.hostSubtitleId) return null;
+  return {
+    ratingKey: s.ratingKey,
+    variantKey: client.variantKey,
+    subtitleStreamId: client.subtitleStreamId,
+    quality: client.quality,
+  };
+}
+
+/** Put a viewer back on their own choice, if its stream is still running for
+ *  the same title. Whether they were. */
+function landOnOwnChoice(room: Room, client: RoomClient, choice: OwnChoice): boolean {
+  const v = room.state.variants.get(choice.variantKey);
+  if (!v || choice.ratingKey !== room.state.ratingKey) return false;
+  client.variantKey = v.key;
+  client.subtitleStreamId = choice.subtitleStreamId;
+  client.quality = choice.quality;
+  ensureVariantOwner(room, v);
+  return true;
+}
+
+/**
+ * Keep a viewer's own choice, and the stream it is, for AWAY_HOLD_MS after
+ * their connection closed. Unclaimed by then, the stream goes as it would have
+ * when they left: torn down if nobody else is on it.
+ */
+function holdAwayViewer(room: Room, roomId: string, client: RoomClient, choice: OwnChoice): void {
+  const before = room.away.get(client.userId);
+  if (before) clearTimeout(before.timer);
+  const timer = setTimeout(() => {
+    if (room.away.get(client.userId)?.timer !== timer) return;
+    room.away.delete(client.userId);
+    if (rooms.get(roomId) !== room || choice.ratingKey !== room.state.ratingKey) return;
+    if (choice.variantKey === room.state.hostVariantKey) return;
+    settleLeftStream(room, choice.variantKey);
+  }, AWAY_HOLD_MS);
+  timer.unref?.();
+  room.away.set(client.userId, { ...choice, timer });
+  logEvent("Sync", "keeping a viewer's own stream for them to come back to", {
+    room: roomId.substring(0, 8),
+    who: client.username ?? client.userId,
+    variant: choice.variantKey,
+    subtitle: choice.subtitleStreamId,
+    holdMs: AWAY_HOLD_MS,
+  });
+}
+
+/** Forget everybody kept for — the room is going. */
+function clearAway(room: Room): void {
+  for (const a of room.away.values()) clearTimeout(a.timer);
+  room.away.clear();
+}
+
+/**
  * How far the room position may be advanced past its last report.
  *
  * The host heartbeats every 5s, so a gap much beyond that means it isn't
@@ -1095,7 +1195,10 @@ const MAX_EXTRAPOLATION_S = 30;
  * enough to cover any real detour, short enough that a forgotten tab costs a few
  * minutes of CPU rather than a night of it.
  */
-const IDLE_STREAM_GRACE_MS = 5 * 60 * 1000;
+const IDLE_STREAM_GRACE_MS = Number(process.env.PDT_IDLE_STREAM_GRACE_MS) || 5 * 60 * 1000;
+/** How often streams are looked over for IDLE_STREAM_GRACE_MS, and rooms
+ *  whose instance has gone are cleared. */
+const STREAM_SWEEP_MS = Number(process.env.PDT_STREAM_SWEEP_MS) || 5 * 60 * 1000;
 
 /**
  * A playback position from a client message, or the fallback if it is unusable.
@@ -1366,6 +1469,7 @@ function holdEmptyRoom(room: Room, roomId: string, leftName: string): void {
     }
     endRoomStream(room, roomId, "nobody came back, killing transcode", leftName);
     closeGather(room);
+    clearAway(room);
     destroyAllVariants(room);
     rooms.delete(roomId);
   }, EMPTY_ROOM_HOLD_MS);
@@ -1391,10 +1495,10 @@ function endRoomStream(room: Room, roomId: string, why: string, leftName: string
 }
 
 export function attachWebSocketServer(server: Server): void {
-  wss = new WebSocketServer({ noServer: true });
+  wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD_BYTES });
 
   // Dedicated WSS for the P2P tracker — keeps tracker traffic isolated
-  trackerWss = new WebSocketServer({ noServer: true });
+  trackerWss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD_BYTES });
   createTracker();
 
   trackerWss.on("connection", (ws) => {
@@ -1589,14 +1693,34 @@ export function attachWebSocketServer(server: Server): void {
           });
         }
 
+        // What this viewer had chosen for themselves, to come back to: from
+        // the connection this one replaces — Discord's pop-out opens the new
+        // page before the old one has gone — or from the room, which kept it
+        // when their connection closed (holdAwayViewer).
+        let choice: OwnChoice | null = null;
+        let choiceFrom: "the connection it replaces" | "the room" = "the connection it replaces";
+
         // Evict stale connection from the same user (e.g. browser reconnected
         // before Node processed the close event for the old socket)
         for (const existing of room.clients) {
           if (existing.userId === userId) {
+            // Before anything below forgets it. Dropped without the stream it
+            // was on being settled, which kept a stream nobody was on running
+            // until the room ended — now it is the stream they come back to.
+            choice = ownChoiceOf(room, existing);
             existing.isHost = false; // prevent close handler from triggering host-left logic
             room.clients.delete(existing);
             existing.ws.close(1000, "Replaced by new connection");
             break;
+          }
+        }
+        const away = room.away.get(userId);
+        if (away) {
+          clearTimeout(away.timer);
+          room.away.delete(userId);
+          if (!choice) {
+            choice = away;
+            choiceFrom = "the room";
           }
         }
 
@@ -1628,6 +1752,22 @@ export function attachWebSocketServer(server: Server): void {
         roomId = instanceId;
         room.clients.add(client);
 
+        // Back to their own stream, if it is still running for this title.
+        // Otherwise on the host's like anybody joining, and the one they left
+        // goes as it would have when they left.
+        const returned = !isHost && choice !== null && landOnOwnChoice(room, client, choice);
+        if (returned && choice) {
+          logEvent("Sync", "a viewer came back to their own stream", {
+            room: instanceId.substring(0, 8),
+            who: username ?? userId,
+            variant: choice.variantKey,
+            subtitle: choice.subtitleStreamId,
+            from: choiceFrom,
+          });
+        } else if (choice && choice.variantKey !== room.state.hostVariantKey) {
+          settleLeftStream(room, choice.variantKey);
+        }
+
         // If the host is (re)joining and there are other clients, refresh their
         // view of who the host is (covers a reclaim after a socket drop, a host
         // joining on a new device, or a stale/missing hostUsername).
@@ -1642,6 +1782,7 @@ export function attachWebSocketServer(server: Server): void {
 
         // Send current state to newly joined client
         const hostClient = [...room.clients].find((c) => c.isHost);
+        const landed = client.variantKey ? room.state.variants.get(client.variantKey) : undefined;
         sendTo(ws, {
           type: "state",
           ratingKey: room.state.ratingKey,
@@ -1659,21 +1800,28 @@ export function attachWebSocketServer(server: Server): void {
           queue: room.state.queue,
           hostUsername: hostClient?.username ?? null,
           participants: participantsOf(room),
-          // Which stream to play and which tracks it is for. Null when nothing
-          // is playing; an older client ignores it and behaves exactly as before.
-          variant: room.state.hostVariantKey
-            ? variantMessage(
-                room.state.variants.get(room.state.hostVariantKey)!,
-                // A joiner doesn't drive the host's stream — unless it is
-                // theirs, coming back to a room held for them (holdEmptyRoom).
-                // Told otherwise, the page that came back never pinged it, and
-                // a copy measures only so far past the last ping: on 12 October
-                // blah0391's stopped three minutes after the pop-out, and the
-                // room starved at its end until the stream was restarted.
-                room.state.variants.get(room.state.hostVariantKey)!.ownerUserId === client.userId,
-                room.state.ratingKey,
-                client.subtitleStreamId,
-              )
+          // Which stream to play and which tracks it is for: the host's, or
+          // the viewer's own coming back to it. Null when nothing is playing;
+          // an older client ignores it and behaves exactly as before.
+          variant: landed
+            ? {
+                ...variantMessage(
+                  landed,
+                  // A joiner doesn't drive the host's stream — unless it is
+                  // theirs, coming back to a room held for them (holdEmptyRoom),
+                  // or their own one, coming back to it. Told otherwise, the page
+                  // that came back never pinged it, and a copy measures only so
+                  // far past the last ping: on 12 October blah0391's stopped
+                  // three minutes after the pop-out, and the room starved at its
+                  // end until the stream was restarted.
+                  landed.ownerUserId === client.userId,
+                  room.state.ratingKey,
+                  client.subtitleStreamId,
+                ),
+                // Their own choice, quality and all, which a page that has just
+                // opened takes as its own rather than asking for its default.
+                ...(returned ? { returning: true } : {}),
+              }
             : null,
         });
 
@@ -1946,9 +2094,13 @@ export function attachWebSocketServer(server: Server): void {
             ? msg.hlsSessionId
             : null;
         if (!sid) return;
-        const offset = safePosition(msg.sessionOffset, room.state.position);
+        // The stream it already is, announced again by a driver that has
+        // taken it up — a page back from a pop-out — which doesn't know where
+        // it began and says 0:00. Where a transcode began can't have moved.
+        const again = sid === v.hlsSessionId;
+        const offset = again ? v.sessionOffset : safePosition(msg.sessionOffset, room.state.position);
         attachSession(room, v, sid, offset, roomId);
-        logEvent("Sync", "stream restarted", {
+        logEvent("Sync", again ? "stream taken up again by its driver" : "stream restarted", {
           room: roomId.substring(0, 8),
           by: client.username ?? client.userId,
           variant: key,
@@ -2658,6 +2810,19 @@ export function attachWebSocketServer(server: Server): void {
       }
     });
 
+    // A connection that fails — a message over WS_MAX_PAYLOAD_BYTES, a frame
+    // that isn't valid WebSocket, a reset — says so with an "error" the
+    // library throws when nothing is listening: an uncaught exception, which
+    // ends the process and every room on it. The library closes the socket
+    // itself, and "close" below does the rest.
+    ws.on("error", (err) => {
+      logEvent("Sync", "a connection failed, closing it", {
+        user: client?.userId ?? "unauthenticated",
+        room: roomId?.substring(0, 8) ?? "none",
+        error: err.message,
+      });
+    });
+
     ws.on("close", () => {
       clearInterval(pingTimer);
       if (!client || !roomId) return;
@@ -2674,6 +2839,10 @@ export function attachWebSocketServer(server: Server): void {
         if (!room.clients.has(closingClient)) return;
         room.clients.delete(closingClient);
 
+      // A choice of their own is kept for them to come back to, and the stream
+      // it is with it, even with nobody else on it — see holdAwayViewer.
+      const choice = ownChoiceOf(room, closingClient);
+      if (choice) holdAwayViewer(room, closingRoomId, closingClient, choice);
       // The stream they were watching may now be empty, or may have just lost
       // the client that was driving it. Done before succession so the successor
       // is chosen against an accurate picture of who is on what.
@@ -2684,8 +2853,10 @@ export function attachWebSocketServer(server: Server): void {
         if (left) {
           if (membersOf(room, leftVariantKey).length === 0) {
             // Nobody is left watching it. Never the host's own stream while the
-            // room lives on — a successor inherits that below.
-            if (leftVariantKey !== room.state.hostVariantKey || !closingClient.isHost) {
+            // room lives on — a successor inherits that below — and not one
+            // kept for the viewer who left, which holdAwayViewer settles if
+            // they don't come back.
+            if (!choice && (leftVariantKey !== room.state.hostVariantKey || !closingClient.isHost)) {
               destroyVariant(room, leftVariantKey);
             }
           } else if (left.ownerUserId === closingClient.userId) {
@@ -2721,6 +2892,7 @@ export function attachWebSocketServer(server: Server): void {
         // isn't always flagged as one, and the interval then pinged Plex every
         // 30s for a room that no longer existed.
         closeGather(room);
+        clearAway(room);
         destroyAllVariants(room);
         rooms.delete(closingRoomId);
       } else {
@@ -2761,12 +2933,20 @@ export function attachWebSocketServer(server: Server): void {
     // Streams nobody has had open for a while. A variant survives its watchers
     // stepping out of the player on purpose — see IDLE_STREAM_GRACE_MS — but not
     // indefinitely.
+    //
+    // A stream with nobody on it at all is idle too. It used to be passed
+    // over, and one a viewer's old connection was dropped from without its
+    // stream being settled ran on, kept alive by the bot's own pings, until
+    // the room ended. Except the host's, which a host away from the room comes
+    // back to, and one kept for a viewer coming back (holdAwayViewer).
     const now = Date.now();
     for (const [instanceId, room] of rooms) {
+      const kept = new Set([...room.away.values()].map((a) => a.variantKey));
       for (const [key, variant] of [...room.state.variants]) {
         const members = membersOf(room, key);
         const watching = members.some((c) => c.isWatching);
-        if (members.length === 0 || watching) {
+        const waitedFor = kept.has(key) || (members.length === 0 && key === room.state.hostVariantKey);
+        if (watching || waitedFor) {
           variant.idleSince = null;
           continue;
         }
@@ -2788,11 +2968,12 @@ export function attachWebSocketServer(server: Server): void {
       if (!instanceHosts.has(instanceId) && room.clients.size === 0) {
         // Same reasoning as the close handler: the intervals outlive the room
         // otherwise, pinging Plex for something that is gone.
+        clearAway(room);
         destroyAllVariants(room);
         rooms.delete(instanceId);
       }
     }
-  }, 5 * 60 * 1000);
+  }, STREAM_SWEEP_MS);
   cleanupInterval.unref();
 }
 

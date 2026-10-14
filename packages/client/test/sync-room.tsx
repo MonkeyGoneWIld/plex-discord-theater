@@ -1377,6 +1377,79 @@ function Runner() {
   }
 
   /**
+   * A viewer on a stream of its own — its own audio, its own quality — popping
+   * the activity out. The page back used to be put on the host's stream, its
+   * audio and quality gone, and the one it had been on ran on with nobody on
+   * it until the room ended. Now the page back takes up its own stream again,
+   * the transcode it was driving, and asks for nothing else.
+   */
+  async function runPopOutOwnTracks() {
+    setRunning(true);
+    const out: string[] = ["— a viewer on its own audio and quality popping the activity out —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    const press = (labels: string[]) => viewerFrame.current?.contentWindow?.postMessage({ kind: "press", press: labels }, "*");
+    const after = (t: number, msg: RegExp) => (events.get("u-viewer") ?? []).filter((e) => e.t > t && msg.test(e.msg));
+    const inStep = () => {
+      const h = latest.get("u-host");
+      const v = latest.get("u-viewer");
+      return !!h && !!v && !h.paused && !v.paused && v.ready >= 3 && Math.abs(h.pos - v.pos) < 1;
+    };
+    try {
+      // A list long enough to outlast the check: forty seconds of it, and the
+      // host stops at its end whatever the viewer does.
+      await startOnce("p2p=0&stream=copy4&event=1&eventS=200", {}, 40_000);
+      await pause(3_000);
+      const choseAt = Date.now();
+      const started = (t: number) => after(t, /^starting a stream for these tracks$/);
+      press(["Audio & Subtitles", "Audio", "Français (AAC Stereo)"]);
+      await waitFor(() => started(choseAt).length > 0 && inStep(), 45_000, "the viewer on its own audio");
+      await pause(2_000);
+      const qualityAt = Date.now();
+      press(["Audio & Subtitles", "Quality", "Up to 8 Mbps"]);
+      await waitFor(() => started(qualityAt).some((e) => /@8000$/.test(String(e.data.variant))) && inStep(),
+        45_000, "the viewer on its own audio at its own quality");
+      const own = String(started(qualityAt).at(-1)?.data.variant);
+      // A while on it, as anybody would be before popping out. Straight after a
+      // switch, the segments the page remembers are its new stream's first,
+      // slow ones, and the page back lands further ahead and waits longer for
+      // the room — on whichever stream it is put on.
+      await pause(20_000);
+
+      const poppedAt = Date.now();
+      const frame = viewerFrame.current;
+      if (frame) frame.src = frame.src;
+      say(`… the viewer, on ${own}, reloaded at ${latest.get("u-viewer")?.pos.toFixed(1)}s`);
+      let hostStoppedMs = 0;
+      let last = Date.now();
+      let backAt = 0;
+      while (Date.now() - poppedAt < 30_000) {
+        await pause(200);
+        const now = Date.now();
+        const h = latest.get("u-host");
+        if (h && (h.paused || h.ready < 3)) hostStoppedMs += now - last;
+        last = now;
+        const reloaded = after(poppedAt, /^starting session$/).length > 0;
+        if (!backAt && reloaded && inStep()) backAt = now;
+      }
+      const taken = after(poppedAt, /^(adopting the stream this client now drives|now driving this stream)$/).map((e) => String(e.data.variant));
+      const asked = after(poppedAt, /^(asking for a stream at this quality|starting a stream for these tracks)$/);
+      say(`    back: ${taken.join(" → ") || "nothing of its own"}${asked.length ? `; then asked for ${asked.map((e) => e.msg).join(", ")}` : ""}`);
+      say(`${taken.length > 0 && taken.every((k) => k === own) ? "PASS" : "FAIL"} the page back is on its own stream again (${taken.at(-1) ?? "the host's"})`);
+      say(`${after(poppedAt, /^adopting the stream this client now drives$/).length > 0 ? "PASS" : "FAIL"} taking up the transcode it was driving, not starting another`);
+      say(`${asked.length === 0 ? "PASS" : "FAIL"} and asks for no other tracks or quality (${asked.length})`);
+      say(`${hostStoppedMs < 1500 ? "PASS" : "FAIL"} the host played on (stopped ${(hostStoppedMs / 1000).toFixed(1)}s in all)`);
+      say(`${backAt && backAt - poppedAt < 15_000 ? "PASS" : "FAIL"} the viewer was back, playing in step, ${backAt ? `${((backAt - poppedAt) / 1000).toFixed(1)}s after it reloaded` : "never"}`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
    * The host starting another title mid-film: everybody starts it together,
    * with a picture of it. The room's word that it waits for the new title
    * reaches a player before the title does, and on 13 October monkey26
@@ -1703,6 +1776,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runPopOut("host", "slow")}>Host pops out, slow back</button>
         <button disabled={running} onClick={() => void runPopOut("host", "long")}>Host pops out, long back</button>
         <button disabled={running} onClick={() => void runPopOutCache()}>Pop out, from the cache</button>
+        <button disabled={running} onClick={() => void runPopOutOwnTracks()}>Viewer pops out, own tracks</button>
         <button disabled={running} onClick={() => void runJoinWhileAhead()}>Join while ahead</button>
         <button disabled={running} onClick={() => void runNextTitle()}>Next title, together</button>
         <button disabled={running} onClick={() => void runJoinerStalls()}>Joiner stalls</button>

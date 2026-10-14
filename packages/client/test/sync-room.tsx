@@ -1526,6 +1526,59 @@ function Runner() {
   }
 
   /**
+   * What the host's page holds in memory over a long copy, beyond what it has
+   * downloaded — read after a garbage collection, which the runner allows
+   * (--js-flags=--expose-gc), so that what is counted is what is kept. The P2P
+   * engine keeps everything downloaded, up to its limit; nothing else should
+   * grow with it. On 14 October Troy's page held 1.5 GB more than the engine
+   * may keep after 9 GB downloaded, and climbing; on 11 October a page held
+   * 150 to 260 MB more after as much, and flat.
+   */
+  async function runMemory(engineMiB = 0, query = "", skips = false, kbps = 0) {
+    setRunning(true);
+    const out: string[] = [`— the players' memory over a long copy${engineMiB ? `, the P2P engine kept to ${engineMiB} MiB` : ""}${skips ? ", the host skipping ahead" : ""}${kbps ? `, downloads at ${kbps / 1000} Mbps` : ""}${query ? ` (${query})` : ""} —`];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      await startOnce(`p2p=0&stream=copy4long&event=1&eventS=300&cache=1${query}`, kbps ? { "u-host": kbps, "u-viewer": kbps } : {}, 0, engineMiB ? `&engineMiB=${engineMiB}` : "");
+      const win = hostFrame.current?.contentWindow as unknown as { gc?: () => void; performance: Performance & { memory?: { usedJSHeapSize: number } } } | null;
+      const heldMB = () => { win?.gc?.(); return (win?.performance.memory?.usedJSHeapSize ?? 0) / 1e6; };
+      // Both players: frames of one site share a page's memory, and what it
+      // reports is all of it.
+      const gotMB = async () => (await api("/api/test/served") as Served[])
+        .reduce((n, x) => n + (x.sent ?? x.bytes ?? 0), 0) / 1e6;
+      say(`    collected here: ${win?.gc ? "yes" : "no — the runner has to (HeapProfiler.collectGarbage)"}`);
+      let first = { held: heldMB(), got: await gotMB() };
+      let last = first;
+      for (let i = 1; i <= 9; i++) {
+        // Ten seconds on, as on Troy on 14 October, a skip or two a minute.
+        if (skips) { await pause(10_000); hostKey("ArrowRight"); await pause(10_000); }
+        else await pause(20_000);
+        last = { held: heldMB(), got: await gotMB() };
+        say(`    ${i * 20}s: ${last.held.toFixed(0)} MB held, ${last.got.toFixed(0)} MB downloaded`);
+        // With the engines kept small, they are full by the first sample: from there.
+        if (i === 1 && engineMiB) first = last;
+      }
+      const health = (events.get("u-host") ?? []).filter((e) => e.tag === "Health" && e.msg === "sample").at(-1)?.data;
+      say(`    the host's last sample: engine ${health?.engineMB ?? "?"} MB in ${health?.engineSegments ?? "?"} segments, kept for the page after ${health?.keptMB ?? "?"} MB, keeping ${health?.keeping ?? "?"}, let go by ${health?.notKept ?? "?"}`);
+      const grew = last.held - first.held;
+      const got = last.got - first.got;
+      if (engineMiB) {
+        // Each engine full from the first sample on: what is held stays put.
+        say(`${grew < 40 ? "PASS" : "FAIL"} what is held stops growing once the engines are full (${grew.toFixed(0)} MB more held for ${got.toFixed(0)} MB more downloaded)`);
+      } else {
+        say(`${grew - got < 30 ? "PASS" : "FAIL"} it holds no more than it downloads (${grew.toFixed(0)} MB more held for ${got.toFixed(0)} MB more downloaded)`);
+      }
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
    * A viewer joining a film already playing, whose picture stops just after it
    * starts: getting going, it catches up on its own, and the host — the room —
    * plays on. On 13 October monkey26 joined, stopped two seconds in, and the
@@ -1822,6 +1875,12 @@ function Runner() {
         <button disabled={running} onClick={() => void runNextTitle()}>Next title, together</button>
         <button disabled={running} onClick={() => void runJoinerStalls()}>Joiner stalls</button>
         <button disabled={running} onClick={() => void runJoinerStalls(35)}>Joiner stalls later</button>
+        <button disabled={running} onClick={() => void runMemory()}>Memory over a long copy</button>
+        <button disabled={running} onClick={() => void runMemory(60)}>Memory, engine full</button>
+        <button disabled={running} onClick={() => void runMemory(60, "&parts=0")}>Memory, engine full, no parts</button>
+        <button disabled={running} onClick={() => void runMemory(60, "", true)}>Memory, engine full, skipping</button>
+        <button disabled={running} onClick={() => void runMemory(60, "", true, 12000)}>Memory, engine full, skipping, slow</button>
+        <button disabled={running} onClick={() => void runMemory(60, "&parts=0", true)}>Memory, engine full, skipping, no parts</button>
         <button disabled={running} onClick={() => void runAlonePopOut()}>Host alone pops out</button>
         <button disabled={running} onClick={() => void runPreviewAhead()}>Preview frames from the title's page</button>
         <button disabled={running} onClick={() => void runSkipThenPause()}>Skip then pause</button>

@@ -3606,6 +3606,24 @@ export function isHevcSession(sessionId: string): boolean {
   return codec !== undefined && codec !== "h264";
 }
 
+/**
+ * Sessions re-encoded only because whoever started them can't play HEVC: an
+ * HEVC file nothing else stopped from being copied. Anyone on such a stream
+ * who can play HEVC is better off on a copy of their own — see the sync
+ * server's seatOf.
+ */
+const hevcWithheld = new Set<string>();
+
+export function isHevcWithheldSession(sessionId: string): boolean {
+  return hevcWithheld.has(sessionId);
+}
+
+/** Say whether a session was re-encoded only for want of HEVC — at its start. */
+export function recordHevcWithheld(sessionId: string, withheld = true): void {
+  if (withheld) hevcWithheld.add(sessionId);
+  else hevcWithheld.delete(sessionId);
+}
+
 /** Look up the ratingKey for one of our session UUIDs. */
 export function getSessionRatingKey(sessionId: string): string | undefined {
   return sessionRatingKeys.get(sessionId);
@@ -3725,6 +3743,7 @@ export function markTranscodeStopped(sessionId: string): void {
   sessionRatingKeys.delete(sessionId);
   sessionMediaIndex.delete(sessionId);
   sessionVideoCodec.delete(sessionId);
+  hevcWithheld.delete(sessionId);
   manifestCache.delete(sessionId);
   hostPingInfo.delete(sessionId);
   // DIAGNOSTIC: should trend back toward 0 between watch sessions.
@@ -4460,7 +4479,7 @@ function refusedCopyReason(version: VersionFacts | null, askedKbps: number, room
   if (codec && codec !== "h264" && codec !== "hevc") {
     return `Unsupported video codec (${codec.toUpperCase()})`;
   }
-  if (codec === "hevc" && !roomHevc) return "HEVC not supported by everyone on this stream";
+  if (codec === "hevc" && !roomHevc) return "HEVC not supported by this player";
   if (codec === "h264" && (version?.bitDepth ?? 8) > 8) return `${version!.bitDepth}-bit H.264 not supported by browsers`;
   if ((version?.width ?? 0) > 2048 || (version?.height ?? 0) > 1200) return "Above 1080p, downscaled";
   // Asked above any peak, the bitrate wasn't it — see COPY_ASK_KBPS.
@@ -4987,6 +5006,7 @@ router.get(
         notCopied = "Open-GOP keyframes";
       }
       const copy = notCopied === null;
+      recordHevcWithheld(sessionId, copy && !roomHevc && version?.videoCodec?.toLowerCase() === "hevc");
       return fetchManifest(subtitleMode, {
         videoResolution: quality && quality <= QUALITY_720P_KBPS ? "1280x720" : transcodeFrame(version ?? {}),
         hevc: roomHevc && HEVC_TRANSCODE ? "encode" : roomHevc && copy ? "copy" : false,

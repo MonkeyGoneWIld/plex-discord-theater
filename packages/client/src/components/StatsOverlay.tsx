@@ -321,7 +321,12 @@ export function StatsOverlay({
         }
       }
       const aheadS = video.readyState === 0 ? null : Math.max(inPlayer, downloadedAheadRef.current?.() ?? 0);
-      const toEnd = Number.isFinite(video.duration) && video.duration > 0 && rangeEnd >= video.duration - 0.5;
+      // Only once the playlist lists the whole film. A copy's grows as the
+      // bot reads the file, and the video's length is where it has got to:
+      // a buffer that had caught up with that read "to the end" an hour from
+      // it (14 October, Troy).
+      const listedToEnd = !(hls?.levels[hls.currentLevel] ?? hls?.levels[0])?.details?.live;
+      const toEnd = listedToEnd && Number.isFinite(video.duration) && video.duration > 0 && rangeEnd >= video.duration - 0.5;
       pushSample(history.buffer, aheadS, GRAPH_SLOTS);
 
       // Speed: what came in over the time anything was coming in, across the

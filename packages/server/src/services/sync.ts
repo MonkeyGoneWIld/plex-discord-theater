@@ -3,7 +3,7 @@ import type { Server } from "http";
 import { isValidSession, getSessionUserId } from "../middleware/auth.js";
 import { instanceHosts, updateInstanceHost, touchInstance } from "../routes/discord.js";
 import { plexFetch } from "./plex.js";
-import { isHevcSession, getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode, stopTranscodeSession, protectSession, releaseSession } from "../routes/plex.js";
+import { isHevcSession, isHevcWithheldSession, getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode, stopTranscodeSession, protectSession, releaseSession } from "../routes/plex.js";
 import { createTracker, handleTrackerSocket, destroyTracker } from "./tracker.js";
 import { recordProgress, shouldRecordHistory } from "./watch-history.js";
 import { pushProgressToPlex } from "./plex-accounts.js";
@@ -802,15 +802,13 @@ export function sessionHasOtherWatchers(sessionId: string, userId: string | null
  * Whether a transcode started by this user may be HEVC: when their player can
  * decode it, and the stream they drive isn't one for people who can't.
  *
- * Their own player, not everybody's in the room. A viewer who can't decode
- * HEVC is given a stream of their own, the same tracks in H.264 (seatOf),
- * rather than the whole room being put on H.264 for them — the way somebody
- * listening to other audio is. Whoever ends up on an HEVC stream they can't
- * play, however they got there — joining, a host's track change, a new title,
- * a restart by its driver — is moved to that one (splitOffHevc). The host is
- * the exception, never moved off the room's stream: a host who can't decode
- * HEVC keeps the room's stream H.264 for everyone on it. A user in no room
- * gets H.264; there is nobody to ask.
+ * Their own player, not everybody's in the room. Each stream is for whoever
+ * on it can play it, the way somebody listening to other audio has a stream of
+ * their own: anyone who can't decode HEVC is put on an H.264 twin of an HEVC
+ * stream, and anyone who can is put on a copy of their own when the stream
+ * they are on is H.264 only because its driver couldn't take HEVC — the host
+ * as much as anybody (seatOf, sortByHevc). A user in no room gets H.264;
+ * there is nobody to ask.
  */
 export function mayStartHevc(userId: string): boolean {
   let found = false;
@@ -818,11 +816,7 @@ export function mayStartHevc(userId: string): boolean {
     const mine = [...room.clients].filter((c) => c.userId === userId);
     if (mine.length === 0) continue;
     found = true;
-    for (const c of mine) {
-      if (!c.hevc || (c.variantKey !== null && isH264Twin(c.variantKey))) return false;
-      if (c.variantKey !== null && c.variantKey === room.state.hostVariantKey &&
-          [...room.clients].some((h) => h.isHost && !h.hevc)) return false;
-    }
+    if (mine.some((c) => !c.hevc || (c.variantKey !== null && isH264Twin(c.variantKey)))) return false;
   }
   return found;
 }
@@ -831,87 +825,93 @@ function streamIsHevc(v: Variant | undefined): boolean {
   return !!v?.hlsSessionId && isHevcSession(v.hlsSessionId);
 }
 
+/** A stream re-encoded only because its driver can't take HEVC. */
+function streamHevcWithheld(v: Variant | undefined): boolean {
+  return !!v?.hlsSessionId && isHevcWithheldSession(v.hlsSessionId);
+}
+
+const plainKeyOf = (key: string) => (isH264Twin(key) ? key.slice(0, -H264_TWIN.length) : key);
+
 /**
- * The stream a client goes on when it is put on `key`: that one — or, for a
- * viewer who can't decode HEVC when that one is HEVC, its H.264 twin.
+ * The stream a client goes on when it is put on `key`. For someone who can't
+ * decode HEVC, the H.264 twin of an HEVC stream — or of one not yet running
+ * when the twin already is. For someone who can, the stream itself — or, when
+ * that is a twin made H.264 only because whoever brought it up couldn't take
+ * HEVC, the stream it is the twin of: a copy, theirs to bring up if nobody
+ * has yet. On 14 October monkey26 hosted from Firefox, which can't decode
+ * HEVC, and blah0391, who can, watched a 12 Mbps re-encode of an HEVC film.
  *
- * Only once a stream is known to be HEVC: one not yet running may well come
- * up H.264, and then everyone shares it. A stream a viewer who can't decode
- * HEVC brings up themselves always does (mayStartHevc), whoever joins it.
+ * Only once a stream is known: one not yet running may well come up as what
+ * everyone can play, and then everyone shares it.
  */
 function seatOf(room: Room, client: RoomClient, key: string): string {
-  if (client.hevc || client.isHost || isH264Twin(key)) return key;
-  return streamIsHevc(room.state.variants.get(key)) ? key + H264_TWIN : key;
+  const plain = plainKeyOf(key);
+  const twinKey = plain + H264_TWIN;
+  if (client.hevc) {
+    return key === twinKey && streamHevcWithheld(room.state.variants.get(twinKey)) ? plain : key;
+  }
+  if (key === twinKey) return key;
+  const v = room.state.variants.get(plain);
+  if (streamIsHevc(v)) return twinKey;
+  return !v?.hlsSessionId && room.state.variants.get(twinKey)?.hlsSessionId ? twinKey : key;
+}
+
+/** Give a stream another key, everyone on it and waiting to come back to it with it. */
+function rekeyVariant(room: Room, v: Variant, key: string): void {
+  const old = v.key;
+  room.state.variants.delete(old);
+  v.key = key;
+  room.state.variants.set(key, v);
+  for (const c of room.clients) if (c.variantKey === old) c.variantKey = key;
+  for (const a of room.away.values()) if (a.variantKey === old) a.variantKey = key;
+  if (room.state.hostVariantKey === old) room.state.hostVariantKey = key;
+}
+
+/** The room's stream is the host's, wherever the host goes. */
+function followHost(room: Room, v: Variant): void {
+  room.state.hostVariantKey = v.key;
+  if (v.hlsSessionId) {
+    room.state.hlsSessionId = v.hlsSessionId;
+    room.state.sessionOffset = v.sessionOffset;
+  }
 }
 
 /**
- * Move whoever is on `v` and can't decode HEVC onto its H.264 twin, `v`
- * being HEVC — each told the stream they are on now, the first of them to
- * bring it up, or following it if somebody already has. Everyone else stays
- * where they are and hears nothing. On 14 October monkey26 joined a room
- * playing a copy of an HEVC film, and the whole room went over to a 12 Mbps
- * re-encode of it for them.
+ * Now that `v` has a transcode: everyone on it who would be better on another
+ * stream by what their player decodes goes there (seatOf) — each told the
+ * stream they are on now, the first of them to bring it up, or following it
+ * if somebody already has. Everyone else stays and hears nothing.
+ *
+ * A stream made H.264 only because its driver couldn't take HEVC takes its
+ * twin's key first, leaving the plain one for a copy. On 14 October monkey26
+ * joined a room playing a copy of an HEVC film and the whole room went over to
+ * a 12 Mbps re-encode for them; later the same evening, monkey26 hosting from
+ * Firefox, everybody else watched one.
  */
-function splitOffHevc(room: Room, roomId: string, v: Variant): void {
-  if (isH264Twin(v.key) || !streamIsHevc(v)) return;
+function sortByHevc(room: Room, roomId: string, v: Variant): void {
+  if (!isH264Twin(v.key) && streamHevcWithheld(v) && !room.state.variants.has(v.key + H264_TWIN)) {
+    rekeyVariant(room, v, v.key + H264_TWIN);
+  }
   const movers = membersOf(room, v.key).filter((c) => seatOf(room, c, v.key) !== v.key);
   if (movers.length === 0) return;
-  let twin: Variant | null = null;
-  for (const c of movers) twin = assignVariant(room, c, v.audioStreamId, v.subtitleStreamId, v.quality, false);
-  if (!twin) return;
-  settleLeftStream(room, v.key);
   for (const c of movers) {
-    sendTo(c.ws, variantMessage(twin, twin.ownerUserId === c.userId, room.state.ratingKey, c.subtitleStreamId));
+    const to = assignVariant(room, c, v.audioStreamId, v.subtitleStreamId, v.quality, false);
+    if (c.isHost) followHost(room, to);
   }
-  logEvent("Sync", "a stream of their own for whoever can't play HEVC", {
+  settleLeftStream(room, v.key);
+  const to = new Set<string>();
+  for (const c of movers) {
+    const t = room.state.variants.get(c.variantKey!)!;
+    to.add(t.key);
+    sendTo(c.ws, variantMessage(t, t.ownerUserId === c.userId, room.state.ratingKey, c.subtitleStreamId));
+  }
+  logEvent("Sync", "a stream of their own, by what each can play", {
     room: roomId.substring(0, 8),
     from: v.key,
-    to: twin.key,
+    to: [...to].join(","),
     who: movers.map((c) => c.username ?? c.userId).join(","),
-    running: twin.hlsSessionId !== null,
+    why: isH264Twin(v.key) ? "HEVC withheld for its driver" : "HEVC",
   });
-}
-
-/**
- * Put the host's stream back on H.264, because the host can't decode HEVC —
- * the one person never moved to a stream of their own (see mayStartHevc).
- *
- * Its driver is told it has no transcode — exactly what the driver of a fresh
- * fork is told — so it starts a new one where playback is. That start asks
- * mayStartHevc, gets no, and comes up as H.264, and announcing it moves
- * everyone on the stream across. Until then the HEVC transcode keeps serving
- * the people who can play it, rather than the stream going dark while its
- * driver catches up.
- */
-function moveHostStreamOffHevc(room: Room, roomId: string, cause: RoomClient, why: string): void {
-  const v = room.state.hostVariantKey ? room.state.variants.get(room.state.hostVariantKey) : undefined;
-  if (!v || !streamIsHevc(v)) return;
-  const owner = [...room.clients].find((c) => c.userId === v.ownerUserId);
-  if (!owner) return;
-  sendTo(owner.ws, { ...variantMessage(v, true, room.state.ratingKey, owner.subtitleStreamId), hlsSessionId: null });
-  logEvent("Sync", "moving a stream off HEVC", {
-    room: roomId.substring(0, 8),
-    variant: v.key,
-    session: v.hlsSessionId!.substring(0, 8),
-    driver: owner.username ?? owner.userId,
-    because: cause.username ?? cause.userId,
-    why,
-  });
-}
-
-/**
- * What to do about someone who has just turned out not to decode HEVC —
- * joined saying so, or found it out: a viewer goes to a stream of their own
- * if theirs is HEVC; a host takes the room's stream to H.264.
- */
-function keepOffHevc(room: Room, roomId: string, client: RoomClient, why: string): void {
-  if (client.hevc) return;
-  if (client.isHost) {
-    moveHostStreamOffHevc(room, roomId, client, why);
-    return;
-  }
-  const v = client.variantKey ? room.state.variants.get(client.variantKey) : undefined;
-  if (v) splitOffHevc(room, roomId, v);
 }
 
 export function sessionHostUserId(sessionId: string): string | null {
@@ -1870,17 +1870,22 @@ export function attachWebSocketServer(server: Server): void {
         } else if (choice && choice.variantKey !== room.state.hostVariantKey) {
           settleLeftStream(room, choice.variantKey);
         }
-        // Onto a stream of their own if they can't play the host's: see
-        // splitOffHevc. Said in the state below, the one word they need.
-        const hostStream = !returned && client.variantKey ? room.state.variants.get(client.variantKey) : undefined;
-        if (hostStream && seatOf(room, client, hostStream.key) !== hostStream.key) {
-          const twin = assignVariant(room, client, hostStream.audioStreamId, hostStream.subtitleStreamId, hostStream.quality, false);
-          logEvent("Sync", "a stream of their own for whoever can't play HEVC", {
+        // Onto the stream this player can play, if the one it landed on isn't
+        // — the host's, or its own coming back to it from another device:
+        // monkey26 moved from Firefox to Discord for Windows on 14 October
+        // and came back to the H.264 stream Firefox had needed (seatOf). Said
+        // in the state below, the one word they need.
+        const landedOn = client.variantKey ? room.state.variants.get(client.variantKey) : undefined;
+        if (landedOn && seatOf(room, client, landedOn.key) !== landedOn.key) {
+          const to = assignVariant(room, client, landedOn.audioStreamId, landedOn.subtitleStreamId, landedOn.quality);
+          if (isHost) followHost(room, to);
+          logEvent("Sync", "a stream of their own, by what each can play", {
             room: instanceId.substring(0, 8),
-            from: hostStream.key,
-            to: twin.key,
+            from: landedOn.key,
+            to: to.key,
             who: username ?? userId,
-            running: twin.hlsSessionId !== null,
+            why: client.hevc ? "HEVC withheld for its driver" : "HEVC",
+            running: to.hlsSessionId !== null,
           });
         }
 
@@ -1946,11 +1951,6 @@ export function attachWebSocketServer(server: Server): void {
         // And the new arrival whether anybody is short of picture.
         tellLoading(room);
 
-        // A host arriving in a room whose stream is HEVC without being able to
-        // decode it. The state above still points at the HEVC stream; the
-        // H.264 one replaces it as soon as its driver has brought it up.
-        if (isHost && !client.hevc) moveHostStreamOffHevc(room, instanceId, client, "joined");
-
         return;
       }
 
@@ -1972,7 +1972,8 @@ export function attachWebSocketServer(server: Server): void {
       if (type === "caps") {
         if (msg.hevc !== false || !client.hevc) return;
         client.hevc = false;
-        keepOffHevc(room, roomId, client, "codec error");
+        const on = client.variantKey ? room.state.variants.get(client.variantKey) : undefined;
+        if (on) sortByHevc(room, roomId, on);
         return;
       }
 
@@ -2225,7 +2226,7 @@ export function attachWebSocketServer(server: Server): void {
           session: sid.substring(0, 8),
           offsetS: offset,
         });
-        splitOffHevc(room, roomId, v);
+        sortByHevc(room, roomId, v);
         announceVariant(room, v);
         return;
       }
@@ -2455,7 +2456,11 @@ export function attachWebSocketServer(server: Server): void {
           // The host's own ceiling, which their start was made at.
           const quality = qualityKbps(msg.quality);
           client.quality = quality;
-          const hostKey = variantKeyOf(audioStreamId, burned, quality);
+          // A start re-encoded only because the host can't take HEVC goes by
+          // its twin's key, the plain one being for a copy (sortByHevc) — and a
+          // restart of it must not land on the copy somebody else drives.
+          const plainKey = variantKeyOf(audioStreamId, burned, quality);
+          const hostKey = isHevcWithheldSession(sid) ? plainKey + H264_TWIN : plainKey;
           let hostVariant = room.state.variants.get(hostKey);
           if (!hostVariant) {
             hostVariant = {
@@ -2471,6 +2476,7 @@ export function attachWebSocketServer(server: Server): void {
             room.state.variants.set(hostKey, hostVariant);
           }
           hostVariant.ownerUserId = client.userId;
+          const hostWasOn = client.variantKey;
           client.variantKey = hostKey;
           client.subtitleStreamId = subtitleStreamId;
           room.state.hostVariantKey = hostKey;
@@ -2514,7 +2520,10 @@ export function attachWebSocketServer(server: Server): void {
           // Everyone on the host's stream — which for a new title is everyone —
           // needs the session as well as the announcement: everyone who can
           // play it, that is, and the rest a stream of their own.
-          splitOffHevc(room, roomId, hostVariant);
+          sortByHevc(room, roomId, hostVariant);
+          // Off the stream it asked for, to that one's twin (see hostKey):
+          // whoever came with it gets a driver of their own for it.
+          if (!itemChanged && hostWasOn && hostWasOn !== hostKey) settleLeftStream(room, hostWasOn);
           announceVariant(room, hostVariant);
           break;
         }

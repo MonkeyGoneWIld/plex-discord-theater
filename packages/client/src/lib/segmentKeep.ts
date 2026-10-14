@@ -28,6 +28,15 @@ const MINUTE_MS = 60_000;
 /** This page's kept segments at most: more than three minutes of a 38 Mbps
  *  film, which is more than any player here holds ahead of where it plays. */
 const KEEP_BYTES = 1_500_000_000;
+/**
+ * Segments being kept at once, at most — read and waiting for Cache Storage to
+ * take them. Each holds its bytes in the page until then, so writes that fall
+ * behind the downloads would pile up in memory: a segment that comes in while
+ * this many are still being kept isn't kept. On 14 October Troy's page held
+ * 1.5 GB more than the P2P engine may keep, two hours in with a skip or two a
+ * minute, and climbing.
+ */
+const KEEPING_AT_MOST = 3;
 
 /** What keeping needs of Cache Storage — the browser's, or a stand-in. */
 type Store = Pick<CacheStorage, "open" | "keys" | "delete" | "match">;
@@ -42,10 +51,18 @@ export function useCacheStorageForTests(s: Store | null): void {
   ownBytes.clear();
   sweptMinute = null;
   servedOne = false;
+  keeping = 0;
+  notKept = 0;
+  stopped = false;
 }
 
 /** This page's kept bytes, by minute. */
 const ownBytes = new Map<number, number>();
+/** Segments being kept now, and those not kept for it — see KEEPING_AT_MOST. */
+let keeping = 0;
+let notKept = 0;
+/** Set when memory runs short: nothing more is kept — see stopKeepingSegments. */
+let stopped = false;
 /** The minute old caches were last let go in. */
 let sweptMinute: number | null = null;
 let servedOne = false;
@@ -61,7 +78,26 @@ function refused(err: unknown, doing: string): void {
 
 /** Whether this page keeps segments at all. */
 export function keepingSegments(): boolean {
-  return cacheStorage() !== null;
+  return cacheStorage() !== null && !stopped;
+}
+
+/** Whether to keep one more segment now, or let it go by — KEEPING_AT_MOST. */
+export function roomToKeep(): boolean {
+  if (keeping < KEEPING_AT_MOST) return true;
+  if (notKept++ === 0) logWarn("Storage", "keeping the film for the page after this one has fallen behind: letting segments go by", { keeping });
+  return false;
+}
+
+/** Keep nothing more on this page, for want of memory; what is kept stays. */
+export function stopKeepingSegments(): void {
+  stopped = true;
+}
+
+/** How keeping is going, for the health samples. */
+export function keepStats(): { keptMB: number; keeping: number; notKept: number } {
+  let bytes = 0;
+  for (const b of ownBytes.values()) bytes += b;
+  return { keptMB: Math.round(bytes / 1e6), keeping, notKept };
 }
 
 /** Let go of minutes past keeping, once a minute; and of this page's oldest
@@ -93,6 +129,15 @@ async function letGo(s: Store, minute: number): Promise<void> {
  * size is known, and never when the download fails or is called off.
  */
 export async function keepSegment(url: string, body: ReadableStream<Uint8Array>, contentType: string | null, bytes: number | null): Promise<void> {
+  keeping++;
+  try {
+    await keepWhole(url, body, contentType, bytes);
+  } finally {
+    keeping--;
+  }
+}
+
+async function keepWhole(url: string, body: ReadableStream<Uint8Array>, contentType: string | null, bytes: number | null): Promise<void> {
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
@@ -107,11 +152,15 @@ export async function keepSegment(url: string, body: ReadableStream<Uint8Array>,
     return;
   }
   const s = cacheStorage();
-  if (!s || size === 0 || (bytes !== null && size !== bytes)) return;
+  if (!s || stopped || size === 0 || (bytes !== null && size !== bytes)) return;
   const minute = Math.floor(Date.now() / MINUTE_MS);
+  // The bytes go into the Blob here; the page's own copies of them needn't
+  // wait for Cache Storage too.
+  const blob = new Blob(chunks as BlobPart[]);
+  chunks.length = 0;
   try {
     const cache = await s.open(PREFIX + minute);
-    await cache.put(url, new Response(new Blob(chunks as BlobPart[]), {
+    await cache.put(url, new Response(blob, {
       headers: {
         "Content-Type": contentType ?? "video/mp2t",
         "Content-Length": String(size),

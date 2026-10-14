@@ -45,6 +45,7 @@ import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegm
 import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
 import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, inBrowserCache, installSegmentParts, keepLater, partsFor, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
+import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
 import { installTakeFromPeer } from "../lib/takeFromPeer";
 import { connectionsSeen, watchPeerConnections } from "../lib/peerConnections";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
@@ -461,6 +462,25 @@ const CACHE_LOOK_MS = 300;
  * Mbps 2 GB is about 25 minutes of film; at 25 Mbps about 10.
  */
 const ENGINE_MEMORY_MIB = /Android|iPhone|iPad|iPod/i.test(typeof navigator === "undefined" ? "" : navigator.userAgent) ? 1024 : 2048;
+/** ENGINE_MEMORY_MIB, or what the test player sets (test/sync-player ?engineMiB=),
+ *  or what is left of it once memory has run short (MEMORY_SHORT_SHARE). */
+let engineMemoryCutMiB: number | null = null;
+const engineMemoryMiB = () => engineMemoryCutMiB ?? (globalThis as { __pdtEngineMiB?: number }).__pdtEngineMiB ?? ENGINE_MEMORY_MIB;
+/**
+ * The share of the page's memory past which it gives some back: nothing more
+ * kept for the page after this one (lib/segmentKeep), and half as much kept
+ * by the P2P engine, which lets go of what has been watched first. On 14
+ * October Troy's page reached 3.85 GB of its 4.29 two hours in, still
+ * climbing, 1.5 GB more than the engine may keep — the window is the whole
+ * page, and running out takes the film with it.
+ */
+const MEMORY_SHORT_SHARE = 0.75;
+
+/** Where the P2P engine keeps segments, for its size: not part of its API. */
+type EngineStorage = { currentStorageUsage?: number; segmentMemoryStorageLimit?: number; cache?: Map<unknown, unknown> };
+function engineStorageOf(hls: Hls | null): EngineStorage | undefined {
+  return (hls as unknown as { p2pEngine?: { core?: { segmentStorage?: EngineStorage } } } | null)?.p2pEngine?.core?.segmentStorage;
+}
 
 // Don't bother flushing slivers — avoids issuing a remove on every tick for a
 // second or two of overshoot.
@@ -2411,8 +2431,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // all, so its assignment always differs from the last title's — and the
     // host starting Avatar after Toy Story read as the host switching audio.
     const sameTitle = appliedVariantTitleRef.current === v.ratingKey;
+    // The same tracks in H.264 or as a copy, by what this player decodes
+    // (the server's seatOf), is no change of tracks.
+    const tracksOf = (key: string | null) => key?.replace(/\/h264$/, "") ?? null;
     const movedBysomeoneElse =
-      hadTracks && sameTitle && appliedVariantKeyRef.current !== v.variantKey && !askedForTracksRef.current;
+      hadTracks && sameTitle && tracksOf(appliedVariantKeyRef.current) !== tracksOf(v.variantKey) && !askedForTracksRef.current;
     appliedVariantKeyRef.current = v.variantKey;
     appliedVariantTitleRef.current = v.ratingKey;
     askedForTracksRef.current = false;
@@ -4134,7 +4157,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // rest is what has been watched, kept for going back to. It was
                 // 1 GiB, and before that 512 MiB, sized for re-encodes that
                 // peaked at 20 Mbps.
-                segmentMemoryStorageLimit: ENGINE_MEMORY_MIB,
+                segmentMemoryStorageLimit: engineMemoryMiB(),
                 // This engine owns the fragment loader, so hls.js's buffer targets
                 // are only advisory. With no peers connected, high-demand is the
                 // *only* thing that triggers an HTTP fetch: p2p-downloadable is
@@ -4382,7 +4405,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   if (!times) return;
                   held.set(segmentUrl, [times[0], times[1], bytesLength]);
                   // What the engine has let go to make room, it no longer has.
-                  forgetEvicted(held, video.currentTime, ENGINE_MEMORY_MIB * 1024 * 1024);
+                  forgetEvicted(held, video.currentTime, engineMemoryMiB() * 1024 * 1024);
                   // The segment beside it may be the one the picture needs now:
                   // the rest of its parts at once (partsAtOnce).
                   pumpSegmentParts();
@@ -5719,6 +5742,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             frames.shown - lastFrames.shown < 2 * (frames.at - lastFrames.at)) {
           logWarn("Video", "the picture hardly moved while the time ran on", { ...frameDeltas, ...snapshot(v) });
         }
+        const engine = engineStorageOf(hlsRef.current);
         logEvent("Health", "sample", {
           session: sessionIdRef.current?.substring(0, 8) ?? "none",
           role: amHost ? "host" : "viewer",
@@ -5742,8 +5766,27 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           p2pMB: stats.p2pBytes / 1e6,
           httpMB: stats.httpBytes / 1e6,
           ...heapSample(),
+          // Where the memory is: what the engine counts as kept (MiB as MB),
+          // and what is being kept for the page after this one.
+          ...(engine?.currentStorageUsage != null ? {
+            engineMB: Math.round(engine.currentStorageUsage * 1.048576),
+            engineSegments: engine.cache?.size ?? "?",
+          } : {}),
+          ...keepStats(),
           ...snapshot(v),
         });
+        const mem = (performance as Performance & { memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number } }).memory;
+        if (mem && engineMemoryCutMiB === null && mem.usedJSHeapSize > mem.jsHeapSizeLimit * MEMORY_SHORT_SHARE) {
+          engineMemoryCutMiB = Math.round(engineMemoryMiB() / 2);
+          stopKeepingSegments();
+          if (engine) engine.segmentMemoryStorageLimit = engineMemoryCutMiB;
+          logWarn("Health", "memory running short: keeping nothing more for the page after this one, and half as much in the P2P engine", {
+            ...heapSample(),
+            engineMiB: engineMemoryCutMiB,
+            ...(engine?.currentStorageUsage != null ? { engineMB: Math.round(engine.currentStorageUsage * 1.048576) } : {}),
+            ...keepStats(),
+          });
+        }
 
         // Stall watchdog. A stall that throws an error is handled by the
         // hls.js ERROR path; this catches the silent one — playback wedged

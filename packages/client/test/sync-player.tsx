@@ -39,6 +39,10 @@ const titlePageMs = new URLSearchParams(location.search).has("titlePage")
 // ?whisper plays it unmuted at a whisper instead, where the browser allows
 // that: a muted video in a page nobody can see is paused a few seconds in.
 const whisper = new URLSearchParams(location.search).has("whisper");
+// ?engineMiB=: the P2P engine's memory, smaller, so a short film fills it.
+if (new URLSearchParams(location.search).has("engineMiB")) {
+  (globalThis as { __pdtEngineMiB?: number }).__pdtEngineMiB = Number(new URLSearchParams(location.search).get("engineMiB"));
+}
 // ?timerFrames: frame callbacks on a timer. A browser that isn't drawing the
 // page — its window behind another — runs none, and the subtitle layer times
 // its lines by them; the checks read the page's text, which this keeps true.

@@ -7,7 +7,7 @@ import {
   MAX_PARTS, fetchInParts, fetchInPartsLater, inBrowserCache, installSegmentParts, partBounds, partUrl, partsFor, pumpSegmentParts,
   keepLater, segmentBytesOf, segmentProgress,
 } from "../src/lib/segmentParts";
-import { keepingSegments, keptSegment, useCacheStorageForTests } from "../src/lib/segmentKeep";
+import { keepStats, keepingSegments, keptSegment, stopKeepingSegments, useCacheStorageForTests } from "../src/lib/segmentKeep";
 import { keepOnPeer, keepSharedOnPeer, ownerOf, shareChoice, shouldTakeFromPeer } from "../src/lib/takeFromPeer";
 
 let pass = 0;
@@ -340,6 +340,35 @@ console.log("\n— what is kept for the page after this one —");
     same(await readAll(await target.fetch(keepLater(fetchInPartsLater(new Request(URL4), URL4, SEGMENT.length)))), SEGMENT), true);
   check("whole", b.asked.length, partsFor(SEGMENT.length));
   check("and nothing more is asked of Cache Storage", keepingSegments(), false);
+  useCacheStorageForTests(null);
+}
+
+console.log("\n— keeping that falls behind the downloads —");
+{
+  // Cache Storage that takes its time: every put waits until let go.
+  const waiting: Array<() => void> = [];
+  const slow = {
+    async open() {
+      return { put: (_r: RequestInfo | URL, res: Response) => new Promise<void>((done) => { waiting.push(() => { void res.arrayBuffer().then(() => done()); }); }), match: async () => undefined } as unknown as Cache;
+    },
+    async keys() { return [] as string[]; },
+    async delete() { return true; },
+    async match() { return undefined; },
+  };
+  useCacheStorageForTests(slow);
+  const b = bot();
+  const target = { fetch: b.fetch };
+  installSegmentParts(target);
+  const urls = [0, 1, 2, 3, 4].map((i) => URL0.replace("00428", `0050${i}`));
+  const whole = await Promise.all(urls.map(async (u) => same(await readAll(await target.fetch(keepLater(fetchInPartsLater(new Request(u), u, SEGMENT.length)))), SEGMENT)));
+  await sleep(20);
+  check("every segment is handed on whole, kept or not", whole.every(Boolean), true);
+  check("no more than three are being kept at once, the rest let go by", [keepStats().keeping, keepStats().notKept], [3, 2]);
+  while (waiting.length) waiting.shift()!();
+  await sleep(20);
+  check("and once they are in, there is room again", keepStats().keeping, 0);
+  stopKeepingSegments();
+  check("short of memory, nothing more is kept", keepingSegments(), false);
   useCacheStorageForTests(null);
 }
 

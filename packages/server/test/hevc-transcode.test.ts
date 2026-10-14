@@ -17,8 +17,8 @@ process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "hevc-transc
 
 // After THUMB_CACHE_DIR, for the same reason as variant-sync.test.ts: the stores
 // open their databases as they load.
-const { attachWebSocketServer, closeWebSocketServer, mayStartHevc } = await import("../src/services/sync.js");
-const { recordSessionVideoCodec, isHevcSession } = await import("../src/routes/plex.js");
+const { attachWebSocketServer, closeWebSocketServer, mayStartHevc, sessionHostUserId } = await import("../src/services/sync.js");
+const { recordSessionVideoCodec, recordHevcWithheld, isHevcSession } = await import("../src/routes/plex.js");
 const { transcodeFrame } = await import("../src/services/media-versions.js");
 const { createSession } = await import("../src/middleware/auth.js");
 const { instanceHosts } = await import("../src/routes/discord.js");
@@ -205,19 +205,94 @@ console.log("\n— a viewer whose player fails to decode HEVC withdraws —");
   [host, a].forEach((c) => c.close());
 }
 
-console.log("\n— a host who can't decode HEVC —");
+console.log("\n— a host whose player turns out not to decode HEVC —");
 {
   newRoom("hevc-6");
   const host = await join("hevc-6", "u-host", "host", true);
   const a = await join("hevc-6", "u-a", "a", true);
-  await startPlayback(host, "hevc");
+  const sid = await startPlayback(host, "hevc");
   [host, a].forEach((c) => c.clear());
   host.send({ type: "caps", hevc: false });
   await sleep(60);
-  check("the host's own stream is rebuilt", host.toldToRebuild(), true);
-  check("as H.264, whoever drives it", [mayStartHevc("u-host"), mayStartHevc("u-a")], [false, false]);
-  check("and nobody is split off it", a.seen.filter((m) => m.type === "variant").length, 0);
+  check("the host is given an H.264 stream of its own to bring up", host.toldToRebuild(), true);
+  check("as H.264", mayStartHevc("u-host"), false);
+  const aOn = a.seen.filter((m) => m.type === "variant").at(-1);
+  check("the viewer stays on the copy, driving it now", [aOn?.variantKey, aOn?.hlsSessionId, aOn?.isOwner], ["1:0", sid, true]);
+  check("and may still start HEVC", mayStartHevc("u-a"), true);
   [host, a].forEach((c) => c.close());
+}
+
+console.log("\n— a host who can't decode HEVC starting an HEVC film —");
+{
+  newRoom("hevc-7");
+  const host = await join("hevc-7", "u-host", "host", false);
+  const a = await join("hevc-7", "u-a", "a", true);
+  [host, a].forEach((c) => c.clear());
+  // The host's start: re-encoded for want of HEVC, a copy being possible.
+  const sid = crypto.randomUUID();
+  recordSessionVideoCodec(sid, "h264");
+  recordHevcWithheld(sid);
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: sid, position: 0, sessionOffset: 0,
+    audioStreamId: 1, subtitleStreamId: 0,
+  });
+  await sleep(60);
+  const aOn = a.seen.filter((m) => m.type === "variant").at(-1);
+  check("the viewer who can play HEVC is given a copy of its own to bring up", [aOn?.variantKey, aOn?.isOwner, aOn?.hlsSessionId], ["1:0", true, null]);
+  check("and may start it as HEVC", mayStartHevc("u-a"), true);
+  check("the host stays on its own", host.seen.some((m) => m.type === "variant" && m.hlsSessionId === null), false);
+  const copySid = crypto.randomUUID();
+  recordSessionVideoCodec(copySid, "hevc");
+  a.send({ type: "variant-session", hlsSessionId: copySid, sessionOffset: 0 });
+  await sleep(60);
+  check("bringing it up moves nobody else", host.seen.filter((m) => m.type === "variant").some((m) => m.hlsSessionId === copySid), false);
+
+  const b = await join("hevc-7", "u-b", "b", true);
+  await sleep(60);
+  const bState = b.seen.find((m) => m.type === "state")?.variant;
+  check("another who can play HEVC, joining, follows the copy", [bState?.variantKey, bState?.hlsSessionId, bState?.isOwner], ["1:0", copySid, false]);
+  const c = await join("hevc-7", "u-c", "c", false);
+  await sleep(60);
+  const cState = c.seen.find((m) => m.type === "state")?.variant;
+  check("one who can't follows the host's", [cState?.variantKey, cState?.hlsSessionId], ["1:0/h264", sid]);
+
+  // The host restarts — a far seek — on its own stream, not the copy.
+  [a, b].forEach((x) => x.clear());
+  const sid2 = crypto.randomUUID();
+  recordSessionVideoCodec(sid2, "h264");
+  recordHevcWithheld(sid2);
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: sid2, position: 300, sessionOffset: 300,
+    audioStreamId: 1, subtitleStreamId: 0,
+  });
+  await sleep(60);
+  check("the host's restart leaves the copy alone", [a, b].map((x) => x.seen.some((m) => m.type === "variant" && m.hlsSessionId === sid2)), [false, false]);
+  check("and goes to whoever follows the host's", c.seen.filter((m) => m.type === "variant").at(-1)?.hlsSessionId, sid2);
+  [host, a, b, c].forEach((x) => x.close());
+}
+
+console.log("\n— a viewer moving from a player that can't decode HEVC to one that can —");
+{
+  newRoom("hevc-8");
+  const host = await join("hevc-8", "u-host", "host", true);
+  const sid = await startPlayback(host, "hevc");
+  const firefox = await join("hevc-8", "u-m", "m", false);
+  await sleep(60);
+  check("on Firefox, on an H.264 stream of its own", firefox.seen.find((m) => m.type === "state")?.variant?.variantKey, "1:0/h264");
+  const twinSid = crypto.randomUUID();
+  recordSessionVideoCodec(twinSid, "h264");
+  recordHevcWithheld(twinSid);
+  firefox.send({ type: "variant-session", hlsSessionId: twinSid, sessionOffset: 0 });
+  await sleep(60);
+  // Discord for Windows, the same person: the Firefox connection is replaced.
+  const windows = await join("hevc-8", "u-m", "m", true);
+  await sleep(60);
+  const wState = windows.seen.find((m) => m.type === "state")?.variant;
+  check("on Windows, on the host's copy", [wState?.variantKey, wState?.hlsSessionId], ["1:0", sid]);
+  check("and the H.264 stream nobody is on now goes", sessionHostUserId(twinSid), null);
+  [host, firefox, windows].forEach((c) => c.close());
 }
 
 console.log("\n— a viewer's own stream —");

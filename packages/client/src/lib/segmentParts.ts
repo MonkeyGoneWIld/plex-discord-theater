@@ -22,7 +22,7 @@
  * fetched it in four, and had all 26 to 28 MB of it again from the bot, while
  * the segments after it came out of the cache in no time.
  */
-import { keepSegment, keepingSegments, keptSegment } from "./segmentKeep";
+import { keepSegment, keepingSegments, keptSegment, roomToKeep } from "./segmentKeep";
 
 /** About how big each part is. Small enough that even a short segment is
  *  split, since every part runs at a download's pace. */
@@ -191,7 +191,7 @@ async function fetchKeeping(
   const response = mark
     ? await fetchInParts(native, request, mark.bytes, mark.parts, mark.key, mark.atOnce)
     : await native(request);
-  if (response.status !== 200 || !response.body || !keepingSegments()) return response;
+  if (response.status !== 200 || !response.body || !keepingSegments() || !roomToKeep()) return response;
   const [handedOn, toKeep] = response.body.tee();
   void keepSegment(request.url, toKeep, response.headers.get("Content-Type"), mark?.bytes ?? segmentBytesOf(request.url));
   return new Response(handedOn, { status: response.status, statusText: response.statusText, headers: response.headers });

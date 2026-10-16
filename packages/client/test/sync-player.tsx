@@ -32,6 +32,9 @@ const poppedOut = (() => {
  */
 const titlePageMs = new URLSearchParams(location.search).has("titlePage")
   ? Number(new URLSearchParams(location.search).get("titlePage")) || 0 : null;
+/** ?followRole: this player's role is the room's, as the app has it — handed
+ *  the host, or handing it over — rather than fixed by which player it is. */
+const followRole = new URLSearchParams(location.search).has("followRole");
 
 // Muted for good, so the browser lets it play without anyone clicking in this
 // frame — and keeps letting it: un-muting a video that started muted without
@@ -239,10 +242,11 @@ function Room() {
   // handed whatever the room moves on to, as the app does.
   // Reloaded the way Discord's pop-out reloads it: its role and its film come
   // from the room, as the app has them, not from which player this is.
-  const host = poppedOut ? state.isHost === true : isHost;
-  if (poppedOut && state.isHost === null) return <p style={{ color: "#aaa" }}>Back from a pop-out: joining…</p>;
+  const fromRoom = poppedOut || followRole;
+  const host = fromRoom ? state.isHost === true : isHost;
+  if (fromRoom && state.isHost === null) return <p style={{ color: "#aaa" }}>{poppedOut ? "Back from a pop-out: joining…" : "Joining…"}</p>;
   if (!host && !roomItem) return <p style={{ color: "#aaa" }}>Viewer: waiting for the host to start…</p>;
-  const item = host ? (poppedOut && roomItem ? roomItem : hostItem) : roomItem!;
+  const item = host ? (fromRoom && roomItem ? roomItem : hostItem) : roomItem!;
   if (stopped) return <p style={{ color: "#aaa" }}>Host: stopped</p>;
   if (onTitlePage) return <p style={{ color: "#aaa" }}>Host: on the title's page</p>;
   return (

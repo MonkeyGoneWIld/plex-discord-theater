@@ -25,8 +25,10 @@
 // players fetch them in parts (lib/segmentParts). &parts=0 leaves the sizes out.
 // &event=1 lists it as the bot lists a copy: from where the stream was asked
 // to start, the next 40s, still growing, so a skip past that rebuilds the
-// stream there. stream=copy4 is the same with a four-second keyframe
-// interval, ~4 MB a segment, and stream=copy4long the same five minutes long.
+// stream there, and &manifestMs= has a new one's playlist take that long to
+// come, as Plex starting a copy does. stream=copy4 is the same with a
+// four-second keyframe interval, ~4 MB a segment, and stream=copy4long the
+// same five minutes long.
 //
 // &cache=1 answers segments as the bot does, for the browser to keep five
 // minutes (Cache-Control) — and so for the page after a pop-out to find them.
@@ -111,6 +113,9 @@ let eventList = false;
 /** How much of a copy the playlist lists from where it starts: 40s, or
  *  &eventS= — a longer list keeps a skip inside it in place. */
 let eventS = 40;
+/** &manifestMs=: how long a new copy's playlist takes to come, as the bot's
+ *  takes while Plex starts the copy — a second or so. */
+let manifestMs = 0;
 /** Where each session was asked to start: its owner says, everyone else joins it. */
 const sessionStart = new Map<string, number>();
 /**
@@ -279,6 +284,7 @@ const server = http.createServer(async (req, res) => {
     previewsSent.length = 0;
     eventList = url.searchParams.get("event") === "1";
     eventS = Number(url.searchParams.get("eventS") ?? 40) || 40;
+    manifestMs = Number(url.searchParams.get("manifestMs") ?? 0) || 0;
     sessionStart.clear();
     p2pOn = url.searchParams.get("p2p") !== "0";
     const stream = url.searchParams.get("stream");
@@ -356,7 +362,11 @@ const server = http.createServer(async (req, res) => {
     // stream starts, then what it has measured from there — 40s — at each
     // segment's length, an EVENT playlist that says where to begin.
     const sid = p.split("/")[5];
-    if (!sessionStart.has(sid)) sessionStart.set(sid, Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0));
+    if (!sessionStart.has(sid)) {
+      sessionStart.set(sid, Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0));
+      if (manifestMs) await new Promise((r) => setTimeout(r, manifestMs));
+      if (res.destroyed) return;
+    }
     const offset = sessionStart.get(sid)!;
     const names = fs.readdirSync(streamDir).filter((f) => /^seg\d+\.ts$/.test(f)).sort();
     const first = Math.min(Math.floor(offset / segmentS), names.length - 1);

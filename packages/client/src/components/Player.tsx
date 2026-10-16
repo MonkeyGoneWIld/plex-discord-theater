@@ -2717,14 +2717,43 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // one was ahead of it — is the one everybody follows now, so it plays.
     // Its picture is reported fresh from here: see reportHostPicture.
     hostToldWaitingRef.current = false;
-    stopWaitingForRoom("this player is the host now");
     {
       const v = videoRef.current;
       const sync = syncStateRef.current;
-      // Held where the room waits, if it does: steerHost takes it from there.
-      if (sync?.playing && sync.hostWaiting) hostHeldRef.current = true;
-      else if (v && v.paused && sync?.playing && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-        v.play().catch(() => {});
+      /**
+       * Handed the room before its own picture is moving: a joiner given host
+       * a second or two in, still loading, or holding just past the room until
+       * it gets there. It was told to play only if its picture was in at that
+       * instant, and nothing told it later, so it sat paused; its first
+       * heartbeat said so, and the room paused for everybody. On 16 October
+       * blah0391 handed monkey26 the room twice as they joined, and it stood
+       * 12.6 and 15 seconds until somebody pressed play. Such a host catches
+       * up with the room as one taking over a playing room does
+       * (hostCatchUpRef): the room plays on by its clock, a wait ahead of it
+       * stays one, and it drives the room once its picture is in step. Only
+       * for a handover: a player opened as host decides this as its stream
+       * starts (the session effect), and has nothing to play yet here.
+       */
+      const handedTheRoom = !mountedAsHostRef.current && !!sessionIdRef.current;
+      if (handedTheRoom && v && sync?.playing && !sync.hostWaiting && !pictureMoving(v) &&
+          sync.ratingKey === itemRef.current.ratingKey && sync.position > DRIFT_THRESHOLD_S) {
+        hostCatchUpRef.current = true;
+        hostCatchUpSinceRef.current = Date.now();
+        hostCatchUpActedAtRef.current = 0;
+        hostCatchUpBehindSinceRef.current = 0;
+        logEvent("Sync", "the host now, with its picture not moving yet: the room plays on by its clock until it is in step", {
+          waitingAheadOfRoom: !!roomWaitRef.current,
+          roomPosS: Number(roomPositionNow(sync).toFixed(2)),
+          ...snapshot(v),
+        });
+        if (!roomWaitRef.current && v.paused) v.play().catch(() => {});
+      } else {
+        stopWaitingForRoom("this player is the host now");
+        // Held where the room waits, if it does: steerHost takes it from there.
+        if (sync?.playing && sync.hostWaiting) hostHeldRef.current = true;
+        else if (v && v.paused && sync?.playing && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+          v.play().catch(() => {});
+        }
       }
     }
 
@@ -4680,6 +4709,27 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             // began at 0:00, took the in-place path for every backward seek, and
             // sat out the full stall timeout before restarting.
             sessionStartOffsetRef.current = syncStateRef.current?.sessionOffset ?? 0;
+          }
+
+          /**
+           * A stream a newer skip has already replaced: its restart waits only
+           * for this manifest (handleSeekRestart's commit), and tears it down
+           * within the debounce. Announced, it told the room where it begins
+           * after the skip that replaced it, and the room went there: on 16
+           * October blah0391 skipped twelve times in sixteen seconds, the room
+           * jumped to 46:35 after a skip to 20:02, and ended on 42:40 for a last
+           * skip to 31:37, with monkey26 stuck behind it for half a minute. So
+           * it is neither announced nor landed on nor played.
+           */
+          const newerTarget = seekOffsetRef.current;
+          if (sessionOwner && !didAdoptRef.current && restartTimerRef.current !== null &&
+              newerTarget !== null && Math.abs(newerTarget - startOffset) > 1) {
+            logEvent("Seek", "a newer skip replaces this stream, not announcing it", {
+              session: sessionId?.substring(0, 8),
+              startS: startOffset,
+              newerTargetS: Number(newerTarget.toFixed(2)),
+            });
+            return;
           }
 
           // Clear track switching overlay

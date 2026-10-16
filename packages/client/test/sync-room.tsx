@@ -110,7 +110,7 @@ function Runner() {
   const viewerFrame = useRef<HTMLIFrameElement>(null);
   /** The host's player, on this page's own origin: its fixture, to drive it. */
   const hostFixture = () => (hostFrame.current?.contentWindow as unknown as {
-    fixture?: { newStream?: () => void; actions?: { sendSetCoHost: (id: string, v: boolean) => void } };
+    fixture?: { newStream?: () => void; actions?: { sendSetCoHost: (id: string, v: boolean) => void; sendPromoteHost: (id: string) => void } };
   } | null)?.fixture;
   /** Every report of both players, every 100ms, until stopped. */
   const sampleBoth = () => {
@@ -506,6 +506,140 @@ function Runner() {
       say(`FAIL ${String(err)}`);
     } finally {
       viewerQuery = "";
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
+   * The host handing the room to a viewer who has only just joined, as
+   * blah0391 handed monkey26 the room on 16 October. Its picture wasn't moving
+   * yet — still loading, and waiting a little past the room for it — so it was
+   * never told to play, its first heartbeat said it was paused, and the room
+   * paused for everybody, 12.6 and 15 seconds until somebody pressed play.
+   * Now the one who handed it over plays on, skipping nothing, and the new
+   * host comes in once its picture is in step with the room.
+   */
+  async function runHandToJoiner() {
+    setRunning(true);
+    const out: string[] = ["— the host handing the room to a viewer who has just joined —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    let sampler = 0;
+    try {
+      latest.clear();
+      events.clear();
+      await api("/api/test/reset?p2p=0&stream=copy4&event=1&eventS=120");
+      await api("/api/test/flow?user=u-viewer&kbps=6000");
+      viewerQuery = "&latejoin&followRole";
+      hostQuery = "&followRole";
+      setHostOn(false);
+      setFrames(nextFrames(currentGen));
+      setHostOn(true);
+      await waitFor(() => { const h = latest.get("u-host"); return !!h && !h.paused && h.pos > 20; }, 90_000, "the host 20s in");
+      (viewerFrame.current?.contentWindow as Window | null | undefined)?.postMessage({ kind: "press", press: ["Join"] }, "*");
+      await waitFor(() => events.get("u-viewer")?.some((e) => e.tag === "HLS" && e.msg === "manifest parsed"), 30_000, "the joiner's stream");
+      const samples: Sample[] = [];
+      sampler = window.setInterval(() => {
+        const host = latest.get("u-host");
+        const viewer = latest.get("u-viewer");
+        if (host && viewer) samples.push({ t: Date.now(), host, viewer });
+      }, 100);
+      hostFixture()?.actions?.sendPromoteHost("u-viewer");
+      const handedAt = Date.now();
+      const v0 = latest.get("u-viewer");
+      say(`… handed over at ${latest.get("u-host")!.pos.toFixed(1)}s, the joiner ${v0 && !v0.paused ? "playing" : "not playing yet"} (readyState ${v0?.ready ?? "?"})`);
+      await pause(25_000);
+      window.clearInterval(sampler);
+      const joiner = events.get("u-viewer") ?? [];
+      const promoted = joiner.some((e) => e.t >= handedAt && /promoted to host/.test(e.msg));
+      const newHostPlayedAt = joiner.find((e) => e.t >= handedAt && e.tag === "Video" && e.msg === "playing")?.t;
+      const after = samples.filter((x) => x.t >= handedAt);
+      // "host" is the player who hosted until now.
+      const pausedMs = after.filter((x) => x.host.paused).length * 100;
+      const jumped = after.filter((x, i) => i > 0 && x.host.pos - after[i - 1].host.pos > 1.5).length;
+      const back = after.filter((x, i) => i > 0 && after[i - 1].host.pos - x.host.pos > 0.5).length;
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      say(`${promoted ? "PASS" : "FAIL"} the joiner was made host`);
+      say(`${pausedMs <= 500 ? "PASS" : "FAIL"} the one who handed it over plays on (paused ${pausedMs} ms)`);
+      say(`${jumped === 0 && back === 0 ? "PASS" : "FAIL"} and skips nothing and sees nothing twice (${jumped} jump(s) on, ${back} back)`);
+      say(`${newHostPlayedAt && newHostPlayedAt - handedAt < 15_000 ? "PASS" : "FAIL"} the new host plays within fifteen seconds (${newHostPlayedAt ? `${((newHostPlayedAt - handedAt) / 1000).toFixed(1)}s` : "never"})`);
+      say(`${Math.abs(v.pos - h.pos) < 1 && !v.paused && !h.paused ? "PASS" : "FAIL"} together 25 seconds on (${(v.pos - h.pos).toFixed(2)}s apart${v.paused ? ", the new host paused" : ""}${h.paused ? ", the old host paused" : ""})`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      window.clearInterval(sampler);
+      viewerQuery = "";
+      hostQuery = "";
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
+   * The host skipping again and again in a copied film, faster than each new
+   * stream comes. On 16 October blah0391 skipped twelve times in sixteen
+   * seconds: each stream a newer skip had replaced still told the room where
+   * it began, the room went there — to 46:35 after a skip to 20:02 — and ended
+   * ten minutes from where the last skip went, with monkey26 stuck for half a
+   * minute. Now everybody plays from where the last skip went.
+   */
+  async function runSkipBurst() {
+    setRunning(true);
+    const out: string[] = ["— the host skipping faster than a copy's new streams come —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    let sampler = 0;
+    try {
+      // A new stream's playlist a second and a half in coming, as Plex starting a copy.
+      await startOnce("p2p=0&stream=copy4&event=1&eventS=20&manifestMs=1500", {}, 60_000);
+      await pause(3_000);
+      const samples: Sample[] = [];
+      sampler = window.setInterval(() => {
+        const host = latest.get("u-host");
+        const viewer = latest.get("u-viewer");
+        if (host && viewer) samples.push({ t: Date.now(), host, viewer });
+      }, 100);
+      const began = Date.now();
+      const press = (key: string, n: number) => { for (let i = 0; i < n; i++) hostKey(key); };
+      // On, further on while that loads, and all the way back while that does.
+      press("ArrowRight", 4);
+      await pause(1_000);
+      press("ArrowRight", 8);
+      await pause(1_300);
+      press("ArrowLeft", 12);
+      await pause(1_500);
+      const seeks = (events.get("u-host") ?? []).filter((e) => e.t >= began && e.tag === "Seek" && e.msg === "host seek");
+      const last = Number(seeks[seeks.length - 1]?.data.targetS);
+      const lastAt = seeks[seeks.length - 1]?.t ?? began;
+      say(`… skipped ${seeks.length} times: ${seeks.map((e) => Number(e.data.targetS).toFixed(0)).join("s → ")}s`);
+      const there = (r: Report | undefined) => !!r && !r.paused && r.pos > last - 3 && r.pos < last + 15;
+      await waitFor(() => there(latest.get("u-host")) && there(latest.get("u-viewer")), 40_000, "both to play from where the last skip went");
+      const thereAt = Date.now();
+      await pause(4_000);
+      window.clearInterval(sampler);
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      // Playing somewhere an earlier skip went, after the last one.
+      const elsewhere = samples.filter((x) => x.t > lastAt &&
+        ((!x.host.paused && x.host.pos > last + 20) || (!x.viewer.paused && x.viewer.pos > last + 20))).length;
+      const roomWrong = (events.get("u-host") ?? []).filter((e) => e.t >= began && /the room's clock is before this stream begins/.test(e.msg)).length;
+      const stuck = (events.get("u-viewer") ?? []).filter((e) => e.t >= began && /seek stalled with no progress/.test(e.msg)).length;
+      const replaced = (events.get("u-host") ?? []).filter((e) => e.t >= began && /a newer skip replaces this stream/.test(e.msg)).length;
+      say(`${thereAt - lastAt < 12_000 ? "PASS" : "FAIL"} both play from where the last skip went, ${((thereAt - lastAt) / 1000).toFixed(1)}s after it (host at ${h.pos.toFixed(1)}s, viewer at ${v.pos.toFixed(1)}s)`);
+      say(`${elsewhere === 0 && roomWrong === 0 ? "PASS" : "FAIL"} and nobody plays where an earlier skip went (${elsewhere} samples; the room's clock past the host's stream ${roomWrong} time(s))`);
+      say(`${Math.abs(v.pos - h.pos) < 1 ? "PASS" : "FAIL"} together (${Math.abs(v.pos - h.pos).toFixed(2)}s apart)`);
+      say(`${stuck === 0 ? "PASS" : "FAIL"} and the viewer never stuck on the way (${stuck})`);
+      say(`streams replaced before they were announced: ${replaced}`);
+    } catch (err) {
+      const h = latest.get("u-host");
+      const v = latest.get("u-viewer");
+      say(`FAIL ${String(err)} (host at ${h?.pos.toFixed(1)}s ${h?.paused ? "paused" : "playing"}, viewer at ${v?.pos.toFixed(1)}s ${v?.paused ? "paused" : "playing"})`);
+    } finally {
+      window.clearInterval(sampler);
       (window as unknown as { results?: string[]; events?: typeof events }).results = out;
       (window as unknown as { events?: typeof events }).events = events;
       setRunning(false);
@@ -1863,6 +1997,8 @@ function Runner() {
         <button disabled={running} onClick={() => void runCopySkipInPlace(true)}>Skip ahead inside a copy, P2P</button>
         <button disabled={running} onClick={() => void runCopySkipInPlace(false, 8_000)}>Skip ahead inside a copy, slow</button>
         <button disabled={running} onClick={() => void runLateJoin()}>Late joiner</button>
+        <button disabled={running} onClick={() => void runHandToJoiner()}>Host handed to a joiner</button>
+        <button disabled={running} onClick={() => void runSkipBurst()}>Skips in a burst, in a copy</button>
         <button disabled={running} onClick={() => void runPopOut("host")}>Host pops out</button>
         <button disabled={running} onClick={() => void runPopOut("viewer")}>Viewer pops out</button>
         <button disabled={running} onClick={() => void runPopOut("host", "slow")}>Host pops out, slow back</button>

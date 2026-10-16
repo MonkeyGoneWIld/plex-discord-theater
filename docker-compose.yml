@@ -21,7 +21,8 @@ services:
 
     # Everything below is read from your .env file. Copy .env.example to .env
     # and fill in the required block; the rest can stay empty, and each one
-    # simply turns its feature off. See .env.example for what each does.
+    # simply turns its feature off — except Direct Stream and HEVC, which are
+    # on unless set to 0. See .env.example for what each does.
     #
     # All of it is read at runtime, DISCORD_CLIENT_ID included — the server
     # hands that one to the browser on each request rather than it being
@@ -71,14 +72,15 @@ services:
       # is if your upload is tight.
       - VIDEO_BITRATE_KBPS=${VIDEO_BITRATE_KBPS}
       - VIDEO_PEAK_BITRATE_KBPS=${VIDEO_PEAK_BITRATE_KBPS}
-      # 1 = HEVC transcodes for players that can decode them; anyone who
-      # can't gets an H.264 stream of their own. Needs Plex Pass and hardware
-      # HEVC encoding enabled in Plex.
-      - HEVC_TRANSCODE=${HEVC_TRANSCODE:-}
-      # 1 = copy the original video instead of re-encoding it, for players
-      # that can decode it. Files averaging over DIRECT_STREAM_MAX_KBPS are
-      # still re-encoded.
-      - DIRECT_STREAM=${DIRECT_STREAM:-}
+      # HEVC transcodes for players that can decode them; anyone who can't
+      # gets an H.264 stream of their own. Needs Plex Pass and hardware HEVC
+      # encoding enabled in Plex; without them Plex keeps sending H.264.
+      # On unless set to 0.
+      - HEVC_TRANSCODE=${HEVC_TRANSCODE:-1}
+      # Copy the original video instead of re-encoding it, for players that
+      # can decode it. Files averaging over DIRECT_STREAM_MAX_KBPS are still
+      # re-encoded. On unless set to 0.
+      - DIRECT_STREAM=${DIRECT_STREAM:-1}
       # Highest average bitrate (kbps) still copied; bigger files are
       # re-encoded so a home upload isn't asked for more than it has.
       # Unset = VIDEO_BITRATE_KBPS.
@@ -120,8 +122,9 @@ services:
       # useful while chasing a specific stream, and roughly five times the log
       # volume the rest of the time.
       - DEBUG=${DEBUG:-}
-      # Guards the "stop every transcode" endpoint. Without it that endpoint
-      # only answers requests originating on this machine.
+      # Password for one maintenance command that stops every stream the bot
+      # has running on Plex, for clearing stuck ones by hand. Empty, it is
+      # accepted only from inside the container, which suits most people.
       - ADMIN_SECRET=${ADMIN_SECRET}
       - QBT_MANAGER_API_KEY=${QBT_MANAGER_API_KEY:-}
 

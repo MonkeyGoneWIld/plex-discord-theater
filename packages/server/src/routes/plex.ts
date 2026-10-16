@@ -123,12 +123,11 @@ const VIDEO_PEAK_BITRATE_KBPS = envInt(
  * HEVC looks as good as H.264 at about two thirds of the bitrate, so at the
  * same setting the picture is simply better. It needs Plex Pass, hardware
  * encoding on Intel or NVIDIA, and "Enable HEVC video encoding" in Plex; a
- * server without those just answers with H.264. Off unless set, because the
- * decode happens in each viewer's Discord, which is the part nobody has tried
- * on every device yet — see mayStartHevc for how a viewer who can't is kept on
- * H.264.
+ * server without those just answers with H.264. On unless set to 0. The
+ * decode happens in each viewer's Discord, and a viewer who can't is kept on
+ * H.264 — see mayStartHevc.
  */
-const HEVC_TRANSCODE = process.env.HEVC_TRANSCODE === "1";
+const HEVC_TRANSCODE = process.env.HEVC_TRANSCODE !== "0";
 
 /**
  * Let Plex copy the video instead of re-encoding it, whenever everyone in the
@@ -137,9 +136,10 @@ const HEVC_TRANSCODE = process.env.HEVC_TRANSCODE === "1";
  * Plex can't copy (a burned subtitle, a file over the bitrate cap, a codec the
  * room can't play) is re-encoded exactly as before. Copied streams are played
  * through a playlist this server builds from the segments themselves — see
- * services/direct-stream.ts for why Plex's own can't be used. Off unless set.
+ * services/direct-stream.ts for why Plex's own can't be used. On unless set
+ * to 0.
  */
-const DIRECT_STREAM = process.env.DIRECT_STREAM === "1";
+const DIRECT_STREAM = process.env.DIRECT_STREAM !== "0";
 
 /**
  * The highest *average* bitrate a file may have and still be copied, in kbps.
@@ -4662,7 +4662,7 @@ router.get(
         // wedged at a fixed point mid-episode. The segments were never the
         // problem; Plex's playlist for them is (services/direct-stream.ts), and a
         // copied stream is now played through one built from the segments
-        // instead. Without DIRECT_STREAM every title is re-encoded, as then.
+        // instead. With DIRECT_STREAM=0 every title is re-encoded, as then.
         directStream: copy ? "1" : "0",
         directStreamAudio: "1",
         videoResolution,

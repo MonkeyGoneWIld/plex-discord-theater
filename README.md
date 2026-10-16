@@ -102,9 +102,9 @@ default quality, volume, the subtitle look, and your watch history setting.
   frames.
 - **Video zoom:** choose Original, Fill Screen, Match Width, Match Height, Widescreen, Ultrawide, or Custom Zoom (50–200%), saved per movie or show on your device.
 - **Play Version:** choose between multiple versions of a title when available.
-- **Original picture:** with Direct Stream on, Plex copies the original video
-  (H.264, and HEVC for players that can decode it) instead of re-encoding it,
-  converting only the audio where needed.
+- **Original picture:** Plex copies the original video (H.264, and HEVC for
+  players that can decode it) instead of re-encoding it, converting only the
+  audio where needed. Direct Stream is on by default.
 - **Stats for nerds:** press `i` during playback to view whether the video is
   copied or re-encoded and why, codec, bitrate, resolution, frames, audio,
   subtitles, sync, buffer, connection and peers, with live graphs coloured by
@@ -320,16 +320,17 @@ services:
       VIDEO_BITRATE_KBPS: ""
       VIDEO_PEAK_BITRATE_KBPS: ""
 
-      # "1" = HEVC transcodes for players that can decode them: a better
-      # picture at the same bitrate. Anyone who can't gets an H.264 stream of
-      # their own. Needs Plex Pass and hardware HEVC encoding enabled in Plex;
-      # otherwise Plex keeps sending H.264.
-      HEVC_TRANSCODE: ""
+      # HEVC transcodes for players that can decode them: a better picture
+      # at the same bitrate. Anyone who can't gets an H.264 stream of their
+      # own. Needs Plex Pass and hardware HEVC encoding enabled in Plex;
+      # otherwise Plex keeps sending H.264. "0" turns it off.
+      HEVC_TRANSCODE: "1"
 
-      # "1" = play the original video instead of a re-encode whenever a
-      # player can decode it (Direct Stream). Audio is still converted where
-      # needed; files averaging over DIRECT_STREAM_MAX_KBPS are re-encoded.
-      DIRECT_STREAM: ""
+      # Play the original video instead of a re-encode whenever a player can
+      # decode it (Direct Stream). Audio is still converted where needed;
+      # files averaging over DIRECT_STREAM_MAX_KBPS are re-encoded. "0" turns
+      # it off.
+      DIRECT_STREAM: "1"
 
       # The highest average bitrate (kbps) a file may have and still be
       # copied. Every viewer pulls a copy at the file's own bitrate, so keep
@@ -349,7 +350,11 @@ services:
       STREAM_CACHE_DIR: ""
       TRANSCODE_CACHE_MB: ""
 
-      # Guards the "stop every transcode" endpoint.
+      # Password for one maintenance command that stops every stream the bot
+      # has running on Plex, in every room, for clearing streams stuck in
+      # Plex by hand. Nothing calls it on its own, and the server already
+      # stops streams nobody is watching. Empty, the command is accepted only
+      # from inside the container, which suits most people.
       ADMIN_SECRET: ""
 
       # ── Leave these alone ────────────────────────────────────────────────

@@ -1437,7 +1437,7 @@ function Runner() {
       say(`${hostStops.length === 0 ? "PASS" : "FAIL"} the host never stops (${hostStops.length})`);
       // Once the viewer has picture enough — or its own is down to what it keeps whatever happens.
       const backInHand = Number(host.find((e) => /back to downloading at full speed/.test(e.msg))?.data.inHandS ?? NaN);
-      say(`${easedAt && backAt && ((enoughAt && backAt >= enoughAt - 1000) || backInHand < 31) ? "PASS" : "FAIL"} and goes back to full speed once the viewer has picture enough, or its own needs it (${backAt ? `${((backAt - joinedAt) / 1000).toFixed(1)}s after the join, ${backInHand.toFixed(0)}s in hand` : "never"})`);
+      say(`${easedAt && backAt && ((enoughAt && backAt >= enoughAt - 1000) || backInHand < 21) ? "PASS" : "FAIL"} and goes back to full speed once the viewer has picture enough, or its own needs it (${backAt ? `${((backAt - joinedAt) / 1000).toFixed(1)}s after the join, ${backInHand.toFixed(0)}s in hand` : "never"})`);
       const h = latest.get("u-host")!;
       const v = latest.get("u-viewer")!;
       say(`${Math.abs(v.pos - h.pos) < 1 && !v.paused && !h.paused ? "PASS" : "FAIL"} together at the end (${(v.pos - h.pos).toFixed(2)}s apart)`);

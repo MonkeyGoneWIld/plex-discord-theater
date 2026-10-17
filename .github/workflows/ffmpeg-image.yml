@@ -1,0 +1,65 @@
+# Builds the Debian image with ffmpeg and checks what's inside it works: the
+# ffmpeg build, Intel's OpenCL runtime, the native modules, and the app
+# starting as appuser. No GPU on the runner, so nothing here encodes on one —
+# scripts/diagnose-ffmpeg.mjs does that on a real server.
+name: ffmpeg image check
+on:
+  push:
+    branches: [feature/ffmpeg-engine]
+    paths:
+      - Dockerfile
+      - docker/**
+      - scripts/diagnose-ffmpeg.mjs
+      - scripts/library-survey.mjs
+      - package-lock.json
+      - .github/workflows/ffmpeg-image.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build
+        run: docker build -t pdt:check .
+      - name: What's inside
+        run: |
+          docker run --rm --entrypoint sh pdt:check -c '
+            set -e
+            ffmpeg -hide_banner -version | head -n 1
+            ffmpeg -hide_banner -encoders | grep -E " (h264|hevc|av1)_qsv "
+            ffmpeg -hide_banner -filters | grep -E " (tonemap_opencl|tonemapx|vpp_qsv|scale_vaapi|overlay_qsv) "
+            vainfo --help >/dev/null 2>&1 || test -x /usr/lib/jellyfin-ffmpeg/vainfo
+            clinfo -l || true
+            setpriv --version
+            id appuser
+            node -e "new (require(\"better-sqlite3\"))(\":memory:\").prepare(\"select 1\").get(); console.log(\"better-sqlite3 ok\")"
+            node -e "import(\"sharp\").then((s) => console.log(\"sharp ok\", s.default.versions.vips))"
+            node scripts/diagnose-ffmpeg.mjs --help >/dev/null
+            node scripts/library-survey.mjs --help >/dev/null
+          '
+      - name: The app starts, as appuser
+        run: |
+          docker run -d --name pdt \
+            -e PLEX_URL=http://127.0.0.1:9 -e PLEX_TOKEN=x \
+            -e DISCORD_CLIENT_ID=x -e DISCORD_CLIENT_SECRET=x \
+            -e REDIRECT_URI=https://example.com -e ALLOWED_ORIGINS=https://example.com \
+            pdt:check
+          sleep 10
+          docker logs pdt 2>&1 | tail -n 30
+          test "$(docker inspect -f '{{.State.Running}}' pdt)" = true
+          docker exec pdt node -e '
+            const fs = require("fs");
+            for (const pid of fs.readdirSync("/proc").filter((p) => /^\d+$/.test(p))) {
+              let cmd = "";
+              try { cmd = fs.readFileSync("/proc/" + pid + "/cmdline", "utf8"); } catch { continue; }
+              if (!cmd.startsWith("node\0packages/server/dist/index.js")) continue;
+              const status = fs.readFileSync("/proc/" + pid + "/status", "utf8");
+              console.log(status.match(/^(Uid|Gid|Groups):.*$/gm).join("\n"));
+              process.exit(status.match(/^Uid:\s+(\d+)/m)[1] === "100" ? 0 : 1);
+            }
+            console.log("app process not found");
+            process.exit(2);
+          '
+          docker exec pdt node scripts/diagnose-ffmpeg.mjs gpu --out /tmp/diagnose || true

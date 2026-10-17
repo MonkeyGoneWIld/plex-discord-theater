@@ -29,9 +29,11 @@
  *   docker run --rm -it --network host -v "$PWD":/work -w /work node:22-alpine \
  *     node library-survey.mjs --plex-url http://… --plex-token …
  *
- * Also writes every title and its verdict to diagnose-out/library-survey-<time>.csv.
+ * Also writes every title and its verdict to library-survey-<time>.csv, in
+ * /data/diagnose inside the container and diagnose-out/ elsewhere.
  */
 
+import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -43,7 +45,10 @@ Usage: node scripts/library-survey.mjs [options]
   --plex-url <url>      Overrides PLEX_URL.
   --plex-token <token>  Overrides PLEX_TOKEN.
   --section <id>        Only this library section (repeatable).
-  --out <file>          CSV path (default diagnose-out/library-survey-<time>.csv).
+  --out <file>          CSV path (default <data>/diagnose/library-survey-<time>.csv).
+  --streams             Also read every title's streams, one request each: HDR
+                        type, Dolby Vision profile, interlacing, picture
+                        subtitles. Minutes rather than seconds on a big library.
 `;
 
 const args = { section: [] };
@@ -53,6 +58,10 @@ for (let i = 0; i < argv.length; i++) {
   if (name === "help") {
     console.log(HELP);
     process.exit(0);
+  }
+  if (name === "streams") {
+    args.streams = true;
+    continue;
   }
   const value = argv[++i];
   if (!["plex-url", "plex-token", "section", "out"].includes(name) || value === undefined) {
@@ -69,8 +78,10 @@ if (!PLEX_URL || !PLEX_TOKEN) {
   console.error("Set PLEX_URL and PLEX_TOKEN (or pass --plex-url / --plex-token).");
   process.exit(2);
 }
+// Inside the container, the data volume, where the host can reach it.
+const OUT_DIR = existsSync("/data") ? "/data/diagnose" : "diagnose-out";
 const CSV_PATH = path.resolve(
-  args.out ?? path.join("diagnose-out", `library-survey-${new Date().toISOString().replace(/[:.]/g, "-")}.csv`),
+  args.out ?? path.join(OUT_DIR, `library-survey-${new Date().toISOString().replace(/[:.]/g, "-")}.csv`),
 );
 
 // ─── Plex ───────────────────────────────────────────────────────
@@ -174,6 +185,87 @@ function classify(m) {
   return { verdict: "transcode", reason: `audio ${audio}` };
 }
 
+// ─── Streams (--streams) ────────────────────────────────────────
+
+/** HDR as Plex describes a video stream. */
+function hdrOf(v) {
+  if (!v) return "SDR";
+  if (v.DOVIPresent || v.DOVIProfile != null) {
+    const p = Number(v.DOVIProfile);
+    const bl = Number(v.DOVIBLCompatID);
+    if (p === 8) return bl === 1 ? "DV P8.1" : bl === 4 ? "DV P8.4" : bl === 2 ? "DV P8.2" : "DV P8";
+    return Number.isFinite(p) ? `DV P${p}` : "DV";
+  }
+  const trc = String(v.colorTrc ?? "").toLowerCase();
+  if (trc === "smpte2084") return "HDR10";
+  if (trc === "arib-std-b67") return "HLG";
+  return "SDR";
+}
+
+const PICTURE_SUBTITLES = new Set(["pgs", "vobsub", "dvd_subtitle", "dvb_subtitle", "hdmv_pgs_subtitle"]);
+
+/** Run `fn` over `items`, `n` at a time. */
+async function pool(items, n, fn) {
+  let next = 0;
+  await Promise.all(Array.from({ length: n }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      await fn(items[i], i);
+    }
+  }));
+}
+
+/** Each row's streams, from the title's own metadata — the listings leave them out. */
+async function readStreams(rows) {
+  let done = 0;
+  await pool(rows, 8, async (r) => {
+    try {
+      const meta = (await plexJSON(`/library/metadata/${r.ratingKey}`)).MediaContainer?.Metadata?.[0];
+      const media = (meta?.Media ?? []).find((m) => m.id === r.mediaId) ?? meta?.Media?.[0];
+      const streams = media?.Part?.[0]?.Stream ?? [];
+      const v = streams.find((s) => s.streamType === 1);
+      r.hdr = hdrOf(v);
+      r.doviProfile = v?.DOVIProfile ?? "";
+      r.colorTrc = v?.colorTrc ?? "";
+      r.scanType = v?.scanType ?? "";
+      r.pictureSubs = streams.filter((s) => s.streamType === 3 && PICTURE_SUBTITLES.has(String(s.codec ?? "").toLowerCase())).length;
+      r.anamorphic = v?.anamorphic ? (v.pixelAspectRatio ?? "yes") : "";
+    } catch {
+      r.hdr = "unread";
+    }
+    if (++done % 250 === 0 || done === rows.length) process.stdout.write(`\r  streams: ${done} / ${rows.length}   `);
+  });
+  process.stdout.write("\n");
+}
+
+function printStreams(rows) {
+  const copyLimit = Number(process.env.DIRECT_STREAM_MAX_KBPS) || Number(process.env.VIDEO_BITRATE_KBPS) || 12000;
+  const count = (f) => rows.filter(f).length;
+  console.log(`\nHDR (of ${rows.length} titles)`);
+  const kinds = {};
+  for (const r of rows) kinds[r.hdr] = (kinds[r.hdr] ?? 0) + 1;
+  for (const [k, n] of Object.entries(kinds).sort((a, b) => b[1] - a[1])) {
+    const note = k === "DV P5" ? "   no HDR10 base layer: can't be copied to a browser"
+      : k.startsWith("DV") || k === "HDR10" || k === "HLG" ? "   copied like any HEVC file" : "";
+    console.log(`  ${k.padEnd(10)} ${String(n).padStart(6)}  ${pct(n, rows.length).padStart(4)}${note}`);
+  }
+  const hdr = rows.filter((r) => r.hdr !== "SDR" && r.hdr !== "unread" && r.hdr !== "DV P8.2");
+  console.log(`  HDR averaging over ${copyLimit} kbps (re-encoded, HDR kept): ${count((r) => hdr.includes(r) && r.bitrate > copyLimit)}`);
+  console.log(`Interlaced: ${count((r) => /interlaced/i.test(r.scanType))} · anamorphic: ${count((r) => r.anamorphic)} · with picture subtitles (PGS/VobSub): ${count((r) => r.pictureSubs > 0)}`);
+  const examples = [
+    ["HDR10", (r) => r.hdr === "HDR10"], ["HLG", (r) => r.hdr === "HLG"], ["DV P8.1", (r) => r.hdr === "DV P8.1"],
+    ["DV P7", (r) => r.hdr === "DV P7"], ["DV P5", (r) => r.hdr === "DV P5"],
+    ["HDR over the copy limit", (r) => hdr.includes(r) && r.bitrate > copyLimit],
+    ["interlaced", (r) => /interlaced/i.test(r.scanType)], ["AV1", (r) => r.videoCodec === "av1"],
+    ["picture subtitles", (r) => r.pictureSubs > 0],
+  ];
+  console.log("\nTitles to try with: node scripts/diagnose-ffmpeg.mjs file --rating-key <id>");
+  for (const [label, f] of examples) {
+    const picks = rows.filter(f).slice(0, 3);
+    if (picks.length) console.log(`  ${label.padEnd(24)} ${picks.map((r) => `${r.ratingKey} ${r.title}`).join("  ·  ")}`);
+  }
+}
+
 // ─── Survey ─────────────────────────────────────────────────────
 
 function median(values) {
@@ -257,8 +349,13 @@ async function main() {
         resolution: chosen ? `${chosen.width ?? "?"}x${chosen.height ?? "?"}` : "",
         bitrate: chosen?.bitrate ?? null,
         versions: media.length,
+        mediaId: chosen?.id ?? null,
       });
     }
+  }
+  if (args.streams) {
+    console.log(`Reading the streams of ${rows.length} titles…`);
+    await readStreams(rows);
   }
 
   const movies = rows.filter((r) => r.kind === "movie");
@@ -277,10 +374,12 @@ async function main() {
   if (rescued) console.log(`${rescued} more title(s) have another version that would Direct Play now.`);
   const playable = all.now.count + all.hevc.count;
   console.log(`\nIn short: ${pct(all.now.count, rows.length)} could Direct Play today, ${pct(playable, rows.length)} if every viewer can decode HEVC.`);
+  if (args.streams) printStreams(rows);
 
   await mkdir(path.dirname(CSV_PATH), { recursive: true });
   const cols = ["section", "kind", "ratingKey", "title", "verdict", "reason", "otherPlays", "container", "videoCodec",
-    "videoProfile", "audioCodec", "audioChannels", "resolution", "bitrate", "versions"];
+    "videoProfile", "audioCodec", "audioChannels", "resolution", "bitrate", "versions",
+    ...(args.streams ? ["hdr", "doviProfile", "colorTrc", "scanType", "pictureSubs", "anamorphic"] : [])];
   const esc = (v) => {
     const s = v == null ? "" : String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;

@@ -124,7 +124,8 @@ function positive(name, fallback) {
 
 const lines = [];
 const report = { command: COMMAND, startedAt: new Date().toISOString(), ffmpeg: FFMPEG, device: DEVICE };
-const redact = (s) => (PLEX_TOKEN ? String(s).split(PLEX_TOKEN).join("<token>") : String(s));
+// Only something token-sized: a stand-in like "x" would be masked everywhere.
+const redact = (s) => (PLEX_TOKEN.length >= 8 ? String(s).split(PLEX_TOKEN).join("<token>") : String(s));
 function out(s = "") {
   const text = redact(s);
   console.log(text);
@@ -409,7 +410,8 @@ async function encodeTest(name, ffArgs, frames) {
   const stats = ffStats(r.stderr);
   const ok = r.code === 0 && (stats?.frames ?? 0) >= frames * 0.9;
   const rc = rateControl(r.stderr);
-  out(`${tick(ok)} ${name.padEnd(46)} ${ok ? `${String(stats.fps).padStart(5)} fps  ${String(stats.speed).padStart(5)}× real time${rc ? `  (${rc})` : ""}` : "failed"}`);
+  const fps = stats?.fps ? `${String(stats.fps).padStart(5)} fps  ` : "";
+  out(`${tick(ok)} ${name.padEnd(46)} ${ok ? `${fps}${String(stats.speed).padStart(5)}× real time${rc ? `  (${rc})` : ""}` : "failed"}`);
   if (!ok) for (const l of whyFailed(r.stderr)) out(`      ${l}`);
   return { name, ok, fps: stats?.fps ?? null, speed: stats?.speed ?? null, rateControl: rc, error: ok ? null : whyFailed(r.stderr) };
 }

@@ -244,7 +244,7 @@ console.log("\n— ahead of the watcher, and no further —");
   const edge = (text: string) => entries(text).reduce((s, e) => s + e.duration, 0);
   const playlist = async () => (await fetch(origin + variant)).text();
   let now = await playlist();
-  for (let i = 0; i < 40 && edge(now) <= 36 && !now.includes("#EXT-X-ENDLIST"); i++) {
+  for (let i = 0; i < 40 && edge(now) < 32 && !now.includes("#EXT-X-ENDLIST"); i++) {
     await sleep(250);
     now = await playlist();
   }
@@ -255,8 +255,9 @@ console.log("\n— ahead of the watcher, and no further —");
     const a = await playlist();
     await sleep(1000);
     const b = await playlist();
-    check("with the watcher at 0 it stops just past 36 s, short of the end",
-      [edge(a) > 36 && edge(a) < 48, edge(b) === edge(a), b.includes("#EXT-X-ENDLIST")], [true, true, false]);
+    // Stopped once a segment ends past 36 s; the playlist lists up to the one before.
+    check("with the watcher at 0 it stops about 36 s in, short of the end",
+      [edge(a) >= 32 && edge(a) < 48, edge(b) === edge(a), b.includes("#EXT-X-ENDLIST")], [true, true, false]);
   }
   const ping = await fetch(`${origin}/api/plex/hls/ping/${slow}?time=50000&playing=1`);
   check("a ping is answered without asking Plex", [ping.status, transcodeAsked()], [200, []]);

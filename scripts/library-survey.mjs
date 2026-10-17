@@ -194,6 +194,8 @@ function hdrOf(v) {
     const p = Number(v.DOVIProfile);
     const bl = Number(v.DOVIBLCompatID);
     if (p === 8) return bl === 1 ? "DV P8.1" : bl === 4 ? "DV P8.4" : bl === 2 ? "DV P8.2" : "DV P8";
+    // AV1's Dolby Vision: 10.1 has an HDR10 picture underneath, 10.0 nothing, like 5.
+    if (p === 10) return bl === 1 ? "DV P10.1" : bl === 4 ? "DV P10.4" : bl === 2 ? "DV P10.2" : "DV P10.0";
     return Number.isFinite(p) ? `DV P${p}` : "DV";
   }
   const trc = String(v.colorTrc ?? "").toLowerCase();
@@ -245,16 +247,17 @@ function printStreams(rows) {
   const kinds = {};
   for (const r of rows) kinds[r.hdr] = (kinds[r.hdr] ?? 0) + 1;
   for (const [k, n] of Object.entries(kinds).sort((a, b) => b[1] - a[1])) {
-    const note = k === "DV P5" ? "   no HDR10 base layer: can't be copied to a browser"
+    const note = k === "DV P5" || k === "DV P10.0" ? "   no HDR10 base layer: can't be copied to a browser"
       : k.startsWith("DV") || k === "HDR10" || k === "HLG" ? "   copied like any HEVC file" : "";
     console.log(`  ${k.padEnd(10)} ${String(n).padStart(6)}  ${pct(n, rows.length).padStart(4)}${note}`);
   }
-  const hdr = rows.filter((r) => r.hdr !== "SDR" && r.hdr !== "unread" && r.hdr !== "DV P8.2");
+  const hdr = rows.filter((r) => !["SDR", "unread", "DV P8.2", "DV P10.2"].includes(r.hdr));
   console.log(`  HDR averaging over ${copyLimit} kbps (re-encoded, HDR kept): ${count((r) => hdr.includes(r) && r.bitrate > copyLimit)}`);
   console.log(`Interlaced: ${count((r) => /interlaced/i.test(r.scanType))} · anamorphic: ${count((r) => r.anamorphic)} · with picture subtitles (PGS/VobSub): ${count((r) => r.pictureSubs > 0)}`);
   const examples = [
     ["HDR10", (r) => r.hdr === "HDR10"], ["HLG", (r) => r.hdr === "HLG"], ["DV P8.1", (r) => r.hdr === "DV P8.1"],
     ["DV P7", (r) => r.hdr === "DV P7"], ["DV P5", (r) => r.hdr === "DV P5"],
+    ["DV P10 (AV1)", (r) => r.hdr.startsWith("DV P10")],
     ["HDR over the copy limit", (r) => hdr.includes(r) && r.bitrate > copyLimit],
     ["interlaced", (r) => /interlaced/i.test(r.scanType)], ["AV1", (r) => r.videoCodec === "av1"],
     ["picture subtitles", (r) => r.pictureSubs > 0],

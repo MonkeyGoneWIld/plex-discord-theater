@@ -18,6 +18,8 @@
  *                    HDR, then real encodes from the file — a copy, HEVC with
  *                    HDR kept, H.264 tone-mapped three ways, several at once —
  *                    with their speed, and samples to look at.
+ *   rate             Rate control on one title: CBR, VBR, QVBR, ICQ and presets,
+ *                    each measured for bitrate, busiest second and SSIM.
  *   plex-visibility  Whether a stream Plex isn't transcoding shows in Plex's Now
  *                    Playing, and so in Tautulli and Tracearr: timeline reports
  *                    for a test session, phase by phase, while you watch.
@@ -38,12 +40,13 @@ import path from "node:path";
 // ─── Arguments ──────────────────────────────────────────────────
 
 const HELP = `
-Usage: node scripts/diagnose-ffmpeg.mjs <gpu|paths|file|plex-visibility|all> [options]
+Usage: node scripts/diagnose-ffmpeg.mjs <gpu|paths|file|rate|plex-visibility|all> [options]
 
   --device <path>        Render node (default FFMPEG_HWACCEL_DEVICE or /dev/dri/renderD128)
   --out <dir>            Where reports and samples go (default /data/diagnose)
   --plex-url <url>       Overrides PLEX_URL.
   --plex-token <token>   Overrides PLEX_TOKEN.
+  --tonemap <name>       Tone mapping for H.264 re-encodes (default FFMPEG_TONEMAP or reinhard)
 
 paths
   --count <n>            Titles sampled per library (default 10)
@@ -56,6 +59,12 @@ file
   --seconds <n>          How much of it each encode takes (default 20)
   --concurrent <n>       Encodes run at once in the last test (default 3)
   --skip-plex            Leave out the Plex decision probes
+
+rate                     Rate control compared on one title: bitrate, busiest second,
+                         speed and SSIM against the source, for CBR, VBR, QVBR, ICQ and
+                         the QSV presets
+  --rating-key <id>      (required); --media-index, --at as for file
+  --seconds <n>          How much of it each encode takes (default 30)
 
 plex-visibility
   --rating-key <id>      The title the test session reports (required)
@@ -78,7 +87,7 @@ for (let i = 0; i < argv.length; i++) {
   }
   args[name] = value;
 }
-if (args.help || !["gpu", "paths", "file", "plex-visibility", "all"].includes(COMMAND ?? "")) {
+if (args.help || !["gpu", "paths", "file", "rate", "plex-visibility", "all"].includes(COMMAND ?? "")) {
   console.log(HELP);
   process.exit(args.help ? 0 : 2);
 }
@@ -102,6 +111,8 @@ const OUT_ROOT = path.resolve(args.out ?? (exists("/data") ? "/data/diagnose" : 
 const STAMP = new Date().toISOString().replace(/[:.]/g, "-");
 /** This script's own Plex client identifier, never the app's. */
 const DIAG_CLIENT = "pdt-diagnose-ffmpeg";
+/** The tone mapping the H.264 re-encodes use: reinhard looked closest to Plex's. */
+const TONEMAP = args.tonemap ?? process.env.FFMPEG_TONEMAP ?? "reinhard";
 
 function needPlex() {
   if (!PLEX_URL || !PLEX_TOKEN) {
@@ -296,6 +307,8 @@ function hdrOf(v) {
     const p = Number(v.DOVIProfile);
     const bl = Number(v.DOVIBLCompatID);
     if (p === 8) return bl === 1 ? "DV P8.1" : bl === 4 ? "DV P8.4" : bl === 2 ? "DV P8.2" : "DV P8";
+    // AV1's Dolby Vision: 10.1 has an HDR10 picture underneath, 10.0 nothing, like 5.
+    if (p === 10) return bl === 1 ? "DV P10.1" : bl === 4 ? "DV P10.4" : bl === 2 ? "DV P10.2" : "DV P10.0";
     return Number.isFinite(p) ? `DV P${p}` : "DV";
   }
   const trc = String(v.colorTrc ?? "").toLowerCase();
@@ -303,7 +316,8 @@ function hdrOf(v) {
   if (trc === "arib-std-b67") return "HLG";
   return "SDR";
 }
-const isHdr = (cls) => cls !== "SDR" && cls !== "DV P8.2";
+/** Dolby Vision with an SDR picture underneath plays as that SDR picture. */
+const isHdr = (cls) => !["SDR", "DV P8.2", "DV P10.2"].includes(cls);
 
 // ─── Paths ──────────────────────────────────────────────────────
 
@@ -388,8 +402,9 @@ function appProcess() {
   }
   for (const pid of pids) {
     try {
-      const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/g, " ");
-      if (!cmd.includes("packages/server/dist/index.js")) continue;
+      // node itself, not tini (PID 1), whose command line carries the same words.
+      const argvOf = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+      if (path.basename(argvOf[0] ?? "") !== "node" || argvOf[1] !== "packages/server/dist/index.js") continue;
       const status = fs.readFileSync(`/proc/${pid}/status`, "utf8");
       const uid = Number(status.match(/^Uid:\s+(\d+)/m)?.[1]);
       const gid = Number(status.match(/^Gid:\s+(\d+)/m)?.[1]);
@@ -510,7 +525,8 @@ async function gpu() {
   heading("Test encodes (synthetic 1080p, 10 s each)");
   const N = 240;
   const toQsv = (fmt) => `format=${fmt},hwupload=extra_hw_frames=64,format=qsv`;
-  const rate = ["-b:v", "8M", "-maxrate", "8M", "-bufsize", "16M"];
+  // A target under its cap: equal ones make QSV pick constant bitrate, whatever else is asked.
+  const rate = ["-b:v", "12M", "-maxrate", "20M", "-bufsize", "40M"];
   report.gpu.encodes = [
     await encodeTest("H.264 (h264_qsv, low power)", [...hwInit(), ...SYNTH, "-vf", toQsv("nv12"),
       "-c:v", "h264_qsv", "-low_power", "1", "-profile:v", "high", "-preset", "medium", ...rate], N),
@@ -553,14 +569,14 @@ async function gpu() {
 
   heading("Tone mapping, three ways (synthetic HDR10 → SDR, 2 s each)");
   const hdrSrc = `format=p010le,${HDR_PARAMS}`;
-  const tm = "tonemap=mobius:desat=0:peak=100:t=bt709:m=bt709:p=bt709";
+  const tm = `tonemap=${TONEMAP}:desat=0:peak=100:t=bt709:m=bt709:p=bt709`;
   report.gpu.tonemap = [
-    await encodeTest("OpenCL on the GPU (tonemap_opencl, mobius)", ["-init_hw_device", `vaapi=va:${DEVICE},driver=iHD`,
+    await encodeTest(`OpenCL on the GPU (tonemap_opencl, ${TONEMAP})`, ["-init_hw_device", `vaapi=va:${DEVICE},driver=iHD`,
       "-init_hw_device", "opencl=ocl@va", "-filter_hw_device", "ocl", ...SYNTH, "-vf",
       `${hdrSrc},hwupload,tonemap_opencl=${tm}:format=nv12,hwdownload,format=nv12`, "-c:v", "libx264", "-preset", "ultrafast"], 48),
     await encodeTest("QSV video engine (vpp_qsv tonemap)", [...hwInit(), ...SYNTH, "-vf",
       `${hdrSrc},hwupload=extra_hw_frames=64,format=qsv,vpp_qsv=tonemap=1:format=nv12`, "-c:v", "h264_qsv", "-low_power", "1"], 48),
-    await encodeTest("Software (tonemapx, mobius)", [...SYNTH, "-vf", `${hdrSrc},tonemapx=${tm}:format=yuv420p`,
+    await encodeTest(`Software (tonemapx, ${TONEMAP})`, [...SYNTH, "-vf", `${hdrSrc},tonemapx=${tm}:format=yuv420p`,
       "-c:v", "libx264", "-preset", "ultrafast"], 48),
   ];
 }
@@ -701,7 +717,51 @@ function targetFrame(w, h) {
   return [even(w), even(h)];
 }
 
-async function file() {
+const known = (v) => !!v && !["unknown", "unspecified", "reserved"].includes(String(v));
+
+/**
+ * The color labels a re-encode reads its source by, and writes on its output.
+ *
+ * Intel's scaler refuses video whose color matrix isn't recorded — "Function
+ * not implemented" two frames in, which is what stopped every untagged file in
+ * the first run (Star Wars, Midnight in Paris, the MPEG-2 ones) while every
+ * tagged one went through. A label that is missing gets what players assume
+ * anyway: BT.709 for HD, BT.601 for SD — PAL's at 25 or 50 fps, NTSC's
+ * otherwise — and TV range.
+ */
+function colorOf(s) {
+  const [num, den] = String(s?.r_frame_rate ?? "24/1").split("/").map(Number);
+  const fps = den ? num / den : num;
+  const sd = (s?.height ?? 1080) <= 576;
+  const pal = sd && (Math.abs(fps - 25) < 0.5 || Math.abs(fps - 50) < 0.5);
+  const fallback = sd
+    ? pal ? { primaries: "bt470bg", trc: "gamma28", matrix: "bt470bg" } : { primaries: "smpte170m", trc: "smpte170m", matrix: "smpte170m" }
+    : { primaries: "bt709", trc: "bt709", matrix: "bt709" };
+  const c = {
+    primaries: known(s?.color_primaries) ? s.color_primaries : fallback.primaries,
+    trc: known(s?.color_transfer) ? s.color_transfer : fallback.trc,
+    matrix: known(s?.color_space) ? s.color_space : fallback.matrix,
+    range: known(s?.color_range) ? s.color_range : "tv",
+  };
+  const set = [
+    !known(s?.color_primaries) && `color_primaries=${c.primaries}`,
+    !known(s?.color_transfer) && `color_trc=${c.trc}`,
+    !known(s?.color_space) && `colorspace=${c.matrix}`,
+    !known(s?.color_range) && "range=tv",
+  ].filter(Boolean);
+  return {
+    ...c,
+    /** Ahead of the first GPU filter, for the labels the file leaves out. */
+    setparams: set.length ? `setparams=${set.join(":")},` : "",
+    missing: set.map((p) => p.split("=")[0]),
+    tags: ["-color_primaries", c.primaries, "-color_trc", c.trc, "-colorspace", c.matrix, "-color_range", c.range === "pc" ? "pc" : "tv"],
+  };
+}
+
+const AUDIO = ["-map", "0:a:0?", "-c:a", "aac", "-ac", "2", "-b:a", "256k"];
+
+/** One title, ready to encode from: its version, where to read it, what it is. */
+async function loadTitle({ defaultSeconds }) {
   needPlex();
   const ratingKey = String(args["rating-key"] ?? "");
   if (!/^\d+$/.test(ratingKey)) {
@@ -719,7 +779,7 @@ async function file() {
   const cls = hdrOf(video);
   const durationS = (item.duration ?? version.duration ?? 0) / 1000;
   const at = positive("at", Math.round(Math.min(600, durationS * 0.25)));
-  const seconds = positive("seconds", 20);
+  const seconds = positive("seconds", defaultSeconds);
   const title = item.type === "episode"
     ? `${item.grandparentTitle} S${item.parentIndex}E${item.index} "${item.title}"`
     : `${item.title}${item.year ? ` (${item.year})` : ""}`;
@@ -744,7 +804,46 @@ async function file() {
       input = ["-headers", `X-Plex-Token: ${PLEX_TOKEN}\r\n`, "-i", `${PLEX_URL}${part.key}`];
     }
   }
-  report.file = { ratingKey, title, mediaIndex, hdr: cls, plexPath: part.file, local, at, seconds, encodes: [] };
+
+  const src = local ? await hdrLabels(local, `${at}%+#1`) : null;
+  const s = src?.stream ?? null;
+  const [W, H] = targetFrame(s?.width ?? version.width, s?.height ?? version.height);
+  const color = colorOf(s);
+  const interlaced = !!s?.field_order && !["progressive", "unknown"].includes(s.field_order);
+  const hdr = isHdr(cls);
+  return {
+    ratingKey, mediaIndex, title, item, version, part, video, cls, hdr, at, seconds, local, input, src, s, W, H, color,
+    interlaced,
+    trc: String(video?.colorTrc ?? s?.color_transfer ?? "").toLowerCase() === "arib-std-b67" ? "arib-std-b67" : "smpte2084",
+    /** Dolby Vision with no HDR10 base layer: only a tone mapper that applies its metadata draws it right. */
+    doviOnly: cls === "DV P5" || cls === "DV P10.0",
+    window: ["-ss", String(at), "-t", String(seconds)],
+    /** The GPU's way in: decoded there, labels filled in, deinterlaced, scaled to W×H in `fmt`, handed to QSV. */
+    gpuChain: (fmt) =>
+      `${color.setparams}${interlaced ? "deinterlace_vaapi=rate=frame," : ""}scale_vaapi=w=${W}:h=${H}:format=${fmt},hwmap=derive_device=qsv,format=qsv`,
+    /** The CPU's: for what the GPU can't decode (10-bit H.264, VC-1 here, MPEG-4). */
+    cpuChain: (fmt) =>
+      `${color.setparams}${interlaced ? "bwdif=mode=send_frame," : ""}scale=${W}:${H},format=${fmt === "p010" ? "p010le" : fmt},hwupload=extra_hw_frames=64,format=qsv`,
+  };
+}
+
+function describeSource(t) {
+  heading("The file, as ffprobe reads it");
+  const { s, src, at, color } = t;
+  if (s) {
+    out(`${s.codec_name} ${s.profile ?? ""} ${s.pix_fmt} ${s.width}x${s.height} ${s.r_frame_rate}  transfer ${s.color_transfer ?? "?"}  matrix ${s.color_space ?? "?"}  range ${s.color_range ?? "?"}  field order ${s.field_order ?? "?"}  SAR ${s.sample_aspect_ratio ?? "?"}`);
+    out(`HDR metadata at ${at}s: mastering display ${src.masteringDisplay ? "yes" : "no"}${src.contentLight ? `, MaxCLL ${src.contentLight.maxCLL}, MaxFALL ${src.contentLight.maxFALL}` : ", no content light level"}${src.dovi ? ", Dolby Vision RPU" : ""}`);
+    if (color.missing.length) out(`color labels missing (${color.missing.join(", ")}): read as ${color.primaries} / ${color.trc} / ${color.matrix}, ${color.range} range`);
+    if (t.interlaced) out(`interlaced (${s.field_order}): deinterlaced in every re-encode`);
+  } else {
+    out("(read through Plex: no local file to probe)");
+  }
+}
+
+async function file() {
+  const t = await loadTitle({ defaultSeconds: 20 });
+  const { ratingKey, mediaIndex, input, window, W, H, hdr, trc, doviOnly, src, color, seconds, at } = t;
+  report.file = { ratingKey, title: t.title, mediaIndex, hdr: t.cls, plexPath: t.part.file, local: t.local, at, seconds, encodes: [] };
 
   if (!args["skip-plex"]) {
     heading("What the Plex engine does with it today");
@@ -766,33 +865,20 @@ async function file() {
     }
   }
 
-  heading("The file, as ffprobe reads it");
-  const src = local ? await hdrLabels(local, `${at}%+#1`) : null;
-  const s = src?.stream;
-  if (s) {
-    out(`${s.codec_name} ${s.profile ?? ""} ${s.pix_fmt} ${s.width}x${s.height} ${s.r_frame_rate}  transfer ${s.color_transfer ?? "?"}  field order ${s.field_order ?? "?"}  SAR ${s.sample_aspect_ratio ?? "?"}`);
-    out(`HDR metadata at ${at}s: mastering display ${src.masteringDisplay ? "yes" : "no"}${src.contentLight ? `, MaxCLL ${src.contentLight.maxCLL}, MaxFALL ${src.contentLight.maxFALL}` : ", no content light level"}${src.dovi ? ", Dolby Vision RPU" : ""}`);
-  } else {
-    out("(read through Plex: no local file to probe)");
-  }
+  describeSource(t);
   report.file.source = src;
+  report.file.color = color;
 
-  const w = s?.width ?? version.width;
-  const h = s?.height ?? version.height;
-  const [W, H] = targetFrame(w, h);
   const dir = path.join(OUT_ROOT, `${STAMP}-${ratingKey}`);
   await mkdir(dir, { recursive: true });
-  const trc = String(video?.colorTrc ?? s?.color_transfer ?? "").toLowerCase() === "arib-std-b67" ? "arib-std-b67" : "smpte2084";
-  const hdr = isHdr(cls);
-  const dv5 = cls === "DV P5";
-  const window = ["-ss", String(at), "-t", String(seconds)];
   const rate = ["-b:v", "8M", "-maxrate", "8M", "-bufsize", "16M"];
-  const h264 = ["-c:v", "h264_qsv", "-low_power", "1", "-profile:v", "high", "-preset", "medium", ...rate, ...TAGS_SDR];
+  const h264 = ["-c:v", "h264_qsv", "-low_power", "1", "-profile:v", "high", "-preset", "medium", ...rate];
   const hevc = ["-c:v", "hevc_qsv", "-low_power", "1", "-profile:v", "main10", "-preset", "medium", ...rate];
-  const toQsv = (fmt) => `scale_vaapi=w=${W}:h=${H}:format=${fmt},hwmap=derive_device=qsv,format=qsv`;
   const tmOpencl = (algo) =>
-    `scale_vaapi=w=${W}:h=${H}:format=p010,hwmap=derive_device=opencl:mode=read,` +
-    `tonemap_opencl=tonemap=${algo}:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12${dv5 ? ":apply_dovi=1" : ""}`;
+    `${color.setparams}scale_vaapi=w=${W}:h=${H}:format=p010,hwmap=derive_device=opencl:mode=read,` +
+    `tonemap_opencl=tonemap=${algo}:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12${doviOnly ? ":apply_dovi=1" : ""}`;
+  /** The arguments of the HEVC encode that worked, for the several-at-once test. */
+  let hevcThatWorked = null;
 
   async function encode(name, ffArgs, outFile, { check } = {}) {
     const target = path.join(dir, outFile);
@@ -801,26 +887,42 @@ async function file() {
     const ok = r.code === 0 && exists(target);
     const rc = rateControl(r.stderr);
     out(`${tick(ok)} ${name.padEnd(44)} ${ok ? `${String(stats?.speed ?? "?").padStart(5)}× real time  ${outFile}${rc ? `  (${rc})` : ""}` : "failed"}`);
-    if (!ok) for (const l of whyFailed(r.stderr)) out(`      ${l}`);
+    if (!ok) {
+      for (const l of whyFailed(r.stderr)) out(`      ${l}`);
+      // All of it, for when the lines above don't say enough.
+      fs.writeFileSync(target.replace(/\.\w+$/, ".log"), redact(r.stderr.slice(-60_000)));
+    }
     const result = { name, ok, speed: stats?.speed ?? null, rateControl: rc, file: ok ? target : null, error: ok ? null : whyFailed(r.stderr) };
     if (ok && check) Object.assign(result, await check(target));
     report.file.encodes.push(result);
     return result;
   }
+  /** GPU decode first; the CPU when the GPU can't decode the codec. */
+  async function encodeEither(label, fmt, enc, outFile, opts) {
+    const gpuArgs = [...hwInit(), ...hwDecode, ...window, ...input, "-map", "0:v:0", "-vf", t.gpuChain(fmt), ...enc];
+    const gpu = await encode(`${label} (GPU decode)`, gpuArgs, `${outFile}.mp4`, opts);
+    if (gpu.ok) return { ...gpu, args: gpuArgs };
+    const cpuArgs = [...hwInit(), ...window, ...input, "-map", "0:v:0", "-vf", t.cpuChain(fmt), ...enc];
+    const cpu = await encode(`${label} (CPU decode)`, cpuArgs, `${outFile}-cpu.mp4`, opts);
+    return { ...cpu, args: cpuArgs };
+  }
 
   heading(`Encodes: ${seconds} s from ${at} s, output ${W}x${H}`);
   // The copy: how soon its first 3 s segment is ready, and how fast it runs.
+  // Its segments are measured and then removed: a remux's are large.
   const copyDir = path.join(dir, "copy");
   await mkdir(copyDir, { recursive: true });
   let firstSegMs = null;
-  const copy = await run(FFMPEG, [...FF, ...window, ...input, "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy",
-    "-c:a", "aac", "-ac", "2", "-b:a", "256k", "-f", "segment", "-segment_format", "mpegts", "-segment_time", "3",
+  const copy = await run(FFMPEG, [...FF, ...window, ...input, "-map", "0:v:0", ...AUDIO, "-c:v", "copy",
+    "-f", "segment", "-segment_format", "mpegts", "-segment_time", "3",
     "-segment_list", "pipe:1", "-segment_list_type", "csv", "-reset_timestamps", "0", path.join(copyDir, "%05d.ts")],
     { onStdout: (_s, ms) => { firstSegMs ??= Math.round(ms); } });
   const copyStats = ffStats(copy.stderr);
-  out(`${tick(copy.code === 0)} ${"Copy (video as it is, audio to AAC)".padEnd(44)} ${copy.code === 0 ? `${String(copyStats?.speed ?? "?").padStart(5)}× real time  first segment after ${firstSegMs ?? "?"} ms` : "failed"}`);
-  if (copy.code !== 0) for (const l of whyFailed(copy.stderr)) out(`      ${l}`);
+  const copyNote = ["h264", "hevc"].includes(t.s?.codec_name) ? "" : "  (never copied for players: not H.264 or HEVC)";
+  out(`${tick(copy.code === 0)} ${"Copy (video as it is, audio to AAC)".padEnd(44)} ${copy.code === 0 ? `${String(copyStats?.speed ?? "?").padStart(5)}× real time  first segment after ${firstSegMs ?? "?"} ms` : `failed${copyNote}`}`);
+  if (copy.code !== 0 && !copyNote) for (const l of whyFailed(copy.stderr)) out(`      ${l}`);
   report.file.copy = { ok: copy.code === 0, speed: copyStats?.speed ?? null, firstSegmentMs: firstSegMs };
+  fs.rmSync(copyDir, { recursive: true, force: true });
 
   const checkHdr = async (target) => {
     const got = await hdrLabels(target);
@@ -835,66 +937,49 @@ async function file() {
   };
 
   if (hdr) {
-    const keep = await encode("HEVC Main10, HDR kept (GPU decode)", [...hwInit(), ...hwDecode, ...window, ...input,
-      "-map", "0:v:0", "-vf", toQsv("p010"), ...hevc, ...tagsHdr(trc), "-an"], "hevc-keep-hdr.mp4", { check: checkHdr });
-    if (!keep.ok) {
-      await encode("HEVC Main10, HDR kept (CPU decode)", [...hwInit(), ...window, ...input, "-map", "0:v:0", "-vf",
-        `scale=${W}:${H},format=p010le,hwupload=extra_hw_frames=64,format=qsv`, ...hevc, ...tagsHdr(trc), "-an"],
-        "hevc-keep-hdr-cpu.mp4", { check: checkHdr });
+    if (doviOnly) {
+      out(`${t.cls} has no HDR10 picture underneath its Dolby Vision, so it can't be kept as HDR: it is tone-mapped,`);
+      out("with its Dolby Vision metadata applied (OpenCL). The QSV and software ones below don't apply it, so expect wrong colors there.");
+    } else {
+      const keep = await encodeEither("HEVC Main10, HDR kept", "p010", [...hevc, ...tagsHdr(trc), "-an"], "hevc-keep-hdr", { check: checkHdr });
+      if (keep.ok) hevcThatWorked = keep.args;
     }
-    const viaOpencl = await encode("H.264 tone-mapped: OpenCL mobius", [...hwInit({ opencl: true }), ...hwDecode, ...window,
-      ...input, "-map", "0:v:0", "-vf", `${tmOpencl("mobius")},hwmap=derive_device=vaapi:mode=write:reverse=1,format=vaapi,hwmap=derive_device=qsv,format=qsv`,
-      ...h264, "-an"], "h264-tonemap-opencl-mobius.mp4");
+    const viaOpencl = await encode("H.264 tone-mapped: OpenCL (with audio)", [...hwInit({ opencl: true }), ...hwDecode, ...window,
+      ...input, "-map", "0:v:0", "-vf", `${tmOpencl(TONEMAP)},hwmap=derive_device=vaapi:mode=write:reverse=1,format=vaapi,hwmap=derive_device=qsv,format=qsv`,
+      ...h264, ...TAGS_SDR, ...AUDIO], `h264-tonemap-opencl-${TONEMAP}.mp4`);
     if (!viaOpencl.ok) {
-      await encode("H.264 tone-mapped: OpenCL mobius → VAAPI", [...hwInit({ opencl: true }), ...hwDecode, ...window,
-        ...input, "-map", "0:v:0", "-vf", `${tmOpencl("mobius")},hwmap=derive_device=vaapi:mode=write:reverse=1,format=vaapi`,
-        "-c:v", "h264_vaapi", "-profile:v", "high", ...rate, ...TAGS_SDR, "-an"], "h264-tonemap-opencl-mobius-vaapi.mp4");
+      await encode("H.264 tone-mapped: OpenCL → VAAPI", [...hwInit({ opencl: true }), ...hwDecode, ...window,
+        ...input, "-map", "0:v:0", "-vf", `${tmOpencl(TONEMAP)},hwmap=derive_device=vaapi:mode=write:reverse=1,format=vaapi`,
+        "-c:v", "h264_vaapi", "-profile:v", "high", ...rate, ...TAGS_SDR, "-an"], `h264-tonemap-opencl-${TONEMAP}-vaapi.mp4`);
     }
     await encode("H.264 tone-mapped: QSV video engine", [...hwInit(), ...hwDecode, ...window, ...input, "-map", "0:v:0",
-      "-vf", `${toQsv("p010")},vpp_qsv=tonemap=1:format=nv12`, ...h264, "-an"], "h264-tonemap-vpp.mp4");
+      "-vf", `${t.gpuChain("p010")},vpp_qsv=tonemap=1:format=nv12`, ...h264, ...TAGS_SDR, "-an"], "h264-tonemap-vpp.mp4");
     await encode("H.264 tone-mapped: software tonemapx", [...hwInit(), ...window, ...input, "-map", "0:v:0", "-vf",
-      `scale=${W}:${H},tonemapx=tonemap=mobius:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12,hwupload=extra_hw_frames=64,format=qsv`,
-      ...h264, "-an"], "h264-tonemap-tonemapx.mp4");
+      `scale=${W}:${H},tonemapx=tonemap=${TONEMAP}:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12,hwupload=extra_hw_frames=64,format=qsv`,
+      ...h264, ...TAGS_SDR, "-an"], "h264-tonemap-tonemapx.mp4");
 
     heading(`Tone-mapping samples: one frame at ${at} s, for comparing by eye`);
-    for (const algo of ["mobius", "bt2390", "hable", "reinhard"]) {
+    for (const algo of ["reinhard", "mobius", "bt2390", "hable"]) {
       const r = await run(FFMPEG, [...FF, ...hwInit({ opencl: true }), ...hwDecode, "-ss", String(at), ...input,
         "-map", "0:v:0", "-vf", `${tmOpencl(algo)},hwdownload,format=nv12`, "-frames:v", "1", "-update", "1",
         path.join(dir, `frame-${algo}.png`)]);
       out(`${tick(r.code === 0)} frame-${algo}.png${r.code === 0 ? "" : `  ${whyFailed(r.stderr, 2).join(" / ")}`}`);
     }
     const vppFrame = await run(FFMPEG, [...FF, ...hwInit(), ...hwDecode, "-ss", String(at), ...input, "-map", "0:v:0",
-      "-vf", `${toQsv("p010")},vpp_qsv=tonemap=1:format=nv12,hwdownload,format=nv12`, "-frames:v", "1", "-update", "1",
+      "-vf", `${t.gpuChain("p010")},vpp_qsv=tonemap=1:format=nv12,hwdownload,format=nv12`, "-frames:v", "1", "-update", "1",
       path.join(dir, "frame-intel-vpp.png")]);
     out(`${tick(vppFrame.code === 0)} frame-intel-vpp.png${vppFrame.code === 0 ? "" : `  ${whyFailed(vppFrame.stderr, 2).join(" / ")}`}`);
-    out("Compare them with the same moment paused in Discord on a Plex-mode H.264 stream (Firefox), which Plex tone-maps.");
   } else {
-    // Interlaced (DVD, broadcast MPEG-2): deinterlaced first, as Plex does.
-    const interlaced = !!s?.field_order && !["progressive", "unknown"].includes(s.field_order);
-    if (interlaced) out(`interlaced (${s.field_order}): deinterlacing in every re-encode`);
-    const gpuChain = (fmt) => `${interlaced ? "deinterlace_vaapi=rate=frame," : ""}${toQsv(fmt)}`;
-    const cpuChain = (fmt) =>
-      `${interlaced ? "bwdif=mode=send_frame," : ""}scale=${W}:${H},format=${fmt},hwupload=extra_hw_frames=64,format=qsv`;
-    for (const [label, fmt, enc, outFile] of [
-      ["HEVC Main10 re-encode", "p010", [...hevc, ...TAGS_SDR], "hevc-main10"],
-      ["H.264 re-encode", "nv12", h264, "h264"],
-    ]) {
-      const gpu = await encode(`${label} (GPU decode)`, [...hwInit(), ...hwDecode, ...window, ...input, "-map", "0:v:0",
-        "-vf", gpuChain(fmt), ...enc, "-an"], `${outFile}.mp4`);
-      // A codec the GPU can't decode (10-bit H.264, MPEG-4, …) is decoded by
-      // the CPU and still encoded on the GPU.
-      if (!gpu.ok) {
-        await encode(`${label} (CPU decode)`, [...hwInit(), ...window, ...input, "-map", "0:v:0",
-          "-vf", cpuChain(fmt === "p010" ? "p010le" : "nv12"), ...enc, "-an"], `${outFile}-cpu.mp4`);
-      }
-    }
+    const h = await encodeEither("HEVC Main10 re-encode", "p010", [...hevc, ...color.tags, "-an"], "hevc-main10");
+    if (h.ok) hevcThatWorked = h.args;
+    await encodeEither("H.264 re-encode (with audio)", "nv12", [...h264, ...color.tags, ...AUDIO], "h264");
   }
 
   const n = positive("concurrent", 3);
-  if (n > 1) {
-    heading(`${n} HEVC Main10 re-encodes at once`);
-    const runs = await Promise.all(Array.from({ length: n }, () => run(FFMPEG, [...FF, ...hwInit(), ...hwDecode, ...window,
-      ...input, "-map", "0:v:0", "-vf", toQsv("p010"), ...hevc, "-an", "-f", "null", "-"], { timeoutMs: Math.max(180_000, seconds * 30_000) })));
+  if (n > 1 && hevcThatWorked) {
+    heading(`${n} HEVC Main10 re-encodes at once (the way that worked above)`);
+    const runs = await Promise.all(Array.from({ length: n }, () => run(FFMPEG, [...FF, ...hevcThatWorked, "-f", "null", "-"],
+      { timeoutMs: Math.max(180_000, seconds * 30_000) })));
     const speeds = runs.map((r) => (r.code === 0 ? ffStats(r.stderr)?.speed ?? null : null));
     out(`${tick(speeds.every((x) => x !== null))} speed of each, against real time: ${speeds.map((x) => (x === null ? "failed" : `${x}×`)).join(", ")}`);
     for (const r of runs.filter((r) => r.code !== 0).slice(0, 1)) for (const l of whyFailed(r.stderr)) out(`      ${l}`);
@@ -902,6 +987,97 @@ async function file() {
   }
   out("");
   out(`Samples are in ${dir}`);
+}
+
+// ─── rate ───────────────────────────────────────────────────────
+
+/** SSIM of an encode against the source over the same stretch, in dB (higher is closer). */
+async function ssimAgainst(encoded, t, fmt) {
+  const r = await run(FFMPEG, [...FF, "-i", encoded, ...t.window, ...t.input, "-lavfi",
+    `[0:v]format=${fmt},setpts=PTS-STARTPTS[a];[1:v]${t.interlaced ? "bwdif=mode=send_frame," : ""}scale=${t.W}:${t.H}:flags=bicubic,format=${fmt},setpts=PTS-STARTPTS[b];[a][b]ssim`,
+    "-f", "null", "-"], { timeoutMs: Math.max(300_000, t.seconds * 30_000) });
+  const m = r.stderr.match(/SSIM .*All:([\d.]+) \(([\d.]+|inf)\)/);
+  return m ? { ssim: Number(m[1]), db: m[2] === "inf" ? Infinity : Number(m[2]) } : null;
+}
+
+/** An encode's average and busiest-second bitrate, kbps. */
+async function bitrates(file, seconds) {
+  const r = await run(FFPROBE, ["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,size", "-of", "csv=p=0", file]);
+  const perSecond = new Map();
+  let total = 0;
+  for (const line of r.stdout.split("\n")) {
+    const [pts, size] = line.split(",").map(Number);
+    if (!Number.isFinite(pts) || !Number.isFinite(size)) continue;
+    total += size;
+    const k = Math.floor(pts);
+    perSecond.set(k, (perSecond.get(k) ?? 0) + size);
+  }
+  const peak = Math.max(0, ...perSecond.values());
+  return { avg: Math.round((total * 8) / seconds / 1000), peak: Math.round((peak * 8) / 1000) };
+}
+
+async function rate() {
+  const t = await loadTitle({ defaultSeconds: 30 });
+  describeSource(t);
+  if (t.doviOnly) {
+    out(`${t.cls} is always tone-mapped, so its HEVC rate isn't the question; try an HDR10, DV 7/8 or SDR title.`);
+    return;
+  }
+  const dir = path.join(OUT_ROOT, `${STAMP}-rate-${t.ratingKey}`);
+  await mkdir(dir, { recursive: true });
+  const fmt = "p010";
+  const tags = t.hdr ? tagsHdr(t.trc) : t.color.tags;
+  const hevc = (preset, extra) => ["-c:v", "hevc_qsv", "-low_power", "1", "-profile:v", "main10", "-preset", preset, ...extra, ...tags, "-an"];
+  const h264 = (extra) => ["-c:v", "h264_qsv", "-low_power", "1", "-profile:v", "high", "-preset", "medium", ...extra, ...t.color.tags, "-an"];
+  const cap = (target, peak) => ["-b:v", `${target}M`, "-maxrate", `${peak}M`, "-bufsize", `${peak * 2}M`];
+  const modes = [
+    ["HEVC CBR 12", hevc("medium", cap(12, 12))],
+    ["HEVC VBR 12, cap 20", hevc("medium", cap(12, 20))],
+    ["HEVC VBR 12, cap 20, look-ahead", hevc("medium", [...cap(12, 20), "-extbrc", "1", "-look_ahead_depth", "40"])],
+    ["HEVC QVBR q22, cap 20", hevc("medium", ["-global_quality", "22", ...cap(12, 20)])],
+    ["HEVC QVBR q25, cap 20", hevc("medium", ["-global_quality", "25", ...cap(12, 20)])],
+    ["HEVC ICQ q22, no cap", hevc("medium", ["-global_quality", "22"])],
+    ["HEVC VBR 12, cap 20, preset slow", hevc("slow", cap(12, 20))],
+    ["HEVC VBR 12, cap 20, preset veryslow", hevc("veryslow", cap(12, 20))],
+    ["HEVC VBR 8, cap 12 (an 8 Mbps viewer)", hevc("medium", cap(8, 12))],
+    ["HEVC QVBR q25, cap 12 (an 8 Mbps viewer)", hevc("medium", ["-global_quality", "25", ...cap(8, 12)])],
+    ...(t.hdr ? [] : [
+      ["H.264 CBR 12", h264(cap(12, 12))],
+      ["H.264 VBR 12, cap 20", h264(cap(12, 20))],
+      ["H.264 QVBR q23, cap 20", h264(["-global_quality", "23", ...cap(12, 20)])],
+    ]),
+  ];
+  heading(`Rate control: ${t.seconds} s from ${t.at} s, output ${t.W}x${t.H}${t.hdr ? ", HDR kept" : ""}`);
+  out(`${"".padEnd(42)} ${"chosen by QSV".padEnd(34)} speed   avg      busiest second   SSIM`);
+  let way = "gpu";
+  report.rate = { ratingKey: t.ratingKey, title: t.title, hdr: t.cls, at: t.at, seconds: t.seconds, modes: [] };
+  for (const [name, enc] of modes) {
+    const target = path.join(dir, `${report.rate.modes.length}.mp4`);
+    const attempt = (how) => run(FFMPEG, [...FF, "-v", "verbose", ...hwInit(), ...(how === "gpu" ? hwDecode : []), ...t.window,
+      ...t.input, "-map", "0:v:0", "-vf", how === "gpu" ? t.gpuChain(fmt) : t.cpuChain(fmt), ...enc, target],
+      { timeoutMs: Math.max(180_000, t.seconds * 20_000) });
+    let r = await attempt(way);
+    if (r.code !== 0 && way === "gpu") {
+      way = "cpu";
+      out(`(the GPU can't decode this file: the CPU decodes from here on)`);
+      r = await attempt(way);
+    }
+    if (r.code !== 0) {
+      out(`${tick(false)} ${name.padEnd(40)} failed: ${whyFailed(r.stderr, 2).join(" / ")}`);
+      report.rate.modes.push({ name, ok: false });
+      continue;
+    }
+    const speed = ffStats(r.stderr)?.speed ?? null;
+    const rc = rateControl(r.stderr) ?? "?";
+    const b = await bitrates(target, t.seconds);
+    const q = await ssimAgainst(target, t, "yuv420p10le");
+    out(`${tick(true)} ${name.padEnd(40)} ${rc.padEnd(34)} ${String(speed ?? "?").padStart(5)}×  ${(b.avg / 1000).toFixed(1).padStart(5)} Mbps  ${(b.peak / 1000).toFixed(1).padStart(5)} Mbps      ${q ? `${q.db.toFixed(2)} dB` : "?"}`);
+    report.rate.modes.push({ name, ok: true, rateControl: rc, speed, avgKbps: b.avg, peakKbps: b.peak, ssim: q?.ssim ?? null, ssimDb: q?.db ?? null });
+    fs.rmSync(target, { force: true });
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+  out("");
+  out("SSIM in dB: higher is closer to the source; around 1 dB is a difference you can see.");
 }
 
 // ─── plex-visibility ────────────────────────────────────────────
@@ -948,6 +1124,10 @@ async function plexVisibility() {
       },
     });
     const body = await res.text().catch(() => "");
+    if (!report.visibility.firstTimelineAnswer) {
+      report.visibility.firstTimelineAnswer = { status: res.status, body: body.slice(0, 500) };
+      out(`${t()} Plex answered the first timeline report: ${res.status} ${JSON.stringify(body.slice(0, 160))}`);
+    }
     const terminated = /terminationCode|terminationText/.test(body);
     if (terminated) {
       out(`${t()} ${s.name}: Plex says this stream was terminated: ${body.slice(0, 300)}`);
@@ -959,8 +1139,21 @@ async function plexVisibility() {
     return { status: res.status, terminated };
   }
 
+  /** PLEX_TOKEN can't list sessions (it isn't the server owner's): said once, then not asked again. */
+  let forbidden = false;
   async function rows() {
-    const data = await plexJSON("/status/sessions");
+    if (forbidden) return [];
+    const res = await plex("/status/sessions");
+    if (res.status === 401 || res.status === 403) {
+      forbidden = true;
+      out(`${t()} This token can't read Plex's session list (${res.status}): it isn't the server owner's. The test`);
+      out("      still reports the streams; watch Tautulli for them, or run it again with --plex-token <the owner's token>");
+      out("      (the one Tautulli uses) so it can see Now Playing itself.");
+      report.visibility.sessionsForbidden = res.status;
+      return [];
+    }
+    if (!res.ok) throw new Error(`/status/sessions → HTTP ${res.status}`);
+    const data = await res.json();
     return (data.MediaContainer?.Metadata ?? [])
       .filter((m) => String(m.Player?.machineIdentifier ?? "").startsWith(`pdt-diag-${short}`))
       .map((m) => ({
@@ -1015,7 +1208,7 @@ async function plexVisibility() {
           out(`${t()} ${s.name} appeared in Now Playing`);
         }
       }
-      out(`${t()} ${now.length} row(s)${now.length ? `   ${now.map(describe).join("  |  ")}` : ""}`);
+      if (!forbidden) out(`${t()} ${now.length} row(s)${now.length ? `   ${now.map(describe).join("  |  ")}` : ""}`);
       for (const r of now) seen.set(r.sessionKey, r);
       await sleep(3500);
     }
@@ -1034,9 +1227,15 @@ async function plexVisibility() {
       }
     }
     try {
-      await plex("/:/progress", {
-        params: { key: ratingKey, identifier: "com.plexapp.plugins.library", time: before.viewOffset ?? 0, state: "stopped" },
-      });
+      const identifier = "com.plexapp.plugins.library";
+      if (before.viewOffset != null) {
+        await plex("/:/progress", { params: { key: ratingKey, identifier, time: before.viewOffset, state: "stopped" } });
+      } else if (!before.viewCount) {
+        // Unwatched with no resume point: marking it unwatched again is exactly that.
+        await plex("/:/unscrobble", { params: { key: ratingKey, identifier } });
+      } else {
+        out("This title was watched before, with no resume point: Plex has no way to put that back; clear it in Plex if it bothers you.");
+      }
       const after = (await plexJSON(`/library/metadata/${ratingKey}`)).MediaContainer?.Metadata?.[0];
       out(`resume point: was ${before.viewOffset ?? "none"}, now ${after?.viewOffset ?? "none"}`);
       report.visibility.after = { viewOffset: after?.viewOffset ?? null, viewCount: after?.viewCount ?? 0 };
@@ -1053,7 +1252,7 @@ async function plexVisibility() {
   const first = await phase("1. One test stream (A) playing", phaseS,
     "Look now at Plex's dashboard (Now Playing), Tautulli's Activity and Tracearr.\n" +
     "To test Terminate, stop this stream from Tautulli or Plex during this phase.");
-  if (first.length === 0 && A.state !== "stopped") {
+  if (!forbidden && first.length === 0 && A.state !== "stopped") {
     shadowOn = true;
     await phase("1b. A playing, and reading the file through Plex", Math.max(20, phaseS / 2),
       "Nothing showed from the timeline alone, so the test now also reads the file through Plex, the way a player playing it directly would.");
@@ -1077,10 +1276,15 @@ async function plexVisibility() {
   heading("Summary");
   const r1 = report.visibility.phases[0]?.rows ?? [];
   const p2 = report.visibility.phases.find((p) => p.name.startsWith("2."))?.rows ?? [];
-  out(`${tick(!!A.seenAt)} a timeline-only stream ${A.seenAt ? `appears in Now Playing (after ${Math.round((A.seenAt - started) / 1000)} s)` : "did NOT appear in Now Playing"}${shadowOn ? " — only once the file was read through Plex" : ""}`);
-  out(`${tick(r1.some((r) => r.sessionId === A.session))} Plex's Session id is ours (what the qBT manager matches on)`);
-  out(`  bandwidth Plex shows: ${r1.map((r) => r.bandwidth ?? "none").join(", ") || "—"}`);
-  out(`  same client id, two streams: ${new Set(p2.map((r) => r.sessionKey)).size} row(s)`);
+  if (forbidden) {
+    out(`${tick(false)} couldn't see Now Playing from here (the token can't list sessions): go by what Tautulli showed,`);
+    out("  or run it again with --plex-token <the server owner's token>.");
+  } else out(`${tick(!!A.seenAt)} a timeline-only stream ${A.seenAt ? `appears in Now Playing (after ${Math.round((A.seenAt - started) / 1000)} s)` : "did NOT appear in Now Playing"}${shadowOn ? " — only once the file was read through Plex" : ""}`);
+  if (!forbidden) {
+    out(`${tick(r1.some((r) => r.sessionId === A.session))} Plex's Session id is ours (what the qBT manager matches on)`);
+    out(`  bandwidth Plex shows: ${r1.map((r) => r.bandwidth ?? "none").join(", ") || "—"}`);
+    out(`  same client id, two streams: ${new Set(p2.map((r) => r.sessionKey)).size} row(s)`);
+  }
   out(`  terminate: ${report.visibility.terminated ? `seen in the timeline response (${report.visibility.terminated.session})` : "not tried, or not seen in the timeline response"}`);
   out("Also note what Tautulli and Tracearr showed (player, user, Direct Play/Stream), and send that along with this report.");
 }
@@ -1092,6 +1296,7 @@ async function main() {
   if (COMMAND === "gpu" || COMMAND === "all") await gpu();
   if (COMMAND === "paths" || COMMAND === "all") await paths();
   if (COMMAND === "file") await file();
+  if (COMMAND === "rate") await rate();
   if (COMMAND === "plex-visibility") await plexVisibility();
   await saveReport();
 }

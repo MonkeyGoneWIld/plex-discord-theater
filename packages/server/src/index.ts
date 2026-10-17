@@ -28,6 +28,7 @@ import { closeDetailCache } from "./services/detail-cache.js";
 import { anyRoomPlaying, attachWebSocketServer, closeWebSocketServer } from "./services/sync.js";
 import { directStreamCacheDir, directStreamMemoryBytes } from "./services/direct-stream.js";
 import { transcodeCacheBytes } from "./services/segment-prefetch.js";
+import { checkFfmpeg, mediaPathMap } from "./services/ffmpeg/config.js";
 
 const required = ["DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET", "PLEX_URL", "PLEX_TOKEN", "REDIRECT_URI"] as const;
 for (const name of required) {
@@ -318,6 +319,30 @@ function reportIntegrations(): void {
     `copied ones kept until the stream ends, ${mb(directStreamMemoryBytes())} in memory (DIRECT_STREAM_MEMORY_MB)`,
     `and the rest on disk at ${directStreamCacheDir()} (STREAM_CACHE_DIR);`,
     `re-encoded ones ${mb(transcodeCacheBytes())} in memory (TRANSCODE_CACHE_MB), the rest on Plex's disk`,
+  );
+  void reportEngine();
+}
+
+/**
+ * Which engine makes the streams, and for ffmpeg whether it is there to.
+ * PLAYBACK_ENGINE=ffmpeg without ffmpeg falls back to Plex for everything.
+ */
+async function reportEngine(): Promise<void> {
+  if (process.env.PLAYBACK_ENGINE?.trim().toLowerCase() !== "ffmpeg") {
+    console.log("[Config] playback engine: Plex");
+    return;
+  }
+  const found = await checkFfmpeg();
+  if (!found.ok) {
+    console.warn(`[Config] playback engine: ffmpeg wanted (PLAYBACK_ENGINE=ffmpeg) but not found (${found.error}); every stream goes to Plex`);
+    return;
+  }
+  const map = mediaPathMap();
+  console.log(
+    "[Config] playback engine: ffmpeg —",
+    `${found.version};`,
+    "copies H.264 and HEVC files itself, HDR included; re-encodes still go to Plex;",
+    map.length ? `library at ${map.map(([from, to]) => `${from} → ${to}`).join(", ")} (MEDIA_PATH_MAP)` : "library at Plex's own paths",
   );
 }
 

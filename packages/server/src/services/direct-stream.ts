@@ -58,6 +58,7 @@ import path from "node:path";
 import { plexFetchSegment } from "./plex.js";
 import { firstKeyframe, videoSpan } from "./ts-timestamps.js";
 import { logEvent } from "./logger.js";
+import { measuredPlaylist, round3 } from "./measured-playlist.js";
 
 /**
  * How far past the playhead to measure. The player fetches 150s ahead of
@@ -118,22 +119,6 @@ const PLEX_TS_OFFSET_S = 10;
 /** Plex is asked for 3s segments, which fixes the index a mid-film start begins
  *  at, even though its copied segments are nothing like 3s long. */
 const SECONDS_PER_SEGMENT = 3;
-/**
- * How long each gap entry before a mid-film session's first segment is.
- *
- * Long, because hls.js walks them: until the element has jumped to the start
- * position it reads 0:00, and hls.js fills from there, one gap entry at a time,
- * a few milliseconds each. At 10s a session started an hour and a half in had
- * 540 of them.
- *
- * They are left out of the target duration, which hls.js doesn't hold an entry
- * to. It does time reloads by it: the first load of a playlist happens with
- * nothing buffered, so hls.js measures the player as being at 0:00, far from
- * the end, and waits a whole target duration to reload. With the gap entries
- * counted that was a minute, and a session started mid-film played the half
- * minute its first playlist listed and then sat waiting for the rest.
- */
-const FILLER_STEP_S = 60;
 /** Never advertised lower than this. Copied segments run to ~10.5s. */
 const MIN_TARGET_DURATION = 12;
 /**
@@ -218,7 +203,6 @@ const byPlexKey = new Map<string, CopySession>();
  */
 const refused = new Set<string>();
 
-const round3 = (n: number) => Math.round(n * 1000) / 1000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function segmentPath(s: CopySession, index: number): string {
@@ -656,52 +640,18 @@ export async function directStreamPlaylist(
   // playlist would be an error to it, and a request left hanging past its own
   // timeout is one it stops waiting for.
   if (list.length === 0 && !s.ended) return "retry";
-  const first = list[0] ?? s.segments[0];
-  const lines: string[] = [];
-
-  // Up to the first segment: gaps, in steps the target duration can cover.
-  const fillTo = first ? round3(Math.max(0, first.start)) : 0;
-  let filled = 0;
-  while (fillTo - filled > 0.0005) {
-    const step = round3(Math.min(FILLER_STEP_S, fillTo - filled));
-    lines.push(`#EXTINF:${step.toFixed(3)},`, "#EXT-X-GAP", "gap.ts");
-    filled = round3(filled + step);
-  }
-
-  // The target duration is the segments' alone — see FILLER_STEP_S.
-  let longest = 0;
-  // Each segment runs to where the next one starts, so the running total is
-  // exactly the timestamps — the last one, once the end is known, to its own end.
-  for (let i = 0; i < list.length; i++) {
-    const seg = list[i];
-    const next = s.segments[i + 1];
-    const duration = round3((next ? round3(next.start) : round3(seg.end)) - round3(seg.start));
-    longest = Math.max(longest, duration);
-    lines.push(`#EXTINF:${duration.toFixed(3)},`, urlFor(seg.path, seg.bytes));
-  }
-  // Raised when a segment needs it and never lowered: a target duration that
-  // shrank between reloads would be a different playlist as far as the spec goes.
-  s.targetDuration = Math.max(s.targetDuration, Math.ceil(longest));
-
-  const head = [
-    "#EXTM3U",
-    "#EXT-X-VERSION:3",
-    "#EXT-X-PLAYLIST-TYPE:EVENT",
-    `#EXT-X-TARGETDURATION:${s.targetDuration}`,
-    "#EXT-X-MEDIA-SEQUENCE:0",
-  ];
-  // Always, from the start of the title too: a playlist that is still growing
-  // is live as far as hls.js is concerned, and without a start it begins near
-  // the end of what is listed — minutes into the film. Never before both
-  // picture and sound have begun, which with a lead in the audio is later
-  // than the first segment's start.
-  const playable = first
-    ? Math.max(first.videoStart, first.audioStart ?? first.videoStart)
-    : fillTo;
-  head.push(`#EXT-X-START:TIME-OFFSET=${round3(Math.max(s.offsetS, playable)).toFixed(3)},PRECISE=YES`);
-  const tail = s.ended ? ["#EXT-X-ENDLIST"] : [];
+  const { text, targetDuration } = measuredPlaylist({
+    segments: s.segments,
+    published: list.length,
+    offsetS: s.offsetS,
+    ended: s.ended,
+    targetDuration: s.targetDuration,
+    urlFor,
+  });
+  // Raised when a segment needs it and never lowered — see measuredPlaylist.
+  s.targetDuration = targetDuration;
   s.handedOut = true;
-  return [...head, ...lines, ...tail].join("\n") + "\n";
+  return text;
 }
 
 /** The most parts a segment is served in — see segmentPart. */

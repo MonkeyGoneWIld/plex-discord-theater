@@ -16,6 +16,7 @@ import {
   directStreamSegment,
   partBounds,
   updateDirectStreamPosition,
+  type CopiedSegment,
 } from "../services/direct-stream.js";
 import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
@@ -47,6 +48,22 @@ import { playedThreshold } from "../services/played-state.js";
 import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
 import { markOriginalAudio } from "../services/original-language.js";
 import { audioNotes, type AudioDecision, type SourceAudio } from "../services/stream-audio.js";
+import { ffmpegEngineOn, localPath, readable } from "../services/ffmpeg/config.js";
+import { AUDIO_KBPS, copyArgs, inputArgs, planCopy, type SourceStream, type SourceVersion } from "../services/ffmpeg/plan.js";
+import {
+  ffmpegKeyRetired,
+  ffmpegPlaylist,
+  ffmpegRefused,
+  ffmpegSegment,
+  ffmpegTitleStreaming,
+  isFfmpegKey,
+  isFfmpegSession,
+  keepFfmpegAlive,
+  startFfmpegRun,
+  stopAllFfmpegSessions,
+  stopFfmpegSession,
+  updateFfmpegPosition,
+} from "../services/ffmpeg/engine.js";
 
 const router = Router();
 
@@ -3563,7 +3580,7 @@ const sessionRatingKeys = new Map<string, string>();
 /** Whether any stream of this title is running now. */
 function titleIsStreaming(ratingKey: string): boolean {
   for (const key of sessionRatingKeys.values()) if (key === ratingKey) return true;
-  return false;
+  return ffmpegTitleStreaming(ratingKey);
 }
 /**
  * Maps our session UUID → which of the item's files it is playing.
@@ -3733,6 +3750,7 @@ function noteHeadAdvance(key: string, segPath: string): void {
 export function markTranscodeStopped(sessionId: string): void {
   stopPrefetch(sessionId);
   stopDirectStream(sessionId);
+  stopFfmpegSession(sessionId);
   transcodeControlKey.delete(sessionId);
   const plexKey = plexTranscodeKeys.get(sessionId);
   if (plexKey) {
@@ -4092,6 +4110,8 @@ export { terminatePlexSession };
  * and a misleading warning.
  */
 export async function pingPlexTranscode(hlsSessionId: string): Promise<boolean> {
+  // Made here, by ffmpeg: nothing on Plex to keep alive.
+  if (isFfmpegSession(hlsSessionId)) return keepFfmpegAlive(hlsSessionId);
   let alive = true;
   try {
     // Tries our session id first and Plex's transcode key on a 404 — see
@@ -4291,6 +4311,7 @@ setInterval(() => {
   const now = Date.now();
   for (const [key, entry] of manifestCache) {
     if (now - entry.createdAt <= MANIFEST_CACHE_TTL_MS) continue;
+    if (isFfmpegSession(key)) continue;
     const plexKey = plexTranscodeKeys.get(key);
     if (!plexKey || !activeTranscodeKeys.has(plexKey)) manifestCache.delete(key);
   }
@@ -4503,6 +4524,129 @@ function streamNotes(notes: Record<string, string | number | null>): string[] {
     .map(([k, v]) => `#EXT-X-SESSION-DATA:DATA-ID="com.pdt.${k}",VALUE="${String(v).replace(/["\r\n]/g, "'")}"`);
 }
 
+// ─── The ffmpeg engine ──────────────────────────────────────────
+
+/** A version's file and streams as plan.ts takes them, from Plex's metadata. */
+const ffmpegSources = new LruMap<string, { at: number; source: SourceVersion | null }>(200);
+const FFMPEG_SOURCE_TTL_MS = 5 * 60_000;
+
+async function ffmpegSource(ratingKey: string, mediaIndex: number): Promise<SourceVersion | null> {
+  const key = `${ratingKey}:${mediaIndex}`;
+  const hit = ffmpegSources.get(key);
+  if (hit && Date.now() - hit.at < FFMPEG_SOURCE_TTL_MS) return hit.source;
+  const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(`/library/metadata/${ratingKey}`);
+  const media = data.MediaContainer.Metadata?.[0]?.Media?.[mediaIndex] as (PlexMedia & { Part?: Array<PlexPart & { file?: string }> }) | undefined;
+  const part = media?.Part?.[0];
+  const source: SourceVersion | null = part
+    ? {
+        container: media?.container ?? null,
+        width: media?.width ?? null,
+        height: media?.height ?? null,
+        partKey: part.key ?? null,
+        file: part.file ?? null,
+        streams: (part.Stream ?? []) as SourceStream[],
+      }
+    : null;
+  ffmpegSources.set(key, { at: Date.now(), source });
+  return source;
+}
+
+/**
+ * Start a copy of this session's stream with ffmpeg and return its master
+ * playlist — or null, for Plex to make the stream: a file ffmpeg can't copy
+ * yet (plan.ts says why), or a run that didn't start.
+ */
+async function startWithFfmpeg(o: {
+  sessionId: string;
+  ratingKey: string;
+  mediaIndex: number;
+  offsetS: number;
+  audioStreamID: number | null;
+  roomHevc: boolean;
+  quality: number;
+  fileKbps: number | null;
+  audioTracks: SourceAudio[];
+  authToken?: string;
+}): Promise<string | null> {
+  const session = o.sessionId.substring(0, 8);
+  let source: SourceVersion | null = null;
+  try {
+    source = await ffmpegSource(o.ratingKey, o.mediaIndex);
+  } catch (err) {
+    logEvent("FFmpeg", "couldn't read the title from Plex; left to Plex", { session, ratingKey: o.ratingKey, err: String(err) });
+    return null;
+  }
+  if (!source) return null;
+  const plan = planCopy(source, { audioStreamId: o.audioStreamID || null, hevcOk: o.roomHevc });
+  if (!plan.ok) {
+    logEvent("FFmpeg", "left to Plex", { session, ratingKey: o.ratingKey, why: plan.why });
+    return null;
+  }
+
+  // From the mount when the file is there; otherwise through Plex's own file
+  // endpoint, which is a plain read of the file, not a transcode.
+  const local = source.file ? localPath(source.file) : null;
+  const fromMount = !!local && readable(local);
+  let input: string[];
+  if (fromMount) {
+    input = inputArgs({ local: local! });
+  } else if (source.partKey) {
+    input = inputArgs({ url: `${process.env.PLEX_URL!.replace(/\/$/, "")}${source.partKey}`, token: process.env.PLEX_TOKEN! });
+  } else {
+    logEvent("FFmpeg", "nothing to read the file from; left to Plex", { session, ratingKey: o.ratingKey });
+    return null;
+  }
+
+  const started = await startFfmpegRun({
+    sessionId: o.sessionId,
+    ratingKey: o.ratingKey,
+    codec: plan.codec,
+    offsetS: o.offsetS,
+    args: copyArgs(plan, input, o.offsetS),
+  });
+  if (!started.ok) {
+    logEvent("FFmpeg", "run didn't start; left to Plex", { session, ratingKey: o.ratingKey, why: started.why });
+    return null;
+  }
+
+  recordSessionVideoCodec(o.sessionId, plan.codec);
+  const decided: AudioDecision | null = plan.audio
+    ? {
+        id: plan.audio.id,
+        decision: plan.audioCopy ? "copy" : "transcode",
+        codec: "aac",
+        channels: plan.audioCopy ? plan.audio.channels ?? null : 2,
+        bitrate: plan.audioCopy ? null : AUDIO_KBPS,
+      }
+    : null;
+  const notes = streamNotes({
+    engine: "ffmpeg",
+    video: "copy",
+    kbps: o.fileKbps,
+    quality: o.quality || null,
+    ...audioNotes(decided, o.audioTracks),
+  });
+  const playlist = segProxyUrl(`${TRANSCODE_PREFIX}session/${started.key}/base/index.m3u8`, o.authToken);
+  // One variant, no CODECS: hls.js reads the codecs out of the segments, as it
+  // does for Plex's playlists, which don't declare them either.
+  const bandwidth = Math.round((o.fileKbps ?? 8000) * 1000);
+  const manifest = [
+    "#EXTM3U",
+    "#EXT-X-VERSION:3",
+    ...notes,
+    `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${plan.width}x${plan.height}`,
+    playlist,
+    "",
+  ].join("\n");
+  manifestCache.set(o.sessionId, { manifest, createdAt: Date.now() });
+  logEvent("FFmpeg", "copying", {
+    session, ratingKey: o.ratingKey, fromS: o.offsetS, video: plan.codec, hdr: plan.hdr,
+    audio: plan.audio ? `${plan.audio.codec} ${plan.audio.channels ?? "?"}ch ${plan.audioCopy ? "copied" : "→ AAC"}` : "none",
+    source: fromMount ? "mount" : "plex",
+  });
+  return manifest;
+}
+
 // ─── HLS streaming ──────────────────────────────────────────────
 
 /**
@@ -4576,9 +4720,9 @@ router.get(
     // offset is a deliberate seek/restart and falls through to a fresh transcode.
     const cached = manifestCache.get(sessionId);
     const livePlexKey = plexTranscodeKeys.get(sessionId);
-    if (cached && !offset && livePlexKey && activeTranscodeKeys.has(livePlexKey)) {
+    if (cached && !offset && ((livePlexKey && activeTranscodeKeys.has(livePlexKey)) || isFfmpegSession(sessionId))) {
       if (DEBUG) console.log("[HLS] Reusing live transcode for session:", sessionId.substring(0, 8),
-        "plexKey:", livePlexKey.substring(0, 8));
+        livePlexKey ? `plexKey: ${livePlexKey.substring(0, 8)}` : "(ffmpeg)");
       res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
       res.send(cached.manifest);
       return;
@@ -4957,7 +5101,6 @@ router.get(
         subtitleId = 0;
         subtitleMode = "none";
       }
-      await selectTracksForStart(ratingKey, mediaIndex, audioStreamID, subtitleId);
       // Decided per start, so a room that has gained someone who can't decode
       // HEVC gets H.264 from its next transcode on.
       const roomHevc = userId !== null && mayStartHevc(userId);
@@ -5007,6 +5150,18 @@ router.get(
       }
       const copy = notCopied === null;
       recordHevcWithheld(sessionId, copy && !roomHevc && version?.videoCodec?.toLowerCase() === "hevc");
+      // With PLAYBACK_ENGINE=ffmpeg, a copy is made here, from the file, and
+      // Plex isn't asked for anything. Whatever ffmpeg can't copy yet — or
+      // won't start — is Plex's, exactly as before.
+      if (copy && subtitleMode === "none" && ffmpegEngineOn() && !ffmpegRefused(ratingKey)) {
+        const manifest = await startWithFfmpeg({
+          sessionId, ratingKey, mediaIndex, offsetS: offset ? Number(offset) : 0, audioStreamID, roomHevc,
+          quality, fileKbps: kbps, audioTracks: version?.audioTracks ?? [],
+          authToken: req.query.token as string | undefined,
+        });
+        if (manifest) return manifest;
+      }
+      await selectTracksForStart(ratingKey, mediaIndex, audioStreamID, subtitleId);
       return fetchManifest(subtitleMode, {
         videoResolution: quality && quality <= QUALITY_720P_KBPS ? "1280x720" : transcodeFrame(version ?? {}),
         hevc: roomHevc && HEVC_TRANSCODE ? "encode" : roomHevc && copy ? "copy" : false,
@@ -5083,12 +5238,32 @@ async function isTranscodeSessionAlive(plexKey: string): Promise<boolean> {
 }
 
 /** The playlist or a segment of a copied stream — see the /hls/seg route. */
-async function serveDirectStream(req: Request, res: Response, plexKey: string, segPath: string): Promise<void> {
+function serveDirectStream(req: Request, res: Response, plexKey: string, segPath: string): Promise<void> {
+  return serveMeasured(req, res, segPath, {
+    playlist: (urlFor) => directStreamPlaylist(plexKey, urlFor),
+    segment: (path) => directStreamSegment(plexKey, path),
+  });
+}
+
+/**
+ * The playlist or a segment of a stream measured here — a Plex copy
+ * (direct-stream.ts) or an ffmpeg run (ffmpeg/engine.ts), which are served
+ * alike.
+ */
+async function serveMeasured(
+  req: Request,
+  res: Response,
+  segPath: string,
+  stream: {
+    playlist: (urlFor: (path: string, bytes: number) => string) => Promise<string | "retry" | null>;
+    segment: (path: string) => CopiedSegment | "gone" | null;
+  },
+): Promise<void> {
   if (segPath.endsWith(".m3u8")) {
     const authToken = req.query.token as string | undefined;
     // Each segment's size rides on its URL, for the player to fetch it in
     // parts — see segmentPart. Only through here: the relay serves whole files.
-    const playlist = await directStreamPlaylist(plexKey, (path, bytes) => {
+    const playlist = await stream.playlist((path, bytes) => {
       const url = segProxyUrl(path, authToken);
       return url.startsWith("/api/") ? `${url}&n=${bytes}` : url;
     });
@@ -5106,7 +5281,7 @@ async function serveDirectStream(req: Request, res: Response, plexKey: string, s
     res.send(playlist);
     return;
   }
-  const segment = directStreamSegment(plexKey, segPath);
+  const segment = stream.segment(segPath);
   // Measured, then let go — its stream ended, or the disk refused it. The
   // player restarts where it is, which beats asking Plex for an old segment
   // and having it renumber.
@@ -5180,10 +5355,26 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
     return;
   }
 
+  const segKeyMatch = segPath.match(PLEX_SESSION_KEY_RE);
+
+  // A stream the ffmpeg engine makes is answered entirely from here, and a
+  // key of its that has ended is gone: neither is ever passed to Plex.
+  if (segKeyMatch && isFfmpegKey(segKeyMatch[1])) {
+    const key = segKeyMatch[1];
+    await serveMeasured(req, res, segPath, {
+      playlist: (urlFor) => ffmpegPlaylist(key, urlFor),
+      segment: (path) => ffmpegSegment(key, path),
+    });
+    return;
+  }
+  if (segKeyMatch && ffmpegKeyRetired(segKeyMatch[1])) {
+    res.status(410).end();
+    return;
+  }
+
   // Block segment requests for stopped transcode sessions.
   // After the host stops, the viewer's hls.js keeps fetching for a moment —
   // those requests hitting Plex create phantom state that blocks new transcodes.
-  const segKeyMatch = segPath.match(PLEX_SESSION_KEY_RE);
   if (segKeyMatch && allKnownPlexKeys.has(segKeyMatch[1]) && !activeTranscodeKeys.has(segKeyMatch[1])) {
     res.status(410).end(); // Gone — transcode was stopped
     return;
@@ -5316,6 +5507,16 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
   const sessionId = req.params.sessionId as string;
   if (!UUID_RE.test(sessionId)) {
     res.status(400).json({ error: "Invalid session ID" });
+    return;
+  }
+
+  // Made here, by ffmpeg: where the driver is, for how far ahead to make it.
+  // Nothing on Plex to keep alive.
+  if (isFfmpegSession(sessionId)) {
+    const timeMs = Number(req.query.time);
+    if (Number.isFinite(timeMs)) updateFfmpegPosition(sessionId, timeMs / 1000);
+    keepFfmpegAlive(sessionId);
+    res.json({ ok: true });
     return;
   }
 
@@ -5560,6 +5761,13 @@ router.delete(
       hadPlexKey: plexTranscodeKeys.has(sessionId),
     });
 
+    // Made here, by ffmpeg: nothing to tell Plex.
+    if (isFfmpegSession(sessionId)) {
+      markTranscodeStopped(sessionId);
+      res.json({ ok: true });
+      return;
+    }
+
     if (stoppingSessions.has(sessionId)) {
       if (DEBUG) console.log("[HLS] Stop session", sessionId.substring(0, 8), "(already stopping via sync)");
       res.json({ ok: true });
@@ -5643,6 +5851,8 @@ router.delete("/hls/sessions", async (req: Request, res: Response) => {
     res.status(403).json({ error: "Forbidden" });
     return;
   }
+  // The streams made here, by ffmpeg, aren't on Plex's list.
+  const ffmpeg = stopAllFfmpegSessions("stopped by the kill-all command");
   try {
     const data = await plexJSON<{
       MediaContainer: {
@@ -5677,7 +5887,7 @@ router.delete("/hls/sessions", async (req: Request, res: Response) => {
       }
     }
 
-    res.json({ total: sessions.length, stopped });
+    res.json({ total: sessions.length, stopped, ffmpeg });
   } catch (err) {
     console.error("Kill sessions error:", err);
     res.status(502).json({ error: "Failed to fetch/kill sessions" });
@@ -5920,6 +6130,7 @@ async function pipeBody(
 /** Stop transcode sessions started by this server instance during graceful shutdown.
  *  Only affects sessions in our plexTranscodeKeys map; other Plex clients are untouched. */
 export async function stopAllActiveSessions(): Promise<void> {
+  stopAllFfmpegSessions("server shutting down");
   const entries = [...plexTranscodeKeys.entries()];
   for (const [sessionId, plexKey] of entries) {
     const ratingKey = sessionRatingKeys.get(sessionId) || null;

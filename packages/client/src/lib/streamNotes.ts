@@ -21,6 +21,9 @@ export interface StreamNotes {
   audioKbps: number | null;
   /** Why it was converted, in a sentence. */
   audioReason: string | null;
+  /** What made the stream: Plex's transcoder, or this server's own ffmpeg
+   *  (PLAYBACK_ENGINE=ffmpeg). A server that doesn't say is Plex's. */
+  engine: "plex" | "ffmpeg";
 }
 
 /** StreamNotes from hls.js's parsed session data, or null when the server sent
@@ -45,6 +48,7 @@ export function readStreamNotes(
     audio: audio === "copy" || audio === "transcode" ? audio : null,
     audioFrom: value("audioFrom"), audioTo: value("audioTo"), audioKbps: num("audioKbps"),
     audioReason: value("audioReason"),
+    engine: value("engine") === "ffmpeg" ? "ffmpeg" : "plex",
   };
 }
 

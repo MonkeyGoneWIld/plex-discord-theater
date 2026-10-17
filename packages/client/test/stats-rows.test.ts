@@ -86,7 +86,7 @@ check("every detail fits on one line", fits(subtitleDetails(inside, "drawn", rea
 
 console.log("\n— audio —");
 const notes = (n: Partial<StreamNotes>): StreamNotes => ({
-  video: "copy", reason: null, kbps: null, quality: null, audio: null, audioFrom: null, audioTo: null, audioKbps: null, audioReason: null, ...n,
+  video: "copy", reason: null, kbps: null, quality: null, audio: null, audioFrom: null, audioTo: null, audioKbps: null, audioReason: null, engine: "plex", ...n,
 });
 check("as it is in the file: the row says it all", [audioSummary(notes({ audio: "copy", audioFrom: "AAC Stereo" })), audioDetails(notes({ audio: "copy", audioFrom: "AAC Stereo" }))],
   ["AAC Stereo · direct", []]);

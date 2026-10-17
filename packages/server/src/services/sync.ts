@@ -10,6 +10,7 @@ import { pushProgressToPlex } from "./plex-accounts.js";
 import { episodesInSameFile } from "./episode-files.js";
 import { logEvent } from "./logger.js";
 import { updateDirectStreamPosition } from "./direct-stream.js";
+import { isFfmpegSession, updateFfmpegPosition } from "./ffmpeg/engine.js";
 import { qualityKbps } from "./media-versions.js";
 
 /** Interval between WebSocket pings to detect dead connections. */
@@ -60,6 +61,12 @@ const MSG_WINDOW_MS = 10_000;
  */
 async function killPlexTranscode(hlsSessionId: string | null): Promise<void> {
   if (!hlsSessionId) return;
+
+  // Made here, by ffmpeg: stopped here, with nothing to tell Plex.
+  if (isFfmpegSession(hlsSessionId)) {
+    markTranscodeStopped(hlsSessionId);
+    return;
+  }
 
   if (isSessionStopping(hlsSessionId)) {
     console.log("[Sync] Stop skipped for", hlsSessionId.substring(0, 8), "(already stopping via HTTP)");
@@ -713,6 +720,7 @@ function startSessionPing(instanceId: string, hlsSessionId: string): void {
     const room = rooms.get(instanceId);
     if (room?.state.ratingKey && room.state.playing) {
       updateDirectStreamPosition(hlsSessionId, interpolatedPosition(room.state));
+      updateFfmpegPosition(hlsSessionId, interpolatedPosition(room.state));
     }
     pingPlexTranscode(hlsSessionId)
       .then((alive) => {

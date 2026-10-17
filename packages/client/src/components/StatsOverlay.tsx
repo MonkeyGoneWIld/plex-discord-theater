@@ -487,6 +487,7 @@ export function StatsOverlay({
       details: [
         ...playbackWhy(notes, mode).map(([l, v]) => [l, v, "warn"] as [string, string, Health]),
         ["Quality", quality ? `Up to ${qualityLabel(quality)}` : qualityLabel(0)],
+        ...(notes ? [["Engine", notes.engine === "ffmpeg" ? "ffmpeg" : "Plex"] as [string, string]] : []),
         ...(sessionId ? [["Session", sessionId.slice(0, 8)] as [string, string]] : []),
       ],
     },

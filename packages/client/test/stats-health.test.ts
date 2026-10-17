@@ -22,7 +22,7 @@ function check(name: string, actual: unknown, expected: unknown) {
 console.log("— playback —");
 check("Direct Play green, Direct Stream amber, Transcode red", ["Direct Play", "Direct Stream", "Transcode", null].map(modeHealth), ["ok", "warn", "bad", "none"]);
 const notes = (n: Partial<StreamNotes>): StreamNotes => ({
-  video: "copy", reason: null, kbps: null, quality: null, audio: "copy", audioFrom: null, audioTo: null, audioKbps: null, audioReason: null, ...n,
+  video: "copy", reason: null, kbps: null, quality: null, audio: "copy", audioFrom: null, audioTo: null, audioKbps: null, audioReason: null, engine: "plex", ...n,
 });
 check("Direct Play needs no why", playbackWhy(notes({}), "Direct Play"), []);
 check("a Direct Stream's why is its audio",

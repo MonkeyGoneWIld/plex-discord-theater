@@ -960,7 +960,7 @@ async function file() {
     await encode("H.264 tone-mapped: QSV video engine", [...hwInit(), ...hwDecode, ...window, ...input, "-map", "0:v:0",
       "-vf", `${t.gpuChain("p010")},vpp_qsv=tonemap=1:format=nv12`, ...h264, ...TAGS_SDR, "-an"], "h264-tonemap-vpp.mp4");
     await encode("H.264 tone-mapped: software tonemapx", [...hwInit(), ...window, ...input, "-map", "0:v:0", "-vf",
-      `scale=${W}:${H},tonemapx=tonemap=${TONEMAP}:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12,hwupload=extra_hw_frames=64,format=qsv`,
+      `scale=${W}:${H},format=yuv420p10le,tonemapx=tonemap=${TONEMAP}:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12,hwupload=extra_hw_frames=64,format=qsv`,
       ...h264, ...TAGS_SDR, "-an"], "h264-tonemap-tonemapx.mp4");
 
     heading(`Tone-mapping samples: one frame at ${at} s, for comparing by eye`);
@@ -1030,7 +1030,6 @@ async function rate() {
   }
   const dir = path.join(OUT_ROOT, `${STAMP}-rate-${t.ratingKey}`);
   await mkdir(dir, { recursive: true });
-  const fmt = "p010";
   const tags = t.hdr ? tagsHdr(t.trc) : t.color.tags;
   const hevc = (preset, extra) => ["-c:v", "hevc_qsv", "-low_power", "1", "-profile:v", "main10", "-preset", preset, ...extra, ...tags, "-an"];
   const h264 = (extra) => ["-c:v", "h264_qsv", "-low_power", "1", "-profile:v", "high", "-preset", "medium", ...extra, ...t.color.tags, "-an"];
@@ -1057,15 +1056,20 @@ async function rate() {
   let way = "gpu";
   report.rate = { ratingKey: t.ratingKey, title: t.title, hdr: t.cls, at: t.at, seconds: t.seconds, modes: [] };
   for (const [name, enc] of modes) {
+    // H.264 takes 8-bit frames; HEVC Main10 10-bit.
+    const fmt = enc.includes("h264_qsv") ? "nv12" : "p010";
     const target = path.join(dir, `${report.rate.modes.length}.mp4`);
     const attempt = (how) => run(FFMPEG, [...FF, "-v", "verbose", ...hwInit(), ...(how === "gpu" ? hwDecode : []), ...t.window,
       ...t.input, "-map", "0:v:0", "-vf", how === "gpu" ? t.gpuChain(fmt) : t.cpuChain(fmt), ...enc, target],
       { timeoutMs: Math.max(180_000, t.seconds * 20_000) });
     let r = await attempt(way);
     if (r.code !== 0 && way === "gpu") {
-      way = "cpu";
-      out(`(the GPU can't decode this file: the CPU decodes from here on)`);
-      r = await attempt(way);
+      const cpu = await attempt("cpu");
+      if (cpu.code === 0) {
+        way = "cpu";
+        out(`(the GPU can't decode this file: the CPU decodes from here on)`);
+      }
+      r = cpu.code === 0 ? cpu : r;
     }
     if (r.code !== 0) {
       out(`${tick(false)} ${name.padEnd(40)} failed: ${whyFailed(r.stderr, 2).join(" / ")}`);

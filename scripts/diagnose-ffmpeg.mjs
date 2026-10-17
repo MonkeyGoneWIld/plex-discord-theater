@@ -69,6 +69,8 @@ rate                     Rate control compared on one title: bitrate, busiest se
 plex-visibility
   --rating-key <id>      The title the test session reports (required)
   --phase-seconds <n>    Length of the first phase (default 45); the rest are shorter
+  --sessions-token <t>   Read Plex's session list with this token instead (the owner's), while
+                         the streams are still reported with PLEX_TOKEN, as the engine will
 `;
 
 const argv = process.argv.slice(2);
@@ -107,6 +109,8 @@ const VAINFO = exists(`${JF}/vainfo`) ? `${JF}/vainfo` : "vainfo";
 const DEVICE = args.device ?? process.env.FFMPEG_HWACCEL_DEVICE ?? "/dev/dri/renderD128";
 const PLEX_URL = (args["plex-url"] ?? process.env.PLEX_URL ?? "").replace(/\/$/, "");
 const PLEX_TOKEN = args["plex-token"] ?? process.env.PLEX_TOKEN ?? "";
+/** Only for reading Plex's session list, when PLEX_TOKEN isn't allowed to (plex-visibility). */
+const SESSIONS_TOKEN = args["sessions-token"] ?? "";
 const OUT_ROOT = path.resolve(args.out ?? (exists("/data") ? "/data/diagnose" : "diagnose-out"));
 const STAMP = new Date().toISOString().replace(/[:.]/g, "-");
 /** This script's own Plex client identifier, never the app's. */
@@ -136,7 +140,8 @@ function positive(name, fallback) {
 const lines = [];
 const report = { command: COMMAND, startedAt: new Date().toISOString(), ffmpeg: FFMPEG, device: DEVICE };
 // Only something token-sized: a stand-in like "x" would be masked everywhere.
-const redact = (s) => (PLEX_TOKEN.length >= 8 ? String(s).split(PLEX_TOKEN).join("<token>") : String(s));
+const redact = (s) => [PLEX_TOKEN, SESSIONS_TOKEN].reduce(
+  (text, token) => (token.length >= 8 ? text.split(token).join("<token>") : text), String(s));
 function out(s = "") {
   const text = redact(s);
   console.log(text);
@@ -1143,11 +1148,11 @@ async function plexVisibility() {
   let forbidden = false;
   async function rows() {
     if (forbidden) return [];
-    const res = await plex("/status/sessions");
+    const res = await plex("/status/sessions", SESSIONS_TOKEN ? { headers: { "X-Plex-Token": SESSIONS_TOKEN } } : {});
     if (res.status === 401 || res.status === 403) {
       forbidden = true;
       out(`${t()} This token can't read Plex's session list (${res.status}): it isn't the server owner's. The test`);
-      out("      still reports the streams; watch Tautulli for them, or run it again with --plex-token <the owner's token>");
+      out("      still reports the streams; watch Tautulli for them, or run it again with --sessions-token <the owner's token>");
       out("      (the one Tautulli uses) so it can see Now Playing itself.");
       report.visibility.sessionsForbidden = res.status;
       return [];
@@ -1278,7 +1283,7 @@ async function plexVisibility() {
   const p2 = report.visibility.phases.find((p) => p.name.startsWith("2."))?.rows ?? [];
   if (forbidden) {
     out(`${tick(false)} couldn't see Now Playing from here (the token can't list sessions): go by what Tautulli showed,`);
-    out("  or run it again with --plex-token <the server owner's token>.");
+    out("  or run it again with --sessions-token <the server owner's token>.");
   } else out(`${tick(!!A.seenAt)} a timeline-only stream ${A.seenAt ? `appears in Now Playing (after ${Math.round((A.seenAt - started) / 1000)} s)` : "did NOT appear in Now Playing"}${shadowOn ? " — only once the file was read through Plex" : ""}`);
   if (!forbidden) {
     out(`${tick(r1.some((r) => r.sessionId === A.session))} Plex's Session id is ours (what the qBT manager matches on)`);

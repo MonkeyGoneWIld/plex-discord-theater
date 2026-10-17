@@ -187,8 +187,9 @@ function Runner() {
   }
 
   /**
-   * The viewer slow to get its first picture: the host waits for it, and they
-   * start together — or, past ten seconds, the host starts without it.
+   * The viewer slow to get its first picture: the room starts with the host's
+   * picture, waiting for nobody else's, and the viewer comes in where the room
+   * is once it can.
    */
   async function runSlowViewer(stallMs: number) {
     setRunning(true);
@@ -209,17 +210,11 @@ function Runner() {
       const hostStarted = await waitFor(() => firstPlay("u-host"), 45_000, "the host to start");
       const viewerStarted = await waitFor(() => firstPlay("u-viewer"), 45_000, "the viewer to start");
       const hostAfterS = (hostStarted - began) / 1000;
-      if (stallMs <= 8000) {
-        say(`${Math.abs(viewerStarted - hostStarted) < 700 ? "PASS" : "FAIL"} they start together (viewer ${viewerStarted - hostStarted} ms after the host)`);
-        say(`${hostAfterS >= stallMs / 1000 - 1 ? "PASS" : "FAIL"} because the host waited for the viewer (host started ${hostAfterS.toFixed(1)}s in)`);
-        const skipped = (events.get("u-viewer") ?? []).filter((e) => /settling onto the room|going to where the room/.test(e.msg));
-        say(`${skipped.length === 0 ? "PASS" : "FAIL"} and the viewer skipped nothing to catch up (${skipped.length})`);
-      } else {
-        say(`${hostAfterS < 16 ? "PASS" : "FAIL"} the host doesn't wait for ever (started ${hostAfterS.toFixed(1)}s in)`);
-        say(`${hostAfterS >= 9 ? "PASS" : "FAIL"} but it does wait about ten seconds first`);
-        say(`${viewerStarted > hostStarted ? "PASS" : "FAIL"} and the viewer follows once it can (${((viewerStarted - hostStarted) / 1000).toFixed(1)}s later)`);
-      }
-      await pause(6_000);
+      say(`${hostAfterS < Math.min(stallMs / 1000 - 1, 6) ? "PASS" : "FAIL"} the host starts without waiting for the viewer (started ${hostAfterS.toFixed(1)}s in)`);
+      say(`${viewerStarted > hostStarted ? "PASS" : "FAIL"} and the viewer follows once it can (${((viewerStarted - hostStarted) / 1000).toFixed(1)}s later)`);
+      await pause(3_000);
+      say(`${apartNow() < 1 ? "PASS" : "FAIL"} in step with the room seconds after it starts (${apartNow().toFixed(2)}s apart)`);
+      await pause(3_000);
       const h = latest.get("u-host")!;
       const v = latest.get("u-viewer")!;
       const apart = Math.abs(v.pos - h.pos);
@@ -232,6 +227,13 @@ function Runner() {
       setRunning(false);
     }
   }
+
+  /** How far apart the two players are, by their latest reports. */
+  const apartNow = () => {
+    const h = latest.get("u-host");
+    const v = latest.get("u-viewer");
+    return h && v ? Math.abs(v.pos - h.pos) : NaN;
+  };
 
   /** When the room started after the host pressed play, and how much each had buffered by then. */
   async function startOnce(query: string, flows: Record<string, number>, uploadKbps = 0, frameQuery = "") {
@@ -282,6 +284,8 @@ function Runner() {
       const flows = { "u-host": 6000, "u-viewer": 6000 };
       const inParts = await startOnce("p2p=0&stream=copy", flows);
       say(`in parts: started ${inParts.startS.toFixed(1)}s after play, host ${inParts.hostAheadS.toFixed(1)}s buffered, viewer ${inParts.viewerAheadS.toFixed(1)}s, ${inParts.apartMs} ms apart`);
+      await pause(3_000);
+      const inStepS = apartNow();
       for (const e of inParts.segments) say(`    segment ${e.data.seg}: ${e.data.MB} MB from ${e.data.from} in ${e.data.tookS}s (${e.data.Mbps} Mbps)`);
       say(`    sent: ${inParts.sent.join(", ")}`);
       const whole = await startOnce("p2p=0&stream=copy&parts=0", flows);
@@ -293,7 +297,7 @@ function Runner() {
       say(`${inParts.startS < whole.startS / 2 ? "PASS" : "FAIL"} in parts it starts in under half the time`);
       say(`${shared.startS < inParts.startS + 1.5 ? "PASS" : "FAIL"} and players sharing segments start no later`);
       say(`${inParts.startS < 8 ? "PASS" : "FAIL"} and within eight seconds`);
-      say(`${Math.abs(inParts.apartMs) < 700 ? "PASS" : "FAIL"} both start together`);
+      say(`${inStepS < 1 ? "PASS" : "FAIL"} the viewer in step with the room seconds after it starts (${inStepS.toFixed(2)}s apart)`);
       say(`${inParts.hostAheadS < 15 ? "PASS" : "FAIL"} without a pile of buffer it waited for first (${inParts.hostAheadS.toFixed(1)}s)`);
     } catch (err) {
       say(`FAIL ${String(err)}`);
@@ -321,7 +325,7 @@ function Runner() {
       const took = (events.get("u-host") ?? []).filter((e) => e.tag === "P2P" && /taking the segment/.test(e.msg));
       say(`${took.length > 0 ? "PASS" : "FAIL"} the host takes the segment it waits on from the viewer (${took.map((e) => `seg ${e.data.seg} after ${e.data.afterS}s`).join(", ") || "never"})`);
       say(`${r.startS < 12 ? "PASS" : "FAIL"} so the room starts within twelve seconds, not the ~30 its own downloads would take`);
-      say(`${Math.abs(r.apartMs) < 700 ? "PASS" : "FAIL"} both start together`);
+      say(`    the viewer started ${r.apartMs} ms after the host, the room waiting for nobody but it`);
       await pause(8_000);
       const h = latest.get("u-host")!;
       const v = latest.get("u-viewer")!;
@@ -1643,9 +1647,7 @@ function Runner() {
       // Said, from the last film's picture, before the word of the new one came:
       // the room counts it for nothing (services/sync.ts, "ready").
       for (const e of early) say(`    before its new stream: ${e.msg} ${JSON.stringify({ gather: e.data.gather, inHandS: e.data.inHandS })}`);
-      say(`${Math.abs(apart) < 700 ? "PASS" : "FAIL"} the room waits for the viewer's picture of the new title: the two start it together (${apart} ms apart)`);
-      const inHandS = Number(viewerPlays.data.bufAheadS);
-      say(`${inHandS >= 2.5 ? "PASS" : "FAIL"} the viewer with picture enough to start on (${inHandS.toFixed(1)}s)`);
+      say(`${Math.abs(apart) < 3000 ? "PASS" : "FAIL"} the viewer starts the new title within seconds of the host, which waits for nobody (${apart} ms apart)`);
       await pause(10_000);
       const h = latest.get("u-host")!;
       const v = latest.get("u-viewer")!;
@@ -1766,8 +1768,8 @@ function Runner() {
       // little faster once it has six seconds in hand (SOFT_SYNC_MIN_BUFFER_S),
       // which on a connection this close to the film's own speed takes a while.
       say(`${Math.abs(v.pos - h.pos) < 4 && !v.paused && !h.paused ? "PASS" : "FAIL"} and it plays on with the host, within the few seconds it closes unseen (${(v.pos - h.pos).toFixed(2)}s apart)`);
-      const jumped = (events.get("u-viewer") ?? []).filter((e) => e.t > joinedAt && /heartbeat drift correction|going past it/.test(e.msg));
-      say(`${jumped.length === 0 ? "PASS" : "FAIL"} without being jumped to catch up (${jumped.length})`);
+      const caught = (events.get("u-viewer") ?? []).filter((e) => e.t > joinedAt && /catching up with the room|heartbeat drift correction|going past it/.test(e.msg));
+      say(`    caught up: ${caught.map((e) => e.msg).join("; ") || "no need"}`);
     } catch (err) {
       say(`FAIL ${String(err)}`);
     } finally {
@@ -1780,10 +1782,9 @@ function Runner() {
 
   /**
    * The viewer's picture stopping mid-film for want of data, while the host's
-   * plays on: the room waits for it, the host holding where it is, and they go
-   * on together — the viewer never jumped forward past what it hadn't seen to
-   * catch up. "It should never skip parts of the video; buffering is much
-   * better" (13 October).
+   * plays on: the room waits for the host's picture alone, so it plays on, and
+   * the viewer — on its own loading screen meanwhile — comes back in step, in
+   * one move: nothing shown twice, no stops and starts to get there.
    */
   async function runViewerStall() {
     setRunning(true);
@@ -1810,27 +1811,85 @@ function Runner() {
         const v = latest.get("u-viewer");
         return v && !v.paused && v.ready < 3 ? v.t : null;
       }, 40_000, "the viewer's picture to stop");
-      await waitFor(() => {
+      const backAt = await waitFor(() => {
         const v = latest.get("u-viewer");
-        const h = latest.get("u-host");
-        return v && h && v.t > stoppedAt + 3000 && !v.paused && v.ready >= 3 && !h.paused;
-      }, 60_000, "both to go on");
+        return v && v.t > stoppedAt + 3000 && !v.paused && v.ready >= 3 ? v.t : null;
+      }, 60_000, "the viewer's picture to come back");
       await pause(10_000);
       stop();
       const during = samples.slice(from);
-      const held = during.some((s) => s.host.paused && s.host.waiting);
-      say(`${held ? "PASS" : "FAIL"} the host holds while the viewer's picture is stopped`);
-      const without = during.filter((s) => s.t > stoppedAt + 1500 && !s.viewer.paused && s.viewer.ready < 3 && !s.host.paused).length;
-      say(`${without <= 2 ? "PASS" : "FAIL"} rather than playing on without it (${without} samples)`);
-      const steps = during.slice(1).map((s, i) => s.viewer.pos - during[i].viewer.pos);
-      const jumps = steps.filter((d) => d > 1.5);
-      say(`${jumps.length === 0 ? "PASS" : "FAIL"} the viewer is never jumped forward${jumps.length ? ` (${jumps.map((d) => d.toFixed(2)).join(", ")}s)` : ""}`);
-      const back = steps.filter((d) => d < -0.05);
-      say(`${back.length === 0 ? "PASS" : "FAIL"} nor sent back${back.length ? ` (${back.map((d) => d.toFixed(2)).join(", ")}s)` : ""}`);
-      const caughtUp = (events.get("u-viewer") ?? []).filter((e) => /going past it|drift correction|correcting to room position|going to where the room/.test(e.msg));
-      say(`${caughtUp.length === 0 ? "PASS" : "FAIL"} nor corrected to catch up (${caughtUp.map((e) => e.msg).join("; ") || "none"})`);
+      const held = during.filter((s) => s.t > stoppedAt && (s.host.paused || s.host.waiting)).length;
+      say(`${held === 0 ? "PASS" : "FAIL"} the host plays on while the viewer's picture is stopped (${held} samples held)`);
+      const own = during.filter((s) => s.t > stoppedAt && s.t < backAt && s.viewer.loading).length;
+      say(`${own > 0 ? "PASS" : "FAIL"} the viewer on its own loading screen meanwhile`);
+      const back = during.slice(1).map((s, i) => s.viewer.pos - during[i].viewer.pos).filter((d) => d < -0.05);
+      say(`${back.length === 0 ? "PASS" : "FAIL"} never sent back${back.length ? ` (${back.map((d) => d.toFixed(2)).join(", ")}s)` : ""}`);
+      // Back in step the moment its picture moves again, not behind and then
+      // moved: a picture moving before and after a jump is a stutter.
+      const backSample = during.find((s) => s.t >= backAt);
+      const backApart = backSample ? Math.abs(backSample.viewer.pos - backSample.host.pos) : NaN;
+      say(`${backApart < 1 ? "PASS" : "FAIL"} its picture comes back in step with the room (${backApart.toFixed(2)}s apart)`);
+      const moving = during.filter((s) => s.t > backAt);
+      const jumps = moving.slice(1).map((s, i) => s.viewer.pos - moving[i].viewer.pos).filter((d) => d > 1.5);
+      say(`${jumps.length === 0 ? "PASS" : "FAIL"} and isn't moved again once it plays${jumps.length ? ` (${jumps.map((d) => d.toFixed(2)).join(", ")}s)` : ""}`);
       const asked = (events.get("u-viewer") ?? []).some((e) => /asking the room to wait for it/.test(e.msg));
-      say(`${asked ? "PASS" : "FAIL"} because it asked the room to wait for it`);
+      say(`${!asked ? "PASS" : "FAIL"} without asking the room to wait for it`);
+      const end = during[during.length - 1];
+      const apart = Math.abs(end.viewer.pos - end.host.pos);
+      say(`${apart < 1 && !end.viewer.paused && !end.host.paused ? "PASS" : "FAIL"} and they play on together (${apart.toFixed(2)}s apart)`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      stop();
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
+   * The viewer's picture stopping with the buffer in front of it, as a decoder
+   * can: on 16 October one viewer's stuck three seconds into every episode,
+   * ten seconds in hand, and the whole room stopped two seconds for it each
+   * time. The room plays on, and the viewer is going again, in step, at once.
+   */
+  async function runViewerFreeze() {
+    setRunning(true);
+    const out: string[] = ["— the viewer's picture stuck with the buffer ahead of it —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    latest.clear();
+    events.clear();
+    const { samples, stop } = sampleBoth();
+    try {
+      await api("/api/test/reset?p2p=0");
+      setHostOn(false);
+      setFrames(nextFrames);
+      await waitFor(() => latest.get("u-viewer")?.joined, 60_000, "the viewer to join");
+      setHostOn(true);
+      await waitFor(() => firstPlay("u-host") && firstPlay("u-viewer"), 60_000, "both to start");
+      await pause(8_000);
+      const from = samples.length;
+      const frozenAt = Date.now();
+      const frozenPos = latest.get("u-viewer")!.pos;
+      (viewerFrame.current?.contentWindow as Window | null | undefined)?.postMessage({ kind: "freeze" }, "*");
+      say(`… the viewer's picture stuck at ${frozenPos.toFixed(1)}s with the buffer ahead`);
+      const goingAt = await waitFor(() => {
+        const v = latest.get("u-viewer");
+        return v && v.t > frozenAt + 300 && v.ready >= 3 && !v.paused && v.pos > frozenPos + 0.3 ? v.t : null;
+      }, 30_000, "the viewer's picture to go again");
+      await pause(8_000);
+      stop();
+      const during = samples.slice(from);
+      const held = during.filter((s) => s.t > frozenAt && (s.host.paused || s.host.waiting)).length;
+      say(`${held === 0 ? "PASS" : "FAIL"} the host plays on (${held} samples held)`);
+      say(`${goingAt - frozenAt < 1500 ? "PASS" : "FAIL"} the viewer is going again within a second and a half (${goingAt - frozenAt} ms)`);
+      const back = during.slice(1).map((s, i) => s.viewer.pos - during[i].viewer.pos).filter((d) => d < -0.05);
+      say(`${back.length === 0 ? "PASS" : "FAIL"} never sent back${back.length ? ` (${back.map((d) => d.toFixed(2)).join(", ")}s)` : ""}`);
+      const moves = (events.get("u-viewer") ?? []).filter((e) => e.t > frozenAt && /catching up with the room|stepping it|drift correction|correcting to room|going past it/.test(e.msg));
+      say(`${moves.length === 1 ? "PASS" : "FAIL"} in one move (${moves.map((e) => e.msg).join("; ") || "none"})`);
+      const asked = (events.get("u-viewer") ?? []).some((e) => e.t > frozenAt && /asking the room to wait for it/.test(e.msg));
+      say(`${!asked ? "PASS" : "FAIL"} without asking the room to wait for it`);
       const end = during[during.length - 1];
       const apart = Math.abs(end.viewer.pos - end.host.pos);
       say(`${apart < 1 && !end.viewer.paused && !end.host.paused ? "PASS" : "FAIL"} and they play on together (${apart.toFixed(2)}s apart)`);
@@ -1860,7 +1919,7 @@ function Runner() {
     try {
       const r = await startOnce("p2p=0&stream=copy4", {}, 14_000);
       say(`started ${r.startS.toFixed(1)}s after play, host ${r.hostAheadS.toFixed(1)}s in hand, viewer ${r.viewerAheadS.toFixed(1)}s, ${r.apartMs} ms apart`);
-      say(`${Math.abs(r.apartMs) < 700 ? "PASS" : "FAIL"} both start together`);
+      say(`    the viewer started ${r.apartMs} ms after the host, the room waiting for nobody but it`);
       say(`${r.hostAheadS >= 6 ? "PASS" : "FAIL"} with more in hand than the three seconds it used to start on (${r.hostAheadS.toFixed(1)}s)`);
       const startedAt = Date.now();
       await pause(60_000);
@@ -1989,6 +2048,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runSlowViewer(5000)}>Slow viewer</button>
         <button disabled={running} onClick={() => void runSlowViewer(20000)}>Very slow viewer</button>
         <button disabled={running} onClick={() => void runViewerStall()}>Viewer stalls</button>
+        <button disabled={running} onClick={() => void runViewerFreeze()}>Viewer's picture freezes</button>
         <button disabled={running} onClick={() => void runSlowLink()}>Slow connection</button>
         <button disabled={running} onClick={() => void runStartup()}>Start-up</button>
         <button disabled={running} onClick={() => void runHostCrawls()}>Host's downloads crawl</button>

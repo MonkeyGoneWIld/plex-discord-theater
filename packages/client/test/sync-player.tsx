@@ -186,6 +186,39 @@ const buttonFor = (label: string) => {
   const text = (b: Element) => b.textContent?.trim() ?? "";
   return all.find((b) => b.title === label || text(b) === label) ?? all.find((b) => text(b).startsWith(label));
 };
+// A picture that stops with the buffer in front of it, as a decoder can: on
+// 16 October one viewer's stuck three seconds into every episode, with ten
+// seconds in hand. The element goes on saying it plays, short of picture, and
+// goes on again once something seeks it — what got that one going.
+window.addEventListener("message", (e: MessageEvent) => {
+  if ((e.data as { kind?: string })?.kind !== "freeze") return;
+  const v = document.querySelector("video");
+  if (!v) return;
+  const proto = HTMLMediaElement.prototype;
+  const rate = Object.getOwnPropertyDescriptor(proto, "playbackRate")!;
+  const time = Object.getOwnPropertyDescriptor(proto, "currentTime")!;
+  const ready = Object.getOwnPropertyDescriptor(proto, "readyState")!;
+  let wanted = rate.get!.call(v) as number;
+  const own = v as unknown as Record<string, unknown>;
+  const thaw = () => {
+    delete own.readyState;
+    delete own.playbackRate;
+    delete own.currentTime;
+    rate.set!.call(v, wanted);
+    events.push({ t: Date.now(), tag: "Fixture", msg: "picture going again", data: { posS: v.currentTime } });
+  };
+  rate.set!.call(v, 0);
+  Object.defineProperty(v, "readyState", { configurable: true, get: () => Math.min(2, ready.get!.call(v) as number) });
+  Object.defineProperty(v, "playbackRate", { configurable: true, get: () => wanted, set: (x: number) => { wanted = x; } });
+  Object.defineProperty(v, "currentTime", {
+    configurable: true,
+    get: () => time.get!.call(v),
+    set: (t: number) => { thaw(); time.set!.call(v, t); },
+  });
+  events.push({ t: Date.now(), tag: "Fixture", msg: "picture frozen", data: { posS: v.currentTime } });
+  v.dispatchEvent(new Event("waiting"));
+});
+
 window.addEventListener("message", async (e: MessageEvent) => {
   const m = e.data as { kind?: string; press?: string[] };
   if (m?.kind !== "press" || !m.press) return;

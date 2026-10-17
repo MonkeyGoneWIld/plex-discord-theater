@@ -147,8 +147,8 @@ export interface SyncState {
   seekByHost: boolean;
   /**
    * Whether the host made it somewhere it already had the picture for, which
-   * the room goes straight on from instead of waiting for everybody's picture
-   * there. A player that hasn't got it says so (sendSeekLoading).
+   * the room goes straight on from instead of waiting for the host's picture
+   * there.
    */
   seekReady: boolean;
   /** Timestamp of the last host command — used to detect stale state on reconnect */
@@ -165,15 +165,16 @@ export interface SyncState {
   positionAt: number;
   /**
    * The room is waiting: its clock stands still and everybody — the host
-   * included — holds where they are, because somebody's picture isn't ready.
-   * The host's, whose stream has just started or has stalled; or anybody's at
-   * a moment the room starts again together, a seek or a resume or a new
-   * stream, until they say it is (sendReady) or the server stops waiting for
-   * them. The server decides, and says so with "room-waiting".
+   * included — holds where they are, because the host's picture isn't ready:
+   * its stream has just started, it has a seek or a resume to load, or it has
+   * stalled. The server decides, and says so with "room-waiting".
    *
-   * Viewers used to start a film before the host whenever their segments
-   * arrived first, then — held for the host alone — up to twenty seconds
-   * after it whenever their own were slower, and skip what they had missed.
+   * Never for anybody else's. Viewers used to start a film before the host
+   * whenever their segments arrived first; then the room waited for every
+   * viewer's picture at each start, skip and resume, and for a viewer's that
+   * stopped mid-film — one viewer's stuck picture held everybody. Now a viewer
+   * whose picture isn't there when the room runs catches up with it (Player's
+   * catchUpWithRoom).
    */
   hostWaiting: boolean;
   /**
@@ -184,9 +185,9 @@ export interface SyncState {
    */
   hostSwitching: Switching | null;
   /**
-   * The moment the room is gathering everybody for, from the server. A
-   * viewer's "ready" names it, so a late answer to an earlier one can't start
-   * the room.
+   * Names the latest moment the room waits for the host's picture, from the
+   * server — when a viewer is placed for the room's start (Player's
+   * placeForRoomStart).
    */
   gatherSeq: number;
   /**
@@ -334,21 +335,12 @@ export interface SyncActions {
    *  then does a seek get an answer. `ready`: the host has the picture there
    *  already — see SyncState.seekReady. */
   sendSeek: (position: number, hold?: boolean, ready?: boolean) => void;
-  /** This player hasn't got the picture a ready seek went to: the room waits
-   *  for it there after all — see SyncState.seekReady. */
-  sendSeekLoading: () => void;
-  /** Not the host: this player's picture has stopped for want of data, and
-   *  the room waits for it to be ready again — see SyncState.gatherSeq. */
-  sendStalled: () => void;
   /** Whether this player is short of picture, for the others to ease off the
    *  bot meanwhile — see SyncState.othersLoading. Said again on reconnecting. */
   sendLoading: (short: boolean) => void;
   sendStop: () => void;
   /** `waiting`: the host's picture isn't ready — SyncState.hostWaiting. */
   sendHeartbeat: (position: number, playing: boolean, waiting?: boolean) => void;
-  /** This player's picture is ready for the room to start again — see
-   *  SyncState.gatherSeq. */
-  sendReady: (gather: number, ratingKey?: string) => void;
   acknowledgeTransport: (revision: number) => void;
   sendBrowse: (context: string) => void;
   sendQueueAdd: (item: QueueItem) => void;
@@ -647,12 +639,6 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           return { ...prev, position, playing, positionAt: stalled || prev.hostWaiting ? 0 : now };
         });
       },
-      // With the title it is a picture of: the room's word that it waits for a
-      // new title comes before the title itself, and a picture of the last
-      // one counts for nothing (services/sync.ts, "ready").
-      sendReady: (gather: number, ratingKey?: string) => send({ type: "ready", gather, ...(ratingKey ? { ratingKey } : {}) }),
-      sendSeekLoading: () => send({ type: "seek-loading" }),
-      sendStalled: () => send({ type: "stalled" }),
       sendLoading: (short: boolean) => {
         loadingRef.current = short;
         send({ type: "loading", value: short });
@@ -718,12 +704,6 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             username: usernameRef.current,
             // Whether this player may be sent HEVC — see mayStartHevc.
             hevc: canPlayHevcTranscode(),
-            // This player says when its picture is ready, so the room can
-            // wait for it — see SyncState.hostWaiting — and whether anybody
-            // is looking at it, since the room doesn't wait for a player
-            // nobody is watching.
-            gather: true,
-            visible: !document.hidden,
           }),
         );
         if (loadingRef.current) ws.send(JSON.stringify({ type: "loading", value: true }));
@@ -1132,14 +1112,8 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
 
     connect();
 
-    // Discord minimised, or another app in front: say so — see "visible" on
-    // the server.
-    const onVisibility = () => send({ type: "visible", value: !document.hidden });
-    document.addEventListener("visibilitychange", onVisibility);
-
     return () => {
       active = false;
-      document.removeEventListener("visibilitychange", onVisibility);
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;

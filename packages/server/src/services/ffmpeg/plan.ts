@@ -38,6 +38,8 @@ export interface SourceVersion {
   partKey: string | null;
   /** The file as Plex sees it. */
   file: string | null;
+  /** The title's length, seconds, when Plex knows it. */
+  durationS?: number | null;
   streams: SourceStream[];
 }
 
@@ -139,11 +141,19 @@ export function inputArgs(source: { local: string } | { url: string; token: stri
  * is laid out in. A copy is cut at the first keyframe past every
  * `segmentSeconds`; a seek starts at the keyframe before `offsetS`, and the
  * audio there.
+ *
+ * The cuts are listed (-segment_times) rather than left to -segment_time.
+ * The segment muxer counts its times from the first packet, and Jellyfin's
+ * build adds that start a second time to -segment_time, so after a seek to
+ * 300 s its first cut came near 600 s: one 300 s segment the player waited
+ * half a minute for, and none at all in time for a seek near the end. Listed
+ * times are counted from the first packet once, by every build.
  */
 export function copyArgs(
   plan: Extract<CopyPlan, { ok: true }>,
   input: string[],
   offsetS: number,
+  durationS: number | null = null,
   segmentSeconds = 4,
 ): string[] {
   const audio = !plan.audio
@@ -151,6 +161,10 @@ export function copyArgs(
     : plan.audioCopy
       ? ["-c:a", "copy"]
       : ["-c:a", "aac", "-ac", "2", "-b:a", `${AUDIO_KBPS}k`, "-af", "aresample=async=1"];
+  // Past the last listed cut the segment runs to the end of the file, so the
+  // list covers what's left with room to spare; 6 h when Plex has no length.
+  const leftS = Math.max(0, (durationS && durationS > 0 ? durationS : 6 * 3600) - offsetS) + 120;
+  const cuts = Array.from({ length: Math.ceil(leftS / segmentSeconds) }, (_, i) => (i + 1) * segmentSeconds);
   return [
     "-hide_banner", "-nostdin", "-loglevel", "error",
     ...(offsetS > 0 ? ["-ss", String(offsetS)] : []),
@@ -163,7 +177,7 @@ export function copyArgs(
     "-f", "segment",
     "-segment_format", "mpegts",
     "-segment_format_options", "mpegts_copyts=1",
-    "-segment_time", String(segmentSeconds),
+    "-segment_times", cuts.join(","),
     "-reset_timestamps", "0",
     "-segment_list", "pipe:1",
     "-segment_list_type", "csv",

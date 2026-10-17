@@ -284,6 +284,8 @@ console.log("\n— a seek past what is there —");
   const bytes = Buffer.from(await (await fetch(origin + first.uri)).arrayBuffer());
   const span = videoSpan(bytes)!;
   check("whose picture opens on the keyframe at 30 s", Math.abs(span.start - 30) < 0.1, true);
+  // Jellyfin's ffmpeg counted the start twice with -segment_time: 30 s to 64 s here.
+  check("and is a segment long, not the stretch since the start", span.end - span.start <= 6, true);
   const old = await fetch(`${origin}/api/plex/hls/seg?p=${encodeURIComponent(`/video/:/transcode/universal/session/${firstKey}/base/index.m3u8`)}`);
   check("the run it replaced is gone (410), not asked of Plex", [old.status, transcodeAsked()], [410, []]);
 }

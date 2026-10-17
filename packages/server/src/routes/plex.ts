@@ -4535,6 +4535,7 @@ async function ffmpegSource(ratingKey: string, mediaIndex: number): Promise<Sour
   const hit = ffmpegSources.get(key);
   if (hit && Date.now() - hit.at < FFMPEG_SOURCE_TTL_MS) return hit.source;
   const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(`/library/metadata/${ratingKey}`);
+  const durationMs = data.MediaContainer.Metadata?.[0]?.duration;
   const media = data.MediaContainer.Metadata?.[0]?.Media?.[mediaIndex] as (PlexMedia & { Part?: Array<PlexPart & { file?: string }> }) | undefined;
   const part = media?.Part?.[0];
   const source: SourceVersion | null = part
@@ -4544,6 +4545,7 @@ async function ffmpegSource(ratingKey: string, mediaIndex: number): Promise<Sour
         height: media?.height ?? null,
         partKey: part.key ?? null,
         file: part.file ?? null,
+        durationS: durationMs ? durationMs / 1000 : null,
         streams: (part.Stream ?? []) as SourceStream[],
       }
     : null;
@@ -4602,7 +4604,7 @@ async function startWithFfmpeg(o: {
     ratingKey: o.ratingKey,
     codec: plan.codec,
     offsetS: o.offsetS,
-    args: copyArgs(plan, input, o.offsetS),
+    args: copyArgs(plan, input, o.offsetS, source.durationS ?? null),
   });
   if (!started.ok) {
     logEvent("FFmpeg", "run didn't start; left to Plex", { session, ratingKey: o.ratingKey, why: started.why });

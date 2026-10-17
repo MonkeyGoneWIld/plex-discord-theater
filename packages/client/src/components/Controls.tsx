@@ -40,6 +40,11 @@ interface ControlsProps {
    * since a skip into it plays straight away.
    */
   downloadedAheadS?: () => number;
+  /**
+   * Whether another player in the room is short of picture (SyncState
+   * othersLoading): the preview passes after the first wait while it is.
+   */
+  othersShort?: () => boolean;
   /** Imperative handle — see ControlsHandle. */
   handleRef?: React.Ref<ControlsHandle>;
   /** Host-only affordances: queue, track switcher, people panel. */
@@ -460,6 +465,7 @@ function SeekIndicator({
 export function Controls({
   videoRef,
   downloadedAheadS,
+  othersShort,
   handleRef,
   isHost,
   canControl = isHost,
@@ -611,6 +617,8 @@ export function Controls({
   // Read by the listeners below, which are attached once.
   const downloadedAheadRef = useRef(downloadedAheadS);
   downloadedAheadRef.current = downloadedAheadS;
+  const othersShortRef = useRef(othersShort);
+  othersShortRef.current = othersShort;
 
   // Mirror the element's volume, whoever changed it. Without this the slider
   // and mute icon go stale when the keyboard shortcuts adjust volume, since
@@ -1230,6 +1238,23 @@ export function Controls({
         await new Promise((r) => setTimeout(r, PREVIEW_BUFFER_POLL_MS));
       }
     };
+    /**
+     * And, after the first pass, for no other player to be short of picture.
+     * Every player's downloads come out of the bot's one upload, and a pass is
+     * one request at full speed beside them: on 17 October a host easing off
+     * for a viewer that had run dry started a 7.5 MB pass the same second, and
+     * the viewer, at 5.5 Mbps meanwhile, jumped 18.6 s past the room.
+     */
+    const waitForOthers = async (pass: number) => {
+      let said = false;
+      while (!cancelled && othersShortRef.current?.()) {
+        if (!said) {
+          said = true;
+          logEvent("Preview", "pass held while another player is short of picture", { partId: previewPartId, pass });
+        }
+        await new Promise((r) => setTimeout(r, PREVIEW_BUFFER_POLL_MS));
+      }
+    };
 
     const read = async () => {
       transferStartedAt = performance.now();
@@ -1257,6 +1282,7 @@ export function Controls({
         // at all is what starts the competition with the video.
         if (headroom() < mark) Object.assign(status, { state: "waiting", waitingForBufferS: mark });
         await waitForHeadroom(mark);
+        if (pass > 0) await waitForOthers(pass);
         if (cancelled) return;
         Object.assign(status, { state: "downloading", waitingForBufferS: null });
         if (pass > 0) {

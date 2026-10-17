@@ -1940,6 +1940,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * `atS` is where it stopped and `roomAtS` where the room was at the time.
    */
   const roomWaitRef = useRef<{ atS: number; roomAtS: number; since: number } | null>(null);
+  /** The room paused while this player waited ahead of it, and the pause
+   *  command hasn't taken it back to the room yet. */
+  const pausedOnWaitRef = useRef(false);
   const [waitingForRoom, setWaitingForRoom] = useState(false);
   /**
    * Where a follower was when its stream was torn down, if that was ahead of
@@ -6282,7 +6285,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       syncState.ratingKey === itemRef.current.ratingKey
       ? video.currentTime - roomNow
       : 0;
-    const staysAhead = !amHost && !isNewSeek && waitsForRoom(aheadS);
+    // Except when the room pauses while this player waits ahead of it: the
+    // room can stay paused for minutes, so this player goes back to it and
+    // loads what it jumped over, rather than sit ahead waiting for a room
+    // that isn't moving (17 Oct: a viewer waited out the host's whole pause).
+    const pausedOnWait = !amHost && !syncState.playing && (!!roomWaitRef.current || pausedOnWaitRef.current);
+    pausedOnWaitRef.current = false;
+    const staysAhead = !amHost && !isNewSeek && !pausedOnWait && waitsForRoom(aheadS);
     if (isNewSeek) stopWaitingForRoom("the room was sent somewhere");
     else if (!syncState.playing) stopWaitingForRoom("the room paused");
     // The room is the host: while its picture isn't moving, nobody else's is.
@@ -6819,6 +6828,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         return;
       }
       if (!sync.playing) {
+        // The pause command takes this player back to the room.
+        if (!isHostRef.current) pausedOnWaitRef.current = true;
         stopWaitingForRoom("the room paused");
         return;
       }
@@ -7972,6 +7983,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       onLostPointerCapture={isPip ? endPipDrag : undefined}
       onDoubleClick={isPip && !pipPhone ? restoreFromPip : undefined}
       onDragStart={isPip ? (event) => event.preventDefault() : undefined}
+      // A click on the picture while the controls are hidden: the press lands
+      // on the video, brings the controls back, and the release lands on them,
+      // so the browser gives the click to what the two share — this — and
+      // neither the video's click-to-pause nor the controls' saw it. Only
+      // every other click on the picture paused (17 Oct).
+      onClick={isPip ? undefined : (event) => { if (event.target === event.currentTarget) togglePlayPause(); }}
     >
       {!isPip && (syncState?.authFailed ? (
         <div style={styles.error}>Session expired — please close and restart the activity</div>

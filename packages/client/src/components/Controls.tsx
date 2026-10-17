@@ -2316,8 +2316,9 @@ const styles: Record<string, React.CSSProperties> = {
     paddingRight: "calc(20px + var(--sair, 0px))",
     paddingBottom: "16px",
     paddingLeft: "calc(20px + var(--sail, 0px))",
-    // Controls may appear over the frame; the frame itself must not change.
-    background: "transparent",
+    // The bottom bar's scrim, mirrored: Back and the title stay readable over
+    // a bright picture, and only the strip they sit in is darkened.
+    background: "linear-gradient(to bottom, rgba(0,0,0,0.75) 0%, rgba(0,0,0,0.35) 60%, transparent 100%)",
   },
   backBtn: {
     ...QUIET_SURFACE,
@@ -2360,8 +2361,8 @@ const styles: Record<string, React.CSSProperties> = {
     paddingBottom: "calc(16px + var(--saib, 0px))",
     paddingLeft: "calc(20px + var(--sail, 0px))",
     // This lower scrim is intentional: it keeps the timeline, timestamps and
-    // small utility controls readable. Unlike the removed top/full overlays it
-    // is confined to the control area and does not wash the whole picture.
+    // small utility controls readable. Like the top bar's, it is confined to
+    // the control area and does not wash the whole picture.
     background: "linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%)",
   },
   progressHit: {

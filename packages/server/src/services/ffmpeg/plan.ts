@@ -123,6 +123,17 @@ export function planCopy(src: SourceVersion, req: { audioStreamId: number | null
 /** Bitrate of the AAC a converted track becomes, kbps. */
 export const AUDIO_KBPS = 256;
 
+/**
+ * How far ahead of the film's time a copy's clock runs, as Plex's does
+ * (direct-stream.ts PLEX_TS_OFFSET_S). hls.js takes a track that opens less
+ * than 1 s past its listed start for a 33-bit clock rollover and leaves it out
+ * of its start time: with the film's own clock, the copy's picture (listed
+ * where it opens) was set aside and its sound, a few seconds later after a
+ * seek, set the start, so the whole copy played that much early — 2 to 4 s
+ * ahead of a Plex re-encode at the same bar position on 17 October.
+ */
+export const COPY_CLOCK_OFFSET_S = 10;
+
 /** Where ffmpeg reads the file from: the mount, or Plex with the token in a header. */
 export function inputArgs(source: { local: string } | { url: string; token: string }): string[] {
   return "local" in source
@@ -136,9 +147,9 @@ export function inputArgs(source: { local: string } | { url: string; token: stri
  * ffmpeg's arguments for a copy from `offsetS`, into numbered MPEG-TS segments
  * in its working folder, each announced on stdout once it is complete.
  *
- * Timestamps stay the film's own (-copyts -start_at_zero, and the muxer's
- * mpegts_copyts so it doesn't add its own 1.4 s), which is what the playlist
- * is laid out in. A copy is cut at the first keyframe past every
+ * Timestamps are the film's own (-copyts -start_at_zero, and the muxer's
+ * mpegts_copyts so it doesn't add its own 1.4 s) plus COPY_CLOCK_OFFSET_S,
+ * which the engine takes off again to lay out the playlist. A copy is cut at the first keyframe past every
  * `segmentSeconds`; a seek starts at the keyframe before `offsetS`, and the
  * audio there.
  *
@@ -174,6 +185,7 @@ export function copyArgs(
     ...(plan.audio ? ["-map", `0:${plan.audio.index}`] : []),
     "-c:v", "copy",
     ...audio,
+    "-output_ts_offset", String(COPY_CLOCK_OFFSET_S),
     "-f", "segment",
     "-segment_format", "mpegts",
     "-segment_format_options", "mpegts_copyts=1",

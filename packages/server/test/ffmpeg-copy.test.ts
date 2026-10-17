@@ -223,7 +223,7 @@ let firstKey: string | null = null;
   check("a segment is served as MPEG-TS", [res.status, res.headers.get("content-type")], [200, "video/MP2T"]);
   check("all of it", bytes.length, Number(first.uri.match(/&n=(\d+)$/)![1]));
   const span = videoSpan(bytes)!;
-  check("its timestamps are the film's own: it opens at 0", span.start < 0.1, true);
+  check("its timestamps are the film's own plus Plex's 10 s: it opens at 10", Math.abs(span.start - 10) < 0.1, true);
   check("with sound in it", span.audioStart !== null, true);
   const ranged = await fetch(origin + first.uri, { headers: { Range: "bytes=100-199" } });
   check("a byte range of one is served too", [ranged.status, (await ranged.arrayBuffer()).byteLength], [206, 100]);
@@ -283,7 +283,7 @@ console.log("\n— a seek past what is there —");
   const first = entries(playlist)[0];
   const bytes = Buffer.from(await (await fetch(origin + first.uri)).arrayBuffer());
   const span = videoSpan(bytes)!;
-  check("whose picture opens on the keyframe at 30 s", Math.abs(span.start - 30) < 0.1, true);
+  check("whose picture opens on the keyframe at 30 s (40 on the copy's clock)", Math.abs(span.start - 40) < 0.1, true);
   // Jellyfin's ffmpeg counted the start twice with -segment_time: 30 s to 64 s here.
   check("and is a segment long, not the stretch since the start", span.end - span.start <= 6, true);
   const old = await fetch(`${origin}/api/plex/hls/seg?p=${encodeURIComponent(`/video/:/transcode/universal/session/${firstKey}/base/index.m3u8`)}`);

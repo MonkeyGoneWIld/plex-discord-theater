@@ -34,6 +34,7 @@ import { measuredPlaylist, round3, type MeasuredSegment } from "../measured-play
 import { logEvent } from "../logger.js";
 import { LruMap } from "../lru.js";
 import { ffmpegPath } from "./config.js";
+import { COPY_CLOCK_OFFSET_S } from "./plan.js";
 
 /** How far past the watcher a run gets before it is paused — as a Plex copy is
  *  measured (direct-stream.ts), past the player's own 150 s window. */
@@ -178,11 +179,13 @@ async function measure(run: Run, name: string): Promise<void> {
     return;
   }
   if (run.clockOffset === null) {
-    // The segments carry the film's own time (plan.ts). The first one opens on
-    // the keyframe at or before where the run was asked to start; if it doesn't
-    // fit that, it is taken to begin there instead, and said so.
-    const plausible = span.start <= run.offsetS + 1 && span.start >= run.offsetS - 30;
-    run.clockOffset = plausible ? 0 : span.start - run.offsetS;
+    // The segments carry the film's own time plus COPY_CLOCK_OFFSET_S (plan.ts).
+    // The first one opens on the keyframe at or before where the run was asked
+    // to start; if it doesn't fit that, it is taken to begin there instead, and
+    // said so.
+    const filmStart = span.start - COPY_CLOCK_OFFSET_S;
+    const plausible = filmStart <= run.offsetS + 1 && filmStart >= run.offsetS - 30;
+    run.clockOffset = plausible ? COPY_CLOCK_OFFSET_S : span.start - run.offsetS;
     logEvent("FFmpeg", "first segment", {
       session: short(run.sessionId), ratingKey: run.ratingKey, fromS: run.offsetS,
       startS: round3(span.start), clockOffsetS: round3(run.clockOffset), assumed: !plausible,

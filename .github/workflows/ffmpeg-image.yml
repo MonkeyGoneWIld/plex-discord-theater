@@ -42,7 +42,7 @@ jobs:
       - name: The app starts, as appuser
         run: |
           docker run -d --name pdt \
-            -e PLEX_URL=http://127.0.0.1:9 -e PLEX_TOKEN=x \
+            -e THUMB_CACHE_DIR=/data -e PLEX_URL=http://127.0.0.1:9 -e PLEX_TOKEN=x \
             -e DISCORD_CLIENT_ID=x -e DISCORD_CLIENT_SECRET=x \
             -e REDIRECT_URI=https://example.com -e ALLOWED_ORIGINS=https://example.com \
             pdt:check

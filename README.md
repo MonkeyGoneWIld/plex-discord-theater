@@ -1,8 +1,8 @@
 # Plex Discord Theater
 
-Current release: **v1.2.1**. Images are published as
+Current release: **v1.2.2**. Images are published as
 `ghcr.io/monkeygonewild/plex-discord-theater:latest` and
-`ghcr.io/monkeygonewild/plex-discord-theater:1.2.1`.
+`ghcr.io/monkeygonewild/plex-discord-theater:1.2.2`.
 
 For viewer-aware qBittorrent upload limits and Discord pause detection, see the
 [qBittorrent Manager integration guide](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/qBittorrent-Manager-API).

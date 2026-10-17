@@ -42,7 +42,7 @@ import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, next
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
-import { arrivingKbps, loadingTitle } from "../lib/loadingMessage";
+import { arrivingKbps, catchingUpTitle, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
 import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, inBrowserCache, installSegmentParts, keepLater, partsFor, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
@@ -3320,7 +3320,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       if (!v || !seekingInBuffer(v, seekingSince, (t) => pictureHeldAt(v, t))) {
         setNoPicture(!v || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA);
       }
-      setLoadingText(loadingTitle(pictureShownRef.current));
+      // Waiting ahead of a room that plays on: how long until it gets here.
+      const sync = syncStateRef.current;
+      const wait = roomWaitRef.current;
+      const leftS = wait && sync?.playing && sync.ratingKey && !sync.hostWaiting && !isHostRef.current
+        ? wait.atS - roomPositionNow(sync)
+        : null;
+      setLoadingText(leftS !== null && leftS > 0 ? catchingUpTitle(leftS) : loadingTitle(pictureShownRef.current));
     }, 250);
     return () => window.clearInterval(id);
   }, []);
@@ -8013,7 +8019,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       )}
 
       {/* Loading screen — whenever the picture should be moving and isn't, or
-          there is no picture yet. "Loading…" or "Buffering…", nothing more. */}
+          there is no picture yet. "Loading…" or "Buffering…", nothing more —
+          or, waiting ahead of the room, how long until it gets here. */}
       {loadingShown && (
         <div style={styles.bufferingOverlay} role="status" aria-live="polite" data-loading-screen="">
           <div style={styles.bufferingSpinner} />

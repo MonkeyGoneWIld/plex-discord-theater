@@ -162,6 +162,13 @@ const LAND_SPARE_S = 1;
  * seconds there and landed 3, 7 and 11 seconds past the room all the same,
  * by the speed of the bot, and waited that long for it with the picture in.
  * With no speed to go by, one that isn't cached is taken to come too late.
+ *
+ * With the sizes and a speed to go by, the search starts at the room itself,
+ * not at `targetS` — the guess (catchUpLeadS) for when there is no telling,
+ * which only ever moved the landing further. On 17 October a viewer whose
+ * first segment took 16 s was sent the guess's most, 20 s past the room, and
+ * sat out all 20; what it landed in needed 18 of them, and on a faster
+ * connection a few would have done.
  */
 export function landingBySize(
   targetS: number,
@@ -175,11 +182,15 @@ export function landingBySize(
   /** Seconds a segment takes to come in, fetched now; null when there is no telling. */
   const takesS = (s: { bytes: number | null; cached?: boolean }): number | null =>
     s.cached ? 0 : speed && s.bytes && s.bytes > 0 ? s.bytes / speed : null;
-  const first = segments.findIndex((s) => targetS >= s.start && targetS < s.start + s.duration);
+  const segmentAt = (t: number) => segments.findIndex((s) => t >= s.start && t < s.start + s.duration);
+  const nearS = roomS + LAND_SPARE_S;
+  const near = nearS < targetS ? segmentAt(nearS) : -1;
+  const startS = near >= 0 && takesS(segments[near]) !== null ? nearS : targetS;
+  const first = segmentAt(startS);
   if (first < 0 || takesS(segments[first]) === null) return targetS;
   for (let i = first; i < segments.length; i++) {
     const seg = segments[i];
-    const fromS = i === first ? targetS : seg.start + LAND_INTO_SEGMENT_S;
+    const fromS = i === first ? startS : seg.start + LAND_INTO_SEGMENT_S;
     if (fromS > limitS) break;
     const inS = takesS(seg);
     if (inS === null) break;

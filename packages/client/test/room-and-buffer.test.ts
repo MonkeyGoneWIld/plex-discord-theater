@@ -177,7 +177,15 @@ console.log("\n— and far enough past it for what it lands in to come first —
   const landS = landingBySize(2725.08, 2721.38, segs, bps, 2721.38 + 25);
   check(`26 MB at 26 Mbps would come after the room got there: it lands past it, at the start of the next (${at(landS - 2721.38)}s past the room)`,
     at(landS), at(2732.3 + LAND_INTO_SEGMENT_S));
-  check("a fast connection: where it was going", landingBySize(2725.08, 2721.38, segs, 100 * MB, Infinity), 2725.08);
+  check("a fast connection: just past the room, not as far as the guess",
+    at(landingBySize(2725.08, 2721.38, segs, 100 * MB, Infinity)), at(2721.38 + 26.21 / 80 + 1));
+  // The viewer on Avengers on 17 October: its first segment took 16 s at about
+  // 9 Mbps, the room was at 15.35, and the guess sent it 20 s past — 35.35.
+  const avengers = [{ start: 0.08, duration: 11.65, bytes: 18.03 * MB }, { start: 11.73, duration: 10.35, bytes: 22.15 * MB },
+    { start: 22.08, duration: 11.32, bytes: 16.84 * MB }, { start: 33.4, duration: 8.52, bytes: 10.51 * MB },
+    { start: 41.92, duration: 10.3, bytes: 9.64 * MB }, { start: 52.22, duration: 10, bytes: 5.45 * MB }];
+  check("by the sizes, the start of the first segment that can be in before the room gets to it, short of the guess",
+    at(landingBySize(15.35 + 20, 15.35, avengers, 9e6 / 8, 15.35 + 25)), at(33.4 + LAND_INTO_SEGMENT_S));
   // A heavy segment just after the one it would land in is needed when the
   // room gets to it, wherever before it the landing is: it lands beyond it.
   const heavy = [{ start: 100, duration: 4, bytes: 2 * MB }, { start: 104, duration: 4, bytes: 30 * MB }, { start: 108, duration: 30, bytes: 3 * MB }];

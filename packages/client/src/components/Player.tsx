@@ -231,9 +231,14 @@ const PICTURE_ENOUGH_S = 25;
  *  ever. Once it has had picture enough, it may say so again. */
 const SHORT_FOR_AT_MOST_MS = 60_000;
 /** In hand, from which a player eases off the bot for another that is short
- *  of picture, and under which it stops, whoever is short. */
-const EASE_OFF_FROM_S = 45;
-const EASE_OFF_UNTIL_S = 30;
+ *  of picture — as soon as it has picture enough itself — and under which it
+ *  stops, whoever is short, still clear of being short itself. It was 45 s:
+ *  on 17 October, two players starting streams of their own at once (a
+ *  quality change, a Firefox viewer's H.264) shared the upload until the
+ *  first had 45 s, and the other waited 26 s for its first picture, or ran
+ *  dry twice. */
+const EASE_OFF_FROM_S = PICTURE_ENOUGH_S;
+const EASE_OFF_UNTIL_S = 20;
 /** Picture enough in hand for a segment beside the one the picture needs next
  *  to download at full speed beside it — see partsAtOnce. */
 const TWO_AT_FULL_SPEED_FROM_S = 12;

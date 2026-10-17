@@ -47,10 +47,6 @@ The host controls the room timeline. Playback stays in sync for all viewers.
 Hosts can grant playback control to co-hosts or transfer the host role. Viewers
 can ask the host or a co-host to pause or resume.
 
-| ![The People panel, with Co-host and Make host beside a viewer](docs/screenshots/people.png) | ![A viewer's request to resume, as the host sees it](docs/screenshots/pause-request.png) |
-| :-- | :-- |
-| The host makes someone co-host or hands over the room. | A viewer's request, as the host sees it. |
-
 ### Plex browser
 
 The home screen renders the same hubs Plex generates, including Continue
@@ -77,31 +73,28 @@ connected.
 For TV shows, season pages show missing and unaired episodes with air dates, and
 available episodes can be played directly from the season view.
 
-![A season page, with its unaired episodes a click away](docs/screenshots/season.jpg)
-
 ### Per-viewer audio, subtitles and quality
 
 Each viewer selects their own audio track, subtitles and quality without
-affecting other participants. The host's audio and subtitles are where the room
-starts: when the host changes them, everyone still watching the host's tracks
-moves with them, and anyone who picked their own stays where they are. Track
-selections persist into the next episode
-when the same tracks are available. Subtitles are drawn by each player, styled
-the way Plex draws them; their size, position, colour, background and font can
-be changed, and subtitles that are out of sync can be adjusted in the player
-bar. A viewer on a slow connection can pick a lower quality and get a stream of
+affecting other participants. The host's tracks are where the room starts:
+when the host changes them, everyone still on the host's tracks moves with
+them, and anyone who picked their own stays where they are. Track selections
+persist into the next episode when the same tracks are available.
+
+A viewer on a slow connection can pick a lower quality and get a stream of
 their own, and a player that can't decode HEVC gets an H.264 stream of its own,
 so nobody else's picture is lowered for them.
 
-![Subtitles drawn by the player, with their timing and look being adjusted](docs/screenshots/subtitle-look.jpg)
+Subtitles are drawn by each player, styled the way Plex draws them. Their size,
+position, colour, background and font can be changed from the subtitle button
+in the player bar, which also moves subtitles that are out of sync earlier or
+later:
+
+![The subtitle panel open in the player, beside a subtitle drawn over the film](docs/screenshots/subtitle-look.jpg)
 
 **Settings** sets what every title starts with for you: subtitle and audio
 languages (subtitles can be shown only when the audio is in another language),
 default quality, volume, the subtitle look, and your watch history setting.
-
-| <img src="docs/screenshots/player-menu-quality.png" alt="The player's Quality menu" width="280"> | <img src="docs/screenshots/settings.png" alt="The Settings panel" width="280"> |
-| :-- | :-- |
-| **Quality** in the player changes only your stream. | **Settings** sets what every title starts with. |
 
 ### Playback features
 
@@ -127,11 +120,11 @@ default quality, volume, the subtitle look, and your watch history setting.
 - **Watched controls:** mark a title watched, or apply the change to a whole
   season or show. Works with or without a linked Plex account.
 
-![Picture-in-picture: the film keeps playing in a corner while you browse](docs/screenshots/pip.jpg)
+With picture-in-picture, the film keeps playing in a window of its own over
+the library. Here it sits over a title page; it can be dragged to any edge,
+resized, expanded back to the full player, or closed:
 
-| ![Stats for nerds on a copied stream](docs/screenshots/stats.png) | ![Stats for nerds on a re-encoded stream, with the reason](docs/screenshots/stats-reencoded.png) |
-| :-- | :-- |
-| A copied stream: the original picture. | A re-encode, and why: a picture subtitle burned in. |
+![Picture-in-picture: the film playing in a floating window over a title page](docs/screenshots/pip-title.jpg)
 
 > [!NOTE]
 > Skip buttons and seek previews require Plex to have generated the underlying
@@ -147,10 +140,6 @@ This can repeat the title on profile layouts that display both fields.
 It describes the shared room even while you browse locally; the count is room
 membership, not a claim that every participant's player is running.
 
-| ![The Watching card on a Discord profile](docs/screenshots/presence-profile.png) | ![The invitation card in a channel, with the title and time](docs/screenshots/presence-invite.png) |
-| :-- | :-- |
-| Your profile while the room plays. | The invitation in the channel, with the title and time. |
-
 When duration is known, playing sessions send start/end timestamps for Discord's
 native progress display. Discord controls each card's layout; the app cannot
 force a compact popover to use the full profile layout. Pause removes the
@@ -162,8 +151,6 @@ Open **People** in the browsing header or player and turn off **Show media
 details on Discord** for generic presence without the title, artwork, or progress.
 The choice is saved on this device and applies only to your own presence.
 Previously fetched artwork may remain in Discord's cache.
-
-![The Show media details on Discord setting in People](docs/screenshots/presence-toggle.png)
 
 Artwork uses the public HTTPS origin configured in `REDIRECT_URI`. That origin
 must be reachable by Discord's image proxy without an extra login:
@@ -190,8 +177,6 @@ skip ten seconds.
 | ![Browsing movies on a phone](docs/screenshots/phone-browse.jpg) | ![A movie detail page on a phone](docs/screenshots/phone-title.jpg) |
 | :-- | :-- |
 | Browse with three posters per row. | Open a title without desktop-sized clutter. |
-
-![The player on a phone, turned sideways](docs/screenshots/phone-player.jpg)
 
 ## Personal Plex sync
 
@@ -224,8 +209,6 @@ Linked users see a **Watchlist** tab for their Plex Universal Watchlist and can
 add or remove titles from detail pages. The **Watchlist** tab replaces the local
 **History** tab; progress remains available through **Continue Watching** and
 watched controls.
-
-![The Watchlist tab for a linked Plex account](docs/screenshots/watchlist.jpg)
 
 ### Authentication
 

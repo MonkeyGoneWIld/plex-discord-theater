@@ -5,6 +5,8 @@
  */
 
 import { plexFetchSegment } from "./plex.js";
+import { videoSpan } from "./ts-timestamps.js";
+import { logEvent } from "./logger.js";
 
 // Verbose per-poll logging, off in production unless DEBUG=1 (mirrors routes/plex.ts).
 const DEBUG = process.env.DEBUG === "1" || process.env.NODE_ENV !== "production";
@@ -44,6 +46,11 @@ interface PrefetchSession {
   /** When this session was started, so the oldest can be displaced when the
    *  concurrency cap is reached rather than refusing the newcomer. */
   startedAt: number;
+  /** Where Plex's playlist says each segment starts, film seconds — see
+   *  measureAgainstPlaylist. */
+  listedStartS: Map<string, number>;
+  /** The first segments' indexes, measured once each. */
+  measured: Set<number>;
 }
 
 // ─── Constants ──────────────────────────────────────────────────
@@ -126,6 +133,69 @@ function parseSegmentPaths(m3u8Text: string, baseDir: string): string[] {
     }
   }
   return segments;
+}
+
+/**
+ * Where the playlist puts each segment, by adding up its EXTINFs from the first
+ * listed — which is how hls.js lays a playlist out.
+ */
+function parseListedStarts(m3u8Text: string, baseDir: string): Map<string, number> {
+  const starts = new Map<string, number>();
+  let atS = 0;
+  let durationS = 0;
+  for (const line of m3u8Text.split("\n")) {
+    const trimmed = line.trim();
+    const inf = trimmed.match(/^#EXTINF:([\d.]+)/);
+    if (inf) {
+      durationS = parseFloat(inf[1]);
+      continue;
+    }
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    starts.set(trimmed.startsWith("/") ? trimmed : `${baseDir}${trimmed}`, atS);
+    atS += durationS;
+  }
+  return starts;
+}
+
+/** How far Plex's MPEG-TS clock runs ahead of the film — as direct-stream.ts measured for copies. */
+const PLEX_TS_OFFSET_S = 10;
+/** How many of a session's first segments are measured against its playlist. */
+const MEASURE_FIRST = 3;
+
+/**
+ * Where one of a re-encode's first segments really starts, against where Plex's
+ * playlist puts it. hls.js pins the first segment it loads to the playlist and
+ * places everything after by timestamp, so a first segment that starts
+ * somewhere else shifts the whole stream: on 17 October a Firefox viewer's
+ * re-encode, after a skip, looked two seconds behind a copy at the same
+ * position on the bar. Copies are laid out by what they hold (direct-stream.ts);
+ * re-encodes go by Plex's playlist, and this is the measurement of whether
+ * that playlist can be trusted.
+ */
+function measureAgainstPlaylist(session: PrefetchSession, segPath: string, idx: number, data: Buffer): void {
+  if (idx < session.startIndex || idx >= session.startIndex + MEASURE_FIRST || session.measured.has(idx)) return;
+  session.measured.add(idx);
+  const span = videoSpan(data);
+  const listedS = session.listedStartS.get(segPath);
+  const r = (n: number) => Math.round(n * 1000) / 1000;
+  if (!span) {
+    logEvent("HLS", "a re-encoded segment had no video timestamps", { session: session.sessionId.substring(0, 8), index: idx, bytes: data.length });
+    return;
+  }
+  const videoS = span.start - PLEX_TS_OFFSET_S;
+  const audioS = span.audioStart === null ? null : span.audioStart - PLEX_TS_OFFSET_S;
+  const firstS = audioS === null ? videoS : Math.min(videoS, audioS);
+  logEvent("HLS", "a re-encoded segment against its playlist", {
+    session: session.sessionId.substring(0, 8),
+    index: idx,
+    listedS: listedS === undefined ? "?" : r(listedS),
+    videoS: r(videoS),
+    audioS: audioS === null ? "none" : r(audioS),
+    endS: r(span.end - PLEX_TS_OFFSET_S),
+    // What hls.js would be off by, pinning this segment first: positive, the
+    // picture comes later than the bar says; negative, earlier.
+    offS: listedS === undefined ? "?" : r(firstS - listedS),
+  });
 }
 
 /** Numeric segment index from a path like ".../00976.ts" (0 if unparseable). */
@@ -232,6 +302,7 @@ async function fetchWorker(session: PrefetchSession): Promise<void> {
         // This segment exists, so the head is at least here — slide the window.
         const idx = segmentIndex(segPath);
         if (idx > session.maxFetchedIndex) session.maxFetchedIndex = idx;
+        measureAgainstPlaylist(session, segPath, idx, data);
 
         evictIfNeeded(session);
       } catch {
@@ -281,6 +352,7 @@ async function pollSubManifest(session: PrefetchSession): Promise<void> {
 
     const m3u8 = await res.text();
     const segments = parseSegmentPaths(m3u8, baseDir);
+    if (session.measured.size < MEASURE_FIRST) session.listedStartS = parseListedStarts(m3u8, baseDir);
 
     // Queue only segments within [startIndex, playhead + LEAD], in order. Below
     // startIndex: seeked past. Above the ceiling: not needed yet — they get
@@ -383,6 +455,8 @@ export function startPrefetch(sessionId: string, plexKey: string, startIndex = 0
     idlePolls: 0,
     cachedBytes: 0,
     startedAt: Date.now(),
+    listedStartS: new Map(),
+    measured: new Set(),
   };
 
   sessions.set(sessionId, session);

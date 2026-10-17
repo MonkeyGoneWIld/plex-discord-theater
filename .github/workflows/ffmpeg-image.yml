@@ -39,9 +39,12 @@ jobs:
             node scripts/diagnose-ffmpeg.mjs --help >/dev/null
             node scripts/library-survey.mjs --help >/dev/null
           '
-      - name: The app starts, as appuser
+      - name: The app starts, as appuser, with a library mounted inside /data
         run: |
+          mkdir -p "$RUNNER_TEMP/media/movies" "$RUNNER_TEMP/data"
+          echo film > "$RUNNER_TEMP/media/movies/film.mkv"
           docker run -d --name pdt \
+            -v "$RUNNER_TEMP/data:/data" -v "$RUNNER_TEMP/media:/data/media" \
             -e THUMB_CACHE_DIR=/data -e PLEX_URL=http://127.0.0.1:9 -e PLEX_TOKEN=x \
             -e DISCORD_CLIENT_ID=x -e DISCORD_CLIENT_SECRET=x \
             -e REDIRECT_URI=https://example.com -e ALLOWED_ORIGINS=https://example.com \
@@ -62,4 +65,9 @@ jobs:
             console.log("app process not found");
             process.exit(2);
           '
+          # The library — writable here, and on the same disk as /data, so only
+          # the entrypoint's pruning can have spared it — was left alone, and
+          # the app's data is the app's.
+          test "$(stat -c %u "$RUNNER_TEMP/media/movies/film.mkv")" = "$(id -u)"
+          docker exec pdt sh -c 'test "$(stat -c %U /data/logs)" = appuser && test -r /data/media/movies/film.mkv'
           docker exec pdt node scripts/diagnose-ffmpeg.mjs gpu --out /tmp/diagnose || true

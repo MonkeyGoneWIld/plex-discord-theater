@@ -2,15 +2,27 @@
 # Runs as root once per container start, then hands over to the app user.
 set -eu
 
-# What the app writes is its own: only what isn't already, and never across
-# into another filesystem. A media library mounted under /data (read-only)
-# would otherwise be walked file by file on every start, and refuse each one.
-find /data -xdev \( ! -user appuser -o ! -group appgroup \) -exec chown -h appuser:appgroup {} + 2>/dev/null || true
+# Give the app user what it writes, under `dir`: only what isn't already its
+# own, and never anything mounted inside it. A media library mounted at
+# /data/media, read-only, would otherwise be walked file by file on every
+# start, and refuse each one. Mounts are left out by name as well as by
+# filesystem (-xdev), since a bind mount from the same disk shares one.
+own() {
+  dir=$1
+  set --
+  while read -r _ _ _ _ point _; do
+    case "$point" in
+      "$dir"/*) set -- "$@" -path "$point" -prune -o ;;
+    esac
+  done < /proc/self/mountinfo
+  find "$dir" -xdev "$@" \( ! -user appuser -o ! -group appgroup \) -exec chown -h appuser:appgroup {} + 2>/dev/null || true
+}
 
+own /data
 # The stream cache, when STREAM_CACHE_DIR is a mount of its own.
 if [ -n "${STREAM_CACHE_DIR:-}" ]; then
   mkdir -p "$STREAM_CACHE_DIR"
-  find "$STREAM_CACHE_DIR" -xdev \( ! -user appuser -o ! -group appgroup \) -exec chown -h appuser:appgroup {} + 2>/dev/null || true
+  own "$STREAM_CACHE_DIR"
 fi
 
 # A GPU mapped in (/dev/dri) belongs to whichever group owns it here, and that

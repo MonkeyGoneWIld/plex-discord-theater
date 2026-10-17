@@ -148,12 +148,28 @@ const SOFT_SYNC_MIN_BUFFER_S = 6;
  */
 const HOST_WAIT_AFTER_MS = 300;
 /**
- * How long a viewer's picture is stopped before it asks the room to wait for
- * it: a hiccup shorter than this it gets over on its own, a moment behind the
- * room, which it closes unseen (the soft sync below) — every one of them the
- * room's to wait for would have stopped everybody for it.
+ * How long a viewer's picture is stopped, with the room playing on, before it
+ * catches up with the room — see catchUpAfterStop. Stuck with the picture in
+ * front of it, a decoder that has lost its place, which waits for nothing; or
+ * with none, waiting on the network, when a stop of a moment — a segment that
+ * comes just in time — is over before then.
  */
-const VIEWER_STALL_AFTER_MS = 1_000;
+const STUCK_CATCH_UP_AFTER_MS = 500;
+const STARVED_CATCH_UP_AFTER_MS = 1_000;
+/**
+ * How long after catching up, its picture not moving since, a viewer the room
+ * has gone past again catches up again: the part it went to hasn't come — the
+ * network is out for longer than the lead it went ahead by. Nothing has been
+ * shown since, so this shows nothing twice; the picture comes back once, in
+ * step, whenever the network does.
+ */
+const CATCH_UP_AGAIN_MS = 3_000;
+/**
+ * How far behind the room a stream's first picture may come in and play on
+ * from where it is, the soft sync below closing the gap unseen. Further
+ * behind, it goes to where the room is first — see catchUpWithRoom.
+ */
+const LATE_START_S = 1;
 /** How long "Host is seeking…" shows, at least, for a skip that needs no loading. */
 const HOST_SEEKING_FLASH_MS = 1400;
 /**
@@ -198,22 +214,6 @@ const HOST_CATCH_UP_STEP_S = 0.75;
  * the host's word.
  */
 const HOST_CATCH_UP_MAX_MS = 60_000;
-/**
- * How long a player that has come into a room already playing — joined, back
- * from a pop-out, its stream rebuilt — is getting going, from its first frames:
- * a stop in that time holds nobody. It catches up on its own, as anybody
- * joining always has. On 13 October monkey26 joined, stopped two seconds in,
- * and the whole room — blah0391 with forty seconds in hand — waited nineteen
- * seconds for it.
- *
- * At least that long, and until it has had picture enough in hand
- * (PICTURE_ENOUGH_S) once — up to VIEWER_SETTLED_MAX_MS. On 14 October
- * monkey26, back from a pop-out into Pirates of the Caribbean, never had more
- * than five seconds in hand, stopped at 16 and 29 seconds, and at 33 asked the
- * room to wait: blah0391 held thirty seconds with a minute in hand.
- */
-const VIEWER_SETTLED_MS = 30_000;
-const VIEWER_SETTLED_MAX_MS = 120_000;
 /**
  * How much of what the browser's buffer holds after the place a skip goes to
  * it keeps, when the skip lands outside it — see freeRoomFor.
@@ -1970,9 +1970,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    *  playing behind the room without the room's place held — see steerHost. */
   const hostCatchUpActedAtRef = useRef(0);
   const hostCatchUpBehindSinceRef = useRef(0);
-  /** The gather this player last told the room it was ready for, and with
-   *  which title's picture — see reportViewerReady. */
-  const readySentForRef = useRef("");
   /** Frames shown and dropped at the last health sample — see there. */
   const frameCountRef = useRef<{ shown: number; dropped: number; at: number } | null>(null);
   /** Whether a seek sent from here holds this player until the room says it
@@ -2987,90 +2984,153 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   }, [reportHostPicture, enoughHeldAt, downloadedAheadS, readyToGo, noteReadiness, waitForRoom, stopWaitingForRoom, isRestartPending]);
 
   /**
-   * Everyone but the host: tell the room when this picture is ready to start
-   * again — once for each moment it gathers everybody for (SyncState.gatherSeq).
-   * A player well behind where the room waits goes there first: the room
-   * starts from there, and starting from further back would only mean
-   * skipping forward the moment it did.
+   * Everyone but the host, while the room waits for the host's picture: be
+   * where the room will start from. A player well behind it goes there first —
+   * the room starts from there, and starting from further back would only mean
+   * catching up the moment it did — and a stream this player hasn't shown
+   * anything of yet starts exactly where the room does, a little before as
+   * well as after: the host may start a copy on its keyframe, a few seconds
+   * before the point it was started from (see the start-gap check), and
+   * nothing of it has been seen here to be seen twice. Not for a player waiting
+   * ahead of the room on purpose, which has seen it — in the stream before
+   * this one.
    */
-  const reportViewerReady = useCallback(() => {
+  const placeForRoomStart = useCallback(() => {
     const v = videoRef.current;
     const sync = syncStateRef.current;
-    if (!v || !sync?.playing || !sync.hostWaiting || !sync.gatherSeq) return;
-    // Once a gather, for each title: the word that the room waits for a new
-    // title comes before the title, and an answer from the last one's
-    // picture counts for nothing (services/sync.ts) — this one's is said too.
-    const readyKey = `${sync.gatherSeq}:${itemRef.current.ratingKey}`;
-    if (readySentForRef.current === readyKey) return;
+    if (!v || !sync?.playing || !sync.hostWaiting) return;
     if (sync.ratingKey !== itemRef.current.ratingKey || !sessionIdRef.current) return;
-    // Not before the seek this gather is for has been acted on: the word
-    // that the room waits and the seek itself come together, and this ran
-    // first — a viewer told the room it was ready where it was, the room ran,
-    // and then it went back ten seconds and loaded with everybody playing.
+    // Not before the seek this wait is for has been acted on: the word that
+    // the room waits and the seek itself come together, and this ran first.
     if (sync.seekSeq !== appliedSeekSeqRef.current) return;
+    if (v.readyState < HTMLMediaElement.HAVE_METADATA || v.seeking || !(sync.position > 0)) return;
     const behindS = sync.position - v.currentTime;
-    // And a stream this player hasn't shown anything of yet starts exactly
-    // where the room does, a little before as well as after: the host may
-    // start a copy on its keyframe, a few seconds before the point it was
-    // started from (see the start-gap check), and nothing of it has been seen
-    // here to be seen twice. Not for a player waiting ahead of the room on
-    // purpose, which has seen it — in the stream before this one.
     const startsHere = !streamShownRef.current && !roomWaitRef.current &&
       behindS < -0.3 && behindS >= -MAX_START_BACK_S - 0.5;
-    if ((behindS > GATHER_BEHIND_TOLERANCE_S || startsHere) && sync.position > 0 &&
-        v.readyState >= HTMLMediaElement.HAVE_METADATA && !v.seeking) {
-      logEvent("Sync", "going to where the room starts from", {
-        fromS: Number(v.currentTime.toFixed(2)),
-        toS: Number(sync.position.toFixed(2)),
-      });
-      resetPlaybackRate(v);
-      v.currentTime = sync.position;
-      return;
-    }
-    const r = readyToGo(v);
-    noteReadiness(r);
-    if (!r?.ready) return;
-    readySentForRef.current = readyKey;
-    logEvent("Sync", "picture ready, telling the room", { gather: sync.gatherSeq, inHandS: Number(r.inHandS.toFixed(1)), ...snapshot(v) });
-    syncActionsRef.current?.sendReady(sync.gatherSeq, itemRef.current.ratingKey);
+    if (behindS <= GATHER_BEHIND_TOLERANCE_S && !startsHere) return;
+    logEvent("Sync", "going to where the room starts from", {
+      fromS: Number(v.currentTime.toFixed(2)),
+      toS: Number(sync.position.toFixed(2)),
+    });
+    resetPlaybackRate(v);
+    v.currentTime = sync.position;
   }, []);
 
   /**
-   * Everyone but the host: tell the room this picture has stopped for want of
-   * data. The room waits for it, everybody holding where they are, until it
-   * has enough in hand to go on, and they go on together (services/sync.ts,
-   * "stalled") — as for the host's. Left to play on, the room left it behind,
-   * and it was jumped forward to where the room had got to, past what it
-   * hadn't seen yet. Buffering is better than that. Once a stop.
+   * Where a follower behind the room goes to wait for it: a little past it — as
+   * far as the part it lands in needs to come in before the room gets there
+   * (lib/roomWait landingBySize) — or null when the stream hasn't been made
+   * that far yet. Landed on the room's own place, it played the half second
+   * it had and stopped: a viewer that joined May at 3:03 on 12 October was
+   * jumped nine seconds into a segment it hadn't got, stopped for six, and was
+   * jumped again — three stops in twenty seconds.
    */
-  const stallToldRef = useRef(false);
-  /** Whether this stream began by landing in a room already playing, and when
-   *  its picture first moved — see VIEWER_SETTLED_MS. */
-  const landedInPlayingRoomRef = useRef(false);
-  const pictureSinceRef = useRef(0);
-  /** Whether this stream has had picture enough in hand yet — see VIEWER_SETTLED_MS. */
-  const hadPictureEnoughRef = useRef(false);
-  const reportViewerStall = useCallback((starved: boolean, starvedMs: number) => {
+  const landPastRoom = useCallback((video: HTMLVideoElement, roomS: number): number | null => {
+    const leadS = catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs());
+    const end = video.seekable.length ? video.seekable.end(video.seekable.length - 1) : NaN;
+    if (!Number.isFinite(end) || roomS + leadS >= end - 1) return null;
+    const frags = hlsRef.current ? levelFragments(hlsRef.current) : null;
+    const limitS = Math.min(end - 1, roomS + MAX_WAIT_FOR_ROOM_S - 5);
+    const speed = comingInBytesPerS(meterReadingsRef.current, Date.now()) ?? networkBytesPerSRef.current;
+    return landingFor(landingBySize(roomS + leadS, roomS, sizedSegments(frags), speed, limitS), frags, limitS);
+  }, []);
+
+  /**
+   * Everyone but the host: one move forward, to where the room is now.
+   *
+   * The room waits for the host's picture alone (SyncState.hostWaiting), never
+   * for one viewer's: it plays on, and a viewer whose picture stopped, or whose
+   * stream came in after the room had started, catches up with it. It used to
+   * make everybody wait instead — on 16 October one viewer's picture stuck
+   * three seconds into every episode, with ten seconds in hand, and the whole
+   * room stopped for two seconds each time.
+   *
+   * Where the room is, if that is held here, at once — and a picture stuck with
+   * the buffer in front of it gets going again for the seek, so one in step
+   * with the room, or ahead of it, takes the least step that does that. Not
+   * held, a little past it, to wait there while that part comes (landPastRoom).
+   * Forward only, so nothing is shown twice, and once, so nothing stutters.
+   * Whether it moved.
+   */
+  const catchUpWithRoom = useCallback((why: string): boolean => {
+    const v = videoRef.current;
+    const sync = syncStateRef.current;
+    if (!v || isHostRef.current || !sync?.playing || sync.hostWaiting || !sync.connected) return false;
+    if (sync.ratingKey !== itemRef.current.ratingKey || !sessionIdRef.current || roomWaitRef.current) return false;
+    const roomS = roomPositionNow(sync);
+    const hereS = v.currentTime;
+    if (!(roomS > 0)) return false;
+    if (pictureHeldAt(v, roomS) || (roomS <= hereS && bufferAheadSeconds(v) >= 1)) {
+      const toS = Math.max(roomS, hereS + 0.001);
+      logEvent("Sync", "catching up with the room, where it is", {
+        why,
+        fromS: Number(hereS.toFixed(2)),
+        toS: Number(toS.toFixed(2)),
+        ...snapshot(v),
+      });
+      resetPlaybackRate(v);
+      v.currentTime = toS;
+      return true;
+    }
+    if (roomS <= hereS) return false;
+    const landS = landPastRoom(v, roomS);
+    if (landS !== null) {
+      logEvent("Sync", "catching up with the room, going past it to wait there", {
+        why,
+        fromS: Number(hereS.toFixed(2)),
+        roomS: Number(roomS.toFixed(2)),
+        toS: Number(landS.toFixed(2)),
+        ...snapshot(v),
+      });
+      resetPlaybackRate(v);
+      v.currentTime = landS;
+      waitForRoom(v, roomS, "caught up past the room");
+      return true;
+    }
+    // The room is at the edge of what has been made of this stream: there,
+    // and the picture comes as it is made. A stream this player drives is
+    // restarted there, since nothing past its edge exists to seek into.
+    logEvent("Sync", "catching up with the room, at the edge of the stream", {
+      why,
+      fromS: Number(hereS.toFixed(2)),
+      toS: Number(roomS.toFixed(2)),
+      ...snapshot(v),
+    });
+    resetPlaybackRate(v);
+    if (ownsSessionRef.current) handleHostSeekRef.current(roomS, false);
+    else v.currentTime = roomS;
+    return true;
+  }, [pictureHeldAt, landPastRoom, waitForRoom]);
+
+  /**
+   * Everyone but the host: a picture that stops while the room plays on
+   * catches up with it (catchUpWithRoom) — stuck with the picture in front of
+   * it after STUCK_CATCH_UP_AFTER_MS, waiting on the network after
+   * STARVED_CATCH_UP_AFTER_MS. Once a stop, unless the room goes past where it
+   * went before the picture there comes (CATCH_UP_AGAIN_MS). Not before its
+   * stream has shown anything, which is its start (see onPlaying), nor while a
+   * seek of anybody else's is on its way.
+   */
+  const caughtUpAtRef = useRef(0);
+  const catchUpAfterStop = useCallback((starved: boolean, starvedMs: number) => {
     const v = videoRef.current;
     if (!v) return;
-    if (!starved) {
-      if (pictureMoving(v)) stallToldRef.current = false;
+    if (pictureMoving(v)) {
+      caughtUpAtRef.current = 0;
       return;
     }
-    const sync = syncStateRef.current;
-    if (stallToldRef.current || starvedMs < VIEWER_STALL_AFTER_MS || v.seeking) return;
-    if (!sync?.playing || sync.hostWaiting || !sync.connected || sync.ratingKey !== itemRef.current.ratingKey) return;
-    // Its first frames, or a wait ahead of the room on purpose, are no stop.
-    if (!sessionIdRef.current || !streamShownRef.current || roomWaitRef.current) return;
-    // Nor is one while it is still getting going in a room it came into
-    // playing: see VIEWER_SETTLED_MS.
-    const sincePictureMs = Date.now() - pictureSinceRef.current;
-    if (landedInPlayingRoomRef.current && (sincePictureMs < VIEWER_SETTLED_MS ||
-        (!hadPictureEnoughRef.current && sincePictureMs < VIEWER_SETTLED_MAX_MS))) return;
-    stallToldRef.current = true;
-    logEvent("Sync", "picture stopped, asking the room to wait for it", snapshot(v));
-    syncActionsRef.current?.sendStalled();
-  }, []);
+    if (!starved || !streamShownRef.current) return;
+    if (caughtUpAtRef.current) {
+      const sync = syncStateRef.current;
+      if (!sync || Date.now() - caughtUpAtRef.current < CATCH_UP_AGAIN_MS ||
+          roomPositionNow(sync) - v.currentTime <= LATE_START_S) return;
+    } else if (v.seeking) return;
+    const stuck = bufferAheadSeconds(v) >= 1;
+    if (starvedMs < (stuck ? STUCK_CATCH_UP_AFTER_MS : STARVED_CATCH_UP_AFTER_MS)) return;
+    const why = caughtUpAtRef.current ? "the room went past where it caught up to before its picture came"
+      : stuck ? "its picture stuck with the buffer ahead" : "its picture stopped for want of data";
+    if (catchUpWithRoom(why)) caughtUpAtRef.current = Date.now();
+  }, [catchUpWithRoom]);
 
   /**
    * The loading screen whenever the picture should be moving and isn't.
@@ -3082,8 +3142,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * without the data to go on, for more than a moment. And while it holds for
    * the room, which from the chair is the same thing.
    *
-   * Holding is also where the room is told about this picture — steerHost for
-   * the host, reportViewerReady for everybody else.
+   * Holding is also where the room is told about the host's picture
+   * (steerHost), and where everybody else is placed for the room's start
+   * (placeForRoomStart) or catches up with a room gone on (catchUpAfterStop).
    */
   const [roomHolding, setRoomHolding] = useState(false);
   useEffect(() => {
@@ -3161,12 +3222,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
       if (isHostRef.current) steerHost(starved, starvedMs);
       else {
-        reportViewerStall(starved, starvedMs);
-        reportViewerReady();
+        catchUpAfterStop(starved, starvedMs);
+        placeForRoomStart();
       }
     }, 250);
     return () => window.clearInterval(id);
-  }, [steerHost, reportViewerReady, reportViewerStall, downloadMeter]);
+  }, [steerHost, placeForRoomStart, catchUpAfterStop, downloadMeter]);
 
   /**
    * Short of picture, or with plenty to spare while somebody else is: told to
@@ -3188,7 +3249,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         ? v.duration - v.currentTime
         : Infinity;
       let short = shortToldRef.current;
-      if (streaming && inHandS >= Math.min(PICTURE_ENOUGH_S, leftS - 1)) hadPictureEnoughRef.current = true;
       if (!streaming || inHandS >= Math.min(PICTURE_ENOUGH_S, leftS - 1)) {
         short = false;
         spent = false;
@@ -3234,8 +3294,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // the next tick of the poll above.
   useEffect(() => {
     if (isHostRef.current) steerHost(false, 0);
-    else reportViewerReady();
-  }, [syncState?.playing, syncState?.hostWaiting, syncState?.gatherSeq, isHost, steerHost, reportViewerReady]);
+    else placeForRoomStart();
+  }, [syncState?.playing, syncState?.hostWaiting, syncState?.gatherSeq, isHost, steerHost, placeForRoomStart]);
 
   /**
    * Whether there is a picture at all. No picture is reason enough for the
@@ -4534,8 +4594,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         copiedStreamRef.current = false;
         playlistEdgeRef.current = null;
         streamShownRef.current = false;
-        landedInPlayingRoomRef.current = false;
-        hadPictureEnoughRef.current = false;
         streamBuiltAtRef.current = Date.now();
         // What the server says about this stream — copied or re-encoded, and
         // why — for Stats for nerds and the buffering hint. A new stream also
@@ -4843,7 +4901,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 role: isHostRef.current ? "host" : "viewer",
               });
               video.currentTime = syncPos + leadS;
-              landedInPlayingRoomRef.current = true;
               // Whatever is left is startup between here and the first frame,
               // which nothing can predict. Measured and closed once when frames
               // actually arrive — unless it is waited out ahead of the room.
@@ -4997,7 +5054,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           // first segment, so that segment is enough to start on — if the next
           // will be in before it has played (lib/copyStart). The host decides;
           // its report moves the room there, and everybody else goes too (see
-          // reportViewerReady).
+          // placeForRoomStart).
           const range = bufferedRangeAt(video, video.currentTime);
           if (range) {
             startGapChecked = true;
@@ -5518,10 +5575,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             stalled.totalMs += performance.now() - stalled.since;
             stalled.since = 0;
           }
-          if (!streamShownRef.current) {
-            setStreamShownAt(streamBuiltAtRef.current);
-            pictureSinceRef.current = Date.now();
-          }
+          const firstPicture = !streamShownRef.current;
+          if (firstPicture) setStreamShownAt(streamBuiltAtRef.current);
           streamShownRef.current = true;
           coverStart();
           noteGoodPosition(video);
@@ -5562,6 +5617,17 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 resetPlaybackRate(video);
                 video.currentTime = reachable;
               }
+            }
+          } else if (firstPicture && !isHostRef.current) {
+            // A stream whose first picture came in after the room had started
+            // without it — the room waits for the host's picture alone — and
+            // further behind it than LATE_START_S: to where the room is, once,
+            // before anything else of it has been seen. Nearer, the soft sync
+            // closes the gap unseen.
+            const sync = syncStateRef.current;
+            if (sync?.playing && !sync.hostWaiting && sync.ratingKey === itemRef.current.ratingKey &&
+                roomPositionNow(sync) - video.currentTime > LATE_START_S) {
+              catchUpWithRoom("its first picture came in after the room had started");
             }
           }
           // Frames are moving again, so the element's own clock is the truth
@@ -6297,18 +6363,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         }
       }
     }
-
-    // A skip the host already had the picture for, which the room goes
-    // straight on from: somewhere this player hasn't got, it says so, and the
-    // room waits for it there after all — see SyncState.seekReady.
-    if (isNewSeek && syncState.seekReady && !amHost && syncState.playing && roomNow > 0 &&
-        video.readyState >= HTMLMediaElement.HAVE_METADATA && !enoughHeldAt(video, roomNow)) {
-      logEvent("Sync", "the skip is somewhere this player hasn't got, asking the room to wait for it", {
-        toS: Number(roomNow.toFixed(2)),
-        ...snapshot(video),
-      });
-      syncActionsRef.current?.sendSeekLoading();
-    }
   }, [syncState?.commandSeq]);
 
   /**
@@ -6697,23 +6751,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
      * took to come in — it waits there while that part comes, and the room
      * arrives to it playing.
      */
-    const leadS = catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs());
-    const end = video.seekable.length ? video.seekable.end(video.seekable.length - 1) : NaN;
-    if (video.currentTime < target && !pictureHeldAt(video, target) && Number.isFinite(end) && target + leadS < end - 1 &&
-        syncState.ratingKey === itemRef.current.ratingKey) {
+    const landS = video.currentTime < target && !pictureHeldAt(video, target) &&
+      syncState.ratingKey === itemRef.current.ratingKey ? landPastRoom(video, target) : null;
+    if (landS !== null) {
       lastDriftCorrectionRef.current = Date.now();
       stalledSeekSinceRef.current = null;
-      const frags = hlsRef.current ? levelFragments(hlsRef.current) : null;
-      const limitS = Math.min(end - 1, target + MAX_WAIT_FOR_ROOM_S - 5);
-      // Far enough for what it lands in to come first — lib/roomWait landingBySize.
-      const speed = comingInBytesPerS(meterReadingsRef.current, Date.now()) ?? networkBytesPerSRef.current;
-      const landS = landingFor(landingBySize(target + leadS, target, sizedSegments(frags), speed, limitS), frags, limitS);
       logWarn("Viewer", "behind the room, going past it to wait there", {
         driftS: drift,
         fromS: video.currentTime,
         roomS: target,
         toS: landS,
-        leadS,
         ...snapshot(video),
       });
       video.currentTime = landS;

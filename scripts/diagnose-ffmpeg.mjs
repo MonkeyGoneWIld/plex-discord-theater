@@ -869,10 +869,25 @@ async function file() {
     out(`${tick(vppFrame.code === 0)} frame-intel-vpp.png${vppFrame.code === 0 ? "" : `  ${whyFailed(vppFrame.stderr, 2).join(" / ")}`}`);
     out("Compare them with the same moment paused in Discord on a Plex-mode H.264 stream (Firefox), which Plex tone-maps.");
   } else {
-    await encode("HEVC Main10 re-encode (GPU)", [...hwInit(), ...hwDecode, ...window, ...input, "-map", "0:v:0",
-      "-vf", toQsv("p010"), ...hevc, ...TAGS_SDR, "-an"], "hevc-main10.mp4");
-    await encode("H.264 re-encode (GPU)", [...hwInit(), ...hwDecode, ...window, ...input, "-map", "0:v:0",
-      "-vf", toQsv("nv12"), ...h264, "-an"], "h264.mp4");
+    // Interlaced (DVD, broadcast MPEG-2): deinterlaced first, as Plex does.
+    const interlaced = !!s?.field_order && !["progressive", "unknown"].includes(s.field_order);
+    if (interlaced) out(`interlaced (${s.field_order}): deinterlacing in every re-encode`);
+    const gpuChain = (fmt) => `${interlaced ? "deinterlace_vaapi=rate=frame," : ""}${toQsv(fmt)}`;
+    const cpuChain = (fmt) =>
+      `${interlaced ? "bwdif=mode=send_frame," : ""}scale=${W}:${H},format=${fmt},hwupload=extra_hw_frames=64,format=qsv`;
+    for (const [label, fmt, enc, outFile] of [
+      ["HEVC Main10 re-encode", "p010", [...hevc, ...TAGS_SDR], "hevc-main10"],
+      ["H.264 re-encode", "nv12", h264, "h264"],
+    ]) {
+      const gpu = await encode(`${label} (GPU decode)`, [...hwInit(), ...hwDecode, ...window, ...input, "-map", "0:v:0",
+        "-vf", gpuChain(fmt), ...enc, "-an"], `${outFile}.mp4`);
+      // A codec the GPU can't decode (10-bit H.264, MPEG-4, …) is decoded by
+      // the CPU and still encoded on the GPU.
+      if (!gpu.ok) {
+        await encode(`${label} (CPU decode)`, [...hwInit(), ...window, ...input, "-map", "0:v:0",
+          "-vf", cpuChain(fmt === "p010" ? "p010le" : "nv12"), ...enc, "-an"], `${outFile}-cpu.mp4`);
+      }
+    }
   }
 
   const n = positive("concurrent", 3);

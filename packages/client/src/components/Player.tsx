@@ -1560,6 +1560,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     return enoughToStart(coveredAheadS(t, ranges), left);
   }, []);
   /** Seconds downloaded past the playhead — see lib/bufferAhead. */
+  /** Whether another player in the room is short of picture — see easingOffRef. */
+  const othersShort = useCallback((): boolean => !!syncStateRef.current?.othersLoading, []);
   const downloadedAheadS = useCallback((): number => {
     const video = videoRef.current;
     if (!video || video.readyState === HTMLMediaElement.HAVE_NOTHING) return 0;
@@ -8292,6 +8294,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       {!isPip && <Controls
         videoRef={videoRef}
         downloadedAheadS={downloadedAheadS}
+        othersShort={othersShort}
         handleRef={controlsRef}
         isHost={isHost}
         title={displayTitle}

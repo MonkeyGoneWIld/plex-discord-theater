@@ -43,6 +43,8 @@ const LEAD_S = Number(process.env.PDT_FFMPEG_LEAD_S) || 180;
 const RESUME_S = LEAD_S - Math.min(30, LEAD_S / 2);
 /** Seconds listed before the first playlist is handed out — see direct-stream.ts. */
 const READY_SPAN_S = 30;
+/** For a re-encode: three segments, so the encoder doesn't hold the start. */
+const READY_SPAN_ENCODE_S = 9;
 /** How long the first playlist waits for READY_SPAN_S: inside hls.js's 10 s. */
 const READY_TIMEOUT_MS = 6_000;
 /** How long a start waits for the first segment before leaving the stream to Plex. */
@@ -73,6 +75,8 @@ interface Run {
   sessionId: string;
   ratingKey: string;
   codec: string;
+  /** A re-encode, not a copy: holds one of FFMPEG_MAX_ENCODES. */
+  encode: boolean;
   dir: string;
   baseDir: string;
   /** Where the run was asked to start, film time. */
@@ -123,7 +127,7 @@ function ready(run: Run): boolean {
   if (run.ended || run.failed) return true;
   const list = published(run);
   const last = list[list.length - 1];
-  return !!last && last.end - Math.max(run.offsetS, list[0].start) >= READY_SPAN_S;
+  return !!last && last.end - Math.max(run.offsetS, list[0].start) >= (run.encode ? READY_SPAN_ENCODE_S : READY_SPAN_S);
 }
 
 /** Pause the run far enough ahead of the watcher; carry on once they near it. */
@@ -188,13 +192,13 @@ async function measure(run: Run, name: string): Promise<void> {
     run.clockOffset = plausible ? COPY_CLOCK_OFFSET_S : span.start - run.offsetS;
     logEvent("FFmpeg", "first segment", {
       session: short(run.sessionId), ratingKey: run.ratingKey, fromS: run.offsetS,
-      startS: round3(span.start), clockOffsetS: round3(run.clockOffset), assumed: !plausible,
+      encode: run.encode, startS: round3(span.start), clockOffsetS: round3(run.clockOffset), assumed: !plausible,
       audioLeadS: span.audioStart === null ? "none" : round3(span.start - span.audioStart),
       ms: Date.now() - run.startedAt,
     });
     // A plain I-frame where a copy opens: an open-GOP Blu-ray, which browsers
     // can't start from (keyframes.ts). Plex's engine handles those.
-    if (run.codec === "h264" && firstKeyframe(data) === "not-idr" && !run.handedOut) {
+    if (!run.encode && run.codec === "h264" && firstKeyframe(data) === "not-idr" && !run.handedOut) {
       fail(run, "its keyframes aren't IDR frames (open GOP)");
       return;
     }
@@ -246,6 +250,7 @@ export async function startFfmpegRun(o: {
   sessionId: string;
   ratingKey: string;
   codec: string;
+  encode?: boolean;
   offsetS: number;
   args: string[];
 }): Promise<{ ok: true; key: string } | { ok: false; why: string }> {
@@ -259,7 +264,7 @@ export async function startFfmpegRun(o: {
     return { ok: false, why: `couldn't make ${dir}: ${err instanceof Error ? err.message : String(err)}` };
   }
   const run: Run = {
-    key, sessionId: o.sessionId, ratingKey: o.ratingKey, codec: o.codec, dir,
+    key, sessionId: o.sessionId, ratingKey: o.ratingKey, codec: o.codec, encode: !!o.encode, dir,
     baseDir: `/video/:/transcode/universal/session/${key}/base/`,
     offsetS: o.offsetS, proc: null, paused: false, stopped: false,
     segments: [], byPath: new Map(), clockOffset: null, ended: false, failed: null,
@@ -321,6 +326,14 @@ export async function startFfmpegRun(o: {
     return { ok: false, why: `${why}${run.stderrTail.length ? ` (${run.stderrTail.slice(-2).join(" | ")})` : ""}` };
   }
   return { ok: true, key };
+}
+
+/** Re-encodes running — a paused one included, not one that has ended — but
+ *  for this session's own, which a start replaces. */
+export function ffmpegEncodesRunning(exceptSession?: string): number {
+  let n = 0;
+  for (const run of runs.values()) if (run.encode && !run.ended && !run.failed && run.sessionId !== exceptSession) n++;
+  return n;
 }
 
 /** Whether this session's stream is made here, by ffmpeg. */

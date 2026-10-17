@@ -28,7 +28,7 @@ import { closeDetailCache } from "./services/detail-cache.js";
 import { anyRoomPlaying, attachWebSocketServer, closeWebSocketServer } from "./services/sync.js";
 import { directStreamCacheDir, directStreamMemoryBytes } from "./services/direct-stream.js";
 import { transcodeCacheBytes } from "./services/segment-prefetch.js";
-import { checkFfmpeg, mediaPathMap } from "./services/ffmpeg/config.js";
+import { checkFfmpeg, detectHardware, mediaPathMap } from "./services/ffmpeg/config.js";
 
 const required = ["DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET", "PLEX_URL", "PLEX_TOKEN", "REDIRECT_URI"] as const;
 for (const name of required) {
@@ -338,10 +338,11 @@ async function reportEngine(): Promise<void> {
     return;
   }
   const map = mediaPathMap();
+  const hw = await detectHardware();
   console.log(
     "[Config] playback engine: ffmpeg —",
     `${found.version};`,
-    "copies H.264 and HEVC files itself, HDR included; re-encodes still go to Plex;",
+    `copies H.264 and HEVC files itself, HDR included; re-encodes on ${hw.note}, tone mapping and burned-in subtitles still go to Plex;`,
     map.length ? `library at ${map.map(([from, to]) => `${from} → ${to}`).join(", ")} (MEDIA_PATH_MAP)` : "library at Plex's own paths",
   );
 }

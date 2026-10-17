@@ -71,7 +71,7 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
   5: { file: AAC_FILM, plexPath: "/nowhere/film.mkv", codec: "h264", width: 640, height: 360, audio: "aac", channels: 2 },
   // Not a film at all: ffmpeg fails.
   6: { file: BROKEN_FILM, plexPath: BROKEN_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2 },
-  // Dolby Vision profile 5: needs tone mapping, which is Phase 2's.
+  // Dolby Vision profile 5: needs tone mapping, which is Phase 3's.
   7: { file: AAC_FILM, plexPath: AAC_FILM, codec: "hevc", width: 640, height: 360, audio: "aac", channels: 2,
     hdr: { DOVIPresent: true, DOVIProfile: 5, colorTrc: "smpte2084" } },
   // Read through Plex at ten times the speed it plays, as a disk far slower
@@ -311,9 +311,105 @@ console.log("\n— a file that isn't mounted here —");
     [asked.includes("/library/parts/5/1/file.mkv"), transcodeAsked()], [true, []]);
 }
 
+console.log("\n— what a re-encode is made of —");
+{
+  const { planEncode, encodeArgs } = await import("../src/services/ffmpeg/plan.js");
+  const version = (video: Record<string, unknown>, more: Record<string, unknown> = {}) => ({
+    container: "mkv", width: 1920, height: 1080, partKey: "/library/parts/1/1/file.mkv", file: "/data/media/f.mkv",
+    streams: [{ id: 11, streamType: 1, index: 0, codec: "hevc", bitDepth: 10, colorPrimaries: "bt709", colorTrc: "bt709",
+      colorSpace: "bt709", colorRange: "tv", ...video },
+      { id: 12, streamType: 2, index: 1, codec: "eac3", channels: 6, default: true }],
+    ...more,
+  });
+  const ask = { audioStreamId: null, hevcOk: true, hardware: "qsv" as "qsv" | "software", kbps: 8000, peakKbps: 8000,
+    maxWidth: 1920, maxHeight: 1080, keepHdr: true };
+  const plan = (v: ReturnType<typeof version>, more: Partial<typeof ask> = {}) => planEncode(v, { ...ask, ...more });
+  const hdr10 = plan(version({ colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc" }));
+  check("HDR10 for an HEVC player stays HDR, in HEVC Main10",
+    hdr10.ok && [hdr10.codec, hdr10.hdrTrc], ["hevc", "smpte2084"]);
+  const hdrArgs = hdr10.ok ? encodeArgs(hdr10, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
+  check("  labelled HDR10 on the output, decoded and scaled on the GPU in 10 bits",
+    [hdrArgs.includes("-color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc"),
+      hdrArgs.includes("-hwaccel vaapi"), hdrArgs.includes("scale_vaapi=w=1920:h=1080:format=p010"),
+      hdrArgs.includes("-c:v hevc_qsv -low_power 1 -profile:v main10")], [true, true, true, true]);
+  check("  VBR, never CBR: the peak a little over a target equal to it",
+    hdrArgs.includes("-b:v 8000k -maxrate 8001k -bufsize 16002k"), true);
+  const hlg = plan(version({ DOVIPresent: true, DOVIProfile: 8, DOVIBLCompatID: 4, colorTrc: "arib-std-b67" }));
+  check("Dolby Vision 8.4 is kept as the HLG underneath", hlg.ok && hlg.hdrTrc, "arib-std-b67");
+  const why = (p: ReturnType<typeof plan>) => (p.ok ? "encode" : p.why);
+  check("HDR10 to H.264 needs tone mapping, which is Plex's for now",
+    why(plan(version({ colorTrc: "smpte2084" }), { hevcOk: false })), "HDR10 to H.264 needs tone mapping");
+  check("so does Dolby Vision 5", why(plan(version({ DOVIPresent: true, DOVIProfile: 5 }))), "Dolby Vision P5 needs tone mapping");
+  check("and HDR with FFMPEG_HDR_REENCODE=tonemap",
+    why(plan(version({ colorTrc: "smpte2084" }), { keepHdr: false })), "HDR10 needs tone mapping (FFMPEG_HDR_REENCODE=tonemap)");
+  const cpu = plan(version({ codec: "h264", bitDepth: 8 }), { hardware: "software" });
+  check("on the CPU it is H.264", cpu.ok && cpu.codec, "h264");
+  const anamorphic = plan(version({ codec: "mpeg2video", bitDepth: 8, anamorphic: true, pixelAspectRatio: "4:3" },
+    { width: 1440, height: 1080 }));
+  check("1440×1080 at 4:3 pixels becomes square 1920×1080, decoded on the GPU",
+    anamorphic.ok && [anamorphic.width, anamorphic.height, anamorphic.gpuDecode], [1920, 1080, true]);
+  check("4K fits 1080p, and the 4 Mbps level 720p",
+    [plan(version({}, { width: 3840, height: 2160 })), plan(version({}), { maxWidth: 1280, maxHeight: 720 })]
+      .map((p) => p.ok && `${p.width}x${p.height}`), ["1920x1080", "1280x720"]);
+  const vc1 = plan(version({ codec: "vc1", bitDepth: 8, scanType: "interlaced", colorPrimaries: undefined,
+    colorTrc: undefined, colorSpace: undefined, colorRange: undefined }, { width: 720, height: 480 }));
+  check("VC-1 is decoded on the CPU, deinterlaced, its missing labels filled as NTSC's",
+    vc1.ok && [vc1.gpuDecode, vc1.interlaced, vc1.color.fill],
+    [false, true, "setparams=color_primaries=smpte170m:color_trc=smpte170m:colorspace=smpte170m:range=tv"]);
+  const vc1Args = vc1.ok ? encodeArgs(vc1, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
+  check("  and handed to the GPU after the CPU's filters", vc1Args.includes(
+    "-vf setparams=color_primaries=smpte170m:color_trc=smpte170m:colorspace=smpte170m:range=tv," +
+    "bwdif=mode=send_frame,scale=720:480,format=p010le,hwupload=extra_hw_frames=64,format=qsv"), true);
+}
+
+/** A playlist's entries once it lists `n`: an encode lists them as it goes. */
+async function listed(variant: string, n: number) {
+  for (let i = 0; ; i++) {
+    const list = entries(await (await fetch(origin + variant)).text());
+    if (list.length >= n || i >= 40) return list;
+    await sleep(250);
+  }
+}
+
+console.log("\n— a re-encode —");
+{
+  asked.length = 0;
+  const m = await master("3", crypto.randomUUID());
+  const notes = notesOf(m.text);
+  check("HEVC for a player nobody said decodes it is re-encoded by ffmpeg, saying why",
+    [notes.engine, notes.video, notes.reason], ["ffmpeg", "transcode", "HEVC, and this player can't decode it"]);
+  check("  and Plex was never asked to transcode", transcodeAsked(), []);
+  const list = await listed(variantOf(m.text), 3);
+  check("  in 3 s segments", list.slice(0, 3).map((e) => Math.round(e.duration * 10) / 10), [3, 3, 3]);
+  const m4 = await master("4", crypto.randomUUID());
+  check("a 4K file is re-encoded at 1080p", [notesOf(m4.text).engine, /RESOLUTION=1920x1080/.test(m4.text)], ["ffmpeg", true]);
+}
+{
+  const m = await master("3", crypto.randomUUID(), "?offset=31");
+  const list = await listed(variantOf(m.text), 2);
+  const starts: number[] = [];
+  for (const e of list.slice(0, 2)) {
+    starts.push(Math.round(videoSpan(Buffer.from(await (await fetch(origin + e.uri)).arrayBuffer()))!.start * 10) / 10);
+  }
+  check("a seek's re-encode opens where it was asked (41 on the clock), its keyframes 3 s on", starts, [41, 44]);
+}
+{
+  process.env.FFMPEG_MAX_ENCODES = "1";
+  // The runs above reach the film's end first: an ended run holds no slot.
+  await sleep(4000);
+  const keep = crypto.randomUUID();
+  const first = await master("3", keep);
+  asked.length = 0;
+  const second = await master("4", crypto.randomUUID());
+  check("with FFMPEG_MAX_ENCODES taken, the next re-encode goes to Plex",
+    [notesOf(first.text).engine, transcodeAsked().includes("/video/:/transcode/universal/decision")], ["ffmpeg", true]);
+  check("  and nothing of the engine's is handed out for it", second.text.includes("com.pdt.engine"), false);
+  delete process.env.FFMPEG_MAX_ENCODES;
+  await fetch(`${origin}/api/plex/hls/session/${keep}?reason=test`, { method: "DELETE" });
+}
+
 console.log("\n— what is still Plex's —");
-for (const [rk, why] of [["3", "HEVC for a player nobody said decodes it"], ["4", "a 4K file"],
-  ["7", "Dolby Vision profile 5"], ["6", "a file ffmpeg can't read"]]) {
+for (const [rk, why] of [["7", "Dolby Vision profile 5"], ["6", "a file ffmpeg can't read"]]) {
   asked.length = 0;
   const m = await master(rk, crypto.randomUUID());
   check(`${why} goes to Plex`, transcodeAsked().includes("/video/:/transcode/universal/decision"), true);

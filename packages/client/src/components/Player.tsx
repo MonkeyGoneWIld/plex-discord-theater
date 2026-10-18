@@ -44,7 +44,8 @@ import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readi
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
 import { arrivingKbps, backfillShare, backfillTitle, catchingUpTitle, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
-import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, inBrowserCache, installSegmentParts, keepLater, partsFor, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
+import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
+import { nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
 import { installTakeFromPeer } from "../lib/takeFromPeer";
 import { connectionsSeen, watchPeerConnections } from "../lib/peerConnections";
@@ -4310,13 +4311,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         applyDownloadsRef.current = applyHttpSlots;
         /** Seconds held from `t` without a gap: the browser's buffer and the engine's memory. */
         const heldFromS = (t: number) => coveredAheadS(t, [...bufferedRanges(video.buffered), ...heldRanges(engineHeldRef.current)]);
-        /** The URL of the first segment not held from the playhead, once there is one. */
+        /** The URL of the first segment not held from the playhead, once there is one — see lib/nextNeeded. */
         const nextNeededUrl = (): string | null => {
           if ((hlsRef.current as unknown) !== hls || video.readyState < HTMLMediaElement.HAVE_METADATA) return null;
-          const frags = levelFragments(hls) as Array<{ start: number; duration: number; url?: string }> | null;
+          const frags = levelFragments(hls) as ListedSegment[] | null;
           if (!frags?.length) return null;
-          const heldTo = video.currentTime + heldFromS(video.currentTime);
-          return frags.find((f) => f.start + f.duration > heldTo + 0.05)?.url ?? null;
+          return nextNeededSegment(frags, video.currentTime + heldFromS(video.currentTime), engineHeldRef.current);
         };
         /**
          * How many of a segment's parts download at once (lib/segmentParts).
@@ -4672,6 +4672,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                     seg: segIndexFromUrl(segmentUrl),
                     MB: (bytesLength / 1e6).toFixed(2),
                     from: downloadSource === "p2p" ? "another player" : parts > 1 ? `the bot, in ${parts}` : "the bot",
+                    ...(downloadSource !== "p2p" && parts > 1 ? { partsAtOnce: partsPeak(segmentUrl) ?? "?" } : {}),
                     tookS: asked === undefined ? "?" : ((now - asked) / 1000).toFixed(1),
                     Mbps: asked === undefined ? "?" : ((bytesLength * 8) / ((now - asked) * 1000)).toFixed(1),
                     sinceStreamS: ((now - streamAskedAt) / 1000).toFixed(1),

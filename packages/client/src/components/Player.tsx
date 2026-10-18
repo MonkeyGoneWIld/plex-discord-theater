@@ -1944,7 +1944,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /** The backfill under way, for the loading screen — see the backfill
    *  effect: the stretch it fetches, `fromS` to `toS`; `reachedS`, how far
    *  back what is in goes; `partS`, the film in hand of the segment coming. */
-  const backfillRef = useRef<{ fromS: number; toS: number; reachedS: number; partS: number } | null>(null);
+  const backfillRef = useRef<{ fromS: number; toS: number; reachedS: number; partS: number; shown: number } | null>(null);
   const [backfilling, setBackfilling] = useState(false);
   /**
    * Where a follower was when its stream was torn down, if that was ahead of
@@ -3335,7 +3335,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         : null;
       // Paused, fetching what it jumped over: how much of it is in.
       const fill = !sync?.playing && !isHostRef.current ? backfillRef.current : null;
-      setLoadingText(fill ? backfillTitle(backfillShare(fill))
+      // Never back down, whatever a segment's arithmetic says meanwhile.
+      if (fill) fill.shown = Math.max(fill.shown, backfillShare(fill));
+      setLoadingText(fill ? backfillTitle(fill.shown)
         : leftS !== null && leftS > 0 ? catchingUpTitle(leftS) : loadingTitle(pictureShownRef.current));
     }, 250);
     return () => window.clearInterval(id);
@@ -6921,7 +6923,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       roomPosS: Number(roomS.toFixed(2)), fromS: Number(fromS.toFixed(2)), atS: Number(wait.atS.toFixed(2)),
       segments: order.filter((f) => !held(f.start + Math.min(0.1, f.duration / 2))).length,
     });
-    const fill = { fromS, toS: wait.atS, reachedS: wait.atS, partS: 0 };
+    const fill = { fromS, toS: wait.atS, reachedS: wait.atS, partS: 0, shown: 0 };
     backfillRef.current = fill;
     setBackfilling(true);
     const endFill = () => {
@@ -6942,14 +6944,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             const response = await fetch(bytes ? fetchInPartsLater(request, f.url, bytes) : request);
             if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
             // Read as it comes, for the loading screen's share.
+            // Only its share of the stretch counts: the segment it waits in
+            // is mostly ahead of it, and counting all of it put the share up
+            // to a few per cent, then back to nothing once it was in (18 Oct).
             const size = bytes ?? (Number(response.headers.get("Content-Length")) || 0);
+            const inStretchS = Math.max(0, Math.min(f.start + f.duration, fill.toS) - Math.max(f.start, fromS));
             const reader = response.body.getReader();
             let got = 0;
             for (;;) {
               const { done, value } = await reader.read();
               if (done) break;
               got += value.byteLength;
-              if (size > 0) fill.partS = f.duration * Math.min(1, got / size);
+              if (size > 0) fill.partS = inStretchS * Math.min(1, got / size);
             }
           } catch (err) {
             if (stop.signal.aborted) return;

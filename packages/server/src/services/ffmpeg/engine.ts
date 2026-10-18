@@ -41,10 +41,16 @@ import { COPY_CLOCK_OFFSET_S } from "./plan.js";
 const LEAD_S = Number(process.env.PDT_FFMPEG_LEAD_S) || 180;
 /** And how close they come before it carries on. */
 const RESUME_S = LEAD_S - Math.min(30, LEAD_S / 2);
-/** Seconds listed before the first playlist is handed out — see direct-stream.ts. */
+/**
+ * Seconds listed before the first playlist is handed out — see direct-stream.ts.
+ * A re-encode's too. It was three segments, so the encoder wouldn't hold the
+ * start; but a player started on those knew nothing of the rest until hls.js
+ * next read the playlist, and judged the next minute by them alone: on 18
+ * October every start of one went on 3 to 6 s in hand and stopped a few
+ * seconds later. Thirty seconds is 2 or 3 s on Intel's GPU; READY_TIMEOUT_MS
+ * bounds it on the CPU.
+ */
 const READY_SPAN_S = 30;
-/** For a re-encode: three segments, so the encoder doesn't hold the start. */
-const READY_SPAN_ENCODE_S = 9;
 /** How long the first playlist waits for READY_SPAN_S: inside hls.js's 10 s. */
 const READY_TIMEOUT_MS = 6_000;
 /** How long a start waits for the first segment before leaving the stream to Plex. */
@@ -84,6 +90,8 @@ interface Run {
   proc: ChildProcess | null;
   /** SIGSTOPped: far enough ahead of the watcher. */
   paused: boolean;
+  /** Paused at least once: how fast it got there has been said. */
+  pausedOnce: boolean;
   /** Stopped by us: its exit is nothing to report. */
   stopped: boolean;
   segments: Segment[];
@@ -127,7 +135,7 @@ function ready(run: Run): boolean {
   if (run.ended || run.failed) return true;
   const list = published(run);
   const last = list[list.length - 1];
-  return !!last && last.end - Math.max(run.offsetS, list[0].start) >= (run.encode ? READY_SPAN_ENCODE_S : READY_SPAN_S);
+  return !!last && last.end - Math.max(run.offsetS, list[0].start) >= READY_SPAN_S;
 }
 
 /** Pause the run far enough ahead of the watcher; carry on once they near it. */
@@ -139,6 +147,18 @@ function throttle(run: Run): void {
     if (!run.paused && edge > run.positionS + LEAD_S) {
       run.proc.kill("SIGSTOP");
       run.paused = true;
+      if (!run.pausedOnce) {
+        run.pausedOnce = true;
+        // How fast it got there, never paused before: on Intel's GPU a 1080p
+        // re-encode runs many times faster than the film plays, on the CPU a
+        // few. From here on it runs in short bursts as the watcher nears.
+        const madeS = edge - (run.segments[0]?.start ?? run.offsetS);
+        const tookS = (Date.now() - run.startedAt) / 1000;
+        logEvent("FFmpeg", "far enough ahead of the watcher, paused until they near it", {
+          session: short(run.sessionId), encode: run.encode, aheadS: round3(edge - run.positionS),
+          madeS: round3(madeS), tookS: round3(tookS), speedX: Math.round((madeS / Math.max(tookS, 0.001)) * 10) / 10,
+        });
+      }
     } else if (run.paused && edge < run.positionS + RESUME_S) {
       run.proc.kill("SIGCONT");
       run.paused = false;
@@ -266,7 +286,7 @@ export async function startFfmpegRun(o: {
   const run: Run = {
     key, sessionId: o.sessionId, ratingKey: o.ratingKey, codec: o.codec, encode: !!o.encode, dir,
     baseDir: `/video/:/transcode/universal/session/${key}/base/`,
-    offsetS: o.offsetS, proc: null, paused: false, stopped: false,
+    offsetS: o.offsetS, proc: null, paused: false, pausedOnce: false, stopped: false,
     segments: [], byPath: new Map(), clockOffset: null, ended: false, failed: null,
     targetDuration: MIN_TARGET_DURATION, handedOut: false, positionS: o.offsetS,
     waiters: [], queue: Promise.resolve(), stdoutRest: "", stderrTail: [],

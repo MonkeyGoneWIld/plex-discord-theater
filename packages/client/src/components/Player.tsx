@@ -594,6 +594,16 @@ function bufferedRangeAt(video: HTMLVideoElement, t: number): { start: number; e
   return null;
 }
 
+/**
+ * What the log calls a stream whose playlist grows as it is made: a copy, or
+ * one the ffmpeg engine re-encodes. Both are handled alike (copiedStreamRef);
+ * on 18 October a re-encode logged as "Direct Stream" and "copied stream" hid
+ * which one the buffering was on.
+ */
+function streamName(notes: StreamNotes | null): string {
+  return notes?.video === "transcode" ? "re-encoded stream" : "copied stream";
+}
+
 /** Put playback back to normal speed. Safe to call on anything, including null. */
 function resetPlaybackRate(video: HTMLVideoElement | null): void {
   if (video && video.playbackRate !== 1) video.playbackRate = 1;
@@ -1916,7 +1926,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * Whether the stream is a copied one — Plex's original video, played through
    * a playlist the server builds as it measures the segments, which therefore
    * grows as it plays (services/direct-stream.ts). Known from the playlist's
-   * EVENT type; Plex's own playlists have none.
+   * EVENT type; Plex's own playlists have none. The ffmpeg engine's
+   * re-encodes are listed the same way, as they are made, and are handled as
+   * copies too: what the log calls them is the server's word (streamName).
    */
   const copiedStreamRef = useRef(false);
   /** Where that playlist ends for now, in film time; null once it is complete. */
@@ -4774,7 +4786,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           applyHttpSlots();
           const copied = data.details.type === "EVENT";
           if (copied && !copiedStreamRef.current) {
-            logEvent("HLS", "playing the original video (Direct Stream)", {
+            logEvent("HLS", streamNotesRef.current?.video === "transcode"
+              ? "playing a stream the server re-encodes, listed as it is made"
+              : "playing the original video (Direct Stream)", {
               session: sessionId?.substring(0, 8),
             });
           }
@@ -5247,10 +5261,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               nextInS: Number.isFinite(nextInS) ? Number(nextInS.toFixed(1)) : "unknown",
             };
             if (startS >= video.currentTime) {
-              logEvent("HLS", "not starting on the copy's keyframe: its next segment wouldn't be in before the first had played", facts);
+              logEvent("HLS", "not starting on the first segment's keyframe: the next segment wouldn't be in before it had played", facts);
               return;
             }
-            logEvent("HLS", "starting on the copy's keyframe, so its first segment is enough to start on", facts);
+            logEvent("HLS", "starting on the first segment's keyframe, so that segment is enough to start on", facts);
             video.currentTime = startS;
             return;
           }
@@ -7441,7 +7455,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       const pastEnd = edge !== null && positionSeconds > edge - 1;
       const farBack = positionSeconds < video.currentTime - COPY_BACK_WINDOW_S && !pictureHeldAt(video, positionSeconds);
       if (pastEnd || farBack) {
-        logEvent("Seek", "copied stream can't serve this in place → restart", {
+        logEvent("Seek", `${streamName(streamNotesRef.current)} can't serve this in place → restart`, {
           targetS: positionSeconds,
           playlistEdgeS: edge ?? "complete",
           currentS: video.currentTime,

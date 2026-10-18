@@ -1075,7 +1075,7 @@ function Runner() {
       const late = await startOnce("p2p=0&stream=copy4&event=1", fast, 60_000);
       const hostAt = firstPlayAt("u-host");
       const viewerAt = firstPlayAt("u-viewer");
-      const snap = hostSaid(/starting on the copy's keyframe/);
+      const snap = hostSaid(/starting on the first segment's keyframe/);
       say(`fast, resumed at 0:43.4, 0.6s before it ends: started ${late.startS.toFixed(1)}s after play, host at ${hostAt.toFixed(2)}s, viewer at ${viewerAt.toFixed(2)}s, ${late.apartMs} ms apart`);
       if (snap) say(`    the host's first segment at ${snap.data.firstMbps} Mbps, so the next in ${snap.data.nextInS}s`);
       say(`${snap && Math.abs(hostAt - 40) < 0.5 && Math.abs(viewerAt - 40) < 0.5 ? "PASS" : "FAIL"} both start on the keyframe the copy begins at, 0:40`);
@@ -1093,7 +1093,7 @@ function Runner() {
       const slowly = await startOnce("p2p=0&stream=copy4&event=1", slow, 20_000);
       const slowHostAt = firstPlayAt("u-host");
       const slowViewerAt = firstPlayAt("u-viewer");
-      const held = hostSaid(/not starting on the copy's keyframe/);
+      const held = hostSaid(/not starting on the first segment's keyframe/);
       say(`slow, resumed at 0:43.4: started ${slowly.startS.toFixed(1)}s after play, host at ${slowHostAt.toFixed(2)}s, viewer at ${slowViewerAt.toFixed(2)}s, ${slowly.apartMs} ms apart`);
       if (held) say(`    the host's first segment at ${held.data.firstMbps} Mbps, so the next in ${held.data.nextInS}s`);
       say(`${held && Math.abs(slowHostAt - 43.4) < 0.5 && Math.abs(slowViewerAt - 43.4) < 0.5 ? "PASS" : "FAIL"} the next segment can't be in in time, so both wait for it and start where they were asked`);

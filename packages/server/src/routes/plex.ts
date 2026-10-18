@@ -1139,9 +1139,10 @@ function rememberDuration(ratingKey: string, payload: Record<string, unknown>): 
  * which audio tracks are in the title's original language; 10 left out
  * subtitles Plex can't read, counted every file beside the media as a
  * sidecar, not only the ones in a text format, and added each version's part
- * key.
+ * key. 11 added each version's picture (HDR and so on), which Stats for nerds
+ * shows: rows saved before it had none, and Edgerunners showed no range.
  */
-export const META_PAYLOAD_VERSION = 10;
+export const META_PAYLOAD_VERSION = 11;
 
 const metaCache = new LruMap<string, { payload: Record<string, unknown>; at: number }>(2_000);
 const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour

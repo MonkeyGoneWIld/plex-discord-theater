@@ -63,3 +63,33 @@ export function pictureStartFor(
   if (nextInS > range.end - range.start) return atS;
   return range.start;
 }
+
+/**
+ * Where a seek that can't finish should go instead: its place `atS` is in
+ * front of the picture of a stream's first segment, which is in already, so
+ * nothing more is coming for it. A copy's picture starts on the keyframe
+ * before the point it was started from and its sound on that point, and the
+ * element has nothing to play until both are there: on 18 October monkey26
+ * landed on the room at 5914.90 in a copy whose first segment, all in, played
+ * from 5914.98, and sat seeking with two minutes in hand, the room waiting on
+ * it, until somebody skipped. Null when the place is in the buffer; when it
+ * is in any other segment — one whose start the browser let go of is fetched
+ * again, never gone past — or that one isn't in yet; when the picture is more
+ * than `maxGapS` on; and without the playlist's segments.
+ */
+export function pictureAfterSeek(
+  atS: number,
+  ranges: ReadonlyArray<readonly [number, number]>,
+  segments: ReadonlyArray<{ start: number; duration: number; gap?: boolean }> | null,
+  maxGapS: number,
+): number | null {
+  // The stream's first: a copy is listed with gaps up to where it starts.
+  const first = segments?.find((f) => !f.gap);
+  if (!first || atS < first.start || atS >= first.start + first.duration) return null;
+  for (const [start, end] of ranges) {
+    if (atS >= start && atS <= end) return null;
+    if (start < atS) continue;
+    return start - atS <= maxGapS && start < first.start + first.duration ? start : null;
+  }
+  return null;
+}

@@ -38,7 +38,7 @@ import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
 import { LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, cameFromCache, catchUpLeadS, landingBySize, landingFor, recentSegmentBytesPerS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
-import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, nextSegmentInS, pictureStartFor } from "../lib/copyStart";
+import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, nextSegmentInS, pictureStartFor, pictureAfterSeek } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
@@ -192,6 +192,12 @@ const GATHER_BEHIND_TOLERANCE_S = HARD_SYNC_DRIFT_S;
  * the loading poll — and is nudged.
  */
 const HELD_STUCK_NUDGE_MS = 1000;
+/**
+ * A seek still going on this long, in front of a stream's first picture with
+ * its segment in, is not going to finish — see lib/copyStart pictureAfterSeek
+ * — and goes to where the picture starts.
+ */
+const SEEK_IN_FRONT_STEP_MS = 500;
 /** How often a follower waiting for the room checks whether it has arrived. */
 const WAIT_FOR_ROOM_POLL_MS = 250;
 /**
@@ -763,7 +769,7 @@ function heapSample(): Record<string, unknown> {
  * The segments of the stream playing, in film time — what a cut behind the
  * playhead has to respect. See lib/bufferTrim.
  */
-function levelFragments(hls: Hls): Array<{ start: number; duration: number }> | null {
+function levelFragments(hls: Hls): Array<{ start: number; duration: number; gap?: boolean }> | null {
   const level = hls.levels[hls.currentLevel] ?? hls.levels[hls.loadLevel] ?? hls.levels[0];
   return level?.details?.fragments ?? null;
 }
@@ -2364,6 +2370,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // True while playing an adopted session: skip the position-resetting "play"
   // broadcast, and seek to the room's current position on load like a viewer.
   const didAdoptRef = useRef(false);
+  /**
+   * Whether this player has started a stream since it mounted. A host's first
+   * one, in a room playing on without it, is it taking the room over, and it
+   * catches up with the room (hostCatchUpRef) — its later ones, a seek or a
+   * track change, are the room going with it.
+   */
+  const streamedHereRef = useRef(false);
 
   /**
    * Take up or hand back the driving of a stream, as the server assigns it.
@@ -3187,6 +3200,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     let holdingSince = 0;
     let heldStuckSince = 0;
     let heldNudges = 0;
+    let seekInFrontSince = 0;
+    let seekInFrontSteps = 0;
     const id = window.setInterval(() => {
       const v = videoRef.current;
       const sync = syncStateRef.current;
@@ -3253,6 +3268,27 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           ...snapshot(v),
         });
         v!.currentTime = v!.currentTime + 0.001;
+      }
+
+      // A seek gone in front of a stream's first picture, its segment in: to
+      // where the picture starts, a moment on — see lib/copyStart
+      // pictureAfterSeek. Paused, held or playing alike; nothing else steps a
+      // seek.
+      const pictureAt = v && v.seeking && v.readyState < HTMLMediaElement.HAVE_FUTURE_DATA
+        ? pictureAfterSeek(v.currentTime, bufferedRanges(v.buffered), hlsRef.current ? levelFragments(hlsRef.current) : null, MAX_HOLE_JUMP_S)
+        : null;
+      if (pictureAt === null) { seekInFrontSince = 0; if (!v?.seeking) seekInFrontSteps = 0; }
+      else if (!seekInFrontSince) seekInFrontSince = Date.now();
+      else if (Date.now() - seekInFrontSince >= SEEK_IN_FRONT_STEP_MS && seekInFrontSteps < 3) {
+        seekInFrontSteps++;
+        seekInFrontSince = 0;
+        logWarn("Stall", "seeking in front of the stream's first picture, its segment in: going to it", {
+          attempt: seekInFrontSteps,
+          toS: Number(pictureAt.toFixed(2)),
+          gapS: Number((pictureAt - v!.currentTime).toFixed(2)),
+          ...snapshot(v),
+        });
+        v!.currentTime = pictureAt + 0.05;
       }
 
       if (isHostRef.current) steerHost(starved, starvedMs);
@@ -3965,10 +4001,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // A host coming onto a stream it didn't start, in a room already playing
     // this title — back from a pop-out, adopting or following the stream the
     // room went on with — catches up with the room before it drives it: see
-    // hostCatchUpRef.
+    // hostCatchUpRef. So does one starting its own here, for the first time:
+    // back in a browser that can't play the room's, on a stream of its own
+    // from where the room is. On 18 October monkey26, back in Firefox, had
+    // the room wait for that stream's picture instead, and blah0391 stopped
+    // with a minute and a half in hand.
     {
       const room = syncStateRef.current;
-      hostCatchUpRef.current = !!sessionId && isHostRef.current && !(sessionOwner && !didAdoptRef.current) &&
+      const restartingOwn = sessionOwner && !didAdoptRef.current && streamedHereRef.current;
+      hostCatchUpRef.current = !!sessionId && isHostRef.current && !restartingOwn &&
         !!room?.playing && !room.hostWaiting && room.ratingKey === item.ratingKey && room.position > DRIFT_THRESHOLD_S;
       if (hostCatchUpRef.current) {
         hostCatchUpSinceRef.current = Date.now();
@@ -3977,6 +4018,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         logEvent("Sync", "taking over a room that is playing: following its clock until in step", {
           roomPosS: Number(roomPositionNow(room!).toFixed(2)),
           adopted: didAdoptRef.current,
+          ...(sessionOwner && !didAdoptRef.current ? { stream: "its own, started here" } : {}),
         });
       }
     }
@@ -3986,6 +4028,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       logEvent("HLS", "no session id yet, waiting for sync", { isHost: isHostRef.current });
       return;
     }
+    streamedHereRef.current = true;
 
     sessionIdRef.current = sessionId;
     // Mirrored into state so the version lookup above can key on it. Not a
@@ -7128,7 +7171,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       didAdoptRef.current &&
       sync?.playing === true &&
       sync?.ratingKey === item.ratingKey;
-    if (isHostRef.current && !roomIsAlreadyOnThis) {
+    // Nor while catching up with the room on a stream of its own: the room
+    // plays on by its clock and isn't to wait for this picture, and "play"
+    // put it where this stream began and had it wait (hostCatchUpRef).
+    if (isHostRef.current && !roomIsAlreadyOnThis && !hostCatchUpRef.current) {
       // Send the formatted title, not the bare episode name — viewers
       // reconstruct their item from sync state alone (no show/season fields),
       // so this string is all they have to display.

@@ -1581,8 +1581,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * speed things come in at, or plenty in hand whatever is coming, and more
    * for having stopped lately. See lib/readyCushion. Null while the picture
    * at the playhead, and a few seconds of it, isn't in the browser yet.
+   * `patient`: nobody waits on this answer — a host catching up, the room
+   * playing on without it — so it is never "waited long enough for more".
    */
-  const readyToGo = useCallback((video: HTMLVideoElement | null): Readiness | null => {
+  const readyToGo = useCallback((video: HTMLVideoElement | null, patient = false): Readiness | null => {
     const now = Date.now();
     // A wait is looked at every quarter second while it lasts; a gap is a new one.
     const wait = cushionWaitRef.current;
@@ -1622,7 +1624,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       stops: stopsRef.current.length,
       fallbackS: catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs()),
       skip: skipWaitRef.current,
-      waitedS: wait.since ? (now - wait.since) / 1000 : 0,
+      waitedS: wait.since && !patient ? (now - wait.since) / 1000 : 0,
     });
     // Waiting for more than the least, from when it had the least — and once
     // gone on, gone on: a player that said it was ready after waiting its
@@ -1990,6 +1992,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    *  playing behind the room without the room's place held — see steerHost. */
   const hostCatchUpActedAtRef = useRef(0);
   const hostCatchUpBehindSinceRef = useRef(0);
+  /** When a catch-up last ended in step with the room — a host that runs dry
+   *  within HOST_CATCH_UP_MAX_MS of it catches up again (steerHost). */
+  const hostCaughtUpAtRef = useRef(0);
+  /** Whether this catch-up has said it is in step but short of what keeps it going. */
+  const hostCatchUpShortSaidRef = useRef(false);
   /** Frames shown and dropped at the last health sample — see there. */
   const frameCountRef = useRef<{ shown: number; dropped: number; at: number } | null>(null);
   /** Whether a seek sent from here holds this player until the room says it
@@ -2784,6 +2791,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         hostCatchUpSinceRef.current = Date.now();
         hostCatchUpActedAtRef.current = 0;
         hostCatchUpBehindSinceRef.current = 0;
+        hostCatchUpShortSaidRef.current = false;
         logEvent("Sync", "the host now, with its picture not moving yet: the room plays on by its clock until it is in step", {
           waitingAheadOfRoom: !!roomWaitRef.current,
           roomPosS: Number(roomPositionNow(sync).toFixed(2)),
@@ -2927,12 +2935,34 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // segments taking six to come, stopped it three seconds later.
       const leftS = Number.isFinite(v.duration) ? Math.max(0, v.duration - v.currentTime - 0.25) : Infinity;
       const cushionS = Math.min(Math.max(READY_AHEAD_S, catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs())), leftS);
-      const inStep = sync.playing && !sync.hostWaiting && moving && Math.abs(offS) < HOST_CATCH_UP_STEP_S &&
+      const inStepNow = sync.playing && !sync.hostWaiting && moving && Math.abs(offS) < HOST_CATCH_UP_STEP_S &&
         enoughHeldAt(v, v.currentTime) && downloadedAheadS() + READY_TOLERANCE_S >= cushionS;
+      /**
+       * And with what keeps it going: the next minute in before the picture
+       * gets to it, at the speed it comes in at, as a host's picture has to
+       * be for the room to start again after it stopped (readyToGo) — waited
+       * for as long as it takes, since nobody waits on it. On 18 October
+       * monkey26, back in Firefox on a re-encode coming in little faster
+       * than it played, was in step with 8.8 s in hand, drove the room, ran
+       * dry 9 s later, and the room waited 14 s for it.
+       */
+      const keepsGoing = inStepNow ? readyToGo(v, true) : null;
+      const inStep = inStepNow && !!keepsGoing?.ready;
+      if (inStepNow && !inStep && !hostCatchUpShortSaidRef.current) {
+        hostCatchUpShortSaidRef.current = true;
+        logEvent("Sync", "in step with the room, playing on with it until the next minute comes in time", {
+          why: keepsGoing?.why ?? "picture not in",
+          inHandS: keepsGoing ? Number(keepsGoing.inHandS.toFixed(1)) : 0,
+          ...(keepsGoing?.lateS != null ? { nextMinuteLateS: Number(keepsGoing.lateS.toFixed(1)) } : {}),
+        });
+      }
       const tookMs = Date.now() - hostCatchUpSinceRef.current;
       if (inStep) {
         hostCatchUpRef.current = false;
-        logEvent("Sync", "caught up with the room, driving it from here", { offS: Number(offS.toFixed(2)), tookMs, ...snapshot(v) });
+        hostCaughtUpAtRef.current = Date.now();
+        logEvent("Sync", "caught up with the room, driving it from here", {
+          offS: Number(offS.toFixed(2)), tookMs, why: keepsGoing!.why, ...snapshot(v),
+        });
         syncActionsRef.current?.sendHeartbeat(v.currentTime, true, false);
         return;
       }
@@ -3026,7 +3056,32 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       return;
     }
     if (pictureMoving(v)) reportHostPicture(false);
-    else if (starved && starvedMs >= HOST_WAIT_AFTER_MS) reportHostPicture(true);
+    else if (starved && starvedMs >= HOST_WAIT_AFTER_MS) {
+      /**
+       * Run dry within a minute of catching up with a room it took over — a
+       * device switch, a pop-out, a handover: it catches up again, the room
+       * playing on by its clock, rather than the room waiting for it. Not a
+       * seek of its own, which the room goes with, nor once the room waits.
+       */
+      const caughtUpAt = hostCaughtUpAtRef.current;
+      if (caughtUpAt && Date.now() - caughtUpAt < HOST_CATCH_UP_MAX_MS && !v.seeking && !skipWaitRef.current &&
+          !hostToldWaitingRef.current && restartTimerRef.current === null && !isRestartPending() &&
+          sync.ratingKey === itemRef.current.ratingKey) {
+        hostCaughtUpAtRef.current = 0;
+        hostCatchUpRef.current = true;
+        hostCatchUpSinceRef.current = Date.now();
+        hostCatchUpActedAtRef.current = 0;
+        hostCatchUpBehindSinceRef.current = 0;
+        hostCatchUpShortSaidRef.current = false;
+        logEvent("Sync", "ran dry soon after catching up with the room: catching up again, the room playing on", {
+          sinceCaughtUpMs: Date.now() - caughtUpAt,
+          roomPosS: Number(roomPositionNow(sync, Infinity).toFixed(2)),
+          ...snapshot(v),
+        });
+        return;
+      }
+      reportHostPicture(true);
+    }
   }, [reportHostPicture, enoughHeldAt, downloadedAheadS, readyToGo, noteReadiness, waitForRoom, stopWaitingForRoom, isRestartPending]);
 
   /**
@@ -4015,6 +4070,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         hostCatchUpSinceRef.current = Date.now();
         hostCatchUpActedAtRef.current = 0;
         hostCatchUpBehindSinceRef.current = 0;
+        hostCatchUpShortSaidRef.current = false;
         logEvent("Sync", "taking over a room that is playing: following its clock until in step", {
           roomPosS: Number(roomPositionNow(room!).toFixed(2)),
           adopted: didAdoptRef.current,

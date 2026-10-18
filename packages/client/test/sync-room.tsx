@@ -524,18 +524,28 @@ function Runner() {
    * room wait for that stream's picture, and blah0391 stopped with a minute
    * and a half in hand. It catches up with the room as one back on the
    * room's own stream does, and the room plays on without it until then.
+   *
+   * `slow`: its stream comes in little faster than it plays, and soon after it
+   * catches up, for a while, slower — as monkey26's re-encode did later that
+   * day, when it was in step with 8.8 s in hand, ran dry 9 s on, and the room
+   * waited 14 s for it. It catches up again, the room playing on.
    */
-  async function runHostBackOwnStream() {
+  async function runHostBackOwnStream(slow = false) {
     setRunning(true);
-    const out: string[] = ["— the host back from a pop-out where it can't play the room's stream —"];
+    const out: string[] = [slow
+      ? "— the host back where it can't play the room's stream, on a stream that barely keeps up —"
+      : "— the host back from a pop-out where it can't play the room's stream —"];
     const say = (line: string) => { out.push(line); setLines([...out]); };
     setLines([...out]);
     const hostWin = () => hostFrame.current?.contentWindow as (Window & typeof globalThis) | null | undefined;
     const after = (user: string, t: number, msg: RegExp) => (events.get(user) ?? []).filter((e) => e.t >= t && msg.test(e.msg));
     try {
-      await startOnce("p2p=0&stream=copy4&event=1&eventS=200&hevc=1", {}, 40_000);
+      // Five minutes of film for the slow one, which runs past the two of copy4.
+      await startOnce(`p2p=0&stream=${slow ? "copy4long" : "copy4"}&event=1&eventS=200&hevc=1`, {}, 40_000);
       await pause(15_000);
       await api("/api/test/nohevc?user=u-host");
+      // ~8.4 Mbps a stream: a little faster than it plays.
+      if (slow) await api("/api/test/flow?user=u-host&kbps=11000");
       const poppedAt = Date.now();
       const win = hostWin();
       win?.localStorage.setItem("pdt:hevc-failed", "1");
@@ -545,9 +555,27 @@ function Runner() {
       let viewerStoppedMs = 0;
       let inStepAt = 0;
       let last = Date.now();
-      while (Date.now() - poppedAt < 40_000) {
+      // When the host first drove the room, and when its stream slowed and
+      // came back.
+      let droveAt = 0;
+      let slowedAt = 0;
+      let backAt = 0;
+      while (Date.now() - poppedAt < (slow ? 120_000 : 40_000)) {
         await pause(200);
         const now = Date.now();
+        if (slow && !droveAt && after("u-host", poppedAt, /^caught up with the room, driving it from here$/).length > 0) {
+          droveAt = now;
+          slowedAt = now;
+          await api("/api/test/flow?user=u-host&kbps=500");
+          say(`… the host drove the room ${((now - poppedAt) / 1000).toFixed(1)}s after it reloaded; its stream slowed to 0.5 Mbps`);
+        }
+        // Back to a speed it catches up at once it has run dry, or 50 s on.
+        const dryAt = slowedAt ? after("u-host", slowedAt, /^ran dry|^host's picture not ready/)[0]?.t ?? 0 : 0;
+        if (slow && slowedAt && !backAt && ((dryAt && now - dryAt > 2_000) || now - slowedAt > 50_000)) {
+          backAt = now;
+          await api("/api/test/flow?user=u-host&kbps=16000");
+          say(`… and back to 16 Mbps ${((now - slowedAt) / 1000).toFixed(1)}s on${dryAt ? ", the host having run dry" : ""}`);
+        }
         const h = latest.get("u-host");
         const v = latest.get("u-viewer");
         if (v && (v.paused || v.ready < 3)) viewerStoppedMs += now - last;
@@ -564,6 +592,14 @@ function Runner() {
       say(`${held.length === 0 ? "PASS" : "FAIL"} and never held for the host's new stream (${held.length})`);
       say(`${inStepAt && inStepAt - poppedAt < 20_000 ? "PASS" : "FAIL"} the host was back, playing in step, ${inStepAt ? `${((inStepAt - poppedAt) / 1000).toFixed(1)}s after it reloaded` : "never"}`);
       say(`${said.some((m) => /caught up with the room, driving it from here/.test(m)) ? "PASS" : "FAIL"} the host drives the room again once in step`);
+      if (slow) {
+        const again = after("u-host", droveAt || poppedAt, /^ran dry soon after catching up with the room/);
+        const droveAgain = after("u-host", (again[0]?.t ?? Infinity), /^caught up with the room, driving it from here$/);
+        const waits = after("u-host", poppedAt, /^host.s picture not ready/);
+        say(`${again.length > 0 ? "PASS" : "FAIL"} run dry on the slow stream, it caught up again rather than the room waiting (${again.length})`);
+        say(`${droveAgain.length > 0 ? "PASS" : "FAIL"} and drove the room again once in step (${droveAgain.length})`);
+        say(`    the host told the room to wait ${waits.length} times`);
+      }
       const h = latest.get("u-host")!;
       const v = latest.get("u-viewer")!;
       say(`${Math.abs(h.pos - v.pos) < 1 && !h.paused && !v.paused ? "PASS" : "FAIL"} and they play on together (${(h.pos - v.pos).toFixed(2)}s apart)`);
@@ -2132,6 +2168,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runPopOutCache("viewer", true)}>Viewer pops out, browser's cache let go</button>
         <button disabled={running} onClick={() => void runPopOutOwnTracks()}>Viewer pops out, own tracks</button>
         <button disabled={running} onClick={() => void runHostBackOwnStream()}>Host back where it can't play the room's stream</button>
+        <button disabled={running} onClick={() => void runHostBackOwnStream(true)}>Host back on a stream that barely keeps up</button>
         <button disabled={running} onClick={() => void runJoinWhileAhead()}>Join while ahead</button>
         <button disabled={running} onClick={() => void runNextTitle()}>Next title, together</button>
         <button disabled={running} onClick={() => void runJoinerStalls()}>Joiner stalls</button>

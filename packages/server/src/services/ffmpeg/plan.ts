@@ -275,7 +275,7 @@ export function colorLabels(v: SourceStream, height: number): ColorLabels {
   const fallback = !sd
     ? { primaries: "bt709", trc: "bt709", matrix: "bt709" }
     : pal
-      ? { primaries: "bt470bg", trc: "gamma28", matrix: "bt470bg" }
+      ? { primaries: "bt470bg", trc: "bt470bg", matrix: "bt470bg" }
       : { primaries: "smpte170m", trc: "smpte170m", matrix: "smpte170m" };
   const fill = [
     !known(v.colorPrimaries) && `color_primaries=${fallback.primaries}`,
@@ -290,6 +290,16 @@ export function colorLabels(v: SourceStream, height: number): ColorLabels {
     range: v.colorRange?.toLowerCase() === "pc" ? "pc" : "tv",
     fill: fill.length ? `setparams=${fill.join(":")}` : null,
   };
+}
+
+/**
+ * A transfer as the output's -color_trc names it. The labels are kept in the
+ * names ffprobe and Plex use, which setparams takes too; the encoder option
+ * knows PAL's and NTSC-M's only as gamma28 and gamma22, and a PAL DVD rip
+ * died on "gamma28" in setparams before this (17 Oct).
+ */
+function trcOption(trc: string): string {
+  return trc === "bt470bg" ? "gamma28" : trc === "bt470m" ? "gamma22" : trc;
 }
 
 /** A re-encode's picture: square pixels, inside maxW × maxH, never larger
@@ -424,7 +434,7 @@ export function encodeArgs(
         "-maxrate", `${peak}k`, "-bufsize", `${peak * 2}k`, "-forced-idr", "1"];
   const tags = plan.hdrTrc
     ? ["-color_primaries", "bt2020", "-color_trc", plan.hdrTrc, "-colorspace", "bt2020nc", "-color_range", "tv"]
-    : ["-color_primaries", plan.color.primaries, "-color_trc", plan.color.trc, "-colorspace", plan.color.matrix,
+    : ["-color_primaries", plan.color.primaries, "-color_trc", trcOption(plan.color.trc), "-colorspace", plan.color.matrix,
         "-color_range", plan.color.range];
   return [
     "-hide_banner", "-nostdin", "-loglevel", "error",

@@ -356,6 +356,12 @@ console.log("\n— what a re-encode is made of —");
   check("VC-1 is decoded on the CPU, deinterlaced, its missing labels filled as NTSC's",
     vc1.ok && [vc1.gpuDecode, vc1.interlaced, vc1.color.fill],
     [false, true, "setparams=color_primaries=smpte170m:color_trc=smpte170m:colorspace=smpte170m:range=tv"]);
+  const pal = plan(version({ codec: "mpeg2video", bitDepth: 8, frameRate: 25, colorPrimaries: undefined,
+    colorTrc: undefined, colorSpace: undefined, colorRange: undefined }, { width: 720, height: 576 }));
+  check("a PAL DVD's labels filled by names Jellyfin's ffmpeg 8 knows (no gamma28)", pal.ok && pal.color.fill,
+    "setparams=color_primaries=bt470bg:color_trc=bt470bg:colorspace=bt470bg:range=tv");
+  check("  and labelled on the output by the encoder's name for it",
+    pal.ok && encodeArgs(pal, ["-i", "f.mkv"], 0, 60, "").join(" ").includes("-color_trc gamma28"), true);
   const vc1Args = vc1.ok ? encodeArgs(vc1, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
   check("  and handed to the GPU after the CPU's filters", vc1Args.includes(
     "-vf setparams=color_primaries=smpte170m:color_trc=smpte170m:colorspace=smpte170m:range=tv," +

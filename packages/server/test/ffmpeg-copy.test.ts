@@ -541,10 +541,10 @@ console.log("\n— a re-encode —");
   check("HEVC for a player nobody said decodes it is re-encoded by ffmpeg, saying why",
     [notes.engine, notes.video, notes.reason], ["ffmpeg", "transcode", "HEVC, and this player can't decode it"]);
   check("  and Plex was never asked to transcode", transcodeAsked(), []);
-  // Ten segments of 2.97 to 3.01 s: just under 30 by their durations.
+  // Four segments of 2.97 to 3.01 s: just under 12 by their durations.
   const firstList = entries(await (await fetch(origin + variantOf(m.text))).text());
-  check("  its first playlist lists 30 s, not the next segment or two",
-    firstList.reduce((s, e) => s + e.duration, 0) >= 29, true);
+  check("  its first playlist lists 12 s, not the next segment or two",
+    firstList.reduce((s, e) => s + e.duration, 0) >= 11.5, true);
   const list = await listed(variantOf(m.text), 3);
   check("  in 3 s segments", list.slice(0, 3).map((e) => Math.round(e.duration * 10) / 10), [3, 3, 3]);
   const m4 = await master("4", ids[1]);
@@ -751,6 +751,32 @@ console.log("\n— a render node that wasn't there at startup —");
     console.log = log;
     delete process.env.FFMPEG_HWACCEL_DEVICE;
   }
+}
+
+console.log("\n— what of the GPU a re-encode used, by the kernel's count —");
+{
+  const { parseFdinfo, gpuUse } = await import("../src/services/ffmpeg/gpu-use.js");
+  const i915 = (videoNs: number, renderNs: number) => [
+    "pos:\t0", "flags:\t02100002", "drm-driver:\ti915", "drm-client-id:\t18", "drm-pdev:\t0000:00:02.0",
+    `drm-engine-render:\t${renderNs} ns`, "drm-engine-copy:\t0 ns", `drm-engine-video:\t${videoNs} ns`,
+    "drm-engine-capacity-video:\t2", "drm-engine-video-enhance:\t0 ns",
+  ].join("\n");
+  const xe = (vcs: number, total: number) => [
+    "drm-driver:\txe", "drm-client-id:\t42", "drm-cycles-rcs:\t0", `drm-total-cycles-rcs:\t${total}`,
+    `drm-cycles-vcs:\t${vcs}`, `drm-total-cycles-vcs:\t${total}`, "drm-engine-capacity-vcs:\t2",
+  ].join("\n");
+  const sample = (at: number, text: string) => {
+    const f = parseFdinfo(text)!;
+    return { at, cpuS: null, devices: ["/dev/dri/renderD128"], driver: f.driver, engines: f.engines };
+  };
+  check("i915: busy ns over the time between, by the engines there are of it",
+    gpuUse(sample(0, i915(0, 0)), sample(10_000, i915(9e9, 1e9))),
+    "video 45%, render 10%, copy 0%, video-enhance 0% over 10 s (i915, /dev/dri/renderD128)");
+  check("xe: busy cycles over the GPU's cycles meanwhile, by its class names as i915's",
+    gpuUse(sample(0, xe(0, 1000)), sample(5_000, xe(1600, 2000))), "video 80%, render 0% over 5 s (xe, /dev/dri/renderD128)");
+  check("a file that isn't a DRM client is no count", parseFdinfo("pos:\t0\nflags:\t02\n"), null);
+  check("nothing of the GPU open: the CPU did it",
+    gpuUse(null, { at: 1, cpuS: null, devices: [], driver: null, engines: {} }), "none: ffmpeg had no GPU open, so the CPU did the work");
 }
 
 api.close();

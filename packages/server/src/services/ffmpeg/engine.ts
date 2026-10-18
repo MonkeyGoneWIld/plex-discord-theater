@@ -34,6 +34,7 @@ import { measuredPlaylist, round3, type MeasuredSegment } from "../measured-play
 import { logEvent } from "../logger.js";
 import { LruMap } from "../lru.js";
 import { ffmpegPath } from "./config.js";
+import { cpuUse, gpuUse, sampleGpu, type GpuSample } from "./gpu-use.js";
 import { COPY_CLOCK_OFFSET_S } from "./plan.js";
 
 /** How far past the watcher a run gets before it is paused — as a Plex copy is
@@ -41,16 +42,16 @@ import { COPY_CLOCK_OFFSET_S } from "./plan.js";
 const LEAD_S = Number(process.env.PDT_FFMPEG_LEAD_S) || 180;
 /** And how close they come before it carries on. */
 const RESUME_S = LEAD_S - Math.min(30, LEAD_S / 2);
-/**
- * Seconds listed before the first playlist is handed out — see direct-stream.ts.
- * A re-encode's too. It was three segments, so the encoder wouldn't hold the
- * start; but a player started on those knew nothing of the rest until hls.js
- * next read the playlist, and judged the next minute by them alone: on 18
- * October every start of one went on 3 to 6 s in hand and stopped a few
- * seconds later. Thirty seconds is 2 or 3 s on Intel's GPU; READY_TIMEOUT_MS
- * bounds it on the CPU.
- */
+/** Seconds listed before the first playlist is handed out — see direct-stream.ts. */
 const READY_SPAN_S = 30;
+/**
+ * A re-encode's: four segments. It went out with the next segment listed, one
+ * or two, and a player started on those knew nothing of the rest until hls.js
+ * next read the playlist: on 18 October every start of one went on 1 to 3 s
+ * in hand and stopped a few seconds later. Thirty seconds cost 3.5 s before
+ * the first picture on Intel's GPU, too long; twelve is about 1.5 s.
+ */
+const READY_SPAN_ENCODE_S = 12;
 /** How long the first playlist waits for READY_SPAN_S: inside hls.js's 10 s. */
 const READY_TIMEOUT_MS = 6_000;
 /** How long a start waits for the first segment before leaving the stream to Plex. */
@@ -110,6 +111,8 @@ interface Run {
   stdoutRest: string;
   stderrTail: string[];
   startedAt: number;
+  /** A re-encode's GPU counts at its first segment, to say what it used — see gpu-use.ts. */
+  gpuAtStart: GpuSample | null;
   lastAlive: number;
 }
 
@@ -137,7 +140,12 @@ function ready(run: Run): boolean {
   if (run.ended || run.failed) return true;
   const list = published(run);
   const last = list[list.length - 1];
-  return !!last && last.end - Math.max(run.offsetS, list[0].start) >= READY_SPAN_S;
+  return !!last && last.end - Math.max(run.offsetS, list[0].start) >= (run.encode ? READY_SPAN_ENCODE_S : READY_SPAN_S);
+}
+
+/** What a re-encode used of the GPU and the CPU since its first segment, for the log. */
+function use(run: Run, now: GpuSample | null): { gpu: string; cpu: string } {
+  return { gpu: gpuUse(run.gpuAtStart, now), cpu: cpuUse(run.gpuAtStart, now) };
 }
 
 /** Pause the run far enough ahead of the watcher; carry on once they near it. */
@@ -159,6 +167,7 @@ function throttle(run: Run): void {
         logEvent("FFmpeg", "far enough ahead of the watcher, paused until they near it", {
           session: short(run.sessionId), encode: run.encode, aheadS: round3(edge - run.positionS),
           madeS: round3(madeS), tookS: round3(tookS), speedX: Math.round((madeS / Math.max(tookS, 0.001)) * 10) / 10,
+          ...(run.encode && run.proc.pid ? use(run, sampleGpu(run.proc.pid)) : {}),
         });
       }
     } else if (run.paused && edge < run.positionS + RESUME_S) {
@@ -218,6 +227,7 @@ async function measure(run: Run, name: string): Promise<void> {
       audioLeadS: span.audioStart === null ? "none" : round3(span.start - span.audioStart),
       ms: Date.now() - run.startedAt,
     });
+    if (run.encode && run.proc?.pid) run.gpuAtStart = sampleGpu(run.proc.pid);
     // A plain I-frame where a copy opens: an open-GOP Blu-ray, which browsers
     // can't start from (keyframes.ts). Plex's engine handles those.
     if (!run.encode && run.codec === "h264" && firstKeyframe(data) === "not-idr" && !run.handedOut) {
@@ -243,6 +253,8 @@ async function measure(run: Run, name: string): Promise<void> {
 }
 
 function stopRun(run: Run, why: string): void {
+  // Before it goes, while its files are open.
+  const used = run.gpuAtStart && run.proc?.pid && run.proc.exitCode === null ? use(run, sampleGpu(run.proc.pid)) : null;
   run.stopped = true;
   try {
     run.proc?.kill("SIGKILL");
@@ -257,6 +269,7 @@ function stopRun(run: Run, why: string): void {
   logEvent("FFmpeg", "run stopped", {
     session: short(run.sessionId), why, segments: run.segments.length,
     reachedS: round3(run.segments[run.segments.length - 1]?.end ?? run.offsetS),
+    ...used,
   });
   void fs.promises.rm(run.dir, { recursive: true, force: true }).catch(() => {});
 }
@@ -292,7 +305,7 @@ export async function startFfmpegRun(o: {
     offsetS: o.offsetS, proc: null, paused: false, pausedOnce: false, stopped: false,
     segments: [], byPath: new Map(), clockOffset: null, ended: false, failed: null,
     targetDuration: MIN_TARGET_DURATION, handedOut: false, positionS: o.offsetS,
-    waiters: [], queue: Promise.resolve(), stdoutRest: "", stderrTail: [],
+    waiters: [], queue: Promise.resolve(), stdoutRest: "", stderrTail: [], gpuAtStart: null,
     startedAt: Date.now(), lastAlive: Date.now(),
   };
   runs.set(key, run);
@@ -409,9 +422,10 @@ export async function ffmpegPlaylist(
   if (!run || run.failed) return null;
   run.lastAlive = Date.now();
   // Every segment written wakes the waiters, so this looks again after each
-  // one until READY_SPAN_S is listed. A single wait went out at the next
-  // segment: on 18 October every re-encode's first playlist still listed one
-  // or two, and every start and skip stopped 3 s in.
+  // one until READY_SPAN_S (a re-encode's READY_SPAN_ENCODE_S) is listed. A
+  // single wait went out at the next segment: on 18 October every re-encode's
+  // first playlist still listed one or two, and every start and skip stopped
+  // 3 s in.
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (!ready(run) && !run.stopped && Date.now() < deadline) {
     await Promise.race([new Promise<void>((r) => run.waiters.push(r)), sleep(deadline - Date.now())]);

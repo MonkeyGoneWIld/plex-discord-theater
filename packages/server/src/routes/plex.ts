@@ -22,7 +22,7 @@ import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
 import { fileKeyframes } from "../services/keyframes.js";
-import { sessionHostUserId, sessionHasOtherWatchers, mayStartHevc, mayStartTranscode } from "../services/sync.js";
+import { sessionHostUserId, sessionHasOtherWatchers, mayStartHevc, mayStartTranscode, roomPositionForSession } from "../services/sync.js";
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
 import { parseSubtitles, type Cue } from "../services/subtitles.js";
@@ -4779,7 +4779,7 @@ router.get(
     // request WITH an offset must start a fresh transcode at that position, while
     // one WITHOUT should reuse the session's existing transcode if it's alive.
     const offsetSec = Math.round(parseFloat(req.query.offset as string));
-    const offset = Number.isFinite(offsetSec) && offsetSec > 0 ? String(offsetSec) : undefined;
+    let offset = Number.isFinite(offsetSec) && offsetSec > 0 ? String(offsetSec) : undefined;
 
     // Which of the item's files to play, in order of who knows best: the client
     // that chose it (the host's detail page, on its first request), then this
@@ -4811,6 +4811,22 @@ router.get(
       res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
       res.send(cached.manifest);
       return;
+    }
+
+    // No place asked for, and nothing running for it: a room's stream starts
+    // again where the room is, never at the top. A player taking up a room's
+    // stream asks with no place, expecting it running; on 18 October the one
+    // monkey26 came back to had stopped seconds before, started again at 0:00
+    // an hour and 48 minutes behind the room, and the player chased the room
+    // through it a stretch at a time until it stuck.
+    if (!offset) {
+      const roomAt = roomPositionForSession(sessionId, ratingKey);
+      if (roomAt !== null && roomAt >= 1) {
+        offset = String(Math.round(roomAt));
+        logEvent("HLS", "a room's stream asked for with no place isn't running: starting it where the room is", {
+          session: sessionId.substring(0, 8), ratingKey, atS: offset,
+        });
+      }
     }
 
     // Dedup concurrent manifest requests — if another request is already doing

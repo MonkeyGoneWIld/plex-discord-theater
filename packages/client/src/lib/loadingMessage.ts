@@ -20,6 +20,31 @@ export function catchingUpTitle(leftS: number): string {
 }
 
 /**
+ * How long a backfill has left — the room paused while this player waited
+ * ahead of it, and it is fetching what it jumped over (Player's backfill) —
+ * from how fast what is in came: seconds of film to fetch, seconds of it in,
+ * when it started and when the last of it came. Null until something has.
+ */
+export function backfillLeftS(
+  fill: { totalS: number; doneS: number; startedAt: number; lastAt: number },
+  nowMs: number,
+): number | null {
+  if (!(fill.doneS > 0)) return null;
+  const msPerFilmS = (fill.lastAt - fill.startedAt) / fill.doneS;
+  return Math.max(0, ((fill.totalS - fill.doneS) * msPerFilmS - (nowMs - fill.lastAt)) / 1000);
+}
+
+/**
+ * What the loading screen says meanwhile, counting down like catchingUpTitle
+ * to when it goes back to the room's place: a still of where it waited, or
+ * black, said nothing (18 October).
+ */
+export function backfillTitle(leftS: number | null): string {
+  const what = "Paused · loading what you skipped…";
+  return leftS === null ? what : `${what} ${Math.max(1, Math.ceil(leftS))} s`;
+}
+
+/**
  * What has been arriving, kbps, from the downloads recorded as [when (ms),
  * bytes] — over the last `windowMs`, or null with nothing in it. Old entries
  * are dropped from `samples` as it goes.

@@ -42,7 +42,7 @@ import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, next
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
-import { arrivingKbps, catchingUpTitle, loadingTitle } from "../lib/loadingMessage";
+import { arrivingKbps, backfillLeftS, backfillTitle, catchingUpTitle, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
 import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, inBrowserCache, installSegmentParts, keepLater, partsFor, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
@@ -1941,6 +1941,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    */
   const roomWaitRef = useRef<{ atS: number; roomAtS: number; since: number } | null>(null);
   const [waitingForRoom, setWaitingForRoom] = useState(false);
+  /** The backfill under way, for the loading screen's countdown — see the
+   *  backfill effect: seconds of film to fetch, seconds of it in, when it
+   *  started and when the last segment came. */
+  const backfillRef = useRef<{ totalS: number; doneS: number; startedAt: number; lastAt: number } | null>(null);
+  const [backfilling, setBackfilling] = useState(false);
   /**
    * Where a follower was when its stream was torn down, if that was ahead of
    * the room. Read once by the next manifest, so following the host onto a
@@ -3328,7 +3333,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       const leftS = wait && sync?.playing && sync.ratingKey && !sync.hostWaiting && !isHostRef.current
         ? wait.atS - roomPositionNow(sync)
         : null;
-      setLoadingText(leftS !== null && leftS > 0 ? catchingUpTitle(leftS) : loadingTitle(pictureShownRef.current));
+      // Paused, fetching what it jumped over: how long until it goes back to
+      // the room's place.
+      const fill = !sync?.playing && !isHostRef.current ? backfillRef.current : null;
+      setLoadingText(fill ? backfillTitle(backfillLeftS(fill, Date.now()))
+        : leftS !== null && leftS > 0 ? catchingUpTitle(leftS) : loadingTitle(pictureShownRef.current));
     }, 250);
     return () => window.clearInterval(id);
   }, []);
@@ -6277,8 +6286,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
      * carries the room's position without meaning "go there". See
      * lib/roomWait.
      */
+    // A player waiting ahead counts with no picture there yet: it landed on a
+    // segment still coming in, and the pause that found it so pulled it back
+    // to the room — the very thing the backfill is there to avoid (18 Oct).
     const aheadS = roomNow > 0 &&
-      video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+      (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA || !!roomWaitRef.current) &&
       syncState.ratingKey === itemRef.current.ratingKey
       ? video.currentTime - roomNow
       : 0;
@@ -6897,6 +6909,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     logEvent("Sync", "room paused while waiting ahead: fetching what was jumped over, backwards", {
       roomPosS: Number(roomS.toFixed(2)), atS: Number(wait.atS.toFixed(2)), segments: behind.length,
     });
+    const fill = {
+      totalS: behind.reduce((n, f) => n + f.duration, 0), doneS: 0, startedAt: Date.now(), lastAt: Date.now(),
+    };
+    backfillRef.current = fill;
+    setBackfilling(true);
+    const endFill = () => {
+      if (backfillRef.current !== fill) return;
+      backfillRef.current = null;
+      setBackfilling(false);
+    };
     hls.stopLoad();
     void (async () => {
       const token = getSessionToken();
@@ -6914,11 +6936,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           logWarn("Sync", "backfill stopped: a segment behind didn't come", {
             atS: Number(f.start.toFixed(2)), error: err instanceof Error ? err.message : String(err),
           });
+          endFill();
           loadAgain(video.currentTime);
           return;
         }
         if (stop.signal.aborted) return;
+        fill.doneS += f.duration;
+        fill.lastAt = Date.now();
       }
+      endFill();
       if (stop.signal.aborted || roomWaitRef.current !== wait) return;
       const sync = syncStateRef.current;
       if (!sync || sync.playing) return;
@@ -6933,6 +6959,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     })();
     return () => {
       stop.abort();
+      endFill();
       loadAgain(video.currentTime);
     };
   }, [waitingForRoom, syncState?.playing]);
@@ -7972,7 +7999,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const hostPaused = !canControl && streamActive && syncState?.playing === false;
   // Holding for the room — anybody's picture not ready, or this one ahead of
   // the room — is the loading screen, like any other wait for a picture.
-  const loadingShown = !isPip && (buffering || roomHolding || (noPicture && !!syncState?.ratingKey)) && !error;
+  // So is a backfill, with its countdown: a still of where it waits, or black,
+  // said nothing about what it was doing (18 Oct).
+  const backfillShown = backfilling && !isHost && syncState?.playing === false;
+  const loadingShown = !isPip && (buffering || roomHolding || backfillShown || (noPicture && !!syncState?.ratingKey)) && !error;
   // Held for the host's stream, which is coming back for a switch of the
   // host's own — see SyncState.hostSwitching. Said until the loading screen
   // is down: the room runs again a moment before this player's picture

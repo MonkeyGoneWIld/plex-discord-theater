@@ -27,6 +27,7 @@
  * plain-text track's as SRT.
  */
 
+import fs from "node:fs";
 import { inflateSync } from "node:zlib";
 import { plexFetch } from "./plex.js";
 import { LruMap } from "./lru.js";
@@ -131,7 +132,7 @@ function text(buf: Uint8Array, el: Element): string {
 // ── Reading the file through Plex ─────────────────────────────────
 
 /** A range of the file, or null when Plex wouldn't send it as one. */
-type RangeReader = (start: number, end: number) => Promise<Uint8Array | null>;
+export type RangeReader = (start: number, end: number) => Promise<Uint8Array | null>;
 
 const RANGE_TIMEOUT_MS = 10_000;
 
@@ -171,6 +172,25 @@ function plexRanges(partKey: string): RangeReader {
       return null;
     } finally {
       clearTimeout(timer);
+    }
+  };
+}
+
+/** Ranges of a file mounted here (PLAYBACK_ENGINE=ffmpeg): the same bytes
+ *  without asking Plex for them. */
+export function fileRanges(file: string): RangeReader {
+  return async (start, end) => {
+    try {
+      const handle = await fs.promises.open(file, "r");
+      try {
+        const out = Buffer.alloc(Math.max(0, end - start + 1));
+        const { bytesRead } = await handle.read(out, 0, out.length, start);
+        return out.subarray(0, bytesRead);
+      } finally {
+        await handle.close();
+      }
+    } catch {
+      return null;
     }
   };
 }
@@ -220,12 +240,15 @@ export interface MkvSubtitleIndex {
 /** Read through an index, cached per file; a promise so callers share one read. */
 const indexes = new LruMap<string, Promise<MkvSubtitleIndex | null>>(20);
 
-/** A Matroska file's subtitle tracks and index, or null when it can't be read. */
-export function mkvSubtitleIndex(partKey: string, fileSize: number | null): Promise<MkvSubtitleIndex | null> {
+/** A Matroska file's subtitle tracks and index, or null when it can't be read:
+ *  through Plex, or `range` (fileRanges, for one mounted here). */
+export function mkvSubtitleIndex(
+  partKey: string, fileSize: number | null, range?: RangeReader,
+): Promise<MkvSubtitleIndex | null> {
   const key = `${partKey}|${fileSize ?? ""}`;
   const known = indexes.get(key);
   if (known) return known;
-  const reading = readIndex(plexRanges(partKey)).catch(() => null);
+  const reading = readIndex(range ?? plexRanges(partKey)).catch(() => null);
   indexes.set(key, reading);
   // A failed read is worth trying again later, not remembering.
   void reading.then((index) => { if (!index && indexes.get(key) === reading) indexes.delete(key); });

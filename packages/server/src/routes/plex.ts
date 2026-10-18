@@ -31,9 +31,10 @@ import {
   prefetchEmbeddedSubtitles,
   readEmbeddedSubtitle,
   type EmbeddedSubtitle,
+  type FileSubtitle,
   type ReadOptions,
 } from "../services/embedded-subtitles.js";
-import { indexesLines, mkvSubtitleIndex, mkvSubtitleText, subtitleTrackFor } from "../services/mkv-subtitles.js";
+import { fileRanges, indexesLines, mkvSubtitleIndex, mkvSubtitleText, subtitleTrackFor } from "../services/mkv-subtitles.js";
 import { mapPlexRatings } from "../services/ratings.js";
 import {
   DETAIL_MAX_AGE_MS,
@@ -2891,12 +2892,16 @@ const SUBTITLE_WINDOW_AHEAD_S = 600;
  * its index when it is a Matroska file that has one (fileLines), or by Plex
  * reading from there for a subtitle it converts. An ASS track it copies, and a
  * copy started mid-film holds every line back until the end.
+ *
+ * With PLAYBACK_ENGINE=ffmpeg and the file mounted here, ffmpeg reads it
+ * instead, from anywhere, ASS too (subtitleFile); Plex if that fails.
  */
-function embeddedSubtitle(
+async function embeddedSubtitle(
   ratingKey: string, mediaIndex: number, streamId: string, fingerprint: string | null,
   codec: string | null, at?: number,
 ): Promise<EmbeddedSubtitle> {
   const copied = ["ass", "ssa"].includes((codec ?? "").toLowerCase());
+  const fromFile = await subtitleFile(ratingKey, mediaIndex, Number(streamId));
   return readEmbeddedSubtitle({
     streamId,
     ratingKey,
@@ -2907,8 +2912,27 @@ function embeddedSubtitle(
       return start();
     }),
     fileLines: () => fileLines(ratingKey, mediaIndex, Number(streamId)),
-    readsFromAnywhere: !copied,
+    readsFromAnywhere: !copied || !!fromFile,
+    fromFile,
   }, at);
+}
+
+/**
+ * Where ffmpeg reads a subtitle straight out of its file: PLAYBACK_ENGINE=ffmpeg,
+ * the file mounted here, the subtitle a stream of it Plex has placed. Null
+ * leaves it to Plex.
+ */
+async function subtitleFile(ratingKey: string, mediaIndex: number, streamId: number): Promise<FileSubtitle | null> {
+  if (!ffmpegEngineOn()) return null;
+  try {
+    const source = await ffmpegSource(ratingKey, mediaIndex);
+    const sub = source?.streams.find((s) => s.streamType === 3 && s.id === streamId);
+    if (!source?.file || !sub || sub.key || sub.index == null) return null;
+    const file = localPath(source.file);
+    return readable(file) ? { file, index: sub.index, codec: sub.codec ?? null } : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -2922,9 +2946,12 @@ async function fileLines(
 ): Promise<((from: number, to: number) => Promise<string | null>) | null> {
   const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(`/library/metadata/${ratingKey}`);
   const media = data.MediaContainer.Metadata?.[0]?.Media?.[mediaIndex];
-  const part = media?.Part?.[0];
+  const part = media?.Part?.[0] as (PlexPart & { file?: string }) | undefined;
   if (!part?.key || !(media?.container === "mkv" || /\.mkv$/i.test(part.key))) return null;
-  const index = await mkvSubtitleIndex(part.key, part.size ?? null);
+  // Out of the file itself when it is mounted here (PLAYBACK_ENGINE=ffmpeg).
+  const local = ffmpegEngineOn() && part.file ? localPath(part.file) : null;
+  const range = local && readable(local) ? fileRanges(local) : undefined;
+  const index = await mkvSubtitleIndex(part.key, part.size ?? null, range);
   if (!index) return null;
   const streams = (part.Stream ?? [])
     .filter((s) => s.streamType === 3 && !s.key)
@@ -2937,7 +2964,7 @@ async function fileLines(
     return null;
   }
   const partKey = part.key;
-  return (from, to) => mkvSubtitleText(partKey, index, track, from, to);
+  return (from, to) => mkvSubtitleText(partKey, index, track, from, to, range);
 }
 
 /** Guard against a "subtitle" that is really a video file. Comfortably larger
@@ -3095,13 +3122,15 @@ async function prefetchSubtitles(
   if (ordered.length === 0) return;
 
   const fingerprint = subtitleFingerprint(version);
-  const reads: ReadOptions[] = ordered.map((t) => {
+  const files = await Promise.all(ordered.map((t) => subtitleFile(ratingKey, mediaIndex, t.id)));
+  const reads: ReadOptions[] = ordered.map((t, i) => {
     let before: number | null = null;
     return {
       streamId: String(t.id),
       ratingKey,
       mediaIndex,
       fingerprint,
+      fromFile: files[i],
       withTrackSelected: (start) => withItemLock(ratingKey, async () => {
         before = await currentSubtitleSelection(ratingKey, mediaIndex);
         await selectTracksForStart(ratingKey, mediaIndex, null, t.id);
@@ -4566,8 +4595,8 @@ async function ffmpegSource(ratingKey: string, mediaIndex: number): Promise<Sour
  * Start this session's stream with ffmpeg and return its master playlist: a
  * copy when the file may be copied and ffmpeg can copy it, otherwise a
  * re-encode (plan.ts). Null leaves the stream to Plex: what ffmpeg can't make
- * (Dolby Vision 5 without OpenCL), every encode slot taken, or a run that
- * didn't start.
+ * (Dolby Vision 5 without OpenCL, a text subtitle burned in), every encode
+ * slot taken, or a run that didn't start.
  */
 async function startWithFfmpeg(o: {
   sessionId: string;
@@ -4590,6 +4619,8 @@ async function startWithFfmpeg(o: {
   hevcEncode: boolean;
   /** What the file's picture is, for Stats for nerds. */
   picture: PictureFacts | null;
+  /** The subtitle burned into the picture, if any. */
+  burnSubtitleId?: number | null;
 }): Promise<string | null> {
   const session = o.sessionId.substring(0, 8);
   let source: SourceVersion | null = null;
@@ -4652,7 +4683,7 @@ async function startWithFfmpeg(o: {
     const ask = {
       audioStreamId: o.audioStreamID || null, hevcOk: o.hevcEncode, hardware: ffmpegHardware(),
       kbps: o.transcodeKbps, peakKbps: o.peakKbps, maxWidth, maxHeight, keepHdr: keepHdrOnReencode(),
-      tonemapper: tonemapper(), tonemapAlgo: tonemapAlgo(),
+      tonemapper: tonemapper(), tonemapAlgo: tonemapAlgo(), burn: o.burnSubtitleId ?? null,
     };
     let plan = planEncode(source, ask);
     if (!plan.ok) {
@@ -4691,6 +4722,9 @@ async function startWithFfmpeg(o: {
         : plan.hdr,
       on: plan.hardware, decode: plan.gpuDecode ? "gpu" : "cpu",
       deinterlace: plan.interlaced, filled: plan.color.fill ?? "none",
+      burn: plan.burn
+        ? `${plan.burn.sub.codec} #${plan.burn.sub.index}${plan.burn.sub.language ? ` (${plan.burn.sub.language})` : ""}${plan.burn.stretch ? ", stretched" : ""}`
+        : "none",
       audio: plan.audio ? `${plan.audio.codec} ${plan.audio.channels ?? "?"}ch ${plan.audioCopy ? "copied" : "→ AAC"}` : "none",
       source: fromMount ? "mount" : "plex",
     });
@@ -5260,12 +5294,13 @@ router.get(
       recordHevcWithheld(sessionId, copy && !roomHevc && version?.videoCodec?.toLowerCase() === "hevc");
       const frame = quality && quality <= QUALITY_720P_KBPS ? "1280x720" : transcodeFrame(version ?? {});
       // With PLAYBACK_ENGINE=ffmpeg, the stream is made here, from the file —
-      // copied or re-encoded — and Plex isn't asked for anything. Whatever
-      // ffmpeg can't make yet (burned-in subtitles), or won't
-      // start, is Plex's, exactly as before.
-      if (subtitleMode === "none" && ffmpegEngineOn() && !ffmpegRefused(ratingKey)) {
+      // copied or re-encoded, a picture subtitle burned in — and Plex isn't
+      // asked for anything. Whatever ffmpeg can't make (a text subtitle burned
+      // in, one in a file of its own), or won't start, is Plex's, as before.
+      if (ffmpegEngineOn() && !ffmpegRefused(ratingKey)) {
         const manifest = await startWithFfmpeg({
           sessionId, ratingKey, mediaIndex, offsetS: offset ? Number(offset) : 0, audioStreamID, roomHevc,
+          burnSubtitleId: subtitleMode === "burn" && subtitleId ? subtitleId : null,
           quality, fileKbps: kbps, audioTracks: version?.audioTracks ?? [],
           authToken: req.query.token as string | undefined,
           copy, notCopied, transcodeKbps, peakKbps, frame, hevcEncode: roomHevc && HEVC_TRANSCODE,

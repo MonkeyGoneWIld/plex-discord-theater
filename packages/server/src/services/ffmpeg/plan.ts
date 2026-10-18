@@ -9,6 +9,7 @@
  * HEVC, H.264 High for the rest, on Intel's GPU (QSV) or the CPU; an HEVC
  * re-encode of an HDR file stays HDR. The rest of HDR — for an H.264 player,
  * Dolby Vision 5, FFMPEG_HDR_REENCODE=tonemap — is tone-mapped to H.264 SDR.
+ * A picture subtitle (PGS, VobSub, DVB) is burned into an H.264 SDR picture.
  */
 
 /** A stream of the file, as Plex's /library/metadata describes it. */
@@ -26,6 +27,7 @@ export interface SourceStream {
   default?: boolean;
   /** Present on a sidecar: a file of its own, not a stream of this one. */
   key?: string;
+  language?: string;
   colorTrc?: string;
   colorPrimaries?: string;
   colorSpace?: string;
@@ -325,8 +327,47 @@ export function encodeFrame(
   return [even(displayW * scale), even(height * scale)];
 }
 
+/** Subtitles that are pictures, as Plex and ffprobe name them: burned in, as
+ *  nothing else shows them. */
+const PICTURE_SUBTITLES = new Set(["pgs", "hdmv_pgs_subtitle", "vobsub", "dvd_subtitle", "dvb_subtitle", "dvbsub"]);
+
+/** The subtitle a stream burns in, or why ffmpeg doesn't: a text one (drawn by
+ *  the player, or burned by Plex when it couldn't read it) or a sidecar file. */
+export function pickBurn(
+  src: SourceVersion, subtitleStreamId: number,
+): { ok: true; sub: SourceStream & { index: number } } | { ok: false; why: string } {
+  const sub = src.streams.find((s) => s.streamType === 3 && s.id === subtitleStreamId);
+  if (!sub) return { ok: false, why: `no subtitle ${subtitleStreamId}` };
+  if (sub.key) return { ok: false, why: "a subtitle file beside the film, burned in" };
+  const codec = (sub.codec ?? "").toLowerCase();
+  if (!PICTURE_SUBTITLES.has(codec)) return { ok: false, why: `a ${codec || "text"} subtitle burned in` };
+  if (sub.index == null) return { ok: false, why: "subtitle not placed in the file" };
+  return { ok: true, sub: sub as SourceStream & { index: number } };
+}
+
+/**
+ * The canvas a picture subtitle is drawn on, given to ffmpeg up front
+ * (-canvas_size). A Blu-ray's PGS is drawn on 1920×1080, the film cropped or
+ * not, and a UHD disc's too. ffmpeg only learns that from the first one, which
+ * is minutes in where its look at the file's start doesn't reach, so it draws
+ * on the film's own size until then; a 1920×800 film's subtitles below row 800
+ * then don't fit, and ffmpeg 7+ rebuilds the whole filter graph mid-stream to
+ * the size the first one says — on the CPU, fine (checked on 7.1), but with
+ * the GPU's frames going to its encoder, a new frame pool it was never opened
+ * with. DVB's is 720×576 by its standard. A DVD's comes with the stream, and
+ * a 720p rip's PGS could be either, so those are left to ffmpeg.
+ */
+function subtitleCanvas(sub: SourceStream, width: number): string | null {
+  const codec = (sub.codec ?? "").toLowerCase();
+  if ((codec === "pgs" || codec === "hdmv_pgs_subtitle") && width > 1280) return "1920x1080";
+  if (codec === "dvb_subtitle" || codec === "dvbsub") return "720x576";
+  return null;
+}
+
 export interface EncodeRequest {
   audioStreamId: number | null;
+  /** The picture subtitle burned into the stream (pickBurn), if any. */
+  burn?: number | null;
   /** HEVC out: the player decodes it, and HEVC_TRANSCODE allows it. */
   hevcOk: boolean;
   hardware: Hardware;
@@ -361,6 +402,10 @@ export type EncodePlan =
       /** HDR made SDR on the way: on what, by which curve, and whether Dolby
        *  Vision's metadata is applied (profile 5, 10.0); null when it isn't. */
       tonemap: { via: Tonemapper; algo: string; dovi: boolean } | null;
+      /** The picture subtitle burned in: the file's stream, whether its
+       *  pictures are stretched with the film's (anamorphic) or fitted, and
+       *  the canvas they are drawn on, when ffmpeg can't be left to find it. */
+      burn: { sub: SourceStream & { index: number }; stretch: boolean; canvas: string | null } | null;
       width: number;
       height: number;
       hardware: Hardware;
@@ -383,12 +428,21 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
   const inCodec = (video.codec ?? "").toLowerCase();
   const gpuDecode = req.hardware === "qsv" && req.gpuDecode !== false && GPU_DECODES.has(inCodec) &&
     !(inCodec === "h264" && (video.bitDepth ?? 8) > 8);
-  const hevcOut = req.hevcOk && req.hardware === "qsv";
+  let burn: Extract<EncodePlan, { ok: true }>["burn"] = null;
+  if (req.burn) {
+    const picked = pickBurn(src, req.burn);
+    if (!picked.ok) return no(picked.why);
+    burn = { sub: picked.sub, stretch: !!video.anamorphic, canvas: subtitleCanvas(picked.sub, width) };
+  }
+  // A burned subtitle's picture is drawn in H.264, 8 bits, on the CPU (see
+  // encodeArgs): every player has it, and a subtitle's whites in SDR.
+  const hevcOut = req.hevcOk && req.hardware === "qsv" && !burn;
   const hdr = hdrClass(video);
   const doviOnly = hdr === "DV P5" || hdr === "DV P10.0";
   // HDR stays HDR in HEVC (FFMPEG_HDR_REENCODE=keep); otherwise it is mapped
   // to SDR, in H.264 — Phase 0's tone-mapped chains, all into H.264 — on the
-  // GPU when it decodes the file, else on the CPU.
+  // GPU when it decodes the file, else on the CPU. A subtitle burned onto HDR
+  // would glare at full PQ brightness: that picture is tone-mapped too.
   let tonemap: { via: Tonemapper; algo: string; dovi: boolean } | null = null;
   if (hdr !== "SDR" && (doviOnly || !hevcOut || !req.keepHdr)) {
     const via: Tonemapper = !gpuDecode ? "software" : req.tonemapper === "opencl" ? "opencl" : "vpp";
@@ -411,6 +465,7 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
     hdrTrc: hdr === "SDR" || tonemap ? null
       : String(video.colorTrc ?? "").toLowerCase() === "arib-std-b67" ? "arib-std-b67" : "smpte2084",
     tonemap,
+    burn,
     width: w,
     height: h,
     hardware: req.hardware,
@@ -438,6 +493,16 @@ export const ENCODE_SEGMENT_S = 3;
  * Tone mapping is Phase 0's too, the picture kept in 10 bits up to it:
  * OpenCL mapped from VAAPI and back, QSV's video engine, or tonemapx on the
  * CPU; the output labelled BT.709.
+ *
+ * A burned picture subtitle is drawn on the CPU, as Plex draws it: the film's
+ * picture brought down from the GPU once it is scaled (and tone-mapped), the
+ * subtitle's own pictures (ffmpeg's sub2video, which keeps each one up until
+ * the next, on subtitleCanvas) scaled to the frame — stretched with an
+ * anamorphic film, else fitted inside it and centred, so a 1080p subtitle
+ * over a 1920×800 film is all there — overlaid, and handed back to the GPU's
+ * encoder. Overlay on the
+ * GPU (overlay_qsv) was never tried on the 265K; one 1080p frame each way is
+ * little next to the encode.
  */
 export function encodeArgs(
   plan: Extract<EncodePlan, { ok: true }>,
@@ -455,6 +520,24 @@ export function encodeArgs(
   const curve = tm ? `tonemap=${tm.algo}:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12` : "";
   const gpuIn = `${fill}${plan.interlaced ? "deinterlace_vaapi=rate=frame," : ""}scale_vaapi=w=${W}:h=${H}:format=${tm ? "p010" : fmt}`;
   const cpuIn = `${fill}${deinterlaceCpu}scale=${W}:${H},`;
+  const burn = plan.burn;
+  // With a subtitle burned in: the picture as CPU frames, for the overlay, and
+  // what takes it on from there to the encoder.
+  const toCpu = plan.hardware === "qsv"
+    ? plan.gpuDecode
+      ? tm?.via === "opencl"
+        ? `${gpuIn},hwmap=derive_device=opencl:mode=read,tonemap_opencl=${curve}${tm.dovi ? ":apply_dovi=1" : ""},hwdownload,format=nv12`
+        : tm
+          ? `${gpuIn},hwmap=derive_device=qsv,format=qsv,vpp_qsv=tonemap=1:format=nv12,hwdownload,format=nv12`
+          : `${gpuIn},hwdownload,format=nv12`
+      : tm ? `${cpuIn}format=yuv420p10le,tonemapx=${curve}` : `${cpuIn}format=nv12`
+    : tm ? `${cpuIn}format=yuv420p10le,tonemapx=${curve},format=yuv420p` : `${cpuIn}format=yuv420p`;
+  const fromCpu = plan.hardware === "qsv" ? "hwupload=extra_hw_frames=64,format=qsv" : "format=yuv420p";
+  const subScale = burn?.stretch ? `scale=${W}:${H}` : `scale=${W}:${H}:force_original_aspect_ratio=decrease`;
+  const graph = burn
+    ? `[0:${plan.video.index}]${toCpu}[pic];[0:${burn.sub.index}]${subScale}[sub];` +
+      `[pic][sub]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:eof_action=pass,${fromCpu}[v]`
+    : null;
   const vf = plan.hardware === "qsv"
     ? plan.gpuDecode
       ? tm?.via === "opencl"
@@ -486,10 +569,13 @@ export function encodeArgs(
     ...(plan.gpuDecode ? ["-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi", "-hwaccel_device", "va"] : []),
     ...(offsetS > 0 ? ["-ss", String(offsetS)] : []),
     "-copyts", "-start_at_zero",
+    ...(burn?.canvas ? ["-canvas_size", burn.canvas] : []),
     ...input,
-    "-map", `0:${plan.video.index}`,
+    ...(graph
+      ? ["-filter_complex", graph, "-map", "[v]"]
+      : ["-map", `0:${plan.video.index}`]),
     ...(plan.audio ? ["-map", `0:${plan.audio.index}`] : []),
-    "-vf", vf,
+    ...(graph ? [] : ["-vf", vf]),
     ...encoder,
     ...tags,
     "-aspect", `${W}:${H}`,

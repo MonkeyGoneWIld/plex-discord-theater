@@ -3,6 +3,9 @@
  * player sees them: real ffmpeg, films made for the test, and a fake Plex that
  * records everything it is asked — so a copy can be shown never to ask Plex to
  * transcode anything, and what ffmpeg can't copy yet to go to Plex as before.
+ * Its re-encodes too, a PGS subtitle burned in among them: one written here,
+ * a white box, looked for in the picture where it should and shouldn't be.
+ * And text subtitles read out of the file by ffmpeg rather than by Plex.
  *
  * Skipped where there is no ffmpeg.
  */
@@ -53,6 +56,71 @@ function film(name: string, audio: string[]): string {
 }
 const AAC_FILM = film("aac.mkv", ["-c:a", "aac", "-ac", "2"]);
 const AC3_FILM = film("ac3.mkv", ["-c:a", "ac3", "-ac", "6"]);
+
+/**
+ * A PGS subtitle (.sup) of white boxes: each shown from `from` to `to`
+ * seconds at [x, y, w, h] on a W×H canvas — an epoch-start display set, and
+ * an empty one to clear it, as a Blu-ray's are.
+ */
+function pgs(W: number, H: number, shown: Array<{ from: number; to: number; box: [number, number, number, number] }>): Buffer {
+  const out: Buffer[] = [];
+  const seg = (pts: number, type: number, body: number[]) => {
+    const head = Buffer.alloc(13);
+    head.write("PG", 0, "latin1");
+    head.writeUInt32BE(Math.round(pts * 90_000), 2);
+    head.writeUInt32BE(0, 6);
+    head.writeUInt8(type, 10);
+    head.writeUInt16BE(body.length, 11);
+    out.push(head, Buffer.from(body));
+  };
+  const u16 = (n: number) => [(n >> 8) & 0xff, n & 0xff];
+  shown.forEach(({ from, to, box: [x, y, w, h] }, n) => {
+    const window = [1, 0, ...u16(x), ...u16(y), ...u16(w), ...u16(h)];
+    seg(from, 0x16, [...u16(W), ...u16(H), 0x10, ...u16(n * 2), 0x80, 0, 0, 1, ...u16(0), 0, 0, ...u16(x), ...u16(y)]);
+    seg(from, 0x17, window);
+    seg(from, 0x14, [0, 0, 1, 235, 128, 128, 255]);
+    // Each line: w pixels of colour 1, then the end of the line.
+    const rle: number[] = [];
+    for (let i = 0; i < h; i++) rle.push(0, 0xc0 | ((w >> 8) & 0x3f), w & 0xff, 1, 0, 0);
+    const len = rle.length + 4;
+    seg(from, 0x15, [...u16(0), 0, 0xc0, (len >> 16) & 0xff, (len >> 8) & 0xff, len & 0xff, ...u16(w), ...u16(h), ...rle]);
+    seg(from, 0x80, []);
+    seg(to, 0x16, [...u16(W), ...u16(H), 0x10, ...u16(n * 2 + 1), 0, 0, 0, 0]);
+    seg(to, 0x17, window);
+    seg(to, 0x80, []);
+  });
+  return Buffer.concat(out);
+}
+const BOX: [number, number, number, number] = [220, 280, 200, 40];
+const SUP = path.join(tmp, "boxes.sup");
+fs.writeFileSync(SUP, pgs(640, 360, [{ from: 0.5, to: 5, box: BOX }, { from: 32, to: 40, box: BOX }]));
+const SRT = "1\n00:00:02,000 --> 00:00:04,500\nHello there\n\n2\n00:00:40,000 --> 00:00:42,000\nHalfway\n";
+const ASS = [
+  "[Script Info]", "ScriptType: v4.00+", "PlayResX: 640", "PlayResY: 360", "",
+  "[V4+ Styles]",
+  "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+  "Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,1", "",
+  "[Events]",
+  "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+  "Dialogue: 0,0:00:03.00,0:00:05.00,Default,,0,0,0,,Konnichiwa",
+  "Dialogue: 0,0:00:41.00,0:00:43.00,Default,,0,0,0,,Mata ne", "",
+].join("\n");
+fs.writeFileSync(path.join(tmp, "lines.srt"), SRT);
+fs.writeFileSync(path.join(tmp, "lines.ass"), ASS);
+const TEXT_FILM = path.join(tmp, "text.mkv");
+{
+  const r = spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-y", "-i", AAC_FILM,
+    "-i", path.join(tmp, "lines.srt"), "-i", path.join(tmp, "lines.ass"),
+    "-map", "0", "-map", "1", "-map", "2", "-c", "copy", TEXT_FILM]);
+  if (r.status !== 0) throw new Error(`couldn't make text.mkv: ${r.stderr}`);
+}
+const PGS_FILM = path.join(tmp, "pgs.mkv");
+{
+  // -copyts: ffmpeg would otherwise start the subtitle's clock at its first picture.
+  const r = spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-y", "-copyts", "-i", AAC_FILM, "-i", SUP,
+    "-map", "0", "-map", "1", "-c", "copy", PGS_FILM]);
+  if (r.status !== 0) throw new Error(`couldn't make pgs.mkv: ${r.stderr}`);
+}
 const BROKEN_FILM = path.join(tmp, "broken.mkv");
 fs.writeFileSync(BROKEN_FILM, Buffer.alloc(200_000, 7));
 
@@ -60,7 +128,8 @@ fs.writeFileSync(BROKEN_FILM, Buffer.alloc(200_000, 7));
 
 /** ratingKey → the file, and how Plex describes it. */
 const titles: Record<string, { file: string; plexPath: string; codec: string; width: number; height: number;
-  audio: string; channels: number; hdr?: Record<string, unknown>; slow?: boolean }> = {
+  audio: string; channels: number; hdr?: Record<string, unknown>; slow?: boolean;
+  subs?: Array<Record<string, unknown>> }> = {
   1: { file: AAC_FILM, plexPath: AAC_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2 },
   2: { file: AC3_FILM, plexPath: AC3_FILM, codec: "h264", width: 640, height: 360, audio: "ac3", channels: 6 },
   // HEVC, for a player nobody has said decodes it.
@@ -78,6 +147,13 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
   // than a real one: so a run's pause can be seen before it reaches the end.
   8: { file: AAC_FILM, plexPath: "/nowhere/slow.mkv", codec: "h264", width: 640, height: 360, audio: "aac", channels: 2,
     slow: true },
+  // With the PGS subtitle (stream 21, the file's third) in it.
+  9: { file: PGS_FILM, plexPath: PGS_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2 },
+  // With an SRT and an ASS subtitle in it.
+  10: { file: TEXT_FILM, plexPath: TEXT_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2, subs: [
+    { id: 31, streamType: 3, index: 2, codec: "srt", language: "English", languageCode: "eng" },
+    { id: 32, streamType: 3, index: 3, codec: "ass", language: "Japanese", languageCode: "jpn" },
+  ] },
 };
 
 const asked: string[] = [];
@@ -98,8 +174,12 @@ const plex = http.createServer((req, res) => {
           size: fs.statSync(t.file).size, Stream: [
             { id: 11, streamType: 1, index: 0, codec: t.codec, bitDepth: 8, ...t.hdr },
             { id: 12, streamType: 2, index: 1, codec: t.audio, channels: t.channels, selected: true },
-            // Listed only: a picture subtitle, which can only be burned in.
-            { id: 21, streamType: 3, index: 2, codec: "pgs", language: "English", languageCode: "eng" },
+            // A picture subtitle, which can only be burned in: in film 9, listed
+            // only in the rest. And a text one, listed only.
+            ...(t.subs ?? [
+              { id: 21, streamType: 3, index: 2, codec: "pgs", language: "English", languageCode: "eng" },
+              { id: 22, streamType: 3, index: 3, codec: "srt", language: "French", languageCode: "fra" },
+            ]),
           ] }] }],
     }] });
   }
@@ -398,6 +478,38 @@ console.log("\n— what a re-encode is made of —");
   check("  and handed to the GPU after the CPU's filters", vc1Args.includes(
     "-vf setparams=color_primaries=smpte170m:color_trc=smpte170m:colorspace=smpte170m:range=tv," +
     "bwdif=mode=send_frame,scale=720:480,format=p010le,hwupload=extra_hw_frames=64,format=qsv"), true);
+
+  const subs = (more: Record<string, unknown> = {}) => ({ ...version({ colorTrc: "smpte2084", colorPrimaries: "bt2020", colorSpace: "bt2020nc" }),
+    ...more });
+  const withSubs = (v: ReturnType<typeof version>) => ({ ...v, streams: [...v.streams,
+    { id: 21, streamType: 3, index: 2, codec: "pgs", language: "English" },
+    { id: 22, streamType: 3, index: 3, codec: "srt" },
+    { id: 23, streamType: 3, codec: "pgs", key: "/library/streams/23" }] });
+  const burned = plan(withSubs(subs()), { burn: 21, tonemapper: "opencl" });
+  check("a PGS subtitle on HDR10, for an HEVC player, is burned into tone-mapped H.264",
+    burned.ok && [burned.codec, burned.hdrTrc, burned.tonemap?.via, burned.burn?.sub.index], ["h264", null, "opencl", 2]);
+  const burnArgs = burned.ok ? encodeArgs(burned, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128") : [];
+  const graph = burnArgs[burnArgs.indexOf("-filter_complex") + 1] ?? "";
+  check("  the picture brought down from OpenCL, the subtitle fitted to the frame, overlaid, and back up to QSV", graph,
+    "[0:0]scale_vaapi=w=1920:h=1080:format=p010,hwmap=derive_device=opencl:mode=read," +
+    "tonemap_opencl=tonemap=reinhard:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12,hwdownload,format=nv12[pic];" +
+    "[0:2]scale=1920:1080:force_original_aspect_ratio=decrease[sub];" +
+    "[pic][sub]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:eof_action=pass,hwupload=extra_hw_frames=64,format=qsv[v]");
+  check("  mapped from the graph, with no -vf", [burnArgs.join(" ").includes("-map [v] -map 0:1"), burnArgs.includes("-vf")], [true, false]);
+  check("  on a Blu-ray's canvas, given up front", burnArgs.join(" ").includes("-canvas_size 1920x1080 -i f.mkv"), true);
+  const sdr = plan(withSubs(version({})), { burn: 21 });
+  check("on SDR HEVC, for an HEVC player, H.264 too, from the GPU's scale",
+    sdr.ok && [sdr.codec, sdr.tonemap, encodeArgs(sdr, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ")
+      .includes("[0:0]scale_vaapi=w=1920:h=1080:format=nv12,hwdownload,format=nv12[pic]")], ["h264", null, true]);
+  const dvd = plan(withSubs(version({ codec: "mpeg2video", bitDepth: 8, anamorphic: true, pixelAspectRatio: "32:27" },
+    { width: 720, height: 480 })), { burn: 21, hardware: "software" });
+  const dvdGraph = dvd.ok ? encodeArgs(dvd, ["-i", "f.mkv"], 0, 60, "").join(" ") : "";
+  check("an anamorphic DVD's subtitle is stretched with its picture, on the CPU, on the canvas it comes with",
+    [dvd.ok && dvd.burn?.stretch, dvdGraph.includes("[0:2]scale=854:480[sub]"), dvdGraph.includes(",format=yuv420p[v]"),
+      dvdGraph.includes("-canvas_size")], [true, true, true, false]);
+  check("a text subtitle burned in is Plex's", why(plan(withSubs(version({})), { burn: 22 })), "a srt subtitle burned in");
+  check("so is a picture subtitle in a file of its own",
+    why(plan(withSubs(version({})), { burn: 23 })), "a subtitle file beside the film, burned in");
 }
 
 /** A playlist's entries once it lists `n`: an encode lists them as it goes. */
@@ -458,13 +570,72 @@ for (const [rk, why] of [["7", "Dolby Vision profile 5 without OpenCL"], ["6", "
 }
 {
   asked.length = 0;
-  await master("1", crypto.randomUUID(), "?subtitles=burn&subtitleStreamID=21");
-  check("a stream with a subtitle burned in goes to Plex", transcodeAsked().includes("/video/:/transcode/universal/decision"), true);
+  await master("1", crypto.randomUUID(), "?subtitles=burn&subtitleStreamID=22");
+  check("a stream with a text subtitle burned in goes to Plex", transcodeAsked().includes("/video/:/transcode/universal/decision"), true);
   asked.length = 0;
   process.env.PLAYBACK_ENGINE = "plex";
   await master("1", crypto.randomUUID());
   check("and with PLAYBACK_ENGINE=plex, everything does", transcodeAsked().includes("/video/:/transcode/universal/decision"), true);
   process.env.PLAYBACK_ENGINE = "ffmpeg";
+}
+
+console.log("\n— a PGS subtitle burned in —");
+/** How bright the picture is where the box goes, 0–255, at the first frame of a segment. */
+async function brightness(uri: string) {
+  const file = path.join(tmp, `seg-${crypto.randomUUID()}.ts`);
+  fs.writeFileSync(file, Buffer.from(await (await fetch(origin + uri)).arrayBuffer()));
+  const [x, y, w, h] = BOX;
+  const r = spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-i", file, "-frames:v", "1",
+    "-vf", `crop=${w - 40}:${h - 16}:${x + 20}:${y + 8},format=gray`, "-f", "rawvideo", "pipe:1"]);
+  const px = r.stdout as Buffer;
+  return px.length ? Math.round(px.reduce((a, b) => a + b, 0) / px.length) : -1;
+}
+{
+  asked.length = 0;
+  const id = crypto.randomUUID();
+  const m = await master("9", id, "?subtitles=burn&subtitleStreamID=21");
+  const notes = notesOf(m.text);
+  check("is re-encoded by ffmpeg, saying why", [notes.engine, notes.video, notes.reason],
+    ["ffmpeg", "transcode", "Subtitle burn-in (image-based)"]);
+  check("  and Plex was never asked to transcode", transcodeAsked(), []);
+  const list = await listed(variantOf(m.text), 3);
+  const shown = await brightness(list[1].uri);
+  const gone = await brightness(list[2].uri);
+  check(`  the box is in the picture while it is shown (3 s: ${shown}), and gone once it isn't (6 s: ${gone})`,
+    [shown > 200, gone >= 0 && gone < 200], [true, true]);
+  await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
+}
+{
+  const id = crypto.randomUUID();
+  const m = await master("9", id, "?subtitles=burn&subtitleStreamID=21&offset=31");
+  const list = await listed(variantOf(m.text), 2);
+  const before = await brightness(list[0].uri);
+  const after = await brightness(list[1].uri);
+  check(`  after a seek to 31 s, on time: not yet at 31 s (${before}), there at 34 s (${after})`,
+    [before >= 0 && before < 200, after > 200], [true, true]);
+  await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
+}
+
+console.log("\n— text subtitles read by ffmpeg, out of the file —");
+{
+  asked.length = 0;
+  type Answer = { cues?: Array<{ start: number; end: number; text: string }>; complete?: boolean };
+  const read = async (id: number) => {
+    let a: Answer = {};
+    for (let i = 0; i < 40 && !a.complete; i++) {
+      if (i) await sleep(250);
+      a = await (await fetch(`${origin}/api/plex/subtitles/${id}?ratingKey=10&mediaIndex=0`)).json() as Answer;
+    }
+    return a;
+  };
+  const srt = await read(31);
+  check("an SRT track is read whole", [srt.complete, srt.cues?.map((c) => [c.start, c.end, c.text])],
+    [true, [[2, 4.5, "Hello there"], [40, 42, "Halfway"]]]);
+  const ass = await read(32);
+  check("so is an ASS one", [ass.complete, ass.cues?.map((c) => [c.start, c.end, c.text])],
+    [true, [[3, 5, "Konnichiwa"], [41, 43, "Mata ne"]]]);
+  check("with nothing asked of Plex's subtitle reader, nor a track selected on the item",
+    asked.filter((p) => p.startsWith("/subtitles") || /^\/library\/parts\/\d+$/.test(p)), []);
 }
 
 console.log("\n— stopping —");

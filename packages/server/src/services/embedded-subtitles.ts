@@ -47,6 +47,7 @@
  */
 
 import Database from "better-sqlite3";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -55,6 +56,7 @@ import { plexFetch, plexUrl } from "./plex.js";
 import { parseSubtitles, parseTimestamp, SUBTITLE_PARSER_VERSION, type Cue } from "./subtitles.js";
 import { logEvent } from "./logger.js";
 import { LruMap } from "./lru.js";
+import { ffmpegPath } from "./ffmpeg/config.js";
 
 /**
  * How long an ask waits for a read to finish before answering with the lines
@@ -285,6 +287,20 @@ export interface ReadOptions {
    * back until the end of the file.
    */
   readsFromAnywhere?: boolean;
+  /**
+   * The subtitle in the file mounted here, for ffmpeg to read it out of
+   * (PLAYBACK_ENGINE=ffmpeg): no track selected on the item and no lock held,
+   * and from anywhere, an ASS track too. Plex reads it without one, or when
+   * ffmpeg fails before a line has come.
+   */
+  fromFile?: FileSubtitle | null;
+}
+
+/** A subtitle stream in a file mounted here: its path and ffmpeg's -map index. */
+export interface FileSubtitle {
+  file: string;
+  index: number;
+  codec: string | null;
 }
 
 /**
@@ -475,11 +491,12 @@ async function plexWindow(r: Reading, opts: ReadOptions, w: Window): Promise<voi
   const startedAt = Date.now();
   let firstMs: number | null = null;
   const details = { ratingKey: r.ratingKey, streamId: r.streamId, from: Math.round(w.from) };
-  const result = await plexRead(opts, w.from, {
+  const who = opts.fromFile ? "ffmpeg" : "Plex";
+  const result = await readSubtitle(opts, w.from, {
     lines: (cues, upTo) => {
       if (firstMs === null && cues.length > 0) {
         firstMs = Date.now() - startedAt;
-        logEvent("Subtitles", "Plex is reading a subtitle from where someone is", { ...details, firstLineMs: firstMs });
+        logEvent("Subtitles", `${who} is reading a subtitle from where someone is`, { ...details, firstLineMs: firstMs });
       }
       w.cues.push(...cues);
       w.to = Math.max(w.to, upTo);
@@ -488,7 +505,7 @@ async function plexWindow(r: Reading, opts: ReadOptions, w: Window): Promise<voi
     started: (stop) => { w.stop = stop; },
     stopped: () => !w.open || reading.get(r.streamId) !== r || w.to >= w.until || r.frontier >= w.to + AROUND_BEFORE_S,
   });
-  logEvent("Subtitles", "Plex read from where someone is", {
+  logEvent("Subtitles", `${who} read from where someone is`, {
     ...details, to: Math.round(w.to), cues: w.cues.length, firstLineMs: firstMs, ms: Date.now() - startedAt,
     ...(result.failure ? { failed: result.failure.why } : {}),
   });
@@ -803,6 +820,132 @@ interface ReadResult {
 }
 
 /**
+ * One read of the subtitle from `offset` seconds on: by ffmpeg out of the file
+ * when it is mounted here (opts.fromFile), else by Plex — and by Plex too when
+ * ffmpeg fails before a line has come.
+ */
+async function readSubtitle(
+  opts: ReadOptions, offset: number, sink: Sink, announce?: Record<string, unknown>,
+): Promise<ReadResult> {
+  if (opts.fromFile) {
+    let handed = false;
+    const result = await ffmpegRead(opts.fromFile, offset, {
+      ...sink,
+      lines: (cues, upTo) => {
+        handed ||= cues.length > 0;
+        sink.lines(cues, upTo);
+      },
+    }, announce);
+    if (!result.failure || handed) return result;
+    logEvent("Subtitles", "ffmpeg couldn't read a subtitle out of the file; Plex reads it", {
+      ...announce, from: Math.round(offset), why: result.failure.why, ...result.failure.extra,
+    });
+  }
+  return plexRead(opts, offset, sink, announce);
+}
+
+/** Lines as they come, handed to `sink` whole, and made into cues at most
+ *  every PARSE_EVERY_MS. */
+function lineFeed(sink: Sink, offset: number): { push(chunk: Uint8Array): void; end(): void } {
+  const lines = new Lines();
+  let parsedAt = 0;
+  const hand = (final: boolean) => {
+    if (!final && Date.now() - parsedAt < PARSE_EVERY_MS) return;
+    parsedAt = Date.now();
+    const cut = lines.take();
+    if (cut.length === 0 || lines.header === null) return;
+    let upTo = -Infinity;
+    for (const line of cut) upTo = Math.max(upTo, startOf(line) ?? -Infinity);
+    const parsed = parseSubtitles(lines.header + cut.join(lines.kind === "ass" ? "\n" : "\n\n") + "\n");
+    sink.lines(parsed?.cues ?? [], Number.isFinite(upTo) ? upTo : offset);
+  };
+  return {
+    push: (chunk) => { lines.push(chunk); hand(false); },
+    end: () => { lines.end(); hand(true); },
+  };
+}
+
+/**
+ * One read of the subtitle by ffmpeg, out of the file, from `offset` seconds
+ * on: ASS as it is, everything else as SRT, on the film's own clock (-copyts,
+ * as the engine's streams are). Stopped however it ends.
+ */
+async function ffmpegRead(
+  sub: FileSubtitle, offset: number, sink: Sink, announce?: Record<string, unknown>,
+): Promise<ReadResult> {
+  const startedAt = Date.now();
+  const ass = ["ass", "ssa"].includes((sub.codec ?? "").toLowerCase());
+  const args = [
+    "-hide_banner", "-nostdin", "-loglevel", "error",
+    ...(offset > 0 ? ["-ss", String(offset)] : []),
+    "-copyts", "-start_at_zero",
+    "-protocol_whitelist", "file", "-i", sub.file,
+    "-map", `0:${sub.index}`, "-c:s", ass ? "copy" : "srt", "-f", ass ? "ass" : "srt", "pipe:1",
+  ];
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  let firstByteMs: number | null = null;
+  let stopped = false;
+  const stderr: string[] = [];
+  const result = (failure: ReadResult["failure"]): ReadResult =>
+    ({ raw: Buffer.concat(chunks), failure, stopped, firstByteMs });
+
+  let proc: ReturnType<typeof spawn>;
+  try {
+    proc = spawn(ffmpegPath(), args, { stdio: ["ignore", "pipe", "pipe"] });
+  } catch (err) {
+    return result({ why: `couldn't start ffmpeg: ${err instanceof Error ? err.message : String(err)}` });
+  }
+  const stop = () => {
+    stopped = true;
+    try { proc.kill("SIGKILL"); } catch { /* gone */ }
+  };
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; stop(); }, READ_TIMEOUT_MS);
+  const check = setInterval(() => { if (sink.stopped?.()) stop(); }, STOP_CHECK_MS);
+  sink.started?.(stop);
+  if (announce) {
+    logEvent("Subtitles", "ffmpeg is reading an embedded subtitle out of the file", {
+      ...announce, from: Math.round(offset), codec: sub.codec, stream: sub.index,
+    });
+  }
+  const feed = lineFeed(sink, offset);
+  let tooBig = false;
+  proc.stderr?.on("data", (d: Buffer) => {
+    for (const line of d.toString().split("\n")) if (line.trim()) stderr.push(line.trim().slice(0, 200));
+    if (stderr.length > 10) stderr.splice(0, stderr.length - 10);
+  });
+  try {
+    const code = await new Promise<number | null>((resolve, reject) => {
+      proc.stdout?.on("data", (value: Buffer) => {
+        if (stopped || tooBig) return;
+        if (sink.stopped?.()) return stop();
+        if (firstByteMs === null) firstByteMs = Date.now() - startedAt;
+        chunks.push(value);
+        bytes += value.length;
+        if (bytes > MAX_BYTES) {
+          tooBig = true;
+          return stop();
+        }
+        feed.push(value);
+      });
+      proc.on("error", reject);
+      proc.on("close", (c) => resolve(c));
+    });
+    if (tooBig) return result({ why: "too large to be a subtitle", extra: { bytes } });
+    if (stopped) return result(timedOut ? { why: `timed out after ${READ_TIMEOUT_MS / 60_000} min` } : null);
+    if (code !== 0) return result({ why: `ffmpeg exited ${code}`, extra: { stderr: stderr.slice(-3).join(" | ") || "none" } });
+    feed.end();
+    return result(null);
+  } catch (err) {
+    return result({ why: `ffmpeg: ${err instanceof Error ? err.message : String(err)}` });
+  } finally {
+    clearTimeout(timer);
+    clearInterval(check);
+  }
+}
+
+/**
  * One read of the subtitle from Plex, from `offset` seconds on, its lines
  * handed to `sink` as they come — whole, and made into cues at most every
  * PARSE_EVERY_MS. Stopped on Plex however it ends.
@@ -872,18 +1015,7 @@ async function plexRead(
       });
     }
 
-    const lines = new Lines();
-    let parsedAt = 0;
-    const hand = (final: boolean) => {
-      if (!final && Date.now() - parsedAt < PARSE_EVERY_MS) return;
-      parsedAt = Date.now();
-      const cut = lines.take();
-      if (cut.length === 0 || lines.header === null) return;
-      let upTo = -Infinity;
-      for (const line of cut) upTo = Math.max(upTo, startOf(line) ?? -Infinity);
-      const parsed = parseSubtitles(lines.header + cut.join(lines.kind === "ass" ? "\n" : "\n\n") + "\n");
-      sink.lines(parsed?.cues ?? [], Number.isFinite(upTo) ? upTo : offset);
-    };
+    const feed = lineFeed(sink, offset);
     const reader = res.body.getReader();
     for (;;) {
       if (sink.stopped?.()) {
@@ -904,13 +1036,9 @@ async function plexRead(
       chunks.push(value);
       bytes += value.length;
       if (bytes > MAX_BYTES) return result({ why: "too large to be a subtitle", extra: { ...answer, bytes } });
-      lines.push(value);
-      hand(false);
+      feed.push(value);
     }
-    if (!stopped) {
-      lines.end();
-      hand(true);
-    }
+    if (!stopped) feed.end();
     return result(null);
   } catch (err) {
     if (stopped) return result(null);
@@ -938,7 +1066,7 @@ async function run(r: Reading, opts: ReadOptions): Promise<void> {
     });
   };
 
-  const result = await plexRead(opts, 0, {
+  const result = await readSubtitle(opts, 0, {
     lines: (cues, upTo) => {
       if (firstLineMs === null && cues.length > 0) firstLineMs = Date.now() - startedAt;
       const last = r.cues.at(-1);
@@ -957,7 +1085,7 @@ async function run(r: Reading, opts: ReadOptions): Promise<void> {
   const raw = result.raw;
   const parsed = parseSubtitles(decodeSubtitle(raw));
   if (!parsed || parsed.cues.length === 0) {
-    fail(raw.length === 0 ? "Plex sent nothing" : "not a subtitle Plex sent", {
+    fail(raw.length === 0 ? "nothing came" : "not a subtitle that came", {
       bytes: raw.length,
       start: JSON.stringify(decodeSubtitle(raw.subarray(0, 120))),
     });
@@ -974,7 +1102,7 @@ async function run(r: Reading, opts: ReadOptions): Promise<void> {
     console.warn("[Subtitles] couldn't keep a read-out subtitle:", err);
   }
   logEvent("Subtitles", "read an embedded subtitle out of the file", {
-    ...details, format: parsed.format, cues: parsed.cues.length, bytes: raw.length,
+    ...details, by: opts.fromFile ? "ffmpeg" : "plex", format: parsed.format, cues: parsed.cues.length, bytes: raw.length,
     firstByteMs: result.firstByteMs, firstLineMs, ms: Date.now() - startedAt,
   });
 }

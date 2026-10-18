@@ -35,6 +35,12 @@
 // &cache=none for it to keep none of them (no-store), as a browser that has
 // let them go has none.
 //
+// &hevc=1 has the room take every stream for HEVC, as a copy of an HEVC film
+// is — the media is the same H.264, which nobody but the sync server looks
+// at — and a stream asked for by a player told it can't play HEVC
+//   POST /api/test/nohevc?user=u-host
+// for one re-encoded to H.264 for want of it, as the bot's are.
+//
 // &previews=1 gives the title preview frames, as Plex has them for most
 // films: /api/plex/preview/<part>/index sends them a pass at a time as the
 // bot does, each after &previewDelayMs= (Plex reading the file out), and
@@ -50,6 +56,7 @@ const { attachWebSocketServer } = await import("../../server/src/services/sync.j
 const { createSession, getSessionUserId } = await import("../../server/src/middleware/auth.js");
 const { instanceHosts } = await import("../../server/src/routes/discord.js");
 const { progressivePreview } = await import("../../server/src/services/preview-stream.js");
+const { recordSessionVideoCodec, recordHevcWithheld } = await import("../../server/src/routes/plex.js");
 
 const PORT = 3000;
 const SMALL_STREAM = path.join(os.tmpdir(), "plex-theater-media-errors");
@@ -118,6 +125,11 @@ let eventS = 40;
 let manifestMs = 0;
 /** Where each session was asked to start: its owner says, everyone else joins it. */
 const sessionStart = new Map<string, number>();
+/** Whether streams are HEVC, and who can't play it — see &hevc=1. */
+let hevcOn = false;
+const noHevc = new Set<string>();
+/** The sessions whose codec has been said, by whoever asked for each first. */
+const codecSaid = new Set<string>();
 /**
  * &notes=1: the stream's master playlist carries the notes the bot writes
  * into one (routes/plex.ts streamNotes) — the original video, its EAC3 5.1
@@ -286,6 +298,9 @@ const server = http.createServer(async (req, res) => {
     eventS = Number(url.searchParams.get("eventS") ?? 40) || 40;
     manifestMs = Number(url.searchParams.get("manifestMs") ?? 0) || 0;
     sessionStart.clear();
+    hevcOn = url.searchParams.get("hevc") === "1";
+    noHevc.clear();
+    codecSaid.clear();
     p2pOn = url.searchParams.get("p2p") !== "0";
     const stream = url.searchParams.get("stream");
     streamDir = stream === "copy" ? COPY_STREAM : stream === "copy4" ? COPY4_STREAM : stream === "copy4long" ? COPY4_LONG_STREAM : SMALL_STREAM;
@@ -295,6 +310,10 @@ const server = http.createServer(async (req, res) => {
     subtitleReads.clear();
     subtitleReadPace = Number(url.searchParams.get("subPace") ?? 3) || 3;
     return json(res, { ok: true, p2p: p2pOn, stream: path.basename(streamDir), parts: partsOn });
+  }
+  if (p === "/api/test/nohevc") {
+    noHevc.add(url.searchParams.get("user") ?? "u-host");
+    return json(res, { ok: true });
   }
   if (p === "/api/test/served") return json(res, served);
   if (p === "/api/test/previews") return json(res, previewsSent);
@@ -338,6 +357,15 @@ const server = http.createServer(async (req, res) => {
     return subtitleRead(res, id, url);
   }
 
+  if (/^\/api\/plex\/hls\/[^/]+\/[^/]+\/master\.m3u8$/.test(p) && hevcOn) {
+    const sid = p.split("/")[5];
+    if (!codecSaid.has(sid)) {
+      codecSaid.add(sid);
+      const withheld = noHevc.has(user ?? "");
+      recordSessionVideoCodec(sid, withheld ? "h264" : "hevc");
+      recordHevcWithheld(sid, withheld);
+    }
+  }
   if (/^\/api\/plex\/hls\/[^/]+\/[^/]+\/master\.m3u8$/.test(p) && notesOn && !url.searchParams.has("media")) {
     const notes: Record<string, string> = {
       video: "copy", kbps: "8000", audio: "transcode", audioFrom: "EAC3 5.1", audioTo: "AAC 5.1", audioKbps: "384",

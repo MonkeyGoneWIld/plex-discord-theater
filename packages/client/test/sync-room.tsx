@@ -518,6 +518,69 @@ function Runner() {
   }
 
   /**
+   * The host back from a pop-out in a browser that can't play the room's
+   * stream — HEVC, which the viewer plays — and put on a stream of its own,
+   * from where the room is. On 18 October monkey26, back in Firefox, had the
+   * room wait for that stream's picture, and blah0391 stopped with a minute
+   * and a half in hand. It catches up with the room as one back on the
+   * room's own stream does, and the room plays on without it until then.
+   */
+  async function runHostBackOwnStream() {
+    setRunning(true);
+    const out: string[] = ["— the host back from a pop-out where it can't play the room's stream —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    const hostWin = () => hostFrame.current?.contentWindow as (Window & typeof globalThis) | null | undefined;
+    const after = (user: string, t: number, msg: RegExp) => (events.get(user) ?? []).filter((e) => e.t >= t && msg.test(e.msg));
+    try {
+      await startOnce("p2p=0&stream=copy4&event=1&eventS=200&hevc=1", {}, 40_000);
+      await pause(15_000);
+      await api("/api/test/nohevc?user=u-host");
+      const poppedAt = Date.now();
+      const win = hostWin();
+      win?.localStorage.setItem("pdt:hevc-failed", "1");
+      win?.sessionStorage.setItem("pdt:test:poppedOut", "1");
+      win?.location.reload();
+      say(`… the host reloaded at ${latest.get("u-host")?.pos.toFixed(1)}s, where it can't play HEVC`);
+      let viewerStoppedMs = 0;
+      let inStepAt = 0;
+      let last = Date.now();
+      while (Date.now() - poppedAt < 40_000) {
+        await pause(200);
+        const now = Date.now();
+        const h = latest.get("u-host");
+        const v = latest.get("u-viewer");
+        if (v && (v.paused || v.ready < 3)) viewerStoppedMs += now - last;
+        last = now;
+        const reloaded = after("u-host", poppedAt, /^starting session$/).length > 0;
+        if (!inStepAt && reloaded && h && v && !h.paused && h.ready >= 3 && Math.abs(h.pos - v.pos) < 1) inStepAt = now;
+      }
+      const own = after("u-host", poppedAt, /^starting a stream for these tracks$/).map((e) => String(e.data.variant));
+      const said = after("u-host", poppedAt, /taking over a room|caught up with the room|catching up|driving it from|picture not ready/).map((e) => e.msg);
+      say(`    ${said.join(" → ") || "—"}`);
+      say(`${own.length > 0 ? "PASS" : "FAIL"} the host is back on a stream of its own (${own.join(", ") || "the room's"})`);
+      say(`${viewerStoppedMs < 1500 ? "PASS" : "FAIL"} the viewer played on (stopped ${(viewerStoppedMs / 1000).toFixed(1)}s in all)`);
+      const held = after("u-viewer", poppedAt, /^holding for the room$/);
+      say(`${held.length === 0 ? "PASS" : "FAIL"} and never held for the host's new stream (${held.length})`);
+      say(`${inStepAt && inStepAt - poppedAt < 20_000 ? "PASS" : "FAIL"} the host was back, playing in step, ${inStepAt ? `${((inStepAt - poppedAt) / 1000).toFixed(1)}s after it reloaded` : "never"}`);
+      say(`${said.some((m) => /caught up with the room, driving it from here/.test(m)) ? "PASS" : "FAIL"} the host drives the room again once in step`);
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      say(`${Math.abs(h.pos - v.pos) < 1 && !h.paused && !v.paused ? "PASS" : "FAIL"} and they play on together (${(h.pos - v.pos).toFixed(2)}s apart)`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      try {
+        hostWin()?.sessionStorage.removeItem("pdt:test:poppedOut");
+        hostWin()?.localStorage.removeItem("pdt:hevc-failed");
+      } catch { /* gone */ }
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
    * The host handing the room to a viewer who has only just joined, as
    * blah0391 handed monkey26 the room on 16 October. Its picture wasn't moving
    * yet — still loading, and waiting a little past the room for it — so it was
@@ -2068,6 +2131,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runPopOutCache("viewer")}>Viewer pops out, from the cache</button>
         <button disabled={running} onClick={() => void runPopOutCache("viewer", true)}>Viewer pops out, browser's cache let go</button>
         <button disabled={running} onClick={() => void runPopOutOwnTracks()}>Viewer pops out, own tracks</button>
+        <button disabled={running} onClick={() => void runHostBackOwnStream()}>Host back where it can't play the room's stream</button>
         <button disabled={running} onClick={() => void runJoinWhileAhead()}>Join while ahead</button>
         <button disabled={running} onClick={() => void runNextTitle()}>Next title, together</button>
         <button disabled={running} onClick={() => void runJoinerStalls()}>Joiner stalls</button>

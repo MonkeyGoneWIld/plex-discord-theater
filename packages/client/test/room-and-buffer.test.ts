@@ -13,13 +13,15 @@
  *   ends too soon after the start point to start on (lib/copyStart).
  * - A follower going past the room doesn't land on the last sliver of a
  *   segment (lib/roomWait landingFor).
+ * - A seek in front of a stream's first picture goes to it, and one waiting
+ *   for its segment waits (lib/copyStart pictureAfterSeek).
  */
 import { LAND_INTO_SEGMENT_S, MAX_WAIT_FOR_ROOM_S, cameFromCache, catchUpLeadS, landingBySize, landingFor, recentSegmentBytesPerS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS } from "../src/lib/bufferTrim";
 import { roomPositionNow } from "../src/hooks/useSync";
-import { enoughToStart, nextSegmentInS, pictureStartFor } from "../src/lib/copyStart";
+import { enoughToStart, nextSegmentInS, pictureAfterSeek, pictureStartFor } from "../src/lib/copyStart";
 import { AFTER_STOPS_S, MAX_EXTRA_WAIT_S, MAX_READY_CUSHION_AFTER_STOPS_S, MAX_READY_CUSHION_S, afterStopsS, comingInBytesPerS, lateByS, readiness } from "../src/lib/readyCushion";
 
 let pass = 0;
@@ -305,6 +307,25 @@ console.log("\n— picture enough in hand to go —");
   check("over everything, with too little in the last ten seconds",
     comingInBytesPerS([[0, 0, 0], [5_000, 10 * MB, 4_000], [20_000, 11 * MB, 4_500], [25_000, 12 * MB, 5_000]], 25_000), 2.4 * MB);
   check("nothing to go by yet", [comingInBytesPerS([], 0), comingInBytesPerS([[0, 0, 0], [500, 1 * MB, 400]], 500)], [null, null]);
+}
+
+console.log("\n— a seek in front of a stream's first picture —");
+{
+  // monkey26 on 18 October: the copy's first segment from its keyframe at
+  // 5913.95, its sound — and so its picture — from 5914.98; gaps before it,
+  // as the bot lists a copy.
+  const copy = [{ start: 0, duration: 5913.95, gap: true }, { start: 5913.95, duration: 4.05 }, { start: 5918, duration: 4 }];
+  check("goes to where the picture starts", pictureAfterSeek(5914.9, [[5914.98, 6035]], copy, 10), 5914.98);
+  check("in the buffer, it finishes on its own", pictureAfterSeek(5915.2, [[5914.98, 6035]], copy, 10), null);
+  check("its segment not in yet, it waits for it", pictureAfterSeek(5914.9, [[5918, 6035]], copy, 10), null);
+  check("past an earlier range too", pictureAfterSeek(5914.9, [[5800, 5850], [5914.98, 6035]], copy, 10), 5914.98);
+  check("nothing buffered, nothing to go to", pictureAfterSeek(5914.9, [], copy, 10), null);
+  check("in a later segment whose start the browser let go of, it waits for it again",
+    pictureAfterSeek(5919, [[5920.5, 6035]], copy, 10), null);
+  check("before the stream starts, nothing", pictureAfterSeek(5900, [[5914.98, 6035]], copy, 10), null);
+  check("further on than a hole is ever jumped, it waits",
+    pictureAfterSeek(100, [[111, 130]], [{ start: 98, duration: 20 }], 10), null);
+  check("without the playlist, nothing", pictureAfterSeek(10, [[10.5, 20]], null, 10), null);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

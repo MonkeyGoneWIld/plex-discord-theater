@@ -37,12 +37,12 @@ import { carryTrackPrefs, describeWatched, endTrackSitting, isCommentary, mergeT
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
-import { LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, cameFromCache, catchUpLeadS, landingBySize, landingFor, recentSegmentBytesPerS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
+import { LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, cameFromCache, catchUpLeadS, landingBySize, landingFor, recentSegmentBytesPerS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, nextSegmentInS, pictureStartFor } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
-import { arrivingKbps, backfillLeftS, backfillTitle, catchingUpTitle, loadingTitle } from "../lib/loadingMessage";
+import { arrivingKbps, backfillShare, backfillTitle, catchingUpTitle, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
 import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, inBrowserCache, installSegmentParts, keepLater, partsFor, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
@@ -1941,10 +1941,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    */
   const roomWaitRef = useRef<{ atS: number; roomAtS: number; since: number } | null>(null);
   const [waitingForRoom, setWaitingForRoom] = useState(false);
-  /** The backfill under way, for the loading screen's countdown — see the
-   *  backfill effect: seconds of film to fetch, seconds of it in, when it
-   *  started and when the last segment came. */
-  const backfillRef = useRef<{ totalS: number; doneS: number; startedAt: number; lastAt: number } | null>(null);
+  /** The backfill under way, for the loading screen — see the backfill
+   *  effect: the stretch it fetches, `fromS` to `toS`; `reachedS`, how far
+   *  back what is in goes; `partS`, the film in hand of the segment coming. */
+  const backfillRef = useRef<{ fromS: number; toS: number; reachedS: number; partS: number } | null>(null);
   const [backfilling, setBackfilling] = useState(false);
   /**
    * Where a follower was when its stream was torn down, if that was ahead of
@@ -3333,10 +3333,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       const leftS = wait && sync?.playing && sync.ratingKey && !sync.hostWaiting && !isHostRef.current
         ? wait.atS - roomPositionNow(sync)
         : null;
-      // Paused, fetching what it jumped over: how long until it goes back to
-      // the room's place.
+      // Paused, fetching what it jumped over: how much of it is in.
       const fill = !sync?.playing && !isHostRef.current ? backfillRef.current : null;
-      setLoadingText(fill ? backfillTitle(backfillLeftS(fill, Date.now()))
+      setLoadingText(fill ? backfillTitle(backfillShare(fill))
         : leftS !== null && leftS > 0 ? catchingUpTitle(leftS) : loadingTitle(pictureShownRef.current));
     }, 250);
     return () => window.clearInterval(id);
@@ -6861,19 +6860,22 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * The room paused while this player waits ahead of it: the wait holds — the
    * room may be back in two seconds, and pulling this player back then would
    * starve it again — but the downloading turns round. Loading ahead stops,
-   * and the stretch it jumped over, from the room's place to its own, is
-   * fetched backwards — the segment just behind it first, then the one behind
-   * that — and kept (lib/segmentKeep), so every one that comes in is time
-   * won back. With all of it in, it goes back to the room's place, which
-   * plays from what was kept, and starts with everyone. A resume before then
-   * calls it off and it waits ahead as before, loading ahead again; what came
-   * in stays kept. (17 Oct: a viewer sat ahead through the host's whole
-   * pause; the first answer, going straight back on a pause, starved it the
-   * moment the host played again.)
+   * and the stretch it jumped over, up to its own place, is fetched backwards
+   * — the segment just behind it first, then the one behind that — and kept
+   * (lib/segmentKeep), so every one that comes in is time won back. The
+   * loading screen says how much of it is in. With all of it in, it goes back
+   * to the room's place, which plays from what was kept, and starts with
+   * everyone. A resume before then calls it off, and it waits from where what
+   * came in begins rather than where it was: three quarters in, the room is a
+   * quarter of the way from it, not all of it (18 Oct). (17 Oct: a viewer sat
+   * ahead through the host's whole pause; the first answer, going straight
+   * back on a pause, starved it the moment the host played again.)
    *
-   * Only a stretch the playlist has: a stream of this player's own that began
-   * where it landed (its own quality, a twin) lists nothing behind there, and
-   * waits as before.
+   * Only what it jumped over: seconds it has shown itself, waiting ahead
+   * after the host's picture froze, aren't fetched or gone back to — nobody is
+   * shown the same seconds twice. And only a stretch the playlist has: a
+   * stream of this player's own that began where it landed (its own quality,
+   * a twin) lists nothing behind there, and waits as before.
    */
   useEffect(() => {
     if (!waitingForRoom || !syncState || syncState.playing || !syncState.ratingKey || isHostRef.current) return;
@@ -6884,11 +6886,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const frags = level?.details?.fragments;
     if (!hls || !video || !wait || !frags?.length) return;
     const roomS = roomPositionNow(syncState);
-    const stretch = frags.filter((f) => f.start + f.duration > roomS && f.start < wait.atS);
-    const listed = stretch.length > 0 && stretch[0].start <= roomS + 0.5 && stretch.every((f) => !f.gap);
+    let fromS = roomS;
+    for (let i = 0; i < video.played.length; i++) {
+      if (video.played.start(i) < wait.atS) fromS = Math.max(fromS, Math.min(video.played.end(i), wait.atS));
+    }
+    const stretch = frags.filter((f) => f.start + f.duration > fromS && f.start < wait.atS);
+    const listed = wait.atS - fromS > 0.5 && stretch.length > 0 && stretch[0].start <= fromS + 0.5 &&
+      stretch.every((f) => !f.gap);
     if (!listed) {
-      logEvent("Sync", "room paused while waiting ahead: nothing behind to fetch, waiting on", {
-        roomPosS: Number(roomS.toFixed(2)), atS: Number(wait.atS.toFixed(2)),
+      logEvent("Sync", "room paused while waiting ahead: nothing jumped over to fetch, waiting on", {
+        roomPosS: Number(roomS.toFixed(2)), fromS: Number(fromS.toFixed(2)), atS: Number(wait.atS.toFixed(2)),
       });
       return;
     }
@@ -6898,20 +6905,20 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       }
       return false;
     };
-    const behind = stretch.filter((f) => !held(f.start + Math.min(0.1, f.duration / 2))).reverse();
     const stop = new AbortController();
+    const seekSeq = syncState.seekSeq;
     let loadingAgain = false;
     const loadAgain = (atS: number) => {
       if (loadingAgain || hlsRef.current !== hls) return;
       loadingAgain = true;
       hls.startLoad(atS);
     };
+    const order = stretch.slice().reverse();
     logEvent("Sync", "room paused while waiting ahead: fetching what was jumped over, backwards", {
-      roomPosS: Number(roomS.toFixed(2)), atS: Number(wait.atS.toFixed(2)), segments: behind.length,
+      roomPosS: Number(roomS.toFixed(2)), fromS: Number(fromS.toFixed(2)), atS: Number(wait.atS.toFixed(2)),
+      segments: order.filter((f) => !held(f.start + Math.min(0.1, f.duration / 2))).length,
     });
-    const fill = {
-      totalS: behind.reduce((n, f) => n + f.duration, 0), doneS: 0, startedAt: Date.now(), lastAt: Date.now(),
-    };
+    const fill = { fromS, toS: wait.atS, reachedS: wait.atS, partS: 0 };
     backfillRef.current = fill;
     setBackfilling(true);
     const endFill = () => {
@@ -6924,34 +6931,56 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       const token = getSessionToken();
       const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
       const startedAt = Date.now();
-      for (const f of behind) {
-        try {
-          const request = keepLater(new Request(f.url, { headers, signal: stop.signal }));
-          const bytes = segmentBytesOf(f.url);
-          const response = await fetch(bytes ? fetchInPartsLater(request, f.url, bytes) : request);
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          await response.arrayBuffer();
-        } catch (err) {
+      for (const f of order) {
+        if (!held(f.start + Math.min(0.1, f.duration / 2))) {
+          try {
+            const request = keepLater(new Request(f.url, { headers, signal: stop.signal }));
+            const bytes = segmentBytesOf(f.url);
+            const response = await fetch(bytes ? fetchInPartsLater(request, f.url, bytes) : request);
+            if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+            // Read as it comes, for the loading screen's share.
+            const size = bytes ?? (Number(response.headers.get("Content-Length")) || 0);
+            const reader = response.body.getReader();
+            let got = 0;
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              got += value.byteLength;
+              if (size > 0) fill.partS = f.duration * Math.min(1, got / size);
+            }
+          } catch (err) {
+            if (stop.signal.aborted) return;
+            logWarn("Sync", "backfill stopped: a segment behind didn't come", {
+              atS: Number(f.start.toFixed(2)), error: err instanceof Error ? err.message : String(err),
+            });
+            endFill();
+            loadAgain(video.currentTime);
+            return;
+          }
           if (stop.signal.aborted) return;
-          logWarn("Sync", "backfill stopped: a segment behind didn't come", {
-            atS: Number(f.start.toFixed(2)), error: err instanceof Error ? err.message : String(err),
-          });
-          endFill();
-          loadAgain(video.currentTime);
-          return;
         }
-        if (stop.signal.aborted) return;
-        fill.doneS += f.duration;
-        fill.lastAt = Date.now();
+        fill.reachedS = Math.max(fromS, f.start);
+        fill.partS = 0;
       }
       endFill();
       if (stop.signal.aborted || roomWaitRef.current !== wait) return;
       const sync = syncStateRef.current;
       if (!sync || sync.playing) return;
       const backS = roomPositionNow(sync);
+      if (fromS > backS + SOFT_SYNC_DEAD_ZONE_S) {
+        // Back to where what it jumped over begins, short of the room: what
+        // comes before that it has shown already. It waits for the room there.
+        logEvent("Sync", "room paused while waiting ahead: what was jumped over is in, back to where it begins", {
+          roomPosS: Number(backS.toFixed(2)), toS: Number(fromS.toFixed(2)), fromS: Number(video.currentTime.toFixed(2)),
+          ms: Date.now() - startedAt,
+        });
+        wait.atS = fromS;
+        video.currentTime = fromS;
+        loadAgain(fromS);
+        return;
+      }
       logEvent("Sync", "room paused while waiting ahead: what was jumped over is in, back to the room", {
-        roomPosS: Number(backS.toFixed(2)), fromS: Number(video.currentTime.toFixed(2)),
-        segments: behind.length, ms: Date.now() - startedAt,
+        roomPosS: Number(backS.toFixed(2)), fromS: Number(video.currentTime.toFixed(2)), ms: Date.now() - startedAt,
       });
       stopWaitingForRoom("the room paused, and what was jumped over came in");
       video.currentTime = backS;
@@ -6960,6 +6989,20 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     return () => {
       stop.abort();
       endFill();
+      // Called off by the room playing again, part of the way in: wait from
+      // where what came in begins, so the room is that much less far off. Not
+      // for a seek, which sends everybody somewhere else anyway.
+      const sync = syncStateRef.current;
+      const toS = fill.reachedS + LAND_INTO_SEGMENT_S;
+      if (sync?.playing && sync.seekSeq === seekSeq && roomWaitRef.current === wait && toS < wait.atS - 1) {
+        logEvent("Sync", "room playing again before what was jumped over was all in: waiting from where it begins", {
+          fromS: Number(wait.atS.toFixed(2)), toS: Number(toS.toFixed(2)),
+          roomPosS: Number(roomPositionNow(sync).toFixed(2)),
+          shareIn: Number(backfillShare(fill).toFixed(2)),
+        });
+        wait.atS = toS;
+        video.currentTime = toS;
+      }
       loadAgain(video.currentTime);
     };
   }, [waitingForRoom, syncState?.playing]);

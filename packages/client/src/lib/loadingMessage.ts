@@ -16,32 +16,28 @@ export function loadingTitle(pictureShown: boolean): string {
  * what was happening.
  */
 export function catchingUpTitle(leftS: number): string {
-  return `Catching up with the room… ${Math.max(1, Math.ceil(leftS))} s`;
+  return `Catching up to host · ${Math.max(1, Math.ceil(leftS))} s`;
 }
 
 /**
- * How long a backfill has left — the room paused while this player waited
- * ahead of it, and it is fetching what it jumped over (Player's backfill) —
- * from how fast what is in came: seconds of film to fetch, seconds of it in,
- * when it started and when the last of it came. Null until something has.
+ * How much of a backfill is in, 0 to 1 — the room paused while this player
+ * waited ahead of it, and it is fetching what it jumped over, `fromS` to
+ * `toS`, backwards (Player's backfill): `reachedS` is how far back what is in
+ * goes, and `partS` the film in hand of the segment coming.
  */
-export function backfillLeftS(
-  fill: { totalS: number; doneS: number; startedAt: number; lastAt: number },
-  nowMs: number,
-): number | null {
-  if (!(fill.doneS > 0)) return null;
-  const msPerFilmS = (fill.lastAt - fill.startedAt) / fill.doneS;
-  return Math.max(0, ((fill.totalS - fill.doneS) * msPerFilmS - (nowMs - fill.lastAt)) / 1000);
+export function backfillShare(fill: { fromS: number; toS: number; reachedS: number; partS: number }): number {
+  const span = fill.toS - fill.fromS;
+  if (!(span > 0)) return 1;
+  return Math.min(1, Math.max(0, (fill.toS - fill.reachedS + fill.partS) / span));
 }
 
 /**
- * What the loading screen says meanwhile, counting down like catchingUpTitle
- * to when it goes back to the room's place: a still of where it waited, or
- * black, said nothing (18 October).
+ * What the loading screen says meanwhile. A share, not seconds: when it is
+ * done depends on the download, which no clock says — a countdown of it ran
+ * out and started again (18 October). Never 100% while it is still there.
  */
-export function backfillTitle(leftS: number | null): string {
-  const what = "Paused · loading what you skipped…";
-  return leftS === null ? what : `${what} ${Math.max(1, Math.ceil(leftS))} s`;
+export function backfillTitle(share: number): string {
+  return `Host paused · Catching up to host · ${Math.min(99, Math.floor(share * 100))}%`;
 }
 
 /**

@@ -64,6 +64,10 @@ const IDLE_MS = 10 * 60_000;
 /** Runs of one title that die within this long of each other leave it to Plex. */
 const CRASH_WINDOW_MS = 15 * 60_000;
 const CRASHES_TO_REFUSE = 2;
+/** How far past the watcher a stream's bitrate is measured, for the upload
+ *  budget — and the least of it, made already, that counts as a measure. */
+const BANDWIDTH_AHEAD_S = 120;
+const BANDWIDTH_MEASURED_S = 30;
 
 const CACHE_DIR = path.join(directStreamCacheDir(), "ffmpeg");
 // Whatever a server that stopped without ending its streams left behind.
@@ -84,6 +88,8 @@ interface Run {
   codec: string;
   /** A re-encode, not a copy: holds one of FFMPEG_MAX_ENCODES. */
   encode: boolean;
+  /** What one viewer downloads of it as planned, kbps, when known — see ffmpegBandwidth. */
+  targetKbps: number | null;
   dir: string;
   baseDir: string;
   /** Where the run was asked to start, film time. */
@@ -287,6 +293,8 @@ export async function startFfmpegRun(o: {
   ratingKey: string;
   codec: string;
   encode?: boolean;
+  /** A copy's: the file's average. A re-encode's: its video target and its sound. */
+  targetKbps?: number | null;
   offsetS: number;
   args: string[];
 }): Promise<{ ok: true; key: string } | { ok: false; why: string }> {
@@ -300,7 +308,8 @@ export async function startFfmpegRun(o: {
     return { ok: false, why: `couldn't make ${dir}: ${err instanceof Error ? err.message : String(err)}` };
   }
   const run: Run = {
-    key, sessionId: o.sessionId, ratingKey: o.ratingKey, codec: o.codec, encode: !!o.encode, dir,
+    key, sessionId: o.sessionId, ratingKey: o.ratingKey, codec: o.codec, encode: !!o.encode,
+    targetKbps: o.targetKbps && o.targetKbps > 0 ? o.targetKbps : null, dir,
     baseDir: `/video/:/transcode/universal/session/${key}/base/`,
     offsetS: o.offsetS, proc: null, paused: false, pausedOnce: false, stopped: false,
     segments: [], byPath: new Map(), clockOffset: null, ended: false, failed: null,
@@ -407,6 +416,56 @@ export function ffmpegTitleStreaming(ratingKey: string): boolean {
 export function ffmpegRefused(ratingKey: string): boolean {
   const times = (crashes.get(ratingKey) ?? []).filter((t) => Date.now() - t < CRASH_WINDOW_MS);
   return times.length >= CRASHES_TO_REFUSE;
+}
+
+/**
+ * What one viewer of this session's stream downloads, kbps, for the upload
+ * budget (routes/qbt-manager.ts): measureBandwidth of what the run has made,
+ * from `positionS` — the room's, not where the run began. Plex has none to
+ * give: Phase 0 (17 October) saw a stream made here listed as Direct Play at
+ * the file's bitrate, which a re-encode's is nothing like, with no Session —
+ * so no bandwidth, and no id to match it by.
+ */
+export function ffmpegBandwidth(
+  sessionId: string,
+  positionS: number,
+): { kbps: number; source: "measured" | "target" } | null {
+  const run = bySession.get(sessionId);
+  if (!run) return null;
+  return measureBandwidth(run.segments, Number.isFinite(positionS) ? positionS : run.positionS, run.targetKbps);
+}
+
+/**
+ * ffmpegBandwidth's measure, on its own so the tests can hold it to its
+ * window: picture, sound and MPEG-TS together, every byte of the segments
+ * between `fromS` and BANDWIDTH_AHEAD_S past it over their length — the one
+ * playing at `fromS` among them, none wholly behind it, none that starts past
+ * the window. A two-hour film watched from its middle is measured there, not
+ * on a loud prologue nobody is downloading any more. Less than
+ * BANDWIDTH_MEASURED_S of it made — a run just started, or near the end of
+ * the film — is no measure, and `targetKbps` is given instead; null when that
+ * isn't known either.
+ */
+export function measureBandwidth(
+  segments: ReadonlyArray<Pick<MeasuredSegment, "start" | "end" | "bytes">>,
+  fromS: number,
+  targetKbps: number | null,
+): { kbps: number; source: "measured" | "target" } | null {
+  let bytes = 0;
+  let madeS = 0;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (seg.end <= fromS || seg.start >= fromS + BANDWIDTH_AHEAD_S) continue;
+    // Its length as the playlist has it: up to where the next one starts.
+    const lengthS = (segments[i + 1]?.start ?? seg.end) - seg.start;
+    if (lengthS <= 0) continue;
+    bytes += seg.bytes;
+    madeS += lengthS;
+  }
+  const measured = madeS >= BANDWIDTH_MEASURED_S;
+  const kbps = measured ? (bytes * 8) / madeS / 1000 : targetKbps;
+  if (!kbps) return null;
+  return { kbps: Math.min(10_000_000, Math.max(1, Math.round(kbps))), source: measured ? "measured" : "target" };
 }
 
 /**

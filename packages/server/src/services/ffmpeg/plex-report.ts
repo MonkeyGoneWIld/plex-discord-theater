@@ -198,6 +198,18 @@ export async function plexReportTick(now = Date.now()): Promise<void> {
   await Promise.all(posts);
 }
 
+/**
+ * The player a stream (StreamNow.key) is reported to Plex as: its
+ * Player@machineIdentifier in /status/sessions, the same through every seek.
+ * Null before its first report, and with FFMPEG_REPORT_TO_PLEX off. For the
+ * upload budget (routes/qbt-manager.ts), which takes that row of Plex's as
+ * the Theater's own rather than counting the stream twice.
+ */
+export function plexClientIdOf(key: string): string | null {
+  if (!reportsToPlex()) return null;
+  return reported.get(key)?.clientId ?? null;
+}
+
 /** Tell Plex everything reported has stopped: the server is going down. */
 export async function reportAllStopped(): Promise<void> {
   if (!reportsToPlex()) return;

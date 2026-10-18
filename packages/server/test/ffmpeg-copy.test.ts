@@ -5,8 +5,9 @@
  * transcode anything, and what ffmpeg can't copy yet to go to Plex as before.
  * Its re-encodes too, a PGS subtitle burned in among them: one written here,
  * a white box, looked for in the picture where it should and shouldn't be.
- * And text subtitles read out of the file by ffmpeg rather than by Plex, and
- * what Plex is told plays (ffmpeg/plex-report.ts).
+ * And text subtitles read out of the file by ffmpeg rather than by Plex, what
+ * Plex is told plays (ffmpeg/plex-report.ts), and what the upload budget is
+ * told of each stream (routes/qbt-manager.ts).
  *
  * Skipped where there is no ffmpeg.
  */
@@ -175,6 +176,8 @@ const plex = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ MediaContainer: body }));
   };
+  // Who it is, for the upload budget's snapshot (routes/qbt-manager.ts).
+  if (url.pathname === "/") return send({ machineIdentifier: "test-plex" });
   const meta = url.pathname.match(/^\/library\/metadata\/(\d+)$/);
   if (meta && titles[meta[1]]) {
     const t = titles[meta[1]];
@@ -184,7 +187,7 @@ const plex = http.createServer((req, res) => {
         Part: [{ id: Number(meta[1]), key: `/library/parts/${meta[1]}/1/file.mkv`, file: t.plexPath,
           size: fs.statSync(t.file).size, Stream: [
             { id: 11, streamType: 1, index: 0, codec: t.codec, bitDepth: 8, ...t.hdr },
-            { id: 12, streamType: 2, index: 1, codec: t.audio, channels: t.channels, selected: true },
+            { id: 12, streamType: 2, index: 1, codec: t.audio, channels: t.channels, bitrate: 160, selected: true },
             // A picture subtitle, which can only be burned in: in film 9, listed
             // only in the rest. And a text one, listed only.
             ...(t.subs ?? [
@@ -404,7 +407,7 @@ console.log("\n— a file that isn't mounted here —");
 
 console.log("\n— what a re-encode is made of —");
 {
-  const { planEncode, encodeArgs } = await import("../src/services/ffmpeg/plan.js");
+  const { planEncode, encodeArgs, encodeTargetKbps } = await import("../src/services/ffmpeg/plan.js");
   const version = (video: Record<string, unknown>, more: Record<string, unknown> = {}) => ({
     container: "mkv", width: 1920, height: 1080, partKey: "/library/parts/1/1/file.mkv", file: "/data/media/f.mkv",
     streams: [{ id: 11, streamType: 1, index: 0, codec: "hevc", bitDepth: 10, colorPrimaries: "bt709", colorTrc: "bt709",
@@ -426,6 +429,8 @@ console.log("\n— what a re-encode is made of —");
       hdrArgs.includes("-c:v hevc_qsv -low_power 1 -profile:v main10")], [true, true, true, true]);
   check("  VBR, never CBR: the peak a little over a target equal to it",
     hdrArgs.includes("-b:v 8000k -maxrate 8001k -bufsize 16002k"), true);
+  check("  its target for the upload budget, the video's and the EAC3's as AAC at 256 kbps",
+    hdr10.ok && encodeTargetKbps(hdr10), 8256);
   const hlg = plan(version({ DOVIPresent: true, DOVIProfile: 8, DOVIBLCompatID: 4, colorTrc: "arib-std-b67" }));
   check("Dolby Vision 8.4 is kept as the HLG underneath", hlg.ok && hlg.hdrTrc, "arib-std-b67");
   const why = (p: ReturnType<typeof plan>) => (p.ok ? "encode" : p.why);
@@ -777,6 +782,181 @@ console.log("\n— what of the GPU a re-encode used, by the kernel's count —")
   check("a file that isn't a DRM client is no count", parseFdinfo("pos:\t0\nflags:\t02\n"), null);
   check("nothing of the GPU open: the CPU did it",
     gpuUse(null, { at: 1, cpuS: null, readBytes: null, devices: [], driver: null, engines: {} }), "none: ffmpeg had no GPU open, so the CPU did the work");
+}
+
+console.log("\n— how much of a stream is measured, for the upload budget —");
+{
+  const { measureBandwidth } = await import("../src/services/ffmpeg/engine.js");
+  // A run of 300 s in 5 s segments: a loud prologue at 8000 kbps to 100 s,
+  // 2000 kbps to 220 s, 500 kbps to the end — the whole of it 3600. Every
+  // stretch says something different, so a window in the wrong place shows.
+  const kbpsAt = (s: number) => (s < 100 ? 8000 : s < 220 ? 2000 : 500);
+  const run = Array.from({ length: 60 }, (_, i) => ({ start: i * 5, end: i * 5 + 5, bytes: (kbpsAt(i * 5) * 1000 / 8) * 5 }));
+  const upTo = (s: number) => run.filter((seg) => seg.end <= s);
+  check("a room at 100 s is measured from there to 120 s on: not from the run's start (7000), past it (1400) or behind it too (4727)",
+    measureBandwidth(run, 100, 3000), { kbps: 2000, source: "measured" });
+  check("  and at the start, from the start: the prologue's, mostly",
+    measureBandwidth(run, 0, 3000), { kbps: 7000, source: "measured" });
+  check("  the segment playing at the room's position counted whole, the one before it not",
+    measureBandwidth(run, 98, 3000), { kbps: 2240, source: "measured" });
+  check("30 s made past the room is a measure", measureBandwidth(upTo(130), 100, 3000), { kbps: 2000, source: "measured" });
+  check("  25 s is none: the run's target is given instead", measureBandwidth(upTo(125), 100, 3000), { kbps: 3000, source: "target" });
+  check("  and nothing, with no target either", measureBandwidth(upTo(125), 100, null), null);
+}
+
+// Last, since rooms start the reporter's own timer, every second on the real
+// clock: the Now Playing checks above keep a clock of their own, and the
+// render node's count what is logged.
+console.log("\n— what the upload budget is told of each stream (qbt-manager snapshot) —");
+{
+  const { attachWebSocketServer, closeWebSocketServer, getQbtManagerStreams } = await import("../src/services/sync.js");
+  const { createSession } = await import("../src/middleware/auth.js");
+  const { instanceHosts } = await import("../src/routes/discord.js");
+  const { default: qbtRoutes } = await import("../src/routes/qbt-manager.js");
+  const { WebSocket } = await import("ws");
+  type Stream = Record<string, unknown>;
+  process.env.QBT_MANAGER_API_KEY = "qbt-test-key";
+  // Nothing reported until a check below says so.
+  process.env.FFMPEG_REPORT_TO_PLEX = "0";
+  app.use("/api/integrations/qbt-manager", qbtRoutes);
+  attachWebSocketServer(api);
+  const sockets: InstanceType<typeof WebSocket>[] = [];
+
+  /** A room with its host in it, who plays what it is told to. */
+  async function room() {
+    const id = `qbt-${crypto.randomUUID()}`;
+    const userId = `${id}-host`;
+    instanceHosts.set(id, { hostUserId: userId, guildId: null, channelId: null, createdAt: Date.now() });
+    const token = createSession(userId, null);
+    const ws = new WebSocket(`${origin.replace(/^http/, "ws")}/ws?token=${token}`);
+    sockets.push(ws);
+    const seen: Stream[] = [];
+    ws.on("message", (d) => seen.push(JSON.parse(String(d))));
+    await new Promise<void>((r, j) => { ws.once("open", () => r()); ws.once("error", j); });
+    ws.send(JSON.stringify({ type: "join", sessionToken: token, instanceId: id, userId, username: "host" }));
+    for (let i = 0; i < 80 && !seen.some((m) => m.type === "state"); i++) await sleep(25);
+    return {
+      play: (ratingKey: string, hlsSessionId: string, positionS: number, offsetS = positionS) => ws.send(JSON.stringify({
+        type: "play", ratingKey, title: `Film ${ratingKey}`, subtitles: false, hlsSessionId,
+        position: positionS, sessionOffset: offsetS, audioStreamId: 0, subtitleStreamId: 0,
+      })),
+      /** Its player's stop of a session, as the host's: nobody else's is heeded while the host watches it. */
+      stop: (hlsSessionId: string) => fetch(`${origin}/api/plex/hls/session/${hlsSessionId}?reason=test`, {
+        method: "DELETE", headers: { Authorization: `Bearer ${token}` },
+      }),
+    };
+  }
+  /** The room's stream on `sid` once `ready` says so, as the manager is sent it. */
+  async function streamOn(sid: string, ready: (s: Stream) => boolean = () => true): Promise<Stream | undefined> {
+    for (let i = 0; i < 80; i++) {
+      const s = getQbtManagerStreams().find((x) => x.hls_session_id === sid) as Stream | undefined;
+      if (s && ready(s)) break;
+      await sleep(50);
+    }
+    const res = await fetch(`${origin}/api/integrations/qbt-manager/state`, { headers: { Authorization: "Bearer qbt-test-key" } });
+    return ((await res.json()) as { streams: Stream[] }).streams.find((x) => x.hls_session_id === sid);
+  }
+  /** A run's playlist once it has `edgeS` listed, or has ended. */
+  async function madeTo(variant: string, edgeS: number) {
+    let text = "";
+    for (let i = 0; i < 80; i++) {
+      text = await (await fetch(origin + variant)).text();
+      if (text.includes("#EXT-X-ENDLIST") || entries(text).reduce((s, e) => s + e.duration, 0) >= edgeS) break;
+      await sleep(100);
+    }
+    return text;
+  }
+
+  // A copy from the start, made to 32 s or more ahead of a room at 0 s.
+  const a = await room();
+  const A = crypto.randomUUID();
+  const copy = await master("1", A);
+  const listed = entries(await madeTo(variantOf(copy.text), 32));
+  const bytes = listed.reduce((s, e) => s + Number(e.uri.match(/&n=(\d+)$/)![1]), 0);
+  const listedS = listed.reduce((s, e) => s + e.duration, 0);
+  const playlistKbps = (bytes * 8) / listedS / 1000;
+  a.play("1", A, 0);
+  const measured = await streamOn(A);
+  check("a copy with 30 s and more made past the room is measured, and said to be ffmpeg's",
+    [measured?.engine, measured?.bandwidth_source], ["ffmpeg", "measured"]);
+  const kbps = Number(measured?.bandwidth_kbps);
+  check(`  at what its segments hold, picture, sound and MPEG-TS: ${kbps} kbps (its playlist's: ${Math.round(playlistKbps)})`,
+    [Number.isInteger(kbps), Math.abs(kbps - playlistKbps) / playlistKbps < 0.1], [true, true]);
+  check("  with FFMPEG_REPORT_TO_PLEX=0, no player in Plex for it", measured?.plex_client_id, null);
+
+  timelines.length = 0;
+  delete process.env.FFMPEG_REPORT_TO_PLEX;
+  const reportedAs = () => timelines.find((t) => t.q.ratingKey === "1")?.h["x-plex-client-identifier"];
+  for (let i = 0; i < 60 && !reportedAs(); i++) await sleep(50);
+  const reported = await streamOn(A, (s) => s.plex_client_id !== null);
+  check("reported to Plex, the player it is reported as: Plex's row of it",
+    [reported?.plex_client_id, reportedAs()], [`plex-discord-theater-${A}`, `plex-discord-theater-${A}`]);
+
+  // A seek by a host alone on its variant: its player stops the session before
+  // it asks for the next, and the room is on the stopped one until it hears of
+  // that, while Plex still lists the reporter's row.
+  await a.stop(A);
+  const between = await streamOn(A);
+  check("  between a seek's stop and its new session: still ffmpeg's, on that player, with no bandwidth to give",
+    [between?.engine, between?.plex_client_id, !!between && "bandwidth_kbps" in between, !!between && "bandwidth_source" in between],
+    ["ffmpeg", `plex-discord-theater-${A}`, false, false]);
+
+  // The new session on the same variant, which Plex goes on knowing by the first.
+  const B = crypto.randomUUID();
+  await master("1", B, "?offset=20");
+  a.play("1", B, 20);
+  const sought = await streamOn(B);
+  check("  and after a seek, on its new session, still the first session's",
+    [sought?.engine, sought?.plex_client_id], ["ffmpeg", `plex-discord-theater-${A}`]);
+
+  // Reported already, and then not: the reporter still holds the stream, but tells Plex nothing.
+  process.env.FFMPEG_REPORT_TO_PLEX = "0";
+  const unreported = await streamOn(B);
+  check("  FFMPEG_REPORT_TO_PLEX=0 set after it was reported: no player in Plex for it any more",
+    [unreported?.engine, unreported?.plex_client_id], ["ffmpeg", null]);
+  // Stopped, with no player in Plex for it — reporting off, as once the
+  // reporter has let it go — it is nothing of ffmpeg's to the manager.
+  await a.stop(B);
+  const gone = await streamOn(B);
+  check("  stopped, with no player in Plex for it: none of it, as a stream of Plex's",
+    [!!gone, ["engine", "plex_client_id", "bandwidth_kbps", "bandwidth_source"].filter((k) => !!gone && k in gone)], [true, []]);
+  delete process.env.FFMPEG_REPORT_TO_PLEX;
+
+  // Near the end of the film, on a run made from its start: 60 s made, 20 s
+  // of it past the room, which is all that counts.
+  const nearEnd = await room();
+  const C = crypto.randomUUID();
+  const late = await master("1", C);
+  // Its driver's ping, from 40 s: so it carries on past LEAD_S to the end.
+  await fetch(`${origin}/api/plex/hls/ping/${C}?time=40000&playing=1`);
+  await madeTo(variantOf(late.text), 60);
+  nearEnd.play("1", C, 40, 0);
+  const lateCopy = await streamOn(C);
+  check("a copy with under 30 s made past the room, however much behind it, is given its target: the file's average",
+    [lateCopy?.bandwidth_source, lateCopy?.bandwidth_kbps], ["target", Number(notesOf(late.text).kbps)]);
+
+  const encoding = await room();
+  const D = crypto.randomUUID();
+  const encode = await master("3", D, "?offset=40");
+  encoding.play("3", D, 40);
+  const lateEncode = await streamOn(D);
+  check("a re-encode's target is its video's and its sound's: the AAC copied, at Plex's 160 kbps",
+    [notesOf(encode.text).video, lateEncode?.bandwidth_source, lateEncode?.bandwidth_kbps],
+    ["transcode", "target", Number(notesOf(encode.text).kbps) + 160]);
+
+  // One of Plex's: a session no run of the engine's makes.
+  const plexRoom = await room();
+  const E = crypto.randomUUID();
+  plexRoom.play("1", E, 0);
+  const plexStream = await streamOn(E);
+  check("a stream of Plex's carries none of it: schema 1 as it always was", Object.keys(plexStream ?? {}).sort(), [
+    "hls_session_id", "host_heartbeat_age_seconds", "plex_transcode_key", "rating_key", "room_id", "state",
+    "state_age_seconds", "state_revision", "variant_id", "viewer_count",
+  ]);
+
+  for (const ws of sockets) ws.terminate();
+  closeWebSocketServer();
+  for (const id of [A, B, C, D]) await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
 }
 
 api.close();

@@ -10,8 +10,8 @@ import { pushProgressToPlex } from "./plex-accounts.js";
 import { episodesInSameFile } from "./episode-files.js";
 import { logEvent } from "./logger.js";
 import { updateDirectStreamPosition } from "./direct-stream.js";
-import { ffmpegSessionKnown, isFfmpegSession, updateFfmpegPosition } from "./ffmpeg/engine.js";
-import { startPlexReports, type ReportState, type StreamNow } from "./ffmpeg/plex-report.js";
+import { ffmpegBandwidth, ffmpegSessionKnown, isFfmpegSession, updateFfmpegPosition } from "./ffmpeg/engine.js";
+import { plexClientIdOf, startPlexReports, type ReportState, type StreamNow } from "./ffmpeg/plex-report.js";
 import { qualityKbps } from "./media-versions.js";
 
 /** Interval between WebSocket pings to detect dead connections. */
@@ -563,9 +563,56 @@ export function getQbtManagerStreams() {
       ).map((client) => client.userId)).size,
       host_heartbeat_age_seconds: room.state.hostHeartbeatAt === null ? null :
         Math.max(0, now - room.state.hostHeartbeatAt) / 1000,
+      ...ffmpegStreamFacts(roomId, room, variant),
     })));
 }
 
+/**
+ * What the manager is told of a stream ffmpeg makes, which Plex can't tell it
+ * (Phase 6): its bitrate, measured here (ffmpegBandwidth), and the player it
+ * is reported to Plex as (plex-report.ts), whose row in Plex's sessions is
+ * this stream's and no other. Nothing for one of Plex's, so neither a manager
+ * that predates these nor Plex mode sees any change.
+ */
+function ffmpegStreamFacts(roomId: string, room: Room, variant: Variant): {
+  engine?: "ffmpeg";
+  bandwidth_kbps?: number;
+  bandwidth_source?: "measured" | "target";
+  plex_client_id?: string | null;
+} {
+  const sid = variant.hlsSessionId;
+  if (!sid || !room.state.ratingKey || !ffmpegSessionKnown(sid)) return {};
+  const clientId = plexClientIdOf(ffmpegStreamKey(roomId, variant.key, room.state.ratingKey));
+  if (!isFfmpegSession(sid)) {
+    // Its run stopped, and the next one not taken up yet. A host alone on its
+    // variant who seeks past what is made, or whose player recovers, stops the
+    // old session before asking for the new one, and the variant stays on the
+    // old one until the new manifest is in and 'play' or 'variant-session'
+    // says so: half a second to three. Plex lists the reporter's row all the
+    // while — it hears "stopped" only GONE_MS on — and a poll that found no
+    // plex_client_id then left that row to be counted as a stream of its own,
+    // remote, with no bandwidth Plex knows: the minimum budget, until the next
+    // poll. So the player still, while the reporter holds it, and no
+    // bandwidth, there being no run to measure: the manager keeps what it had
+    // for the session, or matches Plex as before, and the row stays claimed.
+    // A seek's run that never started, its session left to Plex, is told so
+    // too for those seconds: Plex's then, matched by its session all the
+    // same, and only the label wrong.
+    return clientId === null ? {} : { engine: "ffmpeg", plex_client_id: clientId };
+  }
+  const bandwidth = ffmpegBandwidth(sid, interpolatedPosition(room.state));
+  return {
+    engine: "ffmpeg",
+    ...(bandwidth ? { bandwidth_kbps: bandwidth.kbps, bandwidth_source: bandwidth.source } : {}),
+    plex_client_id: clientId,
+  };
+}
+
+/** A room's variant of a title, as Plex's Now Playing has it: one stream
+ *  through every seek's new session. */
+function ffmpegStreamKey(instanceId: string, variantKey: string, ratingKey: string): string {
+  return `${instanceId}:${variantKey}:${ratingKey}`;
+}
 
 /**
  * The streams ffmpeg is making that somebody watches, for Plex's Now Playing
@@ -583,7 +630,7 @@ function ffmpegStreamsNow(): StreamNow[] {
     for (const v of s.variants.values()) {
       if (!v.hlsSessionId || !isFfmpegSession(v.hlsSessionId)) continue;
       if (v.key !== s.hostVariantKey && !membersOf(room, v.key).some((c) => c.isWatching)) continue;
-      out.push({ key: `${instanceId}:${v.key}:${s.ratingKey}`, sessionId: v.hlsSessionId, ratingKey: s.ratingKey, positionS, state });
+      out.push({ key: ffmpegStreamKey(instanceId, v.key, s.ratingKey), sessionId: v.hlsSessionId, ratingKey: s.ratingKey, positionS, state });
     }
   }
   return out;

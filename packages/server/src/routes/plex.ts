@@ -54,7 +54,7 @@ import {
   tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
-  AUDIO_KBPS, copyArgs, encodeArgs, inputArgs, planCopy, planEncode, type SourceStream, type SourceVersion,
+  AUDIO_KBPS, copyArgs, encodeArgs, encodeTargetKbps, inputArgs, planCopy, planEncode, type SourceStream, type SourceVersion,
 } from "../services/ffmpeg/plan.js";
 import {
   ffmpegEncodesRunning,
@@ -4660,6 +4660,7 @@ async function startWithFfmpeg(o: {
       sessionId: o.sessionId,
       ratingKey: o.ratingKey,
       codec: copyPlan.codec,
+      targetKbps: o.fileKbps,
       offsetS: o.offsetS,
       args: copyArgs(copyPlan, input, o.offsetS, source.durationS ?? null),
     });
@@ -4695,7 +4696,8 @@ async function startWithFfmpeg(o: {
       return null;
     }
     let started = await startFfmpegRun({
-      sessionId: o.sessionId, ratingKey: o.ratingKey, codec: plan.codec, encode: true, offsetS: o.offsetS,
+      sessionId: o.sessionId, ratingKey: o.ratingKey, codec: plan.codec, encode: true,
+      targetKbps: encodeTargetKbps(plan), offsetS: o.offsetS,
       args: encodeArgs(plan, input, o.offsetS, source.durationS ?? null, hwDevice()),
     });
     // The GPU decodes the codec but not this file: decoded on the CPU instead.
@@ -4705,7 +4707,8 @@ async function startWithFfmpeg(o: {
       if (retry.ok) {
         plan = retry;
         started = await startFfmpegRun({
-          sessionId: o.sessionId, ratingKey: o.ratingKey, codec: plan.codec, encode: true, offsetS: o.offsetS,
+          sessionId: o.sessionId, ratingKey: o.ratingKey, codec: plan.codec, encode: true,
+          targetKbps: encodeTargetKbps(plan), offsetS: o.offsetS,
           args: encodeArgs(plan, input, o.offsetS, source.durationS ?? null, hwDevice()),
         });
       }

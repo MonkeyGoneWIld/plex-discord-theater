@@ -22,6 +22,8 @@ export interface SourceStream {
   codec?: string;
   bitDepth?: number;
   channels?: number;
+  /** kbps, when Plex knows: an audio track's is what a copy of it carries. */
+  bitrate?: number;
   /** Plex's current choice for the item, and the file's own default. */
   selected?: boolean;
   default?: boolean;
@@ -475,6 +477,18 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
     kbps: req.kbps,
     peakKbps: req.peakKbps,
   };
+}
+
+/**
+ * What one viewer downloads of a re-encode as planned, kbps: the picture's
+ * target and the sound — AUDIO_KBPS for a track converted, a copied one at
+ * what Plex says it is, or AUDIO_KBPS too when Plex doesn't say. Stands in for
+ * the upload budget's measure until there is one (engine.ts ffmpegBandwidth).
+ */
+export function encodeTargetKbps(plan: Extract<EncodePlan, { ok: true }>): number {
+  if (!plan.audio) return plan.kbps;
+  const audio = plan.audioCopy && plan.audio.bitrate && plan.audio.bitrate > 0 ? plan.audio.bitrate : AUDIO_KBPS;
+  return plan.kbps + audio;
 }
 
 /** Re-encodes are cut every 3 s, as Plex's are. */

@@ -429,9 +429,6 @@ export function StatsOverlay({
   // Plex's words for the stream — see playbackMode. Without the server's
   // notes, the playlist says only whether the video is the original.
   const mode = playbackMode(notes) ?? (copied === null ? null : copied ? "Direct Stream" : "Transcode");
-  // Whether this screen can show HDR at all: an HDR stream on one that
-  // can't looks washed out, which no setting here will fix.
-  const hdrDisplay = typeof window.matchMedia === "function" && window.matchMedia("(dynamic-range: high)").matches;
   const hdrStream = !!notes?.range && !notes.range.startsWith("SDR");
   const videoSummary = [
     snap && snap.streamResolution !== "—" ? snap.streamResolution : null,
@@ -513,7 +510,6 @@ export function StatsOverlay({
         ["Codec", codecName(snap?.videoCodec) ?? "—"],
         ...(notes?.range ? [["Range", notes.range, notes.range.startsWith("SDR (") ? "warn" : "none"] as [string, string, Health]] : []),
         ...(notes?.videoFrom ? [["File", notes.videoFrom] as [string, string]] : []),
-        ["Display", hdrDisplay ? "HDR capable" : "SDR only", hdrStream && !hdrDisplay ? "warn" : "none"],
         ["Viewport", snap?.viewport ?? "—"],
       ],
     },

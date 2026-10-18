@@ -61,6 +61,7 @@ import {
   ffmpegPlaylist,
   ffmpegRefused,
   ffmpegSegment,
+  ffmpegSessionKnown,
   ffmpegTitleStreaming,
   isFfmpegKey,
   isFfmpegSession,
@@ -70,6 +71,7 @@ import {
   stopFfmpegSession,
   updateFfmpegPosition,
 } from "../services/ffmpeg/engine.js";
+import { reportAllStopped } from "../services/ffmpeg/plex-report.js";
 
 const router = Router();
 
@@ -3953,7 +3955,7 @@ async function stopTranscodeKey(sessionIdentifier: string): Promise<void> {
  * through the metadata cache rather than reporting duration=0, which leaves
  * Plex tracking progress against nothing ("progress of 3437358/0ms").
  */
-async function durationFor(ratingKey: string): Promise<number | undefined> {
+export async function durationFor(ratingKey: string): Promise<number | undefined> {
   const known = mediaDurations.get(ratingKey);
   if (known) return known;
   try {
@@ -4146,8 +4148,8 @@ export { terminatePlexSession };
  * and a misleading warning.
  */
 export async function pingPlexTranscode(hlsSessionId: string): Promise<boolean> {
-  // Made here, by ffmpeg: nothing on Plex to keep alive.
-  if (isFfmpegSession(hlsSessionId)) return keepFfmpegAlive(hlsSessionId);
+  // Made here, by ffmpeg: nothing on Plex to keep alive. Gone, once it has stopped.
+  if (ffmpegSessionKnown(hlsSessionId)) return keepFfmpegAlive(hlsSessionId);
   let alive = true;
   try {
     // Tries our session id first and Plex's transcode key on a 404 — see
@@ -5659,8 +5661,9 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
   }
 
   // Made here, by ffmpeg: where the driver is, for how far ahead to make it.
-  // Nothing on Plex to keep alive.
-  if (isFfmpegSession(sessionId)) {
+  // Nothing on Plex to keep alive, nor a timeline to post: plex-report.ts
+  // tells Plex what plays, from the room's clock.
+  if (ffmpegSessionKnown(sessionId)) {
     const timeMs = Number(req.query.time);
     if (Number.isFinite(timeMs)) updateFfmpegPosition(sessionId, timeMs / 1000);
     keepFfmpegAlive(sessionId);
@@ -5909,8 +5912,8 @@ router.delete(
       hadPlexKey: plexTranscodeKeys.has(sessionId),
     });
 
-    // Made here, by ffmpeg: nothing to tell Plex.
-    if (isFfmpegSession(sessionId)) {
+    // Made here, by ffmpeg: nothing to tell Plex, stopped already or not.
+    if (ffmpegSessionKnown(sessionId)) {
       markTranscodeStopped(sessionId);
       res.json({ ok: true });
       return;
@@ -6279,6 +6282,7 @@ async function pipeBody(
  *  Only affects sessions in our plexTranscodeKeys map; other Plex clients are untouched. */
 export async function stopAllActiveSessions(): Promise<void> {
   stopAllFfmpegSessions("server shutting down");
+  await reportAllStopped().catch(() => {});
   const entries = [...plexTranscodeKeys.entries()];
   for (const [sessionId, plexKey] of entries) {
     const ratingKey = sessionRatingKeys.get(sessionId) || null;

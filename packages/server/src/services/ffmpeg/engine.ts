@@ -117,6 +117,8 @@ const runs = new Map<string, Run>();
 const bySession = new Map<string, Run>();
 /** Keys of runs that have ended: their URLs answer 410, never anything from Plex. */
 const retired = new LruMap<string, number>(2_000);
+/** Sessions whose runs have ended: a stop or a ping for one is nothing of Plex's. */
+const retiredSessions = new LruMap<string, number>(2_000);
 /** When each title's runs died, recently. */
 const crashes = new Map<string, number[]>();
 
@@ -250,6 +252,7 @@ function stopRun(run: Run, why: string): void {
   runs.delete(run.key);
   if (bySession.get(run.sessionId) === run) bySession.delete(run.sessionId);
   retired.set(run.key, Date.now());
+  retiredSessions.set(run.sessionId, Date.now());
   notify(run);
   logEvent("FFmpeg", "run stopped", {
     session: short(run.sessionId), why, segments: run.segments.length,
@@ -359,6 +362,16 @@ export function ffmpegEncodesRunning(exceptSession?: string): number {
 /** Whether this session's stream is made here, by ffmpeg. */
 export function isFfmpegSession(sessionId: string): boolean {
   return bySession.has(sessionId);
+}
+
+/**
+ * Whether this session's stream is or was made here: one stopped already is
+ * still nothing of Plex's. Stopped twice — its owner's page and the room both
+ * stop a stream left behind — the second went to Plex, which answered 404 to a
+ * "stopped" for ratingKey 0.
+ */
+export function ffmpegSessionKnown(sessionId: string): boolean {
+  return bySession.has(sessionId) || retiredSessions.has(sessionId);
 }
 
 /** Whether a URL's key is a run's of this engine. */

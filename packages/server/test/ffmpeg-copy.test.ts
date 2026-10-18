@@ -5,7 +5,8 @@
  * transcode anything, and what ffmpeg can't copy yet to go to Plex as before.
  * Its re-encodes too, a PGS subtitle burned in among them: one written here,
  * a white box, looked for in the picture where it should and shouldn't be.
- * And text subtitles read out of the file by ffmpeg rather than by Plex.
+ * And text subtitles read out of the file by ffmpeg rather than by Plex, and
+ * what Plex is told plays (ffmpeg/plex-report.ts).
  *
  * Skipped where there is no ffmpeg.
  */
@@ -157,9 +158,19 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
 };
 
 const asked: string[] = [];
+/** Timeline reports, as Plex had them. */
+const timelines: Array<{ q: Record<string, string>; h: Record<string, string> }> = [];
 const plex = http.createServer((req, res) => {
   const url = new URL(req.url!, "http://plex");
   asked.push(url.pathname);
+  if (url.pathname === "/:/timeline" && req.method === "POST") {
+    const h: Record<string, string> = {};
+    for (const [k, v] of Object.entries(req.headers)) if (k.startsWith("x-plex-") && k !== "x-plex-token") h[k] = String(v);
+    const { "X-Plex-Token": _token, ...q } = Object.fromEntries(url.searchParams);
+    timelines.push({ q, h });
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end("{}");
+  }
   const send = (body: unknown) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ MediaContainer: body }));
@@ -651,6 +662,60 @@ console.log("\n— stopping —");
   const left = fs.existsSync(path.join(tmp, "stream-cache", "ffmpeg", sid))
     ? fs.readdirSync(path.join(tmp, "stream-cache", "ffmpeg", sid)) : [];
   check("and so are its files", left, []);
+  asked.length = 0;
+  await fetch(`${origin}/api/plex/hls/session/${sid}?reason=again`, { method: "DELETE" });
+  await fetch(`${origin}/api/plex/hls/ping/${sid}?time=5000`).catch(() => null);
+  check("stopped again, or pinged, it is still nothing to tell Plex", asked, []);
+}
+
+console.log("\n— Plex's Now Playing —");
+{
+  const report = await import("../src/services/ffmpeg/plex-report.js");
+  const A = crypto.randomUUID();
+  const B = crypto.randomUUID();
+  let now: Array<{ key: string; sessionId: string; ratingKey: string; positionS: number; state: "playing" | "paused" | "buffering" }> = [];
+  report.reportFrom(() => now, plexRoutes.durationFor);
+  const at = (ms: number, streams: typeof now) => { now = streams; return report.plexReportTick(1_000_000 + ms); };
+  const stream = (sessionId: string, positionS: number, state: "playing" | "paused" | "buffering" = "playing") =>
+    [{ key: "room:0:0:1", sessionId, ratingKey: "1", positionS, state }];
+  timelines.length = 0;
+
+  await at(0, stream(A, 12.5));
+  check("a stream is reported at once", timelines.map((t) => t.q), [{
+    ratingKey: "1", key: "/library/metadata/1", state: "playing", time: "12500", duration: "60000",
+    identifier: "com.plexapp.plugins.library",
+  }]);
+  const h = timelines[0]?.h ?? {};
+  check("on a player of its own, named for Plex",
+    [h["x-plex-client-identifier"], h["x-plex-session-identifier"], h["x-plex-product"], h["x-plex-device-name"]],
+    [`plex-discord-theater-${A}`, A, "Plex Discord Theater", "Discord Theater"]);
+  await at(1_000, stream(A, 13.5));
+  await at(9_000, stream(A, 21.5));
+  check("then not again while it plays on as the clock says", timelines.length, 1);
+  await at(10_000, stream(A, 22.5));
+  check("until ten seconds have gone", timelines.map((t) => [t.q.state, t.q.time]).slice(1), [["playing", "22500"]]);
+  await at(11_000, stream(B, 40));
+  check("a seek, on its new session, at once and on the same player",
+    timelines.slice(2).map((t) => [t.q.state, t.q.time, t.h["x-plex-client-identifier"]]),
+    [["playing", "40000", `plex-discord-theater-${A}`]]);
+  await at(12_000, stream(B, 41, "paused"));
+  await at(13_000, stream(B, 41, "buffering"));
+  check("a pause and a wait for somebody's picture, at once",
+    timelines.slice(3).map((t) => [t.q.state, t.q.time]), [["paused", "41000"], ["buffering", "41000"]]);
+  await at(14_000, []);
+  await at(25_000, []);
+  check("gone, not stopped yet: a seek's restart is back sooner", timelines.length, 5);
+  await at(29_000, []);
+  check("gone fifteen seconds, stopped where it was",
+    timelines.slice(5).map((t) => [t.q.state, t.q.time, t.h["x-plex-client-identifier"]]),
+    [["stopped", "41000", `plex-discord-theater-${A}`]]);
+
+  timelines.length = 0;
+  process.env.FFMPEG_REPORT_TO_PLEX = "0";
+  await at(40_000, stream(crypto.randomUUID(), 5));
+  await at(60_000, []);
+  check("FFMPEG_REPORT_TO_PLEX=0 tells Plex nothing", timelines.length, 0);
+  delete process.env.FFMPEG_REPORT_TO_PLEX;
 }
 
 api.close();

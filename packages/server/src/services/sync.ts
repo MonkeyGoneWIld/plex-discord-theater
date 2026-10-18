@@ -3,14 +3,15 @@ import type { Server } from "http";
 import { isValidSession, getSessionUserId } from "../middleware/auth.js";
 import { instanceHosts, updateInstanceHost, touchInstance } from "../routes/discord.js";
 import { plexFetch } from "./plex.js";
-import { isHevcSession, isHevcWithheldSession, getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode, stopTranscodeSession, protectSession, releaseSession } from "../routes/plex.js";
+import { durationFor, isHevcSession, isHevcWithheldSession, getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode, stopTranscodeSession, protectSession, releaseSession } from "../routes/plex.js";
 import { createTracker, handleTrackerSocket, destroyTracker } from "./tracker.js";
 import { recordProgress, shouldRecordHistory } from "./watch-history.js";
 import { pushProgressToPlex } from "./plex-accounts.js";
 import { episodesInSameFile } from "./episode-files.js";
 import { logEvent } from "./logger.js";
 import { updateDirectStreamPosition } from "./direct-stream.js";
-import { isFfmpegSession, updateFfmpegPosition } from "./ffmpeg/engine.js";
+import { ffmpegSessionKnown, isFfmpegSession, updateFfmpegPosition } from "./ffmpeg/engine.js";
+import { startPlexReports, type ReportState, type StreamNow } from "./ffmpeg/plex-report.js";
 import { qualityKbps } from "./media-versions.js";
 
 /** Interval between WebSocket pings to detect dead connections. */
@@ -62,8 +63,9 @@ const MSG_WINDOW_MS = 10_000;
 async function killPlexTranscode(hlsSessionId: string | null): Promise<void> {
   if (!hlsSessionId) return;
 
-  // Made here, by ffmpeg: stopped here, with nothing to tell Plex.
-  if (isFfmpegSession(hlsSessionId)) {
+  // Made here, by ffmpeg: stopped here, with nothing to tell Plex — stopped
+  // already, too (ffmpegSessionKnown).
+  if (ffmpegSessionKnown(hlsSessionId)) {
     markTranscodeStopped(hlsSessionId);
     return;
   }
@@ -564,6 +566,28 @@ export function getQbtManagerStreams() {
     })));
 }
 
+
+/**
+ * The streams ffmpeg is making that somebody watches, for Plex's Now Playing
+ * (ffmpeg/plex-report.ts). One a room's variant and title, keyed so that a
+ * seek's new session is the same stream; the host's while the host is away
+ * from the player too, as the room keeps it for them.
+ */
+function ffmpegStreamsNow(): StreamNow[] {
+  const out: StreamNow[] = [];
+  for (const [instanceId, room] of rooms) {
+    const s = room.state;
+    if (!s.ratingKey) continue;
+    const state: ReportState = !s.playing ? "paused" : s.waiting || !s.positionConfirmed ? "buffering" : "playing";
+    const positionS = interpolatedPosition(s);
+    for (const v of s.variants.values()) {
+      if (!v.hlsSessionId || !isFfmpegSession(v.hlsSessionId)) continue;
+      if (v.key !== s.hostVariantKey && !membersOf(room, v.key).some((c) => c.isWatching)) continue;
+      out.push({ key: `${instanceId}:${v.key}:${s.ratingKey}`, sessionId: v.hlsSessionId, ratingKey: s.ratingKey, positionS, state });
+    }
+  }
+  return out;
+}
 
 /**
  * Keep-alive timers, one per *stream* rather than one per room.
@@ -1495,6 +1519,7 @@ export function attachWebSocketServer(server: Server): void {
   // Dedicated WSS for the P2P tracker — keeps tracker traffic isolated
   trackerWss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD_BYTES });
   createTracker();
+  startPlexReports(ffmpegStreamsNow, durationFor);
 
   trackerWss.on("connection", (ws) => {
     handleTrackerSocket(ws);

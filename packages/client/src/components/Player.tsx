@@ -1940,9 +1940,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * `atS` is where it stopped and `roomAtS` where the room was at the time.
    */
   const roomWaitRef = useRef<{ atS: number; roomAtS: number; since: number } | null>(null);
-  /** The room paused while this player waited ahead of it, and the pause
-   *  command hasn't taken it back to the room yet. */
-  const pausedOnWaitRef = useRef(false);
   const [waitingForRoom, setWaitingForRoom] = useState(false);
   /**
    * Where a follower was when its stream was torn down, if that was ahead of
@@ -6285,15 +6282,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       syncState.ratingKey === itemRef.current.ratingKey
       ? video.currentTime - roomNow
       : 0;
-    // Except when the room pauses while this player waits ahead of it: the
-    // room can stay paused for minutes, so this player goes back to it and
-    // loads what it jumped over, rather than sit ahead waiting for a room
-    // that isn't moving (17 Oct: a viewer waited out the host's whole pause).
-    const pausedOnWait = !amHost && !syncState.playing && (!!roomWaitRef.current || pausedOnWaitRef.current);
-    pausedOnWaitRef.current = false;
-    const staysAhead = !amHost && !isNewSeek && !pausedOnWait && waitsForRoom(aheadS);
+    const staysAhead = !amHost && !isNewSeek && waitsForRoom(aheadS);
+    // A pause doesn't end a wait: this player stays where it is and fetches
+    // what it jumped over meanwhile — see the backfill below.
     if (isNewSeek) stopWaitingForRoom("the room was sent somewhere");
-    else if (!syncState.playing) stopWaitingForRoom("the room paused");
     // The room is the host: while its picture isn't moving, nobody else's is.
     const holdForHost = !amHost && syncState.playing && syncState.hostWaiting;
 
@@ -6827,12 +6819,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         if (sync.playing) video.play().catch(() => {});
         return;
       }
-      if (!sync.playing) {
-        // The pause command takes this player back to the room.
-        if (!isHostRef.current) pausedOnWaitRef.current = true;
-        stopWaitingForRoom("the room paused");
-        return;
-      }
+      // Paused, the room isn't coming any closer; the backfill below uses the
+      // time, and the wait goes on when it plays again.
+      if (!sync.playing) return;
       const room = roomPositionNow(sync, isHostRef.current && hostCatchUpRef.current ? Infinity : undefined);
       const here = video.readyState >= HTMLMediaElement.HAVE_METADATA ? video.currentTime : wait.atS;
       const outcome = roomWaitOutcome(here, room, SOFT_SYNC_DEAD_ZONE_S);
@@ -6853,6 +6842,98 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     }, WAIT_FOR_ROOM_POLL_MS);
     return () => clearInterval(timer);
   }, [waitingForRoom]);
+
+  /**
+   * The room paused while this player waits ahead of it: the wait holds — the
+   * room may be back in two seconds, and pulling this player back then would
+   * starve it again — but the downloading turns round. Loading ahead stops,
+   * and the stretch it jumped over, from the room's place to its own, is
+   * fetched backwards — the segment just behind it first, then the one behind
+   * that — and kept (lib/segmentKeep), so every one that comes in is time
+   * won back. With all of it in, it goes back to the room's place, which
+   * plays from what was kept, and starts with everyone. A resume before then
+   * calls it off and it waits ahead as before, loading ahead again; what came
+   * in stays kept. (17 Oct: a viewer sat ahead through the host's whole
+   * pause; the first answer, going straight back on a pause, starved it the
+   * moment the host played again.)
+   *
+   * Only a stretch the playlist has: a stream of this player's own that began
+   * where it landed (its own quality, a twin) lists nothing behind there, and
+   * waits as before.
+   */
+  useEffect(() => {
+    if (!waitingForRoom || !syncState || syncState.playing || !syncState.ratingKey || isHostRef.current) return;
+    const hls = hlsRef.current;
+    const video = videoRef.current;
+    const wait = roomWaitRef.current;
+    const level = hls ? hls.levels[hls.currentLevel >= 0 ? hls.currentLevel : 0] : undefined;
+    const frags = level?.details?.fragments;
+    if (!hls || !video || !wait || !frags?.length) return;
+    const roomS = roomPositionNow(syncState);
+    const stretch = frags.filter((f) => f.start + f.duration > roomS && f.start < wait.atS);
+    const listed = stretch.length > 0 && stretch[0].start <= roomS + 0.5 && stretch.every((f) => !f.gap);
+    if (!listed) {
+      logEvent("Sync", "room paused while waiting ahead: nothing behind to fetch, waiting on", {
+        roomPosS: Number(roomS.toFixed(2)), atS: Number(wait.atS.toFixed(2)),
+      });
+      return;
+    }
+    const held = (t: number) => {
+      for (let i = 0; i < video.buffered.length; i++) {
+        if (t >= video.buffered.start(i) && t < video.buffered.end(i)) return true;
+      }
+      return false;
+    };
+    const behind = stretch.filter((f) => !held(f.start + Math.min(0.1, f.duration / 2))).reverse();
+    const stop = new AbortController();
+    let loadingAgain = false;
+    const loadAgain = (atS: number) => {
+      if (loadingAgain || hlsRef.current !== hls) return;
+      loadingAgain = true;
+      hls.startLoad(atS);
+    };
+    logEvent("Sync", "room paused while waiting ahead: fetching what was jumped over, backwards", {
+      roomPosS: Number(roomS.toFixed(2)), atS: Number(wait.atS.toFixed(2)), segments: behind.length,
+    });
+    hls.stopLoad();
+    void (async () => {
+      const token = getSessionToken();
+      const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+      const startedAt = Date.now();
+      for (const f of behind) {
+        try {
+          const request = keepLater(new Request(f.url, { headers, signal: stop.signal }));
+          const bytes = segmentBytesOf(f.url);
+          const response = await fetch(bytes ? fetchInPartsLater(request, f.url, bytes) : request);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          await response.arrayBuffer();
+        } catch (err) {
+          if (stop.signal.aborted) return;
+          logWarn("Sync", "backfill stopped: a segment behind didn't come", {
+            atS: Number(f.start.toFixed(2)), error: err instanceof Error ? err.message : String(err),
+          });
+          loadAgain(video.currentTime);
+          return;
+        }
+        if (stop.signal.aborted) return;
+      }
+      if (stop.signal.aborted || roomWaitRef.current !== wait) return;
+      const sync = syncStateRef.current;
+      if (!sync || sync.playing) return;
+      const backS = roomPositionNow(sync);
+      logEvent("Sync", "room paused while waiting ahead: what was jumped over is in, back to the room", {
+        roomPosS: Number(backS.toFixed(2)), fromS: Number(video.currentTime.toFixed(2)),
+        segments: behind.length, ms: Date.now() - startedAt,
+      });
+      stopWaitingForRoom("the room paused, and what was jumped over came in");
+      video.currentTime = backS;
+      loadAgain(backS);
+    })();
+    return () => {
+      stop.abort();
+      loadAgain(video.currentTime);
+    };
+  }, [waitingForRoom, syncState?.playing]);
 
   /**
    * Watch for a stream that cannot keep up, and offer the way out.

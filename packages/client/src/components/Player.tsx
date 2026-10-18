@@ -5213,7 +5213,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             // as in it here, but the element has nothing to show there, and
             // played into a stall that hls.js only stepped over a second
             // later, every time a viewer started a re-encode.
-            if (range.start > video.currentTime && !video.seeking) video.currentTime = range.start;
+            // Seeking there too: a seek to just before the first frame never
+            // ends, and hls.js steps over a start gap only while playing. On
+            // 18 October the host started 1408 at 3798.92, the ffmpeg
+            // re-encode's first frame was at 3799.00, and its player sat
+            // seeking, paused for the room, with 150 s downloaded, until it
+            // was closed.
+            if (range.start > video.currentTime) video.currentTime = range.start;
             if (!isHostRef.current || !copiedStreamRef.current || !hostHeldRef.current || !video.paused) return;
             if (pictureStartFor(video.currentTime, range) >= video.currentTime) return;
             const stats = data.frag.stats;

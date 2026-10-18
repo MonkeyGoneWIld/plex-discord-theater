@@ -705,11 +705,11 @@ console.log("\n— through the routes —");
     return { notes: notesOf(text), asked: decisions.at(-1)! };
   };
   check("a copy says so, and how heavy it is, and that its audio is the file's",
-    (await startNotes("100")).notes, { video: "copy", kbps: "8000", audio: "copy", audioFrom: "AAC Stereo" });
+    (await startNotes("100")).notes, { video: "copy", kbps: "8000", videoFrom: "H.264 · SDR · 1920×1080", range: "SDR", audio: "copy", audioFrom: "AAC Stereo" });
   check("audio Plex converts says from what, to what, and why",
     (await startNotes(EAC3_TITLE)).notes,
     {
-      video: "copy", kbps: "8000", audio: "transcode", audioFrom: "EAC3 5.1", audioTo: "AAC 5.1", audioKbps: "384",
+      video: "copy", kbps: "8000", videoFrom: "H.264 · SDR · 1920×1080", range: "SDR", audio: "transcode", audioFrom: "EAC3 5.1", audioTo: "AAC 5.1", audioKbps: "384",
       audioReason: "Unsupported codec (EAC3)",
     });
   check("an open-GOP Blu-ray says why it was re-encoded",
@@ -717,7 +717,7 @@ console.log("\n— through the routes —");
   check("a file over the copy limit says that is why, and what it is re-encoded at",
     (await startNotes("950")).notes,
     {
-      video: "transcode", reason: "31 Mbps average exceeds 20 Mbps server limit", kbps: "12000",
+      video: "transcode", reason: "31 Mbps average exceeds 20 Mbps server limit", kbps: "12000", videoFrom: "H.264 · SDR · 1920×1080", range: "SDR",
       audio: "copy", audioFrom: "AAC Stereo",
     });
   check("one Plex declined to copy says so, without blaming a bitrate it was asked well over",
@@ -729,7 +729,7 @@ console.log("\n— through the routes —");
   check("a file averaging over it is re-encoded at it, without asking for a copy first, and the player told why",
     [capped.asked.directStream, capped.asked.videoBitrate, capped.notes],
     ["0", "8000", {
-      video: "transcode", reason: "15 Mbps average exceeds 8 Mbps quality limit", kbps: "8000", quality: "8000",
+      video: "transcode", reason: "15 Mbps average exceeds 8 Mbps quality limit", kbps: "8000", quality: "8000", videoFrom: "H.264 · SDR · 1920×1080", range: "SDR",
       audio: "copy", audioFrom: "AAC Stereo",
     }]);
   const fits = await startNotes("100", "?quality=12000");

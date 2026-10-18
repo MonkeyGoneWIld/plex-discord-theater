@@ -31,7 +31,7 @@ const sessionData = (notes: Record<string, string>) => Object.fromEntries(
 );
 
 /** What a server that says nothing about the audio leaves. */
-const NO_AUDIO = { audio: null, audioFrom: null, audioTo: null, audioKbps: null, audioReason: null };
+const NO_AUDIO = { audio: null, audioFrom: null, audioTo: null, audioKbps: null, audioReason: null, videoFrom: null, range: null };
 
 console.log("— what the server says about a stream —");
 check("a re-encode, with why and at what rate",

@@ -4469,7 +4469,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   askedAt.delete(segmentUrl);
                   if (asked === undefined || (hlsRef.current as unknown) !== hls) return;
                   const ms = performance.now() - asked;
-                  lastSegmentRef.current = { bytes: bytesLength, ms, fromPeer: downloadSource === "p2p" };
+                  lastSegmentRef.current = {
+                    bytes: bytesLength, ms, fromPeer: downloadSource === "p2p",
+                    fromCache: downloadSource !== "p2p" && cameFromCache(bytesLength, ms),
+                  };
                   // Out of the browser's cache: nothing to go by for the
                   // connection, and not for the meter either, which would
                   // have it coming in at a few Gbps.

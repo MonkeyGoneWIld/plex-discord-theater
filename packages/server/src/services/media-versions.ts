@@ -121,6 +121,60 @@ export function transcodeFrame(media: { width?: number | null; height?: number |
   return "1920x1080";
 }
 
+/** A video stream as Plex describes it, the parts that say what its picture is. */
+export interface PictureSource {
+  codec?: string;
+  /** "main 10", "high". */
+  profile?: string;
+  bitDepth?: number;
+  /** "smpte2084" is HDR10's PQ, "arib-std-b67" HLG, anything else SDR. */
+  colorTrc?: string;
+  DOVIPresent?: boolean;
+  DOVIProfile?: number;
+  /** 1 alongside HDR10, 4 alongside HLG, 0 nothing a player without Dolby
+   *  Vision can show right — profile 5. */
+  DOVIBLCompatID?: number;
+  frameRate?: number;
+  /** "progressive" or "interlaced". */
+  scanType?: string;
+  width?: number;
+  height?: number;
+}
+
+/** What a file's picture is, for Stats for nerds: its dynamic range, and the
+ *  rest worth knowing when the colours or the motion look wrong. */
+export interface PictureFacts {
+  /** "HDR10", "HLG", "Dolby Vision P8.1 / HDR10", "Dolby Vision P5"; null SDR. */
+  hdr: string | null;
+  /** "HEVC Main 10 · 10-bit · HDR10 · 3840×2160 · 23.976 fps". */
+  text: string;
+}
+
+/** A video stream's PictureFacts; null without one. */
+export function pictureFacts(stream: PictureSource | undefined, media: { width?: number; height?: number } = {}): PictureFacts | null {
+  if (!stream) return null;
+  const trc = stream.colorTrc?.toLowerCase();
+  const base = trc === "smpte2084" ? "HDR10" : trc === "arib-std-b67" ? "HLG" : null;
+  const dovi = stream.DOVIPresent || (stream.DOVIProfile ?? 0) > 0;
+  const hdr = dovi
+    ? `Dolby Vision${stream.DOVIProfile ? ` P${stream.DOVIProfile}${stream.DOVIBLCompatID ? `.${stream.DOVIBLCompatID}` : ""}` : ""}${base ? ` / ${base}` : ""}`
+    : base;
+  const codec = stream.codec?.toLowerCase();
+  const codecText = codec === "h264" ? "H.264" : codec === "mpeg2video" ? "MPEG-2" : codec?.toUpperCase();
+  const profile = stream.profile?.replace(/\b\w/g, (c) => c.toUpperCase());
+  const w = stream.width ?? media.width;
+  const h = stream.height ?? media.height;
+  const text = [
+    [codecText, profile].filter(Boolean).join(" ") || null,
+    stream.bitDepth ? `${stream.bitDepth}-bit` : null,
+    hdr ?? "SDR",
+    w && h ? `${w}×${h}` : null,
+    stream.frameRate ? `${Number(stream.frameRate.toFixed(3))} fps` : null,
+    stream.scanType?.toLowerCase() === "interlaced" ? "interlaced" : null,
+  ].filter(Boolean).join(" · ");
+  return { hdr, text };
+}
+
 /** "5.1", "7.1", "Stereo", "Mono" — channel counts as people say them. */
 export function channelLabel(channels: number | undefined | null): string | null {
   if (!channels || channels < 1) return null;

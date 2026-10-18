@@ -5,7 +5,7 @@ import { pipeline } from "node:stream/promises";
 import sharp from "sharp";
 import { progressivePreview } from "../services/preview-stream.js";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
-import { playableVersionOrder, resolutionLabel, channelLabel, transcodeFrame, qualityKbps } from "../services/media-versions.js";
+import { playableVersionOrder, resolutionLabel, channelLabel, transcodeFrame, qualityKbps, pictureFacts, type PictureFacts, type PictureSource } from "../services/media-versions.js";
 import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition } from "../services/segment-prefetch.js";
 import {
   startDirectStream,
@@ -206,7 +206,7 @@ interface PlexDirectory {
   type: string;
 }
 
-interface PlexStream {
+interface PlexStream extends PictureSource {
   id: number;
   streamType: number;
   codec?: string;
@@ -232,8 +232,6 @@ interface PlexStream {
   key?: string;
   /** Container of a sidecar: "srt", "ass", "vtt". Absent on embedded streams. */
   format?: string;
-  /** Bits per sample of a video stream. */
-  bitDepth?: number;
   /** Its place among the file's streams — which, for a subtitle inside the
    *  file, says which of the file's tracks it is (mkv-subtitles.ts). */
   index?: number;
@@ -299,6 +297,8 @@ interface MediaVersion {
    *  ("h264", "hevc", "vc1"…) and bit depth. */
   videoCodec: string | null;
   bitDepth: number | null;
+  /** What its picture is — HDR or not, and so on — for Stats for nerds. */
+  picture: PictureFacts | null;
   /** The file's size in bytes, for telling a replaced file from the one a
    *  subtitle was read out of — see subtitleFingerprint. */
   fileSize: number | null;
@@ -333,6 +333,7 @@ function mapVersions(media: PlexMedia[] | undefined): MediaVersion[] {
       bitrate: m.bitrate ?? null,
       videoCodec: m.videoCodec ?? null,
       bitDepth: streams.find((s) => s.streamType === 1)?.bitDepth ?? null,
+      picture: pictureFacts(streams.find((s) => s.streamType === 1), m),
       fileSize: part?.size ?? null,
       partKey: part?.key ?? null,
       previewThumbs: part?.indexes === "sd",
@@ -4463,6 +4464,7 @@ interface VersionFacts {
   bitrate: number | null;
   videoCodec: string | null;
   bitDepth: number | null;
+  picture: PictureFacts | null;
   partKey: string | null;
   fileSize: number | null;
   /** Its audio tracks as the file has them, for what Plex does with one. */
@@ -4482,6 +4484,7 @@ async function versionFacts(ratingKey: string, mediaIndex: number): Promise<Vers
       bitrate: v.bitrate ?? null,
       videoCodec: v.videoCodec ?? null,
       bitDepth: v.bitDepth ?? null,
+      picture: v.picture ?? null,
       partKey: v.partKey ?? null,
       fileSize: v.fileSize ?? null,
       audioTracks: (v.audioTracks ?? []).map((t) => ({ id: t.id, codec: t.codec ?? null, channels: t.channels ?? null })),
@@ -4583,6 +4586,8 @@ async function startWithFfmpeg(o: {
   peakKbps: number;
   frame: string;
   hevcEncode: boolean;
+  /** What the file's picture is, for Stats for nerds. */
+  picture: PictureFacts | null;
 }): Promise<string | null> {
   const session = o.sessionId.substring(0, 8);
   let source: SourceVersion | null = null;
@@ -4612,6 +4617,8 @@ async function startWithFfmpeg(o: {
   let video: { codec: "h264" | "hevc"; width: number; height: number; audio: SourceStream | null; audioCopy: boolean; kbps: number | null };
   let key: string;
   let reason: string | null = null;
+  /** The stream's dynamic range, for Stats for nerds. */
+  let range: string | null = null;
   if (copyPlan?.ok) {
     const started = await startFfmpegRun({
       sessionId: o.sessionId,
@@ -4626,6 +4633,7 @@ async function startWithFfmpeg(o: {
     }
     key = started.key;
     video = { ...copyPlan, kbps: o.fileKbps };
+    range = o.picture ? o.picture.hdr ?? "SDR" : copyPlan.hdr;
     logEvent("FFmpeg", "copying", {
       session, ratingKey: o.ratingKey, fromS: o.offsetS, video: copyPlan.codec, hdr: copyPlan.hdr,
       audio: copyPlan.audio ? `${copyPlan.audio.codec} ${copyPlan.audio.channels ?? "?"}ch ${copyPlan.audioCopy ? "copied" : "→ AAC"}` : "none",
@@ -4670,6 +4678,9 @@ async function startWithFfmpeg(o: {
     }
     key = started.key;
     video = { ...plan, kbps: plan.kbps };
+    // Tone mapping is still Plex's (planEncode refuses it), so a re-encode
+    // either keeps the file's HDR or was SDR to begin with.
+    range = plan.hdrTrc ? `${plan.hdrTrc === "arib-std-b67" ? "HLG" : "HDR10"} (kept)` : "SDR";
     logEvent("FFmpeg", "re-encoding", {
       session, ratingKey: o.ratingKey, fromS: o.offsetS, why: reason,
       video: `${plan.video.codec} → ${plan.codec} ${plan.width}x${plan.height} ${plan.kbps}k (peak ${plan.peakKbps}k)`,
@@ -4696,6 +4707,8 @@ async function startWithFfmpeg(o: {
     reason,
     kbps: video.kbps,
     quality: o.quality || null,
+    videoFrom: o.picture?.text ?? null,
+    range,
     ...audioNotes(decided, o.audioTracks),
   });
   const playlist = segProxyUrl(`${TRANSCODE_PREFIX}session/${key}/base/index.m3u8`, o.authToken);
@@ -4837,7 +4850,7 @@ router.get(
     // Core manifest fetch logic — wrapped in a promise for in-flight deduplication
     const fetchManifest = async (
       subtitleMode: "burn" | "none",
-      { videoResolution, hevc, copy, copyKbps, transcodeKbps, peakKbps, notCopied, refused, quality, fileKbps, audioTracks }: {
+      { videoResolution, hevc, copy, copyKbps, transcodeKbps, peakKbps, notCopied, refused, quality, fileKbps, audioTracks, picture }: {
         videoResolution: string;
         /** Which way HEVC is offered: as what Plex encodes to, as something it
          *  may copy, or not at all. */
@@ -4859,6 +4872,8 @@ router.get(
         fileKbps: number | null;
         /** The file's audio tracks, for what Plex does with the one playing. */
         audioTracks: SourceAudio[];
+        /** What the file's picture is, for Stats for nerds. */
+        picture: PictureFacts | null;
       },
     ): Promise<string> => {
       const params: Record<string, string> = {
@@ -5144,6 +5159,11 @@ router.get(
         // Roughly what each viewer pulls: the file's own rate for a copy.
         kbps: videoCopied ? fileKbps : Number(params.videoBitrate),
         quality: quality || null,
+        // The file's picture, and the stream's range: a copy's is the file's,
+        // and Plex re-encodes to SDR, tone-mapping an HDR file.
+        videoFrom: picture?.text ?? null,
+        range: videoCopied ? picture ? picture.hdr ?? "SDR" : null
+          : picture?.hdr ? `SDR (tone-mapped from ${picture.hdr})` : picture ? "SDR" : null,
         ...audioNotes(audioDecided, audioTracks),
       });
       const rewritten = rewriteManifestUrls(m3u8, authToken)
@@ -5228,6 +5248,7 @@ router.get(
           quality, fileKbps: kbps, audioTracks: version?.audioTracks ?? [],
           authToken: req.query.token as string | undefined,
           copy, notCopied, transcodeKbps, peakKbps, frame, hevcEncode: roomHevc && HEVC_TRANSCODE,
+          picture: version?.picture ?? null,
         });
         if (manifest) return manifest;
       }
@@ -5244,6 +5265,7 @@ router.get(
         quality,
         fileKbps: kbps,
         audioTracks: version?.audioTracks ?? [],
+        picture: version?.picture ?? null,
       });
     });
     manifestInFlight.set(sessionId, promise);

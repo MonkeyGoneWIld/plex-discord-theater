@@ -31,6 +31,8 @@ export interface LastSegment {
   /** From the engine first asking for it to its last byte. */
   ms: number;
   fromPeer: boolean;
+  /** Out of what this device kept or the browser's cache, not the network. */
+  fromCache?: boolean;
 }
 
 interface StatsOverlayProps {
@@ -131,7 +133,7 @@ function mbps(bitsPerSec: number | null, digits = 1): string {
 
 function lastSegmentText(seg: LastSegment | null): string | null {
   if (!seg || !(seg.ms > 0)) return null;
-  return `${formatBytes(seg.bytes)} · ${Math.round(seg.ms)} ms · ${mbps((seg.bytes * 8 * 1000) / seg.ms)}${seg.fromPeer ? " · peer" : ""}`;
+  return `${formatBytes(seg.bytes)} · ${Math.round(seg.ms)} ms · ${mbps((seg.bytes * 8 * 1000) / seg.ms)}`;
 }
 
 function formatBytes(bytes: number): string {
@@ -427,9 +429,14 @@ export function StatsOverlay({
   // Plex's words for the stream — see playbackMode. Without the server's
   // notes, the playlist says only whether the video is the original.
   const mode = playbackMode(notes) ?? (copied === null ? null : copied ? "Direct Stream" : "Transcode");
+  // Whether this screen can show HDR at all: an HDR stream on one that
+  // can't looks washed out, which no setting here will fix.
+  const hdrDisplay = typeof window.matchMedia === "function" && window.matchMedia("(dynamic-range: high)").matches;
+  const hdrStream = !!notes?.range && !notes.range.startsWith("SDR");
   const videoSummary = [
     snap && snap.streamResolution !== "—" ? snap.streamResolution : null,
     codecFamily(snap?.videoCodec),
+    hdrStream ? notes!.range!.replace(/ \/ .*$/, "") : null,
     streamBps ? mbps(streamBps) : null,
   ].filter(Boolean).join(" · ") || "—";
 
@@ -474,7 +481,14 @@ export function StatsOverlay({
   const thumbsLoading = thumbs && (thumbs.state === "waiting" || thumbs.state === "downloading");
 
   const lastSegment = lastSegmentText(lastSegmentRef?.current ?? null) ?? snap?.lastFrag ?? null;
-  const delivery = vpsRelay ? "VPS relay (nginx cache)" : "P2P mesh (WebRTC)";
+  // Where the last segment came from, not the room's way of sharing them: it
+  // said "P2P mesh" with every segment coming from the server (18 Oct).
+  const last = lastSegmentRef?.current ?? null;
+  const delivery = !last
+    ? vpsRelay ? "VPS relay" : "—"
+    : last.fromPeer ? "Peer (WebRTC)"
+    : last.fromCache ? "This device (kept)"
+    : vpsRelay ? "VPS relay (HTTP)" : "Server (HTTP)";
   const graphMax = (values: Array<number | null>, floor: number, also = 0) =>
     Math.max(floor, also, ...values.filter((v): v is number => v !== null)) * 1.15;
 
@@ -497,6 +511,9 @@ export function StatsOverlay({
         ["Source", source, copied === null ? "none" : copied ? "ok" : "warn"],
         ...(notes?.video === "transcode" && notes.reason ? [["Reason", notes.reason, "warn"] as [string, string, Health]] : []),
         ["Codec", codecName(snap?.videoCodec) ?? "—"],
+        ...(notes?.range ? [["Range", notes.range, notes.range.startsWith("SDR (") ? "warn" : "none"] as [string, string, Health]] : []),
+        ...(notes?.videoFrom ? [["File", notes.videoFrom] as [string, string]] : []),
+        ["Display", hdrDisplay ? "HDR capable" : "SDR only", hdrStream && !hdrDisplay ? "warn" : "none"],
         ["Viewport", snap?.viewport ?? "—"],
       ],
     },

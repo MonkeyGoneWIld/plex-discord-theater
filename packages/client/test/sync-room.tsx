@@ -21,7 +21,7 @@
 //   - the viewer is never sent back: nobody sees the same seconds twice;
 //   - once the host goes on, they are back together within a few seconds;
 //   - the loading screen says "Loading…" or "Buffering…" and nothing else —
-//     or "Catching up with the room… N s" while one waits ahead of the room.
+//     or "Catching up to host · N s" while one waits ahead of the room.
 // With P2P on, the viewer's segments should carry the host through instead.
 //
 // "Start-up" and "Host's downloads crawl" play a copied film instead (see
@@ -1172,7 +1172,7 @@ function Runner() {
     const out: string[] = ["— what each player is told —"];
     const say = (line: string) => { out.push(line); setLines([...out]); };
     setLines([...out]);
-    const SAID = /Host is switching (?:audio|subtitles|quality)…|Switching (?:audio|subtitles|quality)…|(?:Co-host|Host) is seeking…|Host paused the video|Loading…|Buffering…|Catching up with the room…|Stream interrupted — Reconnecting\.\.\.|Stream lost|Reconnecting to the watch party…|Connection lost|Playback error[^\n]*/g;
+    const SAID = /Host is switching (?:audio|subtitles|quality)…|Switching (?:audio|subtitles|quality)…|(?:Co-host|Host) is seeking…|Host paused the video|Loading…|Buffering…|Catching up to host · \d+ s|Host paused · Catching up to host · \d+%|Stream interrupted — Reconnecting\.\.\.|Stream lost|Reconnecting to the watch party…|Connection lost|Playback error[^\n]*/g;
     const saidIn = (r: Report) => r.text.match(SAID) ?? [];
     const press = (who: "host" | "viewer", labels: string[]) =>
       (who === "host" ? hostFrame : viewerFrame).current?.contentWindow?.postMessage({ kind: "press", press: labels }, "*");

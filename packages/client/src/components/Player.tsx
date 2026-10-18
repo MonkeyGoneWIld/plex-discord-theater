@@ -6453,7 +6453,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    */
   useEffect(() => {
     if (isHostRef.current || !syncState) return;
-    if (!syncState.playing) stopWaitingForRoom("the room paused");
+    // A pause doesn't end a wait ahead of the room: the backfill fetches what
+    // was jumped over meanwhile. Ending it here, first, left the backfill with
+    // no wait to work from (18 Oct, The 'Burbs).
     const video = videoRef.current;
     if (!video) return;
     /**

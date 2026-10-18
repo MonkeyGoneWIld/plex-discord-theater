@@ -7,8 +7,8 @@
  * decodes it, HDR included), the audio as it is when it is AAC and as AAC
  * otherwise. Re-encodes (planEncode): HEVC Main10 for a player that decodes
  * HEVC, H.264 High for the rest, on Intel's GPU (QSV) or the CPU; an HEVC
- * re-encode of an HDR file stays HDR. What needs tone mapping (HDR to H.264,
- * Dolby Vision 5) is left to Plex until that is built.
+ * re-encode of an HDR file stays HDR. The rest of HDR — for an H.264 player,
+ * Dolby Vision 5, FFMPEG_HDR_REENCODE=tonemap — is tone-mapped to H.264 SDR.
  */
 
 /** A stream of the file, as Plex's /library/metadata describes it. */
@@ -243,10 +243,20 @@ export type Hardware = "qsv" | "software";
 const GPU_DECODES = new Set(["h264", "hevc", "av1", "vp9", "mpeg2video"]);
 
 /** VAAPI on the render node and QSV derived from it, as Jellyfin sets Intel up
- *  on Linux — what Phase 0 ran on the 265K. */
-export function qsvInit(device: string): string[] {
-  return ["-init_hw_device", `vaapi=va:${device},driver=iHD`, "-init_hw_device", "qsv=qs@va", "-filter_hw_device", "qs"];
+ *  on Linux — what Phase 0 ran on the 265K — and OpenCL from it too for
+ *  tonemap_opencl. */
+export function qsvInit(device: string, opencl = false): string[] {
+  return ["-init_hw_device", `vaapi=va:${device},driver=iHD`, "-init_hw_device", "qsv=qs@va",
+    ...(opencl ? ["-init_hw_device", "opencl=ocl@va"] : []), "-filter_hw_device", "qs"];
 }
+
+/**
+ * What tone-maps HDR to SDR, best first: OpenCL on Intel's GPU, the only one
+ * that applies Dolby Vision's own metadata, which profile 5 has no picture
+ * without (Phase 0 run 2: the others give it green and purple); QSV's video
+ * engine; Jellyfin's tonemapx on the CPU, for what is decoded there.
+ */
+export type Tonemapper = "opencl" | "vpp" | "software";
 
 export interface ColorLabels {
   primaries: string;
@@ -328,6 +338,11 @@ export interface EncodeRequest {
   maxHeight: number;
   /** FFMPEG_HDR_REENCODE=keep: an HEVC re-encode of an HDR file stays HDR. */
   keepHdr: boolean;
+  /** What the GPU tone-maps with, as detectHardware found: OpenCL when it
+   *  works there, else QSV's video engine. Unsaid, the video engine. */
+  tonemapper?: Tonemapper;
+  /** FFMPEG_TONEMAP's curve: reinhard unless said. */
+  tonemapAlgo?: string;
   /** Decode on the GPU where it can; false for the retry after it couldn't. */
   gpuDecode?: boolean;
 }
@@ -343,6 +358,9 @@ export type EncodePlan =
       /** The HDR transfer written on the output (smpte2084 or arib-std-b67);
        *  null for SDR. */
       hdrTrc: string | null;
+      /** HDR made SDR on the way: on what, by which curve, and whether Dolby
+       *  Vision's metadata is applied (profile 5, 10.0); null when it isn't. */
+      tonemap: { via: Tonemapper; algo: string; dovi: boolean } | null;
       width: number;
       height: number;
       hardware: Hardware;
@@ -362,16 +380,24 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
   const width = src.width ?? 0;
   const height = src.height ?? 0;
   if (width <= 0 || height <= 0) return no("picture size unknown");
-  const codec = req.hevcOk && req.hardware === "qsv" ? "hevc" : "h264";
+  const inCodec = (video.codec ?? "").toLowerCase();
+  const gpuDecode = req.hardware === "qsv" && req.gpuDecode !== false && GPU_DECODES.has(inCodec) &&
+    !(inCodec === "h264" && (video.bitDepth ?? 8) > 8);
+  const hevcOut = req.hevcOk && req.hardware === "qsv";
   const hdr = hdrClass(video);
-  if (hdr !== "SDR") {
-    if (hdr === "DV P5" || hdr === "DV P10.0") return no(`Dolby Vision ${hdr.slice(3)} needs tone mapping`);
-    if (codec === "h264") return no(`${hdr} to H.264 needs tone mapping`);
-    if (!req.keepHdr) return no(`${hdr} needs tone mapping (FFMPEG_HDR_REENCODE=tonemap)`);
+  const doviOnly = hdr === "DV P5" || hdr === "DV P10.0";
+  // HDR stays HDR in HEVC (FFMPEG_HDR_REENCODE=keep); otherwise it is mapped
+  // to SDR, in H.264 — Phase 0's tone-mapped chains, all into H.264 — on the
+  // GPU when it decodes the file, else on the CPU.
+  let tonemap: { via: Tonemapper; algo: string; dovi: boolean } | null = null;
+  if (hdr !== "SDR" && (doviOnly || !hevcOut || !req.keepHdr)) {
+    const via: Tonemapper = !gpuDecode ? "software" : req.tonemapper === "opencl" ? "opencl" : "vpp";
+    if (doviOnly && via !== "opencl") return no(`Dolby Vision ${hdr.slice(3)} needs OpenCL tone mapping`);
+    tonemap = { via, algo: req.tonemapAlgo ?? "reinhard", dovi: doviOnly };
   }
+  const codec = hevcOut && !tonemap ? "hevc" : "h264";
   const audio = pickAudio(src, req.audioStreamId);
   if (audio === false) return no(`no audio track ${req.audioStreamId}`);
-  const inCodec = (video.codec ?? "").toLowerCase();
   const [w, h] = encodeFrame(
     width, height, video.anamorphic ? video.pixelAspectRatio : undefined, req.maxWidth, req.maxHeight,
   );
@@ -382,12 +408,13 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
     audioCopy: (audio?.codec ?? "").toLowerCase() === "aac",
     codec,
     hdr,
-    hdrTrc: hdr === "SDR" ? null : String(video.colorTrc ?? "").toLowerCase() === "arib-std-b67" ? "arib-std-b67" : "smpte2084",
+    hdrTrc: hdr === "SDR" || tonemap ? null
+      : String(video.colorTrc ?? "").toLowerCase() === "arib-std-b67" ? "arib-std-b67" : "smpte2084",
+    tonemap,
     width: w,
     height: h,
     hardware: req.hardware,
-    gpuDecode: req.hardware === "qsv" && req.gpuDecode !== false && GPU_DECODES.has(inCodec) &&
-      !(inCodec === "h264" && (video.bitDepth ?? 8) > 8),
+    gpuDecode,
     interlaced: /interlaced/i.test(video.scanType ?? ""),
     color: colorLabels(video, height),
     kbps: req.kbps,
@@ -407,6 +434,10 @@ export const ENCODE_SEGMENT_S = 3;
  * lands on one. Rate control is VBR: target, peak, twice the peak's buffer
  * (§8.4). QSV picks CBR, which pads with filler, when the two are equal, so
  * the peak is always at least a little above the target.
+ *
+ * Tone mapping is Phase 0's too, the picture kept in 10 bits up to it:
+ * OpenCL mapped from VAAPI and back, QSV's video engine, or tonemapx on the
+ * CPU; the output labelled BT.709.
  */
 export function encodeArgs(
   plan: Extract<EncodePlan, { ok: true }>,
@@ -420,11 +451,22 @@ export function encodeArgs(
   const fmt = plan.codec === "hevc" ? "p010" : "nv12";
   const fill = plan.color.fill ? `${plan.color.fill},` : "";
   const deinterlaceCpu = plan.interlaced ? "bwdif=mode=send_frame," : "";
+  const tm = plan.tonemap;
+  const curve = tm ? `tonemap=${tm.algo}:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12` : "";
+  const gpuIn = `${fill}${plan.interlaced ? "deinterlace_vaapi=rate=frame," : ""}scale_vaapi=w=${W}:h=${H}:format=${tm ? "p010" : fmt}`;
+  const cpuIn = `${fill}${deinterlaceCpu}scale=${W}:${H},`;
   const vf = plan.hardware === "qsv"
     ? plan.gpuDecode
-      ? `${fill}${plan.interlaced ? "deinterlace_vaapi=rate=frame," : ""}scale_vaapi=w=${W}:h=${H}:format=${fmt},hwmap=derive_device=qsv,format=qsv`
-      : `${fill}${deinterlaceCpu}scale=${W}:${H},format=${fmt === "p010" ? "p010le" : fmt},hwupload=extra_hw_frames=64,format=qsv`
-    : `${fill}${deinterlaceCpu}scale=${W}:${H},format=yuv420p`;
+      ? tm?.via === "opencl"
+        ? `${gpuIn},hwmap=derive_device=opencl:mode=read,tonemap_opencl=${curve}${tm.dovi ? ":apply_dovi=1" : ""},` +
+          "hwmap=derive_device=vaapi:mode=write:reverse=1,format=vaapi,hwmap=derive_device=qsv,format=qsv"
+        : `${gpuIn},hwmap=derive_device=qsv,format=qsv${tm ? ",vpp_qsv=tonemap=1:format=nv12" : ""}`
+      : tm
+        ? `${cpuIn}format=yuv420p10le,tonemapx=${curve},hwupload=extra_hw_frames=64,format=qsv`
+        : `${cpuIn}format=${fmt === "p010" ? "p010le" : fmt},hwupload=extra_hw_frames=64,format=qsv`
+    : tm
+      ? `${cpuIn}format=yuv420p10le,tonemapx=${curve},format=yuv420p`
+      : `${cpuIn}format=yuv420p`;
   const peak = Math.max(plan.peakKbps, plan.kbps + 1);
   const encoder = plan.hardware === "qsv"
     ? ["-c:v", `${plan.codec}_qsv`, "-low_power", "1", "-profile:v", plan.codec === "hevc" ? "main10" : "high",
@@ -434,11 +476,13 @@ export function encodeArgs(
         "-maxrate", `${peak}k`, "-bufsize", `${peak * 2}k`, "-forced-idr", "1"];
   const tags = plan.hdrTrc
     ? ["-color_primaries", "bt2020", "-color_trc", plan.hdrTrc, "-colorspace", "bt2020nc", "-color_range", "tv"]
-    : ["-color_primaries", plan.color.primaries, "-color_trc", trcOption(plan.color.trc), "-colorspace", plan.color.matrix,
+    : tm
+      ? ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv"]
+      : ["-color_primaries", plan.color.primaries, "-color_trc", trcOption(plan.color.trc), "-colorspace", plan.color.matrix,
         "-color_range", plan.color.range];
   return [
     "-hide_banner", "-nostdin", "-loglevel", "error",
-    ...(plan.hardware === "qsv" ? qsvInit(device) : []),
+    ...(plan.hardware === "qsv" ? qsvInit(device, tm?.via === "opencl") : []),
     ...(plan.gpuDecode ? ["-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi", "-hwaccel_device", "va"] : []),
     ...(offsetS > 0 ? ["-ss", String(offsetS)] : []),
     "-copyts", "-start_at_zero",

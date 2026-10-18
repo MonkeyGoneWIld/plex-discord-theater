@@ -71,7 +71,7 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
   5: { file: AAC_FILM, plexPath: "/nowhere/film.mkv", codec: "h264", width: 640, height: 360, audio: "aac", channels: 2 },
   // Not a film at all: ffmpeg fails.
   6: { file: BROKEN_FILM, plexPath: BROKEN_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2 },
-  // Dolby Vision profile 5: needs tone mapping, which is Phase 3's.
+  // Dolby Vision profile 5: tone-mapped on OpenCL only, which isn't here.
   7: { file: AAC_FILM, plexPath: AAC_FILM, codec: "hevc", width: 640, height: 360, audio: "aac", channels: 2,
     hdr: { DOVIPresent: true, DOVIProfile: 5, colorTrc: "smpte2084" } },
   // Read through Plex at ten times the speed it plays, as a disk far slower
@@ -323,7 +323,8 @@ console.log("\n— what a re-encode is made of —");
   });
   const ask = { audioStreamId: null, hevcOk: true, hardware: "qsv" as "qsv" | "software", kbps: 8000, peakKbps: 8000,
     maxWidth: 1920, maxHeight: 1080, keepHdr: true };
-  const plan = (v: ReturnType<typeof version>, more: Partial<typeof ask> = {}) => planEncode(v, { ...ask, ...more });
+  const plan = (v: ReturnType<typeof version>, more: Partial<Parameters<typeof planEncode>[1]> = {}) =>
+    planEncode(v, { ...ask, ...more });
   const hdr10 = plan(version({ colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc" }));
   check("HDR10 for an HEVC player stays HDR, in HEVC Main10",
     hdr10.ok && [hdr10.codec, hdr10.hdrTrc], ["hevc", "smpte2084"]);
@@ -337,11 +338,42 @@ console.log("\n— what a re-encode is made of —");
   const hlg = plan(version({ DOVIPresent: true, DOVIProfile: 8, DOVIBLCompatID: 4, colorTrc: "arib-std-b67" }));
   check("Dolby Vision 8.4 is kept as the HLG underneath", hlg.ok && hlg.hdrTrc, "arib-std-b67");
   const why = (p: ReturnType<typeof plan>) => (p.ok ? "encode" : p.why);
-  check("HDR10 to H.264 needs tone mapping, which is Plex's for now",
-    why(plan(version({ colorTrc: "smpte2084" }), { hevcOk: false })), "HDR10 to H.264 needs tone mapping");
-  check("so does Dolby Vision 5", why(plan(version({ DOVIPresent: true, DOVIProfile: 5 }))), "Dolby Vision P5 needs tone mapping");
-  check("and HDR with FFMPEG_HDR_REENCODE=tonemap",
-    why(plan(version({ colorTrc: "smpte2084" }), { keepHdr: false })), "HDR10 needs tone mapping (FFMPEG_HDR_REENCODE=tonemap)");
+  const tonemapped = (p: ReturnType<typeof plan>) => p.ok && [p.codec, p.hdrTrc, p.tonemap?.via, p.tonemap?.dovi];
+  check("HDR10 for an H.264 player is tone-mapped to H.264, on QSV's video engine without OpenCL",
+    tonemapped(plan(version({ colorTrc: "smpte2084" }), { hevcOk: false })), ["h264", null, "vpp", false]);
+  check("  and on OpenCL where it works",
+    tonemapped(plan(version({ colorTrc: "smpte2084" }), { hevcOk: false, tonemapper: "opencl" })), ["h264", null, "opencl", false]);
+  check("so is HDR with FFMPEG_HDR_REENCODE=tonemap, for an HEVC player too",
+    tonemapped(plan(version({ colorTrc: "smpte2084" }), { keepHdr: false })), ["h264", null, "vpp", false]);
+  check("and on the CPU when the GPU doesn't decode it",
+    tonemapped(plan(version({ colorTrc: "smpte2084" }), { hevcOk: false, gpuDecode: false })), ["h264", null, "software", false]);
+  check("Dolby Vision 5 is tone-mapped with its own metadata, on OpenCL",
+    tonemapped(plan(version({ DOVIPresent: true, DOVIProfile: 5 }), { tonemapper: "opencl" })), ["h264", null, "opencl", true]);
+  check("  and left to Plex without it",
+    why(plan(version({ DOVIPresent: true, DOVIProfile: 5 }))), "Dolby Vision P5 needs OpenCL tone mapping");
+  check("  or decoded on the CPU",
+    why(plan(version({ DOVIPresent: true, DOVIProfile: 5 }), { tonemapper: "opencl", gpuDecode: false })),
+    "Dolby Vision P5 needs OpenCL tone mapping");
+  const p5 = plan(version({ DOVIPresent: true, DOVIProfile: 5, colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc" }),
+    { tonemapper: "opencl" });
+  const p5Args = p5.ok ? encodeArgs(p5, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
+  check("  by Phase 0's chain: OpenCL from VAAPI, its Dolby Vision applied, back to QSV, labelled BT.709", [
+    p5Args.includes("-init_hw_device qsv=qs@va -init_hw_device opencl=ocl@va -filter_hw_device qs"),
+    p5Args.includes("-vf scale_vaapi=w=1920:h=1080:format=p010,hwmap=derive_device=opencl:mode=read," +
+      "tonemap_opencl=tonemap=reinhard:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12:apply_dovi=1," +
+      "hwmap=derive_device=vaapi:mode=write:reverse=1,format=vaapi,hwmap=derive_device=qsv,format=qsv"),
+    p5Args.includes("-c:v h264_qsv"),
+    p5Args.includes("-color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv"),
+  ], [true, true, true, true]);
+  const vpp = plan(version({ colorTrc: "smpte2084" }), { hevcOk: false });
+  check("  QSV's video engine after the GPU's scale",
+    vpp.ok && encodeArgs(vpp, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ").includes(
+      "scale_vaapi=w=1920:h=1080:format=p010,hwmap=derive_device=qsv,format=qsv,vpp_qsv=tonemap=1:format=nv12"), true);
+  const soft = plan(version({ colorTrc: "smpte2084" }), { hardware: "software", tonemapAlgo: "mobius" });
+  check("  and tonemapx on the CPU, by FFMPEG_TONEMAP's curve",
+    soft.ok && encodeArgs(soft, ["-i", "f.mkv"], 0, 60, "").join(" ").includes(
+      "scale=1920:1080,format=yuv420p10le,tonemapx=tonemap=mobius:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12,format=yuv420p"),
+    true);
   const cpu = plan(version({ codec: "h264", bitDepth: 8 }), { hardware: "software" });
   check("on the CPU it is H.264", cpu.ok && cpu.codec, "h264");
   const anamorphic = plan(version({ codec: "mpeg2video", bitDepth: 8, anamorphic: true, pixelAspectRatio: "4:3" },
@@ -380,15 +412,18 @@ async function listed(variant: string, n: number) {
 console.log("\n— a re-encode —");
 {
   asked.length = 0;
-  const m = await master("3", crypto.randomUUID());
+  const ids = [crypto.randomUUID(), crypto.randomUUID()];
+  const m = await master("3", ids[0]);
   const notes = notesOf(m.text);
   check("HEVC for a player nobody said decodes it is re-encoded by ffmpeg, saying why",
     [notes.engine, notes.video, notes.reason], ["ffmpeg", "transcode", "HEVC, and this player can't decode it"]);
   check("  and Plex was never asked to transcode", transcodeAsked(), []);
   const list = await listed(variantOf(m.text), 3);
   check("  in 3 s segments", list.slice(0, 3).map((e) => Math.round(e.duration * 10) / 10), [3, 3, 3]);
-  const m4 = await master("4", crypto.randomUUID());
+  const m4 = await master("4", ids[1]);
   check("a 4K file is re-encoded at 1080p", [notesOf(m4.text).engine, /RESOLUTION=1920x1080/.test(m4.text)], ["ffmpeg", true]);
+  // Both of the CPU's encode slots, which the seek below needs one of.
+  for (const id of ids) await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
 }
 {
   const m = await master("3", crypto.randomUUID(), "?offset=31");
@@ -415,7 +450,7 @@ console.log("\n— a re-encode —");
 }
 
 console.log("\n— what is still Plex's —");
-for (const [rk, why] of [["7", "Dolby Vision profile 5"], ["6", "a file ffmpeg can't read"]]) {
+for (const [rk, why] of [["7", "Dolby Vision profile 5 without OpenCL"], ["6", "a file ffmpeg can't read"]]) {
   asked.length = 0;
   const m = await master(rk, crypto.randomUUID());
   check(`${why} goes to Plex`, transcodeAsked().includes("/video/:/transcode/universal/decision"), true);

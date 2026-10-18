@@ -49,7 +49,7 @@ import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
 import { markOriginalAudio } from "../services/original-language.js";
 import { audioNotes, type AudioDecision, type SourceAudio } from "../services/stream-audio.js";
 import {
-  ffmpegEngineOn, ffmpegHardware, hwDevice, keepHdrOnReencode, localPath, maxEncodes, readable,
+  ffmpegEngineOn, ffmpegHardware, hwDevice, keepHdrOnReencode, localPath, maxEncodes, readable, tonemapAlgo, tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
   AUDIO_KBPS, copyArgs, encodeArgs, inputArgs, planCopy, planEncode, type SourceStream, type SourceVersion,
@@ -4566,7 +4566,8 @@ async function ffmpegSource(ratingKey: string, mediaIndex: number): Promise<Sour
  * Start this session's stream with ffmpeg and return its master playlist: a
  * copy when the file may be copied and ffmpeg can copy it, otherwise a
  * re-encode (plan.ts). Null leaves the stream to Plex: what ffmpeg can't make
- * yet (tone mapping), every encode slot taken, or a run that didn't start.
+ * (Dolby Vision 5 without OpenCL), every encode slot taken, or a run that
+ * didn't start.
  */
 async function startWithFfmpeg(o: {
   sessionId: string;
@@ -4651,6 +4652,7 @@ async function startWithFfmpeg(o: {
     const ask = {
       audioStreamId: o.audioStreamID || null, hevcOk: o.hevcEncode, hardware: ffmpegHardware(),
       kbps: o.transcodeKbps, peakKbps: o.peakKbps, maxWidth, maxHeight, keepHdr: keepHdrOnReencode(),
+      tonemapper: tonemapper(), tonemapAlgo: tonemapAlgo(),
     };
     let plan = planEncode(source, ask);
     if (!plan.ok) {
@@ -4679,13 +4681,15 @@ async function startWithFfmpeg(o: {
     }
     key = started.key;
     video = { ...plan, kbps: plan.kbps };
-    // Tone mapping is still Plex's (planEncode refuses it), so a re-encode
-    // either keeps the file's HDR or was SDR to begin with.
-    range = plan.hdrTrc ? `${plan.hdrTrc === "arib-std-b67" ? "HLG" : "HDR10"} (kept)` : "SDR";
+    range = plan.hdrTrc ? `${plan.hdrTrc === "arib-std-b67" ? "HLG" : "HDR10"} (kept)`
+      : plan.tonemap ? `SDR (tone-mapped from ${o.picture?.hdr ?? plan.hdr})` : "SDR";
     logEvent("FFmpeg", "re-encoding", {
       session, ratingKey: o.ratingKey, fromS: o.offsetS, why: reason,
       video: `${plan.video.codec} → ${plan.codec} ${plan.width}x${plan.height} ${plan.kbps}k (peak ${plan.peakKbps}k)`,
-      hdr: plan.hdrTrc ? `${plan.hdr} kept` : plan.hdr, on: plan.hardware, decode: plan.gpuDecode ? "gpu" : "cpu",
+      hdr: plan.hdrTrc ? `${plan.hdr} kept`
+        : plan.tonemap ? `${plan.hdr} → SDR, ${plan.tonemap.algo} on ${plan.tonemap.via}${plan.tonemap.dovi ? " with its Dolby Vision" : ""}`
+        : plan.hdr,
+      on: plan.hardware, decode: plan.gpuDecode ? "gpu" : "cpu",
       deinterlace: plan.interlaced, filled: plan.color.fill ?? "none",
       audio: plan.audio ? `${plan.audio.codec} ${plan.audio.channels ?? "?"}ch ${plan.audioCopy ? "copied" : "→ AAC"}` : "none",
       source: fromMount ? "mount" : "plex",
@@ -5241,7 +5245,7 @@ router.get(
       const frame = quality && quality <= QUALITY_720P_KBPS ? "1280x720" : transcodeFrame(version ?? {});
       // With PLAYBACK_ENGINE=ffmpeg, the stream is made here, from the file —
       // copied or re-encoded — and Plex isn't asked for anything. Whatever
-      // ffmpeg can't make yet (burned-in subtitles, tone mapping), or won't
+      // ffmpeg can't make yet (burned-in subtitles), or won't
       // start, is Plex's, exactly as before.
       if (subtitleMode === "none" && ffmpegEngineOn() && !ffmpegRefused(ratingKey)) {
         const manifest = await startWithFfmpeg({

@@ -4,7 +4,7 @@
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import { qsvInit, type Hardware } from "./plan.js";
+import { qsvInit, type Hardware, type Tonemapper } from "./plan.js";
 
 /** Jellyfin's build, which the image ships. */
 const JELLYFIN_FFMPEG = "/usr/lib/jellyfin-ffmpeg/ffmpeg";
@@ -79,6 +79,7 @@ export function readable(file: string): boolean {
 
 /** Null until detectHardware has run. */
 let hardware: Hardware | null = null;
+let mapper: Tonemapper | null = null;
 
 /** The render node QSV runs on. */
 export function hwDevice(): string {
@@ -94,6 +95,21 @@ export function ffmpegHardware(): Hardware {
 export function maxEncodes(): number {
   const n = Number(process.env.FFMPEG_MAX_ENCODES);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : ffmpegHardware() === "qsv" ? 4 : 2;
+}
+
+/** What the GPU tone-maps with, as detectHardware found: OpenCL when it
+ *  works there, else QSV's video engine; the CPU without QSV. */
+export function tonemapper(): Tonemapper {
+  return mapper ?? "software";
+}
+
+const CURVES = ["reinhard", "mobius", "hable", "bt2390", "linear", "gamma", "clip"];
+
+/** FFMPEG_TONEMAP: the curve HDR is mapped to SDR by — reinhard, the closest
+ *  to Plex's, unless set. */
+export function tonemapAlgo(): string {
+  const want = process.env.FFMPEG_TONEMAP?.trim().toLowerCase();
+  return want && CURVES.includes(want) ? want : "reinhard";
 }
 
 /** FFMPEG_HDR_REENCODE: keep (default), or tonemap as Plex does. */
@@ -126,11 +142,14 @@ function trial(args: string[]): Promise<{ ok: boolean; said: string }> {
  * FFMPEG_HWACCEL (auto | qsv | none): auto and qsv try a short HEVC Main10 and
  * H.264 encode on Intel's GPU, with Phase 0's setup, and use it if both work;
  * otherwise re-encodes are H.264 on the CPU. VAAPI and NVENC aren't built yet.
+ * With QSV, a short tonemap_opencl says whether OpenCL tone-maps there: else
+ * QSV's video engine does, and Dolby Vision 5 is left to Plex.
  */
 export async function detectHardware(): Promise<{ hardware: Hardware; note: string }> {
   const want = (process.env.FFMPEG_HWACCEL ?? "auto").trim().toLowerCase();
-  const done = (h: Hardware, note: string) => {
+  const done = (h: Hardware, note: string, m: Tonemapper = "software") => {
     hardware = h;
+    mapper = m;
     return { hardware: h, note };
   };
   if (["none", "software", "off", "cpu"].includes(want)) return done("software", "CPU (FFMPEG_HWACCEL=none)");
@@ -142,8 +161,23 @@ export async function detectHardware(): Promise<{ hardware: Hardware; note: stri
     "-vf", `format=${fmt},hwupload=extra_hw_frames=16,format=qsv`,
     "-c:v", codec, "-low_power", "1", "-profile:v", profile, "-f", "null", "-",
   ]);
-  const [hevc, h264] = await Promise.all([encode("hevc_qsv", "p010le", "main10"), encode("h264_qsv", "nv12", "high")]);
-  if (hevc.ok && h264.ok) return done("qsv", "Intel QSV (HEVC Main10 and H.264)");
+  const opencl = () => trial([
+    "-hide_banner", "-nostdin", "-loglevel", "error",
+    "-init_hw_device", `vaapi=va:${hwDevice()},driver=iHD`, "-init_hw_device", "opencl=ocl@va", "-filter_hw_device", "ocl",
+    "-f", "lavfi", "-i", "testsrc2=s=320x240:r=24:d=1",
+    "-vf", "format=p010le,setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc:range=tv,hwupload," +
+      `tonemap_opencl=tonemap=${tonemapAlgo()}:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12,hwdownload,format=nv12`,
+    "-f", "null", "-",
+  ]);
+  const [hevc, h264, cl] = await Promise.all([
+    encode("hevc_qsv", "p010le", "main10"), encode("h264_qsv", "nv12", "high"), opencl(),
+  ]);
+  if (hevc.ok && h264.ok) {
+    return cl.ok
+      ? done("qsv", `Intel QSV (HEVC Main10 and H.264), tone mapping ${tonemapAlgo()} on OpenCL`, "opencl")
+      : done("qsv", `Intel QSV (HEVC Main10 and H.264), tone mapping ${tonemapAlgo()} on QSV's video engine ` +
+          `(OpenCL didn't: ${cl.said || "no answer"}; Dolby Vision 5 goes to Plex)`, "vpp");
+  }
   const why = (!hevc.ok ? hevc.said : h264.said) || "no answer";
   return done("software", `CPU (Intel QSV didn't encode: ${why})`);
 }

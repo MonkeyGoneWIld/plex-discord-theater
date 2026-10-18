@@ -788,6 +788,21 @@ function sortByHevc(room: Room, roomId: string, v: Variant): void {
   });
 }
 
+/**
+ * Where the room playing this stream of this title is now; null when none is.
+ * For a stream asked for with no place, that isn't running any more.
+ */
+export function roomPositionForSession(sessionId: string, ratingKey: string): number | null {
+  for (const room of rooms.values()) {
+    const s = room.state;
+    if (s.ratingKey !== ratingKey) continue;
+    if (s.hlsSessionId === sessionId || [...s.variants.values()].some((v) => v.hlsSessionId === sessionId)) {
+      return interpolatedPosition(s);
+    }
+  }
+  return null;
+}
+
 export function sessionHostUserId(sessionId: string): string | null {
   for (const room of rooms.values()) {
     // Whoever drives this particular stream. With one transcode per set of

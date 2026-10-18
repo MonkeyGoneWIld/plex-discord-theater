@@ -1946,6 +1946,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    *  back what is in goes; `partS`, the film in hand of the segment coming. */
   const backfillRef = useRef<{ fromS: number; toS: number; reachedS: number; partS: number; shown: number } | null>(null);
   const [backfilling, setBackfilling] = useState(false);
+  /** Whether the loading screen was up at the last render — see keptUp. */
+  const loadingUpRef = useRef(false);
   /**
    * Where a follower was when its stream was torn down, if that was ahead of
    * the room. Read once by the next manifest, so following the host onto a
@@ -2086,6 +2088,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * (services/sync.ts, the heartbeat).
    */
   const hostPositionForRoom = useCallback((): number => {
+    // Catching up with the room, the room's clock is the place, as the
+    // heartbeat says (sendHostHeartbeat): a pause pressed while waiting ahead
+    // of it would have put everybody where this player waits.
+    const sync = syncStateRef.current;
+    if (hostCatchUpRef.current && sync?.playing && !sync.hostWaiting) return roomPositionNow(sync, Infinity);
     if (restartTimerRef.current !== null || isRestartPending()) {
       return seekOffsetRef.current ?? restartTargetRef.current ?? positionForRoom();
     }
@@ -2420,6 +2427,20 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // its session, and its audio and subtitle, which Pirates doesn't have:
     // no subtitle was ticked, and choosing one restarted the stream.
     if (v.ratingKey && v.ratingKey !== item.ratingKey) return;
+    // The room's stream when this player mounted (adoptSessionIdRef) is this
+    // player's to take up only when it is the one it is put on. On 18 October
+    // monkey26 came back as host in Firefox, which can't play the room's HEVC,
+    // and was put on an H.264 stream of its own — but took up the room's
+    // anyway, started it again as that, and blah0391, watching the copy, was
+    // left on a stream that was gone.
+    if (adoptSessionIdRef.current && adoptSessionIdRef.current !== v.hlsSessionId) {
+      logEvent("HLS", "not taking up the room's stream: this player is on another", {
+        variant: v.variantKey,
+        room: adoptSessionIdRef.current.substring(0, 8),
+        own: v.hlsSessionId?.substring(0, 8) ?? "none yet",
+      });
+      adoptSessionIdRef.current = null;
+    }
     // Bank what this client is on, per title. Rolled over rather than
     // overwritten, because the moment a new title arrives the previous pair is
     // the only record of what the person was actually watching.
@@ -3205,8 +3226,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         setBuffering(false);
       }
 
-      const holding = !!sync?.playing && !!sync.ratingKey &&
-        (sync.hostWaiting || (!isHostRef.current && !!roomWaitRef.current));
+      // A host's own wait for the room too, catching up with it: in Firefox
+      // on 18 October it was a paused picture with a play button for twenty
+      // seconds (hostCatchUpRef).
+      const holding = !!sync?.playing && !!sync.ratingKey && (sync.hostWaiting || !!roomWaitRef.current);
       if (!holding) holdingSince = 0;
       else if (!holdingSince) holdingSince = Date.now();
       setRoomHolding(holding && Date.now() - holdingSince >= LOADING_SCREEN_AFTER_MS);
@@ -3330,8 +3353,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // Waiting ahead of a room that plays on: how long until it gets here.
       const sync = syncStateRef.current;
       const wait = roomWaitRef.current;
-      const leftS = wait && sync?.playing && sync.ratingKey && !sync.hostWaiting && !isHostRef.current
-        ? wait.atS - roomPositionNow(sync)
+      const leftS = wait && sync?.playing && sync.ratingKey && !sync.hostWaiting
+        ? wait.atS - roomPositionNow(sync, isHostRef.current ? Infinity : undefined)
         : null;
       // Paused, fetching what it jumped over: how much of it is in.
       const fill = !sync?.playing && !isHostRef.current ? backfillRef.current : null;
@@ -7487,7 +7510,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // Held for the room is playing, as far as anybody pressing pause is
     // concerned — see SyncState.hostWaiting.
     const sync = syncStateRef.current;
-    const resuming = video.paused && !(sync?.playing && sync.hostWaiting);
+    const resuming = video.paused && !(sync?.playing && (sync.hostWaiting || roomWaitRef.current));
     if (resuming) {
       // Started when the room is — see sendRoomResume.
       sendRoomResume(hostPositionForRoom());
@@ -8054,7 +8077,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // So is a backfill, with its countdown: a still of where it waits, or black,
   // said nothing about what it was doing (18 Oct).
   const backfillShown = backfilling && !isHost && syncState?.playing === false;
-  const loadingShown = !isPip && (buffering || roomHolding || backfillShown || (noPicture && !!syncState?.ratingKey)) && !error;
+  // Up, it stays up while this player waits for the room, until it plays: a
+  // backfill called off by the room playing again went to its new place at
+  // full brightness for most of a second, and read as about to play (18 Oct).
+  const keptUp = waitingForRoom && loadingUpRef.current && (syncState?.playing || backfilling);
+  const loadingShown = !isPip && (buffering || roomHolding || backfillShown || keptUp || (noPicture && !!syncState?.ratingKey)) && !error;
+  loadingUpRef.current = loadingShown;
   // Held for the host's stream, which is coming back for a switch of the
   // host's own — see SyncState.hostSwitching. Said until the loading screen
   // is down: the room runs again a moment before this player's picture
@@ -8099,7 +8127,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     return () => clearTimeout(done);
   }, [switchingFor]);
   // Paused only to wait for the room, which is still playing.
-  const heldForRoom = !!syncState?.playing && (syncState.hostWaiting || (!isHost && waitingForRoom));
+  const heldForRoom = !!syncState?.playing && (syncState.hostWaiting || waitingForRoom);
 
   const playerContainerStyle: CSSProperties = isPip
     ? {

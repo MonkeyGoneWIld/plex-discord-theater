@@ -115,19 +115,6 @@ export function tonemapAlgo(): string {
   return want && CURVES.includes(want) ? want : "reinhard";
 }
 
-/**
- * FFMPEG_ENCODE_SPEED: how many times faster than the film plays a re-encode
- * reads it, past its first seconds — 2 unless set; 0 for as fast as it goes.
- * Flat out, on Intel's GPU, it read the film at 8 times: on 18 October, in
- * three tests, the bot sent the host 4 to 8 Mbps while it did, and 20 to 36 the
- * moment it paused, and every start stopped 9 s in.
- */
-export function encodeSpeed(): number {
-  const raw = process.env.FFMPEG_ENCODE_SPEED?.trim();
-  const n = Number(raw);
-  return raw && Number.isFinite(n) && n >= 0 ? n : 2;
-}
-
 /** FFMPEG_HDR_REENCODE: keep (default), or tonemap as Plex does. */
 export function keepHdrOnReencode(): boolean {
   return process.env.FFMPEG_HDR_REENCODE?.trim().toLowerCase() !== "tonemap";

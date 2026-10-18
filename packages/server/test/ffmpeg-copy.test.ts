@@ -32,8 +32,6 @@ process.env.PLAYBACK_ENGINE = "ffmpeg";
 // Small, so the pause ahead of the watcher shows inside a 60 s film: it
 // stops past 36 s and carries on once the watcher is within 18 s of that.
 process.env.PDT_FFMPEG_LEAD_S = "36";
-// Flat out: the re-encodes below are timed on it (FFMPEG_ENCODE_SPEED is checked on its own).
-process.env.FFMPEG_ENCODE_SPEED = "0";
 
 let pass = 0;
 let fail = 0;
@@ -562,40 +560,6 @@ console.log("\n— a re-encode —");
     starts.push(Math.round(videoSpan(Buffer.from(await (await fetch(origin + e.uri)).arrayBuffer()))!.start * 10) / 10);
   }
   check("a seek's re-encode opens where it was asked (41 on the clock), its keyframes 3 s on", starts, [41, 44]);
-}
-{
-  const { encodeSpeed } = await import("../src/services/ffmpeg/config.js");
-  const { planEncode, encodeArgs } = await import("../src/services/ffmpeg/plan.js");
-  const was = process.env.FFMPEG_ENCODE_SPEED;
-  delete process.env.FFMPEG_ENCODE_SPEED;
-  const unset = encodeSpeed();
-  process.env.FFMPEG_ENCODE_SPEED = "0";
-  check("a re-encode reads at twice the film's speed unless FFMPEG_ENCODE_SPEED says otherwise; 0 for flat out",
-    [unset, encodeSpeed()], [2, 0]);
-  const p = planEncode({
-    container: "mkv", width: 1920, height: 1080, partKey: "/library/parts/1/1/file.mkv", file: "/data/media/f.mkv",
-    streams: [{ id: 11, streamType: 1, index: 0, codec: "hevc" }, { id: 12, streamType: 2, index: 1, codec: "aac", channels: 2 }],
-  }, { audioStreamId: null, hevcOk: false, hardware: "software", kbps: 8000, peakKbps: 12000, maxWidth: 1920, maxHeight: 1080 });
-  const args = p.ok ? encodeArgs(p, ["-i", "f.mkv"], 30, 60, "", 2).join(" ") : "";
-  check("  its first 15 s as fast as it goes, then twice the film's speed, read so from the input",
-    /-readrate 2 -readrate_initial_burst 15 .*-i f\.mkv/.test(args), true);
-  check("  and nothing of it at 0", p.ok && encodeArgs(p, ["-i", "f.mkv"], 30, 60, "", 0).includes("-readrate"), false);
-
-  process.env.FFMPEG_ENCODE_SPEED = "2";
-  const id = crypto.randomUUID();
-  const t0 = Date.now();
-  const m = await master("3", id);
-  const firstList = entries(await (await fetch(origin + variantOf(m.text))).text());
-  const firstS = (Date.now() - t0) / 1000;
-  await sleep(6000);
-  const later = entries(await (await fetch(origin + variantOf(m.text))).text());
-  const listedS = later.reduce((s, e) => s + e.duration, 0);
-  check("  live: its first playlist still comes at once, with 12 s",
-    [firstS < 5, firstList.reduce((s, e) => s + e.duration, 0) >= 11.5], [true, true]);
-  // Flat out, the whole 60 s film is made by now.
-  check("  then it goes at about twice the film's speed, not to the end at once", listedS > 15 && listedS < 45, true);
-  await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
-  process.env.FFMPEG_ENCODE_SPEED = was ?? "0";
 }
 {
   process.env.FFMPEG_MAX_ENCODES = "1";

@@ -4,7 +4,7 @@
  * server's segmentPart does, at a pace per download.
  */
 import {
-  MAX_PARTS, fetchInParts, fetchInPartsLater, inBrowserCache, installSegmentParts, partBounds, partUrl, partsFor, pumpSegmentParts,
+  MAX_PARTS, fetchInParts, fetchInPartsLater, inBrowserCache, installSegmentParts, partBounds, partUrl, partsFor, partsPeak, pumpSegmentParts,
   keepLater, segmentBytesOf, segmentProgress,
 } from "../src/lib/segmentParts";
 import { keepStats, keepingSegments, keptSegment, stopKeepingSegments, useCacheStorageForTests } from "../src/lib/segmentKeep";
@@ -129,6 +129,7 @@ console.log("\n— a few parts at a time —");
   const got = await readAll(await fetchInParts(b.fetch, new Request(URL0), SEGMENT.length, 4, URL0, () => 1));
   check("all of it, in order", same(got, SEGMENT), true);
   check("one part at a time", b.mostAtOnce, 1);
+  check("  and the log is told so", partsPeak(URL0), 1);
   check("every part asked for, in order, under the URLs four at once would use",
     b.asked, [0, 1, 2, 3].map((i) => partUrl(URL0, i, 4)));
   const two = bot();
@@ -151,6 +152,7 @@ console.log("\n— more at once, once it may —");
   pumpSegmentParts();
   check("and the other three asked for the moment it may have four", b.asked.length, 4);
   check("all of it, in order", same(await reading, SEGMENT), true);
+  check("  and the log is told four ran at once", partsPeak(URL0), 4);
   pumpSegmentParts();
   check("and nothing asked for again once it is in", b.asked.length, 4);
 }

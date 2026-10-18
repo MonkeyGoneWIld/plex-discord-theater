@@ -117,6 +117,15 @@ const marked = new WeakMap<Request, { key: string; bytes: number; parts: number;
 /** Requests for a whole segment, to be answered from what is kept and kept — see keepLater. */
 const keepable = new WeakSet<Request>();
 const progress = new Map<string, PartsProgress>();
+/** The most parts of each recent download that ran at once, for the log — see partsPeak. */
+const peaks = new Map<string, number>();
+const PEAKS_KEPT = 64;
+function notePeak(key: string, running: number): void {
+  if (running <= (peaks.get(key) ?? 0)) return;
+  peaks.delete(key);
+  peaks.set(key, running);
+  if (peaks.size > PEAKS_KEPT) peaks.delete(peaks.keys().next().value!);
+}
 /** Every download in parts under way: each one's way of starting more of its parts — see pumpSegmentParts. */
 const pumps = new Set<() => void>();
 
@@ -150,6 +159,11 @@ export function keepLater(request: Request): Request {
  */
 export function pumpSegmentParts(): void {
   for (const pump of [...pumps]) pump();
+}
+
+/** The most of a segment's parts that downloaded at once, the last time it was fetched in parts. */
+export function partsPeak(key: string): number | undefined {
+  return peaks.get(key);
 }
 
 /** How the download of a segment in parts is going, while it runs. */
@@ -253,7 +267,9 @@ export async function fetchInParts(
   };
   /** Parts asked for and not yet in. */
   let running = 0;
+  peaks.delete(key);
   for (const most = allowed(); responses.length < most; running++) launch();
+  notePeak(key, running);
 
   let first: Response;
   try {
@@ -334,6 +350,7 @@ export async function fetchInParts(
   pump = () => {
     if (failed || whole) return;
     for (const most = allowed(); responses.length < parts && running < most; running++) follow(launch());
+    notePeak(key, running);
   };
 
   const body = new ReadableStream<Uint8Array>({

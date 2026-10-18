@@ -839,12 +839,26 @@ export function App() {
   // than nesting under whatever page it was reached from (which is a sibling,
   // not an ancestor). Back still pops the real stack, so the previous page is a
   // click away — it just isn't drawn as a parent here.
-  if (isFlatView(view)) {
-    crumbs.push({ label: "Home", home: true, onClick: goHome });
-    crumbs.push({ label: crumbLabel(view) });
-  } else {
+  //
+  // So does everything opened under it: the trail starts at the last such page
+  // on the stack, and a season of a show opened from a person reads Home › Show
+  // › Season, not every page walked through to get there (18 Oct: Home › Hell's
+  // Kitchen › Season 1 › Day 05 › Gordon Ramsay › Ramsay's Kitchen Nightmares
+  // USA › Season 1).
+  let trailRoot = 0;
   viewStack.forEach((v, i) => {
+    if (isFlatView(v)) trailRoot = i;
+  });
+  if (trailRoot > 0) crumbs.push({ label: "Home", home: true, onClick: goHome });
+  viewStack.forEach((v, i) => {
+    if (i < trailRoot) return;
     const isLast = i === viewStack.length - 1;
+    // The page the trail starts from is drawn alone, never under ancestors
+    // made up for it.
+    if (i > 0 && i === trailRoot) {
+      crumbs.push({ label: crumbLabel(v), onClick: isLast ? undefined : () => truncateToView(i) });
+      return;
+    }
     const prevKind = viewStack[i - 1]?.kind;
 
     if (v.kind === "season" && prevKind !== "show" && v.show.ratingKey) {
@@ -891,7 +905,6 @@ export function App() {
       onClick: isLast ? undefined : i === 0 ? goHome : () => truncateToView(i),
     });
   });
-  }
 
   /**
    * The trail as drawn.

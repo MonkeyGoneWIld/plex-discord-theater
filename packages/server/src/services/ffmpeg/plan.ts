@@ -479,6 +479,8 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
 
 /** Re-encodes are cut every 3 s, as Plex's are. */
 export const ENCODE_SEGMENT_S = 3;
+/** Read as fast as it goes at the start of a re-encode: its first playlist waits for 12 s listed (engine.ts). */
+const READ_BURST_S = 15;
 
 /**
  * ffmpeg's arguments for a re-encode from `offsetS`, segmented as a copy is
@@ -510,6 +512,8 @@ export function encodeArgs(
   offsetS: number,
   durationS: number | null,
   device: string,
+  /** Times the film's speed it reads at past its first READ_BURST_S; 0, no limit (config.ts encodeSpeed). */
+  speed = 0,
 ): string[] {
   const W = plan.width;
   const H = plan.height;
@@ -567,6 +571,7 @@ export function encodeArgs(
     "-hide_banner", "-nostdin", "-loglevel", "error",
     ...(plan.hardware === "qsv" ? qsvInit(device, tm?.via === "opencl") : []),
     ...(plan.gpuDecode ? ["-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi", "-hwaccel_device", "va"] : []),
+    ...(speed > 0 ? ["-readrate", String(speed), "-readrate_initial_burst", String(READ_BURST_S)] : []),
     ...(offsetS > 0 ? ["-ss", String(offsetS)] : []),
     "-copyts", "-start_at_zero",
     ...(burn?.canvas ? ["-canvas_size", burn.canvas] : []),

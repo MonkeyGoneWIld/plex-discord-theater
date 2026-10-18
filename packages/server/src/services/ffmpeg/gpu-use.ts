@@ -19,6 +19,8 @@ export interface GpuSample {
   at: number;
   /** CPU seconds it has used, user and system — the other side of the same question. */
   cpuS: number | null;
+  /** Bytes it has read, the film from the NAS included (/proc/<pid>/io rchar). */
+  readBytes: number | null;
   /** The DRM devices it has open, and their driver — none, it isn't using a GPU. */
   devices: string[];
   driver: string | null;
@@ -59,7 +61,7 @@ export function sampleGpu(pid: number): GpuSample | null {
   } catch {
     return null;
   }
-  const sample: GpuSample = { at: Date.now(), cpuS: cpuSeconds(pid), devices: [], driver: null, engines: {} };
+  const sample: GpuSample = { at: Date.now(), cpuS: cpuSeconds(pid), readBytes: bytesRead(pid), devices: [], driver: null, engines: {} };
   const clients = new Set<string>();
   for (const fd of fds) {
     let target: string;
@@ -93,6 +95,21 @@ function cpuSeconds(pid: number): number | null {
   } catch {
     return null;
   }
+}
+
+function bytesRead(pid: number): number | null {
+  try {
+    const n = Number(fs.readFileSync(`/proc/${pid}/io`, "utf8").match(/^rchar:\s*(\d+)/m)?.[1]);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/** How fast it read from `from` to `to`, Mbps. */
+export function readUse(from: GpuSample | null, to: GpuSample | null): string {
+  if (!from || !to || from.readBytes === null || to.readBytes === null || to.at <= from.at) return "unknown";
+  return `${Math.round(((to.readBytes - from.readBytes) * 8) / ((to.at - from.at) / 1000) / 1e6)} Mbps`;
 }
 
 /** How many CPU cores' worth it used from `from` to `to`. */

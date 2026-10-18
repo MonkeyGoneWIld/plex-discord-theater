@@ -34,7 +34,7 @@ import { measuredPlaylist, round3, type MeasuredSegment } from "../measured-play
 import { logEvent } from "../logger.js";
 import { LruMap } from "../lru.js";
 import { ffmpegPath } from "./config.js";
-import { cpuUse, gpuUse, sampleGpu, type GpuSample } from "./gpu-use.js";
+import { cpuUse, gpuUse, readUse, sampleGpu, type GpuSample } from "./gpu-use.js";
 import { COPY_CLOCK_OFFSET_S } from "./plan.js";
 
 /** How far past the watcher a run gets before it is paused — as a Plex copy is
@@ -143,9 +143,9 @@ function ready(run: Run): boolean {
   return !!last && last.end - Math.max(run.offsetS, list[0].start) >= (run.encode ? READY_SPAN_ENCODE_S : READY_SPAN_S);
 }
 
-/** What a re-encode used of the GPU and the CPU since its first segment, for the log. */
-function use(run: Run, now: GpuSample | null): { gpu: string; cpu: string } {
-  return { gpu: gpuUse(run.gpuAtStart, now), cpu: cpuUse(run.gpuAtStart, now) };
+/** What a re-encode used of the GPU and the CPU since its first segment, and how fast it read, for the log. */
+function use(run: Run, now: GpuSample | null): { gpu: string; cpu: string; read: string } {
+  return { gpu: gpuUse(run.gpuAtStart, now), cpu: cpuUse(run.gpuAtStart, now), read: readUse(run.gpuAtStart, now) };
 }
 
 /** Pause the run far enough ahead of the watcher; carry on once they near it. */

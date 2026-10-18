@@ -50,7 +50,8 @@ import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
 import { markOriginalAudio } from "../services/original-language.js";
 import { audioNotes, type AudioDecision, type SourceAudio } from "../services/stream-audio.js";
 import {
-  ffmpegEngineOn, ffmpegHardware, hwDevice, keepHdrOnReencode, localPath, maxEncodes, readable, tonemapAlgo, tonemapper,
+  ffmpegEngineOn, ffmpegHardware, hwDevice, keepHdrOnReencode, localPath, maxEncodes, readable, recheckHardware, tonemapAlgo,
+  tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
   AUDIO_KBPS, copyArgs, encodeArgs, inputArgs, planCopy, planEncode, type SourceStream, type SourceVersion,
@@ -4676,6 +4677,7 @@ async function startWithFfmpeg(o: {
     });
   } else {
     reason = o.notCopied ?? (copyPlan && !copyPlan.ok ? copyPlan.why : "not copied");
+    await recheckHardware();
     const busy = ffmpegEncodesRunning(o.sessionId);
     if (busy >= maxEncodes()) {
       logEvent("FFmpeg", "every encode slot is taken; left to Plex", { session, ratingKey: o.ratingKey, running: busy, max: maxEncodes() });

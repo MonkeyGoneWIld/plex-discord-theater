@@ -541,6 +541,10 @@ console.log("\n— a re-encode —");
   check("HEVC for a player nobody said decodes it is re-encoded by ffmpeg, saying why",
     [notes.engine, notes.video, notes.reason], ["ffmpeg", "transcode", "HEVC, and this player can't decode it"]);
   check("  and Plex was never asked to transcode", transcodeAsked(), []);
+  // Ten segments of 2.97 to 3.01 s: just under 30 by their durations.
+  const firstList = entries(await (await fetch(origin + variantOf(m.text))).text());
+  check("  its first playlist lists 30 s, not the next segment or two",
+    firstList.reduce((s, e) => s + e.duration, 0) >= 29, true);
   const list = await listed(variantOf(m.text), 3);
   check("  in 3 s segments", list.slice(0, 3).map((e) => Math.round(e.duration * 10) / 10), [3, 3, 3]);
   const m4 = await master("4", ids[1]);
@@ -716,6 +720,37 @@ console.log("\n— Plex's Now Playing —");
   await at(60_000, []);
   check("FFMPEG_REPORT_TO_PLEX=0 tells Plex nothing", timelines.length, 0);
   delete process.env.FFMPEG_REPORT_TO_PLEX;
+}
+
+console.log("\n— a render node that wasn't there at startup —");
+{
+  const { detectHardware, recheckHardware } = await import("../src/services/ffmpeg/config.js");
+  // A stand-in for /dev/dri/renderD128: QSV won't encode on it, but that it
+  // was looked for again is what this is about.
+  const node = path.join(tmp, "renderD128");
+  process.env.FFMPEG_HWACCEL_DEVICE = node;
+  const first = await detectHardware();
+  check("missing, the CPU, saying what /dev/dri has and that it looks again",
+    [first.hardware, first.note.startsWith(`CPU (no ${node}; /dev/dri has: `), first.note.includes("looked for again")], ["software", true, true]);
+  const said: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => { said.push(a.join(" ")); };
+  try {
+    await recheckHardware();
+    const stillMissing = said.length;
+    fs.writeFileSync(node, "");
+    await Promise.all([recheckHardware(), recheckHardware()]);
+    const once = said.length;
+    await recheckHardware();
+    console.log = log;
+    check("not looked at again while it's still missing", stillMissing, 0);
+    check("once it's there, looked at again, once, however many re-encodes ask",
+      [once, said[0]?.startsWith(`[Config] ${node} is here now; re-encodes on `)], [1, true]);
+    check("  and not again after", said.length, 1);
+  } finally {
+    console.log = log;
+    delete process.env.FFMPEG_HWACCEL_DEVICE;
+  }
 }
 
 api.close();

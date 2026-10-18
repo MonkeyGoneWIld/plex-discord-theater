@@ -80,6 +80,9 @@ export function readable(file: string): boolean {
 /** Null until detectHardware has run. */
 let hardware: Hardware | null = null;
 let mapper: Tonemapper | null = null;
+/** The render node wasn't there when detectHardware last ran — see recheckHardware. */
+let deviceMissing = false;
+let rechecking: Promise<void> | null = null;
 
 /** The render node QSV runs on. */
 export function hwDevice(): string {
@@ -154,7 +157,16 @@ export async function detectHardware(): Promise<{ hardware: Hardware; note: stri
   };
   if (["none", "software", "off", "cpu"].includes(want)) return done("software", "CPU (FFMPEG_HWACCEL=none)");
   if (want !== "auto" && want !== "qsv") return done("software", `CPU (FFMPEG_HWACCEL=${want} isn't supported yet: auto, qsv or none)`);
-  if (!fs.existsSync(hwDevice())) return done("software", `CPU (no ${hwDevice()} — map /dev/dri for Intel's GPU)`);
+  deviceMissing = !fs.existsSync(hwDevice());
+  if (deviceMissing) {
+    let has: string;
+    try {
+      has = fs.readdirSync("/dev/dri").join(", ") || "nothing";
+    } catch {
+      has = "no /dev/dri at all";
+    }
+    return done("software", `CPU (no ${hwDevice()}; /dev/dri has: ${has} — map /dev/dri for Intel's GPU; looked for again before each re-encode)`);
+  }
   const encode = (codec: string, fmt: string, profile: string) => trial([
     "-hide_banner", "-nostdin", "-loglevel", "error", ...qsvInit(hwDevice()),
     "-f", "lavfi", "-i", "testsrc2=s=320x240:r=24:d=1",
@@ -180,4 +192,18 @@ export async function detectHardware(): Promise<{ hardware: Hardware; note: stri
   }
   const why = (!hevc.ok ? hevc.said : h264.said) || "no answer";
   return done("software", `CPU (Intel QSV didn't encode: ${why})`);
+}
+
+/**
+ * Before a re-encode: if the render node wasn't there when the hardware was
+ * looked at, look again, and use the GPU once it is. On 18 October the
+ * container started twice without /dev/dri/renderD128, which the host had all
+ * along, and every re-encode until the next restart ran on the CPU.
+ */
+export function recheckHardware(): Promise<void> {
+  if (!deviceMissing || !fs.existsSync(hwDevice())) return Promise.resolve();
+  rechecking ??= detectHardware()
+    .then((hw) => console.log(`[Config] ${hwDevice()} is here now; re-encodes on ${hw.note}`))
+    .finally(() => { rechecking = null; });
+  return rechecking;
 }

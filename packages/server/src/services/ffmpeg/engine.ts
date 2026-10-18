@@ -408,8 +408,13 @@ export async function ffmpegPlaylist(
   const run = runs.get(key);
   if (!run || run.failed) return null;
   run.lastAlive = Date.now();
-  if (!ready(run)) {
-    await Promise.race([new Promise<void>((r) => run.waiters.push(r)), sleep(READY_TIMEOUT_MS)]);
+  // Every segment written wakes the waiters, so this looks again after each
+  // one until READY_SPAN_S is listed. A single wait went out at the next
+  // segment: on 18 October every re-encode's first playlist still listed one
+  // or two, and every start and skip stopped 3 s in.
+  const deadline = Date.now() + READY_TIMEOUT_MS;
+  while (!ready(run) && !run.stopped && Date.now() < deadline) {
+    await Promise.race([new Promise<void>((r) => run.waiters.push(r)), sleep(deadline - Date.now())]);
   }
   if (run.failed || run.stopped) return null;
   const list = published(run);

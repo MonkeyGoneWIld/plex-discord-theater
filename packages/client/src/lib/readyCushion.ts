@@ -29,6 +29,12 @@
  * And after a skip, as in every player, the moment it has picture enough to
  * start on, as it always has: somebody who skipped is waiting to see the place
  * they skipped to. If it stops after that, its next wait is a stop's.
+ * Not on a stream the server re-encodes (a burned subtitle, an H.264 twin, a
+ * lower quality), whose segments past the first few are being made as it
+ * plays and share the bot's upload with everybody else's: on 18 October every
+ * skip on one — 1408, 1917, 300, a DVD — went with 3 seconds in hand and
+ * stopped 3 to 6 seconds later, for 4 to 16 seconds, the room with it. There
+ * a skip waits as a start does.
  *
  * MAX_READY_CUSHION_S was 20 seconds. A stream's first segments come slowest
  * — on 14 October 2 to 8 Mbps for the first fifteen seconds, then 17 to 32 —

@@ -1623,7 +1623,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       bytesPerFilmS: heldS > 0 ? heldBytes / heldS : null,
       stops: stopsRef.current.length,
       fallbackS: catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs()),
-      skip: skipWaitRef.current,
+      // Not on a stream re-encoded as it plays, whose next segments come no
+      // faster than they are made and shared out: see lib/readyCushion.
+      skip: skipWaitRef.current && streamNotesRef.current?.video !== "transcode",
       waitedS: wait.since && !patient ? (now - wait.since) / 1000 : 0,
     });
     // Waiting for more than the least, from when it had the least — and once

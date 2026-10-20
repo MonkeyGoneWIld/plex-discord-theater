@@ -90,6 +90,25 @@ If you use a temporary Cloudflare Tunnel, the address changed. Update the URL
 mapping in the Developer Portal, or switch to a
 [named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-local-tunnel/).
 
+### The Discord profile shows no artwork or progress
+
+- **No artwork.** Discord fetches the poster from your public address, the one
+  in `REDIRECT_URI`, at `/api/presence/artwork/<id>`, through its own image
+  proxy. It has to be reachable without a login, so a Cloudflare Access page or
+  basic auth in front of the whole host blocks it; exempt that path. The link
+  serves only that one cached poster, never anything else from Plex, and it
+  expires after 24 hours.
+- **No progress bar.** Discord shows one only while the room plays and the
+  title's length is known. Pause removes it, and resuming or seeking puts it
+  back.
+- **A plain watching status, without the title.** That viewer turned off
+  **Show media details on Discord** under **People**. It is saved per device.
+- **Nothing at all.** The viewer didn't give the Activity permission to set
+  their status when it asked. Playback works either way.
+
+Discord decides each card's layout; a compact pop-out can't be made to show the
+full profile card.
+
 ---
 
 ## Library and browsing

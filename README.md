@@ -4,9 +4,6 @@ Current release: **v1.2.2**. Images are published as
 `ghcr.io/monkeygonewild/plex-discord-theater:latest` and
 `ghcr.io/monkeygonewild/plex-discord-theater:1.2.2`.
 
-For viewer-aware qBittorrent upload limits and Discord pause detection, see the
-[qBittorrent Manager integration guide](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/qBittorrent-Manager-API).
-
 A Discord Activity for synchronized watch parties from a Plex Media Server. One
 person hosts, playback stays in lockstep for everyone in the voice channel, and
 each viewer can independently select audio tracks, subtitles and quality.
@@ -110,9 +107,6 @@ default quality, volume, the subtitle look, and your watch history setting.
   frames.
 - **Video zoom:** choose Original, Fill Screen, Match Width, Match Height, Widescreen, Ultrawide, or Custom Zoom (50–200%), saved per movie or show on your device.
 - **Play Version:** choose between multiple versions of a title when available.
-- **Original picture:** Plex copies the original video (H.264, and HEVC for
-  players that can decode it) instead of re-encoding it, converting only the
-  audio where needed. Direct Stream is on by default.
 - **Stats for nerds:** press `i` during playback to view whether the video is
   copied or re-encoded and why, codec, bitrate, resolution, frames, audio,
   subtitles, sync, buffer, connection and peers, with live graphs coloured by
@@ -133,40 +127,9 @@ resized, expanded back to the full player, or closed:
 
 ### Discord Rich Presence
 
-Profile presence uses **Watching**, with the movie/year or show/episode in its
-details. The state line also retains the title alongside playback status and
-room count, preserving media context for consumers that read only state.
-This can repeat the title on profile layouts that display both fields.
-It describes the shared room even while you browse locally; the count is room
-membership, not a claim that every participant's player is running.
-
-When duration is known, playing sessions send start/end timestamps for Discord's
-native progress display. Discord controls each card's layout; the app cannot
-force a compact popover to use the full profile layout. Pause removes the
-running timer; seeks and resume update it. Missing artwork or denied
-`rpc.activities.write` permission never blocks playback. Transient presence
-failures receive bounded retries rather than disabling presence immediately.
-
-Open **People** in the browsing header or player and turn off **Show media
-details on Discord** for generic presence without the title, artwork, or progress.
-The choice is saved on this device and applies only to your own presence.
-Previously fetched artwork may remain in Discord's cache.
-
-Artwork uses the public HTTPS origin configured in `REDIRECT_URI`. That origin
-must be reachable by Discord's image proxy without an extra login:
-
-- Authenticated `POST /api/presence/artwork` with `{"ratingKey":"123"}` publishes
-  a movie/show poster and returns `{"url":"https://…/api/presence/artwork/…"}`.
-  Episodes use their show's poster. Missing or unavailable artwork returns
-  `{"url":null}`.
-- Unauthenticated `GET /api/presence/artwork/:opaqueId` serves only the published
-  cached image. It cannot browse Plex, fetch arbitrary URLs, or expose tokens.
-  JPEG, PNG, and WebP inputs are validated and fitted inside a 512×512 square
-  over a dimmed, blurred copy of the same poster, then published as PNG. The
-  foreground stays sharp and fully visible without stretching or solid side
-  bars. Images are capped at 2 MiB.
-- Links expire after 24 hours, potentially earlier after cache eviction or a
-  server restart. Public reads do not extend their lifetime.
+Your Discord profile shows **Watching** with the title, its artwork and how far
+through it the room is, and the invitation in the voice channel shows the same.
+Anyone can switch to a plain watching status for themselves under **People**.
 
 ### Mobile support
 
@@ -230,6 +193,35 @@ seasons to request and view what is already available or pending.
 Requests authenticate to Seerr using the configured Plex account, so no Seerr
 administrator API key is required.
 
+## For server owners
+
+- **Original picture:** H.264 and HEVC files are copied, not re-encoded,
+  whenever a player can decode them; only the audio is converted where needed.
+- **HEVC transcodes:** a sharper picture at the same bitrate for every player
+  that can decode HEVC, and H.264 for the rest.
+- **FFmpeg engine (optional):** streams made in the container on Intel Quick
+  Sync, with HDR kept on re-encodes and Dolby Vision 5 in the right colours;
+  Plex covers anything it can't make.
+  [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FFmpeg-Engine)
+- **Shared bandwidth:** viewers on the same stream pass segments to each other,
+  peer to peer, which eases your upload.
+- **VPS relay (optional):** your home connection uploads one stream and a VPS
+  serves the whole room.
+  [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/VPS-Relay)
+- **qBittorrent upload limits (optional):** with
+  [plex-qbt-manager](https://github.com/MonkeyGoneWIld/plex-qbt-manager),
+  qBittorrent makes room for the watch party's upload and gets it back when
+  the room pauses or stops.
+  [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/qBittorrent-Manager-API)
+- **Instant skips back:** the films being played are kept in memory and on
+  disk, so going back plays at once.
+- **Fast title pages:** a background warm-up caches details and artwork for
+  your newest titles while nobody is watching.
+- **Private:** Plex tokens never reach a browser, and the Activity can be
+  limited to your own Discord servers.
+- **Diagnostic logs:** every viewer's player events land in the server's log
+  file, with tokens redacted, so a stream that failed can be traced afterwards.
+
 ## Installation
 
 > **Full walkthrough:** the
@@ -267,8 +259,9 @@ to get your `X-Plex-Token`.
 
 ### 3. Deploy
 
-Paste this into Portainer, Dockge, or a `docker-compose.yml` and fill in the
-values. Everything is set inline, so no `.env` file is needed.
+Paste this into Portainer, Dockge, or a `docker-compose.yml`. Fill in the six
+values under **Required**; everything else works as it is. Uncomment the
+optional settings you want, now or later.
 
 ```yaml
 services:
@@ -280,130 +273,97 @@ services:
       - "3000:3000"
     volumes:
       - app-data:/data
-      # Optional: keep copied films on an SSD, with STREAM_CACHE_DIR below
-      # set to "/cache/stream".
+      # Optional: keep copied films on an SSD instead (and set
+      # STREAM_CACHE_DIR below to "/cache/stream").
       # - /path/to/ssd/theater-stream-cache:/cache/stream
-      # PLAYBACK_ENGINE "ffmpeg" only: your library, read-only, at the path
-      # Plex has it (or set MEDIA_PATH_MAP below).
-      # - /path/to/media:/data/media:ro
-    # PLAYBACK_ENGINE "ffmpeg" only: Intel's GPU, for re-encodes on Quick Sync.
+      # Optional, for the ffmpeg engine: your library, read-only, at the
+      # path Plex has it.
+      # - /mnt/media:/data/media:ro
+    # Optional, for the ffmpeg engine: Intel's GPU, for Quick Sync.
     # devices:
     #   - /dev/dri:/dev/dri
     environment:
       # ── Required ─────────────────────────────────────────────────────────
-      # From the Discord Developer Portal.
+      # From the Discord Developer Portal: Application ID and Client Secret.
       DISCORD_CLIENT_ID: ""
       DISCORD_CLIENT_SECRET: ""
-
-      # Your Plex server, reachable from inside this container.
-      # Not localhost — that means the container itself.
+      # Your Plex server as this container reaches it (not localhost, which
+      # is the container itself), and its X-Plex-Token.
       PLEX_URL: "http://192.168.1.50:32400"
       PLEX_TOKEN: ""
-
-      # Your public HTTPS address. Must match the Discord URL mapping exactly.
+      # Your public HTTPS address, exactly as in Discord's URL mapping.
       REDIRECT_URI: "https://watch.example.com"
       ALLOWED_ORIGINS: "https://watch.example.com"
 
-      # ── Recommended ──────────────────────────────────────────────────────
-      # These are what make the detail pages worth looking at. Leave any of
-      # them empty to turn that feature off.
-
-      # plex.tv ACCOUNT token, not the server token above. Without it, titles
-      # you don't own have blank detail pages. Also signs in to Seerr.
-      PLEX_ACCOUNT_TOKEN: ""
-
-      # Collections, "More Like This", and cast/crew filmographies.
-      # Free key: https://www.themoviedb.org/settings/api
-      TMDB_API_KEY: ""
-
-      # Correct season numbering for missing-episode lists. TVDB is what
-      # Sonarr monitors. Free key: https://thetvdb.com/api-information
-      # TVDB_PIN is only needed for a subscriber key.
-      TVDB_API_KEY: ""
-      TVDB_PIN: ""
-
-      # Overseerr / Jellyseerr — enables the Request button.
-      SEERR_URL: ""
-
-      # ── Optional ─────────────────────────────────────────────────────────
-      # Stable key for encrypting linked Plex accounts. Generate with
-      # `openssl rand -hex 32` and keep it across deployments.
-      PLEX_LINK_SECRET: ""
-
-      # Restrict to named Discord servers, comma-separated. Empty = any.
-      ALLOWED_GUILD_IDS: ""
-
-      # Route video through a VPS so your upload carries one stream instead of
-      # one per viewer. See the VPS Relay page in the wiki.
-      VPS_RELAY_URL: ""
-      VPS_RELAY_KEY: ""
-
-      # Per-viewer bandwidth scales with the bitrate. Lower it if your upload
-      # is tight; defaults are 12000 / 20000.
-      VIDEO_BITRATE_KBPS: ""
-      VIDEO_PEAK_BITRATE_KBPS: ""
-
-      # HEVC transcodes for players that can decode them: a better picture
-      # at the same bitrate. Anyone who can't gets an H.264 stream of their
-      # own. Needs Plex Pass and hardware HEVC encoding enabled in Plex;
-      # otherwise Plex keeps sending H.264. "0" turns it off.
-      HEVC_TRANSCODE: "1"
-
-      # Play the original video instead of a re-encode whenever a player can
-      # decode it (Direct Stream). Audio is still converted where needed;
-      # files averaging over DIRECT_STREAM_MAX_KBPS are re-encoded. "0" turns
-      # it off.
+      # ── Defaults: change them only if you want to ────────────────────────
+      # Re-encode bitrate in kbps, average and peak (keep the peak at least
+      # the average). Each viewer downloads about this much.
+      VIDEO_BITRATE_KBPS: "12000"
+      VIDEO_PEAK_BITRATE_KBPS: "20000"
+      # Copy the original video when a player can decode it. "0" re-encodes
+      # everything.
       DIRECT_STREAM: "1"
-
       # The highest average bitrate (kbps) a file may have and still be
-      # copied. Every viewer pulls a copy at the file's own bitrate, so keep
-      # this below your upload divided by how many usually watch; bigger
-      # files are re-encoded. Empty = VIDEO_BITRATE_KBPS.
-      DIRECT_STREAM_MAX_KBPS: ""
+      # copied; bigger files are re-encoded. Every viewer pulls a copy at the
+      # file's own bitrate, so keep this under your upload divided by how
+      # many usually watch.
+      DIRECT_STREAM_MAX_KBPS: "12000"
+      # HEVC re-encodes for players that can decode HEVC. Needs Plex Pass
+      # and hardware HEVC encoding in Plex; otherwise Plex sends H.264.
+      HEVC_TRANSCODE: "1"
+      # Memory for the films being played, MB, every stream together: copies,
+      # then re-encodes. A copy past its memory goes to STREAM_CACHE_DIR on
+      # disk until its stream ends. That folder is emptied at every start,
+      # so give it one of its own.
+      DIRECT_STREAM_MEMORY_MB: "6144"
+      TRANSCODE_CACHE_MB: "2048"
+      STREAM_CACHE_DIR: "/data/stream-cache"
+      # Who makes the streams: "plex", or "ffmpeg" (see the ffmpeg engine
+      # settings below).
+      PLAYBACK_ENGINE: "plex"
 
-      # How much of a copied film is kept in memory, MB, for every stream
-      # together (empty = 6144). The rest is kept on disk in STREAM_CACHE_DIR
-      # (empty = /data/stream-cache) until the stream ends, with no limit but
-      # the disk: up to 13.5 GB an hour for a 30 Mbps Blu-ray, so point it at
-      # an SSD with room (mount one under volumes above). Re-encoded films
-      # keep TRANSCODE_CACHE_MB in memory, for every re-encode together
-      # (empty = 2048); Plex keeps the rest on its own disk. Lower both on a
-      # server short of memory: the defaults can reach 8 GB while films play.
-      DIRECT_STREAM_MEMORY_MB: ""
-      STREAM_CACHE_DIR: ""
-      TRANSCODE_CACHE_MB: ""
+      # ── Optional: uncomment what you want ────────────────────────────────
+      # Your plex.tv ACCOUNT token, not the server token above: detail pages
+      # for titles you don't own, and Seerr sign-in.
+      # PLEX_ACCOUNT_TOKEN: "your-plex-account-token"
+      # Collections, "More Like This" and cast pages.
+      # Free key: https://www.themoviedb.org/settings/api
+      # TMDB_API_KEY: "your-tmdb-v3-api-key"
+      # Missing-episode lists numbered the way Sonarr numbers them.
+      # Free key: https://thetvdb.com/api-information (a PIN only for a
+      # subscriber key).
+      # TVDB_API_KEY: "your-tvdb-api-key"
+      # TVDB_PIN: "your-tvdb-pin"
+      # The Request button, through Overseerr or Jellyseerr.
+      # SEERR_URL: "https://requests.example.com"
+      # Only these Discord servers may use it: server IDs, comma-separated.
+      # ALLOWED_GUILD_IDS: "123456789012345678,234567890123456789"
+      # A stable key for linked Plex accounts; keep it across deployments.
+      # Without it, DISCORD_CLIENT_SECRET is used. Make one with
+      # `openssl rand -hex 32`.
+      # PLEX_LINK_SECRET: "64-hex-characters-from-openssl"
+      # Route video through a VPS, so your upload carries one stream for
+      # the whole room. See the VPS Relay page in the wiki.
+      # VPS_RELAY_URL: "https://relay.example.com"
+      # VPS_RELAY_KEY: "a-long-random-secret"
+      # plex-qbt-manager's THEATER_API_KEY, for its upload limits.
+      # QBT_MANAGER_API_KEY: "a-long-random-secret"
+      # Password for the maintenance command that stops every stream the
+      # bot has on Plex. Unset, it works only from inside the container.
+      # ADMIN_SECRET: "a-long-random-secret"
 
-      # Who makes the streams. "plex" (empty) is Plex. "ffmpeg" makes them in
-      # this container from the files themselves: copies of the original
-      # picture, HDR included, and re-encodes on Intel Quick Sync (or the CPU
-      # without it). Anything it can't make is left to Plex, stream by
-      # stream. Uncomment the media mount and devices above with it. See the
-      # FFmpeg Engine page in the wiki.
-      PLAYBACK_ENGINE: ""
-      # Only if the library is mounted at other paths than Plex's own:
-      # "plex path=>path here", comma-separated.
-      MEDIA_PATH_MAP: ""
-      # "auto" (empty) uses Quick Sync when it works; "none" the CPU.
-      FFMPEG_HWACCEL: ""
-      FFMPEG_HWACCEL_DEVICE: "/dev/dri/renderD128"
-      # Re-encodes at once, past which Plex makes the stream (empty = 4 on
-      # the GPU, 2 on the CPU). Copies don't count.
-      FFMPEG_MAX_ENCODES: ""
-      # Re-encodes for HEVC players stay HDR ("keep", empty), or "tonemap"
-      # to SDR as Plex does. The curve for streams mapped to SDR: reinhard
-      # (empty), mobius, hable, bt2390, linear, gamma or clip.
-      FFMPEG_HDR_REENCODE: ""
-      FFMPEG_TONEMAP: ""
-      # Show ffmpeg's streams in Plex's dashboard, Tautulli and Tracearr.
-      # "0" turns it off.
-      FFMPEG_REPORT_TO_PLEX: "1"
-
-      # Password for one maintenance command that stops every stream the bot
-      # has running on Plex, in every room, for clearing streams stuck in
-      # Plex by hand. Nothing calls it on its own, and the server already
-      # stops streams nobody is watching. Empty, the command is accepted only
-      # from inside the container, which suits most people.
-      ADMIN_SECRET: ""
+      # ── Optional: the ffmpeg engine ──────────────────────────────────────
+      # Set PLAYBACK_ENGINE above to "ffmpeg" and uncomment the library
+      # mount and devices at the top. These are its defaults; see the FFmpeg
+      # Engine page in the wiki.
+      # Only if Plex sees the library at other paths than this container:
+      # MEDIA_PATH_MAP: "/media=>/data/media"
+      # FFMPEG_HWACCEL: "auto"                       # or "none" for the CPU
+      # FFMPEG_HWACCEL_DEVICE: "/dev/dri/renderD128"
+      # FFMPEG_MAX_ENCODES: "4"                      # 2 on the CPU
+      # FFMPEG_HDR_REENCODE: "keep"                  # or "tonemap"
+      # FFMPEG_TONEMAP: "reinhard"
+      # FFMPEG_REPORT_TO_PLEX: "1"
 
       # ── Leave these alone ────────────────────────────────────────────────
       NODE_ENV: "production"

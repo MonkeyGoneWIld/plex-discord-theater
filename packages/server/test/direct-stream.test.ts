@@ -416,9 +416,20 @@ console.log("\n— a copy from the start —");
 {
   const key = crypto.randomUUID();
   const plexSide = plexSession(key, 0);
-  ds.startDirectStream("s-from-start", key, "500", 0);
+  ds.startDirectStream("s-from-start", key, "500", 0, 2000);
+  check("for the upload budget, before anything is measured: the file's average",
+    ds.directStreamBandwidth("s-from-start", 0), { kbps: 2000, source: "target" });
   const playlist = (await ds.directStreamPlaylist(key, (p) => `/seg?p=${p}`))!;
   const list = entries(playlist);
+  {
+    // Half a minute in hand, and all of it inside the two minutes measured.
+    const segs = list.map((e) => ds.directStreamSegment(key, e.uri.slice("/seg?p=".length)));
+    const bytes = segs.reduce((n, seg) => n + (seg && seg !== "gone" ? seg.bytes : 0), 0);
+    const bw = ds.directStreamBandwidth("s-from-start", 0);
+    check("  and once half a minute of it is: what its segments hold, not Plex's figure for the session",
+      [bw?.source, Math.abs((bw?.kbps ?? 0) - (bytes * 8) / sum(list.map((e) => e.d)) / 1000) <= 1], ["measured", true]);
+    check("  nothing for a session that isn't a copy measured here", ds.directStreamBandwidth("not-a-copy", 0), null);
+  }
   check("it is an EVENT playlist, still growing", [playlist.includes("#EXT-X-PLAYLIST-TYPE:EVENT"), playlist.includes("#EXT-X-ENDLIST")], [true, false]);
   check("it says where to start, so hls.js doesn't start at its far end", playlist.includes("#EXT-X-START:TIME-OFFSET=0.000"), true);
   check("nothing before the first segment", list.filter((e) => e.gap).length, 0);

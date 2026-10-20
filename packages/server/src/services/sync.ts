@@ -9,7 +9,7 @@ import { recordProgress, shouldRecordHistory } from "./watch-history.js";
 import { pushProgressToPlex } from "./plex-accounts.js";
 import { episodesInSameFile } from "./episode-files.js";
 import { logEvent } from "./logger.js";
-import { updateDirectStreamPosition } from "./direct-stream.js";
+import { directStreamBandwidth, updateDirectStreamPosition } from "./direct-stream.js";
 import { qualityKbps } from "./media-versions.js";
 
 /** Interval between WebSocket pings to detect dead connections. */
@@ -554,7 +554,28 @@ export function getQbtManagerStreams() {
       ).map((client) => client.userId)).size,
       host_heartbeat_age_seconds: room.state.hostHeartbeatAt === null ? null :
         Math.max(0, now - room.state.hostHeartbeatAt) / 1000,
+      ...copyFacts(room, variant),
     })));
+}
+
+/**
+ * What the manager is told of a Direct Stream copy, which Plex can't tell it:
+ * what one viewer downloads, measured here (direct-stream.ts). Plex's figure
+ * for a copy is how fast it hands this server the segments over the LAN — on
+ * 18 October 121 Mbps for a film of 1 to 5 — and the manager, taking it,
+ * cut qBittorrent's upload to its minimum. Nothing for a re-encode of Plex's,
+ * whose figure is the stream's, so a manager that predates these sees no
+ * change.
+ */
+function copyFacts(room: Room, variant: Variant): {
+  engine?: "plex";
+  bandwidth_kbps?: number;
+  bandwidth_source?: "measured" | "target";
+} {
+  const sid = variant.hlsSessionId;
+  if (!sid) return {};
+  const bandwidth = directStreamBandwidth(sid, interpolatedPosition(room.state));
+  return bandwidth ? { engine: "plex", bandwidth_kbps: bandwidth.kbps, bandwidth_source: bandwidth.source } : {};
 }
 
 

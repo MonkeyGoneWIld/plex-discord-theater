@@ -1,6 +1,8 @@
 # qBittorrent upload budgeting
 
-Use this branch with `plex-qbt-manager` branch `feature/dynamic-upload-limits`.
+Use this branch with `plex-qbt-manager` branch `feature/ffmpeg-bandwidth`, which
+reads the bandwidth fields below. An older manager ignores them and takes
+Plex's figure for every stream, Direct Stream copies included.
 Both services should share the internet connection whose upload is being budgeted.
 
 Set `QBT_MANAGER_API_KEY` in Theater to a long random secret. Set the manager's
@@ -90,6 +92,22 @@ Live paused and zero-viewer variants remain in the full snapshot. Removed rooms
 disappear. Sequence increases on every response and resets with a new boot UUID.
 State age changes only on actual playing/paused transitions; heartbeat age has
 its own clock. A transcode key can be null until Plex's manifest resolves it.
+
+A Direct Stream copy (Plex's video copied, measured by Theater) also carries,
+additively and still schema version 1:
+
+```json
+{ "engine": "plex", "bandwidth_kbps": 2400, "bandwidth_source": "measured" }
+```
+
+`bandwidth_kbps` is what one viewer downloads: every byte of the copy's
+segments from the room's position to 120 s past it, over their length. With
+less than 30 s of them in hand, it is the file's average instead
+(`bandwidth_source: "target"`); with neither, the keys are left out. Plex's own
+figure for a copy is how fast it hands Theater the segments over the LAN (121
+Mbps for a 1 to 5 Mbps film on 18 October), so the manager reserves Theater's
+figure for the stream and still claims Plex's session for it. Plex re-encodes
+carry none of these keys; Plex's figure for them is the stream's.
 
 Use manager `LOG_LEVEL=DEBUG` and `/status` to see matching Plex account IDs,
 viewer counts, base bandwidth, applied weight, reservations and integration

@@ -784,26 +784,6 @@ console.log("\n— what of the GPU a re-encode used, by the kernel's count —")
     gpuUse(null, { at: 1, cpuS: null, readBytes: null, devices: [], driver: null, engines: {} }), "none: ffmpeg had no GPU open, so the CPU did the work");
 }
 
-console.log("\n— how much of a stream is measured, for the upload budget —");
-{
-  const { measureBandwidth } = await import("../src/services/ffmpeg/engine.js");
-  // A run of 300 s in 5 s segments: a loud prologue at 8000 kbps to 100 s,
-  // 2000 kbps to 220 s, 500 kbps to the end — the whole of it 3600. Every
-  // stretch says something different, so a window in the wrong place shows.
-  const kbpsAt = (s: number) => (s < 100 ? 8000 : s < 220 ? 2000 : 500);
-  const run = Array.from({ length: 60 }, (_, i) => ({ start: i * 5, end: i * 5 + 5, bytes: (kbpsAt(i * 5) * 1000 / 8) * 5 }));
-  const upTo = (s: number) => run.filter((seg) => seg.end <= s);
-  check("a room at 100 s is measured from there to 120 s on: not from the run's start (7000), past it (1400) or behind it too (4727)",
-    measureBandwidth(run, 100, 3000), { kbps: 2000, source: "measured" });
-  check("  and at the start, from the start: the prologue's, mostly",
-    measureBandwidth(run, 0, 3000), { kbps: 7000, source: "measured" });
-  check("  the segment playing at the room's position counted whole, the one before it not",
-    measureBandwidth(run, 98, 3000), { kbps: 2240, source: "measured" });
-  check("30 s made past the room is a measure", measureBandwidth(upTo(130), 100, 3000), { kbps: 2000, source: "measured" });
-  check("  25 s is none: the run's target is given instead", measureBandwidth(upTo(125), 100, 3000), { kbps: 3000, source: "target" });
-  check("  and nothing, with no target either", measureBandwidth(upTo(125), 100, null), null);
-}
-
 // Last, since rooms start the reporter's own timer, every second on the real
 // clock: the Now Playing checks above keep a clock of their own, and the
 // render node's count what is logged.

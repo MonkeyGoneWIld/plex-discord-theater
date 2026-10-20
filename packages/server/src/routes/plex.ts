@@ -5187,7 +5187,7 @@ router.get(
         // arithmetic and parallel fetches would ask Plex for segments out of
         // order, and Plex answers that by renumbering the stream.
         if (videoCopied) {
-          startDirectStream(sessionId, plexKeyMatch[1], ratingKey, offset ? parseInt(offset, 10) : 0);
+          startDirectStream(sessionId, plexKeyMatch[1], ratingKey, offset ? parseInt(offset, 10) : 0, fileKbps);
         } else {
           const startSeg = offset ? Math.floor(parseInt(offset, 10) / 3) : 0;
           startPrefetch(sessionId, plexKeyMatch[1], startSeg);

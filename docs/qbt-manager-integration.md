@@ -1,9 +1,10 @@
 # qBittorrent upload budgeting
 
 Use this branch with `plex-qbt-manager` branch `feature/ffmpeg-bandwidth`, which
-budgets the streams the ffmpeg engine makes (see below). Older managers, `main`
-and v1.2.0 among them, ignore the keys those streams carry and give an ffmpeg
-stream the minimum upload budget while it plays.
+budgets the streams the ffmpeg engine makes and the Direct Stream copies
+Theater measures (see below). An older manager ignores the keys those streams
+carry: it takes Plex's figure for every Plex stream, Direct Stream copies
+included, and has nothing to budget an ffmpeg stream by.
 Both services should share the internet connection whose upload is being budgeted.
 
 Set `QBT_MANAGER_API_KEY` in Theater to a long random secret. Set the manager's
@@ -98,7 +99,7 @@ its own clock. A transcode key can be null until Plex's manifest resolves it.
 
 With `PLAYBACK_ENGINE=ffmpeg`, a stream the ffmpeg engine makes, copy or
 re-encode alike, carries four more keys. They are optional and additive: the
-schema stays version 1, Plex-engine streams carry none of them, and a manager
+schema stays version 1, Plex re-encodes carry none of them, and a manager
 that predates them ignores them. Plex can't budget these streams itself: it
 lists one, when told of it, as Direct Play at the file's bitrate, with no
 Session id and no bandwidth.
@@ -145,7 +146,7 @@ handling, without a Plex session match and without marking the Theater
 uncertain for lacking one. It claims every Plex row whose player is
 `plex_client_id`, so that row is not counted again, and takes the account
 from it when there is one. An ffmpeg stream without `bandwidth_kbps` is matched
-against Plex as before, which normally selects the minimum budget.
+against Plex as before, and counts as nothing while nothing matches it.
 
 A stream whose session has stopped before its next one is announced carries
 `engine` and `plex_client_id` but no `bandwidth_kbps` or `bandwidth_source`. A
@@ -160,6 +161,22 @@ The same two keys are sent, for those 15 s at most, when a seek's new run
 fails to start and Plex makes that session instead: the stream is then Plex's,
 labelled `ffmpeg`, and matched against Plex by its session as any other, so
 only the label is off.
+
+A Direct Stream copy (Plex's video copied, measured by Theater) also carries,
+additively and still schema version 1:
+
+```json
+{ "engine": "plex", "bandwidth_kbps": 2400, "bandwidth_source": "measured" }
+```
+
+`bandwidth_kbps` is what one viewer downloads: every byte of the copy's
+segments from the room's position to 120 s past it, over their length. With
+less than 30 s of them in hand, it is the file's average instead
+(`bandwidth_source: "target"`); with neither, the keys are left out. Plex's own
+figure for a copy is how fast it hands Theater the segments over the LAN (121
+Mbps for a 1 to 5 Mbps film on 18 October), so the manager reserves Theater's
+figure for the stream and still claims Plex's session for it. Plex re-encodes
+carry none of these keys; Plex's figure for them is the stream's.
 
 Use manager `LOG_LEVEL=DEBUG` and `/status` to see matching Plex account IDs,
 viewer counts, base bandwidth, applied weight, reservations and integration

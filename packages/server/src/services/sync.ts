@@ -9,7 +9,7 @@ import { recordProgress, shouldRecordHistory } from "./watch-history.js";
 import { pushProgressToPlex } from "./plex-accounts.js";
 import { episodesInSameFile } from "./episode-files.js";
 import { logEvent } from "./logger.js";
-import { updateDirectStreamPosition } from "./direct-stream.js";
+import { directStreamBandwidth, updateDirectStreamPosition } from "./direct-stream.js";
 import { ffmpegBandwidth, ffmpegSessionKnown, isFfmpegSession, updateFfmpegPosition } from "./ffmpeg/engine.js";
 import { plexClientIdOf, startPlexReports, type ReportState, type StreamNow } from "./ffmpeg/plex-report.js";
 import { qualityKbps } from "./media-versions.js";
@@ -564,6 +564,7 @@ export function getQbtManagerStreams() {
       host_heartbeat_age_seconds: room.state.hostHeartbeatAt === null ? null :
         Math.max(0, now - room.state.hostHeartbeatAt) / 1000,
       ...ffmpegStreamFacts(roomId, room, variant),
+      ...copyFacts(room, variant),
     })));
 }
 
@@ -635,6 +636,27 @@ function ffmpegStreamsNow(): StreamNow[] {
   }
   return out;
 }
+
+/**
+ * What the manager is told of a Direct Stream copy, which Plex can't tell it:
+ * what one viewer downloads, measured here (direct-stream.ts). Plex's figure
+ * for a copy is how fast it hands this server the segments over the LAN — on
+ * 18 October 121 Mbps for a film of 1 to 5 — and the manager, taking it,
+ * cut qBittorrent's upload to its minimum. Nothing for a re-encode of Plex's,
+ * whose figure is the stream's, so a manager that predates these sees no
+ * change.
+ */
+function copyFacts(room: Room, variant: Variant): {
+  engine?: "plex";
+  bandwidth_kbps?: number;
+  bandwidth_source?: "measured" | "target";
+} {
+  const sid = variant.hlsSessionId;
+  if (!sid) return {};
+  const bandwidth = directStreamBandwidth(sid, interpolatedPosition(room.state));
+  return bandwidth ? { engine: "plex", bandwidth_kbps: bandwidth.kbps, bandwidth_source: bandwidth.source } : {};
+}
+
 
 /**
  * Keep-alive timers, one per *stream* rather than one per room.

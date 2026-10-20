@@ -33,6 +33,7 @@ import { directStreamCacheDir, type CopiedSegment } from "../direct-stream.js";
 import { measuredPlaylist, round3, type MeasuredSegment } from "../measured-playlist.js";
 import { logEvent } from "../logger.js";
 import { LruMap } from "../lru.js";
+import { measureBandwidth, type Bandwidth } from "../stream-bandwidth.js";
 import { ffmpegPath } from "./config.js";
 import { cpuUse, gpuUse, readUse, sampleGpu, type GpuSample } from "./gpu-use.js";
 import { COPY_CLOCK_OFFSET_S } from "./plan.js";
@@ -64,10 +65,6 @@ const IDLE_MS = 10 * 60_000;
 /** Runs of one title that die within this long of each other leave it to Plex. */
 const CRASH_WINDOW_MS = 15 * 60_000;
 const CRASHES_TO_REFUSE = 2;
-/** How far past the watcher a stream's bitrate is measured, for the upload
- *  budget — and the least of it, made already, that counts as a measure. */
-const BANDWIDTH_AHEAD_S = 120;
-const BANDWIDTH_MEASURED_S = 30;
 
 const CACHE_DIR = path.join(directStreamCacheDir(), "ffmpeg");
 // Whatever a server that stopped without ending its streams left behind.
@@ -429,43 +426,10 @@ export function ffmpegRefused(ratingKey: string): boolean {
 export function ffmpegBandwidth(
   sessionId: string,
   positionS: number,
-): { kbps: number; source: "measured" | "target" } | null {
+): Bandwidth | null {
   const run = bySession.get(sessionId);
   if (!run) return null;
   return measureBandwidth(run.segments, Number.isFinite(positionS) ? positionS : run.positionS, run.targetKbps);
-}
-
-/**
- * ffmpegBandwidth's measure, on its own so the tests can hold it to its
- * window: picture, sound and MPEG-TS together, every byte of the segments
- * between `fromS` and BANDWIDTH_AHEAD_S past it over their length — the one
- * playing at `fromS` among them, none wholly behind it, none that starts past
- * the window. A two-hour film watched from its middle is measured there, not
- * on a loud prologue nobody is downloading any more. Less than
- * BANDWIDTH_MEASURED_S of it made — a run just started, or near the end of
- * the film — is no measure, and `targetKbps` is given instead; null when that
- * isn't known either.
- */
-export function measureBandwidth(
-  segments: ReadonlyArray<Pick<MeasuredSegment, "start" | "end" | "bytes">>,
-  fromS: number,
-  targetKbps: number | null,
-): { kbps: number; source: "measured" | "target" } | null {
-  let bytes = 0;
-  let madeS = 0;
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    if (seg.end <= fromS || seg.start >= fromS + BANDWIDTH_AHEAD_S) continue;
-    // Its length as the playlist has it: up to where the next one starts.
-    const lengthS = (segments[i + 1]?.start ?? seg.end) - seg.start;
-    if (lengthS <= 0) continue;
-    bytes += seg.bytes;
-    madeS += lengthS;
-  }
-  const measured = madeS >= BANDWIDTH_MEASURED_S;
-  const kbps = measured ? (bytes * 8) / madeS / 1000 : targetKbps;
-  if (!kbps) return null;
-  return { kbps: Math.min(10_000_000, Math.max(1, Math.round(kbps))), source: measured ? "measured" : "target" };
 }
 
 /**

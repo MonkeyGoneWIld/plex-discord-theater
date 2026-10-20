@@ -59,6 +59,7 @@ import { plexFetchSegment } from "./plex.js";
 import { firstKeyframe, videoSpan } from "./ts-timestamps.js";
 import { logEvent } from "./logger.js";
 import { measuredPlaylist, round3 } from "./measured-playlist.js";
+import { measureBandwidth, type Bandwidth } from "./stream-bandwidth.js";
 
 /**
  * How far past the playhead to measure. The player fetches 150s ahead of
@@ -191,6 +192,9 @@ interface CopySession {
   handedOut: boolean;
   /** Its keyframes turned out not to be IDR frames — see keyframes.ts. */
   openGop: boolean;
+  /** The file's average, kbps, when Plex knows it: what a viewer downloads until
+   *  enough is measured to say — see directStreamBandwidth. */
+  targetKbps: number | null;
 }
 
 const sessions = new Map<string, CopySession>();
@@ -536,10 +540,17 @@ async function pump(s: CopySession): Promise<void> {
  * Begin measuring a copied transcode. `offsetS` is where it was asked to start;
  * Plex numbers its first segment from that, at 3s a segment.
  */
-export function startDirectStream(sessionId: string, plexKey: string, ratingKey: string, offsetS: number): void {
+export function startDirectStream(
+  sessionId: string,
+  plexKey: string,
+  ratingKey: string,
+  offsetS: number,
+  targetKbps: number | null = null,
+): void {
   stopDirectStream(sessionId);
   const s: CopySession = {
     sessionId,
+    targetKbps: targetKbps && targetKbps > 0 ? targetKbps : null,
     plexKey,
     ratingKey,
     baseDir: `/video/:/transcode/universal/session/${plexKey}/base/`,
@@ -587,6 +598,18 @@ export function stopDirectStream(sessionId: string): void {
   if (byPlexKey.get(s.plexKey) === s) byPlexKey.delete(s.plexKey);
   // What it put on disk goes with it.
   void fs.promises.rm(sessionDir(s), { recursive: true, force: true }).catch(() => {});
+}
+
+/**
+ * What one viewer of this session's copy downloads, for the upload budget —
+ * see stream-bandwidth.ts — from where the room is: Plex's own figure for the
+ * session is how fast it hands the segments to this server. Null for a
+ * session that isn't a copy measured here.
+ */
+export function directStreamBandwidth(sessionId: string, positionS: number): Bandwidth | null {
+  const s = sessions.get(sessionId);
+  if (!s) return null;
+  return measureBandwidth(s.segments, Number.isFinite(positionS) ? positionS : s.positionS, s.targetKbps);
 }
 
 /** Whether this Plex transcode key is a copied stream measured here. */

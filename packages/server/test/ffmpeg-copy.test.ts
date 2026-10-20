@@ -734,7 +734,10 @@ console.log("\n— a render node that wasn't there at startup —");
   // was looked for again is what this is about.
   const node = path.join(tmp, "renderD128");
   process.env.FFMPEG_HWACCEL_DEVICE = node;
+  // Empty, as the compose files leave it: auto, which looks for the GPU.
+  process.env.FFMPEG_HWACCEL = "";
   const first = await detectHardware();
+  delete process.env.FFMPEG_HWACCEL;
   check("missing, the CPU, saying what /dev/dri has and that it looks again",
     [first.hardware, first.note.startsWith(`CPU (no ${node}; /dev/dri has: `), first.note.includes("looked for again")], ["software", true, true]);
   const said: string[] = [];

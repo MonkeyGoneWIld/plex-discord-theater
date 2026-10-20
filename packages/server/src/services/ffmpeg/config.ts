@@ -149,7 +149,8 @@ function trial(args: string[]): Promise<{ ok: boolean; said: string }> {
  * QSV's video engine does, and Dolby Vision 5 is left to Plex.
  */
 export async function detectHardware(): Promise<{ hardware: Hardware; note: string }> {
-  const want = (process.env.FFMPEG_HWACCEL ?? "auto").trim().toLowerCase();
+  // Empty is auto: the compose files leave every setting there, most empty.
+  const want = (process.env.FFMPEG_HWACCEL?.trim() || "auto").toLowerCase();
   const done = (h: Hardware, note: string, m: Tonemapper = "software") => {
     hardware = h;
     mapper = m;

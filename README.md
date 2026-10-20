@@ -242,6 +242,9 @@ administrator API key is required.
 
 - Plex Media Server with transcoding enabled
 - Docker
+- Optional, for the [ffmpeg engine](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FFmpeg-Engine):
+  the library mounted into the container, and an Intel GPU with Quick Sync for
+  re-encodes
 - A Discord application with Activities enabled
 - A public HTTPS endpoint — Discord will not load `localhost`
 
@@ -280,6 +283,12 @@ services:
       # Optional: keep copied films on an SSD, with STREAM_CACHE_DIR below
       # set to "/cache/stream".
       # - /path/to/ssd/theater-stream-cache:/cache/stream
+      # PLAYBACK_ENGINE "ffmpeg" only: your library, read-only, at the path
+      # Plex has it (or set MEDIA_PATH_MAP below).
+      # - /path/to/media:/data/media:ro
+    # PLAYBACK_ENGINE "ffmpeg" only: Intel's GPU, for re-encodes on Quick Sync.
+    # devices:
+    #   - /dev/dri:/dev/dri
     environment:
       # ── Required ─────────────────────────────────────────────────────────
       # From the Discord Developer Portal.
@@ -364,6 +373,31 @@ services:
       STREAM_CACHE_DIR: ""
       TRANSCODE_CACHE_MB: ""
 
+      # Who makes the streams. "plex" (empty) is Plex. "ffmpeg" makes them in
+      # this container from the files themselves: copies of the original
+      # picture, HDR included, and re-encodes on Intel Quick Sync (or the CPU
+      # without it). Anything it can't make is left to Plex, stream by
+      # stream. Uncomment the media mount and devices above with it. See the
+      # FFmpeg Engine page in the wiki.
+      PLAYBACK_ENGINE: ""
+      # Only if the library is mounted at other paths than Plex's own:
+      # "plex path=>path here", comma-separated.
+      MEDIA_PATH_MAP: ""
+      # "auto" (empty) uses Quick Sync when it works; "none" the CPU.
+      FFMPEG_HWACCEL: ""
+      FFMPEG_HWACCEL_DEVICE: "/dev/dri/renderD128"
+      # Re-encodes at once, past which Plex makes the stream (empty = 4 on
+      # the GPU, 2 on the CPU). Copies don't count.
+      FFMPEG_MAX_ENCODES: ""
+      # Re-encodes for HEVC players stay HDR ("keep", empty), or "tonemap"
+      # to SDR as Plex does. The curve for streams mapped to SDR: reinhard
+      # (empty), mobius, hable, bt2390, linear, gamma or clip.
+      FFMPEG_HDR_REENCODE: ""
+      FFMPEG_TONEMAP: ""
+      # Show ffmpeg's streams in Plex's dashboard, Tautulli and Tracearr.
+      # "0" turns it off.
+      FFMPEG_REPORT_TO_PLEX: "1"
+
       # Password for one maintenance command that stops every stream the bot
       # has running on Plex, in every room, for clearing streams stuck in
       # Plex by hand. Nothing calls it on its own, and the server already
@@ -404,6 +438,7 @@ Join a voice channel, click the **Activities** rocket, and pick the application.
 | [Discord Application Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup) | Creating the app, keeping it private, the 25-member limit, verification |
 | [Plex Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Plex-Setup) | Tokens, markers, preview thumbnails |
 | [Configuration Reference](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Configuration-Reference) | Every environment variable |
+| [FFmpeg Engine](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FFmpeg-Engine) | Making streams in the container, Quick Sync, HDR |
 | [Using the Activity](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Using-the-Activity) | End-user guide |
 | [Optional Integrations](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Optional-Integrations) | TMDB, TVDB, Seerr |
 | [VPS Relay](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/VPS-Relay) | Serving large rooms from one stream |

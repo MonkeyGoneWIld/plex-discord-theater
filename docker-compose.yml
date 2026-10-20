@@ -67,6 +67,34 @@ services:
       - VPS_RELAY_URL=${VPS_RELAY_URL}
       - VPS_RELAY_KEY=${VPS_RELAY_KEY}
 
+      # ── Playback engine ─────────────────────────────────────────
+      # plex (the default) has Plex make every stream. ffmpeg makes them in
+      # this container instead, from the files themselves: copies of the
+      # original picture, HDR included, and re-encodes on Intel's GPU (Quick
+      # Sync) when one is mapped in under `devices` below, else on the CPU.
+      # Anything it can't make is left to Plex. Uncomment the media mount and
+      # `devices` below with it. See the wiki's FFmpeg Engine page.
+      - PLAYBACK_ENGINE=${PLAYBACK_ENGINE:-}
+      # Only when the library is mounted at other paths than Plex's own:
+      # "plex path=>path here", comma-separated, e.g. /media=>/data/media
+      - MEDIA_PATH_MAP=${MEDIA_PATH_MAP:-}
+      # auto (the default) uses Intel QSV when it works, and the CPU when not;
+      # none always uses the CPU. FFMPEG_HWACCEL_DEVICE is the render node.
+      - FFMPEG_HWACCEL=${FFMPEG_HWACCEL:-}
+      - FFMPEG_HWACCEL_DEVICE=${FFMPEG_HWACCEL_DEVICE:-}
+      # Re-encodes at once; past it, Plex makes the stream. Copies don't count.
+      # Empty = 4 on the GPU, 2 on the CPU.
+      - FFMPEG_MAX_ENCODES=${FFMPEG_MAX_ENCODES:-}
+      # keep (the default): a re-encode for an HEVC player stays HDR, as the
+      # copy is. tonemap maps it to SDR, as Plex does. FFMPEG_TONEMAP is the
+      # curve for streams that are mapped: reinhard (default), mobius, hable,
+      # bt2390, linear, gamma or clip.
+      - FFMPEG_HDR_REENCODE=${FFMPEG_HDR_REENCODE:-}
+      - FFMPEG_TONEMAP=${FFMPEG_TONEMAP:-}
+      # Tell Plex what ffmpeg is playing, so it shows in Plex's dashboard,
+      # Tautulli and Tracearr. On unless set to 0.
+      - FFMPEG_REPORT_TO_PLEX=${FFMPEG_REPORT_TO_PLEX:-}
+
       # ── Tuning ──────────────────────────────────────────────────
       # Per-viewer bandwidth scales with the bitrate — the biggest lever there
       # is if your upload is tight.
@@ -139,6 +167,14 @@ services:
       # up to 13.5 GB an hour for a 30 Mbps Blu-ray. To keep that on an SSD,
       # mount one here and set STREAM_CACHE_DIR=/cache/stream in .env.
       # - /path/to/ssd/theater-stream-cache:/cache/stream
+      # PLAYBACK_ENGINE=ffmpeg: your library, read-only, at the path Plex has
+      # it (or set MEDIA_PATH_MAP). Without it, ffmpeg reads each file from
+      # Plex over the network instead, which works but seeks slower.
+      # - /path/to/media:/data/media:ro
+
+    # PLAYBACK_ENGINE=ffmpeg: Intel's GPU, for re-encodes on Quick Sync.
+    # devices:
+    #   - /dev/dri:/dev/dri
     restart: unless-stopped
     logging:
       driver: json-file

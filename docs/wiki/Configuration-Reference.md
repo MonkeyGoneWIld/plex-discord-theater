@@ -2,8 +2,11 @@
 
 Every environment variable, what it does, and when you would change it.
 
-All of these go in `.env` next to `docker-compose.yml`. No quotes around values,
-no spaces around the `=`.
+Set these under `environment:` in the compose file from the
+[README](https://github.com/MonkeyGoneWIld/plex-discord-theater#3-deploy), as
+`KEY: "value"`, quoted. Building from source instead, they go in `.env` next to
+`docker-compose.yml`, as `KEY=value`, with no quotes and no spaces around the
+`=`.
 
 Most settings left unset simply turn their feature off — the related row, tab
 or button is hidden rather than broken. The few that are on unless set to `0`,

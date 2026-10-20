@@ -96,15 +96,18 @@ mapping in the Developer Portal, or switch to a
   in `REDIRECT_URI`, at `/api/presence/artwork/<id>`, through its own image
   proxy. It has to be reachable without a login, so a Cloudflare Access page or
   basic auth in front of the whole host blocks it; exempt that path. The link
-  serves only that one cached poster, never anything else from Plex, and it
-  expires after 24 hours.
+  serves only that one cached poster, never anything else from Plex. It lasts
+  up to 24 hours, and a server restart or a full image cache ends it sooner.
 - **No progress bar.** Discord shows one only while the room plays and the
-  title's length is known. Pause removes it, and resuming or seeking puts it
-  back.
+  title's length is known. Pause removes it and resuming puts it back; a seek
+  during playback moves it.
 - **A plain watching status, without the title.** That viewer turned off
   **Show media details on Discord** under **People**. It is saved per device.
-- **Nothing at all.** The viewer didn't give the Activity permission to set
-  their status when it asked. Playback works either way.
+- **Nothing from the Activity at all.** It isn't allowed to set that viewer's
+  status: they declined when Discord asked, Discord refused the permission for
+  the application, or Discord rejected an update. Look in the server log for
+  `authorize without presence scope` or `presence delivery stopped`. Playback
+  works either way.
 
 Discord decides each card's layout; a compact pop-out can't be made to show the
 full profile card.

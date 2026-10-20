@@ -125,14 +125,14 @@ Session id and no bandwidth.
 
 - `engine` is `"ffmpeg"`, present only on these streams.
 - `bandwidth_kbps` is what one viewer of the variant downloads, in kbps
-  (1 kbps = 1000 bit/s), video, audio and MPEG-TS overhead together: the bytes
-  of the segments ffmpeg has already made from the room's position to 120 s
-  past it, over their total duration. An integer from 1 to 10000000.
-- `bandwidth_source` is `"measured"` for that, or `"target"` when those
-  segments cover under 30 s of film (a run just started, a seek, the end of the
-  film) and the stream's target is given instead: a re-encode's video target
-  plus its audio, a copy's file average. Both keys are left out when neither
-  is known.
+  (1 kbps = 1000 bit/s), one figure for the whole stream, as Plex gives one for
+  each of its own: a copy's file average, or a re-encode's video target plus
+  its audio. An integer from 1 to 10000000. It doesn't follow the film's
+  bitrate as it plays, so the manager has no reason to keep changing
+  qBittorrent's limit.
+- `bandwidth_source` is `"target"` for that. When Plex doesn't know a copy's
+  file bitrate, it is `"measured"`: the average of the first 30 s the run
+  makes, kept for the rest of the run. Both keys are left out until then.
 - `plex_client_id` is the `X-Plex-Client-Identifier` the stream is reported
   to Plex under (`FFMPEG_REPORT_TO_PLEX`, on by default):
   `plex-discord-theater-<the stream's first session id>`, unchanged across
@@ -169,10 +169,13 @@ additively and still schema version 1:
 { "engine": "plex", "bandwidth_kbps": 2400, "bandwidth_source": "measured" }
 ```
 
-`bandwidth_kbps` is what one viewer downloads: every byte of the copy's
-segments from the room's position to 120 s past it, over their length. With
-less than 30 s of them in hand, it is the file's average instead
-(`bandwidth_source: "target"`); with neither, the keys are left out. Plex's own
+`bandwidth_kbps` is what one viewer downloads, one figure for the whole
+stream, as Plex gives one for each of its own: the file's average
+(`bandwidth_source: "target"`). When Plex doesn't know the file's bitrate, it
+is the average of the first 30 s Theater measures (`"measured"`), kept for
+the rest of the stream; until then the keys are left out. The figure doesn't
+follow the film's bitrate as it plays, so the manager has no reason to keep
+changing qBittorrent's limit. Plex's own
 figure for a copy is how fast it hands Theater the segments over the LAN (121
 Mbps for a 1 to 5 Mbps film on 18 October), so the manager reserves Theater's
 figure for the stream and still claims Plex's session for it. Plex re-encodes

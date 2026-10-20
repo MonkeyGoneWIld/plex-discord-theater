@@ -33,7 +33,7 @@ import { directStreamCacheDir, type CopiedSegment } from "../direct-stream.js";
 import { measuredPlaylist, round3, type MeasuredSegment } from "../measured-playlist.js";
 import { logEvent } from "../logger.js";
 import { LruMap } from "../lru.js";
-import { measureBandwidth, type Bandwidth } from "../stream-bandwidth.js";
+import { streamBandwidth, type Bandwidth } from "../stream-bandwidth.js";
 import { ffmpegPath } from "./config.js";
 import { cpuUse, gpuUse, readUse, sampleGpu, type GpuSample } from "./gpu-use.js";
 import { COPY_CLOCK_OFFSET_S } from "./plan.js";
@@ -87,6 +87,8 @@ interface Run {
   encode: boolean;
   /** What one viewer downloads of it as planned, kbps, when known — see ffmpegBandwidth. */
   targetKbps: number | null;
+  /** Without one, the average of the first of it made, worked out once — see ffmpegBandwidth. */
+  averageKbps: number | null;
   dir: string;
   baseDir: string;
   /** Where the run was asked to start, film time. */
@@ -306,7 +308,7 @@ export async function startFfmpegRun(o: {
   }
   const run: Run = {
     key, sessionId: o.sessionId, ratingKey: o.ratingKey, codec: o.codec, encode: !!o.encode,
-    targetKbps: o.targetKbps && o.targetKbps > 0 ? o.targetKbps : null, dir,
+    targetKbps: o.targetKbps && o.targetKbps > 0 ? o.targetKbps : null, averageKbps: null, dir,
     baseDir: `/video/:/transcode/universal/session/${key}/base/`,
     offsetS: o.offsetS, proc: null, paused: false, pausedOnce: false, stopped: false,
     segments: [], byPath: new Map(), clockOffset: null, ended: false, failed: null,
@@ -417,19 +419,15 @@ export function ffmpegRefused(ratingKey: string): boolean {
 
 /**
  * What one viewer of this session's stream downloads, kbps, for the upload
- * budget (routes/qbt-manager.ts): measureBandwidth of what the run has made,
- * from `positionS` — the room's, not where the run began. Plex has none to
- * give: Phase 0 (17 October) saw a stream made here listed as Direct Play at
- * the file's bitrate, which a re-encode's is nothing like, with no Session —
- * so no bandwidth, and no id to match it by.
+ * budget (routes/qbt-manager.ts): one figure for the stream — a copy's file
+ * average, a re-encode's video target and its sound — see stream-bandwidth.ts.
+ * Plex has none to give: Phase 0 (17 October) saw a stream made here listed
+ * as Direct Play at the file's bitrate, which a re-encode's is nothing like,
+ * with no Session — so no bandwidth, and no id to match it by.
  */
-export function ffmpegBandwidth(
-  sessionId: string,
-  positionS: number,
-): Bandwidth | null {
+export function ffmpegBandwidth(sessionId: string): Bandwidth | null {
   const run = bySession.get(sessionId);
-  if (!run) return null;
-  return measureBandwidth(run.segments, Number.isFinite(positionS) ? positionS : run.positionS, run.targetKbps);
+  return run ? streamBandwidth(run) : null;
 }
 
 /**

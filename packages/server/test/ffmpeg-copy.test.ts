@@ -851,17 +851,11 @@ console.log("\n— what the upload budget is told of each stream (qbt-manager sn
   const a = await room();
   const A = crypto.randomUUID();
   const copy = await master("1", A);
-  const listed = entries(await madeTo(variantOf(copy.text), 32));
-  const bytes = listed.reduce((s, e) => s + Number(e.uri.match(/&n=(\d+)$/)![1]), 0);
-  const listedS = listed.reduce((s, e) => s + e.duration, 0);
-  const playlistKbps = (bytes * 8) / listedS / 1000;
+  await madeTo(variantOf(copy.text), 32);
   a.play("1", A, 0);
   const measured = await streamOn(A);
-  check("a copy with 30 s and more made past the room is measured, and said to be ffmpeg's",
-    [measured?.engine, measured?.bandwidth_source], ["ffmpeg", "measured"]);
-  const kbps = Number(measured?.bandwidth_kbps);
-  check(`  at what its segments hold, picture, sound and MPEG-TS: ${kbps} kbps (its playlist's: ${Math.round(playlistKbps)})`,
-    [Number.isInteger(kbps), Math.abs(kbps - playlistKbps) / playlistKbps < 0.1], [true, true]);
+  check("a copy, however much of it is made, is given one figure: the file's average, and said to be ffmpeg's",
+    [measured?.engine, measured?.bandwidth_source, measured?.bandwidth_kbps], ["ffmpeg", "target", Number(notesOf(copy.text).kbps)]);
   check("  with FFMPEG_REPORT_TO_PLEX=0, no player in Plex for it", measured?.plex_client_id, null);
 
   timelines.length = 0;
@@ -912,7 +906,7 @@ console.log("\n— what the upload budget is told of each stream (qbt-manager sn
   await madeTo(variantOf(late.text), 60);
   nearEnd.play("1", C, 40, 0);
   const lateCopy = await streamOn(C);
-  check("a copy with under 30 s made past the room, however much behind it, is given its target: the file's average",
+  check("  near the end of the film, the same: the file's average",
     [lateCopy?.bandwidth_source, lateCopy?.bandwidth_kbps], ["target", Number(notesOf(late.text).kbps)]);
 
   const encoding = await room();

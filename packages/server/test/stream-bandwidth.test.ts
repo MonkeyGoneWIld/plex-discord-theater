@@ -1,9 +1,9 @@
 /**
  * What the upload budget is told one viewer of a stream downloads
- * (services/stream-bandwidth.ts): the segments in hand from the room's
- * position to two minutes past it, or the stream's target with too few.
+ * (services/stream-bandwidth.ts): one figure for the stream, its target or,
+ * with none, the average of its first half minute.
  */
-import { measureBandwidth } from "../src/services/stream-bandwidth.js";
+import { streamBandwidth } from "../src/services/stream-bandwidth.js";
 
 let pass = 0;
 let fail = 0;
@@ -14,23 +14,24 @@ function check(name: string, actual: unknown, expected: unknown) {
   else { fail++; console.log(`  FAIL ${name}\n         expected ${e}\n         actual   ${a}`); }
 }
 
-console.log("\n— how much of a stream is measured, for the upload budget —");
+console.log("\n— one figure for a stream, for the upload budget —");
 {
-  // 300 s in 5 s segments: a loud prologue at 8000 kbps to 100 s, 2000 kbps to
-  // 220 s, 500 kbps to the end — the whole of it 3600. Every stretch says
-  // something different, so a window in the wrong place shows.
+  // 300 s in 5 s segments: 8000 kbps to 100 s, 2000 kbps to 220 s, 500 kbps to
+  // the end. A figure that followed the film would change three times.
   const kbpsAt = (s: number) => (s < 100 ? 8000 : s < 220 ? 2000 : 500);
   const run = Array.from({ length: 60 }, (_, i) => ({ start: i * 5, end: i * 5 + 5, bytes: (kbpsAt(i * 5) * 1000 / 8) * 5 }));
-  const upTo = (s: number) => run.filter((seg) => seg.end <= s);
-  check("a room at 100 s is measured from there to 120 s on: not from the start (7000), past it (1400) or behind it too (4727)",
-    measureBandwidth(run, 100, 3000), { kbps: 2000, source: "measured" });
-  check("  and at the start, from the start: the prologue's, mostly",
-    measureBandwidth(run, 0, 3000), { kbps: 7000, source: "measured" });
-  check("  the segment playing at the room's position counted whole, the one before it not",
-    measureBandwidth(run, 98, 3000), { kbps: 2240, source: "measured" });
-  check("30 s in hand past the room is a measure", measureBandwidth(upTo(130), 100, 3000), { kbps: 2000, source: "measured" });
-  check("  25 s is none: the target is given instead", measureBandwidth(upTo(125), 100, 3000), { kbps: 3000, source: "target" });
-  check("  and nothing, with no target either", measureBandwidth(upTo(125), 100, null), null);
+  const withTarget = { targetKbps: 3000, averageKbps: null, segments: run.slice(0, 2) };
+  check("its target, from the first moment", streamBandwidth(withTarget), { kbps: 3000, source: "target" });
+  withTarget.segments = run;
+  check("  and still, whatever has come in since", streamBandwidth(withTarget), { kbps: 3000, source: "target" });
+
+  const s = { targetKbps: null, averageKbps: null as number | null, segments: run.slice(0, 5) };
+  check("with no target, nothing until half a minute is in hand", streamBandwidth(s), null);
+  s.segments = run.slice(0, 6);
+  check("  then the average of that", streamBandwidth(s), { kbps: 8000, source: "measured" });
+  s.segments = run;
+  check("  kept from then on, through the quieter rest of the film", streamBandwidth(s), { kbps: 8000, source: "measured" });
+  check("  worked out once", s.averageKbps, 8000);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -100,10 +100,13 @@ additively and still schema version 1:
 { "engine": "plex", "bandwidth_kbps": 2400, "bandwidth_source": "measured" }
 ```
 
-`bandwidth_kbps` is what one viewer downloads: every byte of the copy's
-segments from the room's position to 120 s past it, over their length. With
-less than 30 s of them in hand, it is the file's average instead
-(`bandwidth_source: "target"`); with neither, the keys are left out. Plex's own
+`bandwidth_kbps` is what one viewer downloads, one figure for the whole
+stream, as Plex gives one for each of its own: the file's average
+(`bandwidth_source: "target"`). When Plex doesn't know the file's bitrate, it
+is the average of the first 30 s Theater measures (`"measured"`), kept for
+the rest of the stream; until then the keys are left out. The figure doesn't
+follow the film's bitrate as it plays, so the manager has no reason to keep
+changing qBittorrent's limit. Plex's own
 figure for a copy is how fast it hands Theater the segments over the LAN (121
 Mbps for a 1 to 5 Mbps film on 18 October), so the manager reserves Theater's
 figure for the stream and still claims Plex's session for it. Plex re-encodes

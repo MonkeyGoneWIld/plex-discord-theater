@@ -32,7 +32,8 @@ process.env.SUBTITLE_PREFETCH = "0";
 process.env.PLAYBACK_ENGINE = "ffmpeg";
 // Small, so the pause ahead of the watcher shows inside a 60 s film: it
 // stops past 36 s and carries on once the watcher is within 18 s of that.
-process.env.PDT_FFMPEG_LEAD_S = "36";
+// Unset, runs go on to the end of the film: checked on its own below.
+process.env.FFMPEG_LOOKAHEAD = "36";
 
 let pass = 0;
 let fail = 0;
@@ -363,6 +364,23 @@ console.log("\n— ahead of the watcher, and no further —");
   check("once the watcher is at 50 s it carries on to the end of the film", ended.includes("#EXT-X-ENDLIST"), true);
   check("which the playlist reaches, at its true length", Math.abs(edge(ended) - 60) < 0.2, true);
   await fetch(`${origin}/api/plex/hls/session/${slow}?reason=test`, { method: "DELETE" });
+}
+
+console.log("\n— the whole film, with FFMPEG_LOOKAHEAD unset —");
+{
+  delete process.env.FFMPEG_LOOKAHEAD;
+  const whole = crypto.randomUUID();
+  const variant = variantOf((await master("8", whole)).text);
+  const edge = (text: string) => entries(text).reduce((s, e) => s + e.duration, 0);
+  let now = "";
+  for (let i = 0; i < 60 && !now.includes("#EXT-X-ENDLIST"); i++) {
+    await sleep(250);
+    now = await (await fetch(origin + variant)).text();
+  }
+  check("with the watcher at 0 it goes on to the end of the film all the same",
+    [now.includes("#EXT-X-ENDLIST"), Math.abs(edge(now) - 60) < 0.2], [true, true]);
+  await fetch(`${origin}/api/plex/hls/session/${whole}?reason=test`, { method: "DELETE" });
+  process.env.FFMPEG_LOOKAHEAD = "36";
 }
 
 console.log("\n— a seek past what is there —");

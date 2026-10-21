@@ -12,10 +12,15 @@
  * two the same. A seek past what is listed restarts the run there, as it does
  * for a Plex copy.
  *
- * The run stays LEAD_S ahead of whoever is watching and is paused there
- * (SIGSTOP), so a film isn't read to its end for nobody; it carries on once
- * they catch up. Everything it wrote is kept, on disk in STREAM_CACHE_DIR,
- * until the stream ends, so going back is served from here. A run that dies
+ * The run goes on flat out to the end of the film: a copy is done in a minute
+ * or two, a re-encode in ten to thirty, and from then on a seek anywhere plays
+ * at once, from here. Plex's copies are held a few minutes ahead because Plex
+ * ends a session that reaches the end of the file; nothing here does.
+ * FFMPEG_LOOKAHEAD holds a run that far ahead of whoever is watching instead
+ * (SIGSTOP), carrying on once they near it. A start goes first: runs already
+ * well ahead of their watchers give way to it for a few seconds (giveWay).
+ * Everything a run wrote is kept, on disk in STREAM_CACHE_DIR, until the
+ * stream ends, so going back is served from here. A run that dies
  * answers 410 for its playlist, which the player meets by restarting where it
  * is; a title that keeps dying is left to Plex.
  *
@@ -34,15 +39,19 @@ import { measuredPlaylist, round3, type MeasuredSegment } from "../measured-play
 import { logEvent } from "../logger.js";
 import { LruMap } from "../lru.js";
 import { streamBandwidth, type Bandwidth } from "../stream-bandwidth.js";
-import { ffmpegPath } from "./config.js";
+import { ffmpegPath, lookaheadS } from "./config.js";
 import { cpuUse, gpuUse, readUse, sampleGpu, type GpuSample } from "./gpu-use.js";
 import { COPY_CLOCK_OFFSET_S } from "./plan.js";
 
-/** How far past the watcher a run gets before it is paused — as a Plex copy is
- *  measured (direct-stream.ts), past the player's own 150 s window. */
-const LEAD_S = Number(process.env.PDT_FFMPEG_LEAD_S) || 180;
-/** And how close they come before it carries on. */
-const RESUME_S = LEAD_S - Math.min(30, LEAD_S / 2);
+/** How far past the watcher a run is when its speed is logged, unless
+ *  FFMPEG_LOOKAHEAD pauses it before. */
+const SPEED_AFTER_S = 180;
+/** Runs this far past their watchers give way to a start (giveWay)... */
+const GIVE_WAY_AHEAD_S = 90;
+/** ...until it has this much made past where it started, */
+const GIVE_WAY_UNTIL_S = 60;
+/** or for this long at most: their watchers are still 70 s from their edge. */
+const GIVE_WAY_MAX_MS = 20_000;
 /** Seconds listed before the first playlist is handed out — see direct-stream.ts. */
 const READY_SPAN_S = 30;
 /**
@@ -94,10 +103,12 @@ interface Run {
   /** Where the run was asked to start, film time. */
   offsetS: number;
   proc: ChildProcess | null;
-  /** SIGSTOPped: far enough ahead of the watcher. */
+  /** SIGSTOPped: FFMPEG_LOOKAHEAD ahead of the watcher. */
   paused: boolean;
-  /** Paused at least once: how fast it got there has been said. */
-  pausedOnce: boolean;
+  /** SIGSTOPped for a while, while other streams start (giveWay): how many. */
+  yielding: number;
+  /** How fast it got ahead of the watcher has been said. */
+  speedSaid: boolean;
   /** Stopped by us: its exit is nothing to report. */
   stopped: boolean;
   segments: Segment[];
@@ -118,6 +129,8 @@ interface Run {
   startedAt: number;
   /** A re-encode's GPU counts at its first segment, to say what it used — see gpu-use.ts. */
   gpuAtStart: GpuSample | null;
+  /** And lately, for what it used by the time it ended, when they can't be read any more. */
+  gpuLately: GpuSample | null;
   lastAlive: number;
 }
 
@@ -153,35 +166,90 @@ function use(run: Run, now: GpuSample | null): { gpu: string; cpu: string; read:
   return { gpu: gpuUse(run.gpuAtStart, now), cpu: cpuUse(run.gpuAtStart, now), read: readUse(run.gpuAtStart, now) };
 }
 
-/** Pause the run far enough ahead of the watcher; carry on once they near it. */
+/** Where the run has made the film to, film time. */
+function edgeOf(run: Run): number {
+  return run.segments[run.segments.length - 1]?.end ?? run.offsetS;
+}
+
+/** How much it has made and how fast, for the log. */
+function speed(run: Run): { madeS: number; tookS: number; speedX: number } {
+  const madeS = edgeOf(run) - (run.segments[0]?.start ?? run.offsetS);
+  const tookS = (Date.now() - run.startedAt) / 1000;
+  return { madeS: round3(madeS), tookS: round3(tookS), speedX: Math.round((madeS / Math.max(tookS, 0.001)) * 10) / 10 };
+}
+
+/**
+ * Say how fast the run got well ahead of the watcher, once: on Intel's GPU a
+ * 1080p re-encode runs many times faster than the film plays, on the CPU a
+ * few. With FFMPEG_LOOKAHEAD, pause it there and carry on once the watcher
+ * nears it — within a sixth of it, 30 s at most.
+ */
 function throttle(run: Run): void {
-  // No SIGSTOP on Windows, where only development runs; the run goes on to the end there.
-  if (process.platform === "win32" || !run.proc || run.proc.exitCode !== null || run.stopped) return;
-  const edge = run.segments[run.segments.length - 1]?.end ?? run.offsetS;
+  if (!run.proc || run.proc.exitCode !== null || run.stopped || run.yielding > 0) return;
+  const edge = edgeOf(run);
+  const lead = lookaheadS();
+  const far = edge > run.positionS + (lead ?? SPEED_AFTER_S);
+  if (far && !run.speedSaid) {
+    run.speedSaid = true;
+    logEvent("FFmpeg", lead === null
+      ? "3 minutes ahead of the watcher, going on to the end"
+      : "far enough ahead of the watcher, paused until they near it", {
+      session: short(run.sessionId), encode: run.encode, aheadS: round3(edge - run.positionS), ...speed(run),
+      ...(run.encode && run.proc.pid ? use(run, sampleGpu(run.proc.pid)) : {}),
+    });
+  }
+  // No SIGSTOP on Windows, where only development runs: the run goes on to the end there.
+  if (process.platform === "win32") return;
   try {
-    if (!run.paused && edge > run.positionS + LEAD_S) {
+    if (lead !== null && !run.paused && far) {
       run.proc.kill("SIGSTOP");
       run.paused = true;
-      if (!run.pausedOnce) {
-        run.pausedOnce = true;
-        // How fast it got there, never paused before: on Intel's GPU a 1080p
-        // re-encode runs many times faster than the film plays, on the CPU a
-        // few. From here on it runs in short bursts as the watcher nears.
-        const madeS = edge - (run.segments[0]?.start ?? run.offsetS);
-        const tookS = (Date.now() - run.startedAt) / 1000;
-        logEvent("FFmpeg", "far enough ahead of the watcher, paused until they near it", {
-          session: short(run.sessionId), encode: run.encode, aheadS: round3(edge - run.positionS),
-          madeS: round3(madeS), tookS: round3(tookS), speedX: Math.round((madeS / Math.max(tookS, 0.001)) * 10) / 10,
-          ...(run.encode && run.proc.pid ? use(run, sampleGpu(run.proc.pid)) : {}),
-        });
-      }
-    } else if (run.paused && edge < run.positionS + RESUME_S) {
+    } else if (run.paused && (lead === null || edge < run.positionS + lead - Math.min(30, lead / 2))) {
       run.proc.kill("SIGCONT");
       run.paused = false;
     }
   } catch {
     // Gone already.
   }
+}
+
+/**
+ * Hold the runs already well ahead of their watchers (GIVE_WAY_AHEAD_S) while
+ * `run` makes its first minute, GIVE_WAY_MAX_MS at most. With every run going
+ * flat out to the end, the one a viewer is waiting on would otherwise share
+ * the GPU and the disk with others nobody needs yet: a seek's first picture
+ * should cost what it did when they were paused.
+ */
+async function giveWay(run: Run): Promise<void> {
+  if (process.platform === "win32") return;
+  const held = [...runs.values()].filter((o) => o !== run && !o.paused && !o.stopped && !o.ended && !o.failed &&
+    o.proc?.exitCode === null && (o.yielding > 0 || edgeOf(o) > o.positionS + GIVE_WAY_AHEAD_S));
+  if (!held.length) return;
+  for (const o of held) {
+    try {
+      if (o.yielding === 0) o.proc!.kill("SIGSTOP");
+      o.yielding++;
+    } catch {
+      // Gone already.
+    }
+  }
+  const startedAt = Date.now();
+  const deadline = startedAt + GIVE_WAY_MAX_MS;
+  while (!run.stopped && !run.failed && !run.ended && edgeOf(run) - run.offsetS < GIVE_WAY_UNTIL_S && Date.now() < deadline) {
+    await Promise.race([new Promise<void>((r) => run.waiters.push(r)), sleep(500)]);
+  }
+  for (const o of held) {
+    if (o.yielding === 0 || --o.yielding > 0 || o.stopped) continue;
+    try {
+      o.proc!.kill("SIGCONT");
+    } catch {
+      // Gone already.
+    }
+    throttle(o);
+  }
+  logEvent("FFmpeg", "others gave way to a start", {
+    session: short(run.sessionId), held: held.length, ms: Date.now() - startedAt, madeS: round3(edgeOf(run) - run.offsetS),
+  });
 }
 
 function fail(run: Run, why: string): void {
@@ -310,10 +378,10 @@ export async function startFfmpegRun(o: {
     key, sessionId: o.sessionId, ratingKey: o.ratingKey, codec: o.codec, encode: !!o.encode,
     targetKbps: o.targetKbps && o.targetKbps > 0 ? o.targetKbps : null, averageKbps: null, dir,
     baseDir: `/video/:/transcode/universal/session/${key}/base/`,
-    offsetS: o.offsetS, proc: null, paused: false, pausedOnce: false, stopped: false,
+    offsetS: o.offsetS, proc: null, paused: false, yielding: 0, speedSaid: false, stopped: false,
     segments: [], byPath: new Map(), clockOffset: null, ended: false, failed: null,
     targetDuration: MIN_TARGET_DURATION, handedOut: false, positionS: o.offsetS,
-    waiters: [], queue: Promise.resolve(), stdoutRest: "", stderrTail: [], gpuAtStart: null,
+    waiters: [], queue: Promise.resolve(), stdoutRest: "", stderrTail: [], gpuAtStart: null, gpuLately: null,
     startedAt: Date.now(), lastAlive: Date.now(),
   };
   runs.set(key, run);
@@ -327,6 +395,7 @@ export async function startFfmpegRun(o: {
     return { ok: false, why: `couldn't start ffmpeg: ${err instanceof Error ? err.message : String(err)}` };
   }
   run.proc = proc;
+  void giveWay(run);
   proc.stdout?.on("data", (d: Buffer) => {
     const text = run.stdoutRest + d.toString();
     const lines = text.split("\n");
@@ -349,8 +418,9 @@ export async function startFfmpegRun(o: {
       if (code === 0) {
         run.ended = true;
         logEvent("FFmpeg", "reached the end of the file", {
-          session: short(run.sessionId), segments: run.segments.length,
-          endS: round3(run.segments[run.segments.length - 1]?.end ?? run.offsetS),
+          session: short(run.sessionId), encode: run.encode, segments: run.segments.length,
+          endS: round3(edgeOf(run)), ...speed(run),
+          ...(run.gpuLately ? use(run, run.gpuLately) : {}),
         });
         notify(run);
       } else {
@@ -373,7 +443,8 @@ export async function startFfmpegRun(o: {
 }
 
 /** Re-encodes running — a paused one included, not one that has ended — but
- *  for this session's own, which a start replaces. */
+ *  for this session's own, which a start replaces. One that has made the
+ *  whole film frees its slot. */
 export function ffmpegEncodesRunning(exceptSession?: string): number {
   let n = 0;
   for (const run of runs.values()) if (run.encode && !run.ended && !run.failed && run.sessionId !== exceptSession) n++;
@@ -517,12 +588,17 @@ export function stopAllFfmpegSessions(why = "stopped"): number {
   return all.length;
 }
 
-// What every other stop missed; and the pause catching up with a watcher
-// whose pings stopped coming while the room's clock went on.
+// What every other stop missed; the pause catching up with a watcher whose
+// pings stopped coming while the room's clock went on; and what a re-encode
+// has used so far, for when it ends.
 setInterval(() => {
   const now = Date.now();
   for (const run of [...runs.values()]) {
-    if (now - run.lastAlive > IDLE_MS) stopRun(run, "nobody asked for it in 10 minutes");
-    else throttle(run);
+    if (now - run.lastAlive > IDLE_MS) {
+      stopRun(run, "nobody asked for it in 10 minutes");
+      continue;
+    }
+    throttle(run);
+    if (run.gpuAtStart && run.proc?.pid && run.proc.exitCode === null) run.gpuLately = sampleGpu(run.proc.pid) ?? run.gpuLately;
   }
 }, 15_000).unref();

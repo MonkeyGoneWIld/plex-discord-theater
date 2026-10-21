@@ -94,10 +94,25 @@ export function ffmpegHardware(): Hardware {
   return hardware ?? "software";
 }
 
-/** FFMPEG_MAX_ENCODES: re-encodes at once (copies don't count); past it, Plex makes the stream. */
+/**
+ * FFMPEG_MAX_ENCODES: re-encodes at once (copies don't count); past it, Plex
+ * makes the stream. Six on a GPU: Phase 0 had three 4K HDR → 1080p re-encodes
+ * at once on the 265K at about 4× each, so six still run about twice as fast
+ * as the film plays; and Plex, which takes the seventh, shares that GPU.
+ */
 export function maxEncodes(): number {
   const n = Number(process.env.FFMPEG_MAX_ENCODES);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : ffmpegHardware() === "qsv" ? 4 : 2;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : ffmpegHardware() === "software" ? 2 : 6;
+}
+
+/**
+ * FFMPEG_LOOKAHEAD: how far past its watcher a run gets before it is paused,
+ * seconds. Unset, 0 or "all": no pause — the whole film is made, flat out.
+ */
+export function lookaheadS(): number | null {
+  const v = (process.env.FFMPEG_LOOKAHEAD ?? "").trim().toLowerCase();
+  const n = Number(v);
+  return v && v !== "all" && Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /** What the GPU tone-maps with, as detectHardware found: OpenCL when it

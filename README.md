@@ -331,10 +331,15 @@ services:
       # Only if Plex sees the library at other paths than this container:
       # Plex's path=>the path here, comma-separated.
       # MEDIA_PATH_MAP: "/media=>/data/media"
-      # FFMPEG_HWACCEL: "auto"                       # or "none" for the CPU
+      # FFMPEG_HWACCEL: "auto"                       # qsv, vaapi, nvenc, or none for the CPU
       # FFMPEG_HWACCEL_DEVICE: "/dev/dri/renderD128"
-      # Re-encodes at once. Unset, 4 on Quick Sync and 2 on the CPU.
-      # FFMPEG_MAX_ENCODES: "4"
+      # Re-encodes at once. Unset, 6 on the GPU and 2 on the CPU.
+      # FFMPEG_MAX_ENCODES: "6"
+      # Unset, each stream's whole film is made ahead (room for it in
+      # STREAM_CACHE_DIR); seconds hold each run that far ahead instead.
+      # FFMPEG_LOOKAHEAD: ""
+      # FFMPEG_AUDIO_CHANNELS: "2"                   # 6 for 5.1 AAC
+      # FFMPEG_PREVIEWS: "on"                        # previews for files Plex has none for
       # FFMPEG_HDR_REENCODE: "keep"                  # or "tonemap"
       # FFMPEG_TONEMAP: "reinhard"
       # FFMPEG_REPORT_TO_PLEX: "1"

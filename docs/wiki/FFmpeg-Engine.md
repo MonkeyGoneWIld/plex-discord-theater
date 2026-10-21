@@ -21,20 +21,33 @@ the same either way, so switching is a setting and a restart.
 - **Dolby Vision 5 in the right colours.** Plex copies it, and browsers show it
   purple and green. ffmpeg re-encodes it with its Dolby Vision metadata applied
   (on the GPU, where OpenCL works).
-- **Plex's transcoder does nothing.** The work runs in this container, on
-  Intel's GPU (Quick Sync) when one is mapped in.
+- **Seeks land at once.** Each stream's whole film is made ahead, flat out —
+  a copy in a minute or two, a re-encode in ten to thirty — and kept until the
+  stream ends, so a seek anywhere in it plays from here without a restart.
+- **Re-encodes at the source's own bitrate.** A 3 Mbps HEVC film re-encoded to
+  H.264 is made at about 6 Mbps, not at the quality level's 12, so viewers
+  download only what the picture needs.
+- **Every subtitle burned in.** Text subtitles (SRT, ASS with its own fonts)
+  and picture ones beside the film (`.sup`, VobSub) are drawn by ffmpeg too.
+- **Seek-bar previews for every file.** Where Plex never made preview
+  thumbnails, ffmpeg makes them, once per file.
+- **Plex's transcoder does nothing.** The work runs in this container, on the
+  GPU when one is mapped in: Intel Quick Sync, VAAPI (AMD, or Intel), or NVIDIA
+  NVENC.
 
 ## What it needs
 
 | | |
 |---|---|
 | **The library, mounted read-only** | At the path Plex has it, or mapped with [`MEDIA_PATH_MAP`](#media_path_map). Without it ffmpeg reads each file from Plex over the network. That works, but seeks are slower. |
-| **`/dev/dri`, for Quick Sync** | An Intel GPU whose Quick Sync encodes HEVC Main10 and H.264. Without one, re-encodes are H.264 on the CPU, and copies are unaffected. |
+| **A GPU, for re-encodes** | `/dev/dri` for Intel Quick Sync or VAAPI, or NVIDIA's container runtime for NVENC (see [`FFMPEG_HWACCEL`](#ffmpeg_hwaccel--ffmpeg_hwaccel_device)). Without one, re-encodes are H.264 on the CPU, and copies are unaffected. |
+| **Disk for the streams** | Each stream's film is written to `STREAM_CACHE_DIR` as it is made, and kept until the stream ends: a copy takes the file's own size (a 4K remux, 50 to 80 GB), a re-encode its bitrate times its length (a 1080p film, about 4 to 8 GB). [`FFMPEG_LOOKAHEAD`](#ffmpeg_lookahead) holds each run that far ahead of the room instead. |
 | **Plex, as before** | For the library, and for the streams ffmpeg leaves to it. Keep [transcoding working](Plex-Setup#transcoding-must-work). |
 
-The image ships Jellyfin's ffmpeg with Intel's media and OpenCL drivers, so
-nothing needs installing in the container. It was tested on a Core Ultra 7
-265K.
+The image ships Jellyfin's ffmpeg with Intel's media and OpenCL drivers, and
+fonts for subtitles, so nothing needs installing in the container. It was
+tested on a Core Ultra 7 265K. VAAPI on AMD and NVENC are built in but haven't
+been tried on real hardware yet.
 
 ### Compose
 
@@ -59,6 +72,17 @@ The container's user is added to `/dev/dri`'s groups at startup, so no
 When Docker runs inside a Proxmox LXC or a VM, the GPU has to be passed through
 to that first, and then mapped into the container as above.
 
+For NVIDIA, install the NVIDIA Container Toolkit on the host, and instead of
+`/dev/dri`:
+
+```yaml
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,video,utility"
+      FFMPEG_HWACCEL: "nvenc"
+```
+
 ### Library paths
 
 ffmpeg opens the file at the path Plex reports for it, which is the folder you
@@ -80,7 +104,15 @@ docker exec -it plex-discord-theater node scripts/diagnose-ffmpeg.mjs paths
 ```
 
 This command samples titles from each library, says which it can read, and
-suggests a map for any it can't.
+suggests a map for any it can't. The server does a quicker version of it at
+every start:
+
+```text
+[Config] library on the mount: Movies 10/10 readable, TV Shows 10/10 readable
+```
+
+A library that isn't fully readable is a warning, with the paths it couldn't
+find. What isn't readable is read through Plex.
 
 ---
 
@@ -93,7 +125,7 @@ docker compose logs | grep 'playback engine'
 ```
 
 ```text
-[Config] playback engine: ffmpeg — ffmpeg version 8.1.3-Jellyfin …; copies H.264 and HEVC files itself, HDR included; re-encodes on Intel QSV (HEVC Main10 and H.264), tone mapping reinhard on OpenCL, picture subtitles burned in; a text subtitle burned in still goes to Plex; library at Plex's own paths
+[Config] playback engine: ffmpeg — ffmpeg version 8.1.3-Jellyfin …; copies H.264 and HEVC files itself, HDR included; re-encodes on Intel QSV (HEVC Main10 and H.264), tone mapping reinhard on OpenCL, subtitles burned in (text ones from their text, with their fonts); 512 MB of segments kept in memory; previews made for files Plex has none for; library at Plex's own paths
 ```
 
 At startup it tries a short HEVC Main10 encode and a short H.264 encode on the
@@ -103,6 +135,7 @@ happened instead:
 | The line says | Meaning |
 |---|---|
 | `re-encodes on Intel QSV …, tone mapping … on OpenCL` | Everything works |
+| `re-encodes on VAAPI …` or `NVIDIA NVENC …` | The GPU named, or the one `auto` found when QSV didn't work |
 | `… on QSV's video engine (OpenCL didn't: …; Dolby Vision 5 goes to Plex)` | Re-encodes are on the GPU, but Dolby Vision 5 is left to Plex |
 | `CPU (no /dev/dri/renderD128; /dev/dri has: …)` | The GPU isn't mapped in. It is looked for again before each re-encode, so mapping it in later works without a restart. |
 | `CPU (Intel QSV didn't encode: …)` | The GPU is there, but the encode test failed. See [Troubleshooting](Troubleshooting#re-encodes-run-on-the-cpu). |
@@ -110,7 +143,9 @@ happened instead:
 
 ### Per stream
 
-**Stats for nerds** (`I`) has an **Engine** row: `ffmpeg` or `Plex`. Its
+**Stats for nerds** (`I`) has an **Engine** row: `ffmpeg` with what encodes
+and decodes it (`ffmpeg · Intel QSV, GPU decode`), or `Plex`. A stream ffmpeg
+left to Plex says why, in amber: `Plex (ffmpeg: encode slots full (6/6))`. Its
 **Playback** row says whether the stream is a copy or a re-encode, and why.
 
 The server log has one line per stream:
@@ -157,11 +192,44 @@ Plex` line.
 
 | Left to Plex when | Why |
 |---|---|
-| A text subtitle is burned into the picture | Not built yet. Text subtitles a player draws itself are fine. |
+| A text subtitle inside the film is burned in, and its text hasn't been read out yet | ffmpeg needs the whole text to draw it. It is read out meanwhile, so the next start, a seek included, is ffmpeg's. An `.mkv`'s text is usually read straight away. |
+| A picture subtitle beside the film (`.sup`, `.idx`) isn't found on the mount | ffmpeg needs the file. It is found when exactly one file in the film's folder is named after the film and says the subtitle's language and flags (`Film (2001).en.forced.sup`). |
 | Dolby Vision 5 without OpenCL | Only OpenCL applies its metadata. Without it the colours would be wrong. |
 | Every re-encode slot is taken | [`FFMPEG_MAX_ENCODES`](#ffmpeg_max_encodes). Copies don't take one. |
+| The file on disk isn't the size Plex has for it | It was replaced since Plex last looked. Plex is asked again once, then the stream is Plex's until it rescans. |
+| The file's tracks aren't the ones Plex lists | Read by `ffprobe` before the first start of each file, so an audio or subtitle choice can't pick the wrong track. |
 | Neither the mount nor Plex's file link gives ffmpeg the file | Plex can still read it |
 | ffmpeg failed on the title twice in 15 minutes | It goes to Plex until 15 minutes after the last failure |
+
+[`FFMPEG_FALLBACK_TO_PLEX=off`](#ffmpeg_fallback_to_plex) makes these fail to
+start instead, to find out what they are.
+
+## Subtitles
+
+Text subtitles inside a film (SRT, ASS, WebVTT) are read out of the file on the
+mount by ffmpeg rather than by Plex, all of one file's in one pass, and
+subtitles beside the film are read off the mount when they can be told apart
+(see above). Plex reads whatever can't be. `FFMPEG_SUBTITLES=off` leaves all of
+it to Plex, as without the engine.
+
+A subtitle burned into the picture — a picture subtitle, or a text one the
+player can't draw — is drawn by ffmpeg in a re-encode: a picture one from the
+film or from its file beside it, a text one by libass from its text, an ASS
+track with the fonts the film carries for it.
+
+## Seek-bar previews
+
+Plex makes preview thumbnails only for libraries with **Generate video preview
+thumbnails** on, and only once its scheduled task has reached a file. For any
+file it has none for, ffmpeg makes them the first time someone opens the title:
+a 320-pixel frame every 10 seconds, one seek per frame rather than the whole
+file read through, at the lowest CPU priority, one file at a time. HDR films'
+frames are tone-mapped.
+
+They are kept in the data folder, under `previews`, so each file is done once.
+The first viewer of a long film may see them arrive a minute or two into it.
+[`FFMPEG_PREVIEWS`](#ffmpeg_previews--ffmpeg_previews_max_gb) turns this off,
+and `FFMPEG_PREVIEWS_MAX_GB` (20 by default) bounds the folder.
 
 ## HDR
 
@@ -170,7 +238,7 @@ Plex` line.
 | Copy | Kept, untouched, as in Plex mode |
 | Re-encode for a player that decodes HEVC | Kept: HDR10 HEVC Main10. `FFMPEG_HDR_REENCODE=tonemap` maps it to SDR instead, as Plex does. |
 | H.264 (a player that can't decode HEVC, such as Discord in Firefox) | Mapped to SDR |
-| A picture subtitle burned in | Mapped to SDR, so the subtitle isn't blinding |
+| A subtitle burned in | Mapped to SDR, so the subtitle isn't blinding |
 | Dolby Vision 5 | Mapped to SDR, with its metadata applied |
 
 The curve used for SDR is `FFMPEG_TONEMAP`, `reinhard` by default, the closest
@@ -193,8 +261,11 @@ dashboard, and so in Tautulli and Tracearr:
 ## Bandwidth and the qBittorrent manager
 
 Each viewer downloads the stream as in Plex mode: a copy at the file's own
-bitrate, a re-encode at about `VIDEO_BITRATE_KBPS`. See
-[Requirements](Requirements#bandwidth).
+bitrate, a re-encode at what the source needs — about the source's bitrate,
+more for a codec that needs more bits than the source's (HEVC to H.264 is
+double), less for a smaller picture — never above `VIDEO_BITRATE_KBPS` or the
+quality level, and never below 1.5, 2.5 or 4 Mbps for SD, 720p or 1080p and up.
+See [Requirements](Requirements#bandwidth).
 
 Plex lists ffmpeg's streams with no bandwidth, so the server gives the
 [qBittorrent manager](qBittorrent-Manager-API) its own figure for each stream.
@@ -220,16 +291,69 @@ paths than Plex's own. Unset, files are opened at Plex's paths. See
 
 ### `FFMPEG_HWACCEL` · `FFMPEG_HWACCEL_DEVICE`
 
-`auto` (the default) uses Intel Quick Sync when the startup test encodes on it,
-and the CPU when it doesn't; `qsv` is the same. `none` always uses the CPU.
-VAAPI and NVIDIA aren't supported yet.
+What re-encodes run on, each tried with a short encode at startup:
 
-`FFMPEG_HWACCEL_DEVICE` is the render node, `/dev/dri/renderD128` by default.
+| Value | |
+|---|---|
+| `auto` (default) | Intel Quick Sync, else VAAPI on the same render node, else the CPU |
+| `qsv` | Intel Quick Sync, else the CPU |
+| `vaapi` | VAAPI: AMD, or Intel without Quick Sync's runtime. Its low-power encoder when that is all it has |
+| `nvenc` | NVIDIA NVENC, scaling on CUDA |
+| `none` | The CPU (x264) |
+
+`FFMPEG_HWACCEL_DEVICE` is the render node for `qsv` and `vaapi`,
+`/dev/dri/renderD128` by default, or the GPU's number for `nvenc`.
+
+### `FFMPEG_HW_DECODE`
+
+On unless `off`. Off, the GPU still encodes but the CPU decodes everything:
+for a GPU whose decoder fails on some files.
 
 ### `FFMPEG_MAX_ENCODES`
 
 How many re-encodes run at once. Past it, Plex makes the stream. The default
-is 4 on the GPU and 2 on the CPU. Copies don't count.
+is 6 on the GPU and 2 on the CPU. Copies don't count.
+
+### `FFMPEG_PRESET`
+
+The encoder's speed against its quality: `ultrafast`, `superfast`, `veryfast`,
+`faster`, `fast`, `medium`, `slow`, `slower` or `veryslow`. Unset, each encoder
+has its own: `faster` on the CPU, `medium` on Quick Sync, `p4` on NVENC.
+NVENC takes the names as `p1` to `p7`. VAAPI has no presets.
+
+### `FFMPEG_LOOKAHEAD`
+
+Unset, each stream's whole film is made ahead, flat out, so every seek lands
+in what is made already. A number of seconds holds each run that far ahead of
+the room instead, carrying on as the room nears it: less disk and less GPU,
+slower seeks past it.
+
+### `FFMPEG_AUDIO_CHANNELS`
+
+`6`: a surround track the player can't play (DTS, TrueHD, AC-3 in browsers that
+lack it) becomes 5.1 AAC. Unset, it becomes stereo, as Plex does. Tracks the
+player can play are copied either way.
+
+### `FFMPEG_SUBTITLES`
+
+On unless `off`. See [Subtitles](#subtitles).
+
+### `FFMPEG_PREVIEWS` · `FFMPEG_PREVIEWS_MAX_GB`
+
+On unless `off`. See [Seek-bar previews](#seek-bar-previews).
+`FFMPEG_PREVIEWS_MAX_GB` is the room they get, 20 by default; past it the
+least recently used go.
+
+### `FFMPEG_SEGMENT_MEMORY_MB`
+
+Memory for the segments rooms are fetching now, so a room's viewers, who ask
+for the same segment within seconds of each other, are sent it without reading
+the disk. 512 by default; `0` reads every one from disk.
+
+### `FFMPEG_FALLBACK_TO_PLEX`
+
+On unless `off`. Off, a stream ffmpeg can't make fails to start instead of
+going to Plex, and the error says why. For testing.
 
 ### `FFMPEG_HDR_REENCODE` · `FFMPEG_TONEMAP`
 
@@ -241,10 +365,11 @@ curve: `reinhard` (default), `mobius`, `hable`, `bt2390`, `linear`, `gamma` or
 
 On unless `0`. See [Plex's dashboard](#plexs-dashboard-tautulli-and-tracearr).
 
-### `FFMPEG_PATH`
+### `FFMPEG_PATH` · `FFPROBE_PATH`
 
 Another ffmpeg than the image's own, Jellyfin's build at
 `/usr/lib/jellyfin-ffmpeg/ffmpeg`. Only for running from source.
+`FFPROBE_PATH` is its ffprobe, the one beside `FFMPEG_PATH` unless set.
 
 The stream caches (`DIRECT_STREAM_MEMORY_MB`, `STREAM_CACHE_DIR`,
 `TRANSCODE_CACHE_MB`), `DIRECT_STREAM`, `DIRECT_STREAM_MAX_KBPS` and

@@ -283,9 +283,9 @@ docker compose logs | grep 'playback engine'
 - `playback engine: Plex`: `PLAYBACK_ENGINE` isn't `ffmpeg`.
 - `ffmpeg wanted … but not found`: the image has no ffmpeg at `FFMPEG_PATH`.
   Pull a current image, and unset `FFMPEG_PATH`.
-- **Stats for nerds** (`I`) says `Engine: Plex` for one stream only: ffmpeg
-  left it to Plex. The log says why, on a `[FFmpeg] … left to Plex` line; the
-  reasons are under
+- **Stats for nerds** (`I`) says `Engine: Plex (ffmpeg: …)` for one stream
+  only: ffmpeg left it to Plex, for the reason in brackets. The log says it
+  too, on a `[FFmpeg] … left to Plex` line; the reasons are under
   [When a stream goes to Plex](FFmpeg-Engine#when-a-stream-goes-to-plex).
 
 ### Re-encodes run on the CPU
@@ -296,12 +296,37 @@ The startup line ends `re-encodes on CPU (…)`, with the reason in brackets:
   `/dev/dri:/dev/dri` under `devices`. If Docker runs inside a Proxmox LXC or
   a VM, pass the GPU through to that first. It is looked for again before each
   re-encode, so no restart is needed once it is there.
-- `Intel QSV didn't encode: …`: the GPU is there and the test encode failed.
-  Run the GPU check, which tries each step on its own:
+- `Intel QSV didn't encode: …`, `VAAPI didn't encode: …` or `NVENC didn't
+  encode: …`: the GPU is there and the test encode failed. Run the GPU check,
+  which tries each step on its own:
 
   ```bash
   docker exec -it plex-discord-theater node scripts/diagnose-ffmpeg.mjs gpu
   ```
+
+- For NVIDIA: the NVIDIA Container Toolkit has to be on the host, and the
+  container started with `runtime: nvidia` and
+  `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility`.
+
+### Some files fail to re-encode on the GPU
+
+A GPU's decoder can fail on files its encoder is fine with. `FFMPEG_HW_DECODE=off`
+leaves the decoding to the CPU, the encoding still on the GPU.
+
+### The stream cache's disk fills up
+
+Each stream's whole film is written to `STREAM_CACHE_DIR` as it is made, and
+kept until the stream ends. Point it at a disk with room for the streams that
+play at once, or set [`FFMPEG_LOOKAHEAD`](FFmpeg-Engine#ffmpeg_lookahead) to
+hold each run a few minutes ahead of its room.
+
+### No seek-bar previews
+
+Plex's own are used when it has them. For a file it has none for, ffmpeg makes
+them the first time the title is opened, which takes a minute or two for a
+film; the log has a `[Preview] previews made by ffmpeg` line when they are
+done. None are made when the file isn't readable on the mount, or with
+`FFMPEG_PREVIEWS=off`.
 
 ### `intel_gpu_top` shows nothing during a re-encode
 
@@ -315,7 +340,8 @@ the GPU.
 ### Seeks are slow, or the log says `source=plex`
 
 ffmpeg couldn't read the file at its path here, and read it from Plex over the
-network instead. Mount the library, or fix
+network instead. The `[Config] library on the mount:` line at startup says
+which libraries it could read. Mount the library, or fix
 [`MEDIA_PATH_MAP`](FFmpeg-Engine#library-paths). To check every library:
 
 ```bash

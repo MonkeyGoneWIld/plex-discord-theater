@@ -70,21 +70,40 @@ services:
       # ── Playback engine ─────────────────────────────────────────
       # plex (the default) has Plex make every stream. ffmpeg makes them in
       # this container instead, from the files themselves: copies of the
-      # original picture, HDR included, and re-encodes on Intel's GPU (Quick
-      # Sync) when one is mapped in under `devices` below, else on the CPU.
-      # Anything it can't make is left to Plex. Uncomment the media mount and
-      # `devices` below with it. See the wiki's FFmpeg Engine page.
+      # original picture, HDR included, and re-encodes on the GPU (Intel Quick
+      # Sync, VAAPI or NVIDIA NVENC) when one is mapped in under `devices`
+      # below, else on the CPU. Each stream's whole film is made ahead into
+      # STREAM_CACHE_DIR: leave room for it. Anything it can't make is left to
+      # Plex. Uncomment the media mount and `devices` below with it. See the
+      # wiki's FFmpeg Engine page.
       - PLAYBACK_ENGINE=${PLAYBACK_ENGINE:-}
       # Only when the library is mounted at other paths than Plex's own:
       # "plex path=>path here", comma-separated, e.g. /media=>/data/media
       - MEDIA_PATH_MAP=${MEDIA_PATH_MAP:-}
-      # auto (the default) uses Intel QSV when it works, and the CPU when not;
-      # none always uses the CPU. FFMPEG_HWACCEL_DEVICE is the render node.
+      # auto (the default) uses Intel QSV when it works, else VAAPI, else the
+      # CPU; qsv, vaapi, nvenc or none choose. FFMPEG_HWACCEL_DEVICE is the
+      # render node. FFMPEG_HW_DECODE=off decodes on the CPU.
       - FFMPEG_HWACCEL=${FFMPEG_HWACCEL:-}
       - FFMPEG_HWACCEL_DEVICE=${FFMPEG_HWACCEL_DEVICE:-}
+      - FFMPEG_HW_DECODE=${FFMPEG_HW_DECODE:-}
       # Re-encodes at once; past it, Plex makes the stream. Copies don't count.
-      # Empty = 4 on the GPU, 2 on the CPU.
+      # Empty = 6 on the GPU, 2 on the CPU.
       - FFMPEG_MAX_ENCODES=${FFMPEG_MAX_ENCODES:-}
+      # ultrafast to veryslow; empty = each encoder's own.
+      - FFMPEG_PRESET=${FFMPEG_PRESET:-}
+      # Empty = the whole film made ahead; seconds = held that far ahead.
+      - FFMPEG_LOOKAHEAD=${FFMPEG_LOOKAHEAD:-}
+      # 6 = surround the player can't play becomes 5.1 AAC, not stereo.
+      - FFMPEG_AUDIO_CHANNELS=${FFMPEG_AUDIO_CHANNELS:-}
+      # off = text subtitles read by Plex, not out of the file here.
+      - FFMPEG_SUBTITLES=${FFMPEG_SUBTITLES:-}
+      # off = no seek-bar previews made for files Plex has none for.
+      - FFMPEG_PREVIEWS=${FFMPEG_PREVIEWS:-}
+      - FFMPEG_PREVIEWS_MAX_GB=${FFMPEG_PREVIEWS_MAX_GB:-}
+      # Memory for the segments rooms are fetching now. Empty = 512.
+      - FFMPEG_SEGMENT_MEMORY_MB=${FFMPEG_SEGMENT_MEMORY_MB:-}
+      # off = a stream ffmpeg can't make fails, rather than going to Plex.
+      - FFMPEG_FALLBACK_TO_PLEX=${FFMPEG_FALLBACK_TO_PLEX:-}
       # keep (the default): a re-encode for an HEVC player stays HDR, as the
       # copy is. tonemap maps it to SDR, as Plex does. FFMPEG_TONEMAP is the
       # curve for streams that are mapped: reinhard (default), mobius, hable,

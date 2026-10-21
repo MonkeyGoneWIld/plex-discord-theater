@@ -279,21 +279,32 @@ of memory, lower both.
 
 Who makes the streams. Unset, Plex does. `PLAYBACK_ENGINE=ffmpeg` has this
 container make them, from the files themselves, and leaves to Plex any stream
-ffmpeg can't make. It needs the library mounted into the container, and
-`/dev/dri` for Intel Quick Sync. [FFmpeg Engine](FFmpeg-Engine) covers the
-setup and how to check it.
+ffmpeg can't make. It needs the library mounted into the container, a GPU
+for re-encodes (`/dev/dri` for Intel or AMD, or NVIDIA's runtime), and room in
+`STREAM_CACHE_DIR` for each stream's whole film. [FFmpeg Engine](FFmpeg-Engine)
+covers the setup and how to check it.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `PLAYBACK_ENGINE` | Plex | `ffmpeg` to make streams in this container |
 | `MEDIA_PATH_MAP` | none | `Plex's path=>the path here`, comma-separated, for a library mounted at other paths than Plex's |
-| `FFMPEG_HWACCEL` | `auto` | `auto` or `qsv`: Intel Quick Sync when it works, else the CPU. `none`: the CPU |
-| `FFMPEG_HWACCEL_DEVICE` | `/dev/dri/renderD128` | The render node Quick Sync runs on |
-| `FFMPEG_MAX_ENCODES` | 4 on the GPU, 2 on the CPU | Re-encodes at once, past which Plex makes the stream. Copies don't count |
+| `FFMPEG_HWACCEL` | `auto` | `auto`: Intel Quick Sync, else VAAPI, else the CPU. `qsv`, `vaapi`, `nvenc` or `none` (the CPU) choose |
+| `FFMPEG_HWACCEL_DEVICE` | `/dev/dri/renderD128` | The render node Quick Sync and VAAPI run on, or NVENC's GPU number |
+| `FFMPEG_HW_DECODE` | on | `off`: the GPU encodes, the CPU decodes |
+| `FFMPEG_MAX_ENCODES` | 6 on the GPU, 2 on the CPU | Re-encodes at once, past which Plex makes the stream. Copies don't count |
+| `FFMPEG_PRESET` | each encoder's own | `ultrafast` to `veryslow`: the encoder's speed against quality |
+| `FFMPEG_LOOKAHEAD` | the whole film | Seconds each run is held ahead of the room; unset, the whole film is made ahead |
+| `FFMPEG_AUDIO_CHANNELS` | 2 | `6`: surround the player can't play becomes 5.1 AAC rather than stereo |
+| `FFMPEG_SUBTITLES` | on | `off`: text subtitles are read by Plex, not out of the file here |
+| `FFMPEG_PREVIEWS` | on | `off`: no seek-bar previews made for files Plex has none for |
+| `FFMPEG_PREVIEWS_MAX_GB` | 20 | Room for those previews; the least recently used go past it |
+| `FFMPEG_SEGMENT_MEMORY_MB` | 512 | Memory for the segments rooms are fetching now; `0` reads them from disk |
+| `FFMPEG_FALLBACK_TO_PLEX` | on | `off`: a stream ffmpeg can't make fails to start instead of going to Plex |
 | `FFMPEG_HDR_REENCODE` | `keep` | `keep`: re-encodes for HEVC players stay HDR. `tonemap`: mapped to SDR, as Plex does |
 | `FFMPEG_TONEMAP` | `reinhard` | The curve for streams mapped to SDR: `reinhard`, `mobius`, `hable`, `bt2390`, `linear`, `gamma` or `clip` |
 | `FFMPEG_REPORT_TO_PLEX` | on | Show ffmpeg's streams in Plex's dashboard, Tautulli and Tracearr. `0` turns it off |
 | `FFMPEG_PATH` | the image's ffmpeg | Another ffmpeg, for running from source |
+| `FFPROBE_PATH` | the ffprobe beside ffmpeg | Its ffprobe |
 
 `DIRECT_STREAM`, `DIRECT_STREAM_MAX_KBPS`, `VIDEO_BITRATE_KBPS` and the stream
 caches above apply to ffmpeg's streams as they do to Plex's.

@@ -396,6 +396,32 @@ let firstKey: string | null = null;
   check("asked again without an offset, the running stream is the answer", keyOf(variant), firstKey);
 }
 
+console.log("\n— a seek past what is there —");
+{
+  // Here, before FFMPEG_LOOKAHEAD is unset below and the run from the start goes on to the end:
+  // one that has reached it serves the seek from what it made.
+  const m = await master("1", sid, "?offset=31");
+  const variant = variantOf(m.text);
+  const key = keyOf(variant);
+  check("an offset starts a run of its own", !!key && key !== firstKey, true);
+  const playlist = await (await fetch(origin + variant)).text();
+  check("the playlist begins where the player asked", playlist.includes("#EXT-X-START:TIME-OFFSET=31.000,PRECISE=YES"), true);
+  if (process.platform === "win32") {
+    // Where the run from the start went on to the end: the seek is served from it (see below).
+    console.log("  (no SIGSTOP on Windows: the run from the start has reached the end, so it isn't a new run here)");
+  } else {
+    check("with gaps up to the keyframe before it", /#EXT-X-GAP/.test(playlist), true);
+    const first = entries(playlist)[0];
+    const bytes = Buffer.from(await (await fetch(origin + first.uri)).arrayBuffer());
+    const span = videoSpan(bytes)!;
+    check("whose picture opens on the keyframe at 30 s (40 on the copy's clock)", Math.abs(span.start - 40) < 0.1, true);
+    // Jellyfin's ffmpeg counted the start twice with -segment_time: 30 s to 64 s here.
+    check("and is a segment long, not the stretch since the start", span.end - span.start <= 6, true);
+  }
+  const old = await fetch(`${origin}/api/plex/hls/seg?p=${encodeURIComponent(`/video/:/transcode/universal/session/${firstKey}/base/index.m3u8`)}`);
+  check("the run it replaced is gone (410), not asked of Plex", [old.status, transcodeAsked()], [410, []]);
+}
+
 console.log("\n— ahead of the watcher, and no further —");
 {
   const slow = crypto.randomUUID();
@@ -445,30 +471,6 @@ console.log("\n— the whole film, with FFMPEG_LOOKAHEAD unset —");
     [now.includes("#EXT-X-ENDLIST"), Math.abs(edge(now) - 60) < 0.2], [true, true]);
   await fetch(`${origin}/api/plex/hls/session/${whole}?reason=test`, { method: "DELETE" });
   process.env.FFMPEG_LOOKAHEAD = "36";
-}
-
-console.log("\n— a seek past what is there —");
-{
-  const m = await master("1", sid, "?offset=31");
-  const variant = variantOf(m.text);
-  const key = keyOf(variant);
-  check("an offset starts a run of its own", !!key && key !== firstKey, true);
-  const playlist = await (await fetch(origin + variant)).text();
-  check("the playlist begins where the player asked", playlist.includes("#EXT-X-START:TIME-OFFSET=31.000,PRECISE=YES"), true);
-  if (process.platform === "win32") {
-    // Where the run from the start went on to the end: the seek is served from it (see below).
-    console.log("  (no SIGSTOP on Windows: the run from the start has reached the end, so it isn't a new run here)");
-  } else {
-    check("with gaps up to the keyframe before it", /#EXT-X-GAP/.test(playlist), true);
-    const first = entries(playlist)[0];
-    const bytes = Buffer.from(await (await fetch(origin + first.uri)).arrayBuffer());
-    const span = videoSpan(bytes)!;
-    check("whose picture opens on the keyframe at 30 s (40 on the copy's clock)", Math.abs(span.start - 40) < 0.1, true);
-    // Jellyfin's ffmpeg counted the start twice with -segment_time: 30 s to 64 s here.
-    check("and is a segment long, not the stretch since the start", span.end - span.start <= 6, true);
-  }
-  const old = await fetch(`${origin}/api/plex/hls/seg?p=${encodeURIComponent(`/video/:/transcode/universal/session/${firstKey}/base/index.m3u8`)}`);
-  check("the run it replaced is gone (410), not asked of Plex", [old.status, transcodeAsked()], [410, []]);
 }
 
 console.log("\n— audio that isn't AAC —");

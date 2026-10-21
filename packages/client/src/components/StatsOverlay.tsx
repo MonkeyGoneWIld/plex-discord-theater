@@ -3,7 +3,7 @@ import type Hls from "hls.js";
 import HlsPkg from "hls.js";
 import { qualityLabel } from "../lib/quality";
 import { codecFamily, codecName } from "../lib/codecName";
-import { audioDetails, audioSummary, playbackMode, type StreamNotes } from "../lib/streamNotes";
+import { audioDetails, audioSummary, engineText, playbackMode, type StreamNotes } from "../lib/streamNotes";
 import type { StreamTrack } from "../lib/api";
 import { previewDetails, previewSummary, type PreviewStatus } from "../lib/previewStatus";
 import { subtitleDetails, subtitleSummary, type SubtitleLoadStatus, type SubtitleShown } from "../lib/subtitleStatus";
@@ -498,7 +498,7 @@ export function StatsOverlay({
       details: [
         ...playbackWhy(notes, mode).map(([l, v]) => [l, v, "warn"] as [string, string, Health]),
         ["Quality", quality ? `Up to ${qualityLabel(quality)}` : qualityLabel(0)],
-        ...(notes ? [["Engine", notes.engine === "ffmpeg" ? "ffmpeg" : "Plex"] as [string, string]] : []),
+        ...(notes ? [["Engine", engineText(notes), notes.fallback ? "warn" : undefined] as [string, string, Health?]] : []),
         ...(sessionId ? [["Session", sessionId.slice(0, 8)] as [string, string]] : []),
       ],
     },

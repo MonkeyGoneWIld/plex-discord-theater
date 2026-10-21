@@ -4,7 +4,8 @@
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
-import { qsvInit, type Hardware, type Tonemapper } from "./plan.js";
+import path from "node:path";
+import { PRESETS, cudaInit, qsvInit, vaapiInit, type Hardware, type Tonemapper } from "./plan.js";
 
 /** Jellyfin's build, which the image ships. */
 const JELLYFIN_FFMPEG = "/usr/lib/jellyfin-ffmpeg/ffmpeg";
@@ -14,6 +15,50 @@ let found: boolean | null = null;
 
 export function ffmpegPath(): string {
   return process.env.FFMPEG_PATH?.trim() || (fs.existsSync(JELLYFIN_FFMPEG) ? JELLYFIN_FFMPEG : "ffmpeg");
+}
+
+/** FFPROBE_PATH, else the ffprobe beside ffmpeg (Jellyfin's ships one), else the PATH's. */
+export function ffprobePath(): string {
+  const set = process.env.FFPROBE_PATH?.trim();
+  if (set) return set;
+  const ffmpeg = ffmpegPath();
+  if (!/[\\/]/.test(ffmpeg)) return "ffprobe";
+  const beside = path.join(path.dirname(ffmpeg), path.basename(ffmpeg).replace(/ffmpeg/i, "ffprobe"));
+  return fs.existsSync(beside) ? beside : "ffprobe";
+}
+
+/** A setting turned off: 0, off, false or no. */
+function off(value: string | undefined): boolean {
+  return ["0", "off", "false", "no"].includes((value ?? "").trim().toLowerCase());
+}
+
+/** FFMPEG_FALLBACK_TO_PLEX=off: a stream ffmpeg can't make fails to start
+ *  rather than going to Plex — for finding out what those are. */
+export function fallbackToPlex(): boolean {
+  return !off(process.env.FFMPEG_FALLBACK_TO_PLEX);
+}
+
+/** FFMPEG_SUBTITLES=off: text subtitles inside a film are read by Plex, as
+ *  without the engine, not out of the mounted file. */
+export function ffmpegSubtitlesOn(): boolean {
+  return ffmpegEngineOn() && !off(process.env.FFMPEG_SUBTITLES);
+}
+
+/** FFMPEG_AUDIO_CHANNELS=6: a surround track that isn't AAC becomes 5.1 AAC
+ *  rather than stereo (plan.ts convertedAudio). */
+export function audioChannels(): 2 | 6 {
+  return process.env.FFMPEG_AUDIO_CHANNELS?.trim() === "6" ? 6 : 2;
+}
+
+/** FFMPEG_PRESET: one of plan.ts PRESETS, or null for each encoder's own. */
+export function encodePreset(): string | null {
+  const want = process.env.FFMPEG_PRESET?.trim().toLowerCase();
+  return want && PRESETS.includes(want) ? want : null;
+}
+
+/** FFMPEG_HW_DECODE=off: the GPU encodes, the CPU decodes everything. */
+export function gpuDecodeOn(): boolean {
+  return !off(process.env.FFMPEG_HW_DECODE);
 }
 
 /** PLAYBACK_ENGINE=ffmpeg, and ffmpeg not found missing at startup. */
@@ -75,18 +120,42 @@ export function readable(file: string): boolean {
   }
 }
 
+/** A file's size in bytes, null when it can't be read. */
+export function sizeOnDisk(file: string): number | null {
+  try {
+    return fs.statSync(file).size;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Re-encodes ─────────────────────────────────────────────────
 
 /** Null until detectHardware has run. */
 let hardware: Hardware | null = null;
 let mapper: Tonemapper | null = null;
+/** The GPU encodes HEVC Main10 too, not only H.264. */
+let hevcEncodes = false;
+/** VAAPI's encoder only has its low-power form: newer Intel GPUs. */
+let vaapiLowPower = false;
 /** The render node wasn't there when detectHardware last ran — see recheckHardware. */
 let deviceMissing = false;
 let rechecking: Promise<void> | null = null;
 
-/** The render node QSV runs on. */
+/** The render node QSV and VAAPI run on; NVENC's GPU number, where a number
+ *  is given (cudaInit takes anything else as 0). */
 export function hwDevice(): string {
   return process.env.FFMPEG_HWACCEL_DEVICE?.trim() || "/dev/dri/renderD128";
+}
+
+/** Whether re-encodes can be HEVC: a GPU that encodes HEVC Main10. */
+export function gpuEncodesHevc(): boolean {
+  return ffmpegHardware() !== "software" && hevcEncodes;
+}
+
+/** VAAPI with its low-power encoder (lowPower in plan.ts). */
+export function lowPowerVaapi(): boolean {
+  return vaapiLowPower;
 }
 
 /** What re-encodes run on, as detectHardware found: the CPU until it has run. */
@@ -99,6 +168,7 @@ export function ffmpegHardware(): Hardware {
  * makes the stream. Six on a GPU: Phase 0 had three 4K HDR → 1080p re-encodes
  * at once on the 265K at about 4× each, so six still run about twice as fast
  * as the film plays; and Plex, which takes the seventh, shares that GPU.
+ * Consumer NVIDIA cards allow eight NVENC sessions at once, Plex's included.
  */
 export function maxEncodes(): number {
   const n = Number(process.env.FFMPEG_MAX_ENCODES);
@@ -157,22 +227,42 @@ function trial(args: string[]): Promise<{ ok: boolean; said: string }> {
 }
 
 /**
- * FFMPEG_HWACCEL (auto | qsv | none): auto and qsv try a short HEVC Main10 and
- * H.264 encode on Intel's GPU, with Phase 0's setup, and use it if both work;
- * otherwise re-encodes are H.264 on the CPU. VAAPI and NVENC aren't built yet.
- * With QSV, a short tonemap_opencl says whether OpenCL tone-maps there: else
- * QSV's video engine does, and Dolby Vision 5 is left to Plex.
+ * FFMPEG_HWACCEL (auto | qsv | vaapi | nvenc | none). auto and qsv try a short
+ * HEVC Main10 and H.264 encode on Intel's GPU, with Phase 0's setup, and use
+ * it if both work; auto then tries VAAPI on the same render node (an AMD GPU,
+ * or Intel without QSV's runtime). vaapi tries VAAPI alone: H.264, and HEVC
+ * Main10 if it has it, in its full or low-power form. nvenc tries NVIDIA's
+ * NVENC with CUDA's scaler. Otherwise re-encodes are H.264 on the CPU. With
+ * QSV or VAAPI, a short tonemap_opencl says whether OpenCL tone-maps there:
+ * else QSV's video engine does (VAAPI's and NVENC's frames are brought down
+ * and tone-mapped on the CPU), and Dolby Vision 5 is left to Plex.
  */
 export async function detectHardware(): Promise<{ hardware: Hardware; note: string }> {
   // Empty is auto: the compose files leave every setting there, most empty.
   const want = (process.env.FFMPEG_HWACCEL?.trim() || "auto").toLowerCase();
-  const done = (h: Hardware, note: string, m: Tonemapper = "software") => {
+  const done = (h: Hardware, note: string, m: Tonemapper = "software", hevc = h !== "software", lowPower = false) => {
     hardware = h;
     mapper = m;
+    hevcEncodes = hevc;
+    vaapiLowPower = lowPower;
     return { hardware: h, note };
   };
   if (["none", "software", "off", "cpu"].includes(want)) return done("software", "CPU (FFMPEG_HWACCEL=none)");
-  if (want !== "auto" && want !== "qsv") return done("software", `CPU (FFMPEG_HWACCEL=${want} isn't supported yet: auto, qsv or none)`);
+  if (!["auto", "qsv", "vaapi", "nvenc"].includes(want)) {
+    return done("software", `CPU (FFMPEG_HWACCEL=${want} isn't one of auto, qsv, vaapi, nvenc or none)`);
+  }
+  const testCard = ["-f", "lavfi", "-i", "testsrc2=s=320x240:r=24:d=1"];
+  if (want === "nvenc") {
+    const nvenc = (codec: string, fmt: string, profile: string) => trial([
+      "-hide_banner", "-nostdin", "-loglevel", "error", ...cudaInit(hwDevice()), ...testCard,
+      "-vf", `format=${fmt === "p010" ? "p010le" : fmt},hwupload,scale_cuda=w=160:h=120:format=${fmt}`,
+      "-c:v", codec, "-profile:v", profile, "-f", "null", "-",
+    ]);
+    const [h264, hevc] = await Promise.all([nvenc("h264_nvenc", "nv12", "high"), nvenc("hevc_nvenc", "p010", "main10")]);
+    if (!h264.ok) return done("software", `CPU (NVENC didn't encode: ${h264.said || "no answer"})`);
+    return done("nvenc", `NVIDIA NVENC (H.264${hevc.ok ? " and HEVC Main10" : `; not HEVC: ${hevc.said || "no answer"}`}), ` +
+      `tone mapping ${tonemapAlgo()} on the CPU (Dolby Vision 5 goes to Plex)`, "software", hevc.ok);
+  }
   deviceMissing = !fs.existsSync(hwDevice());
   if (deviceMissing) {
     let has: string;
@@ -189,14 +279,43 @@ export async function detectHardware(): Promise<{ hardware: Hardware; note: stri
     "-vf", `format=${fmt},hwupload=extra_hw_frames=16,format=qsv`,
     "-c:v", codec, "-low_power", "1", "-profile:v", profile, "-f", "null", "-",
   ]);
-  const opencl = () => trial([
+  const opencl = (intel = true) => trial([
     "-hide_banner", "-nostdin", "-loglevel", "error",
-    "-init_hw_device", `vaapi=va:${hwDevice()},driver=iHD`, "-init_hw_device", "opencl=ocl@va", "-filter_hw_device", "ocl",
+    "-init_hw_device", `vaapi=va:${hwDevice()}${intel ? ",driver=iHD" : ""}`, "-init_hw_device", "opencl=ocl@va", "-filter_hw_device", "ocl",
     "-f", "lavfi", "-i", "testsrc2=s=320x240:r=24:d=1",
     "-vf", "format=p010le,setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc:range=tv,hwupload," +
       `tonemap_opencl=tonemap=${tonemapAlgo()}:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12,hwdownload,format=nv12`,
     "-f", "null", "-",
   ]);
+  // VAAPI: its full encoder, else its low-power one; OpenCL from it without
+  // naming Intel's driver, so an AMD GPU is asked too.
+  const vaapi = async () => {
+    const encodeVa = (codec: string, fmt: string, profile: string, lowPower: boolean) => trial([
+      "-hide_banner", "-nostdin", "-loglevel", "error", ...vaapiInit(hwDevice()), ...testCard,
+      "-vf", `format=${fmt},hwupload,format=vaapi`,
+      "-c:v", codec, ...(lowPower ? ["-low_power", "1"] : []), "-profile:v", profile, "-f", "null", "-",
+    ]);
+    let lowPower = false;
+    let h264 = await encodeVa("h264_vaapi", "nv12", "high", false);
+    if (!h264.ok) {
+      const lp = await encodeVa("h264_vaapi", "nv12", "high", true);
+      if (lp.ok) [h264, lowPower] = [lp, true];
+    }
+    if (!h264.ok) return { ok: false as const, said: h264.said };
+    const [hevc, cl] = await Promise.all([encodeVa("hevc_vaapi", "p010le", "main10", lowPower), opencl(false)]);
+    const what = `VAAPI${lowPower ? ", low-power" : ""} (H.264${hevc.ok ? " and HEVC Main10" : ", not HEVC"})`;
+    return {
+      ok: true as const,
+      result: cl.ok
+        ? done("vaapi", `${what}, tone mapping ${tonemapAlgo()} on OpenCL`, "opencl", hevc.ok, lowPower)
+        : done("vaapi", `${what}, tone mapping ${tonemapAlgo()} on the CPU (Dolby Vision 5 goes to Plex)`,
+            "software", hevc.ok, lowPower),
+    };
+  };
+  if (want === "vaapi") {
+    const va = await vaapi();
+    return va.ok ? va.result : done("software", `CPU (VAAPI didn't encode: ${va.said || "no answer"})`);
+  }
   const [hevc, h264, cl] = await Promise.all([
     encode("hevc_qsv", "p010le", "main10"), encode("h264_qsv", "nv12", "high"), opencl(),
   ]);
@@ -207,6 +326,10 @@ export async function detectHardware(): Promise<{ hardware: Hardware; note: stri
           `(OpenCL didn't: ${cl.said || "no answer"}; Dolby Vision 5 goes to Plex)`, "vpp");
   }
   const why = (!hevc.ok ? hevc.said : h264.said) || "no answer";
+  if (want === "auto") {
+    const va = await vaapi();
+    if (va.ok) return va.result;
+  }
   return done("software", `CPU (Intel QSV didn't encode: ${why})`);
 }
 

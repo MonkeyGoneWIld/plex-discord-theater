@@ -14,7 +14,7 @@ import {
   resetPreferredQuality,
   setPreferredQuality,
 } from "../src/lib/quality";
-import { playbackMode, readStreamNotes } from "../src/lib/streamNotes";
+import { engineText, playbackMode, readStreamNotes } from "../src/lib/streamNotes";
 
 let pass = 0;
 let fail = 0;
@@ -31,7 +31,10 @@ const sessionData = (notes: Record<string, string>) => Object.fromEntries(
 );
 
 /** What a server that says nothing about the audio leaves. */
-const NO_AUDIO = { audio: null, audioFrom: null, audioTo: null, audioKbps: null, audioReason: null, videoFrom: null, range: null };
+const NO_AUDIO = {
+  audio: null, audioFrom: null, audioTo: null, audioKbps: null, audioReason: null, videoFrom: null, range: null,
+  encoder: null, fallback: null,
+};
 
 console.log("— what the server says about a stream —");
 check("a re-encode, with why and at what rate",
@@ -62,6 +65,14 @@ check("hls.js reads the server's notes out of the playlist intact",
 check("and still finds the stream in it", parsed.levels.length, 1);
 check("nor from notes it doesn't recognise", readStreamNotes(sessionData({ video: "maybe" })), null);
 check("a stream ffmpeg made says so", readStreamNotes(sessionData({ video: "copy", engine: "ffmpeg" }))?.engine, "ffmpeg");
+check("and what it re-encoded on",
+  engineText(readStreamNotes(sessionData({ video: "transcode", engine: "ffmpeg", encoder: "NVIDIA NVENC, GPU decode" }))!),
+  "ffmpeg · NVIDIA NVENC, GPU decode");
+check("a copy by ffmpeg is just ffmpeg", engineText(readStreamNotes(sessionData({ video: "copy", engine: "ffmpeg" }))!), "ffmpeg");
+check("one ffmpeg left to Plex says why",
+  engineText(readStreamNotes(sessionData({ video: "transcode", fallback: "all 6 encode slots taken" }))!),
+  "Plex (ffmpeg: all 6 encode slots taken)");
+check("and Plex without the engine is just Plex", engineText(readStreamNotes(sessionData({ video: "copy" }))!), "Plex");
 
 console.log("\n— its audio, and what Plex would call it —");
 const converted = readStreamNotes(sessionData({

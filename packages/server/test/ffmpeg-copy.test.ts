@@ -47,18 +47,20 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // ── Films ────────────────────────────────────────────────────────
 
-/** 60 s at 640×360, a keyframe every 2 s, with the audio given. */
-function film(name: string, audio: string[]): string {
+/** 60 s at 640×360, a keyframe every 2 s, with the audio given, in H.264 or HEVC. */
+function film(name: string, audio: string[], video = "libx264"): string {
   const file = path.join(tmp, name);
   const r = spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-y",
     "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
-    "-t", "60", "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast", "-g", "48",
+    "-t", "60", "-map", "0:v", "-map", "1:a", "-c:v", video, "-preset", "ultrafast", "-g", "48",
+    ...(video === "libx265" ? ["-x265-params", "log-level=none"] : []),
     "-pix_fmt", "yuv420p", ...audio, file]);
   if (r.status !== 0) throw new Error(`couldn't make ${name}: ${r.stderr}`);
   return file;
 }
 const AAC_FILM = film("aac.mkv", ["-c:a", "aac", "-ac", "2"]);
 const AC3_FILM = film("ac3.mkv", ["-c:a", "ac3", "-ac", "6"]);
+const HEVC_FILM = film("hevc.mkv", ["-c:a", "aac", "-ac", "2"], "libx265");
 
 /**
  * A PGS subtitle (.sup) of white boxes: each shown from `from` to `to`
@@ -131,12 +133,12 @@ fs.writeFileSync(BROKEN_FILM, Buffer.alloc(200_000, 7));
 
 /** ratingKey → the file, and how Plex describes it. */
 const titles: Record<string, { file: string; plexPath: string; codec: string; width: number; height: number;
-  audio: string; channels: number; hdr?: Record<string, unknown>; slow?: boolean;
+  audio: string; channels: number; hdr?: Record<string, unknown>; slow?: boolean; size?: number;
   subs?: Array<Record<string, unknown>> }> = {
   1: { file: AAC_FILM, plexPath: AAC_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2 },
   2: { file: AC3_FILM, plexPath: AC3_FILM, codec: "h264", width: 640, height: 360, audio: "ac3", channels: 6 },
   // HEVC, for a player nobody has said decodes it.
-  3: { file: AAC_FILM, plexPath: AAC_FILM, codec: "hevc", width: 640, height: 360, audio: "aac", channels: 2 },
+  3: { file: HEVC_FILM, plexPath: HEVC_FILM, codec: "hevc", width: 640, height: 360, audio: "aac", channels: 2 },
   // 4K: shown at 1080p, which is a re-encode.
   4: { file: AAC_FILM, plexPath: AAC_FILM, codec: "h264", width: 3840, height: 2160, audio: "aac", channels: 2 },
   // Not mounted here: read through Plex's file endpoint.
@@ -157,9 +159,18 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
     { id: 31, streamType: 3, index: 2, codec: "srt", language: "English", languageCode: "eng" },
     { id: 32, streamType: 3, index: 3, codec: "ass", language: "Japanese", languageCode: "jpn" },
   ] },
+  // Plex has it as AC3 where the file has AAC: replaced since Plex read it,
+  // at the same size.
+  11: { file: AAC_FILM, plexPath: AAC_FILM, codec: "h264", width: 640, height: 360, audio: "ac3", channels: 6 },
+  // And a file whose size isn't what Plex last read.
+  12: { file: AAC_FILM, plexPath: AAC_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2,
+    size: fs.statSync(AAC_FILM).size + 1 },
 };
 
 const asked: string[] = [];
+/** Whether Plex's transcoder answers a start, for the checks on what is
+ *  said of a stream ffmpeg left to it: otherwise a start fails. */
+let plexStarts = false;
 /** Timeline reports, as Plex had them. */
 const timelines: Array<{ q: Record<string, string>; h: Record<string, string> }> = [];
 const plex = http.createServer((req, res) => {
@@ -186,7 +197,7 @@ const plex = http.createServer((req, res) => {
       ratingKey: meta[1], title: `Film ${meta[1]}`, type: "movie", duration: 60_000,
       Media: [{ id: 1, container: "mkv", width: t.width, height: t.height, videoCodec: t.codec, bitrate: 2000,
         Part: [{ id: Number(meta[1]), key: `/library/parts/${meta[1]}/1/file.mkv`, file: t.plexPath,
-          size: fs.statSync(t.file).size, Stream: [
+          size: t.size ?? fs.statSync(t.file).size, Stream: [
             { id: 11, streamType: 1, index: 0, codec: t.codec, bitDepth: 8, ...t.hdr },
             { id: 12, streamType: 2, index: 1, codec: t.audio, channels: t.channels, bitrate: 160, selected: true },
             // A picture subtitle, which can only be burned in: in film 9, listed
@@ -220,7 +231,18 @@ const plex = http.createServer((req, res) => {
     res.on("close", () => clearInterval(timer));
     return;
   }
-  // Plex's transcoder isn't really here: a start that reaches it fails.
+  // Plex's transcoder isn't really here: a start that reaches it fails, or
+  // is answered with a playlist of nothing, re-encoded.
+  if (plexStarts && url.pathname === "/video/:/transcode/universal/decision") {
+    return send({ Metadata: [{ Media: [{ Part: [{ Stream: [{ streamType: 1, codec: "h264", decision: "transcode" }] }] }] }] });
+  }
+  if (plexStarts && url.pathname === "/video/:/transcode/universal/start.m3u8") {
+    res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
+    return res.end(`#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=640x360
+session/${crypto.randomUUID()}/base/index.m3u8
+`);
+  }
   res.writeHead(500).end();
 });
 await new Promise<void>((r) => plex.listen(0, "127.0.0.1", r));
@@ -412,6 +434,16 @@ console.log("\n— audio that isn't AAC —");
   const first = entries(await (await fetch(origin + variant)).text())[0];
   const span = videoSpan(Buffer.from(await (await fetch(origin + first.uri)).arrayBuffer()))!;
   check("and is in the segments", span.audioStart !== null, true);
+  process.env.FFMPEG_AUDIO_CHANNELS = "6";
+  const surround = await master("2", crypto.randomUUID());
+  const said = notesOf(surround.text);
+  const seg = path.join(tmp, "surround.ts");
+  const list = entries(await (await fetch(origin + variantOf(surround.text))).text());
+  fs.writeFileSync(seg, Buffer.from(await (await fetch(origin + list[0].uri)).arrayBuffer()));
+  const channels = spawnSync("ffprobe", ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels",
+    "-of", "csv=p=0", seg], { encoding: "utf8" }).stdout.trim().split(/\s+/)[0];
+  check("with FFMPEG_AUDIO_CHANNELS=6, as AAC 5.1 at 448 kbps", [said.audioTo, said.audioKbps, channels], ["AAC 5.1", "448", "6"]);
+  delete process.env.FFMPEG_AUDIO_CHANNELS;
 }
 
 console.log("\n— a file that isn't mounted here —");
@@ -541,9 +573,50 @@ console.log("\n— what a re-encode is made of —");
   check("an anamorphic DVD's subtitle is stretched with its picture, on the CPU, on the canvas it comes with",
     [dvd.ok && dvd.burn?.stretch, dvdGraph.includes("[0:2]scale=854:480[sub]"), dvdGraph.includes(",format=yuv420p[v]"),
       dvdGraph.includes("-canvas_size")], [true, true, true, false]);
-  check("a text subtitle burned in is Plex's", why(plan(withSubs(version({})), { burn: 22 })), "a srt subtitle burned in");
-  check("so is a picture subtitle in a file of its own",
-    why(plan(withSubs(version({})), { burn: 23 })), "a subtitle file beside the film, burned in");
+  check("a text subtitle burned in, with no text of it to draw from, is Plex's",
+    why(plan(withSubs(version({})), { burn: 22 })), "a srt subtitle burned in, with no text of it to draw from");
+  check("so is a picture subtitle in a file of its own, not found on the mount",
+    why(plan(withSubs(version({})), { burn: 23 })), "a picture subtitle beside the film, not found on the mount");
+
+  // NVIDIA's and VAAPI's chains (FFMPEG_HWACCEL=nvenc, vaapi): checked on a
+  // real NVENC on 20 October, and VAAPI's are QSV's without the QSV.
+  const nv = plan(version({}), { hardware: "nvenc", hevcOk: true });
+  const nvArgs = nv.ok ? encodeArgs(nv, ["-i", "f.mkv"], 0, 60, "0").join(" ") : "";
+  check("NVENC: decoded and scaled by CUDA, HEVC by its encoder at its middle preset", [
+    nvArgs.includes("-init_hw_device cuda=cu:0 -filter_hw_device cu -hwaccel cuda -hwaccel_output_format cuda"),
+    nvArgs.includes("-vf scale_cuda=w=1920:h=1080:format=p010"),
+    nvArgs.includes("-c:v hevc_nvenc -preset p4 -tune hq -profile:v main10 -rc vbr"),
+    nvArgs.includes("-forced-idr 1"),
+  ], [true, true, true, true]);
+  const nvHdr = plan(version({ colorTrc: "smpte2084" }), { hardware: "nvenc", hevcOk: false, preset: "fast" });
+  check("  HDR for an H.264 player brought down and tone-mapped on the CPU, FFMPEG_PRESET=fast as p3",
+    nvHdr.ok && [nvHdr.tonemap?.via, encodeArgs(nvHdr, ["-i", "f.mkv"], 0, 60, "0").join(" ").includes(
+      "scale_cuda=w=1920:h=1080:format=p010,hwdownload,format=p010le,tonemapx=tonemap=reinhard"), nvHdr.preset],
+    ["software", true, "p3"]);
+  const va = plan(version({ codec: "vc1", bitDepth: 8, colorPrimaries: undefined, colorTrc: undefined, colorSpace: undefined,
+    colorRange: undefined }, { width: 1920, height: 1080 }), { hardware: "vaapi", hevcOk: false, lowPower: true });
+  const vaArgs = va.ok ? encodeArgs(va, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
+  check("VAAPI: what the GPU can't decode uploaded from the CPU, its low-power H.264 encoder, VBR", [
+    vaArgs.includes("-init_hw_device vaapi=va:/dev/dri/renderD128 -filter_hw_device va"),
+    vaArgs.includes(",format=nv12,hwupload,format=vaapi"),
+    vaArgs.includes("-c:v h264_vaapi -low_power 1 -profile:v high -rc_mode VBR"),
+    vaArgs.includes("-hwaccel "),
+  ], [true, true, true, false]);
+
+  // What a re-encode is made at (sourceMatchedKbps): on 18 October all of it
+  // was 12 Mbps.
+  const matched = (codec: string, kbps: number, width: number, height: number, more: Record<string, unknown> = {}) => {
+    const p = plan(version({ codec, bitDepth: 8, bitrate: kbps }, { width, height }), { kbps: 12000, peakKbps: 20000, hevcOk: false, ...more });
+    return p.ok ? [p.kbps, p.peakKbps] : p.why;
+  };
+  check("Steins;Gate's 3 Mbps HEVC at 1080p is H.264 at 6 Mbps, its peak as far above", matched("hevc", 3000, 1920, 1080), [6000, 10000]);
+  check("  and HEVC at the 1080p floor for an HEVC player", matched("hevc", 3000, 1920, 1080, { hevcOk: true }), [4000, 6667]);
+  check("Hell's Kitchen's 673 kbps 320×240 MPEG-4 at the floor for its size", matched("msmpeg4v3", 673, 320, 240), [1500, 2500]);
+  check("a 4K 60 Mbps HEVC at 1080p at the level's 12 Mbps", matched("hevc", 60000, 3840, 2160), [12000, 20000]);
+  check("and an MPEG-2 DVD at what an H.264 needs of its 6 Mbps", matched("mpeg2video", 6000, 720, 480), [3000, 5000]);
+  const surround = plan(version({}), { audioChannels: 6 });
+  check("FFMPEG_AUDIO_CHANNELS=6: EAC3 5.1 becomes AAC 5.1 at 448 kbps", surround.ok && [surround.audioOut, encodeArgs(surround,
+    ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ").includes("-c:a aac -ac 6 -b:a 448k")], [{ channels: 6, kbps: 448 }, true]);
 }
 
 /** A playlist's entries once it lists `n`: an encode lists them as it goes. */
@@ -561,8 +634,10 @@ console.log("\n— a re-encode —");
   const ids = [crypto.randomUUID(), crypto.randomUUID()];
   const m = await master("3", ids[0]);
   const notes = notesOf(m.text);
-  check("HEVC for a player nobody said decodes it is re-encoded by ffmpeg, saying why",
-    [notes.engine, notes.video, notes.reason], ["ffmpeg", "transcode", "HEVC, and this player can't decode it"]);
+  check("HEVC for a player nobody said decodes it is re-encoded by ffmpeg, saying why, and on what",
+    [notes.engine, notes.video, notes.reason, notes.encoder],
+    ["ffmpeg", "transcode", "HEVC, and this player can't decode it", "CPU (x264), CPU decode"]);
+  check("  at what H.264 needs for its 2 Mbps HEVC", notes.kbps, "4000");
   check("  and Plex was never asked to transcode", transcodeAsked(), []);
   // Four segments of 2.97 to 3.01 s: just under 12 by their durations.
   const firstList = entries(await (await fetch(origin + variantOf(m.text))).text());
@@ -591,20 +666,43 @@ console.log("\n— a re-encode —");
   const keep = crypto.randomUUID();
   const first = await master("3", keep);
   asked.length = 0;
-  const second = await master("4", crypto.randomUUID());
+  plexStarts = true;
+  const onPlex = crypto.randomUUID();
+  const second = await master("4", onPlex);
+  plexStarts = false;
+  await fetch(`${origin}/api/plex/hls/session/${onPlex}?reason=test`, { method: "DELETE" });
   check("with FFMPEG_MAX_ENCODES taken, the next re-encode goes to Plex",
     [notesOf(first.text).engine, transcodeAsked().includes("/video/:/transcode/universal/decision")], ["ffmpeg", true]);
   check("  and nothing of the engine's is handed out for it", second.text.includes("com.pdt.engine"), false);
+  check("  Stats for nerds is told why", notesOf(second.text).fallback, "encode slots full (1/1)");
   delete process.env.FFMPEG_MAX_ENCODES;
   await fetch(`${origin}/api/plex/hls/session/${keep}?reason=test`, { method: "DELETE" });
 }
 
 console.log("\n— what is still Plex's —");
-for (const [rk, why] of [["7", "Dolby Vision profile 5 without OpenCL"], ["6", "a file ffmpeg can't read"]]) {
+for (const [rk, why, said] of [
+  ["7", "Dolby Vision profile 5 without OpenCL", "Dolby Vision P5 needs OpenCL tone mapping"],
+  ["6", "a file ffmpeg can't read", null],
+  ["11", "a file whose tracks aren't what Plex has", "tracks differ from Plex's: stream #1 is aac in the file, ac3 to Plex"],
+  ["12", "a file whose size isn't what Plex last read", "the file on disk isn't the one Plex last read"],
+] as const) {
   asked.length = 0;
-  const m = await master(rk, crypto.randomUUID());
+  plexStarts = true;
+  const id = crypto.randomUUID();
+  const m = await master(rk, id);
+  plexStarts = false;
   check(`${why} goes to Plex`, transcodeAsked().includes("/video/:/transcode/universal/decision"), true);
   check(`  and nothing of the engine's is handed out for it`, m.text.includes("com.pdt.engine"), false);
+  if (said) check("  Stats for nerds is told why", notesOf(m.text).fallback, said);
+  await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
+}
+{
+  process.env.FFMPEG_FALLBACK_TO_PLEX = "off";
+  asked.length = 0;
+  const m = await master("12", crypto.randomUUID());
+  check("with FFMPEG_FALLBACK_TO_PLEX=off it fails to start instead, Plex never asked",
+    [m.status, transcodeAsked().includes("/video/:/transcode/universal/decision")], [502, false]);
+  delete process.env.FFMPEG_FALLBACK_TO_PLEX;
 }
 {
   asked.length = 0;

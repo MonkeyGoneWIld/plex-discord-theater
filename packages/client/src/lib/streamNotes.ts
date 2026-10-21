@@ -24,6 +24,10 @@ export interface StreamNotes {
   /** What made the stream: Plex's transcoder, or this server's own ffmpeg
    *  (PLAYBACK_ENGINE=ffmpeg). A server that doesn't say is Plex's. */
   engine: "plex" | "ffmpeg";
+  /** What ffmpeg re-encoded on — "NVIDIA NVENC, GPU decode" — and, for a
+   *  stream the ffmpeg engine left to Plex, why. */
+  encoder: string | null;
+  fallback: string | null;
   /** The file's picture — "HEVC Main 10 · 10-bit · HDR10 · 3840×2160 ·
    *  23.976 fps" — and the stream's dynamic range: "HDR10", "SDR (tone-mapped
    *  from HDR10)". Null from a server that doesn't say. */
@@ -54,8 +58,15 @@ export function readStreamNotes(
     audioFrom: value("audioFrom"), audioTo: value("audioTo"), audioKbps: num("audioKbps"),
     audioReason: value("audioReason"),
     videoFrom: value("videoFrom"), range: value("range"),
+    encoder: value("encoder"), fallback: value("fallback"),
     engine: value("engine") === "ffmpeg" ? "ffmpeg" : "plex",
   };
+}
+
+/** The Engine line: who made the stream, on what, or why ffmpeg didn't. */
+export function engineText(notes: StreamNotes): string {
+  if (notes.engine === "ffmpeg") return notes.encoder ? `ffmpeg · ${notes.encoder}` : "ffmpeg";
+  return notes.fallback ? `Plex (ffmpeg: ${notes.fallback})` : "Plex";
 }
 
 /**

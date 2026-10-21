@@ -29,6 +29,8 @@ import { anyRoomPlaying, attachWebSocketServer, closeWebSocketServer } from "./s
 import { directStreamCacheDir, directStreamMemoryBytes } from "./services/direct-stream.js";
 import { transcodeCacheBytes } from "./services/segment-prefetch.js";
 import { checkFfmpeg, detectHardware, mediaPathMap } from "./services/ffmpeg/config.js";
+import { checkLibraryPaths, libraryReadabilityText } from "./services/ffmpeg/library-check.js";
+import { plexJSON } from "./services/plex.js";
 
 const required = ["DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET", "PLEX_URL", "PLEX_TOKEN", "REDIRECT_URI"] as const;
 for (const name of required) {
@@ -345,6 +347,14 @@ async function reportEngine(): Promise<void> {
     `copies H.264 and HEVC files itself, HDR included; re-encodes on ${hw.note}, picture subtitles burned in; a text subtitle burned in still goes to Plex;`,
     map.length ? `library at ${map.map(([from, to]) => `${from} → ${to}`).join(", ")} (MEDIA_PATH_MAP)` : "library at Plex's own paths",
   );
+  try {
+    const libraries = await checkLibraryPaths((p) => plexJSON(p));
+    const text = libraryReadabilityText(libraries);
+    const short = libraries.some((l) => l.looked > 0 && l.readable < l.looked);
+    (short ? console.warn : console.log)(`[Config] library on the mount: ${text}`);
+  } catch (err) {
+    console.warn(`[Config] library on the mount: couldn't ask Plex for files to look for (${String(err)})`);
+  }
 }
 
 const allowedGuildCount = (process.env.ALLOWED_GUILD_IDS || "")

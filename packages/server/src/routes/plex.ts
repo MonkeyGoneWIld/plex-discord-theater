@@ -51,12 +51,14 @@ import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
 import { markOriginalAudio } from "../services/original-language.js";
 import { audioNotes, type AudioDecision, type SourceAudio } from "../services/stream-audio.js";
 import {
-  ffmpegEngineOn, ffmpegHardware, hwDevice, keepHdrOnReencode, localPath, maxEncodes, readable, recheckHardware, tonemapAlgo,
-  tonemapper,
+  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegHardware, gpuDecodeOn, gpuEncodesHevc, hwDevice,
+  keepHdrOnReencode, localPath, lowPowerVaapi, maxEncodes, readable, recheckHardware, sizeOnDisk, tonemapAlgo, tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
-  AUDIO_KBPS, copyArgs, encodeArgs, encodeTargetKbps, inputArgs, planCopy, planEncode, type SourceStream, type SourceVersion,
+  AUDIO_KBPS, HARDWARE_NAMES, copyArgs, encodeArgs, encodeTargetKbps, inputArgs, planCopy, planEncode, type AudioOut,
+  type EncodeRequest, type SourceStream, type SourceVersion,
 } from "../services/ffmpeg/plan.js";
+import { probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
 import {
   ffmpegEncodesRunning,
   ffmpegKeyRetired,
@@ -4572,10 +4574,10 @@ function streamNotes(notes: Record<string, string | number | null>): string[] {
 const ffmpegSources = new LruMap<string, { at: number; source: SourceVersion | null }>(200);
 const FFMPEG_SOURCE_TTL_MS = 5 * 60_000;
 
-async function ffmpegSource(ratingKey: string, mediaIndex: number): Promise<SourceVersion | null> {
+async function ffmpegSource(ratingKey: string, mediaIndex: number, fresh = false): Promise<SourceVersion | null> {
   const key = `${ratingKey}:${mediaIndex}`;
   const hit = ffmpegSources.get(key);
-  if (hit && Date.now() - hit.at < FFMPEG_SOURCE_TTL_MS) return hit.source;
+  if (hit && !fresh && Date.now() - hit.at < FFMPEG_SOURCE_TTL_MS) return hit.source;
   const data = await plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(`/library/metadata/${ratingKey}`);
   const durationMs = data.MediaContainer.Metadata?.[0]?.duration;
   const media = data.MediaContainer.Metadata?.[0]?.Media?.[mediaIndex] as (PlexMedia & { Part?: Array<PlexPart & { file?: string }> }) | undefined;
@@ -4588,6 +4590,9 @@ async function ffmpegSource(ratingKey: string, mediaIndex: number): Promise<Sour
         partKey: part.key ?? null,
         file: part.file ?? null,
         durationS: durationMs ? durationMs / 1000 : null,
+        bitrateKbps: media?.bitrate ?? null,
+        fileSize: part.size ?? null,
+        partId: part.id ?? null,
         streams: (part.Stream ?? []) as SourceStream[],
       }
     : null;
@@ -4598,9 +4603,11 @@ async function ffmpegSource(ratingKey: string, mediaIndex: number): Promise<Sour
 /**
  * Start this session's stream with ffmpeg and return its master playlist: a
  * copy when the file may be copied and ffmpeg can copy it, otherwise a
- * re-encode (plan.ts). Null leaves the stream to Plex: what ffmpeg can't make
- * (Dolby Vision 5 without OpenCL, a text subtitle burned in), every encode
- * slot taken, or a run that didn't start.
+ * re-encode (plan.ts). Otherwise why it is left to Plex, which Stats for nerds
+ * shows: what ffmpeg can't make (Dolby Vision 5 without OpenCL, a text
+ * subtitle with no text to draw it from), a file that isn't what Plex last
+ * read (its size, its streams: probe.ts), every encode slot taken, or a run
+ * that didn't start.
  */
 async function startWithFfmpeg(o: {
   sessionId: string;
@@ -4625,16 +4632,19 @@ async function startWithFfmpeg(o: {
   picture: PictureFacts | null;
   /** The subtitle burned into the picture, if any. */
   burnSubtitleId?: number | null;
-}): Promise<string | null> {
+}): Promise<{ manifest: string } | { fallback: string }> {
   const session = o.sessionId.substring(0, 8);
+  const toPlex = (fallback: string, log: string, extra: Record<string, unknown> = {}) => {
+    logEvent("FFmpeg", `${log}; left to Plex`, { session, ratingKey: o.ratingKey, ...extra });
+    return { fallback };
+  };
   let source: SourceVersion | null = null;
   try {
     source = await ffmpegSource(o.ratingKey, o.mediaIndex);
   } catch (err) {
-    logEvent("FFmpeg", "couldn't read the title from Plex; left to Plex", { session, ratingKey: o.ratingKey, err: String(err) });
-    return null;
+    return toPlex("couldn't read the title from Plex", "couldn't read the title from Plex", { err: String(err) });
   }
-  if (!source) return null;
+  if (!source) return toPlex("no file for this version", "no file for this version");
 
   // From the mount when the file is there; otherwise through Plex's own file
   // endpoint, which is a plain read of the file, not a transcode.
@@ -4642,21 +4652,53 @@ async function startWithFfmpeg(o: {
   const fromMount = !!local && readable(local);
   let input: string[];
   if (fromMount) {
+    // A file replaced since Plex last read it: Plex's streams are the old
+    // file's, and its numbers may not be this one's. Plex is asked again
+    // first, in case it has read the new one since this was cached.
+    let size = sizeOnDisk(local!);
+    if (source.fileSize && size !== null && size !== source.fileSize) {
+      source = await ffmpegSource(o.ratingKey, o.mediaIndex, true).catch(() => source);
+      size = sizeOnDisk(local!);
+      if (source?.fileSize && size !== null && size !== source.fileSize) {
+        return toPlex("the file on disk isn't the one Plex last read", "the file on disk isn't the one Plex last read", {
+          file: local, onDisk: size, plex: source.fileSize,
+        });
+      }
+      if (!source) return toPlex("no file for this version", "no file for this version");
+    }
     input = inputArgs({ local: local! });
   } else if (source.partKey) {
     input = inputArgs({ url: `${process.env.PLEX_URL!.replace(/\/$/, "")}${source.partKey}`, token: process.env.PLEX_TOKEN! });
   } else {
-    logEvent("FFmpeg", "nothing to read the file from; left to Plex", { session, ratingKey: o.ratingKey });
-    return null;
+    return toPlex("nothing to read the file from", "nothing to read the file from");
   }
+  // ffprobe's streams, once per file, asked while the stream is planned.
+  const probed = probeOnce(`${fromMount ? local : source.partKey}:${source.fileSize ?? "?"}`, input);
+  const tracksDiffer = async (used: Array<SourceStream | null | undefined>): Promise<string | null> => {
+    const found = await probed;
+    if (!found) {
+      logEvent("FFmpeg", "ffprobe couldn't read the file; its tracks are unchecked", { session, ratingKey: o.ratingKey });
+      return null;
+    }
+    return trackMismatch(used.filter((s): s is SourceStream => !!s), found);
+  };
 
-  const copyPlan = o.copy ? planCopy(source, { audioStreamId: o.audioStreamID || null, hevcOk: o.roomHevc }) : null;
-  let video: { codec: "h264" | "hevc"; width: number; height: number; audio: SourceStream | null; audioCopy: boolean; kbps: number | null };
+  const copyPlan = o.copy
+    ? planCopy(source, { audioStreamId: o.audioStreamID || null, hevcOk: o.roomHevc, audioChannels: audioChannels() })
+    : null;
+  let video: {
+    codec: "h264" | "hevc"; width: number; height: number; audio: SourceStream | null; audioCopy: boolean;
+    audioOut: AudioOut | null; kbps: number | null;
+  };
   let key: string;
   let reason: string | null = null;
   /** The stream's dynamic range, for Stats for nerds. */
   let range: string | null = null;
+  /** What made the picture, for Stats for nerds: null for a copy. */
+  let encoder: string | null = null;
   if (copyPlan?.ok) {
+    const differ = await tracksDiffer([copyPlan.video, copyPlan.audio]);
+    if (differ) return toPlex(`tracks differ from Plex's: ${differ}`, "the file's tracks aren't Plex's", { why: differ });
     const started = await startFfmpegRun({
       sessionId: o.sessionId,
       ratingKey: o.ratingKey,
@@ -4665,16 +4707,13 @@ async function startWithFfmpeg(o: {
       offsetS: o.offsetS,
       args: copyArgs(copyPlan, input, o.offsetS, source.durationS ?? null),
     });
-    if (!started.ok) {
-      logEvent("FFmpeg", "run didn't start; left to Plex", { session, ratingKey: o.ratingKey, why: started.why });
-      return null;
-    }
+    if (!started.ok) return toPlex(`ffmpeg didn't start: ${started.why}`, "run didn't start", { why: started.why });
     key = started.key;
     video = { ...copyPlan, kbps: o.fileKbps };
     range = o.picture ? o.picture.hdr ?? "SDR" : copyPlan.hdr;
     logEvent("FFmpeg", "copying", {
       session, ratingKey: o.ratingKey, fromS: o.offsetS, video: copyPlan.codec, hdr: copyPlan.hdr,
-      audio: copyPlan.audio ? `${copyPlan.audio.codec} ${copyPlan.audio.channels ?? "?"}ch ${copyPlan.audioCopy ? "copied" : "→ AAC"}` : "none",
+      audio: audioText(copyPlan),
       source: fromMount ? "mount" : "plex",
     });
   } else {
@@ -4682,20 +4721,21 @@ async function startWithFfmpeg(o: {
     await recheckHardware();
     const busy = ffmpegEncodesRunning(o.sessionId);
     if (busy >= maxEncodes()) {
-      logEvent("FFmpeg", "every encode slot is taken; left to Plex", { session, ratingKey: o.ratingKey, running: busy, max: maxEncodes() });
-      return null;
+      return toPlex(`encode slots full (${busy}/${maxEncodes()})`, "every encode slot is taken", { running: busy, max: maxEncodes() });
     }
     const [maxWidth, maxHeight] = o.frame.split("x").map(Number);
-    const ask = {
-      audioStreamId: o.audioStreamID || null, hevcOk: o.hevcEncode, hardware: ffmpegHardware(),
+    const hardware = ffmpegHardware();
+    const ask: EncodeRequest = {
+      audioStreamId: o.audioStreamID || null, hevcOk: o.hevcEncode && gpuEncodesHevc(), hardware,
       kbps: o.transcodeKbps, peakKbps: o.peakKbps, maxWidth, maxHeight, keepHdr: keepHdrOnReencode(),
       tonemapper: tonemapper(), tonemapAlgo: tonemapAlgo(), burn: o.burnSubtitleId ?? null,
+      audioChannels: audioChannels(), preset: encodePreset(), lowPower: lowPowerVaapi(),
+      gpuDecode: gpuDecodeOn() ? undefined : false,
     };
     let plan = planEncode(source, ask);
-    if (!plan.ok) {
-      logEvent("FFmpeg", "left to Plex", { session, ratingKey: o.ratingKey, why: plan.why, notCopied: reason });
-      return null;
-    }
+    if (!plan.ok) return toPlex(plan.why, "can't make it", { why: plan.why, notCopied: reason });
+    const differ = await tracksDiffer([plan.video, plan.audio, plan.burn?.kind === "picture" ? plan.burn.sub : null]);
+    if (differ) return toPlex(`tracks differ from Plex's: ${differ}`, "the file's tracks aren't Plex's", { why: differ });
     let started = await startFfmpegRun({
       sessionId: o.sessionId, ratingKey: o.ratingKey, codec: plan.codec, encode: true,
       targetKbps: encodeTargetKbps(plan), offsetS: o.offsetS,
@@ -4714,26 +4754,27 @@ async function startWithFfmpeg(o: {
         });
       }
     }
-    if (!started.ok) {
-      logEvent("FFmpeg", "run didn't start; left to Plex", { session, ratingKey: o.ratingKey, why: started.why });
-      return null;
-    }
+    if (!started.ok) return toPlex(`ffmpeg didn't start: ${started.why}`, "run didn't start", { why: started.why });
     key = started.key;
     video = { ...plan, kbps: plan.kbps };
     range = plan.hdrTrc ? `${plan.hdrTrc === "arib-std-b67" ? "HLG" : "HDR10"} (kept)`
       : plan.tonemap ? `SDR (tone-mapped from ${o.picture?.hdr ?? plan.hdr})` : "SDR";
+    encoder = `${HARDWARE_NAMES[plan.hardware]}, ${plan.gpuDecode ? "GPU" : "CPU"} decode`;
     logEvent("FFmpeg", "re-encoding", {
       session, ratingKey: o.ratingKey, fromS: o.offsetS, why: reason,
       video: `${plan.video.codec} → ${plan.codec} ${plan.width}x${plan.height} ${plan.kbps}k (peak ${plan.peakKbps}k)`,
+      // Below what the quality level allows: matched to the source's own.
+      matched: plan.sourceKbps ? `${plan.sourceKbps}k ${plan.video.codec} source; ${plan.askedKbps}k allowed` : "no",
       hdr: plan.hdrTrc ? `${plan.hdr} kept`
         : plan.tonemap ? `${plan.hdr} → SDR, ${plan.tonemap.algo} on ${plan.tonemap.via}${plan.tonemap.dovi ? " with its Dolby Vision" : ""}`
         : plan.hdr,
-      on: plan.hardware, decode: plan.gpuDecode ? "gpu" : "cpu",
+      on: plan.hardware, preset: plan.preset ?? "default", decode: plan.gpuDecode ? "gpu" : "cpu",
       deinterlace: plan.interlaced, filled: plan.color.fill ?? "none",
       burn: plan.burn
-        ? `${plan.burn.sub.codec} #${plan.burn.sub.index}${plan.burn.sub.language ? ` (${plan.burn.sub.language})` : ""}${plan.burn.stretch ? ", stretched" : ""}`
+        ? `${plan.burn.sub.codec} #${plan.burn.sub.index ?? "sidecar"}${plan.burn.sub.language ? ` (${plan.burn.sub.language})` : ""}` +
+          `${plan.burn.kind === "picture" ? "" : `, ${plan.burn.kind}`}${plan.burn.stretch ? ", stretched" : ""}`
         : "none",
-      audio: plan.audio ? `${plan.audio.codec} ${plan.audio.channels ?? "?"}ch ${plan.audioCopy ? "copied" : "→ AAC"}` : "none",
+      audio: audioText(plan),
       source: fromMount ? "mount" : "plex",
     });
   }
@@ -4744,12 +4785,13 @@ async function startWithFfmpeg(o: {
         id: video.audio.id,
         decision: video.audioCopy ? "copy" : "transcode",
         codec: "aac",
-        channels: video.audioCopy ? video.audio.channels ?? null : 2,
-        bitrate: video.audioCopy ? null : AUDIO_KBPS,
+        channels: video.audioCopy ? video.audio.channels ?? null : video.audioOut?.channels ?? 2,
+        bitrate: video.audioCopy ? null : video.audioOut?.kbps ?? AUDIO_KBPS,
       }
     : null;
   const notes = streamNotes({
     engine: "ffmpeg",
+    encoder,
     video: reason === null ? "copy" : "transcode",
     reason,
     kbps: video.kbps,
@@ -4771,7 +4813,14 @@ async function startWithFfmpeg(o: {
     "",
   ].join("\n");
   manifestCache.set(o.sessionId, { manifest, createdAt: Date.now() });
-  return manifest;
+  return { manifest };
+}
+
+/** A plan's sound, for the log. */
+function audioText(plan: { audio: SourceStream | null; audioCopy: boolean; audioOut: AudioOut | null }): string {
+  if (!plan.audio) return "none";
+  const from = `${plan.audio.codec} ${plan.audio.channels ?? "?"}ch`;
+  return plan.audioCopy ? `${from} copied` : `${from} → AAC ${plan.audioOut?.channels ?? 2}ch ${plan.audioOut?.kbps ?? AUDIO_KBPS}k`;
 }
 
 // ─── HLS streaming ──────────────────────────────────────────────
@@ -4911,7 +4960,7 @@ router.get(
     // Core manifest fetch logic — wrapped in a promise for in-flight deduplication
     const fetchManifest = async (
       subtitleMode: "burn" | "none",
-      { videoResolution, hevc, copy, copyKbps, transcodeKbps, peakKbps, notCopied, refused, quality, fileKbps, audioTracks, picture }: {
+      { videoResolution, hevc, copy, copyKbps, transcodeKbps, peakKbps, notCopied, refused, quality, fileKbps, audioTracks, picture, fallback }: {
         videoResolution: string;
         /** Which way HEVC is offered: as what Plex encodes to, as something it
          *  may copy, or not at all. */
@@ -4935,6 +4984,8 @@ router.get(
         audioTracks: SourceAudio[];
         /** What the file's picture is, for Stats for nerds. */
         picture: PictureFacts | null;
+        /** Why the ffmpeg engine left this stream to Plex, when it did. */
+        fallback?: string | null;
       },
     ): Promise<string> => {
       const params: Record<string, string> = {
@@ -5215,6 +5266,7 @@ router.get(
         });
       }
       const notes = streamNotes({
+        fallback: fallback ?? null,
         video: videoCopied ? "copy" : "transcode",
         reason,
         // Roughly what each viewer pulls: the file's own rate for a copy.
@@ -5300,19 +5352,27 @@ router.get(
       recordHevcWithheld(sessionId, copy && !roomHevc && version?.videoCodec?.toLowerCase() === "hevc");
       const frame = quality && quality <= QUALITY_720P_KBPS ? "1280x720" : transcodeFrame(version ?? {});
       // With PLAYBACK_ENGINE=ffmpeg, the stream is made here, from the file —
-      // copied or re-encoded, a picture subtitle burned in — and Plex isn't
-      // asked for anything. Whatever ffmpeg can't make (a text subtitle burned
-      // in, one in a file of its own), or won't start, is Plex's, as before.
-      if (ffmpegEngineOn() && !ffmpegRefused(ratingKey)) {
-        const manifest = await startWithFfmpeg({
-          sessionId, ratingKey, mediaIndex, offsetS: offset ? Number(offset) : 0, audioStreamID, roomHevc,
-          burnSubtitleId: subtitleMode === "burn" && subtitleId ? subtitleId : null,
-          quality, fileKbps: kbps, audioTracks: version?.audioTracks ?? [],
-          authToken: req.query.token as string | undefined,
-          copy, notCopied, transcodeKbps, peakKbps, frame, hevcEncode: roomHevc && HEVC_TRANSCODE,
-          picture: version?.picture ?? null,
-        });
-        if (manifest) return manifest;
+      // copied or re-encoded, a subtitle burned in — and Plex isn't asked for
+      // anything. Whatever ffmpeg can't make, or won't start, is Plex's, as
+      // before, with the reason in Stats for nerds — or, with
+      // FFMPEG_FALLBACK_TO_PLEX=off, fails to start.
+      let fallback: string | null = null;
+      if (ffmpegEngineOn()) {
+        const tried = ffmpegRefused(ratingKey)
+          ? { fallback: "ffmpeg failed on this title lately" }
+          : await startWithFfmpeg({
+              sessionId, ratingKey, mediaIndex, offsetS: offset ? Number(offset) : 0, audioStreamID, roomHevc,
+              burnSubtitleId: subtitleMode === "burn" && subtitleId ? subtitleId : null,
+              quality, fileKbps: kbps, audioTracks: version?.audioTracks ?? [],
+              authToken: req.query.token as string | undefined,
+              copy, notCopied, transcodeKbps, peakKbps, frame, hevcEncode: roomHevc && HEVC_TRANSCODE,
+              picture: version?.picture ?? null,
+            });
+        if ("manifest" in tried) return tried.manifest;
+        if (!fallbackToPlex()) {
+          throw new Error(`ffmpeg couldn't make this stream, and FFMPEG_FALLBACK_TO_PLEX is off: ${tried.fallback}`);
+        }
+        fallback = tried.fallback;
       }
       await selectTracksForStart(ratingKey, mediaIndex, audioStreamID, subtitleId);
       return fetchManifest(subtitleMode, {
@@ -5328,6 +5388,7 @@ router.get(
         fileKbps: kbps,
         audioTracks: version?.audioTracks ?? [],
         picture: version?.picture ?? null,
+        fallback,
       });
     });
     manifestInFlight.set(sessionId, promise);

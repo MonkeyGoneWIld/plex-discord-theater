@@ -254,12 +254,19 @@ function audioArgs(plan: { audio: SourceStream | null; audioCopy: boolean; audio
   return ["-c:a", "aac", "-ac", String(out.channels), "-b:a", `${out.kbps}k`, "-af", "aresample=async=1"];
 }
 
+/**
+ * The longest stretch of cuts listed. The list is one argument, and Linux
+ * takes none past 128 KiB: Plex's length can be days past the file's (Grimm
+ * S3E7 at 97 hours, a 45-minute file), which ffmpeg then wouldn't start for.
+ */
+const MAX_LISTED_S = 12 * 3600;
+
 /** Numbered MPEG-TS segments cut every `segmentSeconds` from the first packet,
  *  on the copy's clock, each announced on stdout once it is complete. */
 function segmentArgs(offsetS: number, durationS: number | null, segmentSeconds: number): string[] {
   // Past the last listed cut the segment runs to the end of the file, so the
   // list covers what's left with room to spare; 6 h when Plex has no length.
-  const leftS = Math.max(0, (durationS && durationS > 0 ? durationS : 6 * 3600) - offsetS) + 120;
+  const leftS = Math.min(MAX_LISTED_S, Math.max(0, (durationS && durationS > 0 ? durationS : 6 * 3600) - offsetS) + 120);
   const cuts = Array.from({ length: Math.ceil(leftS / segmentSeconds) }, (_, i) => (i + 1) * segmentSeconds);
   return [
     "-output_ts_offset", String(COPY_CLOCK_OFFSET_S),

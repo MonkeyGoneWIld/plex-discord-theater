@@ -12,6 +12,7 @@ import { checkLibraryPaths, libraryReadabilityText } from "../src/services/ffmpe
 import { findSidecar } from "../src/services/ffmpeg/burn-files.js";
 import { dropHot, hotSegment, hotSegmentStats, keepHot, setHotBudget } from "../src/services/ffmpeg/hot-segments.js";
 import { bif } from "../src/services/ffmpeg/previews.js";
+import { copyArgs } from "../src/services/ffmpeg/plan.js";
 
 let pass = 0;
 let fail = 0;
@@ -152,6 +153,18 @@ console.log("\n— a BIF of previews —");
     [[0, 1, 2, 3].map((i) => made.readUInt32LE(64 + i * 8)), [0, 1, 2, 3].map(offset)],
     [[0, 1, 2, 0xffffffff], [96, 101, 106, 111]]);
   check("and the frames, in order", made.subarray(offset(1), offset(2)).toString("hex"), "ffd802ffd9");
+}
+
+console.log("\n— the segment cuts —");
+{
+  const plan = { ok: true, video: { index: 0 }, audio: null, audioCopy: false, audioOut: null } as unknown as Parameters<typeof copyArgs>[0];
+  const cutsOf = (args: string[]) => args[args.indexOf("-segment_times") + 1];
+  const film = cutsOf(copyArgs(plan, ["-i", "film.mkv"], 0, 7200, 3)).split(",");
+  check("a two-hour film's cuts run past its end", [film[0], film.length, Number(film.at(-1))], ["3", 2440, 7320]);
+  // Grimm S3E7: Plex says 97 hours.
+  const days = cutsOf(copyArgs(plan, ["-i", "film.mkv"], 0, 350_083, 3));
+  check("a length days long lists twelve hours of cuts, in one argument Linux takes",
+    [Number(days.split(",").at(-1)), Buffer.byteLength(days) < 128 * 1024], [43_200, true]);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

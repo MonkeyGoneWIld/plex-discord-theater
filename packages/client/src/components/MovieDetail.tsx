@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, backdropThumbUrl, setStreams, versionOf, type Credit, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
+import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, backdropThumbUrl, versionOf, type Credit, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
+import { selectStreams } from "../lib/selectStreams";
 import { formatAirDate, formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
@@ -348,28 +349,35 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
       const audio = audioTracks.find((t) => t.id === selectedAudio) ?? null;
       saveAudioPref(audio);
       saveSubtitlePref(subtitleTracks.find((t) => t.id === selectedSubtitle) ?? null, audio);
-      if (selectedAudio != null) {
-        await setStreams(partId, {
+      let audioId = selectedAudio ?? 0;
+      let subtitleId = selectedSubtitle ?? 0;
+      if (selectedAudio != null && resolved) {
+        // The same tracks in the file as it is now, if it was replaced since
+        // this page's details were fetched.
+        const set = await selectStreams(item.ratingKey, resolved, {
           audioStreamID: selectedAudio,
-          subtitleStreamID: selectedSubtitle ?? 0,
-        });
+          subtitleStreamID: subtitleId,
+        }, selectedVersion ?? undefined);
+        audioId = set.audio(selectedAudio) ?? 0;
+        subtitleId = set.subtitle(subtitleId);
+        if (set.meta) setMeta(set.meta);
         // The cached meta now reports stale selected-track flags — drop it.
         invalidateMeta(item.ratingKey);
       }
       // The player works in seconds; history stores milliseconds.
       onPlay(
         item,
-        selectedSubtitle != null,
+        subtitleId !== 0,
         resumeFromMs != null ? resumeFromMs / 1000 : undefined,
         selectedVersion ?? undefined,
-        selectedAudio ?? 0,
-        selectedSubtitle ?? 0,
+        audioId,
+        subtitleId,
       );
     } catch (err) {
       console.error("Failed to set streams:", err);
       setError("Failed to configure playback. Please try again.");
     }
-  }, [partId, selectedAudio, selectedSubtitle, audioTracks, subtitleTracks, item, onPlay, selectedVersion]);
+  }, [partId, resolved, selectedAudio, selectedSubtitle, audioTracks, subtitleTracks, item, onPlay, selectedVersion]);
 
   // Offer a resume only for a genuine part-watch: far enough in to matter, and
   // not already finished (the server flags that, so a rewatch starts clean).

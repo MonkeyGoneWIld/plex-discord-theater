@@ -1081,6 +1081,9 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
   }
 
   try {
+    // Asked for fresh, past both caches: by a player whose tracks Plex refused,
+    // because the file was replaced since and its part and track ids are new.
+    if (req.query.fresh === "1") invalidateTitleDetailCaches(ratingKey);
     const payload = await buildMeta(ratingKey);
     if (!payload) {
       res.status(404).json({ error: "Item not found" });
@@ -2909,6 +2912,7 @@ router.put("/streams/:partId", async (req: Request, res: Response) => {
   try {
     const plexRes = await plexFetch(`/library/parts/${partId}`, params, undefined, "PUT");
     if (!plexRes.ok) {
+      logEvent("Streams", "Plex refused the tracks for a part", { partId, ...params, status: plexRes.status });
       res.status(plexRes.status).json({ error: "Failed to set streams" });
       return;
     }

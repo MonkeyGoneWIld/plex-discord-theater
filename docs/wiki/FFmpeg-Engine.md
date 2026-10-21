@@ -371,6 +371,11 @@ Another ffmpeg than the image's own, Jellyfin's build at
 `/usr/lib/jellyfin-ffmpeg/ffmpeg`. Only for running from source.
 `FFPROBE_PATH` is its ffprobe, the one beside `FFMPEG_PATH` unless set.
 
+Use Jellyfin's build there too. Another build (upstream 7.1, say) counts
+segment cuts from zero, not from where the stream starts: after a seek it
+cuts at every keyframe, and late in a long film one segment can run to the
+end.
+
 The stream caches (`DIRECT_STREAM_MEMORY_MB`, `STREAM_CACHE_DIR`,
 `TRANSCODE_CACHE_MB`), `DIRECT_STREAM`, `DIRECT_STREAM_MAX_KBPS` and
 `VIDEO_BITRATE_KBPS` apply to ffmpeg's streams as they do to Plex's. See the

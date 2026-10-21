@@ -7481,8 +7481,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // set currentTime on media that wasn't there yet, and then sat out the full
     // six-second stall before restarting. Every seek in a burst paid it, so the
     // bar stopped tracking and the room watched a position that never loaded.
+    //
+    // Not for a stream listed as it is made (EVENT) — a copy, or the ffmpeg
+    // engine's runs: its list is what exists, and a place past its end went
+    // to the restart above. On 21 October a skip to 1:44:59 in 1917, whose
+    // copy had been made to the end two seconds before, was restarted here
+    // from scratch, as 27 skips that day were.
     const head = bufEnd ?? sessionStartOffsetRef.current;
-    if (!wasBuffered && positionSeconds - head > FAR_SEEK_THRESHOLD_S) {
+    if (!wasBuffered && !copiedStreamRef.current && positionSeconds - head > FAR_SEEK_THRESHOLD_S) {
       logEvent("Seek", "far forward jump past transcode head → restart", {
         targetS: positionSeconds,
         headS: head,

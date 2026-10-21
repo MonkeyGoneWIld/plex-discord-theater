@@ -353,19 +353,23 @@ function Runner() {
    * it once sat six seconds on nothing and then rebuilt the stream anyway
    * (The Bourne Identity, 11 October).
    */
-  async function runCopySkipInPlace(p2p: boolean, uploadKbps = 30_000) {
+  async function runCopySkipInPlace(p2p: boolean, uploadKbps = 30_000, skipS = 60) {
     setRunning(true);
     const slow = uploadKbps < 20_000;
-    const out: string[] = [`— the host skipping ahead inside a copy, ${p2p ? "with" : "without"} P2P, everything at ${uploadKbps / 1000} Mbps —`];
+    // Three minutes is past the two Plex's transcodes are restarted beyond
+    // (FAR_SEEK_THRESHOLD_S), in a copy listed to its end, as the ffmpeg
+    // engine's are a minute in.
+    const far = skipS > 120;
+    const out: string[] = [`— the host skipping ${skipS}s ahead inside a copy, ${p2p ? "with" : "without"} P2P, everything at ${uploadKbps / 1000} Mbps —`];
     const say = (line: string) => { out.push(line); setLines([...out]); };
     setLines([...out]);
     try {
-      await startOnce(`p2p=${p2p ? 1 : 0}&stream=copy4&event=1&eventS=120`, {}, uploadKbps);
+      await startOnce(`p2p=${p2p ? 1 : 0}&stream=${far ? "copy4long" : "copy4"}&event=1&eventS=${far ? 300 : 120}`, {}, uploadKbps);
       await pause(slow ? 20_000 : 8_000);
       const from = latest.get("u-host")!.pos;
       const skippedAt = Date.now();
-      for (let i = 0; i < 6; i++) hostKey("ArrowRight");
-      const target = from + 60;
+      for (let i = 0; i < skipS / 10; i++) hostKey("ArrowRight");
+      const target = from + skipS;
       say(`… skipping from ${from.toFixed(1)}s to about ${target.toFixed(0)}s`);
       const playing = (who: string) => {
         const r = latest.get(who);
@@ -2156,6 +2160,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runCopySkipInPlace(false)}>Skip ahead inside a copy</button>
         <button disabled={running} onClick={() => void runCopySkipInPlace(true)}>Skip ahead inside a copy, P2P</button>
         <button disabled={running} onClick={() => void runCopySkipInPlace(false, 8_000)}>Skip ahead inside a copy, slow</button>
+        <button disabled={running} onClick={() => void runCopySkipInPlace(false, 30_000, 180)}>Skip far ahead inside a copy</button>
         <button disabled={running} onClick={() => void runLateJoin()}>Late joiner</button>
         <button disabled={running} onClick={() => void runHandToJoiner()}>Host handed to a joiner</button>
         <button disabled={running} onClick={() => void runSkipBurst()}>Skips in a burst, in a copy</button>

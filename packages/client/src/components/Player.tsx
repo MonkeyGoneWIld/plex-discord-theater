@@ -1989,8 +1989,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /**
    * A follower stopped to let the room catch up — see lib/roomWait.
    * `atS` is where it stopped and `roomAtS` where the room was at the time.
+   * `guess` while `atS` is a joiner's first guess, before its playlist's
+   * segments say where it lands: no countdown is shown from it.
    */
-  const roomWaitRef = useRef<{ atS: number; roomAtS: number; since: number } | null>(null);
+  const roomWaitRef = useRef<{ atS: number; roomAtS: number; since: number; guess?: boolean } | null>(null);
   const [waitingForRoom, setWaitingForRoom] = useState(false);
   /** The backfill under way, for the loading screen — see the backfill
    *  effect: the stretch it fetches, `fromS` to `toS`; `reachedS`, how far
@@ -3202,7 +3204,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const roomS = roomPositionNow(sync);
     const hereS = v.currentTime;
     if (!(roomS > 0)) return false;
-    if (pictureHeldAt(v, roomS) || (roomS <= hereS && bufferAheadSeconds(v) >= 1)) {
+    // Enough of it held to start on, not a sliver: gone to the half second
+    // left of a first segment, a joiner played it, stopped, and went past the
+    // room after all (the "Viewer's picture after the room starts" check).
+    if (enoughHeldAt(v, roomS) || (roomS <= hereS && bufferAheadSeconds(v) >= 1)) {
       const toS = Math.max(roomS, hereS + 0.001);
       logEvent("Sync", "catching up with the room, where it is", {
         why,
@@ -3242,7 +3247,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (ownsSessionRef.current) handleHostSeekRef.current(roomS, false);
     else v.currentTime = roomS;
     return true;
-  }, [pictureHeldAt, landPastRoom, waitForRoom]);
+  }, [enoughHeldAt, landPastRoom, waitForRoom]);
 
   /**
    * Everyone but the host: a picture that stops while the room plays on
@@ -3483,9 +3488,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         setNoPicture(!v || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA);
       }
       // Waiting ahead of a room that plays on: how long until it gets here.
+      // Not from a joiner's first guess, which its segments then move: on 21
+      // October a joiner read 16 s for a moment, then 6.
       const sync = syncStateRef.current;
       const wait = roomWaitRef.current;
-      const leftS = wait && sync?.playing && sync.ratingKey && !sync.hostWaiting
+      const leftS = wait && (!wait.guess || (v?.readyState ?? 0) >= HTMLMediaElement.HAVE_CURRENT_DATA) &&
+        sync?.playing && sync.ratingKey && !sync.hostWaiting
         ? wait.atS - roomPositionNow(sync, isHostRef.current ? Infinity : undefined)
         : null;
       // Paused, fetching what it jumped over: how much of it is in.
@@ -4920,6 +4928,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   });
                 }
                 wait.atS = landS;
+                wait.guess = false;
                 if (Math.abs(video.currentTime - landS) > 0.01) video.currentTime = landS;
                 // After everything else has had this playlist: the P2P engine
                 // learns its segments from it.
@@ -5210,6 +5219,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             });
           } else if (waitHereForRoom || joinAheadOf !== null) {
             waitForRoom(video, joinAheadOf ?? roomS, joinAheadOf !== null ? "joining a little ahead of the room" : "rebuild");
+            if (joinAheadOf !== null && roomWaitRef.current) roomWaitRef.current.guess = true;
           }
 
           // Host: broadcast play with sessionId when manifest is ready. Skip it
@@ -5788,7 +5798,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           coverStart();
           noteGoodPosition(video);
           pictureShownRef.current = true;
-          setBuffering(false);
+          /**
+           * Whether this picture is being moved on to the room before it is
+           * watched (below). The loading screen stays up over it until the
+           * picture where the room is plays, or the wait past it takes over:
+           * dropped here, the old place played a moment and then jumped — on
+           * 21 October a viewer's film started 6 s behind the room, played
+           * two seconds of it, stopped, and jumped twelve.
+           */
+          let movedOn = false;
           // First frames after joining a stream in progress. Everything between
           // the seek above and this moment — manifest, segments, decode — the
           // room spent playing, and this client spent buffering. One correction,
@@ -5799,7 +5817,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             // Anyone who just rebuilt into a running timeline, host included —
             // the seek above aimed at the clock, this closes whatever the
             // startup cost on top of it.
-            if (sync && sync.playing) {
+            if (sync && sync.playing && !isHostRef.current && roomPositionNow(sync) - video.currentTime > LATE_START_S &&
+                !enoughHeldAt(video, roomPositionNow(sync))) {
+              // A follower the room has gone on from further than it holds
+              // enough of: past the room to wait for it, as any catch-up does.
+              // Stepped to the edge of what it held instead, it played the
+              // half second left there, stopped for the rest, and was jumped
+              // again.
+              movedOn = catchUpWithRoom("its first picture came in after the room had gone on from it");
+            } else if (sync && sync.playing) {
               const target = roomPositionNow(sync);
               // No further than this player has buffered. Jumping past it — on
               // the very first frames, with one segment in — sent the player
@@ -5823,20 +5849,33 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 });
                 resetPlaybackRate(video);
                 video.currentTime = reachable;
+                movedOn = true;
               }
             }
-          } else if (firstPicture && !isHostRef.current) {
+          } else if (!isHostRef.current) {
             // A stream whose first picture came in after the room had started
             // without it — the room waits for the host's picture alone — and
             // further behind it than LATE_START_S: to where the room is, once,
             // before anything else of it has been seen. Nearer, the soft sync
             // closes the gap unseen.
+            //
+            // And a picture that came in after a skip, once the room had run on
+            // from it further than the soft sync closes: the heartbeat jumped it
+            // a few seconds later anyway, after it had played some of where it
+            // was (21 October, a viewer's picture 5.7 s behind the room after a
+            // skip to 1:00:00 in 1917). Now, before any of it is seen.
             const sync = syncStateRef.current;
-            if (sync?.playing && !sync.hostWaiting && sync.ratingKey === itemRef.current.ratingKey &&
-                roomPositionNow(sync) - video.currentTime > LATE_START_S) {
-              catchUpWithRoom("its first picture came in after the room had started");
+            const behindS = sync?.playing && !sync.hostWaiting && sync.ratingKey === itemRef.current.ratingKey
+              ? roomPositionNow(sync) - video.currentTime
+              : 0;
+            if (behindS > (firstPicture ? LATE_START_S : HARD_SYNC_DRIFT_S)) {
+              movedOn = catchUpWithRoom(firstPicture
+                ? "its first picture came in after the room had started"
+                : "its picture came in after the room had gone on from it");
             }
           }
+          if (movedOn) caughtUpAtRef.current = Date.now();
+          else setBuffering(false);
           // Frames are moving again, so the element's own clock is the truth
           // once more and the bar can stop holding the seek target.
           setRestartingTo(null);

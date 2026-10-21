@@ -237,7 +237,7 @@ function Runner() {
   };
 
   /** When the room started after the host pressed play, and how much each had buffered by then. */
-  async function startOnce(query: string, flows: Record<string, number>, uploadKbps = 0, frameQuery = "") {
+  async function startOnce(query: string, flows: Record<string, number>, uploadKbps = 0, frameQuery = "", beforeHost?: () => Promise<void>) {
     latest.clear();
     events.clear();
     await api(`/api/test/reset?${query}`);
@@ -251,6 +251,7 @@ function Runner() {
     const gen = (frameQuery ? nextFramesWith(frameQuery) : nextFrames)(currentGen);
     setFrames(gen);
     await waitFor(() => latest.get("u-viewer")?.joined, 60_000, "the viewer to join");
+    await beforeHost?.();
     const began = Date.now();
     setHostOn(true);
     const hostStarted = await waitFor(() => firstPlay("u-host"), 90_000, "the host to start");
@@ -1802,6 +1803,83 @@ function Runner() {
   }
 
   /**
+   * A viewer whose picture comes in after the room has run on from it goes
+   * to the room before playing any of it. On 21 October a friend's 1917
+   * started 6 s behind the room, played, and was jumped 12 s; after a skip to
+   * 1:00:00 it played 4 s from 5.7 s behind, then jumped.
+   */
+  async function runPictureAfterRoom(at: "start" | "skip") {
+    setRunning(true);
+    const out: string[] = [`— a viewer's picture comes in after the room has started, at a ${at} —`];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    const viewerSaid = () => events.get("u-viewer") ?? [];
+    const hostSaid = () => events.get("u-host") ?? [];
+    /** Slow to the viewer's first segment from now, then at full speed again. */
+    const slowFirstSegment = async (from: number) => {
+      await api("/api/test/pace?user=u-viewer&ms=900");
+      // Its picture in where it went — past 100 s, from 120 or a skip to 190
+      // ("segment in" is said for a stream's first few only).
+      void waitFor(() => viewerSaid().find((e) => e.t > from && e.tag === "Video" && (e.msg === "seeked" || e.msg === "playing") &&
+        Number(e.data.bufAheadS) > 0 && Number(e.data.posS) > 100), 60_000, "the viewer's first segment")
+        .then(() => api("/api/test/pace?user=u-viewer&ms=0")).catch(() => {});
+    };
+    try {
+      let from = 0;
+      if (at === "start") {
+        // From a resume point, as 1917 was: the viewer lands on the room's clock.
+        hostQuery = "&resume=120";
+        await startOnce("p2p=0&stream=copy4long&event=1&eventS=300&fresh=1", {}, 40_000, "", async () => {
+          from = Date.now();
+          await slowFirstSegment(from);
+        });
+      } else {
+        await startOnce("p2p=0&stream=copy4long&event=1&eventS=300&fresh=1", {}, 40_000);
+        await pause(10_000);
+        from = Date.now();
+        await slowFirstSegment(from);
+        // Three minutes on: past all it holds.
+        for (let i = 0; i < 18; i++) hostKey("ArrowRight");
+      }
+      const hostPlays = await waitFor(() => hostSaid().find((e) => e.t > from && e.tag === "Video" && e.msg === "playing"), 40_000, "the host's picture");
+      const viewerPlays = await waitFor(() => viewerSaid().find((e) => e.t > from && e.tag === "Video" && e.msg === "playing"), 40_000, "the viewer's picture");
+      const lateS = (viewerPlays.t - hostPlays.t) / 1000;
+      say(`    the viewer's picture came in ${lateS.toFixed(1)}s after the host's, at ${Number(viewerPlays.data.posS).toFixed(1)}s`);
+      await pause(12_000);
+      // A wait past the room — by the speed the slow first segment came at,
+      // it can be long — is let run out before anything is judged.
+      const waits = () => viewerSaid().filter((e) => e.t >= viewerPlays.t && e.tag === "Sync" && /^ahead of the room, waiting for it/.test(e.msg)).length;
+      const waitsDone = () => viewerSaid().filter((e) => e.t >= viewerPlays.t && e.tag === "Sync" && /^done waiting for the room/.test(e.msg)).length;
+      if (waits() > waitsDone()) {
+        await waitFor(() => waitsDone() >= waits(), 30_000, "the viewer's wait for the room to end");
+        await pause(3_000);
+      }
+      // Moves after the viewer's picture came in: at once, before any of where
+      // it was is watched, or later, after some of it was — even a second of it
+      // then a jump is what was seen on 21 October.
+      const moves = viewerSaid().filter((e) => e.t >= viewerPlays.t && (
+        (e.tag === "Viewer" && /^(heartbeat drift correction|behind the room, going past it)/.test(e.msg)) ||
+        (e.tag === "Sync" && /^(settling onto the room after joining|catching up with the room)/.test(e.msg))));
+      const late = moves.filter((e) => e.t - viewerPlays.t > 250);
+      say(`    moves: ${moves.map((e) => `${e.msg} +${((e.t - viewerPlays.t) / 1000).toFixed(2)}s`).join("; ") || "none"}`);
+      say(`${lateS >= 3 ? "PASS" : "FAIL"} the viewer's picture comes in seconds after the room started (${lateS.toFixed(1)}s)`);
+      say(`${late.length === 0 ? "PASS" : "FAIL"} it doesn't play where it was and jump later (${late.length} later)`);
+      const h = latest.get("u-host");
+      const v = latest.get("u-viewer");
+      const apart = h && v ? v.pos - h.pos : NaN;
+      say(`${Math.abs(apart) < 1 && !v?.paused ? "PASS" : "FAIL"} and plays with the room (${apart.toFixed(2)}s apart)`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      hostQuery = "";
+      await api("/api/test/pace?user=u-viewer&ms=0").catch(() => {});
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
    * Clicks on the controls never pause, and a click on the picture still
    * does. On 21 October pressing the bottom bar sometimes paused the room: a
    * mouse resting on a button saw the bar fade under it, and a press on a
@@ -2319,6 +2397,8 @@ function Runner() {
         <button disabled={running} onClick={() => void runPlexLength()}>Plex's length far too long</button>
         <button disabled={running} onClick={() => void runControlsClick()}>Clicks on the controls</button>
         <button disabled={running} onClick={() => void runLandAfterSlowSkip()}>Landing after a slow skip</button>
+        <button disabled={running} onClick={() => void runPictureAfterRoom("start")}>Viewer's picture after the room starts</button>
+        <button disabled={running} onClick={() => void runPictureAfterRoom("skip")}>Viewer's picture after the room skips on</button>
         <button disabled={running} onClick={() => void runLateJoin()}>Late joiner</button>
         <button disabled={running} onClick={() => void runHandToJoiner()}>Host handed to a joiner</button>
         <button disabled={running} onClick={() => void runSkipBurst()}>Skips in a burst, in a copy</button>

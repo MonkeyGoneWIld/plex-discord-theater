@@ -33,7 +33,8 @@
 // &cache=1 answers segments as the bot does, for the browser to keep five
 // minutes (Cache-Control) — and so for the page after a pop-out to find them.
 // &cache=none for it to keep none of them (no-store), as a browser that has
-// let them go has none.
+// let them go has none. &fresh=1 gives the segments addresses no earlier run
+// had, so none of theirs is found in the browser's cache.
 //
 // &hevc=1 has the room take every stream for HEVC, as a copy of an HEVC film
 // is — the media is the same H.264, which nobody but the sync server looks
@@ -100,6 +101,8 @@ let partsOn = true;
 /** Whether segments are answered for the browser to keep, as the bot's are — see &cache=1. */
 let cacheOn = false;
 let cacheNone = false;
+/** On every segment's address, so none of an earlier run's is found in the browser's cache — see &fresh=1. */
+let urlTag = "";
 
 /** Until when each user's segments are held back. */
 const stallUntil = new Map<string, number>();
@@ -315,6 +318,7 @@ const server = http.createServer(async (req, res) => {
     partsOn = url.searchParams.get("parts") !== "0";
     cacheOn = url.searchParams.get("cache") === "1";
     cacheNone = url.searchParams.get("cache") === "none";
+    urlTag = url.searchParams.get("fresh") === "1" ? `&r=${Date.now()}` : "";
     subtitleReads.clear();
     subtitleReadPace = Number(url.searchParams.get("subPace") ?? 3) || 3;
     return json(res, { ok: true, p2p: p2pOn, stream: path.basename(streamDir), parts: partsOn });
@@ -413,7 +417,7 @@ const server = http.createServer(async (req, res) => {
     }
     const listed = names.slice(first, first + Math.ceil(eventS / segmentS));
     for (const name of listed) {
-      lines.push(`#EXTINF:${segmentS.toFixed(3)},`, `/api/test/stream/${name}?n=${fs.statSync(path.join(streamDir, name)).size}`);
+      lines.push(`#EXTINF:${segmentS.toFixed(3)},`, `/api/test/stream/${name}?n=${fs.statSync(path.join(streamDir, name)).size}${urlTag}`);
     }
     if (endlist && listed.at(-1) === names.at(-1)) lines.push("#EXT-X-ENDLIST");
     res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
@@ -422,7 +426,7 @@ const server = http.createServer(async (req, res) => {
   if (/^\/api\/plex\/hls\/[^/]+\/[^/]+\/master\.m3u8$/.test(p)) {
     const playlist = fs.readFileSync(path.join(streamDir, "index.m3u8"), "utf8")
       .replace(/^(seg\d+\.ts)$/gm, (name) => partsOn
-        ? `/api/test/stream/${name}?n=${fs.statSync(path.join(streamDir, name)).size}`
+        ? `/api/test/stream/${name}?n=${fs.statSync(path.join(streamDir, name)).size}${urlTag}`
         : `/api/test/stream/${name}`);
     res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
     return res.end(playlist);

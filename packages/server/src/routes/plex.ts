@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { pipeline } from "node:stream/promises";
 import sharp from "sharp";
 import { progressivePreview } from "../services/preview-stream.js";
+import { sendPlaylist } from "../services/send-playlist.js";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
 import { playableVersionOrder, resolutionLabel, channelLabel, transcodeFrame, qualityKbps, pictureFacts, type PictureFacts, type PictureSource } from "../services/media-versions.js";
 import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition } from "../services/segment-prefetch.js";
@@ -4849,8 +4850,7 @@ router.get(
     if (cached && !offset && ((livePlexKey && activeTranscodeKeys.has(livePlexKey)) || isFfmpegSession(sessionId))) {
       if (DEBUG) console.log("[HLS] Reusing live transcode for session:", sessionId.substring(0, 8),
         livePlexKey ? `plexKey: ${livePlexKey.substring(0, 8)}` : "(ffmpeg)");
-      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-      res.send(cached.manifest);
+      await sendPlaylist(req, res, cached.manifest);
       return;
     }
 
@@ -4877,8 +4877,7 @@ router.get(
     if (inFlight) {
       try {
         const manifest = await inFlight;
-        res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-        res.send(manifest);
+        await sendPlaylist(req, res, manifest);
       } catch (err) {
         res.status(502).json({ error: "Failed to start HLS session" });
       }
@@ -5335,8 +5334,7 @@ router.get(
 
     try {
       const manifest = await promise;
-      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-      res.send(manifest);
+      await sendPlaylist(req, res, manifest);
       // Its other subtitles aren't read here: the player asks for those in the
       // language it draws, once its buffer can spare Plex the time.
     } catch (err) {
@@ -5431,9 +5429,8 @@ async function serveMeasured(
       res.status(503).end();
       return;
     }
-    res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
     res.setHeader("Cache-Control", "no-cache");
-    res.send(playlist);
+    await sendPlaylist(req, res, playlist);
     return;
   }
   const segment = stream.segment(segPath);
@@ -5639,7 +5636,7 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
       const m3u8 = await plexRes.text();
       const authToken = req.query.token as string | undefined;
       const baseDir = segPath.substring(0, segPath.lastIndexOf("/") + 1);
-      res.send(rewriteManifestUrls(m3u8, authToken, true, baseDir));
+      await sendPlaylist(req, res, rewriteManifestUrls(m3u8, authToken, true, baseDir));
       return;
     }
 

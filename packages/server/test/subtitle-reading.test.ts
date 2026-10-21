@@ -39,10 +39,15 @@ function check(name: string, actual: unknown, expected: unknown) {
   else { fail++; console.log(`  FAIL ${name}\n         expected ${e}\n         actual   ${a}`); }
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Asks `cond` until it holds, and not once more after: a `cond` that asks
+ *  the server would ask again, and could be answered otherwise. */
 async function until(cond: () => boolean | Promise<boolean>, ms = 10_000) {
   const end = Date.now() + ms;
-  while (!(await cond()) && Date.now() < end) await sleep(25);
-  return cond();
+  for (;;) {
+    if (await cond()) return true;
+    if (Date.now() >= end) return false;
+    await sleep(25);
+  }
 }
 
 // ── The film and its subtitles ────────────────────────────────────

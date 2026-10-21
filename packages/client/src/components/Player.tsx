@@ -605,6 +605,16 @@ function streamName(notes: StreamNotes | null): string {
 }
 
 /** Put playback back to normal speed. Safe to call on anything, including null. */
+/**
+ * Whether Plex's length for a title is wrong for the file a stream measured
+ * to its end: over twice as long, and by ten minutes or more. Twice, and not
+ * less, so that the first of a film's two files (Plex adds them up) is never
+ * taken for the whole.
+ */
+function plexLengthWrong(plexS: number, fileS: number): boolean {
+  return plexS > fileS * 2.2 && plexS - fileS >= 600;
+}
+
 function resetPlaybackRate(video: HTMLVideoElement | null): void {
   if (video && video.playbackRate !== 1) video.playbackRate = 1;
 }
@@ -1933,6 +1943,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const copiedStreamRef = useRef(false);
   /** Where that playlist ends for now, in film time; null once it is complete. */
   const playlistEdgeRef = useRef<number | null>(null);
+  /** The file's own length, from such a playlist once it is complete — see itemDurationS. */
+  const [fileLength, setFileLength] = useState<{ ratingKey: string; s: number } | null>(null);
   /** Whether the current stream has shown a frame here yet. */
   const streamShownRef = useRef(false);
   /** The title's runtime, kept current every render — see itemDurationS. */
@@ -4794,6 +4806,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           }
           copiedStreamRef.current = copied;
           playlistEdgeRef.current = copied && data.details.live ? data.details.edge : null;
+          if (copied && !data.details.live && data.details.totalduration > 0) {
+            const s = data.details.totalduration;
+            const key = itemRef.current.ratingKey;
+            setFileLength((was) => (was?.ratingKey === key && Math.abs(was.s - s) < 1 ? was : { ratingKey: key, s }));
+          }
           /**
            * A follower landing a little past the room, now that its segments
            * are known: at the start of the next one instead, if where it was
@@ -7804,11 +7821,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       : lastGoodPositionRef.current;
   }
 
-  /** The title's runtime in seconds, or 0 when nothing knows it yet. */
+  /**
+   * The title's runtime in seconds, or 0 when nothing knows it yet: Plex's,
+   * unless a stream listed to its end (a copy made to the end of the file)
+   * says the file is far shorter. Plex had Grimm S3E7, a 43-minute file, at
+   * 97 hours, and JoJo S4E29 at an hour for 24 minutes: the bar ran on past
+   * the film, with its last preview frame all the way (21 October).
+   */
   function itemDurationS(): number {
     const meta = itemMeta?.ratingKey === item.ratingKey ? itemMeta : null;
     const durationMs = meta?.duration ?? item.duration ?? 0;
-    if (durationMs > 0) return durationMs / 1000;
+    const fileS = fileLength?.ratingKey === item.ratingKey ? fileLength.s : 0;
+    if (durationMs > 0) return fileS > 0 && plexLengthWrong(durationMs / 1000, fileS) ? fileS : durationMs / 1000;
     const video = videoRef.current;
     return video && Number.isFinite(video.duration) ? video.duration : 0;
   }

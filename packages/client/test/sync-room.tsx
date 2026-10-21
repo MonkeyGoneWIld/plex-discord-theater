@@ -1720,6 +1720,38 @@ function Runner() {
   }
 
   /**
+   * A title Plex gives the wrong length: the bar goes by the file's, once the
+   * copy is made to its end. On 21 October Grimm S3E7, a 43-minute file,
+   * showed as 97 hours, and the bar barely moved. A film whose two files Plex
+   * adds up keeps Plex's length: the first file is not the whole.
+   */
+  async function runPlexLength() {
+    setRunning(true);
+    const out: string[] = ["— a title Plex gives the wrong length —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      for (const [plexS, fileWins] of [[3600, true], [200, false]] as const) {
+        // The whole two minutes listed, and said to be all there is.
+        await startOnce(`p2p=0&stream=copy4&event=1&eventS=200&endlist=1&plexS=${plexS}`, {}, 40_000);
+        await pause(8_000);
+        const h = latest.get("u-host");
+        const pos = h?.pos ?? NaN;
+        const want = (pos / (fileWins ? 120 : plexS)) * 100;
+        const bar = h?.barPct ?? NaN;
+        say(`    Plex says ${plexS}s, the file is 120s: at ${pos.toFixed(1)}s the bar is at ${bar.toFixed(2)}% (${want.toFixed(2)}% of ${fileWins ? "the file" : "Plex's"})`);
+        say(`${Math.abs(bar - want) < 2 ? "PASS" : "FAIL"} ${fileWins ? "the bar goes by the file's length" : "the bar keeps Plex's length, not twice the file's"}`);
+      }
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
    * The host starting another title mid-film: everybody starts it together,
    * with a picture of it. The room's word that it waits for the new title
    * reaches a player before the title does, and on 13 October monkey26
@@ -2161,6 +2193,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runCopySkipInPlace(true)}>Skip ahead inside a copy, P2P</button>
         <button disabled={running} onClick={() => void runCopySkipInPlace(false, 8_000)}>Skip ahead inside a copy, slow</button>
         <button disabled={running} onClick={() => void runCopySkipInPlace(false, 30_000, 180)}>Skip far ahead inside a copy</button>
+        <button disabled={running} onClick={() => void runPlexLength()}>Plex's length far too long</button>
         <button disabled={running} onClick={() => void runLateJoin()}>Late joiner</button>
         <button disabled={running} onClick={() => void runHandToJoiner()}>Host handed to a joiner</button>
         <button disabled={running} onClick={() => void runSkipBurst()}>Skips in a burst, in a copy</button>

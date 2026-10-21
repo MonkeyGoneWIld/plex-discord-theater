@@ -123,6 +123,12 @@ let eventS = 40;
 /** &manifestMs=: how long a new copy's playlist takes to come, as the bot's
  *  takes while Plex starts the copy — a second or so. */
 let manifestMs = 0;
+/** &endlist=1: a copy made to its end, whose list says so once it lists the
+ *  last segment — the bot's, once ffmpeg reaches the end of the file. */
+let endlist = false;
+/** &plexS=: the length Plex gives the title, seconds, when it isn't the
+ *  file's — Grimm S3E7's was 97 hours on 21 October. */
+let plexS = 0;
 /** Where each session was asked to start: its owner says, everyone else joins it. */
 const sessionStart = new Map<string, number>();
 /** Whether streams are HEVC, and who can't play it — see &hevc=1. */
@@ -232,7 +238,7 @@ async function subtitleRead(res: http.ServerResponse, id: number, url: URL) {
 }
 
 const meta = (ratingKey: string) => ({
-  ratingKey, title: `Sync Test ${ratingKey}`, type: "movie", thumb: null, duration: lengthOf(streamDir) * 1000,
+  ratingKey, title: `Sync Test ${ratingKey}`, type: "movie", thumb: null, duration: (plexS || lengthOf(streamDir)) * 1000,
   partId: Number(ratingKey), markers: [], genres: [], versions: [], ...tracksOf(ratingKey),
   previewThumbs: previewsOn,
 });
@@ -297,6 +303,8 @@ const server = http.createServer(async (req, res) => {
     eventList = url.searchParams.get("event") === "1";
     eventS = Number(url.searchParams.get("eventS") ?? 40) || 40;
     manifestMs = Number(url.searchParams.get("manifestMs") ?? 0) || 0;
+    endlist = url.searchParams.get("endlist") === "1";
+    plexS = Number(url.searchParams.get("plexS") ?? 0) || 0;
     sessionStart.clear();
     hevcOn = url.searchParams.get("hevc") === "1";
     noHevc.clear();
@@ -403,9 +411,11 @@ const server = http.createServer(async (req, res) => {
     for (let filled = 0; filled < first * segmentS; filled += 60) {
       lines.push(`#EXTINF:${Math.min(60, first * segmentS - filled).toFixed(3)},`, "#EXT-X-GAP", "gap.ts");
     }
-    for (const name of names.slice(first, first + Math.ceil(eventS / segmentS))) {
+    const listed = names.slice(first, first + Math.ceil(eventS / segmentS));
+    for (const name of listed) {
       lines.push(`#EXTINF:${segmentS.toFixed(3)},`, `/api/test/stream/${name}?n=${fs.statSync(path.join(streamDir, name)).size}`);
     }
+    if (endlist && listed.at(-1) === names.at(-1)) lines.push("#EXT-X-ENDLIST");
     res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
     return res.end(lines.join("\n") + "\n");
   }

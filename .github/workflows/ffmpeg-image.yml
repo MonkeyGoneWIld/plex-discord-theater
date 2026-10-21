@@ -38,7 +38,7 @@ jobs:
               -vf subtitles=/tmp/burn.srt,crop=400:90:120:260,format=gray -frames:v 1 -f rawvideo - \
               | od -An -tu1 -v | tr -s " " "\n" | sort -n | tail -n 1)
             echo "brightest pixel of the burned line: $lit"; test "$lit" -gt 180
-            # An HDR film's preview frame, tone-mapped by tonemapx (ffmpeg/previews.ts).
+            # A preview frame of an HDR film, tone-mapped by tonemapx (ffmpeg/previews.ts).
             ffmpeg -hide_banner -v error -f lavfi -i testsrc2=s=640x360:d=1 \
               -vf "format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc,scale=320:-2,format=yuv420p10le,tonemapx=tonemap=hable:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=yuv420p,scale=out_range=pc,format=yuvj420p" \
               -frames:v 1 -q:v 5 -f image2pipe -c:v mjpeg - | head -c 2 | od -An -tx1 | grep -q "ff d8"

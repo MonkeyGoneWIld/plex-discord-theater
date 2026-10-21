@@ -27,6 +27,12 @@ const FRAME_TIMEOUT_MS = 30_000;
 const MAX_WAITING = 20;
 /** A file that couldn't be made isn't tried again for this long. */
 const RETRY_AFTER_MS = 60 * 60_000;
+/**
+ * Frames missed in a row that mean the film has ended: Plex's length can be
+ * far longer than the file (a Grimm episode at 97 hours), and a seek past the
+ * end draws nothing.
+ */
+const MISSES_AT_END = 30;
 
 const MAGIC = Buffer.from([0x89, 0x42, 0x49, 0x46, 13, 10, 26, 10]);
 
@@ -152,28 +158,38 @@ async function make(o: PreviewSource): Promise<string | null> {
     }
   }
   let next = frames[0] ? 1 : 0;
+  let end = count;
+  let lastDrawn = frames[0] ? 0 : -1;
+  let inARow = 0;
   await Promise.all(Array.from({ length: SEEKS_AT_ONCE }, async () => {
-    while (next < count) {
+    while (next < end) {
       const i = next++;
       frames[i] = await grab(o.film, i * PREVIEW_INTERVAL_S, vf);
+      if (frames[i]) {
+        lastDrawn = Math.max(lastDrawn, i);
+        inARow = 0;
+      } else if (++inARow >= MISSES_AT_END) {
+        end = Math.min(end, lastDrawn + 1);
+      }
     }
   }));
-  const missed = frames.filter((f) => !f).length;
+  const kept = frames.slice(0, end);
+  const missed = kept.filter((f) => !f).length;
   // A frame that couldn't be had is the one before it, or the first that could.
-  const first = frames.find((f): f is Buffer => !!f);
+  const first = kept.find((f): f is Buffer => !!f);
   if (!first) {
     logEvent("Preview", "ffmpeg couldn't make previews", { partId: o.partId, frames: count });
     return null;
   }
   let last = first;
-  const filled = frames.map((f) => (last = f ?? last));
+  const filled = kept.map((f) => (last = f ?? last));
   const file = fileFor(o.partId, o.fileSize);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, bif(filled, PREVIEW_INTERVAL_S * 1000));
   fs.renameSync(tmp, file);
   logEvent("Preview", "previews made by ffmpeg", {
-    partId: o.partId, frames: count, missed, hdr: o.hdr ? vf === SDR ? "as it is" : vf.includes("tonemapx") ? "tonemapx" : "zscale" : "no",
+    partId: o.partId, frames: kept.length, ...(end < count ? { plexFrames: count } : {}), missed, hdr: o.hdr ? vf === SDR ? "as it is" : vf.includes("tonemapx") ? "tonemapx" : "zscale" : "no",
     bytes: fs.statSync(file).size, ms: Date.now() - startedAt,
   });
   trim();

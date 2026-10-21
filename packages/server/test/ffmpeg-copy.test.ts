@@ -664,6 +664,21 @@ async function listed(variant: string, n: number) {
   }
 }
 
+/**
+ * The first of a run's segments that opens at or after `s` seconds into it.
+ * An upstream ffmpeg counts the listed cuts from zero, not from the first
+ * packet as Jellyfin's does, so it also cuts at x264's scene-change keyframes:
+ * where a burned-in line appears, say. The run's segments are more, not fewer.
+ */
+function opening(list: Array<{ duration: number; uri: string }>, s: number) {
+  let at = 0;
+  for (const e of list) {
+    if (at > s - 0.1) return e;
+    at += e.duration;
+  }
+  return list[list.length - 1];
+}
+
 console.log("\n— a re-encode —");
 {
   asked.length = 0;
@@ -781,9 +796,9 @@ async function brightness(uri: string) {
   check("is re-encoded by ffmpeg, saying why", [notes.engine, notes.video, notes.reason],
     ["ffmpeg", "transcode", "Subtitle burn-in (image-based)"]);
   check("  and Plex was never asked to transcode", transcodeAsked(), []);
-  const list = await listed(variantOf(m.text), 3);
-  const shown = await brightness(list[1].uri);
-  const gone = await brightness(list[2].uri);
+  const list = await listed(variantOf(m.text), 5);
+  const shown = await brightness(opening(list, 3).uri);
+  const gone = await brightness(opening(list, 6).uri);
   check(`  the box is in the picture while it is shown (3 s: ${shown}), and gone once it isn't (6 s: ${gone})`,
     [shown > 200, gone >= 0 && gone < 200], [true, true]);
   await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
@@ -821,10 +836,10 @@ async function brightest(uri: string, crop = "400:90:120:260") {
   const m = await master("13", id, "?subtitles=burn&subtitleStreamID=41");
   check("an SRT whose text was read is burned in by ffmpeg, not Plex",
     [notesOf(m.text).engine, notesOf(m.text).video, transcodeAsked()], ["ffmpeg", "transcode", []]);
-  const list = await listed(variantOf(m.text), 3);
+  const list = await listed(variantOf(m.text), 5);
   // "Hello there" is up from 2 to 4.5 s: on at 3, off at 6.
-  const on = await brightest(list[1].uri);
-  const off = await brightest(list[2].uri);
+  const on = await brightest(opening(list, 3).uri);
+  const off = await brightest(opening(list, 6).uri);
   check(`  its line is in the picture while it is up (3 s: ${on}), and gone after (6 s: ${off})`, [on > 180, off >= 0 && off < 60], [true, true]);
   await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
   const seek = crypto.randomUUID();
@@ -855,9 +870,9 @@ async function brightest(uri: string, crop = "400:90:120:260") {
   const m = await master("14", id, "?subtitles=burn&subtitleStreamID=51");
   check("a PGS beside the film is found on the mount and burned in by ffmpeg",
     [notesOf(m.text).engine, transcodeAsked()], ["ffmpeg", []]);
-  const list = await listed(variantOf(m.text), 3);
-  const shown = await brightness(list[1].uri);
-  const gone = await brightness(list[2].uri);
+  const list = await listed(variantOf(m.text), 5);
+  const shown = await brightness(opening(list, 3).uri);
+  const gone = await brightness(opening(list, 6).uri);
   check(`  the box shown at 3 s (${shown}), gone at 6 s (${gone})`, [shown > 200, gone >= 0 && gone < 200], [true, true]);
   await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
   const seek = crypto.randomUUID();
@@ -1261,6 +1276,11 @@ console.log("\n— previews made by ffmpeg, keyframes off the mount, segments ke
   check("  every frame a JPEG, each its own picture",
     [frames.every((f) => f[0] === 0xff && f[1] === 0xd8), new Set(frames.map((f) => f.toString("base64"))).size], [true, 6]);
   check("  kept for next time", fs.existsSync(path.join(tmp, "previews", `1-${fs.statSync(titles["1"].file).size}.bif`)), true);
+  // Plex's length far past the file's: stopped where the film ends.
+  const { makePreview } = await import("../src/services/ffmpeg/previews.js");
+  const long = await makePreview({ partId: 9001, fileSize: 1, film: titles["2"].file, durationS: 3600, hdr: false });
+  check("  a film Plex thinks an hour long gets its own minute's frames",
+    long ? fs.readFileSync(long).readUInt32LE(12) : null, 6);
   process.env.FFMPEG_PREVIEWS = "off";
   const off = await fetch(`${origin}/api/plex/preview/2/index`);
   await off.arrayBuffer();

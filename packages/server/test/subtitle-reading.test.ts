@@ -362,15 +362,15 @@ console.log("\n— skipping about —");
     [true, "Line 99 of 88", "Line 100 of 88", true]);
   const b = await ask(88, "804", 6000);
   check("a skip to where nothing has been read is answered at once", [b.ms < 1500, lineAt(b, 6000)?.text], [true, "Line 599 of 88"]);
-  // The rest of the stretch ahead comes a moment later; then nothing changes.
+  // The rest of the stretch ahead comes a moment later, and Plex's read from
+  // the start reaches it after that; then nothing changes.
   let sig = b.sig;
+  let again = b;
   await until(async () => {
-    const next = await ask(88, "804", 6000);
-    const same = next.sig === sig;
-    sig = next.sig;
-    return same;
+    again = await ask(88, "804", 6000, sig);
+    sig = again.sig;
+    return !!again.unchanged;
   });
-  const again = await ask(88, "804", 6000, sig);
   check("asked again with nothing new there: told so, not sent it all again",
     [again.unchanged, again.cues.length], [true, 0]);
   const back = await ask(88, "804", 1005);

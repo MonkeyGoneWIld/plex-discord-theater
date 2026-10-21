@@ -243,6 +243,8 @@ const plex = http.createServer((req, res) => {
           ] }] }],
     }] });
   }
+  // No previews: none of these films has had Plex's made.
+  if (/^\/library\/parts\/\d+\/indexes\/sd$/.test(url.pathname)) return res.writeHead(404).end();
   // The file itself, with byte ranges, as Plex serves it.
   const part = url.pathname.match(/^\/library\/parts\/(\d+)\/1\/file\.mkv$/);
   if (part && titles[part[1]]) {
@@ -1213,6 +1215,58 @@ console.log("\n— what the upload budget is told of each stream (qbt-manager sn
   for (const ws of sockets) ws.terminate();
   closeWebSocketServer();
   for (const id of [A, B, C, D]) await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
+}
+
+console.log("\n— previews made by ffmpeg, keyframes off the mount, segments kept in memory —");
+{
+  const { fileKeyframes } = await import("../src/services/keyframes.js");
+  asked.length = 0;
+  check("the keyframe check reads a film on the mount, not through Plex",
+    [await fileKeyframes("/library/parts/77/1/file.mkv", 77, titles["1"].file), asked.includes("/library/parts/77/1/file.mkv")],
+    ["idr", false]);
+}
+{
+  const { hotSegmentStats } = await import("../src/services/ffmpeg/hot-segments.js");
+  const { directStreamCacheDir } = await import("../src/services/direct-stream.js");
+  const before = hotSegmentStats().segments;
+  const id = crypto.randomUUID();
+  const m = await master("1", id);
+  const list = await listed(variantOf(m.text), 3);
+  const kept = hotSegmentStats().segments;
+  check("a run's segments are kept in memory as they are made", kept - before >= 3, true);
+  const first = Buffer.from(await (await fetch(origin + list[0].uri)).arrayBuffer());
+  // Its files gone from disk, what is in memory is still sent.
+  const dir = path.join(directStreamCacheDir(), "ffmpeg", id, keyOf(list[0].uri)!);
+  for (const name of fs.readdirSync(dir)) {
+    try { fs.rmSync(path.join(dir, name), { force: true }); } catch { /* being written */ }
+  }
+  const again = await fetch(origin + list[0].uri);
+  const second = Buffer.from(await again.arrayBuffer());
+  check("  and sent from there", [again.status, second.equals(first), first.length > 0], [200, true, true]);
+  await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
+  check("  and let go when the run ends", hotSegmentStats().segments < kept, true);
+}
+{
+  const meta = await (await fetch(`${origin}/api/plex/meta/1`)).json() as { previewThumbs?: boolean; versions?: Array<{ previewThumbs: boolean }> };
+  check("previews are offered for a film Plex has none for", [meta.previewThumbs, meta.versions?.[0]?.previewThumbs], [true, true]);
+  const pass0 = await fetch(`${origin}/api/plex/preview/1/index?progressive=2&pass=0`);
+  const head = Buffer.from(await pass0.arrayBuffer());
+  check("  the first pass comes once ffmpeg has made them",
+    [pass0.status, pass0.headers.get("content-type")], [200, "application/x-plex-preview-v2"]);
+  check("  six frames, ten seconds apart", [head.readUInt32LE(4 + 12), head.readUInt32LE(4 + 16)], [6, 10_000]);
+  const whole = Buffer.from(await (await fetch(`${origin}/api/plex/preview/1/index`)).arrayBuffer());
+  const count = whole.readUInt32LE(12);
+  const frames = Array.from({ length: count }, (_, i) =>
+    whole.subarray(whole.readUInt32LE(64 + i * 8 + 4), whole.readUInt32LE(64 + (i + 1) * 8 + 4)));
+  check("  every frame a JPEG, each its own picture",
+    [frames.every((f) => f[0] === 0xff && f[1] === 0xd8), new Set(frames.map((f) => f.toString("base64"))).size], [true, 6]);
+  check("  kept for next time", fs.existsSync(path.join(tmp, "previews", `1-${fs.statSync(titles["1"].file).size}.bif`)), true);
+  process.env.FFMPEG_PREVIEWS = "off";
+  const off = await fetch(`${origin}/api/plex/preview/2/index`);
+  await off.arrayBuffer();
+  const offMeta = await (await fetch(`${origin}/api/plex/meta/2`)).json() as { previewThumbs?: boolean };
+  check("with FFMPEG_PREVIEWS=off, none are made or offered", [off.status, offMeta.previewThumbs], [404, false]);
+  delete process.env.FFMPEG_PREVIEWS;
 }
 
 api.close();

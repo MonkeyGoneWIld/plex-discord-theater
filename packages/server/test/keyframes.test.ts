@@ -1,9 +1,13 @@
 /**
  * Telling a film whose keyframes are all IDR frames from an open-GOP one,
  * which is re-encoded rather than copied (services/keyframes.ts): from the
- * start of its Matroska file, and from a copied segment.
+ * start of its Matroska file — off the mount, with the ffmpeg engine — and
+ * from a copied segment.
  */
-import { matroskaKeyframes } from "../src/services/keyframes.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileKeyframes, matroskaKeyframes } from "../src/services/keyframes.js";
 import { firstKeyframe } from "../src/services/ts-timestamps.js";
 import { isISlice } from "../src/services/h264.js";
 import { NAL, matroska, tsSegment } from "./mkv-fixture.js";
@@ -41,6 +45,18 @@ check("cut off before its plain I-frame, it can't say",
 check("anything that isn't Matroska is unknown",
   matroskaKeyframes(Buffer.from("not a matroska file at all")), "unknown");
 check("as is an empty one", matroskaKeyframes(new Uint8Array()), "unknown");
+
+console.log("\n— read off the mount —");
+{
+  // No Plex here: what is said comes from the file.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "keyframes-"));
+  const file = path.join(dir, "film.mkv");
+  fs.writeFileSync(file, matroska(["idr", "p", "p", "i", "p", "i"]));
+  check("a film on the mount is read there", await fileKeyframes("/library/parts/1/1/file.mkv", 1, file), "not-idr");
+  check("one that isn't there is asked of Plex: none here, so unknown",
+    await fileKeyframes("/library/parts/2/1/file.mkv", 1, path.join(dir, "gone.mkv")), "unknown");
+  fs.rmSync(dir, { recursive: true, force: true });
+}
 
 console.log("\n— a copied segment —");
 check("opening on an IDR frame", firstKeyframe(tsSegment("idr")), "idr");

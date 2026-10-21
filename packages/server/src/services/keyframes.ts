@@ -22,11 +22,13 @@
  * like that is re-encoded instead, which puts an IDR frame at every keyframe.
  *
  * Told from the start of the file, before Plex is asked for anything: the
- * first few megabytes, read through Plex, hold several keyframes. Only
+ * first few megabytes — off the mount with the ffmpeg engine, through Plex
+ * otherwise — hold several keyframes. Only
  * Matroska is read — nearly every remux is one — and anything unclear is
  * "unknown", which is copied as before. direct-stream.ts also looks at every
  * segment it measures, for whatever this misses.
  */
+import fs from "node:fs";
 import { isISlice } from "./h264.js";
 import { plexFetch } from "./plex.js";
 
@@ -215,13 +217,24 @@ export function matroskaKeyframes(buf: Uint8Array): KeyframeKind {
 
 /**
  * The keyframes of the file Plex keeps at `partKey` ("/library/parts/…/file.mkv"),
- * from its first PROBE_BYTES. Remembered per file; "unknown" is asked again.
+ * from its first PROBE_BYTES: read off the mount when it is there (`local`,
+ * with the ffmpeg engine), through Plex otherwise. Remembered per file;
+ * "unknown" is asked again.
  */
-export async function fileKeyframes(partKey: string, fileSize: number | null): Promise<KeyframeKind> {
+export async function fileKeyframes(
+  partKey: string, fileSize: number | null, local?: string | null,
+): Promise<KeyframeKind> {
   if (!/\.mkv$/i.test(partKey)) return "unknown";
   const id = `${partKey}|${fileSize ?? ""}`;
   const remembered = known.get(id);
   if (remembered) return remembered;
+  if (local) {
+    const kind = await localKeyframes(local);
+    if (kind !== null) {
+      if (kind !== "unknown") known.set(id, kind);
+      return kind;
+    }
+  }
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), PROBE_TIMEOUT_MS);
   try {
@@ -255,5 +268,21 @@ export async function fileKeyframes(partKey: string, fileSize: number | null): P
     return "unknown";
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/** The keyframes at the start of a file on the mount; null when it can't be read. */
+async function localKeyframes(file: string): Promise<KeyframeKind | null> {
+  try {
+    const handle = await fs.promises.open(file, "r");
+    try {
+      const buf = Buffer.alloc(PROBE_BYTES);
+      const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+      return matroskaKeyframes(buf.subarray(0, bytesRead));
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
   }
 }

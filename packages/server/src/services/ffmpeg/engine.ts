@@ -41,6 +41,7 @@ import { LruMap } from "../lru.js";
 import { streamBandwidth, type Bandwidth } from "../stream-bandwidth.js";
 import { ffmpegPath, lookaheadS } from "./config.js";
 import { cpuUse, gpuUse, readUse, sampleGpu, type GpuSample } from "./gpu-use.js";
+import { dropHot, hotSegment, keepHot } from "./hot-segments.js";
 import { COPY_CLOCK_OFFSET_S } from "./plan.js";
 
 /** How far past the watcher a run is when its speed is logged, unless
@@ -321,6 +322,7 @@ async function measure(run: Run, name: string): Promise<void> {
   };
   run.segments.push(seg);
   run.byPath.set(seg.path, seg);
+  keepHot(file, data);
   throttle(run);
   notify(run);
 }
@@ -344,6 +346,7 @@ function stopRun(run: Run, why: string): void {
     reachedS: round3(run.segments[run.segments.length - 1]?.end ?? run.offsetS),
     ...used,
   });
+  dropHot(run.dir);
   void fs.promises.rm(run.dir, { recursive: true, force: true }).catch(() => {});
 }
 
@@ -544,6 +547,9 @@ export function ffmpegSegment(key: string, segPath: string): CopiedSegment | "go
   const seg = run?.byPath.get(segPath);
   if (!run || !seg) return null;
   run.lastAlive = Date.now();
+  // In memory while rooms are on it (hot-segments.ts); its file otherwise.
+  const kept = hotSegment(seg.file);
+  if (kept) return { bytes: kept.length, read: async (start, end) => kept.subarray(start, end) };
   if (!fs.existsSync(seg.file)) return "gone";
   return {
     bytes: seg.bytes,

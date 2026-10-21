@@ -10,6 +10,8 @@ import path from "node:path";
 import { trackMismatch, type Probed } from "../src/services/ffmpeg/probe.js";
 import { checkLibraryPaths, libraryReadabilityText } from "../src/services/ffmpeg/library-check.js";
 import { findSidecar } from "../src/services/ffmpeg/burn-files.js";
+import { dropHot, hotSegment, hotSegmentStats, keepHot, setHotBudget } from "../src/services/ffmpeg/hot-segments.js";
+import { bif } from "../src/services/ffmpeg/previews.js";
 
 let pass = 0;
 let fail = 0;
@@ -114,6 +116,42 @@ console.log("\n— which file a sidecar is —");
   check("German's other code in a name, and VobSub by its .idx", findSidecar(film, { ...en, codec: "vobsub", languageTag: "de",
     languageCode: "deu", language: "German" }, folder(["Heat (1995).ger.idx", "Heat (1995).ger.sub"])), at("Heat (1995).ger.idx"));
   check("a folder that can't be read: none", findSidecar(film, en, () => { throw new Error("EACCES"); }), null);
+}
+
+console.log("\n— segments kept in memory —");
+{
+  setHotBudget(30);
+  const run1 = path.join("/cache", "s1", "k1");
+  const run2 = path.join("/cache", "s1", "k10");
+  keepHot(path.join(run1, "a.ts"), Buffer.alloc(10));
+  keepHot(path.join(run1, "b.ts"), Buffer.alloc(10));
+  keepHot(path.join(run2, "c.ts"), Buffer.alloc(10));
+  hotSegment(path.join(run1, "a.ts"));
+  keepHot(path.join(run2, "d.ts"), Buffer.alloc(10));
+  check("past the budget, the least recently used goes",
+    [!!hotSegment(path.join(run1, "a.ts")), !!hotSegment(path.join(run1, "b.ts")), hotSegmentStats()],
+    [true, false, { segments: 3, bytes: 30 }]);
+  keepHot(path.join(run2, "e.ts"), Buffer.alloc(40));
+  check("one bigger than all of it isn't kept", hotSegment(path.join(run2, "e.ts")), null);
+  dropHot(run1);
+  check("a run's go when it ends, not another's whose name starts the same", hotSegmentStats(), { segments: 2, bytes: 20 });
+  setHotBudget(0);
+  check("a budget of nothing keeps nothing", hotSegmentStats(), { segments: 0, bytes: 0 });
+  setHotBudget(null);
+}
+
+console.log("\n— a BIF of previews —");
+{
+  const jpeg = (n: number) => Buffer.from([0xff, 0xd8, n, 0xff, 0xd9]);
+  const made = bif([jpeg(1), jpeg(2), jpeg(3)], 10_000);
+  const offset = (i: number) => made.readUInt32LE(64 + i * 8 + 4);
+  check("its header: the magic, version 0, three frames ten seconds apart",
+    [made.subarray(0, 8).toString("hex"), made.readUInt32LE(8), made.readUInt32LE(12), made.readUInt32LE(16)],
+    ["894249460d0a1a0a", 0, 3, 10_000]);
+  check("its index: each frame's number and where it starts, then the end",
+    [[0, 1, 2, 3].map((i) => made.readUInt32LE(64 + i * 8)), [0, 1, 2, 3].map(offset)],
+    [[0, 1, 2, 0xffffffff], [96, 101, 106, 111]]);
+  check("and the frames, in order", made.subarray(offset(1), offset(2)).toString("hex"), "ffd802ffd9");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

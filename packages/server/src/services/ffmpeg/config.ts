@@ -61,6 +61,27 @@ export function gpuDecodeOn(): boolean {
   return !off(process.env.FFMPEG_HW_DECODE);
 }
 
+/** FFMPEG_SEGMENT_MEMORY_MB: memory for the segments rooms are fetching now
+ *  (hot-segments.ts), 512 MB unless set; 0 reads every one from disk. */
+export function segmentMemoryBytes(): number {
+  const v = process.env.FFMPEG_SEGMENT_MEMORY_MB?.trim();
+  const mb = v ? Number(v) : 512;
+  return (Number.isFinite(mb) && mb >= 0 ? mb : 512) * 1024 * 1024;
+}
+
+/** FFMPEG_PREVIEWS=off: no seek-bar previews made here for a file Plex has
+ *  none for (previews.ts). */
+export function ffmpegPreviewsOn(): boolean {
+  return ffmpegEngineOn() && !off(process.env.FFMPEG_PREVIEWS);
+}
+
+/** FFMPEG_PREVIEWS_MAX_GB: room on disk for the previews made here, 20 GB
+ *  unless set; the least recently used go past it. */
+export function previewsMaxBytes(): number {
+  const gb = Number(process.env.FFMPEG_PREVIEWS_MAX_GB?.trim() || 20);
+  return (Number.isFinite(gb) && gb > 0 ? gb : 20) * 1024 ** 3;
+}
+
 /** PLAYBACK_ENGINE=ffmpeg, and ffmpeg not found missing at startup. */
 export function ffmpegEngineOn(): boolean {
   return process.env.PLAYBACK_ENGINE?.trim().toLowerCase() === "ffmpeg" && found !== false;

@@ -52,15 +52,16 @@ import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
 import { markOriginalAudio } from "../services/original-language.js";
 import { audioNotes, type AudioDecision, type SourceAudio } from "../services/stream-audio.js";
 import {
-  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegHardware, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesHevc, hwDevice,
+  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegHardware, ffmpegPreviewsOn, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesHevc, hwDevice,
   keepHdrOnReencode, localPath, lowPowerVaapi, maxEncodes, readable, recheckHardware, sizeOnDisk, tonemapAlgo, tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
-  AUDIO_KBPS, HARDWARE_NAMES, copyArgs, encodeArgs, encodeTargetKbps, inputArgs, pickBurn, planCopy, planEncode,
+  AUDIO_KBPS, HARDWARE_NAMES, copyArgs, encodeArgs, encodeTargetKbps, hdrClass, inputArgs, pickBurn, planCopy, planEncode,
   type AudioOut, type EncodeRequest, type SourceStream, type SourceVersion,
 } from "../services/ffmpeg/plan.js";
 import { probe, probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
 import { prepareBurn, sidecarOnMount } from "../services/ffmpeg/burn-files.js";
+import { madePreview, makePreview, previewBody, previewPartOf, rememberPreviewPart } from "../services/ffmpeg/previews.js";
 import {
   ffmpegEncodesRunning,
   ffmpegKeyRetired,
@@ -1091,7 +1092,8 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
     const fileEpisodes = payload.type === "episode"
       ? await episodesInSameFile(ratingKey).catch(() => [])
       : [];
-    res.json(fileEpisodes.length > 1 ? { ...payload, fileEpisodes } : payload);
+    const shown = withFfmpegPreviews(ratingKey, payload);
+    res.json(fileEpisodes.length > 1 ? { ...shown, fileEpisodes } : shown);
   } catch (err) {
     console.error("Metadata error:", err);
     res.status(502).json({ error: "Failed to fetch metadata" });
@@ -1109,6 +1111,54 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
  * Nulls are deliberately not cached: a 404 here usually means the library is
  * mid-scan, and pinning that answer for an hour would outlast the cause.
  */
+/**
+ * With the ffmpeg engine, previews offered for a version Plex has none for:
+ * made when first asked for, from the file on the mount (ffmpeg/previews.ts).
+ * Optimistic, as previewThumbs may be — a file not on the mount is a 404 the
+ * player takes as "no frames". Added per request, never stored in the payload.
+ */
+function withFfmpegPreviews(ratingKey: string, payload: Record<string, unknown>): Record<string, unknown> {
+  const versions = payload.versions as Array<{ partId: number | null; mediaIndex: number; previewThumbs: boolean }> | undefined;
+  if (!ffmpegPreviewsOn() || !versions?.some((v) => !v.previewThumbs && v.partId != null)) return payload;
+  for (const v of versions) if (v.partId != null) rememberPreviewPart(v.partId, ratingKey, v.mediaIndex);
+  return {
+    ...payload,
+    previewThumbs: payload.partId != null || payload.previewThumbs === true,
+    versions: versions.map((v) => (v.partId != null ? { ...v, previewThumbs: true } : v)),
+  };
+}
+
+/** How long a preview request waits for ffmpeg to make the part's previews. */
+const PREVIEW_WAIT_MS = 5 * 60_000;
+
+/**
+ * Previews ffmpeg makes for a part Plex has none for — waited for while the
+ * viewer still asks, up to PREVIEW_WAIT_MS, and made on regardless — or null
+ * when they can't be.
+ */
+async function ffmpegPreview(partId: number, res: Response): Promise<{ file: string; bytes: number } | null> {
+  const title = ffmpegPreviewsOn() ? previewPartOf(partId) : null;
+  if (!title) return null;
+  const source = await ffmpegSource(title.ratingKey, title.mediaIndex).catch(() => null);
+  if (!source?.file || source.partId !== partId || !source.durationS) return null;
+  const film = localPath(source.file);
+  if (!readable(film)) return null;
+  const making = makePreview({
+    partId, fileSize: source.fileSize ?? null, film, durationS: source.durationS,
+    hdr: hdrClass(source.streams.find((s) => s.streamType === 1)) !== "SDR",
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const file = await Promise.race([
+    making,
+    new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), PREVIEW_WAIT_MS);
+      res.once("close", () => resolve(null));
+    }),
+  ]);
+  clearTimeout(timer);
+  return file ? madePreview(partId, source.fileSize ?? null) : null;
+}
+
 export async function buildMeta(ratingKey: string): Promise<Record<string, unknown> | null> {
   const hit = metaCache.get(ratingKey);
   if (hit && Date.now() - hit.at < META_CACHE_TTL_MS) return rememberDuration(ratingKey, hit.payload);
@@ -3028,6 +3078,18 @@ async function loadSidecar(
   return { cues: parsed.cues };
 }
 
+/** A version's file on the mount, with the ffmpeg engine, when it can be read there. */
+async function mountedFile(ratingKey: string, mediaIndex: number): Promise<string | null> {
+  if (!ffmpegEngineOn()) return null;
+  try {
+    const source = await ffmpegSource(ratingKey, mediaIndex);
+    const film = source?.file ? localPath(source.file) : null;
+    return film && readable(film) ? film : null;
+  } catch {
+    return null;
+  }
+}
+
 /** A sidecar's file on the mount (FFMPEG_SUBTITLES), when it is found there. */
 async function sidecarFromMount(
   ratingKey: string, mediaIndex: number, streamId: number,
@@ -3360,23 +3422,33 @@ router.get("/preview/:partId/index", async (req: Request, res: Response) => {
 
   try {
     const plexRes = await plexFetch(`/library/parts/${partId}/indexes/sd`);
+    let body: ReadableStream<Uint8Array> | null = plexRes.body;
+    let declared = plexRes.headers.get("content-length");
+    let from = "plex";
     if (!plexRes.ok) {
       plexRes.body?.cancel().catch(() => {});
-      // 404 is ordinary — it means Plex has not generated previews for this
-      // file. The client reads it as "no frames" rather than as a failure.
-      res.status(plexRes.status === 404 ? 404 : 502).end();
-      return;
+      // With the ffmpeg engine, made here instead (ffmpeg/previews.ts).
+      const made = plexRes.status === 404 ? await ffmpegPreview(Number(partId), res) : null;
+      if (res.destroyed) return;
+      if (!made) {
+        // 404 is ordinary — it means Plex has not generated previews for this
+        // file. The client reads it as "no frames" rather than as a failure.
+        res.status(plexRes.status === 404 ? 404 : 502).end();
+        return;
+      }
+      body = previewBody(made.file);
+      declared = String(made.bytes);
+      from = "ffmpeg";
     }
 
-    const declared = plexRes.headers.get("content-length");
     if (declared && parseInt(declared, 10) > MAX_PREVIEW_INDEX_BYTES) {
-      plexRes.body?.cancel().catch(() => {});
+      body?.cancel().catch(() => {});
       res.status(502).end();
       return;
     }
 
     // Opt-in keeps older clients' ordinary BIF reader working.
-    if ((req.query.progressive === "1" || req.query.progressive === "2") && plexRes.body) {
+    if ((req.query.progressive === "1" || req.query.progressive === "2") && body) {
       const version = req.query.progressive === "2" ? 2 : 1;
       const transfer = randomUUID().slice(0, 8);
       const startedAt = performance.now();
@@ -3389,9 +3461,9 @@ router.get("/preview/:partId/index", async (req: Request, res: Response) => {
       res.setHeader("X-Accel-Buffering", "no");
       // Passes are a v2 layout; a v1 request always gets the whole stream.
       const onePass = version === 2 ? pass : undefined;
-      logEvent("Preview", "transfer started", { partId, transfer, transport: `progressive-v${version}`, pass: onePass });
+      logEvent("Preview", "transfer started", { partId, transfer, transport: `progressive-v${version}`, pass: onePass, from });
       try {
-        await pipeline(Readable.from(progressivePreview(plexRes.body, abort.signal, (progress) => {
+        await pipeline(Readable.from(progressivePreview(body, abort.signal, (progress) => {
           logEvent("Preview", "tier sent", {
             partId, transfer, ...progress, elapsedMs: Math.round(performance.now() - startedAt),
           });
@@ -3402,7 +3474,7 @@ router.get("/preview/:partId/index", async (req: Request, res: Response) => {
       return;
     }
 
-    logEvent("Preview", "transfer started", { partId, transport: "legacy-bif" });
+    logEvent("Preview", "transfer started", { partId, transport: "legacy-bif", from });
     res.setHeader("Content-Type", "application/octet-stream");
     if (declared) res.setHeader("Content-Length", declared);
     // The frames for a part never change. The client holds them for the length
@@ -3411,7 +3483,7 @@ router.get("/preview/:partId/index", async (req: Request, res: Response) => {
     res.setHeader("Cache-Control", "private, max-age=86400");
     // Streamed rather than buffered: this is the one response on the server
     // measured in megabytes rather than kilobytes, and it needs no inspection.
-    await pipeBody(plexRes.body, res);
+    await pipeBody(body, res);
   } catch (err) {
     // The player going away mid-transfer — leaving the title, switching to
     // another — closes the stream under it. Nothing failed.
@@ -5403,7 +5475,7 @@ router.get(
       } else if (directStreamRefused(ratingKey)) notCopied = "Direct Stream failed earlier";
       else if (
         version?.videoCodec?.toLowerCase() === "h264" && version.partKey &&
-        (await fileKeyframes(version.partKey, version.fileSize)) === "not-idr"
+        (await fileKeyframes(version.partKey, version.fileSize, await mountedFile(ratingKey, mediaIndex))) === "not-idr"
       ) {
         // An open-GOP Blu-ray: see services/keyframes.ts.
         notCopied = "Open-GOP keyframes";

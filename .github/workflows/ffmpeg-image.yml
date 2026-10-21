@@ -32,6 +32,12 @@ jobs:
             ffmpeg -hide_banner -filters | grep -E " (tonemap_opencl|tonemapx|vpp_qsv|scale_vaapi|overlay_qsv) "
             vainfo --help >/dev/null 2>&1 || test -x /usr/lib/jellyfin-ffmpeg/vainfo
             clinfo -l || true
+            # A text subtitle burned in is drawn: libass finds a font.
+            printf "1\n00:00:00,000 --> 00:00:05,000\nHello there\n" > /tmp/burn.srt
+            lit=$(ffmpeg -hide_banner -v error -f lavfi -i color=c=black:s=640x360:d=1 \
+              -vf subtitles=/tmp/burn.srt,crop=400:90:120:260,format=gray -frames:v 1 -f rawvideo - \
+              | od -An -tu1 -v | tr -s " " "\n" | sort -n | tail -n 1)
+            echo "brightest pixel of the burned line: $lit"; test "$lit" -gt 180
             setpriv --version
             id appuser
             node -e "new (require(\"better-sqlite3\"))(\":memory:\").prepare(\"select 1\").get(); console.log(\"better-sqlite3 ok\")"

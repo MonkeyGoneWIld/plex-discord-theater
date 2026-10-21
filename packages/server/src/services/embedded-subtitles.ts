@@ -44,11 +44,17 @@
  *
  * Every read is stopped on Plex once it is over. Letting go of the answer isn't
  * enough: Plex goes on reading the file to the end for nobody.
+ *
+ * ffmpeg reading a file mounted here reads the others queued for the same
+ * file in the same pass (companions): each subtitle is spread across the whole
+ * film, so one read of it is all of them, where one each was the film read
+ * three times over.
  */
 
 import Database from "better-sqlite3";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { randomUUID } from "node:crypto";
@@ -94,6 +100,9 @@ const PLEX_AHEAD_S = 1200;
 /** No Plex read from somewhere this close ahead of the read from the start:
  *  that is there within a second or so. */
 const PLEX_NOT_FOR_S = 120;
+/** The most subtitles one ffmpeg pass reads out of a file: the one asked for
+ *  and the others queued for the same file. */
+const PASS_MAX = 6;
 /** Where someone said they were counts for this long. */
 const WANTED_FOR_MS = 30_000;
 /** How often a read is checked for whether it should stop, between lines. */
@@ -203,6 +212,21 @@ export type EmbeddedSubtitle =
   | { state: "ready"; cues: Cue[] }
   | { state: "reading"; cues: Cue[]; covered: Span[] }
   | { state: "unreadable" };
+
+/**
+ * The text a subtitle was read out as, whole, when it has been — for drawing
+ * it into the picture (ffmpeg/burn-files.ts). Null when it hasn't, or was read
+ * from a file that has since changed.
+ */
+export function embeddedSubtitleText(streamId: string, fingerprint?: string | null): string | null {
+  try {
+    const row = readStmt.get(streamId);
+    if (!row?.raw || !sameFile(row.fingerprint, fingerprint ?? null)) return null;
+    return decodeSubtitle(gunzipSync(row.raw));
+  } catch {
+    return null;
+  }
+}
 
 /**
  * What is known about one, without starting anything. Null: never tried — or
@@ -617,7 +641,7 @@ async function pumpPrefetch(): Promise<void> {
   }
 }
 
-function begin(opts: ReadOptions): Reading {
+function begin(opts: ReadOptions, read: (r: Reading) => Promise<void> = (r) => run(r, opts)): Reading {
   const r: Reading = {
     streamId: opts.streamId,
     ratingKey: opts.ratingKey,
@@ -629,7 +653,7 @@ function begin(opts: ReadOptions): Reading {
     wanted: [],
     listeners: new Set(),
   };
-  r.done = run(r, opts).finally(() => {
+  r.done = read(r).finally(() => {
     if (reading.get(r.streamId) === r) reading.delete(r.streamId);
     for (const w of r.windows) {
       w.open = false;
@@ -812,6 +836,9 @@ interface Sink {
 interface ReadResult {
   /** All Plex sent, for keeping. */
   raw: Buffer;
+  /** What ffmpeg read of the companions in the same pass, each in turn: null
+   *  for one it didn't, or when the pass didn't finish. */
+  along?: Array<Buffer | null>;
   /** Why it failed — null when it was read to the end, or stopped. */
   failure: { why: string; extra?: Record<string, unknown> } | null;
   /** Ended early, by `stopped`. */
@@ -825,7 +852,7 @@ interface ReadResult {
  * ffmpeg fails before a line has come.
  */
 async function readSubtitle(
-  opts: ReadOptions, offset: number, sink: Sink, announce?: Record<string, unknown>,
+  opts: ReadOptions, offset: number, sink: Sink, announce?: Record<string, unknown>, along: FileSubtitle[] = [],
 ): Promise<ReadResult> {
   if (opts.fromFile) {
     let handed = false;
@@ -835,7 +862,7 @@ async function readSubtitle(
         handed ||= cues.length > 0;
         sink.lines(cues, upTo);
       },
-    }, announce);
+    }, announce, offset === 0 ? along : []);
     if (!result.failure || handed) return result;
     logEvent("Subtitles", "ffmpeg couldn't read a subtitle out of the file; Plex reads it", {
       ...announce, from: Math.round(offset), why: result.failure.why, ...result.failure.extra,
@@ -869,26 +896,44 @@ function lineFeed(sink: Sink, offset: number): { push(chunk: Uint8Array): void; 
  * One read of the subtitle by ffmpeg, out of the file, from `offset` seconds
  * on: ASS as it is, everything else as SRT, on the film's own clock (-copyts,
  * as the engine's streams are). Stopped however it ends.
+ *
+ * `along` are other subtitles of the same file, read in the same pass: each
+ * into a file of its own, kept once ffmpeg has gone through to the end.
  */
 async function ffmpegRead(
-  sub: FileSubtitle, offset: number, sink: Sink, announce?: Record<string, unknown>,
+  sub: FileSubtitle, offset: number, sink: Sink, announce?: Record<string, unknown>, along: FileSubtitle[] = [],
 ): Promise<ReadResult> {
   const startedAt = Date.now();
-  const ass = ["ass", "ssa"].includes((sub.codec ?? "").toLowerCase());
+  const isAss = (s: FileSubtitle) => ["ass", "ssa"].includes((s.codec ?? "").toLowerCase());
+  const output = (s: FileSubtitle, to: string) =>
+    ["-map", `0:${s.index}`, "-c:s", isAss(s) ? "copy" : "srt", "-f", isAss(s) ? "ass" : "srt", to];
+  const alongDir = along.length ? fs.mkdtempSync(path.join(os.tmpdir(), "pdt-subtitles-")) : null;
+  const alongFiles = along.map((_, i) => path.join(alongDir!, `${i}.txt`));
   const args = [
     "-hide_banner", "-nostdin", "-loglevel", "error",
     ...(offset > 0 ? ["-ss", String(offset)] : []),
     "-copyts", "-start_at_zero",
     "-protocol_whitelist", "file", "-i", sub.file,
-    "-map", `0:${sub.index}`, "-c:s", ass ? "copy" : "srt", "-f", ass ? "ass" : "srt", "pipe:1",
+    ...output(sub, "pipe:1"),
+    ...along.flatMap((s, i) => output(s, alongFiles[i])),
   ];
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   let firstByteMs: number | null = null;
   let stopped = false;
   const stderr: string[] = [];
-  const result = (failure: ReadResult["failure"]): ReadResult =>
-    ({ raw: Buffer.concat(chunks), failure, stopped, firstByteMs });
+  let finished = false;
+  const result = (failure: ReadResult["failure"]): ReadResult => ({
+    raw: Buffer.concat(chunks), failure, stopped, firstByteMs,
+    along: alongFiles.map((file) => {
+      if (!finished) return null;
+      try {
+        return fs.statSync(file).size <= MAX_BYTES ? fs.readFileSync(file) : null;
+      } catch {
+        return null;
+      }
+    }),
+  });
 
   let proc: ReturnType<typeof spawn>;
   try {
@@ -907,6 +952,7 @@ async function ffmpegRead(
   if (announce) {
     logEvent("Subtitles", "ffmpeg is reading an embedded subtitle out of the file", {
       ...announce, from: Math.round(offset), codec: sub.codec, stream: sub.index,
+      ...(along.length ? { alsoStreams: along.map((s) => s.index).join(",") } : {}),
     });
   }
   const feed = lineFeed(sink, offset);
@@ -936,12 +982,14 @@ async function ffmpegRead(
     if (stopped) return result(timedOut ? { why: `timed out after ${READ_TIMEOUT_MS / 60_000} min` } : null);
     if (code !== 0) return result({ why: `ffmpeg exited ${code}`, extra: { stderr: stderr.slice(-3).join(" | ") || "none" } });
     feed.end();
+    finished = true;
     return result(null);
   } catch (err) {
     return result({ why: `ffmpeg: ${err instanceof Error ? err.message : String(err)}` });
   } finally {
     clearTimeout(timer);
     clearInterval(check);
+    if (alongDir) setImmediate(() => fs.rm(alongDir, { recursive: true, force: true }, () => {}));
   }
 }
 
@@ -1053,41 +1101,41 @@ async function plexRead(
   }
 }
 
-/** The read from the start: what is drawn until it's done, and what is kept. */
-async function run(r: Reading, opts: ReadOptions): Promise<void> {
-  const startedAt = Date.now();
-  const details: Record<string, unknown> = { ratingKey: r.ratingKey, streamId: r.streamId };
-  let firstLineMs: number | null = null;
-
-  const fail = (why: string, extra: Record<string, unknown> = {}) => {
-    unreadable.set(r.streamId, Date.now());
-    logEvent("Subtitles", "couldn't read an embedded subtitle out of the file", {
-      ...details, why, ...extra, ms: Date.now() - startedAt,
-    });
-  };
-
-  const result = await readSubtitle(opts, 0, {
-    lines: (cues, upTo) => {
-      if (firstLineMs === null && cues.length > 0) firstLineMs = Date.now() - startedAt;
-      const last = r.cues.at(-1);
-      r.cues = last && cues.length > 0 && cues[0].start < last.start
-        ? [...r.cues, ...cues].sort((a, b) => a.start - b.start || a.end - b.end)
-        : r.cues.concat(cues);
-      r.frontier = Math.max(r.frontier, upTo);
-      changed(r);
-    },
-  }, details);
-  if (result.failure) {
-    fail(result.failure.why, result.failure.extra);
-    return;
+/**
+ * Reads queued for the same file as `opts`, taken out of the queue to be read
+ * in its pass by ffmpeg: the rest of what the queue would have read of the
+ * file, one pass each, later.
+ */
+function companions(opts: ReadOptions): ReadOptions[] {
+  const film = opts.fromFile;
+  if (!film) return [];
+  const out: ReadOptions[] = [];
+  for (let i = 0; i < prefetchQueue.length && out.length < PASS_MAX - 1;) {
+    const q = prefetchQueue[i];
+    const f = q.read.fromFile;
+    const same = !!f && f.file === film.file && f.index !== film.index && q.read.streamId !== opts.streamId &&
+      !out.some((o) => o.streamId === q.read.streamId);
+    if (same && !embeddedSubtitleState(q.read.streamId, q.read.fingerprint) && (!q.stillWanted || q.stillWanted())) {
+      prefetchQueue.splice(i, 1);
+      out.push(q.read);
+    } else {
+      i++;
+    }
   }
+  return out;
+}
 
-  const raw = result.raw;
+/** What a read from the start came to: its cues kept, or why it is unreadable. */
+function keep(
+  r: Reading, opts: ReadOptions, raw: Buffer, startedAt: number, stats: Record<string, unknown> = {},
+): void {
+  const details = { ratingKey: r.ratingKey, streamId: r.streamId };
   const parsed = parseSubtitles(decodeSubtitle(raw));
   if (!parsed || parsed.cues.length === 0) {
-    fail(raw.length === 0 ? "nothing came" : "not a subtitle that came", {
-      bytes: raw.length,
-      start: JSON.stringify(decodeSubtitle(raw.subarray(0, 120))),
+    unreadable.set(r.streamId, Date.now());
+    logEvent("Subtitles", "couldn't read an embedded subtitle out of the file", {
+      ...details, why: raw.length === 0 ? "nothing came" : "not a subtitle that came",
+      bytes: raw.length, start: JSON.stringify(decodeSubtitle(raw.subarray(0, 120))), ms: Date.now() - startedAt,
     });
     return;
   }
@@ -1103,8 +1151,62 @@ async function run(r: Reading, opts: ReadOptions): Promise<void> {
   }
   logEvent("Subtitles", "read an embedded subtitle out of the file", {
     ...details, by: opts.fromFile ? "ffmpeg" : "plex", format: parsed.format, cues: parsed.cues.length, bytes: raw.length,
-    firstByteMs: result.firstByteMs, firstLineMs, ms: Date.now() - startedAt,
+    ...stats, ms: Date.now() - startedAt,
   });
+}
+
+/** The read from the start: what is drawn until it's done, and what is kept. */
+async function run(r: Reading, opts: ReadOptions): Promise<void> {
+  const startedAt = Date.now();
+  const details: Record<string, unknown> = { ratingKey: r.ratingKey, streamId: r.streamId };
+  let firstLineMs: number | null = null;
+
+  const fail = (why: string, extra: Record<string, unknown> = {}) => {
+    unreadable.set(r.streamId, Date.now());
+    logEvent("Subtitles", "couldn't read an embedded subtitle out of the file", {
+      ...details, why, ...extra, ms: Date.now() - startedAt,
+    });
+  };
+
+  // The others of this file waiting their turn, read now, in the same pass:
+  // reading too from here on, so nothing starts another read of them.
+  const along = companions(opts).map((o) => {
+    let settle!: (raw: Buffer | null) => void;
+    const came = new Promise<Buffer | null>((resolve) => { settle = resolve; });
+    begin(o, async (cr) => {
+      const raw = await came;
+      if (raw) keep(cr, o, raw, startedAt, { inPassWith: r.streamId });
+    });
+    return { o, settle };
+  });
+  if (along.length) {
+    logEvent("Subtitles", "reading subtitles of the same file in one pass", {
+      ...details, also: along.map((a) => a.o.streamId).join(","),
+    });
+  }
+
+  let result: ReadResult | null = null;
+  try {
+    result = await readSubtitle(opts, 0, {
+    lines: (cues, upTo) => {
+      if (firstLineMs === null && cues.length > 0) firstLineMs = Date.now() - startedAt;
+      const last = r.cues.at(-1);
+      r.cues = last && cues.length > 0 && cues[0].start < last.start
+        ? [...r.cues, ...cues].sort((a, b) => a.start - b.start || a.end - b.end)
+        : r.cues.concat(cues);
+      r.frontier = Math.max(r.frontier, upTo);
+      changed(r);
+    },
+  }, details, along.map((a) => a.o.fromFile!));
+  } finally {
+    // Those the pass didn't read are left to be asked for again.
+    along.forEach((a, i) => a.settle(result?.along?.[i] ?? null));
+  }
+  if (result.failure) {
+    fail(result.failure.why, result.failure.extra);
+    return;
+  }
+  keep(r, opts, result.raw, startedAt, { firstByteMs: result.firstByteMs, firstLineMs });
 }
 
 /** For tests: forget everything known, on disk too. */

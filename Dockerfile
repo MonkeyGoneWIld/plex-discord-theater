@@ -66,12 +66,14 @@ ARG APP_GID=101
 
 # Debian security patches published since the base image was cut, then tini
 # (PID 1 signal handling), curl (the healthcheck), clinfo (whether OpenCL sees
-# the GPU, for scripts/diagnose-ffmpeg.mjs), ffmpeg and the OpenCL runtime.
+# the GPU, for scripts/diagnose-ffmpeg.mjs), a font for libass to draw a text
+# subtitle burned in with (an ASS track's own fonts come out of the film),
+# ffmpeg and the OpenCL runtime.
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update; \
     apt-get upgrade -y; \
-    apt-get install -y --no-install-recommends ca-certificates curl tini clinfo; \
+    apt-get install -y --no-install-recommends ca-certificates curl tini clinfo fonts-dejavu-core fontconfig; \
     mkdir /tmp/debs; \
     cd /tmp/debs; \
     curl -fsSLo jellyfin-ffmpeg8.deb "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v${JELLYFIN_FFMPEG_VER}/jellyfin-ffmpeg8_${JELLYFIN_FFMPEG_VER}-trixie_amd64.deb"; \

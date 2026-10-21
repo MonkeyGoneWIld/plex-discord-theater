@@ -344,7 +344,7 @@ async function reportEngine(): Promise<void> {
   console.log(
     "[Config] playback engine: ffmpeg —",
     `${found.version};`,
-    `copies H.264 and HEVC files itself, HDR included; re-encodes on ${hw.note}, picture subtitles burned in; a text subtitle burned in still goes to Plex;`,
+    `copies H.264 and HEVC files itself, HDR included; re-encodes on ${hw.note}, subtitles burned in (text ones from their text, with their fonts);`,
     map.length ? `library at ${map.map(([from, to]) => `${from} → ${to}`).join(", ")} (MEDIA_PATH_MAP)` : "library at Plex's own paths",
   );
   try {

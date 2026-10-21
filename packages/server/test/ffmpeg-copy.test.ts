@@ -126,6 +126,25 @@ const PGS_FILM = path.join(tmp, "pgs.mkv");
     "-map", "0", "-map", "1", "-c", "copy", PGS_FILM]);
   if (r.status !== 0) throw new Error(`couldn't make pgs.mkv: ${r.stderr}`);
 }
+/** Black, with the SRT and the ASS in it: what is burned in shows. */
+const BLACK_FILM = path.join(tmp, "black.mkv");
+{
+  const r = spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-y",
+    "-f", "lavfi", "-i", "color=c=black:s=640x360:r=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+    "-i", path.join(tmp, "lines.srt"), "-i", path.join(tmp, "lines.ass"),
+    "-t", "60", "-map", "0:v", "-map", "1:a", "-map", "2", "-map", "3", "-c:v", "libx264", "-preset", "ultrafast", "-g", "48",
+    "-pix_fmt", "yuv420p", "-c:a", "aac", "-c:s", "copy", BLACK_FILM]);
+  if (r.status !== 0) throw new Error(`couldn't make black.mkv: ${r.stderr}`);
+}
+/** A film in a folder of its own, with an English PGS and an English SRT
+ *  beside it, and a French SRT that isn't the one asked for. */
+const SIDECAR_DIR = path.join(tmp, "Sidecar Film (2001)");
+fs.mkdirSync(SIDECAR_DIR);
+const SIDECAR_FILM = path.join(SIDECAR_DIR, "Sidecar Film (2001).mkv");
+fs.copyFileSync(path.join(tmp, "black.mkv"), SIDECAR_FILM);
+fs.copyFileSync(SUP, path.join(SIDECAR_DIR, "Sidecar Film (2001).en.sup"));
+fs.writeFileSync(path.join(SIDECAR_DIR, "Sidecar Film (2001).en.srt"), SRT);
+fs.writeFileSync(path.join(SIDECAR_DIR, "Sidecar Film (2001).fr.srt"), "1\n00:00:01,000 --> 00:00:02,000\nBonjour\n");
 const BROKEN_FILM = path.join(tmp, "broken.mkv");
 fs.writeFileSync(BROKEN_FILM, Buffer.alloc(200_000, 7));
 
@@ -165,6 +184,21 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
   // And a file whose size isn't what Plex last read.
   12: { file: AAC_FILM, plexPath: AAC_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2,
     size: fs.statSync(AAC_FILM).size + 1 },
+  // Black, with its SRT (41) and ASS (42) to burn in.
+  13: { file: BLACK_FILM, plexPath: BLACK_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2, subs: [
+    { id: 41, streamType: 3, index: 2, codec: "srt", language: "English", languageCode: "eng" },
+    { id: 42, streamType: 3, index: 3, codec: "ass", language: "Japanese", languageCode: "jpn" },
+  ] },
+  // Black, with sidecars: a PGS (51) and an SRT (52), which Plex can't send.
+  14: { file: SIDECAR_FILM, plexPath: SIDECAR_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2, subs: [
+    { id: 51, streamType: 3, codec: "pgs", key: "/library/streams/51", language: "English", languageCode: "eng", languageTag: "en" },
+    { id: 52, streamType: 3, codec: "srt", key: "/library/streams/52", language: "English", languageCode: "eng", languageTag: "en" },
+  ] },
+  // The text film again, under other stream ids: read ahead, both in one pass.
+  15: { file: TEXT_FILM, plexPath: TEXT_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2, subs: [
+    { id: 61, streamType: 3, index: 2, codec: "srt", language: "English", languageCode: "eng" },
+    { id: 62, streamType: 3, index: 3, codec: "ass", language: "Japanese", languageCode: "jpn" },
+  ] },
 };
 
 const asked: string[] = [];
@@ -706,8 +740,19 @@ for (const [rk, why, said] of [
 }
 {
   asked.length = 0;
-  await master("1", crypto.randomUUID(), "?subtitles=burn&subtitleStreamID=22");
-  check("a stream with a text subtitle burned in goes to Plex", transcodeAsked().includes("/video/:/transcode/universal/decision"), true);
+  plexStarts = true;
+  const id = crypto.randomUUID();
+  const m = await master("1", id, "?subtitles=burn&subtitleStreamID=22");
+  plexStarts = false;
+  check("a text subtitle burned in whose text can't be had goes to Plex, saying so",
+    [transcodeAsked().includes("/video/:/transcode/universal/decision"), notesOf(m.text).fallback],
+    [true, "the subtitle's text isn't read out yet"]);
+  await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
+  // Its text is read out meanwhile, for the next start: through Plex here,
+  // which the fake refuses. Done before what follows counts Plex's requests.
+  const { embeddedSubtitleState } = await import("../src/services/embedded-subtitles.js");
+  for (let i = 0; i < 40 && embeddedSubtitleState("22")?.state !== "unreadable"; i++) await sleep(250);
+  check("  and its text is read out meanwhile, for the next start", embeddedSubtitleState("22")?.state, "unreadable");
   asked.length = 0;
   process.env.PLAYBACK_ENGINE = "plex";
   await master("1", crypto.randomUUID());
@@ -752,6 +797,103 @@ async function brightness(uri: string) {
   await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
 }
 
+console.log("\n— a text subtitle burned in, and one beside the film —");
+/** The brightest pixel where a subtitle is drawn, 0–255, at a segment's first frame. */
+async function brightest(uri: string, crop = "400:90:120:260") {
+  const file = path.join(tmp, `seg-${crypto.randomUUID()}.ts`);
+  fs.writeFileSync(file, Buffer.from(await (await fetch(origin + uri)).arrayBuffer()));
+  const r = spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-i", file, "-frames:v", "1",
+    "-vf", `crop=${crop},format=gray`, "-f", "rawvideo", "pipe:1"]);
+  const px = r.stdout as Buffer;
+  return px.length ? px.reduce((a, b) => Math.max(a, b), 0) : -1;
+}
+{
+  // Read out by ffmpeg first, as the player would have.
+  for (let i = 0; i < 40; i++) {
+    const a = await (await fetch(`${origin}/api/plex/subtitles/41?ratingKey=13&mediaIndex=0`)).json() as { complete?: boolean };
+    if (a.complete) break;
+    await sleep(250);
+  }
+  asked.length = 0;
+  const id = crypto.randomUUID();
+  const m = await master("13", id, "?subtitles=burn&subtitleStreamID=41");
+  check("an SRT whose text was read is burned in by ffmpeg, not Plex",
+    [notesOf(m.text).engine, notesOf(m.text).video, transcodeAsked()], ["ffmpeg", "transcode", []]);
+  const list = await listed(variantOf(m.text), 3);
+  // "Hello there" is up from 2 to 4.5 s: on at 3, off at 6.
+  const on = await brightest(list[1].uri);
+  const off = await brightest(list[2].uri);
+  check(`  its line is in the picture while it is up (3 s: ${on}), and gone after (6 s: ${off})`, [on > 180, off >= 0 && off < 60], [true, true]);
+  await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
+  const seek = crypto.randomUUID();
+  const later = await master("13", seek, "?subtitles=burn&subtitleStreamID=41&offset=38");
+  const after = await listed(variantOf(later.text), 2);
+  // "Halfway", 40 to 42 s.
+  const before = await brightest(after[0].uri);
+  const there = await brightest(after[1].uri);
+  check(`  after a seek to 38 s, on time: not at 38 s (${before}), there at 41 s (${there})`, [before >= 0 && before < 60, there > 180], [true, true]);
+  await fetch(`${origin}/api/plex/hls/session/${seek}?reason=test`, { method: "DELETE" });
+}
+{
+  // The ASS, never read: its text comes out of the mkv's index, the first time.
+  asked.length = 0;
+  const second = crypto.randomUUID();
+  const again = await master("13", second, "?subtitles=burn&subtitleStreamID=42");
+  check("an ASS never read is burned in by ffmpeg from the mkv's index, Plex never asked",
+    [notesOf(again.text).engine, transcodeAsked()], ["ffmpeg", []]);
+  const list = await listed(variantOf(again.text), 2);
+  // "Konnichiwa", 3 to 5 s.
+  const on = await brightest(list[1].uri);
+  check(`  drawn by libass (3 s: ${on})`, on > 180, true);
+  await fetch(`${origin}/api/plex/hls/session/${second}?reason=test`, { method: "DELETE" });
+}
+{
+  asked.length = 0;
+  const id = crypto.randomUUID();
+  const m = await master("14", id, "?subtitles=burn&subtitleStreamID=51");
+  check("a PGS beside the film is found on the mount and burned in by ffmpeg",
+    [notesOf(m.text).engine, transcodeAsked()], ["ffmpeg", []]);
+  const list = await listed(variantOf(m.text), 3);
+  const shown = await brightness(list[1].uri);
+  const gone = await brightness(list[2].uri);
+  check(`  the box shown at 3 s (${shown}), gone at 6 s (${gone})`, [shown > 200, gone >= 0 && gone < 200], [true, true]);
+  await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
+  const seek = crypto.randomUUID();
+  const later = await master("14", seek, "?subtitles=burn&subtitleStreamID=51&offset=31");
+  const after = await listed(variantOf(later.text), 2);
+  const before = await brightness(after[0].uri);
+  const there = await brightness(after[1].uri);
+  check(`  on the film's clock after a seek: not at 31 s (${before}), there at 34 s (${there})`,
+    [before >= 0 && before < 200, there > 200], [true, true]);
+  await fetch(`${origin}/api/plex/hls/session/${seek}?reason=test`, { method: "DELETE" });
+}
+{
+  asked.length = 0;
+  const a = await (await fetch(`${origin}/api/plex/subtitles/52?ratingKey=14&mediaIndex=0`)).json() as
+    { cues?: Array<{ start: number; text: string }> };
+  check("an SRT beside the film is read off the mount, its French neighbour not taken for it",
+    [a.cues?.map((c) => [c.start, c.text]), asked.includes("/library/streams/52")], [[[2, "Hello there"], [40, "Halfway"]], false]);
+}
+{
+  // An ASS track's fonts come out of the film under names of their own.
+  const { prepareBurn } = await import("../src/services/ffmpeg/burn-files.js");
+  const { probe } = await import("../src/services/ffmpeg/probe.js");
+  const font = path.join(tmp, "Fake Sans.ttf");
+  fs.writeFileSync(font, Buffer.from("not really a font"));
+  const withFont = path.join(tmp, "with-font.mkv");
+  spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-y", "-i", TEXT_FILM, "-map", "0", "-c", "copy",
+    "-attach", font, "-metadata:s:t", "mimetype=font/ttf", "-metadata:s:t", "filename=../../escaped.ttf", withFont]);
+  const input = ["-protocol_whitelist", "file", "-i", withFont];
+  const made = await prepareBurn("fonts-test", {
+    sub: { id: 32, streamType: 3, index: 3, codec: "ass" }, kind: "text", film: withFont, input, probed: await probe(input),
+    storedText: () => ASS, indexText: async () => null, sidecarBytes: async () => null, startOf: async () => null,
+  });
+  check("an ASS track's font comes out of the film beside its text, not where its name points",
+    made.ok && [path.basename(made.file), made.fonts && fs.readdirSync(made.fonts), made.fonts &&
+      fs.readFileSync(path.join(made.fonts, "0.ttf"), "utf8"), fs.existsSync(path.join(tmp, "..", "escaped.ttf"))],
+    ["subtitle.ass", ["0.ttf"], "not really a font", false]);
+}
+
 console.log("\n— text subtitles read by ffmpeg, out of the file —");
 {
   asked.length = 0;
@@ -772,6 +914,27 @@ console.log("\n— text subtitles read by ffmpeg, out of the file —");
     [true, [[3, 5, "Konnichiwa"], [41, 43, "Mata ne"]]]);
   check("with nothing asked of Plex's subtitle reader, nor a track selected on the item",
     asked.filter((p) => p.startsWith("/subtitles") || /^\/library\/parts\/\d+$/.test(p)), []);
+}
+{
+  const { prefetchEmbeddedSubtitles, embeddedSubtitleState } = await import("../src/services/embedded-subtitles.js");
+  const said: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => { said.push(a.join(" ")); log(...a); };
+  const read = (id: number, index: number, codec: string) => ({
+    streamId: String(id), ratingKey: "15", mediaIndex: 0, withTrackSelected: <T>(start: () => Promise<T>) => start(),
+    fromFile: { file: TEXT_FILM, index, codec },
+  });
+  prefetchEmbeddedSubtitles([read(61, 2, "srt"), read(62, 3, "ass")]);
+  for (let i = 0; i < 40 && !["61", "62"].every((id) => embeddedSubtitleState(id)?.state === "ready"); i++) await sleep(250);
+  console.log = log;
+  const cues = (id: string) => {
+    const st = embeddedSubtitleState(id);
+    return st?.state === "ready" ? st.cues.map((c) => c.text) : st?.state ?? null;
+  };
+  check("two of a film's subtitles read ahead are both read", [cues("61"), cues("62")],
+    [["Hello there", "Halfway"], ["Konnichiwa", "Mata ne"]]);
+  check("  in one pass of ffmpeg through the film",
+    said.filter((l) => l.includes("ffmpeg is reading an embedded subtitle out of the file")).length, 1);
 }
 
 console.log("\n— stopping —");

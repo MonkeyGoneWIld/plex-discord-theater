@@ -31,6 +31,7 @@ import {
   decodeSubtitle,
   prefetchEmbeddedSubtitles,
   readEmbeddedSubtitle,
+  embeddedSubtitleText,
   type EmbeddedSubtitle,
   type FileSubtitle,
   type ReadOptions,
@@ -51,14 +52,15 @@ import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
 import { markOriginalAudio } from "../services/original-language.js";
 import { audioNotes, type AudioDecision, type SourceAudio } from "../services/stream-audio.js";
 import {
-  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegHardware, gpuDecodeOn, gpuEncodesHevc, hwDevice,
+  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegHardware, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesHevc, hwDevice,
   keepHdrOnReencode, localPath, lowPowerVaapi, maxEncodes, readable, recheckHardware, sizeOnDisk, tonemapAlgo, tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
-  AUDIO_KBPS, HARDWARE_NAMES, copyArgs, encodeArgs, encodeTargetKbps, inputArgs, planCopy, planEncode, type AudioOut,
-  type EncodeRequest, type SourceStream, type SourceVersion,
+  AUDIO_KBPS, HARDWARE_NAMES, copyArgs, encodeArgs, encodeTargetKbps, inputArgs, pickBurn, planCopy, planEncode,
+  type AudioOut, type EncodeRequest, type SourceStream, type SourceVersion,
 } from "../services/ffmpeg/plan.js";
-import { probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
+import { probe, probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
+import { prepareBurn, sidecarOnMount } from "../services/ffmpeg/burn-files.js";
 import {
   ffmpegEncodesRunning,
   ffmpegKeyRetired,
@@ -2929,7 +2931,7 @@ async function embeddedSubtitle(
  * leaves it to Plex.
  */
 async function subtitleFile(ratingKey: string, mediaIndex: number, streamId: number): Promise<FileSubtitle | null> {
-  if (!ffmpegEngineOn()) return null;
+  if (!ffmpegSubtitlesOn()) return null;
   try {
     const source = await ffmpegSource(ratingKey, mediaIndex);
     const sub = source?.streams.find((s) => s.streamType === 3 && s.id === streamId);
@@ -2955,7 +2957,7 @@ async function fileLines(
   const part = media?.Part?.[0] as (PlexPart & { file?: string }) | undefined;
   if (!part?.key || !(media?.container === "mkv" || /\.mkv$/i.test(part.key))) return null;
   // Out of the file itself when it is mounted here (PLAYBACK_ENGINE=ffmpeg).
-  const local = ffmpegEngineOn() && part.file ? localPath(part.file) : null;
+  const local = ffmpegSubtitlesOn() && part.file ? localPath(part.file) : null;
   const range = local && readable(local) ? fileRanges(local) : undefined;
   const index = await mkvSubtitleIndex(part.key, part.size ?? null, range);
   if (!index) return null;
@@ -2983,17 +2985,24 @@ const MAX_SUBTITLE_BYTES = 64 * 1024 * 1024;
  * parsed. On failure, the status the route answers with and why.
  */
 async function loadSidecar(
-  streamId: string,
+  streamId: string, title?: { ratingKey: string; mediaIndex: number },
 ): Promise<{ cues: Cue[] } | { status: number; error: string }> {
   const hit = subtitleCache.get(streamId);
   if (hit && Date.now() - hit.at < SUBTITLE_CACHE_TTL_MS) return { cues: hit.cues };
 
-  const plexRes = await plexFetch(`/library/streams/${streamId}`);
-  if (!plexRes.ok) return { status: plexRes.status === 404 ? 404 : 502, error: "Subtitle not available" };
-
-  // Plex does not always send a length for these, so the cap is enforced on
-  // what actually arrived rather than on what was promised.
-  const raw = await plexRes.arrayBuffer();
+  // Off the mount, with the ffmpeg engine, when it is found there for certain
+  // (burn-files.ts findSidecar); Plex otherwise.
+  const onMount = title ? await sidecarFromMount(title.ratingKey, title.mediaIndex, Number(streamId)) : null;
+  let raw: ArrayBuffer | Buffer;
+  if (onMount) {
+    raw = onMount.bytes;
+  } else {
+    const plexRes = await plexFetch(`/library/streams/${streamId}`);
+    if (!plexRes.ok) return { status: plexRes.status === 404 ? 404 : 502, error: "Subtitle not available" };
+    // Plex does not always send a length for these, so the cap is enforced on
+    // what actually arrived rather than on what was promised.
+    raw = await plexRes.arrayBuffer();
+  }
   if (raw.byteLength > MAX_SUBTITLE_BYTES) {
     logEvent("Subtitles", "sidecar too large to be a subtitle", {
       streamId, bytes: raw.byteLength,
@@ -3014,9 +3023,25 @@ async function loadSidecar(
 
   subtitleCache.set(streamId, { cues: parsed.cues, at: Date.now() });
   logEvent("Subtitles", "sidecar ready to draw", {
-    streamId, format: parsed.format, cues: parsed.cues.length,
+    streamId, format: parsed.format, cues: parsed.cues.length, from: onMount ? onMount.file : "plex",
   });
   return { cues: parsed.cues };
+}
+
+/** A sidecar's file on the mount (FFMPEG_SUBTITLES), when it is found there. */
+async function sidecarFromMount(
+  ratingKey: string, mediaIndex: number, streamId: number,
+): Promise<{ file: string; bytes: Buffer } | null> {
+  if (!ffmpegSubtitlesOn()) return null;
+  try {
+    const source = await ffmpegSource(ratingKey, mediaIndex);
+    const sub = source?.streams.find((s) => s.streamType === 3 && s.id === streamId && s.key);
+    if (!source?.file || !sub) return null;
+    const film = localPath(source.file);
+    return readable(film) ? sidecarOnMount(film, sub) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Whether to read a title's other subtitles ahead of anyone asking — on unless
@@ -3118,7 +3143,7 @@ async function prefetchSubtitles(
   const picked = [lead, ...sameLanguage].slice(0, SUBTITLE_READ_AHEAD_MAX);
   for (const t of picked.filter((t) => t.sidecar)) {
     try {
-      await loadSidecar(String(t.id));
+      await loadSidecar(String(t.id), { ratingKey, mediaIndex });
     } catch {
       // Fetched again when someone picks it, and reported then.
     }
@@ -3241,9 +3266,11 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
   const ratingKey = typeof req.query.ratingKey === "string" && NUMERIC_RE.test(req.query.ratingKey)
     ? req.query.ratingKey
     : null;
+  let title: { ratingKey: string; mediaIndex: number } | undefined;
   if (ratingKey) {
     const requested = Number(req.query.mediaIndex);
     const mediaIndex = Number.isInteger(requested) && requested >= 0 ? requested : await defaultMediaIndex(ratingKey);
+    title = { ratingKey, mediaIndex };
     // Only this one. The title's others in its language are read once the
     // player has a buffer to spare for it, and asks (readSameLanguageAhead).
     const track = await subtitleTrackOf(ratingKey, mediaIndex, Number(streamId));
@@ -3279,7 +3306,7 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
   }
 
   try {
-    const loaded = await loadSidecar(streamId);
+    const loaded = await loadSidecar(streamId, title);
     if ("status" in loaded) {
       res.status(loaded.status).json({ error: loaded.error });
       return;
@@ -4725,12 +4752,45 @@ async function startWithFfmpeg(o: {
     }
     const [maxWidth, maxHeight] = o.frame.split("x").map(Number);
     const hardware = ffmpegHardware();
+    // A text subtitle, or a picture one beside the film: its file made ready
+    // for ffmpeg to draw from (burn-files.ts).
+    let burnFiles: Pick<EncodeRequest, "burnFile" | "burnFonts" | "burnFileStartS"> = {};
+    const picked = o.burnSubtitleId ? pickBurn(source, o.burnSubtitleId) : null;
+    if (picked?.ok && picked.kind !== "picture") {
+      const sub = picked.sub;
+      const fingerprint = source.partId != null ? `${source.partId}:${source.fileSize ?? "?"}` : null;
+      const ready = await prepareBurn(`${sub.id}-${fingerprint ?? "?"}`, {
+        sub, kind: picked.kind, film: fromMount ? local : null, input, probed: await probed,
+        storedText: () => embeddedSubtitleText(String(sub.id), fingerprint),
+        indexText: async () => {
+          const read = await fileLines(o.ratingKey, o.mediaIndex, sub.id);
+          return read ? read(0, Infinity) : null;
+        },
+        sidecarBytes: async () => {
+          const res = await plexFetch(`/library/streams/${sub.id}`);
+          return res.ok ? Buffer.from(await res.arrayBuffer()) : null;
+        },
+        startOf: async (file) => (await probe(inputArgs({ local: file })))?.startS ?? null,
+      });
+      if (!ready.ok) {
+        // Read out now, for the next start: a seek, or the next viewer.
+        if (picked.kind === "text" && !sub.key) {
+          void embeddedSubtitle(o.ratingKey, o.mediaIndex, String(sub.id), fingerprint, sub.codec ?? null)
+            .catch(() => {});
+        }
+        return toPlex(ready.why, "can't burn the subtitle in", { why: ready.why, subtitle: sub.id });
+      }
+      burnFiles = { burnFile: ready.file, burnFonts: ready.fonts, burnFileStartS: ready.fileStartS };
+      logEvent("FFmpeg", "subtitle made ready to burn in", {
+        session, ratingKey: o.ratingKey, subtitle: sub.id, kind: picked.kind, from: ready.from, fonts: ready.fonts ? "yes" : "no",
+      });
+    }
     const ask: EncodeRequest = {
       audioStreamId: o.audioStreamID || null, hevcOk: o.hevcEncode && gpuEncodesHevc(), hardware,
       kbps: o.transcodeKbps, peakKbps: o.peakKbps, maxWidth, maxHeight, keepHdr: keepHdrOnReencode(),
       tonemapper: tonemapper(), tonemapAlgo: tonemapAlgo(), burn: o.burnSubtitleId ?? null,
       audioChannels: audioChannels(), preset: encodePreset(), lowPower: lowPowerVaapi(),
-      gpuDecode: gpuDecodeOn() ? undefined : false,
+      gpuDecode: gpuDecodeOn() ? undefined : false, ...burnFiles,
     };
     let plan = planEncode(source, ask);
     if (!plan.ok) return toPlex(plan.why, "can't make it", { why: plan.why, notCopied: reason });

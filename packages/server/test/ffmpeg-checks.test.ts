@@ -1,13 +1,15 @@
 /**
  * The ffmpeg engine's checks on the library, without ffmpeg: a file's streams
  * against Plex's (ffmpeg/probe.ts), and whether the library is on the mount
- * at startup (ffmpeg/library-check.ts).
+ * at startup (ffmpeg/library-check.ts), and which file beside a film a
+ * sidecar Plex lists is (ffmpeg/burn-files.ts findSidecar).
  */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { trackMismatch, type Probed } from "../src/services/ffmpeg/probe.js";
 import { checkLibraryPaths, libraryReadabilityText } from "../src/services/ffmpeg/library-check.js";
+import { findSidecar } from "../src/services/ffmpeg/burn-files.js";
 
 let pass = 0;
 let fail = 0;
@@ -85,6 +87,33 @@ console.log("\n— the library on the mount, at startup —");
   check("all there, said plainly", libraryReadabilityText(libraries.slice(0, 1)), "Movies 2/2 readable");
   delete process.env.MEDIA_PATH_MAP;
   fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+console.log("\n— which file a sidecar is —");
+{
+  const film = "/data/movies/Heat (1995)/Heat (1995).mkv";
+  const folder = (names: string[]) => () => names;
+  const at = (name: string) => path.join(path.dirname(film), name);
+  const en = { id: 1, streamType: 3, codec: "srt", key: "/library/streams/1", languageTag: "en", languageCode: "eng", language: "English" };
+  const files = ["Heat (1995).mkv", "Heat (1995).en.srt", "Heat (1995).en.forced.srt", "Heat (1995).en.sdh.srt",
+    "Heat (1995).fr.srt", "Heat (1995).English.sup", "Heat (1995) - Behind the Scenes.en.srt", "Other.en.srt"];
+  check("the one named for its language, not its forced or SDH ones, nor another film's",
+    findSidecar(film, en, folder(files)), at("Heat (1995).en.srt"));
+  check("its forced one", findSidecar(film, { ...en, forced: true }, folder(files)), at("Heat (1995).en.forced.srt"));
+  check("its SDH one", findSidecar(film, { ...en, hearingImpaired: true }, folder(files)), at("Heat (1995).en.sdh.srt"));
+  check("French by its two letters", findSidecar(film, { ...en, languageTag: "fr", languageCode: "fra", language: "French" },
+    folder(files)), at("Heat (1995).fr.srt"));
+  check("a PGS one by its language's name and .sup", findSidecar(film, { ...en, codec: "pgs" }, folder(files)),
+    at("Heat (1995).English.sup"));
+  check("German, which none of them is: none", findSidecar(film, { ...en, languageTag: "de", languageCode: "deu", language: "German" },
+    folder(files)), null);
+  check("a file named for the film alone, when it is the only one",
+    findSidecar(film, en, folder(["Heat (1995).mkv", "Heat (1995).srt"])), at("Heat (1995).srt"));
+  check("but not when two say its language", findSidecar(film, en, folder(["Heat (1995).srt", "Heat (1995).eng.SRT",
+    "Heat (1995).en.srt"])), null);
+  check("German's other code in a name, and VobSub by its .idx", findSidecar(film, { ...en, codec: "vobsub", languageTag: "de",
+    languageCode: "deu", language: "German" }, folder(["Heat (1995).ger.idx", "Heat (1995).ger.sub"])), at("Heat (1995).ger.idx"));
+  check("a folder that can't be read: none", findSidecar(film, en, () => { throw new Error("EACCES"); }), null);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -16,7 +16,7 @@
  * - A seek in front of a stream's first picture goes to it, and one waiting
  *   for its segment waits (lib/copyStart pictureAfterSeek).
  */
-import { LAND_INTO_SEGMENT_S, MAX_WAIT_FOR_ROOM_S, cameFromCache, catchUpLeadS, landingBySize, landingFor, recentSegmentBytesPerS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
+import { LAND_INTO_SEGMENT_S, MAX_WAIT_FOR_ROOM_S, cameFromCache, catchUpLeadS, landingBySize, landingBytesPerS, landingFor, recentSegmentBytesPerS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS } from "../src/lib/bufferTrim";
@@ -215,6 +215,32 @@ console.log("\n— and far enough past it for what it lands in to come first —
     at(landingBySize(2716, 2716, partly, bps, 2716 + 25)), at(2732.3 + LAND_INTO_SEGMENT_S));
   check("and with no speed to say it will come in time, not landed on the cached one",
     landingBySize(2716, 2716, partly, null, 2716 + 25) > 2716 + 1, true);
+}
+
+console.log("\n— a landing goes by the fastest recent segment, not a slow start —");
+{
+  const MB = 1_000_000;
+  const now = 1_000_000;
+  // The viewer on 20176 skipped to 45:23 on 21 October: 7.21 MB in 3.0 s,
+  // 2.12 in 1.0, 4.34 in 3.5 and 2.87 in 5.0 — about 8 Mbps over the last ten
+  // seconds — then 5.75 MB in 2.6 s once it had landed.
+  const skipped = [{ at: now - 11_000, bytes: 7.21 * MB, ms: 3_000 }, { at: now - 10_000, bytes: 2.12 * MB, ms: 1_000 },
+    { at: now - 7_000, bytes: 4.34 * MB, ms: 3_500 }, { at: now - 5_000, bytes: 2.87 * MB, ms: 5_000 }];
+  const windowBps = 1 * MB;
+  check("the fastest segment of the last minute, over a slow last few seconds",
+    Math.round(landingBytesPerS(windowBps, skipped, now)! / 1000), Math.round(7.21 * MB / 3 / 1000));
+  check("the window, when that is faster", landingBytesPerS(9 * MB, skipped, now), 9 * MB);
+  check("the window on a second go", landingBytesPerS(windowBps, skipped, now, true), windowBps);
+  check("not a segment under a megabyte, whose time is mostly asking for it",
+    landingBytesPerS(windowBps, [{ at: now - 1_000, bytes: 0.4 * MB, ms: 100 }], now), windowBps);
+  check("not one over a minute old", landingBytesPerS(windowBps, [{ at: now - 61_000, bytes: 8 * MB, ms: 1_000 }], now), windowBps);
+  check("nothing to go by: nothing", landingBytesPerS(null, [], now), null);
+  // What it does to the landing on that skip: segments of about 5.5 MB every
+  // four seconds from the room on.
+  const ahead = Array.from({ length: 10 }, (_, i) => ({ start: 2733 + i * 4, duration: 4, bytes: 5.5 * MB }));
+  const before = landingBySize(2733.47 + 20, 2733.47, ahead, windowBps, 2733.47 + 25) - 2733.47;
+  const after = landingBySize(2733.47 + 20, 2733.47, ahead, landingBytesPerS(windowBps, skipped, now), 2733.47 + 25) - 2733.47;
+  check(`it lands ${after.toFixed(1)}s past the room, not ${before.toFixed(1)}`, after < 6, true);
 }
 
 console.log("\n— a segment out of the browser's cache says nothing of the connection —");

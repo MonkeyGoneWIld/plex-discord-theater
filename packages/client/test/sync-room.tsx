@@ -1752,6 +1752,56 @@ function Runner() {
   }
 
   /**
+   * A viewer whose downloads slow to nothing just after a skip, as both
+   * players asking the bot for the new place at once do, stops and goes past
+   * the room to wait there: a few seconds past it, by how fast its segments
+   * came a moment before, not twenty by the slow few seconds. On 21 October
+   * half the landings were 14 to 22 s past the room; the picture came 2 to 3 s
+   * after, and the viewer sat out the rest with it in.
+   */
+  async function runLandAfterSlowSkip() {
+    setRunning(true);
+    const out: string[] = ["— a viewer's downloads held up just after a skip —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    const viewerSaid = () => events.get("u-viewer") ?? [];
+    try {
+      await startOnce("p2p=0&stream=copy4long&event=1&eventS=300", {}, 40_000);
+      await pause(10_000);
+      // Slow from the skip — each part of a segment 1.2 s after the last, a
+      // segment every ten seconds or so — until it has gone past the room;
+      // then at full speed again.
+      await api("/api/test/pace?user=u-viewer&ms=1200");
+      const from = latest.get("u-host")!.pos;
+      const heldAt = Date.now();
+      // Three minutes on: past all it holds, as a skip in a film is.
+      for (let i = 0; i < 18; i++) hostKey("ArrowRight");
+      say(`… skipped from ${from.toFixed(0)}s to about ${(from + 180).toFixed(0)}s, the viewer's downloads slow`);
+      const landed = await waitFor(() => viewerSaid().find((e) => e.t > heldAt && /going past it to wait there/.test(e.msg)), 60_000, "the viewer to go past the room");
+      await api("/api/test/pace?user=u-viewer&ms=0");
+      const pastS = Number(landed.data.toS) - Number(landed.data.roomS);
+      const speed = viewerSaid().filter((e) => e.t <= landed.t + 50 && e.msg === "the speed a landing goes by").at(-1);
+      const done = await waitFor(() => viewerSaid().find((e) => e.t > landed.t && /^done waiting for the room/.test(e.msg)), 40_000, "the room to reach it");
+      const pictureAt = viewerSaid().find((e) => e.t > landed.t && e.tag === "Video" && e.msg === "seeked")?.t;
+      say(`    ${pastS.toFixed(1)}s past the room${speed ? `, by ${speed.data.mbps} Mbps (the last few seconds: ${speed.data.windowMbps})` : ""}; its picture ${pictureAt ? `${((pictureAt - landed.t) / 1000).toFixed(1)}s` : "never said"} after, the room ${((done.t - landed.t) / 1000).toFixed(1)}s after`);
+      say(`${pastS < 8 ? "PASS" : "FAIL"} it goes a few seconds past the room, not twenty (${pastS.toFixed(1)}s)`);
+      await pause(10_000);
+      const again = viewerSaid().filter((e) => e.t > landed.t && /going past it to wait there/.test(e.msg));
+      const h = latest.get("u-host");
+      const v = latest.get("u-viewer");
+      const apart = h && v ? v.pos - h.pos : NaN;
+      say(`${again.length === 0 && Math.abs(apart) < 1 && !v?.paused ? "PASS" : "FAIL"} and plays on with the room, without going past it again (${again.length} more; ${apart.toFixed(2)}s apart)`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      await api("/api/test/pace?user=u-viewer&ms=0").catch(() => {});
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
    * Clicks on the controls never pause, and a click on the picture still
    * does. On 21 October pressing the bottom bar sometimes paused the room: a
    * mouse resting on a button saw the bar fade under it, and a press on a
@@ -2268,6 +2318,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runCopySkipInPlace(false, 30_000, 180)}>Skip far ahead inside a copy</button>
         <button disabled={running} onClick={() => void runPlexLength()}>Plex's length far too long</button>
         <button disabled={running} onClick={() => void runControlsClick()}>Clicks on the controls</button>
+        <button disabled={running} onClick={() => void runLandAfterSlowSkip()}>Landing after a slow skip</button>
         <button disabled={running} onClick={() => void runLateJoin()}>Late joiner</button>
         <button disabled={running} onClick={() => void runHandToJoiner()}>Host handed to a joiner</button>
         <button disabled={running} onClick={() => void runSkipBurst()}>Skips in a burst, in a copy</button>

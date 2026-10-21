@@ -288,7 +288,7 @@ const server = http.createServer(async (req, res) => {
     const who = url.searchParams.get("user") ?? "u-host";
     const ms = Number(url.searchParams.get("ms") ?? 0);
     if (ms > 0) paceMs.set(who, ms);
-    else paceMs.delete(who);
+    else { paceMs.delete(who); nextSlot.delete(who); }
     return json(res, { ok: true });
   }
   if (p === "/api/test/reset") {
@@ -440,7 +440,8 @@ const server = http.createServer(async (req, res) => {
       nextSlot.set(who, slot + pace);
     }
     for (;;) {
-      const until = Math.max(slot, stallUntil.get(who) ?? 0);
+      // A pace lifted lets go of what waits for its turn, as a stall ended does.
+      const until = Math.max(paceMs.has(who) ? slot : asked, stallUntil.get(who) ?? 0);
       if (Date.now() >= until) break;
       await new Promise((r) => setTimeout(r, Math.min(200, until - Date.now())));
     }

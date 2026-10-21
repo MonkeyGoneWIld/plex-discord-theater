@@ -220,6 +220,45 @@ export function landingBySize(
   return Math.max(targetS, Math.min(alone, limitS));
 }
 
+/** How far back a segment from the bot counts towards a landing's speed, and the least of one that does — see landingBytesPerS. */
+export const LAND_FASTEST_WITHIN_MS = 60_000;
+export const LAND_FASTEST_MIN_BYTES = 1_000_000;
+
+/**
+ * The speed a landing past the room goes by (landingBySize), bytes a second:
+ * how fast things came in over the last few seconds, `windowBytesPerS` — or
+ * the fastest of the segments of a megabyte or more that came from the bot in
+ * the last minute, `segments`, if that is faster.
+ *
+ * The last few seconds before a stop are, as often as not, the start of a
+ * stream or of a skip: both players asking the bot for their first segments at
+ * once, and the bot starting the stream. It is not the connection. On 21
+ * October a viewer on 20176 skipped to 45:23 got its segments at 19, 18, 10
+ * and 5 Mbps, stopped, and went 20.6 s past the room by the last of them; the
+ * next two came at 17.5, and it sat 18 s with its picture in. Half the
+ * landings that day were like it: 11 to 18 s spent waiting with the picture
+ * in, past film the viewer never saw.
+ *
+ * Not on a second go (`again`): a viewer that stopped again having landed by
+ * the fastest has a connection slower than that now, and goes by the window.
+ */
+export function landingBytesPerS(
+  windowBytesPerS: number | null,
+  segments: ReadonlyArray<{ at: number; bytes: number; ms: number }>,
+  nowMs: number,
+  again = false,
+): number | null {
+  if (again) return windowBytesPerS;
+  let fastest: number | null = null;
+  for (const s of segments) {
+    if (nowMs - s.at > LAND_FASTEST_WITHIN_MS || s.bytes < LAND_FASTEST_MIN_BYTES || !(s.ms > 0)) continue;
+    const bps = (s.bytes * 1000) / s.ms;
+    if (fastest === null || bps > fastest) fastest = bps;
+  }
+  if (fastest === null) return windowBytesPerS;
+  return windowBytesPerS !== null && windowBytesPerS > fastest ? windowBytesPerS : fastest;
+}
+
 /**
  * Whether a segment that came in `bytes` in `ms` came out of the browser's
  * cache — faster than any player's connection to the bot — and so says

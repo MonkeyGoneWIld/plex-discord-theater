@@ -37,7 +37,7 @@ import { carryTrackPrefs, describeWatched, endTrackSitting, isCommentary, mergeT
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
-import { LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, cameFromCache, catchUpLeadS, landingBySize, landingFor, recentSegmentBytesPerS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
+import { LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, cameFromCache, catchUpLeadS, landingBySize, landingBytesPerS, landingFor, recentSegmentBytesPerS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, nextSegmentInS, pictureStartFor, pictureAfterSeek } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
@@ -1555,6 +1555,20 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    *  anything in flight], the last fifteen seconds of it: the speed things
    *  come in at, which readyToGo goes by. */
   const meterReadingsRef = useRef<Array<[number, number, number]>>([]);
+  /** The segments that came from the bot in the last minute, for a landing's speed (lib/roomWait landingBytesPerS). */
+  const botSegmentsRef = useRef<Array<{ at: number; bytes: number; ms: number }>>([]);
+  /** The speed a landing past the room goes by — see lib/roomWait landingBytesPerS. */
+  const landingSpeed = useCallback((again = false) => {
+    const now = Date.now();
+    const windowBps = comingInBytesPerS(meterReadingsRef.current, now) ?? networkBytesPerSRef.current;
+    const bps = landingBytesPerS(windowBps, botSegmentsRef.current, now, again);
+    logEvent("Sync", "the speed a landing goes by", {
+      mbps: bps === null ? null : Number(((bps * 8) / 1e6).toFixed(1)),
+      windowMbps: windowBps === null ? null : Number(((windowBps * 8) / 1e6).toFixed(1)),
+      again,
+    });
+    return bps;
+  }, []);
   /** When the picture has stopped for want of data while playing, lately —
    *  each stop asks for more in hand before going on (lib/readyCushion). */
   const stopsRef = useRef<number[]>([]);
@@ -3045,8 +3059,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           const frags = hlsRef.current ? levelFragments(hlsRef.current) : null;
           const limitS = Math.min(end - 1, roomS + MAX_WAIT_FOR_ROOM_S - 5);
           // Far enough for what it lands in to come first — lib/roomWait landingBySize.
-          const speed = comingInBytesPerS(meterReadingsRef.current, Date.now()) ?? networkBytesPerSRef.current;
-          const landS = landingFor(landingBySize(roomS + leadS, roomS, sizedSegments(frags), speed, limitS), frags, limitS);
+          const landS = landingFor(landingBySize(roomS + leadS, roomS, sizedSegments(frags), landingSpeed(), limitS), frags, limitS);
           logEvent("Sync", "catching up: behind the room, going past it to wait there", {
             offS: Number(offS.toFixed(2)), leadS, toS: Number(landS.toFixed(2)), ...snapshot(v),
           });
@@ -3155,15 +3168,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * jumped nine seconds into a segment it hadn't got, stopped for six, and was
    * jumped again — three stops in twenty seconds.
    */
-  const landPastRoom = useCallback((video: HTMLVideoElement, roomS: number): number | null => {
+  const landPastRoom = useCallback((video: HTMLVideoElement, roomS: number, again = false): number | null => {
     const leadS = catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs());
     const end = video.seekable.length ? video.seekable.end(video.seekable.length - 1) : NaN;
     if (!Number.isFinite(end) || roomS + leadS >= end - 1) return null;
     const frags = hlsRef.current ? levelFragments(hlsRef.current) : null;
     const limitS = Math.min(end - 1, roomS + MAX_WAIT_FOR_ROOM_S - 5);
-    const speed = comingInBytesPerS(meterReadingsRef.current, Date.now()) ?? networkBytesPerSRef.current;
-    return landingFor(landingBySize(roomS + leadS, roomS, sizedSegments(frags), speed, limitS), frags, limitS);
-  }, []);
+    return landingFor(landingBySize(roomS + leadS, roomS, sizedSegments(frags), landingSpeed(again), limitS), frags, limitS);
+  }, [landingSpeed]);
 
   /**
    * Everyone but the host: one move forward, to where the room is now.
@@ -3182,7 +3194,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * Forward only, so nothing is shown twice, and once, so nothing stutters.
    * Whether it moved.
    */
-  const catchUpWithRoom = useCallback((why: string): boolean => {
+  const catchUpWithRoom = useCallback((why: string, again = false): boolean => {
     const v = videoRef.current;
     const sync = syncStateRef.current;
     if (!v || isHostRef.current || !sync?.playing || sync.hostWaiting || !sync.connected) return false;
@@ -3203,7 +3215,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       return true;
     }
     if (roomS <= hereS) return false;
-    const landS = landPastRoom(v, roomS);
+    const landS = landPastRoom(v, roomS, again);
     if (landS !== null) {
       logEvent("Sync", "catching up with the room, going past it to wait there", {
         why,
@@ -3259,7 +3271,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (starvedMs < (stuck ? STUCK_CATCH_UP_AFTER_MS : STARVED_CATCH_UP_AFTER_MS)) return;
     const why = caughtUpAtRef.current ? "the room went past where it caught up to before its picture came"
       : stuck ? "its picture stuck with the buffer ahead" : "its picture stopped for want of data";
-    if (catchUpWithRoom(why)) caughtUpAtRef.current = Date.now();
+    if (catchUpWithRoom(why, !!caughtUpAtRef.current)) caughtUpAtRef.current = Date.now();
   }, [catchUpWithRoom]);
 
   /**
@@ -4636,6 +4648,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   if (easingOffRef.current) return;
                   networkSegmentMsRef.current = ms;
                   networkBytesPerSRef.current = comingInBytesPerS(meterReadingsRef.current, Date.now()) ?? (bytesLength * 1000) / Math.max(1, ms);
+                  if (downloadSource !== "p2p") {
+                    const kept = botSegmentsRef.current;
+                    kept.push({ at: Date.now(), bytes: bytesLength, ms });
+                    while (kept.length && Date.now() - kept[0].at > LAND_FASTEST_WITHIN_MS) kept.shift();
+                  }
                   // For the page after this one, at most every ten seconds.
                   if (Date.now() - segmentKeptAt > 10_000) {
                     segmentKeptAt = Date.now();

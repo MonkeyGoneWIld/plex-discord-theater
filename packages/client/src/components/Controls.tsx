@@ -523,6 +523,11 @@ export function Controls({
   const visibleRef = useRef(true);
   visibleRef.current = visible;
   const revealTapRef = useRef(false);
+  // Whether the mouse is resting on a bar — see the hide countdown.
+  const overBarRef = useRef(false);
+  // Whether the press of the click under way landed on the picture — see the
+  // overlay's onClick.
+  const pressedPictureRef = useRef(false);
   // When and where the last picture tap landed, for the double-tap test below.
   const lastTapRef = useRef<{ at: number; zone: "back" | "forward" | null }>({ at: 0, zone: null });
   const [hoveringProgress, setHoveringProgress] = useState(false);
@@ -673,8 +678,13 @@ export function Controls({
     // follows the bar's pointerdown lands here and restarts the countdown the
     // drag had just cleared, and hiding the controls takes the bar away mid-
     // drag. The drag's end starts a fresh countdown.
+    //
+    // Nor from under a mouse resting on a bar. Someone aiming at a button who
+    // paused over it for three seconds saw the bar fade, and their click went
+    // through to the picture and paused the room (21 Oct). Moving off the bar
+    // starts the countdown again.
     hideTimer.current = setTimeout(() => {
-      if (!draggingRef.current) setVisible(false);
+      if (!draggingRef.current && !overBarRef.current) setVisible(false);
     }, HIDE_DELAY_MS);
   }, []);
 
@@ -682,13 +692,19 @@ export function Controls({
     const parent = videoRef.current?.parentElement?.parentElement;
     if (!parent) return;
     const onMove = () => resetHideTimer();
+    // A mouse only: a tap leaves no pointer resting anywhere.
+    const onPointerMove = (event: PointerEvent) => {
+      if (event.pointerType === "mouse") overBarRef.current = !!(event.target as Element | null)?.closest?.("[data-scrim]");
+    };
     const onLeave = () => {
+      overBarRef.current = false;
       // A drag carried past the player's edge is still a drag.
       if (draggingRef.current) return;
       if (hideTimer.current) clearTimeout(hideTimer.current);
       setVisible(false);
     };
     parent.addEventListener("mousemove", onMove);
+    parent.addEventListener("pointermove", onPointerMove);
     parent.addEventListener("mouseleave", onLeave);
     // Touch has no mousemove, so on a phone the bar hid after 3s and never came
     // back: every tap fell through the hidden (pointer-events: none) overlay to
@@ -709,6 +725,7 @@ export function Controls({
       // only revealed it.
       if (event.type === "pointerdown") {
         revealTapRef.current = (event as PointerEvent).pointerType !== "mouse" && !visibleRef.current;
+        if ((event as PointerEvent).pointerType !== "mouse") overBarRef.current = false;
       }
       if (event.type === "touchstart" && (event as TouchEvent).touches.length > 1) revealTapRef.current = false;
       resetHideTimer();
@@ -718,6 +735,7 @@ export function Controls({
     resetHideTimer();
     return () => {
       parent.removeEventListener("mousemove", onMove);
+      parent.removeEventListener("pointermove", onPointerMove);
       parent.removeEventListener("mouseleave", onLeave);
       parent.removeEventListener("pointerdown", onReveal);
       parent.removeEventListener("touchstart", onReveal);
@@ -1511,6 +1529,18 @@ export function Controls({
     : 0;
   const barHeight = hoveringProgress || scrubPct != null ? 8 : 5;
 
+  /** Whether a press or click on the overlay landed on the picture — see its onClick. */
+  const onPicture = (e: React.MouseEvent<HTMLDivElement>) => {
+    const hit = e.target as HTMLElement;
+    if (hit === e.currentTarget) return true;
+    // A phone tap belongs to the gesture layer, which already means something
+    // else by it — show or hide the bar, twice to skip — and play/pause is a
+    // button in the middle of the picture there, not a tap on the surround.
+    if (phone || !hit.hasAttribute("data-scrim")) return false;
+    const bar = progressRef.current?.getBoundingClientRect();
+    return !bar || e.clientY < bar.top;
+  };
+
   // Hoisted out of the tree below because a phone wraps it in a row with the
   // elapsed and remaining times either side, and a desktop doesn't.
   const progressBar = (
@@ -1626,18 +1656,16 @@ export function Controls({
         // is the transport row, the padding beside it and the strip under it,
         // all of it bar rather than picture. One comparison covers both
         // scrims, the top one being entirely above the scrub bar already.
+        //
+        // And pressed there as well as released there. A press on a control
+        // let go of somewhere else — a drag along the scrub bar or the volume
+        // ending above it — is a click on what the two have in common, this
+        // overlay or a scrim, and it paused the room (21 Oct).
+        onPointerDown={(e) => { pressedPictureRef.current = onPicture(e); }}
         onClick={(e) => {
-          const hit = e.target as HTMLElement;
-          let deadSpace = hit === e.currentTarget;
-          // A phone tap belongs to the gesture layer, which already means
-          // something else by it — show or hide the bar, twice to skip — and
-          // play/pause is a button in the middle of the picture there, not a
-          // tap on the surround.
-          if (!deadSpace && !phone && hit.hasAttribute("data-scrim")) {
-            const bar = progressRef.current?.getBoundingClientRect();
-            deadSpace = !bar || e.clientY < bar.top;
-          }
-          if (deadSpace) onSurfaceClick?.();
+          const pressed = pressedPictureRef.current;
+          pressedPictureRef.current = false;
+          if (pressed && onPicture(e)) onSurfaceClick?.();
         }}
       >
       {/* Phone gesture layer.

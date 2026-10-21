@@ -1785,6 +1785,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [showZoomPanel, setShowZoomPanel] = useState(false);
   const zoomPhone = useMediaQuery(PHONE_QUERY);
   const zoomRootRef = useRef<HTMLDivElement>(null);
+  /** Where the press of the click under way landed — see the player box's onClick. */
+  const pressedOnRef = useRef<EventTarget | null>(null);
   const zoomMeta = itemMeta?.ratingKey === item.ratingKey ? itemMeta : null;
   // The title as the control bar shows it — set where that is computed, below.
   const displayTitleRef = useRef(formatMediaTitle(item));
@@ -8336,7 +8338,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // so the browser gives the click to what the two share — this — and
       // neither the video's click-to-pause nor the controls' saw it. Only
       // every other click on the picture paused (17 Oct).
-      onClick={isPip ? undefined : (event) => { if (event.target === event.currentTarget) togglePlayPause(); }}
+      //
+      // Pressed on the picture, then: a press on a control let go of over the
+      // picture, as the controls faded under it, is the same click the other
+      // way round, and it paused the room (21 Oct).
+      onPointerDownCapture={(event) => { pressedOnRef.current = event.target; }}
+      onClick={isPip ? undefined : (event) => {
+        const pressedOn = pressedOnRef.current;
+        pressedOnRef.current = null;
+        if (event.target === event.currentTarget && (pressedOn === videoRef.current || pressedOn === event.currentTarget)) togglePlayPause();
+      }}
     >
       {!isPip && (syncState?.authFailed ? (
         <div style={styles.error}>Session expired — please close and restart the activity</div>

@@ -1752,6 +1752,79 @@ function Runner() {
   }
 
   /**
+   * Clicks on the controls never pause, and a click on the picture still
+   * does. On 21 October pressing the bottom bar sometimes paused the room: a
+   * mouse resting on a button saw the bar fade under it, and a press on a
+   * control let go of anywhere else was a click on the picture.
+   */
+  async function runControlsClick() {
+    setRunning(true);
+    const out: string[] = ["— clicks on the controls —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      await startOnce("p2p=0&stream=copy4&event=1&eventS=200", {}, 40_000);
+      await pause(2_000);
+      const win = hostFrame.current?.contentWindow as (Window & typeof globalThis) | null | undefined;
+      if (!win) throw new Error("no host frame");
+      const doc = win.document;
+      const video = doc.querySelector("video")!;
+      const box = doc.querySelector<HTMLElement>("[data-presentation]")!;
+      const overlay = doc.querySelector<HTMLElement>("[data-zoom-surface]")!;
+      const scrub = doc.querySelector<HTMLElement>("[data-player-progress]")!;
+      const bottom = scrub.closest<HTMLElement>("[data-scrim]")!;
+      const control = bottom.querySelector<HTMLElement>("button")!;
+      const shown = () => overlay.style.pointerEvents !== "none";
+      const mouse = { bubbles: true, cancelable: true, pointerId: 1, pointerType: "mouse", button: 0, view: win };
+      const moveOver = (el: HTMLElement) => {
+        el.dispatchEvent(new win.PointerEvent("pointermove", mouse));
+        el.dispatchEvent(new win.MouseEvent("mousemove", mouse));
+      };
+      const click = (pressOn: HTMLElement, releaseOn: HTMLElement, clientY = 0) => {
+        pressOn.dispatchEvent(new win.PointerEvent("pointerdown", { ...mouse, clientY }));
+        releaseOn.dispatchEvent(new win.MouseEvent("click", { ...mouse, clientY }));
+      };
+      /** Whether the host stays playing for `ms`. */
+      const playsOn = async (ms: number) => {
+        const until = Date.now() + ms;
+        while (Date.now() < until) { if (video.paused) return false; await pause(100); }
+        return true;
+      };
+
+      moveOver(control);
+      await pause(4_500);
+      say(`${shown() ? "PASS" : "FAIL"} the controls stay up under a mouse resting on a button for 4.5 s`);
+      moveOver(video);
+      await pause(4_500);
+      say(`${!shown() ? "PASS" : "FAIL"} and go 3 s after it moves off them`);
+      moveOver(control);
+      await pause(300);
+
+      const above = scrub.getBoundingClientRect().top - 20;
+      click(control, overlay);
+      const overOverlay = await playsOn(1_500);
+      click(control, bottom, above);
+      const overScrim = await playsOn(1_500);
+      click(control, box);
+      const overBox = await playsOn(1_500);
+      say(`${overOverlay && overScrim && overBox ? "PASS" : "FAIL"} a press on a control let go of elsewhere never pauses (over the picture ${overOverlay ? "played on" : "paused"}, over the bar's gradient ${overScrim ? "played on" : "paused"}, with the bar gone ${overBox ? "played on" : "paused"})`);
+
+      if (video.paused) { click(overlay, overlay); await waitFor(() => !video.paused, 10_000, "the host to play again"); }
+      click(overlay, overlay);
+      const pausedOnPicture = await waitFor(() => video.paused, 3_000, "a click on the picture to pause").then(() => true, () => false);
+      click(video, box);
+      const playedFromHidden = await waitFor(() => !video.paused, 10_000, "a click with the bar coming back to play").then(() => true, () => false);
+      say(`${pausedOnPicture && playedFromHidden ? "PASS" : "FAIL"} a click on the picture still pauses (${pausedOnPicture ? "yes" : "no"}), and one that brings the bar back still plays (${playedFromHidden ? "yes" : "no"})`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
    * The host starting another title mid-film: everybody starts it together,
    * with a picture of it. The room's word that it waits for the new title
    * reaches a player before the title does, and on 13 October monkey26
@@ -2194,6 +2267,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runCopySkipInPlace(false, 8_000)}>Skip ahead inside a copy, slow</button>
         <button disabled={running} onClick={() => void runCopySkipInPlace(false, 30_000, 180)}>Skip far ahead inside a copy</button>
         <button disabled={running} onClick={() => void runPlexLength()}>Plex's length far too long</button>
+        <button disabled={running} onClick={() => void runControlsClick()}>Clicks on the controls</button>
         <button disabled={running} onClick={() => void runLateJoin()}>Late joiner</button>
         <button disabled={running} onClick={() => void runHandToJoiner()}>Host handed to a joiner</button>
         <button disabled={running} onClick={() => void runSkipBurst()}>Skips in a burst, in a copy</button>

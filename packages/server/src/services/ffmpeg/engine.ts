@@ -20,7 +20,14 @@
  * (SIGSTOP), carrying on once they near it. A start goes first: runs already
  * well ahead of their watchers give way to it for a few seconds (giveWay).
  * Everything a run wrote is kept, on disk in STREAM_CACHE_DIR, until the
- * stream ends, so going back is served from here. A run that dies
+ * stream ends, so going back is served from here.
+ *
+ * A run started mid-film — a resume, a seek — makes what it skipped as well,
+ * once it has reached the end of the file: a second ffmpeg, from the start of
+ * the film up to where the run's picture begins (Before). A seek back into
+ * that is then served from what was made, as is any restart into the run's
+ * own stretch: the run under a new key, listed whole, rather than a new
+ * ffmpeg (rekey). A run that dies
  * answers 410 for its playlist, which the player meets by restarting where it
  * is; a title that keeps dying is left to Plex.
  *
@@ -39,7 +46,7 @@ import { measuredPlaylist, round3, type MeasuredSegment } from "../measured-play
 import { logEvent } from "../logger.js";
 import { LruMap } from "../lru.js";
 import { streamBandwidth, type Bandwidth } from "../stream-bandwidth.js";
-import { ffmpegPath, lookaheadS } from "./config.js";
+import { ffmpegPath, lookaheadS, maxEncodes } from "./config.js";
 import { cpuUse, gpuUse, readUse, sampleGpu, type GpuSample } from "./gpu-use.js";
 import { dropHot, hotSegment, keepHot } from "./hot-segments.js";
 import { COPY_CLOCK_OFFSET_S } from "./plan.js";
@@ -72,6 +79,9 @@ const MIN_TARGET_DURATION = 6;
 /** A run nobody has asked about for this long is stopped: the room's own
  *  keep-alive comes every 30 s, so this only catches what everything forgot. */
 const IDLE_MS = 10 * 60_000;
+/** A run started closer than this to the start of the film leaves what is
+ *  before it to a restart: a few seconds aren't worth a second ffmpeg. */
+const BEFORE_FROM_S = 10;
 /** Runs of one title that die within this long of each other leave it to Plex. */
 const CRASH_WINDOW_MS = 15 * 60_000;
 const CRASHES_TO_REFUSE = 2;
@@ -88,6 +98,33 @@ interface Segment extends MeasuredSegment {
   file: string;
 }
 
+/**
+ * What a run started mid-film skipped: the same stream from the start of the
+ * film up to where the run's picture begins, made once the run has reached
+ * the end of the file. Its segments are the run's, under its key ("b" before
+ * their numbers), but listed only once all of it is made, and only under a
+ * new key (rekey): a playlist grows at its end, never at its start.
+ */
+interface Before {
+  proc: ChildProcess | null;
+  dir: string;
+  /** Where it stops, film time: where the run's picture starts. */
+  toS: number;
+  segments: Segment[];
+  /** Its segments' clock minus film time, fixed by the first. */
+  clockOffset: number | null;
+  ended: boolean;
+  failed: string | null;
+  /** Stopped with its run. */
+  stopped: boolean;
+  /** SIGSTOPped while a stream starts (giveWay): how many. */
+  yielding: number;
+  queue: Promise<void>;
+  stdoutRest: string;
+  stderrTail: string[];
+  startedAt: number;
+}
+
 interface Run {
   key: string;
   sessionId: string;
@@ -101,6 +138,13 @@ interface Run {
   averageKbps: number | null;
   dir: string;
   baseDir: string;
+  /** The same stream's arguments from the start of the film up to `toS`: for its Before. */
+  fromStart: ((toS: number) => string[]) | null;
+  /** Those arguments, which are the same for every run of the same stream
+   *  wherever it starts: a restart into one is served from what it made. */
+  same: string | null;
+  /** What it skipped, being made or made; null until it reaches the end of the file. */
+  before: Before | null;
   /** Where the run was asked to start, film time. */
   offsetS: number;
   proc: ChildProcess | null;
@@ -223,8 +267,10 @@ function throttle(run: Run): void {
  */
 async function giveWay(run: Run): Promise<void> {
   if (process.platform === "win32") return;
-  const held = [...runs.values()].filter((o) => o !== run && !o.paused && !o.stopped && !o.ended && !o.failed &&
+  const held: Array<Run | Before> = [...runs.values()].filter((o) => o !== run && !o.paused && !o.stopped && !o.ended && !o.failed &&
     o.proc?.exitCode === null && (o.yielding > 0 || edgeOf(o) > o.positionS + GIVE_WAY_AHEAD_S));
+  // And whatever is making what a run skipped, which nobody is waiting on.
+  for (const o of runs.values()) if (o.before && making(o.before)) held.push(o.before);
   if (!held.length) return;
   for (const o of held) {
     try {
@@ -246,7 +292,7 @@ async function giveWay(run: Run): Promise<void> {
     } catch {
       // Gone already.
     }
-    throttle(o);
+    if ("key" in o) throttle(o);
   }
   logEvent("FFmpeg", "others gave way to a start", {
     session: short(run.sessionId), held: held.length, ms: Date.now() - startedAt, madeS: round3(edgeOf(run) - run.offsetS),
@@ -336,6 +382,14 @@ function stopRun(run: Run, why: string): void {
   } catch {
     // Gone already.
   }
+  if (run.before) {
+    run.before.stopped = true;
+    try {
+      run.before.proc?.kill("SIGKILL");
+    } catch {
+      // Gone already.
+    }
+  }
   runs.delete(run.key);
   if (bySession.get(run.sessionId) === run) bySession.delete(run.sessionId);
   retired.set(run.key, Date.now());
@@ -350,13 +404,164 @@ function stopRun(run: Run, why: string): void {
   void fs.promises.rm(run.dir, { recursive: true, force: true }).catch(() => {});
 }
 
+/** Whether a run's Before is being made. */
+function making(b: Before): boolean {
+  return !b.ended && !b.failed && !b.stopped && b.proc?.exitCode === null;
+}
+
+/**
+ * Once a run started mid-film has reached the end of the file, make what it
+ * skipped (Before). A re-encode's waits for a free encode slot, asked again
+ * every 15 s, and takes none: a start is never left to Plex for one.
+ */
+function startBefore(run: Run): void {
+  const first = run.segments[0];
+  if (run.before || !run.fromStart || !run.ended || run.stopped || run.failed || !first || first.videoStart < BEFORE_FROM_S) return;
+  if (run.encode) {
+    const busy = ffmpegEncodesRunning() + [...runs.values()].filter((o) => o.encode && o.before && making(o.before)).length;
+    if (busy >= maxEncodes()) return;
+  }
+  const b: Before = {
+    proc: null, dir: path.join(run.dir, "before"), toS: first.videoStart, segments: [], clockOffset: null,
+    ended: false, failed: null, stopped: false, yielding: 0, queue: Promise.resolve(), stdoutRest: "", stderrTail: [],
+    startedAt: Date.now(),
+  };
+  run.before = b;
+  const said = { session: short(run.sessionId), ratingKey: run.ratingKey, encode: run.encode, toS: round3(b.toS) };
+  try {
+    fs.mkdirSync(b.dir, { recursive: true });
+    b.proc = spawn(ffmpegPath(), run.fromStart(b.toS), { cwd: b.dir, stdio: ["ignore", "pipe", "pipe"] });
+  } catch (err) {
+    b.failed = err instanceof Error ? err.message : String(err);
+    logEvent("FFmpeg", "couldn't start making what was before where the run started", { ...said, why: b.failed });
+    return;
+  }
+  logEvent("FFmpeg", "making what was before where the run started", said);
+  b.proc.stdout?.on("data", (d: Buffer) => {
+    const lines = (b.stdoutRest + d.toString()).split("\n");
+    b.stdoutRest = lines.pop() ?? "";
+    for (const line of lines) {
+      const name = line.split(",")[0]?.trim();
+      if (name) b.queue = b.queue.then(() => measureBefore(run, b, name));
+    }
+  });
+  b.proc.stderr?.on("data", (d: Buffer) => {
+    for (const line of d.toString().split("\n")) if (line.trim()) b.stderrTail.push(line.trim().slice(0, 300));
+    if (b.stderrTail.length > 30) b.stderrTail.splice(0, b.stderrTail.length - 30);
+  });
+  b.proc.on("error", (err) => {
+    if (!b.stopped && !b.ended) b.failed = `ffmpeg: ${err.message}`;
+  });
+  b.proc.on("close", (code, signal) => {
+    void b.queue.then(() => {
+      if (b.stopped) return;
+      const last = b.segments[b.segments.length - 1];
+      // It has to meet the run's first segment: a hole between them would be
+      // jumped, and a stretch twice over is a second to fetch for nothing. A
+      // frame or two over is how a copy cut in decode order ends.
+      b.failed = b.failed ?? (code !== 0 ? `ffmpeg exited ${code ?? signal}`
+        : !last ? "it made nothing"
+        : last.end < b.toS - 0.1 || last.end > b.toS + 1 ? `it ended at ${round3(last.end)} s` : null);
+      b.ended = !b.failed;
+      logEvent("FFmpeg", b.ended ? "made what was before where the run started" : "couldn't make what was before where the run started", {
+        ...said, segments: b.segments.length, tookS: round3((Date.now() - b.startedAt) / 1000),
+        ...(b.failed ? { why: b.failed, stderr: b.stderrTail.slice(-3).join(" | ") || "none" } : {}),
+      });
+    });
+  });
+}
+
+/** One segment of a Before: measured, and kept for when it is listed. */
+async function measureBefore(run: Run, b: Before, name: string): Promise<void> {
+  if (b.stopped || b.failed) return;
+  const file = path.join(b.dir, path.basename(name));
+  let data: Buffer;
+  try {
+    data = await fs.promises.readFile(file);
+  } catch {
+    return;
+  }
+  const span = videoSpan(data);
+  if (!span) return;
+  // From the start of the film, on the run's clock (measure).
+  if (b.clockOffset === null) {
+    const filmStart = span.start - COPY_CLOCK_OFFSET_S;
+    b.clockOffset = filmStart <= 1 && filmStart >= -30 ? COPY_CLOCK_OFFSET_S : span.start;
+  }
+  const videoStart = span.start - b.clockOffset;
+  // The run has that already.
+  if (videoStart >= b.toS - 0.001) return;
+  const audioStart = span.audioStart === null ? null : span.audioStart - b.clockOffset;
+  b.segments.push({
+    path: `${run.baseDir}b${path.basename(name)}`,
+    file,
+    start: audioStart === null ? videoStart : Math.min(videoStart, audioStart),
+    end: span.end - b.clockOffset,
+    videoStart,
+    audioStart,
+    bytes: data.length,
+  });
+}
+
+/**
+ * Whether a restart of this session at `offsetS` can be served from what its
+ * run made: the same stream, made from before there to the end of the file.
+ */
+function servesFrom(run: Run, same: string | null, offsetS: number): boolean {
+  if (same === null || run.same !== same || !run.ended || run.failed || run.stopped) return false;
+  return offsetS >= (run.before?.ended ? 0 : run.segments[0]?.start ?? Infinity);
+}
+
+/**
+ * A restart into what this session's run has made, served from it: the run
+ * under a new key, listed whole — what it skipped first, once that is made —
+ * and started where the player asked. Its old key answers 410, as a replaced
+ * run's does.
+ */
+function rekey(run: Run, offsetS: number): string {
+  const key = randomUUID();
+  const baseDir = `/video/:/transcode/universal/session/${key}/base/`;
+  const b = run.before;
+  const joined = !!b?.ended && run.segments[0] !== b.segments[0];
+  if (joined) {
+    // Listed from its picture: a re-encode's copied sound opens a second or so
+    // before it (1.2 s in the tests), and what was made before has that sound
+    // already. Listed from the sound, it began before the last of those, which
+    // went out with a length below zero.
+    run.segments[0].start = run.segments[0].videoStart;
+    run.segments = [...b!.segments, ...run.segments];
+  }
+  const moved = (seg: Segment) => {
+    seg.path = baseDir + seg.path.slice(seg.path.lastIndexOf("/") + 1);
+  };
+  run.segments.forEach(moved);
+  b?.segments.forEach(moved);
+  run.byPath = new Map(run.segments.map((seg) => [seg.path, seg]));
+  runs.delete(run.key);
+  retired.set(run.key, Date.now());
+  logEvent("FFmpeg", "a restart served from what was made", {
+    session: short(run.sessionId), ratingKey: run.ratingKey, fromS: offsetS, wasFromS: run.offsetS,
+    listedFromS: round3(run.segments[0]?.start ?? 0), joinedBefore: joined, segments: run.segments.length,
+  });
+  run.key = key;
+  run.baseDir = baseDir;
+  run.offsetS = offsetS;
+  run.positionS = offsetS;
+  run.handedOut = false;
+  run.targetDuration = MIN_TARGET_DURATION;
+  run.lastAlive = Date.now();
+  runs.set(key, run);
+  return key;
+}
+
 // ─── Public API ─────────────────────────────────────────────────
 
 /**
  * Start a run for `sessionId` — replacing the one it has — with ffmpeg
  * `args` (plan.ts), and wait for its first segment. Fails without one in
  * FIRST_SEGMENT_TIMEOUT_MS, or if ffmpeg dies first, so the caller can leave
- * the stream to Plex.
+ * the stream to Plex. A restart into what the session's run has made of the
+ * same stream is served from that instead (rekey).
  */
 export async function startFfmpegRun(o: {
   sessionId: string;
@@ -367,8 +572,12 @@ export async function startFfmpegRun(o: {
   targetKbps?: number | null;
   offsetS: number;
   args: string[];
+  /** The same stream's arguments from the start of the film up to `toS`: see Before. */
+  fromStart?: (toS: number) => string[];
 }): Promise<{ ok: true; key: string } | { ok: false; why: string }> {
   const previous = bySession.get(o.sessionId);
+  const same = o.fromStart ? o.fromStart(0).join("\n") : null;
+  if (previous && servesFrom(previous, same, o.offsetS)) return { ok: true, key: rekey(previous, o.offsetS) };
   if (previous) stopRun(previous, "restarted");
   const key = randomUUID();
   const dir = path.join(CACHE_DIR, o.sessionId.replace(/[^\w-]/g, "_"), key);
@@ -381,6 +590,7 @@ export async function startFfmpegRun(o: {
     key, sessionId: o.sessionId, ratingKey: o.ratingKey, codec: o.codec, encode: !!o.encode,
     targetKbps: o.targetKbps && o.targetKbps > 0 ? o.targetKbps : null, averageKbps: null, dir,
     baseDir: `/video/:/transcode/universal/session/${key}/base/`,
+    fromStart: o.fromStart ?? null, same, before: null,
     offsetS: o.offsetS, proc: null, paused: false, yielding: 0, speedSaid: false, stopped: false,
     segments: [], byPath: new Map(), clockOffset: null, ended: false, failed: null,
     targetDuration: MIN_TARGET_DURATION, handedOut: false, positionS: o.offsetS,
@@ -426,6 +636,7 @@ export async function startFfmpegRun(o: {
           ...(run.gpuLately ? use(run, run.gpuLately) : {}),
         });
         notify(run);
+        startBefore(run);
       } else {
         fail(run, `ffmpeg exited ${code ?? signal}`);
       }
@@ -566,6 +777,13 @@ export function ffmpegSegment(key: string, segPath: string): CopiedSegment | "go
   };
 }
 
+/** Where this session's run is with what it skipped (Before), for the tests:
+ *  "none", "making", "made", or why it couldn't. */
+export function ffmpegBeforeState(sessionId: string): string {
+  const b = bySession.get(sessionId)?.before;
+  return !b ? "none" : b.ended ? "made" : b.failed ? `failed: ${b.failed}` : "making";
+}
+
 /** Where the watcher is, from the driver's pings and the room's clock. */
 export function updateFfmpegPosition(sessionId: string, positionS: number): void {
   const run = bySession.get(sessionId);
@@ -595,8 +813,8 @@ export function stopAllFfmpegSessions(why = "stopped"): number {
 }
 
 // What every other stop missed; the pause catching up with a watcher whose
-// pings stopped coming while the room's clock went on; and what a re-encode
-// has used so far, for when it ends.
+// pings stopped coming while the room's clock went on; what a re-encode
+// has used so far, for when it ends; and a Before that waited for a slot.
 setInterval(() => {
   const now = Date.now();
   for (const run of [...runs.values()]) {
@@ -606,5 +824,7 @@ setInterval(() => {
     }
     throttle(run);
     if (run.gpuAtStart && run.proc?.pid && run.proc.exitCode === null) run.gpuLately = sampleGpu(run.proc.pid) ?? run.gpuLately;
+    // A re-encode's, once an encode slot is free.
+    if (run.ended && !run.before) startBefore(run);
   }
 }, 15_000).unref();

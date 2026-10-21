@@ -455,13 +455,18 @@ console.log("\n— a seek past what is there —");
   check("an offset starts a run of its own", !!key && key !== firstKey, true);
   const playlist = await (await fetch(origin + variant)).text();
   check("the playlist begins where the player asked", playlist.includes("#EXT-X-START:TIME-OFFSET=31.000,PRECISE=YES"), true);
-  check("with gaps up to the keyframe before it", /#EXT-X-GAP/.test(playlist), true);
-  const first = entries(playlist)[0];
-  const bytes = Buffer.from(await (await fetch(origin + first.uri)).arrayBuffer());
-  const span = videoSpan(bytes)!;
-  check("whose picture opens on the keyframe at 30 s (40 on the copy's clock)", Math.abs(span.start - 40) < 0.1, true);
-  // Jellyfin's ffmpeg counted the start twice with -segment_time: 30 s to 64 s here.
-  check("and is a segment long, not the stretch since the start", span.end - span.start <= 6, true);
+  if (process.platform === "win32") {
+    // Where the run from the start went on to the end: the seek is served from it (see below).
+    console.log("  (no SIGSTOP on Windows: the run from the start has reached the end, so it isn't a new run here)");
+  } else {
+    check("with gaps up to the keyframe before it", /#EXT-X-GAP/.test(playlist), true);
+    const first = entries(playlist)[0];
+    const bytes = Buffer.from(await (await fetch(origin + first.uri)).arrayBuffer());
+    const span = videoSpan(bytes)!;
+    check("whose picture opens on the keyframe at 30 s (40 on the copy's clock)", Math.abs(span.start - 40) < 0.1, true);
+    // Jellyfin's ffmpeg counted the start twice with -segment_time: 30 s to 64 s here.
+    check("and is a segment long, not the stretch since the start", span.end - span.start <= 6, true);
+  }
   const old = await fetch(`${origin}/api/plex/hls/seg?p=${encodeURIComponent(`/video/:/transcode/universal/session/${firstKey}/base/index.m3u8`)}`);
   check("the run it replaced is gone (410), not asked of Plex", [old.status, transcodeAsked()], [410, []]);
 }
@@ -734,6 +739,54 @@ console.log("\n— a re-encode —");
   check("  Stats for nerds is told why", notesOf(second.text).fallback, "encode slots full (1/1)");
   delete process.env.FFMPEG_MAX_ENCODES;
   await fetch(`${origin}/api/plex/hls/session/${keep}?reason=test`, { method: "DELETE" });
+}
+
+console.log("\n— what a run started mid-film skipped, made once it reaches the end —");
+{
+  // Hot Fuzz on 21 October: resumed 30 minutes in, a seek back started ffmpeg again.
+  const engine: { ffmpegBeforeState?: (id: string) => string } = await import("../src/services/ffmpeg/engine.js");
+  delete process.env.FFMPEG_LOOKAHEAD;
+  for (const [rk, what] of [["1", "a copy"], ["3", "a re-encode"]] as const) {
+    const id = crypto.randomUUID();
+    const started = variantOf((await master(rk, id, "?offset=31")).text);
+    let now = "";
+    for (let i = 0; i < 120 && !now.includes("#EXT-X-ENDLIST"); i++) {
+      await sleep(250);
+      now = await (await fetch(origin + started)).text();
+    }
+    // A re-encode's waits for an encode slot, looked for every 15 s.
+    let state = engine.ffmpegBeforeState?.(id) ?? "none";
+    for (let i = 0; i < 160 && (state === "none" || state === "making"); i++) {
+      await sleep(250);
+      state = engine.ffmpegBeforeState?.(id) ?? "none";
+    }
+    check(`${what} from 31 s, once at the end of the film, makes the film before it`, state, "made");
+    const m = await master(rk, id, "?offset=5");
+    const variant = variantOf(m.text);
+    const playlist = await (await fetch(origin + variant)).text();
+    check("  a seek back to 5 s is served from that: a key of its own, listed whole and ended, no gap",
+      [!!keyOf(variant) && keyOf(variant) !== keyOf(started), playlist.includes("#EXT-X-GAP"), playlist.includes("#EXT-X-ENDLIST"),
+        playlist.includes("#EXT-X-START:TIME-OFFSET=5.000,PRECISE=YES")], [true, false, true, true]);
+    check("  every segment a length above zero", playlist.includes("#EXTINF:-") || playlist.includes("#EXTINF:0.000,"), false);
+    const list = entries(playlist);
+    const made = list.filter((e) => /\/base\/b\d+\.ts/.test(decodeURIComponent(e.uri))).length;
+    check("  what was made before, then the run's own",
+      made > 0 && made < list.length && list.every((e, i) => /\/base\/b\d+\.ts/.test(decodeURIComponent(e.uri)) === i < made), true);
+    if (made > 0 && made < list.length) {
+      const span = async (uri: string) => videoSpan(Buffer.from(await (await fetch(origin + uri)).arrayBuffer()))!;
+      const [first, seamA, seamB] = [await span(list[0].uri), await span(list[made - 1].uri), await span(list[made].uri)];
+      check("  from the start of the film (10 on the clock) to its end",
+        [Math.abs(first.start - 10) < 0.1, Math.abs(list.reduce((s, e) => s + e.duration, 0) - 60) < 0.2], [true, true]);
+      // A copy cut by its decode order may hold a frame or two of the run's first.
+      const over = Math.round((seamA.end - seamB.start) * 1000) / 1000;
+      check("  meeting where the run started: no hole, nothing twice but a frame or two",
+        [Math.round(seamB.start * 10) / 10, over >= -0.01 && over <= 0.15 ? "meets" : over], [rk === "1" ? 40 : 41, "meets"]);
+    }
+    const old = await fetch(`${origin}/api/plex/hls/seg?p=${encodeURIComponent(`/video/:/transcode/universal/session/${keyOf(started)}/base/index.m3u8`)}`);
+    check("  the key it was under is gone (410)", old.status, 410);
+    await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
+  }
+  process.env.FFMPEG_LOOKAHEAD = "36";
 }
 
 console.log("\n— what is still Plex's —");

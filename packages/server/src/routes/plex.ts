@@ -4786,6 +4786,7 @@ async function startWithFfmpeg(o: {
     return trackMismatch(used.filter((s): s is SourceStream => !!s), found);
   };
 
+  const durationS = source.durationS ?? null;
   const copyPlan = o.copy
     ? planCopy(source, { audioStreamId: o.audioStreamID || null, hevcOk: o.roomHevc, audioChannels: audioChannels() })
     : null;
@@ -4808,7 +4809,8 @@ async function startWithFfmpeg(o: {
       codec: copyPlan.codec,
       targetKbps: o.fileKbps,
       offsetS: o.offsetS,
-      args: copyArgs(copyPlan, input, o.offsetS, source.durationS ?? null),
+      args: copyArgs(copyPlan, input, o.offsetS, durationS),
+      fromStart: (toS) => copyArgs(copyPlan, input, 0, durationS, undefined, toS),
     });
     if (!started.ok) return toPlex(`ffmpeg didn't start: ${started.why}`, "run didn't start", { why: started.why });
     key = started.key;
@@ -4872,10 +4874,12 @@ async function startWithFfmpeg(o: {
     if (!plan.ok) return toPlex(plan.why, "can't make it", { why: plan.why, notCopied: reason });
     const differ = await tracksDiffer([plan.video, plan.audio, plan.burn?.kind === "picture" ? plan.burn.sub : null]);
     if (differ) return toPlex(`tracks differ from Plex's: ${differ}`, "the file's tracks aren't Plex's", { why: differ });
+    const fromStart = (p: typeof plan) => p.ok ? (toS: number) => encodeArgs(p, input, 0, durationS, hwDevice(), toS) : undefined;
     let started = await startFfmpegRun({
       sessionId: o.sessionId, ratingKey: o.ratingKey, codec: plan.codec, encode: true,
       targetKbps: encodeTargetKbps(plan), offsetS: o.offsetS,
-      args: encodeArgs(plan, input, o.offsetS, source.durationS ?? null, hwDevice()),
+      args: encodeArgs(plan, input, o.offsetS, durationS, hwDevice()),
+      fromStart: fromStart(plan),
     });
     // The GPU decodes the codec but not this file: decoded on the CPU instead.
     if (!started.ok && plan.gpuDecode) {
@@ -4886,7 +4890,8 @@ async function startWithFfmpeg(o: {
         started = await startFfmpegRun({
           sessionId: o.sessionId, ratingKey: o.ratingKey, codec: plan.codec, encode: true,
           targetKbps: encodeTargetKbps(plan), offsetS: o.offsetS,
-          args: encodeArgs(plan, input, o.offsetS, source.durationS ?? null, hwDevice()),
+          args: encodeArgs(plan, input, o.offsetS, durationS, hwDevice()),
+          fromStart: fromStart(plan),
         });
       }
     }

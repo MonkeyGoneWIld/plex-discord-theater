@@ -24,6 +24,8 @@ the same either way, so switching is a setting and a restart.
 - **Seeks land at once.** Each stream's whole film is made ahead, flat out —
   a copy in a minute or two, a re-encode in ten to thirty — and kept until the
   stream ends, so a seek anywhere in it plays from here without a restart.
+  A stream started partway in, from a resume or a seek, then makes the part
+  before where it started too, so a seek back is served from what is made.
 - **Re-encodes at the source's own bitrate.** A 3 Mbps HEVC film re-encoded to
   H.264 is made at about 6 Mbps, not at the quality level's 12, so viewers
   download only what the picture needs.
@@ -323,10 +325,11 @@ NVENC takes the names as `p1` to `p7`. VAAPI has no presets.
 
 ### `FFMPEG_LOOKAHEAD`
 
-Unset, each stream's whole film is made ahead, flat out, so every seek lands
-in what is made already. A number of seconds holds each run that far ahead of
-the room instead, carrying on as the room nears it: less disk and less GPU,
-slower seeks past it.
+Unset, each stream's whole film is made ahead, flat out, then whatever came
+before where it started, so every seek lands in what is made already. A number
+of seconds holds each run that far ahead of the room instead, carrying on as
+the room nears it: less disk and less GPU, slower seeks past it, and the part
+before a resume made only once the room nears the end.
 
 ### `FFMPEG_AUDIO_CHANNELS`
 

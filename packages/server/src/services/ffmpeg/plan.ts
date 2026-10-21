@@ -231,6 +231,9 @@ export function inputArgs(source: { local: string } | { url: string; token: stri
  * 300 s its first cut came near 600 s: one 300 s segment the player waited
  * half a minute for, and none at all in time for a seek near the end. Listed
  * times are counted from the first packet once, by every build.
+ *
+ * With `toS`, it stops reading the file there: what a run started mid-film
+ * skipped, made afterwards (engine.ts, the run's backfill).
  */
 export function copyArgs(
   plan: Extract<CopyPlan, { ok: true }>,
@@ -238,18 +241,25 @@ export function copyArgs(
   offsetS: number,
   durationS: number | null = null,
   segmentSeconds = 4,
+  toS: number | null = null,
 ): string[] {
   return [
     "-hide_banner", "-nostdin", "-loglevel", "error",
     ...(offsetS > 0 ? ["-ss", String(offsetS)] : []),
+    ...untilArgs(toS),
     "-copyts", "-start_at_zero",
     ...input,
     "-map", `0:${plan.video.index}`,
     ...(plan.audio ? ["-map", `0:${plan.audio.index}`] : []),
     "-c:v", "copy",
     ...audioArgs(plan),
-    ...segmentArgs(offsetS, durationS, segmentSeconds),
+    ...segmentArgs(offsetS, toS ?? durationS, segmentSeconds),
   ];
+}
+
+/** Where to stop reading the film, film time: an input option, before its -i. */
+function untilArgs(toS: number | null): string[] {
+  return toS !== null ? ["-to", toS.toFixed(3)] : [];
 }
 
 /** The audio as it is when it is AAC, as AAC otherwise (convertedAudio). */
@@ -742,6 +752,8 @@ export function filterPath(file: string): string {
  * filter) from the file made ready for it, with the fonts it came with. Overlay
  * on the GPU (overlay_qsv) was never tried on the 265K; one 1080p frame each
  * way is little next to the encode.
+ *
+ * With `toS`, it stops reading the film there, as a copy does.
  */
 export function encodeArgs(
   plan: Extract<EncodePlan, { ok: true }>,
@@ -749,6 +761,7 @@ export function encodeArgs(
   offsetS: number,
   durationS: number | null,
   device: string,
+  toS: number | null = null,
 ): string[] {
   const W = plan.width;
   const H = plan.height;
@@ -847,6 +860,7 @@ export function encodeArgs(
     ...init,
     ...decode,
     ...(offsetS > 0 ? ["-ss", String(offsetS)] : []),
+    ...untilArgs(toS),
     "-copyts", "-start_at_zero",
     ...(burn?.kind === "picture" && burn.canvas ? ["-canvas_size", burn.canvas] : []),
     ...input,
@@ -864,6 +878,6 @@ export function encodeArgs(
     // Audio piles up while the GPU encoder starts; ffmpeg's default queue is
     // too short for that.
     "-max_muxing_queue_size", "4096",
-    ...segmentArgs(offsetS, durationS, ENCODE_SEGMENT_S),
+    ...segmentArgs(offsetS, toS ?? durationS, ENCODE_SEGMENT_S),
   ];
 }

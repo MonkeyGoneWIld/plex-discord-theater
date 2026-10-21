@@ -294,7 +294,7 @@ covers the setup and how to check it.
 | `FFMPEG_MAX_ENCODES` | 6 on the GPU, 2 on the CPU | Re-encodes at once, past which Plex makes the stream. Copies don't count |
 | `FFMPEG_PRESET` | each encoder's own | `ultrafast` to `veryslow`: the encoder's speed against quality |
 | `FFMPEG_LOOKAHEAD` | the whole film | Seconds each run is held ahead of the room; unset, the whole film is made ahead |
-| `FFMPEG_AUDIO_CHANNELS` | 2 | `6`: surround the player can't play becomes 5.1 AAC rather than stereo |
+| `FFMPEG_AUDIO_CHANNELS` | 6 | Surround the player can't play becomes 5.1 AAC; `2`: stereo, as Plex makes it |
 | `FFMPEG_SUBTITLES` | on | `off`: text subtitles are read by Plex, not out of the file here |
 | `FFMPEG_PREVIEWS` | on | `off`: no seek-bar previews made for files Plex has none for |
 | `FFMPEG_PREVIEWS_MAX_GB` | 20 | Room for those previews; the least recently used go past it |

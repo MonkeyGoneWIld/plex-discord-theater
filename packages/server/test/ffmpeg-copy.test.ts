@@ -348,6 +348,12 @@ console.log("\n— what a copy is judged on —");
   const dflt = planCopy(version({}), { audioStreamId: null, hevcOk: true });
   check("with none asked for, the file's default, converted", dflt.ok && [dflt.audio?.id, dflt.audioCopy], [12, false]);
   check("a track the file hasn't is no copy", why(version({}), true, 99), "no audio track 99");
+  check("nor 1080i H.264, which Chrome can't decode (Cunk on Shakespeare)",
+    why(version({ codec: "h264", bitDepth: 8, scanType: "interlaced" })), "interlaced H.264");
+  check("but HEVC marked interlaced is (His Dark Materials)", why(version({ scanType: "interlaced" })), "copy");
+  const stereo = planCopy(version({}, { streams: [{ id: 11, streamType: 1, index: 0, codec: "hevc", bitDepth: 10 },
+    { id: 12, streamType: 2, index: 1, codec: "ac3", channels: 2, default: true }] }), { audioStreamId: null, hevcOk: true, audioChannels: 6 });
+  check("stereo stays stereo when surround becomes 5.1", stereo.ok && stereo.audioOut, { channels: 2, kbps: 256 });
 }
 
 console.log("\n— a copy from the start —");
@@ -465,20 +471,20 @@ console.log("\n— audio that isn't AAC —");
   const m = await master("2", crypto.randomUUID());
   const notes = notesOf(m.text);
   check("is converted, and the player told so", [notes.engine, notes.audio, notes.audioFrom, notes.audioTo],
-    ["ffmpeg", "transcode", "AC3 5.1", "AAC Stereo"]);
+    ["ffmpeg", "transcode", "AC3 5.1", "AAC 5.1"]);
   const variant = variantOf(m.text);
   const first = entries(await (await fetch(origin + variant)).text())[0];
   const span = videoSpan(Buffer.from(await (await fetch(origin + first.uri)).arrayBuffer()))!;
   check("and is in the segments", span.audioStart !== null, true);
-  process.env.FFMPEG_AUDIO_CHANNELS = "6";
-  const surround = await master("2", crypto.randomUUID());
-  const said = notesOf(surround.text);
   const seg = path.join(tmp, "surround.ts");
-  const list = entries(await (await fetch(origin + variantOf(surround.text))).text());
+  const list = entries(await (await fetch(origin + variant)).text());
   fs.writeFileSync(seg, Buffer.from(await (await fetch(origin + list[0].uri)).arrayBuffer()));
   const channels = spawnSync("ffprobe", ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels",
     "-of", "csv=p=0", seg], { encoding: "utf8" }).stdout.trim().split(/\s+/)[0];
-  check("with FFMPEG_AUDIO_CHANNELS=6, as AAC 5.1 at 448 kbps", [said.audioTo, said.audioKbps, channels], ["AAC 5.1", "448", "6"]);
+  check("as AAC 5.1 at 448 kbps", [notes.audioKbps, channels], ["448", "6"]);
+  process.env.FFMPEG_AUDIO_CHANNELS = "2";
+  const stereo = notesOf((await master("2", crypto.randomUUID())).text);
+  check("and with FFMPEG_AUDIO_CHANNELS=2, as AAC stereo, as Plex makes it", [stereo.audioTo, stereo.audioKbps], ["AAC Stereo", "256"]);
   delete process.env.FFMPEG_AUDIO_CHANNELS;
 }
 
@@ -651,7 +657,7 @@ console.log("\n— what a re-encode is made of —");
   check("a 4K 60 Mbps HEVC at 1080p at the level's 12 Mbps", matched("hevc", 60000, 3840, 2160), [12000, 20000]);
   check("and an MPEG-2 DVD at what an H.264 needs of its 6 Mbps", matched("mpeg2video", 6000, 720, 480), [3000, 5000]);
   const surround = plan(version({}), { audioChannels: 6 });
-  check("FFMPEG_AUDIO_CHANNELS=6: EAC3 5.1 becomes AAC 5.1 at 448 kbps", surround.ok && [surround.audioOut, encodeArgs(surround,
+  check("EAC3 5.1 becomes AAC 5.1 at 448 kbps", surround.ok && [surround.audioOut, encodeArgs(surround,
     ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ").includes("-c:a aac -ac 6 -b:a 448k")], [{ channels: 6, kbps: 448 }, true]);
 }
 

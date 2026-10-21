@@ -330,9 +330,9 @@ slower seeks past it.
 
 ### `FFMPEG_AUDIO_CHANNELS`
 
-`6`: a surround track the player can't play (DTS, TrueHD, AC-3 in browsers that
-lack it) becomes 5.1 AAC. Unset, it becomes stereo, as Plex does. Tracks the
-player can play are copied either way.
+Unset or `6`: a surround track the player can't play (DTS, TrueHD, AC-3 in
+browsers that lack it) becomes 5.1 AAC. `2`: it becomes stereo, as Plex does.
+Stereo stays stereo, and tracks the player can play are copied, either way.
 
 ### `FFMPEG_SUBTITLES`
 

@@ -338,7 +338,7 @@ services:
       # Unset, each stream's whole film is made ahead (room for it in
       # STREAM_CACHE_DIR); seconds hold each run that far ahead instead.
       # FFMPEG_LOOKAHEAD: ""
-      # FFMPEG_AUDIO_CHANNELS: "2"                   # 6 for 5.1 AAC
+      # FFMPEG_AUDIO_CHANNELS: "6"                   # 2 for stereo AAC only
       # FFMPEG_PREVIEWS: "on"                        # previews for files Plex has none for
       # FFMPEG_HDR_REENCODE: "keep"                  # or "tonemap"
       # FFMPEG_TONEMAP: "reinhard"

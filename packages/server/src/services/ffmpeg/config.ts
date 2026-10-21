@@ -44,10 +44,11 @@ export function ffmpegSubtitlesOn(): boolean {
   return ffmpegEngineOn() && !off(process.env.FFMPEG_SUBTITLES);
 }
 
-/** FFMPEG_AUDIO_CHANNELS=6: a surround track that isn't AAC becomes 5.1 AAC
- *  rather than stereo (plan.ts convertedAudio). */
+/** A surround track that isn't AAC becomes 5.1 AAC, or stereo with
+ *  FFMPEG_AUDIO_CHANNELS=2 (plan.ts convertedAudio). Stereo was the default
+ *  until 1917 in 5.1 sounded "a lot better" on 21 October. */
 export function audioChannels(): 2 | 6 {
-  return process.env.FFMPEG_AUDIO_CHANNELS?.trim() === "6" ? 6 : 2;
+  return process.env.FFMPEG_AUDIO_CHANNELS?.trim() === "2" ? 2 : 6;
 }
 
 /** FFMPEG_PRESET: one of plan.ts PRESETS, or null for each encoder's own. */

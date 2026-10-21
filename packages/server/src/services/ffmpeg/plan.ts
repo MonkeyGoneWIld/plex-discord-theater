@@ -126,6 +126,12 @@ export function planCopy(
   const codec = (video.codec ?? "").toLowerCase();
   if (codec !== "h264" && codec !== "hevc") return no(`video is ${codec || "unknown"}`);
   if (codec === "h264" && (video.bitDepth ?? 8) > 8) return no(`${video.bitDepth}-bit H.264`);
+  // Field by field, as TV is broadcast: Chrome's decoder gave up on the first
+  // segment of Cunk on Shakespeare's 1080i copy on 21 October, for both
+  // players and every retry, and a picture it did decode would be combed.
+  // The re-encode deinterlaces it. HEVC marked interlaced is copied: His Dark
+  // Materials' showed no combing that day.
+  if (codec === "h264" && /interlaced/i.test(video.scanType ?? "")) return no("interlaced H.264");
   if (codec === "hevc" && (video.bitDepth ?? 8) > 10) return no(`${video.bitDepth}-bit HEVC`);
   if (codec === "hevc" && !req.hevcOk) return no("HEVC, and this player can't decode it");
   const hdr = hdrClass(video);
@@ -169,7 +175,7 @@ function pickAudio(src: SourceVersion, audioStreamId: number | null): (SourceStr
 
 /** Bitrate of the AAC a converted track becomes, kbps: stereo, */
 export const AUDIO_KBPS = 256;
-/** and 5.1 (FFMPEG_AUDIO_CHANNELS=6), as Plex makes 5.1 AAC. */
+/** and 5.1 (FFMPEG_AUDIO_CHANNELS, 6 unless 2), as Plex makes 5.1 AAC. */
 export const AUDIO_KBPS_SURROUND = 448;
 
 export interface AudioOut {
@@ -178,10 +184,10 @@ export interface AudioOut {
 }
 
 /**
- * What a track that isn't AAC becomes: AAC stereo, as Plex makes it for a
- * browser — or, with FFMPEG_AUDIO_CHANNELS=6, AAC 5.1 for one with more than
- * two channels (7.1 is folded into 5.1). Browsers play 5.1 AAC, and fold it
- * to stereo themselves where that is all there is.
+ * What a track that isn't AAC becomes: AAC 5.1 for one with more than two
+ * channels (7.1 is folded into 5.1), AAC stereo for the rest — or stereo for
+ * all, as Plex makes it for a browser, with FFMPEG_AUDIO_CHANNELS=2. Browsers
+ * play 5.1 AAC, and fold it to stereo themselves where that is all there is.
  */
 export function convertedAudio(audio: SourceStream, channels: number | undefined): AudioOut {
   return channels === 6 && (audio.channels ?? 2) > 2

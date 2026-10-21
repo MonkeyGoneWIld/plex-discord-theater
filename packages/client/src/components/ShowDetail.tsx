@@ -2,9 +2,10 @@ import { useState, useEffect, useCallback } from "react";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import {
   fetchMeta, fetchChildren, fetchSeerrTv, fetchShowNextUp, historyEntryToItem, posterThumbUrl,
-  backdropThumbUrl, invalidateMeta, setStreams, versionOf,
+  backdropThumbUrl, invalidateMeta, versionOf,
   type Credit, type HistoryEntry, type PlexItem, type PlexMeta, type SeerrSeason,
 } from "../lib/api";
+import { selectStreams } from "../lib/selectStreams";
 import {
   loadAudioPref, loadSubtitlePref, matchAudioTrack, plexAudioChoice, startingSubtitle, titleTrackPrefs,
   saveAudioPref, saveSubtitlePref,
@@ -363,24 +364,30 @@ export function ShowDetail({
       // the null safely; it had a picker showing None when they pressed it.
       if (subtitle) saveSubtitlePref(subtitle);
 
+      let audioId = audio?.id ?? 0;
+      let subtitleId = subtitle?.id ?? 0;
       if (version.partId != null && audio) {
-        await setStreams(version.partId, {
+        // The same tracks in the file as it is now, if it was replaced since
+        // the episode's details were cached.
+        const set = await selectStreams(startFrom.ratingKey, version, {
           audioStreamID: audio.id,
-          subtitleStreamID: subtitle?.id ?? 0,
+          subtitleStreamID: subtitleId,
         });
+        audioId = set.audio(audio.id) ?? 0;
+        subtitleId = set.subtitle(subtitleId);
         // The cached meta now reports stale selected-track flags — drop it.
         invalidateMeta(startFrom.ratingKey);
       }
 
       onPlay(
         startFrom,
-        subtitle != null,
+        subtitleId !== 0,
         // The player works in seconds; history stores milliseconds. Only a
         // genuine part-watch resumes — the button says "Play" otherwise.
         nextUp && nextUp.positionMs > 0 ? nextUp.positionMs / 1000 : undefined,
         undefined,
-        audio?.id ?? 0,
-        subtitle?.id ?? 0,
+        audioId,
+        subtitleId,
       );
     } catch (err) {
       console.error("Failed to start episode:", err);

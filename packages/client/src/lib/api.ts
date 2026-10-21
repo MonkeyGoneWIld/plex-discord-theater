@@ -613,6 +613,14 @@ export function invalidateMeta(ratingKey: string): void {
   apiCache.delete(`/api/plex/meta/${encodeURIComponent(ratingKey)}`);
 }
 
+/** fetchMeta past both caches, the bot's as well as this one: for a title
+ *  whose file may have been replaced since (selectStreams). The bot keeps
+ *  what it fetched, so a fetchMeta after has it too. */
+export function fetchFreshMeta(ratingKey: string): Promise<PlexMeta> {
+  invalidateMeta(ratingKey);
+  return apiGet<PlexMeta>(`/api/plex/meta/${encodeURIComponent(ratingKey)}?fresh=1`);
+}
+
 /** Detail metadata for an online (Discover) title, fetched by its plex:// guid. */
 export interface DiscoverMeta {
   title: string;

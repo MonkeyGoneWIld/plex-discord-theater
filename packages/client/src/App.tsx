@@ -14,7 +14,8 @@ import { InviteButton } from "./components/InviteButton";
 import { PlexAccountButton } from "./components/PlexAccountButton";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { formatMediaTitle } from "./lib/format";
-import { apiPost, authUrl, fetchMeta, invalidateMeta, setStreams, versionOf } from "./lib/api";
+import { apiPost, authUrl, fetchMeta, invalidateMeta, versionOf } from "./lib/api";
+import { selectStreams } from "./lib/selectStreams";
 import { matchAudioTrack, plexAudioChoice, plexSubtitleChoice, startingAudioPref, startingSubtitle, startingSubtitlePref, titleTrackPrefs } from "./lib/trackPrefs";
 import { useMediaQuery, MOBILE_LANDSCAPE_QUERY, NARROW_QUERY, PHONE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
@@ -795,10 +796,15 @@ export function App() {
         // Selected before the player mounts: once the transcode has started,
         // changing it costs a restart. One call, so an episode that needs both
         // doesn't pay for two round trips before it can start.
-        await setStreams(version.partId, {
+        const set = await selectStreams(queueItem.ratingKey, version, {
           ...(subtitlePref ? { subtitleStreamID: subtitleMatch?.id ?? 0 } : subtitleOffCommentary ? { subtitleStreamID: 0 } : {}),
           ...(audioToSet ? { audioStreamID: audioToSet.id } : {}),
         });
+        // As they are in the file now, if it was replaced since its details
+        // were cached.
+        audioStreamId = set.audio(audioStreamId);
+        subtitleStreamId = set.subtitle(subtitleStreamId);
+        subtitles = subtitleStreamId !== 0;
         invalidateMeta(queueItem.ratingKey);
       } else {
         subtitleStreamId = plexSubtitle?.id ?? 0;

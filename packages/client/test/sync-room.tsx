@@ -414,6 +414,79 @@ function Runner() {
   }
 
   /**
+   * The host skipping to the last moments of a copy's ten-second segment —
+   * inside what it lists, and past that, where the stream is rebuilt there.
+   * On 22 October a skip back in 1917 landed a second from the end of a 16 MB
+   * segment, fetched it for that second, and the room waited six more for the
+   * next. It lands on the next keyframe instead, and that segment is all
+   * either player fetches to start there.
+   */
+  async function runSkipToSliver(rebuilt: boolean) {
+    setRunning(true);
+    const out: string[] = [`— the host skipping to a segment's last moments, ${rebuilt ? "past what a copy lists" : "inside what it lists"} —`];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      // One connection a little faster than the two streams together, so
+      // neither holds much more than the next segment or two.
+      await startOnce(`p2p=0&stream=copy&event=1&fresh=1&eventS=${rebuilt ? 40 : 120}`, {}, 24_000);
+      // Seven and a half seconds into a segment: past what is held by a
+      // minute or more, a skip lands two or three seconds from the end of
+      // one, and rebuilt, a moment nearer for the time the new stream takes.
+      await waitFor(() => {
+        const h = latest.get("u-host");
+        return !!h && !h.paused && h.pos > 5 && h.pos % 10 > 7.3 && h.pos % 10 < 7.8;
+      }, 30_000, "the host seven seconds into a segment");
+      const from = latest.get("u-host")!.pos;
+      const skipS = rebuilt ? 60 : 70;
+      const skippedAt = Date.now();
+      for (let i = 0; i < skipS / 10; i++) hostKey("ArrowRight");
+      const target = from + skipS;
+      const sliver = Math.floor(target / 10);
+      const keyframeS = (sliver + 1) * 10;
+      say(`… skipping from ${from.toFixed(1)}s to about ${target.toFixed(1)}s, ${(keyframeS - target).toFixed(1)}s before the keyframe at ${keyframeS}s`);
+      const playing = (who: string) => {
+        const r = latest.get(who);
+        return !!r && !r.paused && r.ready >= 3 && r.pos > target - 3 && r.pos < target + 20;
+      };
+      await waitFor(() => playing("u-host") && playing("u-viewer"), 60_000, "both to play from where the host skipped to");
+      const tookS = (Date.now() - skippedAt) / 1000;
+      const host = events.get("u-host") ?? [];
+      const restarted = host.some((e) => e.tag === "Seek" && /restarting transcode/.test(e.msg));
+      say(`${restarted === rebuilt ? "PASS" : "FAIL"} the stream ${rebuilt ? "was" : "wasn't"} rebuilt for it`);
+      const landed = host.find((e) => e.t >= skippedAt && /landing on the next keyframe/.test(e.msg));
+      say(`${landed && Math.abs(Number(landed.data.toS) - keyframeS) < 0.5 ? "PASS" : "FAIL"} the host lands on the next keyframe (${landed ? `${landed.data.fromS}s → ${landed.data.toS}s` : "not said"})`);
+      // What of the sliver's segment each was sent after the skip — a moment
+      // of one called off as it went is nothing.
+      const served = (await api("/api/test/served")) as Array<{ user: string; seg: string; at: number; askedAt?: number; sent?: number; bytes?: number; cut?: boolean }>;
+      const name = `seg${String(sliver).padStart(3, "0")}.ts`;
+      for (const who of ["u-host", "u-viewer"]) {
+        const got = served.filter((x) => x.user === who && x.seg === name && (x.askedAt ?? x.at) >= skippedAt);
+        const sent = got.reduce((n, x) => n + (x.sent ?? 0), 0);
+        const whole = got[0]?.bytes ?? 0;
+        say(`${sent < 1e6 ? "PASS" : "FAIL"} ${who === "u-host" ? "the host" : "the viewer"} isn't sent the segment the skip went into for its last moments (${(sent / 1e6).toFixed(1)} of ${(whole / 1e6).toFixed(1)} MB)`);
+      }
+      // For the record: rebuilt, the viewer's picture tends to come after the
+      // room has started on this one shared connection, and how it settles
+      // onto the room then is the "Viewer's picture after the room starts"
+      // checks' business.
+      await pause(5_000);
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      say(`    5 s on, the viewer ${(v.pos - h.pos).toFixed(2)}s from the host, at ${h.pos.toFixed(1)}s`);
+      say(`    both playing ${tookS.toFixed(1)}s after the skip`);
+    } catch (err) {
+      const h = latest.get("u-host");
+      const v = latest.get("u-viewer");
+      say(`FAIL ${String(err)} (host at ${h?.pos.toFixed(1)}s ${h?.paused ? "paused" : "playing"}, viewer at ${v?.pos.toFixed(1)}s)`);
+    } finally {
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
    * The start of a title's preview frames fetched on its page — by the host
    * and the viewer alike, since either can look along the seek bar — and the
    * seek bar taking it from there as the film starts, instead of asking for it
@@ -2394,6 +2467,8 @@ function Runner() {
         <button disabled={running} onClick={() => void runCopySkipInPlace(true)}>Skip ahead inside a copy, P2P</button>
         <button disabled={running} onClick={() => void runCopySkipInPlace(false, 8_000)}>Skip ahead inside a copy, slow</button>
         <button disabled={running} onClick={() => void runCopySkipInPlace(false, 30_000, 180)}>Skip far ahead inside a copy</button>
+        <button disabled={running} onClick={() => void runSkipToSliver(false)}>Skip to a segment's last moments</button>
+        <button disabled={running} onClick={() => void runSkipToSliver(true)}>Skip to a segment's last moments, rebuilt</button>
         <button disabled={running} onClick={() => void runPlexLength()}>Plex's length far too long</button>
         <button disabled={running} onClick={() => void runControlsClick()}>Clicks on the controls</button>
         <button disabled={running} onClick={() => void runLandAfterSlowSkip()}>Landing after a slow skip</button>

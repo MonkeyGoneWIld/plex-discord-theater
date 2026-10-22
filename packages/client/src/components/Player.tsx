@@ -795,6 +795,20 @@ function levelFragments(hls: Hls): Array<{ start: number; duration: number; gap?
   return level?.details?.fragments ?? null;
 }
 
+/**
+ * Where a skip to `atS` lands: on the next segment's keyframe when `atS`
+ * leaves only a sliver of its own (lib/roomWait landingFor), so that the one
+ * segment is enough to start on. A segment is fetched whole: on 22 October a
+ * skip back in 1917, whose keyframes are ten seconds apart, landed a second
+ * from the end of one, fetched its 16 MB for that second, and the room waited
+ * six more for the next. Never further than the segments listed.
+ */
+function skipLanding(atS: number, fragments: ReadonlyArray<{ start: number; duration: number; gap?: boolean }> | null): number {
+  const listed = fragments?.filter((f) => !f.gap) ?? [];
+  const last = listed[listed.length - 1];
+  return last ? landingFor(atS, listed, last.start + last.duration - 1) : atS;
+}
+
 /** Segments with the sizes a copy's playlist gives them (n=), for lib/roomWait's landingBySize. */
 function sizedSegments(
   fragments: ReadonlyArray<{ start: number; duration: number; url?: string }> | null,
@@ -1896,6 +1910,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /** Where the stream being brought up starts, once seekOffsetRef is spent —
    *  see hostPositionForRoom. */
   const restartTargetRef = useRef<number | null>(null);
+  /** Whether the next stream this player brings up is for a skip — see
+   *  skipLanding. Spent with seekOffsetRef. */
+  const restartForSkipRef = useRef(false);
   // Last position this client is confident playback actually reached for the
   // current item. Updated only from a video that is genuinely playing, so it is
   // never polluted by the transient 0 a torn-down element reports mid-restart.
@@ -4172,6 +4189,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // back to where it was.
     let offset = seekOffsetRef.current;
     seekOffsetRef.current = null;
+    const forSkip = restartForSkipRef.current && offset !== null;
+    restartForSkipRef.current = false;
     if (sessionOwner && offset === null) {
       const fallback = lastGoodPositionRef.current;
       if (fallback > 0) {
@@ -4393,6 +4412,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
          * says where the segments are — see the landing, and LEVEL_LOADED.
          */
         let landingAhead: { atS: number; roomAtS: number; at: number } | null = null;
+        /** Where this player's own stream for a skip lands, until its
+         *  playlist says where the segments are — see LEVEL_LOADED. */
+        let skipLandingAt: number | null = null;
 
         if (!vpsRelay) {
           // P2P mode — peers share segments via WebRTC. Copied segments come
@@ -4839,6 +4861,36 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             setFileLength((was) => (was?.ratingKey === key && Math.abs(was.s - s) < 1 ? was : { ratingKey: key, s }));
           }
           /**
+           * This player's own stream for a skip, now that its segments are
+           * known: on the next keyframe when where it lands leaves a sliver of
+           * its segment (skipLanding). The loading begun meanwhile, at the
+           * place asked for, goes there too; and the room, waiting for this
+           * picture, is told, so that everybody else lands there with it.
+           */
+          if (skipLandingAt !== null) {
+            const atS = skipLandingAt;
+            skipLandingAt = null;
+            const landS = skipLanding(atS, data.details.fragments);
+            if (landS !== atS && Math.abs(video.currentTime - atS) < 0.01 && video.readyState < HTMLMediaElement.HAVE_METADATA) {
+              logEvent("Seek", "landing on the next keyframe, so one segment is enough to start on", {
+                fromS: Number(atS.toFixed(2)),
+                toS: Number(landS.toFixed(2)),
+              });
+              hls.stopLoad();
+              video.currentTime = landS;
+              // After everything else has had this playlist: the P2P engine
+              // learns its segments from it.
+              setTimeout(() => {
+                if (mounted && hlsRef.current === hls) hls.startLoad(video.currentTime);
+              }, 0);
+              const sync = syncStateRef.current;
+              if (isHostRef.current && sync?.playing && sync.connected) {
+                hostToldWaitingRef.current = true;
+                syncActionsRef.current?.sendHeartbeat(landS, true, true);
+              }
+            }
+          }
+          /**
            * A follower landing a little past the room, now that its segments
            * are known: at the start of the next one instead, if where it was
            * going leaves only a sliver of its own (lib/roomWait landingFor).
@@ -5118,6 +5170,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 joinAheadOf = syncPos;
                 landingAhead = { atS: syncPos + leadS, roomAtS: syncPos, at: Date.now() };
               } else joinSettleRef.current = true;
+              // This player's own stream for a skip: on the next keyframe, if
+              // where it lands leaves a sliver of its segment (skipLanding),
+              // once the segments are known.
+              if (forSkip && !leadS && sessionOwner && !didAdoptRef.current) skipLandingAt = syncPos;
             }
           } else if (
             // The same, into a room that is paused: on the stream someone else
@@ -7454,6 +7510,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         sessionStartOffsetS: sessionStartOffsetRef.current,
         ...snapshot(videoRef.current),
       });
+      restartForSkipRef.current = true;
       setRetryKey((k) => k + 1);
     };
 
@@ -7574,6 +7631,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       return;
     }
 
+    // Held nowhere, here or in the engine's memory: on the next keyframe if
+    // the place leaves a sliver of its segment (skipLanding), and the room
+    // goes there with it.
+    if (!wasBuffered && !pictureHeldAt(video, positionSeconds) && hlsRef.current) {
+      const landS = skipLanding(positionSeconds, levelFragments(hlsRef.current));
+      if (landS !== positionSeconds) {
+        logEvent("Seek", "landing on the next keyframe, so one segment is enough to start on", {
+          fromS: Number(positionSeconds.toFixed(2)),
+          toS: Number(landS.toFixed(2)),
+        });
+        positionSeconds = landS;
+      }
+    }
     video.currentTime = positionSeconds;
     if (broadcast) {
       // Everybody starts from the new place together: held here until the

@@ -774,6 +774,24 @@ export function sessionHasOtherWatchers(sessionId: string, userId: string | null
 }
 
 /**
+ * The streams of `ratingKey` that `userId` drives in their room now. A new
+ * one of theirs replaces one of these: a seek to before where a stream began
+ * starts it again under a new session (Player.tsx).
+ */
+export function streamsDrivenBy(userId: string | null, ratingKey: string): string[] {
+  if (!userId) return [];
+  const found = new Set<string>();
+  for (const room of rooms.values()) {
+    const s = room.state;
+    if (s.ratingKey !== ratingKey) continue;
+    for (const v of s.variants.values()) if (v.hlsSessionId && v.ownerUserId === userId) found.add(v.hlsSessionId);
+    const host = [...room.clients].some((c) => c.userId === userId && c.isHost) || room.hostReconnect?.client.userId === userId;
+    if (host && s.hlsSessionId) found.add(s.hlsSessionId);
+  }
+  return [...found];
+}
+
+/**
  * Whether a transcode started by this user may be HEVC: when their player can
  * decode it, and the stream they drive isn't one for people who can't.
  *

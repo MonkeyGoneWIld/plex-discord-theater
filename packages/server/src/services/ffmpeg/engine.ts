@@ -82,6 +82,10 @@ const IDLE_MS = 10 * 60_000;
 /** A run started closer than this to the start of the film leaves what is
  *  before it to a restart: a few seconds aren't worth a second ffmpeg. */
 const BEFORE_FROM_S = 10;
+/** How long a run made whole — Before and all — is kept once its session
+ *  stops, for a new session of its driver's to take over (takeOver). The
+ *  player asks for that new one straight after it stops the old. */
+const SPARE_MS = 15_000;
 /** Runs of one title that die within this long of each other leave it to Plex. */
 const CRASH_WINDOW_MS = 15 * 60_000;
 const CRASHES_TO_REFUSE = 2;
@@ -185,6 +189,8 @@ const bySession = new Map<string, Run>();
 const retired = new LruMap<string, number>(2_000);
 /** Sessions whose runs have ended: a stop or a ping for one is nothing of Plex's. */
 const retiredSessions = new LruMap<string, number>(2_000);
+/** Runs made whole whose sessions stopped, by session, kept SPARE_MS. */
+const spare = new Map<string, Run>();
 /** When each title's runs died, recently. */
 const crashes = new Map<string, number[]>();
 
@@ -373,7 +379,7 @@ async function measure(run: Run, name: string): Promise<void> {
   notify(run);
 }
 
-function stopRun(run: Run, why: string): void {
+function stopRun(run: Run, why: string, keep = false): void {
   // Before it goes, while its files are open.
   const used = run.gpuAtStart && run.proc?.pid && run.proc.exitCode === null ? use(run, sampleGpu(run.proc.pid)) : null;
   run.stopped = true;
@@ -401,6 +407,17 @@ function stopRun(run: Run, why: string): void {
     ...used,
   });
   dropHot(run.dir);
+  if (keep && run.ended && !run.failed && run.before?.ended) {
+    // The player stops its old session before it asks for the new one.
+    const sessionId = run.sessionId;
+    spare.set(sessionId, run);
+    setTimeout(() => {
+      if (spare.get(sessionId) !== run) return;
+      spare.delete(sessionId);
+      void fs.promises.rm(run.dir, { recursive: true, force: true }).catch(() => {});
+    }, SPARE_MS).unref();
+    return;
+  }
   void fs.promises.rm(run.dir, { recursive: true, force: true }).catch(() => {});
 }
 
@@ -504,12 +521,40 @@ async function measureBefore(run: Run, b: Before, name: string): Promise<void> {
 }
 
 /**
- * Whether a restart of this session at `offsetS` can be served from what its
- * run made: the same stream, made from before there to the end of the file.
+ * Whether a restart at `offsetS` can be served from what this run made: the
+ * same stream, made from before there to the end of the file. A spare one too.
  */
 function servesFrom(run: Run, same: string | null, offsetS: number): boolean {
-  if (same === null || run.same !== same || !run.ended || run.failed || run.stopped) return false;
+  if (same === null || run.same !== same || !run.ended || run.failed) return false;
+  if (run.stopped && spare.get(run.sessionId) !== run) return false;
   return offsetS >= (run.before?.ended ? 0 : run.segments[0]?.start ?? Infinity);
+}
+
+/**
+ * A new session of the stream a driver replaces — a seek to before where a
+ * stream began starts it again under a new session (Player.tsx) — takes over
+ * what the old one made, running or spare, when it is the same stream made
+ * that far. Hot Fuzz and 1917 on 22 October: made whole, and never used.
+ */
+function takeOver(sessionId: string, replaces: string[], same: string | null, offsetS: number): string | null {
+  for (const id of replaces) {
+    const run = bySession.get(id) ?? spare.get(id);
+    if (!run || id === sessionId || !servesFrom(run, same, offsetS)) continue;
+    if (spare.get(id) === run) {
+      spare.delete(id);
+      run.stopped = false;
+    } else {
+      bySession.delete(id);
+      retiredSessions.set(id, Date.now());
+    }
+    logEvent("FFmpeg", "a new session takes over what the one it replaces made", {
+      session: short(sessionId), from: short(id), ratingKey: run.ratingKey,
+    });
+    run.sessionId = sessionId;
+    bySession.set(sessionId, run);
+    return rekey(run, offsetS);
+  }
+  return null;
 }
 
 /**
@@ -574,10 +619,14 @@ export async function startFfmpegRun(o: {
   args: string[];
   /** The same stream's arguments from the start of the film up to `toS`: see Before. */
   fromStart?: (toS: number) => string[];
+  /** The sessions of the streams its driver has, which this one replaces: see takeOver. */
+  replaces?: string[];
 }): Promise<{ ok: true; key: string } | { ok: false; why: string }> {
   const previous = bySession.get(o.sessionId);
   const same = o.fromStart ? o.fromStart(0).join("\n") : null;
   if (previous && servesFrom(previous, same, o.offsetS)) return { ok: true, key: rekey(previous, o.offsetS) };
+  const taken = previous ? null : takeOver(o.sessionId, o.replaces ?? [], same, o.offsetS);
+  if (taken) return { ok: true, key: taken };
   if (previous) stopRun(previous, "restarted");
   const key = randomUUID();
   const dir = path.join(CACHE_DIR, o.sessionId.replace(/[^\w-]/g, "_"), key);
@@ -803,7 +852,7 @@ export function keepFfmpegAlive(sessionId: string): boolean {
 
 export function stopFfmpegSession(sessionId: string, why = "stopped"): void {
   const run = bySession.get(sessionId);
-  if (run) stopRun(run, why);
+  if (run) stopRun(run, why, true);
 }
 
 export function stopAllFfmpegSessions(why = "stopped"): number {

@@ -788,6 +788,37 @@ console.log("\n— what a run started mid-film skipped, made once it reaches the
     check("  the key it was under is gone (410)", old.status, 410);
     await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
   }
+
+  // 1917 and Hot Fuzz on 22 October: a seek to before where the stream began
+  // asks for a new session (Player.tsx), and the one made whole went unused.
+  // The player stops its old session first when nobody else is on it.
+  for (const [rk, what, stopFirst] of [["1", "a copy", false], ["3", "a re-encode", false], ["1", "a copy", true]] as const) {
+    const was = crypto.randomUUID();
+    const started = variantOf((await master(rk, was, "?offset=31")).text);
+    let state = engine.ffmpegBeforeState?.(was) ?? "none";
+    for (let i = 0; i < 240 && state !== "made" && !state.startsWith("failed"); i++) {
+      await sleep(250);
+      state = engine.ffmpegBeforeState?.(was) ?? "none";
+    }
+    if (stopFirst) await fetch(`${origin}/api/plex/hls/session/${was}?reason=test`, { method: "DELETE" });
+    plexRoutes.replaceStreamsForTests?.(() => [was]);
+    const id = crypto.randomUUID();
+    const variant = variantOf((await master(rk, id, "?offset=5")).text);
+    plexRoutes.replaceStreamsForTests?.(() => []);
+    const playlist = await (await fetch(origin + variant)).text();
+    const made = entries(playlist).filter((e) => /\/base\/b\d+\.ts/.test(decodeURIComponent(e.uri))).length;
+    check(`${what}${stopFirst ? ", its old session stopped first," : ""} sought back to 5 s under a new session: served from what the old one made`,
+      [!!keyOf(variant) && keyOf(variant) !== keyOf(started), playlist.includes("#EXT-X-GAP"), playlist.includes("#EXT-X-ENDLIST"),
+        playlist.includes("#EXT-X-START:TIME-OFFSET=5.000,PRECISE=YES"), made > 0, engine.ffmpegBeforeState?.(id)],
+      [true, false, true, true, true, "made"]);
+    if (!stopFirst) {
+      await fetch(`${origin}/api/plex/hls/session/${was}?reason=test`, { method: "DELETE" });
+      check("  the old session's stop, after, leaves it be", (await fetch(origin + variant)).status, 200);
+    }
+    const old = await fetch(`${origin}/api/plex/hls/seg?p=${encodeURIComponent(`/video/:/transcode/universal/session/${keyOf(started)}/base/index.m3u8`)}`);
+    check("  the old key is gone (410)", old.status, 410);
+    await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
+  }
   process.env.FFMPEG_LOOKAHEAD = "36";
 }
 
@@ -1024,10 +1055,15 @@ console.log("\n— stopping —");
   check("the stream stops without a word to Plex", [del.status, asked], [200, []]);
   check("its playlist is gone", (await fetch(origin + variant)).status, 410);
   check("and its segments", (await fetch(origin + first.uri)).status, 410);
-  await sleep(200);
-  const left = fs.existsSync(path.join(tmp, "stream-cache", "ffmpeg", sid))
+  // Made whole, Before and all, it is kept 15 s for a new session of its driver's (takeOver).
+  const filesLeft = () => fs.existsSync(path.join(tmp, "stream-cache", "ffmpeg", sid))
     ? fs.readdirSync(path.join(tmp, "stream-cache", "ffmpeg", sid)) : [];
-  check("and so are its files", left, []);
+  let left = filesLeft();
+  for (let i = 0; i < 100 && left.length > 0; i++) {
+    await sleep(250);
+    left = filesLeft();
+  }
+  check("and so are its files, within 15 s", left, []);
   asked.length = 0;
   await fetch(`${origin}/api/plex/hls/session/${sid}?reason=again`, { method: "DELETE" });
   await fetch(`${origin}/api/plex/hls/ping/${sid}?time=5000`).catch(() => null);

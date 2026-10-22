@@ -23,7 +23,7 @@ import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
 import { fileKeyframes } from "../services/keyframes.js";
-import { sessionHostUserId, sessionHasOtherWatchers, mayStartHevc, mayStartTranscode, roomPositionForSession } from "../services/sync.js";
+import { sessionHostUserId, sessionHasOtherWatchers, mayStartHevc, mayStartTranscode, roomPositionForSession, streamsDrivenBy } from "../services/sync.js";
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
 import { parseSubtitles, type Cue } from "../services/subtitles.js";
@@ -4735,6 +4735,8 @@ async function startWithFfmpeg(o: {
   picture: PictureFacts | null;
   /** The subtitle burned into the picture, if any. */
   burnSubtitleId?: number | null;
+  /** The sessions of the streams this one replaces: see startFfmpegRun. */
+  replaces?: string[];
 }): Promise<{ manifest: string } | { fallback: string }> {
   const session = o.sessionId.substring(0, 8);
   const toPlex = (fallback: string, log: string, extra: Record<string, unknown> = {}) => {
@@ -4811,6 +4813,7 @@ async function startWithFfmpeg(o: {
       offsetS: o.offsetS,
       args: copyArgs(copyPlan, input, o.offsetS, durationS),
       fromStart: (toS) => copyArgs(copyPlan, input, 0, durationS, undefined, toS),
+      replaces: o.replaces,
     });
     if (!started.ok) return toPlex(`ffmpeg didn't start: ${started.why}`, "run didn't start", { why: started.why });
     key = started.key;
@@ -4879,7 +4882,7 @@ async function startWithFfmpeg(o: {
       sessionId: o.sessionId, ratingKey: o.ratingKey, codec: plan.codec, encode: true,
       targetKbps: encodeTargetKbps(plan), offsetS: o.offsetS,
       args: encodeArgs(plan, input, o.offsetS, durationS, hwDevice()),
-      fromStart: fromStart(plan),
+      fromStart: fromStart(plan), replaces: o.replaces,
     });
     // The GPU decodes the codec but not this file: decoded on the CPU instead.
     if (!started.ok && plan.gpuDecode) {
@@ -4891,7 +4894,7 @@ async function startWithFfmpeg(o: {
           sessionId: o.sessionId, ratingKey: o.ratingKey, codec: plan.codec, encode: true,
           targetKbps: encodeTargetKbps(plan), offsetS: o.offsetS,
           args: encodeArgs(plan, input, o.offsetS, durationS, hwDevice()),
-          fromStart: fromStart(plan),
+          fromStart: fromStart(plan), replaces: o.replaces,
         });
       }
     }
@@ -4976,6 +4979,12 @@ let startAllowed: typeof mayStartTranscode = mayStartTranscode;
 /** For the tests about something else than who may start one: starts without a room. */
 export function allowStartsWithoutRoom(): void {
   startAllowed = () => true;
+}
+/** The streams a new one of its driver's replaces — streamsDrivenBy, unless a test says otherwise. */
+let replacedStreams: typeof streamsDrivenBy = streamsDrivenBy;
+/** For the tests, which have no room: which streams a new one replaces. */
+export function replaceStreamsForTests(streams: typeof streamsDrivenBy): void {
+  replacedStreams = streams;
 }
 
 router.get(
@@ -5508,6 +5517,7 @@ router.get(
               authToken: req.query.token as string | undefined,
               copy, notCopied, transcodeKbps, peakKbps, frame, hevcEncode: roomHevc && HEVC_TRANSCODE,
               picture: version?.picture ?? null,
+              replaces: replacedStreams(userId, ratingKey).filter((id) => id !== sessionId),
             });
         if ("manifest" in tried) return tried.manifest;
         if (!fallbackToPlex()) {

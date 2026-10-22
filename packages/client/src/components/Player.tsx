@@ -801,7 +801,10 @@ function levelFragments(hls: Hls): Array<{ start: number; duration: number; gap?
  * segment is enough to start on. A segment is fetched whole: on 22 October a
  * skip back in 1917, whose keyframes are ten seconds apart, landed a second
  * from the end of one, fetched its 16 MB for that second, and the room waited
- * six more for the next. Never further than the segments listed.
+ * six more for the next. Never further than the segments listed. A title
+ * started part-way in lands the same way: 1917 resumed at 16:26.6 later that
+ * day, 2.85 s before a keyframe, and the room waited 7.4 s for a second
+ * 13 MB segment.
  */
 function skipLanding(atS: number, fragments: ReadonlyArray<{ start: number; duration: number; gap?: boolean }> | null): number {
   const listed = fragments?.filter((f) => !f.gap) ?? [];
@@ -4191,6 +4194,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     seekOffsetRef.current = null;
     const forSkip = restartForSkipRef.current && offset !== null;
     restartForSkipRef.current = false;
+    /** The first stream of a title, which lands like a skip's — see skipLanding. */
+    const startingTitle = !prev || titleChanged;
     if (sessionOwner && offset === null) {
       const fallback = lastGoodPositionRef.current;
       if (fallback > 0) {
@@ -4412,8 +4417,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
          * says where the segments are — see the landing, and LEVEL_LOADED.
          */
         let landingAhead: { atS: number; roomAtS: number; at: number } | null = null;
-        /** Where this player's own stream for a skip lands, until its
-         *  playlist says where the segments are — see LEVEL_LOADED. */
+        /** Where this player's own stream for a skip, or a title's start,
+         *  lands, until its playlist says where the segments are — see
+         *  LEVEL_LOADED. */
         let skipLandingAt: number | null = null;
 
         if (!vpsRelay) {
@@ -4861,17 +4867,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             setFileLength((was) => (was?.ratingKey === key && Math.abs(was.s - s) < 1 ? was : { ratingKey: key, s }));
           }
           /**
-           * This player's own stream for a skip, now that its segments are
-           * known: on the next keyframe when where it lands leaves a sliver of
-           * its segment (skipLanding). The loading begun meanwhile, at the
-           * place asked for, goes there too; and the room, waiting for this
-           * picture, is told, so that everybody else lands there with it.
+           * This player's own stream for a skip or a title's start, now that
+           * its segments are known: on the next keyframe when where it lands
+           * leaves a sliver of its segment (skipLanding). The loading begun
+           * meanwhile, at the place asked for, goes there too; and the room,
+           * waiting for this picture, is told, so that everybody else lands
+           * there with it.
            */
           if (skipLandingAt !== null) {
             const atS = skipLandingAt;
             skipLandingAt = null;
             const landS = skipLanding(atS, data.details.fragments);
-            if (landS !== atS && Math.abs(video.currentTime - atS) < 0.01 && video.readyState < HTMLMediaElement.HAVE_METADATA) {
+            if (landS !== atS &&Math.abs(video.currentTime - atS) < 0.01 && video.readyState < HTMLMediaElement.HAVE_METADATA) {
               logEvent("Seek", "landing on the next keyframe, so one segment is enough to start on", {
                 fromS: Number(atS.toFixed(2)),
                 toS: Number(landS.toFixed(2)),
@@ -4884,7 +4891,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 if (mounted && hlsRef.current === hls) hls.startLoad(video.currentTime);
               }, 0);
               const sync = syncStateRef.current;
-              if (isHostRef.current && sync?.playing && sync.connected) {
+              if (isHostRef.current && sync?.connected && startingTitle) {
+                // A title's start was announced with a "play" a moment ago,
+                // whose answer this player may not have yet, and a heartbeat
+                // sent before it is turned away as stale (the server's
+                // transportRevision). A seek is taken whenever it comes, and
+                // moves a viewer already loading where the play said.
+                hostToldWaitingRef.current = true;
+                syncActionsRef.current?.sendSeek(landS, true);
+              } else if (isHostRef.current && sync?.playing && sync.connected) {
                 hostToldWaitingRef.current = true;
                 syncActionsRef.current?.sendHeartbeat(landS, true, true);
               }
@@ -5216,6 +5231,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               toS: startOffset,
             });
             video.currentTime = startOffset;
+            // A host starting a title part-way in — a resume — lands as a skip
+            // does, once the segments are known.
+            if (startingTitle && isHostRef.current) skipLandingAt = startOffset;
           }
 
           // Pre-fetch cache ensures segments arrive instantly — play as soon as
@@ -5257,6 +5275,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             !roomSaysPlaying && pausedBeforeRebuildRef.current === true;
           pausedBeforeRebuildRef.current = null;
           const holding = roomPaused || rebuildPaused;
+          // A stream held paused stays where it was put: nobody is waiting
+          // for it to start, and the room would not be told of a landing.
+          if (holding) skipLandingAt = null;
           // And a room whose host has no picture yet — its stream is starting
           // too, or it has stalled. Everyone starts with the host, never before
           // it: see SyncState.hostWaiting.

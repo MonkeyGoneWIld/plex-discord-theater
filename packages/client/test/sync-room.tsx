@@ -487,6 +487,47 @@ function Runner() {
   }
 
   /**
+   * The host resuming a copy two and a half seconds before a keyframe, seven
+   * and a half after the one before: too far back to start on that one (see
+   * runKeyframeStart), so it lands on the next keyframe instead, as a skip
+   * does, and the viewer starts there with it — the one segment is enough to
+   * start on. 1917 resumed at 16:26.6 on 22 October waited 7.4 s for a
+   * second segment.
+   */
+  async function runStartAtSliver() {
+    setRunning(true);
+    const out: string[] = ["— a copy resumed in a segment's last moments, too far into it to start on its keyframe —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    const firstPlayAt = (user: string) => Number(events.get(user)?.find((e) => e.tag === "Video" && e.msg === "playing")?.data.posS ?? NaN);
+    try {
+      hostQuery = "&resume=77.5";
+      const began = Date.now();
+      const started = await startOnce("p2p=0&stream=copy&event=1&fresh=1", {}, 24_000);
+      const landed = (events.get("u-host") ?? []).find((e) => /landing on the next keyframe/.test(e.msg));
+      say(`${landed && Math.abs(Number(landed.data.toS) - 80) < 0.5 ? "PASS" : "FAIL"} the host lands on the next keyframe (${landed ? `${landed.data.fromS}s → ${landed.data.toS}s` : "not said"})`);
+      const hostAt = firstPlayAt("u-host");
+      const viewerAt = firstPlayAt("u-viewer");
+      say(`${Math.abs(hostAt - 80) < 0.5 && Math.abs(viewerAt - 80) < 0.5 ? "PASS" : "FAIL"} both start there (host at ${hostAt.toFixed(2)}s, viewer at ${viewerAt.toFixed(2)}s)`);
+      const served = (await api("/api/test/served")) as Array<{ user: string; seg: string; at: number; askedAt?: number; sent?: number; bytes?: number }>;
+      for (const who of ["u-host", "u-viewer"]) {
+        const got = served.filter((x) => x.user === who && x.seg === "seg007.ts" && (x.askedAt ?? x.at) >= began);
+        const sent = got.reduce((n, x) => n + (x.sent ?? 0), 0);
+        say(`${sent < 1e6 ? "PASS" : "FAIL"} ${who === "u-host" ? "the host" : "the viewer"} isn't sent the segment the resume point is in for its last moments (${(sent / 1e6).toFixed(1)} of ${((got[0]?.bytes ?? 0) / 1e6).toFixed(1)} MB)`);
+      }
+      say(`${Math.abs(started.apartMs) < 700 ? "PASS" : "FAIL"} together (${started.apartMs} ms apart)`);
+      say(`    started ${started.startS.toFixed(1)}s after play`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      hostQuery = "";
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
    * The start of a title's preview frames fetched on its page — by the host
    * and the viewer alike, since either can look along the seek bar — and the
    * seek bar taking it from there as the film starts, instead of asking for it
@@ -2469,6 +2510,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runCopySkipInPlace(false, 30_000, 180)}>Skip far ahead inside a copy</button>
         <button disabled={running} onClick={() => void runSkipToSliver(false)}>Skip to a segment's last moments</button>
         <button disabled={running} onClick={() => void runSkipToSliver(true)}>Skip to a segment's last moments, rebuilt</button>
+        <button disabled={running} onClick={() => void runStartAtSliver()}>Resume in a segment's last moments</button>
         <button disabled={running} onClick={() => void runPlexLength()}>Plex's length far too long</button>
         <button disabled={running} onClick={() => void runControlsClick()}>Clicks on the controls</button>
         <button disabled={running} onClick={() => void runLandAfterSlowSkip()}>Landing after a slow skip</button>

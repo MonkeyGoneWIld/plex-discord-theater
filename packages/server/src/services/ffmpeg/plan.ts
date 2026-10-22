@@ -245,7 +245,11 @@ export function copyArgs(
 ): string[] {
   return [
     "-hide_banner", "-nostdin", "-loglevel", "error",
-    ...(offsetS > 0 ? ["-ss", String(offsetS)] : []),
+    // The copied picture starts at the keyframe the seek lands on, and the
+    // converted sound with it, not where the player asked: 1917 on 22 October
+    // landed a keyframe early, 10.5 s before, and its first segment went out
+    // with no sound. A player that took that one first failed on the next.
+    ...(offsetS > 0 ? ["-ss", String(offsetS), "-noaccurate_seek"] : []),
     ...untilArgs(toS),
     "-copyts", "-start_at_zero",
     ...input,

@@ -61,6 +61,9 @@ function film(name: string, audio: string[], video = "libx264"): string {
 const AAC_FILM = film("aac.mkv", ["-c:a", "aac", "-ac", "2"]);
 const AC3_FILM = film("ac3.mkv", ["-c:a", "ac3", "-ac", "6"]);
 const HEVC_FILM = film("hevc.mkv", ["-c:a", "aac", "-ac", "2"], "libx265");
+/** AC3, a keyframe every 4 s, and B-frames: ffmpeg's seek to 32 s lands on the one at 28. */
+const LATE_SOUND_FILM = film("late-sound.mkv", ["-bf", "2", "-g", "96", "-keyint_min", "96", "-sc_threshold", "0",
+  "-c:a", "ac3", "-ac", "6"]);
 
 /**
  * A PGS subtitle (.sup) of white boxes: each shown from `from` to `to`
@@ -199,6 +202,7 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
     { id: 61, streamType: 3, index: 2, codec: "srt", language: "English", languageCode: "eng" },
     { id: 62, streamType: 3, index: 3, codec: "ass", language: "Japanese", languageCode: "jpn" },
   ] },
+  16: { file: LATE_SOUND_FILM, plexPath: LATE_SOUND_FILM, codec: "h264", width: 640, height: 360, audio: "ac3", channels: 6 },
 };
 
 const asked: string[] = [];
@@ -493,6 +497,12 @@ console.log("\n— audio that isn't AAC —");
   const stereo = notesOf((await master("2", crypto.randomUUID())).text);
   check("and with FFMPEG_AUDIO_CHANNELS=2, as AAC stereo, as Plex makes it", [stereo.audioTo, stereo.audioKbps], ["AAC Stereo", "256"]);
   delete process.env.FFMPEG_AUDIO_CHANNELS;
+  // 1917 on 22 October: its first segment had no sound, and the friend's player failed on the next.
+  const late = variantOf((await master("16", crypto.randomUUID(), "?offset=32")).text);
+  const opening = entries(await (await fetch(origin + late)).text())[0];
+  const at = videoSpan(Buffer.from(await (await fetch(origin + opening.uri)).arrayBuffer()))!;
+  check("from a seek that lands a keyframe early, the first segment has sound from its picture on",
+    [Math.round((at.start - 10) * 10) / 10, at.audioStart !== null && Math.abs(at.audioStart - at.start) < 0.5], [28, true]);
 }
 
 console.log("\n— a file that isn't mounted here —");

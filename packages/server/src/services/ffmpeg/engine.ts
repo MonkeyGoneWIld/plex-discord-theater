@@ -414,11 +414,17 @@ function stopRun(run: Run, why: string, keep = false): void {
     setTimeout(() => {
       if (spare.get(sessionId) !== run) return;
       spare.delete(sessionId);
-      void fs.promises.rm(run.dir, { recursive: true, force: true }).catch(() => {});
+      removeDir(run.dir);
     }, SPARE_MS).unref();
     return;
   }
-  void fs.promises.rm(run.dir, { recursive: true, force: true }).catch(() => {});
+  removeDir(run.dir);
+}
+
+/** A run's files, gone. Asked again while a killed ffmpeg still holds or
+ *  writes one: on Windows the first try failed, and its folder stayed. */
+function removeDir(dir: string): void {
+  void fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }).catch(() => {});
 }
 
 /** Whether a run's Before is being made. */

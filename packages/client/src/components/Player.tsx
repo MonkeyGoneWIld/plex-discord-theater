@@ -41,7 +41,7 @@ import { LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAI
 import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, nextSegmentInS, pictureStartFor, pictureAfterSeek } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
-import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../lib/bufferAhead";
+import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, JOIN_TOLERANCE_S, type HeldSegment } from "../lib/bufferAhead";
 import { arrivingKbps, backfillShare, backfillTitle, catchingUpTitle, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
 import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
@@ -720,6 +720,35 @@ function nextBufferedStart(video: HTMLVideoElement, t: number): number | null {
   return null;
 }
 
+/**
+ * A seek that landed a moment in front of the picture — between a segment's
+ * listed start and its first frame — moved onto it. The element never
+ * finishes seeking there, and hls.js steps over such a gap only while playing,
+ * so a player paused for the room sat in front of it for good, while its
+ * readiness counted the picture as in hand (a gap this small is a segment
+ * edge to coveredAheadS). On 23 October a skip back in The Punisher landed at
+ * 32:29.70, the picture began at 32:29.82, and host and viewer sat there with
+ * 40 s downloaded until the host rebuilt the stream 20 s later. A gap this
+ * small is no segment missing — that would be seconds — so nothing is skipped.
+ */
+function stepOntoPicture(video: HTMLVideoElement): boolean {
+  if (!video.seeking) return false;
+  const t = video.currentTime;
+  const { buffered } = video;
+  for (let i = 0; i < buffered.length; i++) {
+    if (buffered.end(i) <= t) continue;
+    const start = buffered.start(i);
+    if (start <= t || start - t > JOIN_TOLERANCE_S) return false;
+    logEvent("Seek", "the picture starts a moment after where the seek landed, going there", {
+      fromS: Number(t.toFixed(2)),
+      toS: Number(start.toFixed(2)),
+      paused: video.paused,
+    });
+    video.currentTime = start + 0.05;
+    return true;
+  }
+  return false;
+}
 
 /** Seconds of contiguous buffer ahead of the current playhead (0 if none). */
 function bufferAheadSeconds(video: HTMLVideoElement): number {
@@ -1640,10 +1669,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const now = Date.now();
     // A wait is looked at every quarter second while it lasts; a gap is a new one.
     const wait = cushionWaitRef.current;
-    if (now - wait.lastAt > 1_000) wait.since = 0;
+    if (now - wait.lastAt > 1_000) {
+      wait.since = 0;
+      wait.wentOn = null;
+    }
     wait.lastAt = now;
     if (!video || !pictureReady(video)) {
       wait.since = 0;
+      wait.wentOn = null;
       return null;
     }
     const nowS = video.currentTime;
@@ -1684,13 +1717,25 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // Waiting for more than the least, from when it had the least — and once
     // gone on, gone on: a player that said it was ready after waiting its
     // longest, and the next moment that it wasn't, held the room as long again.
-    if (r.why === "short of the least in hand") wait.since = 0;
-    else if (!wait.since) wait.since = now;
+    // So for any ready: the next minute's lateness, from a speed measured
+    // over the last few seconds, sat on the line after a skip in Project Hail
+    // Mary on 23 October — in time, then 1.3 s late a quarter second later —
+    // and each answer reached the room after the one before had: it ran,
+    // waited, ran and waited again within half a second.
+    if (r.why === "short of the least in hand") {
+      wait.since = 0;
+      wait.wentOn = null;
+      return r;
+    }
+    if (!wait.since) wait.since = now;
+    if (r.ready) wait.wentOn = r;
+    else if (wait.wentOn) return wait.wentOn;
     return r;
   }, []);
   /** Since when this player has had the least in hand and waited for more, and
-   *  when that was last looked at — see readyToGo. */
-  const cushionWaitRef = useRef({ since: 0, lastAt: 0 });
+   *  when that was last looked at; and what said it could go on, once one did
+   *  — see readyToGo. */
+  const cushionWaitRef = useRef<{ since: number; lastAt: number; wentOn: Readiness | null }>({ since: 0, lastAt: 0, wentOn: null });
   /**
    * Whether the picture being waited for is a skip's: from a skip — the
    * host's own, or the room's — until the picture moves at the place it went
@@ -5401,6 +5446,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           });
           video.currentTime = pictureFrom + 0.05;
         });
+        // And a seek landed in front of the picture, as soon as that comes in.
+        hls.on(Hls.Events.FRAG_BUFFERED, () => {
+          if (mounted) stepOntoPicture(video);
+        });
 
         // Clear the error banner once fragments flow again. Only the network
         // budget refills here: a fragment arriving is exactly what a network
@@ -6306,6 +6355,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         wedgeLastPosRef.current = v.currentTime;
         if (moved) stepsOverStall = 0;
 
+        // A seek in front of picture that was there before it landed: no
+        // segment arrives to set it off (see stepOntoPicture).
+        if (stepOntoPicture(v)) {
+          wedgeLastPosRef.current = v.currentTime;
+          return;
+        }
+
         // Stopped with the picture buffered in front of it — see
         // STUCK_WITH_BUFFER_NUDGE_S. Acted on at the first look: not having
         // moved since the last one is already two seconds, and with a second
@@ -6575,6 +6631,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (isNewSeek) {
       lastSeekAtRef.current = Date.now();
       skipWaitRef.current = true;
+      cushionWaitRef.current.wentOn = null;
     }
 
     // Correction against where the room is *now*. `position` is the last
@@ -7552,6 +7609,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // Somewhere new on purpose: any wait for the room was about where we were.
     lastSeekAtRef.current = Date.now();
     skipWaitRef.current = true;
+    cushionWaitRef.current.wentOn = null;
     stopWaitingForRoom("seeking");
     const video = videoRef.current;
     if (!video) {
@@ -7754,6 +7812,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const ready = !!video && isHostRef.current && pictureHeldAt(video, positionSeconds) && enoughHeldAt(video, positionSeconds);
     lastSeekAtRef.current = Date.now();
     skipWaitRef.current = true;
+    cushionWaitRef.current.wentOn = null;
     if (video) {
       resetPlaybackRate(video);
       video.currentTime = positionSeconds;
@@ -8793,8 +8852,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         </div>
       )}
 
-      {!isPip && showStats && vpsRelay !== null && (
+      {vpsRelay !== null && (
         <StatsOverlay
+          visible={!isPip && showStats}
           videoRef={videoRef}
           hlsRef={hlsRef}
           vpsRelay={vpsRelay}

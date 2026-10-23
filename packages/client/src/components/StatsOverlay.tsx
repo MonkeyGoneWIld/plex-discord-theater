@@ -65,6 +65,9 @@ interface StatsOverlayProps {
   syncInfo?: () => SyncInfo | null;
   /** The title's runtime, for where a subtitle's lines have come. */
   runtimeS?: number | null;
+  /** Shown, or measuring out of sight: the panel stays mounted while closed,
+   *  so it opens on the last minute of its graphs rather than an empty box. */
+  visible: boolean;
   onClose: () => void;
 }
 
@@ -200,9 +203,12 @@ function Bar({ parts, children }: { parts: Array<[number, string]>; children?: R
 
 export function StatsOverlay({
   videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRef, notes, quality, downloadedAheadS, subtitle, subtitleStatusRef,
-  previewPartId = null, previewStatusRef, lastSegmentRef, downloadMeter, syncInfo, runtimeS = null, onClose,
+  previewPartId = null, previewStatusRef, lastSegmentRef, downloadMeter, syncInfo, runtimeS = null, visible, onClose,
 }: StatsOverlayProps) {
   // Read by the poll, which is set up once.
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const pollRef = useRef<(() => void) | null>(null);
   const downloadedAheadRef = useRef(downloadedAheadS);
   downloadedAheadRef.current = downloadedAheadS;
   const downloadMeterRef = useRef(downloadMeter);
@@ -219,7 +225,7 @@ export function StatsOverlay({
   // speed they gave.
   const meterReadingsRef = useRef<Array<{ bytes: number; activeMs: number; at: number }>>([]);
   const lastSpeedRef = useRef<number | null>(null);
-  // A minute of each graphed measure, a sample a poll.
+  // A minute of each graphed measure, a sample a poll, kept while closed.
   const historyRef = useRef({
     fps: [] as Array<number | null>,
     drops: [] as boolean[],
@@ -356,6 +362,8 @@ export function StatsOverlay({
         speedEstimated = true;
       }
       pushSample(history.speed, speedBps, GRAPH_SLOTS);
+      // Out of sight, the samples are all there is to keep.
+      if (!visibleRef.current) return;
 
       // Current level: resolution, bitrate, codecs
       let streamResolution = "—";
@@ -394,6 +402,7 @@ export function StatsOverlay({
       setTick((n) => n + 1);
     };
 
+    pollRef.current = poll;
     poll();
     const id = setInterval(poll, POLL_INTERVAL_MS);
     return () => {
@@ -405,6 +414,10 @@ export function StatsOverlay({
       }
     };
   }, [videoRef, hlsRef]);
+  // Opened: what it shows now, not as of the last poll.
+  useEffect(() => {
+    if (visible) pollRef.current?.();
+  }, [visible]);
 
   // What is behind a row stays out of the way until the row is opened.
   const [open, setOpen] = useState<Set<Section>>(loadOpen);
@@ -415,6 +428,7 @@ export function StatsOverlay({
     saveOpen(next);
     return next;
   });
+  if (!visible) return null;
 
   const history = historyRef.current;
   const p2p = p2pStatsRef.current;

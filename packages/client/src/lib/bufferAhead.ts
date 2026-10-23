@@ -12,7 +12,7 @@
  */
 
 /** Gaps smaller than this between pieces are taken as joined: segment edges. */
-const JOIN_TOLERANCE_S = 0.5;
+export const JOIN_TOLERANCE_S = 0.5;
 
 /**
  * Seconds of picture, from `nowS`, covered without a break by `ranges` — each

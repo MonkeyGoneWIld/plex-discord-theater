@@ -286,10 +286,17 @@ console.log("\n— picture enough in hand to go —");
   check("once that stretch is in, it goes", backLater.ready, true);
   const backWaited = readiness({ ...base, nowS: 1870.68, heldToS: 1876.2, upcoming: segs(1876.2, [7, 23.36, 3.7, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]), bytesPerS: 1.4 * MB, waitedS: MAX_EXTRA_WAIT_S });
   check("but a connection that won't catch the film up isn't waited on for ever", [backWaited.ready, backWaited.why], [true, "waited long enough for more"]);
-  check("a skip goes as soon as it has picture enough to start on, as it always has",
-    [readiness({ ...base, nowS: 1870.68, heldToS: 1873.7, upcoming: segs(1873.7, [4.95, 7, 23.36]), bytesPerS: 3.5 * MB, skip: true }).ready], [true]);
-  check("having stopped lately too: a stop's wait is for starting again after it, not for a skip",
-    readiness({ ...base, heldToS: 103.5, upcoming: segs(103.5, [5]), bytesPerS: 1 * MB, stops: 2, skip: true }).why, "a skip, with picture enough to start on");
+  check("a skip well ahead of the film goes with three seconds in hand, as it always has",
+    readiness({ ...base, heldToS: 103.5, upcoming: segs(103.5, Array(14).fill(5)), bytesPerS: 5 * MB, skip: true }).ready, true);
+  // monkey26 skipping 113522, a 20 Mbps copy, on 23 October: 3.55 s in hand,
+  // segments of 10 to 16 MB coming at 15 to 17 Mbps. It went, and stopped ten
+  // seconds later.
+  const skipped = readiness({ ...base, heldToS: 103.55, upcoming: segs(103.55, [13, 16, 10, 12, 14, 13, 12, 13, 14, 12, 13, 12, 13, 14]), bytesPerS: 2 * MB, skip: true });
+  check("a skip with the next minute not coming in time waits as a start does", [skipped.ready, skipped.why], [false, "the next minute won't come in time"]);
+  check("up to the same eight seconds in hand",
+    readiness({ ...base, heldToS: 100 + MAX_READY_CUSHION_S, upcoming: segs(108, Array(13).fill(13)), bytesPerS: 2 * MB, skip: true }).ready, true);
+  check("having stopped lately: a stop's wait is for starting again after it, not for a skip",
+    readiness({ ...base, heldToS: 103.5, upcoming: segs(103.5, Array(14).fill(5)), bytesPerS: 50 * MB, stops: 2, skip: true }).ready, true);
   check("after a stop, with what the stops ask for in hand, it waits for the next minute as a start does, for a while",
     [readiness({ ...base, heldToS: 108, upcoming: segs(108, Array(13).fill(30)), bytesPerS: 1 * MB, stops: 1 }).ready,
       readiness({ ...base, heldToS: 108, upcoming: segs(108, Array(13).fill(30)), bytesPerS: 1 * MB, stops: 1, waitedS: MAX_EXTRA_WAIT_S }).ready],

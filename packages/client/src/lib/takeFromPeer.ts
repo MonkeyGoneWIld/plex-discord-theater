@@ -12,8 +12,6 @@ export const URGENT_S = 6;
 const SETTLE_MS = 1500;
 /** One finishing sooner than this is left to finish. */
 const NEARLY_DONE_MS = 1500;
-/** A peer nobody has measured yet is taken to manage this. */
-const UNMEASURED_PEER_BITS_PER_S = 16_000_000;
 /** How long a segment taken from a peer is left there before it is judged. */
 const PEER_SETTLE_MS = 3000;
 /** How our own download of a segment is going: all of its parts together. */
@@ -31,8 +29,15 @@ export interface FromPeer {
   bitsPerS: number;
 }
 
-/** Our download is crawling, and the peer would be done sooner. */
+/**
+ * Our download is crawling, and the peer would be done sooner — a peer that
+ * has sent us something before. One nobody had measured was taken to manage
+ * 16 Mbps, and from 17 to 23 October 97 of 99 takes were from such a peer: 68
+ * of them sent nothing for two seconds or closed, and the segment went back to
+ * the bot later than it would have come from it.
+ */
 export function shouldTakeFromPeer(http: HttpProgress, peer: FromPeer, now: number): boolean {
+  if (!(peer.bitsPerS > 0)) return false;
   const elapsed = now - http.startedAt;
   if (elapsed < SETTLE_MS) return false;
   const rate = http.received / elapsed;
@@ -41,7 +46,7 @@ export function shouldTakeFromPeer(http: HttpProgress, peer: FromPeer, now: numb
     : rate > 0 ? (http.total - http.received) / rate : Infinity;
   if (httpLeftMs <= NEARLY_DONE_MS) return false;
   if (peer.left === undefined) return true;
-  const peerRate = (peer.bitsPerS > 0 ? peer.bitsPerS : UNMEASURED_PEER_BITS_PER_S) / 8000;
+  const peerRate = peer.bitsPerS / 8000;
   return peer.left / peerRate < httpLeftMs;
 }
 

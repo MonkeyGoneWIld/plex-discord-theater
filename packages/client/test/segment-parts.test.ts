@@ -82,10 +82,10 @@ async function readAll(res: Response): Promise<Uint8Array> {
 const same = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((v, i) => v === b[i]);
 
 console.log("\n— how a segment is split —");
-check("a 7 MB segment goes in eight parts", partsFor(7_200_400), 8);
-check("a 2.4 MB one in three", partsFor(2_400_000), 3);
-check("never more than the bot splits one into, eight", [partsFor(28_000_000), MAX_PARTS], [8, 8]);
-check("a small one in one", partsFor(600_000), 1);
+check("a 7 MB segment goes in fifteen parts", partsFor(7_200_400), 15);
+check("a 2.4 MB one in five", partsFor(2_400_000), 5);
+check("never more than the bot splits one into, sixteen", [partsFor(28_000_000), MAX_PARTS], [16, 16]);
+check("a small one in one", partsFor(400_000), 1);
 check("nothing known, one", partsFor(NaN), 1);
 check("the parts cover it end to end, the server's split",
   partBounds(10, 3), [[0, 3], [3, 6], [6, 10]]);
@@ -381,16 +381,16 @@ console.log("\n— the segment the picture waits on, from another player or the 
   const crawling = { received: 2.6 * MB, total: 7.2 * MB, startedAt: 0 };
   check("a crawl that has nine seconds to go is taken from a peer that has it",
     shouldTakeFromPeer(crawling, { left: 4.6 * MB, bitsPerS: 20_000_000 }, 9000), true);
-  check("even one nobody has measured yet",
-    shouldTakeFromPeer(crawling, { left: 4.6 * MB, bitsPerS: 0 }, 9000), true);
-  check("but not in its first moments, before its pace shows",
-    shouldTakeFromPeer({ received: 0, total: 7.2 * MB, startedAt: 0 }, { left: 7.2 * MB, bitsPerS: 0 }, 1000), false);
+  check("but not from one that has never sent us anything",
+    shouldTakeFromPeer(crawling, { left: 4.6 * MB, bitsPerS: 0 }, 9000), false);
+  check("nor in its first moments, before its pace shows",
+    shouldTakeFromPeer({ received: 0, total: 7.2 * MB, startedAt: 0 }, { left: 7.2 * MB, bitsPerS: 20_000_000 }, 1000), false);
   check("nor when it is about to finish",
-    shouldTakeFromPeer({ received: 7 * MB, total: 7.2 * MB, startedAt: 0 }, { left: 0.2 * MB, bitsPerS: 0 }, 4000), false);
+    shouldTakeFromPeer({ received: 7 * MB, total: 7.2 * MB, startedAt: 0 }, { left: 0.2 * MB, bitsPerS: 20_000_000 }, 4000), false);
   check("nor from a peer that would take longer than it",
     shouldTakeFromPeer({ received: 3 * MB, total: 7.2 * MB, startedAt: 0 }, { left: 6 * MB, bitsPerS: 2_000_000 }, 3000), false);
   check("a download that has sent nothing at all is a crawl",
-    shouldTakeFromPeer({ received: 0, total: 7.2 * MB, startedAt: 0 }, { left: 7.2 * MB, bitsPerS: 0 }, 3000), true);
+    shouldTakeFromPeer({ received: 0, total: 7.2 * MB, startedAt: 0 }, { left: 7.2 * MB, bitsPerS: 20_000_000 }, 3000), true);
   check("one taken from a peer stays there while it settles",
     keepOnPeer({ received: 0, remaining: 7 * MB, startedAt: 0 }, 1000), true);
   check("and while it is doing well",

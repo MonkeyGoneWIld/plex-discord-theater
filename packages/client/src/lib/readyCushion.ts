@@ -26,15 +26,19 @@
  * lately. Every stop is everybody's — the room waits for whoever stopped — so
  * it is one wait for longer, rather than stopping again and again.
  *
- * And after a skip, as in every player, the moment it has picture enough to
- * start on, as it always has: somebody who skipped is waiting to see the place
- * they skipped to. If it stops after that, its next wait is a stop's.
- * Not on a stream the server re-encodes (a burned subtitle, an H.264 twin, a
- * lower quality), whose segments past the first few are being made as it
- * plays and share the bot's upload with everybody else's: on 18 October every
- * skip on one — 1408, 1917, 300, a DVD — went with 3 seconds in hand and
- * stopped 3 to 6 seconds later, for 4 to 16 seconds, the room with it. There
- * a skip waits as a start does.
+ * And after a skip, the same as a start, only with no stops counted: a stop's
+ * longer wait is for starting again after one, not for somewhere else. A skip
+ * used to go the moment it had picture enough to start on — somebody who
+ * skipped is waiting to see the place they skipped to — and on a connection
+ * ahead of the film it still does, at three seconds. One that isn't stopped
+ * after it: on 23 October the host skipped a 20 Mbps Dolby Vision copy
+ * (113522) with its segments coming at 15 to 17 Mbps, went with 3.55 seconds
+ * in hand, and stopped ten seconds later for 4.2, the room with it. On 18
+ * October every skip on a re-encode — 1408, 1917, 300, a DVD — went with 3
+ * seconds and stopped 3 to 6 seconds later, for 4 to 16. One wait is better
+ * than a wait and a stop. On a stream the server re-encodes, whose segments
+ * are made as it plays, its stops count too: a skip there waits exactly as a
+ * start does.
  *
  * MAX_READY_CUSHION_S was 20 seconds. A stream's first segments come slowest
  * — on 14 October 2 to 8 Mbps for the first fifteen seconds, then 17 to 32 —
@@ -119,7 +123,7 @@ export interface ReadyInput {
   stops: number;
   /** In hand to go on with, with nothing to measure by — see roomWait's catchUpLeadS. */
   fallbackS: number;
-  /** Whether this is the wait after a skip — see the top of this file. */
+  /** Whether this is the wait after a skip, with no stops counted — see the top of this file. */
   skip: boolean;
   /** How long it has had the least in hand and waited for more, seconds. */
   waitedS: number;
@@ -129,7 +133,7 @@ export interface Readiness {
   ready: boolean;
   /** What it goes by, for the log. */
   why: "enough in hand" | "the next minute comes in time" | "the next minute won't come in time" | "short of the least in hand" |
-    "no speed to go by" | "a skip, with picture enough to start on" | "waited long enough for more";
+    "no speed to go by" | "waited long enough for more";
   inHandS: number;
   /** The least it goes on with. */
   leastS: number;
@@ -141,12 +145,7 @@ export interface Readiness {
 export function readiness(o: ReadyInput): Readiness {
   const inHandS = Math.max(0, o.heldToS - o.nowS);
   const leftS = Math.max(0, o.leftS);
-  if (o.skip) {
-    const leastS = Math.min(READY_AHEAD_S, leftS);
-    const enough = inHandS + READY_TOLERANCE_S >= leastS;
-    return { ready: enough, why: enough ? "a skip, with picture enough to start on" : "short of the least in hand", lateS: null, inHandS, leastS };
-  }
-  const stopsS = afterStopsS(o.stops);
+  const stopsS = o.skip ? 0 : afterStopsS(o.stops);
   const capS = Math.min(Math.max(stopsS > 0 ? MAX_READY_CUSHION_AFTER_STOPS_S : MAX_READY_CUSHION_S, stopsS), leftS);
   const leastS = Math.min(Math.max(READY_AHEAD_S, stopsS), capS);
   const base = { inHandS, leastS };

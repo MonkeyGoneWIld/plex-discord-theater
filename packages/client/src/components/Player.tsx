@@ -1675,8 +1675,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       bytesPerFilmS: heldS > 0 ? heldBytes / heldS : null,
       stops: stopsRef.current.length,
       fallbackS: catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs()),
-      // Not on a stream re-encoded as it plays, whose next segments come no
-      // faster than they are made and shared out: see lib/readyCushion.
+      // A skip's wait counts no stops — but not on a stream re-encoded as it
+      // plays, whose next segments come no faster than they are made and
+      // shared out: see lib/readyCushion.
       skip: skipWaitRef.current && streamNotesRef.current?.video !== "transcode",
       waitedS: wait.since && !patient ? (now - wait.since) / 1000 : 0,
     });
@@ -4526,8 +4527,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // of it. Often the start needs the second as well, and that
                 // one shared too: Avatar's second segment, 8 MB, took nine
                 // seconds beside the two after it while its first, 21 MB on
-                // its own, had taken five. Alone, a segment comes in eight
-                // parts rather than four — as many downloads as two at once.
+                // its own, had taken five. Alone, a segment comes in all its
+                // parts at once — as many downloads as two beside each other.
                 simultaneousHttpDownloads: 3,
                 // How long a download from the bot may go without a byte before
                 // the engine calls it off and asks again. Its default, 3s, is

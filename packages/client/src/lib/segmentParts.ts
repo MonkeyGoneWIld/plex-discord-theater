@@ -26,17 +26,25 @@ import { keepSegment, keepingSegments, keptSegment, roomToKeep } from "./segment
 
 /** About how big each part is. Small enough that even a short segment is
  *  split, since every part runs at a download's pace. */
-const PART_BYTES = 1_000_000;
+const PART_BYTES = 500_000;
 /**
  * Parts per segment at most: as many as the bot will split one into
  * (MAX_SEGMENT_PARTS). All of them download at once for a segment fetched on
  * its own — the one a stream's picture waits on — or the one the picture
  * needs next (see Player's partsAtOnce).
+ *
+ * It was 8, of 1 MB each. On 23 October, for the first twenty seconds of a
+ * start and of a skip on a 20 Mbps copy, every download ran at the same 1.2
+ * to 2 Mbps whatever ran beside it, and the segment the picture waited on
+ * came in as fast as its parts added up to: 8.2 Mbps in seven parts, 5.9 in
+ * five, 2.8 in three. The picture waited 13 seconds to start, and 9 after
+ * the skip. A minute later the same connection ran 43 to 55 Mbps with more
+ * downloads at once.
  */
-export const MAX_PARTS = 8;
+export const MAX_PARTS = 16;
 /** Parts of a segment downloading at once beside another segment: two
  *  segments' worth is as many downloads as one on its own. */
-export const PARTS_AT_ONCE_BESIDE = 4;
+export const PARTS_AT_ONCE_BESIDE = 8;
 
 export function partsFor(bytes: number, most = MAX_PARTS): number {
   if (!Number.isFinite(bytes) || bytes <= 0) return 1;

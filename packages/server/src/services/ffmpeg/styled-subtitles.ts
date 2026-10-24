@@ -2,11 +2,12 @@
  * ASS subtitles drawn as their script has them — its fonts, colours,
  * positions, moves, fades, karaoke and drawings — by libass in the player
  * (StyledSubtitleLayer, with JASSUB), where services/subtitles.ts makes plain
- * lines of them, drawn in the viewer's own look. Only for a typeset track
- * (styledAss): a dub's signs and songs, or a fansub's own look. Your Lie in
- * April's signs-and-songs track is almost all of it, nearly 7,000 lines of
+ * lines of them, drawn in the viewer's own look. Every one, as Plex draws
+ * them. Your Lie in April's signs-and-songs track is nearly 7,000 lines of
  * moves, fades and drawings in five fonts of its own, and as plain lines it
- * lost all of that.
+ * lost all of that. It was only typeset ones at first (styledAss), and one
+ * with a look of its own and few tags, a fansub's colours and font, still
+ * lost it: whatever a script sets is what Plex shows.
  *
  * Its fonts are the film's attachments, taken out once and kept by what they
  * are — a hash of their bytes — so a series' episodes share them, and so does
@@ -44,10 +45,8 @@ const TYPESET_SHARE = 0.02;
 const TYPESET_MIN = 3;
 
 /**
- * Whether an ASS script has directions of its own for how its lines look —
- * enough of its lines placed, moved, faded, coloured or set in a font of their
- * own — so that it is drawn as it is, rather than as plain lines in the
- * viewer's look.
+ * Whether an ASS script is typeset — enough of its lines placed, moved,
+ * faded, coloured or set in a font of their own — for the log.
  */
 export function styledAss(script: string): boolean {
   let lines = 0;

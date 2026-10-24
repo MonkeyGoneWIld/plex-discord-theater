@@ -30,11 +30,12 @@ function check(name: string, actual: unknown, expected: unknown) {
 // ── a Plex with two films, which keeps what it is told ───────────
 const CACHED = "100"; // metadata already in the persisted cache, as after a restart
 const UNSEEN = "200"; // metadata nobody has asked for yet
+const REPLACED = "300"; // metadata saved before its file was replaced
 const film = (ratingKey: string, title: string, duration: number) => ({
   ratingKey, title, type: "movie", duration,
   Media: [{ id: Number(ratingKey), Part: [{ id: Number(ratingKey), file: `/movies/${title}.mkv` }] }],
 });
-const films = [film(CACHED, "Cached", 7_200_000), film(UNSEEN, "Unseen", 5_400_000)];
+const films = [film(CACHED, "Cached", 7_200_000), film(UNSEEN, "Unseen", 5_400_000), film(REPLACED, "Replaced", 3_600_000)];
 
 const timelines: Array<{ ratingKey: string | null; state: string | null; duration: string | null }> = [];
 const metadataRequests: string[] = [];
@@ -113,6 +114,10 @@ writeDetailCache("meta", CACHED, {
   versions: [{ mediaIndex: 0, partId: Number(CACHED) }],
 });
 check("/meta answers from the cache", (await (await fetch(`${base}/meta/${CACHED}`)).json()).duration, 7_200_000);
+// The page holds its files up to Plex's (checkFiles): the one ask the rest
+// goes without.
+const pageAsked = metadataRequests.filter((rk) => rk === CACHED).length;
+check("having held its files up to Plex's, once", pageAsked, 1);
 const cachedSession = await play(CACHED);
 check("the first timeline carries its duration", await timelineDuration(CACHED, "playing"), "7200000");
 const beforePing = timelines.length;
@@ -120,7 +125,19 @@ await (await fetch(`${base}/hls/ping/${cachedSession}?time=60000&playing=1`)).te
 check("so does a ping's timeline", await timelineDuration(CACHED, "playing", beforePing), "7200000");
 await plexRoutes.notifyPlexStopped(CACHED, cachedSession);
 check("so does the stopped timeline", await timelineDuration(CACHED, "stopped"), "7200000");
-check("…all without asking Plex for the metadata", metadataRequests.includes(CACHED), false);
+check("…all without asking Plex for the metadata again", metadataRequests.filter((rk) => rk === CACHED).length, pageAsked);
+
+console.log("— a title whose file was replaced since its page was saved —");
+writeDetailCache("meta", REPLACED, {
+  payloadVersion: plexRoutes.META_PAYLOAD_VERSION,
+  ratingKey: REPLACED, title: "Replaced", type: "movie", duration: 3_600_000,
+  versions: [{ mediaIndex: 0, partId: 299, fileSize: null }],
+});
+const replaced = await (await fetch(`${base}/meta/${REPLACED}`)).json() as { versions: Array<{ partId: number }> };
+check("/meta offers the file Plex has now", replaced.versions.map((v) => v.partId), [300]);
+const replacedAsked = metadataRequests.filter((rk) => rk === REPLACED).length;
+await (await fetch(`${base}/meta/${REPLACED}`)).json();
+check("and doesn't ask Plex again within the minute", metadataRequests.filter((rk) => rk === REPLACED).length, replacedAsked);
 
 console.log("— a title nobody has looked up —");
 const unseenSession = await play(UNSEEN);

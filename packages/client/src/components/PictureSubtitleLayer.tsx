@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchPgsBytes, fetchPgsStatus, type PgsStatus } from "../lib/api";
+import { cachedPgsBytes, fetchPgsBytes, fetchPgsStatus, type PgsStatus } from "../lib/api";
 import { logEvent, logWarn } from "../lib/log";
 import { PgsReader, decodeRle, displayAt, mergeDisplays, type PgsDisplay, type PgsObject } from "../lib/pgs";
 import type { CoveredSpan } from "../lib/subtitleCues";
@@ -25,7 +25,16 @@ import type { SubtitleLoadStatus } from "../lib/subtitleStatus";
  * One made before comes in pieces of about a megabyte: the one where the
  * picture is first, then the next couple of minutes', then — while the video
  * has picture in hand to spare — the rest, nearest first. Asked for by the
- * subtitle's `v`, they are kept by the browser for the next time it is on.
+ * subtitle's `v`, they are kept by the browser for the next time it is on,
+ * and then all of them that it kept are read at once, from it: they take
+ * nothing from the video. On 24 October The 'Burbs, opened again, read them
+ * as the video had picture to spare, as if they were coming from the bot,
+ * and took 10.6 s to have all of it.
+ *
+ * It asks where the picture will be as soon as the player has said — the
+ * place it starts at or joins the room at — rather than once there is
+ * picture: on 24 October a joiner's first lines came 8 s after it started,
+ * 2 s after its picture.
  */
 
 /** How often to ask how far the cut has got, while it goes on. */
@@ -177,35 +186,64 @@ export function PictureSubtitleLayer({
       onUnavailableRef.current?.();
     };
 
+    /** Whether the pieces the browser kept from before have been looked for. */
+    let lookedInCache = false;
+    /** Every piece of a made subtitle the browser kept, nearest first. */
+    const readCached = async () => {
+      const s = latest;
+      if (lookedInCache || !s?.done || !s.v) return;
+      lookedInCache = true;
+      const t = where();
+      const order = [...s.pieces].sort((a, b) =>
+        (a.fromS <= t ? t - a.fromS : a.fromS - t + NEAR_S) - (b.fromS <= t ? t - b.fromS : b.fromS - t + NEAR_S));
+      for (const p of order) {
+        if (!p.done || readOf(p) > 0 || had(p)) continue;
+        const bytes = await cachedPgsBytes(streamId, ratingKey, mediaIndex, p.id, s.v);
+        if (cancelled) return;
+        if (bytes) take(p, bytes, true);
+      }
+    };
+
     /** Read pieces, nearest first, while there are any worth reading now. */
     const read = async () => {
+      await readCached();
       for (let p = nextPiece(); p && latest; p = nextPiece()) {
-        const k = keyOf(p);
-        let r = readers.get(k);
-        if (!r) readers.set(k, r = { reader: new PgsReader(), lastPts: p.fromS });
-        const whole = p.done && r.reader.read === 0 ? latest.v ?? null : null;
-        const bytes = await fetchPgsBytes(streamId, ratingKey, mediaIndex, p.id, r.reader.read, whole);
         if (cancelled) return;
-        const shown = r.reader.push(bytes);
-        if (shown.length) {
-          r.lastPts = Math.max(r.lastPts, shown[shown.length - 1].pts);
-          listRef.current = mergeDisplays(listRef.current, shown);
-        }
-        // Where every line has come: from where the piece starts, to its end
-        // once it is all here, else to its last line so far.
-        pieceSpans.set(k, [p.fromS, p.done && p.bytes <= r.reader.read ? p.toS : r.lastPts]);
-        spans = [...pieceSpans.values()];
-        const lines = listRef.current.filter((d) => d.objects.length).length;
-        Object.assign(status, { lines, covered: spans });
-        if (lines) setHasLines(true);
-        if (status.firstLinesMs === null && covers(where())) {
-          status.firstLinesMs = Date.now() - startedAt;
-          logEvent("Subtitles", "picture subtitle lines for here", {
-            streamId, at: Math.round(where()), ms: status.firstLinesMs, made: latest.v !== null, piece: p.id,
-          });
-        }
+        const k = keyOf(p);
+        const r = readers.get(k);
+        const from = r?.reader.read ?? 0;
+        const whole = p.done && from === 0 ? latest.v ?? null : null;
+        const bytes = await fetchPgsBytes(streamId, ratingKey, mediaIndex, p.id, from, whole);
+        if (cancelled) return;
+        take(p, bytes);
         // Nothing more of it written yet.
         if (bytes.length === 0) break;
+      }
+    };
+
+    /** A piece's bytes, read on from where it was left; `kept`, from the browser. */
+    const take = (p: Piece, bytes: Uint8Array, kept = false) => {
+      const k = keyOf(p);
+      let r = readers.get(k);
+      if (!r) readers.set(k, r = { reader: new PgsReader(), lastPts: p.fromS });
+      const shown = r.reader.push(bytes);
+      if (shown.length) {
+        r.lastPts = Math.max(r.lastPts, shown[shown.length - 1].pts);
+        listRef.current = mergeDisplays(listRef.current, shown);
+      }
+      // Where every line has come: from where the piece starts, to its end
+      // once it is all here, else to its last line so far.
+      pieceSpans.set(k, [p.fromS, p.done && p.bytes <= r.reader.read ? p.toS : r.lastPts]);
+      spans = [...pieceSpans.values()];
+      const lines = listRef.current.filter((d) => d.objects.length).length;
+      Object.assign(status, { lines, covered: spans });
+      if (lines) setHasLines(true);
+      if (status.firstLinesMs === null && covers(where())) {
+        status.firstLinesMs = Date.now() - startedAt;
+        logEvent("Subtitles", "picture subtitle lines for here", {
+          streamId, at: Math.round(where()), ms: status.firstLinesMs, made: latest?.v != null, piece: p.id,
+          ...(kept ? { kept: true } : {}),
+        });
       }
     };
 
@@ -251,12 +289,14 @@ export function PictureSubtitleLayer({
     };
 
     // The first ask starts the cut from where the picture is, so it waits
-    // for there to be a picture: a stream resumed an hour in is at 0 until then.
+    // for there to be a picture: a stream resumed an hour in is at 0 until
+    // then — or for the player to have said where it will be, which it does
+    // when it starts a stream part-way in, or joins a room, before any picture.
     const asked = Date.now();
     const whenPlaced = () => {
       if (cancelled) return;
       const v = videoRef.current;
-      if ((v && v.readyState >= 2) || Date.now() - asked > PLACE_WAIT_MS) ask();
+      if ((v && (v.readyState >= 2 || v.currentTime > 0)) || Date.now() - asked > PLACE_WAIT_MS) ask();
       else next = setTimeout(whenPlaced, 250);
     };
     whenPlaced();

@@ -7,7 +7,7 @@ import sharp from "sharp";
 import { progressivePreview } from "../services/preview-stream.js";
 import { sendPlaylist } from "../services/send-playlist.js";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
-import { isUhd, UHD_MIN_WIDTH, playableVersionOrder, resolutionLabel, channelLabel, transcodeFrame, qualityKbps, pictureFacts, type PictureFacts, type PictureSource } from "../services/media-versions.js";
+import { isUhd, UHD_MIN_WIDTH, playableVersionOrder, resolutionLabel, channelLabel, editionOf, transcodeFrame, qualityKbps, pictureFacts, type PictureFacts, type PictureSource } from "../services/media-versions.js";
 import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition } from "../services/segment-prefetch.js";
 import {
   startDirectStream,
@@ -259,6 +259,8 @@ interface PlexPart {
   key?: string;
   /** Bytes. With the part's id, what tells a replaced file from the old one. */
   size?: number;
+  /** The file's path on Plex's side: its name says its edition (editionOf). */
+  file?: string;
   /**
    * "sd" when Plex has generated BIF video preview thumbnails for this part,
    * i.e. when /library/parts/<id>/indexes/sd/<offsetMs> will resolve. Absent
@@ -302,6 +304,8 @@ interface MediaVersion {
   mediaIndex: number;
   partId: number | null;
   label: string;
+  /** The cut its file's name says it is — IMAX, Extended… — see editionOf. */
+  edition: string | null;
   resolution: string;
   /** A 4K file, which the activity shows at 1080p (isUhd). */
   uhd: boolean;
@@ -334,8 +338,11 @@ function mapVersions(media: PlexMedia[] | undefined): MediaVersion[] {
     const part = m.Part?.[0];
     const streams = part?.Stream ?? [];
     // A version Plex has a name for uses it; otherwise it is described by what
-    // it is, which is what anyone choosing between two files wants to know.
+    // it is, which is what anyone choosing between two files wants to know:
+    // its edition first, then its picture and sound.
+    const edition = editionOf(part?.file);
     const described = [
+      edition,
       resolutionLabel(m),
       m.videoCodec ? m.videoCodec.toUpperCase() : null,
       channelLabel(m.audioChannels),
@@ -344,6 +351,7 @@ function mapVersions(media: PlexMedia[] | undefined): MediaVersion[] {
       mediaIndex,
       partId: part?.id ?? null,
       label: m.title?.trim() || described,
+      edition,
       resolution: resolutionLabel(m),
       uhd: isUhd(m),
       width: m.width ?? null,
@@ -1092,6 +1100,7 @@ router.get("/meta/:ratingKey", async (req: Request, res: Response) => {
     // Asked for fresh, past both caches: by a player whose tracks Plex refused,
     // because the file was replaced since and its part and track ids are new.
     if (req.query.fresh === "1") invalidateTitleDetailCaches(ratingKey);
+    else await checkFiles(ratingKey);
     const payload = await buildMeta(ratingKey);
     if (!payload) {
       res.status(404).json({ error: "Item not found" });
@@ -1170,6 +1179,53 @@ async function ffmpegPreview(partId: number, res: Response): Promise<{ file: str
   return file ? madePreview(partId, source.fileSize ?? null) : null;
 }
 
+/** When each title's files were last held up against Plex's, for its saved /meta. */
+const filesCheckedAt = new LruMap<string, number>(2_000);
+/** How often, at most, a title's files are held up against Plex's. */
+const FILES_CHECK_EVERY_MS = 60_000;
+/** How long a page waits for that: past it, the saved answer stands, and a
+ *  change found after is there the next time. */
+const FILES_CHECK_WAIT_MS = 1_500;
+
+/** A version list's files: where each is in Plex's list, its part and its size. */
+function filesOf(versions: unknown): string {
+  if (!Array.isArray(versions)) return "";
+  return (versions as Array<Partial<MediaVersion>>).map((v) => `${v.mediaIndex}:${v.partId ?? ""}:${v.fileSize ?? ""}`).join("|");
+}
+
+/**
+ * Drop a title's saved detail when Plex's files for it are no longer the ones
+ * it lists: a file replaced, added or taken away. A saved /meta stands for an
+ * hour in memory and a week on disk, and the warmer holds titles up to Plex's
+ * every four hours: on 24 October Project Hail Mary, its 4K file replaced and
+ * the old one put back beside it, offered only its 1080p copy until the bot
+ * was restarted. Asked about from its page (the /meta route) — not from a
+ * stream's start, which shouldn't wait on Plex for it.
+ */
+async function checkFiles(ratingKey: string): Promise<void> {
+  const saved = metaCache.get(ratingKey)?.payload ?? readDetailCache<Record<string, unknown>>("meta", ratingKey)?.payload;
+  if (!saved || (saved.type !== "movie" && saved.type !== "episode")) return;
+  const at = filesCheckedAt.get(ratingKey);
+  if (at !== undefined && Date.now() - at < FILES_CHECK_EVERY_MS) return;
+  filesCheckedAt.set(ratingKey, Date.now());
+  const check = plexJSON<{ MediaContainer: { Metadata?: PlexMetadataItem[] } }>(`/library/metadata/${ratingKey}`)
+    .then((data) => {
+      const m = data.MediaContainer.Metadata?.[0];
+      if (!m) return;
+      const now = mapVersions(m.Media);
+      if (filesOf(now) === filesOf(saved.versions)) return;
+      logEvent("Streams", "a title's files changed in Plex since its page was saved; building it again", {
+        ratingKey, versionsWere: Array.isArray(saved.versions) ? saved.versions.length : 0, versionsNow: now.length,
+      });
+      invalidateTitleDetailCaches(ratingKey);
+      for (const key of [...ffmpegSources.keys()]) if (key.startsWith(`${ratingKey}:`)) ffmpegSources.delete(key);
+    })
+    .catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([check, new Promise<void>((resolve) => { timer = setTimeout(resolve, FILES_CHECK_WAIT_MS); })]);
+  clearTimeout(timer);
+}
+
 export async function buildMeta(ratingKey: string): Promise<Record<string, unknown> | null> {
   const hit = metaCache.get(ratingKey);
   if (hit && Date.now() - hit.at < META_CACHE_TTL_MS) return rememberDuration(ratingKey, hit.payload);
@@ -1234,9 +1290,11 @@ function rememberDuration(ratingKey: string, payload: Record<string, unknown>): 
  * key. 11 added each version's picture (HDR and so on), which Stats for nerds
  * shows: rows saved before it had none, and Edgerunners showed no range. 12
  * offered a 4K file beside a lower copy (after it) and marked each version
- * `uhd`.
+ * `uhd`. 14 named each version's edition, from its file's name, in its label
+ * and as `edition`: Project Hail Mary's 1.43 IMAX and IMAX 4K files were both
+ * "4K · HEVC · 7.1".
  */
-export const META_PAYLOAD_VERSION = 13;
+export const META_PAYLOAD_VERSION = 14;
 
 const metaCache = new LruMap<string, { payload: Record<string, unknown>; at: number }>(2_000);
 const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -3439,10 +3497,11 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
 
 // ─── Styled ASS subtitles ───────────────────────────────────────
 
-/** A typeset ASS script, as it is handed out: kept by its stream and file. */
+/** An ASS script, as it is handed out: kept by its stream and file. */
 interface StyledScript {
   v: string;
-  styled: boolean;
+  /** Whether it is typeset, for the log (styled-subtitles.ts styledAss). */
+  typeset: boolean;
   text: string;
   gz?: Buffer;
   logged?: boolean;
@@ -3491,7 +3550,7 @@ async function assScript(t: NonNullable<Awaited<ReturnType<typeof assTrack>>>): 
   }
   const script: StyledScript = {
     v: createHash("sha1").update(text).digest("hex").slice(0, 16),
-    styled: styledAss(text),
+    typeset: styledAss(text),
     text,
   };
   styledScripts.set(key, script);
@@ -3519,12 +3578,12 @@ async function assFonts(ratingKey: string, mediaIndex: number, fingerprint: stri
 /**
  * GET /api/plex/ass/:streamId?ratingKey=&mediaIndex=
  *
- * Whether an ASS subtitle is drawn as its script has it (StyledSubtitleLayer)
- * or as plain lines in the viewer's look (the /subtitles route):
+ * Whether an ASS subtitle is drawn as its script has it (StyledSubtitleLayer),
+ * as Plex draws every one, or as plain lines in the viewer's look (the
+ * /subtitles route):
  *
  *   { state: "reading" }  until the read of it out of the film is done;
- *   { state: "plain" }    not typeset (styled-subtitles.ts styledAss), or
- *                         STYLED_SUBTITLES=off;
+ *   { state: "plain" }    with STYLED_SUBTITLES=off;
  *   { state: "styled", v, bytes, fonts }  its script is /ass/:streamId/script
  *                         with `v`, and its fonts /subtitle-fonts/:id.
  *
@@ -3542,16 +3601,16 @@ router.get("/ass/:streamId", async (req: Request, res: Response) => {
     res.json({ state: "reading" });
     return;
   }
-  if (!script.styled || !styledSubtitlesOn()) {
+  if (!styledSubtitlesOn()) {
     res.json({ state: "plain" });
     return;
   }
   const fonts = await assFonts(t.ratingKey, t.mediaIndex, t.fingerprint);
   if (!script.logged) {
     script.logged = true;
-    logEvent("Subtitles", "a typeset ASS subtitle, drawn as its script has it", {
-      ratingKey: t.ratingKey, streamId: t.streamId, bytes: Buffer.byteLength(script.text), fonts: fonts.length,
-      fontNames: fonts.map((f) => f.name).join(", ") || "none",
+    logEvent("Subtitles", "an ASS subtitle, drawn as its script has it", {
+      ratingKey: t.ratingKey, streamId: t.streamId, typeset: script.typeset, bytes: Buffer.byteLength(script.text),
+      fonts: fonts.length, fontNames: fonts.map((f) => f.name).join(", ") || "none",
     });
   }
   res.json({ state: "styled", v: script.v, bytes: Buffer.byteLength(script.text), fonts });

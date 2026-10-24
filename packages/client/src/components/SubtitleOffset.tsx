@@ -19,7 +19,7 @@ import { SubtitleLookControls } from "./SubtitleLook";
  * (lib/subtitleStyle.ts); the timing is not.
  *
  * A picture subtitle (PGS) drawn here is the disc's own pictures, its look made
- * with them, and a typeset ASS one is drawn as its script has it: only their
+ * with them, and an ASS one is drawn as its script has it: only their
  * timing can change, so that is all they are offered.
  */
 
@@ -30,7 +30,7 @@ interface SubtitleSettingsProps {
   offsetMs: number;
   onChange: (ms: number) => void;
   onClose: () => void;
-  /** A picture subtitle, or a typeset one drawn as its script has it: its
+  /** A picture subtitle, or an ASS one drawn as its script has it: its
    *  look is the disc's or the script's, so no look controls. */
   timingOnly?: "picture" | "styled" | null;
 }

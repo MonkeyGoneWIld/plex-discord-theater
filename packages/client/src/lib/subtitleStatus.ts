@@ -22,6 +22,8 @@ export interface SubtitleLoadStatus {
   firstLinesMs: number | null;
   /** ms from asking to having all of it. */
   completeMs: number | null;
+  /** Drawn by libass as its script has it (StyledSubtitleLayer), rather than as plain lines. */
+  styled?: boolean;
 }
 
 /** How the subtitle on screen is shown, as the player has it. */
@@ -63,7 +65,8 @@ export function subtitleDetails(
   const rows: Array<[string, string]> = [["Track", track.title]];
   if (shown === "switching") return rows;
   if (shown === "burned") return [...rows, ["Rendering", "Burned in by Plex"]];
-  rows.push(["Rendering", `Client · ${track.picture ? "PGS pictures" : track.sidecar ? "sidecar file" : "embedded text"}`]);
+  const styled = status?.streamId === track.id && status.styled === true;
+  rows.push(["Rendering", `Client · ${track.picture ? "PGS pictures" : styled ? "libass, as its script has it" : track.sidecar ? "sidecar file" : "embedded text"}`]);
   const state = statusOf(track, status, failed);
   if (state === "failed") return [...rows, ["Status", "Failed"]];
   if (state === "loading" || !status) {

@@ -1927,7 +1927,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    *  rather than left pointing at subtitles that never arrived. */
   const [sidecarFailed, setSidecarFailed] = useState(false);
   // How the ASS subtitle drawn here is drawn, as StyledSubtitleLayer found it:
-  // as its script has it, typeset, or as plain lines in this viewer's look.
+  // as its script has it, or as plain lines in this viewer's look.
   const [assLook, setAssLook] = useState<{ id: number; look: "text" | "styled" } | null>(null);
   const handleAssLook = useCallback((id: number, look: "text" | "styled") => {
     setAssLook((prev) => (prev?.id === id && prev.look === look ? prev : { id, look }));
@@ -3715,9 +3715,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       : null;
   // Pictures (PGS) rather than text: PictureSubtitleLayer draws it.
   const drawnPicture = drawnSubtitleId !== null && activeSubtitleTrack?.picture === true;
-  // ASS: typeset, StyledSubtitleLayer draws it as its script has it; plain, the
-  // text layer does. Until that is known — a moment, from the server — the
-  // plain lines load but aren't shown, so a typeset one doesn't flash up plain.
+  // ASS: StyledSubtitleLayer draws it as its script has it, or, where it
+  // can't, the text layer does. Until that is known — a moment, from the
+  // server — the plain lines load but aren't shown, so it doesn't flash up plain.
   const drawnAss = drawnSubtitleId !== null && !drawnPicture && /^(ass|ssa)$/i.test(activeSubtitleTrack?.codec ?? "");
   const assLookHere = !drawnAss ? null : assLook?.id === drawnSubtitleId ? assLook.look : "pending";
   const drawnStyled = assLookHere === "styled";
@@ -9014,8 +9014,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         hidden={loadingShown || assLookHere === "pending"}
         statusRef={subtitleStatusRef}
       />
-      {/* A typeset ASS subtitle, drawn as its script has it, with the film's
-          fonts, rather than as plain lines. */}
+      {/* An ASS subtitle, drawn as its script has it, with the film's fonts,
+          rather than as plain lines — as Plex draws them. */}
       <StyledSubtitleLayer
         streamId={drawnAss ? drawnSubtitleId : null}
         ratingKey={item.ratingKey}
@@ -9024,6 +9024,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         offsetMs={subtitleOffsetMs}
         hidden={loadingShown}
         onLook={handleAssLook}
+        statusRef={subtitleStatusRef}
       />
       {/* A PGS subtitle, drawn from the pictures the server cuts out of the
           film rather than burned in. */}

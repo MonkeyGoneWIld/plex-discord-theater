@@ -263,7 +263,6 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
   useEffect(() => {
     setCues([]);
     setCovered(null);
-    if (statusRef) statusRef.current = null;
     if (streamId == null) return;
     let cancelled = false;
     let next: ReturnType<typeof setTimeout> | undefined;
@@ -352,7 +351,16 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
       setPlace(at);
       if (spans && coveredAhead(spans, at) === null) ask();
     }, WATCH_PLACE_MS);
-    return () => { cancelled = true; clearTimeout(next); clearInterval(watch); };
+    return () => {
+      cancelled = true;
+      clearTimeout(next);
+      clearInterval(watch);
+      // Only its own: an ASS subtitle drawn as its script has it takes over
+      // from these lines with a status of its own (StyledSubtitleLayer), and
+      // that one stays. Clearing whatever was there left Stats for nerds saying
+      // "Loading" for good on Your Lie in April, drawn and all.
+      if (statusRef && statusRef.current === status) statusRef.current = null;
+    };
   }, [streamId]);
 
   const shown = useActiveCues(videoRef, cues, offsetMs);

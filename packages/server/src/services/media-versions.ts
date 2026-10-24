@@ -175,6 +175,45 @@ export function pictureFacts(stream: PictureSource | undefined, media: { width?:
   return { hdr, text };
 }
 
+/** Cuts and editions a release names in its file name, and what to call each. */
+const EDITION_WORDS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\bimax[ ._-]enhanced\b/i, "IMAX Enhanced"],
+  [/\bimax\b/i, "IMAX"],
+  [/\bdirector'?s[ ._-]cut\b/i, "Director's Cut"],
+  [/\bfinal[ ._-]cut\b/i, "Final Cut"],
+  [/\bextended\b/i, "Extended"],
+  [/\btheatrical\b/i, "Theatrical"],
+  [/\bunrated\b/i, "Unrated"],
+  [/\buncut\b/i, "Uncut"],
+  [/\bultimate[ ._-](?:cut|edition)\b/i, "Ultimate"],
+  [/\bspecial[ ._-]edition\b/i, "Special Edition"],
+  [/\banniversary[ ._-]edition\b/i, "Anniversary Edition"],
+  [/\bopen[ ._-]matte\b/i, "Open Matte"],
+  [/\bredux\b/i, "Redux"],
+  [/\bcriterion\b/i, "Criterion"],
+  [/\bremastered\b/i, "Remastered"],
+];
+
+/**
+ * A file's edition, from its name: Plex's own {edition-…} tag, as Project
+ * Hail Mary's two 4K files have ("1.43 IMAX", "IMAX"), else the cuts a
+ * release names after the year or episode number — IMAX, Extended, Director's
+ * Cut and the like. Null for none. Two copies of a film are told apart by it
+ * more than by anything else about them.
+ */
+export function editionOf(file: string | null | undefined): string | null {
+  if (!file) return null;
+  const name = file.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, "");
+  const tagged = /\{edition-([^}]+)\}/i.exec(name)?.[1]?.trim();
+  if (tagged) return tagged;
+  // Past the year, or an episode's number, so a title's own words aren't taken.
+  const after = /(?:^|[\s._(\[-])(?:(?:19|20)\d{2}|S\d{1,2}E\d{1,3})(?=$|[\s._)\]-])/i.exec(name);
+  const rest = after ? name.slice(after.index + after[0].length) : name;
+  const found = EDITION_WORDS.filter(([word]) => word.test(rest)).map(([, label]) => label);
+  const named = found.filter((label) => !(label === "IMAX" && found.includes("IMAX Enhanced")));
+  return named.length ? named.slice(0, 2).join(" ") : null;
+}
+
 /** "5.1", "7.1", "Stereo", "Mono" — channel counts as people say them. */
 export function channelLabel(channels: number | undefined | null): string | null {
   if (!channels || channels < 1) return null;

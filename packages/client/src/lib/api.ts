@@ -892,7 +892,7 @@ export function fetchSubtitleCues(
 
 /**
  * How an ASS subtitle is drawn — see the /ass route: as plain lines in the
- * viewer's look, or, typeset, as its script has it, with the film's fonts.
+ * viewer's look, or as its script has it, with the film's fonts.
  */
 export type AssStatus =
   | { state: "reading" }
@@ -951,10 +951,34 @@ export async function fetchPgsBytes(
   streamId: number, ratingKey: string, mediaIndex: number | undefined, piece: number, from: number,
   v: string | null = null,
 ): Promise<Uint8Array> {
-  const path = `/api/plex/pgs/${streamId}/${piece}?${pgsQuery(ratingKey, mediaIndex, { from: String(from), ...(v && { v }) })}`;
+  const path = pgsPiecePath(streamId, ratingKey, mediaIndex, piece, from, v);
   const res = await fetch(`${BASE}${path}`, { headers: authHeaders(), cache: v ? "default" : "no-store" });
   if (!res.ok) await throwApiError(res, path);
   return new Uint8Array(await res.arrayBuffer());
+}
+
+function pgsPiecePath(
+  streamId: number, ratingKey: string, mediaIndex: number | undefined, piece: number, from: number, v: string | null,
+): string {
+  return `/api/plex/pgs/${streamId}/${piece}?${pgsQuery(ratingKey, mediaIndex, { from: String(from), ...(v && { v }) })}`;
+}
+
+/**
+ * All of a made subtitle's piece, if the browser kept it from before
+ * (fetchPgsBytes with `v`) — read without going out for it. Null when it
+ * didn't, or can't say.
+ */
+export async function cachedPgsBytes(
+  streamId: number, ratingKey: string, mediaIndex: number | undefined, piece: number, v: string,
+): Promise<Uint8Array | null> {
+  try {
+    const res = await fetch(`${BASE}${pgsPiecePath(streamId, ratingKey, mediaIndex, piece, 0, v)}`, {
+      headers: authHeaders(), cache: "only-if-cached", mode: "same-origin",
+    });
+    return res.ok ? new Uint8Array(await res.arrayBuffer()) : null;
+  } catch {
+    return null;
+  }
 }
 
 export function hlsMasterUrl(

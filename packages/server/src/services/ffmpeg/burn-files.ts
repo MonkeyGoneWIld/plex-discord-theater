@@ -121,9 +121,14 @@ function isFont(s: { mimetype: string | null; filename: string | null; codecName
   return /\.(ttf|otf|ttc)$/i.test(s.filename ?? "");
 }
 
+/** The film's font attachments, in the order dumpFonts numbers them. */
+export function fontAttachments(probed: Probed): Probed["streams"] {
+  return probed.streams.filter((s) => s.codecType === "attachment" && isFont(s));
+}
+
 /** The film's fonts, written into `dir` as 0.ttf, 1.otf…; how many came. */
-function dumpFonts(input: string[], probed: Probed, dir: string): Promise<number> {
-  const fonts = probed.streams.filter((s) => s.codecType === "attachment" && isFont(s));
+export function dumpFonts(input: string[], probed: Probed, dir: string): Promise<number> {
+  const fonts = fontAttachments(probed);
   if (!fonts.length) return Promise.resolve(0);
   fs.mkdirSync(dir, { recursive: true });
   const dumps = fonts.flatMap((s, i) => {

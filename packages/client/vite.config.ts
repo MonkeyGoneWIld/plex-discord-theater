@@ -37,4 +37,9 @@ export default defineConfig({
   build: {
     outDir: "dist",
   },
+  // JASSUB's worker is a module (StyledSubtitleLayer), as its libass build
+  // finds itself by import.meta.url.
+  worker: {
+    format: "es",
+  },
 });

@@ -14,6 +14,7 @@ import { SkipMarkerButton } from "./SkipMarkerButton";
 import { TransportRequestCard } from "./TransportRequestCard";
 import { SubtitleLayer } from "./SubtitleLayer";
 import { PictureSubtitleLayer } from "./PictureSubtitleLayer";
+import { StyledSubtitleLayer } from "./StyledSubtitleLayer";
 import { SubtitleSettings } from "./SubtitleOffset";
 import { ZoomPanel } from "./ZoomPanel";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchPlayedThreshold, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
@@ -1925,6 +1926,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /** A sidecar that could not be read, so the offer to adjust it is withdrawn
    *  rather than left pointing at subtitles that never arrived. */
   const [sidecarFailed, setSidecarFailed] = useState(false);
+  // How the ASS subtitle drawn here is drawn, as StyledSubtitleLayer found it:
+  // as its script has it, typeset, or as plain lines in this viewer's look.
+  const [assLook, setAssLook] = useState<{ id: number; look: "text" | "styled" } | null>(null);
+  const handleAssLook = useCallback((id: number, look: "text" | "styled") => {
+    setAssLook((prev) => (prev?.id === id && prev.look === look ? prev : { id, look }));
+  }, []);
   // The live session, in state as well as in a ref — the ref is for the
   // listeners, this is what the version lookup below keys on.
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -3708,6 +3715,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       : null;
   // Pictures (PGS) rather than text: PictureSubtitleLayer draws it.
   const drawnPicture = drawnSubtitleId !== null && activeSubtitleTrack?.picture === true;
+  // ASS: typeset, StyledSubtitleLayer draws it as its script has it; plain, the
+  // text layer does. Until that is known — a moment, from the server — the
+  // plain lines load but aren't shown, so a typeset one doesn't flash up plain.
+  const drawnAss = drawnSubtitleId !== null && !drawnPicture && /^(ass|ssa)$/i.test(activeSubtitleTrack?.codec ?? "");
+  const assLookHere = !drawnAss ? null : assLook?.id === drawnSubtitleId ? assLook.look : "pending";
+  const drawnStyled = assLookHere === "styled";
   // As Stats for nerds tells it.
   const subtitleShown: SubtitleShown = activeSubtitleId === 0 ? "off"
     : activeSubtitleId === burnedSubtitleId ? "burned"
@@ -8992,14 +9005,25 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       {/* Subtitles this client draws, because Plex was told not to burn them
           in — the only kind there is anything to adjust about. */}
       <SubtitleLayer
-        streamId={drawnPicture ? null : drawnSubtitleId}
+        streamId={drawnPicture || drawnStyled ? null : drawnSubtitleId}
         ratingKey={item.ratingKey}
         mediaIndex={effectiveMediaIndex}
         videoRef={videoRef}
         offsetMs={subtitleOffsetMs}
         onUnavailable={() => setSidecarFailed(true)}
-        hidden={loadingShown}
+        hidden={loadingShown || assLookHere === "pending"}
         statusRef={subtitleStatusRef}
+      />
+      {/* A typeset ASS subtitle, drawn as its script has it, with the film's
+          fonts, rather than as plain lines. */}
+      <StyledSubtitleLayer
+        streamId={drawnAss ? drawnSubtitleId : null}
+        ratingKey={item.ratingKey}
+        mediaIndex={effectiveMediaIndex}
+        videoRef={videoRef}
+        offsetMs={subtitleOffsetMs}
+        hidden={loadingShown}
+        onLook={handleAssLook}
       />
       {/* A PGS subtitle, drawn from the pictures the server cuts out of the
           film rather than burned in. */}
@@ -9240,7 +9264,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           offsetMs={subtitleOffsetMs}
           onChange={setSubtitleOffsetMs}
           onClose={() => setShowSubtitleOffset(false)}
-          timingOnly={drawnPicture}
+          timingOnly={drawnPicture ? "picture" : drawnStyled ? "styled" : null}
         />
       )}
       {showZoomPanel && !zoomPhone && zoomMode === "manual" && (

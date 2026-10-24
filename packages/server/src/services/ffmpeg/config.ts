@@ -44,6 +44,13 @@ export function ffmpegSubtitlesOn(): boolean {
   return ffmpegEngineOn() && !off(process.env.FFMPEG_SUBTITLES);
 }
 
+/** STYLED_SUBTITLES=off: a typeset ASS subtitle is drawn as plain lines in
+ *  the viewer's own look, as before 24 October, not as its script has it
+ *  (styled-subtitles.ts). */
+export function styledSubtitlesOn(): boolean {
+  return !off(process.env.STYLED_SUBTITLES);
+}
+
 /** FFMPEG_PGS=off: PGS subtitles are burned in, as before 24 October, rather
  *  than cut out of the film for the player to draw (picture-subtitles.ts). */
 export function ffmpegPgsOn(): boolean {

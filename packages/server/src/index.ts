@@ -61,7 +61,11 @@ app.use(
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'"],
+        // 'wasm-unsafe-eval' — libass, which draws typeset ASS subtitles
+        // (StyledSubtitleLayer), is WebAssembly in a worker, and the worker's
+        // script is served under this same policy. It lets WebAssembly be
+        // compiled and nothing else: eval and new Function stay refused.
+        scriptSrc: ["'self'", "'wasm-unsafe-eval'"],
         styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
         fontSrc: ["'self'", "https://fonts.gstatic.com"],
         // blob: — hls.js attaches its MediaSource via URL.createObjectURL, so

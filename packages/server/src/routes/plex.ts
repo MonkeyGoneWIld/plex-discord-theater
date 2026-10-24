@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { Readable } from "node:stream";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import { pipeline } from "node:stream/promises";
 import sharp from "sharp";
 import { progressivePreview } from "../services/preview-stream.js";
@@ -53,7 +54,7 @@ import { markOriginalAudio } from "../services/original-language.js";
 import { audioNotes, type AudioDecision, type SourceAudio } from "../services/stream-audio.js";
 import {
   audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegHardware, ffmpegPgsOn, ffmpegPreviewsOn, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesAv1, gpuEncodesHevc, hwDevice,
-  keepHdrOnReencode, localPath, lowPowerVaapi, lowPowerVaapiAv1, maxEncodes, readable, recheckHardware, sizeOnDisk, tonemapAlgo, tonemapper,
+  keepHdrOnReencode, localPath, lowPowerVaapi, lowPowerVaapiAv1, maxEncodes, readable, recheckHardware, sizeOnDisk, styledSubtitlesOn, tonemapAlgo, tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
   ALL_CAPS, AUDIO_KBPS, HARDWARE_NAMES, NO_CAPS, copyArgs, copyNeeds, encodeArgs, encodeTargetKbps, hdrClass, inputArgs, pickBurn,
@@ -63,6 +64,7 @@ import { probe, probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
 import { prepareBurn, sidecarOnMount } from "../services/ffmpeg/burn-files.js";
 import { madePreview, makePreview, previewBody, previewPartOf, rememberPreviewPart } from "../services/ffmpeg/previews.js";
 import { pgsAhead, pgsBytes, pgsStatus, type PgsSource } from "../services/ffmpeg/picture-subtitles.js";
+import { fontFile, fontsOfFilm, styledAss, type SubtitleFont } from "../services/ffmpeg/styled-subtitles.js";
 import {
   ffmpegEncodesRunning,
   ffmpegKeyRetired,
@@ -3068,25 +3070,9 @@ async function loadSidecar(
   const hit = subtitleCache.get(streamId);
   if (hit && Date.now() - hit.at < SUBTITLE_CACHE_TTL_MS) return { cues: hit.cues };
 
-  // Off the mount, with the ffmpeg engine, when it is found there for certain
-  // (burn-files.ts findSidecar); Plex otherwise.
-  const onMount = title ? await sidecarFromMount(title.ratingKey, title.mediaIndex, Number(streamId)) : null;
-  let raw: ArrayBuffer | Buffer;
-  if (onMount) {
-    raw = onMount.bytes;
-  } else {
-    const plexRes = await plexFetch(`/library/streams/${streamId}`);
-    if (!plexRes.ok) return { status: plexRes.status === 404 ? 404 : 502, error: "Subtitle not available" };
-    // Plex does not always send a length for these, so the cap is enforced on
-    // what actually arrived rather than on what was promised.
-    raw = await plexRes.arrayBuffer();
-  }
-  if (raw.byteLength > MAX_SUBTITLE_BYTES) {
-    logEvent("Subtitles", "sidecar too large to be a subtitle", {
-      streamId, bytes: raw.byteLength,
-    });
-    return { status: 413, error: "Subtitle too large" };
-  }
+  const got = await sidecarBytes(streamId, title);
+  if ("status" in got) return got;
+  const { raw, onMount } = got;
 
   // Sidecars are UTF-8 far more often than not, and the ones that are not are
   // usually Latin-1. Decoding strictly first means a mis-encoded file is
@@ -3104,6 +3090,33 @@ async function loadSidecar(
     streamId, format: parsed.format, cues: parsed.cues.length, from: onMount ? onMount.file : "plex",
   });
   return { cues: parsed.cues };
+}
+
+/**
+ * A sidecar's bytes: off the mount, with the ffmpeg engine, when it is found
+ * there for certain (burn-files.ts findSidecar); Plex's otherwise.
+ */
+async function sidecarBytes(
+  streamId: string, title?: { ratingKey: string; mediaIndex: number },
+): Promise<{ raw: ArrayBuffer | Buffer; onMount: { file: string } | null } | { status: number; error: string }> {
+  const onMount = title ? await sidecarFromMount(title.ratingKey, title.mediaIndex, Number(streamId)) : null;
+  let raw: ArrayBuffer | Buffer;
+  if (onMount) {
+    raw = onMount.bytes;
+  } else {
+    const plexRes = await plexFetch(`/library/streams/${streamId}`);
+    if (!plexRes.ok) return { status: plexRes.status === 404 ? 404 : 502, error: "Subtitle not available" };
+    // Plex does not always send a length for these, so the cap is enforced on
+    // what actually arrived rather than on what was promised.
+    raw = await plexRes.arrayBuffer();
+  }
+  if (raw.byteLength > MAX_SUBTITLE_BYTES) {
+    logEvent("Subtitles", "sidecar too large to be a subtitle", {
+      streamId, bytes: raw.byteLength,
+    });
+    return { status: 413, error: "Subtitle too large" };
+  }
+  return { raw, onMount };
 }
 
 /** A version's file on the mount, with the ffmpeg engine, when it can be read there. */
@@ -3422,6 +3435,162 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
     console.error("[Subtitles] fetch error:", err);
     res.status(502).json({ error: "Failed to fetch subtitle" });
   }
+});
+
+// ─── Styled ASS subtitles ───────────────────────────────────────
+
+/** A typeset ASS script, as it is handed out: kept by its stream and file. */
+interface StyledScript {
+  v: string;
+  styled: boolean;
+  text: string;
+  gz?: Buffer;
+  logged?: boolean;
+}
+const styledScripts = new LruMap<string, StyledScript>(12);
+
+/** The ASS subtitle a request names, when it is one. */
+async function assTrack(req: Request): Promise<{
+  ratingKey: string; mediaIndex: number; streamId: string; codec: string | null; fingerprint: string | null; embedded: boolean;
+} | null> {
+  const streamId = req.params.streamId as string;
+  const ratingKey = typeof req.query.ratingKey === "string" ? req.query.ratingKey : "";
+  if (!NUMERIC_RE.test(streamId) || !NUMERIC_RE.test(ratingKey)) return null;
+  const requested = Number(req.query.mediaIndex);
+  const mediaIndex = Number.isInteger(requested) && requested >= 0 ? requested : await defaultMediaIndex(ratingKey);
+  const track = await subtitleTrackOf(ratingKey, mediaIndex, Number(streamId));
+  if (!track || track.picture || !/^(ass|ssa)$/i.test(track.codec ?? "")) return null;
+  return {
+    ratingKey, mediaIndex, streamId, codec: track.codec ?? null, fingerprint: track.fingerprint,
+    embedded: !!track.external && track.sidecar === false,
+  };
+}
+
+/**
+ * An ASS subtitle's script, whole: as the read of it out of the film kept it
+ * (embedded-subtitles.ts) — started here if nothing has started it — or the
+ * sidecar's file. "reading" until that read is done; null when it can't be had.
+ */
+async function assScript(t: NonNullable<Awaited<ReturnType<typeof assTrack>>>): Promise<StyledScript | "reading" | null> {
+  const key = `${t.streamId}:${t.fingerprint ?? ""}`;
+  const hit = styledScripts.get(key);
+  if (hit) return hit;
+  let text: string | null;
+  if (t.embedded) {
+    text = embeddedSubtitleText(t.streamId, t.fingerprint);
+    if (text === null) {
+      const sub = await embeddedSubtitle(t.ratingKey, t.mediaIndex, t.streamId, t.fingerprint, t.codec);
+      if (sub.state === "unreadable") return null;
+      text = embeddedSubtitleText(t.streamId, t.fingerprint);
+      if (text === null) return sub.state === "reading" ? "reading" : null;
+    }
+  } else {
+    const got = await sidecarBytes(t.streamId, { ratingKey: t.ratingKey, mediaIndex: t.mediaIndex });
+    if ("status" in got) return null;
+    text = decodeSubtitle(got.raw);
+  }
+  const script: StyledScript = {
+    v: createHash("sha1").update(text).digest("hex").slice(0, 16),
+    styled: styledAss(text),
+    text,
+  };
+  styledScripts.set(key, script);
+  return script;
+}
+
+/** The fonts the film carries, for its ASS subtitles: none without the engine
+ *  to take them out with, or when it has none. */
+async function assFonts(ratingKey: string, mediaIndex: number, fingerprint: string | null): Promise<SubtitleFont[]> {
+  if (!ffmpegSubtitlesOn() || !fingerprint) return [];
+  const source = await ffmpegSource(ratingKey, mediaIndex).catch(() => null);
+  if (!source) return [];
+  const local = source.file ? localPath(source.file) : null;
+  const fromMount = !!local && readable(local);
+  const input = fromMount
+    ? inputArgs({ local: local! })
+    : source.partKey
+      ? inputArgs({ url: `${process.env.PLEX_URL!.replace(/\/$/, "")}${source.partKey}`, token: process.env.PLEX_TOKEN! })
+      : null;
+  if (!input) return [];
+  const probed = await probeOnce(`${fromMount ? local : source.partKey}:${source.fileSize ?? "?"}`, input);
+  return fontsOfFilm(fingerprint, input, probed);
+}
+
+/**
+ * GET /api/plex/ass/:streamId?ratingKey=&mediaIndex=
+ *
+ * Whether an ASS subtitle is drawn as its script has it (StyledSubtitleLayer)
+ * or as plain lines in the viewer's look (the /subtitles route):
+ *
+ *   { state: "reading" }  until the read of it out of the film is done;
+ *   { state: "plain" }    not typeset (styled-subtitles.ts styledAss), or
+ *                         STYLED_SUBTITLES=off;
+ *   { state: "styled", v, bytes, fonts }  its script is /ass/:streamId/script
+ *                         with `v`, and its fonts /subtitle-fonts/:id.
+ *
+ * 404 when it isn't an ASS subtitle, or can't be had.
+ */
+router.get("/ass/:streamId", async (req: Request, res: Response) => {
+  res.setHeader("Cache-Control", "no-store");
+  const t = await assTrack(req);
+  const script = t ? await assScript(t) : null;
+  if (!t || script === null) {
+    res.status(404).json({ error: "No such ASS subtitle" });
+    return;
+  }
+  if (script === "reading") {
+    res.json({ state: "reading" });
+    return;
+  }
+  if (!script.styled || !styledSubtitlesOn()) {
+    res.json({ state: "plain" });
+    return;
+  }
+  const fonts = await assFonts(t.ratingKey, t.mediaIndex, t.fingerprint);
+  if (!script.logged) {
+    script.logged = true;
+    logEvent("Subtitles", "a typeset ASS subtitle, drawn as its script has it", {
+      ratingKey: t.ratingKey, streamId: t.streamId, bytes: Buffer.byteLength(script.text), fonts: fonts.length,
+      fontNames: fonts.map((f) => f.name).join(", ") || "none",
+    });
+  }
+  res.json({ state: "styled", v: script.v, bytes: Buffer.byteLength(script.text), fonts });
+});
+
+/** GET /api/plex/ass/:streamId/script?ratingKey=&mediaIndex=&v= — the script,
+ *  gzipped where that is taken; kept by the browser when `v` is its own. */
+router.get("/ass/:streamId/script", async (req: Request, res: Response) => {
+  const t = await assTrack(req);
+  const script = t ? await assScript(t) : null;
+  if (!t || script === null || script === "reading") {
+    res.status(404).json({ error: "No such ASS subtitle" });
+    return;
+  }
+  const kept = req.query.v === script.v;
+  res.setHeader("Cache-Control", kept ? "private, max-age=2592000, immutable" : "no-store");
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Vary", "Accept-Encoding");
+  if (/\bgzip\b/.test(String(req.headers["accept-encoding"] ?? ""))) {
+    script.gz ??= gzipSync(script.text);
+    res.setHeader("Content-Encoding", "gzip");
+    res.end(script.gz);
+    return;
+  }
+  res.end(script.text);
+});
+
+/** GET /api/plex/subtitle-fonts/:id — a font a film carries, by the hash of
+ *  its bytes: the same in every film that has it, and kept for good. */
+router.get("/subtitle-fonts/:id", (req: Request, res: Response) => {
+  const id = req.params.id as string;
+  const file = fontFile(id);
+  if (!file) {
+    res.status(404).json({ error: "No such font" });
+    return;
+  }
+  res.setHeader("Cache-Control", "private, max-age=31536000, immutable");
+  res.setHeader("Content-Type", id.endsWith(".otf") ? "font/otf" : id.endsWith(".ttc") ? "font/collection" : "font/ttf");
+  res.sendFile(file);
 });
 
 /**

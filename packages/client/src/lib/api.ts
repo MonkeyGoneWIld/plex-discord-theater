@@ -890,6 +890,37 @@ export function fetchSubtitleCues(
   return fresh || where ? apiGet(path) : cachedGet(path);
 }
 
+/**
+ * How an ASS subtitle is drawn — see the /ass route: as plain lines in the
+ * viewer's look, or, typeset, as its script has it, with the film's fonts.
+ */
+export type AssStatus =
+  | { state: "reading" }
+  | { state: "plain" }
+  | { state: "styled"; v: string; bytes: number; fonts: Array<{ id: string; name: string; bytes: number }> };
+
+export function fetchAssStatus(streamId: number, ratingKey: string, mediaIndex: number | undefined): Promise<AssStatus> {
+  return apiGet(`/api/plex/ass/${streamId}?${pgsQuery(ratingKey, mediaIndex, {})}`);
+}
+
+/** A typeset ASS subtitle's script, kept by the browser by its `v`. */
+export async function fetchAssScript(
+  streamId: number, ratingKey: string, mediaIndex: number | undefined, v: string,
+): Promise<string> {
+  const path = `/api/plex/ass/${streamId}/script?${pgsQuery(ratingKey, mediaIndex, { v })}`;
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
+  if (!res.ok) await throwApiError(res, path);
+  return res.text();
+}
+
+/** A font a film carries, by the hash of its bytes: kept by the browser for good. */
+export async function fetchSubtitleFont(id: string): Promise<Uint8Array> {
+  const path = `/api/plex/subtitle-fonts/${encodeURIComponent(id)}`;
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
+  if (!res.ok) await throwApiError(res, path);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
 /** Where a PGS subtitle's cut out of the film has got to: see the /pgs route. */
 export interface PgsStatus {
   pieces: Array<{ id: number; fromS: number; toS: number | null; bytes: number; done: boolean }>;

@@ -19,7 +19,8 @@ import { SubtitleLookControls } from "./SubtitleLook";
  * (lib/subtitleStyle.ts); the timing is not.
  *
  * A picture subtitle (PGS) drawn here is the disc's own pictures, its look made
- * with them: only its timing can change, so that is all it is offered.
+ * with them, and a typeset ASS one is drawn as its script has it: only their
+ * timing can change, so that is all they are offered.
  */
 
 /** One press. Plex uses the same step, and people arrive here expecting it. */
@@ -29,11 +30,12 @@ interface SubtitleSettingsProps {
   offsetMs: number;
   onChange: (ms: number) => void;
   onClose: () => void;
-  /** A picture subtitle: its look is the disc's, so no look controls. */
-  timingOnly?: boolean;
+  /** A picture subtitle, or a typeset one drawn as its script has it: its
+   *  look is the disc's or the script's, so no look controls. */
+  timingOnly?: "picture" | "styled" | null;
 }
 
-export function SubtitleSettings({ offsetMs, onChange, onClose, timingOnly = false }: SubtitleSettingsProps) {
+export function SubtitleSettings({ offsetMs, onChange, onClose, timingOnly = null }: SubtitleSettingsProps) {
   // Deliberately unbounded. A cap would be guessing at how badly out of sync
   // somebody's file is, and the only person who knows that is watching it.
   const step = (delta: number) => onChange(offsetMs + delta);
@@ -99,7 +101,11 @@ export function SubtitleSettings({ offsetMs, onChange, onClose, timingOnly = fal
       </div>
 
       {timingOnly ? (
-        <div style={styles.hint}>These subtitles are pictures from the disc, so they keep its look.</div>
+        <div style={styles.hint}>
+          {timingOnly === "picture"
+            ? "These subtitles are pictures from the disc, so they keep its look."
+            : "These subtitles set their own fonts, colours and places on screen, so they keep them."}
+        </div>
       ) : (
         <>
           <div style={styles.divider} />

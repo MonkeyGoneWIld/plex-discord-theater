@@ -4083,7 +4083,8 @@ export function isHevcSession(sessionId: string): boolean {
   return codec !== undefined && codec !== "h264" && codec !== "av1";
 }
 
-/** What an ffmpeg session's sound needs: Opus or FLAC, copied as it is. */
+/** What an ffmpeg session's sound needs: Opus, FLAC, AC3 or EAC3, copied as
+ *  it is, or Opus or FLAC made of what browsers don't play (convertedAudio). */
 const sessionAudioNeeds = new Map<string, PlayerCap[]>();
 
 export function recordSessionAudioNeeds(sessionId: string, needs: PlayerCap[]): void {
@@ -5309,7 +5310,7 @@ async function startWithFfmpeg(o: {
     ? {
         id: video.audio.id,
         decision: video.audioCopy ? "copy" : "transcode",
-        codec: video.audioCopy ? (video.audio.codec ?? "aac").toLowerCase() : "aac",
+        codec: video.audioCopy ? (video.audio.codec ?? "aac").toLowerCase() : video.audioOut?.codec ?? "aac",
         channels: video.audioCopy ? video.audio.channels ?? null : video.audioOut?.channels ?? 2,
         bitrate: video.audioCopy ? null : video.audioOut?.kbps ?? AUDIO_KBPS,
       }
@@ -5345,7 +5346,8 @@ async function startWithFfmpeg(o: {
 function audioText(plan: { audio: SourceStream | null; audioCopy: boolean; audioOut: AudioOut | null }): string {
   if (!plan.audio) return "none";
   const from = `${plan.audio.codec} ${plan.audio.channels ?? "?"}ch`;
-  return plan.audioCopy ? `${from} copied` : `${from} → AAC ${plan.audioOut?.channels ?? 2}ch ${plan.audioOut?.kbps ?? AUDIO_KBPS}k`;
+  return plan.audioCopy ? `${from} copied`
+    : `${from} → ${plan.audioOut?.codec ?? "aac"} ${plan.audioOut?.channels ?? 2}ch ${plan.audioOut?.kbps ?? AUDIO_KBPS}k`;
 }
 
 // ─── HLS streaming ──────────────────────────────────────────────

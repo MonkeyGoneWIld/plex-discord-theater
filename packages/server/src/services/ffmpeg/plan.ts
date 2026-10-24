@@ -5,7 +5,9 @@
  *
  * Copies (planCopy): the video as it is (H.264, or HEVC for a player that
  * decodes it, HDR included), the audio as it is when it is AAC — or Opus,
- * FLAC, AC3 or EAC3 for a player that decodes them — and as AAC otherwise.
+ * FLAC, AC3 or EAC3 for a player that decodes them — and as AAC otherwise,
+ * but for PCM, made FLAC, and 7.1, made Opus 7.1, for a player that decodes
+ * those (convertedAudio).
  * Re-encodes (planEncode): HEVC Main10 for a player that decodes
  * HEVC, H.264 High for the rest, on a GPU (Intel's QSV, VAAPI, NVIDIA's NVENC)
  * or the CPU, at the quality level's bitrate or what the source needs, if
@@ -234,14 +236,17 @@ export function planCopy(
     opus: !!req.opusOk, flac: !!req.flacOk, ac3: !!req.ac3Ok, eac3: !!req.eac3Ok,
   });
   const audioCopy = copied.copy;
-  const audioFmp4 = audioCopy && audioCapOf(audio?.codec) !== null;
+  const audioOut = audio && !audioCopy ? convertedAudio(audio, req.audioChannels, {
+    opus: !!req.opusOk, flac: !!req.flacOk,
+  }) : null;
+  const audioFmp4 = audioCopy ? audioCapOf(audio?.codec) !== null : !!audioOut && audioOut.codec !== "aac";
   return {
     ok: true,
     video: video as SourceStream & { index: number },
     audio,
     audioCopy,
     audioWhy: copied.why,
-    audioOut: audio && !audioCopy ? convertedAudio(audio, req.audioChannels) : null,
+    audioOut,
     codec,
     fmp4: codec === "av1" || audioFmp4,
     hdr,
@@ -257,6 +262,7 @@ export function copyNeeds(plan: Extract<CopyPlan, { ok: true }>): PlayerCap[] {
   if (plan.codec === "av1") needs.push("av1");
   const audio = audioCapOf(plan.audio?.codec);
   if (plan.audioCopy && audio) needs.push(audio);
+  if (plan.audioOut && plan.audioOut.codec !== "aac") needs.push(plan.audioOut.codec);
   return needs;
 }
 
@@ -276,22 +282,42 @@ function pickAudio(src: SourceVersion, audioStreamId: number | null): (SourceStr
 export const AUDIO_KBPS = 256;
 /** and 5.1 (FFMPEG_AUDIO_CHANNELS, 6 unless 2), as Plex makes 5.1 AAC. */
 export const AUDIO_KBPS_SURROUND = 448;
+/** Opus 7.1 (and 6.1): 64 kbps a channel. */
+export const AUDIO_KBPS_OPUS_71 = 512;
+/** FLAC made of PCM is about this much of its size. */
+const FLAC_OF_PCM = 0.6;
 
 export interface AudioOut {
-  channels: 2 | 6;
+  codec: "aac" | "opus" | "flac";
+  channels: number;
   kbps: number;
 }
 
 /**
- * What a track that isn't AAC becomes: AAC 5.1 for one with more than two
- * channels (7.1 is folded into 5.1), AAC stereo for the rest — or stereo for
- * all, as Plex makes it for a browser, with FFMPEG_AUDIO_CHANNELS=2. Browsers
- * play 5.1 AAC, and fold it to stereo themselves where that is all there is.
+ * What a track that isn't copied becomes: AAC 5.1 for one with more than two
+ * channels, AAC stereo for the rest — or stereo for all, as Plex makes it for
+ * a browser, with FFMPEG_AUDIO_CHANNELS=2. Browsers play 5.1 AAC, and fold it
+ * to stereo themselves where that is all there is. For a player that decodes
+ * them (`caps`), in a copy:
+ *
+ *  - PCM becomes FLAC, the same sound at about 60% of the size, within
+ *    FLAC_COPY_MAX_KBPS: stereo, as the library's is;
+ *  - more than 5.1 — TrueHD and DTS-HD MA 7.1, and EAC3 7.1 for a player
+ *    without EAC3 — becomes Opus with all of it, rather than folded into 5.1:
+ *    no browser plays TrueHD or DTS, and AAC above 5.1 not every one.
  */
-export function convertedAudio(audio: SourceStream, channels: number | undefined): AudioOut {
-  return channels === 6 && (audio.channels ?? 2) > 2
-    ? { channels: 6, kbps: AUDIO_KBPS_SURROUND }
-    : { channels: 2, kbps: AUDIO_KBPS };
+export function convertedAudio(audio: SourceStream, channels: number | undefined, caps: Partial<PlayerCaps> = {}): AudioOut {
+  const codec = (audio.codec ?? "").toLowerCase();
+  const has = audio.channels ?? 2;
+  if (caps.flac && codec.startsWith("pcm") && (audio.bitDepth ?? 16) <= 24 && (channels === 6 || has <= 2)) {
+    const pcmKbps = audio.bitrate && audio.bitrate > 0 ? audio.bitrate : has * 48 * (audio.bitDepth ?? 16);
+    const kbps = Math.round(pcmKbps * FLAC_OF_PCM);
+    if (kbps <= FLAC_COPY_MAX_KBPS) return { codec: "flac", channels: has, kbps };
+  }
+  if (caps.opus && channels === 6 && has > 6) return { codec: "opus", channels: Math.min(has, 8), kbps: AUDIO_KBPS_OPUS_71 };
+  return channels === 6 && has > 2
+    ? { codec: "aac", channels: 6, kbps: AUDIO_KBPS_SURROUND }
+    : { codec: "aac", channels: 2, kbps: AUDIO_KBPS };
 }
 
 /**
@@ -367,12 +393,16 @@ function untilArgs(toS: number | null): string[] {
   return toS !== null ? ["-to", toS.toFixed(3)] : [];
 }
 
-/** The audio as it is when it is AAC, as AAC otherwise (convertedAudio). */
+/** The audio as it is, or as convertedAudio has it. */
 function audioArgs(plan: { audio: SourceStream | null; audioCopy: boolean; audioOut: AudioOut | null }): string[] {
   if (!plan.audio) return [];
   if (plan.audioCopy) return ["-c:a", "copy"];
-  const out = plan.audioOut ?? { channels: 2, kbps: AUDIO_KBPS };
-  return ["-c:a", "aac", "-ac", String(out.channels), "-b:a", `${out.kbps}k`, "-af", "aresample=async=1"];
+  const out = plan.audioOut ?? { codec: "aac", channels: 2, kbps: AUDIO_KBPS };
+  if (out.codec === "flac") return ["-c:a", "flac", "-af", "aresample=async=1"];
+  // libopus takes 7.1 and 6.1 in their standard layouts, which -ac makes of
+  // the others (7.1 wide); it picks its sample rate, 48 kHz.
+  return ["-c:a", out.codec === "opus" ? "libopus" : "aac", "-ac", String(out.channels), "-b:a", `${out.kbps}k`,
+    "-af", "aresample=async=1"];
 }
 
 /**

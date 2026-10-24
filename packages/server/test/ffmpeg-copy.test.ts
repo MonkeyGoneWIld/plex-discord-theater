@@ -162,12 +162,15 @@ const AV1_FILM = path.join(tmp, "av1.mkv");
 }
 const FLAC_FILM = film("flac.mkv", ["-c:a", "flac", "-ac", "2"]);
 const EAC3_FILM = film("eac3.mkv", ["-c:a", "eac3", "-ac", "6", "-b:a", "384k"]);
+/** PCM 7.1, standing in for TrueHD and DTS-HD MA 7.1, which no browser plays either. */
+const PCM71_FILM = film("pcm71.mkv", ["-c:a", "pcm_s16le", "-ac", "8"]);
+const PCM_FILM = film("pcm.mkv", ["-c:a", "pcm_s16le", "-ac", "2"]);
 
 // ── Plex ─────────────────────────────────────────────────────────
 
 /** ratingKey → the file, and how Plex describes it. */
 const titles: Record<string, { file: string; plexPath: string; codec: string; width: number; height: number;
-  audio: string; channels: number; hdr?: Record<string, unknown>; slow?: boolean; size?: number;
+  audio: string; channels: number; audioKbps?: number; hdr?: Record<string, unknown>; slow?: boolean; size?: number;
   subs?: Array<Record<string, unknown>> }> = {
   1: { file: AAC_FILM, plexPath: AAC_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2 },
   2: { file: AC3_FILM, plexPath: AC3_FILM, codec: "h264", width: 640, height: 360, audio: "ac3", channels: 6 },
@@ -218,6 +221,9 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
   17: { file: AV1_FILM, plexPath: AV1_FILM, codec: "av1", width: 640, height: 360, audio: "opus", channels: 2 },
   18: { file: FLAC_FILM, plexPath: FLAC_FILM, codec: "h264", width: 640, height: 360, audio: "flac", channels: 2 },
   19: { file: EAC3_FILM, plexPath: EAC3_FILM, codec: "h264", width: 640, height: 360, audio: "eac3", channels: 6 },
+  // PCM at what Plex says of it: 48 kHz, 16 bits, a channel each.
+  20: { file: PCM71_FILM, plexPath: PCM71_FILM, codec: "h264", width: 640, height: 360, audio: "pcm", channels: 8, audioKbps: 6144 },
+  21: { file: PCM_FILM, plexPath: PCM_FILM, codec: "h264", width: 640, height: 360, audio: "pcm", channels: 2, audioKbps: 1536 },
 };
 
 const asked: string[] = [];
@@ -252,7 +258,7 @@ const plex = http.createServer((req, res) => {
         Part: [{ id: Number(meta[1]), key: `/library/parts/${meta[1]}/1/file.mkv`, file: t.plexPath,
           size: t.size ?? fs.statSync(t.file).size, Stream: [
             { id: 11, streamType: 1, index: 0, codec: t.codec, bitDepth: 8, ...t.hdr },
-            { id: 12, streamType: 2, index: 1, codec: t.audio, channels: t.channels, bitrate: 160, selected: true },
+            { id: 12, streamType: 2, index: 1, codec: t.audio, channels: t.channels, bitrate: t.audioKbps ?? 160, selected: true },
             // A picture subtitle, which can only be burned in: in film 9, listed
             // only in the rest. And a text one, listed only.
             ...(t.subs ?? [
@@ -372,7 +378,7 @@ console.log("\n— what a copy is judged on —");
   check("but HEVC marked interlaced is (His Dark Materials)", why(version({ scanType: "interlaced" })), "copy");
   const stereo = planCopy(version({}, { streams: [{ id: 11, streamType: 1, index: 0, codec: "hevc", bitDepth: 10 },
     { id: 12, streamType: 2, index: 1, codec: "ac3", channels: 2, default: true }] }), { audioStreamId: null, hevcOk: true, audioChannels: 6 });
-  check("stereo stays stereo when surround becomes 5.1", stereo.ok && stereo.audioOut, { channels: 2, kbps: 256 });
+  check("stereo stays stereo when surround becomes 5.1", stereo.ok && stereo.audioOut, { codec: "aac", channels: 2, kbps: 256 });
 }
 
 console.log("\n— a copy from the start —");
@@ -598,7 +604,36 @@ console.log("\n— AV1 and Opus, and FLAC, copied in fragmented MP4 for a player
     ["copy", "transcode", "AAC 5.1", "EAC3, and this player can't play it"]);
   await fetch(`${origin}/api/plex/hls/session/${noEac3.sid}?reason=test`, { method: "DELETE" });
 
+  /** The sound of a stream's first segment: codec, MP4 tag, channels. */
+  const soundOf = async (c: { playlist: string }, name: string) => {
+    const init = Buffer.from(await (await fetch(origin + mapOf(c.playlist)!)).arrayBuffer());
+    const seg = Buffer.from(await (await fetch(origin + entries(c.playlist)[0].uri)).arrayBuffer());
+    const whole = path.join(tmp, name);
+    fs.writeFileSync(whole, Buffer.concat([init, seg]));
+    return spawnSync(process.env.FFPROBE_PATH || "ffprobe", ["-v", "error", "-select_streams", "a",
+      "-show_entries", "stream=codec_name,codec_tag_string,channels", "-of", "csv=p=0", whole], { encoding: "utf8" }).stdout.trim()
+      .replace(/,+$/, "");
+  };
+  plexRoutes.capsForTests({ ...none, opus: true });
+  const opus71 = await copied("20");
+  check("7.1 no browser plays, for a player that decodes Opus: the picture copied, the sound Opus 7.1 rather than AAC 5.1, Opus needed, in fMP4",
+    [opus71.notes.video, opus71.notes.audio, opus71.notes.audioTo, plexRoutes.sessionNeeds(opus71.sid), !!mapOf(opus71.playlist)],
+    ["copy", "transcode", "Opus 7.1", ["opus"], true]);
+  check("its sound Opus, all eight channels, as MSE takes it", await soundOf(opus71, "opus71-first.mp4"), "opus,Opus,8");
+  await fetch(`${origin}/api/plex/hls/session/${opus71.sid}?reason=test`, { method: "DELETE" });
+  plexRoutes.capsForTests(none);
+  const aac51 = await copied("20");
+  check("for a player that doesn't, AAC 5.1 in MPEG-TS, and whoever decodes Opus given a copy with it",
+    [aac51.notes.audioTo, !!mapOf(aac51.playlist), plexRoutes.sessionWithheld(aac51.sid)], ["AAC 5.1", false, ["opus"]]);
+  await fetch(`${origin}/api/plex/hls/session/${aac51.sid}?reason=test`, { method: "DELETE" });
   plexRoutes.capsForTests({ ...none, flac: true });
+  const pcm = await copied("21");
+  check("PCM stereo, for a player that decodes FLAC: made FLAC, the same sound, FLAC needed, in fMP4",
+    [pcm.notes.video, pcm.notes.audio, pcm.notes.audioTo, plexRoutes.sessionNeeds(pcm.sid), !!mapOf(pcm.playlist)],
+    ["copy", "transcode", "FLAC Stereo", ["flac"], true]);
+  check("its sound FLAC, stereo, as MSE takes it", await soundOf(pcm, "pcm-first.mp4"), "flac,fLaC,2");
+  await fetch(`${origin}/api/plex/hls/session/${pcm.sid}?reason=test`, { method: "DELETE" });
+
   const held = await copied("17");
   check("for a player that decodes neither, AV1 is re-encoded and Opus made AAC, in MPEG-TS",
     [held.notes.video, held.notes.audio, !!mapOf(held.playlist)], ["transcode", "transcode", false]);
@@ -779,7 +814,8 @@ console.log("\n— what a re-encode is made of —");
   check("and an MPEG-2 DVD at what an H.264 needs of its 6 Mbps", matched("mpeg2video", 6000, 720, 480), [3000, 5000]);
   const surround = plan(version({}), { audioChannels: 6 });
   check("EAC3 5.1 becomes AAC 5.1 at 448 kbps", surround.ok && [surround.audioOut, encodeArgs(surround,
-    ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ").includes("-c:a aac -ac 6 -b:a 448k")], [{ channels: 6, kbps: 448 }, true]);
+    ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ").includes("-c:a aac -ac 6 -b:a 448k")],
+    [{ codec: "aac", channels: 6, kbps: 448 }, true]);
 }
 
 /** A playlist's entries once it lists `n`: an encode lists them as it goes. */

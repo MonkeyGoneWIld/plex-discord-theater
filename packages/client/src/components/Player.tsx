@@ -37,7 +37,7 @@ import { carryTrackPrefs, describeWatched, endTrackSitting, isCommentary, mergeT
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
-import { LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, cameFromCache, catchUpLeadS, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, settleForward, waitsForRoom } from "../lib/roomWait";
+import { LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, SLOW_SEEK_MS, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, nextSegmentInS, pictureStartFor, pictureAfterSeek } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
@@ -3239,6 +3239,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /** This device's last few seeks to picture it had, ms — see seekLeadS. Read once. */
   const seeksMsRef = useRef<number[] | null>(null);
   const seeksMs = useCallback((): number[] => (seeksMsRef.current ??= recentSeeksMs()), []);
+  /** The seek to picture held here under way, if any: where to, since when, how far into its segment (seekTimed). */
+  const heldSeekRef = useRef<{ t: number; at: number; fromKeyS: number | null } | null>(null);
   const landPastRoom = useCallback((video: HTMLVideoElement, roomS: number, again = false): number | null => {
     const leadS = catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs());
     const end = video.seekable.length ? video.seekable.end(video.seekable.length - 1) : NaN;
@@ -3278,18 +3280,31 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // left of a first segment, a joiner played it, stopped, and went past the
     // room after all (the "Viewer's picture after the room starts" check).
     if (enoughHeldAt(v, roomS) || (roomS <= hereS && bufferAheadSeconds(v) >= 1)) {
-      const leadS = roomS > hereS ? seekLeadS(seeksMs()) : 0;
-      const toS = leadS > 0 && enoughHeldAt(v, roomS + leadS) ? roomS + leadS : Math.max(roomS, hereS + 0.001);
-      logEvent("Sync", "catching up with the room, where it is", {
+      const behind = roomS > hereS;
+      // A device that decodes slowly lands on a keyframe (keyframeLanding);
+      // the seek it is still on counts, as the catch-up after it gives it up.
+      const under = heldSeekRef.current;
+      const inFlightMs = v.seeking && under ? performance.now() - under.at : 0;
+      const keyS = behind && hlsRef.current && seeksSlow(seeksMs(), inFlightMs)
+        ? keyframeLanding(roomS, levelFragments(hlsRef.current))
+        : null;
+      const onKey = keyS !== null && enoughHeldAt(v, keyS);
+      const leadS = behind && !onKey ? seekLeadS(seeksMs()) : 0;
+      const toS = onKey ? keyS : leadS > 0 && enoughHeldAt(v, roomS + leadS) ? roomS + leadS : Math.max(roomS, hereS + 0.001);
+      logEvent("Sync", onKey ? "catching up with the room, onto the next keyframe past it, its seeks being slow" : "catching up with the room, where it is", {
         why,
         fromS: Number(hereS.toFixed(2)),
         toS: Number(toS.toFixed(2)),
-        ...(toS > roomS ? { roomS: Number(roomS.toFixed(2)), seekLeadS: Number(leadS.toFixed(2)) } : {}),
+        ...(toS > roomS ? { roomS: Number(roomS.toFixed(2)) } : {}),
+        ...(onKey ? { seeksMs: seeksMs().join("/"), ...(inFlightMs ? { seekUnderWayMs: Math.round(inFlightMs) } : {}) }
+          : toS > roomS ? { seekLeadS: Number(leadS.toFixed(2)) } : {}),
         ...snapshot(v),
       });
       resetPlaybackRate(v);
       v.currentTime = toS;
-      if (toS - roomS > SOFT_SYNC_DEAD_ZONE_S) waitForRoom(v, roomS, "caught up where the room will be when the seek is done");
+      if (toS - roomS > SOFT_SYNC_DEAD_ZONE_S) {
+        waitForRoom(v, roomS, onKey ? "caught up on the next keyframe past the room" : "caught up where the room will be when the seek is done");
+      }
       return true;
     }
     if (roomS <= hereS) return false;
@@ -6050,10 +6065,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             hls.trigger(Hls.Events.BUFFER_FLUSHING, { startOffset: 0, endOffset: behind, type: null });
           }
         };
-        // A seek to picture held here, timed — see seekLeadS.
-        let heldSeek: { t: number; at: number } | null = null;
+        // A seek to picture held here, timed — see seekLeadS and seeksSlow.
+        // One given up for another after a second or more counts as that
+        // long: on a slow decoder the catch-up after it gave them all up.
+        heldSeekRef.current = null;
         const onSeeking = () => {
-          heldSeek = pictureHeldAt(video, video.currentTime) ? { t: video.currentTime, at: performance.now() } : null;
+          const before = heldSeekRef.current;
+          const beforeMs = before ? performance.now() - before.at : 0;
+          if (beforeMs >= SLOW_SEEK_MS) seeksMsRef.current = rememberSeekMs(seeksMs(), beforeMs);
+          const t = video.currentTime;
+          const heldHere = pictureHeldAt(video, t);
+          const frag = heldHere ? levelFragments(hls)?.find((f) => t >= f.start && t < f.start + f.duration) : undefined;
+          heldSeekRef.current = heldHere ? { t, at: performance.now(), fromKeyS: frag ? t - frag.start : null } : null;
           if (mounted) freeRoomFor(video.currentTime);
           if (!mounted || !inParts || !startCovered) return;
           if (pictureHeldAt(video, video.currentTime)) return;
@@ -6064,10 +6087,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           applyHttpSlots();
         };
         const onSeeked = () => {
-          const held = heldSeek;
-          heldSeek = null;
+          const held = heldSeekRef.current;
+          heldSeekRef.current = null;
           const heldSeekMs = held && Math.abs(video.currentTime - held.t) < 0.5 ? Math.round(performance.now() - held.at) : null;
-          if (heldSeekMs !== null) seeksMsRef.current = rememberSeekMs(seeksMs(), heldSeekMs);
+          if (heldSeekMs !== null && held && seekTimed(held.fromKeyS)) seeksMsRef.current = rememberSeekMs(seeksMs(), heldSeekMs);
           logEvent("Video", "seeked", { ...snapshot(video), ...(heldSeekMs !== null ? { heldSeekMs } : {}) });
           noteGoodPosition(video);
           if (!video.paused) setBuffering(false);

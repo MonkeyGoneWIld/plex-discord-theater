@@ -364,3 +364,60 @@ export function rememberSeekMs(seeksMs: readonly number[], ms: number): number[]
   }
   return next;
 }
+
+/** A seek to picture already here this long or longer: the device decodes its way to a place slowly. */
+export const SLOW_SEEK_MS = 1_000;
+
+/**
+ * Whether this device's seeks are slow (SLOW_SEEK_MS): one of its last few,
+ * or the one it is still on, `inFlightMs` along.
+ */
+export function seeksSlow(seeksMs: readonly number[], inFlightMs = 0): boolean {
+  return inFlightMs >= SLOW_SEEK_MS || seeksMs.slice(-SEEKS_KEPT).some((ms) => ms >= SLOW_SEEK_MS);
+}
+
+/**
+ * How far into a segment a landing on its keyframe goes: the listed start can
+ * be a little before the first frame (32:29.70 against 32:29.82 on 23
+ * October), and a landing a hair before it decodes the whole segment before.
+ */
+export const KEYFRAME_INTO_S = 0.25;
+/** The longest a slow seeker waits on a keyframe for the room; further, and it seeks where the room will be (seekLeadS). */
+export const MAX_KEYFRAME_WAIT_S = 8;
+
+/**
+ * Where a follower whose seeks are slow (seeksSlow) catches up with the room:
+ * just into the first segment that starts past it, to wait there — or null
+ * when none starts within MAX_KEYFRAME_WAIT_S.
+ *
+ * Every segment starts on a keyframe — a copy is cut at the film's own, an
+ * encode forces one at each — and a seek decodes from the keyframe before the
+ * place to the place. On blah0391's computer that goes at about the film's own
+ * speed: catch-ups four seconds into a segment took over three on 23 and 24
+ * October, the room had gone on when they landed, and it went again — three
+ * jumps in seven seconds coming back to The Punisher at 22:52, two after a
+ * skip to 5:36 with eight seconds of frozen picture. No aim past the room
+ * mends that, as the further it aims the more there is to decode. Onto a
+ * keyframe there is next to nothing.
+ */
+export function keyframeLanding(
+  roomS: number,
+  segments: ReadonlyArray<{ start: number; duration: number; gap?: boolean }> | null | undefined,
+): number | null {
+  const next = segments?.find((s) => !s.gap && s.start + KEYFRAME_INTO_S > roomS);
+  if (!next || next.start - roomS > MAX_KEYFRAME_WAIT_S) return null;
+  return next.start + KEYFRAME_INTO_S;
+}
+
+/** Closer than this to its segment's start, a seek says nothing of the decoder — see seekTimed. */
+const KEYFRAME_NEAR_S = 0.5;
+
+/**
+ * Whether a seek to picture already here goes towards seeksSlow: not one
+ * landed on a keyframe (keyframeLanding), which is quick on any device, and a
+ * few of which would leave the slow ones out of the last few kept.
+ * `fromKeyS`: how far into its segment it went, or null when not known.
+ */
+export function seekTimed(fromKeyS: number | null): boolean {
+  return fromKeyS === null || fromKeyS >= KEYFRAME_NEAR_S;
+}

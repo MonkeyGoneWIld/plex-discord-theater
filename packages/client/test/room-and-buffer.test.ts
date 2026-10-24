@@ -16,7 +16,7 @@
  * - A seek in front of a stream's first picture goes to it, and one waiting
  *   for its segment waits (lib/copyStart pictureAfterSeek).
  */
-import { LAND_INTO_SEGMENT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, settleForward, waitsForRoom } from "../src/lib/roomWait";
+import { KEYFRAME_INTO_S, LAND_INTO_SEGMENT_S, MAX_KEYFRAME_WAIT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS } from "../src/lib/bufferTrim";
@@ -279,6 +279,27 @@ console.log("\n— the last segment's time, kept across a reload —");
   check("no further than a decoder ever takes", seekLeadS([13_830]), MAX_SEEK_LEAD_S);
   kept.set("pdt:seekMs", "not json");
   check("nothing readable kept, nothing known", recentSeeksMs(), []);
+
+  // A device that decodes slowly lands on a keyframe instead.
+  check("quick seeks aren't slow", seeksSlow([200, 150, 220]), false);
+  check("one of a second or more in the last few is", seeksSlow([3_030, 200, 150]), true);
+  check("and so is one still under way that long", seeksSlow([200], 3_200), true);
+  check("but not once three since have been quick", seeksSlow([3_030, 200, 150, 220]), false);
+  // The Punisher S2E4 on 24 October: 5.6 s segments, the room at 5:40.99 after
+  // a skip to 5:36.51, the picture in at 5:36.51.
+  const punisher = [{ start: 330.9, duration: 5.6 }, { start: 336.5, duration: 5.6 }, { start: 342.1, duration: 5.6 }, { start: 347.7, duration: 5.6 }];
+  check("the room 4.5 s into a segment: just into the next, 1.4 s past it", keyframeLanding(340.99, punisher), 342.1 + KEYFRAME_INTO_S);
+  check("the room just before a segment's start: that one", keyframeLanding(342.0, punisher), 342.1 + KEYFRAME_INTO_S);
+  check("the room just past a segment's start, before the landing: that one still", keyframeLanding(342.2, punisher), 342.1 + KEYFRAME_INTO_S);
+  check("past the landing: the next", keyframeLanding(342.4, punisher), 347.7 + KEYFRAME_INTO_S);
+  check("no segment after the room: none", keyframeLanding(350, punisher), null);
+  check("none starting within the wait: none", keyframeLanding(10, [{ start: 0, duration: 20 }, { start: 20, duration: 20 }]), null);
+  check("a gap isn't landed on", keyframeLanding(340.99, [{ ...punisher[2], gap: true }, punisher[3]]), 347.7 + KEYFRAME_INTO_S);
+  check("no segments known: none", keyframeLanding(340.99, null), null);
+  check("a seek a second into its segment is timed", seekTimed(1.0), true);
+  check("one onto a keyframe isn't, nor washes out the slow ones", seekTimed(KEYFRAME_INTO_S), false);
+  check("one whose segment isn't known is", seekTimed(null), true);
+  check("the longest wait is a long segment", MAX_KEYFRAME_WAIT_S, 8);
 }
 
 console.log("\n— picture enough in hand to go —");

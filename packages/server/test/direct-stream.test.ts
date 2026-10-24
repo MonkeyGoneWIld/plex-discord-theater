@@ -180,10 +180,12 @@ function plexSegment(s: PlexSession, index: number): Buffer | null {
 const decisions: Array<{
   ratingKey: string; directStream: string | null; profile: string; subtitles: string | null; videoBitrate: string | null;
 }> = [];
-/** Each title's bitrate, kbps: 950 is over DIRECT_STREAM_MAX_KBPS, 960 and 970
- *  over VIDEO_BITRATE_KBPS's default of 12000 but under the cap. */
+/** Each title's bitrate, kbps: 950 is over DIRECT_STREAM_MAX_KBPS, 960, 970
+ *  and 945 over VIDEO_BITRATE_KBPS's default of 12000 but under the cap. */
 const fileKbps = (ratingKey: string) =>
-  ratingKey === "950" ? 31000 : ratingKey === "960" || ratingKey === "970" ? 15000 : 8000;
+  ratingKey === "950" ? 31000 : ratingKey === "960" || ratingKey === "970" || ratingKey === UHD_TITLE ? 15000 : 8000;
+/** 945 is 4K, under the cap. */
+const UHD_TITLE = "945";
 /** 940's audio is EAC3 5.1, which Plex converts to AAC; everyone else's is AAC Stereo, copied. */
 const EAC3_TITLE = "940";
 /** The subtitle the item has selected, as Plex keeps it — per item, not per request. */
@@ -247,7 +249,9 @@ const plex = http.createServer((req, res) => {
   if (meta) {
     return send({ Metadata: [{
       ratingKey: meta[1], title: "Film", type: "movie", duration: FILM_END * 1000,
-      Media: [{ id: 1, width: 1920, height: 1080, videoCodec: "h264", bitrate: fileKbps(meta[1]), Part: [{ id: 1, file: "/movies/Film.mkv",
+      Media: [{
+        id: 1, width: meta[1] === UHD_TITLE ? 3840 : 1920, height: meta[1] === UHD_TITLE ? 2160 : 1080, videoCodec: "h264",
+        bitrate: fileKbps(meta[1]), Part: [{ id: 1, file: "/movies/Film.mkv",
         ...(PART_FILES[meta[1]] ? { key: `/library/parts/${meta[1]}/1/file.mkv` } : {}), Stream: [
         { id: 11, streamType: 1, codec: "h264" },
         meta[1] === EAC3_TITLE
@@ -730,6 +734,9 @@ console.log("\n— through the routes —");
       video: "transcode", reason: "31 Mbps average exceeds 20 Mbps server limit", kbps: "12000", videoFrom: "H.264 · SDR · 1920×1080", range: "SDR",
       audio: "copy", audioFrom: "AAC Stereo",
     });
+  const uhd = await startNotes(UHD_TITLE);
+  check("a 4K file under the copy limit is still re-encoded, without asking for a copy, and says it is 4K",
+    [uhd.asked.directStream, uhd.notes.video, uhd.notes.reason], ["0", "transcode", "4K, shown at 1080p at most"]);
   check("one Plex declined to copy says so, without blaming a bitrate it was asked well over",
     (await startNotes("970")).notes.reason,
     "Declined by Plex");

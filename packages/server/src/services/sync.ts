@@ -1882,12 +1882,7 @@ export function attachWebSocketServer(server: Server): void {
           // A joiner asks for their own quality once they are in, if they
           // have one; until then they watch what the host does.
           quality: 0,
-          caps: {
-            hevc: msg.hevc === true,
-            av1: msg.av1 === true,
-            opus: msg.opus === true,
-            flac: msg.flac === true,
-          },
+          caps: Object.fromEntries(PLAYER_CAPS.map((cap) => [cap, msg[cap] === true])) as unknown as PlayerCaps,
           av1Encode: msg.av1 === true && msg.av1Encode === true,
         };
         roomId = instanceId;

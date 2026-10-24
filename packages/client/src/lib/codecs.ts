@@ -1,7 +1,9 @@
 /**
  * What this player decodes beyond H.264 and AAC in MPEG-TS, which every one
- * does: HEVC (hevc.ts), and AV1, Opus and FLAC in fragmented MP4 as the ffmpeg
- * engine copies them — asked of Media Source Extensions, as hls.js feeds them.
+ * does: HEVC (hevc.ts), and AV1, Opus, FLAC, AC3 and EAC3 in fragmented MP4 as
+ * the ffmpeg engine copies them — asked of Media Source Extensions, as hls.js
+ * feeds them. AC3 and EAC3 are Edge's and Safari's, and Chromium's where the
+ * system decodes them.
  * Told to the room on joining (the server's PlayerCaps): each stream is made
  * for what its driver decodes, and whoever on it can't play that is put on a
  * stream of their own, never the room on a lesser one.
@@ -15,13 +17,15 @@
  */
 import { canPlayHevcTranscode, isHevcCodec, markHevcUnplayable } from "./hevc";
 
-export type Cap = "hevc" | "av1" | "opus" | "flac";
+export type Cap = "hevc" | "av1" | "opus" | "flac" | "ac3" | "eac3";
 
 export interface Caps {
   hevc: boolean;
   av1: boolean;
   opus: boolean;
   flac: boolean;
+  ac3: boolean;
+  eac3: boolean;
   /**
    * AV1 decoded by the GPU, so a re-encode may be made in AV1 for this player
    * (not a need: anyone who decodes AV1 at all plays it). Known once the
@@ -80,6 +84,8 @@ export function playerCaps(): Caps {
     av1,
     opus: !failedHere("opus") && supports('audio/mp4; codecs="opus"'),
     flac: !failedHere("flac") && supports('audio/mp4; codecs="flac"'),
+    ac3: !failedHere("ac3") && supports('audio/mp4; codecs="ac-3"'),
+    eac3: !failedHere("eac3") && supports('audio/mp4; codecs="ec-3"'),
     av1Encode: av1 && av1Smooth,
   };
 }
@@ -91,6 +97,8 @@ export function capsUsed(video: string | null | undefined, audio: string | null 
   if (/^av01/i.test(video ?? "")) used.push("av1");
   if (/^opus/i.test(audio ?? "")) used.push("opus");
   if (/^(flac|fLaC)/i.test(audio ?? "")) used.push("flac");
+  if (/^(ac-3|mp4a\.a5)/i.test(audio ?? "")) used.push("ac3");
+  if (/^(ec-3|mp4a\.a6)/i.test(audio ?? "")) used.push("eac3");
   return used;
 }
 

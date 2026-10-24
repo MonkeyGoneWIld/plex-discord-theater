@@ -6,7 +6,7 @@ import sharp from "sharp";
 import { progressivePreview } from "../services/preview-stream.js";
 import { sendPlaylist } from "../services/send-playlist.js";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
-import { isUhd, playableVersionOrder, resolutionLabel, channelLabel, transcodeFrame, qualityKbps, pictureFacts, type PictureFacts, type PictureSource } from "../services/media-versions.js";
+import { isUhd, UHD_MIN_WIDTH, playableVersionOrder, resolutionLabel, channelLabel, transcodeFrame, qualityKbps, pictureFacts, type PictureFacts, type PictureSource } from "../services/media-versions.js";
 import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition } from "../services/segment-prefetch.js";
 import {
   startDirectStream,
@@ -56,13 +56,13 @@ import {
   keepHdrOnReencode, localPath, lowPowerVaapi, lowPowerVaapiAv1, maxEncodes, readable, recheckHardware, sizeOnDisk, tonemapAlgo, tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
-  AUDIO_KBPS, HARDWARE_NAMES, NO_CAPS, copyArgs, copyNeeds, encodeArgs, encodeTargetKbps, hdrClass, inputArgs, pickBurn,
+  ALL_CAPS, AUDIO_KBPS, HARDWARE_NAMES, NO_CAPS, copyArgs, copyNeeds, encodeArgs, encodeTargetKbps, hdrClass, inputArgs, pickBurn,
   planCopy, planEncode, type AudioOut, type EncodeRequest, type PlayerCap, type PlayerCaps, type SourceStream, type SourceVersion,
 } from "../services/ffmpeg/plan.js";
 import { probe, probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
 import { prepareBurn, sidecarOnMount } from "../services/ffmpeg/burn-files.js";
 import { madePreview, makePreview, previewBody, previewPartOf, rememberPreviewPart } from "../services/ffmpeg/previews.js";
-import { pgsBytes, pgsStatus, type PgsSource } from "../services/ffmpeg/picture-subtitles.js";
+import { pgsAhead, pgsBytes, pgsStatus, type PgsSource } from "../services/ffmpeg/picture-subtitles.js";
 import {
   ffmpegEncodesRunning,
   ffmpegKeyRetired,
@@ -3219,6 +3219,18 @@ async function prefetchSubtitles(
   }
   if (!version) return;
 
+  // A picture subtitle (PGS) to start on is cut out of the film ahead instead,
+  // so the stream starts with it made — unless whoever is looking moves on to
+  // another page before a cut is free.
+  const starting = version.subtitleTracks.find((t) => t.id === first)
+    ?? (scope === "all" ? version.subtitleTracks.find((t) => t.selected) : undefined);
+  if (starting?.picture) {
+    const fingerprint = subtitleFingerprint(version);
+    if (!fingerprint || !ffmpegPgsOn() || (stillWanted && !stillWanted())) return;
+    pgsAhead(pgsKey(fingerprint, starting.id), () => pgsSource(ratingKey, mediaIndex, starting.id), from ?? `title:${ratingKey}`);
+    return;
+  }
+
   // The subtitle being watched (or about to be), and for "all" the others in
   // its language — up to SUBTITLE_READ_AHEAD_MAX in all. Nothing without one:
   // with subtitles off there is nothing to have ready.
@@ -3459,7 +3471,12 @@ async function pgsTrack(req: Request): Promise<{ key: string; ratingKey: string;
   const mediaIndex = Number.isInteger(requested) && requested >= 0 ? requested : await defaultMediaIndex(ratingKey);
   const track = await subtitleTrackOf(ratingKey, mediaIndex, Number(streamId));
   if (!track?.picture || !track.fingerprint) return null;
-  return { key: `${track.fingerprint.replace(/[^0-9a-z]+/gi, "-")}-${streamId}`, ratingKey, mediaIndex, streamId: Number(streamId) };
+  return { key: pgsKey(track.fingerprint, Number(streamId)), ratingKey, mediaIndex, streamId: Number(streamId) };
+}
+
+/** What a PGS subtitle's cut is called: the file it is in, and its stream. */
+function pgsKey(fingerprint: string, streamId: number): string {
+  return `${fingerprint.replace(/[^0-9a-z]+/gi, "-")}-${streamId}`;
 }
 
 /**
@@ -3485,9 +3502,11 @@ router.get("/pgs/:streamId", async (req: Request, res: Response) => {
 });
 
 /**
- * GET /api/plex/pgs/:streamId/:piece?ratingKey=&mediaIndex=&from=
+ * GET /api/plex/pgs/:streamId/:piece?ratingKey=&mediaIndex=&from=&v=
  *
- * A piece's bytes from `from` to what has been cut so far.
+ * A piece's bytes from `from` to what has been cut so far. All of a made
+ * subtitle's piece, asked for by the `v` its status gave, is the same bytes for
+ * as long as that is: the browser keeps it.
  */
 router.get("/pgs/:streamId/:piece", async (req: Request, res: Response) => {
   const track = await pgsTrack(req);
@@ -3497,14 +3516,18 @@ router.get("/pgs/:streamId/:piece", async (req: Request, res: Response) => {
     res.status(404).json({ error: "Subtitle not available" });
     return;
   }
-  const bytes = await pgsBytes(track.key, piece, from);
-  if (!bytes) {
+  const gzip = /\bgzip\b/.test(String(req.headers["accept-encoding"] ?? ""));
+  const got = await pgsBytes(track.key, piece, from, gzip);
+  if (!got) {
     res.status(404).json({ error: "No such piece" });
     return;
   }
-  res.setHeader("Cache-Control", "no-store");
+  const kept = got.whole && got.v !== null && req.query.v === got.v;
+  res.setHeader("Cache-Control", kept ? "private, max-age=2592000, immutable" : "no-store");
   res.setHeader("Content-Type", "application/octet-stream");
-  res.end(bytes);
+  res.setHeader("Vary", "Accept-Encoding");
+  if (got.gzipped) res.setHeader("Content-Encoding", "gzip");
+  res.end(got.bytes);
 });
 
 // ─── Scrub previews ─────────────────────────────────────────────
@@ -4791,6 +4814,9 @@ async function versionFacts(ratingKey: string, mediaIndex: number): Promise<Vers
   }
 }
 
+/** Larger than the activity shows — 1080p — so never copied; see plan.ts planCopy. */
+const aboveHd = (v: VersionFacts | null) => (v?.width ?? 0) > 2048 || (v?.height ?? 0) > 1200;
+
 const mbpsText = (kbps: number) => `${(kbps / 1000).toFixed(kbps % 1000 ? 1 : 0)} Mbps`;
 
 /**
@@ -4807,7 +4833,7 @@ function refusedCopyReason(version: VersionFacts | null, askedKbps: number, room
   }
   if (codec === "hevc" && !roomHevc) return "HEVC not supported by this player";
   if (codec === "h264" && (version?.bitDepth ?? 8) > 8) return `${version!.bitDepth}-bit H.264 not supported by browsers`;
-  if ((version?.width ?? 0) > 2048 || (version?.height ?? 0) > 1200) return "Above 1080p, downscaled";
+  if (aboveHd(version)) return "Above 1080p, downscaled";
   // Asked above any peak, the bitrate wasn't it — see COPY_ASK_KBPS.
   if (askedKbps >= COPY_ASK_KBPS) return "Declined by Plex";
   if (version?.bitrate) {
@@ -4948,23 +4974,23 @@ async function startWithFfmpeg(o: {
   };
 
   const durationS = source.durationS ?? null;
-  const copyAsk = {
-    audioStreamId: o.audioStreamID || null, hevcOk: o.caps.hevc, av1Ok: o.caps.av1, opusOk: o.caps.opus,
-    flacOk: o.caps.flac, audioChannels: audioChannels(),
-  };
+  const okFor = (c: PlayerCaps) => ({
+    hevcOk: c.hevc, av1Ok: c.av1, opusOk: c.opus, flacOk: c.flac, ac3Ok: c.ac3, eac3Ok: c.eac3,
+  });
+  const copyAsk = { audioStreamId: o.audioStreamID || null, ...okFor(o.caps), audioChannels: audioChannels() };
   const copyPlan = o.copy ? planCopy(source, copyAsk) : null;
   // What only the driver's player kept from being copied — an AV1 or HEVC
-  // picture re-encoded, Opus or FLAC made AAC: whoever on the stream decodes
-  // it has a copy of their own (sessionWithheld, sync.ts seatOf).
+  // picture re-encoded, Opus, FLAC, AC3 or EAC3 made AAC: whoever on the
+  // stream decodes it has a copy of their own (sessionWithheld, sync.ts seatOf).
   if (copyPlan) {
-    const full = planCopy(source, { ...copyAsk, hevcOk: true, av1Ok: true, opusOk: true, flacOk: true });
+    const full = planCopy(source, { ...copyAsk, ...okFor(ALL_CAPS) });
     const got = copyPlan.ok ? copyNeeds(copyPlan) : [];
     const lost = full.ok ? copyNeeds(full).filter((c) => !got.includes(c) && !o.caps[c]) : [];
     if (lost.length) recordWithheld(o.sessionId, [...new Set<PlayerCap>([...sessionWithheld(o.sessionId), ...lost])]);
   }
   let video: {
     codec: "h264" | "hevc" | "av1"; width: number; height: number; audio: SourceStream | null; audioCopy: boolean;
-    audioOut: AudioOut | null; kbps: number | null;
+    audioWhy: string | null; audioOut: AudioOut | null; kbps: number | null;
   };
   let key: string;
   let reason: string | null = null;
@@ -5108,7 +5134,7 @@ async function startWithFfmpeg(o: {
 
   recordSessionVideoCodec(o.sessionId, video.codec);
   recordSessionAudioNeeds(o.sessionId, copyPlan?.ok && reason === null
-    ? copyNeeds(copyPlan).filter((c) => c === "opus" || c === "flac")
+    ? copyNeeds(copyPlan).filter((c) => c !== "hevc" && c !== "av1")
     : []);
   const decided: AudioDecision | null = video.audio
     ? {
@@ -5128,7 +5154,7 @@ async function startWithFfmpeg(o: {
     quality: o.quality || null,
     videoFrom: o.picture?.text ?? null,
     range,
-    ...audioNotes(decided, o.audioTracks),
+    ...audioNotes(decided, o.audioTracks, video.audioWhy),
   });
   const playlist = segProxyUrl(`${TRANSCODE_PREFIX}session/${key}/base/index.m3u8`, o.authToken);
   // One variant, no CODECS: hls.js reads the codecs out of the segments, as it
@@ -5671,7 +5697,12 @@ router.get(
       // what does is the reason the player shows.
       let notCopied: string | null = null;
       if (!DIRECT_STREAM) notCopied = "Direct Stream disabled on this server";
-      else if (subtitleMode === "burn") {
+      else if (aboveHd(version)) {
+        // Never sent as it is, at any bitrate: the activity shows 1080p at
+        // most, so a 4K file under the server limit is still re-encoded, and
+        // raising the limit never sends one.
+        notCopied = (version?.width ?? 0) >= UHD_MIN_WIDTH ? "4K, shown at 1080p at most" : "Above 1080p, shown at 1080p at most";
+      } else if (subtitleMode === "burn") {
         // Picture subtitles (PGS, VobSub) can only be burned in. A text one is
         // burned in when it couldn't be drawn — Plex failed to read it out.
         const burned = subtitleId ? await subtitleTrackOf(ratingKey, mediaIndex, subtitleId) : null;

@@ -161,6 +161,7 @@ const AV1_FILM = path.join(tmp, "av1.mkv");
   if (r.status !== 0) throw new Error(`couldn't make av1.mkv: ${r.stderr}`);
 }
 const FLAC_FILM = film("flac.mkv", ["-c:a", "flac", "-ac", "2"]);
+const EAC3_FILM = film("eac3.mkv", ["-c:a", "eac3", "-ac", "6", "-b:a", "384k"]);
 
 // ── Plex ─────────────────────────────────────────────────────────
 
@@ -216,6 +217,7 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
   16: { file: LATE_SOUND_FILM, plexPath: LATE_SOUND_FILM, codec: "h264", width: 640, height: 360, audio: "ac3", channels: 6 },
   17: { file: AV1_FILM, plexPath: AV1_FILM, codec: "av1", width: 640, height: 360, audio: "opus", channels: 2 },
   18: { file: FLAC_FILM, plexPath: FLAC_FILM, codec: "h264", width: 640, height: 360, audio: "flac", channels: 2 },
+  19: { file: EAC3_FILM, plexPath: EAC3_FILM, codec: "h264", width: 640, height: 360, audio: "eac3", channels: 6 },
 };
 
 const asked: string[] = [];
@@ -521,7 +523,7 @@ console.log("\n— audio that isn't AAC —");
 console.log("\n— AV1 and Opus, and FLAC, copied in fragmented MP4 for a player that decodes them —");
 {
   const { initTracks, mp4Span } = await import("../src/services/mp4-timestamps.js");
-  const none = { hevc: false, av1: false, opus: false, flac: false, av1Encode: false };
+  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, av1Encode: false };
   plexRoutes.capsForTests({ ...none, av1: true, opus: true, flac: true });
   const mapOf = (playlist: string) => playlist.match(/^#EXT-X-MAP:URI="([^"]+)"/m)?.[1] ?? null;
   const copied = async (ratingKey: string) => {
@@ -571,6 +573,30 @@ console.log("\n— AV1 and Opus, and FLAC, copied in fragmented MP4 for a player
   check("in fMP4 too", [!!mapOf(flac.playlist), entries(flac.playlist).every((e) => /\.m4s/.test(decodeURIComponent(e.uri)))],
     [true, true]);
   await fetch(`${origin}/api/plex/hls/session/${flac.sid}?reason=test`, { method: "DELETE" });
+
+  plexRoutes.capsForTests({ ...none, eac3: true });
+  const eac3 = await copied("19");
+  check("H.264 with EAC3 5.1, for a player that decodes EAC3: both copied, EAC3 needed, in fMP4",
+    [eac3.notes.video, eac3.notes.audio, eac3.notes.audioFrom, plexRoutes.sessionNeeds(eac3.sid), !!mapOf(eac3.playlist)],
+    ["copy", "copy", "EAC3 5.1", ["eac3"], true]);
+  {
+    const list = entries(eac3.playlist);
+    const init = Buffer.from(await (await fetch(origin + mapOf(eac3.playlist)!)).arrayBuffer());
+    const seg = Buffer.from(await (await fetch(origin + list[0].uri)).arrayBuffer());
+    const whole = path.join(tmp, "eac3-first.mp4");
+    fs.writeFileSync(whole, Buffer.concat([init, seg]));
+    const probe = spawnSync(process.env.FFPROBE_PATH || "ffprobe", ["-v", "error", "-select_streams", "a",
+      "-show_entries", "stream=codec_name,codec_tag_string,channels", "-of", "csv=p=0", whole], { encoding: "utf8" }).stdout.trim()
+      .replace(/,+$/, "");
+    check("its sound EAC3 5.1, tagged ec-3 as MSE takes it", probe, "eac3,ec-3,6");
+  }
+  await fetch(`${origin}/api/plex/hls/session/${eac3.sid}?reason=test`, { method: "DELETE" });
+  plexRoutes.capsForTests(none);
+  const noEac3 = await copied("19");
+  check("for a player that can't, made AAC 5.1, and saying that is why rather than \"Unsupported codec\"",
+    [noEac3.notes.video, noEac3.notes.audio, noEac3.notes.audioTo, noEac3.notes.audioReason],
+    ["copy", "transcode", "AAC 5.1", "EAC3, and this player can't play it"]);
+  await fetch(`${origin}/api/plex/hls/session/${noEac3.sid}?reason=test`, { method: "DELETE" });
 
   plexRoutes.capsForTests({ ...none, flac: true });
   const held = await copied("17");
@@ -745,7 +771,8 @@ console.log("\n— what a re-encode is made of —");
     const p = plan(version({ codec, bitDepth: 8, bitrate: kbps }, { width, height }), { kbps: 12000, peakKbps: 20000, hevcOk: false, ...more });
     return p.ok ? [p.kbps, p.peakKbps] : p.why;
   };
-  check("Steins;Gate's 3 Mbps HEVC at 1080p is H.264 at 6 Mbps, its peak as far above", matched("hevc", 3000, 1920, 1080), [6000, 10000]);
+  check("Steins;Gate's 3 Mbps HEVC at 1080p is H.264 at 4.8 Mbps, its peak as far above", matched("hevc", 3000, 1920, 1080), [4800, 8000]);
+  check("Airplane II's 6.8 Mbps HEVC is H.264 at 10.9 Mbps, under the level's 12", matched("hevc", 6818, 1920, 1080), [10909, 18182]);
   check("  and HEVC at the 1080p floor for an HEVC player", matched("hevc", 3000, 1920, 1080, { hevcOk: true }), [4000, 6667]);
   check("Hell's Kitchen's 673 kbps 320×240 MPEG-4 at the floor for its size", matched("msmpeg4v3", 673, 320, 240), [1500, 2500]);
   check("a 4K 60 Mbps HEVC at 1080p at the level's 12 Mbps", matched("hevc", 60000, 3840, 2160), [12000, 20000]);
@@ -788,7 +815,7 @@ console.log("\n— a re-encode —");
   check("HEVC for a player nobody said decodes it is re-encoded by ffmpeg, saying why, and on what",
     [notes.engine, notes.video, notes.reason, notes.encoder],
     ["ffmpeg", "transcode", "HEVC, and this player can't decode it", "CPU (x264), CPU decode"]);
-  check("  at what H.264 needs for its 2 Mbps HEVC", notes.kbps, "4000");
+  check("  at what H.264 needs for its 2 Mbps HEVC", notes.kbps, "3200");
   check("  and Plex was never asked to transcode", transcodeAsked(), []);
   // Four segments of 2.97 to 3.01 s: just under 12 by their durations.
   const firstList = entries(await (await fetch(origin + variantOf(m.text))).text());
@@ -1016,17 +1043,41 @@ function supTimes(buf: Buffer): number[] {
     status = await (await fetch(`${origin}/api/plex/pgs/21?ratingKey=9&mediaIndex=0&at=3`)).json() as Status;
     if (!status.done) await sleep(250);
   }
-  check("  cut out of the film whole, from the start for a player near it",
-    [status?.done, status?.failed, status?.pieces.map((p) => [p.id, p.fromS])], [true, null, [[0, 0]]]);
-  const whole = Buffer.from(await (await fetch(`${origin}/api/plex/pgs/21/0?ratingKey=9&mediaIndex=0&from=0`)).arrayBuffer());
+  check("  cut out of the film whole, from the start for a player near it, then handed out as made",
+    [status?.done, status?.failed, status?.pieces.map((p) => [p.id, p.fromS]), typeof status?.v], [true, null, [[1000, 0]], "string"]);
+  const whole = Buffer.from(await (await fetch(`${origin}/api/plex/pgs/21/1000?ratingKey=9&mediaIndex=0&from=0`)).arrayBuffer());
   check("  every line on the film's clock", supTimes(whole), [0.5, 5, 32, 40]);
+  const cutPiece = Buffer.from(await (await fetch(`${origin}/api/plex/pgs/21/0?ratingKey=9&mediaIndex=0&from=0`)).arrayBuffer());
+  check("  the cut's own piece still there for a player part way through it", cutPiece.equals(whole), true);
   const rest = Buffer.from(await (await fetch(`${origin}/api/plex/pgs/21/0?ratingKey=9&mediaIndex=0&from=100`)).arrayBuffer());
   check("  and read on from where a player left off", [rest.length, rest.equals(whole.subarray(100))], [whole.length - 100, true]);
   check("  kept, for the next to ask", fs.readdirSync(path.join(tmp, "subtitles-pgs")).filter((n) => n.endsWith(".sup")).length, 1);
-  const { forgetPgs, pgsArgs } = await import("../src/services/ffmpeg/picture-subtitles.js");
+  const { forgetPgs, pgsArgs, pgsPieceBytesForTests, joinPgsPiecesForTests } = await import("../src/services/ffmpeg/picture-subtitles.js");
   forgetPgs();
   const again = await (await fetch(`${origin}/api/plex/pgs/21?ratingKey=9&mediaIndex=0&at=40`)).json() as Status;
   check("  which is the kept one, at once", [again.done, again.pieces.map((p) => p.bytes)], [true, [whole.length]]);
+  const kept = await fetch(`${origin}/api/plex/pgs/21/1000?ratingKey=9&mediaIndex=0&from=0&v=${encodeURIComponent(again.v!)}`,
+    { headers: { "accept-encoding": "gzip" } });
+  const keptBytes = Buffer.from(await kept.arrayBuffer());
+  check("  asked for by its v, kept by the browser, and gzipped",
+    [kept.headers.get("cache-control"), whole.length <= 1024 || kept.headers.get("content-encoding") === "gzip", keptBytes.equals(whole)],
+    ["private, max-age=2592000, immutable", true, true]);
+  check("  not without it", (await fetch(`${origin}/api/plex/pgs/21/1000?ratingKey=9&mediaIndex=0&from=0`)).headers.get("cache-control"),
+    "no-store");
+  // In pieces small enough that each line starts one.
+  pgsPieceBytesForTests(1);
+  forgetPgs();
+  const parts = await (await fetch(`${origin}/api/plex/pgs/21?ratingKey=9&mediaIndex=0&at=33`)).json() as
+    Status & { pieces: Array<{ toS: number | null }> };
+  // Its lines go up at 0.5 and 32 s, each cleared after (5, 40 s): a piece each, with its clear.
+  check("  a made one in pieces, each from a line drawn afresh to the next",
+    parts.pieces.map((p) => [p.id, p.fromS, p.toS]), [[1000, 0, 32], [1001, 32, null]]);
+  const each = await Promise.all(parts.pieces.map(async (p) =>
+    Buffer.from(await (await fetch(`${origin}/api/plex/pgs/21/${p.id}?ratingKey=9&mediaIndex=0&from=0`)).arrayBuffer())));
+  check("  the pieces are the file, a line each", [Buffer.concat(each).equals(whole), each.map(supTimes)],
+    [true, [[0.5, 5], [32, 40]]]);
+  pgsPieceBytesForTests(1024 * 1024);
+  forgetPgs();
   // Pieces from a place: the rest of the film from it, and the start up to past it.
   const cut = (fromS: number, toS: number | null) => {
     const out = path.join(tmp, `piece-${fromS}-${toS}.sup`);
@@ -1035,6 +1086,26 @@ function supTimes(buf: Buffer): number[] {
   };
   check("  a piece from 30 s has what is after it, on the film's clock", cut(30, null), [32, 40]);
   check("  one from the start to 35 s, what is before", cut(0, 35), [0.5, 5, 32]);
+  check("  the two made one, each line once, in order",
+    supTimes(joinPgsPiecesForTests(fs.readFileSync(path.join(tmp, "piece-30-null.sup")), fs.readFileSync(path.join(tmp, "piece-0-35.sup")))),
+    [0.5, 5, 32, 40]);
+  {
+    // A page looked at has its picture subtitle cut ahead, nobody playing it.
+    for (const n of fs.readdirSync(path.join(tmp, "subtitles-pgs"))) fs.rmSync(path.join(tmp, "subtitles-pgs", n), { recursive: true, force: true });
+    forgetPgs();
+    process.env.SUBTITLE_PREFETCH = "1";
+    await fetch(`${origin}/api/plex/subtitles/prefetch`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ratingKey: "9", mediaIndex: 0, first: 21, scope: "first" }),
+    });
+    process.env.SUBTITLE_PREFETCH = "0";
+    let made = 0;
+    for (let i = 0; i < 80 && made === 0; i++) {
+      made = fs.readdirSync(path.join(tmp, "subtitles-pgs")).filter((n) => n.endsWith(".sup")).length;
+      if (made === 0) await sleep(250);
+    }
+    check("a picture subtitle a page would start with is cut ahead, kept for when it plays", made, 1);
+  }
   check("a PGS file beside the film is the file it is", await (async () => {
     asked.length = 0;
     let s: Status | null = null;
@@ -1042,7 +1113,7 @@ function supTimes(buf: Buffer): number[] {
       s = await (await fetch(`${origin}/api/plex/pgs/51?ratingKey=14&mediaIndex=0&at=0`)).json() as Status;
       if (!s.done) await sleep(100);
     }
-    const bytes = Buffer.from(await (await fetch(`${origin}/api/plex/pgs/51/0?ratingKey=14&mediaIndex=0&from=0`)).arrayBuffer());
+    const bytes = Buffer.from(await (await fetch(`${origin}/api/plex/pgs/51/1000?ratingKey=14&mediaIndex=0&from=0`)).arrayBuffer());
     return [s?.done, bytes.equals(fs.readFileSync(SUP)), asked.includes("/library/streams/51")];
   })(), [true, true, false]);
   check("a text subtitle has no pictures to cut", (await fetch(`${origin}/api/plex/pgs/22?ratingKey=1&mediaIndex=0`)).status, 404);

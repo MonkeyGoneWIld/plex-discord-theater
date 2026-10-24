@@ -4,8 +4,9 @@
  * be tested without ffmpeg or Plex.
  *
  * Copies (planCopy): the video as it is (H.264, or HEVC for a player that
- * decodes it, HDR included), the audio as it is when it is AAC and as AAC
- * otherwise. Re-encodes (planEncode): HEVC Main10 for a player that decodes
+ * decodes it, HDR included), the audio as it is when it is AAC — or Opus,
+ * FLAC, AC3 or EAC3 for a player that decodes them — and as AAC otherwise.
+ * Re-encodes (planEncode): HEVC Main10 for a player that decodes
  * HEVC, H.264 High for the rest, on a GPU (Intel's QSV, VAAPI, NVIDIA's NVENC)
  * or the CPU, at the quality level's bitrate or what the source needs, if
  * less; an HEVC re-encode of an HDR file stays HDR. The rest of HDR — for an
@@ -14,6 +15,7 @@
  * file or beside it, or a text one drawn by libass — goes into an H.264 SDR
  * picture.
  */
+import { audioName, codecName } from "../stream-audio.js";
 
 /** A stream of the file, as Plex's /library/metadata describes it. */
 export interface SourceStream {
@@ -109,11 +111,53 @@ export interface PlayerCaps {
   av1: boolean;
   opus: boolean;
   flac: boolean;
+  /** Dolby Digital, and Digital Plus: Edge and Safari decode them, and
+   *  Chromium where the system has a decoder for them. */
+  ac3: boolean;
+  eac3: boolean;
 }
 export type PlayerCap = keyof PlayerCaps;
-export const PLAYER_CAPS: readonly PlayerCap[] = ["hevc", "av1", "opus", "flac"];
-export const NO_CAPS: PlayerCaps = { hevc: false, av1: false, opus: false, flac: false };
-export const ALL_CAPS: PlayerCaps = { hevc: true, av1: true, opus: true, flac: true };
+export const PLAYER_CAPS: readonly PlayerCap[] = ["hevc", "av1", "opus", "flac", "ac3", "eac3"];
+export const NO_CAPS: PlayerCaps = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false };
+export const ALL_CAPS: PlayerCaps = { hevc: true, av1: true, opus: true, flac: true, ac3: true, eac3: true };
+
+/**
+ * Sound copied as it is, in fragmented MP4, for a player that decodes it: by
+ * Plex's name for the codec, the cap it needs. AAC every player decodes, in
+ * MPEG-TS too. DTS and TrueHD no browser here does: they become AAC.
+ */
+const AUDIO_CAPS: Record<string, PlayerCap> = { opus: "opus", flac: "flac", ac3: "ac3", eac3: "eac3" };
+
+/** The cap a copy of this sound needs; null for AAC, or sound never copied. */
+export function audioCapOf(codec: string | null | undefined): PlayerCap | null {
+  return AUDIO_CAPS[(codec ?? "").toLowerCase()] ?? null;
+}
+
+/**
+ * Whether a track is copied as it is for a player that decodes `caps`, and,
+ * when it isn't, why — for Stats for nerds. FLAC only within
+ * FLAC_COPY_MAX_KBPS, or stereo when Plex doesn't say.
+ */
+export function copiedAudio(audio: SourceStream | null, caps: Partial<PlayerCaps>): { copy: boolean; why: string | null } {
+  if (!audio) return { copy: false, why: null };
+  const codec = (audio.codec ?? "").toLowerCase();
+  if (codec === "aac") return { copy: true, why: null };
+  const name = codecName(codec) ?? "This sound";
+  const cap = AUDIO_CAPS[codec];
+  if (!cap) {
+    return { copy: false, why: /^(dca|dts|truehd|mlp)/.test(codec) ? `${name}, which browsers can't play` : `${name}, which isn't sent as it is` };
+  }
+  if (!caps[cap]) return { copy: false, why: `${name}, and this player can't play it` };
+  if (codec === "flac" && !(audio.bitrate ? audio.bitrate <= FLAC_COPY_MAX_KBPS : (audio.channels ?? 2) <= 2)) {
+    return {
+      copy: false,
+      why: audio.bitrate
+        ? `${name} at ${audio.bitrate.toLocaleString("en-US")} kbps, too heavy to send as it is`
+        : `${audioName(codec, audio.channels)}, too heavy to send as it is`,
+    };
+  }
+  return { copy: true, why: null };
+}
 
 /**
  * FLAC above this, kbps, becomes AAC rather than being copied: 5.1 at 24 bits
@@ -127,8 +171,11 @@ export type CopyPlan =
       ok: true;
       video: SourceStream & { index: number };
       audio: (SourceStream & { index: number }) | null;
-      /** Copied as it is: AAC, or Opus or FLAC for a player that decodes it. Anything else becomes AAC (audioOut). */
+      /** Copied as it is: AAC, or Opus, FLAC, AC3 or EAC3 for a player that
+       *  decodes it (copiedAudio). Anything else becomes AAC (audioOut). */
       audioCopy: boolean;
+      /** Why it became AAC, when it did. */
+      audioWhy: string | null;
       /** What a converted track becomes; null when it is copied, or there is none. */
       audioOut: AudioOut | null;
       codec: "h264" | "hevc" | "av1";
@@ -148,7 +195,10 @@ export type CopyPlan =
  */
 export function planCopy(
   src: SourceVersion,
-  req: { audioStreamId: number | null; hevcOk: boolean; av1Ok?: boolean; opusOk?: boolean; flacOk?: boolean; audioChannels?: number },
+  req: {
+    audioStreamId: number | null; hevcOk: boolean; av1Ok?: boolean; opusOk?: boolean; flacOk?: boolean;
+    ac3Ok?: boolean; eac3Ok?: boolean; audioChannels?: number;
+  },
 ): CopyPlan {
   const no = (why: string): CopyPlan => ({ ok: false, why });
   const video = src.streams.find((s) => s.streamType === 1);
@@ -179,18 +229,18 @@ export function planCopy(
 
   const audio = pickAudio(src, req.audioStreamId);
   if (audio === false) return no(`no audio track ${req.audioStreamId}`);
-  const audioCodec = (audio?.codec ?? "").toLowerCase();
-  // Opus and FLAC as they are, in fMP4, for a player that decodes them; FLAC
-  // within FLAC_COPY_MAX_KBPS, or stereo when Plex doesn't say.
-  const audioFmp4 = (audioCodec === "opus" && !!req.opusOk) ||
-    (audioCodec === "flac" && !!req.flacOk &&
-      (audio?.bitrate ? audio.bitrate <= FLAC_COPY_MAX_KBPS : (audio?.channels ?? 2) <= 2));
-  const audioCopy = audioCodec === "aac" || audioFmp4;
+  // Opus, FLAC, AC3 and EAC3 as they are, in fMP4, for a player that decodes them.
+  const copied = copiedAudio(audio, {
+    opus: !!req.opusOk, flac: !!req.flacOk, ac3: !!req.ac3Ok, eac3: !!req.eac3Ok,
+  });
+  const audioCopy = copied.copy;
+  const audioFmp4 = audioCopy && audioCapOf(audio?.codec) !== null;
   return {
     ok: true,
     video: video as SourceStream & { index: number },
     audio,
     audioCopy,
+    audioWhy: copied.why,
     audioOut: audio && !audioCopy ? convertedAudio(audio, req.audioChannels) : null,
     codec,
     fmp4: codec === "av1" || audioFmp4,
@@ -205,8 +255,8 @@ export function copyNeeds(plan: Extract<CopyPlan, { ok: true }>): PlayerCap[] {
   const needs: PlayerCap[] = [];
   if (plan.codec === "hevc") needs.push("hevc");
   if (plan.codec === "av1") needs.push("av1");
-  const audio = (plan.audio?.codec ?? "").toLowerCase();
-  if (plan.audioCopy && (audio === "opus" || audio === "flac")) needs.push(audio);
+  const audio = audioCapOf(plan.audio?.codec);
+  if (plan.audioCopy && audio) needs.push(audio);
   return needs;
 }
 
@@ -616,7 +666,9 @@ export type EncodePlan =
       ok: true;
       video: SourceStream & { index: number };
       audio: (SourceStream & { index: number }) | null;
+      /** AAC is copied; anything else becomes AAC with the picture. */
       audioCopy: boolean;
+      audioWhy: string | null;
       audioOut: AudioOut | null;
       /** AV1 is made in fragmented MP4, as an AV1 copy is. */
       codec: "h264" | "hevc" | "av1";
@@ -660,10 +712,12 @@ export type EncodePlan =
 
 /**
  * How many bits a codec needs for a picture, against H.264's: H.264 needs
- * about twice what HEVC and AV1 do, and MPEG-2 about twice what H.264 does.
+ * about 1.6 times what HEVC does and twice what AV1 does, and MPEG-2 about
+ * twice what H.264 does. HEVC was 2, and Airplane II's 6.8 Mbps HEVC made the
+ * H.264 for a Firefox player at 12 Mbps, more than its link carried.
  */
 const CODEC_EFFICIENCY: Record<string, number> = {
-  h264: 1, hevc: 2, av1: 2, vp9: 1.7, vp8: 0.9, vc1: 0.8, wmv3: 0.8, wmv2: 0.6, wmv1: 0.5,
+  h264: 1, hevc: 1.6, av1: 2, vp9: 1.7, vp8: 0.9, vc1: 0.8, wmv3: 0.8, wmv2: 0.6, wmv1: 0.5,
   mpeg2video: 0.5, mpeg1video: 0.4, mpeg4: 0.7, msmpeg4v3: 0.6, msmpeg4v2: 0.6, msmpeg4: 0.6, h263: 0.5,
 };
 
@@ -772,6 +826,9 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
     video: video as SourceStream & { index: number },
     audio,
     audioCopy,
+    // A re-encode is for a lighter stream, or one every player takes: its
+    // sound is AAC, whatever the player decodes.
+    audioWhy: audio && !audioCopy ? "Made AAC with the re-encoded picture" : null,
     audioOut: audio && !audioCopy ? convertedAudio(audio, req.audioChannels) : null,
     codec,
     hdr,

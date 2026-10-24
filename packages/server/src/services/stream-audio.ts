@@ -50,8 +50,11 @@ export function audioName(codec: string | null | undefined, channels: number | n
   return parts.length ? parts.join(" ") : null;
 }
 
-/** The notes for a stream's audio, from Plex's decision and the file's tracks. */
-export function audioNotes(decided: AudioDecision | null, tracks: readonly SourceAudio[]): AudioNotes {
+/**
+ * The notes for a stream's audio, from Plex's decision and the file's tracks.
+ * `why` is the ffmpeg engine's own reason for converting it, which it knows.
+ */
+export function audioNotes(decided: AudioDecision | null, tracks: readonly SourceAudio[], why?: string | null): AudioNotes {
   const none: AudioNotes = { audio: null, audioFrom: null, audioTo: null, audioKbps: null, audioReason: null };
   const decision = decided?.decision;
   if (decision !== "copy" && decision !== "transcode") return none;
@@ -62,7 +65,9 @@ export function audioNotes(decided: AudioDecision | null, tracks: readonly Sourc
   }
   const sourceCodec = source?.codec?.toLowerCase() ?? null;
   let reason: string;
-  if (sourceCodec && sourceCodec !== "aac") {
+  if (why) {
+    reason = why;
+  } else if (sourceCodec && sourceCodec !== "aac") {
     reason = `Unsupported codec (${codecName(sourceCodec)})`;
   } else if (sourceCodec === "aac" && source?.channels && decided!.channels && decided!.channels < source.channels) {
     reason = `Downmixed from ${audioName(null, source.channels)} to ${audioName(null, decided!.channels)}`;

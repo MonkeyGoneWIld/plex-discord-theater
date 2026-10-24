@@ -187,7 +187,7 @@ console.log("\n— AV1, Opus and FLAC copied, in fragmented MP4 —");
       { id: 12, streamType: 2, index: 1, codec: "opus", channels: 6, default: true, ...audio }],
     ...more,
   });
-  const all = { audioStreamId: null, hevcOk: true, av1Ok: true, opusOk: true, flacOk: true };
+  const all = { audioStreamId: null, hevcOk: true, av1Ok: true, opusOk: true, flacOk: true, ac3Ok: true, eac3Ok: true };
   const av1 = planCopy(version({}, {}), all);
   check("10-bit AV1 with Opus 5.1, for a player that decodes both, is copied as it is, in fMP4",
     av1.ok && [av1.codec, av1.audioCopy, av1.fmp4, copyNeeds(av1)], ["av1", true, true, ["av1", "opus"]]);
@@ -208,6 +208,21 @@ console.log("\n— AV1, Opus and FLAC copied, in fragmented MP4 —");
     flacCopied(flac({ channels: 6, bitrate: 4000 })), [false, false, ["hevc"]]);
   check("and with no bitrate said, stereo is copied and surround isn't",
     [flacCopied(flac({ channels: 2 })), flacCopied(flac({ channels: 6 }))], [[true, true, ["hevc", "flac"]], [false, false, ["hevc"]]]);
+  const sound = (audio: Record<string, unknown>, ask: Partial<typeof all> = {}) =>
+    planCopy(version({ codec: "h264", bitDepth: 8 }, audio), { ...all, ...ask });
+  const eac3 = sound({ codec: "eac3", channels: 8 });
+  check("EAC3 7.1 for a player that decodes EAC3 is copied as it is, all 8 channels, in fMP4",
+    eac3.ok && [eac3.audioCopy, eac3.fmp4, copyNeeds(eac3), eac3.audioWhy], [true, true, ["eac3"], null]);
+  const ac3 = sound({ codec: "ac3", channels: 6 });
+  check("and AC3 5.1 for one that decodes AC3", ac3.ok && [ac3.audioCopy, ac3.fmp4, copyNeeds(ac3)], [true, true, ["ac3"]]);
+  const audioWhy = (p: ReturnType<typeof planCopy>) => (p.ok ? [p.audioCopy, p.audioWhy] : p.why);
+  check("not for a player that can't, which is told why",
+    audioWhy(sound({ codec: "eac3", channels: 6 }, { eac3Ok: false })), [false, "EAC3, and this player can't play it"]);
+  check("DTS and TrueHD never, as no browser plays them",
+    [audioWhy(sound({ codec: "dca", channels: 6 })), audioWhy(sound({ codec: "truehd", channels: 8 }))],
+    [[false, "DTS, which browsers can't play"], [false, "TrueHD, which browsers can't play"]]);
+  check("FLAC too heavy to send says so, with its bitrate",
+    audioWhy(sound({ codec: "flac", channels: 6, bitrate: 4000 })), [false, "FLAC at 4,000 kbps, too heavy to send as it is"]);
   const hevcFlac = flac({ channels: 2, bitrate: 1000 });
   const args = hevcFlac.ok ? copyArgs(hevcFlac, ["-i", "f.mkv"], 0, 60, 4).join(" ") : "";
   check("an fMP4 copy is cut by the HLS muxer, on the copy's clock, HEVC tagged as Chrome takes it",

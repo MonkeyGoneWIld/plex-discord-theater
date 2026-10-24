@@ -895,6 +895,8 @@ export interface PgsStatus {
   pieces: Array<{ id: number; fromS: number; toS: number | null; bytes: number; done: boolean }>;
   done: boolean;
   failed: string | null;
+  /** Names a made subtitle's bytes: its pieces asked for by it are kept by the browser. */
+  v?: string | null;
 }
 
 function pgsQuery(ratingKey: string, mediaIndex: number | undefined, more: Record<string, string>): string {
@@ -910,12 +912,16 @@ export function fetchPgsStatus(
   return apiGet(`/api/plex/pgs/${streamId}?${pgsQuery(ratingKey, mediaIndex, { at: at.toFixed(1) })}`);
 }
 
-/** A piece's bytes from `from` to what has been cut so far. */
+/**
+ * A piece's bytes from `from` to what has been cut so far. With `v`, all of a
+ * made subtitle's piece, which the browser keeps; anything else it doesn't.
+ */
 export async function fetchPgsBytes(
   streamId: number, ratingKey: string, mediaIndex: number | undefined, piece: number, from: number,
+  v: string | null = null,
 ): Promise<Uint8Array> {
-  const path = `/api/plex/pgs/${streamId}/${piece}?${pgsQuery(ratingKey, mediaIndex, { from: String(from) })}`;
-  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
+  const path = `/api/plex/pgs/${streamId}/${piece}?${pgsQuery(ratingKey, mediaIndex, { from: String(from), ...(v && { v }) })}`;
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders(), cache: v ? "default" : "no-store" });
   if (!res.ok) await throwApiError(res, path);
   return new Uint8Array(await res.arrayBuffer());
 }

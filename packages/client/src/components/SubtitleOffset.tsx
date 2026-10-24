@@ -17,6 +17,9 @@ import { SubtitleLookControls } from "./SubtitleLook";
  * while you press, so the picture stays visible and playing underneath and
  * every change shows at once. The look is saved for every title on this device
  * (lib/subtitleStyle.ts); the timing is not.
+ *
+ * A picture subtitle (PGS) drawn here is the disc's own pictures, its look made
+ * with them: only its timing can change, so that is all it is offered.
  */
 
 /** One press. Plex uses the same step, and people arrive here expecting it. */
@@ -26,9 +29,11 @@ interface SubtitleSettingsProps {
   offsetMs: number;
   onChange: (ms: number) => void;
   onClose: () => void;
+  /** A picture subtitle: its look is the disc's, so no look controls. */
+  timingOnly?: boolean;
 }
 
-export function SubtitleSettings({ offsetMs, onChange, onClose }: SubtitleSettingsProps) {
+export function SubtitleSettings({ offsetMs, onChange, onClose, timingOnly = false }: SubtitleSettingsProps) {
   // Deliberately unbounded. A cap would be guessing at how badly out of sync
   // somebody's file is, and the only person who knows that is watching it.
   const step = (delta: number) => onChange(offsetMs + delta);
@@ -93,10 +98,16 @@ export function SubtitleSettings({ offsetMs, onChange, onClose }: SubtitleSettin
             : "Subtitles now appear earlier."}
       </div>
 
-      <div style={styles.divider} />
+      {timingOnly ? (
+        <div style={styles.hint}>These subtitles are pictures from the disc, so they keep its look.</div>
+      ) : (
+        <>
+          <div style={styles.divider} />
 
-      <SubtitleLookControls />
-      <div style={styles.hint}>The look is saved for everything you watch here.</div>
+          <SubtitleLookControls />
+          <div style={styles.hint}>The look is saved for everything you watch here.</div>
+        </>
+      )}
     </div>
   );
 }

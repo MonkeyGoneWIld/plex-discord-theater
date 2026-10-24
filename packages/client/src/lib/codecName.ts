@@ -58,6 +58,24 @@ export function codecName(codec: string | null | undefined): string | null {
   }
 }
 
+/** A codec string that is sound, as hls.js and MSE name them. */
+const AUDIO_CODEC = /^(mp4a|opus|flac|ac-3|ec-3|dts[cehlx]|mlpa|alac|mp3)/i;
+
+/**
+ * A stream's picture and sound codecs from what hls.js found in it
+ * (BUFFER_CODECS): separate tracks, or one ("audiovideo") with both in one
+ * string, joined — as an fMP4 stream's are, its sound first.
+ */
+export function splitCodecs(data: {
+  video?: { codec?: string }; audio?: { codec?: string }; audiovideo?: { codec?: string };
+}): { video: string | null; audio: string | null } {
+  const both = (data.audiovideo?.codec ?? "").split(",").map((c) => c.trim()).filter(Boolean);
+  return {
+    video: data.video?.codec ?? both.find((c) => !AUDIO_CODEC.test(c)) ?? null,
+    audio: data.audio?.codec ?? both.find((c) => AUDIO_CODEC.test(c)) ?? null,
+  };
+}
+
 /** Just the codec: "H.264", "HEVC", "AAC". */
 export function codecFamily(codec: string | null | undefined): string | null {
   const name = codecName(codec);

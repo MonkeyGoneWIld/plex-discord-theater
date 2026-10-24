@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type Hls from "hls.js";
 import HlsPkg from "hls.js";
 import { qualityLabel } from "../lib/quality";
-import { codecFamily, codecName } from "../lib/codecName";
+import { codecFamily, codecName, splitCodecs } from "../lib/codecName";
 import { audioDetails, audioSummary, engineText, playbackMode, type StreamNotes } from "../lib/streamNotes";
 import type { StreamTrack } from "../lib/api";
 import { previewDetails, previewSummary, type PreviewStatus } from "../lib/previewStatus";
@@ -259,10 +259,9 @@ export function StatsOverlay({
       _e: unknown,
       data: { video?: { codec?: string }; audio?: { codec?: string }; audiovideo?: { codec?: string } },
     ) => {
-      // audiovideo is the muxed case — one track carrying both, which is what
-      // MPEG-TS from Plex produces.
-      const video = data.video?.codec ?? data.audiovideo?.codec ?? null;
-      const audio = data.audio?.codec ?? null;
+      // audiovideo is the muxed case — one track carrying both, as fMP4 does,
+      // its codecs in one string with the sound's first.
+      const { video, audio } = splitCodecs(data);
       if (video) codecsRef.current.video = video;
       if (audio) codecsRef.current.audio = audio;
     };

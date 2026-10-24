@@ -20,6 +20,7 @@ import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, f
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { capsUsed, markUnplayable, type Cap } from "../lib/codecs";
+import { splitCodecs } from "../lib/codecName";
 import { loadVolume, saveVolume, VOLUME_CHOSEN_EVENT } from "../lib/volume";
 import { readSameLanguageAhead, readSubtitlesAhead } from "../lib/subtitleReadAhead";
 import {
@@ -3847,12 +3848,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           setOfferLowerQuality(null);
         }
       }
-      if (!video || !sync?.playing || video.paused || video.seeking) return;
+      // A host short of picture holds the whole room, its own video paused
+      // with everybody's: buffering too, and it was never counted — Firefox,
+      // hosting on 24 October, held the room 21 s and was offered nothing.
+      const holdingRoom = hostToldWaitingRef.current && !!video && !video.seeking;
+      if (!video || (!holdingRoom && (!sync?.playing || video.paused || video.seeking))) return;
       const recent = starvedSecondsRef.current.filter((t) => now - t < REBUFFER_WINDOW_MS);
       starvedSecondsRef.current = recent;
       if (now < rebufferQuietUntilRef.current) return;
-      const starved = bufferAheadSeconds(video) < 0.5 &&
-        video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA;
+      const starved = holdingRoom || (bufferAheadSeconds(video) < 0.5 &&
+        video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA);
       if (!starved) return;
       lastStarvedAtRef.current = now;
       recent.push(now);
@@ -4894,10 +4899,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // one track ("audiovideo"), its codecs joined.
         let streamCaps: Cap[] = [];
         hls.on(Hls.Events.BUFFER_CODECS, (_e, data) => {
-          const both = (data as { audiovideo?: { codec?: string } }).audiovideo?.codec?.split(",") ?? [];
-          const video = data.video?.codec ?? both.find((c) => !/^(opus|flac|fLaC|mp4a)/i.test(c.trim()));
-          const audio = data.audio?.codec ?? both.find((c) => /^(opus|flac|fLaC|mp4a)/i.test(c.trim()));
-          streamCaps = capsUsed(video?.trim(), audio?.trim());
+          const { video, audio } = splitCodecs(data as Parameters<typeof splitCodecs>[0]);
+          streamCaps = capsUsed(video, audio);
         });
 
         // Copied or re-encoded, and how far a copied stream's playlist reaches.
@@ -9237,6 +9240,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           offsetMs={subtitleOffsetMs}
           onChange={setSubtitleOffsetMs}
           onClose={() => setShowSubtitleOffset(false)}
+          timingOnly={drawnPicture}
         />
       )}
       {showZoomPanel && !zoomPhone && zoomMode === "manual" && (

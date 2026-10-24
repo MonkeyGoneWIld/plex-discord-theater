@@ -21,10 +21,19 @@ import type { SubtitleLoadStatus } from "../lib/subtitleStatus";
  * picture is, then the start. Lines come as it goes, and "Loading subtitles…"
  * says so where none have yet. One that can't be cut has the player ask for
  * a stream with it burned in instead (onUnavailable).
+ *
+ * One made before comes in pieces of about a megabyte: the one where the
+ * picture is first, then the next couple of minutes', then — while the video
+ * has picture in hand to spare — the rest, nearest first. Asked for by the
+ * subtitle's `v`, they are kept by the browser for the next time it is on.
  */
 
 /** How often to ask how far the cut has got, while it goes on. */
 const ASK_MS = 1_000;
+/** Pieces starting within this of the picture are read whatever the video has in hand. */
+const NEAR_S = 120;
+/** Further ones only with this much picture in hand. */
+const SPARE_S = 20;
 /** How long to wait for the picture's place before asking from the start. */
 const PLACE_WAIT_MS = 15_000;
 /** How often "Loading subtitles…" is looked at. */
@@ -119,10 +128,43 @@ export function PictureSubtitleLayer({
     };
     if (statusRef) statusRef.current = status;
     const readers = new Map<string, { reader: PgsReader; lastPts: number }>();
+    /** Where every line has come, by piece read: a cut's stay once the made
+     *  one's pieces replace them, so those aren't read twice. */
+    const pieceSpans = new Map<string, CoveredSpan>();
     let spans: CoveredSpan[] = [];
     let done = false;
+    /** The last word on its pieces; reading them, one at a time. */
+    let latest: PgsStatus | null = null;
+    let busy = false;
     const where = () => Math.max(0, (videoRef.current?.currentTime ?? 0) - offsetRef.current / 1000);
     const covers = (t: number) => spans.some(([a, b]) => t >= a && (b === null || t < b));
+    type Piece = PgsStatus["pieces"][number];
+    const keyOf = (p: Piece) => `${p.id}:${p.fromS}`;
+    const readOf = (p: Piece) => readers.get(keyOf(p))?.reader.read ?? 0;
+    /** All of it had already, from another piece. */
+    const had = (p: Piece) => spans.some(([a, b]) => a <= p.fromS && (b === null || (p.toS !== null && p.toS <= b)));
+    const spare = () => {
+      const v = videoRef.current;
+      if (!v) return true;
+      const t = v.currentTime;
+      for (let i = 0; i < v.buffered.length; i++) {
+        if (v.buffered.start(i) <= t + 0.5 && v.buffered.end(i) > t) return v.buffered.end(i) - t >= SPARE_S;
+      }
+      return false;
+    };
+    /** The piece to read next: where the picture is, then ahead of it, then before. */
+    const nextPiece = (): Piece | null => {
+      if (!latest) return null;
+      const t = where();
+      const open = latest.pieces.filter((p) => p.bytes > readOf(p) && !had(p));
+      const here = open.filter((p) => p.fromS <= t && (p.toS === null || t < p.toS))
+        .sort((a, b) => b.fromS - a.fromS)[0];
+      if (here) return here;
+      const ahead = open.filter((p) => p.fromS > t).sort((a, b) => a.fromS - b.fromS)[0];
+      if (ahead && (ahead.fromS <= t + NEAR_S || spare())) return ahead;
+      if (!spare()) return null;
+      return open.filter((p) => p.fromS <= t).sort((a, b) => b.fromS - a.fromS)[0] ?? null;
+    };
 
     const fail = (why: string) => {
       if (cancelled) return;
@@ -135,29 +177,63 @@ export function PictureSubtitleLayer({
       onUnavailableRef.current?.();
     };
 
-    const read = async (s: PgsStatus) => {
-      for (const p of s.pieces) {
-        const id = `${p.id}:${p.fromS}`;
-        let r = readers.get(id);
-        if (!r) readers.set(id, r = { reader: new PgsReader(), lastPts: p.fromS });
-        if (p.bytes <= r.reader.read) continue;
-        const bytes = await fetchPgsBytes(streamId, ratingKey, mediaIndex, p.id, r.reader.read);
+    /** Read pieces, nearest first, while there are any worth reading now. */
+    const read = async () => {
+      for (let p = nextPiece(); p && latest; p = nextPiece()) {
+        const k = keyOf(p);
+        let r = readers.get(k);
+        if (!r) readers.set(k, r = { reader: new PgsReader(), lastPts: p.fromS });
+        const whole = p.done && r.reader.read === 0 ? latest.v ?? null : null;
+        const bytes = await fetchPgsBytes(streamId, ratingKey, mediaIndex, p.id, r.reader.read, whole);
         if (cancelled) return;
         const shown = r.reader.push(bytes);
         if (shown.length) {
           r.lastPts = Math.max(r.lastPts, shown[shown.length - 1].pts);
           listRef.current = mergeDisplays(listRef.current, shown);
         }
+        // Where every line has come: from where the piece starts, to its end
+        // once it is all here, else to its last line so far.
+        pieceSpans.set(k, [p.fromS, p.done && p.bytes <= r.reader.read ? p.toS : r.lastPts]);
+        spans = [...pieceSpans.values()];
+        const lines = listRef.current.filter((d) => d.objects.length).length;
+        Object.assign(status, { lines, covered: spans });
+        if (lines) setHasLines(true);
+        if (status.firstLinesMs === null && covers(where())) {
+          status.firstLinesMs = Date.now() - startedAt;
+          logEvent("Subtitles", "picture subtitle lines for here", {
+            streamId, at: Math.round(where()), ms: status.firstLinesMs, made: latest.v !== null, piece: p.id,
+          });
+        }
+        // Nothing more of it written yet.
+        if (bytes.length === 0) break;
       }
-      // Where every line has come: each piece from where it starts, to its end
-      // once it is done, else to its last line so far.
-      spans = s.pieces.map((p) => [p.fromS, p.done ? p.toS : readers.get(`${p.id}:${p.fromS}`)?.lastPts ?? p.fromS]);
-      const lines = listRef.current.filter((d) => d.objects.length).length;
-      Object.assign(status, { lines, covered: s.done ? null : spans });
-      if (lines) setHasLines(true);
-      if (status.firstLinesMs === null && covers(where())) status.firstLinesMs = Date.now() - startedAt;
     };
 
+    /** Read what is worth reading now; done once all of it is cut and had. */
+    const pump = async () => {
+      if (busy || cancelled || done || !latest) return;
+      busy = true;
+      try {
+        await read();
+      } catch (err) {
+        fail(String(err));
+        return;
+      } finally {
+        busy = false;
+      }
+      const s = latest;
+      if (cancelled || !s?.done || !s.pieces.every((p) => p.bytes <= readOf(p) || had(p))) return;
+      done = true;
+      clearInterval(watch);
+      setWaiting(false);
+      Object.assign(status, { state: "complete", covered: null, completeMs: Date.now() - startedAt });
+      logEvent("Subtitles", "drawing a picture subtitle here rather than burning it in", {
+        streamId, lines: status.lines, ms: Date.now() - startedAt, made: s.v !== null,
+      });
+    };
+
+    // Asked until all of it is cut; after that its pieces are known, and are
+    // read as the picture goes (watch, below).
     const ask = () => {
       fetchPgsStatus(streamId, ratingKey, mediaIndex, where())
         .then(async (s) => {
@@ -166,21 +242,10 @@ export function PictureSubtitleLayer({
             fail(s.failed);
             return;
           }
-          await read(s);
-          if (cancelled) return;
-          // Done once all of it is cut and all of that read.
-          if (s.done && s.pieces.every((p) => p.bytes <= (readers.get(`${p.id}:${p.fromS}`)?.reader.read ?? 0))) {
-            done = true;
-            clearInterval(watch);
-            setWaiting(false);
-            Object.assign(status, { state: "complete", covered: null, completeMs: Date.now() - startedAt });
-            logEvent("Subtitles", "drawing a picture subtitle here rather than burning it in", {
-              streamId, lines: status.lines, ms: Date.now() - startedAt,
-            });
-            return;
-          }
-          status.state = "reading";
-          next = setTimeout(ask, ASK_MS);
+          latest = s;
+          if (!done) status.state = "reading";
+          await pump();
+          if (!cancelled && !s.done) next = setTimeout(ask, ASK_MS);
         })
         .catch((err) => fail(String(err)));
     };
@@ -196,7 +261,9 @@ export function PictureSubtitleLayer({
     };
     whenPlaced();
     watch = setInterval(() => {
-      if (!done) setWaiting(!covers(where()));
+      if (done) return;
+      setWaiting(!covers(where()));
+      if (latest?.done) void pump();
     }, WATCH_PLACE_MS);
     return () => {
       cancelled = true;

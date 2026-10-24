@@ -336,11 +336,11 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
 {
   newRoom("caps-1");
   const all = { av1: true, opus: true, flac: true, av1Encode: true };
-  const none = { hevc: false, av1: false, opus: false, flac: false, av1Encode: false };
+  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, av1Encode: false };
   const host = await join("caps-1", "u-host", "host", true, all);
   const a = await join("caps-1", "u-a", "a", true, all);
   check("what a player decodes, a stream it starts may use", mayStart("u-host"),
-    { hevc: true, av1: true, opus: true, flac: true, av1Encode: true });
+    { hevc: true, av1: true, opus: true, flac: true, ac3: false, eac3: false, av1Encode: true });
   const phone = await join("caps-1", "u-p", "p", false, { opus: true, av1Encode: true });
   check("each player's own, AV1 on the GPU only with AV1 at all", mayStart("u-p"), { ...none, opus: true });
   check("leaving the others' alone", mayStart("u-a").av1, true);

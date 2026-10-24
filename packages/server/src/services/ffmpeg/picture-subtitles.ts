@@ -14,12 +14,25 @@
  * (FFMPEG_PGS_MAX_GB, least recently used first) for the next time. A sidecar
  * .sup is the file it is, fetched once.
  *
+ * A made one is handed out in pieces too, of about PIECE_BYTES each, every one
+ * starting on a line drawn afresh: a film's is 20 to 40 MB, which through
+ * Discord's proxy took a player joining half a minute to have any of, and one
+ * starting part way in longer. In pieces it reads the one where it is first.
+ * They are the same bytes for as long as the file is (`v`), so the player's
+ * browser keeps them for the next time, and they go gzipped: about 2.3 times
+ * smaller.
+ *
+ * A page somebody is looking at can have its cut started ahead (pgsAhead), as
+ * a text subtitle is read ahead, so the film starts with it made.
+ *
  * Timestamps are the film's own (-copyts -start_at_zero), as the engine's
  * copies are, which is the player's clock.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
+import { gzip } from "node:zlib";
 import { logEvent } from "../logger.js";
 import { ffmpegPath } from "./config.js";
 
@@ -42,6 +55,17 @@ const AT_ONCE = 2;
 const IDLE_MS = 10 * 60_000;
 /** Past this, it isn't a subtitle. */
 const MAX_BYTES = 256 * 1024 * 1024;
+/** About how much of a made subtitle a piece of it is: 40 lines or so. */
+const PIECE_BYTES = 1024 * 1024;
+/**
+ * A made subtitle's pieces are numbered from here, apart from a cut's (0 and
+ * 1), so an id names the same bytes whether the file was made just now or
+ * before: the player's browser keeps them by it.
+ */
+const MADE_FIRST_ID = 1000;
+
+let pieceBytes = PIECE_BYTES;
+const gzipped = promisify(gzip);
 
 export interface PgsPiece {
   id: number;
@@ -59,6 +83,9 @@ export interface PgsStatus {
   done: boolean;
   /** Why it can't be had, when it can't. */
   failed: string | null;
+  /** Names a made subtitle's bytes, for asking for its pieces by: they don't
+   *  change while it does. Null while it is being cut. */
+  v: string | null;
 }
 
 /** Where the subtitle comes from: a track in the film, or a file of its own. */
@@ -68,9 +95,15 @@ export type PgsSource =
 
 interface Piece extends PgsPiece {
   file: string;
+  /** Where in `file` it starts, and how long it is: null for all of a file
+   *  still being written. */
+  offset: number;
+  length: number | null;
   proc: ChildProcess | null;
   failed: string | null;
   started: boolean;
+  /** All of it gzipped, once asked for so. */
+  gz?: Buffer;
 }
 
 interface Job {
@@ -78,9 +111,16 @@ interface Job {
   /** Null until it is known where it comes from. */
   source: PgsSource | null;
   pieces: Piece[];
+  /** A cut's pieces, once the file they made is handed out in its own: a
+   *  player part way through one reads on to its end. */
+  old: Piece[];
+  /** PgsStatus.v. */
+  v: string | null;
   failed: string | null;
   lastAsked: number;
   startedAt: number;
+  /** For a cut started ahead of anyone playing: still worth starting. */
+  wanted?: () => boolean;
 }
 
 const jobs = new Map<string, Job>();
@@ -99,17 +139,95 @@ function maxBytes(): number {
   return (Number.isFinite(gb) && gb > 0 ? gb : DEFAULT_MAX_GB) * 1024 ** 3;
 }
 
-/** The whole subtitle, made before: one piece, done. */
-function made(key: string): Piece | null {
+/** A display set: where it is in a .sup, when it goes up, and whether it is
+ *  drawn afresh (an epoch start), needing nothing from a set before it. */
+interface DisplaySet {
+  at: number;
+  end: number;
+  pts: number;
+  fresh: boolean;
+}
+
+/** The display sets in a .sup, in the order it has them; [] for one that isn't. */
+export function displaySets(buf: Buffer): DisplaySet[] {
+  const out: DisplaySet[] = [];
+  let open: DisplaySet | null = null;
+  let at = 0;
+  while (at + 13 <= buf.length) {
+    if (buf[at] !== 0x50 || buf[at + 1] !== 0x47) return [];
+    const size = buf.readUInt16BE(at + 11);
+    const end = at + 13 + size;
+    if (end > buf.length) break;
+    const type = buf[at + 10];
+    if (type === 0x16) {
+      open = { at, end, pts: buf.readUInt32BE(at + 2) / 90_000, fresh: size > 7 && (buf[at + 13 + 7] & 0x80) !== 0 };
+    }
+    if (open) open.end = end;
+    if (type === 0x80 && open) {
+      out.push(open);
+      open = null;
+    }
+    at = end;
+  }
+  return out;
+}
+
+/**
+ * A made subtitle in pieces of about pieceBytes, each from a set drawn afresh
+ * to just before the next one's: so a line and the set that clears it are in
+ * the same piece, and a piece drawn on its own draws right.
+ */
+function piecesOf(file: string, buf: Buffer): Piece[] {
+  const piece = (i: number, offset: number, length: number, fromS: number, toS: number | null): Piece => ({
+    id: MADE_FIRST_ID + i, fromS, toS, bytes: length, done: true,
+    file, offset, length, proc: null, failed: null, started: true,
+  });
+  const pieces: Piece[] = [];
+  let start = 0;
+  let fromS = 0;
+  for (const s of displaySets(buf)) {
+    if (s.fresh && s.at - start >= pieceBytes) {
+      pieces.push(piece(pieces.length, start, s.at - start, fromS, s.pts));
+      start = s.at;
+      fromS = s.pts;
+    }
+  }
+  pieces.push(piece(pieces.length, start, buf.length - start, fromS, null));
+  return pieces;
+}
+
+/** The whole subtitle, made before, in its pieces. */
+function made(key: string): { pieces: Piece[]; v: string } | null {
   const file = path.join(dataDir(), `${key}.sup`);
   try {
-    const { size } = fs.statSync(file);
+    const buf = fs.readFileSync(file);
     const now = new Date();
     fs.utimesSync(file, now, now);
-    return { id: 0, fromS: 0, toS: null, bytes: size, done: true, file, proc: null, failed: null, started: true };
+    return { pieces: piecesOf(file, buf), v: `${key}-${buf.length}` };
   } catch {
     return null;
   }
+}
+
+/**
+ * A cut's two pieces as one file in film order, each display set once: the
+ * start up to where the rest's first fresh set goes up, then the rest from
+ * there — with anything of the rest's before that past the start's last (a
+ * line cleared), so nothing is lost at the join.
+ */
+function joined(rest: Buffer, start: Buffer | null): Buffer {
+  if (!start) return rest;
+  const later = displaySets(rest);
+  const earlier = displaySets(start);
+  if ((rest.length > 0 && later.length === 0) || (start.length > 0 && earlier.length === 0)) {
+    return Buffer.concat([start, rest]);
+  }
+  const join = later.find((s) => s.fresh)?.pts ?? Infinity;
+  const startEnds = earlier.at(-1)?.pts ?? -1;
+  return Buffer.concat([
+    ...earlier.filter((s) => s.pts < join).map((s) => start.subarray(s.at, s.end)),
+    ...later.filter((s) => s.pts >= join || s.pts > startEnds).map((s) => rest.subarray(s.at, s.end)),
+  ]);
 }
 
 function statusOf(job: Job): PgsStatus {
@@ -117,6 +235,7 @@ function statusOf(job: Job): PgsStatus {
     pieces: job.pieces.map(({ id, fromS, toS, bytes, done }) => ({ id, fromS, toS, bytes, done })),
     done: job.pieces.length > 0 && job.pieces.every((p) => p.done),
     failed: job.failed,
+    v: job.v,
   };
 }
 
@@ -158,6 +277,13 @@ async function cut(job: Job, piece: Piece): Promise<void> {
   await slot();
   if (jobs.get(job.key) !== job || job.failed) {
     release();
+    return;
+  }
+  if (job.wanted && !job.wanted()) {
+    // Read ahead for a page left before its turn came: the next to ask starts again.
+    jobs.delete(job.key);
+    release();
+    logEvent("Subtitles", "a picture subtitle cut ahead for a page left before it began, dropped", { key: job.key });
     return;
   }
   piece.started = true;
@@ -222,15 +348,18 @@ function finish(job: Job): void {
   if (!job.pieces.every((p) => p.done)) return;
   const final = path.join(dataDir(), `${job.key}.sup`);
   try {
-    // The start first, then the rest; where they overlap the player keeps one
-    // of each display set.
-    const ordered = [...job.pieces].sort((a, b) => a.fromS - b.fromS);
+    const [rest, start] = job.pieces;
+    const buf = joined(fs.readFileSync(rest.file), start ? fs.readFileSync(start.file) : null);
     const tmp = `${final}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, Buffer.concat(ordered.map((p) => fs.readFileSync(p.file))));
+    fs.writeFileSync(tmp, buf);
     fs.renameSync(tmp, final);
-    const bytes = fs.statSync(final).size;
+    // From now on handed out as a made one is; whoever is part way through a
+    // piece of the cut reads on to its end.
+    job.old = job.pieces;
+    job.pieces = piecesOf(final, buf);
+    job.v = `${job.key}-${buf.length}`;
     logEvent("Subtitles", "a picture subtitle cut out of the film for players to draw", {
-      key: job.key, pieces: job.pieces.length, bytes, ms: Date.now() - job.startedAt,
+      key: job.key, pieces: job.old.length, bytes: buf.length, handedOutIn: job.pieces.length, ms: Date.now() - job.startedAt,
     });
     // Pieces a player is part way through stay readable until the job is let go.
     trim();
@@ -272,14 +401,16 @@ async function run(job: Job, atS: number): Promise<void> {
     const file = path.join(dataDir(), `${job.key}.sup`);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, bytes);
-    job.pieces = [{ id: 0, fromS: 0, toS: null, bytes: bytes.length, done: true, file, proc: null, failed: null, started: true }];
+    job.pieces = piecesOf(file, bytes);
+    job.v = `${job.key}-${bytes.length}`;
     trim();
     return;
   }
   const dir = path.join(dataDir(), "cutting", job.key);
   const from = atS < ONE_PIECE_BELOW_S ? 0 : Math.max(0, atS - LEAD_S);
   const piece = (id: number, fromS: number, toS: number | null): Piece => ({
-    id, fromS, toS, bytes: 0, done: false, file: path.join(dir, `${id}.sup`), proc: null, failed: null, started: false,
+    id, fromS, toS, bytes: 0, done: false, file: path.join(dir, `${id}.sup`), offset: 0, length: null,
+    proc: null, failed: null, started: false,
   });
   // From where the player is to the end; then the start, up to a little past
   // where the first began, so a line across the join is in one of them whole.
@@ -302,10 +433,38 @@ async function run(job: Job, atS: number): Promise<void> {
  * and the file it is in (its part, its size, its stream).
  */
 export function pgsStatus(key: string, source: () => Promise<PgsSource | null>, atS: number): PgsStatus {
+  const job = jobFor(key, source, atS);
+  job.lastAsked = Date.now();
+  // A player wants it: no longer only ahead of one.
+  job.wanted = undefined;
+  return statusOf(job);
+}
+
+/** The pages that started a cut ahead, by who is looking: their next page's replaces it. */
+const aheadBy = new Map<string, string>();
+
+/**
+ * Start cutting the subtitle a page somebody is looking at would play with,
+ * from the start, unless it is made or under way. Not started if `by` has
+ * moved on to another page's by the time a cut is free to.
+ */
+export function pgsAhead(key: string, source: () => Promise<PgsSource | null>, by: string): void {
+  if (jobs.has(key)) return;
+  aheadBy.set(by, key);
+  const job = jobFor(key, source, 0, () => aheadBy.get(by) === key);
+  if (job.pieces.length === 0) {
+    logEvent("Subtitles", "cutting ahead the picture subtitle a title being looked at would start with", { key });
+  }
+}
+
+function jobFor(key: string, source: () => Promise<PgsSource | null>, atS: number, wanted?: () => boolean): Job {
   let job = jobs.get(key);
   if (!job) {
     const whole = made(key);
-    job = { key, source: null, pieces: whole ? [whole] : [], failed: null, lastAsked: Date.now(), startedAt: Date.now() };
+    job = {
+      key, source: null, pieces: whole?.pieces ?? [], old: [], v: whole?.v ?? null,
+      failed: null, lastAsked: Date.now(), startedAt: Date.now(), wanted,
+    };
     jobs.set(key, job);
     if (!whole) {
       // Asked again before it is known where it comes from: the same job.
@@ -319,32 +478,48 @@ export function pgsStatus(key: string, source: () => Promise<PgsSource | null>, 
       });
     }
   }
-  job.lastAsked = Date.now();
-  return statusOf(job);
+  return job;
 }
 
-/** A piece's bytes from `from` to what is written; null for no such piece. */
-export async function pgsBytes(key: string, id: number, from: number): Promise<Buffer | null> {
+/**
+ * A piece's bytes from `from` to what is written, gzipped when asked and it is
+ * all of a made one's; null for no such piece. `whole` for all of a made
+ * one's, which is the same for as long as `v` is.
+ */
+export async function pgsBytes(key: string, id: number, from: number, gzip = false): Promise<
+  { bytes: Buffer; gzipped: boolean; whole: boolean; v: string | null } | null
+> {
   const job = jobs.get(key);
-  const piece = job?.pieces.find((p) => p.id === id);
+  const piece = job?.pieces.find((p) => p.id === id) ?? job?.old.find((p) => p.id === id);
   if (!job || !piece) return null;
   job.lastAsked = Date.now();
-  if (!piece.started) return Buffer.alloc(0);
+  const whole = piece.done && piece.length !== null && from === 0;
+  const answer = (bytes: Buffer, zipped = false) => ({ bytes, gzipped: zipped, whole, v: job.v });
+  if (whole && gzip && piece.gz) return answer(piece.gz, true);
+  if (!piece.started) return answer(Buffer.alloc(0));
   let handle: fs.promises.FileHandle;
   try {
     handle = await fs.promises.open(piece.file, "r");
   } catch {
-    return Buffer.alloc(0);
+    // A made one gone from the disk is gone; a cut's not written yet.
+    return piece.length !== null ? null : answer(Buffer.alloc(0));
   }
+  let bytes: Buffer;
   try {
     const { size } = await handle.stat();
-    const length = Math.max(0, Math.min(size, MAX_BYTES) - from);
+    const end = piece.length !== null ? piece.offset + piece.length : Math.min(size, MAX_BYTES);
+    const length = Math.max(0, end - piece.offset - from);
     const out = Buffer.alloc(length);
-    const { bytesRead } = await handle.read(out, 0, length, from);
-    return out.subarray(0, bytesRead);
+    const { bytesRead } = await handle.read(out, 0, length, piece.offset + from);
+    bytes = out.subarray(0, bytesRead);
   } finally {
     await handle.close();
   }
+  if (whole && gzip && bytes.length > 1024) {
+    piece.gz = await gzipped(bytes);
+    return answer(piece.gz, true);
+  }
+  return answer(bytes);
 }
 
 // Cuts nobody asks about any more are let go (their ffmpeg stops itself:
@@ -369,4 +544,13 @@ try {
 export function forgetPgs(): void {
   for (const job of jobs.values()) for (const p of job.pieces) p.proc?.kill("SIGKILL");
   jobs.clear();
+  aheadBy.clear();
 }
+
+/** For tests: how much of a made subtitle a piece is. */
+export function pgsPieceBytesForTests(bytes: number): void {
+  pieceBytes = bytes;
+}
+
+/** For tests: a cut's two pieces made one. */
+export const joinPgsPiecesForTests = joined;

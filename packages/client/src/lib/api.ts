@@ -302,10 +302,9 @@ export interface StreamTrack {
 /**
  * One of the files Plex holds for a title.
  *
- * Only sent when there is more than one, and only for the ones worth offering:
- * the server drops a 4K file whenever a lower-resolution copy of the same title
- * exists, because every stream is transcoded to 1080p anyway. Best first, so
- * versions[0] is the default.
+ * Best first, so versions[0] is the default — except that a 4K file comes
+ * after every lower-resolution copy of the same title, since the activity
+ * shows at most 1080p (see shownDownscaled).
  *
  * Tracks and part id are per-version: a second file is a different set of audio
  * and subtitle streams with different ids, not the same ones again.
@@ -317,6 +316,8 @@ export interface PlexVersion {
   /** "4K \u00b7 HEVC \u00b7 5.1", or the name set in Plex if the file has one. */
   label: string;
   resolution: string;
+  /** A 4K file. Absent from an older server, which never offered one beside a lower copy. */
+  uhd?: boolean;
   previewThumbs: boolean;
   audioTracks: StreamTrack[];
   subtitleTracks: StreamTrack[];
@@ -345,6 +346,21 @@ export interface ResolvedVersion {
  * what the server itself derives from versions[0] — so an unspecified
  * mediaIndex resolves to exactly the file the server will play.
  */
+export function isUhdVersion(v: Pick<PlexVersion, "uhd" | "resolution">): boolean {
+  return v.uhd ?? v.resolution === "4K";
+}
+
+/**
+ * Whether the version `mediaIndex` of a title is a 4K file that the activity
+ * brings down to 1080p while a copy that needs no bringing down is there to
+ * pick instead — what the title page warns about. Not a title that only comes
+ * in 4K (Andor): there is nothing else to choose.
+ */
+export function shownDownscaled(versions: readonly PlexVersion[] | undefined, mediaIndex: number | null | undefined): boolean {
+  const chosen = versions?.find((v) => v.mediaIndex === mediaIndex);
+  return !!chosen && isUhdVersion(chosen) && versions!.some((v) => !isUhdVersion(v));
+}
+
 export function versionOf(meta: PlexMeta, mediaIndex?: number): ResolvedVersion {
   const chosen =
     (mediaIndex != null ? meta.versions?.find((v) => v.mediaIndex === mediaIndex) : null) ??

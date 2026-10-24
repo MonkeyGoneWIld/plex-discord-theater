@@ -16,7 +16,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { formatMediaTitle } from "./lib/format";
 import { apiPost, authUrl, fetchMeta, invalidateMeta, versionOf } from "./lib/api";
 import { selectStreams } from "./lib/selectStreams";
-import { matchAudioTrack, plexAudioChoice, plexSubtitleChoice, startingAudioPref, startingSubtitle, startingSubtitlePref, titleTrackPrefs } from "./lib/trackPrefs";
+import { matchAudioTrack, matchVersion, plexAudioChoice, plexSubtitleChoice, startingAudioPref, startingSubtitle, startingSubtitlePref, titleTrackPrefs, titleVersionPref } from "./lib/trackPrefs";
 import { useMediaQuery, MOBILE_LANDSCAPE_QUERY, NARROW_QUERY, PHONE_QUERY } from "./lib/useMediaQuery";
 import type { PlexItem } from "./lib/api";
 import type { QueueItem, SuggestionItem } from "./hooks/useSync";
@@ -761,11 +761,15 @@ export function App() {
     // Everyone else still reads the selection below and gets their own tracks
     // from the per-viewer restore instead.
     const maySelect = effectiveIsHostRef.current;
+    // The file picked for this show on an episode's page, 4K included; else
+    // the default.
+    let mediaIndex: number | undefined;
     try {
       const meta = await fetchMeta(queueItem.ratingKey);
+      mediaIndex = matchVersion(meta.versions, titleVersionPref(meta))?.mediaIndex;
       // The version, not the title: a second file has its own part and its own
       // stream ids, and `meta`'s top-level fields describe only the first.
-      const version = versionOf(meta);
+      const version = versionOf(meta, mediaIndex);
       // What was picked for this show or film comes first, whatever Settings say.
       const own = titleTrackPrefs(meta);
       const subtitlePref = own.subtitle ?? startingSubtitlePref();
@@ -827,6 +831,7 @@ export function App() {
         index: queueItem.index,
       },
       subtitles,
+      mediaIndex,
       audioStreamId,
       subtitleStreamId,
     };

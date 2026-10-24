@@ -6,8 +6,8 @@
  * file happens to hold. These are the cases where "same language" is not enough
  * to identify the right track.
  */
-import { describeWatched, isPartialSubtitle, matchAudioTrack, matchSubtitleTrack, mergeTrackPrefs, plexAudioChoice, plexSubtitleChoice, tracksForNewItem, type AudioPref, type SubtitlePref } from "../src/lib/trackPrefs";
-import type { StreamTrack } from "../src/lib/api";
+import { describeWatched, isPartialSubtitle, matchAudioTrack, matchSubtitleTrack, matchVersion, mergeTrackPrefs, plexAudioChoice, plexSubtitleChoice, rememberTitleVersion, titleTrackPrefs, titleVersionPref, tracksForNewItem, type AudioPref, type SubtitlePref } from "../src/lib/trackPrefs";
+import { shownDownscaled, type PlexVersion, type StreamTrack } from "../src/lib/api";
 
 let pass = 0;
 let fail = 0;
@@ -440,6 +440,44 @@ console.log("\n— what you were watching describes what to look for —");
   check("observed audio wins while a missing subtitle falls back independently",
     tracksForNewItem(now, filled, hostTracks),
     { audioStreamId: 91, subtitleStreamId: 92 });
+}
+
+console.log("\n— the version picked for a film or a show —");
+{
+  const kept = new Map<string, string>();
+  (globalThis as unknown as { localStorage: Storage }).localStorage = {
+    getItem: (k: string) => kept.get(k) ?? null, setItem: (k: string, v: string) => void kept.set(k, v),
+    removeItem: (k: string) => void kept.delete(k), clear: () => kept.clear(), key: () => null, length: 0,
+  } as Storage;
+  const file = (mediaIndex: number, label: string, resolution: string, uhd: boolean): PlexVersion => ({
+    mediaIndex, partId: mediaIndex + 100, label, resolution, uhd, previewThumbs: false, audioTracks: [], subtitleTracks: [],
+  });
+  // As the server sends them: the 1080p copy first, the 4K one after.
+  const film = [file(1, "1080p · H264 · 5.1", "1080p", false), file(0, "4K · HEVC · 7.1", "4K", true)];
+  const movie = { ratingKey: "500", type: "movie" };
+  check("nothing picked: the default", matchVersion(film, titleVersionPref(movie)), null);
+  check("a 1080p copy beside a 4K one: no warning", shownDownscaled(film, 1), false);
+  check("the 4K one picked: the warning", shownDownscaled(film, 0), true);
+  check("a title only in 4K (Andor): none", shownDownscaled([file(0, "4K · HEVC · 5.1", "4K", true)], 0), false);
+  check("two 4K copies and nothing lower: none", shownDownscaled([file(0, "4K · HEVC", "4K", true), file(1, "4K · H264", "4K", true)], 1), false);
+  check("an older server's 4K label counts", shownDownscaled([{ ...file(1, "1080p", "1080p", false), uhd: undefined }, { ...file(0, "4K", "4K", true), uhd: undefined }], 0), true);
+  rememberTitleVersion(movie, film[1]);
+  check("the 4K pick is kept for the film", matchVersion(film, titleVersionPref(movie))?.mediaIndex, 0);
+  check("and not for another film", titleVersionPref({ ratingKey: "501", type: "movie" }), null);
+
+  // A show: each episode its own files, numbered its own way.
+  const e1 = { ratingKey: "11", type: "episode", grandparentRatingKey: "10" };
+  const e2 = { ratingKey: "12", type: "episode", grandparentRatingKey: "10" };
+  const ep1 = [file(0, "1080p · HEVC · 5.1", "1080p", false), file(1, "4K · HEVC · 5.1", "4K", true)];
+  const ep2 = [file(1, "1080p · HEVC · 5.1", "1080p", false), file(0, "4K · HEVC · 7.1", "4K", true)];
+  rememberTitleVersion(e1, ep1[1]);
+  check("4K picked on one episode: the next opens on its own 4K copy", matchVersion(ep2, titleVersionPref(e2))?.mediaIndex, 0);
+  check("not another show's", titleVersionPref({ ratingKey: "21", type: "episode", grandparentRatingKey: "20" }), null);
+  check("an episode with no 4K copy: its default", matchVersion([file(0, "1080p · HEVC · 5.1", "1080p", false)], titleVersionPref(e2)), null);
+  rememberTitleVersion(e2, ep2[0]);
+  check("back to 1080p: the 1080p copy", matchVersion(ep1, titleVersionPref(e1))?.mediaIndex, 0);
+  check("a pick below 4K never lands on 4K", matchVersion([file(0, "720p", "720p", false), file(1, "4K", "4K", true)], titleVersionPref(e1)), null);
+  check("the audio and subtitle kept for the show stay", titleTrackPrefs(e1), { audio: null, subtitle: null });
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

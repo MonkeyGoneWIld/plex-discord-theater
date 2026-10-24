@@ -190,30 +190,29 @@ export function channelLabel(channels: number | undefined | null): string | null
  * the Plex transcode decision takes as `mediaIndex` — so it has to survive both
  * the filtering and the reordering below.
  *
- * Two rules:
+ * Every file is offered, best first, so index 0 is the default — with one
+ * exception to "best": a 4K file goes after every lower-resolution copy of the
+ * same title. The activity shows at most 1080p, so a 4K file is brought down to
+ * it, and costs the server a 4K decode for each one watching. It is offered all
+ * the same, behind a warning on the title page, because a 4K release is not
+ * always the same film as the 1080p one beside it — another cut, another
+ * grade. It used to be left out whenever a lower copy existed. When 4K is the
+ * only copy it is simply the default.
  *
- * A 4K file is dropped whenever the same title also exists at a lower
- * resolution. Every stream this app serves is transcoded down to 1080p, so
- * picking the 4K copy buys a viewer nothing at all and costs the server a 4K
- * decode for each one watching — which on most hardware is the difference
- * between a watch party and a slideshow. When 4K is the *only* copy it is
- * offered as normal: transcoding it is still much better than not playing the
- * film.
- *
- * What survives is ordered best first, so index 0 is the default. Plex's own
- * order is by when the file was added, which has nothing to do with which one
- * anyone wants.
+ * Plex's own order is by when the file was added, which has nothing to do with
+ * which one anyone wants.
  */
 export function playableVersionOrder(media: VersionSource[]): number[] {
   if (media.length === 0) return [];
   const indexed = media.map((m, index) => ({ m, index }));
-  const anyUhd = indexed.some(({ m }) => isUhd(m));
   const anyOther = indexed.some(({ m }) => !isUhd(m));
-  const playable = anyUhd && anyOther ? indexed.filter(({ m }) => !isUhd(m)) : indexed;
+  /** 1 for a 4K file with a lower copy beside it: those go last. */
+  const behind = (m: VersionSource) => (anyOther && isUhd(m) ? 1 : 0);
 
-  return playable
+  return indexed
     .sort(
       (a, b) =>
+        behind(a.m) - behind(b.m) ||
         frameWidth(b.m) - frameWidth(a.m) ||
         (b.m.bitrate ?? 0) - (a.m.bitrate ?? 0) ||
         // Last resort: Plex's own order, so the result is stable rather than

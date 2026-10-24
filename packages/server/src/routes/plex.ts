@@ -6,7 +6,7 @@ import sharp from "sharp";
 import { progressivePreview } from "../services/preview-stream.js";
 import { sendPlaylist } from "../services/send-playlist.js";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
-import { playableVersionOrder, resolutionLabel, channelLabel, transcodeFrame, qualityKbps, pictureFacts, type PictureFacts, type PictureSource } from "../services/media-versions.js";
+import { isUhd, playableVersionOrder, resolutionLabel, channelLabel, transcodeFrame, qualityKbps, pictureFacts, type PictureFacts, type PictureSource } from "../services/media-versions.js";
 import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition } from "../services/segment-prefetch.js";
 import {
   startDirectStream,
@@ -284,10 +284,9 @@ interface PlexMedia {
 /**
  * The playable versions of an item, best first.
  *
- * Which files are worth offering, and in what order, is decided by
- * playableVersionOrder — including the rule that hides a 4K copy whenever a
- * lower-resolution one exists, since every stream is transcoded to 1080p
- * anyway. Everything here is the Plex-shaped mapping around that answer.
+ * The order is decided by playableVersionOrder — including the rule that puts
+ * a 4K copy after every lower-resolution one, since the activity shows at
+ * most 1080p. Everything here is the Plex-shaped mapping around that answer.
  *
  * `mediaIndex` is the position in Plex's own Media array: it is what the
  * transcode decision takes, so it stays tied to the original list rather than
@@ -298,6 +297,8 @@ interface MediaVersion {
   partId: number | null;
   label: string;
   resolution: string;
+  /** A 4K file, which the activity shows at 1080p (isUhd). */
+  uhd: boolean;
   /** The file's own picture size, for sizing its transcode — see transcodeFrame. */
   width: number | null;
   height: number | null;
@@ -338,6 +339,7 @@ function mapVersions(media: PlexMedia[] | undefined): MediaVersion[] {
       partId: part?.id ?? null,
       label: m.title?.trim() || described,
       resolution: resolutionLabel(m),
+      uhd: isUhd(m),
       width: m.width ?? null,
       height: m.height ?? null,
       bitrate: m.bitrate ?? null,
@@ -1224,9 +1226,11 @@ function rememberDuration(ratingKey: string, payload: Record<string, unknown>): 
  * subtitles Plex can't read, counted every file beside the media as a
  * sidecar, not only the ones in a text format, and added each version's part
  * key. 11 added each version's picture (HDR and so on), which Stats for nerds
- * shows: rows saved before it had none, and Edgerunners showed no range.
+ * shows: rows saved before it had none, and Edgerunners showed no range. 12
+ * offered a 4K file beside a lower copy (after it) and marked each version
+ * `uhd`.
  */
-export const META_PAYLOAD_VERSION = 11;
+export const META_PAYLOAD_VERSION = 12;
 
 const metaCache = new LruMap<string, { payload: Record<string, unknown>; at: number }>(2_000);
 const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -4593,8 +4597,8 @@ async function subtitleTrackOf(
  * The largest picture to ask Plex for — see transcodeFrame.
  *
  * Through buildMeta, so a start that already knows its version still costs
- * Plex nothing when the title is cached. A version the list doesn't offer (a
- * hidden 4K copy) or a lookup that fails gets the old fixed 1920x1080.
+ * Plex nothing when the title is cached. A version the list doesn't have, or
+ * a lookup that fails, gets the old fixed 1920x1080.
  */
 /** What a stream start needs to know about the file it plays. */
 interface VersionFacts {

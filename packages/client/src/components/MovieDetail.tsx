@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, backdropThumbUrl, versionOf, type Credit, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
+import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, backdropThumbUrl, shownDownscaled, versionOf, type Credit, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
 import { selectStreams } from "../lib/selectStreams";
 import { formatAirDate, formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
-import { loadAudioPref, loadSubtitlePref, saveAudioPref, saveSubtitlePref, matchAudioTrack, plexAudioChoice, rememberTitleTracks, startingSubtitle, subtitlesOnlyForForeignAudio, titleTrackPrefs } from "../lib/trackPrefs";
+import { loadAudioPref, loadSubtitlePref, saveAudioPref, saveSubtitlePref, matchAudioTrack, matchVersion, plexAudioChoice, rememberTitleTracks, rememberTitleVersion, startingSubtitle, subtitlesOnlyForForeignAudio, titleTrackPrefs, titleVersionPref } from "../lib/trackPrefs";
 import { readSubtitleAhead } from "../lib/subtitleReadAhead";
 import { prefetchPreviewStart } from "../lib/previewPrefetch";
 import { RatingsRow } from "./RatingsRow";
@@ -226,11 +226,13 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
       .then((m) => {
         if (cancelled) return;
         setMeta(m);
-        // versions[0] is the server's pick — the best copy worth streaming, with
-        // any 4K duplicate already dropped. The track defaults follow from it in
-        // the effect below rather than here, because they have to be redone
-        // whenever the choice changes and there is no reason to write that twice.
-        setSelectedVersion(m.versions?.[0]?.mediaIndex ?? null);
+        // The file picked for this film or show before, 4K included; else
+        // versions[0], the server's pick — the best copy below 4K. The track
+        // defaults follow from it in the effect below rather than here, because
+        // they have to be redone whenever the choice changes and there is no
+        // reason to write that twice.
+        const picked = matchVersion(m.versions, titleVersionPref(m));
+        setSelectedVersion(picked?.mediaIndex ?? m.versions?.[0]?.mediaIndex ?? null);
       })
       .catch((err) => {
         console.error(err);
@@ -633,8 +635,9 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
               >
                 {/* Which file, for the few titles Plex holds more than one of.
                     First, because it decides what the other two can offer. A 4K
-                    copy is missing from this list whenever a lower-resolution one
-                    exists — see the note on PlexVersion. */}
+                    copy comes after the lower ones — see the note on
+                    PlexVersion. The pick is kept for this film, or for every
+                    episode of this show. */}
                 {meta && (meta.versions?.length ?? 0) > 1 && (
                   <div style={styles.trackField}>
                     <label style={styles.trackLabel}>Version</label>
@@ -644,7 +647,11 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
                         value: String(v.mediaIndex),
                         label: v.label,
                       }))}
-                      onChange={(v) => setSelectedVersion(Number(v))}
+                      onChange={(v) => {
+                        const version = meta.versions!.find((x) => x.mediaIndex === Number(v));
+                        setSelectedVersion(Number(v));
+                        if (version) rememberTitleVersion(meta, version);
+                      }}
                     />
                   </div>
                 )}
@@ -697,6 +704,14 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
                   </div>
                 )}
               </div>
+              )}
+
+              {/* A 4K copy picked over one that needs no bringing down. Not for
+                  a title that only comes in 4K: there is nothing to choose. */}
+              {meta && shownDownscaled(meta.versions, selectedVersion) && (
+                <p style={styles.downscaleNote} role="note">
+                  This activity streams at up to 1080p. The 4K version will be downscaled to 1080p during playback.
+                </p>
               )}
 
               {error && <p style={styles.errorText}>{error}</p>}
@@ -1333,5 +1348,14 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#e74c3c",
     fontSize: "14px",
     marginBottom: "8px",
+  },
+  /** Under the pickers, across the column: a lighter red than errorText, for
+   *  reading over a dark backdrop. Drawn into trackRow's bottom margin. */
+  downscaleNote: {
+    color: "#ff6b6b",
+    fontSize: "14px",
+    fontWeight: 500,
+    lineHeight: 1.45,
+    margin: "-6px 0 20px",
   },
 };

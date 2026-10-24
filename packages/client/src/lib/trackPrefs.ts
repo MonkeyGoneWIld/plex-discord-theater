@@ -1,4 +1,4 @@
-import type { StreamTrack } from "./api";
+import { isUhdVersion, type PlexVersion, type StreamTrack } from "./api";
 import { LANGUAGES } from "./languages";
 
 export const SUBTITLE_PREF_KEY = "pdt:subtitlePref";
@@ -629,7 +629,52 @@ function titleKey(title: TitleRef): string {
 /** How many films and shows keep a choice; the longest unused go first. */
 const TITLE_TRACKS_MAX = 500;
 
-type TitleTracks = Record<string, { audio?: AudioPref; subtitle?: SubtitlePref; at: number }>;
+type TitleTracks = Record<string, { audio?: AudioPref; subtitle?: SubtitlePref; version?: VersionPref; at: number }>;
+
+/** Which of a title's files was picked, described so a show's other episodes can find theirs — see matchVersion. */
+export interface VersionPref {
+  mediaIndex: number;
+  label: string;
+  resolution: string;
+  uhd: boolean;
+}
+
+/**
+ * Remember the file picked on a film's page, or on an episode's for its whole
+ * show — the 4K one included — so the page opens on it next time. Only for
+ * that film or show: every other title still opens on its best copy below 4K.
+ */
+export function rememberTitleVersion(title: TitleRef, version: PlexVersion): void {
+  const all = readTitleTracks();
+  const key = titleKey(title);
+  all[key] = {
+    ...(all[key] ?? {}),
+    version: { mediaIndex: version.mediaIndex, label: version.label, resolution: version.resolution, uhd: isUhdVersion(version) },
+    at: Date.now(),
+  };
+  writeTitleTracks(all);
+}
+
+/** The file picked for this film or show, if one was — see rememberTitleVersion. */
+export function titleVersionPref(title: TitleRef | null | undefined): VersionPref | null {
+  if (!title?.ratingKey) return null;
+  return readTitleTracks()[titleKey(title)]?.version ?? null;
+}
+
+/**
+ * This title's file for a remembered pick, or null for its default: the same
+ * file (a film's), one named the same, one of the same resolution — an
+ * episode's 4K copy for a show watched in 4K — or, for a 4K pick, any 4K copy.
+ * A pick below 4K never lands on a 4K copy.
+ */
+export function matchVersion<V extends PlexVersion>(versions: readonly V[] | undefined, pref: VersionPref | null): V | null {
+  if (!versions?.length || !pref) return null;
+  return versions.find((v) => v.mediaIndex === pref.mediaIndex && v.label === pref.label)
+    ?? versions.find((v) => v.label === pref.label && v.resolution === pref.resolution)
+    ?? versions.find((v) => v.resolution === pref.resolution && isUhdVersion(v) === pref.uhd)
+    ?? (pref.uhd ? versions.find((v) => isUhdVersion(v)) : undefined)
+    ?? null;
+}
 
 function readTitleTracks(): TitleTracks {
   const all = read<TitleTracks>(TITLE_TRACKS_KEY, (p) => !!p && typeof p === "object" && !Array.isArray(p));
@@ -655,6 +700,11 @@ export function rememberTitleTracks(
     entry.subtitle = chosen.subtitle ? { off: false, ...describe(chosen.subtitle) } : { off: true };
   }
   all[key] = entry;
+  writeTitleTracks(all);
+}
+
+/** Store the choices, dropping the longest unused past TITLE_TRACKS_MAX. */
+function writeTitleTracks(all: TitleTracks): void {
   const keys = Object.keys(all);
   if (keys.length > TITLE_TRACKS_MAX) {
     keys.sort((a, b) => all[a].at - all[b].at);

@@ -7,8 +7,8 @@ import {
 } from "../lib/api";
 import { selectStreams } from "../lib/selectStreams";
 import {
-  loadAudioPref, loadSubtitlePref, matchAudioTrack, plexAudioChoice, startingSubtitle, titleTrackPrefs,
-  saveAudioPref, saveSubtitlePref,
+  loadAudioPref, loadSubtitlePref, matchAudioTrack, matchVersion, plexAudioChoice, startingSubtitle, titleTrackPrefs,
+  titleVersionPref, saveAudioPref, saveSubtitlePref,
 } from "../lib/trackPrefs";
 import { formatTimecode } from "../lib/format";
 import { useRevealTimeout } from "../lib/useRevealTimeout";
@@ -340,7 +340,9 @@ export function ShowDetail({
     setStartError(null);
     try {
       const episodeMeta = await fetchMeta(startFrom.ratingKey);
-      const version = versionOf(episodeMeta);
+      // The file picked for this show on an episode's page, 4K included.
+      const mediaIndex = matchVersion(episodeMeta.versions, titleVersionPref(episodeMeta))?.mediaIndex;
+      const version = versionOf(episodeMeta, mediaIndex);
       // The same two rules the movie page's pickers open on, so pressing Play
       // here and pressing it there land on the same tracks. Audio always
       // resolves to something; subtitles resolve to nothing when the remembered
@@ -385,7 +387,7 @@ export function ShowDetail({
         // The player works in seconds; history stores milliseconds. Only a
         // genuine part-watch resumes — the button says "Play" otherwise.
         nextUp && nextUp.positionMs > 0 ? nextUp.positionMs / 1000 : undefined,
-        undefined,
+        mediaIndex,
         audioId,
         subtitleId,
       );

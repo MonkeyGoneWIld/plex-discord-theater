@@ -2774,11 +2774,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       let want = { audioStreamId: v.audioStreamId, subtitleStreamId: v.subtitleStreamId };
       let wantDrawn = false;
       try {
-        // No media index: the host's tracks for this episode were resolved from
-        // the same default version, so matching against any other file would be
-        // comparing against streams nobody is playing.
+        // The file the stream given here plays: the one its audio track is in,
+        // stream ids belonging to one file — else the default. The host may be
+        // on a show's 4K copy (rememberTitleVersion), and matching against any
+        // other file would be comparing against streams nobody is playing.
         const newMeta = await fetchMeta(item.ratingKey);
-        const version = versionOf(newMeta);
+        const given = newMeta.versions?.find((f) => f.audioTracks.some((t) => t.id === v.audioStreamId));
+        const version = versionOf(newMeta, given?.mediaIndex);
 
         /**
          * What this client was watching, described so it can be looked for here.
@@ -2802,7 +2804,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             source = mergeTrackPrefs(observedBeforeAdvance.prefs, saved);
             outcome = "from tracks observed on last episode, with saved fallback";
           } else try {
-            const before = versionOf(await fetchMeta(was.ratingKey));
+            // The file it was on, by its audio track, as above.
+            const wasMeta = await fetchMeta(was.ratingKey);
+            const before = versionOf(wasMeta, wasMeta.versions?.find((f) => f.audioTracks.some((t) => t.id === was.audioStreamId))?.mediaIndex);
             source = mergeTrackPrefs(describeWatched(before, was), saved);
             outcome = "from last episode, with saved fallback";
           } catch {

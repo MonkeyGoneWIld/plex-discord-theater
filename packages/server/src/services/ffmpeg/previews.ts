@@ -21,6 +21,7 @@ import { Readable } from "node:stream";
 import { logEvent } from "../logger.js";
 import { LruMap } from "../lru.js";
 import { ffmpegPath, previewsMaxBytes } from "./config.js";
+import { probe } from "./probe.js";
 
 export const PREVIEW_INTERVAL_S = 2;
 const WIDTH = 320;
@@ -168,7 +169,9 @@ export function splitJpegs(buf: Buffer): { frames: Buffer[]; rest: Buffer } {
  * A frame every PREVIEW_INTERVAL_S from the keyframes: each slot the last one
  * at or before it (rounding up), from 0 s whenever the picture starts — an
  * Opus film's opens 7 ms in, and its first frame went in the second slot,
- * every frame after it a slot late — and the last keyframe held to the end.
+ * every frame after it a slot late — and the last keyframe held past the end,
+ * so its slot is made whatever the gap after it. What that makes past the end
+ * of the file is let go (make).
  */
 const SLOTS = `tpad=stop_mode=clone:stop_duration=${2 * PREVIEW_INTERVAL_S},` +
   `fps=fps=1/${PREVIEW_INTERVAL_S}:round=up:start_time=0`;
@@ -235,11 +238,13 @@ async function make(o: PreviewSource): Promise<string | null> {
       break;
     }
   }
-  const made = await pass(o.film, vf);
+  const [made, probed] = await Promise.all([pass(o.film, vf), probe(["-protocol_whitelist", "file", "-i", o.film])]);
   if ("failed" in made) {
     logEvent("Preview", "ffmpeg couldn't make previews", { partId: o.partId, why: made.failed, ms: Date.now() - startedAt });
     return null;
   }
+  // A slot for every interval the file runs into, and none past its end.
+  if (probed?.durationS) made.frames.splice(Math.max(1, Math.ceil(probed.durationS / PREVIEW_INTERVAL_S - 0.001)));
   const file = fileFor(o.partId, o.fileSize);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;

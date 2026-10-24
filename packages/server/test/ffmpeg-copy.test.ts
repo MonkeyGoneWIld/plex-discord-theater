@@ -896,7 +896,8 @@ async function brightness(uri: string) {
   const m = await master("9", id, "?subtitles=burn&subtitleStreamID=21");
   const notes = notesOf(m.text);
   check("is re-encoded by ffmpeg, saying why", [notes.engine, notes.video, notes.reason],
-    ["ffmpeg", "transcode", "Subtitle burn-in (image-based)"]);
+    // Asked for only when the player couldn't draw it.
+    ["ffmpeg", "transcode", "Subtitle burn-in (PGS couldn't be drawn)"]);
   check("  and Plex was never asked to transcode", transcodeAsked(), []);
   const list = await listed(variantOf(m.text), 5);
   const shown = await brightness(opening(list, 3).uri);
@@ -914,6 +915,60 @@ async function brightness(uri: string) {
   check(`  after a seek to 31 s, on time: not yet at 31 s (${before}), there at 34 s (${after})`,
     [before >= 0 && before < 200, after > 200], [true, true]);
   await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
+}
+
+console.log("\n— a PGS subtitle the player draws —");
+/** When each display set in a .sup starts, in seconds. */
+function supTimes(buf: Buffer): number[] {
+  const out: number[] = [];
+  for (let at = 0; at + 13 <= buf.length; at += 13 + buf.readUInt16BE(at + 11)) {
+    if (buf.toString("latin1", at, at + 2) !== "PG") return [-1];
+    if (buf[at + 10] === 0x16) out.push(Math.round(buf.readUInt32BE(at + 2) / 90) / 1000);
+  }
+  return out;
+}
+{
+  const meta = await (await fetch(`${origin}/api/plex/meta/9`)).json() as
+    { versions?: Array<{ subtitleTracks: Array<{ id: number; external?: boolean; picture?: boolean }> }> };
+  const t = meta.versions?.[0].subtitleTracks.find((s) => s.id === 21);
+  check("a PGS track is one the player draws, as pictures", [t?.external, t?.picture], [true, true]);
+  check("  and isn't read as text", (await fetch(`${origin}/api/plex/subtitles/21?ratingKey=9&mediaIndex=0`)).status, 404);
+  type Status = { pieces: Array<{ id: number; fromS: number; bytes: number; done: boolean }>; done: boolean; failed: string | null };
+  let status: Status | null = null;
+  for (let i = 0; i < 80 && !status?.done && !status?.failed; i++) {
+    status = await (await fetch(`${origin}/api/plex/pgs/21?ratingKey=9&mediaIndex=0&at=3`)).json() as Status;
+    if (!status.done) await sleep(250);
+  }
+  check("  cut out of the film whole, from the start for a player near it",
+    [status?.done, status?.failed, status?.pieces.map((p) => [p.id, p.fromS])], [true, null, [[0, 0]]]);
+  const whole = Buffer.from(await (await fetch(`${origin}/api/plex/pgs/21/0?ratingKey=9&mediaIndex=0&from=0`)).arrayBuffer());
+  check("  every line on the film's clock", supTimes(whole), [0.5, 5, 32, 40]);
+  const rest = Buffer.from(await (await fetch(`${origin}/api/plex/pgs/21/0?ratingKey=9&mediaIndex=0&from=100`)).arrayBuffer());
+  check("  and read on from where a player left off", [rest.length, rest.equals(whole.subarray(100))], [whole.length - 100, true]);
+  check("  kept, for the next to ask", fs.readdirSync(path.join(tmp, "subtitles-pgs")).filter((n) => n.endsWith(".sup")).length, 1);
+  const { forgetPgs, pgsArgs } = await import("../src/services/ffmpeg/picture-subtitles.js");
+  forgetPgs();
+  const again = await (await fetch(`${origin}/api/plex/pgs/21?ratingKey=9&mediaIndex=0&at=40`)).json() as Status;
+  check("  which is the kept one, at once", [again.done, again.pieces.map((p) => p.bytes)], [true, [whole.length]]);
+  // Pieces from a place: the rest of the film from it, and the start up to past it.
+  const cut = (fromS: number, toS: number | null) => {
+    const out = path.join(tmp, `piece-${fromS}-${toS}.sup`);
+    const r = spawnSync(process.env.FFMPEG_PATH || "ffmpeg", pgsArgs(["-i", PGS_FILM], 2, fromS, toS, out));
+    return r.status === 0 ? supTimes(fs.readFileSync(out)) : [String(r.stderr).trim()];
+  };
+  check("  a piece from 30 s has what is after it, on the film's clock", cut(30, null), [32, 40]);
+  check("  one from the start to 35 s, what is before", cut(0, 35), [0.5, 5, 32]);
+  check("a PGS file beside the film is the file it is", await (async () => {
+    asked.length = 0;
+    let s: Status | null = null;
+    for (let i = 0; i < 40 && !s?.done && !s?.failed; i++) {
+      s = await (await fetch(`${origin}/api/plex/pgs/51?ratingKey=14&mediaIndex=0&at=0`)).json() as Status;
+      if (!s.done) await sleep(100);
+    }
+    const bytes = Buffer.from(await (await fetch(`${origin}/api/plex/pgs/51/0?ratingKey=14&mediaIndex=0&from=0`)).arrayBuffer());
+    return [s?.done, bytes.equals(fs.readFileSync(SUP)), asked.includes("/library/streams/51")];
+  })(), [true, true, false]);
+  check("a text subtitle has no pictures to cut", (await fetch(`${origin}/api/plex/pgs/22?ratingKey=1&mediaIndex=0`)).status, 404);
 }
 
 console.log("\n— a text subtitle burned in, and one beside the film —");

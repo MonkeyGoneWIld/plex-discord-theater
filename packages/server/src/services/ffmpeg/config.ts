@@ -44,6 +44,12 @@ export function ffmpegSubtitlesOn(): boolean {
   return ffmpegEngineOn() && !off(process.env.FFMPEG_SUBTITLES);
 }
 
+/** FFMPEG_PGS=off: PGS subtitles are burned in, as before 24 October, rather
+ *  than cut out of the film for the player to draw (picture-subtitles.ts). */
+export function ffmpegPgsOn(): boolean {
+  return ffmpegEngineOn() && !off(process.env.FFMPEG_PGS);
+}
+
 /** A surround track that isn't AAC becomes 5.1 AAC, or stereo with
  *  FFMPEG_AUDIO_CHANNELS=2 (plan.ts convertedAudio). Stereo was the default
  *  until 1917 in 5.1 sounded "a lot better" on 21 October. */

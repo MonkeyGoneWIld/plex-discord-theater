@@ -13,6 +13,7 @@ import { PeoplePanel } from "./PeoplePanel";
 import { SkipMarkerButton } from "./SkipMarkerButton";
 import { TransportRequestCard } from "./TransportRequestCard";
 import { SubtitleLayer } from "./SubtitleLayer";
+import { PictureSubtitleLayer } from "./PictureSubtitleLayer";
 import { SubtitleSettings } from "./SubtitleOffset";
 import { ZoomPanel } from "./ZoomPanel";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchPlayedThreshold, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
@@ -3703,6 +3704,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     activeSubtitleId !== 0 && activeSubtitleId !== burnedSubtitleId && activeSubtitleTrack?.external
       ? activeSubtitleId
       : null;
+  // Pictures (PGS) rather than text: PictureSubtitleLayer draws it.
+  const drawnPicture = drawnSubtitleId !== null && activeSubtitleTrack?.picture === true;
   // As Stats for nerds tells it.
   const subtitleShown: SubtitleShown = activeSubtitleId === 0 ? "off"
     : activeSubtitleId === burnedSubtitleId ? "burned"
@@ -8978,7 +8981,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       {/* Subtitles this client draws, because Plex was told not to burn them
           in — the only kind there is anything to adjust about. */}
       <SubtitleLayer
-        streamId={drawnSubtitleId}
+        streamId={drawnPicture ? null : drawnSubtitleId}
+        ratingKey={item.ratingKey}
+        mediaIndex={effectiveMediaIndex}
+        videoRef={videoRef}
+        offsetMs={subtitleOffsetMs}
+        onUnavailable={() => setSidecarFailed(true)}
+        hidden={loadingShown}
+        statusRef={subtitleStatusRef}
+      />
+      {/* A PGS subtitle, drawn from the pictures the server cuts out of the
+          film rather than burned in. */}
+      <PictureSubtitleLayer
+        streamId={drawnPicture ? drawnSubtitleId : null}
         ratingKey={item.ratingKey}
         mediaIndex={effectiveMediaIndex}
         videoRef={videoRef}

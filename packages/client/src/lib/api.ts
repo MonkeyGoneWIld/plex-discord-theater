@@ -297,6 +297,12 @@ export interface StreamTrack {
    * it — downloaded, usually, and not always timed to this cut of the film.
    */
   sidecar?: boolean;
+  /**
+   * Subtitles only: a PGS subtitle (a Blu-ray's) the player draws itself, from
+   * the pictures the server cuts out of the film (PictureSubtitleLayer), rather
+   * than one burned in. `external` too.
+   */
+  picture?: boolean;
 }
 
 /**
@@ -882,6 +888,36 @@ export function fetchSubtitleCues(
   const qs = params.toString();
   const path = `/api/plex/subtitles/${encodeURIComponent(String(streamId))}${qs ? `?${qs}` : ""}`;
   return fresh || where ? apiGet(path) : cachedGet(path);
+}
+
+/** Where a PGS subtitle's cut out of the film has got to: see the /pgs route. */
+export interface PgsStatus {
+  pieces: Array<{ id: number; fromS: number; toS: number | null; bytes: number; done: boolean }>;
+  done: boolean;
+  failed: string | null;
+}
+
+function pgsQuery(ratingKey: string, mediaIndex: number | undefined, more: Record<string, string>): string {
+  const params = new URLSearchParams({ ratingKey, ...more });
+  if (mediaIndex != null && mediaIndex >= 0) params.set("mediaIndex", String(mediaIndex));
+  return params.toString();
+}
+
+/** A PGS subtitle's pieces; the first ask starts its cut from `at`. */
+export function fetchPgsStatus(
+  streamId: number, ratingKey: string, mediaIndex: number | undefined, at: number,
+): Promise<PgsStatus> {
+  return apiGet(`/api/plex/pgs/${streamId}?${pgsQuery(ratingKey, mediaIndex, { at: at.toFixed(1) })}`);
+}
+
+/** A piece's bytes from `from` to what has been cut so far. */
+export async function fetchPgsBytes(
+  streamId: number, ratingKey: string, mediaIndex: number | undefined, piece: number, from: number,
+): Promise<Uint8Array> {
+  const path = `/api/plex/pgs/${streamId}/${piece}?${pgsQuery(ratingKey, mediaIndex, { from: String(from) })}`;
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
+  if (!res.ok) await throwApiError(res, path);
+  return new Uint8Array(await res.arrayBuffer());
 }
 
 export function hlsMasterUrl(

@@ -63,7 +63,7 @@ export function subtitleDetails(
   const rows: Array<[string, string]> = [["Track", track.title]];
   if (shown === "switching") return rows;
   if (shown === "burned") return [...rows, ["Rendering", "Burned in by Plex"]];
-  rows.push(["Rendering", `Client · ${track.sidecar ? "sidecar file" : "embedded text"}`]);
+  rows.push(["Rendering", `Client · ${track.picture ? "PGS pictures" : track.sidecar ? "sidecar file" : "embedded text"}`]);
   const state = statusOf(track, status, failed);
   if (state === "failed") return [...rows, ["Status", "Failed"]];
   if (state === "loading" || !status) {

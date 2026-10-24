@@ -27,6 +27,8 @@ export interface ProbedStream {
 export interface Probed {
   streams: ProbedStream[];
   startS: number | null;
+  /** How long the file is, as its container says; null when it doesn't. */
+  durationS?: number | null;
 }
 
 /** How long ffprobe gets: a file's header, from the mount or through Plex. */
@@ -40,7 +42,7 @@ export function probe(input: string[]): Promise<Probed | null> {
     try {
       child = spawn(ffprobePath(), [
         "-hide_banner", "-v", "error",
-        "-show_entries", "format=start_time:stream=index,codec_type,codec_name:stream_tags=language,filename,mimetype",
+        "-show_entries", "format=start_time,duration:stream=index,codec_type,codec_name:stream_tags=language,filename,mimetype",
         "-of", "json", ...input,
       ], { stdio: ["ignore", "pipe", "ignore"] });
     } catch {
@@ -55,12 +57,14 @@ export function probe(input: string[]): Promise<Probed | null> {
       if (code !== 0) { resolve(null); return; }
       try {
         const json = JSON.parse(out) as {
-          format?: { start_time?: string };
+          format?: { start_time?: string; duration?: string };
           streams?: Array<{ index: number; codec_type?: string; codec_name?: string; tags?: Record<string, string> }>;
         };
         const start = Number(json.format?.start_time);
+        const duration = Number(json.format?.duration);
         resolve({
           startS: Number.isFinite(start) ? start : null,
+          durationS: Number.isFinite(duration) && duration > 0 ? duration : null,
           streams: (json.streams ?? []).map((s) => ({
             index: s.index,
             codecType: s.codec_type ?? "",

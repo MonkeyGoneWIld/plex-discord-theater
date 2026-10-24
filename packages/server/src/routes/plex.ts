@@ -52,7 +52,7 @@ import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
 import { markOriginalAudio } from "../services/original-language.js";
 import { audioNotes, type AudioDecision, type SourceAudio } from "../services/stream-audio.js";
 import {
-  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegHardware, ffmpegPreviewsOn, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesHevc, hwDevice,
+  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegHardware, ffmpegPgsOn, ffmpegPreviewsOn, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesHevc, hwDevice,
   keepHdrOnReencode, localPath, lowPowerVaapi, maxEncodes, readable, recheckHardware, sizeOnDisk, tonemapAlgo, tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
@@ -62,6 +62,7 @@ import {
 import { probe, probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
 import { prepareBurn, sidecarOnMount } from "../services/ffmpeg/burn-files.js";
 import { madePreview, makePreview, previewBody, previewPartOf, rememberPreviewPart } from "../services/ffmpeg/previews.js";
+import { pgsBytes, pgsStatus, type PgsSource } from "../services/ffmpeg/picture-subtitles.js";
 import {
   ffmpegEncodesRunning,
   ffmpegKeyRetired,
@@ -1230,7 +1231,7 @@ function rememberDuration(ratingKey: string, payload: Record<string, unknown>): 
  * offered a 4K file beside a lower copy (after it) and marked each version
  * `uhd`.
  */
-export const META_PAYLOAD_VERSION = 12;
+export const META_PAYLOAD_VERSION = 13;
 
 const metaCache = new LruMap<string, { payload: Record<string, unknown>; at: number }>(2_000);
 const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -1310,6 +1311,19 @@ function isEmbeddedText(s: PlexStream): boolean {
 }
 
 /**
+ * Whether this is a PGS subtitle (a Blu-ray's), in the file or beside it.
+ *
+ * With the ffmpeg engine (FFMPEG_PGS) the player draws those itself, from the
+ * .sup the /pgs route cuts out of the film, rather than having them burned
+ * into a re-encode: PGS was most of what kept a copyable film from being
+ * copied. VobSub and DVB are still burned in.
+ */
+function isPgs(s: PlexStream): boolean {
+  const kind = (s.codec || s.format || "").toLowerCase();
+  return kind === "pgs" || kind === "hdmv_pgs_subtitle";
+}
+
+/**
  * Whether Plex can do nothing at all with this subtitle: a track inside the
  * file whose codec it doesn't know. It reports those as "none" — Foil Arms and
  * Hog: Swines has one, an SDH track nothing here can decode. It can't be read
@@ -1342,9 +1356,12 @@ function mapSubtitleTracks(streams: PlexStream[]) {
        *
        * Text inside the file counts too. If it then can't be read, the
        * /subtitles route refuses it and the player asks for a stream with it
-       * burned in instead, so it is never shown twice or not at all.
+       * burned in instead, so it is never shown twice or not at all. So does
+       * PGS with the ffmpeg engine (`picture`), from the /pgs route.
        */
-      external: isSidecarText(s) || isEmbeddedText(s),
+      external: isSidecarText(s) || isEmbeddedText(s) || (isPgs(s) && ffmpegPgsOn()),
+      /** Pictures rather than text: drawn from the /pgs route's .sup. */
+      picture: isPgs(s) && ffmpegPgsOn() ? true : undefined,
       /**
        * A file of its own, as opposed to a track inside the media file —
        * fetched from somewhere else, most often, and so not necessarily timed
@@ -3202,7 +3219,7 @@ async function prefetchSubtitles(
   // The subtitle being watched (or about to be), and for "all" the others in
   // its language — up to SUBTITLE_READ_AHEAD_MAX in all. Nothing without one:
   // with subtitles off there is nothing to have ready.
-  const text = version.subtitleTracks.filter((t) => t.external);
+  const text = version.subtitleTracks.filter((t) => t.external && !t.picture);
   const lead = text.find((t) => t.id === first) ?? (scope === "all" ? text.find((t) => t.selected) : undefined) ?? null;
   if (!lead) return;
   const lang = (t: { languageCode: string | null; language: string | null }) =>
@@ -3344,6 +3361,10 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
     // Only this one. The title's others in its language are read once the
     // player has a buffer to spare for it, and asks (readSameLanguageAhead).
     const track = await subtitleTrackOf(ratingKey, mediaIndex, Number(streamId));
+    if (track?.picture) {
+      res.status(404).json({ error: "A picture subtitle: see /pgs" });
+      return;
+    }
     if (track?.external && track.sidecar === false) {
       const where = Number(req.query.at);
       const at = typeof req.query.at === "string" && Number.isFinite(where) && where >= 0 ? where : undefined;
@@ -3386,6 +3407,101 @@ router.get("/subtitles/:streamId", async (req: Request, res: Response) => {
     console.error("[Subtitles] fetch error:", err);
     res.status(502).json({ error: "Failed to fetch subtitle" });
   }
+});
+
+/**
+ * Where a PGS subtitle comes from: its track in the film, checked against the
+ * file as a stream's are (probe.ts), or the .sup beside it — off the mount,
+ * else from Plex. Null when it can't be had.
+ */
+async function pgsSource(ratingKey: string, mediaIndex: number, streamId: number): Promise<PgsSource | null> {
+  const source = await ffmpegSource(ratingKey, mediaIndex).catch(() => null);
+  const sub = source?.streams.find((s) => s.streamType === 3 && s.id === streamId);
+  if (!source || !sub) return null;
+  const local = source.file ? localPath(source.file) : null;
+  const fromMount = !!local && readable(local);
+  if (sub.key) {
+    return {
+      kind: "file",
+      bytes: async () => {
+        const onMount = fromMount ? sidecarOnMount(local, sub) : null;
+        if (onMount) return onMount.bytes;
+        const res = await plexFetch(`/library/streams/${sub.id}`);
+        return res.ok ? Buffer.from(await res.arrayBuffer()) : null;
+      },
+    };
+  }
+  if (sub.index == null) return null;
+  const input = fromMount
+    ? inputArgs({ local: local! })
+    : source.partKey
+      ? inputArgs({ url: `${process.env.PLEX_URL!.replace(/\/$/, "")}${source.partKey}`, token: process.env.PLEX_TOKEN! })
+      : null;
+  if (!input) return null;
+  const probed = await probeOnce(`${fromMount ? local : source.partKey}:${source.fileSize ?? "?"}`, input);
+  const differs = probed ? trackMismatch([sub], probed) : null;
+  if (differs) {
+    logEvent("Subtitles", "a picture subtitle's track isn't where Plex says", { ratingKey, streamId, why: differs });
+    return null;
+  }
+  return { kind: "film", input, index: sub.index };
+}
+
+/** The PGS subtitle a /pgs request names, and what its cut is called. */
+async function pgsTrack(req: Request): Promise<{ key: string; ratingKey: string; mediaIndex: number; streamId: number } | null> {
+  const streamId = req.params.streamId as string;
+  const ratingKey = typeof req.query.ratingKey === "string" ? req.query.ratingKey : "";
+  if (!ffmpegPgsOn() || !NUMERIC_RE.test(streamId) || !NUMERIC_RE.test(ratingKey)) return null;
+  const requested = Number(req.query.mediaIndex);
+  const mediaIndex = Number.isInteger(requested) && requested >= 0 ? requested : await defaultMediaIndex(ratingKey);
+  const track = await subtitleTrackOf(ratingKey, mediaIndex, Number(streamId));
+  if (!track?.picture || !track.fingerprint) return null;
+  return { key: `${track.fingerprint.replace(/[^0-9a-z]+/gi, "-")}-${streamId}`, ratingKey, mediaIndex, streamId: Number(streamId) };
+}
+
+/**
+ * GET /api/plex/pgs/:streamId?ratingKey=&mediaIndex=&at=
+ *
+ * A PGS subtitle for the player to draw (PictureSubtitleLayer), as the pieces
+ * it is being cut out of the film in — picture-subtitles.ts — and whether all
+ * of it is there. The first ask starts the cut, from `at` (film seconds,
+ * where the player is). 404 for a subtitle that can't be drawn: the player
+ * then asks for a stream with it burned in.
+ */
+router.get("/pgs/:streamId", async (req: Request, res: Response) => {
+  const track = await pgsTrack(req);
+  if (!track) {
+    res.status(404).json({ error: "Subtitle not available" });
+    return;
+  }
+  const at = Number(req.query.at);
+  const status = pgsStatus(track.key, () => pgsSource(track.ratingKey, track.mediaIndex, track.streamId),
+    Number.isFinite(at) && at >= 0 ? at : 0);
+  res.setHeader("Cache-Control", "no-store");
+  res.json(status);
+});
+
+/**
+ * GET /api/plex/pgs/:streamId/:piece?ratingKey=&mediaIndex=&from=
+ *
+ * A piece's bytes from `from` to what has been cut so far.
+ */
+router.get("/pgs/:streamId/:piece", async (req: Request, res: Response) => {
+  const track = await pgsTrack(req);
+  const piece = Number(req.params.piece);
+  const from = Number(req.query.from ?? 0);
+  if (!track || !Number.isInteger(piece) || piece < 0 || !Number.isInteger(from) || from < 0) {
+    res.status(404).json({ error: "Subtitle not available" });
+    return;
+  }
+  const bytes = await pgsBytes(track.key, piece, from);
+  if (!bytes) {
+    res.status(404).json({ error: "No such piece" });
+    return;
+  }
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Content-Type", "application/octet-stream");
+  res.end(bytes);
 });
 
 // ─── Scrub previews ─────────────────────────────────────────────
@@ -4577,10 +4693,12 @@ async function subtitleNotOffered(ratingKey: string, mediaIndex: number, streamI
 /** One subtitle track from a title's metadata, as mapSubtitleTracks made it. */
 async function subtitleTrackOf(
   ratingKey: string, mediaIndex: number, streamId: number,
-): Promise<{ id: number; codec?: string | null; external?: boolean; sidecar?: boolean; fingerprint: string | null } | null> {
+): Promise<{
+  id: number; codec?: string | null; external?: boolean; sidecar?: boolean; picture?: boolean; fingerprint: string | null;
+} | null> {
   try {
     const meta = await buildMeta(ratingKey);
-    type Sub = { id: number; codec?: string | null; external?: boolean; sidecar?: boolean };
+    type Sub = { id: number; codec?: string | null; external?: boolean; sidecar?: boolean; picture?: boolean };
     const versions = meta?.versions as
       | Array<{ mediaIndex?: number; partId: number | null; fileSize?: number | null; subtitleTracks?: Sub[] }>
       | undefined;
@@ -5483,9 +5601,11 @@ router.get(
         // Picture subtitles (PGS, VobSub) can only be burned in. A text one is
         // burned in when it couldn't be drawn — Plex failed to read it out.
         const burned = subtitleId ? await subtitleTrackOf(ratingKey, mediaIndex, subtitleId) : null;
-        notCopied = burned?.external
-          ? "Subtitle burn-in (text unreadable)"
-          : "Subtitle burn-in (image-based)";
+        notCopied = burned?.picture
+          ? "Subtitle burn-in (PGS couldn't be drawn)"
+          : burned?.external
+            ? "Subtitle burn-in (text unreadable)"
+            : "Subtitle burn-in (image-based)";
       }
       else if (quality && kbps !== null && kbps > quality) {
         notCopied = `${mbpsText(kbps)} average exceeds ${mbpsText(quality)} quality limit`;

@@ -11,7 +11,7 @@ import { trackMismatch, type Probed } from "../src/services/ffmpeg/probe.js";
 import { checkLibraryPaths, libraryReadabilityText } from "../src/services/ffmpeg/library-check.js";
 import { findSidecar } from "../src/services/ffmpeg/burn-files.js";
 import { dropHot, hotSegment, hotSegmentStats, keepHot, setHotBudget } from "../src/services/ffmpeg/hot-segments.js";
-import { bif } from "../src/services/ffmpeg/previews.js";
+import { bif, splitJpegs } from "../src/services/ffmpeg/previews.js";
 import { copyArgs } from "../src/services/ffmpeg/plan.js";
 
 let pass = 0;
@@ -153,6 +153,17 @@ console.log("\n— a BIF of previews —");
     [[0, 1, 2, 3].map((i) => made.readUInt32LE(64 + i * 8)), [0, 1, 2, 3].map(offset)],
     [[0, 1, 2, 0xffffffff], [96, 101, 106, 111]]);
   check("and the frames, in order", made.subarray(offset(1), offset(2)).toString("hex"), "ffd802ffd9");
+  // ffmpeg's pipe, cut anywhere: between the FF and the D9 that end a frame too.
+  const piped = Buffer.concat([jpeg(1), Buffer.from([0xff, 0xd8, 0xff, 0x00, 0xff, 0xd0, 7, 0xff, 0xd9]), jpeg(3)]);
+  const found: string[] = [];
+  let rest = Buffer.alloc(0);
+  for (const cut of [[0, 4], [4, 13], [13, 19]]) {
+    const split = splitJpegs(Buffer.concat([rest, piped.subarray(cut[0], cut[1])]));
+    found.push(...split.frames.map((f) => f.toString("hex")));
+    rest = split.rest;
+  }
+  check("the frames in ffmpeg's pipe, each ended by its EOI, however it comes",
+    [found, rest.length], [["ffd801ffd9", "ffd8ff00ffd007ffd9", "ffd803ffd9"], 0]);
 }
 
 console.log("\n— the segment cuts —");

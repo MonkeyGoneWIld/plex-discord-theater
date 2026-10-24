@@ -1375,19 +1375,21 @@ console.log("\n— previews made by ffmpeg, keyframes off the mount, segments ke
   const head = Buffer.from(await pass0.arrayBuffer());
   check("  the first pass comes once ffmpeg has made them",
     [pass0.status, pass0.headers.get("content-type")], [200, "application/x-plex-preview-v2"]);
-  check("  six frames, ten seconds apart", [head.readUInt32LE(4 + 12), head.readUInt32LE(4 + 16)], [6, 10_000]);
+  // A keyframe every 2 s from 0 to 58, the last held to the end: 0 to 60.
+  check("  31 frames, two seconds apart", [head.readUInt32LE(4 + 12), head.readUInt32LE(4 + 16)], [31, 2_000]);
   const whole = Buffer.from(await (await fetch(`${origin}/api/plex/preview/1/index`)).arrayBuffer());
   const count = whole.readUInt32LE(12);
   const frames = Array.from({ length: count }, (_, i) =>
     whole.subarray(whole.readUInt32LE(64 + i * 8 + 4), whole.readUInt32LE(64 + (i + 1) * 8 + 4)));
-  check("  every frame a JPEG, each its own picture",
-    [frames.every((f) => f[0] === 0xff && f[1] === 0xd8), new Set(frames.map((f) => f.toString("base64"))).size], [true, 6]);
-  check("  kept for next time", fs.existsSync(path.join(tmp, "previews", `1-${fs.statSync(titles["1"].file).size}.bif`)), true);
+  check("  every frame a JPEG, each keyframe's its own picture",
+    [frames.every((f) => f[0] === 0xff && f[1] === 0xd8 && f[f.length - 2] === 0xff && f[f.length - 1] === 0xd9),
+      new Set(frames.map((f) => f.toString("base64"))).size], [true, 30]);
+  check("  kept for next time", fs.existsSync(path.join(tmp, "previews", `1-${fs.statSync(titles["1"].file).size}-i2.bif`)), true);
   // Plex's length far past the file's: stopped where the film ends.
   const { makePreview } = await import("../src/services/ffmpeg/previews.js");
   const long = await makePreview({ partId: 9001, fileSize: 1, film: titles["2"].file, durationS: 3600, hdr: false });
   check("  a film Plex thinks an hour long gets its own minute's frames",
-    long ? fs.readFileSync(long).readUInt32LE(12) : null, 6);
+    long ? fs.readFileSync(long).readUInt32LE(12) : null, 31);
   process.env.FFMPEG_PREVIEWS = "off";
   const off = await fetch(`${origin}/api/plex/preview/2/index`);
   await off.arrayBuffer();

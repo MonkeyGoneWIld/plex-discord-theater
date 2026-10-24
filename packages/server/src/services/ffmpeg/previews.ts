@@ -5,10 +5,13 @@
  * serves as it does Plex's. Kept in the app's data folder, so each file is made
  * once; past FFMPEG_PREVIEWS_MAX_GB the least recently used go.
  *
- * Each frame is the keyframe at or before its time, one ffmpeg seek apiece: a
- * few megabytes read per frame, not the whole film read through. One file at a
- * time, SEEKS_AT_ONCE seeks at once, at the lowest CPU priority. An HDR film's
- * frames are tone-mapped: Jellyfin's tonemapx, else zscale's, else as they are.
+ * Made as Plex makes its own: one ffmpeg reading the film through, decoding
+ * only its keyframes, each frame the last keyframe at or before its time. One
+ * seek per frame, as these were made until 24 October, was a spawn and a few
+ * megabytes read apiece: fine at one every ten seconds (143 to 259 frames a
+ * film), five times that at Plex's two. One file at a time, at the lowest CPU
+ * priority. An HDR film's frames are tone-mapped: Jellyfin's tonemapx, else
+ * zscale's, else as they are.
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -19,20 +22,15 @@ import { logEvent } from "../logger.js";
 import { LruMap } from "../lru.js";
 import { ffmpegPath, previewsMaxBytes } from "./config.js";
 
-export const PREVIEW_INTERVAL_S = 10;
+export const PREVIEW_INTERVAL_S = 2;
 const WIDTH = 320;
-const SEEKS_AT_ONCE = 2;
 const FRAME_TIMEOUT_MS = 30_000;
+/** The pass through the film is stopped when no frame has come for this long. */
+const STALL_MS = 120_000;
 /** Files waiting to be made, past which another isn't taken on: asked again later. */
 const MAX_WAITING = 20;
 /** A file that couldn't be made isn't tried again for this long. */
 const RETRY_AFTER_MS = 60 * 60_000;
-/**
- * Frames missed in a row that mean the film has ended: Plex's length can be
- * far longer than the file (a Grimm episode at 97 hours), and a seek past the
- * end draws nothing.
- */
-const MISSES_AT_END = 30;
 
 const MAGIC = Buffer.from([0x89, 0x42, 0x49, 0x46, 13, 10, 26, 10]);
 
@@ -54,8 +52,11 @@ function previewDir(): string {
   return path.join(data, "previews");
 }
 
+/** Made at PREVIEW_INTERVAL_S: one of the ten-second ones made before is made again. */
+const MADE_AS = `-i${PREVIEW_INTERVAL_S}`;
+
 function fileFor(partId: number, fileSize: number | null): string {
-  return path.join(previewDir(), `${partId}-${fileSize ?? "x"}.bif`);
+  return path.join(previewDir(), `${partId}-${fileSize ?? "x"}${MADE_AS}.bif`);
 }
 
 /** Which title and version a part is, from the titles' pages: the preview route has only the part. */
@@ -112,17 +113,10 @@ function grab(film: string, atS: number, vf: string): Promise<Buffer | null> {
     const args = ["-hide_banner", "-nostdin", "-v", "error", "-noaccurate_seek", "-skip_frame", "nokey",
       "-ss", atS.toFixed(3), "-i", film, "-map", "0:V:0", "-frames:v", "1", "-vf", vf, "-q:v", "5",
       "-f", "image2pipe", "-c:v", "mjpeg", "pipe:1"];
-    let child: ReturnType<typeof spawn>;
-    try {
-      child = spawn(ffmpegPath(), args, { stdio: ["ignore", "pipe", "ignore"] });
-    } catch {
+    const child = lowly(args);
+    if (!child) {
       resolve(null);
       return;
-    }
-    try {
-      if (child.pid) os.setPriority(child.pid, os.constants.priority.PRIORITY_LOW);
-    } catch {
-      // As it is.
     }
     const chunks: Buffer[] = [];
     child.stdout?.on("data", (c: Buffer) => chunks.push(c));
@@ -132,6 +126,92 @@ function grab(film: string, atS: number, vf: string): Promise<Buffer | null> {
       clearTimeout(timer);
       const out = Buffer.concat(chunks);
       resolve(code === 0 && out.length > 2 && out[0] === 0xff && out[1] === 0xd8 ? out : null);
+    });
+  });
+}
+
+/** ffmpeg at the lowest CPU priority; null when it can't be started. */
+function lowly(args: string[]): ReturnType<typeof spawn> | null {
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(ffmpegPath(), args, { stdio: ["ignore", "pipe", "pipe"] });
+  } catch {
+    return null;
+  }
+  try {
+    if (child.pid) os.setPriority(child.pid, os.constants.priority.PRIORITY_LOW);
+  } catch {
+    // As it is.
+  }
+  return child;
+}
+
+/**
+ * The JPEGs in what ffmpeg has written so far, and what is left of the next
+ * one. Each ends at its EOI marker (FF D9), which nothing inside one can be:
+ * an FF in its picture data is followed by 00 or a restart marker.
+ */
+export function splitJpegs(buf: Buffer): { frames: Buffer[]; rest: Buffer } {
+  const frames: Buffer[] = [];
+  let from = 0;
+  for (let i = 0; i + 1 < buf.length; i++) {
+    if (buf[i] === 0xff && buf[i + 1] === 0xd9) {
+      frames.push(buf.subarray(from, i + 2));
+      from = i + 2;
+      i++;
+    }
+  }
+  return { frames, rest: buf.subarray(from) };
+}
+
+/**
+ * A frame every PREVIEW_INTERVAL_S from the keyframes: each slot the last one
+ * at or before it (rounding up), from 0 s whenever the picture starts — an
+ * Opus film's opens 7 ms in, and its first frame went in the second slot,
+ * every frame after it a slot late — and the last keyframe held to the end.
+ */
+const SLOTS = `tpad=stop_mode=clone:stop_duration=${2 * PREVIEW_INTERVAL_S},` +
+  `fps=fps=1/${PREVIEW_INTERVAL_S}:round=up:start_time=0`;
+
+/**
+ * Every frame from one pass through the film, its keyframes only (-skip_frame
+ * nokey), up to where the file ends, whatever Plex says its length is (a
+ * Grimm episode at 97 hours).
+ */
+function pass(film: string, vf: string): Promise<{ frames: Buffer[] } | { failed: string }> {
+  return new Promise((resolve) => {
+    const args = ["-hide_banner", "-nostdin", "-v", "error", "-skip_frame", "nokey", "-i", film,
+      "-map", "0:V:0", "-an", "-sn", "-dn", "-vf", `${SLOTS},${vf}`, "-q:v", "5",
+      "-f", "image2pipe", "-c:v", "mjpeg", "pipe:1"];
+    const child = lowly(args);
+    if (!child) {
+      resolve({ failed: "couldn't start ffmpeg" });
+      return;
+    }
+    const frames: Buffer[] = [];
+    let rest: Buffer = Buffer.alloc(0);
+    let stderr = "";
+    let stalled: ReturnType<typeof setTimeout> | undefined;
+    const watch = () => {
+      clearTimeout(stalled);
+      stalled = setTimeout(() => child.kill("SIGKILL"), STALL_MS);
+    };
+    watch();
+    child.stdout?.on("data", (c: Buffer) => {
+      const split = splitJpegs(rest.length ? Buffer.concat([rest, c]) : c);
+      // Copied out of the chunk they came in, which is then let go.
+      for (const f of split.frames) frames.push(Buffer.from(f));
+      rest = Buffer.from(split.rest);
+      if (split.frames.length) watch();
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      stderr = (stderr + d.toString()).slice(-600);
+    });
+    child.on("error", () => {});
+    child.on("close", (code, signal) => {
+      clearTimeout(stalled);
+      if (code === 0 && frames.length) resolve({ frames });
+      else resolve({ failed: `ffmpeg exited ${code ?? signal}${stderr.trim() ? `: ${stderr.trim().split("\n").pop()}` : ""}` });
     });
   });
 }
@@ -147,49 +227,29 @@ export interface PreviewSource {
 
 async function make(o: PreviewSource): Promise<string | null> {
   const startedAt = Date.now();
-  const count = Math.max(1, Math.floor(o.durationS / PREVIEW_INTERVAL_S));
-  const frames: Array<Buffer | null> = new Array(count).fill(null);
+  // An HDR film's is the first chain that draws its first keyframe.
   let vf = SDR;
   for (const tried of o.hdr ? HDR : []) {
-    frames[0] = await grab(o.film, 0, tried);
-    if (frames[0]) {
+    if (await grab(o.film, 0, tried)) {
       vf = tried;
       break;
     }
   }
-  let next = frames[0] ? 1 : 0;
-  let end = count;
-  let lastDrawn = frames[0] ? 0 : -1;
-  let inARow = 0;
-  await Promise.all(Array.from({ length: SEEKS_AT_ONCE }, async () => {
-    while (next < end) {
-      const i = next++;
-      frames[i] = await grab(o.film, i * PREVIEW_INTERVAL_S, vf);
-      if (frames[i]) {
-        lastDrawn = Math.max(lastDrawn, i);
-        inARow = 0;
-      } else if (++inARow >= MISSES_AT_END) {
-        end = Math.min(end, lastDrawn + 1);
-      }
-    }
-  }));
-  const kept = frames.slice(0, end);
-  const missed = kept.filter((f) => !f).length;
-  // A frame that couldn't be had is the one before it, or the first that could.
-  const first = kept.find((f): f is Buffer => !!f);
-  if (!first) {
-    logEvent("Preview", "ffmpeg couldn't make previews", { partId: o.partId, frames: count });
+  const made = await pass(o.film, vf);
+  if ("failed" in made) {
+    logEvent("Preview", "ffmpeg couldn't make previews", { partId: o.partId, why: made.failed, ms: Date.now() - startedAt });
     return null;
   }
-  let last = first;
-  const filled = kept.map((f) => (last = f ?? last));
   const file = fileFor(o.partId, o.fileSize);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, bif(filled, PREVIEW_INTERVAL_S * 1000));
+  fs.writeFileSync(tmp, bif(made.frames, PREVIEW_INTERVAL_S * 1000));
   fs.renameSync(tmp, file);
+  const plexFrames = Math.floor(o.durationS / PREVIEW_INTERVAL_S);
   logEvent("Preview", "previews made by ffmpeg", {
-    partId: o.partId, frames: kept.length, ...(end < count ? { plexFrames: count } : {}), missed, hdr: o.hdr ? vf === SDR ? "as it is" : vf.includes("tonemapx") ? "tonemapx" : "zscale" : "no",
+    partId: o.partId, frames: made.frames.length, everyS: PREVIEW_INTERVAL_S,
+    ...(Math.abs(made.frames.length - plexFrames) > 30 ? { plexFrames } : {}),
+    hdr: o.hdr ? vf === SDR ? "as it is" : vf.includes("tonemapx") ? "tonemapx" : "zscale" : "no",
     bytes: fs.statSync(file).size, ms: Date.now() - startedAt,
   });
   trim();
@@ -200,6 +260,10 @@ async function make(o: PreviewSource): Promise<string | null> {
 function trim(): void {
   try {
     const dir = previewDir();
+    // The ten-second ones made before go first, whatever room is left.
+    for (const n of fs.readdirSync(dir)) {
+      if (n.endsWith(".bif") && !n.endsWith(`${MADE_AS}.bif`)) fs.rmSync(path.join(dir, n), { force: true });
+    }
     const kept = fs.readdirSync(dir)
       .filter((n) => n.endsWith(".bif"))
       .map((n) => {

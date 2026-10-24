@@ -12,7 +12,8 @@ import { checkLibraryPaths, libraryReadabilityText } from "../src/services/ffmpe
 import { findSidecar } from "../src/services/ffmpeg/burn-files.js";
 import { dropHot, hotSegment, hotSegmentStats, keepHot, setHotBudget } from "../src/services/ffmpeg/hot-segments.js";
 import { bif, splitJpegs } from "../src/services/ffmpeg/previews.js";
-import { copyArgs } from "../src/services/ffmpeg/plan.js";
+import { copyArgs, copyNeeds, encodeArgs, planCopy, planEncode } from "../src/services/ffmpeg/plan.js";
+import { measuredPlaylist } from "../src/services/measured-playlist.js";
 
 let pass = 0;
 let fail = 0;
@@ -176,6 +177,109 @@ console.log("\n— the segment cuts —");
   const days = cutsOf(copyArgs(plan, ["-i", "film.mkv"], 0, 350_083, 3));
   check("a length days long lists twelve hours of cuts, in one argument Linux takes",
     [Number(days.split(",").at(-1)), Buffer.byteLength(days) < 128 * 1024], [43_200, true]);
+}
+
+console.log("\n— AV1, Opus and FLAC copied, in fragmented MP4 —");
+{
+  const version = (video: Record<string, unknown>, audio: Record<string, unknown>, more: Record<string, unknown> = {}) => ({
+    container: "mkv", width: 1920, height: 1080, partKey: "/library/parts/1/1/file.mkv", file: "/data/media/f.mkv",
+    streams: [{ id: 11, streamType: 1, index: 0, codec: "av1", bitDepth: 10, ...video },
+      { id: 12, streamType: 2, index: 1, codec: "opus", channels: 6, default: true, ...audio }],
+    ...more,
+  });
+  const all = { audioStreamId: null, hevcOk: true, av1Ok: true, opusOk: true, flacOk: true };
+  const av1 = planCopy(version({}, {}), all);
+  check("10-bit AV1 with Opus 5.1, for a player that decodes both, is copied as it is, in fMP4",
+    av1.ok && [av1.codec, av1.audioCopy, av1.fmp4, copyNeeds(av1)], ["av1", true, true, ["av1", "opus"]]);
+  const why = (p: ReturnType<typeof planCopy>) => (p.ok ? "copy" : p.why);
+  check("not for a player that can't decode AV1", why(planCopy(version({}, {}), { ...all, av1Ok: false })),
+    "AV1, and this player can't decode it");
+  check("nor 12-bit AV1", why(planCopy(version({ bitDepth: 12 }, {}), all)), "12-bit AV1");
+  check("from WebM too, which MPEG-TS copies never were", why(planCopy(version({}, {}, { container: "webm" }), all)), "copy");
+  const noOpus = planCopy(version({ codec: "h264", bitDepth: 8 }, {}), { ...all, opusOk: false });
+  check("Opus for a player that can't decode it becomes AAC, and H.264 with it stays MPEG-TS",
+    noOpus.ok && [noOpus.audioCopy, noOpus.fmp4, copyNeeds(noOpus)], [false, false, []]);
+  const opus = planCopy(version({ codec: "h264", bitDepth: 8 }, {}), all);
+  check("for one that can, H.264 with its Opus is fMP4", opus.ok && [opus.fmp4, copyNeeds(opus)], [true, ["opus"]]);
+  const flac = (audio: Record<string, unknown>) => planCopy(version({ codec: "hevc" }, { codec: "flac", ...audio }), all);
+  const flacCopied = (p: ReturnType<typeof planCopy>) => p.ok && [p.audioCopy, p.fmp4, copyNeeds(p)];
+  check("FLAC stereo at 1 Mbps is copied", flacCopied(flac({ channels: 2, bitrate: 1000 })), [true, true, ["hevc", "flac"]]);
+  check("FLAC 5.1 at 4 Mbps becomes AAC, sent to every viewer as it is",
+    flacCopied(flac({ channels: 6, bitrate: 4000 })), [false, false, ["hevc"]]);
+  check("and with no bitrate said, stereo is copied and surround isn't",
+    [flacCopied(flac({ channels: 2 })), flacCopied(flac({ channels: 6 }))], [[true, true, ["hevc", "flac"]], [false, false, ["hevc"]]]);
+  const hevcFlac = flac({ channels: 2, bitrate: 1000 });
+  const args = hevcFlac.ok ? copyArgs(hevcFlac, ["-i", "f.mkv"], 0, 60, 4).join(" ") : "";
+  check("an fMP4 copy is cut by the HLS muxer, on the copy's clock, HEVC tagged as Chrome takes it",
+    [args.includes("-tag:v hvc1"), args.includes("-output_ts_offset 10 -f hls -hls_segment_type fmp4 -hls_time 3.9375"),
+      args.includes("-hls_fmp4_init_filename init.mp4 -hls_segment_filename %05d.m4s"),
+      args.includes("movflags=+frag_discont+negative_cts_offsets:use_editlist=0"), args.includes("-segment_times")],
+    [true, true, true, true, false]);
+}
+
+console.log("\n— AV1 re-encodes —");
+{
+  const version = (video: Record<string, unknown>) => ({
+    container: "mkv", width: 3840, height: 2160, partKey: "/library/parts/1/1/file.mkv", file: "/data/media/f.mkv",
+    streams: [{ id: 11, streamType: 1, index: 0, codec: "hevc", bitDepth: 10, colorPrimaries: "bt709", colorTrc: "bt709",
+      colorSpace: "bt709", colorRange: "tv", ...video },
+      { id: 12, streamType: 2, index: 1, codec: "eac3", channels: 6, default: true }],
+  });
+  const ask = { audioStreamId: null, hevcOk: true, av1Ok: true, hardware: "qsv" as "qsv" | "vaapi" | "nvenc" | "software",
+    kbps: 12000, peakKbps: 12000, maxWidth: 1920, maxHeight: 1080, keepHdr: false };
+  const plan = (v: ReturnType<typeof version>, more: Partial<Parameters<typeof planEncode>[1]> = {}) =>
+    planEncode(v, { ...ask, ...more });
+  const sdr = plan(version({}));
+  check("4K SDR for a player that decodes AV1 on its GPU is AV1, in about half H.264's bits",
+    sdr.ok && [sdr.codec, sdr.width, sdr.height], ["av1", 1920, 1080]);
+  const sdrArgs = sdr.ok ? encodeArgs(sdr, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
+  check("  on QSV, 8 bits, no profile named, an IDR at every cut, in fMP4",
+    [sdrArgs.includes("-c:v av1_qsv -low_power 1 -preset medium"), sdrArgs.includes("format=nv12"),
+      sdrArgs.includes("-profile:v"), sdrArgs.includes("-forced_idr 1"), sdrArgs.includes("-hls_segment_type fmp4"),
+      sdrArgs.includes("-segment_times")], [true, true, false, true, true, false]);
+  const hdr = plan(version({ colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc" }));
+  check("HDR tone-mapped is AV1 too", hdr.ok && [hdr.codec, hdr.hdrTrc, !!hdr.tonemap], ["av1", null, true]);
+  const kept = plan(version({ colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc" }), { keepHdr: true });
+  check("HDR kept stays HEVC Main10", kept.ok && [kept.codec, kept.hdrTrc], ["hevc", "smpte2084"]);
+  check("not with a subtitle burned in, which is H.264's",
+    (() => { const p = plan({ ...version({}), streams: [...version({}).streams,
+      { id: 21, streamType: 3, index: 2, codec: "pgs" }] } as ReturnType<typeof version>, { burn: 21 }); return p.ok && p.codec; })(),
+    "h264");
+  check("nor without the GPU's AV1", [plan(version({}), { av1Ok: false }), plan(version({}), { hardware: "software" })]
+    .map((p) => p.ok && p.codec), ["hevc", "h264"]);
+  const va = plan(version({}), { hardware: "vaapi", lowPower: false, av1LowPower: true });
+  const vaArgs = va.ok ? encodeArgs(va, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
+  check("on VAAPI, its low-power AV1 encoder where that's all it has", vaArgs.includes("-c:v av1_vaapi -low_power 1 -rc_mode VBR"), true);
+  const nv = plan(version({}), { hardware: "nvenc" });
+  const nvArgs = nv.ok ? encodeArgs(nv, ["-i", "f.mkv"], 0, 60, "0").join(" ") : "";
+  check("on NVENC, with no profile to name", [nvArgs.includes("-c:v av1_nvenc -preset p4 -tune hq -rc vbr"), nvArgs.includes("-profile:v")],
+    [true, false]);
+}
+
+console.log("\n— a measured playlist of fragmented MP4 —");
+{
+  const init = { path: "/s/init.mp4", bytes: 900 };
+  const before = { path: "/s/binit.mp4", bytes: 880 };
+  const seg = (path: string, start: number, end: number, i: typeof init) =>
+    ({ path, start, end, videoStart: start, audioStart: start, bytes: 1000, init: i });
+  const { text } = measuredPlaylist({
+    segments: [seg("/s/b00000.m4s", 70, 74, before), seg("/s/00000.m4s", 74, 78, init), seg("/s/00001.m4s", 78, 82, init)],
+    published: 3, offsetS: 70, ended: false, targetDuration: 4, urlFor: (p, n) => `${p}?n=${n}`,
+  });
+  const lines = text.trim().split("\n");
+  check("version 7, for EXT-X-MAP", lines[1], "#EXT-X-VERSION:7");
+  const maps = lines.filter((l) => l.startsWith("#EXT-X-MAP"));
+  check("the init named before the gaps, and again where it changes",
+    maps, ['#EXT-X-MAP:URI="/s/binit.mp4?n=880"', '#EXT-X-MAP:URI="/s/init.mp4?n=900"']);
+  check("first of all", lines.findIndex((l) => l.startsWith("#EXT-X-MAP")) < lines.findIndex((l) => l === "#EXT-X-GAP"), true);
+  check("the gaps named as fMP4", lines.includes("gap.m4s") && !lines.includes("gap.ts"), true);
+  check("the second init just before the segment that needs it",
+    lines[lines.indexOf('#EXT-X-MAP:URI="/s/init.mp4?n=900"') + 2], "/s/00000.m4s?n=1000");
+  const ts = measuredPlaylist({
+    segments: [{ path: "/s/00000.ts", start: 0, end: 4, videoStart: 0, audioStart: 0, bytes: 1000 }],
+    published: 1, offsetS: 0, ended: true, targetDuration: 4, urlFor: (p) => p,
+  }).text;
+  check("MPEG-TS as before: version 3, no map", [ts.includes("#EXT-X-VERSION:3"), ts.includes("#EXT-X-MAP")], [true, false]);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

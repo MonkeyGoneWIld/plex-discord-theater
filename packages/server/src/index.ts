@@ -344,7 +344,8 @@ async function reportEngine(): Promise<void> {
   console.log(
     "[Config] playback engine: ffmpeg —",
     `${found.version};`,
-    `copies H.264 and HEVC files itself, HDR included; re-encodes on ${hw.note}, subtitles burned in (text ones from their text, with their fonts);`,
+    `copies H.264, HEVC and AV1 files itself, HDR included, and Opus and FLAC sound, for the players that decode them;`,
+    `re-encodes on ${hw.note}, subtitles burned in (text ones from their text, with their fonts);`,
     `${segmentMemoryBytes() / 1024 ** 2} MB of segments kept in memory;`,
     ffmpegPreviewsOn() ? "previews made for files Plex has none for;" : "no previews made (FFMPEG_PREVIEWS=off);",
     map.length ? `library at ${map.map(([from, to]) => `${from} → ${to}`).join(", ")} (MEDIA_PATH_MAP)` : "library at Plex's own paths",

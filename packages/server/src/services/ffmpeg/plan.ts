@@ -94,17 +94,46 @@ export function hdrClass(v: SourceStream | undefined): string {
 
 /** Containers whose H.264 and HEVC copy cleanly into MPEG-TS. */
 const COPY_CONTAINERS = new Set(["mkv", "mp4", "m4v", "mov", "mpegts", "ts", "m2ts"]);
+/** And whose AV1 copies into fragmented MP4: a WebM's too. */
+const FMP4_CONTAINERS = new Set([...COPY_CONTAINERS, "webm"]);
+
+/**
+ * What a player decodes beyond H.264 and AAC in MPEG-TS, which every one
+ * does: each in fragmented MP4, HEVC in either. Asked of the player itself
+ * (the client's codecs.ts), and each stream made for what its driver decodes —
+ * whoever on it can't play that gets a stream of their own (the sync server's
+ * seatOf).
+ */
+export interface PlayerCaps {
+  hevc: boolean;
+  av1: boolean;
+  opus: boolean;
+  flac: boolean;
+}
+export type PlayerCap = keyof PlayerCaps;
+export const PLAYER_CAPS: readonly PlayerCap[] = ["hevc", "av1", "opus", "flac"];
+export const NO_CAPS: PlayerCaps = { hevc: false, av1: false, opus: false, flac: false };
+export const ALL_CAPS: PlayerCaps = { hevc: true, av1: true, opus: true, flac: true };
+
+/**
+ * FLAC above this, kbps, becomes AAC rather than being copied: 5.1 at 24 bits
+ * can be 4 Mbps of sound, sent to every viewer wherever they are. Stereo at
+ * 16 bits is about 1 Mbps.
+ */
+export const FLAC_COPY_MAX_KBPS = 2_000;
 
 export type CopyPlan =
   | {
       ok: true;
       video: SourceStream & { index: number };
       audio: (SourceStream & { index: number }) | null;
-      /** AAC already: copied as it is. Anything else becomes AAC (audioOut). */
+      /** Copied as it is: AAC, or Opus or FLAC for a player that decodes it. Anything else becomes AAC (audioOut). */
       audioCopy: boolean;
       /** What a converted track becomes; null when it is copied, or there is none. */
       audioOut: AudioOut | null;
-      codec: "h264" | "hevc";
+      codec: "h264" | "hevc" | "av1";
+      /** In fragmented MP4 rather than MPEG-TS: AV1, Opus and FLAC don't go into MPEG-TS for a browser. */
+      fmp4: boolean;
       hdr: string;
       width: number;
       height: number;
@@ -114,17 +143,18 @@ export type CopyPlan =
 /**
  * Whether ffmpeg can copy this version for a player, and what with. `audioStreamId`
  * is the track the stream is for (0 or null: the item's choice, as Plex takes
- * it); `hevcOk` whether the player driving it decodes HEVC; `audioChannels`
- * FFMPEG_AUDIO_CHANNELS (convertedAudio).
+ * it); `hevcOk`, `av1Ok`, `opusOk` and `flacOk` what the player driving it
+ * decodes (PlayerCaps); `audioChannels` FFMPEG_AUDIO_CHANNELS (convertedAudio).
  */
 export function planCopy(
-  src: SourceVersion, req: { audioStreamId: number | null; hevcOk: boolean; audioChannels?: number },
+  src: SourceVersion,
+  req: { audioStreamId: number | null; hevcOk: boolean; av1Ok?: boolean; opusOk?: boolean; flacOk?: boolean; audioChannels?: number },
 ): CopyPlan {
   const no = (why: string): CopyPlan => ({ ok: false, why });
   const video = src.streams.find((s) => s.streamType === 1);
   if (!video || video.index == null) return no("no video stream");
   const codec = (video.codec ?? "").toLowerCase();
-  if (codec !== "h264" && codec !== "hevc") return no(`video is ${codec || "unknown"}`);
+  if (codec !== "h264" && codec !== "hevc" && codec !== "av1") return no(`video is ${codec || "unknown"}`);
   if (codec === "h264" && (video.bitDepth ?? 8) > 8) return no(`${video.bitDepth}-bit H.264`);
   // Field by field, as TV is broadcast: Chrome's decoder gave up on the first
   // segment of Cunk on Shakespeare's 1080i copy on 21 October, for both
@@ -134,6 +164,8 @@ export function planCopy(
   if (codec === "h264" && /interlaced/i.test(video.scanType ?? "")) return no("interlaced H.264");
   if (codec === "hevc" && (video.bitDepth ?? 8) > 10) return no(`${video.bitDepth}-bit HEVC`);
   if (codec === "hevc" && !req.hevcOk) return no("HEVC, and this player can't decode it");
+  if (codec === "av1" && (video.bitDepth ?? 8) > 10) return no(`${video.bitDepth}-bit AV1`);
+  if (codec === "av1" && !req.av1Ok) return no("AV1, and this player can't decode it");
   const hdr = hdrClass(video);
   // No HDR10 picture under the Dolby Vision: only a tone mapper that applies
   // it draws it right (Phase 2).
@@ -143,11 +175,17 @@ export function planCopy(
   // 4K is shown at 1080p, as Plex does: the activity can't show more.
   if (width > 2048 || height > 1200) return no("above 1080p");
   const container = (src.container ?? "").toLowerCase();
-  if (!COPY_CONTAINERS.has(container)) return no(`${container || "unknown"} container`);
+  if (!(codec === "av1" ? FMP4_CONTAINERS : COPY_CONTAINERS).has(container)) return no(`${container || "unknown"} container`);
 
   const audio = pickAudio(src, req.audioStreamId);
   if (audio === false) return no(`no audio track ${req.audioStreamId}`);
-  const audioCopy = (audio?.codec ?? "").toLowerCase() === "aac";
+  const audioCodec = (audio?.codec ?? "").toLowerCase();
+  // Opus and FLAC as they are, in fMP4, for a player that decodes them; FLAC
+  // within FLAC_COPY_MAX_KBPS, or stereo when Plex doesn't say.
+  const audioFmp4 = (audioCodec === "opus" && !!req.opusOk) ||
+    (audioCodec === "flac" && !!req.flacOk &&
+      (audio?.bitrate ? audio.bitrate <= FLAC_COPY_MAX_KBPS : (audio?.channels ?? 2) <= 2));
+  const audioCopy = audioCodec === "aac" || audioFmp4;
   return {
     ok: true,
     video: video as SourceStream & { index: number },
@@ -155,10 +193,21 @@ export function planCopy(
     audioCopy,
     audioOut: audio && !audioCopy ? convertedAudio(audio, req.audioChannels) : null,
     codec,
+    fmp4: codec === "av1" || audioFmp4,
     hdr,
     width,
     height,
   };
+}
+
+/** What a copy needs its player to decode, beyond H.264 and AAC in MPEG-TS. */
+export function copyNeeds(plan: Extract<CopyPlan, { ok: true }>): PlayerCap[] {
+  const needs: PlayerCap[] = [];
+  if (plan.codec === "hevc") needs.push("hevc");
+  if (plan.codec === "av1") needs.push("av1");
+  const audio = (plan.audio?.codec ?? "").toLowerCase();
+  if (plan.audioCopy && (audio === "opus" || audio === "flac")) needs.push(audio);
+  return needs;
 }
 
 /** The track a stream is for (0 or null: the item's choice, as Plex takes it);
@@ -256,8 +305,10 @@ export function copyArgs(
     "-map", `0:${plan.video.index}`,
     ...(plan.audio ? ["-map", `0:${plan.audio.index}`] : []),
     "-c:v", "copy",
+    // HEVC in MP4 as Chrome's MSE takes it: parameter sets in the init.
+    ...(plan.fmp4 && plan.codec === "hevc" ? ["-tag:v", "hvc1"] : []),
     ...audioArgs(plan),
-    ...segmentArgs(offsetS, toS ?? durationS, segmentSeconds),
+    ...(plan.fmp4 ? fmp4SegmentArgs(segmentSeconds) : segmentArgs(offsetS, toS ?? durationS, segmentSeconds)),
   ];
 }
 
@@ -301,6 +352,35 @@ function segmentArgs(offsetS: number, durationS: number | null, segmentSeconds: 
     "-segment_list", "pipe:1",
     "-segment_list_type", "csv",
     "%05d.ts",
+  ];
+}
+
+/**
+ * Numbered fragmented-MP4 segments (00000.m4s…) and the init.mp4 they share,
+ * on the copy's clock, cut at the first keyframe past every `segmentSeconds`
+ * from the first packet as segmentArgs's are. The HLS muxer, since the
+ * segment muxer can't share one init between segments; the playlist it
+ * reprints on stdout after each segment is how the engine hears of it.
+ *
+ * frag_discont keeps each fragment's decode time the copy's clock — the
+ * film's own plus COPY_CLOCK_OFFSET_S — as Jellyfin's streams have it, rather
+ * than counted from zero; negative composition offsets and no edit list keep
+ * each picture at its own time rather than shifted so the first is at zero.
+ */
+function fmp4SegmentArgs(segmentSeconds: number): string[] {
+  return [
+    "-output_ts_offset", String(COPY_CLOCK_OFFSET_S),
+    "-f", "hls",
+    "-hls_segment_type", "fmp4",
+    // Its cuts come at the first keyframe at or past each multiple of this,
+    // which a re-encode's keyframes may miss by a hair: 1/16 s early, as
+    // segmentArgs's delta.
+    "-hls_time", String(segmentSeconds - 0.0625),
+    "-hls_list_size", "3",
+    "-hls_fmp4_init_filename", "init.mp4",
+    "-hls_segment_filename", "%05d.m4s",
+    "-hls_segment_options", "movflags=+frag_discont+negative_cts_offsets:use_editlist=0",
+    "pipe:1",
   ];
 }
 
@@ -498,6 +578,14 @@ export interface EncodeRequest {
   burnFileStartS?: number | null;
   /** HEVC out: the player decodes it, and HEVC_TRANSCODE allows it. */
   hevcOk: boolean;
+  /**
+   * AV1 out, where it isn't HEVC: the player decodes AV1 on its GPU, this GPU
+   * encodes it, and the stream isn't one whose copy was held back from others
+   * (they'd be on a copy, this one on H.264 — see sync.ts seatOf).
+   */
+  av1Ok?: boolean;
+  /** VAAPI's AV1 encoder is only its low-power one (Intel's). */
+  av1LowPower?: boolean;
   hardware: Hardware;
   /** Target and peak, kbps — worked out as for a Plex re-encode: the most a
    *  re-encode is made at (sourceMatchedKbps). */
@@ -530,7 +618,8 @@ export type EncodePlan =
       audio: (SourceStream & { index: number }) | null;
       audioCopy: boolean;
       audioOut: AudioOut | null;
-      codec: "h264" | "hevc";
+      /** AV1 is made in fragmented MP4, as an AV1 copy is. */
+      codec: "h264" | "hevc" | "av1";
       hdr: string;
       /** The HDR transfer written on the output (smpte2084 or arib-std-b67);
        *  null for SDR. */
@@ -597,7 +686,7 @@ export function sourceMatchedKbps(o: {
   askedKbps: number;
   sourceKbps: number | null | undefined;
   sourceCodec: string | null | undefined;
-  outCodec: "h264" | "hevc";
+  outCodec: "h264" | "hevc" | "av1";
   sourcePixels: number;
   outPixels: number;
   outHeight: number;
@@ -644,6 +733,7 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
   // A burned subtitle's picture is drawn in H.264, 8 bits, on the CPU (see
   // encodeArgs): every player has it, and a subtitle's whites in SDR.
   const hevcOut = req.hevcOk && req.hardware !== "software" && !burn;
+  const av1Out = !!req.av1Ok && req.hardware !== "software" && !burn;
   const hdr = hdrClass(video);
   const doviOnly = hdr === "DV P5" || hdr === "DV P10.0";
   // HDR stays HDR in HEVC (FFMPEG_HDR_REENCODE=keep); otherwise it is mapped
@@ -660,7 +750,10 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
     if (doviOnly && via !== "opencl") return no(`Dolby Vision ${hdr.slice(3)} needs OpenCL tone mapping`);
     tonemap = { via, algo: req.tonemapAlgo ?? "reinhard", dovi: doviOnly };
   }
-  const codec = hevcOut && !tonemap ? "hevc" : "h264";
+  // AV1 for a player that decodes it on its GPU, whenever the picture out is
+  // SDR — as made or tone-mapped, 8 bits: about half H.264's bits for the
+  // same picture. HDR kept stays HEVC Main10.
+  const codec = av1Out && (hdr === "SDR" || tonemap) ? "av1" : hevcOut && !tonemap ? "hevc" : "h264";
   const audio = pickAudio(src, req.audioStreamId);
   if (audio === false) return no(`no audio track ${req.audioStreamId}`);
   const [w, h] = encodeFrame(
@@ -697,7 +790,7 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
     askedKbps: req.kbps,
     sourceKbps: kbps < req.kbps ? sourceKbps : null,
     preset: presetFor(req.hardware, req.preset),
-    lowPower: req.hardware === "vaapi" && !!req.lowPower,
+    lowPower: req.hardware === "vaapi" && !!(codec === "av1" ? req.av1LowPower : req.lowPower),
   };
 }
 
@@ -834,7 +927,8 @@ export function encodeArgs(
 
   const peak = Math.max(plan.peakKbps, plan.kbps + 1);
   const rate = ["-b:v", `${plan.kbps}k`, "-maxrate", `${peak}k`, "-bufsize", `${peak * 2}k`];
-  const profile = ["-profile:v", plan.codec === "hevc" ? "main10" : "high"];
+  // AV1 is Main, which its encoders choose for 8 bits; NVENC's has no profile to name.
+  const profile = plan.codec === "av1" ? [] : ["-profile:v", plan.codec === "hevc" ? "main10" : "high"];
   const encoder = hw === "qsv"
     ? ["-c:v", `${plan.codec}_qsv`, "-low_power", "1", ...profile, "-preset", plan.preset ?? "medium", ...rate, "-forced_idr", "1"]
     : hw === "vaapi"
@@ -882,6 +976,8 @@ export function encodeArgs(
     // Audio piles up while the GPU encoder starts; ffmpeg's default queue is
     // too short for that.
     "-max_muxing_queue_size", "4096",
-    ...segmentArgs(offsetS, toS ?? durationS, ENCODE_SEGMENT_S),
+    ...(plan.codec === "av1"
+      ? fmp4SegmentArgs(ENCODE_SEGMENT_S)
+      : segmentArgs(offsetS, toS ?? durationS, ENCODE_SEGMENT_S)),
   ];
 }

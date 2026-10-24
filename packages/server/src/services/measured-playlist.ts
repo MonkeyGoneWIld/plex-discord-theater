@@ -21,6 +21,8 @@ export interface MeasuredSegment {
   audioStart: number | null;
   /** Its size: part of its URL, which mustn't change between reloads. */
   bytes: number;
+  /** The init segment it needs, as fragmented MP4: null or absent for MPEG-TS. */
+  init?: { path: string; bytes: number } | null;
 }
 
 /**
@@ -61,13 +63,24 @@ export function measuredPlaylist(o: {
   const list = o.segments.slice(0, o.published);
   const first = list[0] ?? o.segments[0];
   const lines: string[] = [];
+  // Fragmented MP4: each segment's init segment, named before the first that
+  // needs it — the gaps included — and again wherever it changes (what a run
+  // started mid-film made of the stretch before it has its own).
+  const fmp4 = !!first?.init;
+  let mapped: string | null = null;
+  const map = (init: MeasuredSegment["init"]) => {
+    if (!init || init.path === mapped) return;
+    mapped = init.path;
+    lines.push(`#EXT-X-MAP:URI="${o.urlFor(init.path, init.bytes)}"`);
+  };
+  map(first?.init);
 
   // Up to the first segment: gaps, in steps the target duration can cover.
   const fillTo = first ? round3(Math.max(0, first.start)) : 0;
   let filled = 0;
   while (fillTo - filled > 0.0005) {
     const step = round3(Math.min(FILLER_STEP_S, fillTo - filled));
-    lines.push(`#EXTINF:${step.toFixed(3)},`, "#EXT-X-GAP", "gap.ts");
+    lines.push(`#EXTINF:${step.toFixed(3)},`, "#EXT-X-GAP", fmp4 ? "gap.m4s" : "gap.ts");
     filled = round3(filled + step);
   }
 
@@ -79,13 +92,15 @@ export function measuredPlaylist(o: {
     const next = o.segments[i + 1];
     const duration = round3((next ? round3(next.start) : round3(seg.end)) - round3(seg.start));
     longest = Math.max(longest, duration);
+    map(seg.init);
     lines.push(`#EXTINF:${duration.toFixed(3)},`, o.urlFor(seg.path, seg.bytes));
   }
   const targetDuration = Math.max(o.targetDuration, Math.ceil(longest));
 
   const head = [
     "#EXTM3U",
-    "#EXT-X-VERSION:3",
+    // EXT-X-MAP in a playlist that isn't I-frames only is version 6's.
+    fmp4 ? "#EXT-X-VERSION:7" : "#EXT-X-VERSION:3",
     "#EXT-X-PLAYLIST-TYPE:EVENT",
     `#EXT-X-TARGETDURATION:${targetDuration}`,
     "#EXT-X-MEDIA-SEQUENCE:0",

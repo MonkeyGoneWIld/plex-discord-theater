@@ -5,8 +5,10 @@
  * Each stream (a session id, which the room and its players share) has one
  * run at a time: one ffmpeg, started where the player asked — the start, or a
  * seek's `?offset=` — writing numbered MPEG-TS segments into a folder of its
- * own and announcing each one on stdout when it is complete. Every segment is
- * measured as it arrives (ts-timestamps.ts) and listed at its true length, in
+ * own and announcing each one on stdout when it is complete; or fragmented
+ * MP4 ones and the init segment they share, for AV1 and for Opus or FLAC kept
+ * as they are (plan.ts). Every segment is measured as it arrives
+ * (ts-timestamps.ts, mp4-timestamps.ts) and listed at its true length, in
  * film time, in an EVENT playlist the same shape as a Plex copy's
  * (measured-playlist.ts) — so the player, its seeks and its pop-outs treat the
  * two the same. A seek past what is listed restarts the run there, as it does
@@ -41,6 +43,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { firstKeyframe, videoSpan } from "../ts-timestamps.js";
+import { initTracks, mp4Span, type Mp4Track } from "../mp4-timestamps.js";
 import { directStreamCacheDir, type CopiedSegment } from "../direct-stream.js";
 import { measuredPlaylist, round3, type MeasuredSegment } from "../measured-playlist.js";
 import { logEvent } from "../logger.js";
@@ -98,8 +101,17 @@ try {
   // Not there.
 }
 
+/** An fMP4 run's init segment (init.mp4): served at `path`, and its tracks. */
+interface Init {
+  path: string;
+  file: string;
+  bytes: number;
+  tracks: Mp4Track[];
+}
+
 interface Segment extends MeasuredSegment {
   file: string;
+  init: Init | null;
 }
 
 /**
@@ -115,6 +127,10 @@ interface Before {
   /** Where it stops, film time: where the run's picture starts. */
   toS: number;
   segments: Segment[];
+  /** Its own init segment, as fMP4; listed as "binit.mp4". */
+  init: Init | null;
+  /** The segments ffmpeg has announced, as fMP4 (announced). */
+  seen: Set<string>;
   /** Its segments' clock minus film time, fixed by the first. */
   clockOffset: number | null;
   ended: boolean;
@@ -136,6 +152,12 @@ interface Run {
   codec: string;
   /** A re-encode, not a copy: holds one of FFMPEG_MAX_ENCODES. */
   encode: boolean;
+  /** Segments in fragmented MP4 (plan.ts fmp4SegmentArgs), not MPEG-TS. */
+  fmp4: boolean;
+  /** Its init segment, once ffmpeg has written it. */
+  init: Init | null;
+  /** The segments ffmpeg has announced, as fMP4 (announced). */
+  seen: Set<string>;
   /** What one viewer downloads of it as planned, kbps, when known — see ffmpegBandwidth. */
   targetKbps: number | null;
   /** Without one, the average of the first of it made, worked out once — see ffmpegBandwidth. */
@@ -324,6 +346,49 @@ function fail(run: Run, why: string): void {
   notify(run);
 }
 
+/**
+ * The segment a line of ffmpeg's stdout announces, if any: the segment
+ * muxer's list has one line per segment ("00004.ts,16.0,20.0"); the HLS
+ * muxer, for fMP4, reprints its playlist after each, the newest last, so a
+ * name not seen before is a new segment.
+ */
+function announced(line: string, fmp4: boolean, seen: Set<string>): string | null {
+  const text = line.trim();
+  if (!fmp4) return text.split(",")[0]?.trim() || null;
+  if (!/^\d+\.m4s$/.test(text) || seen.has(text)) return null;
+  seen.add(text);
+  return text;
+}
+
+/** An fMP4 run's init segment from its folder, served as `servedAs`; null
+ *  until ffmpeg has written one that can be read. */
+async function readInit(dir: string, servedAs: string): Promise<Init | null> {
+  const file = path.join(dir, "init.mp4");
+  try {
+    const data = await fs.promises.readFile(file);
+    const tracks = initTracks(data);
+    return tracks ? { path: servedAs, file, bytes: data.length, tracks } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where a segment's picture and sound start and end, on its own clock: from
+ * its packets for MPEG-TS, and from its boxes and its run's init for fMP4,
+ * where hls.js lines a segment up by the earliest decode time of its tracks
+ * rather than by presentation times (mp4-timestamps.ts) — which is where it
+ * is listed.
+ */
+function spanOf(data: Buffer, init: Init | null): { start: number; end: number; audioStart: number | null; listFrom: number | null } | null {
+  if (!init) {
+    const span = videoSpan(data);
+    return span ? { ...span, listFrom: null } : null;
+  }
+  const span = mp4Span(init.tracks, data);
+  return span ? { ...span, listFrom: span.alignStart } : null;
+}
+
 /** One segment ffmpeg has finished: measured, and listed. */
 async function measure(run: Run, name: string): Promise<void> {
   if (run.stopped || run.failed) return;
@@ -334,7 +399,14 @@ async function measure(run: Run, name: string): Promise<void> {
   } catch {
     return;
   }
-  const span = videoSpan(data);
+  if (run.fmp4 && !run.init) {
+    run.init = await readInit(run.dir, `${run.baseDir}init.mp4`);
+    if (!run.init) {
+      fail(run, "ffmpeg wrote no init segment that can be read");
+      return;
+    }
+  }
+  const span = spanOf(data, run.init);
   if (!span) {
     logEvent("FFmpeg", "a segment had no video in it", { session: short(run.sessionId), segment: name, bytes: data.length });
     return;
@@ -355,8 +427,10 @@ async function measure(run: Run, name: string): Promise<void> {
     });
     if (run.encode && run.proc?.pid) run.gpuAtStart = sampleGpu(run.proc.pid);
     // A plain I-frame where a copy opens: an open-GOP Blu-ray, which browsers
-    // can't start from (keyframes.ts). Plex's engine handles those.
-    if (!run.encode && run.codec === "h264" && firstKeyframe(data) === "not-idr" && !run.handedOut) {
+    // can't start from (keyframes.ts). Plex's engine handles those. Read from
+    // MPEG-TS only: an fMP4 copy of H.264 (its Opus or FLAC kept) relies on
+    // the file's own check before the start (keyframes.ts).
+    if (!run.encode && !run.fmp4 && run.codec === "h264" && firstKeyframe(data) === "not-idr" && !run.handedOut) {
       fail(run, "its keyframes aren't IDR frames (open GOP)");
       return;
     }
@@ -366,11 +440,13 @@ async function measure(run: Run, name: string): Promise<void> {
   const seg: Segment = {
     path: `${run.baseDir}${path.basename(name)}`,
     file,
-    start: audioStart === null ? videoStart : Math.min(videoStart, audioStart),
+    start: span.listFrom !== null ? span.listFrom - run.clockOffset
+      : audioStart === null ? videoStart : Math.min(videoStart, audioStart),
     end: span.end - run.clockOffset,
     videoStart,
     audioStart,
     bytes: data.length,
+    init: run.init,
   };
   run.segments.push(seg);
   run.byPath.set(seg.path, seg);
@@ -445,9 +521,9 @@ function startBefore(run: Run): void {
     if (busy >= maxEncodes()) return;
   }
   const b: Before = {
-    proc: null, dir: path.join(run.dir, "before"), toS: first.videoStart, segments: [], clockOffset: null,
-    ended: false, failed: null, stopped: false, yielding: 0, queue: Promise.resolve(), stdoutRest: "", stderrTail: [],
-    startedAt: Date.now(),
+    proc: null, dir: path.join(run.dir, "before"), toS: first.videoStart, segments: [], init: null, seen: new Set(),
+    clockOffset: null, ended: false, failed: null, stopped: false, yielding: 0, queue: Promise.resolve(), stdoutRest: "",
+    stderrTail: [], startedAt: Date.now(),
   };
   run.before = b;
   const said = { session: short(run.sessionId), ratingKey: run.ratingKey, encode: run.encode, toS: round3(b.toS) };
@@ -464,7 +540,7 @@ function startBefore(run: Run): void {
     const lines = (b.stdoutRest + d.toString()).split("\n");
     b.stdoutRest = lines.pop() ?? "";
     for (const line of lines) {
-      const name = line.split(",")[0]?.trim();
+      const name = announced(line, run.fmp4, b.seen);
       if (name) b.queue = b.queue.then(() => measureBefore(run, b, name));
     }
   });
@@ -504,7 +580,14 @@ async function measureBefore(run: Run, b: Before, name: string): Promise<void> {
   } catch {
     return;
   }
-  const span = videoSpan(data);
+  if (run.fmp4 && !b.init) {
+    b.init = await readInit(b.dir, `${run.baseDir}binit.mp4`);
+    if (!b.init) {
+      b.failed = "ffmpeg wrote no init segment that can be read";
+      return;
+    }
+  }
+  const span = spanOf(data, b.init);
   if (!span) return;
   // From the start of the film, on the run's clock (measure).
   if (b.clockOffset === null) {
@@ -518,11 +601,13 @@ async function measureBefore(run: Run, b: Before, name: string): Promise<void> {
   b.segments.push({
     path: `${run.baseDir}b${path.basename(name)}`,
     file,
-    start: audioStart === null ? videoStart : Math.min(videoStart, audioStart),
+    start: span.listFrom !== null ? span.listFrom - b.clockOffset
+      : audioStart === null ? videoStart : Math.min(videoStart, audioStart),
     end: span.end - b.clockOffset,
     videoStart,
     audioStart,
     bytes: data.length,
+    init: b.init,
   });
 }
 
@@ -582,11 +667,14 @@ function rekey(run: Run, offsetS: number): string {
     run.segments[0].start = run.segments[0].videoStart;
     run.segments = [...b!.segments, ...run.segments];
   }
-  const moved = (seg: Segment) => {
+  const moved = (seg: { path: string }) => {
     seg.path = baseDir + seg.path.slice(seg.path.lastIndexOf("/") + 1);
   };
   run.segments.forEach(moved);
   b?.segments.forEach(moved);
+  // The init segments their segments share, once each.
+  if (run.init) moved(run.init);
+  if (b?.init) moved(b.init);
   run.byPath = new Map(run.segments.map((seg) => [seg.path, seg]));
   runs.delete(run.key);
   retired.set(run.key, Date.now());
@@ -619,6 +707,8 @@ export async function startFfmpegRun(o: {
   ratingKey: string;
   codec: string;
   encode?: boolean;
+  /** Its arguments make fragmented MP4 (plan.ts fmp4SegmentArgs), not MPEG-TS. */
+  fmp4?: boolean;
   /** A copy's: the file's average. A re-encode's: its video target and its sound. */
   targetKbps?: number | null;
   offsetS: number;
@@ -643,6 +733,7 @@ export async function startFfmpegRun(o: {
   }
   const run: Run = {
     key, sessionId: o.sessionId, ratingKey: o.ratingKey, codec: o.codec, encode: !!o.encode,
+    fmp4: !!o.fmp4, init: null, seen: new Set(),
     targetKbps: o.targetKbps && o.targetKbps > 0 ? o.targetKbps : null, averageKbps: null, dir,
     baseDir: `/video/:/transcode/universal/session/${key}/base/`,
     fromStart: o.fromStart ?? null, same, before: null,
@@ -669,7 +760,7 @@ export async function startFfmpegRun(o: {
     const lines = text.split("\n");
     run.stdoutRest = lines.pop() ?? "";
     for (const line of lines) {
-      const name = line.split(",")[0]?.trim();
+      const name = announced(line, run.fmp4, run.seen);
       if (name) run.queue = run.queue.then(() => measure(run, name));
     }
   });
@@ -810,8 +901,11 @@ export async function ffmpegPlaylist(
 /** A run's segment, from its folder: "gone" once the run has let it go. */
 export function ffmpegSegment(key: string, segPath: string): CopiedSegment | "gone" | null {
   const run = runs.get(key);
-  const seg = run?.byPath.get(segPath);
-  if (!run || !seg) return null;
+  if (!run) return null;
+  // An fMP4 run's init segment, or its Before's.
+  const init = [run.init, run.before?.init].find((i) => i?.path === segPath);
+  const seg: { file: string; bytes: number } | undefined = init ?? run.byPath.get(segPath);
+  if (!seg) return null;
   run.lastAlive = Date.now();
   // In memory while rooms are on it (hot-segments.ts); its file otherwise.
   const kept = hotSegment(seg.file);

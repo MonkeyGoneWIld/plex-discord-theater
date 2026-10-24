@@ -150,6 +150,17 @@ fs.writeFileSync(path.join(SIDECAR_DIR, "Sidecar Film (2001).en.srt"), SRT);
 fs.writeFileSync(path.join(SIDECAR_DIR, "Sidecar Film (2001).fr.srt"), "1\n00:00:01,000 --> 00:00:02,000\nBonjour\n");
 const BROKEN_FILM = path.join(tmp, "broken.mkv");
 fs.writeFileSync(BROKEN_FILM, Buffer.alloc(200_000, 7));
+/** AV1 with Opus, a keyframe every 2 s: copied only in fragmented MP4. By
+ *  the engine's ffmpeg, which has an AV1 encoder where the one on PATH may not. */
+const AV1_FILM = path.join(tmp, "av1.mkv");
+{
+  const r = spawnSync(process.env.FFMPEG_PATH || "ffmpeg", ["-hide_banner", "-v", "error", "-y",
+    "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+    "-t", "60", "-map", "0:v", "-map", "1:a", "-c:v", "libsvtav1", "-preset", "12", "-g", "48", "-pix_fmt", "yuv420p",
+    "-c:a", "libopus", "-b:a", "96k", AV1_FILM]);
+  if (r.status !== 0) throw new Error(`couldn't make av1.mkv: ${r.stderr}`);
+}
+const FLAC_FILM = film("flac.mkv", ["-c:a", "flac", "-ac", "2"]);
 
 // ── Plex ─────────────────────────────────────────────────────────
 
@@ -203,6 +214,8 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
     { id: 62, streamType: 3, index: 3, codec: "ass", language: "Japanese", languageCode: "jpn" },
   ] },
   16: { file: LATE_SOUND_FILM, plexPath: LATE_SOUND_FILM, codec: "h264", width: 640, height: 360, audio: "ac3", channels: 6 },
+  17: { file: AV1_FILM, plexPath: AV1_FILM, codec: "av1", width: 640, height: 360, audio: "opus", channels: 2 },
+  18: { file: FLAC_FILM, plexPath: FLAC_FILM, codec: "h264", width: 640, height: 360, audio: "flac", channels: 2 },
 };
 
 const asked: string[] = [];
@@ -503,6 +516,70 @@ console.log("\n— audio that isn't AAC —");
   const at = videoSpan(Buffer.from(await (await fetch(origin + opening.uri)).arrayBuffer()))!;
   check("from a seek that lands a keyframe early, the first segment has sound from its picture on",
     [Math.round((at.start - 10) * 10) / 10, at.audioStart !== null && Math.abs(at.audioStart - at.start) < 0.5], [28, true]);
+}
+
+console.log("\n— AV1 and Opus, and FLAC, copied in fragmented MP4 for a player that decodes them —");
+{
+  const { initTracks, mp4Span } = await import("../src/services/mp4-timestamps.js");
+  const none = { hevc: false, av1: false, opus: false, flac: false, av1Encode: false };
+  plexRoutes.capsForTests({ ...none, av1: true, opus: true, flac: true });
+  const mapOf = (playlist: string) => playlist.match(/^#EXT-X-MAP:URI="([^"]+)"/m)?.[1] ?? null;
+  const copied = async (ratingKey: string) => {
+    const sid = crypto.randomUUID();
+    asked.length = 0;
+    const m = await master(ratingKey, sid);
+    const variant = variantOf(m.text);
+    let playlist = "";
+    for (let i = 0; i < 40 && entries(playlist).length === 0; i++) {
+      playlist = await (await fetch(origin + variant)).text();
+      if (entries(playlist).length === 0) await sleep(250);
+    }
+    return { sid, notes: notesOf(m.text), playlist };
+  };
+
+  const av1 = await copied("17");
+  check("AV1 with Opus is copied by ffmpeg, both as they are", [av1.notes.engine, av1.notes.video, av1.notes.audio],
+    ["ffmpeg", "copy", "copy"]);
+  check("and Plex was never asked to transcode", transcodeAsked(), []);
+  check("the stream says it needs AV1 and Opus", plexRoutes.sessionNeeds(av1.sid), ["av1", "opus"]);
+  check("its playlist is version 7, with an init segment",
+    [av1.playlist.includes("#EXT-X-VERSION:7"), !!mapOf(av1.playlist)], [true, true]);
+  const list = entries(av1.playlist);
+  check("and fMP4 segments, their sizes in their URLs", list.length > 0 && list.every((e) => /\.m4s/.test(decodeURIComponent(e.uri)) && /&n=\d+$/.test(e.uri)), true);
+  const initRes = await fetch(origin + mapOf(av1.playlist)!);
+  const init = Buffer.from(await initRes.arrayBuffer());
+  check("the init is served as MP4, all of it",
+    [initRes.status, initRes.headers.get("content-type"), init.subarray(4, 8).toString("latin1"), init.length],
+    [200, "video/mp4", "ftyp", Number(mapOf(av1.playlist)!.match(/&n=(\d+)$/)![1])]);
+  const segRes = await fetch(origin + list[0].uri);
+  const seg = Buffer.from(await segRes.arrayBuffer());
+  check("a segment as MP4, kept by caches like a .ts", [segRes.headers.get("content-type"), segRes.headers.get("cache-control")],
+    ["video/mp4", "public, max-age=300, immutable"]);
+  const span = mp4Span(initTracks(init), seg);
+  check("its timestamps the film's own plus Plex's 10 s: it opens at 10, with sound",
+    [!!span && Math.abs(span.start - 10) < 0.1, span?.audioStart !== null && span?.audioStart !== undefined], [true, true]);
+  const whole = path.join(tmp, "av1-first.mp4");
+  fs.writeFileSync(whole, Buffer.concat([init, seg]));
+  const codecs = spawnSync(process.env.FFPROBE_PATH || "ffprobe", ["-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0", whole],
+    { encoding: "utf8" }).stdout.trim().split(/\s+/);
+  check("AV1 and Opus in it, as a browser's MSE takes them", codecs, ["av1", "opus"]);
+  await fetch(`${origin}/api/plex/hls/session/${av1.sid}?reason=test`, { method: "DELETE" });
+
+  const flac = await copied("18");
+  check("H.264 with FLAC: both copied, FLAC needed", [flac.notes.video, flac.notes.audio, plexRoutes.sessionNeeds(flac.sid)],
+    ["copy", "copy", ["flac"]]);
+  check("in fMP4 too", [!!mapOf(flac.playlist), entries(flac.playlist).every((e) => /\.m4s/.test(decodeURIComponent(e.uri)))],
+    [true, true]);
+  await fetch(`${origin}/api/plex/hls/session/${flac.sid}?reason=test`, { method: "DELETE" });
+
+  plexRoutes.capsForTests({ ...none, flac: true });
+  const held = await copied("17");
+  check("for a player that decodes neither, AV1 is re-encoded and Opus made AAC, in MPEG-TS",
+    [held.notes.video, held.notes.audio, !!mapOf(held.playlist)], ["transcode", "transcode", false]);
+  check("what it couldn't have said, so whoever can is given the copy",
+    [plexRoutes.sessionWithheld(held.sid), plexRoutes.sessionNeeds(held.sid)], [["av1", "opus"], []]);
+  await fetch(`${origin}/api/plex/hls/session/${held.sid}?reason=test`, { method: "DELETE" });
+  plexRoutes.capsForTests(none);
 }
 
 console.log("\n— a file that isn't mounted here —");

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { getSessionToken } from "../lib/api";
-import { canPlayHevcTranscode } from "../lib/hevc";
+import { playerCaps, type Cap } from "../lib/codecs";
 import { preferredQuality } from "../lib/quality";
 
 const MAX_RECONNECT_ATTEMPTS = 20;
@@ -384,9 +384,9 @@ export interface SyncActions {
   /** Move onto whatever the host is watching, whatever its tracks are. Used by
    *  the offer shown when this client's own stream can't keep up. */
   sendRejoinHost: () => void;
-  /** Withdraw the HEVC support reported on joining, after an HEVC stream
-   *  failed to decode here. The room's streams move back to H.264. */
-  sendHevcUnsupported: () => void;
+  /** Withdraw codecs reported on joining (lib/codecs), after a stream that
+   *  used them failed to decode here: this player moves onto one without. */
+  sendCodecsUnsupported: (caps: Cap[]) => void;
   /** Co-host: ask the host to advance to the next item. */
   sendPlayItem: (ratingKey: string) => void;
   /**
@@ -666,7 +666,8 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       sendVariantSession: (hlsSessionId: string, sessionOffset: number) =>
         send({ type: "variant-session", hlsSessionId, sessionOffset }),
       sendRejoinHost: () => send({ type: "rejoin-host" }),
-      sendHevcUnsupported: () => send({ type: "caps", hevc: false }),
+      sendCodecsUnsupported: (caps: Cap[]) =>
+        send({ type: "caps", ...Object.fromEntries(caps.map((cap) => [cap, false])) }),
       sendPlayItem: (ratingKey: string) => send({ type: "play-item", ratingKey }),
       sendWatching: (value: boolean) => send({ type: "watching", value }),
       retryConnection: () => {
@@ -702,8 +703,9 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             instanceId,
             userId,
             username: usernameRef.current,
-            // Whether this player may be sent HEVC — see mayStartHevc.
-            hevc: canPlayHevcTranscode(),
+            // What this player may be sent beyond H.264 and AAC — see the
+            // server's mayStart: hevc, av1, opus, flac and av1Encode.
+            ...playerCaps(),
           }),
         );
         if (loadingRef.current) ws.send(JSON.stringify({ type: "loading", value: true }));

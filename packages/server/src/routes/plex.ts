@@ -23,7 +23,7 @@ import { isTvdbConfigured, tvdbSeasonEpisodes } from "../services/tvdb.js";
 import * as thumbCache from "../services/thumb-cache.js";
 import { logEvent } from "../services/logger.js";
 import { fileKeyframes } from "../services/keyframes.js";
-import { sessionHostUserId, sessionHasOtherWatchers, mayStartHevc, mayStartTranscode, roomPositionForSession, streamsDrivenBy } from "../services/sync.js";
+import { sessionHostUserId, sessionHasOtherWatchers, mayStart, mayStartTranscode, roomPositionForSession, streamsDrivenBy } from "../services/sync.js";
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
 import { parseSubtitles, type Cue } from "../services/subtitles.js";
@@ -52,12 +52,12 @@ import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
 import { markOriginalAudio } from "../services/original-language.js";
 import { audioNotes, type AudioDecision, type SourceAudio } from "../services/stream-audio.js";
 import {
-  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegHardware, ffmpegPgsOn, ffmpegPreviewsOn, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesHevc, hwDevice,
-  keepHdrOnReencode, localPath, lowPowerVaapi, maxEncodes, readable, recheckHardware, sizeOnDisk, tonemapAlgo, tonemapper,
+  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegHardware, ffmpegPgsOn, ffmpegPreviewsOn, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesAv1, gpuEncodesHevc, hwDevice,
+  keepHdrOnReencode, localPath, lowPowerVaapi, lowPowerVaapiAv1, maxEncodes, readable, recheckHardware, sizeOnDisk, tonemapAlgo, tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
-  AUDIO_KBPS, HARDWARE_NAMES, copyArgs, encodeArgs, encodeTargetKbps, hdrClass, inputArgs, pickBurn, planCopy, planEncode,
-  type AudioOut, type EncodeRequest, type SourceStream, type SourceVersion,
+  AUDIO_KBPS, HARDWARE_NAMES, NO_CAPS, copyArgs, copyNeeds, encodeArgs, encodeTargetKbps, hdrClass, inputArgs, pickBurn,
+  planCopy, planEncode, type AudioOut, type EncodeRequest, type PlayerCap, type PlayerCaps, type SourceStream, type SourceVersion,
 } from "../services/ffmpeg/plan.js";
 import { probe, probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
 import { prepareBurn, sidecarOnMount } from "../services/ffmpeg/burn-files.js";
@@ -161,6 +161,9 @@ const VIDEO_PEAK_BITRATE_KBPS = envInt(
  * H.264 — see mayStartHevc.
  */
 const HEVC_TRANSCODE = process.env.HEVC_TRANSCODE !== "0";
+/** AV1_TRANSCODE=0: the ffmpeg engine's re-encodes are never AV1, even for a
+ *  player that decodes it on its GPU and a GPU that encodes it. */
+const AV1_TRANSCODE = process.env.AV1_TRANSCODE !== "0";
 
 /**
  * Let Plex copy the video instead of re-encoding it, whenever everyone in the
@@ -3885,25 +3888,57 @@ export function recordSessionVideoCodec(sessionId: string, codec: string): void 
 /** Whether this session's video is (or may be) HEVC. */
 export function isHevcSession(sessionId: string): boolean {
   const codec = sessionVideoCodec.get(sessionId);
-  return codec !== undefined && codec !== "h264";
+  return codec !== undefined && codec !== "h264" && codec !== "av1";
+}
+
+/** What an ffmpeg session's sound needs: Opus or FLAC, copied as it is. */
+const sessionAudioNeeds = new Map<string, PlayerCap[]>();
+
+export function recordSessionAudioNeeds(sessionId: string, needs: PlayerCap[]): void {
+  if (needs.length) sessionAudioNeeds.set(sessionId, needs);
+  else sessionAudioNeeds.delete(sessionId);
 }
 
 /**
- * Sessions re-encoded only because whoever started them can't play HEVC: an
- * HEVC file nothing else stopped from being copied. Anyone on such a stream
- * who can play HEVC is better off on a copy of their own — see the sync
+ * What this session's stream needs its players to decode beyond H.264 and AAC
+ * in MPEG-TS (PlayerCaps): HEVC or AV1 by its picture, Opus or FLAC by its
+ * sound. Whoever on it can't is put on a stream of their own — see the sync
  * server's seatOf.
  */
-const hevcWithheld = new Set<string>();
+export function sessionNeeds(sessionId: string): PlayerCap[] {
+  const needs: PlayerCap[] = [];
+  if (isHevcSession(sessionId)) needs.push("hevc");
+  if (sessionVideoCodec.get(sessionId) === "av1") needs.push("av1");
+  return [...needs, ...(sessionAudioNeeds.get(sessionId) ?? [])];
+}
+
+/**
+ * Sessions re-encoded only because whoever started them can't decode the
+ * file as it is — an HEVC or AV1 picture nothing else stopped from being
+ * copied, Opus or FLAC sound made AAC — and what for. Anyone on such a stream
+ * who decodes that is better off on a copy of their own — see the sync
+ * server's seatOf.
+ */
+const withheldFor = new Map<string, PlayerCap[]>();
+
+/** What this session was re-encoded for want of; empty when it wasn't. */
+export function sessionWithheld(sessionId: string): PlayerCap[] {
+  return withheldFor.get(sessionId) ?? [];
+}
 
 export function isHevcWithheldSession(sessionId: string): boolean {
-  return hevcWithheld.has(sessionId);
+  return sessionWithheld(sessionId).includes("hevc");
+}
+
+/** Say what a session was re-encoded only for want of — at its start. */
+export function recordWithheld(sessionId: string, caps: PlayerCap[]): void {
+  if (caps.length) withheldFor.set(sessionId, caps);
+  else withheldFor.delete(sessionId);
 }
 
 /** Say whether a session was re-encoded only for want of HEVC — at its start. */
 export function recordHevcWithheld(sessionId: string, withheld = true): void {
-  if (withheld) hevcWithheld.add(sessionId);
-  else hevcWithheld.delete(sessionId);
+  recordWithheld(sessionId, withheld ? ["hevc"] : []);
 }
 
 /** Look up the ratingKey for one of our session UUIDs. */
@@ -4026,7 +4061,8 @@ export function markTranscodeStopped(sessionId: string): void {
   sessionRatingKeys.delete(sessionId);
   sessionMediaIndex.delete(sessionId);
   sessionVideoCodec.delete(sessionId);
-  hevcWithheld.delete(sessionId);
+  sessionAudioNeeds.delete(sessionId);
+  withheldFor.delete(sessionId);
   manifestCache.delete(sessionId);
   hostPingInfo.delete(sessionId);
   // DIAGNOSTIC: should trend back toward 0 between watch sessions.
@@ -4840,7 +4876,8 @@ async function startWithFfmpeg(o: {
   mediaIndex: number;
   offsetS: number;
   audioStreamID: number | null;
-  roomHevc: boolean;
+  /** What the driver's player decodes beyond H.264 and AAC (sync.ts mayStart). */
+  caps: PlayerCaps & { av1Encode: boolean };
   quality: number;
   fileKbps: number | null;
   audioTracks: SourceAudio[];
@@ -4911,11 +4948,22 @@ async function startWithFfmpeg(o: {
   };
 
   const durationS = source.durationS ?? null;
-  const copyPlan = o.copy
-    ? planCopy(source, { audioStreamId: o.audioStreamID || null, hevcOk: o.roomHevc, audioChannels: audioChannels() })
-    : null;
+  const copyAsk = {
+    audioStreamId: o.audioStreamID || null, hevcOk: o.caps.hevc, av1Ok: o.caps.av1, opusOk: o.caps.opus,
+    flacOk: o.caps.flac, audioChannels: audioChannels(),
+  };
+  const copyPlan = o.copy ? planCopy(source, copyAsk) : null;
+  // What only the driver's player kept from being copied — an AV1 or HEVC
+  // picture re-encoded, Opus or FLAC made AAC: whoever on the stream decodes
+  // it has a copy of their own (sessionWithheld, sync.ts seatOf).
+  if (copyPlan) {
+    const full = planCopy(source, { ...copyAsk, hevcOk: true, av1Ok: true, opusOk: true, flacOk: true });
+    const got = copyPlan.ok ? copyNeeds(copyPlan) : [];
+    const lost = full.ok ? copyNeeds(full).filter((c) => !got.includes(c) && !o.caps[c]) : [];
+    if (lost.length) recordWithheld(o.sessionId, [...new Set<PlayerCap>([...sessionWithheld(o.sessionId), ...lost])]);
+  }
   let video: {
-    codec: "h264" | "hevc"; width: number; height: number; audio: SourceStream | null; audioCopy: boolean;
+    codec: "h264" | "hevc" | "av1"; width: number; height: number; audio: SourceStream | null; audioCopy: boolean;
     audioOut: AudioOut | null; kbps: number | null;
   };
   let key: string;
@@ -4931,6 +4979,7 @@ async function startWithFfmpeg(o: {
       sessionId: o.sessionId,
       ratingKey: o.ratingKey,
       codec: copyPlan.codec,
+      fmp4: copyPlan.fmp4,
       targetKbps: o.fileKbps,
       offsetS: o.offsetS,
       args: copyArgs(copyPlan, input, o.offsetS, durationS),
@@ -4944,6 +4993,7 @@ async function startWithFfmpeg(o: {
     logEvent("FFmpeg", "copying", {
       session, ratingKey: o.ratingKey, fromS: o.offsetS, video: copyPlan.codec, hdr: copyPlan.hdr,
       audio: audioText(copyPlan),
+      segments: copyPlan.fmp4 ? "fMP4" : "MPEG-TS",
       source: fromMount ? "mount" : "plex",
     });
   } else {
@@ -4990,6 +5040,10 @@ async function startWithFfmpeg(o: {
     }
     const ask: EncodeRequest = {
       audioStreamId: o.audioStreamID || null, hevcOk: o.hevcEncode && gpuEncodesHevc(), hardware,
+      // Not for a stream whose copy was held back: that one is H.264 and AAC,
+      // everyone else who can on a copy (sync.ts seatOf).
+      av1Ok: AV1_TRANSCODE && o.caps.av1Encode && gpuEncodesAv1() && sessionWithheld(o.sessionId).length === 0,
+      av1LowPower: lowPowerVaapiAv1(),
       kbps: o.transcodeKbps, peakKbps: o.peakKbps, maxWidth, maxHeight, keepHdr: keepHdrOnReencode(),
       tonemapper: tonemapper(), tonemapAlgo: tonemapAlgo(), burn: o.burnSubtitleId ?? null,
       audioChannels: audioChannels(), preset: encodePreset(), lowPower: lowPowerVaapi(),
@@ -5000,24 +5054,31 @@ async function startWithFfmpeg(o: {
     const differ = await tracksDiffer([plan.video, plan.audio, plan.burn?.kind === "picture" ? plan.burn.sub : null]);
     if (differ) return toPlex(`tracks differ from Plex's: ${differ}`, "the file's tracks aren't Plex's", { why: differ });
     const fromStart = (p: typeof plan) => p.ok ? (toS: number) => encodeArgs(p, input, 0, durationS, hwDevice(), toS) : undefined;
-    let started = await startFfmpegRun({
-      sessionId: o.sessionId, ratingKey: o.ratingKey, codec: plan.codec, encode: true,
-      targetKbps: encodeTargetKbps(plan), offsetS: o.offsetS,
-      args: encodeArgs(plan, input, o.offsetS, durationS, hwDevice()),
-      fromStart: fromStart(plan), replaces: o.replaces,
+    const run = (p: Extract<typeof plan, { ok: true }>) => startFfmpegRun({
+      sessionId: o.sessionId, ratingKey: o.ratingKey, codec: p.codec, encode: true,
+      // AV1 is made in fragmented MP4, as an AV1 copy is.
+      fmp4: p.codec === "av1",
+      targetKbps: encodeTargetKbps(p), offsetS: o.offsetS,
+      args: encodeArgs(p, input, o.offsetS, durationS, hwDevice()),
+      fromStart: fromStart(p), replaces: o.replaces,
     });
+    let started = await run(plan);
     // The GPU decodes the codec but not this file: decoded on the CPU instead.
     if (!started.ok && plan.gpuDecode) {
       logEvent("FFmpeg", "GPU decode didn't start; decoding on the CPU", { session, ratingKey: o.ratingKey, why: started.why });
       const retry = planEncode(source, { ...ask, gpuDecode: false });
       if (retry.ok) {
         plan = retry;
-        started = await startFfmpegRun({
-          sessionId: o.sessionId, ratingKey: o.ratingKey, codec: plan.codec, encode: true,
-          targetKbps: encodeTargetKbps(plan), offsetS: o.offsetS,
-          args: encodeArgs(plan, input, o.offsetS, durationS, hwDevice()),
-          fromStart: fromStart(plan), replaces: o.replaces,
-        });
+        started = await run(plan);
+      }
+    }
+    // The GPU's AV1 encoder wouldn't make this one: H.264 or HEVC, as before.
+    if (!started.ok && plan.codec === "av1") {
+      logEvent("FFmpeg", "AV1 encode didn't start; re-encoding without it", { session, ratingKey: o.ratingKey, why: started.why });
+      const retry = planEncode(source, { ...ask, av1Ok: false, gpuDecode: plan.gpuDecode ? ask.gpuDecode : false });
+      if (retry.ok) {
+        plan = retry;
+        started = await run(plan);
       }
     }
     if (!started.ok) return toPlex(`ffmpeg didn't start: ${started.why}`, "run didn't start", { why: started.why });
@@ -5046,11 +5107,14 @@ async function startWithFfmpeg(o: {
   }
 
   recordSessionVideoCodec(o.sessionId, video.codec);
+  recordSessionAudioNeeds(o.sessionId, copyPlan?.ok && reason === null
+    ? copyNeeds(copyPlan).filter((c) => c === "opus" || c === "flac")
+    : []);
   const decided: AudioDecision | null = video.audio
     ? {
         id: video.audio.id,
         decision: video.audioCopy ? "copy" : "transcode",
-        codec: "aac",
+        codec: video.audioCopy ? (video.audio.codec ?? "aac").toLowerCase() : "aac",
         channels: video.audioCopy ? video.audio.channels ?? null : video.audioOut?.channels ?? 2,
         bitrate: video.audioCopy ? null : video.audioOut?.kbps ?? AUDIO_KBPS,
       }
@@ -5107,6 +5171,13 @@ let replacedStreams: typeof streamsDrivenBy = streamsDrivenBy;
 /** For the tests, which have no room: which streams a new one replaces. */
 export function replaceStreamsForTests(streams: typeof streamsDrivenBy): void {
   replacedStreams = streams;
+}
+type StartCaps = PlayerCaps & { av1Encode: boolean };
+/** What a start may use beyond H.264 and AAC — mayStart, unless a test says otherwise. */
+let startCaps = (userId: string | null): StartCaps => userId !== null ? mayStart(userId) : { ...NO_CAPS, av1Encode: false };
+/** For the tests, which have no room: what the player starting a stream decodes. */
+export function capsForTests(caps: StartCaps): void {
+  startCaps = () => ({ ...caps });
 }
 
 router.get(
@@ -5347,6 +5418,7 @@ router.get(
       const decisionPath = "/video/:/transcode/universal/decision";
       // Whatever an earlier start of this session was, this one is decided anew.
       sessionVideoCodec.delete(sessionId);
+      sessionAudioNeeds.delete(sessionId);
       // Whether Plex is copying the video, which decides who serves it. A
       // decision that can't be read counts as copying when copying was allowed:
       // the measured playlist plays a re-encoded stream just as well, while
@@ -5574,8 +5646,10 @@ router.get(
         subtitleMode = "none";
       }
       // Decided per start, so a room that has gained someone who can't decode
-      // HEVC gets H.264 from its next transcode on.
-      const roomHevc = userId !== null && mayStartHevc(userId);
+      // HEVC gets H.264 from its next transcode on — and likewise AV1, Opus
+      // and FLAC, which only the ffmpeg engine copies.
+      const caps = startCaps(userId);
+      const roomHevc = caps.hevc;
       const version = await versionFacts(ratingKey, mediaIndex);
       const kbps = version?.bitrate ?? null;
       // A viewer's ceiling is what a re-encode of their stream is made at,
@@ -5635,7 +5709,7 @@ router.get(
         const tried = ffmpegRefused(ratingKey)
           ? { fallback: "ffmpeg failed on this title lately" }
           : await startWithFfmpeg({
-              sessionId, ratingKey, mediaIndex, offsetS: offset ? Number(offset) : 0, audioStreamID, roomHevc,
+              sessionId, ratingKey, mediaIndex, offsetS: offset ? Number(offset) : 0, audioStreamID, caps,
               burnSubtitleId: subtitleMode === "burn" && subtitleId ? subtitleId : null,
               quality, fileKbps: kbps, audioTracks: version?.audioTracks ?? [],
               authToken: req.query.token as string | undefined,
@@ -5695,7 +5769,7 @@ router.get(
  * Sub-manifests grow as the transcode progresses and must never be cached.
  */
 function setSegmentCacheHeaders(res: Response, segPath: string): void {
-  if (segPath.endsWith(".ts")) {
+  if (/\.(?:ts|m4s|mp4)$/.test(segPath)) {
     res.setHeader("Cache-Control", "public, max-age=300, immutable");
   } else if (segPath.endsWith(".m3u8")) {
     res.setHeader("Cache-Control", "no-cache");
@@ -5782,7 +5856,8 @@ async function serveMeasured(
     return;
   }
   setSegmentCacheHeaders(res, segPath);
-  res.setHeader("Content-Type", "video/MP2T");
+  // The ffmpeg engine's fragmented MP4 (an init segment, then .m4s), or MPEG-TS.
+  res.setHeader("Content-Type", /\.(?:m4s|mp4)$/.test(segPath) ? "video/mp4" : "video/MP2T");
   // One of the parts the player asked for at once. Its own URL, so a cache
   // between here and the player keeps each part apart.
   // From memory, or from disk once memory was full; a file gone from under a
@@ -6472,7 +6547,7 @@ function isAllowedProxyPath(p: string): boolean {
  * back to whoever asked.
  */
 const SEGMENT_PATH_RE =
-  /^\/video\/:\/transcode\/universal\/session\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.(?:ts|m3u8)$/i;
+  /^\/video\/:\/transcode\/universal\/session\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\.(?:ts|m4s|mp4|m3u8)$/i;
 
 const ALLOWED_THUMB_PREFIXES = ["/library/", "/photo/"];
 

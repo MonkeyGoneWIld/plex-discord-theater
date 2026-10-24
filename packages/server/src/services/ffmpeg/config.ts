@@ -164,6 +164,10 @@ let hardware: Hardware | null = null;
 let mapper: Tonemapper | null = null;
 /** The GPU encodes HEVC Main10 too, not only H.264. */
 let hevcEncodes = false;
+/** The GPU encodes AV1 too: Intel Arc and Core Ultra, NVIDIA's RTX 40, AMD's RX 7000. */
+let av1Encodes = false;
+/** VAAPI's AV1 encoder only has its low-power form (Intel's), whatever H.264's has. */
+let av1LowPower = false;
 /** VAAPI's encoder only has its low-power form: newer Intel GPUs. */
 let vaapiLowPower = false;
 /** The render node wasn't there when detectHardware last ran — see recheckHardware. */
@@ -179,6 +183,16 @@ export function hwDevice(): string {
 /** Whether re-encodes can be HEVC: a GPU that encodes HEVC Main10. */
 export function gpuEncodesHevc(): boolean {
   return ffmpegHardware() !== "software" && hevcEncodes;
+}
+
+/** Whether re-encodes can be AV1: a GPU that encodes it (8 bits is all asked). */
+export function gpuEncodesAv1(): boolean {
+  return ffmpegHardware() !== "software" && av1Encodes;
+}
+
+/** VAAPI's AV1 encoder in its low-power form (lowPower in plan.ts). */
+export function lowPowerVaapiAv1(): boolean {
+  return av1LowPower;
 }
 
 /** VAAPI with its low-power encoder (lowPower in plan.ts). */
@@ -257,7 +271,7 @@ function trial(args: string[]): Promise<{ ok: boolean; said: string }> {
 /**
  * FFMPEG_HWACCEL (auto | qsv | vaapi | nvenc | none). auto and qsv try a short
  * HEVC Main10 and H.264 encode on Intel's GPU, with Phase 0's setup, and use
- * it if both work; auto then tries VAAPI on the same render node (an AMD GPU,
+ * it if both work — and an AV1 one, for players that decode AV1 on their GPU; auto then tries VAAPI on the same render node (an AMD GPU,
  * or Intel without QSV's runtime). vaapi tries VAAPI alone: H.264, and HEVC
  * Main10 if it has it, in its full or low-power form. nvenc tries NVIDIA's
  * NVENC with CUDA's scaler. Otherwise re-encodes are H.264 on the CPU. With
@@ -268,12 +282,17 @@ function trial(args: string[]): Promise<{ ok: boolean; said: string }> {
 export async function detectHardware(): Promise<{ hardware: Hardware; note: string }> {
   // Empty is auto: the compose files leave every setting there, most empty.
   const want = (process.env.FFMPEG_HWACCEL?.trim() || "auto").toLowerCase();
-  const done = (h: Hardware, note: string, m: Tonemapper = "software", hevc = h !== "software", lowPower = false) => {
+  const done = (
+    h: Hardware, note: string, m: Tonemapper = "software", hevc = h !== "software", lowPower = false,
+    av1: boolean | "low-power" = false,
+  ) => {
     hardware = h;
     mapper = m;
     hevcEncodes = hevc;
+    av1Encodes = !!av1;
+    av1LowPower = av1 === "low-power";
     vaapiLowPower = lowPower;
-    return { hardware: h, note };
+    return { hardware: h, note: `${note}${av1 ? "; AV1 too" : ""}` };
   };
   if (["none", "software", "off", "cpu"].includes(want)) return done("software", "CPU (FFMPEG_HWACCEL=none)");
   if (!["auto", "qsv", "vaapi", "nvenc"].includes(want)) {
@@ -281,15 +300,18 @@ export async function detectHardware(): Promise<{ hardware: Hardware; note: stri
   }
   const testCard = ["-f", "lavfi", "-i", "testsrc2=s=320x240:r=24:d=1"];
   if (want === "nvenc") {
-    const nvenc = (codec: string, fmt: string, profile: string) => trial([
+    // AV1 has no profile to name: Main, which 8 bits are.
+    const nvenc = (codec: string, fmt: string, profile: string | null) => trial([
       "-hide_banner", "-nostdin", "-loglevel", "error", ...cudaInit(hwDevice()), ...testCard,
       "-vf", `format=${fmt === "p010" ? "p010le" : fmt},hwupload,scale_cuda=w=160:h=120:format=${fmt}`,
-      "-c:v", codec, "-profile:v", profile, "-f", "null", "-",
+      "-c:v", codec, ...(profile ? ["-profile:v", profile] : []), "-f", "null", "-",
     ]);
-    const [h264, hevc] = await Promise.all([nvenc("h264_nvenc", "nv12", "high"), nvenc("hevc_nvenc", "p010", "main10")]);
+    const [h264, hevc, av1] = await Promise.all([
+      nvenc("h264_nvenc", "nv12", "high"), nvenc("hevc_nvenc", "p010", "main10"), nvenc("av1_nvenc", "nv12", null),
+    ]);
     if (!h264.ok) return done("software", `CPU (NVENC didn't encode: ${h264.said || "no answer"})`);
     return done("nvenc", `NVIDIA NVENC (H.264${hevc.ok ? " and HEVC Main10" : `; not HEVC: ${hevc.said || "no answer"}`}), ` +
-      `tone mapping ${tonemapAlgo()} on the CPU (Dolby Vision 5 goes to Plex)`, "software", hevc.ok);
+      `tone mapping ${tonemapAlgo()} on the CPU (Dolby Vision 5 goes to Plex)`, "software", hevc.ok, false, av1.ok);
   }
   deviceMissing = !fs.existsSync(hwDevice());
   if (deviceMissing) {
@@ -301,11 +323,11 @@ export async function detectHardware(): Promise<{ hardware: Hardware; note: stri
     }
     return done("software", `CPU (no ${hwDevice()}; /dev/dri has: ${has} — map /dev/dri for Intel's GPU; looked for again before each re-encode)`);
   }
-  const encode = (codec: string, fmt: string, profile: string) => trial([
+  const encode = (codec: string, fmt: string, profile: string | null) => trial([
     "-hide_banner", "-nostdin", "-loglevel", "error", ...qsvInit(hwDevice()),
     "-f", "lavfi", "-i", "testsrc2=s=320x240:r=24:d=1",
     "-vf", `format=${fmt},hwupload=extra_hw_frames=16,format=qsv`,
-    "-c:v", codec, "-low_power", "1", "-profile:v", profile, "-f", "null", "-",
+    "-c:v", codec, "-low_power", "1", ...(profile ? ["-profile:v", profile] : []), "-f", "null", "-",
   ]);
   const opencl = (intel = true) => trial([
     "-hide_banner", "-nostdin", "-loglevel", "error",
@@ -318,10 +340,11 @@ export async function detectHardware(): Promise<{ hardware: Hardware; note: stri
   // VAAPI: its full encoder, else its low-power one; OpenCL from it without
   // naming Intel's driver, so an AMD GPU is asked too.
   const vaapi = async () => {
-    const encodeVa = (codec: string, fmt: string, profile: string, lowPower: boolean) => trial([
+    const encodeVa = (codec: string, fmt: string, profile: string | null, lowPower: boolean) => trial([
       "-hide_banner", "-nostdin", "-loglevel", "error", ...vaapiInit(hwDevice()), ...testCard,
       "-vf", `format=${fmt},hwupload,format=vaapi`,
-      "-c:v", codec, ...(lowPower ? ["-low_power", "1"] : []), "-profile:v", profile, "-f", "null", "-",
+      "-c:v", codec, ...(lowPower ? ["-low_power", "1"] : []), ...(profile ? ["-profile:v", profile] : []),
+      "-f", "null", "-",
     ]);
     let lowPower = false;
     let h264 = await encodeVa("h264_vaapi", "nv12", "high", false);
@@ -330,28 +353,33 @@ export async function detectHardware(): Promise<{ hardware: Hardware; note: stri
       if (lp.ok) [h264, lowPower] = [lp, true];
     }
     if (!h264.ok) return { ok: false as const, said: h264.said };
-    const [hevc, cl] = await Promise.all([encodeVa("hevc_vaapi", "p010le", "main10", lowPower), opencl(false)]);
+    // Intel's AV1 encoder is only low-power; AMD's only the full one.
+    const [hevc, cl, av1Full, av1Low] = await Promise.all([
+      encodeVa("hevc_vaapi", "p010le", "main10", lowPower), opencl(false),
+      encodeVa("av1_vaapi", "nv12", null, false), encodeVa("av1_vaapi", "nv12", null, true),
+    ]);
+    const av1 = av1Full.ok || (av1Low.ok && "low-power");
     const what = `VAAPI${lowPower ? ", low-power" : ""} (H.264${hevc.ok ? " and HEVC Main10" : ", not HEVC"})`;
     return {
       ok: true as const,
       result: cl.ok
-        ? done("vaapi", `${what}, tone mapping ${tonemapAlgo()} on OpenCL`, "opencl", hevc.ok, lowPower)
+        ? done("vaapi", `${what}, tone mapping ${tonemapAlgo()} on OpenCL`, "opencl", hevc.ok, lowPower, av1)
         : done("vaapi", `${what}, tone mapping ${tonemapAlgo()} on the CPU (Dolby Vision 5 goes to Plex)`,
-            "software", hevc.ok, lowPower),
+            "software", hevc.ok, lowPower, av1),
     };
   };
   if (want === "vaapi") {
     const va = await vaapi();
     return va.ok ? va.result : done("software", `CPU (VAAPI didn't encode: ${va.said || "no answer"})`);
   }
-  const [hevc, h264, cl] = await Promise.all([
-    encode("hevc_qsv", "p010le", "main10"), encode("h264_qsv", "nv12", "high"), opencl(),
+  const [hevc, h264, cl, av1] = await Promise.all([
+    encode("hevc_qsv", "p010le", "main10"), encode("h264_qsv", "nv12", "high"), opencl(), encode("av1_qsv", "nv12", null),
   ]);
   if (hevc.ok && h264.ok) {
     return cl.ok
-      ? done("qsv", `Intel QSV (HEVC Main10 and H.264), tone mapping ${tonemapAlgo()} on OpenCL`, "opencl")
+      ? done("qsv", `Intel QSV (HEVC Main10 and H.264), tone mapping ${tonemapAlgo()} on OpenCL`, "opencl", true, false, av1.ok)
       : done("qsv", `Intel QSV (HEVC Main10 and H.264), tone mapping ${tonemapAlgo()} on QSV's video engine ` +
-          `(OpenCL didn't: ${cl.said || "no answer"}; Dolby Vision 5 goes to Plex)`, "vpp");
+          `(OpenCL didn't: ${cl.said || "no answer"}; Dolby Vision 5 goes to Plex)`, "vpp", true, false, av1.ok);
   }
   const why = (!hevc.ok ? hevc.said : h264.said) || "no answer";
   if (want === "auto") {

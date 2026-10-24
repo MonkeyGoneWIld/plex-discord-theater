@@ -17,8 +17,10 @@ process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "hevc-transc
 
 // After THUMB_CACHE_DIR, for the same reason as variant-sync.test.ts: the stores
 // open their databases as they load.
-const { attachWebSocketServer, closeWebSocketServer, mayStartHevc, sessionHostUserId } = await import("../src/services/sync.js");
-const { recordSessionVideoCodec, recordHevcWithheld, isHevcSession } = await import("../src/routes/plex.js");
+const { attachWebSocketServer, closeWebSocketServer, mayStart, mayStartHevc, sessionHostUserId } = await import("../src/services/sync.js");
+const {
+  recordSessionVideoCodec, recordHevcWithheld, isHevcSession, recordSessionAudioNeeds, recordWithheld, sessionNeeds,
+} = await import("../src/routes/plex.js");
 const { transcodeFrame } = await import("../src/services/media-versions.js");
 const { createSession } = await import("../src/middleware/auth.js");
 const { instanceHosts } = await import("../src/routes/discord.js");
@@ -53,14 +55,14 @@ type Msg = Record<string, any>;
 class Client {
   ws!: WebSocket;
   seen: Msg[] = [];
-  constructor(readonly userId: string, readonly name: string, readonly hevc: boolean) {}
+  constructor(readonly userId: string, readonly name: string, readonly hevc: boolean, readonly more: Msg = {}) {}
 
   async connect(instanceId: string) {
     const token = createSession(this.userId, null);
     this.ws = new WebSocket(`ws://127.0.0.1:${port}/ws?token=${token}`);
     await new Promise<void>((r, j) => { this.ws.once("open", () => r()); this.ws.once("error", j); });
     this.ws.on("message", (d) => this.seen.push(JSON.parse(String(d))));
-    this.send({ type: "join", sessionToken: token, instanceId, userId: this.userId, username: this.name, hevc: this.hevc });
+    this.send({ type: "join", sessionToken: token, instanceId, userId: this.userId, username: this.name, hevc: this.hevc, ...this.more });
     await sleep(60);
   }
   send(m: Msg) { this.ws.send(JSON.stringify(m)); }
@@ -72,8 +74,8 @@ class Client {
   close() { this.ws.close(); }
 }
 
-async function join(instanceId: string, userId: string, name: string, hevc: boolean) {
-  const c = new Client(userId, name, hevc);
+async function join(instanceId: string, userId: string, name: string, hevc: boolean, more: Msg = {}) {
+  const c = new Client(userId, name, hevc, more);
   await c.connect(instanceId);
   return c;
 }
@@ -328,6 +330,94 @@ console.log("\n— a viewer's own stream —");
   await sleep(60);
   check("and back on the host's", b.seen.filter((m) => m.type === "variant").at(-1)?.variantKey, "1:0");
   [host, a, b].forEach((c) => c.close());
+}
+
+console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
+{
+  newRoom("caps-1");
+  const all = { av1: true, opus: true, flac: true, av1Encode: true };
+  const none = { hevc: false, av1: false, opus: false, flac: false, av1Encode: false };
+  const host = await join("caps-1", "u-host", "host", true, all);
+  const a = await join("caps-1", "u-a", "a", true, all);
+  check("what a player decodes, a stream it starts may use", mayStart("u-host"),
+    { hevc: true, av1: true, opus: true, flac: true, av1Encode: true });
+  const phone = await join("caps-1", "u-p", "p", false, { opus: true, av1Encode: true });
+  check("each player's own, AV1 on the GPU only with AV1 at all", mayStart("u-p"), { ...none, opus: true });
+  check("leaving the others' alone", mayStart("u-a").av1, true);
+  check("somebody in no room gets H.264 and AAC", mayStart("u-nobody"), none);
+  phone.close();
+  await sleep(60);
+
+  // An AV1 copy with its Opus.
+  const sid = crypto.randomUUID();
+  recordSessionVideoCodec(sid, "av1");
+  recordSessionAudioNeeds(sid, ["opus"]);
+  check("an AV1 copy with its Opus needs both", sessionNeeds(sid), ["av1", "opus"]);
+  check("and isn't HEVC", isHevcSession(sid), false);
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: sid, position: 0, sessionOffset: 0, audioStreamId: 1, subtitleStreamId: 0,
+  });
+  await sleep(60);
+  [host, a].forEach((c) => c.clear());
+  const b = await join("caps-1", "u-b", "b", true, { opus: true, flac: true });
+  await sleep(60);
+  const bState = b.seen.find((m) => m.type === "state")?.variant;
+  check("someone who can't decode AV1 lands on a stream of their own to bring up",
+    [bState?.variantKey, bState?.isOwner, bState?.hlsSessionId], ["1:0/h264", true, null]);
+  check("in H.264 and AAC", mayStart("u-b"), none);
+  check("the host's stream is left as it is", [host.toldToRebuild(), a.seen.filter((m) => m.type === "variant").length], [false, 0]);
+  const twinSid = crypto.randomUUID();
+  recordSessionVideoCodec(twinSid, "h264");
+  recordWithheld(twinSid, ["av1", "opus"]);
+  b.send({ type: "variant-session", hlsSessionId: twinSid, sessionOffset: 0 });
+  await sleep(60);
+  const c = await join("caps-1", "u-c", "c", false, { av1: true });
+  await sleep(60);
+  check("someone who decodes AV1 but not Opus follows the twin",
+    c.seen.find((m) => m.type === "state")?.variant?.variantKey, "1:0/h264");
+  const d = await join("caps-1", "u-d", "d", false, { av1: true, opus: true });
+  await sleep(60);
+  check("someone who decodes both shares the host's copy",
+    [d.seen.find((m) => m.type === "state")?.variant?.variantKey, d.seen.find((m) => m.type === "state")?.variant?.hlsSessionId],
+    ["1:0", sid]);
+
+  // A player that said AV1 and then couldn't.
+  a.clear();
+  a.send({ type: "caps", av1: false });
+  await sleep(60);
+  check("withdrawing AV1 moves that viewer onto the twin", a.seen.filter((m) => m.type === "variant").at(-1)?.variantKey, "1:0/h264");
+  check("for good, and AV1 re-encodes with it", [mayStart("u-a").av1, mayStart("u-a").av1Encode], [false, false]);
+  a.send({ type: "caps", av1: true });
+  await sleep(60);
+  check("a client can't talk itself back into AV1", mayStart("u-a").av1, false);
+  check("the host may still", mayStart("u-host").av1, true);
+  [host, a, b, c, d].forEach((x) => x.close());
+}
+
+{
+  // FLAC copied only for whoever decodes it: a host who can't starts the
+  // film with its picture copied and AAC sound, FLAC held back.
+  newRoom("caps-2");
+  const host = await join("caps-2", "u-host", "host", true, { opus: true });
+  const a = await join("caps-2", "u-a", "a", true, { flac: true });
+  [host, a].forEach((x) => x.clear());
+  const sid = crypto.randomUUID();
+  recordSessionVideoCodec(sid, "h264");
+  recordWithheld(sid, ["flac"]);
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: sid, position: 0, sessionOffset: 0, audioStreamId: 1, subtitleStreamId: 0,
+  });
+  await sleep(60);
+  const aOn = a.seen.filter((m) => m.type === "variant").at(-1);
+  check("a viewer who decodes FLAC is given a copy of its own to bring up",
+    [aOn?.variantKey, aOn?.isOwner, aOn?.hlsSessionId], ["1:0", true, null]);
+  check("with FLAC", mayStart("u-a").flac, true);
+  const b = await join("caps-2", "u-b", "b", true, {});
+  await sleep(60);
+  check("one who doesn't follows the host's", b.seen.find((m) => m.type === "state")?.variant?.hlsSessionId, sid);
+  [host, a, b].forEach((x) => x.close());
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

@@ -19,7 +19,7 @@ import { ZoomPanel } from "./ZoomPanel";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchPlayedThreshold, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
-import { isHevcCodec, markHevcUnplayable } from "../lib/hevc";
+import { capsUsed, markUnplayable, type Cap } from "../lib/codecs";
 import { loadVolume, saveVolume, VOLUME_CHOSEN_EVENT } from "../lib/volume";
 import { readSameLanguageAhead, readSubtitlesAhead } from "../lib/subtitleReadAhead";
 import {
@@ -906,12 +906,13 @@ function trimMediaBuffer(hls: Hls, video: HTMLVideoElement, backS: number): Reco
 
 /**
  * Pull the integer segment index out of an HLS segment URL — Plex/VPS segments
- * end in `00179.ts` (optionally `media-00179.ts`, optionally `?query`). Returns
- * -1 when the shape is unfamiliar, so callers can log "unknown" rather than NaN.
+ * end in `00179.ts` (optionally `media-00179.ts`, optionally `?query`), the
+ * ffmpeg engine's fMP4 ones in `00179.m4s`. Returns -1 when the shape is
+ * unfamiliar, so callers can log "unknown" rather than NaN.
  */
 function segIndexFromUrl(url: string | undefined | null): number {
   if (!url) return -1;
-  const m = url.match(/(\d+)\.ts(?:[?#&]|$)/);
+  const m = url.match(/(\d+)\.(?:ts|m4s)(?:[?#&]|$)/);
   return m ? parseInt(m[1], 10) : -1;
 }
 
@@ -4887,11 +4888,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
         hlsRef.current = hls;
 
-        // Whether this stream's video is HEVC, from the codec hls.js finds in
-        // the segments — Plex's manifest doesn't declare one.
-        let hevcStream = false;
+        // What this stream uses beyond H.264 and AAC — HEVC, AV1, Opus, FLAC
+        // — from the codecs hls.js finds in the segments: no manifest of ours
+        // or Plex's declares them. An fMP4 stream's sound and picture come as
+        // one track ("audiovideo"), its codecs joined.
+        let streamCaps: Cap[] = [];
         hls.on(Hls.Events.BUFFER_CODECS, (_e, data) => {
-          if (data.video) hevcStream = isHevcCodec(data.video.codec);
+          const both = (data as { audiovideo?: { codec?: string } }).audiovideo?.codec?.split(",") ?? [];
+          const video = data.video?.codec ?? both.find((c) => !/^(opus|flac|fLaC|mp4a)/i.test(c.trim()));
+          const audio = data.audio?.codec ?? both.find((c) => /^(opus|flac|fLaC|mp4a)/i.test(c.trim()));
+          streamCaps = capsUsed(video?.trim(), audio?.trim());
         });
 
         // Copied or re-encoded, and how far a copied stream's playlist reaches.
@@ -5730,19 +5736,21 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             ...snapshot(videoRef.current),
           });
 
-          // A media error on an HEVC stream is this device failing to decode
-          // what it said it could. HEVC is only ever offered because every
-          // player in the room said yes, so withdrawing that is the fix: the
-          // room's next transcode is H.264 and this player moves onto it. The
-          // recovery below still runs in the meantime, and is remembered so the
-          // next room isn't offered HEVC on this device's word either.
-          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && hevcStream) {
-            hevcStream = false;
-            logWarn("HLS", "HEVC won't decode on this device — asking the room for H.264", {
+          // A media error on a stream that uses HEVC, AV1, Opus or FLAC is this
+          // device failing to decode what it said it could. Those are only
+          // ever sent because this player said yes, so withdrawing that is the
+          // fix: the room moves this player onto a stream without them. The
+          // recovery below still runs in the meantime, and it is remembered so
+          // the next room isn't told so on this device's word either.
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && streamCaps.length) {
+            const withdrawn = streamCaps;
+            streamCaps = [];
+            logWarn("HLS", "a codec won't decode on this device — asking the room for a stream without it", {
               details: data.details,
+              codecs: withdrawn.join(","),
             });
-            markHevcUnplayable();
-            syncActionsRef.current?.sendHevcUnsupported();
+            markUnplayable(withdrawn);
+            syncActionsRef.current?.sendCodecsUnsupported(withdrawn);
           }
 
           // A minute without a fatal error is a fresh episode of trouble, and

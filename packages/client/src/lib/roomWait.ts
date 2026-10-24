@@ -313,3 +313,54 @@ export function recentSegmentBytesPerS(now = Date.now()): number | null {
     return null;
   }
 }
+
+/**
+ * How far past the room a follower catching up with it aims, so that it is
+ * there when the room is: its own seek takes time, as long as it takes this
+ * device to decode its way from the keyframe before the place to the place —
+ * the longest of its last few seeks to picture it already had. On 23 October
+ * blah0391's picture came in after a skip in The Punisher once the room had
+ * gone on; it went to where the room was, took three seconds to get there,
+ * found the room gone on again, went again, and took two more: seven seconds
+ * of the episode jumped over and twelve without a picture. Catch-up seeks
+ * from 21 to 23 October took from a tenth of a second to three.
+ */
+export function seekLeadS(seeksMs: readonly number[]): number {
+  const recent = seeksMs.slice(-SEEKS_KEPT);
+  if (recent.length === 0) return SEEK_LEAD_UNKNOWN_S;
+  return Math.min(MAX_SEEK_LEAD_S, Math.max(...recent) / 1000);
+}
+/** Seeks that seekLeadS goes by, the latest. */
+const SEEKS_KEPT = 3;
+/**
+ * Before this device has seeked to picture it had: none, and where the room
+ * is, as before — most devices seek in a fifth of a second, and a second's
+ * aim past the room would be a second's frozen picture to them. Its first
+ * seek is kept, on the device, for every one after.
+ */
+export const SEEK_LEAD_UNKNOWN_S = 0;
+/** Longer than this, a seek waited on more than the decoder. */
+export const MAX_SEEK_LEAD_S = 4;
+/** Where they are kept: the device's decoder is the same on the next page. */
+const SEEKS_KEY = "pdt:seekMs";
+
+/** This device's last few seeks to picture it had, milliseconds, oldest first. */
+export function recentSeeksMs(): number[] {
+  try {
+    const kept = JSON.parse(localStorage.getItem(SEEKS_KEY) ?? "[]") as unknown;
+    return Array.isArray(kept) ? kept.filter((ms): ms is number => typeof ms === "number" && ms >= 0).slice(-SEEKS_KEPT) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Add one, and keep the latest; what seekLeadS goes by after it. */
+export function rememberSeekMs(seeksMs: readonly number[], ms: number): number[] {
+  const next = [...seeksMs, Math.round(ms)].slice(-SEEKS_KEPT);
+  try {
+    localStorage.setItem(SEEKS_KEY, JSON.stringify(next));
+  } catch {
+    // Storage unavailable: this page still goes by them.
+  }
+  return next;
+}

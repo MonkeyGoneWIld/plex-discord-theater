@@ -16,7 +16,7 @@
  * - A seek in front of a stream's first picture goes to it, and one waiting
  *   for its segment waits (lib/copyStart pictureAfterSeek).
  */
-import { LAND_INTO_SEGMENT_S, MAX_WAIT_FOR_ROOM_S, cameFromCache, catchUpLeadS, landingBySize, landingBytesPerS, landingFor, recentSegmentBytesPerS, recentSegmentMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, settleForward, waitsForRoom } from "../src/lib/roomWait";
+import { LAND_INTO_SEGMENT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, settleForward, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS } from "../src/lib/bufferTrim";
@@ -266,6 +266,19 @@ console.log("\n— the last segment's time, kept across a reload —");
   rememberSegmentMs(5600, 2_000_000, 3_250_000);
   check("and with the speed segments came at, that too", [recentSegmentMs(2_000_000 + 4_000), recentSegmentBytesPerS(2_000_000 + 4_000)], [5600, 3_250_000]);
   check("for ten minutes", recentSegmentBytesPerS(2_000_000 + 11 * 60_000), null);
+
+  // A catch-up aims past the room by what this device's seeks take.
+  check("a device that hasn't seeked to picture it had goes to where the room is", [seekLeadS(recentSeeksMs()), SEEK_LEAD_UNKNOWN_S], [0, 0]);
+  // blah0391 on 23 October: three seconds to seek into what it had, then two.
+  let seeks = rememberSeekMs(recentSeeksMs(), 3_030);
+  seeks = rememberSeekMs(seeks, 1_950);
+  check("one whose seeks took 3 s and 2 s aims 3 s past it", seekLeadS(seeks), 3.03);
+  check("and the next page knows it", recentSeeksMs(), [3030, 1950]);
+  seeks = rememberSeekMs(rememberSeekMs(rememberSeekMs(seeks, 200), 150), 220);
+  check("three quick ones since, and it aims by them", [seeks, seekLeadS(seeks)], [[200, 150, 220], 0.22]);
+  check("no further than a decoder ever takes", seekLeadS([13_830]), MAX_SEEK_LEAD_S);
+  kept.set("pdt:seekMs", "not json");
+  check("nothing readable kept, nothing known", recentSeeksMs(), []);
 }
 
 console.log("\n— picture enough in hand to go —");

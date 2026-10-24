@@ -874,7 +874,7 @@ export function fetchSubtitleCues(
 ): Promise<SubtitleAnswer> {
   const params = new URLSearchParams();
   if (ratingKey) params.set("ratingKey", ratingKey);
-  if (mediaIndex != null && mediaIndex > 0) params.set("mediaIndex", String(mediaIndex));
+  if (mediaIndex != null && mediaIndex >= 0) params.set("mediaIndex", String(mediaIndex));
   if (where) {
     params.set("at", where.at.toFixed(1));
     if (where.since) params.set("since", where.since);
@@ -906,8 +906,9 @@ export function hlsMasterUrl(
   // Which file to play, for a title that has more than one. Sent only by the
   // client that chose it — the server remembers it against the session, so a
   // viewer following the room and a later seek both land on the same file
-  // without needing to know which one it is.
-  if (options?.mediaIndex != null && options.mediaIndex > 0) {
+  // without needing to know which one it is. 0 too: it is Plex's first file,
+  // often the 4K one, not the server's default, which is the best below 4K.
+  if (options?.mediaIndex != null && options.mediaIndex >= 0) {
     params.set("mediaIndex", String(options.mediaIndex));
   }
   if (options?.audioStreamId != null) params.set("audioStreamID", String(options.audioStreamId));

@@ -7,7 +7,7 @@
  * to identify the right track.
  */
 import { describeWatched, isPartialSubtitle, matchAudioTrack, matchSubtitleTrack, matchVersion, mergeTrackPrefs, plexAudioChoice, plexSubtitleChoice, rememberTitleVersion, titleTrackPrefs, titleVersionPref, tracksForNewItem, type AudioPref, type SubtitlePref } from "../src/lib/trackPrefs";
-import { shownDownscaled, type PlexVersion, type StreamTrack } from "../src/lib/api";
+import { hlsMasterUrl, shownDownscaled, type PlexVersion, type StreamTrack } from "../src/lib/api";
 
 let pass = 0;
 let fail = 0;
@@ -478,6 +478,8 @@ console.log("\n— the version picked for a film or a show —");
   check("back to 1080p: the 1080p copy", matchVersion(ep1, titleVersionPref(e1))?.mediaIndex, 0);
   check("a pick below 4K never lands on 4K", matchVersion([file(0, "720p", "720p", false), file(1, "4K", "4K", true)], titleVersionPref(e1)), null);
   check("the audio and subtitle kept for the show stay", titleTrackPrefs(e1), { audio: null, subtitle: null });
+  check("Plex's first file is asked for by number (often the 4K one)", hlsMasterUrl("20218", "s", { mediaIndex: 0 }).includes("mediaIndex=0"), true);
+  check("no pick, no number: the server's default", hlsMasterUrl("20218", "s", {}).includes("mediaIndex"), false);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

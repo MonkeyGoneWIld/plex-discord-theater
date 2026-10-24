@@ -32,12 +32,14 @@ import type { SubtitleLoadStatus } from "../lib/subtitleStatus";
  */
 
 /**
- * Cue text as a share of the picture's height: Plex's own player at its
- * default size, measured side by side on the same frame. This used to match a
- * subtitle Plex burns in, which is drawn smaller — about two thirds the size —
- * and next to Plex's own app it read as small and thin.
+ * Cue text as a share of the picture's height: letters the size of a text
+ * subtitle the server burns in, so every subtitle reads the same. That one is
+ * FFmpeg's default style, size 16 on a 288-line canvas (5.6%) in DejaVu Sans,
+ * and libass counts a font's size as its whole line height, 1.164 em for
+ * DejaVu, so its capitals stand 3.5% of the picture tall. DM Sans' capitals
+ * are 0.70 em, hence 5%. This was 6.2%, Plex's own player at its default size.
  */
-const FONT_SCALE = 0.062;
+const FONT_SCALE = 0.05;
 /** And how far it sits above the bottom of the picture, in the same units. */
 const BOTTOM_SCALE = 0.055;
 

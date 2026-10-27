@@ -33,6 +33,14 @@
  * A page somebody is looking at can have its cut started ahead (pgsAhead), as
  * a text subtitle is read ahead, so the film starts with it made.
  *
+ * A Matroska film's index usually says where every display set of its
+ * subtitles is (mkv-subtitles.ts): Airplane II's 2,398 of them, Deadpool's
+ * 2,382 to 4,842 a track. Then a piece is cut by reading those blocks alone
+ * (cutFromIndex), 20 to 40 MB rather than the 5 to 60 GB of the film, which
+ * ffmpeg took 12 seconds to 10 minutes to read through on 24 October. A block
+ * that isn't where the index says, or a display set the index leaves out (a
+ * gap in their composition numbers), and ffmpeg cuts the rest as before.
+ *
  * Timestamps are the film's own (-copyts -start_at_zero), as the engine's
  * copies are, which is the player's clock.
  */
@@ -42,6 +50,9 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { gzip } from "node:zlib";
 import { logEvent } from "../logger.js";
+import {
+  fileRanges, mkvBlocks, mkvSubtitleIndex, openFileRanges, subtitleTrackFor, type PlexSubtitleStream,
+} from "../mkv-subtitles.js";
 import { ffmpegPath } from "./config.js";
 
 /** A piece for where the player is starts this far before it: a line up when
@@ -115,10 +126,64 @@ export interface PgsStatus {
   v: string | null;
 }
 
-/** Where the subtitle comes from: a track in the film, or a file of its own. */
+/**
+ * A film's subtitle as its Matroska index has it: when each display set goes
+ * up, film seconds (as -start_at_zero has them, a cut's clock), in order; and
+ * the display sets [from, to) of those, as their blocks have them — null for
+ * one that isn't where the index says, or null for all when the file couldn't
+ * be read.
+ */
+export interface PgsIndexed {
+  at: number[];
+  read(from: number, to: number): Promise<Array<Uint8Array | null> | null>;
+}
+
+/** Where the subtitle comes from: a track in the film, or a file of its own.
+ *  A film's read through its index when it can be (`indexed`). */
 export type PgsSource =
-  | { kind: "film"; input: string[]; index: number }
+  | { kind: "film"; input: string[]; index: number; indexed?: PgsIndexed | null }
   | { kind: "file"; bytes: () => Promise<Buffer | null> };
+
+/** Display sets read through the index at a time: a minute or so of a film's. */
+const INDEX_SETS = 48;
+/** How much of a display set's block is read at first: most are 5 to 30 KB. */
+const BLOCK_GUESS_BYTES = 64 * 1024;
+
+/**
+ * A PGS track of a Matroska film mounted here as the file's index has it
+ * (mkv-subtitles.ts), for its display sets to be read alone (cutFromIndex).
+ * `key`: what the index is kept under; `streams`: Plex's subtitle streams in
+ * the file, to line its tracks up with; `startS`: the film's first time, which
+ * a cut's clock starts from. Null when it can't be: an index that doesn't list
+ * the track's blocks, or tracks that don't line up with Plex's.
+ */
+export async function pgsIndexOf(
+  film: string, key: string, size: number | null, streams: PlexSubtitleStream[], streamId: number, startS: number | null,
+): Promise<PgsIndexed | null> {
+  const index = await mkvSubtitleIndex(key, size, fileRanges(film));
+  if (!index) return null;
+  const track = subtitleTrackFor(index, streams, streamId, "picture");
+  const entries = track && /PGS/i.test(track.codec)
+    ? [...index.entries.get(track.number) ?? []].sort((a, b) => a.start - b.start)
+    : [];
+  if (!track || entries.length === 0) return null;
+  // On the cut's clock: -copyts -start_at_zero takes the film's start off,
+  // in the track's own ticks.
+  const shift = Math.round((startS ?? 0) / index.tick);
+  return {
+    at: entries.map((e) => (Math.round(e.start / index.tick) - shift) * index.tick),
+    read: async (from, to) => {
+      const file = await openFileRanges(film);
+      if (!file) return null;
+      try {
+        const blocks = await mkvBlocks(entries.slice(from, to), track, index.tick, file.range, BLOCK_GUESS_BYTES);
+        return blocks && blocks.map((b) => b?.payload ?? null);
+      } finally {
+        await file.close();
+      }
+    },
+  };
+}
 
 interface Piece extends PgsPiece {
   file: string;
@@ -163,6 +228,8 @@ interface Job {
   nextId: number;
   /** For a cut started ahead of anyone playing: still worth starting. */
   wanted?: () => boolean;
+  /** How its pieces were cut: through the film's index, by ffmpeg, or both. */
+  by: Set<"index" | "ffmpeg">;
 }
 
 const jobs = new Map<string, Job>();
@@ -188,6 +255,51 @@ interface DisplaySet {
   end: number;
   pts: number;
   fresh: boolean;
+}
+
+/**
+ * A display set as a Matroska block has it — its segments, nothing before
+ * each — as a .sup has it: each segment after "PG" and its time, PTS and DTS
+ * alike in 90 kHz ticks, as ffmpeg's sup muxer writes a film's. Null for a
+ * block that isn't whole display sets.
+ */
+export function supOfBlock(block: Uint8Array, atS: number): Buffer | null {
+  const time = Math.round(atS * 90_000) >>> 0;
+  const out: Buffer[] = [];
+  let open = false;
+  let at = 0;
+  // As ffmpeg's: what is left under a segment's type and size is dropped.
+  while (block.length - at > 2) {
+    const type = block[at];
+    const length = ((block[at + 1] << 8) | block[at + 2]) + 3;
+    if (at + length > block.length) return null;
+    if (type === 0x16) open = true;
+    else if (!open) return null;
+    if (type === 0x80) open = false;
+    const head = Buffer.alloc(10);
+    head.write("PG", 0, "latin1");
+    head.writeUInt32BE(time, 2);
+    head.writeUInt32BE(time, 6);
+    out.push(head, Buffer.from(block.buffer, block.byteOffset + at, length));
+    at += length;
+  }
+  return out.length && !open ? Buffer.concat(out) : null;
+}
+
+/** The composition numbers of a block's first display set and its last: one
+ *  more for each set, so a set the index leaves out shows as a gap. */
+export function compositionsOf(block: Uint8Array): [number, number] | null {
+  let first: number | null = null;
+  let last: number | null = null;
+  for (let at = 0; block.length - at > 2;) {
+    const length = ((block[at + 1] << 8) | block[at + 2]) + 3;
+    if (block[at] === 0x16 && length >= 3 + 7) {
+      last = (block[at + 3 + 5] << 8) | block[at + 3 + 6];
+      first ??= last;
+    }
+    at += length;
+  }
+  return first === null || last === null ? null : [first, last];
 }
 
 /** The display sets in a .sup, in the order it has them; [] for one that isn't. */
@@ -350,10 +462,96 @@ function release(): void {
   waiting.shift()?.();
 }
 
+/**
+ * Cut one piece through the film's index, writing its display sets as they
+ * are read, in film order. Whether it is done (or stopped); if not, it ends
+ * where the index failed it — or, nothing written, it is still to be cut.
+ */
+async function cutFromIndex(job: Job, piece: Piece, indexed: PgsIndexed): Promise<boolean> {
+  const first = indexed.at.findIndex((t) => t >= piece.fromS);
+  const from = first === -1 ? indexed.at.length : first;
+  let to = piece.toS === null ? indexed.at.length : indexed.at.findIndex((t) => t >= piece.toS!);
+  if (to === -1) to = indexed.at.length;
+  try {
+    fs.mkdirSync(path.dirname(piece.file), { recursive: true });
+    fs.writeFileSync(piece.file, "");
+  } catch (err) {
+    piece.failed = String(err);
+    return true;
+  }
+  piece.started = true;
+  let last: number | null = null;
+  const began = Date.now();
+  for (let i = from; i < to; i += INDEX_SETS) {
+    if (jobs.get(job.key) !== job || piece.stopped) break;
+    if (Date.now() - job.lastAsked > IDLE_MS) {
+      piece.failed = "nobody asked for it";
+      return true;
+    }
+    const end = Math.min(to, i + INDEX_SETS);
+    const blocks = await indexed.read(i, end);
+    const sets: Buffer[] = [];
+    // `from`: the set ffmpeg cuts on from — the one that couldn't be read, or
+    // for sets left out before it, the last one written (made once when joined).
+    let bad: { at: number; from: number; why: string } | null =
+      blocks ? null : { at: i, from: i, why: "the file couldn't be read" };
+    for (let k = 0; !bad && k < end - i; k++) {
+      const block = blocks![k];
+      const set = block && supOfBlock(block, indexed.at[i + k]);
+      const numbers = block && compositionsOf(block);
+      if (!block) bad = { at: i + k, from: i + k, why: "a display set wasn't where the index said" };
+      else if (!set || !numbers) bad = { at: i + k, from: i + k, why: "a block wasn't a display set" };
+      else if (last !== null && numbers[0] !== ((last + 1) & 0xffff)) {
+        bad = { at: i + k, from: i + k - 1, why: `the index leaves out display sets (${last} to ${numbers[0]})` };
+      } else {
+        sets.push(set);
+        last = numbers[1];
+      }
+    }
+    if (sets.length) {
+      const bytes = Buffer.concat(sets);
+      await fs.promises.appendFile(piece.file, bytes);
+      piece.bytes += bytes.length;
+    }
+    if (bad) {
+      const atS = indexed.at[bad.from] ?? piece.fromS;
+      logEvent("Subtitles", "a picture subtitle couldn't be read through the film's index; ffmpeg cuts the rest", {
+        key: job.key, piece: piece.id, why: bad.why, atS: Math.round(atS), setsRead: bad.at - from,
+      });
+      if (piece.bytes === 0) return false;
+      // Has every set before the one it couldn't read: ffmpeg cuts on from there.
+      job.by.add("index");
+      piece.toS = atS;
+      piece.done = true;
+      piece.reachedS = null;
+      return false;
+    }
+    // Every set before the next is written.
+    piece.reachedS = end < indexed.at.length ? indexed.at[end] : null;
+  }
+  if (piece.stopped) piece.toS = Math.max(piece.fromS, piece.reachedS ?? piece.fromS);
+  piece.done = true;
+  piece.reachedS = null;
+  job.by.add("index");
+  if (Date.now() - began > 5000) {
+    logEvent("Subtitles", "a picture subtitle's piece was slow to read through the film's index", {
+      key: job.key, piece: piece.id, sets: to - from, ms: Date.now() - began,
+    });
+  }
+  return true;
+}
+
 /** Cut one piece; resolves when it is done, stopped or failed. */
 async function cut(job: Job, piece: Piece): Promise<void> {
   if (job.source?.kind !== "film") return;
   const source = job.source;
+  if (source.indexed) {
+    if (await cutFromIndex(job, piece, source.indexed)) return;
+    // From here on, ffmpeg's: the index can't be trusted for the rest of it.
+    source.indexed = null;
+    if (piece.done || piece.failed) return;
+  }
+  job.by.add("ffmpeg");
   await slot(piece.urgent);
   if (jobs.get(job.key) !== job || job.failed || piece.stopped) {
     release();
@@ -497,7 +695,7 @@ function next(job: Job): void {
   job.cutting = piece;
   logEvent("Subtitles", "cutting a picture subtitle out of the film for players to draw", {
     key: job.key, piece: id, fromS: Math.round(piece.fromS), toS: toS === null ? "end" : Math.round(toS),
-    for: here ? "where the player is" : "what is left",
+    for: here ? "where the player is" : "what is left", by: job.source.indexed ? "index" : "ffmpeg",
   });
   void cut(job, piece).then(() => {
     if (job.cutting === piece) job.cutting = null;
@@ -552,6 +750,7 @@ function finish(job: Job): void {
     job.v = `${job.key}-${buf.length}`;
     logEvent("Subtitles", "a picture subtitle cut out of the film for players to draw", {
       key: job.key, pieces: job.old.length, bytes: buf.length, handedOutIn: job.pieces.length, ms: Date.now() - job.startedAt,
+      by: [...job.by].join("+") || "none",
     });
     // Pieces a player is part way through stay readable until the job is let go.
     trim();
@@ -639,7 +838,7 @@ function jobFor(key: string, source: () => Promise<PgsSource | null>, atS: numbe
     job = {
       key, source: null, pieces: whole?.pieces ?? [], old: [], v: whole?.v ?? null,
       failed: null, lastAsked: Date.now(), startedAt: Date.now(), atS: Math.max(0, atS),
-      cutting: null, nextId: 0, wanted,
+      cutting: null, nextId: 0, wanted, by: new Set(),
     };
     jobs.set(key, job);
     if (!whole) {

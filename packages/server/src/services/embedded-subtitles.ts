@@ -325,6 +325,27 @@ export interface FileSubtitle {
   file: string;
   index: number;
   codec: string | null;
+  /** Closed captions' (isCaptions): the film's first time, which the film's
+   *  clock starts from (-start_at_zero, as the engine's streams have it). */
+  startS?: number | null;
+}
+
+/**
+ * Closed captions (EIA-608/708): carried in the picture's own frames, not a
+ * track of their own, which Plex lists as a subtitle at the picture's place.
+ * ffmpeg reads them by decoding the picture (its subcc output of a movie
+ * source); Plex's subtitle read refuses them (400). On 21 October a title's
+ * captions (173175) could be read by neither, and its stream went to Plex.
+ */
+export function isCaptions(codec: string | null | undefined): boolean {
+  return ["eia_608", "eia_708"].includes((codec ?? "").toLowerCase());
+}
+
+/** A file's name as a filter's option inside a filter graph: escaped for the
+ *  option, then for the graph around it (ffmpeg-filters, "Notes on filtergraph
+ *  escaping"). */
+export function graphPath(file: string): string {
+  return file.replace(/[\\':=]/g, (c) => `\\${c}`).replace(/[\\'[\],;]/g, (c) => `\\${c}`);
 }
 
 /**
@@ -893,6 +914,31 @@ function lineFeed(sink: Sink, offset: number): { push(chunk: Uint8Array): void; 
 }
 
 /**
+ * ffmpeg's arguments for one read (ffmpegRead): `sub` from `offset` seconds
+ * on to stdout, each of `along` to its file in `alongFiles`.
+ */
+export function subtitleReadArgs(sub: FileSubtitle, offset: number, along: FileSubtitle[], alongFiles: string[]): string[] {
+  const captions = isCaptions(sub.codec);
+  const isAss = (s: FileSubtitle) => ["ass", "ssa"].includes((s.codec ?? "").toLowerCase());
+  // Captions as plain text: ffmpeg's SRT of them puts {\an7} on every line,
+  // which the player takes as the top of the picture.
+  const output = (s: FileSubtitle, to: string) => ["-map", captions ? "0:s:0" : `0:${s.index}`,
+    "-c:s", isAss(s) ? "copy" : captions ? "text" : "srt", "-f", isAss(s) ? "ass" : "srt", to];
+  const input = captions
+    // The movie source's frames keep the file's times: the film's clock is
+    // those less its start.
+    ? ["-copyts", ...(sub.startS ? ["-itsoffset", String(-sub.startS)] : []),
+      "-f", "lavfi", "-i", `movie=${graphPath(sub.file)}${offset > 0 ? `:sp=${offset}` : ""}[out0+subcc]`]
+    : [...(offset > 0 ? ["-ss", String(offset)] : []), "-copyts", "-start_at_zero", "-protocol_whitelist", "file", "-i", sub.file];
+  return [
+    "-hide_banner", "-nostdin", "-loglevel", "error",
+    ...input,
+    ...output(sub, "pipe:1"),
+    ...along.flatMap((s, i) => output(s, alongFiles[i])),
+  ];
+}
+
+/**
  * One read of the subtitle by ffmpeg, out of the file, from `offset` seconds
  * on: ASS as it is, everything else as SRT, on the film's own clock (-copyts,
  * as the engine's streams are). Stopped however it ends.
@@ -904,19 +950,11 @@ async function ffmpegRead(
   sub: FileSubtitle, offset: number, sink: Sink, announce?: Record<string, unknown>, along: FileSubtitle[] = [],
 ): Promise<ReadResult> {
   const startedAt = Date.now();
-  const isAss = (s: FileSubtitle) => ["ass", "ssa"].includes((s.codec ?? "").toLowerCase());
-  const output = (s: FileSubtitle, to: string) =>
-    ["-map", `0:${s.index}`, "-c:s", isAss(s) ? "copy" : "srt", "-f", isAss(s) ? "ass" : "srt", to];
+  // Captions come out of decoding the picture: nothing else is read with them.
+  if (isCaptions(sub.codec)) along = [];
   const alongDir = along.length ? fs.mkdtempSync(path.join(os.tmpdir(), "pdt-subtitles-")) : null;
   const alongFiles = along.map((_, i) => path.join(alongDir!, `${i}.txt`));
-  const args = [
-    "-hide_banner", "-nostdin", "-loglevel", "error",
-    ...(offset > 0 ? ["-ss", String(offset)] : []),
-    "-copyts", "-start_at_zero",
-    "-protocol_whitelist", "file", "-i", sub.file,
-    ...output(sub, "pipe:1"),
-    ...along.flatMap((s, i) => output(s, alongFiles[i])),
-  ];
+  const args = subtitleReadArgs(sub, offset, along, alongFiles);
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   let firstByteMs: number | null = null;
@@ -1108,12 +1146,12 @@ async function plexRead(
  */
 function companions(opts: ReadOptions): ReadOptions[] {
   const film = opts.fromFile;
-  if (!film) return [];
+  if (!film || isCaptions(film.codec)) return [];
   const out: ReadOptions[] = [];
   for (let i = 0; i < prefetchQueue.length && out.length < PASS_MAX - 1;) {
     const q = prefetchQueue[i];
     const f = q.read.fromFile;
-    const same = !!f && f.file === film.file && f.index !== film.index && q.read.streamId !== opts.streamId &&
+    const same = !!f && !isCaptions(f.codec) && f.file === film.file && f.index !== film.index && q.read.streamId !== opts.streamId &&
       !out.some((o) => o.streamId === q.read.streamId);
     if (same && !embeddedSubtitleState(q.read.streamId, q.read.fingerprint) && (!q.stillWanted || q.stillWanted())) {
       prefetchQueue.splice(i, 1);

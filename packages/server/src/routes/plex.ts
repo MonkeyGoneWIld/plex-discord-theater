@@ -33,6 +33,7 @@ import {
   prefetchEmbeddedSubtitles,
   readEmbeddedSubtitle,
   embeddedSubtitleText,
+  isCaptions,
   type EmbeddedSubtitle,
   type FileSubtitle,
   type ReadOptions,
@@ -63,7 +64,7 @@ import {
 import { probe, probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
 import { prepareBurn, sidecarOnMount } from "../services/ffmpeg/burn-files.js";
 import { madePreview, makePreview, previewBody, previewPartOf, rememberPreviewPart } from "../services/ffmpeg/previews.js";
-import { pgsAhead, pgsBytes, pgsStatus, type PgsSource } from "../services/ffmpeg/picture-subtitles.js";
+import { pgsAhead, pgsBytes, pgsIndexOf, pgsStatus, type PgsSource } from "../services/ffmpeg/picture-subtitles.js";
 import { fontFile, fontsOfFilm, styledAss, type SubtitleFont } from "../services/ffmpeg/styled-subtitles.js";
 import {
   ffmpegEncodesRunning,
@@ -1370,7 +1371,8 @@ function isSidecarText(s: PlexStream): boolean {
  */
 function isEmbeddedText(s: PlexStream): boolean {
   if (s.key) return false;
-  return TEXT_SUBTITLE_FORMATS.has((s.codec || "").toLowerCase());
+  // Closed captions: only ffmpeg reads them out as text, from the picture.
+  return TEXT_SUBTITLE_FORMATS.has((s.codec || "").toLowerCase()) || (isCaptions(s.codec) && ffmpegSubtitlesOn());
 }
 
 /**
@@ -3075,7 +3077,12 @@ async function subtitleFile(ratingKey: string, mediaIndex: number, streamId: num
     const sub = source?.streams.find((s) => s.streamType === 3 && s.id === streamId);
     if (!source?.file || !sub || sub.key || sub.index == null) return null;
     const file = localPath(source.file);
-    return readable(file) ? { file, index: sub.index, codec: sub.codec ?? null } : null;
+    if (!readable(file)) return null;
+    // Captions are read off the picture's frames, on the file's own times.
+    const startS = isCaptions(sub.codec)
+      ? (await probeOnce(`${file}:${source.fileSize ?? "?"}`, inputArgs({ local: file })))?.startS ?? null
+      : undefined;
+    return { file, index: sub.index, codec: sub.codec ?? null, ...(startS !== undefined ? { startS } : {}) };
   } catch {
     return null;
   }
@@ -3094,6 +3101,8 @@ async function fileLines(
   const media = data.MediaContainer.Metadata?.[0]?.Media?.[mediaIndex];
   const part = media?.Part?.[0] as (PlexPart & { file?: string }) | undefined;
   if (!part?.key || !(media?.container === "mkv" || /\.mkv$/i.test(part.key))) return null;
+  // Closed captions are in the picture's frames, never the index.
+  if (isCaptions(part.Stream?.find((s) => s.id === streamId)?.codec)) return null;
   // Out of the file itself when it is mounted here (PLAYBACK_ENGINE=ffmpeg).
   const local = ffmpegSubtitlesOn() && part.file ? localPath(part.file) : null;
   const range = local && readable(local) ? fileRanges(local) : undefined;
@@ -3310,8 +3319,9 @@ async function prefetchSubtitles(
   if (!lead) return;
   const lang = (t: { languageCode: string | null; language: string | null }) =>
     (t.languageCode ?? t.language ?? "").toLowerCase();
+  // Not captions unless they are the one: reading them decodes the whole picture.
   const sameLanguage = scope === "all"
-    ? text.filter((t) => t !== lead && lang(t) !== "" && lang(t) === lang(lead))
+    ? text.filter((t) => t !== lead && lang(t) !== "" && lang(t) === lang(lead) && !isCaptions(t.codec))
     : [];
   const picked = [lead, ...sameLanguage].slice(0, SUBTITLE_READ_AHEAD_MAX);
   for (const t of picked.filter((t) => t.sidecar)) {
@@ -3687,7 +3697,18 @@ async function pgsSource(ratingKey: string, mediaIndex: number, streamId: number
     logEvent("Subtitles", "a picture subtitle's track isn't where Plex says", { ratingKey, streamId, why: differs });
     return null;
   }
-  return { kind: "film", input, index: sub.index };
+  // A Matroska film's display sets read alone, through its index, when it has them.
+  const streams = source.streams
+    .filter((s) => s.streamType === 3 && !s.key)
+    .map((s) => ({ id: s.id, codec: s.codec ?? null, index: s.index ?? null }));
+  const indexed = fromMount && probed && (source.container === "mkv" || /\.mkv$/i.test(local!))
+    ? await pgsIndexOf(local!, source.partKey ?? local!, source.fileSize ?? null, streams, streamId, probed.startS)
+      .catch(() => null)
+    : null;
+  if (fromMount && !indexed) {
+    logEvent("Subtitles", "a picture subtitle isn't in the film's index; ffmpeg reads the film for it", { ratingKey, streamId });
+  }
+  return { kind: "film", input, index: sub.index, indexed };
 }
 
 /** The PGS subtitle a /pgs request names, and what its cut is called. */

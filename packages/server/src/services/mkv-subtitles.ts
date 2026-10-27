@@ -176,6 +176,32 @@ function plexRanges(partKey: string): RangeReader {
   };
 }
 
+/**
+ * Ranges of a file mounted here through one handle, for thousands of reads
+ * (a picture subtitle's blocks): opening the file for each costs more than
+ * the read on a network mount. `close` when done.
+ */
+export async function openFileRanges(file: string): Promise<{ range: RangeReader; close: () => Promise<void> } | null> {
+  let handle: fs.promises.FileHandle;
+  try {
+    handle = await fs.promises.open(file, "r");
+  } catch {
+    return null;
+  }
+  return {
+    range: async (start, end) => {
+      try {
+        const out = Buffer.alloc(Math.max(0, end - start + 1));
+        const { bytesRead } = await handle.read(out, 0, out.length, start);
+        return out.subarray(0, bytesRead);
+      } catch {
+        return null;
+      }
+    },
+    close: () => handle.close().catch(() => {}),
+  };
+}
+
 /** Ranges of a file mounted here (PLAYBACK_ENGINE=ffmpeg): the same bytes
  *  without asking Plex for them. */
 export function fileRanges(file: string): RangeReader {
@@ -217,7 +243,7 @@ export interface MkvSubtitleTrack {
   unreadable: boolean;
 }
 
-interface Entry {
+export interface MkvIndexEntry {
   /** Seconds. */
   start: number;
   /** Seconds, from the index's CueDuration when it has one. */
@@ -234,7 +260,7 @@ export interface MkvSubtitleIndex {
   tracks: MkvSubtitleTrack[];
   /** Each subtitle track's lines, by track number, in time order. Only
    *  entries that say where in their cluster the block is. */
-  entries: Map<number, Entry[]>;
+  entries: Map<number, MkvIndexEntry[]>;
 }
 
 /** Read through an index, cached per file; a promise so callers share one read. */
@@ -358,7 +384,7 @@ export async function readIndex(range: RangeReader): Promise<MkvSubtitleIndex | 
     tracks.push({ number, codec, header: /ASS|SSA/i.test(codec) ? header : null, compression, unreadable });
   }
 
-  const entries = new Map<number, Entry[]>();
+  const entries = new Map<number, MkvIndexEntry[]>();
   const cues = await read(ID_CUES);
   if (cues) {
     const subtitle = new Set(tracks.map((t) => t.number));
@@ -429,11 +455,14 @@ export interface PlexSubtitleStream {
  * Plex numbers a file's streams in the order the tracks are listed, so its
  * subtitle streams in order are the file's subtitle tracks in order. That is
  * only trusted when every one of them agrees: as many on each side, each the
- * same kind of subtitle as the track in its place.
+ * same kind of subtitle as the track in its place. Closed captions Plex lists
+ * among them are in the picture's frames, not a track (173175's on 21
+ * October: one track, two of Plex's, and its subtitle left to Plex).
  */
 export function subtitleTrackFor(
-  index: MkvSubtitleIndex, streams: PlexSubtitleStream[], streamId: number,
+  index: MkvSubtitleIndex, all: PlexSubtitleStream[], streamId: number, kind: "text" | "picture" = "text",
 ): MkvSubtitleTrack | null {
+  const streams = all.filter((s) => !["eia_608", "eia_708"].includes((s.codec ?? "").toLowerCase()));
   if (streams.some((s) => s.index === null)) return null;
   const ordered = [...streams].sort((a, b) => a.index! - b.index!);
   if (ordered.length !== index.tracks.length) return null;
@@ -444,7 +473,8 @@ export function subtitleTrackFor(
   }
   const at = ordered.findIndex((s) => s.id === streamId);
   const track = at === -1 ? null : index.tracks[at];
-  if (!track || track.unreadable || !TEXT_CODECS[(ordered[at].codec ?? "").toLowerCase()]) return null;
+  const codecs = kind === "text" ? TEXT_CODECS : PICTURE_CODECS;
+  if (!track || track.unreadable || !codecs[(ordered[at].codec ?? "").toLowerCase()]) return null;
   return track;
 }
 
@@ -469,6 +499,9 @@ const MAX_BLOCK_BYTES = 1024 * 1024;
 
 interface Line { start: number; end: number; payload: string }
 
+/** A block of a track, unpacked: when it starts and ends, seconds. */
+export interface MkvBlock { entry: MkvIndexEntry; start: number; end: number; payload: Uint8Array }
+
 /**
  * The lines of `track` that start in [from, to), as subtitle text for
  * parseSubtitles — or null when the file couldn't be read for them. A line
@@ -481,13 +514,31 @@ export async function mkvSubtitleText(
   const all = index.entries.get(track.number) ?? [];
   const wanted = all.filter((e) => e.start >= from && e.start < to);
   if (wanted.length === 0) return compose(track, []);
+  const blocks = await mkvBlocks(wanted, track, index.tick, range);
+  if (!blocks) return null;
+  const lines: Line[] = [];
+  for (const b of blocks) {
+    if (b) lines.push({ start: b.start, end: b.end, payload: new TextDecoder().decode(b.payload).replace(/\0+$/, "") });
+  }
+  lines.sort((a, b) => a.start - b.start);
+  return compose(track, lines);
+}
 
+/**
+ * The blocks of `track` the index `entries` point to, unpacked, in the order
+ * of `entries`: null for one that wasn't where the index said. Null when the
+ * file couldn't be read. `guess`: how much of each block is read at first.
+ */
+export async function mkvBlocks(
+  entries: MkvIndexEntry[], track: MkvSubtitleTrack, tick: number, range: RangeReader, guess = BLOCK_GUESS_BYTES,
+): Promise<Array<MkvBlock | null> | null> {
+  const found = new Map<MkvIndexEntry, MkvBlock>();
   // Where each block is: its cluster's data starts CLUSTER_HEADER_MIN to _MAX
   // bytes after the cluster, and the block `relative` bytes after that.
-  const runs: Array<{ start: number; end: number; entries: Entry[] }> = [];
-  for (const e of [...wanted].sort((a, b) => (a.cluster + a.relative) - (b.cluster + b.relative))) {
+  const runs: Array<{ start: number; end: number; entries: MkvIndexEntry[] }> = [];
+  for (const e of [...entries].sort((a, b) => (a.cluster + a.relative) - (b.cluster + b.relative))) {
     const start = e.cluster + e.relative + CLUSTER_HEADER_MIN;
-    const end = e.cluster + e.relative + CLUSTER_HEADER_MAX + BLOCK_GUESS_BYTES;
+    const end = e.cluster + e.relative + CLUSTER_HEADER_MAX + guess;
     const last = runs.at(-1);
     if (last && start - last.end < JOIN_BYTES && end - last.start < 4 * JOIN_BYTES) {
       last.end = Math.max(last.end, end);
@@ -497,28 +548,26 @@ export async function mkvSubtitleText(
     }
   }
 
-  const lines: Line[] = [];
   let failed = false;
   const readRun = async (run: typeof runs[number]) => {
     const buf = await range(run.start, run.end - 1);
     if (!buf) { failed = true; return; }
     for (const e of run.entries) {
       const at = e.cluster + e.relative + CLUSTER_HEADER_MIN;
-      let line = blockAt(buf, at - run.start, track, e, index.tick);
-      if (line && "need" in line) {
+      let block = blockAt(buf, at - run.start, track, e, tick);
+      if (block && "need" in block) {
         // Longer than guessed: read this one again, all of it.
-        const own = await range(at, at + line.need - 1);
-        line = own ? blockAt(own, 0, track, e, index.tick) : null;
+        const own = await range(at, at + block.need - 1);
+        block = own ? blockAt(own, 0, track, e, tick) : null;
       }
-      if (line && !("need" in line)) lines.push(line);
+      if (block && !("need" in block)) found.set(e, block);
     }
   };
   for (let i = 0; i < runs.length; i += PARALLEL_READS) {
     await Promise.all(runs.slice(i, i + PARALLEL_READS).map(readRun));
     if (failed) return null;
   }
-  lines.sort((a, b) => a.start - b.start);
-  return compose(track, lines);
+  return entries.map((e) => found.get(e) ?? null);
 }
 
 /**
@@ -528,8 +577,8 @@ export async function mkvSubtitleText(
  * `offset` it needs.
  */
 function blockAt(
-  buf: Uint8Array, offset: number, track: MkvSubtitleTrack, entry: Entry, tick: number,
-): Line | { need: number } | null {
+  buf: Uint8Array, offset: number, track: MkvSubtitleTrack, entry: MkvIndexEntry, tick: number,
+): MkvBlock | { need: number } | null {
   for (let skip = 0; skip <= CLUSTER_HEADER_MAX - CLUSTER_HEADER_MIN; skip++) {
     const at = offset + skip;
     const el = element(buf, at, Infinity);
@@ -560,7 +609,7 @@ function blockAt(
     const payload = unpack(buf.subarray(block.at + number.length + 3, block.end), track);
     if (payload === null) return null;
     const end = duration !== null ? entry.start + duration * tick : entry.end;
-    return { start: entry.start, end: end ?? entry.start, payload };
+    return { entry, start: entry.start, end: end ?? entry.start, payload };
   }
   return null;
 }
@@ -571,8 +620,8 @@ function blockInGroup(buf: Uint8Array, at: number): number | null {
   return first && first.id === ID_BLOCK ? first.dataAt : null;
 }
 
-/** A block's text, unpacked. */
-function unpack(data: Uint8Array, track: MkvSubtitleTrack): string | null {
+/** A block's bytes, unpacked. */
+function unpack(data: Uint8Array, track: MkvSubtitleTrack): Uint8Array | null {
   try {
     let bytes: Uint8Array = data;
     if (track.compression?.algo === 0) bytes = inflateSync(data);
@@ -581,7 +630,7 @@ function unpack(data: Uint8Array, track: MkvSubtitleTrack): string | null {
       bytes.set(track.compression.settings, 0);
       bytes.set(data, track.compression.settings.length);
     }
-    return new TextDecoder().decode(bytes).replace(/\0+$/, "");
+    return bytes;
   } catch {
     return null;
   }

@@ -96,7 +96,13 @@ export function tsSegment(frame: Frame, delimiter = true): Buffer {
 // ── Subtitles in a Matroska file, with or without their index ─────
 
 /** One subtitle line, in seconds. */
-export interface FixtureLine { start: number; end: number; text: string }
+export interface FixtureLine {
+  start: number;
+  end: number;
+  text: string;
+  /** The block as it is, for a picture subtitle's display set: `text` unused. */
+  bytes?: Buffer;
+}
 
 export interface FixtureSubtitleTrack {
   codec: "S_TEXT/UTF8" | "S_TEXT/ASS" | "S_HDMV/PGS";
@@ -173,7 +179,7 @@ export function matroskaWithSubtitles(opts: {
     opts.tracks.forEach((t, i) => {
       for (const line of t.lines.filter((l) => l.start >= from && l.start < from + clusterS)) {
         const relative = parts.reduce((n, p) => n + p.length, 0);
-        let payload = Buffer.from(t.codec === "S_TEXT/ASS" ? `${readOrder++},${line.text}` : line.text, "utf-8");
+        let payload = line.bytes ?? Buffer.from(t.codec === "S_TEXT/ASS" ? `${readOrder++},${line.text}` : line.text, "utf-8");
         if (t.zlib) payload = deflateSync(payload);
         const ms = Math.round((line.start - from) * 1000);
         const blockBody = Buffer.concat([Buffer.from([0x80 | (i + 2), (ms >> 8) & 0xff, ms & 0xff, 0]), payload]);

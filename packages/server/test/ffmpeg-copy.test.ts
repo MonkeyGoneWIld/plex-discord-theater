@@ -17,6 +17,8 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
+import { matroskaWithSubtitles } from "./mkv-fixture.js";
+import type { PgsSource } from "../src/services/ffmpeg/picture-subtitles.js";
 
 if (spawnSync("ffmpeg", ["-hide_banner", "-version"]).status !== 0) {
   console.log("ffmpeg-copy: skipped, no ffmpeg on PATH");
@@ -129,6 +131,63 @@ const PGS_FILM = path.join(tmp, "pgs.mkv");
     "-map", "0", "-map", "1", "-c", "copy", PGS_FILM]);
   if (r.status !== 0) throw new Error(`couldn't make pgs.mkv: ${r.stderr}`);
 }
+/**
+ * The film's clock starts at its first packet: since ffmpeg 6, AAC_FILM's
+ * sound, 21 ms early for its priming, so each line is that much later on it.
+ */
+const PGS_START = Number(String(spawnSync("ffprobe", ["-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0",
+  PGS_FILM]).stdout).trim()) || 0;
+const onClock = (...s: number[]) => s.map((t) => Number((t - PGS_START).toFixed(3)));
+/**
+ * Closed captions in the picture, as broadcast H.264 carries them (ATSC A/53
+ * in each frame's SEI, EIA-608 pop-on): "HI" from 2 to 4 s, "OK" from 6 to
+ * 7 s. With the SRT as a track of its own, and AAC_FILM's sound.
+ */
+const CC_FILM = path.join(tmp, "captions.mkv");
+{
+  const FPS = 30;
+  /** A pair of EIA-608 bytes, each with odd parity. */
+  const pair = (...two: number[]) => two.map((b) => {
+    let bits = 0;
+    for (let v = b; v; v >>= 1) bits += v & 1;
+    return b | (bits % 2 === 0 ? 0x80 : 0);
+  });
+  const RCL = pair(0x14, 0x20), PAC = pair(0x14, 0x70), EOC = pair(0x14, 0x2f), EDM = pair(0x14, 0x2c);
+  const text = (s: string) => pair(s.charCodeAt(0), s.charCodeAt(1));
+  const byFrame = new Map<number, number[]>([
+    [30, RCL], [31, PAC], [32, text("HI")], [60, EOC], [120, EDM],
+    [150, RCL], [151, PAC], [152, text("OK")], [180, EOC], [210, EDM],
+  ]);
+  const raw = path.join(tmp, "captions.h264");
+  let r = spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-y", "-f", "lavfi", "-i", `testsrc=size=64x36:rate=${FPS}:duration=60`,
+    "-c:v", "libx264", "-preset", "ultrafast", "-bf", "0", "-g", String(FPS), "-f", "h264", raw]);
+  if (r.status !== 0) throw new Error(`couldn't make captions.h264: ${r.stderr}`);
+  const es = fs.readFileSync(raw);
+  const starts: number[] = [];
+  for (let i = 0; i + 3 < es.length; i++) {
+    if (es[i] === 0 && es[i + 1] === 0 && es[i + 2] === 1) {
+      starts.push(i > 0 && es[i - 1] === 0 ? i - 1 : i);
+      i += 2;
+    }
+  }
+  // Before each frame's slice, an SEI with that frame's pair (or nothing: 0x80 0x80).
+  const out: Buffer[] = [];
+  let frame = 0;
+  starts.forEach((s, n) => {
+    const nal = es.subarray(s, starts[n + 1] ?? es.length);
+    const type = nal[nal[2] === 1 ? 3 : 4] & 0x1f;
+    if (type === 1 || type === 5) {
+      const cc = byFrame.get(frame++) ?? [0x80, 0x80];
+      const payload = [0xb5, 0x00, 0x31, ...Buffer.from("GA94"), 0x03, 0xc1, 0xff, 0xfc, cc[0], cc[1], 0xff];
+      out.push(Buffer.from([0, 0, 0, 1, 0x06, 0x04, payload.length, ...payload, 0x80]));
+    }
+    out.push(nal);
+  });
+  fs.writeFileSync(raw, Buffer.concat(out));
+  r = spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-y", "-framerate", String(FPS), "-i", raw, "-i", AAC_FILM,
+    "-i", path.join(tmp, "lines.srt"), "-map", "0:v", "-map", "1:a", "-map", "2", "-c", "copy", CC_FILM]);
+  if (r.status !== 0) throw new Error(`couldn't make captions.mkv: ${r.stderr}`);
+}
 /** Black, with the SRT and the ASS in it: what is burned in shows. */
 const BLACK_FILM = path.join(tmp, "black.mkv");
 {
@@ -189,8 +248,11 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
   // than a real one: so a run's pause can be seen before it reaches the end.
   8: { file: AAC_FILM, plexPath: "/nowhere/slow.mkv", codec: "h264", width: 640, height: 360, audio: "aac", channels: 2,
     slow: true },
-  // With the PGS subtitle (stream 21, the file's third) in it.
-  9: { file: PGS_FILM, plexPath: PGS_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2 },
+  // With the PGS subtitle (stream 21, the file's third) in it, and nothing
+  // else: its tracks line up with Plex's, so it is read through the index.
+  9: { file: PGS_FILM, plexPath: PGS_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2, subs: [
+    { id: 21, streamType: 3, index: 2, codec: "pgs", language: "English", languageCode: "eng" },
+  ] },
   // With an SRT and an ASS subtitle in it.
   10: { file: TEXT_FILM, plexPath: TEXT_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2, subs: [
     { id: 31, streamType: 3, index: 2, codec: "srt", language: "English", languageCode: "eng" },
@@ -224,6 +286,12 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
   // PCM at what Plex says of it: 48 kHz, 16 bits, a channel each.
   20: { file: PCM71_FILM, plexPath: PCM71_FILM, codec: "h264", width: 640, height: 360, audio: "pcm", channels: 8, audioKbps: 6144 },
   21: { file: PCM_FILM, plexPath: PCM_FILM, codec: "h264", width: 640, height: 360, audio: "pcm", channels: 2, audioKbps: 1536 },
+  // Closed captions in the picture (81), which Plex lists at the picture's
+  // place, and an SRT track (82).
+  22: { file: CC_FILM, plexPath: CC_FILM, codec: "h264", width: 64, height: 36, audio: "aac", channels: 2, subs: [
+    { id: 81, streamType: 3, index: 0, codec: "eia_608", language: "English", languageCode: "eng" },
+    { id: 82, streamType: 3, index: 2, codec: "srt", language: "English", languageCode: "eng" },
+  ] },
 };
 
 const asked: string[] = [];
@@ -1089,6 +1157,10 @@ function supTimes(buf: Buffer): number[] {
   return out;
 }
 {
+  // What the cuts say of how they were made.
+  const said: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => { said.push(a.join(" ")); log(...a); };
   const meta = await (await fetch(`${origin}/api/plex/meta/9`)).json() as
     { versions?: Array<{ subtitleTracks: Array<{ id: number; external?: boolean; picture?: boolean }> }> };
   const t = meta.versions?.[0].subtitleTracks.find((s) => s.id === 21);
@@ -1103,7 +1175,9 @@ function supTimes(buf: Buffer): number[] {
   check("  cut out of the film whole, from the start for a player near it, then handed out as made",
     [status?.done, status?.failed, status?.pieces.map((p) => [p.id, p.fromS]), typeof status?.v], [true, null, [[1000, 0]], "string"]);
   const whole = Buffer.from(await (await fetch(`${origin}/api/plex/pgs/21/1000?ratingKey=9&mediaIndex=0&from=0`)).arrayBuffer());
-  check("  every line on the film's clock", supTimes(whole), [0.5, 5, 32, 40]);
+  check("  every line on the film's clock", supTimes(whole), onClock(0.5, 5, 32, 40));
+  check("  read through the film's index, not by ffmpeg reading the film",
+    said.some((l) => l.includes("a picture subtitle cut out of the film for players to draw") && l.includes("by=index")), true);
   const cutPiece = Buffer.from(await (await fetch(`${origin}/api/plex/pgs/21/0?ratingKey=9&mediaIndex=0&from=0`)).arrayBuffer());
   check("  the cut's own piece still there for a player part way through it", cutPiece.equals(whole), true);
   const rest = Buffer.from(await (await fetch(`${origin}/api/plex/pgs/21/0?ratingKey=9&mediaIndex=0&from=100`)).arrayBuffer());
@@ -1129,11 +1203,11 @@ function supTimes(buf: Buffer): number[] {
     Status & { pieces: Array<{ toS: number | null }> };
   // Its lines go up at 0.5 and 32 s, each cleared after (5, 40 s): a piece each, with its clear.
   check("  a made one in pieces, each from a line drawn afresh to the next",
-    parts.pieces.map((p) => [p.id, p.fromS, p.toS]), [[1000, 0, 32], [1001, 32, null]]);
+    parts.pieces.map((p) => [p.id, p.fromS, p.toS]), [[1000, 0, ...onClock(32)], [1001, ...onClock(32), null]]);
   const each = await Promise.all(parts.pieces.map(async (p) =>
     Buffer.from(await (await fetch(`${origin}/api/plex/pgs/21/${p.id}?ratingKey=9&mediaIndex=0&from=0`)).arrayBuffer())));
   check("  the pieces are the file, a line each", [Buffer.concat(each).equals(whole), each.map(supTimes)],
-    [true, [[0.5, 5], [32, 40]]]);
+    [true, [onClock(0.5, 5), onClock(32, 40)]]);
   pgsPieceBytesForTests(1024 * 1024);
   forgetPgs();
   // Pieces from a place: the rest of the film from it, and the start up to past it.
@@ -1145,12 +1219,15 @@ function supTimes(buf: Buffer): number[] {
     reached = reachOf(String(r.stderr));
     return r.status === 0 ? supTimes(fs.readFileSync(out)) : [String(r.stderr).trim().slice(-300)];
   };
-  check("  a piece from 30 s has what is after it, on the film's clock", cut(30, null), [32, 40]);
+  check("  a piece from 30 s has what is after it, on the film's clock", cut(30, null), onClock(32, 40));
   check("  and says how far into the film it read: to the end", reached !== null && reached > 40, true);
-  check("  one from the start to 35 s, what is before", cut(0, 35), [0.5, 5, 32]);
+  check("  one from the start to 35 s, what is before", cut(0, 35), onClock(0.5, 5, 32));
   check("  the two made one, each line once, in order",
     supTimes(joinPgsPiecesForTests([fs.readFileSync(path.join(tmp, "piece-30-null.sup")), fs.readFileSync(path.join(tmp, "piece-0-35.sup"))])),
-    [0.5, 5, 32, 40]);
+    onClock(0.5, 5, 32, 40));
+  cut(0, null);
+  const ffCut = fs.readFileSync(path.join(tmp, "piece-0-null.sup"));
+  check("  the index's cut is ffmpeg's, byte for byte", ffCut.equals(whole), true);
   {
     // Ten minutes read at 60 times the film's speed: a skip to 500 s while the
     // cut is near the start stops it where it had read to, cuts from just
@@ -1189,6 +1266,82 @@ function supTimes(buf: Buffer): number[] {
       supTimes(fs.readFileSync(path.join(tmp, "subtitles-pgs", "long-1.sup"))), [0.5, 5, 300, 305, 590, 595]);
     forgetPgs();
   }
+  {
+    // Read through the film's index, as cutFromIndex does: each display set's
+    // block, as a Matroska file has it, made a .sup's.
+    const { supOfBlock, compositionsOf, displaySets, pgsIndexOf } = await import("../src/services/ffmpeg/picture-subtitles.js");
+    const sup = fs.readFileSync(SUP);
+    const sets = displaySets(sup);
+    const blocks = sets.map((s) => {
+      const parts: Buffer[] = [];
+      for (let at = s.at; at < s.end; at += 13 + sup.readUInt16BE(at + 11)) parts.push(sup.subarray(at + 10, at + 13 + sup.readUInt16BE(at + 11)));
+      return Buffer.concat(parts);
+    });
+    // As a film's cut has it: DTS the same as PTS, where pgs() writes 0.
+    const asCut = Buffer.from(sup);
+    for (let at = 0; at + 13 <= asCut.length; at += 13 + asCut.readUInt16BE(at + 11)) asCut.writeUInt32BE(asCut.readUInt32BE(at + 2), at + 6);
+    check("a display set's block is made a .sup's, as ffmpeg cuts a film's",
+      Buffer.concat(blocks.map((b, i) => supOfBlock(b, sets[i].pts)!)).equals(asCut), true);
+    check("  its composition numbers, one more each set", blocks.map((b) => compositionsOf(b)), [[0, 0], [1, 1], [2, 2], [3, 3]]);
+    check("  and a block that isn't whole display sets is none",
+      [supOfBlock(blocks[0].subarray(0, blocks[0].length - 3), 0.5), supOfBlock(blocks[0].subarray(3), 0.5),
+        supOfBlock(blocks[0].subarray(0, 20), 0.5)], [null, null, null]);
+    const streams = [{ id: 21, codec: "pgs", index: 2 }];
+    const indexed = await pgsIndexOf(PGS_FILM, PGS_FILM, null, streams, 21, PGS_START);
+    check("a PGS track's display sets are where the film's index says, on the film's clock",
+      [indexed?.at, (await indexed?.read(0, 4))?.map((b, i) => !!b && Buffer.from(b).equals(blocks[i]))],
+      [onClock(0.5, 5, 32, 40), [true, true, true, true]]);
+    check("  less a later start, as a cut's clock has it",
+      (await pgsIndexOf(PGS_FILM, `${PGS_FILM}#late`, null, streams, 21, 0.5))?.at, [0, 4.5, 31.5, 39.5]);
+    check("  lined up with Plex's streams with closed captions among them",
+      (await pgsIndexOf(PGS_FILM, `${PGS_FILM}#cc`, null, [{ id: 20, codec: "eia_608", index: 0 }, ...streams], 21, 0))?.at.length, 4);
+    check("  and not when Plex lists a subtitle the file doesn't have",
+      await pgsIndexOf(PGS_FILM, `${PGS_FILM}#more`, null, [...streams, { id: 22, codec: "srt", index: 3 }], 21, 0), null);
+    const packed = path.join(tmp, "pgs-zlib.mkv");
+    fs.writeFileSync(packed, matroskaWithSubtitles({ durationS: 60, tracks: [{ codec: "S_HDMV/PGS", zlib: true,
+      lines: sets.map((s, i) => ({ start: s.pts, end: sets[i + 1]?.pts ?? s.pts + 1, text: "", bytes: blocks[i] })) }] }));
+    const fromPacked = await pgsIndexOf(packed, packed, null, [{ id: 21, codec: "pgs", index: 1 }], 21, 0);
+    check("  packed with zlib, as old mkvmerge did: unpacked",
+      (await fromPacked?.read(0, 4))?.map((b, i) => !!b && Buffer.from(b).equals(blocks[i])), [true, true, true, true]);
+
+    const settle = async (key: string, source: () => Promise<PgsSource | null>) => {
+      let s = pgsStatus(key, source, 0);
+      for (let i = 0; i < 100 && !s.done && !s.failed; i++) {
+        await sleep(100);
+        s = pgsStatus(key, source, 0);
+      }
+      return s;
+    };
+    const madeOf = (key: string) => fs.readFileSync(path.join(tmp, "subtitles-pgs", `${key}.sup`));
+    forgetPgs();
+    const alone = await settle("index-1", async () => ({ kind: "film", input: ["-i", path.join(tmp, "not-there.mkv")], index: 2, indexed }));
+    check("a cut through the index alone, ffmpeg never reading the film, is ffmpeg's cut",
+      [alone.done, alone.failed, alone.done && madeOf("index-1").equals(ffCut)], [true, null, true]);
+    forgetPgs();
+    const holed = {
+      at: indexed!.at,
+      read: async (from: number, to: number) => (await indexed!.read(from, to))?.map((b, k) => from + k === 2 ? null : b) ?? null,
+    };
+    const missed = await settle("index-2", async () => ({ kind: "film", input: ["-i", PGS_FILM], index: 2, indexed: holed }));
+    check("  a display set that isn't where the index says: ffmpeg cuts on from it, every line once",
+      [missed.done, missed.failed, missed.done && supTimes(madeOf("index-2")),
+        said.some((l) => l.includes("key=index-2") && l.includes("couldn't be read through the film's index")),
+        said.some((l) => l.includes("key=index-2") && l.includes("by=index+ffmpeg"))],
+      [true, null, onClock(0.5, 5, 32, 40), true, true]);
+    forgetPgs();
+    const skipped = {
+      at: indexed!.at.filter((_, i) => i !== 1),
+      read: async (from: number, to: number) => {
+        const all = await indexed!.read(0, 4);
+        return all && [all[0], all[2], all[3]].slice(from, to);
+      },
+    };
+    const gapped = await settle("index-3", async () => ({ kind: "film", input: ["-i", PGS_FILM], index: 2, indexed: skipped }));
+    check("  one the index leaves out: ffmpeg cuts from the last set before it, every line once",
+      [gapped.done, gapped.failed, gapped.done && supTimes(madeOf("index-3"))], [true, null, onClock(0.5, 5, 32, 40)]);
+    forgetPgs();
+  }
+  console.log = log;
   {
     // A page looked at has its picture subtitle cut ahead, nobody playing it.
     for (const n of fs.readdirSync(path.join(tmp, "subtitles-pgs"))) fs.rmSync(path.join(tmp, "subtitles-pgs", n), { recursive: true, force: true });
@@ -1336,6 +1489,47 @@ console.log("\n— text subtitles read by ffmpeg, out of the file —");
     [true, [[3, 5, "Konnichiwa"], [41, 43, "Mata ne"]]]);
   check("with nothing asked of Plex's subtitle reader, nor a track selected on the item",
     asked.filter((p) => p.startsWith("/subtitles") || /^\/library\/parts\/\d+$/.test(p)), []);
+}
+
+console.log("\n— closed captions, read out of the picture —");
+{
+  const { subtitleReadArgs } = await import("../src/services/embedded-subtitles.js");
+  const { parseSubtitles } = await import("../src/services/subtitles.js");
+  const { readIndex, fileRanges, subtitleTrackFor } = await import("../src/services/mkv-subtitles.js");
+  type Tracks = { versions?: Array<{ subtitleTracks: Array<{ id: number; external?: boolean; picture?: boolean }> }> };
+  const track = async (id: number) => ((await (await fetch(`${origin}/api/plex/meta/22?fresh=1`)).json()) as Tracks)
+    .versions?.[0].subtitleTracks.find((t) => t.id === id);
+  process.env.PLAYBACK_ENGINE = "plex";
+  check("closed captions, with PLAYBACK_ENGINE=plex, are Plex's to burn in", (await track(81))?.external, false);
+  process.env.PLAYBACK_ENGINE = "ffmpeg";
+  const cc = await track(81);
+  check("  and with ffmpeg, drawn by the player as text", [cc?.external, cc?.picture], [true, undefined]);
+  type Answer = { cues?: Array<{ start: number; end: number; text: string }>; complete?: boolean };
+  let a: Answer = {};
+  for (let i = 0; i < 60 && !a.complete; i++) {
+    if (i) await sleep(250);
+    a = await (await fetch(`${origin}/api/plex/subtitles/81?ratingKey=22&mediaIndex=0`)).json() as Answer;
+  }
+  check("  read out of the picture by ffmpeg, on the film's clock, where subtitles sit",
+    [a.complete, a.cues?.map((c) => [c.start, c.end, c.text]), a.cues?.map((c) => (c as { top?: boolean }).top ?? false)],
+    [true, [[2, 4, "HI"], [6, 7, "OK"]], [false, false]]);
+  const cues = (srt: string) => parseSubtitles(srt)?.cues.map((c) => [c.start, c.end, c.text]) ?? srt.trim().slice(-200);
+  const run = (sub: { file: string; startS: number }, from: number) => {
+    const r = spawnSync(process.env.FFMPEG_PATH || "ffmpeg", subtitleReadArgs({ ...sub, index: 0, codec: "eia_608" }, from, [], []));
+    return r.status === 0 ? String(r.stdout) : String(r.stderr);
+  };
+  check("  from a place, what is after it", cues(run({ file: CC_FILM, startS: 0 }, 4.5)), [[6, 7, "OK"]]);
+  const odd = path.join(tmp, "It's a [Captioned], Film; 1.mkv");
+  fs.copyFileSync(CC_FILM, odd);
+  check("  out of a file named anything", cues(run({ file: odd, startS: 0 }, 0)), [[2, 4, "HI"], [6, 7, "OK"]]);
+  const late = path.join(tmp, "captions-late.mkv");
+  spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-y", "-i", CC_FILM, "-c", "copy", "-output_ts_offset", "10", late]);
+  check("  and one that starts late, less its start", cues(run({ file: late, startS: 10 }, 0)), [[2, 4, "HI"], [6, 7, "OK"]]);
+  const index = await readIndex(fileRanges(CC_FILM));
+  const plexStreams = [{ id: 81, codec: "eia_608", index: 0 }, { id: 82, codec: "srt", index: 2 }];
+  check("  not a track of the file's: its subtitle tracks still line up with Plex's (173175, 21 October)",
+    [index && subtitleTrackFor(index, plexStreams, 82)?.codec, index && subtitleTrackFor(index, plexStreams, 81)],
+    ["S_TEXT/UTF8", null]);
 }
 {
   const { prefetchEmbeddedSubtitles, embeddedSubtitleState } = await import("../src/services/embedded-subtitles.js");
@@ -1669,6 +1863,9 @@ console.log("\n— previews made by ffmpeg, keyframes off the mount, segments ke
   const second = Buffer.from(await again.arrayBuffer());
   check("  and sent from there", [again.status, second.equals(first), first.length > 0], [200, true, true]);
   await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
+  // A run still being made goes on 15 s for its driver's next session (a
+  // pop-out's reload), its segments with it: they go when it does.
+  for (let i = 0; i < 200 && hotSegmentStats().segments >= kept; i++) await sleep(100);
   check("  and let go when the run ends", hotSegmentStats().segments < kept, true);
 }
 {
@@ -1688,11 +1885,15 @@ console.log("\n— previews made by ffmpeg, keyframes off the mount, segments ke
     [frames.every((f) => f[0] === 0xff && f[1] === 0xd8 && f[f.length - 2] === 0xff && f[f.length - 1] === 0xd9),
       new Set(frames.map((f) => f.toString("base64"))).size], [true, 30]);
   check("  kept for next time", fs.existsSync(path.join(tmp, "previews", `1-${fs.statSync(titles["1"].file).size}-i2.bif`)), true);
-  // Plex's length far past the file's: stopped where the film ends.
+  // Plex's length far past the file's: stopped where the film ends — a frame
+  // for each two seconds of it: 30 for a minute exactly, as ffmpeg 7 makes
+  // AC3_FILM, 31 where the ffmpeg that made it ran it on past 60 s.
   const { makePreview } = await import("../src/services/ffmpeg/previews.js");
   const long = await makePreview({ partId: 9001, fileSize: 1, film: titles["2"].file, durationS: 3600, hdr: false });
+  const ac3S = Number(String(spawnSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+    AC3_FILM]).stdout).trim());
   check("  a film Plex thinks an hour long gets its own minute's frames",
-    long ? fs.readFileSync(long).readUInt32LE(12) : null, 31);
+    long ? fs.readFileSync(long).readUInt32LE(12) : null, Math.ceil(ac3S / 2 - 0.001));
   process.env.FFMPEG_PREVIEWS = "off";
   const off = await fetch(`${origin}/api/plex/preview/2/index`);
   await off.arrayBuffer();

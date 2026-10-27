@@ -237,6 +237,7 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
               </>
             ) : (
               <>
+                {status?.lastSyncError && <p style={styles.error}>{status.lastSyncError}</p>}
                 <p style={styles.copy}>
                   Link your own Plex account to sync your complete watch history and resume positions in both directions. During a watch party, every linked participant who has the player open receives credit on their own account.
                 </p>

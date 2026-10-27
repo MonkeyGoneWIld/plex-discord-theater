@@ -136,6 +136,9 @@ const markSyncSuccess = db.prepare(`
   SET last_sync_at = ?, last_sync_error = NULL, history_sync_version = ?
   WHERE user_id = ?
 `);
+const signOut = db.prepare(
+  "UPDATE plex_accounts SET server_token_encrypted = NULL, last_sync_error = ? WHERE user_id = ?",
+);
 const selectSetting = db.prepare("SELECT value FROM settings WHERE key = ?");
 const upsertSetting = db.prepare(`
   INSERT INTO settings (key, value) VALUES (?, ?)
@@ -412,6 +415,20 @@ function accessToken(userId: string): {
   }
 }
 
+/** Plex refused the account's sign-in: revoked on plex.tv, or the password changed. */
+export class PlexSignedOut extends Error {}
+
+/**
+ * Plex answered 401 for this account's token. The link is dropped to
+ * "Link Plex" so the next step is one click, not a watchlist that fails on
+ * every visit. The account row stays, so history isn't reset on relinking.
+ */
+function signedOut(userId: string): PlexSignedOut {
+  const message = "Plex signed this account out. Link Plex again.";
+  signOut.run(message, userId);
+  return new PlexSignedOut(message);
+}
+
 function requireAccessToken(userId: string): NonNullable<ReturnType<typeof accessToken>> {
   const linked = accessToken(userId);
   if (!linked) throw new Error("No Plex account is linked");
@@ -517,7 +534,7 @@ function mapOnlineWatchlistItem(item: AccountMediaMetadata): PlexWatchlistItem |
   };
 }
 
-async function readWatchlist(accountToken: string): Promise<AccountMediaMetadata[]> {
+async function readWatchlist(userId: string, accountToken: string): Promise<AccountMediaMetadata[]> {
   const items: AccountMediaMetadata[] = [];
   let start = 0;
   while (true) {
@@ -531,6 +548,7 @@ async function readWatchlist(accountToken: string): Promise<AccountMediaMetadata
     const response = await plexCloudFetch(url, {
       headers: { ...plexTvHeaders(), "X-Plex-Token": accountToken },
     });
+    if (response.status === 401) throw signedOut(userId);
     if (!response.ok) throw new Error(`Could not read your Plex Watchlist (${response.status})`);
     const data = await response.json() as {
       MediaContainer?: { Metadata?: AccountMediaMetadata[]; totalSize?: number };
@@ -560,7 +578,7 @@ async function localMatchForGuid(guid: string, serverToken: string): Promise<Acc
 /** The linked account's Universal Watchlist, mapped back to playable local items where possible. */
 export async function getPlexWatchlist(userId: string): Promise<PlexWatchlistItem[]> {
   const linked = requireAccessToken(userId);
-  const online = await readWatchlist(linked.accountToken);
+  const online = await readWatchlist(userId, linked.accountToken);
   const resolved: Array<PlexWatchlistItem | null> = new Array(online.length).fill(null);
   await runWithConcurrency(online.map((item, index) => ({ item, index })), 8, async ({ item, index }) => {
     const id = providerId(item.guid);
@@ -599,7 +617,7 @@ export async function getPlexWatchlistState(userId: string, ratingKey: string): 
   const linked = requireAccessToken(userId);
   const guid = await watchlistGuid(linked, { ratingKey });
   const id = providerId(guid)!;
-  const watchlist = await readWatchlist(linked.accountToken);
+  const watchlist = await readWatchlist(userId, linked.accountToken);
   return watchlist.some((item) => providerId(item.guid) === id);
 }
 
@@ -618,6 +636,7 @@ export async function setPlexWatchlistState(
     method: "PUT",
     headers: { ...plexTvHeaders(), "X-Plex-Token": linked.accountToken },
   });
+  if (response.status === 401) throw signedOut(userId);
   if (!response.ok) throw new Error(`Could not update your Plex Watchlist (${response.status})`);
 }
 

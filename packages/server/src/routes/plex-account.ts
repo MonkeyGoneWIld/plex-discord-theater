@@ -6,6 +6,7 @@ import {
   getPlexWatchlistState,
   getPlexItemWatchedState,
   getPlexAccountStatus,
+  PlexSignedOut,
   pollPlexAccountLink,
   setPlexItemWatched,
   setPlexWatchlistState,
@@ -31,6 +32,15 @@ function requireUserId(req: Request, res: Response): string | null {
   return userId;
 }
 
+/**
+ * Plex's answer, as a 4xx: Discord's proxy replaces the body of a 502, so the
+ * player read only "API error 502" and never what Plex said.
+ */
+function failed(res: Response, err: unknown, fallback: string): void {
+  res.status(err instanceof PlexSignedOut ? 409 : 424)
+    .json({ error: err instanceof Error ? err.message : fallback });
+}
+
 router.get("/status", (req, res) => {
   const userId = requireUserId(req, res);
   if (!userId) return;
@@ -44,7 +54,7 @@ router.post("/link", async (req, res) => {
     res.json(await startPlexAccountLink(userId));
   } catch (err) {
     console.error("[Plex Account] Failed to start link:", err);
-    res.status(502).json({ error: err instanceof Error ? err.message : "Could not start Plex sign-in" });
+    failed(res, err, "Could not start Plex sign-in");
   }
 });
 
@@ -56,7 +66,7 @@ router.get("/link", async (req, res) => {
     res.json(status);
   } catch (err) {
     console.error("[Plex Account] Link poll failed for", userId.substring(0, 8), err);
-    res.status(502).json({ error: err instanceof Error ? err.message : "Could not finish Plex sign-in" });
+    failed(res, err, "Could not finish Plex sign-in");
   }
 });
 
@@ -68,7 +78,7 @@ router.post("/sync", async (req, res) => {
     res.json({ ...result, status: getPlexAccountStatus(userId) });
   } catch (err) {
     console.error("[Plex Account] Sync failed for", userId.substring(0, 8), err);
-    res.status(502).json({ error: err instanceof Error ? err.message : "Plex history sync failed" });
+    failed(res, err, "Plex history sync failed");
   }
 });
 
@@ -79,7 +89,7 @@ router.get("/watchlist", async (req, res) => {
     res.json({ items: await getPlexWatchlist(userId) });
   } catch (err) {
     console.error("[Plex Account] Watchlist failed for", userId.substring(0, 8), err);
-    res.status(502).json({ error: err instanceof Error ? err.message : "Could not load Plex Watchlist" });
+    failed(res, err, "Could not load Plex Watchlist");
   }
 });
 
@@ -95,7 +105,7 @@ router.get("/watchlist/:ratingKey", async (req, res) => {
     res.json({ watchlisted: await getPlexWatchlistState(userId, ratingKey) });
   } catch (err) {
     console.error("[Plex Account] Watchlist state failed for", userId.substring(0, 8), err);
-    res.status(502).json({ error: err instanceof Error ? err.message : "Could not read Plex Watchlist state" });
+    failed(res, err, "Could not read Plex Watchlist state");
   }
 });
 
@@ -113,7 +123,7 @@ router.put("/watchlist", async (req, res) => {
     res.json({ watchlisted: req.body.watchlisted });
   } catch (err) {
     console.error("[Plex Account] Watchlist update failed for", userId.substring(0, 8), err);
-    res.status(502).json({ error: err instanceof Error ? err.message : "Could not update Plex Watchlist" });
+    failed(res, err, "Could not update Plex Watchlist");
   }
 });
 
@@ -130,7 +140,7 @@ router.put("/watched/:ratingKey", async (req, res) => {
     res.json({ watched: req.body.watched, ...result });
   } catch (err) {
     console.error("[Plex Account] Watched update failed for", userId.substring(0, 8), err);
-    res.status(502).json({ error: err instanceof Error ? err.message : "Could not update watched state" });
+    failed(res, err, "Could not update watched state");
   }
 });
 
@@ -146,7 +156,7 @@ router.get("/watched/:ratingKey", async (req, res) => {
     res.json(await getPlexItemWatchedState(userId, ratingKey));
   } catch (err) {
     console.error("[Plex Account] Watched state failed for", userId.substring(0, 8), err);
-    res.status(502).json({ error: err instanceof Error ? err.message : "Could not read watched state" });
+    failed(res, err, "Could not read watched state");
   }
 });
 

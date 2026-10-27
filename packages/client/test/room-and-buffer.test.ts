@@ -374,6 +374,11 @@ console.log("\n— picture enough in hand to go —");
   check("over everything, with too little in the last ten seconds",
     comingInBytesPerS([[0, 0, 0], [5_000, 10 * MB, 4_000], [20_000, 11 * MB, 4_500], [25_000, 12 * MB, 5_000]], 25_000), 2.4 * MB);
   check("nothing to go by yet", [comingInBytesPerS([], 0), comingInBytesPerS([[0, 0, 0], [500, 1 * MB, 400]], 500)], [null, null]);
+  // Punisher S2E5 on 24 October: its first segment, 0.25 MB, in 1.3 s.
+  const tiny = comingInBytesPerS([[0, 0, 0], [1_300, 0.26 * MB, 1_300]], 1_300);
+  check("a small segment's time isn't a speed: it is mostly the request's way there and back", tiny, null);
+  check("  so the start goes by what is in hand, as with nothing to go by",
+    readiness({ ...base, nowS: 0, heldToS: 4.9, leftS: 3000, upcoming: segs(4.9, Array(6).fill(10)), bytesPerS: tiny, fallbackS: 3 }).ready, true);
 }
 
 console.log("\n— a seek in front of a stream's first picture —");

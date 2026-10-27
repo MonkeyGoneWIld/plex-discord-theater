@@ -54,6 +54,8 @@ export function clock(s: number): string {
 // Asked for a pass at a time: four, until the answer says otherwise.
 const passCount = (status: PreviewStatus) => (status.transport === "progressive-v2" || status.transport === null ? PASS_NAMES.length : 1);
 const count = (status: PreviewStatus) => (status.frames ? `${status.ready}/${status.frames}` : "starting");
+/** Passes asked for so far, each once however often it was resumed. */
+const passesAsked = (status: PreviewStatus) => Math.min(new Set(status.passes.map((p) => p.pass)).size, passCount(status));
 
 /** The panel's one line for the preview frames. `hasFrames` is whether Plex
  *  has frames for this file at all. */
@@ -68,8 +70,8 @@ export function previewSummary(status: PreviewStatus | null, hasFrames: boolean)
     case "unreadable": return "Index unreadable · per frame";
     case "failed": return `${count(status)} · failed · per frame`;
     case "waiting":
-      return `${count(status)} · pass ${Math.min(status.passes.length + 1, passes)}/${passes} at ${status.waitingForBufferS ?? 0} s buffer`;
-    default: return `${count(status)} · pass ${status.passes.length}/${passes}`;
+      return `${count(status)} · pass ${Math.min(passesAsked(status) + 1, passes)}/${passes} queued`;
+    default: return `${count(status)} · pass ${Math.max(1, passesAsked(status))}/${passes}`;
   }
 }
 
@@ -90,8 +92,10 @@ export function previewDetails(status: PreviewStatus | null): Array<[string, str
     rows.push([name, value]);
   }
   if (status.state === "waiting" && progressive) {
-    const next = status.passes.length;
-    rows.push([`Pass ${next + 1} · ${PASS_NAMES[next] ?? "?"}`, `waiting for ${status.waitingForBufferS ?? 0} s buffer`]);
+    const next = passesAsked(status);
+    if (next < PASS_NAMES.length) {
+      rows.push([`Pass ${next + 1} · ${PASS_NAMES[next]}`, `queued until ${status.waitingForBufferS ?? 0} s buffered`]);
+    }
   }
   return rows;
 }

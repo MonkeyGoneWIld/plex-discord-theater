@@ -63,10 +63,11 @@ export function readStreamNotes(
   };
 }
 
-/** The Engine line: who made the stream, on what, or why ffmpeg didn't. */
+/** The Engine line: who made the stream, and on what. Why ffmpeg handed it
+ *  to Plex is a line of its own (notes.fallback). */
 export function engineText(notes: StreamNotes): string {
   if (notes.engine === "ffmpeg") return notes.encoder ? `ffmpeg · ${notes.encoder}` : "ffmpeg";
-  return notes.fallback ? `Plex (ffmpeg: ${notes.fallback})` : "Plex";
+  return notes.fallback ? "Plex (ffmpeg fallback)" : "Plex";
 }
 
 /**
@@ -91,12 +92,26 @@ export function audioSummary(notes: StreamNotes | null): string {
 }
 
 /** What the audio row opens to, one line each: nothing for audio played as
- *  it is, which the row says all of. */
+ *  it is, which the row says all of. Why it was converted is under Playback. */
 export function audioDetails(notes: StreamNotes | null): Array<[string, string]> {
   if (notes?.audio !== "transcode") return [];
   return [
     ["Source", notes.audioFrom ?? "—"],
     ["Output", `${notes.audioTo ?? "—"}${notes.audioKbps ? ` · ${notes.audioKbps} kbps` : ""}`],
-    ...(notes.audioReason ? [["Reason", notes.audioReason] as [string, string]] : []),
+  ];
+}
+
+/** The file's picture as two short lines: its format, then its frame —
+ *  "HEVC Main 10 · DV P8.1 / HDR10" and "3840×2160 · 23.976 fps". */
+export function fileLines(videoFrom: string | null): Array<[string, string]> {
+  if (!videoFrom) return [];
+  // "Main 10" says the bit depth already; "DV" is Dolby Vision's own short name.
+  const parts = videoFrom.replace(/Dolby Vision/g, "DV").split(" · ")
+    .filter((p, _, all) => !(p === "10-bit" && all.some((q) => / Main 10$/.test(q))));
+  const frame = parts.filter((p) => /^\d+×\d+$|fps$|^interlaced$/.test(p));
+  const format = parts.filter((p) => !frame.includes(p));
+  return [
+    ...(format.length ? [["File", format.join(" · ")] as [string, string]] : []),
+    ...(frame.length ? [["Frame", frame.join(" · ")] as [string, string]] : []),
   ];
 }

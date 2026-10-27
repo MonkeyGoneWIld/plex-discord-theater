@@ -193,7 +193,7 @@ console.log("\n— AV1, Opus and FLAC copied, in fragmented MP4 —");
     av1.ok && [av1.codec, av1.audioCopy, av1.fmp4, copyNeeds(av1)], ["av1", true, true, ["av1", "opus"]]);
   const why = (p: ReturnType<typeof planCopy>) => (p.ok ? "copy" : p.why);
   check("not for a player that can't decode AV1", why(planCopy(version({}, {}), { ...all, av1Ok: false })),
-    "AV1, and this player can't decode it");
+    "AV1: not decoded by this player");
   check("nor 12-bit AV1", why(planCopy(version({ bitDepth: 12 }, {}), all)), "12-bit AV1");
   check("from WebM too, which MPEG-TS copies never were", why(planCopy(version({}, {}, { container: "webm" }), all)), "copy");
   const noOpus = planCopy(version({ codec: "h264", bitDepth: 8 }, {}), { ...all, opusOk: false });
@@ -217,12 +217,12 @@ console.log("\n— AV1, Opus and FLAC copied, in fragmented MP4 —");
   check("and AC3 5.1 for one that decodes AC3", ac3.ok && [ac3.audioCopy, ac3.fmp4, copyNeeds(ac3)], [true, true, ["ac3"]]);
   const audioWhy = (p: ReturnType<typeof planCopy>) => (p.ok ? [p.audioCopy, p.audioWhy] : p.why);
   check("not for a player that can't, which is told why",
-    audioWhy(sound({ codec: "eac3", channels: 6 }, { eac3Ok: false })), [false, "EAC3, and this player can't play it"]);
+    audioWhy(sound({ codec: "eac3", channels: 6 }, { eac3Ok: false })), [false, "EAC3: not decoded by this player"]);
   check("DTS and TrueHD never, as no browser plays them",
     [audioWhy(sound({ codec: "dca", channels: 6 })), audioWhy(sound({ codec: "truehd", channels: 8 }))],
-    [[false, "DTS, which browsers can't play"], [false, "TrueHD, which browsers can't play"]]);
+    [[false, "DTS: no browser decoder"], [false, "TrueHD: no browser decoder"]]);
   check("FLAC too heavy to send says so, with its bitrate",
-    audioWhy(sound({ codec: "flac", channels: 6, bitrate: 4000 })), [false, "FLAC at 4,000 kbps, too heavy to send as it is"]);
+    audioWhy(sound({ codec: "flac", channels: 6, bitrate: 4000 })), [false, "FLAC 4,000 kbps: above copy limit"]);
   const hevcFlac = flac({ channels: 2, bitrate: 1000 });
   const args = hevcFlac.ok ? copyArgs(hevcFlac, ["-i", "f.mkv"], 0, 60, 4).join(" ") : "";
   check("an fMP4 copy is cut by the HLS muxer, on the copy's clock, HEVC tagged as Chrome takes it",
@@ -269,6 +269,22 @@ console.log("\n— AV1 re-encodes —");
   const nvArgs = nv.ok ? encodeArgs(nv, ["-i", "f.mkv"], 0, 60, "0").join(" ") : "";
   check("on NVENC, with no profile to name", [nvArgs.includes("-c:v av1_nvenc -preset p4 -tune hq -rc vbr"), nvArgs.includes("-profile:v")],
     [true, false]);
+
+  console.log("\n— a re-encode's sound —");
+  const truehd = (more: Partial<Parameters<typeof planEncode>[1]>) => plan({ ...version({}), streams: [version({}).streams[0],
+    { id: 12, streamType: 2, index: 1, codec: "truehd", channels: 8, default: true }] } as ReturnType<typeof version>,
+  { av1Ok: false, audioChannels: 6, ...more });
+  const opus = truehd({ opusOk: true });
+  check("TrueHD 7.1 for a player that decodes Opus keeps its 7.1, as Opus, in fMP4, HEVC tagged as Chrome takes it",
+    opus.ok && [opus.audioOut, opus.fmp4, opus.audioWhy], [{ codec: "opus", channels: 8, kbps: 512 }, true, "TrueHD: no browser decoder"]);
+  const opusArgs = opus.ok ? encodeArgs(opus, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
+  check("  cut as fMP4", [opusArgs.includes("-c:a libopus"), opusArgs.includes("-hls_segment_type fmp4"), opusArgs.includes("-tag:v hvc1"),
+    opusArgs.includes("-segment_times")], [true, true, true, false]);
+  const aac = truehd({});
+  check("and AAC 5.1 in MPEG-TS for one that doesn't", aac.ok && [aac.audioOut, aac.fmp4], [{ codec: "aac", channels: 6, kbps: 448 }, false]);
+  const eac3 = plan(version({}), { av1Ok: false, opusOk: true, audioChannels: 6 });
+  check("EAC3 5.1 is AAC 5.1 either way, saying why", eac3.ok && [eac3.audioOut?.codec, eac3.fmp4, eac3.audioWhy],
+    ["aac", false, "Re-encodes carry AAC or Opus only"]);
 }
 
 console.log("\n— a measured playlist of fragmented MP4 —");

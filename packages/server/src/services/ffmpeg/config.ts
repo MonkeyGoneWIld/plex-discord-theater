@@ -366,7 +366,8 @@ export async function detectHardware(): Promise<{ hardware: Hardware; note: stri
       encodeVa("av1_vaapi", "nv12", null, false), encodeVa("av1_vaapi", "nv12", null, true),
     ]);
     const av1 = av1Full.ok || (av1Low.ok && "low-power");
-    const what = `VAAPI${lowPower ? ", low-power" : ""} (H.264${hevc.ok ? " and HEVC Main10" : ", not HEVC"})`;
+    // AV1 named too: the line said "H.264 and HEVC Main10" while AV1 was in use.
+    const what = `VAAPI${lowPower ? ", low-power" : ""} (H.264${hevc.ok ? ", HEVC Main10" : ", not HEVC"}${av1 ? ", AV1" : ", not AV1"})`;
     return {
       ok: true as const,
       result: cl.ok
@@ -383,9 +384,10 @@ export async function detectHardware(): Promise<{ hardware: Hardware; note: stri
     encode("hevc_qsv", "p010le", "main10"), encode("h264_qsv", "nv12", "high"), opencl(), encode("av1_qsv", "nv12", null),
   ]);
   if (hevc.ok && h264.ok) {
+    const what = `Intel QSV (H.264, HEVC Main10${av1.ok ? ", AV1" : ", not AV1"})`;
     return cl.ok
-      ? done("qsv", `Intel QSV (HEVC Main10 and H.264), tone mapping ${tonemapAlgo()} on OpenCL`, "opencl", true, false, av1.ok)
-      : done("qsv", `Intel QSV (HEVC Main10 and H.264), tone mapping ${tonemapAlgo()} on QSV's video engine ` +
+      ? done("qsv", `${what}, tone mapping ${tonemapAlgo()} on OpenCL`, "opencl", true, false, av1.ok)
+      : done("qsv", `${what}, tone mapping ${tonemapAlgo()} on QSV's video engine ` +
           `(OpenCL didn't: ${cl.said || "no answer"}; Dolby Vision 5 goes to Plex)`, "vpp", true, false, av1.ok);
   }
   const why = (!hevc.ok ? hevc.said : h264.said) || "no answer";

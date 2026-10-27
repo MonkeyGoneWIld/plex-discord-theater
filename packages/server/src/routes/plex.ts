@@ -5060,13 +5060,13 @@ function refusedCopyReason(version: VersionFacts | null, askedKbps: number, room
   if (codec && codec !== "h264" && codec !== "hevc") {
     return `Unsupported video codec (${codec.toUpperCase()})`;
   }
-  if (codec === "hevc" && !roomHevc) return "HEVC not supported by this player";
-  if (codec === "h264" && (version?.bitDepth ?? 8) > 8) return `${version!.bitDepth}-bit H.264 not supported by browsers`;
-  if (aboveHd(version)) return "Above 1080p, downscaled";
+  if (codec === "hevc" && !roomHevc) return "HEVC: not decoded by this player";
+  if (codec === "h264" && (version?.bitDepth ?? 8) > 8) return `${version!.bitDepth}-bit H.264: no browser decoder`;
+  if (aboveHd(version)) return "Above 1080p (player max 1080p)";
   // Asked above any peak, the bitrate wasn't it — see COPY_ASK_KBPS.
   if (askedKbps >= COPY_ASK_KBPS) return "Declined by Plex";
   if (version?.bitrate) {
-    return `Peaks above ${mbpsText(askedKbps)} (${mbpsText(version.bitrate)} average)`;
+    return `Peaks over ${mbpsText(askedKbps)} (avg ${mbpsText(version.bitrate)})`;
   }
   return `Declined by Plex at ${mbpsText(askedKbps)}`;
 }
@@ -5301,7 +5301,7 @@ async function startWithFfmpeg(o: {
       av1LowPower: lowPowerVaapiAv1(),
       kbps: o.transcodeKbps, peakKbps: o.peakKbps, maxWidth, maxHeight, keepHdr: keepHdrOnReencode(),
       tonemapper: tonemapper(), tonemapAlgo: tonemapAlgo(), burn: o.burnSubtitleId ?? null,
-      audioChannels: audioChannels(), preset: encodePreset(), lowPower: lowPowerVaapi(),
+      audioChannels: audioChannels(), opusOk: o.caps.opus, preset: encodePreset(), lowPower: lowPowerVaapi(),
       gpuDecode: gpuDecodeOn() ? undefined : false, ...burnFiles,
     };
     let plan = planEncode(source, ask);
@@ -5311,8 +5311,8 @@ async function startWithFfmpeg(o: {
     const fromStart = (p: typeof plan) => p.ok ? (toS: number) => encodeArgs(p, input, 0, durationS, hwDevice(), toS) : undefined;
     const run = (p: Extract<typeof plan, { ok: true }>) => startFfmpegRun({
       sessionId: o.sessionId, ratingKey: o.ratingKey, codec: p.codec, encode: true,
-      // AV1 is made in fragmented MP4, as an AV1 copy is.
-      fmp4: p.codec === "av1",
+      // AV1 is made in fragmented MP4, as an AV1 copy is; so is Opus sound.
+      fmp4: p.fmp4,
       targetKbps: encodeTargetKbps(p), offsetS: o.offsetS,
       args: encodeArgs(p, input, o.offsetS, durationS, hwDevice()),
       fromStart: fromStart(p), replaces: o.replaces,
@@ -5341,7 +5341,7 @@ async function startWithFfmpeg(o: {
     video = { ...plan, kbps: plan.kbps };
     range = plan.hdrTrc ? `${plan.hdrTrc === "arib-std-b67" ? "HLG" : "HDR10"} (kept)`
       : plan.tonemap ? `SDR (tone-mapped from ${o.picture?.hdr ?? plan.hdr})` : "SDR";
-    encoder = `${HARDWARE_NAMES[plan.hardware]}, ${plan.gpuDecode ? "GPU" : "CPU"} decode`;
+    encoder = `${HARDWARE_NAMES[plan.hardware]} · ${plan.gpuDecode ? "GPU" : "CPU"} decode`;
     logEvent("FFmpeg", "re-encoding", {
       session, ratingKey: o.ratingKey, fromS: o.offsetS, why: reason,
       video: `${plan.video.codec} → ${plan.codec} ${plan.width}x${plan.height} ${plan.kbps}k (peak ${plan.peakKbps}k)`,
@@ -5357,14 +5357,17 @@ async function startWithFfmpeg(o: {
           `${plan.burn.kind === "picture" ? "" : `, ${plan.burn.kind}`}${plan.burn.stretch ? ", stretched" : ""}`
         : "none",
       audio: audioText(plan),
+      segments: plan.fmp4 ? "fMP4" : "MPEG-TS",
       source: fromMount ? "mount" : "plex",
     });
   }
 
   recordSessionVideoCodec(o.sessionId, video.codec);
+  // A re-encode's Opus 7.1 too: whoever on it doesn't decode Opus gets a
+  // stream of their own (sync.ts seatOf).
   recordSessionAudioNeeds(o.sessionId, copyPlan?.ok && reason === null
     ? copyNeeds(copyPlan).filter((c) => c !== "hevc" && c !== "av1")
-    : []);
+    : video.audioOut?.codec === "opus" ? ["opus"] : []);
   const decided: AudioDecision | null = video.audio
     ? {
         id: video.audio.id,
@@ -5926,26 +5929,26 @@ router.get(
       // Copied unless something rules it out before Plex is even asked — and
       // what does is the reason the player shows.
       let notCopied: string | null = null;
-      if (!DIRECT_STREAM) notCopied = "Direct Stream disabled on this server";
+      if (!DIRECT_STREAM) notCopied = "Direct Stream disabled";
       else if (aboveHd(version)) {
         // Never sent as it is, at any bitrate: the activity shows 1080p at
         // most, so a 4K file under the server limit is still re-encoded, and
         // raising the limit never sends one.
-        notCopied = (version?.width ?? 0) >= UHD_MIN_WIDTH ? "4K, shown at 1080p at most" : "Above 1080p, shown at 1080p at most";
+        notCopied = (version?.width ?? 0) >= UHD_MIN_WIDTH ? "4K source (player max 1080p)" : "Above 1080p (player max 1080p)";
       } else if (subtitleMode === "burn") {
         // Picture subtitles (PGS, VobSub) can only be burned in. A text one is
         // burned in when it couldn't be drawn — Plex failed to read it out.
         const burned = subtitleId ? await subtitleTrackOf(ratingKey, mediaIndex, subtitleId) : null;
         notCopied = burned?.picture
-          ? "Subtitle burn-in (PGS couldn't be drawn)"
+          ? "Subtitle burn-in (PGS)"
           : burned?.external
             ? "Subtitle burn-in (text unreadable)"
             : "Subtitle burn-in (image-based)";
       }
       else if (quality && kbps !== null && kbps > quality) {
-        notCopied = `${mbpsText(kbps)} average exceeds ${mbpsText(quality)} quality limit`;
+        notCopied = `${mbpsText(kbps)} over ${mbpsText(quality)} quality cap`;
       } else if (kbps !== null && kbps > COPY_LIMIT_KBPS) {
-        notCopied = `${mbpsText(kbps)} average exceeds ${mbpsText(COPY_LIMIT_KBPS)} server limit`;
+        notCopied = `${mbpsText(kbps)} over ${mbpsText(COPY_LIMIT_KBPS)} server cap`;
         logEvent("DirectStream", "re-encoding a file whose average is above DIRECT_STREAM_MAX_KBPS", {
           ratingKey, session: sessionId.substring(0, 8), kbps, capKbps: COPY_LIMIT_KBPS,
         });

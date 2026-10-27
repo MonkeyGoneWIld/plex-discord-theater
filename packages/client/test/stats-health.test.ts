@@ -26,15 +26,15 @@ const notes = (n: Partial<StreamNotes>): StreamNotes => ({
 });
 check("Direct Play needs no why", playbackWhy(notes({}), "Direct Play"), []);
 check("a Direct Stream's why is its audio",
-  playbackWhy(notes({ audio: "transcode", audioReason: "Unsupported codec (EAC3)" }), "Direct Stream"), [["Why", "Audio: Unsupported codec (EAC3)"]]);
+  playbackWhy(notes({ audio: "transcode", audioReason: "Unsupported codec (EAC3)" }), "Direct Stream"), [["Audio", "Unsupported codec (EAC3)"]]);
 check("a Transcode gives every reason, video's first",
-  playbackWhy(notes({ video: "transcode", reason: "38.7 Mbps average exceeds 25 Mbps server limit", audio: "transcode", audioReason: "Unsupported codec (DTS-HD MA)" }), "Transcode"),
-  [["Why", "Video: 38.7 Mbps average exceeds 25 Mbps server limit"], ["", "Audio: Unsupported codec (DTS-HD MA)"]]);
+  playbackWhy(notes({ video: "transcode", reason: "38.7 Mbps over 25 Mbps server cap", audio: "transcode", audioReason: "Unsupported codec (DTS-HD MA)" }), "Transcode"),
+  [["Video", "38.7 Mbps over 25 Mbps server cap"], ["Audio", "Unsupported codec (DTS-HD MA)"]]);
 check("a transcode with its audio copied gives the one",
-  playbackWhy(notes({ video: "transcode", reason: "Open-GOP keyframes" }), "Transcode"), [["Why", "Video: Open-GOP keyframes"]]);
+  playbackWhy(notes({ video: "transcode", reason: "Open-GOP keyframes" }), "Transcode"), [["Video", "Open-GOP keyframes"]]);
 check("a server that said nothing of the audio says so",
-  playbackWhy(notes({ audio: null }), "Direct Stream"), [["Why", "Audio: not reported by the server"]]);
-check("and one that said nothing at all", playbackWhy(null, "Transcode"), [["Why", "Not reported by the server"]]);
+  playbackWhy(notes({ audio: null }), "Direct Stream"), [["Audio", "Not reported by server"]]);
+check("and one that said nothing at all", playbackWhy(null, "Transcode"), [["Reason", "Not reported by server"]]);
 
 console.log("\n— buffer, speed, frames —");
 check("buffer: over 30 s green, 10 to 30 amber, under 10 red",
@@ -76,11 +76,11 @@ console.log("\n— sync —");
 const sync = (s: Partial<SyncInfo>): SyncInfo => ({
   role: "viewer", driftS: 0.05, rate: 1, waitingForRoom: false, roomPlaying: true, stalls: { count: 0, totalMs: 0 }, ...s,
 });
-check("the host sets the clock", syncSummary(sync({ role: "host", driftS: null })), { text: "Host · sets the room clock", health: "ok" });
-check("a viewer in step", syncSummary(sync({})), { text: "+0.05 s from the room", health: "ok" });
-check("behind, and being sped up", syncSummary(sync({ driftS: -2.4, rate: 1.05 })), { text: "−2.40 s from the room · catching up 1.05×", health: "bad" });
-check("a little ahead, eased back", syncSummary(sync({ driftS: 0.8, rate: 0.95 })), { text: "+0.80 s from the room · easing back 0.95×", health: "warn" });
-check("waiting ahead of the room on purpose", syncSummary(sync({ driftS: 6, waitingForRoom: true })), { text: "+6.00 s · waiting for the room", health: "info" });
+check("the host sets the clock", syncSummary(sync({ role: "host", driftS: null })), { text: "Host (room clock)", health: "ok" });
+check("a viewer in step", syncSummary(sync({})), { text: "+0.05 s vs room", health: "ok" });
+check("behind, and being sped up", syncSummary(sync({ driftS: -2.4, rate: 1.05 })), { text: "−2.40 s vs room · catching up 1.05×", health: "bad" });
+check("a little ahead, eased back", syncSummary(sync({ driftS: 0.8, rate: 0.95 })), { text: "+0.80 s vs room · slowing 0.95×", health: "warn" });
+check("waiting ahead of the room on purpose", syncSummary(sync({ driftS: 6, waitingForRoom: true })), { text: "+6.00 s · waiting for room", health: "info" });
 check("the room paused", syncSummary(sync({ driftS: 0, roomPlaying: false })), { text: "+0.00 s · room paused", health: "ok" });
 check("the room on another title", syncSummary(sync({ driftS: null })), { text: "Room on another title", health: "none" });
 check("no room", syncSummary(null), { text: "—", health: "none" });

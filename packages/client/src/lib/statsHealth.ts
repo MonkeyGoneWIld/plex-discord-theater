@@ -113,31 +113,31 @@ export function stallsHealth(stalls: { count: number; totalMs: number }): Health
 /** The Sync line: where this player is against the room, and how that is. */
 export function syncSummary(info: SyncInfo | null): { text: string; health: Health } {
   if (!info) return { text: "—", health: "none" };
-  if (info.role === "host") return { text: "Host · sets the room clock", health: "ok" };
+  if (info.role === "host") return { text: "Host (room clock)", health: "ok" };
   if (info.driftS === null) return { text: "Room on another title", health: "none" };
   const d = info.driftS;
   const drift = `${d >= 0 ? "+" : "−"}${Math.abs(d).toFixed(2)} s`;
-  if (info.waitingForRoom) return { text: `${drift} · waiting for the room`, health: "info" };
+  if (info.waitingForRoom) return { text: `${drift} · waiting for room`, health: "info" };
   if (!info.roomPlaying) return { text: `${drift} · room paused`, health: Math.abs(d) < SYNC_GOOD_S ? "ok" : "warn" };
   const rate = Math.abs(info.rate - 1) >= 0.005
-    ? ` · ${info.rate > 1 ? "catching up" : "easing back"} ${info.rate.toFixed(2)}×`
+    ? ` · ${info.rate > 1 ? "catching up" : "slowing"} ${info.rate.toFixed(2)}×`
     : "";
   const health = Math.abs(d) < SYNC_GOOD_S ? "ok" : Math.abs(d) < SYNC_NEAR_S ? "warn" : "bad";
-  return { text: `${drift} from the room${rate}`, health };
+  return { text: `${drift} vs room${rate}`, health };
 }
 
 /**
- * Why a stream isn't Direct Play, as the Playback row opens to: every
- * reason, a line each, video's first.
+ * Why a stream isn't Direct Play, as the Playback row opens to: a line for
+ * the video's reason and one for the audio's, each labelled with which it is.
  */
 export function playbackWhy(notes: StreamNotes | null, mode: string | null): Array<[string, string]> {
   if (!mode || mode === "Direct Play") return [];
-  const why: string[] = [];
-  if (notes?.video === "transcode") why.push(`Video: ${notes.reason ?? "not said by the server"}`);
-  if (notes?.audio === "transcode") why.push(`Audio: ${notes.audioReason ?? "converted"}`);
-  else if (!notes?.audio && notes?.video === "copy") why.push("Audio: not reported by the server");
-  if (!notes) why.push("Not reported by the server");
-  return why.map((line, i) => [i === 0 ? "Why" : "", line]);
+  if (!notes) return [["Reason", "Not reported by server"]];
+  const why: Array<[string, string]> = [];
+  if (notes.video === "transcode") why.push(["Video", notes.reason ?? "Not reported by server"]);
+  if (notes.audio === "transcode") why.push(["Audio", notes.audioReason ?? "Converted"]);
+  else if (!notes.audio && notes.video === "copy") why.push(["Audio", "Not reported by server"]);
+  return why;
 }
 
 /** A playback mode's colour: green as it is, amber with audio converted, red re-encoded. */

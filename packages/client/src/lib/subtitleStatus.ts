@@ -50,7 +50,43 @@ export function subtitleSummary(
   if (shown === "switching") return `${track.title} · switching`;
   if (shown === "burned") return `${track.title} · burned in`;
   const state = statusOf(track, status, failed);
-  return `${track.title} · ${state === "complete" ? "loaded" : state === "reading" ? `reading (${status!.lines})` : state}`;
+  return `${track.title} · ${state === "complete" ? "loaded" : state}`;
+}
+
+/** How a subtitle drawn by the player is drawn. */
+function renderer(track: StreamTrack, styled: boolean): string {
+  if (track.picture) return "PGS bitmaps";
+  if (styled) return "libass (full ASS styling)";
+  return track.sidecar ? "Text · external file" : "Text · embedded";
+}
+
+/** Stretches that touch or overlap, as one: pieces read side by side overlap. */
+export function mergedSpans(spans: readonly CoveredSpan[]): CoveredSpan[] {
+  const out: CoveredSpan[] = [];
+  for (const [from, to] of [...spans].sort((a, b) => a[0] - b[0])) {
+    const last = out[out.length - 1];
+    if (last && (last[1] === null || from <= last[1] + 0.5)) {
+      last[1] = last[1] === null || to === null ? null : Math.max(last[1], to);
+    } else out.push([from, to]);
+  }
+  return out;
+}
+
+/**
+ * Coverage in one line: the read stretch the picture is in, or that it is in
+ * none, and how much of the film is read — not every stretch, which ran past
+ * the panel's edge and hid the one that mattered.
+ */
+export function coverageText(covered: CoveredSpan[] | null, atS: number, runtimeS: number | null): string {
+  const spans = mergedSpans(covered ?? []);
+  if (!spans.length) return "None yet";
+  const here = spans.find(([from, to]) => from <= atS && (to === null || atS < to));
+  const share = runtimeS
+    ? ` · ${Math.min(100, Math.round(spans.reduce((sum, [from, to]) => sum + (to === null ? runtimeS : Math.min(to, runtimeS)) - from, 0) / runtimeS * 100))}%`
+    : "";
+  return here
+    ? `${clock(here[0])}–${here[1] === null ? "end" : clock(here[1])}${share}`
+    : `Not at ${clock(atS)}${share}`;
 }
 
 /** Its details, one line each. */
@@ -60,13 +96,15 @@ export function subtitleDetails(
   status: SubtitleLoadStatus | null,
   failed: boolean,
   now = Date.now(),
+  atS = 0,
+  runtimeS: number | null = null,
 ): Array<[string, string]> {
   if (shown === "off" || !track) return [];
   const rows: Array<[string, string]> = [["Track", track.title]];
   if (shown === "switching") return rows;
-  if (shown === "burned") return [...rows, ["Rendering", "Burned in by Plex"]];
+  if (shown === "burned") return [...rows, ["Renderer", "Burned into the video"]];
   const styled = status?.streamId === track.id && status.styled === true;
-  rows.push(["Rendering", `Client · ${track.picture ? "PGS pictures" : styled ? "libass, as its script has it" : track.sidecar ? "sidecar file" : "embedded text"}`]);
+  rows.push(["Renderer", renderer(track, styled)]);
   const state = statusOf(track, status, failed);
   if (state === "failed") return [...rows, ["Status", "Failed"]];
   if (state === "loading" || !status) {
@@ -77,7 +115,7 @@ export function subtitleDetails(
   }
   rows.push(
     ["Status", `Reading · ${lines(status.lines)} · ${seconds(now - status.startedAt)}`],
-    ["Coverage", (status.covered ?? []).map(([from, to]) => `${clock(from)}–${to === null ? "end" : clock(to)}`).join(", ") || "none yet"],
+    ["Coverage", coverageText(status.covered, atS, runtimeS)],
   );
   if (status.firstLinesMs !== null) rows.push(["First cues", seconds(status.firstLinesMs)]);
   return rows;

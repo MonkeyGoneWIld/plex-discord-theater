@@ -69,9 +69,9 @@ check("and what it re-encoded on",
   engineText(readStreamNotes(sessionData({ video: "transcode", engine: "ffmpeg", encoder: "NVIDIA NVENC, GPU decode" }))!),
   "ffmpeg · NVIDIA NVENC, GPU decode");
 check("a copy by ffmpeg is just ffmpeg", engineText(readStreamNotes(sessionData({ video: "copy", engine: "ffmpeg" }))!), "ffmpeg");
-check("one ffmpeg left to Plex says why",
+check("one ffmpeg left to Plex says so (why is a line of its own)",
   engineText(readStreamNotes(sessionData({ video: "transcode", fallback: "all 6 encode slots taken" }))!),
-  "Plex (ffmpeg: all 6 encode slots taken)");
+  "Plex (ffmpeg fallback)");
 check("and Plex without the engine is just Plex", engineText(readStreamNotes(sessionData({ video: "copy" }))!), "Plex");
 
 console.log("\n— its audio, and what Plex would call it —");

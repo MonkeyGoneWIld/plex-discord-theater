@@ -1317,7 +1317,11 @@ export function Controls({
           pass, askedS: ahead ? null : sinceStart(), doneS: null, playheadS: null, bytes: 0, readyAfter: null,
           fromTitlePage: !!ahead,
         };
-        status.passes.push(entry);
+        // A pass resumed after a break comes again: its line is replaced, not
+        // added to (Stats for nerds read "pass 5/4" with one line too many).
+        const again = status.passes.findIndex((p) => p.pass === pass);
+        if (again >= 0) status.passes.splice(again, 1, entry);
+        else status.passes.push(entry);
         let contentType: string;
         let body: { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<void> };
         if (ahead) {

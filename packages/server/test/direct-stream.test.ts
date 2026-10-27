@@ -731,12 +731,12 @@ console.log("\n— through the routes —");
   check("a file over the copy limit says that is why, and what it is re-encoded at",
     (await startNotes("950")).notes,
     {
-      video: "transcode", reason: "31 Mbps average exceeds 20 Mbps server limit", kbps: "12000", videoFrom: "H.264 · SDR · 1920×1080", range: "SDR",
+      video: "transcode", reason: "31 Mbps over 20 Mbps server cap", kbps: "12000", videoFrom: "H.264 · SDR · 1920×1080", range: "SDR",
       audio: "copy", audioFrom: "AAC Stereo",
     });
   const uhd = await startNotes(UHD_TITLE);
   check("a 4K file under the copy limit is still re-encoded, without asking for a copy, and says it is 4K",
-    [uhd.asked.directStream, uhd.notes.video, uhd.notes.reason], ["0", "transcode", "4K, shown at 1080p at most"]);
+    [uhd.asked.directStream, uhd.notes.video, uhd.notes.reason], ["0", "transcode", "4K source (player max 1080p)"]);
   check("one Plex declined to copy says so, without blaming a bitrate it was asked well over",
     (await startNotes("970")).notes.reason,
     "Declined by Plex");
@@ -746,7 +746,7 @@ console.log("\n— through the routes —");
   check("a file averaging over it is re-encoded at it, without asking for a copy first, and the player told why",
     [capped.asked.directStream, capped.asked.videoBitrate, capped.notes],
     ["0", "8000", {
-      video: "transcode", reason: "15 Mbps average exceeds 8 Mbps quality limit", kbps: "8000", quality: "8000", videoFrom: "H.264 · SDR · 1920×1080", range: "SDR",
+      video: "transcode", reason: "15 Mbps over 8 Mbps quality cap", kbps: "8000", quality: "8000", videoFrom: "H.264 · SDR · 1920×1080", range: "SDR",
       audio: "copy", audioFrom: "AAC Stereo",
     }]);
   const fits = await startNotes("100", "?quality=12000");

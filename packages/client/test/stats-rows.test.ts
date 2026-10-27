@@ -5,8 +5,8 @@
  * of the film or all there, and what happens to the audio.
  */
 import { clock, previewDetails, previewSummary, type PreviewStatus } from "../src/lib/previewStatus";
-import { subtitleDetails, subtitleSummary, type SubtitleLoadStatus } from "../src/lib/subtitleStatus";
-import { audioDetails, audioSummary, type StreamNotes } from "../src/lib/streamNotes";
+import { coverageText, mergedSpans, subtitleDetails, subtitleSummary, type SubtitleLoadStatus } from "../src/lib/subtitleStatus";
+import { audioDetails, audioSummary, fileLines, type StreamNotes } from "../src/lib/streamNotes";
 import type { StreamTrack } from "../src/lib/api";
 
 let pass = 0;
@@ -35,17 +35,21 @@ const status: PreviewStatus = {
     { pass: 1, askedS: 1.5, doneS: 3.6, playheadS: 3.2, bytes: 3_460_300, readyAfter: 564, fromTitlePage: false },
   ],
 };
-check("how many, and what the next pass waits for", previewSummary(status, true), "564/3759 · pass 3/4 at 25 s buffer");
+check("how many, and what the next pass waits for", previewSummary(status, true), "564/3759 · pass 3/4 queued");
 check("each pass on a line of its own, the waiting one too", previewDetails(status), [
   ["Transport", "Progressive · 4 passes"],
   ["Pass 1 · coarse", "188 · title page · 1.6 MB"],
   ["Pass 2 · medium", "564 · 1.5→3.6 s @0:03 · 3.3 MB"],
-  ["Pass 3 · fine", "waiting for 25 s buffer"],
+  ["Pass 3 · fine", "queued until 25 s buffered"],
 ]);
 const coming = { ...status, state: "downloading" as const, passes: [...status.passes, { pass: 2, askedS: 25.4, doneS: null, playheadS: null, bytes: 2_202_009, readyAfter: null, fromTitlePage: false }] };
 check("one coming in", [previewSummary(coming, true), previewDetails(coming)[3]], ["564/3759 · pass 3/4", ["Pass 3 · fine", "asked 25.4 s · 2.1 MB…"]]);
 const done = { ...status, state: "complete" as const, ready: 3759, bytes: 34_393_293 };
 check("all in", previewSummary(done, true), "3759/3759 · 32.8 MB");
+// Pass 3 resumed after a break is asked for again: still pass 3 of 4, one line.
+const resumedAgain = { ...coming, passes: [...coming.passes, { ...coming.passes[2], askedS: 80 }] };
+check("a resumed pass counts once, never \"5/4\"", previewSummary(resumedAgain, true), "564/3759 · pass 3/4");
+check("and a waiting one past the last pass names none", previewDetails({ ...done, state: "waiting", passes: [0, 1, 2, 3, 3].map((n) => ({ ...status.passes[1], pass: n })) }).length, 6);
 check("none on the server", previewSummary({ ...status, state: "unavailable", httpStatus: 404, passes: [] }, true), "Unavailable (404) · per frame");
 check("an old server's whole index is one",
   previewDetails({ ...done, transport: "legacy-bif", passes: [status.passes[1]] }), [["Transport", "Single index"], ["Index", "564 · 1.5→3.6 s @0:03 · 3.3 MB"]]);
@@ -58,7 +62,7 @@ const track = (t: Partial<StreamTrack>): StreamTrack => ({
 check("off", [subtitleSummary(null, "off", null, false), subtitleDetails(null, "off", null, false)], ["Off", []]);
 const pgs = track({ title: "SDH (English PGS)", codec: "pgs" });
 check("burned in", [subtitleSummary(pgs, "burned", null, false), subtitleDetails(pgs, "burned", null, false)],
-  ["SDH (English PGS) · burned in", [["Track", "SDH (English PGS)"], ["Rendering", "Burned in by Plex"]]]);
+  ["SDH (English PGS) · burned in", [["Track", "SDH (English PGS)"], ["Renderer", "Burned into the video"]]]);
 const at = 1_000_000;
 const loaded: SubtitleLoadStatus = {
   streamId: 7, state: "complete", lines: 1914, covered: null, startedAt: at - 50_000, firstLinesMs: null, completeMs: 48_500,
@@ -66,14 +70,14 @@ const loaded: SubtitleLoadStatus = {
 const beside = track({ title: "English (SRT External)", external: true, sidecar: true });
 check("a file beside the film, all in",
   [subtitleSummary(beside, "drawn", loaded, false), subtitleDetails(beside, "drawn", loaded, false, at)],
-  ["English (SRT External) · loaded", [["Track", "English (SRT External)"], ["Rendering", "Client · sidecar file"], ["Status", "Loaded · 1,914 cues · 48.5 s"]]]);
+  ["English (SRT External) · loaded", [["Track", "English (SRT External)"], ["Renderer", "Text · external file"], ["Status", "Loaded · 1,914 cues · 48.5 s"]]]);
 const reading: SubtitleLoadStatus = { ...loaded, state: "reading", lines: 412, covered: [[0, 750], [3000, 3320]], firstLinesMs: 380, completeMs: null };
 const inside = track({ external: true });
 check("one inside the film, still being read",
   [subtitleSummary(inside, "drawn", reading, false), subtitleDetails(inside, "drawn", reading, false, at)],
-  ["English (SRT) · reading (412)", [
-    ["Track", "English (SRT)"], ["Rendering", "Client · embedded text"], ["Status", "Reading · 412 cues · 50.0 s"],
-    ["Coverage", "0:00–12:30, 50:00–55:20"], ["First cues", "0.4 s"],
+  ["English (SRT) · reading", [
+    ["Track", "English (SRT)"], ["Renderer", "Text · embedded"], ["Status", "Reading · 412 cues · 50.0 s"],
+    ["Coverage", "0:00–12:30"], ["First cues", "0.4 s"],
   ]]);
 check("still loading, and for how long",
   [subtitleSummary(inside, "drawn", { ...loaded, state: "loading", lines: 0 }, false),
@@ -83,16 +87,25 @@ check("the last subtitle's status isn't this one's", subtitleSummary(track({ id:
 check("couldn't be loaded", subtitleSummary(inside, "drawn", loaded, true), "English (SRT) · failed");
 check("a switch on its way", subtitleSummary(track({}), "switching", null, false), "English (SRT) · switching");
 check("every detail fits on one line", fits(subtitleDetails(inside, "drawn", reading, false, at)), []);
+check("coverage: the stretch the picture is in, and how much is read",
+  coverageText([[0, 750], [3000, 3320]], 3100, 7200), "50:00–55:20 · 15%");
+check("coverage: none where the picture is",
+  coverageText([[0, 7477]], 7768, 8400), "Not at 2:09:28 · 89%");
+check("coverage: pieces side by side read as one stretch", mergedSpans([[3000, 3600], [0, 900], [3550, null], [880, 1200]]), [[0, 1200], [3000, null]]);
+check("a PGS track drawn by the player", subtitleDetails(track({ picture: true, title: "English (PGS)" }), "drawn", { ...loaded, streamId: 7 }, false, at)[1], ["Renderer", "PGS bitmaps"]);
 
 console.log("\n— audio —");
 const notes = (n: Partial<StreamNotes>): StreamNotes => ({
   video: "copy", reason: null, kbps: null, quality: null, audio: null, audioFrom: null, audioTo: null, audioKbps: null, audioReason: null, engine: "plex", ...n,
 });
+check("the file's picture as two short lines",
+  [fileLines("HEVC Main 10 · 10-bit · Dolby Vision P8.1 / HDR10 · 3840×2160 · 23.976 fps"), fileLines(null)],
+  [[["File", "HEVC Main 10 · DV P8.1 / HDR10"], ["Frame", "3840×2160 · 23.976 fps"]], []]);
 check("as it is in the file: the row says it all", [audioSummary(notes({ audio: "copy", audioFrom: "AAC Stereo" })), audioDetails(notes({ audio: "copy", audioFrom: "AAC Stereo" }))],
   ["AAC Stereo · direct", []]);
 const converted = notes({ audio: "transcode", audioFrom: "EAC3 5.1", audioTo: "AAC 5.1", audioKbps: 384, audioReason: "Unsupported codec (EAC3)" });
-check("converted: from what, to what, and why behind it", [audioSummary(converted), audioDetails(converted)],
-  ["EAC3 5.1 → AAC 5.1", [["Source", "EAC3 5.1"], ["Output", "AAC 5.1 · 384 kbps"], ["Reason", "Unsupported codec (EAC3)"]]]);
+check("converted: from what, to what (why is under Playback)", [audioSummary(converted), audioDetails(converted)],
+  ["EAC3 5.1 → AAC 5.1", [["Source", "EAC3 5.1"], ["Output", "AAC 5.1 · 384 kbps"]]]);
 check("a server that doesn't say", [audioSummary(null), audioDetails(null)], ["—", []]);
 
 console.log(`\n${pass} passed, ${fail} failed`);

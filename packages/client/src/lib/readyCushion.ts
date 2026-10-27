@@ -162,11 +162,20 @@ export function readiness(o: ReadyInput): Readiness {
 }
 
 /**
+ * Under this much downloaded, the time it took is mostly the requests' way
+ * there and back, not the speed things come in at: Punisher S2's episodes
+ * (24 October) open on a 0.25 MB segment, in 1.3 to 4.6 s, read as 0.4 to
+ * 1.7 Mbps — and every start waited for the next segment, 5.5 MB, taking 4
+ * to 12 seconds to start where it had 5 seconds in hand after 2.
+ */
+export const SPEED_FROM_BYTES = 1024 * 1024;
+
+/**
  * How fast things come in while anything is, bytes a second: from the
  * download meter's readings [when, bytes, ms with something in flight], over
  * the last `windowMs` of them — or over everything, when that window had
  * under a second and a half of downloading in it. Null with under a second of
- * downloading to go by.
+ * downloading, or SPEED_FROM_BYTES, to go by.
  */
 export function comingInBytesPerS(
   readings: ReadonlyArray<readonly [number, number, number]>,
@@ -177,8 +186,8 @@ export function comingInBytesPerS(
   const last = readings[readings.length - 1];
   const from = readings.find(([at]) => nowMs - at <= windowMs) ?? readings[0];
   const recentMs = last[2] - from[2];
-  if (recentMs >= 1_500) return ((last[1] - from[1]) * 1000) / recentMs;
+  if (recentMs >= 1_500 && last[1] - from[1] >= SPEED_FROM_BYTES) return ((last[1] - from[1]) * 1000) / recentMs;
   const first = readings[0];
   const allMs = last[2] - first[2];
-  return allMs >= 1_000 ? ((last[1] - first[1]) * 1000) / allMs : null;
+  return allMs >= 1_000 && last[1] - first[1] >= SPEED_FROM_BYTES ? ((last[1] - first[1]) * 1000) / allMs : null;
 }

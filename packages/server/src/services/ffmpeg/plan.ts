@@ -147,15 +147,15 @@ export function copiedAudio(audio: SourceStream | null, caps: Partial<PlayerCaps
   const name = codecName(codec) ?? "This sound";
   const cap = AUDIO_CAPS[codec];
   if (!cap) {
-    return { copy: false, why: /^(dca|dts|truehd|mlp)/.test(codec) ? `${name}, which browsers can't play` : `${name}, which isn't sent as it is` };
+    return { copy: false, why: /^(dca|dts|truehd|mlp)/.test(codec) ? `${name}: no browser decoder` : `${name}: not supported for copy` };
   }
-  if (!caps[cap]) return { copy: false, why: `${name}, and this player can't play it` };
+  if (!caps[cap]) return { copy: false, why: `${name}: not decoded by this player` };
   if (codec === "flac" && !(audio.bitrate ? audio.bitrate <= FLAC_COPY_MAX_KBPS : (audio.channels ?? 2) <= 2)) {
     return {
       copy: false,
       why: audio.bitrate
-        ? `${name} at ${audio.bitrate.toLocaleString("en-US")} kbps, too heavy to send as it is`
-        : `${audioName(codec, audio.channels)}, too heavy to send as it is`,
+        ? `${name} ${audio.bitrate.toLocaleString("en-US")} kbps: above copy limit`
+        : `${audioName(codec, audio.channels)}: above copy limit`,
     };
   }
   return { copy: true, why: null };
@@ -213,21 +213,21 @@ export function planCopy(
   // players and every retry, and a picture it did decode would be combed.
   // The re-encode deinterlaces it. HEVC marked interlaced is copied: His Dark
   // Materials' showed no combing that day.
-  if (codec === "h264" && /interlaced/i.test(video.scanType ?? "")) return no("interlaced H.264");
+  if (codec === "h264" && /interlaced/i.test(video.scanType ?? "")) return no("Interlaced H.264");
   if (codec === "hevc" && (video.bitDepth ?? 8) > 10) return no(`${video.bitDepth}-bit HEVC`);
-  if (codec === "hevc" && !req.hevcOk) return no("HEVC, and this player can't decode it");
+  if (codec === "hevc" && !req.hevcOk) return no("HEVC: not decoded by this player");
   if (codec === "av1" && (video.bitDepth ?? 8) > 10) return no(`${video.bitDepth}-bit AV1`);
-  if (codec === "av1" && !req.av1Ok) return no("AV1, and this player can't decode it");
+  if (codec === "av1" && !req.av1Ok) return no("AV1: not decoded by this player");
   const hdr = hdrClass(video);
   // No HDR10 picture under the Dolby Vision: only a tone mapper that applies
   // it draws it right (Phase 2).
-  if (hdr === "DV P5" || hdr === "DV P10.0") return no(`Dolby Vision ${hdr.slice(3)} needs tone mapping`);
+  if (hdr === "DV P5" || hdr === "DV P10.0") return no(`Dolby Vision ${hdr.slice(3)}: tone mapping needed`);
   const width = src.width ?? 0;
   const height = src.height ?? 0;
   // 4K is shown at 1080p, as Plex does: the activity can't show more.
-  if (width > 2048 || height > 1200) return no("above 1080p");
+  if (width > 2048 || height > 1200) return no("Above 1080p");
   const container = (src.container ?? "").toLowerCase();
-  if (!(codec === "av1" ? FMP4_CONTAINERS : COPY_CONTAINERS).has(container)) return no(`${container || "unknown"} container`);
+  if (!(codec === "av1" ? FMP4_CONTAINERS : COPY_CONTAINERS).has(container)) return no(`${(container || "unknown").toUpperCase()} container not supported`);
 
   const audio = pickAudio(src, req.audioStreamId);
   if (audio === false) return no(`no audio track ${req.audioStreamId}`);
@@ -673,6 +673,9 @@ export interface EncodeRequest {
   peakKbps: number;
   /** FFMPEG_AUDIO_CHANNELS: 6 for 5.1 AAC from a surround track (convertedAudio). */
   audioChannels?: number;
+  /** The player decodes Opus: a track above 5.1 keeps all its channels as
+   *  Opus 7.1, in fMP4, rather than folding to AAC 5.1 (convertedAudio). */
+  opusOk?: boolean;
   /** FFMPEG_PRESET (PRESETS): the encoder's own default unless said. */
   preset?: string | null;
   /** VAAPI's low-power encoder, which is all newer Intel GPUs have. */
@@ -700,8 +703,10 @@ export type EncodePlan =
       audioCopy: boolean;
       audioWhy: string | null;
       audioOut: AudioOut | null;
-      /** AV1 is made in fragmented MP4, as an AV1 copy is. */
       codec: "h264" | "hevc" | "av1";
+      /** Segments in fragmented MP4: AV1, as an AV1 copy is, and Opus sound,
+       *  which MPEG-TS can't carry to hls.js. */
+      fmp4: boolean;
       hdr: string;
       /** The HDR transfer written on the output (smpte2084 or arib-std-b67);
        *  null for SDR. */
@@ -851,16 +856,20 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
   // The peak as far above the target as it was asked to be.
   const peakKbps = kbps === req.kbps ? req.peakKbps : Math.max(kbps + 1, Math.round(kbps * req.peakKbps / Math.max(req.kbps, 1)));
   const audioCopy = (audio?.codec ?? "").toLowerCase() === "aac";
+  // A re-encode's sound is AAC, or Opus 7.1 from a track above 5.1 for a
+  // player that decodes Opus: TrueHD 7.1 had become AAC 5.1 (23 Oct, Project
+  // Hail Mary). Why it isn't the file's own: what no player takes (TrueHD,
+  // DTS), or else that a re-encode carries only these two.
+  const audioOut = audio && !audioCopy ? convertedAudio(audio, req.audioChannels, { opus: !!req.opusOk }) : null;
   return {
     ok: true,
     video: video as SourceStream & { index: number },
     audio,
     audioCopy,
-    // A re-encode is for a lighter stream, or one every player takes: its
-    // sound is AAC, whatever the player decodes.
-    audioWhy: audio && !audioCopy ? "Made AAC with the re-encoded picture" : null,
-    audioOut: audio && !audioCopy ? convertedAudio(audio, req.audioChannels) : null,
+    audioWhy: audio && !audioCopy ? copiedAudio(audio, ALL_CAPS).why ?? "Re-encodes carry AAC or Opus only" : null,
+    audioOut,
     codec,
+    fmp4: codec === "av1" || audioOut?.codec === "opus",
     hdr,
     hdrTrc: hdr === "SDR" || tonemap ? null
       : String(video.colorTrc ?? "").toLowerCase() === "arib-std-b67" ? "arib-std-b67" : "smpte2084",
@@ -1057,13 +1066,14 @@ export function encodeArgs(
     ...(graph ? [] : ["-vf", vf]),
     ...encoder,
     ...tags,
+    ...(plan.fmp4 && plan.codec === "hevc" ? ["-tag:v", "hvc1"] : []),
     "-aspect", `${W}:${H}`,
     "-force_key_frames:v", `expr:gte(t,n_forced*${ENCODE_SEGMENT_S})`,
     ...audioArgs(plan),
     // Audio piles up while the GPU encoder starts; ffmpeg's default queue is
     // too short for that.
     "-max_muxing_queue_size", "4096",
-    ...(plan.codec === "av1"
+    ...(plan.fmp4
       ? fmp4SegmentArgs(ENCODE_SEGMENT_S)
       : segmentArgs(offsetS, toS ?? durationS, ENCODE_SEGMENT_S)),
   ];

@@ -3,7 +3,7 @@ import type Hls from "hls.js";
 import HlsPkg from "hls.js";
 import { qualityLabel } from "../lib/quality";
 import { codecFamily, codecName, splitCodecs } from "../lib/codecName";
-import { audioDetails, audioSummary, engineText, playbackMode, type StreamNotes } from "../lib/streamNotes";
+import { audioDetails, audioSummary, engineText, fileLines, playbackMode, type StreamNotes } from "../lib/streamNotes";
 import type { StreamTrack } from "../lib/api";
 import { previewDetails, previewSummary, type PreviewStatus } from "../lib/previewStatus";
 import { subtitleDetails, subtitleSummary, type SubtitleLoadStatus, type SubtitleShown } from "../lib/subtitleStatus";
@@ -443,8 +443,9 @@ export function StatsOverlay({
   // notes, the playlist says only whether the video is the original.
   const mode = playbackMode(notes) ?? (copied === null ? null : copied ? "Direct Stream" : "Transcode");
   const hdrStream = !!notes?.range && !notes.range.startsWith("SDR");
+  // "1080p" here; the full width × height is under Viewport and Frame.
   const videoSummary = [
-    snap && snap.streamResolution !== "—" ? snap.streamResolution : null,
+    snap && snap.streamResolution !== "—" ? snap.streamResolution.replace(/^\d+×(\d+)$/, "$1p") : null,
     codecFamily(snap?.videoCodec),
     hdrStream ? notes!.range!.replace(/ \/ .*$/, "") : null,
     streamBps ? mbps(streamBps) : null,
@@ -497,7 +498,7 @@ export function StatsOverlay({
   const delivery = !last
     ? vpsRelay ? "VPS relay" : "—"
     : last.fromPeer ? "Peer (WebRTC)"
-    : last.fromCache ? "This device (kept)"
+    : last.fromCache ? "Local cache"
     : vpsRelay ? "VPS relay (HTTP)" : "Server (HTTP)";
   const graphMax = (values: Array<number | null>, floor: number, also = 0) =>
     Math.max(floor, also, ...values.filter((v): v is number => v !== null)) * 1.15;
@@ -512,6 +513,7 @@ export function StatsOverlay({
         ...playbackWhy(notes, mode).map(([l, v]) => [l, v, "warn"] as [string, string, Health]),
         ["Quality", quality ? `Up to ${qualityLabel(quality)}` : qualityLabel(0)],
         ...(notes ? [["Engine", engineText(notes), notes.fallback ? "warn" : undefined] as [string, string, Health?]] : []),
+        ...(notes?.fallback ? [["Fallback", notes.fallback, "warn"] as [string, string, Health]] : []),
         ...(sessionId ? [["Session", sessionId.slice(0, 8)] as [string, string]] : []),
       ],
     },
@@ -519,10 +521,9 @@ export function StatsOverlay({
       label: "Video", value: videoSummary, health: copied === null ? "none" : copied ? "ok" : "warn", section: "video",
       details: [
         ["Source", source, copied === null ? "none" : copied ? "ok" : "warn"],
-        ...(notes?.video === "transcode" && notes.reason ? [["Reason", notes.reason, "warn"] as [string, string, Health]] : []),
         ["Codec", codecName(snap?.videoCodec) ?? "—"],
         ...(notes?.range ? [["Range", notes.range, notes.range.startsWith("SDR (") ? "warn" : "none"] as [string, string, Health]] : []),
-        ...(notes?.videoFrom ? [["File", notes.videoFrom] as [string, string]] : []),
+        ...fileLines(notes?.videoFrom ?? null),
         ["Viewport", snap?.viewport ?? "—"],
       ],
     },
@@ -541,7 +542,7 @@ export function StatsOverlay({
     {
       label: "Subtitles", section: "subtitles", health: subtitleState,
       ...splitState(subtitle ? subtitleSummary(subtitle.track, subtitle.shown, subtitleStatus, subtitle.failed) : "—"),
-      details: subtitle ? subtitleDetails(subtitle.track, subtitle.shown, subtitleStatus, subtitle.failed) : [],
+      details: subtitle ? subtitleDetails(subtitle.track, subtitle.shown, subtitleStatus, subtitle.failed, Date.now(), snap?.at ?? 0, runtimeS) : [],
       visual: subtitleLoading ? subtitleBar(subtitleStatus, subtitle?.track?.id ?? null, runtimeS, snap?.at ?? 0) : null,
     },
     {
@@ -549,7 +550,7 @@ export function StatsOverlay({
       details: sync ? [
         ["Role", sync.role],
         ["Playback rate", `${sync.rate.toFixed(2)}×`, Math.abs(sync.rate - 1) >= 0.005 ? "info" : "none"],
-        ["Stalls", sync.stalls.count ? `${sync.stalls.count} · ${(sync.stalls.totalMs / 1000).toFixed(1)} s in all` : "none", stallsHealth(sync.stalls)],
+        ["Stalls", sync.stalls.count ? `${sync.stalls.count} · ${(sync.stalls.totalMs / 1000).toFixed(1)} s total` : "None", stallsHealth(sync.stalls)],
       ] : [],
     },
     {
@@ -614,7 +615,7 @@ export function StatsOverlay({
                 <span style={styles.chevron}>{expandable ? (isOpen ? "▾" : "▸") : ""}</span>
                 {row.label}
               </span>
-              <span style={{ ...styles.valueLine, color: HEALTH_COLORS[row.health ?? "none"].line }} title={`${row.value}${row.keep ?? ""}`}>
+              <span style={{ ...styles.valueLine, color: HEALTH_COLORS[row.health ?? "none"].line }}>
                 <span style={styles.valueText}>{row.value}</span>
                 {row.keep ? <span style={styles.valueKeep}>{row.keep}</span> : null}
               </span>
@@ -635,13 +636,7 @@ export function StatsOverlay({
                   {row.details!.map(([label, value, health], i) => (
                     <div key={i} style={styles.row}>
                       <span style={styles.detailLabel}>{label}</span>
-                      <span
-                        style={{
-                          ...(label === "Reason" || label === "Why" || label === "" ? styles.wrappedValue : styles.value),
-                          color: HEALTH_COLORS[health ?? "none"].line,
-                        }}
-                        title={value}
-                      >
+                      <span style={{ ...styles.value, color: HEALTH_COLORS[health ?? "none"].line }}>
                         {value}
                       </span>
                     </div>
@@ -733,7 +728,7 @@ const styles: Record<string, React.CSSProperties> = {
     position: "absolute",
     top: "64px",
     left: "20px",
-    width: "340px",
+    width: "380px",
     maxWidth: "calc(100% - 40px)",
     background: "rgba(15,15,15,0.82)",
     backdropFilter: "blur(12px)",
@@ -851,33 +846,28 @@ const styles: Record<string, React.CSSProperties> = {
     whiteSpace: "nowrap",
     flexShrink: 0,
   },
+  // Every line is written to fit; one that doesn't (a long track name, an
+  // ffmpeg error) wraps rather than being cut off with "…".
   value: {
     textAlign: "right",
     fontVariantNumeric: "tabular-nums",
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
+    overflowWrap: "anywhere",
     minWidth: 0,
   },
   valueLine: {
     display: "flex",
+    flexWrap: "wrap",
     justifyContent: "flex-end",
+    textAlign: "right",
     minWidth: 0,
-    whiteSpace: "nowrap",
     fontVariantNumeric: "tabular-nums",
   },
   valueText: {
-    overflow: "hidden",
-    textOverflow: "ellipsis",
+    overflowWrap: "anywhere",
     minWidth: 0,
   },
   valueKeep: {
     flexShrink: 0,
-  },
-  // A reason can run to a few words more than fit; it is the one thing
-  // allowed a second line, and only once its row is opened.
-  wrappedValue: {
-    textAlign: "right",
-    minWidth: 0,
+    whiteSpace: "pre",
   },
 };

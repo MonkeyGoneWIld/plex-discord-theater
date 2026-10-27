@@ -65,10 +65,12 @@ ARG APP_UID=100
 ARG APP_GID=101
 
 # Debian security patches published since the base image was cut, then tini
-# (PID 1 signal handling), curl (the healthcheck), clinfo (whether OpenCL sees
-# the GPU, for scripts/diagnose-ffmpeg.mjs), a font for libass to draw a text
-# subtitle burned in with (an ASS track's own fonts come out of the film),
-# ffmpeg and the OpenCL runtime.
+# (PID 1 signal handling), clinfo (whether OpenCL sees the GPU, for
+# scripts/diagnose-ffmpeg.mjs), a font for libass to draw a text subtitle
+# burned in with (an ASS track's own fonts come out of the film), ffmpeg and
+# the OpenCL runtime. curl fetches those and goes: the healthcheck asks with
+# node, and curl and libcurl were 32 of the scan's findings on 24 October,
+# four of them critical.
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update; \
@@ -91,6 +93,7 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends ./*.deb; \
     cd /; \
     rm -rf /tmp/debs; \
+    apt-get purge -y --auto-remove curl; \
     for tool in ffmpeg ffprobe vainfo; do ln -s "/usr/lib/jellyfin-ffmpeg/$tool" "/usr/local/bin/$tool"; done; \
     ffmpeg -hide_banner -version | head -n 1; \
     setpriv --version; \
@@ -132,6 +135,16 @@ COPY --from=build /app/packages/client/dist packages/client/dist
 # Run with `docker exec <container> node scripts/<name>.mjs`.
 COPY scripts/diagnose-ffmpeg.mjs scripts/library-survey.mjs scripts/
 
+# Debian's security fixes again, in a layer each new build of the app makes
+# afresh: the one at the top is cached from build to build, and the scan of
+# 24 October found libbrotli1 a fix behind.
+RUN set -eux; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get update; \
+    apt-get upgrade -y; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
+
 # Persistent data directory (thumb cache SQLite) — mountable via THUMB_CACHE_DIR
 RUN mkdir -p /data
 
@@ -151,7 +164,7 @@ EXPOSE ${PORT}
 # goes unhealthy when the thing it proxies is unreachable. `/` was answered off
 # disk by express.static and stayed green through a total Plex outage.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD curl -fsS http://localhost:${PORT}/api/health || exit 1
+  CMD ["node", "-e", "fetch(`http://localhost:${process.env.PORT}/api/health`).then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
 
 ENTRYPOINT ["tini", "--", "entrypoint.sh"]
 CMD ["node", "packages/server/dist/index.js"]

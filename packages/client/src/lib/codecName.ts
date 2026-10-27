@@ -49,8 +49,10 @@ export function codecName(codec: string | null | undefined): string | null {
       return `HEVC${HEVC_PROFILES[idc] ? ` ${HEVC_PROFILES[idc]}` : ""}${level(lvl)}`;
     }
     case "av01": {
+      // "av01.0.08M.10": profile, level and tier, bits.
       const profile = AV1_PROFILES[parts[0] ?? ""];
-      return `AV1${profile ? ` ${profile}` : ""}`;
+      const bits = parts[2] === "10" || parts[2] === "12" ? ` ${parts[2]}-bit` : "";
+      return `AV1${profile ? ` ${profile}` : ""}${bits}`;
     }
     case "vp09":
     case "vp9": return "VP9";

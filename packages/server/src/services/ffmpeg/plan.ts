@@ -664,6 +664,9 @@ export interface EncodeRequest {
    * (they'd be on a copy, this one on H.264 — see sync.ts seatOf).
    */
   av1Ok?: boolean;
+  /** The GPU's AV1 encoder makes 10 bits too: an HDR picture kept
+   *  (keepHdr) is AV1 10-bit rather than HEVC Main10. */
+  av1HdrOk?: boolean;
   /** VAAPI's AV1 encoder is only its low-power one (Intel's). */
   av1LowPower?: boolean;
   hardware: Hardware;
@@ -825,12 +828,15 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
   const av1Out = !!req.av1Ok && req.hardware !== "software" && !burn;
   const hdr = hdrClass(video);
   const doviOnly = hdr === "DV P5" || hdr === "DV P10.0";
-  // HDR stays HDR in HEVC (FFMPEG_HDR_REENCODE=keep); otherwise it is mapped
-  // to SDR, in H.264 — Phase 0's tone-mapped chains, all into H.264 — on the
-  // GPU when it decodes the file, else on the CPU. A subtitle burned onto HDR
-  // would glare at full PQ brightness: that picture is tone-mapped too.
+  // HDR stays HDR (FFMPEG_HDR_REENCODE=keep) for a player that decodes HEVC:
+  // in AV1 10-bit where the stream is AV1 and the GPU makes 10 bits of it,
+  // else HEVC Main10. Otherwise it is mapped to SDR, in H.264 — Phase 0's
+  // tone-mapped chains, all into H.264 — on the GPU when it decodes the file,
+  // else on the CPU. A subtitle burned onto HDR would glare at full PQ
+  // brightness: that picture is tone-mapped too.
+  const keepHdr = hdr !== "SDR" && !doviOnly && hevcOut && req.keepHdr;
   let tonemap: { via: Tonemapper; algo: string; dovi: boolean } | null = null;
-  if (hdr !== "SDR" && (doviOnly || !hevcOut || !req.keepHdr)) {
+  if (hdr !== "SDR" && !keepHdr) {
     // QSV's video engine is QSV's own; VAAPI's GPU has OpenCL or nothing;
     // NVIDIA's frames are brought down and tone-mapped on the CPU.
     const via: Tonemapper = !gpuDecode || req.hardware === "nvenc" ? "software"
@@ -839,10 +845,11 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
     if (doviOnly && via !== "opencl") return no(`Dolby Vision ${hdr.slice(3)} needs OpenCL tone mapping`);
     tonemap = { via, algo: req.tonemapAlgo ?? "reinhard", dovi: doviOnly };
   }
-  // AV1 for a player that decodes it on its GPU, whenever the picture out is
-  // SDR — as made or tone-mapped, 8 bits: about half H.264's bits for the
-  // same picture. HDR kept stays HEVC Main10.
-  const codec = av1Out && (hdr === "SDR" || tonemap) ? "av1" : hevcOut && !tonemap ? "hevc" : "h264";
+  // AV1 for a player that decodes it on its GPU: about half H.264's bits for
+  // the same picture, and 20% fewer than HEVC's. SDR, as made or tone-mapped,
+  // is 8 bits; HDR kept is 10 (av1HdrOk), as the user asked on 27 October —
+  // it had stayed HEVC Main10, which most 4K films were.
+  const codec = av1Out && (!keepHdr || req.av1HdrOk) ? "av1" : hevcOut && !tonemap ? "hevc" : "h264";
   const audio = pickAudio(src, req.audioStreamId);
   if (audio === false) return no(`no audio track ${req.audioStreamId}`);
   const [w, h] = encodeFrame(
@@ -959,7 +966,8 @@ export function encodeArgs(
   const W = plan.width;
   const H = plan.height;
   const hw = plan.hardware;
-  const fmt = plan.codec === "hevc" ? "p010" : "nv12";
+  // HEVC is Main10 throughout; AV1 is 10 bits for HDR kept.
+  const fmt = plan.codec === "hevc" || plan.hdrTrc ? "p010" : "nv12";
   const fill = plan.color.fill ? `${plan.color.fill},` : "";
   const tm = plan.tonemap;
   const curve = tm ? `tonemap=${tm.algo}:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12` : "";
@@ -1023,7 +1031,8 @@ export function encodeArgs(
 
   const peak = Math.max(plan.peakKbps, plan.kbps + 1);
   const rate = ["-b:v", `${plan.kbps}k`, "-maxrate", `${peak}k`, "-bufsize", `${peak * 2}k`];
-  // AV1 is Main, which its encoders choose for 8 bits; NVENC's has no profile to name.
+  // AV1 is Main, 8 or 10 bits, which its encoders take from the frames; NVENC's
+  // has no profile to name.
   const profile = plan.codec === "av1" ? [] : ["-profile:v", plan.codec === "hevc" ? "main10" : "high"];
   const encoder = hw === "qsv"
     ? ["-c:v", `${plan.codec}_qsv`, "-low_power", "1", ...profile, "-preset", plan.preset ?? "medium", ...rate, "-forced_idr", "1"]

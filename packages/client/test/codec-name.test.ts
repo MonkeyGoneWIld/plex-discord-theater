@@ -23,7 +23,7 @@ check("H.264 with profile and level", ["avc1.640028", "avc1.4d401f", "avc1.42e01
 check("H.264 without them", codecName("avc1"), "H.264");
 check("HEVC with profile and level", ["hvc1.2.4.L120.90", "hev1.1.6.L93.B0", "hvc1.2.4.L153.90"].map(codecName),
   ["HEVC Main 10@L4", "HEVC Main@L3.1", "HEVC Main 10@L5.1"]);
-check("AV1 and VP9", ["av01.0.08M.10", "vp09.00.40.08"].map(codecName), ["AV1 Main", "VP9"]);
+check("AV1 and VP9", ["av01.0.08M.08", "av01.0.08M.10", "vp09.00.40.08"].map(codecName), ["AV1 Main", "AV1 Main 10-bit", "VP9"]);
 check("anything else as it is", codecName("theora"), "theora");
 check("nothing for nothing", [codecName(null), codecName("")], [null, null]);
 

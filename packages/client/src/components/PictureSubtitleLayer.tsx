@@ -3,7 +3,7 @@ import { cachedPgsBytes, fetchPgsBytes, fetchPgsStatus, type PgsStatus } from ".
 import { logEvent, logWarn } from "../lib/log";
 import { PgsReader, decodeRle, displayAt, mergeDisplays, type PgsDisplay, type PgsObject } from "../lib/pgs";
 import type { CoveredSpan } from "../lib/subtitleCues";
-import type { SubtitleLoadStatus } from "../lib/subtitleStatus";
+import { mergedSpans, type SubtitleLoadStatus } from "../lib/subtitleStatus";
 
 /**
  * PGS subtitles (a Blu-ray's) this client draws itself, from the pictures the
@@ -18,9 +18,14 @@ import type { SubtitleLoadStatus } from "../lib/subtitleStatus";
  * bars when there is room.
  *
  * The server cuts it as the player asks: from a little before where the
- * picture is, then the start. Lines come as it goes, and "Loading subtitles…"
- * says so where none have yet. One that can't be cut has the player ask for
- * a stream with it burned in instead (onUnavailable).
+ * picture is to the end, then what is before. A skip past where that has read
+ * to has it stopped and cut again from there (run 23: a skip through Project
+ * Hail Mary waited on a cut reading from the start). A piece being cut says
+ * how far into the film it has read: with all it had written read here,
+ * every line before that is here, so a quiet stretch is quiet rather than
+ * "Loading subtitles…", which is only for where the cut hasn't been yet. One
+ * that can't be cut has the player ask for a stream with it burned in instead
+ * (onUnavailable).
  *
  * One made before comes in pieces of about a megabyte: the one where the
  * picture is first, then the next couple of minutes', then — while the video
@@ -47,6 +52,8 @@ const SPARE_S = 20;
 const PLACE_WAIT_MS = 15_000;
 /** How often "Loading subtitles…" is looked at. */
 const WATCH_PLACE_MS = 400;
+/** Pieces read at once: a made one's, after a skip, three nearest first. */
+const AT_ONCE = 3;
 
 interface PictureSubtitleLayerProps {
   /** The PGS subtitle to draw, or null for none. */
@@ -137,9 +144,12 @@ export function PictureSubtitleLayer({
     };
     if (statusRef) statusRef.current = status;
     const readers = new Map<string, { reader: PgsReader; lastPts: number }>();
-    /** Where every line has come, by piece read: a cut's stay once the made
-     *  one's pieces replace them, so those aren't read twice. */
+    /** Pieces being read now. */
+    const reading = new Set<string>();
+    /** Where every line has come, by piece: a cut's stay once the made one's
+     *  pieces replace them, so those aren't read twice. */
     const pieceSpans = new Map<string, CoveredSpan>();
+    /** pieceSpans, joined where they meet. */
     let spans: CoveredSpan[] = [];
     let done = false;
     /** The last word on its pieces; reading them, one at a time. */
@@ -165,7 +175,7 @@ export function PictureSubtitleLayer({
     const nextPiece = (): Piece | null => {
       if (!latest) return null;
       const t = where();
-      const open = latest.pieces.filter((p) => p.bytes > readOf(p) && !had(p));
+      const open = latest.pieces.filter((p) => p.bytes > readOf(p) && !had(p) && !reading.has(keyOf(p)));
       const here = open.filter((p) => p.fromS <= t && (p.toS === null || t < p.toS))
         .sort((a, b) => b.fromS - a.fromS)[0];
       if (here) return here;
@@ -204,21 +214,51 @@ export function PictureSubtitleLayer({
       }
     };
 
-    /** Read pieces, nearest first, while there are any worth reading now. */
+    /** Read pieces, nearest first, AT_ONCE at a time, while there are any
+     *  worth reading now. */
     const read = async () => {
       await readCached();
-      for (let p = nextPiece(); p && latest; p = nextPiece()) {
-        if (cancelled) return;
-        const k = keyOf(p);
-        const r = readers.get(k);
-        const from = r?.reader.read ?? 0;
-        const whole = p.done && from === 0 ? latest.v ?? null : null;
-        const bytes = await fetchPgsBytes(streamId, ratingKey, mediaIndex, p.id, from, whole);
-        if (cancelled) return;
-        take(p, bytes);
-        // Nothing more of it written yet.
-        if (bytes.length === 0) break;
-      }
+      const one = async () => {
+        for (let p = nextPiece(); p && latest; p = nextPiece()) {
+          if (cancelled) return;
+          const k = keyOf(p);
+          const from = readOf(p);
+          const whole = p.done && from === 0 ? latest.v ?? null : null;
+          reading.add(k);
+          let bytes: Uint8Array;
+          try {
+            bytes = await fetchPgsBytes(streamId, ratingKey, mediaIndex, p.id, from, whole);
+          } finally {
+            reading.delete(k);
+          }
+          if (cancelled) return;
+          take(p, bytes);
+          // Nothing more of it written yet.
+          if (bytes.length === 0) return;
+        }
+      };
+      await Promise.all(Array.from({ length: AT_ONCE }, one));
+    };
+
+    /**
+     * Where every line of a piece has come: to its end once all of it is
+     * here; with all it had written read, to where its cut had read the film
+     * to; else to its last line so far.
+     */
+    const spanOf = (p: Piece) => {
+      const r = readers.get(keyOf(p));
+      const all = (r?.reader.read ?? 0) >= p.bytes;
+      let to: number | null;
+      if (all && p.done) to = p.toS;
+      else if (all && p.reachedS != null) to = Math.max(r?.lastPts ?? p.fromS, p.reachedS);
+      else if (r) to = r.lastPts;
+      else return;
+      pieceSpans.set(keyOf(p), [p.fromS, to]);
+    };
+    const respan = (pieces: Piece[]) => {
+      for (const p of pieces) spanOf(p);
+      spans = mergedSpans([...pieceSpans.values()]);
+      status.covered = spans;
     };
 
     /** A piece's bytes, read on from where it was left; `kept`, from the browser. */
@@ -231,12 +271,9 @@ export function PictureSubtitleLayer({
         r.lastPts = Math.max(r.lastPts, shown[shown.length - 1].pts);
         listRef.current = mergeDisplays(listRef.current, shown);
       }
-      // Where every line has come: from where the piece starts, to its end
-      // once it is all here, else to its last line so far.
-      pieceSpans.set(k, [p.fromS, p.done && p.bytes <= r.reader.read ? p.toS : r.lastPts]);
-      spans = [...pieceSpans.values()];
-      const lines = listRef.current.filter((d) => d.objects.length).length;
-      Object.assign(status, { lines, covered: spans });
+      respan([p]);
+      status.lines = listRef.current.filter((d) => d.objects.length).length;
+      const lines = status.lines;
       if (lines) setHasLines(true);
       if (status.firstLinesMs === null && covers(where())) {
         status.firstLinesMs = Date.now() - startedAt;
@@ -281,6 +318,8 @@ export function PictureSubtitleLayer({
             return;
           }
           latest = s;
+          // How far each cut has read, though nothing new was written.
+          if (!done) respan(s.pieces);
           if (!done) status.state = "reading";
           await pump();
           if (!cancelled && !s.done) next = setTimeout(ask, ASK_MS);

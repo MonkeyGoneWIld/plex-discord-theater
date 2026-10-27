@@ -923,7 +923,12 @@ export async function fetchSubtitleFont(id: string): Promise<Uint8Array> {
 
 /** Where a PGS subtitle's cut out of the film has got to: see the /pgs route. */
 export interface PgsStatus {
-  pieces: Array<{ id: number; fromS: number; toS: number | null; bytes: number; done: boolean }>;
+  pieces: Array<{
+    id: number; fromS: number; toS: number | null; bytes: number; done: boolean;
+    /** A piece being cut: how far into the film it has read — every line
+     *  before it is in its first `bytes`. */
+    reachedS?: number | null;
+  }>;
   done: boolean;
   failed: string | null;
   /** Names a made subtitle's bytes: its pieces asked for by it are kept by the browser. */

@@ -27,6 +27,7 @@ import { closePlexAccountsDb } from "./services/plex-accounts.js";
 import { closeDetailCache } from "./services/detail-cache.js";
 import { anyRoomPlaying, attachWebSocketServer, closeWebSocketServer } from "./services/sync.js";
 import { directStreamCacheDir, directStreamMemoryBytes } from "./services/direct-stream.js";
+import { startDataCleanup } from "./services/data-cleanup.js";
 import { transcodeCacheBytes } from "./services/segment-prefetch.js";
 import { checkFfmpeg, detectHardware, ffmpegPreviewsOn, mediaPathMap, segmentMemoryBytes } from "./services/ffmpeg/config.js";
 import { checkLibraryPaths, libraryReadabilityText } from "./services/ffmpeg/library-check.js";
@@ -372,6 +373,7 @@ const allowedGuildCount = (process.env.ALLOWED_GUILD_IDS || "")
 const server = app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   reportIntegrations();
+  startDataCleanup(directStreamCacheDir());
   // Pre-fill the detail-page caches (metadata, cast, collections, related) in
   // the background so opening a title doesn't wait on Plex and TMDB. Started
   // from the listen callback because it calls back into our own HTTP port.

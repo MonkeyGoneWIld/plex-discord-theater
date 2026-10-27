@@ -89,6 +89,9 @@ const BEFORE_FROM_S = 10;
  *  stops, for a new session of its driver's to take over (takeOver). The
  *  player asks for that new one straight after it stops the old. */
 const SPARE_MS = 15_000;
+/** A run still being made is taken over for a place up to this far past what
+ *  it has made: it gets there before a new one would start. */
+const TAKE_OVER_AHEAD_S = 30;
 /** Runs of one title that die within this long of each other leave it to Plex. */
 const CRASH_WINDOW_MS = 15 * 60_000;
 const CRASHES_TO_REFUSE = 2;
@@ -182,6 +185,9 @@ interface Run {
   speedSaid: boolean;
   /** Stopped by us: its exit is nothing to report. */
   stopped: boolean;
+  /** Its session stopped while it was being made: kept going for SPARE_MS,
+   *  for its driver's next session to take over (stopRun). */
+  leaving?: boolean;
   segments: Segment[];
   byPath: Map<string, Segment>;
   /** The segments' clock minus film time, fixed by the first. */
@@ -456,6 +462,30 @@ async function measure(run: Run, name: string): Promise<void> {
 }
 
 function stopRun(run: Run, why: string, keep = false): void {
+  if (keep && !run.stopped && !run.failed && !run.ended && !run.leaving && run.proc?.exitCode === null) {
+    // Still being made: its ffmpeg goes on for SPARE_MS, for the next session
+    // of its driver's to take over — Discord's pop-out reloads the page, which
+    // stops its stream and asks for it again straight after. Project Hail
+    // Mary's pop-out (run 23) began again from nothing.
+    // Its key and session are done with, as a stopped run's are.
+    run.leaving = true;
+    const sessionId = run.sessionId;
+    runs.delete(run.key);
+    if (bySession.get(sessionId) === run) bySession.delete(sessionId);
+    retired.set(run.key, Date.now());
+    retiredSessions.set(sessionId, Date.now());
+    spare.set(sessionId, run);
+    logEvent("FFmpeg", "run kept going for its driver's next session", {
+      session: short(sessionId), why, segments: run.segments.length, keepS: SPARE_MS / 1000,
+    });
+    setTimeout(() => {
+      if (spare.get(sessionId) !== run) return;
+      spare.delete(sessionId);
+      run.leaving = false;
+      stopRun(run, why);
+    }, SPARE_MS).unref();
+    return;
+  }
   // Before it goes, while its files are open.
   const used = run.gpuAtStart && run.proc?.pid && run.proc.exitCode === null ? use(run, sampleGpu(run.proc.pid)) : null;
   run.stopped = true;
@@ -498,9 +528,14 @@ function stopRun(run: Run, why: string, keep = false): void {
 }
 
 /** A run's files, gone. Asked again while a killed ffmpeg still holds or
- *  writes one: on Windows the first try failed, and its folder stayed. */
+ *  writes one: on Windows the first try failed, and its folder stayed. Its
+ *  session's folder goes too once no other run's is in it: bot 2 had
+ *  gathered 22 empty ones (run 23). */
 function removeDir(dir: string): void {
-  void fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }).catch(() => {});
+  void fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    .then(() => path.dirname(dir) !== CACHE_DIR && path.dirname(path.dirname(dir)) === CACHE_DIR
+      ? fs.promises.rmdir(path.dirname(dir)) : undefined)
+    .catch(() => {});
 }
 
 /** Whether a run's Before is being made. */
@@ -614,10 +649,13 @@ async function measureBefore(run: Run, b: Before, name: string): Promise<void> {
 /**
  * Whether a restart at `offsetS` can be served from what this run made: the
  * same stream, made from before there to the end of the file. A spare one too.
+ * Taken over by a new session of its driver's (`taking`), one still being made
+ * too, up to a little past what it has made.
  */
-function servesFrom(run: Run, same: string | null, offsetS: number): boolean {
-  if (same === null || run.same !== same || !run.ended || run.failed) return false;
+function servesFrom(run: Run, same: string | null, offsetS: number, taking = false): boolean {
+  if (same === null || run.same !== same || run.failed) return false;
   if (run.stopped && spare.get(run.sessionId) !== run) return false;
+  if (!run.ended && !(taking && offsetS <= edgeOf(run) + TAKE_OVER_AHEAD_S)) return false;
   return offsetS >= (run.before?.ended ? 0 : run.segments[0]?.start ?? Infinity);
 }
 
@@ -625,12 +663,15 @@ function servesFrom(run: Run, same: string | null, offsetS: number): boolean {
  * A new session of the stream a driver replaces — a seek to before where a
  * stream began starts it again under a new session (Player.tsx) — takes over
  * what the old one made, running or spare, when it is the same stream made
- * that far. Hot Fuzz and 1917 on 22 October: made whole, and never used.
+ * that far. Hot Fuzz and 1917 on 22 October: made whole, and never used. One
+ * still being made too, its ffmpeg and all, when the place is in what it has
+ * or will soon: a pop-out's new page (stopRun).
  */
 function takeOver(sessionId: string, replaces: string[], same: string | null, offsetS: number): string | null {
   for (const id of replaces) {
     const run = bySession.get(id) ?? spare.get(id);
-    if (!run || id === sessionId || !servesFrom(run, same, offsetS)) continue;
+    if (!run || id === sessionId || !servesFrom(run, same, offsetS, true)) continue;
+    run.leaving = false;
     if (spare.get(id) === run) {
       spare.delete(id);
       run.stopped = false;
@@ -958,6 +999,13 @@ export function stopFfmpegSession(sessionId: string, why = "stopped"): void {
 export function stopAllFfmpegSessions(why = "stopped"): number {
   const all = [...bySession.values()];
   for (const run of all) stopRun(run, why);
+  // And those kept going for a session to come.
+  for (const [id, run] of [...spare]) {
+    if (!run.leaving) continue;
+    spare.delete(id);
+    run.leaving = false;
+    stopRun(run, why);
+  }
   return all.length;
 }
 

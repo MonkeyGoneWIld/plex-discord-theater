@@ -7,12 +7,20 @@
  *
  * ffmpeg copies the track out of the film into a .sup (the stream as a Blu-ray
  * carries it), which means reading the whole file: minutes for a remux. So it
- * is cut in pieces the player fetches as they grow. The first runs from a
- * little before where the player is (LEAD_S) to the end; once that is done,
- * a second from the start up to there. A player near the start gets one, from
- * the start. When all of it is made the pieces become one file, kept on disk
- * (FFMPEG_PGS_MAX_GB, least recently used first) for the next time. A sidecar
- * .sup is the file it is, fetched once.
+ * is cut in pieces the player fetches as they grow, one at a time for a film.
+ * The first runs from a little before where the player is (LEAD_S) to the
+ * end. A player that skips past where the cut has read to (CATCH_UP_S) has it
+ * stopped there and a new one started a little before it: in run 23 a skip
+ * through Project Hail Mary waited minutes for a cut reading the whole remux
+ * from the start. What no piece has, before and between, is cut after, the
+ * stretch the player is in first. When all of it is made the pieces become
+ * one file, kept on disk (FFMPEG_PGS_MAX_GB, least recently used first) for
+ * the next time. A sidecar .sup is the file it is, fetched once.
+ *
+ * Each piece being cut says how far it has read the film (`reachedS`, from the
+ * times of the picture's packets as ffmpeg reads them): every line before that
+ * is in it. Between two lines, then, the player knows there is nothing to
+ * show, rather than taking the quiet for a subtitle still on its way.
  *
  * A made one is handed out in pieces too, of about PIECE_BYTES each, every one
  * starting on a line drawn afresh: a film's is 20 to 40 MB, which through
@@ -36,11 +44,23 @@ import { gzip } from "node:zlib";
 import { logEvent } from "../logger.js";
 import { ffmpegPath } from "./config.js";
 
-/** The first piece starts this far before the player: a line up when it
- *  starts was put up before. */
+/** A piece for where the player is starts this far before it: a line up when
+ *  it starts was put up before. */
 const LEAD_S = 30;
 /** A player closer than this to the start reads from the start, in one piece. */
 const ONE_PIECE_BELOW_S = 120;
+/**
+ * A player this far past where the running cut has read to has it stopped
+ * and a new one started for it. Closer, the running one gets there first: a
+ * remux is read at 10 to 20 times the film's speed, and a new cut takes a
+ * second or two to start.
+ */
+const CATCH_UP_S = 60;
+/** Lines are read a little behind the picture's packets at the same time:
+ *  how far a cut has read is taken this far back from the picture's. */
+const REACH_SLACK_S = 5;
+/** Pieces overlap this much where one starts at another's end. */
+const JOIN_S = 5;
 /** The most of the server's disk kept for them, unless FFMPEG_PGS_MAX_GB says. */
 const DEFAULT_MAX_GB = 2;
 /**
@@ -49,8 +69,8 @@ const DEFAULT_MAX_GB = 2;
  * film is read through, and a remux read off the mount takes ten.
  */
 const MAX_MS = 45 * 60_000;
-/** Cuts going on at once, server-wide: each reads a whole film. */
-const AT_ONCE = 2;
+/** Cuts going on at once, server-wide: each reads a film. One a film. */
+const AT_ONCE = 3;
 /** A cut nobody has asked about for this long is stopped, and forgotten. */
 const IDLE_MS = 10 * 60_000;
 /** Past this, it isn't a subtitle. */
@@ -58,23 +78,30 @@ const MAX_BYTES = 256 * 1024 * 1024;
 /** About how much of a made subtitle a piece of it is: 40 lines or so. */
 const PIECE_BYTES = 1024 * 1024;
 /**
- * A made subtitle's pieces are numbered from here, apart from a cut's (0 and
- * 1), so an id names the same bytes whether the file was made just now or
+ * A made subtitle's pieces are numbered from here, apart from a cut's (0
+ * up), so an id names the same bytes whether the file was made just now or
  * before: the player's browser keeps them by it.
  */
 const MADE_FIRST_ID = 1000;
+/** A cut's bytes past this, asked for, go gzipped. */
+const GZIP_FROM_BYTES = 64 * 1024;
 
 let pieceBytes = PIECE_BYTES;
 const gzipped = promisify(gzip);
 
 export interface PgsPiece {
   id: number;
-  /** Film time it starts at, seconds; and where it stops, null for the end. */
+  /** Film time it starts at, seconds; and where it stops, null for the end.
+   *  A cut stopped for a skip ends where it had read to. */
   fromS: number;
   toS: number | null;
   /** Bytes written so far. */
   bytes: number;
   done: boolean;
+  /** A piece being cut: how far into the film it has read, seconds — every
+   *  line before it is in its first `bytes`. Null before it knows, and for
+   *  one done (it has all of fromS to toS). */
+  reachedS?: number | null;
 }
 
 export interface PgsStatus {
@@ -102,6 +129,16 @@ interface Piece extends PgsPiece {
   proc: ChildProcess | null;
   failed: string | null;
   started: boolean;
+  /** How far the picture's packets have come, as ffmpeg reads them; and as
+   *  of the last look, half a second before. That one is reachedS, with the
+   *  bytes on disk now: a line read just before it has had the time to be
+   *  written. */
+  seenS: number | null;
+  seenBefore?: number | null;
+  /** Stopped for a skip, or to give way: done, up to where it had read. */
+  stopped: boolean;
+  /** For where the player is: ahead of cuts filling in what is left. */
+  urgent: boolean;
   /** All of it gzipped, once asked for so. */
   gz?: Buffer;
 }
@@ -119,6 +156,11 @@ interface Job {
   failed: string | null;
   lastAsked: number;
   startedAt: number;
+  /** Where the player last said it was, film seconds. */
+  atS: number;
+  /** The piece being cut, or waiting for its turn to be. */
+  cutting: Piece | null;
+  nextId: number;
   /** For a cut started ahead of anyone playing: still worth starting. */
   wanted?: () => boolean;
 }
@@ -180,7 +222,7 @@ export function displaySets(buf: Buffer): DisplaySet[] {
 function piecesOf(file: string, buf: Buffer): Piece[] {
   const piece = (i: number, offset: number, length: number, fromS: number, toS: number | null): Piece => ({
     id: MADE_FIRST_ID + i, fromS, toS, bytes: length, done: true,
-    file, offset, length, proc: null, failed: null, started: true,
+    file, offset, length, proc: null, failed: null, started: true, seenS: null, stopped: false, urgent: false,
   });
   const pieces: Piece[] = [];
   let start = 0;
@@ -210,39 +252,54 @@ function made(key: string): { pieces: Piece[]; v: string } | null {
 }
 
 /**
- * A cut's two pieces as one file in film order, each display set once: the
- * start up to where the rest's first fresh set goes up, then the rest from
- * there — with anything of the rest's before that past the start's last (a
- * line cleared), so nothing is lost at the join.
+ * A cut's pieces as one file in film order, each display set once: where
+ * pieces overlap they have the same sets, and a piece stopped part way has
+ * only whole ones (displaySets). One that can't be read as a .sup is put
+ * together as it is.
  */
-function joined(rest: Buffer, start: Buffer | null): Buffer {
-  if (!start) return rest;
-  const later = displaySets(rest);
-  const earlier = displaySets(start);
-  if ((rest.length > 0 && later.length === 0) || (start.length > 0 && earlier.length === 0)) {
-    return Buffer.concat([start, rest]);
+function joined(parts: Buffer[]): Buffer {
+  const sets: Array<{ pts: number; bytes: Buffer }> = [];
+  for (const buf of parts) {
+    const found = displaySets(buf);
+    if (buf.length > 0 && found.length === 0) return Buffer.concat(parts);
+    for (const s of found) sets.push({ pts: s.pts, bytes: buf.subarray(s.at, s.end) });
   }
-  const join = later.find((s) => s.fresh)?.pts ?? Infinity;
-  const startEnds = earlier.at(-1)?.pts ?? -1;
-  return Buffer.concat([
-    ...earlier.filter((s) => s.pts < join).map((s) => start.subarray(s.at, s.end)),
-    ...later.filter((s) => s.pts >= join || s.pts > startEnds).map((s) => rest.subarray(s.at, s.end)),
-  ]);
+  // Stable: sets at the same time keep their order.
+  sets.sort((a, b) => a.pts - b.pts);
+  const out: Buffer[] = [];
+  let at = -1;
+  let here: Buffer[] = [];
+  for (const s of sets) {
+    if (s.pts !== at) {
+      at = s.pts;
+      here = [];
+    }
+    if (here.some((b) => b.equals(s.bytes))) continue;
+    here.push(s.bytes);
+    out.push(s.bytes);
+  }
+  return Buffer.concat(out);
 }
 
 function statusOf(job: Job): PgsStatus {
   return {
-    pieces: job.pieces.map(({ id, fromS, toS, bytes, done }) => ({ id, fromS, toS, bytes, done })),
-    done: job.pieces.length > 0 && job.pieces.every((p) => p.done),
+    pieces: job.pieces.map(({ id, fromS, toS, bytes, done, reachedS, length }) => ({
+      id, fromS, toS, bytes, done, ...(length === null && !done ? { reachedS: reachedS ?? null } : {}),
+    })),
+    done: job.v !== null,
     failed: job.failed,
     v: job.v,
   };
 }
 
-/** ffmpeg's arguments for a piece: the track copied out, as it is, film time. */
+/**
+ * ffmpeg's arguments for a piece: the track copied out, as it is, film time.
+ * The picture's packets are read too and thrown away, with their times on
+ * stderr (-debug_ts): how far the cut has read, lines or none (reachOf).
+ */
 export function pgsArgs(input: string[], index: number, fromS: number, toS: number | null, out: string): string[] {
   return [
-    "-hide_banner", "-nostdin", "-loglevel", "error",
+    "-hide_banner", "-nostdin", "-nostats", "-loglevel", "info", "-debug_ts",
     ...(fromS > 0 ? ["-ss", fromS.toFixed(3)] : []),
     ...(toS !== null ? ["-to", toS.toFixed(3)] : []),
     "-copyts", "-start_at_zero",
@@ -251,18 +308,41 @@ export function pgsArgs(input: string[], index: number, fromS: number, toS: numb
     // Each display set on disk as it is cut, for the player asking as it grows.
     "-flush_packets", "1",
     "-f", "sup", "-y", out,
+    "-map", "0:v:0?", "-c", "copy", "-f", "null", "-",
   ];
 }
 
-function slot(): Promise<void> {
+/** The latest picture packet's time in a stretch of ffmpeg's -debug_ts output. */
+export function reachOf(text: string): number | null {
+  let at = text.lastIndexOf("type:video");
+  while (at >= 0) {
+    const m = /^type:video\b[^\n]*?\bpkt_dts_time:(\d+(?:\.\d+)?)/.exec(text.slice(at, at + 400));
+    if (m) return Number(m[1]);
+    at = text.lastIndexOf("type:video", at - 1);
+  }
+  return null;
+}
+
+/** ffmpeg's lines that say what went wrong, not its -debug_ts ones. */
+function complaint(text: string): string {
+  return text.split("\n").filter((l) => l.trim() && !/->|<-|pkt_pts|^\s|^(Input|Output|Stream|Press|Duration)\b/.test(l))
+    .join("\n");
+}
+
+function slot(urgent: boolean): Promise<void> {
   if (running < AT_ONCE) {
     running++;
     return Promise.resolve();
   }
-  return new Promise((resolve) => waiting.push(() => {
-    running++;
-    resolve();
-  }));
+  return new Promise((resolve) => {
+    const go = () => {
+      running++;
+      resolve();
+    };
+    // Where somebody is watching goes before filling in what is left.
+    if (urgent) waiting.unshift(go);
+    else waiting.push(go);
+  });
 }
 
 function release(): void {
@@ -270,12 +350,12 @@ function release(): void {
   waiting.shift()?.();
 }
 
-/** Cut one piece; resolves when it is done or failed. */
+/** Cut one piece; resolves when it is done, stopped or failed. */
 async function cut(job: Job, piece: Piece): Promise<void> {
   if (job.source?.kind !== "film") return;
   const source = job.source;
-  await slot();
-  if (jobs.get(job.key) !== job || job.failed) {
+  await slot(piece.urgent);
+  if (jobs.get(job.key) !== job || job.failed || piece.stopped) {
     release();
     return;
   }
@@ -288,7 +368,7 @@ async function cut(job: Job, piece: Piece): Promise<void> {
   }
   piece.started = true;
   await new Promise<void>((resolve) => {
-    let stderr = "";
+    let said = "";
     let proc: ChildProcess;
     try {
       fs.mkdirSync(path.dirname(piece.file), { recursive: true });
@@ -301,12 +381,19 @@ async function cut(job: Job, piece: Piece): Promise<void> {
     }
     piece.proc = proc;
     const began = Date.now();
-    const watch = setInterval(() => {
+    const measure = (closed = false) => {
+      // How far it had read, then what is on disk: all of that is in it.
+      const seen = closed ? piece.seenS : piece.seenBefore ?? null;
+      piece.seenBefore = piece.seenS;
       try {
         piece.bytes = fs.statSync(piece.file).size;
       } catch {
         // Not written yet.
       }
+      if (seen !== null) piece.reachedS = Math.max(piece.fromS, seen - REACH_SLACK_S);
+    };
+    const watch = setInterval(() => {
+      measure();
       const idle = Date.now() - job.lastAsked > IDLE_MS;
       if (idle || Date.now() - began > MAX_MS || piece.bytes > MAX_BYTES) {
         if (!piece.failed) piece.failed = idle ? "nobody asked for it" : piece.bytes > MAX_BYTES ? "too big" : "it took too long";
@@ -314,7 +401,11 @@ async function cut(job: Job, piece: Piece): Promise<void> {
       }
     }, 500);
     proc.stderr?.on("data", (d: Buffer) => {
-      stderr = (stderr + d.toString()).slice(-600);
+      const text = d.toString("latin1");
+      const reach = reachOf(text);
+      if (reach !== null && reach > (piece.seenS ?? -1)) piece.seenS = reach;
+      const bad = complaint(text);
+      if (bad) said = (said + bad).slice(-600);
     });
     proc.on("error", (err) => {
       piece.failed = piece.failed ?? `ffmpeg: ${err.message}`;
@@ -322,34 +413,135 @@ async function cut(job: Job, piece: Piece): Promise<void> {
     proc.on("close", (code, signal) => {
       clearInterval(watch);
       piece.proc = null;
-      try {
-        piece.bytes = fs.statSync(piece.file).size;
-      } catch {
-        piece.bytes = 0;
+      measure(true);
+      if (piece.stopped && !piece.failed) {
+        // Has everything before where it had read to.
+        piece.toS = piece.reachedS ?? piece.fromS;
+        piece.done = true;
+      } else if (code === 0 && !piece.failed) {
+        piece.done = true;
+      } else {
+        piece.failed = piece.failed ?? `ffmpeg exited ${code ?? signal}${said.trim() ? `: ${said.trim().split("\n").pop()}` : ""}`;
       }
-      if (code === 0 && !piece.failed) piece.done = true;
-      else piece.failed = piece.failed ?? `ffmpeg exited ${code ?? signal}${stderr.trim() ? `: ${stderr.trim().split("\n").pop()}` : ""}`;
+      piece.reachedS = null;
       resolve();
     });
   });
   release();
 }
 
-/** All of a film's pieces done: one file, kept; or the job failed. */
-function finish(job: Job): void {
-  const failed = job.pieces.find((p) => p.failed);
-  if (failed) {
-    job.failed = failed.failed;
-    logEvent("Subtitles", "couldn't cut a picture subtitle out of the film", {
-      key: job.key, why: job.failed, ms: Date.now() - job.startedAt,
-    });
+/** What of the film the pieces done have, in order, joined where they meet. */
+function doneSpans(job: Job): Array<[number, number]> {
+  const spans = job.pieces
+    .filter((p) => p.done && (p.toS === null || p.toS > p.fromS))
+    .map((p): [number, number] => [p.fromS, p.toS ?? Infinity])
+    .sort((a, b) => a[0] - b[0]);
+  const out: Array<[number, number]> = [];
+  for (const [from, to] of spans) {
+    const last = out[out.length - 1];
+    if (last && from <= last[1] + 0.5) last[1] = Math.max(last[1], to);
+    else out.push([from, to]);
+  }
+  return out;
+}
+
+/** What of the film no piece done has: [from, to] stretches, to Infinity for the end. */
+function gaps(job: Job): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  let at = 0;
+  for (const [from, to] of doneSpans(job)) {
+    if (from > at + 0.5) out.push([at, from]);
+    at = Math.max(at, to);
+  }
+  if (at !== Infinity) out.push([at, Infinity]);
+  return out;
+}
+
+/** Whether `atS` is in a piece done, or one being cut will be there soon. */
+function covered(job: Job, atS: number): boolean {
+  if (doneSpans(job).some(([from, to]) => from <= atS && atS < to)) return true;
+  const c = job.cutting;
+  if (!c || atS < c.fromS || (c.toS !== null && atS >= c.toS)) return false;
+  return atS <= (c.reachedS ?? c.fromS) + CATCH_UP_S;
+}
+
+/**
+ * The next piece to cut: the stretch where the player is, from a little
+ * before it, when no piece has it; else what is left, earliest first. None
+ * left: all of it is made into one file.
+ */
+function next(job: Job): void {
+  if (jobs.get(job.key) !== job || job.failed || job.source?.kind !== "film") return;
+  const left = gaps(job);
+  if (!left.length) {
+    finish(job);
     return;
   }
-  if (!job.pieces.every((p) => p.done)) return;
+  const here = left.find(([from, to]) => from <= job.atS && job.atS < to);
+  const [gapFrom, gapTo] = here ?? left[0];
+  const fromS = here
+    ? Math.max(gapFrom > 0 ? gapFrom - JOIN_S : 0, job.atS < ONE_PIECE_BELOW_S ? 0 : job.atS - LEAD_S)
+    : gapFrom > 0 ? gapFrom - JOIN_S : 0;
+  const toS = gapTo === Infinity ? null : gapTo + JOIN_S;
+  if (job.nextId >= MADE_FIRST_ID) {
+    job.failed = "cut in too many pieces";
+    return;
+  }
+  const id = job.nextId++;
+  const piece: Piece = {
+    id, fromS: Math.max(0, fromS), toS, bytes: 0, done: false,
+    file: path.join(dataDir(), "cutting", job.key, `${id}.sup`), offset: 0, length: null,
+    proc: null, failed: null, started: false, seenS: null, reachedS: null, stopped: false, urgent: !!here,
+  };
+  job.pieces.push(piece);
+  job.cutting = piece;
+  logEvent("Subtitles", "cutting a picture subtitle out of the film for players to draw", {
+    key: job.key, piece: id, fromS: Math.round(piece.fromS), toS: toS === null ? "end" : Math.round(toS),
+    for: here ? "where the player is" : "what is left",
+  });
+  void cut(job, piece).then(() => {
+    if (job.cutting === piece) job.cutting = null;
+    if (piece.failed) {
+      job.failed = piece.failed;
+      logEvent("Subtitles", "couldn't cut a picture subtitle out of the film", {
+        key: job.key, piece: id, why: job.failed, ms: Date.now() - job.startedAt,
+      });
+      return;
+    }
+    next(job);
+  });
+}
+
+/**
+ * The player is at `atS`: when no piece has it and the one being cut won't be
+ * there soon, that one is stopped where it has read to and the next is cut
+ * from there — or, still waiting its turn, moved there.
+ */
+function follow(job: Job, atS: number): void {
+  job.atS = atS;
+  if (job.source?.kind !== "film" || job.v !== null || job.failed || !job.cutting || covered(job, atS)) return;
+  const c = job.cutting;
+  if (!c.started) {
+    c.fromS = atS < ONE_PIECE_BELOW_S ? 0 : Math.max(0, atS - LEAD_S);
+    c.urgent = true;
+    const after = doneSpans(job).find(([from]) => from > c.fromS);
+    c.toS = after ? after[0] + JOIN_S : null;
+    return;
+  }
+  if (c.stopped) return;
+  c.stopped = true;
+  logEvent("Subtitles", "a picture subtitle's cut stopped for a skip past it", {
+    key: job.key, piece: c.id, fromS: Math.round(c.fromS), reachedS: Math.round(c.reachedS ?? c.fromS), atS: Math.round(atS),
+  });
+  c.proc?.kill("SIGKILL");
+}
+
+/** All of a film's pieces done: one file, kept. */
+function finish(job: Job): void {
   const final = path.join(dataDir(), `${job.key}.sup`);
   try {
-    const [rest, start] = job.pieces;
-    const buf = joined(fs.readFileSync(rest.file), start ? fs.readFileSync(start.file) : null);
+    const order = [...job.pieces].sort((a, b) => a.fromS - b.fromS);
+    const buf = joined(order.map((p) => fs.readFileSync(p.file)));
     const tmp = `${final}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, buf);
     fs.renameSync(tmp, final);
@@ -390,7 +582,7 @@ function trim(): void {
   }
 }
 
-async function run(job: Job, atS: number): Promise<void> {
+async function run(job: Job): Promise<void> {
   if (!job.source) return;
   if (job.source.kind === "file") {
     const bytes = await job.source.bytes().catch(() => null);
@@ -406,25 +598,7 @@ async function run(job: Job, atS: number): Promise<void> {
     trim();
     return;
   }
-  const dir = path.join(dataDir(), "cutting", job.key);
-  const from = atS < ONE_PIECE_BELOW_S ? 0 : Math.max(0, atS - LEAD_S);
-  const piece = (id: number, fromS: number, toS: number | null): Piece => ({
-    id, fromS, toS, bytes: 0, done: false, file: path.join(dir, `${id}.sup`), offset: 0, length: null,
-    proc: null, failed: null, started: false,
-  });
-  // From where the player is to the end; then the start, up to a little past
-  // where the first began, so a line across the join is in one of them whole.
-  job.pieces = from > 0 ? [piece(0, from, null), piece(1, 0, from + LEAD_S)] : [piece(0, 0, null)];
-  logEvent("Subtitles", "cutting a picture subtitle out of the film for players to draw", {
-    key: job.key, fromS: Math.round(from), pieces: job.pieces.length,
-  });
-  for (const p of job.pieces) {
-    await cut(job, p);
-    if (p.failed || jobs.get(job.key) !== job) break;
-  }
-  // Its pieces are still what players are reading, until it is let go; the
-  // next to ask after that gets the one file.
-  finish(job);
+  next(job);
 }
 
 /**
@@ -437,6 +611,7 @@ export function pgsStatus(key: string, source: () => Promise<PgsSource | null>, 
   job.lastAsked = Date.now();
   // A player wants it: no longer only ahead of one.
   job.wanted = undefined;
+  follow(job, Math.max(0, atS));
   return statusOf(job);
 }
 
@@ -463,7 +638,8 @@ function jobFor(key: string, source: () => Promise<PgsSource | null>, atS: numbe
     const whole = made(key);
     job = {
       key, source: null, pieces: whole?.pieces ?? [], old: [], v: whole?.v ?? null,
-      failed: null, lastAsked: Date.now(), startedAt: Date.now(), wanted,
+      failed: null, lastAsked: Date.now(), startedAt: Date.now(), atS: Math.max(0, atS),
+      cutting: null, nextId: 0, wanted,
     };
     jobs.set(key, job);
     if (!whole) {
@@ -472,7 +648,7 @@ function jobFor(key: string, source: () => Promise<PgsSource | null>, atS: numbe
       void (async () => {
         started.source = await source().catch(() => null);
         if (!started.source) started.failed = "it couldn't be found";
-        else await run(started, Math.max(0, atS));
+        else await run(started);
       })().catch((err) => {
         started.failed = started.failed ?? String(err);
       });
@@ -482,9 +658,10 @@ function jobFor(key: string, source: () => Promise<PgsSource | null>, atS: numbe
 }
 
 /**
- * A piece's bytes from `from` to what is written, gzipped when asked and it is
- * all of a made one's; null for no such piece. `whole` for all of a made
- * one's, which is the same for as long as `v` is.
+ * A piece's bytes from `from` to what is written, gzipped when asked: all of a
+ * made one's (kept so), or a cut's when there is enough to be worth it. Null
+ * for no such piece. `whole` for all of a made one's, which is the same for as
+ * long as `v` is.
  */
 export async function pgsBytes(key: string, id: number, from: number, gzip = false): Promise<
   { bytes: Buffer; gzipped: boolean; whole: boolean; v: string | null } | null
@@ -519,6 +696,8 @@ export async function pgsBytes(key: string, id: number, from: number, gzip = fal
     piece.gz = await gzipped(bytes);
     return answer(piece.gz, true);
   }
+  // A cut's: through Discord's proxy, megabytes of it at a time after a skip.
+  if (gzip && bytes.length > GZIP_FROM_BYTES) return answer(await gzipped(bytes), true);
   return answer(bytes);
 }
 
@@ -552,5 +731,5 @@ export function pgsPieceBytesForTests(bytes: number): void {
   pieceBytes = bytes;
 }
 
-/** For tests: a cut's two pieces made one. */
+/** For tests: a cut's pieces made one. */
 export const joinPgsPiecesForTests = joined;

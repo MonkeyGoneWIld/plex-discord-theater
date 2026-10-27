@@ -363,10 +363,10 @@ console.log("\n— what a copy is judged on —");
   check("so is Dolby Vision 8.1, whose HDR10 picture is underneath",
     why(version({ DOVIPresent: true, DOVIProfile: 8, DOVIBLCompatID: 1 })), "copy");
   check("but not profile 5, which has none",
-    why(version({ DOVIPresent: true, DOVIProfile: 5 })), "Dolby Vision P5 needs tone mapping");
-  check("nor HEVC for a player that can't decode it", why(version({}), false), "HEVC, and this player can't decode it");
+    why(version({ DOVIPresent: true, DOVIProfile: 5 })), "Dolby Vision P5: tone mapping needed");
+  check("nor HEVC for a player that can't decode it", why(version({}), false), "HEVC: not decoded by this player");
   check("nor 10-bit H.264", why(version({ codec: "h264" })), "10-bit H.264");
-  check("nor what MPEG-TS can't carry from an AVI", why(version({}, { container: "avi" })), "avi container");
+  check("nor what MPEG-TS can't carry from an AVI", why(version({}, { container: "avi" })), "AVI container not supported");
   const chosen = planCopy(version({}), { audioStreamId: 13, hevcOk: true });
   check("the track asked for is the one taken, and AAC is copied",
     chosen.ok && [chosen.audio?.id, chosen.audioCopy], [13, true]);
@@ -374,7 +374,7 @@ console.log("\n— what a copy is judged on —");
   check("with none asked for, the file's default, converted", dflt.ok && [dflt.audio?.id, dflt.audioCopy], [12, false]);
   check("a track the file hasn't is no copy", why(version({}), true, 99), "no audio track 99");
   check("nor 1080i H.264, which Chrome can't decode (Cunk on Shakespeare)",
-    why(version({ codec: "h264", bitDepth: 8, scanType: "interlaced" })), "interlaced H.264");
+    why(version({ codec: "h264", bitDepth: 8, scanType: "interlaced" })), "Interlaced H.264");
   check("but HEVC marked interlaced is (His Dark Materials)", why(version({ scanType: "interlaced" })), "copy");
   const stereo = planCopy(version({}, { streams: [{ id: 11, streamType: 1, index: 0, codec: "hevc", bitDepth: 10 },
     { id: 12, streamType: 2, index: 1, codec: "ac3", channels: 2, default: true }] }), { audioStreamId: null, hevcOk: true, audioChannels: 6 });
@@ -601,7 +601,7 @@ console.log("\n— AV1 and Opus, and FLAC, copied in fragmented MP4 for a player
   const noEac3 = await copied("19");
   check("for a player that can't, made AAC 5.1, and saying that is why rather than \"Unsupported codec\"",
     [noEac3.notes.video, noEac3.notes.audio, noEac3.notes.audioTo, noEac3.notes.audioReason],
-    ["copy", "transcode", "AAC 5.1", "EAC3, and this player can't play it"]);
+    ["copy", "transcode", "AAC 5.1", "EAC3: not decoded by this player"]);
   await fetch(`${origin}/api/plex/hls/session/${noEac3.sid}?reason=test`, { method: "DELETE" });
 
   /** The sound of a stream's first segment: codec, MP4 tag, channels. */
@@ -850,7 +850,7 @@ console.log("\n— a re-encode —");
   const notes = notesOf(m.text);
   check("HEVC for a player nobody said decodes it is re-encoded by ffmpeg, saying why, and on what",
     [notes.engine, notes.video, notes.reason, notes.encoder],
-    ["ffmpeg", "transcode", "HEVC, and this player can't decode it", "CPU (x264), CPU decode"]);
+    ["ffmpeg", "transcode", "HEVC: not decoded by this player", "CPU (x264) · CPU decode"]);
   check("  at what H.264 needs for its 2 Mbps HEVC", notes.kbps, "3200");
   check("  and Plex was never asked to transcode", transcodeAsked(), []);
   // Four segments of 2.97 to 3.01 s: just under 12 by their durations.
@@ -970,6 +970,27 @@ console.log("\n— what a run started mid-film skipped, made once it reaches the
     await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
   }
   process.env.FFMPEG_LOOKAHEAD = "36";
+  {
+    // Discord's pop-out reloads the page: its stream is stopped, and asked for
+    // again under a new session straight after. One still being made — held
+    // FFMPEG_LOOKAHEAD ahead of nobody watching — is taken over, ffmpeg and
+    // all: Project Hail Mary's (run 23) began again from nothing.
+    const was = crypto.randomUUID();
+    const started = variantOf((await master("3", was)).text);
+    const had = await listed(started, 3);
+    await fetch(`${origin}/api/plex/hls/session/${was}?reason=pop-out`, { method: "DELETE" });
+    check("a re-encode still being made, its page popped out: its old key is gone (410)", (await fetch(origin + started)).status, 410);
+    plexRoutes.replaceStreamsForTests?.(() => [was]);
+    const id = crypto.randomUUID();
+    const variant = variantOf((await master("3", id, "?offset=6")).text);
+    plexRoutes.replaceStreamsForTests?.(() => []);
+    const playlist = await (await fetch(origin + variant)).text();
+    check("  the new page's session takes over what it made, from 6 s",
+      [!!keyOf(variant) && keyOf(variant) !== keyOf(started), entries(playlist).length >= had.length,
+        playlist.includes("#EXT-X-START:TIME-OFFSET=6.000,PRECISE=YES")],
+      [true, true, true]);
+    await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
+  }
 }
 
 console.log("\n— what is still Plex's —");
@@ -1037,7 +1058,7 @@ async function brightness(uri: string) {
   const notes = notesOf(m.text);
   check("is re-encoded by ffmpeg, saying why", [notes.engine, notes.video, notes.reason],
     // Asked for only when the player couldn't draw it.
-    ["ffmpeg", "transcode", "Subtitle burn-in (PGS couldn't be drawn)"]);
+    ["ffmpeg", "transcode", "Subtitle burn-in (PGS)"]);
   check("  and Plex was never asked to transcode", transcodeAsked(), []);
   const list = await listed(variantOf(m.text), 5);
   const shown = await brightness(opening(list, 3).uri);
@@ -1088,7 +1109,8 @@ function supTimes(buf: Buffer): number[] {
   const rest = Buffer.from(await (await fetch(`${origin}/api/plex/pgs/21/0?ratingKey=9&mediaIndex=0&from=100`)).arrayBuffer());
   check("  and read on from where a player left off", [rest.length, rest.equals(whole.subarray(100))], [whole.length - 100, true]);
   check("  kept, for the next to ask", fs.readdirSync(path.join(tmp, "subtitles-pgs")).filter((n) => n.endsWith(".sup")).length, 1);
-  const { forgetPgs, pgsArgs, pgsPieceBytesForTests, joinPgsPiecesForTests } = await import("../src/services/ffmpeg/picture-subtitles.js");
+  const { forgetPgs, pgsArgs, pgsPieceBytesForTests, joinPgsPiecesForTests, reachOf, pgsStatus } =
+    await import("../src/services/ffmpeg/picture-subtitles.js");
   forgetPgs();
   const again = await (await fetch(`${origin}/api/plex/pgs/21?ratingKey=9&mediaIndex=0&at=40`)).json() as Status;
   check("  which is the kept one, at once", [again.done, again.pieces.map((p) => p.bytes)], [true, [whole.length]]);
@@ -1115,16 +1137,58 @@ function supTimes(buf: Buffer): number[] {
   pgsPieceBytesForTests(1024 * 1024);
   forgetPgs();
   // Pieces from a place: the rest of the film from it, and the start up to past it.
+  let reached: number | null = null;
   const cut = (fromS: number, toS: number | null) => {
     const out = path.join(tmp, `piece-${fromS}-${toS}.sup`);
-    const r = spawnSync(process.env.FFMPEG_PATH || "ffmpeg", pgsArgs(["-i", PGS_FILM], 2, fromS, toS, out));
-    return r.status === 0 ? supTimes(fs.readFileSync(out)) : [String(r.stderr).trim()];
+    const r = spawnSync(process.env.FFMPEG_PATH || "ffmpeg", pgsArgs(["-i", PGS_FILM], 2, fromS, toS, out),
+      { maxBuffer: 64 * 1024 * 1024 });
+    reached = reachOf(String(r.stderr));
+    return r.status === 0 ? supTimes(fs.readFileSync(out)) : [String(r.stderr).trim().slice(-300)];
   };
   check("  a piece from 30 s has what is after it, on the film's clock", cut(30, null), [32, 40]);
+  check("  and says how far into the film it read: to the end", reached !== null && reached > 40, true);
   check("  one from the start to 35 s, what is before", cut(0, 35), [0.5, 5, 32]);
   check("  the two made one, each line once, in order",
-    supTimes(joinPgsPiecesForTests(fs.readFileSync(path.join(tmp, "piece-30-null.sup")), fs.readFileSync(path.join(tmp, "piece-0-35.sup")))),
+    supTimes(joinPgsPiecesForTests([fs.readFileSync(path.join(tmp, "piece-30-null.sup")), fs.readFileSync(path.join(tmp, "piece-0-35.sup"))])),
     [0.5, 5, 32, 40]);
+  {
+    // Ten minutes read at 60 times the film's speed: a skip to 500 s while the
+    // cut is near the start stops it where it had read to, cuts from just
+    // before 500 s to the end, then fills in between (run 23: Project Hail
+    // Mary's skips waited on a cut reading the remux from the start).
+    const long = path.join(tmp, "pgs-long.mkv");
+    const sup = path.join(tmp, "long.sup");
+    fs.writeFileSync(sup, pgs(640, 360, [{ from: 0.5, to: 5, box: BOX }, { from: 300, to: 305, box: BOX }, { from: 590, to: 595, box: BOX }]));
+    const made = spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-y", "-copyts", "-f", "lavfi", "-i", "testsrc=size=64x36:rate=5:duration=600",
+      "-i", sup, "-map", "0", "-map", "1", "-c:v", "libx264", "-preset", "ultrafast", "-g", "50", "-c:s", "copy", long]);
+    if (made.status !== 0) throw new Error(`couldn't make pgs-long.mkv: ${made.stderr}`);
+    forgetPgs();
+    const source = async () => ({ kind: "film" as const, input: ["-readrate", "60", "-i", long], index: 1 });
+    type Seen = { id: number; fromS: number; toS: number | null; done: boolean; reachedS?: number | null };
+    let s = pgsStatus("long-1", source, 0);
+    for (let i = 0; i < 40 && !((s.pieces[0] as Seen | undefined)?.reachedS); i++) {
+      await sleep(100);
+      s = pgsStatus("long-1", source, 0);
+    }
+    const before = (s.pieces[0] as Seen).reachedS ?? null;
+    check("  a cut being read says how far it has got", before !== null && before > 0 && before < 400, true);
+    const seen: Seen[][] = [];
+    for (let i = 0; i < 300 && !s.done && !s.failed; i++) {
+      s = pgsStatus("long-1", source, 500);
+      seen.push(s.pieces as Seen[]);
+      if (!s.done) await sleep(100);
+    }
+    const cutPieces = seen.filter((p) => p.length && p[0].id < 1000).pop() ?? [];
+    const first = cutPieces[0];
+    check("  a skip past it stops it where it had read to",
+      [first?.done, first?.toS !== null && first!.toS! < 440], [true, true]);
+    check("  and cuts from just before the skip first, then what is left",
+      cutPieces.slice(1).map((p) => [p.fromS, p.toS === null ? "end" : "to"]), [[470, "end"], [Math.max(0, first.toS! - 5), "to"]]);
+    check("  until it is all there", [s.done, s.failed], [true, null]);
+    check("  every line once, in order",
+      supTimes(fs.readFileSync(path.join(tmp, "subtitles-pgs", "long-1.sup"))), [0.5, 5, 300, 305, 590, 595]);
+    forgetPgs();
+  }
   {
     // A page looked at has its picture subtitle cut ahead, nobody playing it.
     for (const n of fs.readdirSync(path.join(tmp, "subtitles-pgs"))) fs.rmSync(path.join(tmp, "subtitles-pgs", n), { recursive: true, force: true });

@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useLayoutEffect, useRef, lazy, Suspense } from "react";
 import { useDiscord } from "./hooks/useDiscord";
 import { useFittedTrail } from "./lib/useFittedTrail";
+import { usePromotedToast } from "./lib/usePromotedToast";
 import { useSync, roomPositionNow } from "./hooks/useSync";
 import { Library } from "./components/Library";
 import { MovieDetail } from "./components/MovieDetail";
@@ -129,25 +130,9 @@ export function App() {
 
   const effectiveIsHost = syncState.isHost ?? isHost;
 
-  // Toast when promoted to host.
-  //
-  // Only on a genuine false → true handover. `null` is the third state and it
-  // means "we don't know our role yet", which is where every client starts:
-  // once the join reply began carrying isHost from the roster, null → true
-  // became the *normal* opening move for whoever launched the activity, and
-  // they were congratulated on becoming the host of a room they had just
-  // opened. Starting something is not being handed it.
-  const [promotedToast, setPromotedToast] = useState(false);
-  const prevSyncIsHost = useRef(syncState.isHost);
-  useEffect(() => {
-    const prev = prevSyncIsHost.current;
-    prevSyncIsHost.current = syncState.isHost;
-    if (syncState.isHost === true && prev === false) {
-      setPromotedToast(true);
-      const timer = setTimeout(() => setPromotedToast(false), 2000);
-      return () => clearTimeout(timer);
-    }
-  }, [syncState.isHost]);
+  // Toast when promoted to host: on a genuine handover only, and only while
+  // it is so (lib/usePromotedToast).
+  const promotedToast = usePromotedToast(syncState.isHost);
 
 
   // Warm the player chunk in the background as soon as the app is idle. Nobody

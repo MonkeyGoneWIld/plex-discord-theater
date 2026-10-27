@@ -52,6 +52,7 @@ import { nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
 import { installTakeFromPeer } from "../lib/takeFromPeer";
 import { connectionsSeen, watchPeerConnections } from "../lib/peerConnections";
+import { RTC_CONFIG, joinSideSwarm, trackerAnnounce } from "../lib/sideShare";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
 import { useVideoZoom } from "../lib/useVideoZoom";
 import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -3615,6 +3616,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       .catch(() => setVpsRelay(false)); // default to non-VPS (P2P mode) if config fails
   }, []);
 
+  // In P2P mode, picture subtitles and previews from the other players on
+  // this title when they have them, as the film's segments are (lib/sideShare).
+  useEffect(() => {
+    if (vpsRelay !== false) return;
+    return joinSideSwarm(item.ratingKey, { announce: [trackerAnnounce(getSessionToken())], rtcConfig: RTC_CONFIG });
+  }, [vpsRelay, item.ratingKey]);
+
   // Where Plex counts a title with no credits marker as watched, as a share of
   // its runtime. Only read when the host presses Back, so nothing waits on it;
   // Plex's default stands in until it lands.
@@ -4539,9 +4547,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             p2p: {
               core: {
                 swarmId: `pdt-${sessionId}`,
-                announceTrackers: [
-                  `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/tracker${token ? `?token=${encodeURIComponent(token)}` : ""}`,
-                ],
+                announceTrackers: [trackerAnnounce(token)],
                 // The engine keeps every segment it downloads so it can serve
                 // peers, and left to itself it will hold 4 GiB before evicting
                 // anything: its desktop default. Worse, for VOD it only evicts
@@ -4630,16 +4636,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // wait over, three times, before giving up on it. A request
                 // that has really died is still caught, after this.
                 httpNotReceivingBytesTimeoutMs: 15_000,
-                rtcConfig: {
-                  // Multiple STUN servers improve NAT traversal odds — every
-                  // peer pair that fails to connect falls back to HTTP, costing
-                  // server bandwidth.
-                  iceServers: [
-                    { urls: "stun:stun.l.google.com:19302" },
-                    { urls: "stun:stun1.l.google.com:19302" },
-                    { urls: "stun:stun2.l.google.com:19302" },
-                  ],
-                },
+                rtcConfig: RTC_CONFIG,
                 httpRequestSetup: async (url, _byteRange, signal, requestByteRange) => {
                   const headers: Record<string, string> = {};
                   if (token) headers["Authorization"] = `Bearer ${token}`;

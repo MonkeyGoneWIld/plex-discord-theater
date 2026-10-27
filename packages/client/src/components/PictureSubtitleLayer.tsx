@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { cachedPgsBytes, fetchPgsBytes, fetchPgsStatus, type PgsStatus } from "../lib/api";
+import { pgsKey, sideShare } from "../lib/sideShare";
 import { logEvent, logWarn } from "../lib/log";
 import { PgsReader, decodeRle, displayAt, mergeDisplays, type PgsDisplay, type PgsObject } from "../lib/pgs";
 import type { CoveredSpan } from "../lib/subtitleCues";
@@ -208,9 +209,13 @@ export function PictureSubtitleLayer({
         (a.fromS <= t ? t - a.fromS : a.fromS - t + NEAR_S) - (b.fromS <= t ? t - b.fromS : b.fromS - t + NEAR_S));
       for (const p of order) {
         if (!p.done || readOf(p) > 0 || had(p)) continue;
-        const bytes = await cachedPgsBytes(streamId, ratingKey, mediaIndex, p.id, s.v);
+        const bytes = sideShare.peek(pgsKey(streamId, s.v, p.id)) ??
+          await cachedPgsBytes(streamId, ratingKey, mediaIndex, p.id, s.v);
         if (cancelled) return;
-        if (bytes) take(p, bytes, true);
+        if (!bytes) continue;
+        // For the other players on the title to have from here.
+        sideShare.put(pgsKey(streamId, s.v, p.id), bytes);
+        take(p, bytes, true);
       }
     };
 
@@ -227,7 +232,17 @@ export function PictureSubtitleLayer({
           reading.add(k);
           let bytes: Uint8Array;
           try {
-            bytes = await fetchPgsBytes(streamId, ratingKey, mediaIndex, p.id, from, whole);
+            // All of a made one's piece: from another player that has it when
+            // one does (lib/sideShare), the bot as well for the one the
+            // picture is in. Pieces still being cut grow: from the bot.
+            const t = where();
+            bytes = whole
+              ? await sideShare.get(pgsKey(streamId, whole, p.id), {
+                bytes: p.bytes,
+                urgent: p.fromS <= t + NEAR_S && (p.toS === null || t < p.toS),
+                http: (signal) => fetchPgsBytes(streamId, ratingKey, mediaIndex, p.id, 0, whole, signal),
+              })
+              : await fetchPgsBytes(streamId, ratingKey, mediaIndex, p.id, from, whole);
           } finally {
             reading.delete(k);
           }
@@ -302,8 +317,10 @@ export function PictureSubtitleLayer({
       clearInterval(watch);
       setWaiting(false);
       Object.assign(status, { state: "complete", covered: null, completeMs: Date.now() - startedAt });
+      const shared = sideShare.statsFor("pgs");
       logEvent("Subtitles", "drawing a picture subtitle here rather than burning it in", {
         streamId, lines: status.lines, ms: Date.now() - startedAt, made: s.v !== null,
+        fromPlayersMB: (shared.fromPlayers / 1e6).toFixed(1), fromBotMB: (shared.fromBot / 1e6).toFixed(1),
       });
     };
 

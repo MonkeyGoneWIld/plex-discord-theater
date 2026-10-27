@@ -6,6 +6,7 @@ import { codecFamily, codecName, splitCodecs } from "../lib/codecName";
 import { audioDetails, audioSummary, engineText, fileLines, playbackMode, type StreamNotes } from "../lib/streamNotes";
 import type { StreamTrack } from "../lib/api";
 import { previewDetails, previewSummary, type PreviewStatus } from "../lib/previewStatus";
+import { sideShare, type SideStats } from "../lib/sideShare";
 import { subtitleDetails, subtitleSummary, type SubtitleLoadStatus, type SubtitleShown } from "../lib/subtitleStatus";
 import {
   HEALTH_COLORS, bufferFalling, bufferHealth, framesHealth, modeHealth, playbackWhy, previewHealth, pushSample, sparkLines,
@@ -143,6 +144,23 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Picture subtitles and seek-bar pictures shared with the other players on the
+ * same title (lib/sideShare): how many are connected, and for each kind what
+ * came from them, what came from the bot, and what this player sent them.
+ */
+function sideShareLines(players: number, pgs: SideStats, previews: SideStats): Array<[string, string]> {
+  const line = (s: SideStats) =>
+    `${formatBytes(s.fromPlayers)} from players · ${formatBytes(s.fromBot)} from bot · ${formatBytes(s.sent)} sent`;
+  const used = (s: SideStats) => s.fromPlayers + s.fromBot + s.sent > 0;
+  if (!players && !used(pgs) && !used(previews)) return [];
+  return [
+    ["Sharing subtitles and previews with", `${players} player${players === 1 ? "" : "s"}`],
+    ...(used(pgs) ? [["Picture subtitles", line(pgs)] as [string, string]] : []),
+    ...(used(previews) ? [["Seek-bar pictures", line(previews)] as [string, string]] : []),
+  ];
 }
 
 const GRAPH_W = 300;
@@ -567,7 +585,10 @@ export function StatsOverlay({
     },
     ...(vpsRelay ? [] : [{
       label: "Peers", value: `${p2p.peers.size} peer${p2p.peers.size === 1 ? "" : "s"} · ${p2pRatio}% from peers`, section: "peers" as Section,
-      details: [["Uploaded", formatBytes(p2p.uploadBytes)] as [string, string]],
+      details: [
+        ["Uploaded", formatBytes(p2p.uploadBytes)] as [string, string],
+        ...sideShareLines(sideShare.playerCount(), sideShare.statsFor("pgs"), sideShare.statsFor("previews")),
+      ],
       visual: totalDelivered > 0 ? (
         <>
           <Bar parts={[[p2pRatio, PEERS], [100 - p2pRatio, SERVER]]} />

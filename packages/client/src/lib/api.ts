@@ -954,10 +954,10 @@ export function fetchPgsStatus(
  */
 export async function fetchPgsBytes(
   streamId: number, ratingKey: string, mediaIndex: number | undefined, piece: number, from: number,
-  v: string | null = null,
+  v: string | null = null, signal?: AbortSignal,
 ): Promise<Uint8Array> {
   const path = pgsPiecePath(streamId, ratingKey, mediaIndex, piece, from, v);
-  const res = await fetch(`${BASE}${path}`, { headers: authHeaders(), cache: v ? "default" : "no-store" });
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders(), cache: v ? "default" : "no-store", signal });
   if (!res.ok) await throwApiError(res, path);
   return new Uint8Array(await res.arrayBuffer());
 }

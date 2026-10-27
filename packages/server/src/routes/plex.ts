@@ -3837,6 +3837,10 @@ router.get("/preview/:partId/index", async (req: Request, res: Response) => {
       res.setHeader("Content-Type", `application/x-plex-preview-v${version}`);
       res.setHeader("Cache-Control", "private, max-age=86400");
       res.setHeader("X-Accel-Buffering", "no");
+      // Which previews these are — Plex's or made here, by size — so players
+      // pass later passes between them only when they are the same ones
+      // (the client's lib/sideShare).
+      if (declared) res.setHeader("X-Preview-Version", `${from}-${declared}`);
       // Passes are a v2 layout; a v1 request always gets the whole stream.
       const onePass = version === 2 ? pass : undefined;
       logEvent("Preview", "transfer started", { partId, transfer, transport: `progressive-v${version}`, pass: onePass, from });

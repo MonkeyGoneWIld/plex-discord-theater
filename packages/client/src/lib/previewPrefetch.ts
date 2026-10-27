@@ -27,6 +27,19 @@ export interface PrefetchedPreview {
 
 const fetched = new Map<number, Promise<PrefetchedPreview | null>>();
 
+/** Which of its previews a part's are, as the server says with its first
+ *  pass (X-Preview-Version): what its later passes are shared by between
+ *  players (lib/sideShare). */
+const versions = new Map<number, string>();
+
+export function rememberPreviewVersion(partId: number, version: string | null): void {
+  if (version) versions.set(partId, version);
+}
+
+export function previewVersionOf(partId: number): string | null {
+  return versions.get(partId) ?? null;
+}
+
 /** Where one pass of a part's preview frames is fetched from. */
 export function previewPassPath(partId: number, pass: number): string {
   return `/api/plex/preview/${partId}/index?progressive=2&pass=${pass}`;
@@ -40,6 +53,7 @@ export function prefetchPreviewStart(partId: number, fetchFn: typeof fetch = fet
       const res = await fetchFn(authUrl(previewPassPath(partId, 0)));
       if (!res.ok || !res.body) return null;
       const contentType = res.headers.get("content-type") ?? "";
+      rememberPreviewVersion(partId, res.headers.get("x-preview-version"));
       const chunks: Uint8Array[] = [];
       const reader = res.body.getReader();
       for (;;) {

@@ -7,7 +7,8 @@ import {
 } from "../lib/previewFrames";
 import { createPreviewMotion, type SpeedTier } from "../lib/previewMotion";
 import { loadVolume } from "../lib/volume";
-import { previewPassPath, takePreviewStart } from "../lib/previewPrefetch";
+import { previewPassPath, previewVersionOf, rememberPreviewVersion, takePreviewStart } from "../lib/previewPrefetch";
+import { previewKey, sideShare } from "../lib/sideShare";
 import { dropParkedPreview, parkPreview, takeParkedPreview } from "../lib/previewKeep";
 import type { PreviewPass, PreviewStatus } from "../lib/previewStatus";
 import { getLevel, setLevel, boostAvailable, BOOST_ACCENT, MAX_LEVEL } from "../lib/audioBoost";
@@ -1322,9 +1323,27 @@ export function Controls({
         const again = status.passes.findIndex((p) => p.pass === pass);
         if (again >= 0) status.passes.splice(again, 1, entry);
         else status.passes.push(entry);
+        // A pass after the first from another player on the title that has
+        // it (lib/sideShare), when the first said which previews these are.
+        const shareVersion = pass > 0 ? previewVersionOf(previewPartId) : null;
+        const shareKey = shareVersion ? previewKey(previewPartId, shareVersion, pass) : null;
+        const fromPlayer = !shareKey ? null : sideShare.peek(shareKey) ??
+          (sideShare.othersHave(shareKey) ? await sideShare.fromPlayers(shareKey, null, abort.signal) : null);
+        if (cancelled) return;
+        /** A pass from the bot, kept whole for the other players. */
+        const passChunks: Uint8Array[] | null = shareKey && !fromPlayer ? [] : null;
+        let passEnded = false;
         let contentType: string;
         let body: { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<void> };
-        if (ahead) {
+        if (fromPlayer) {
+          contentType = "application/x-plex-preview-v2";
+          let given = false;
+          body = {
+            read: async () => (given ? { done: true } : (given = true, { done: false, value: fromPlayer })),
+            cancel: async () => {},
+          };
+          logEvent("Preview", "pass from another player", { partId: previewPartId, pass, bytes: fromPlayer.length });
+        } else if (ahead) {
           contentType = ahead.contentType;
           const chunks = [...ahead.chunks];
           body = {
@@ -1338,6 +1357,7 @@ export function Controls({
             return;
           }
           contentType = res.headers.get("content-type") ?? "";
+          if (pass === 0) rememberPreviewVersion(previewPartId, res.headers.get("x-preview-version"));
           body = res.body.getReader();
         }
         const version = contentType.startsWith("application/x-plex-preview-v2") ? 2
@@ -1364,8 +1384,10 @@ export function Controls({
           // the video refills it before the pass carries on.
           await waitForHeadroom(mark);
           const { done, value } = await body.read();
+          if (done) passEnded = true;
           if (done || cancelled) break;
           if (!value) continue;
+          passChunks?.push(value);
           bytes += value.length;
           entry.bytes += value.length;
           status.bytes = bytes;
@@ -1399,6 +1421,11 @@ export function Controls({
           entry.doneS = sinceStart();
           entry.playheadS = videoRef.current?.currentTime ?? null;
           entry.readyAfter = reader.frames()?.ready ?? 0;
+        }
+        if (!cancelled && passEnded && passChunks?.length && shareKey) {
+          const whole = new Uint8Array(passChunks.reduce((n, c) => n + c.length, 0));
+          passChunks.reduce((at, c) => (whole.set(c, at), at + c.length), 0);
+          sideShare.put(shareKey, whole, "bot");
         }
         // A server without passes sends them all in the first response, and
         // so does a v1 or plain BIF one.

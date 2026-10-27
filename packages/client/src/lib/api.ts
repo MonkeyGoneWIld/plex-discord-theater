@@ -905,20 +905,50 @@ export function fetchAssStatus(streamId: number, ratingKey: string, mediaIndex: 
 
 /** A typeset ASS subtitle's script, kept by the browser by its `v`. */
 export async function fetchAssScript(
-  streamId: number, ratingKey: string, mediaIndex: number | undefined, v: string,
+  streamId: number, ratingKey: string, mediaIndex: number | undefined, v: string, signal?: AbortSignal,
 ): Promise<string> {
-  const path = `/api/plex/ass/${streamId}/script?${pgsQuery(ratingKey, mediaIndex, { v })}`;
-  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
+  const path = assScriptPath(streamId, ratingKey, mediaIndex, v);
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders(), signal });
   if (!res.ok) await throwApiError(res, path);
   return res.text();
 }
 
+function assScriptPath(streamId: number, ratingKey: string, mediaIndex: number | undefined, v: string): string {
+  return `/api/plex/ass/${streamId}/script?${pgsQuery(ratingKey, mediaIndex, { v })}`;
+}
+
+/** The script, if the browser kept it from before — read without going out for it. Null when it didn't. */
+export async function cachedAssScript(
+  streamId: number, ratingKey: string, mediaIndex: number | undefined, v: string,
+): Promise<string | null> {
+  try {
+    const res = await fetch(`${BASE}${assScriptPath(streamId, ratingKey, mediaIndex, v)}`, {
+      headers: authHeaders(), cache: "only-if-cached", mode: "same-origin",
+    });
+    return res.ok ? await res.text() : null;
+  } catch {
+    return null;
+  }
+}
+
 /** A font a film carries, by the hash of its bytes: kept by the browser for good. */
-export async function fetchSubtitleFont(id: string): Promise<Uint8Array> {
+export async function fetchSubtitleFont(id: string, signal?: AbortSignal): Promise<Uint8Array> {
   const path = `/api/plex/subtitle-fonts/${encodeURIComponent(id)}`;
-  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders(), signal });
   if (!res.ok) await throwApiError(res, path);
   return new Uint8Array(await res.arrayBuffer());
+}
+
+/** A font, if the browser kept it from before. Null when it didn't. */
+export async function cachedSubtitleFont(id: string): Promise<Uint8Array | null> {
+  try {
+    const res = await fetch(`${BASE}/api/plex/subtitle-fonts/${encodeURIComponent(id)}`, {
+      headers: authHeaders(), cache: "only-if-cached", mode: "same-origin",
+    });
+    return res.ok ? new Uint8Array(await res.arrayBuffer()) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Where a PGS subtitle's cut out of the film has got to: see the /pgs route. */

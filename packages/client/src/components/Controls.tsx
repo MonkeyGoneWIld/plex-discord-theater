@@ -1324,9 +1324,16 @@ export function Controls({
         if (again >= 0) status.passes.splice(again, 1, entry);
         else status.passes.push(entry);
         // A pass after the first from another player on the title that has
-        // it (lib/sideShare), when the first said which previews these are.
+        // it (lib/sideShare), when the first said which previews these are;
+        // divided between the players that need them, each fetching its share
+        // from the bot.
         const shareVersion = pass > 0 ? previewVersionOf(previewPartId) : null;
         const shareKey = shareVersion ? previewKey(previewPartId, shareVersion, pass) : null;
+        if (shareVersion && shareKey && !sideShare.peek(shareKey)) {
+          sideShare.need(PREVIEW_PASS_BUFFER_S.slice(pass).map((_, i) => previewKey(previewPartId, shareVersion, pass + i)));
+          await sideShare.awaitTurn(shareKey, abort.signal);
+          if (cancelled) return;
+        }
         const fromPlayer = !shareKey ? null : sideShare.peek(shareKey) ??
           (sideShare.othersHave(shareKey) ? await sideShare.fromPlayers(shareKey, null, abort.signal) : null);
         if (cancelled) return;

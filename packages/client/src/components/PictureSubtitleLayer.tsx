@@ -137,6 +137,7 @@ export function PictureSubtitleLayer({
     setWaiting(false);
     if (streamId == null) return;
     let cancelled = false;
+    const quit = new AbortController();
     let next: ReturnType<typeof setTimeout> | undefined;
     let watch: ReturnType<typeof setInterval> | undefined;
     const startedAt = Date.now();
@@ -189,6 +190,7 @@ export function PictureSubtitleLayer({
     const fail = (why: string) => {
       if (cancelled) return;
       cancelled = true;
+      quit.abort();
       clearTimeout(next);
       clearInterval(watch);
       status.state = "failed";
@@ -217,6 +219,9 @@ export function PictureSubtitleLayer({
         sideShare.put(pgsKey(streamId, s.v, p.id), bytes);
         take(p, bytes, true);
       }
+      // What is left, for the players on the title to divide between them.
+      const v = s.v;
+      sideShare.need(s.pieces.filter((p) => readOf(p) === 0 && !had(p)).map((p) => pgsKey(streamId, v, p.id)));
     };
 
     /** Read pieces, nearest first, AT_ONCE at a time, while there are any
@@ -234,12 +239,16 @@ export function PictureSubtitleLayer({
           try {
             // All of a made one's piece: from another player that has it when
             // one does (lib/sideShare), the bot as well for the one the
-            // picture is in. Pieces still being cut grow: from the bot.
+            // picture is in; one further off, divided between the players
+            // that need it. Pieces still being cut grow: from the bot.
             const t = where();
+            const urgent = p.fromS <= t + NEAR_S && (p.toS === null || t < p.toS);
+            if (whole && !urgent) await sideShare.awaitTurn(pgsKey(streamId, whole, p.id), quit.signal);
+            if (cancelled) return;
             bytes = whole
               ? await sideShare.get(pgsKey(streamId, whole, p.id), {
                 bytes: p.bytes,
-                urgent: p.fromS <= t + NEAR_S && (p.toS === null || t < p.toS),
+                urgent,
                 http: (signal) => fetchPgsBytes(streamId, ratingKey, mediaIndex, p.id, 0, whole, signal),
               })
               : await fetchPgsBytes(streamId, ratingKey, mediaIndex, p.id, from, whole);
@@ -363,6 +372,7 @@ export function PictureSubtitleLayer({
     }, WATCH_PLACE_MS);
     return () => {
       cancelled = true;
+      quit.abort();
       clearTimeout(next);
       clearInterval(watch);
       if (statusRef && statusRef.current === status) statusRef.current = null;

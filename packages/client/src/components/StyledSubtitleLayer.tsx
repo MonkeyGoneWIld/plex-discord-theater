@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import type JASSUB from "jassub";
-import { fetchAssScript, fetchAssStatus, fetchSubtitleFont, type AssStatus } from "../lib/api";
+import {
+  cachedAssScript, cachedSubtitleFont, fetchAssScript, fetchAssStatus, fetchSubtitleFont, type AssStatus,
+} from "../lib/api";
 import { logEvent, logWarn } from "../lib/log";
+import { assKey, fontKey, sha1Hex, sideShare } from "../lib/sideShare";
 import type { SubtitleLoadStatus } from "../lib/subtitleStatus";
 
 /**
@@ -75,6 +78,37 @@ function loadJassub(): Promise<Jassub> {
   return loading;
 }
 
+/** A script or a font: by the hash it is named by, from wherever it can be had. */
+interface Shared {
+  key: string;
+  /** Whether bytes with this SHA-1 are it. */
+  named: (sha1: string) => boolean;
+  /** The browser's own copy from before, or null. */
+  kept: () => Promise<Uint8Array | null>;
+  http: (signal: AbortSignal) => Promise<Uint8Array>;
+}
+
+/**
+ * Kept here or by the browser from before; else from another player on the
+ * title that has it (lib/sideShare), checked against its hash; else from the
+ * bot — each player fetching its share of what players starting together all
+ * need (awaitTurn), the plain lines showing meanwhile.
+ */
+async function fetchShared(item: Shared, stop: AbortSignal): Promise<Uint8Array> {
+  const had = sideShare.peek(item.key) ?? await item.kept();
+  if (had) {
+    // For the other players on the title to have from here.
+    sideShare.put(item.key, had);
+    return had;
+  }
+  sideShare.need([item.key]);
+  await sideShare.awaitTurn(item.key, stop);
+  if (stop.aborted) throw new Error("stopped");
+  return sideShare.get(item.key, { urgent: true, check: async (b) => item.named(await sha1Hex(b)), http: item.http });
+}
+
+const utf8 = (text: string) => new TextEncoder().encode(text);
+
 function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${what} took over ${ms / 1000} s`)), ms);
@@ -99,6 +133,7 @@ export function StyledSubtitleLayer({
     let instance: JASSUB | null = null;
     let pending: ReturnType<typeof setTimeout> | null = null;
     let loaded: SubtitleLoadStatus | null = null;
+    const quit = new AbortController();
     const askedAt = Date.now();
     const look = (l: "text" | "styled") => {
       if (pending) clearTimeout(pending);
@@ -110,11 +145,27 @@ export function StyledSubtitleLayer({
     const draw = async (status: Extract<AssStatus, { state: "styled" }>) => {
       const startedAt = performance.now();
       try {
-        const [script, fonts, lib] = await Promise.all([
-          fetchAssScript(id, ratingKey, mediaIndex, status.v),
-          Promise.all(status.fonts.map((f) => fetchSubtitleFont(f.id).catch(() => null))),
+        // The script's `v` is the start of the SHA-1 of its text, a font's id
+        // the SHA-1 of its bytes (the server's styled-subtitles.ts).
+        const [scriptBytes, fonts, lib] = await Promise.all([
+          fetchShared({
+            key: assKey(id, status.v),
+            named: (sha1) => sha1.slice(0, 16) === status.v,
+            kept: async () => {
+              const text = await cachedAssScript(id, ratingKey, mediaIndex, status.v);
+              return text === null ? null : utf8(text);
+            },
+            http: async (signal) => utf8(await fetchAssScript(id, ratingKey, mediaIndex, status.v, signal)),
+          }, quit.signal),
+          Promise.all(status.fonts.map((f) => fetchShared({
+            key: fontKey(f.id),
+            named: (sha1) => sha1 === f.id.slice(0, 40),
+            kept: () => cachedSubtitleFont(f.id),
+            http: (signal) => fetchSubtitleFont(f.id, signal),
+          }, quit.signal).catch(() => null))),
           loadJassub(),
         ]);
+        const script = new TextDecoder().decode(scriptBytes);
         const video = videoRef.current;
         if (stopped) return;
         if (!video) throw new Error("no video to draw over");
@@ -147,9 +198,11 @@ export function StyledSubtitleLayer({
         };
         if (statusRef) statusRef.current = loaded;
         look("styled");
+        const shared = sideShare.statsFor("styled");
         logEvent("Subtitles", "drawing an ASS subtitle as its script has it", {
           streamId: id, bytes: status.bytes, fonts: had.length, fontsMissed: fonts.length - had.length,
           ms: Math.round(performance.now() - startedAt),
+          fromPlayersMB: (shared.fromPlayers / 1e6).toFixed(1), fromBotMB: (shared.fromBot / 1e6).toFixed(1),
         });
       } catch (err) {
         logWarn("Subtitles", "couldn't draw an ASS subtitle as its script has it, drawing its lines plainly", {
@@ -182,6 +235,7 @@ export function StyledSubtitleLayer({
 
     return () => {
       stopped = true;
+      quit.abort();
       if (timer) clearTimeout(timer);
       if (pending) clearTimeout(pending);
       if (statusRef && loaded && statusRef.current === loaded) statusRef.current = null;

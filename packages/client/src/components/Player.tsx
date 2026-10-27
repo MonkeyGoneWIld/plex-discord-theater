@@ -52,7 +52,7 @@ import { nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
 import { installTakeFromPeer } from "../lib/takeFromPeer";
 import { connectionsSeen, watchPeerConnections } from "../lib/peerConnections";
-import { RTC_CONFIG, joinSideSwarm, trackerAnnounce } from "../lib/sideShare";
+import { RTC_CONFIG, joinSideSwarm, sideShare, trackerAnnounce } from "../lib/sideShare";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
 import { useVideoZoom } from "../lib/useVideoZoom";
 import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -3616,12 +3616,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       .catch(() => setVpsRelay(false)); // default to non-VPS (P2P mode) if config fails
   }, []);
 
-  // In P2P mode, picture subtitles and previews from the other players on
-  // this title when they have them, as the film's segments are (lib/sideShare).
+  // In P2P mode, picture subtitles, styled subtitles' fonts and previews from
+  // the other players on this title when they have them, as the film's
+  // segments are (lib/sideShare).
   useEffect(() => {
     if (vpsRelay !== false) return;
     return joinSideSwarm(item.ratingKey, { announce: [trackerAnnounce(getSessionToken())], rtcConfig: RTC_CONFIG });
   }, [vpsRelay, item.ratingKey]);
+  // Alone in the room: what can wait isn't held for other players.
+  const othersInRoom = (syncState?.participants ?? []).filter((p) => p.userId !== selfUserId).length;
+  useEffect(() => {
+    sideShare.setRoomOthers(othersInRoom);
+  }, [othersInRoom]);
 
   // Where Plex counts a title with no credits marker as watched, as a share of
   // its runtime. Only read when the host presses Back, so nothing waits on it;

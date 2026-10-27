@@ -3,7 +3,8 @@
  * title (lib/sideShare): two or three players joined by in-memory
  * connections, and a fake player that says what a test needs it to.
  */
-import { SideShare, pgsKey, previewKey, type SideConnection } from "../src/lib/sideShare";
+import { SideShare, assKey, fontKey, kindOf, pgsKey, previewKey, sha1Hex, type SideConnection } from "../src/lib/sideShare";
+import { ownerOf } from "../src/lib/takeFromPeer";
 
 let pass = 0;
 let fail = 0;
@@ -274,14 +275,172 @@ async function main() {
     a.dropPlayers();
   }
 
+  console.log("A styled subtitle's script and fonts, checked against their hash");
+  {
+    const font = bytesOf(50_000, 4);
+    const id = `${await sha1Hex(font)}.ttf`;
+    const key = fontKey(id);
+    const script = new TextEncoder().encode("[Script Info]\nTitle: x\n");
+    const v = (await sha1Hex(script)).slice(0, 16);
+    check("a script and a font are styled, apart from the rest", [kindOf(key), kindOf(assKey(5, v)), kindOf(pgsKey(5, v, 0)),
+      kindOf(previewKey(1, "v", 1))], ["styled", "styled", "pgs", "previews"]);
+    const named = async (b: Uint8Array) => (await sha1Hex(b)) === id.slice(0, 40);
+    const a = new SideShare();
+    const b = new SideShare();
+    join(a, "a", b, "b");
+    a.put(key, font, "bot");
+    await sleep(5);
+    const bot = botFor(bytesOf(10));
+    const got = await b.get(key, { urgent: true, check: named, http: bot.http });
+    check("one from a player whose hash is its name is taken", [same(got, font), bot.asked, b.statsFor("styled").fromPlayers],
+      [true, 0, 50_000]);
+
+    // A player that sends something else under its name.
+    const c = new SideShare();
+    const x = new FakeConn("x");
+    c.addPlayer("x", x);
+    const key2 = fontKey(`${"0".repeat(40)}.otf`);
+    x.emit("data", word({ t: "have", keys: [key2] }));
+    const right = bytesOf(300, 8);
+    const asking = c.get(key2, { check: async (bytes) => same(bytes, right), http: botFor(right).http });
+    await sleep(0);
+    const want = words(x).find((w) => w.t === "want")!;
+    x.emit("data", word({ t: "size", id: want.id, bytes: 300 }));
+    x.emit("data", chunk(want.id!, bytesOf(300, 1)));
+    check("one that isn't what it is named by: the bot's", same(await asking, right), true);
+    check("  that player not asked for it again, nothing counted from it", [c.othersHave(key2), c.statsFor("styled").fromPlayers],
+      [false, 0]);
+  }
+
+  console.log("What can wait, divided between the players that need it");
+  {
+    const a = new SideShare();
+    const b = new SideShare();
+    const ids = ["aa", "bb"];
+    a.joinedSwarm("aa");
+    b.joinedSwarm("bb");
+    join(a, "aa", b, "bb");
+    a.setOthers(1);
+    b.setOthers(1);
+    const keys = Array.from({ length: 12 }, (_, i) => pgsKey(4, "v", i));
+    a.need(keys);
+    b.need(keys);
+    await sleep(5);
+    const bots = new Map<string, number>();
+    const fetchFor = (s: SideShare, key: string) => async () => {
+      await s.awaitTurn(key);
+      return s.get(key, { http: async () => { bots.set(key, (bots.get(key) ?? 0) + 1); await sleep(20); return bytesOf(1000, key.length); } });
+    };
+    const t0 = Date.now();
+    // Both players near the start of the title's swarm: past SETTLE_MS on the clock given.
+    const both = await Promise.all(keys.flatMap((k) => [fetchFor(a, k)(), fetchFor(b, k)()]));
+    check("each fetched from the bot once, by the one whose it is", keys.map((k) => bots.get(k) ?? 0), keys.map(() => 1));
+    check("  and both have all of it", both.every((x) => x.length === 1000), true);
+    check("  each its share: some of it from the other",
+      [a.statsFor("pgs").fromPlayers > 0, b.statsFor("pgs").fromPlayers > 0, Date.now() - t0 < 4000], [true, true, true]);
+    check("  the one whose it is, the same for both", keys.every((k) => ownerOf(k, ids) === ownerOf(k, [...ids].reverse())), true);
+  }
+
+  console.log("Waiting for the others, and not");
+  {
+    let clock = 0;
+    const a = new SideShare(() => clock);
+    const key = previewKey(9, "v", 1);
+    let done = false;
+    void a.awaitTurn(key).then(() => { done = true; });
+    await sleep(300);
+    check("off the title's swarm: nothing to wait for", done, true);
+
+    a.joinedSwarm("aa");
+    done = false;
+    void a.awaitTurn(key).then(() => { done = true; });
+    await sleep(300);
+    check("just joined, nobody heard from yet: waits", done, false);
+    clock += 6100;
+    await sleep(300);
+    check("  until the players have had time to connect", done, true);
+
+    const b = new SideShare(() => clock);
+    b.joinedSwarm("bb");
+    b.setRoomOthers(0);
+    done = false;
+    void b.awaitTurn(key).then(() => { done = true; });
+    await sleep(300);
+    check("alone in the room, before the tracker says: at once", done, true);
+    b.setRoomOthers(2);
+    b.setOthers(0);
+    done = false;
+    void b.awaitTurn(key).then(() => { done = true; });
+    await sleep(300);
+    check("others in the room not yet on the title's swarm: waits for them", done, false);
+    b.setRoomOthers(0);
+    await sleep(300);
+    check("  the room emptied: on at once", done, true);
+
+    // Another player is the one to fetch it, and goes.
+    const c = new SideShare(() => clock);
+    c.joinedSwarm("cc");
+    c.setOthers(1);
+    clock += 7000;
+    const x = new FakeConn("xx");
+    c.addPlayer("xx", x);
+    const theirs = Array.from({ length: 40 }, (_, i) => pgsKey(6, "v", i)).find((k) => ownerOf(k, ["cc", "xx"]) === "xx")!;
+    x.emit("data", word({ t: "need", keys: [theirs] }));
+    c.need([theirs]);
+    done = false;
+    void c.awaitTurn(theirs).then(() => { done = true; });
+    await sleep(300);
+    check("another player's to fetch: left to it", done, false);
+    x.emit("data", word({ t: "have", keys: [theirs] }));
+    await sleep(10);
+    check("  until it has it", done, true);
+    const later = Array.from({ length: 40 }, (_, i) => pgsKey(7, "v", i)).find((k) => ownerOf(k, ["cc", "xx"]) === "xx")!;
+    x.emit("data", word({ t: "need", keys: [later] }));
+    done = false;
+    void c.awaitTurn(later).then(() => { done = true; });
+    await sleep(300);
+    clock += 20_100;
+    await sleep(300);
+    check("  or for 20 s at most", done, true);
+    const gone = Array.from({ length: 40 }, (_, i) => pgsKey(8, "v", i)).find((k) => ownerOf(k, ["cc", "xx"]) === "xx")!;
+    x.emit("data", word({ t: "need", keys: [gone] }));
+    done = false;
+    void c.awaitTurn(gone).then(() => { done = true; });
+    await sleep(300);
+    x.destroy();
+    await sleep(10);
+    check("  or until it goes", done, true);
+    const mine = Array.from({ length: 40 }, (_, i) => pgsKey(9, "v", i)).find((k) => ownerOf(k, ["cc", "yy"]) === "cc")!;
+    const y = new FakeConn("yy");
+    c.addPlayer("yy", y);
+    y.emit("data", word({ t: "need", keys: [mine] }));
+    done = false;
+    void c.awaitTurn(mine).then(() => { done = true; });
+    await sleep(300);
+    check("this player's to fetch: at once", done, true);
+    check("what it needs, said to a player joining", words(y).some((w) => w.t === "need" && w.keys?.includes(theirs)), true);
+    const stop = new AbortController();
+    const z = new FakeConn("zz");
+    c.addPlayer("zz", z);
+    const zs = Array.from({ length: 40 }, (_, i) => pgsKey(10, "v", i)).find((k) => ownerOf(k, ["cc", "yy", "zz"]) === "zz")!;
+    z.emit("data", word({ t: "need", keys: [zs] }));
+    done = false;
+    void c.awaitTurn(zs, stop.signal).then(() => { done = true; });
+    await sleep(300);
+    stop.abort();
+    await sleep(10);
+    check("  and stopped when what wanted it goes", done, true);
+    c.dropPlayers();
+  }
+
   console.log("What is kept");
   {
     const a = new SideShare();
     const big = 16 * 1024 * 1024;
     for (let i = 0; i < 7; i++) a.put(pgsKey(3, "v", i), new Uint8Array(big));
     check("up to 96 MB, the oldest going first", [a.peek(pgsKey(3, "v", 0)), !!a.peek(pgsKey(3, "v", 6))], [null, true]);
-    a.put(pgsKey(3, "v", 9), new Uint8Array(big + 1), "bot");
-    check("nothing over 16 MB is kept", [a.peek(pgsKey(3, "v", 9)), a.statsFor("pgs").fromBot], [null, big + 1]);
+    a.put(pgsKey(3, "v", 9), new Uint8Array(2 * big + 1), "bot");
+    check("nothing over 32 MB is kept", [a.peek(pgsKey(3, "v", 9)), a.statsFor("pgs").fromBot], [null, 2 * big + 1]);
     const x = new FakeConn("x");
     a.addPlayer("x", x);
     const dup = new FakeConn("x");

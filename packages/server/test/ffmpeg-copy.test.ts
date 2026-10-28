@@ -746,10 +746,22 @@ console.log("\n— AV1 and Opus, and FLAC, copied in fragmented MP4 for a player
     [["h264"], true]);
   for (const id of [plexBurned, plexPlain]) await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
   // Its details were read with Plex making the streams, its PGS track one
-  // Plex burns in; read again for the checks below, where ffmpeg makes them
-  // and the player draws it.
-  plexRoutes.invalidateTitleDetailCaches("9");
+  // Plex burns in. With ffmpeg making them again, they are read again rather
+  // than answered from what was saved: Avengers: Endgame's, saved while bot 2
+  // ran the Plex engine on 28 October, had its PGS burned in on ffmpeg.
+  type Pgs = { versions: Array<{ subtitleTracks: Array<{ id: number; external?: boolean; picture?: boolean }> }> };
+  const pgsOf = (meta: unknown) => {
+    const t = (meta as Pgs | null)?.versions[0].subtitleTracks.find((s) => s.id === 21);
+    return [t?.external, t?.picture];
+  };
+  const plexSaved = await plexRoutes.buildMeta("9");
+  check("  its details, read with Plex making the streams, leave its PGS to Plex to burn in", pgsOf(plexSaved), [false, undefined]);
   process.env.PLAYBACK_ENGINE = "ffmpeg";
+  check("  and with ffmpeg making them, the player draws it, though they were in memory", pgsOf(await plexRoutes.buildMeta("9")), [true, true]);
+  const { writeDetailCache } = await import("../src/services/detail-cache.js");
+  plexRoutes.invalidateTitleDetailCaches("9");
+  writeDetailCache("meta", "9", plexSaved);
+  check("  and when they were saved on disk only, as after a redeploy", pgsOf(await plexRoutes.buildMeta("9")), [true, true]);
   plexRoutes.capsForTests(none);
 }
 

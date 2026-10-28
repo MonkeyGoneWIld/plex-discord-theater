@@ -110,6 +110,7 @@ async function play(ratingKey: string): Promise<string> {
 console.log("— a title answered from the persisted cache —");
 writeDetailCache("meta", CACHED, {
   payloadVersion: plexRoutes.META_PAYLOAD_VERSION,
+  subtitleRules: plexRoutes.subtitleRules(),
   ratingKey: CACHED, title: "Cached", type: "movie", duration: 7_200_000,
   versions: [{ mediaIndex: 0, partId: Number(CACHED) }],
 });
@@ -130,6 +131,7 @@ check("…all without asking Plex for the metadata again", metadataRequests.filt
 console.log("— a title whose file was replaced since its page was saved —");
 writeDetailCache("meta", REPLACED, {
   payloadVersion: plexRoutes.META_PAYLOAD_VERSION,
+  subtitleRules: plexRoutes.subtitleRules(),
   ratingKey: REPLACED, title: "Replaced", type: "movie", duration: 3_600_000,
   versions: [{ mediaIndex: 0, partId: 299, fileSize: null }],
 });

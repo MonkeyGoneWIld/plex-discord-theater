@@ -261,8 +261,8 @@ console.log("— saved details age —");
   const db = new Database(path.join(dataDir, "detail-cache.sqlite"));
   const age = (ratingKey: string, days: number) =>
     db.prepare("UPDATE detail_cache SET cached_at = ? WHERE rating_key = ?").run(Date.now() - days * 86_400_000, ratingKey);
-  const saved = (title: string, version: number | undefined = plexModule.META_PAYLOAD_VERSION) =>
-    ({ payloadVersion: version, ratingKey: "500", title, type: "movie" });
+  const saved = (title: string, version: number | undefined = plexModule.META_PAYLOAD_VERSION, rules = plexModule.subtitleRules()) =>
+    ({ payloadVersion: version, subtitleRules: rules, ratingKey: "500", title, type: "movie" });
   writeDetailCache("meta", "500", saved("Old, as saved"));
   age("500", 6);
   check("under a week old, a saved title is answered from disk",
@@ -274,6 +274,10 @@ console.log("— saved details age —");
   plexModule.invalidateTitleDetailCaches("500");
   writeDetailCache("meta", "500", saved("Old, as saved", 1));
   check("saved in an older shape, it is rebuilt however new it is",
+    (await plexModule.buildMeta("500"))?.title, "Old, as Plex has it now");
+  plexModule.invalidateTitleDetailCaches("500");
+  writeDetailCache("meta", "500", saved("Old, as saved", undefined, plexModule.subtitleRules() === "text" ? "text+pgs+captions" : "text"));
+  check("saved by the other engine, whose subtitles the player draws differently, it is rebuilt",
     (await plexModule.buildMeta("500"))?.title, "Old, as Plex has it now");
   writeDetailCache("meta", "600", { ratingKey: "600", title: "Kept", type: "movie" });
   age("600", 8);

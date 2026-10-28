@@ -1228,14 +1228,18 @@ async function checkFiles(ratingKey: string): Promise<void> {
 }
 
 export async function buildMeta(ratingKey: string): Promise<Record<string, unknown> | null> {
+  const rules = subtitleRules();
   const hit = metaCache.get(ratingKey);
-  if (hit && Date.now() - hit.at < META_CACHE_TTL_MS) return rememberDuration(ratingKey, hit.payload);
+  if (hit && Date.now() - hit.at < META_CACHE_TTL_MS && hit.payload.subtitleRules === rules) {
+    return rememberDuration(ratingKey, hit.payload);
+  }
 
   const persisted = readDetailCache<Record<string, unknown>>("meta", ratingKey);
   if (
     persisted &&
     Date.now() - persisted.cachedAt < DETAIL_MAX_AGE_MS &&
-    persisted.payload.payloadVersion === META_PAYLOAD_VERSION
+    persisted.payload.payloadVersion === META_PAYLOAD_VERSION &&
+    persisted.payload.subtitleRules === rules
   ) {
     metaCache.set(ratingKey, { payload: persisted.payload, at: Date.now() });
     return rememberDuration(ratingKey, persisted.payload);
@@ -1296,6 +1300,19 @@ function rememberDuration(ratingKey: string, payload: Record<string, unknown>): 
  * "4K · HEVC · 7.1".
  */
 export const META_PAYLOAD_VERSION = 14;
+
+/**
+ * The subtitles the player is told it draws itself besides text: PGS and
+ * closed captions, which only the ffmpeg engine hands it (mapSubtitleTracks).
+ * Each /meta says which rules built it, and one built under other rules is
+ * built again rather than answered from. A saved row outlives a redeploy to
+ * the other engine: Avengers: Endgame's, saved on 28 October while bot 2 ran
+ * the Plex engine, still had its PGS tracks for Plex to burn in once bot 2 was
+ * back on ffmpeg, and the player asked for one burned in.
+ */
+export function subtitleRules(): string {
+  return ["text", ffmpegPgsOn() && "pgs", ffmpegSubtitlesOn() && "captions"].filter(Boolean).join("+");
+}
 
 const metaCache = new LruMap<string, { payload: Record<string, unknown>; at: number }>(2_000);
 const META_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -1466,6 +1483,7 @@ async function buildMetaUncached(ratingKey: string): Promise<Record<string, unkn
 
     return {
       payloadVersion: META_PAYLOAD_VERSION,
+      subtitleRules: subtitleRules(),
       ratingKey: m.ratingKey,
       title: m.title,
       year: m.year,

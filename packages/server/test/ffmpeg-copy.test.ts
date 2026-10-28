@@ -1738,6 +1738,10 @@ console.log("\n— what the upload budget is told of each stream (qbt-manager sn
   const { createSession } = await import("../src/middleware/auth.js");
   const { instanceHosts } = await import("../src/routes/discord.js");
   const { default: qbtRoutes } = await import("../src/routes/qbt-manager.js");
+  const { ffmpegBandwidth } = await import("../src/services/ffmpeg/engine.js");
+  const { START_KBPS, START_S } = await import("../src/services/stream-bandwidth.js");
+  /** A time past the start of any stream started so far. */
+  const pastStart = () => Date.now() + START_S * 1000;
   const { WebSocket } = await import("ws");
   type Stream = Record<string, unknown>;
   process.env.QBT_MANAGER_API_KEY = "qbt-test-key";
@@ -1799,8 +1803,10 @@ console.log("\n— what the upload budget is told of each stream (qbt-manager sn
   await madeTo(variantOf(copy.text), 32);
   a.play("1", A, 0);
   const measured = await streamOn(A);
-  check("a copy, however much of it is made, is given one figure: the file's average, and said to be ffmpeg's",
-    [measured?.engine, measured?.bandwidth_source, measured?.bandwidth_kbps], ["ffmpeg", "target", Number(notesOf(copy.text).kbps)]);
+  check("a copy, however much of it is made, is given one figure, said to be ffmpeg's: START_KBPS at least while it starts",
+    [measured?.engine, measured?.bandwidth_source, measured?.bandwidth_kbps], ["ffmpeg", "target", Math.max(Number(notesOf(copy.text).kbps), START_KBPS)]);
+  check("  the file's average once its start is over",
+    ffmpegBandwidth(A, pastStart()), { kbps: Number(notesOf(copy.text).kbps), source: "target" });
   check("  with FFMPEG_REPORT_TO_PLEX=0, no player in Plex for it", measured?.plex_client_id, null);
 
   timelines.length = 0;
@@ -1852,7 +1858,8 @@ console.log("\n— what the upload budget is told of each stream (qbt-manager sn
   nearEnd.play("1", C, 40, 0);
   const lateCopy = await streamOn(C);
   check("  near the end of the film, the same: the file's average",
-    [lateCopy?.bandwidth_source, lateCopy?.bandwidth_kbps], ["target", Number(notesOf(late.text).kbps)]);
+    [lateCopy?.bandwidth_source, lateCopy?.bandwidth_kbps, ffmpegBandwidth(C, pastStart())?.kbps],
+    ["target", Math.max(Number(notesOf(late.text).kbps), START_KBPS), Number(notesOf(late.text).kbps)]);
 
   const encoding = await room();
   const D = crypto.randomUUID();
@@ -1860,8 +1867,8 @@ console.log("\n— what the upload budget is told of each stream (qbt-manager sn
   encoding.play("3", D, 40);
   const lateEncode = await streamOn(D);
   check("a re-encode's target is its video's and its sound's: the AAC copied, at Plex's 160 kbps",
-    [notesOf(encode.text).video, lateEncode?.bandwidth_source, lateEncode?.bandwidth_kbps],
-    ["transcode", "target", Number(notesOf(encode.text).kbps) + 160]);
+    [notesOf(encode.text).video, lateEncode?.bandwidth_source, lateEncode?.bandwidth_kbps, ffmpegBandwidth(D, pastStart())?.kbps],
+    ["transcode", "target", Math.max(Number(notesOf(encode.text).kbps) + 160, START_KBPS), Number(notesOf(encode.text).kbps) + 160]);
 
   // One of Plex's: a session no run of the engine's makes.
   const plexRoom = await room();

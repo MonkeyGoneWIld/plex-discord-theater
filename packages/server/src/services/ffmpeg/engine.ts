@@ -897,9 +897,9 @@ export function ffmpegRefused(ratingKey: string): boolean {
  * as Direct Play at the file's bitrate, which a re-encode's is nothing like,
  * with no Session — so no bandwidth, and no id to match it by.
  */
-export function ffmpegBandwidth(sessionId: string): Bandwidth | null {
+export function ffmpegBandwidth(sessionId: string, now = Date.now()): Bandwidth | null {
   const run = bySession.get(sessionId);
-  return run ? streamBandwidth(run) : null;
+  return run ? streamBandwidth(run, now) : null;
 }
 
 /**

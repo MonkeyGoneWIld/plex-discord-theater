@@ -197,6 +197,8 @@ interface CopySession {
   targetKbps: number | null;
   /** Without one, the average of the first of it measured, worked out once. */
   averageKbps: number | null;
+  /** When it started, for its start's figure — see stream-bandwidth.ts START_S. */
+  startedAt: number;
 }
 
 const sessions = new Map<string, CopySession>();
@@ -554,6 +556,7 @@ export function startDirectStream(
     sessionId,
     targetKbps: targetKbps && targetKbps > 0 ? targetKbps : null,
     averageKbps: null,
+    startedAt: Date.now(),
     plexKey,
     ratingKey,
     baseDir: `/video/:/transcode/universal/session/${plexKey}/base/`,
@@ -609,9 +612,9 @@ export function stopDirectStream(sessionId: string): void {
  * Plex's own figure for the session is how fast it hands the segments to
  * this server. Null for a session that isn't a copy measured here.
  */
-export function directStreamBandwidth(sessionId: string): Bandwidth | null {
+export function directStreamBandwidth(sessionId: string, now = Date.now()): Bandwidth | null {
   const s = sessions.get(sessionId);
-  return s ? streamBandwidth(s) : null;
+  return s ? streamBandwidth(s, now) : null;
 }
 
 /** Whether this Plex transcode key is a copied stream measured here. */

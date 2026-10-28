@@ -394,6 +394,9 @@ await new Promise<void>((r) => plex.listen(0, "127.0.0.1", r));
 process.env.PLEX_URL = `http://127.0.0.1:${(plex.address() as AddressInfo).port}`;
 
 const ds = await import("../src/services/direct-stream.js");
+const { START_KBPS, START_S } = await import("../src/services/stream-bandwidth.js");
+/** A time past the start of any stream started so far. */
+const pastStart = () => Date.now() + START_S * 1000;
 const embeddedSubs = await import("../src/services/embedded-subtitles.js");
 const pathOf = (key: string, index: number) =>
   `/video/:/transcode/universal/session/${key}/base/${String(index).padStart(5, "0")}.ts`;
@@ -422,11 +425,13 @@ console.log("\n— a copy from the start —");
   const plexSide = plexSession(key, 0);
   ds.startDirectStream("s-from-start", key, "500", 0, 2000);
   check("for the upload budget, before anything is measured: the file's average",
-    ds.directStreamBandwidth("s-from-start"), { kbps: 2000, source: "target" });
+    ds.directStreamBandwidth("s-from-start", pastStart()), { kbps: 2000, source: "target" });
+  check("  START_KBPS while it starts, for its viewers' first fill",
+    ds.directStreamBandwidth("s-from-start"), { kbps: START_KBPS, source: "target" });
   const playlist = (await ds.directStreamPlaylist(key, (p) => `/seg?p=${p}`))!;
   const list = entries(playlist);
   check("  and still once its segments are in: one figure for the stream",
-    ds.directStreamBandwidth("s-from-start"), { kbps: 2000, source: "target" });
+    ds.directStreamBandwidth("s-from-start", pastStart()), { kbps: 2000, source: "target" });
   check("  nothing for a session that isn't a copy measured here", ds.directStreamBandwidth("not-a-copy"), null);
   check("it is an EVENT playlist, still growing", [playlist.includes("#EXT-X-PLAYLIST-TYPE:EVENT"), playlist.includes("#EXT-X-ENDLIST")], [true, false]);
   check("it says where to start, so hls.js doesn't start at its far end", playlist.includes("#EXT-X-START:TIME-OFFSET=0.000"), true);

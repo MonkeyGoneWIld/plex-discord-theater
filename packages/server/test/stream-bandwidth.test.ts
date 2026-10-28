@@ -3,7 +3,7 @@
  * (services/stream-bandwidth.ts): one figure for the stream, its target or,
  * with none, the average of its first half minute.
  */
-import { streamBandwidth } from "../src/services/stream-bandwidth.js";
+import { START_KBPS, START_S, streamBandwidth } from "../src/services/stream-bandwidth.js";
 
 let pass = 0;
 let fail = 0;
@@ -32,6 +32,23 @@ console.log("\n— one figure for a stream, for the upload budget —");
   s.segments = run;
   check("  kept from then on, through the quieter rest of the film", streamBandwidth(s), { kbps: 8000, source: "measured" });
   check("  worked out once", s.averageKbps, 8000);
+}
+
+console.log("\n— while it starts —");
+{
+  // The 'Burbs on 28 October: a 1.9 Mbps AV1 copy, whose figure the manager
+  // reserved 5.2 Mbps for — and left its start that, ×1.2.
+  const startedAt = 1_000_000;
+  const copy = { targetKbps: 5203, averageKbps: null, segments: [], startedAt };
+  check("a quiet copy, as it starts: START_KBPS", streamBandwidth(copy, startedAt + 1000), { kbps: START_KBPS, source: "target" });
+  check("  to the end of its start", streamBandwidth(copy, startedAt + START_S * 1000 - 1), { kbps: START_KBPS, source: "target" });
+  check("  then its own figure, once", streamBandwidth(copy, startedAt + START_S * 1000), { kbps: 5203, source: "target" });
+  const big = { targetKbps: 48_000, averageKbps: null, segments: [], startedAt };
+  check("a figure above it stays its own", streamBandwidth(big, startedAt + 1000), { kbps: 48_000, source: "target" });
+  const unknown = { targetKbps: null, averageKbps: null, segments: [], startedAt };
+  check("nothing to give is still nothing", streamBandwidth(unknown, startedAt + 1000), null);
+  const untimed = { targetKbps: 5203, averageKbps: null, segments: [] };
+  check("with no start known, its own figure", streamBandwidth(untimed, startedAt + 1000), { kbps: 5203, source: "target" });
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

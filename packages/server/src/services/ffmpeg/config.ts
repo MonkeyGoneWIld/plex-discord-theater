@@ -242,14 +242,15 @@ export function tonemapper(): Tonemapper {
 
 const CURVES = ["reinhard", "mobius", "hable", "bt2390", "linear", "gamma", "clip"];
 
-/** FFMPEG_TONEMAP: the curve HDR is mapped to SDR by — reinhard, the closest
- *  to Plex's, unless set. */
+/** FFMPEG_TONEMAP: the curve HDR is mapped to SDR by — mobius, as Plex's app
+ *  for Windows shows HDR on a screen in SDR (plan.ts TONEMAP_PARAMS), unless set. */
 export function tonemapAlgo(): string {
   const want = process.env.FFMPEG_TONEMAP?.trim().toLowerCase();
-  return want && CURVES.includes(want) ? want : "reinhard";
+  return want && CURVES.includes(want) ? want : "mobius";
 }
 
-/** FFMPEG_HDR_REENCODE: keep (default), or tonemap as Plex does. */
+/** FFMPEG_HDR_REENCODE: keep (default) for a screen that shows HDR, or
+ *  tonemap for everyone, as Plex does. */
 export function keepHdrOnReencode(): boolean {
   return process.env.FFMPEG_HDR_REENCODE?.trim().toLowerCase() !== "tonemap";
 }

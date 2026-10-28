@@ -96,6 +96,15 @@ export function hdrClass(v: SourceStream | undefined): string {
   return "SDR";
 }
 
+/**
+ * Whether a picture of this class (hdrClass) is HDR as a player shows it: PQ
+ * or HLG. Dolby Vision's 8.2 and 10.2 are SDR underneath, and that is all a
+ * browser shows of them.
+ */
+export function hdrPicture(hdr: string): boolean {
+  return hdr !== "SDR" && hdr !== "DV P8.2" && hdr !== "DV P10.2";
+}
+
 /** Containers whose H.264 and HEVC copy cleanly into MPEG-TS. */
 const COPY_CONTAINERS = new Set(["mkv", "mp4", "m4v", "mov", "mpegts", "ts", "m2ts"]);
 /** And whose AV1 copies into fragmented MP4: a WebM's too. */
@@ -117,11 +126,23 @@ export interface PlayerCaps {
    *  Chromium where the system has a decoder for them. */
   ac3: boolean;
   eac3: boolean;
+  /**
+   * The screen shows HDR now, so an HDR picture is shown as it is. On a
+   * screen in SDR Chrome maps HDR's reference white to half the screen's
+   * light, a stop or more darker than Plex's players, and nothing done to
+   * the picture after that mends it: the player's lift on the 8-bit picture
+   * Chrome drew (28 October) matched the colours of Plex's app for Windows
+   * but broke dark scenes into bands and blocks — Avengers: Endgame at 32:00.
+   * So a player on such a screen is sent HDR tone-mapped by the server from
+   * the film's own 10 bits, as Plex's SDR versions are, which were clean in
+   * the same scene.
+   */
+  hdr: boolean;
 }
 export type PlayerCap = keyof PlayerCaps;
-export const PLAYER_CAPS: readonly PlayerCap[] = ["hevc", "av1", "opus", "flac", "ac3", "eac3"];
-export const NO_CAPS: PlayerCaps = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false };
-export const ALL_CAPS: PlayerCaps = { hevc: true, av1: true, opus: true, flac: true, ac3: true, eac3: true };
+export const PLAYER_CAPS: readonly PlayerCap[] = ["hevc", "av1", "opus", "flac", "ac3", "eac3", "hdr"];
+export const NO_CAPS: PlayerCaps = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false };
+export const ALL_CAPS: PlayerCaps = { hevc: true, av1: true, opus: true, flac: true, ac3: true, eac3: true, hdr: true };
 
 /**
  * Sound copied as it is, in fragmented MP4, for a player that decodes it: by
@@ -193,13 +214,14 @@ export type CopyPlan =
  * Whether ffmpeg can copy this version for a player, and what with. `audioStreamId`
  * is the track the stream is for (0 or null: the item's choice, as Plex takes
  * it); `hevcOk`, `av1Ok`, `opusOk` and `flacOk` what the player driving it
- * decodes (PlayerCaps); `audioChannels` FFMPEG_AUDIO_CHANNELS (convertedAudio).
+ * decodes, and `hdrOk` whether its screen shows HDR (PlayerCaps);
+ * `audioChannels` FFMPEG_AUDIO_CHANNELS (convertedAudio).
  */
 export function planCopy(
   src: SourceVersion,
   req: {
     audioStreamId: number | null; hevcOk: boolean; av1Ok?: boolean; opusOk?: boolean; flacOk?: boolean;
-    ac3Ok?: boolean; eac3Ok?: boolean; audioChannels?: number;
+    ac3Ok?: boolean; eac3Ok?: boolean; hdrOk?: boolean; audioChannels?: number;
   },
 ): CopyPlan {
   const no = (why: string): CopyPlan => ({ ok: false, why });
@@ -222,6 +244,8 @@ export function planCopy(
   // No HDR10 picture under the Dolby Vision: only a tone mapper that applies
   // it draws it right (Phase 2).
   if (hdr === "DV P5" || hdr === "DV P10.0") return no(`Dolby Vision ${hdr.slice(3)}: tone mapping needed`);
+  // Tone-mapped by the server for a screen in SDR: see PlayerCaps.hdr.
+  if (hdrPicture(hdr) && !req.hdrOk) return no(`${hdr} for a screen in SDR`);
   const width = src.width ?? 0;
   const height = src.height ?? 0;
   // 4K is shown at 1080p, as Plex does: the activity can't show more.
@@ -263,6 +287,7 @@ export function copyNeeds(plan: Extract<CopyPlan, { ok: true }>): PlayerCap[] {
   const audio = audioCapOf(plan.audio?.codec);
   if (plan.audioCopy && audio) needs.push(audio);
   if (plan.audioOut && plan.audioOut.codec !== "aac") needs.push(plan.audioOut.codec);
+  if (hdrPicture(plan.hdr)) needs.push("hdr");
   return needs;
 }
 
@@ -527,6 +552,24 @@ function presetFor(hardware: Hardware, preset: string | null | undefined): strin
  */
 export type Tonemapper = "opencl" | "vpp" | "software";
 
+/**
+ * A curve's setting where the filter's own default isn't the one wanted.
+ * Mobius at 0.5 keeps the film's light as it is up to half of HDR's
+ * reference white, about 100 nits, then eases the rest into the screen's
+ * white: what Plex's app for Windows shows on a screen in SDR. Measured in
+ * Chrome on 28 October from PQ grey patches at 1, 10, 50, 100 and 203 nits:
+ * the Windows app 23, 63, 134, 183 and 230 of 255; mobius 28, 73, 143, 190
+ * and 228; reinhard, the default before, 30, 77, 140, 173 and 206 — its
+ * highlights a good deal darker.
+ */
+const TONEMAP_PARAMS: Record<string, number> = { mobius: 0.5 };
+
+/** The tone mapper's curve and its setting (TONEMAP_PARAMS). */
+function tonemapCurve(algo: string): string {
+  const param = TONEMAP_PARAMS[algo];
+  return `tonemap=${algo}${param === undefined ? "" : `:param=${param}`}`;
+}
+
 export interface ColorLabels {
   primaries: string;
   trc: string;
@@ -683,12 +726,15 @@ export interface EncodeRequest {
   /** The largest picture: transcodeFrame's, or 720p at the lowest level. */
   maxWidth: number;
   maxHeight: number;
-  /** FFMPEG_HDR_REENCODE=keep: an HEVC re-encode of an HDR file stays HDR. */
+  /** FFMPEG_HDR_REENCODE=keep: an HEVC re-encode of an HDR file stays HDR,
+   *  for a player whose screen shows it. */
   keepHdr: boolean;
+  /** The driver's screen shows HDR (PlayerCaps.hdr): HDR is kept only for it. */
+  hdrOk?: boolean;
   /** What the GPU tone-maps with, as detectHardware found: OpenCL when it
    *  works there, else QSV's video engine. Unsaid, the video engine. */
   tonemapper?: Tonemapper;
-  /** FFMPEG_TONEMAP's curve: reinhard unless said. */
+  /** FFMPEG_TONEMAP's curve: mobius unless said (TONEMAP_PARAMS). */
   tonemapAlgo?: string;
   /** Decode on the GPU where it can; false for the retry after it couldn't. */
   gpuDecode?: boolean;
@@ -824,30 +870,35 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
   const hevcOut = req.hevcOk && req.hardware !== "software" && !burn;
   const av1Out = !!req.av1Ok && req.hardware !== "software" && !burn;
   const hdr = hdrClass(video);
+  const hdrIn = hdrPicture(hdr);
   const doviOnly = hdr === "DV P5" || hdr === "DV P10.0";
   // HDR stays HDR (FFMPEG_HDR_REENCODE=keep) in HEVC Main10, for a player
-  // that decodes HEVC, whatever its screen: the player brightens HDR on a
-  // screen in SDR (lib/hdrOnSdr). Otherwise it is mapped to SDR in H.264, as
-  // Plex's are — on the GPU when it decodes the file, else on the CPU. A
-  // subtitle burned onto HDR would glare at full PQ brightness: that picture
-  // is tone-mapped too.
-  const keepHdr = hdr !== "SDR" && !doviOnly && hevcOut && req.keepHdr;
+  // that decodes HEVC on a screen that shows HDR. Otherwise it is mapped to
+  // SDR here, from the film's 10 bits (PlayerCaps.hdr) — on the GPU when it
+  // decodes the file, else on the CPU. A subtitle burned onto HDR would
+  // glare at full PQ brightness: that picture is tone-mapped too.
+  const keepHdr = hdrIn && !doviOnly && hevcOut && req.keepHdr && !!req.hdrOk;
   let tonemap: { via: Tonemapper; algo: string; dovi: boolean } | null = null;
-  if (hdr !== "SDR" && !keepHdr) {
+  if (hdrIn && !keepHdr) {
     // QSV's video engine is QSV's own; VAAPI's GPU has OpenCL or nothing;
     // NVIDIA's frames are brought down and tone-mapped on the CPU.
     const via: Tonemapper = !gpuDecode || req.hardware === "nvenc" ? "software"
       : req.tonemapper === "opencl" ? "opencl"
       : req.hardware === "qsv" ? "vpp" : "software";
     if (doviOnly && via !== "opencl") return no(`Dolby Vision ${hdr.slice(3)} needs OpenCL tone mapping`);
-    tonemap = { via, algo: req.tonemapAlgo ?? "reinhard", dovi: doviOnly };
+    tonemap = { via, algo: req.tonemapAlgo ?? "mobius", dovi: doviOnly };
   }
   // AV1 for a player that decodes it on its GPU, from an SDR film: about half
   // H.264's bits for the same picture, and 20% fewer than HEVC's. Never from
   // HDR, kept or mapped: Project Hail Mary and The Avengers, mapped to SDR in
   // AV1 at 12 and 7 Mbps on 28 October, broke up into blocks in every dark
-  // scene, where Plex's H.264 of the same scenes was clean.
-  const codec = av1Out && hdr === "SDR" ? "av1" : hevcOut && !tonemap ? "hevc" : "h264";
+  // scene, where Plex's H.264 of the same scenes was clean. Those were 8 bits
+  // into the encoder: mapped on the GPU for a player that decodes HEVC, the
+  // picture stays 10 bits, SDR in HEVC Main10, so a dark scene's few steps
+  // aren't left to an 8-bit encoder to block up. H.264 where the CPU maps it
+  // (tonemapx), and for everyone else.
+  const codec = av1Out && hdr === "SDR" ? "av1"
+    : hevcOut && (!tonemap || tonemap.via !== "software") ? "hevc" : "h264";
   const audio = pickAudio(src, req.audioStreamId);
   if (audio === false) return no(`no audio track ${req.audioStreamId}`);
   const [w, h] = encodeFrame(
@@ -876,7 +927,7 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
     codec,
     fmp4: codec === "av1" || audioOut?.codec === "opus",
     hdr,
-    hdrTrc: hdr === "SDR" || tonemap ? null
+    hdrTrc: !hdrIn || tonemap ? null
       : String(video.colorTrc ?? "").toLowerCase() === "arib-std-b67" ? "arib-std-b67" : "smpte2084",
     tonemap,
     burn,
@@ -967,7 +1018,9 @@ export function encodeArgs(
   const fmt = plan.codec === "hevc" ? "p010" : "nv12";
   const fill = plan.color.fill ? `${plan.color.fill},` : "";
   const tm = plan.tonemap;
-  const curve = tm ? `tonemap=${tm.algo}:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12` : "";
+  // peak=100 is the film's peak taken as 1,000 nits, whatever it says; SDR
+  // white is HDR's reference white, 203 nits (jellyfin-ffmpeg's tone mappers).
+  const curve = tm ? `${tonemapCurve(tm.algo)}:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=${fmt}` : "";
   // On frames the GPU decoded: labels, deinterlace and scale, still there.
   const gpuIn = hw === "nvenc"
     ? `${fill}${plan.interlaced ? "bwdif_cuda=mode=send_frame," : ""}scale_cuda=w=${W}:h=${H}:format=${tm ? "p010" : fmt}`
@@ -981,9 +1034,9 @@ export function encodeArgs(
   // tonemapx, or because the CPU decoded it.
   const cpuPicture = plan.gpuDecode
     ? tm?.via === "opencl"
-      ? `${gpuIn},${opencl},hwdownload,format=nv12`
+      ? `${gpuIn},${opencl},hwdownload,format=${fmt === "p010" ? "p010le" : "nv12"}`
       : tm?.via === "vpp"
-        ? `${gpuIn},hwmap=derive_device=qsv,format=qsv,vpp_qsv=tonemap=1:format=nv12,hwdownload,format=nv12`
+        ? `${gpuIn},hwmap=derive_device=qsv,format=qsv,vpp_qsv=tonemap=1:format=${fmt},hwdownload,format=${fmt === "p010" ? "p010le" : "nv12"}`
         : tm
           ? `${gpuIn},hwdownload,format=p010le,tonemapx=${curve}`
           : `${gpuIn},hwdownload,format=${fmt === "p010" ? "p010le" : "nv12"}`
@@ -999,7 +1052,7 @@ export function encodeArgs(
     ? hw === "qsv"
       ? tm?.via === "opencl"
         ? `${gpuIn},${opencl},hwmap=derive_device=vaapi:mode=write:reverse=1,format=vaapi,hwmap=derive_device=qsv,format=qsv`
-        : `${gpuIn},hwmap=derive_device=qsv,format=qsv${tm ? ",vpp_qsv=tonemap=1:format=nv12" : ""}`
+        : `${gpuIn},hwmap=derive_device=qsv,format=qsv${tm ? `,vpp_qsv=tonemap=1:format=${fmt}` : ""}`
       : tm?.via === "opencl"
         ? `${gpuIn},${opencl},hwmap=derive_device=vaapi:mode=write:reverse=1,format=vaapi`
         : gpuIn

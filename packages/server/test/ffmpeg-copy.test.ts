@@ -426,13 +426,29 @@ console.log("\n— what a copy is judged on —");
       { id: 13, streamType: 2, index: 2, codec: "aac", channels: 2 }],
     ...more,
   });
-  const why = (v: ReturnType<typeof version>, hevcOk = true, audioStreamId: number | null = null) => {
-    const p = planCopy(v, { audioStreamId, hevcOk });
+  const why = (v: ReturnType<typeof version>, hevcOk = true, audioStreamId: number | null = null, hdrOk = true) => {
+    const p = planCopy(v, { audioStreamId, hevcOk, hdrOk });
     return p.ok ? "copy" : p.why;
   };
-  check("HDR10 HEVC, for a player that decodes it, is copied as it is", why(version({ colorTrc: "smpte2084" })), "copy");
+  check("HDR10 HEVC, for a player that decodes it on a screen that shows HDR, is copied as it is",
+    why(version({ colorTrc: "smpte2084" })), "copy");
   check("so is Dolby Vision 8.1, whose HDR10 picture is underneath",
     why(version({ DOVIPresent: true, DOVIProfile: 8, DOVIBLCompatID: 1 })), "copy");
+  check("neither is copied for a screen in SDR: the server tone-maps them", [
+    why(version({ colorTrc: "smpte2084" }), true, null, false),
+    why(version({ DOVIPresent: true, DOVIProfile: 8, DOVIBLCompatID: 1 }), true, null, false),
+  ], ["HDR10 for a screen in SDR", "DV P8.1 for a screen in SDR"]);
+  check("SDR is, and Dolby Vision 8.2, SDR underneath", [
+    why(version({}), true, null, false),
+    why(version({ DOVIPresent: true, DOVIProfile: 8, DOVIBLCompatID: 2 }), true, null, false),
+  ], ["copy", "copy"]);
+  {
+    const { copyNeeds } = await import("../src/services/ffmpeg/plan.js");
+    const hdrCopy = planCopy(version({ colorTrc: "smpte2084" }), { audioStreamId: null, hevcOk: true, hdrOk: true });
+    const sdrCopy = planCopy(version({}), { audioStreamId: null, hevcOk: true, hdrOk: true });
+    check("an HDR copy needs a screen that shows HDR, an SDR one doesn't",
+      [hdrCopy.ok && copyNeeds(hdrCopy), sdrCopy.ok && copyNeeds(sdrCopy)], [["hevc", "hdr"], ["hevc"]]);
+  }
   check("but not profile 5, which has none",
     why(version({ DOVIPresent: true, DOVIProfile: 5 })), "Dolby Vision P5: tone mapping needed");
   check("nor HEVC for a player that can't decode it", why(version({}), false), "HEVC: not decoded by this player");
@@ -600,7 +616,7 @@ console.log("\n— audio that isn't AAC —");
 console.log("\n— AV1 and Opus, and FLAC, copied in fragmented MP4 for a player that decodes them —");
 {
   const { initTracks, mp4Span } = await import("../src/services/mp4-timestamps.js");
-  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, av1Encode: false };
+  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, av1Encode: false };
   plexRoutes.capsForTests({ ...none, av1: true, opus: true, flac: true });
   const mapOf = (playlist: string) => playlist.match(/^#EXT-X-MAP:URI="([^"]+)"/m)?.[1] ?? null;
   const copied = async (ratingKey: string) => {
@@ -785,11 +801,11 @@ console.log("\n— what a re-encode is made of —");
     ...more,
   });
   const ask = { audioStreamId: null, hevcOk: true, hardware: "qsv" as "qsv" | "software", kbps: 8000, peakKbps: 8000,
-    maxWidth: 1920, maxHeight: 1080, keepHdr: true };
+    maxWidth: 1920, maxHeight: 1080, keepHdr: true, hdrOk: true };
   const plan = (v: ReturnType<typeof version>, more: Partial<Parameters<typeof planEncode>[1]> = {}) =>
     planEncode(v, { ...ask, ...more });
   const hdr10 = plan(version({ colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc" }));
-  check("HDR10 for an HEVC player stays HDR, in HEVC Main10",
+  check("HDR10 for an HEVC player on a screen that shows HDR stays HDR, in HEVC Main10",
     hdr10.ok && [hdr10.codec, hdr10.hdrTrc], ["hevc", "smpte2084"]);
   const hdrArgs = hdr10.ok ? encodeArgs(hdr10, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
   check("  labelled HDR10 on the output, decoded and scaled on the GPU in 10 bits",
@@ -808,12 +824,33 @@ console.log("\n— what a re-encode is made of —");
     tonemapped(plan(version({ colorTrc: "smpte2084" }), { hevcOk: false })), ["h264", null, "vpp", false]);
   check("  and on OpenCL where it works",
     tonemapped(plan(version({ colorTrc: "smpte2084" }), { hevcOk: false, tonemapper: "opencl" })), ["h264", null, "opencl", false]);
-  check("so is HDR with FFMPEG_HDR_REENCODE=tonemap, for an HEVC player too",
-    tonemapped(plan(version({ colorTrc: "smpte2084" }), { keepHdr: false })), ["h264", null, "vpp", false]);
+  check("for an HEVC player on a screen in SDR, tone-mapped on the GPU into HEVC Main10, SDR", [
+    tonemapped(plan(version({ colorTrc: "smpte2084" }), { hdrOk: false })),
+    tonemapped(plan(version({ colorTrc: "smpte2084" }), { hdrOk: false, tonemapper: "opencl" })),
+  ], [["hevc", null, "vpp", false], ["hevc", null, "opencl", false]]);
+  const sdrScreen = plan(version({ colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc" }),
+    { hdrOk: false, tonemapper: "opencl" });
+  const sdrScreenArgs = sdrScreen.ok ? encodeArgs(sdrScreen, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
+  check("  10 bits from the decoder to the encoder: OpenCL's mobius at 0.5, out as P010, labelled BT.709", [
+    sdrScreenArgs.includes("-vf scale_vaapi=w=1920:h=1080:format=p010,hwmap=derive_device=opencl:mode=read," +
+      "tonemap_opencl=tonemap=mobius:param=0.5:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=p010," +
+      "hwmap=derive_device=vaapi:mode=write:reverse=1,format=vaapi,hwmap=derive_device=qsv,format=qsv"),
+    sdrScreenArgs.includes("-c:v hevc_qsv -low_power 1 -profile:v main10"),
+    sdrScreenArgs.includes("-color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv"),
+  ], [true, true, true]);
+  const sdrVpp = plan(version({ colorTrc: "smpte2084" }), { hdrOk: false });
+  check("  or QSV's video engine's, out as P010",
+    sdrVpp.ok && encodeArgs(sdrVpp, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ").includes(
+      "hwmap=derive_device=qsv,format=qsv,vpp_qsv=tonemap=1:format=p010"), true);
+  check("so is HDR with FFMPEG_HDR_REENCODE=tonemap, on any screen",
+    tonemapped(plan(version({ colorTrc: "smpte2084" }), { keepHdr: false })), ["hevc", null, "vpp", false]);
+  const dv82 = plan(version({ DOVIPresent: true, DOVIProfile: 8, DOVIBLCompatID: 2 }), { hdrOk: false });
+  check("Dolby Vision 8.2 is re-encoded as the SDR it is underneath, not tone-mapped",
+    dv82.ok && [dv82.codec, dv82.hdrTrc, dv82.tonemap], ["hevc", null, null]);
   check("and on the CPU when the GPU doesn't decode it",
     tonemapped(plan(version({ colorTrc: "smpte2084" }), { hevcOk: false, gpuDecode: false })), ["h264", null, "software", false]);
   check("Dolby Vision 5 is tone-mapped with its own metadata, on OpenCL",
-    tonemapped(plan(version({ DOVIPresent: true, DOVIProfile: 5 }), { tonemapper: "opencl" })), ["h264", null, "opencl", true]);
+    tonemapped(plan(version({ DOVIPresent: true, DOVIProfile: 5 }), { tonemapper: "opencl" })), ["hevc", null, "opencl", true]);
   check("  and left to Plex without it",
     why(plan(version({ DOVIPresent: true, DOVIProfile: 5 }))), "Dolby Vision P5 needs OpenCL tone mapping");
   check("  or decoded on the CPU",
@@ -825,9 +862,9 @@ console.log("\n— what a re-encode is made of —");
   check("  by Phase 0's chain: OpenCL from VAAPI, its Dolby Vision applied, back to QSV, labelled BT.709", [
     p5Args.includes("-init_hw_device qsv=qs@va -init_hw_device opencl=ocl@va -filter_hw_device qs"),
     p5Args.includes("-vf scale_vaapi=w=1920:h=1080:format=p010,hwmap=derive_device=opencl:mode=read," +
-      "tonemap_opencl=tonemap=reinhard:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12:apply_dovi=1," +
+      "tonemap_opencl=tonemap=mobius:param=0.5:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=p010:apply_dovi=1," +
       "hwmap=derive_device=vaapi:mode=write:reverse=1,format=vaapi,hwmap=derive_device=qsv,format=qsv"),
-    p5Args.includes("-c:v h264_qsv"),
+    p5Args.includes("-c:v hevc_qsv"),
     p5Args.includes("-color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv"),
   ], [true, true, true, true]);
   const vpp = plan(version({ colorTrc: "smpte2084" }), { hevcOk: false });
@@ -835,9 +872,11 @@ console.log("\n— what a re-encode is made of —");
     vpp.ok && encodeArgs(vpp, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ").includes(
       "scale_vaapi=w=1920:h=1080:format=p010,hwmap=derive_device=qsv,format=qsv,vpp_qsv=tonemap=1:format=nv12"), true);
   const soft = plan(version({ colorTrc: "smpte2084" }), { hardware: "software", tonemapAlgo: "mobius" });
-  check("  and tonemapx on the CPU, by FFMPEG_TONEMAP's curve",
+  check("  and tonemapx on the CPU, into H.264, by FFMPEG_TONEMAP's curve",
+    soft.ok && soft.codec, "h264");
+  check("  with mobius at 0.5, as Plex's app for Windows shows HDR on a screen in SDR",
     soft.ok && encodeArgs(soft, ["-i", "f.mkv"], 0, 60, "").join(" ").includes(
-      "scale=1920:1080,format=yuv420p10le,tonemapx=tonemap=mobius:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12,format=yuv420p"),
+      "scale=1920:1080,format=yuv420p10le,tonemapx=tonemap=mobius:param=0.5:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12,format=yuv420p"),
     true);
   const cpu = plan(version({ codec: "h264", bitDepth: 8 }), { hardware: "software" });
   check("on the CPU it is H.264", cpu.ok && cpu.codec, "h264");
@@ -877,7 +916,7 @@ console.log("\n— what a re-encode is made of —");
   const graph = burnArgs[burnArgs.indexOf("-filter_complex") + 1] ?? "";
   check("  the picture brought down from OpenCL, the subtitle fitted to the frame, overlaid, and back up to QSV", graph,
     "[0:0]scale_vaapi=w=1920:h=1080:format=p010,hwmap=derive_device=opencl:mode=read," +
-    "tonemap_opencl=tonemap=reinhard:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12,hwdownload,format=nv12[pic];" +
+    "tonemap_opencl=tonemap=mobius:param=0.5:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12,hwdownload,format=nv12[pic];" +
     "[0:2]scale=1920:1080:force_original_aspect_ratio=decrease[sub];" +
     "[pic][sub]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:eof_action=pass,hwupload=extra_hw_frames=64,format=qsv[v]");
   check("  mapped from the graph, with no -vf", [burnArgs.join(" ").includes("-map [v] -map 0:1"), burnArgs.includes("-vf")], [true, false]);
@@ -910,7 +949,7 @@ console.log("\n— what a re-encode is made of —");
   const nvHdr = plan(version({ colorTrc: "smpte2084" }), { hardware: "nvenc", hevcOk: false, preset: "fast" });
   check("  HDR for an H.264 player brought down and tone-mapped on the CPU, FFMPEG_PRESET=fast as p3",
     nvHdr.ok && [nvHdr.tonemap?.via, encodeArgs(nvHdr, ["-i", "f.mkv"], 0, 60, "0").join(" ").includes(
-      "scale_cuda=w=1920:h=1080:format=p010,hwdownload,format=p010le,tonemapx=tonemap=reinhard"), nvHdr.preset],
+      "scale_cuda=w=1920:h=1080:format=p010,hwdownload,format=p010le,tonemapx=tonemap=mobius:param=0.5"), nvHdr.preset],
     ["software", true, "p3"]);
   const va = plan(version({ codec: "vc1", bitDepth: 8, colorPrimaries: undefined, colorTrc: undefined, colorSpace: undefined,
     colorRange: undefined }, { width: 1920, height: 1080 }), { hardware: "vaapi", hevcOk: false, lowPower: true });

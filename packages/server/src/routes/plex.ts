@@ -58,7 +58,7 @@ import {
   keepHdrOnReencode, localPath, lowPowerVaapi, lowPowerVaapiAv1, maxEncodes, readable, recheckHardware, sizeOnDisk, styledSubtitlesOn, tonemapAlgo, tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
-  ALL_CAPS, AUDIO_KBPS, HARDWARE_NAMES, NO_CAPS, copyArgs, copyNeeds, encodeArgs, encodeTargetKbps, hdrClass, inputArgs, pickBurn,
+  ALL_CAPS, AUDIO_KBPS, HARDWARE_NAMES, NO_CAPS, copyArgs, copyNeeds, encodeArgs, encodeTargetKbps, hdrClass, hdrPicture, inputArgs, pickBurn,
   planCopy, planEncode, type AudioOut, type EncodeRequest, type PlayerCap, type PlayerCaps, type SourceStream, type SourceVersion,
 } from "../services/ffmpeg/plan.js";
 import { probe, probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
@@ -4194,16 +4194,32 @@ export function recordSessionAudioNeeds(sessionId: string, needs: PlayerCap[]): 
   else sessionAudioNeeds.delete(sessionId);
 }
 
+/** Sessions whose picture is HDR as it is sent: a copy of an HDR film, or a
+ *  re-encode that kept it — for a screen that shows HDR (PlayerCaps.hdr). */
+const hdrSessions = new Set<string>();
+
+export function recordSessionHdr(sessionId: string, hdr: boolean): void {
+  if (hdr) hdrSessions.add(sessionId);
+  else hdrSessions.delete(sessionId);
+}
+
+/** Whether a picture, as Plex describes it (PictureFacts), is HDR as a player
+ *  shows it: Dolby Vision 8.2 and 10.2 are SDR underneath (plan.ts hdrPicture). */
+function hdrShown(picture: PictureFacts | null | undefined): boolean {
+  return !!picture?.hdr && !/^Dolby Vision P(?:8|10)\.2$/.test(picture.hdr);
+}
+
 /**
  * What this session's stream needs its players to decode beyond H.264 and AAC
  * in MPEG-TS (PlayerCaps): HEVC or AV1 by its picture, Opus or FLAC by its
- * sound. Whoever on it can't is put on a stream of their own — see the sync
- * server's seatOf.
+ * sound, and a screen that shows HDR for an HDR picture. Whoever on it can't
+ * is put on a stream of their own — see the sync server's seatOf.
  */
 export function sessionNeeds(sessionId: string): PlayerCap[] {
   const needs: PlayerCap[] = [];
   if (isHevcSession(sessionId)) needs.push("hevc");
   if (sessionVideoCodec.get(sessionId) === "av1") needs.push("av1");
+  if (hdrSessions.has(sessionId)) needs.push("hdr");
   return [...needs, ...(sessionAudioNeeds.get(sessionId) ?? [])];
 }
 
@@ -4357,6 +4373,7 @@ export function markTranscodeStopped(sessionId: string): void {
   sessionMediaIndex.delete(sessionId);
   sessionVideoCodec.delete(sessionId);
   sessionAudioNeeds.delete(sessionId);
+  hdrSessions.delete(sessionId);
   withheldFor.delete(sessionId);
   manifestCache.delete(sessionId);
   hostPingInfo.delete(sessionId);
@@ -5278,13 +5295,14 @@ async function startWithFfmpeg(o: {
 
   const durationS = source.durationS ?? null;
   const okFor = (c: PlayerCaps) => ({
-    hevcOk: c.hevc, av1Ok: c.av1, opusOk: c.opus, flacOk: c.flac, ac3Ok: c.ac3, eac3Ok: c.eac3,
+    hevcOk: c.hevc, av1Ok: c.av1, opusOk: c.opus, flacOk: c.flac, ac3Ok: c.ac3, eac3Ok: c.eac3, hdrOk: c.hdr,
   });
   const copyAsk = { audioStreamId: o.audioStreamID || null, ...okFor(o.caps), audioChannels: audioChannels() };
   const copyPlan = o.copy ? planCopy(source, copyAsk) : null;
   // What only the driver's player kept from being copied — an AV1 or HEVC
-  // picture re-encoded, Opus, FLAC, AC3 or EAC3 made AAC: whoever on the
-  // stream decodes it has a copy of their own (sessionWithheld, sync.ts seatOf).
+  // picture re-encoded, Opus, FLAC, AC3 or EAC3 made AAC, HDR tone-mapped for
+  // a screen in SDR: whoever on the stream has it has a copy of their own
+  // (sessionWithheld, sync.ts seatOf).
   if (copyPlan) {
     const full = planCopy(source, { ...copyAsk, ...okFor(ALL_CAPS) });
     const got = copyPlan.ok ? copyNeeds(copyPlan) : [];
@@ -5301,6 +5319,8 @@ async function startWithFfmpeg(o: {
   let range: string | null = null;
   /** What made the picture, for Stats for nerds: null for a copy. */
   let encoder: string | null = null;
+  /** A re-encode that kept the film's HDR (plan.ts planEncode). */
+  let hdrKept = false;
   if (copyPlan?.ok) {
     const differ = await tracksDiffer([copyPlan.video, copyPlan.audio]);
     if (differ) return toPlex(`tracks differ from Plex's: ${differ}`, "the file's tracks aren't Plex's", { why: differ });
@@ -5374,7 +5394,7 @@ async function startWithFfmpeg(o: {
       av1Ok: AV1_TRANSCODE && o.caps.av1Encode && gpuEncodesAv1() && sessionWithheld(o.sessionId).length === 0,
       av1LowPower: lowPowerVaapiAv1(),
       kbps: o.transcodeKbps, peakKbps: o.peakKbps, maxWidth, maxHeight, keepHdr: keepHdrOnReencode(),
-      tonemapper: tonemapper(), tonemapAlgo: tonemapAlgo(), burn: o.burnSubtitleId ?? null,
+      hdrOk: o.caps.hdr, tonemapper: tonemapper(), tonemapAlgo: tonemapAlgo(), burn: o.burnSubtitleId ?? null,
       audioChannels: audioChannels(), opusOk: o.caps.opus, preset: encodePreset(), lowPower: lowPowerVaapi(),
       gpuDecode: gpuDecodeOn() ? undefined : false, ...burnFiles,
     };
@@ -5413,6 +5433,7 @@ async function startWithFfmpeg(o: {
     if (!started.ok) return toPlex(`ffmpeg didn't start: ${started.why}`, "run didn't start", { why: started.why });
     key = started.key;
     video = { ...plan, kbps: plan.kbps };
+    hdrKept = plan.hdrTrc !== null;
     range = plan.hdrTrc ? `${plan.hdrTrc === "arib-std-b67" ? "HLG" : "HDR10"} (kept)`
       : plan.tonemap ? `SDR (tone-mapped from ${o.picture?.hdr ?? plan.hdr})` : "SDR";
     encoder = `${HARDWARE_NAMES[plan.hardware]} · ${plan.gpuDecode ? "GPU" : "CPU"} decode`;
@@ -5424,9 +5445,9 @@ async function startWithFfmpeg(o: {
       hdr: plan.hdrTrc ? `${plan.hdr} kept`
         : plan.tonemap ? `${plan.hdr} → SDR, ${plan.tonemap.algo} on ${plan.tonemap.via}${plan.tonemap.dovi ? " with its Dolby Vision" : ""}`
         : plan.hdr,
-      // Whether the driver's screen showed HDR: one in SDR has its player
-      // brighten HDR kept (lib/hdrOnSdr).
-      ...(plan.hdr !== "SDR" ? { screen: o.caps.hdrScreen ? "HDR" : "SDR" } : {}),
+      // Whether the driver's screen showed HDR: one in SDR is sent HDR
+      // tone-mapped (PlayerCaps.hdr).
+      ...(plan.hdr !== "SDR" ? { screen: o.caps.hdr ? "HDR" : "SDR" } : {}),
       on: plan.hardware, preset: plan.preset ?? "default", decode: plan.gpuDecode ? "gpu" : "cpu",
       deinterlace: plan.interlaced, filled: plan.color.fill ?? "none",
       burn: plan.burn
@@ -5440,10 +5461,13 @@ async function startWithFfmpeg(o: {
   }
 
   recordSessionVideoCodec(o.sessionId, video.codec);
+  // An HDR copy, or a re-encode that kept HDR: whoever on it has a screen in
+  // SDR gets a stream tone-mapped for it (sync.ts seatOf).
+  recordSessionHdr(o.sessionId, copyPlan?.ok && reason === null ? hdrPicture(copyPlan.hdr) : hdrKept);
   // A re-encode's Opus 7.1 too: whoever on it doesn't decode Opus gets a
   // stream of their own (sync.ts seatOf).
   recordSessionAudioNeeds(o.sessionId, copyPlan?.ok && reason === null
-    ? copyNeeds(copyPlan).filter((c) => c !== "hevc" && c !== "av1")
+    ? copyNeeds(copyPlan).filter((c) => c !== "hevc" && c !== "av1" && c !== "hdr")
     : video.audioOut?.codec === "opus" ? ["opus"] : []);
   const decided: AudioDecision | null = video.audio
     ? {
@@ -5508,10 +5532,10 @@ let replacedStreams: typeof streamsDrivenBy = streamsDrivenBy;
 export function replaceStreamsForTests(streams: typeof streamsDrivenBy): void {
   replacedStreams = streams;
 }
-type StartCaps = PlayerCaps & { av1Encode: boolean; hdrScreen?: boolean };
+type StartCaps = PlayerCaps & { av1Encode: boolean };
 /** What a start may use beyond H.264 and AAC — mayStart, unless a test says otherwise. */
 let startCaps = (userId: string | null): StartCaps => userId !== null ? mayStart(userId)
-  : { ...NO_CAPS, av1Encode: false, hdrScreen: false };
+  : { ...NO_CAPS, av1Encode: false };
 /** For the tests, which have no room: what the player starting a stream decodes. */
 export function capsForTests(caps: StartCaps): void {
   startCaps = () => ({ ...caps });
@@ -5759,6 +5783,7 @@ router.get(
       // Whatever an earlier start of this session was, this one is decided anew.
       sessionVideoCodec.delete(sessionId);
       sessionAudioNeeds.delete(sessionId);
+      hdrSessions.delete(sessionId);
       // Whether Plex is copying the video, which decides who serves it. A
       // decision that can't be read counts as copying when copying was allowed:
       // the measured playlist plays a re-encoded stream just as well, while
@@ -5850,6 +5875,8 @@ router.get(
       if (!sessionVideoCodec.has(sessionId)) {
         recordSessionVideoCodec(sessionId, hevc ? "unknown" : "h264");
       }
+      // Plex's copy of an HDR picture is HDR; its re-encodes are tone-mapped.
+      recordSessionHdr(sessionId, videoCopied && hdrShown(picture));
 
       // Pass session as both a query param and header (matching plex-mpv-shim behavior)
       const startParams = { ...params, transcodeSessionId: sessionId };
@@ -6069,6 +6096,14 @@ router.get(
         fallback = tried.fallback;
       }
       await selectTracksForStart(ratingKey, mediaIndex, audioStreamID, subtitleId);
+      // HDR for a screen in SDR is Plex's to map to SDR, as its own player in
+      // a browser on such a screen has it done: a re-encode, in H.264, which
+      // Plex tone-maps — clean in Avengers: Endgame's dark scenes on 28
+      // October, where the player's lift of the HDR copy broke them up (see
+      // PlayerCaps.hdr). Whoever on it has a screen that shows HDR gets a copy
+      // of their own (sync.ts seatOf).
+      const hdrForSdr = hdrShown(version?.picture) && !caps.hdr;
+      if (hdrForSdr && copy) recordWithheld(sessionId, [...new Set<PlayerCap>([...sessionWithheld(sessionId), "hdr"])]);
       // Two of Plex's re-encodes to HEVC come out broken, so for these Plex is
       // offered H.264 alone, as for a browser that can't play HEVC, and as
       // Plex's own player in Firefox is:
@@ -6084,12 +6119,12 @@ router.get(
       const plexBreaksHevc = version?.videoCodec?.toLowerCase() === "av1" || subtitleMode === "burn";
       return fetchManifest(subtitleMode, {
         videoResolution: frame,
-        hevc: plexBreaksHevc ? false : roomHevc && HEVC_TRANSCODE ? "encode" : roomHevc && copy ? "copy" : false,
-        copy,
+        hevc: plexBreaksHevc || hdrForSdr ? false : roomHevc && HEVC_TRANSCODE ? "encode" : roomHevc && copy ? "copy" : false,
+        copy: copy && !hdrForSdr,
         copyKbps,
         transcodeKbps,
         peakKbps,
-        notCopied,
+        notCopied: copy && hdrForSdr ? `${version?.picture?.hdr} for a screen in SDR` : notCopied,
         refused: (asked) => refusedCopyReason(version, asked, roomHevc),
         quality,
         fileKbps: kbps,

@@ -30,8 +30,7 @@
 // four-second keyframe interval, ~4 MB a segment, and stream=copy4long the
 // same five minutes long. stream=hdr is HEVC Main 10 marked PQ (HDR10), in
 // four-second segments, as the ffmpeg engine sends a re-encode that keeps HDR;
-// with &notes=1 its notes say HDR10, for the player to light it for a screen
-// in SDR (lib/hdrOnSdr).
+// with &notes=1 its notes say HDR10, as the server says of an HDR stream.
 //
 // &cache=1 answers segments as the bot does, for the browser to keep five
 // minutes (Cache-Control) — and so for the page after a pop-out to find them.

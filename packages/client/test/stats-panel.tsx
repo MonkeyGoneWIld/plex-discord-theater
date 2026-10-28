@@ -43,7 +43,7 @@ function Panel({ width, height }: { width: number; height: number }) {
       <video ref={videoRef} muted playsInline style={{ width: "100%", height: "100%" }} />
       <StatsOverlay
         videoRef={videoRef} hlsRef={hlsRef} vpsRelay={false} sessionId="04ea211a-b1d7-4a1a-bc07-2fd584eef156"
-        p2pStatsRef={p2pStatsRef} notes={notes} hdrLift quality={0} visible onClose={() => {}}
+        p2pStatsRef={p2pStatsRef} notes={notes} quality={0} visible onClose={() => {}}
         syncInfo={() => sync}
       />
     </div>

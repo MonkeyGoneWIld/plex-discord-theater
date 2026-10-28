@@ -241,7 +241,7 @@ console.log("\n— AV1 re-encodes —");
       { id: 12, streamType: 2, index: 1, codec: "eac3", channels: 6, default: true }],
   });
   const ask = { audioStreamId: null, hevcOk: true, av1Ok: true, hardware: "qsv" as "qsv" | "vaapi" | "nvenc" | "software",
-    kbps: 12000, peakKbps: 12000, maxWidth: 1920, maxHeight: 1080, keepHdr: false };
+    kbps: 12000, peakKbps: 12000, maxWidth: 1920, maxHeight: 1080, keepHdr: false, hdrOk: true };
   const plan = (v: ReturnType<typeof version>, more: Partial<Parameters<typeof planEncode>[1]> = {}) =>
     planEncode(v, { ...ask, ...more });
   const sdr = plan(version({}));
@@ -253,7 +253,8 @@ console.log("\n— AV1 re-encodes —");
       sdrArgs.includes("-profile:v"), sdrArgs.includes("-forced_idr 1"), sdrArgs.includes("-hls_segment_type fmp4"),
       sdrArgs.includes("-segment_times")], [true, true, false, true, true, false]);
   const hdr = plan(version({ colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc" }));
-  check("HDR tone-mapped is H.264, not AV1", hdr.ok && [hdr.codec, hdr.hdrTrc, !!hdr.tonemap], ["h264", null, true]);
+  check("HDR tone-mapped is HEVC Main10 for a player that decodes it, not AV1",
+    hdr.ok && [hdr.codec, hdr.hdrTrc, !!hdr.tonemap], ["hevc", null, true]);
   const hdr10 = version({ colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc" });
   const kept = plan(hdr10, { keepHdr: true });
   check("HDR kept is HEVC Main10, never AV1", kept.ok && [kept.codec, kept.hdrTrc, kept.tonemap], ["hevc", "smpte2084", null]);
@@ -262,26 +263,32 @@ console.log("\n— AV1 re-encodes —");
     [keptArgs.includes("format=p010"), keptArgs.includes("-c:v hevc_qsv"),
       keptArgs.includes("-color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc"), keptArgs.includes("-profile:v main10"),
       keptArgs.includes("-hls_segment_type fmp4")], [true, true, true, true, false]);
-  // Project Hail Mary on 28 October: mapped to SDR in AV1 for a screen in
-  // SDR, it broke up into blocks in its dark scenes. Kept whatever the
-  // screen; the player brightens it on one in SDR.
+  // Project Hail Mary on 28 October: mapped to SDR in AV1, 8 bits, it broke
+  // up into blocks in its dark scenes. Kept for a screen that shows HDR; for
+  // one in SDR, mapped from its 10 bits into HEVC Main10 — brightening
+  // Chrome's own 8-bit mapping in the player broke Endgame's dark scenes up
+  // the same way (run 28).
+  const sdrScreen = plan(hdr10, { keepHdr: true, hdrOk: false });
+  check("  for a screen in SDR, mapped into HEVC Main10 though the player decodes AV1",
+    sdrScreen.ok && [sdrScreen.codec, sdrScreen.hdrTrc, !!sdrScreen.tonemap], ["hevc", null, true]);
   const p7 = plan(version({ colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc", DOVIPresent: true, DOVIProfile: 7 }),
     { keepHdr: true, tonemapper: "opencl" });
   check("  Dolby Vision 7 kept by its HDR10 layer", p7.ok && [p7.hdr, p7.codec, p7.hdrTrc], ["DV P7", "hevc", "smpte2084"]);
   const p7Mapped = plan(version({ colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc", DOVIPresent: true, DOVIProfile: 7 }),
     { tonemapper: "opencl" });
   const p7Args = p7Mapped.ok ? encodeArgs(p7Mapped, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
-  check("  and mapped (FFMPEG_HDR_REENCODE=tonemap) on OpenCL, labelled BT.709, in H.264",
-    [p7Args.includes("tonemap_opencl=tonemap=reinhard"), p7Args.includes("apply_dovi"),
-      p7Args.includes("-color_primaries bt709 -color_trc bt709 -colorspace bt709"), p7Args.includes("-c:v h264_qsv")],
-    [true, false, true, true]);
+  check("  and mapped (FFMPEG_HDR_REENCODE=tonemap) on OpenCL, labelled BT.709, in HEVC Main10",
+    [p7Args.includes("tonemap_opencl=tonemap=mobius:param=0.5"), p7Args.includes("apply_dovi"),
+      p7Args.includes("-color_primaries bt709 -color_trc bt709 -colorspace bt709"), p7Args.includes("-c:v hevc_qsv"),
+      p7Args.includes("-profile:v main10")],
+    [true, false, true, true, true]);
   const hlg = plan(version({ colorPrimaries: "bt2020", colorTrc: "arib-std-b67", colorSpace: "bt2020nc" }), { keepHdr: true });
   check("  and HLG as HLG", hlg.ok && [hlg.codec, hlg.hdrTrc], ["hevc", "arib-std-b67"]);
   const noHevc = plan(hdr10, { keepHdr: true, hevcOk: false });
   check("kept only for a player that decodes HEVC: else mapped, in H.264 though it decodes AV1",
     noHevc.ok && [noHevc.codec, noHevc.hdrTrc, !!noHevc.tonemap], ["h264", null, true]);
   const dv5 = plan(version({ DOVIPresent: true, DOVIProfile: 5 }), { keepHdr: true, tonemapper: "opencl" });
-  check("Dolby Vision 5 mapped, in H.264", dv5.ok && [dv5.codec, dv5.hdrTrc, dv5.tonemap?.dovi], ["h264", null, true]);
+  check("Dolby Vision 5 mapped, in HEVC Main10", dv5.ok && [dv5.codec, dv5.hdrTrc, dv5.tonemap?.dovi], ["hevc", null, true]);
   const keptCpu = plan(hdr10, { keepHdr: true, gpuDecode: false });
   const keptCpuArgs = keptCpu.ok ? encodeArgs(keptCpu, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
   check("  decoded on the CPU, uploaded as 10 bits", keptCpuArgs.includes("format=p010le,hwupload"), true);

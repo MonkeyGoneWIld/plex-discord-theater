@@ -45,8 +45,6 @@ interface StatsOverlayProps {
   p2pStatsRef: React.RefObject<P2PStats>;
   /** The server's own account of the stream — see StreamNotes. */
   notes: StreamNotes | null;
-  /** HDR lit for this screen in SDR — see lib/hdrOnSdr. */
-  hdrLift?: boolean;
   /** This viewer's quality ceiling, kbps, 0 for none. */
   quality: number;
   /** Seconds downloaded past the playhead, the browser's buffer and the P2P
@@ -245,7 +243,7 @@ function Bar({ parts, children }: { parts: Array<[number, string]>; children?: R
 }
 
 export function StatsOverlay({
-  videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRef, notes, hdrLift = false, quality, downloadedAheadS, subtitle, subtitleStatusRef,
+  videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRef, notes, quality, downloadedAheadS, subtitle, subtitleStatusRef,
   previewPartId = null, previewStatusRef, lastSegmentRef, downloadMeter, syncInfo, runtimeS = null, visible, onClose,
 }: StatsOverlayProps) {
   // Read by the poll, which is set up once.
@@ -573,10 +571,12 @@ export function StatsOverlay({
       details: [
         ["Source", source, copied === null ? "none" : copied ? "ok" : "warn"],
         ["Codec", codecName(snap?.videoCodec) ?? "—"],
-        // Mapped down from HDR is a loss only on a screen showing HDR. HDR on
-        // a screen in SDR is lit by the player (lib/hdrOnSdr).
-        ...(notes?.range ? [["Range", `${notes.range}${hdrLift ? " · lit for this SDR screen" : ""}`,
-          notes.range.startsWith("SDR (") && hdrScreen() ? "warn" : "none"] as [string, string, Health]] : []),
+        // Mapped down from HDR is a loss only on a screen showing HDR; HDR
+        // as it is, only on a screen in SDR, which the browser draws darker
+        // (codecs.ts Caps.hdr).
+        ...(notes?.range ? [["Range", notes.range,
+          notes.range.startsWith("SDR (") ? hdrScreen() ? "warn" : "none"
+            : notes.range.startsWith("SDR") || hdrScreen() ? "none" : "warn"] as [string, string, Health]] : []),
         ...fileLines(notes?.videoFrom ?? null),
         ["Viewport", snap?.viewport ?? "—"],
       ],

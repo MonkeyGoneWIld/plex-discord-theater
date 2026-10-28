@@ -104,11 +104,11 @@ services:
       - FFMPEG_SEGMENT_MEMORY_MB=${FFMPEG_SEGMENT_MEMORY_MB:-}
       # off = a stream ffmpeg can't make fails, rather than going to Plex.
       - FFMPEG_FALLBACK_TO_PLEX=${FFMPEG_FALLBACK_TO_PLEX:-}
-      # keep (the default): a re-encode for an HEVC player stays HDR, as the
-      # copy is; on a screen in SDR the player lights it. tonemap maps every
-      # one to SDR. FFMPEG_TONEMAP is the
-      # curve for streams that are mapped: reinhard (default), mobius, hable,
-      # bt2390, linear, gamma or clip.
+      # keep (the default): HDR stays HDR for an HEVC player on a screen that
+      # shows HDR; for a screen in SDR the server maps it to SDR from the
+      # film's 10 bits. tonemap maps every re-encode to SDR. FFMPEG_TONEMAP is
+      # the curve for streams that are mapped: mobius (default), reinhard,
+      # hable, bt2390, linear, gamma or clip.
       - FFMPEG_HDR_REENCODE=${FFMPEG_HDR_REENCODE:-}
       - FFMPEG_TONEMAP=${FFMPEG_TONEMAP:-}
       # Tell Plex what ffmpeg is playing, so it shows in Plex's dashboard,

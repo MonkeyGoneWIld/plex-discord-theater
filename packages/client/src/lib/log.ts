@@ -213,8 +213,8 @@ export function initClientLogging(): void {
     clientId,
     ua: navigator.userAgent.slice(0, 180),
     screen: `${window.screen.width}x${window.screen.height}`,
-    // Whether it is showing HDR now, which decides whether a re-encode keeps
-    // HDR (codecs.ts hdrScreen).
+    // Whether it is showing HDR now, which decides whether HDR is sent as it
+    // is or tone-mapped by the server (codecs.ts Caps.hdr).
     hdrScreen: (() => {
       try {
         return window.matchMedia("(dynamic-range: high)").matches;

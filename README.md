@@ -341,7 +341,7 @@ services:
       # FFMPEG_AUDIO_CHANNELS: "6"                   # 2 for stereo AAC only
       # FFMPEG_PREVIEWS: "on"                        # previews for files Plex has none for
       # FFMPEG_HDR_REENCODE: "keep"                  # or "tonemap"
-      # FFMPEG_TONEMAP: "reinhard"
+      # FFMPEG_TONEMAP: "mobius"
       # FFMPEG_REPORT_TO_PLEX: "1"
 
       # ── Leave this alone: it matches the volume above ────────────────────

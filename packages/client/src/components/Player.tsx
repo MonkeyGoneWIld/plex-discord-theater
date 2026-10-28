@@ -20,8 +20,7 @@ import { ZoomPanel } from "./ZoomPanel";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchPlayedThreshold, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion, mediaIndexHolding } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
-import { capsUsed, hdrScreen, markUnplayable, type Cap } from "../lib/codecs";
-import { HDR_LIFT_ID, HDR_LIFT_TABLE, frameTransfer, notChromeOnComputer, rangeIsHdr } from "../lib/hdrOnSdr";
+import { capsUsed, frameTransfer, hdrScreen, hdrScreenQuery, markUnplayable, type Cap } from "../lib/codecs";
 import { splitCodecs } from "../lib/codecName";
 import { loadVolume, saveVolume, VOLUME_CHOSEN_EVENT } from "../lib/volume";
 import { readSameLanguageAhead, readSubtitlesAhead } from "../lib/subtitleReadAhead";
@@ -658,10 +657,6 @@ function captureFrame(video: HTMLVideoElement | null): HTMLCanvasElement | null 
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
   try {
-    // As it was shown: HDR lit for a screen in SDR is a filter on the video
-    // (lib/hdrOnSdr), not in its frames.
-    const shown = getComputedStyle(video).filter;
-    if (shown && shown !== "none") ctx.filter = shown;
     ctx.drawImage(video, 0, 0);
   } catch {
     // Tainted or not yet renderable — no frame is better than a broken one.
@@ -1134,8 +1129,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /** The server's account of the stream playing — see StreamNotes. */
   const [streamNotes, setStreamNotes] = useState<StreamNotes | null>(null);
   const streamNotesRef = useRef<StreamNotes | null>(null);
-  /** HDR lit as Plex's app for Windows shows it, on a screen in SDR — see lib/hdrOnSdr. */
-  const [hdrLift, setHdrLift] = useState(false);
   /** This viewer's quality ceiling — see lib/quality.ts. */
   const quality = usePreferredQuality();
   /** A lower quality to suggest, after a lot of buffering; null when not. */
@@ -3070,46 +3063,37 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     };
   }, []);
 
-  // HDR on a screen in SDR, lit as Plex's app for Windows shows it (lib/hdrOnSdr).
-  // Decided by the frames' own transfer once they come, by the server's word
-  // before; again when the frames change size, and when the window moves to
-  // a screen that shows HDR, or stops showing it. Logged once a stream's
-  // frames are in, and again only if the answer changes.
+  // HDR frames on a screen in SDR: the server tone-maps HDR for such a screen
+  // (codecs.ts Caps.hdr), so these come only from a stream made before the
+  // screen changed, and the browser draws them darker than they should be.
+  // Logged once a stream's frames are in, and again only if that changes.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    let screen: MediaQueryList | null = null;
-    try {
-      screen = window.matchMedia("(dynamic-range: high)");
-    } catch {
-      // No such query: a screen in SDR.
-    }
+    const screen = hdrScreenQuery();
     let told = "";
-    const decide = () => {
+    const check = () => {
       const frames = frameTransfer(video);
-      const hdr = frames ? frames !== "sdr" : rangeIsHdr(streamNotes?.range);
-      const notHere = !hdr ? null : hdrScreen() ? "the screen shows HDR" : notChromeOnComputer();
-      const lift = !!hdr && notHere === null;
-      setHdrLift(lift);
-      if (!hdr || video.readyState < 2) return;
-      const tell = `${lift}|${frames}|${notHere}`;
+      if (frames === null) return;
+      const tell = frames === "sdr" || hdrScreen() ? "" : frames;
       if (tell === told) return;
       told = tell;
-      logEvent("Player", lift ? "lighting HDR for a screen in SDR" : "HDR shown as it comes", {
-        session: sessionIdRef.current?.substring(0, 8),
-        range: streamNotes?.range ?? "unknown",
-        frames: frames ?? "unread",
-        ...(notHere ? { why: notHere } : {}),
-      });
+      if (tell) {
+        logEvent("Player", "HDR on a screen in SDR, as the browser maps it", {
+          session: sessionIdRef.current?.substring(0, 8),
+          range: streamNotes?.range ?? "unknown",
+          frames,
+        });
+      }
     };
-    decide();
-    video.addEventListener("loadeddata", decide);
-    video.addEventListener("resize", decide);
-    screen?.addEventListener?.("change", decide);
+    check();
+    video.addEventListener("loadeddata", check);
+    video.addEventListener("resize", check);
+    screen?.addEventListener?.("change", check);
     return () => {
-      video.removeEventListener("loadeddata", decide);
-      video.removeEventListener("resize", decide);
-      screen?.removeEventListener?.("change", decide);
+      video.removeEventListener("loadeddata", check);
+      video.removeEventListener("resize", check);
+      screen?.removeEventListener?.("change", check);
     };
   }, [streamNotes]);
 
@@ -8989,24 +8973,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           Deliberately no pointer cursor: the picture is a picture, and every
           player leaves the ordinary arrow over it. A hand belongs to the
           controls, which have their own. */}
-      {/* What HDR is drawn through on a screen in SDR — see hdrLift. Over
-          the element's own box only, not the margin a filter gets by default. */}
-      <svg width="0" height="0" aria-hidden="true" style={styles.filterDefs}>
-        <filter id={HDR_LIFT_ID} x="0" y="0" width="1" height="1" colorInterpolationFilters="sRGB">
-          <feComponentTransfer>
-            <feFuncR type="table" tableValues={HDR_LIFT_TABLE} />
-            <feFuncG type="table" tableValues={HDR_LIFT_TABLE} />
-            <feFuncB type="table" tableValues={HDR_LIFT_TABLE} />
-          </feComponentTransfer>
-        </filter>
-      </svg>
       <video
         ref={videoRef}
         style={{
           ...styles.video,
           ...zoomPictureStyle,
           ...(isPip ? { objectFit: "cover" as const } : {}),
-          ...(hdrLift ? { filter: `url(#${HDR_LIFT_ID})` } : {}),
         }}
         playsInline
         onClick={isPip ? undefined : togglePlayPause}
@@ -9236,7 +9208,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           sessionId={sessionIdRef.current}
           p2pStatsRef={p2pStatsRef}
           notes={streamNotes}
-          hdrLift={hdrLift}
           quality={quality}
           downloadedAheadS={downloadedAheadS}
           subtitle={{ track: activeSubtitleTrack, shown: subtitleShown, failed: sidecarFailed }}
@@ -9677,7 +9648,6 @@ const styles: Record<string, React.CSSProperties> = {
     height: "100%",
     objectFit: "contain",
   },
-  filterDefs: { position: "absolute", width: 0, height: 0, overflow: "hidden", pointerEvents: "none" },
   heldFrame: {
     position: "absolute",
     inset: 0,

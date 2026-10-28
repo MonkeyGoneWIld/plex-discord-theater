@@ -128,7 +128,7 @@ docker compose logs | grep 'playback engine'
 ```
 
 ```text
-[Config] playback engine: ffmpeg — ffmpeg version 8.1.3-Jellyfin …; copies H.264 and HEVC files itself, HDR included; re-encodes on Intel QSV (HEVC Main10 and H.264), tone mapping reinhard on OpenCL, subtitles burned in (text ones from their text, with their fonts); 512 MB of segments kept in memory; previews made for files Plex has none for; library at Plex's own paths
+[Config] playback engine: ffmpeg — ffmpeg version 8.1.3-Jellyfin …; copies H.264 and HEVC files itself, HDR included; re-encodes on Intel QSV (HEVC Main10 and H.264), tone mapping mobius on OpenCL, subtitles burned in (text ones from their text, with their fonts); 512 MB of segments kept in memory; previews made for files Plex has none for; library at Plex's own paths
 ```
 
 At startup it tries a short HEVC Main10 encode and a short H.264 encode on the
@@ -238,21 +238,33 @@ and `FFMPEG_PREVIEWS_MAX_GB` (20 by default) bounds the folder.
 
 | Stream | HDR |
 |---|---|
-| Copy | Kept, untouched, as in Plex mode |
-| Re-encode for a player that decodes HEVC | Kept: HDR10, in HEVC Main10, never AV1. `FFMPEG_HDR_REENCODE=tonemap` maps it to SDR instead, as Plex does. |
+| Copy, for a screen that shows HDR | Kept, untouched, as in Plex mode |
+| Re-encode for a player that decodes HEVC, on a screen that shows HDR | Kept: HDR10, in HEVC Main10, never AV1. `FFMPEG_HDR_REENCODE=tonemap` maps it to SDR instead, as Plex does. |
+| A player that decodes HEVC, on a screen in SDR | Mapped to SDR from the film's 10 bits, into HEVC Main10 |
 | H.264 (a player that can't decode HEVC, such as Discord in Firefox) | Mapped to SDR |
 | A subtitle burned in | Mapped to SDR, so the subtitle isn't blinding |
 | Dolby Vision 5 | Mapped to SDR, with its metadata applied |
+| Dolby Vision 8.2 and 10.2 | SDR underneath, played as SDR |
 
-The curve used for SDR is `FFMPEG_TONEMAP`, `reinhard` by default, the closest
-to Plex's.
+The curve used for SDR is `FFMPEG_TONEMAP`, `mobius` by default (at 0.5).
+Measured on the same frames against Plex's app for Windows, it is the closest;
+`reinhard` lifts the darks more and dims the whites.
 
 On a screen in SDR (Windows runs an HDR monitor in SDR unless HDR is switched
 on), Chrome shows HDR with its reference white at half the screen's light,
-about a stop darker than the film's SDR grade. The player lights an HDR stream
-there, copy or re-encode, on either engine, as the SDR grade would be: Stats
-for nerds says "lit for this SDR screen" on the Range line. A screen showing
-HDR gets the stream as it is.
+about a stop darker than the film's SDR grade. Brightening that 8-bit picture
+in the player broke dark scenes into blocks and bands (Endgame at 32:00), so
+the server maps HDR to SDR instead, from the film's 10 bits, as Plex does. Each
+player says on joining whether its screen shows HDR. A viewer whose screen
+doesn't gets a stream of their own, mapped, and nobody else's stream changes.
+In Plex mode Plex is asked for H.264 mapped to SDR, as Plex's own web player
+does on a screen in SDR. Stats for nerds shows the stream's range on the Range
+line, in amber when HDR reaches a screen in SDR.
+
+A screen that leaves HDR mid-film moves its viewer onto a mapped stream; one
+that comes back to HDR is sent HDR again after rejoining. A viewer whose screen
+shows HDR, in a room whose host's doesn't, shares the host's mapped stream when
+both decode HEVC.
 
 ## Plex's dashboard, Tautulli and Tracearr
 
@@ -369,7 +381,7 @@ going to Plex, and the error says why. For testing.
 ### `FFMPEG_HDR_REENCODE` · `FFMPEG_TONEMAP`
 
 `keep` (the default) or `tonemap`. See [HDR](#hdr). `FFMPEG_TONEMAP` is the
-curve: `reinhard` (default), `mobius`, `hable`, `bt2390`, `linear`, `gamma` or
+curve: `mobius` (default), `reinhard`, `hable`, `bt2390`, `linear`, `gamma` or
 `clip`.
 
 ### `FFMPEG_REPORT_TO_PLEX`

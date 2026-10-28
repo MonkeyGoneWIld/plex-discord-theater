@@ -300,8 +300,8 @@ covers the setup and how to check it.
 | `FFMPEG_PREVIEWS_MAX_GB` | 20 | Room for those previews; the least recently used go past it |
 | `FFMPEG_SEGMENT_MEMORY_MB` | 512 | Memory for the segments rooms are fetching now; `0` reads them from disk |
 | `FFMPEG_FALLBACK_TO_PLEX` | on | `off`: a stream ffmpeg can't make fails to start instead of going to Plex |
-| `FFMPEG_HDR_REENCODE` | `keep` | `keep`: re-encodes for HEVC players stay HDR, in HEVC Main10; on a screen in SDR the player lights them. `tonemap`: always mapped to SDR |
-| `FFMPEG_TONEMAP` | `reinhard` | The curve for streams mapped to SDR: `reinhard`, `mobius`, `hable`, `bt2390`, `linear`, `gamma` or `clip` |
+| `FFMPEG_HDR_REENCODE` | `keep` | `keep`: HDR stays HDR, copied or in HEVC Main10, for HEVC players on screens that show HDR; for a screen in SDR the server maps it to SDR from the film's 10 bits, that viewer on a stream of their own. `tonemap`: re-encodes always mapped to SDR |
+| `FFMPEG_TONEMAP` | `mobius` | The curve for streams mapped to SDR: `mobius` (at 0.5, close to Plex's app for Windows), `reinhard`, `hable`, `bt2390`, `linear`, `gamma` or `clip` |
 | `FFMPEG_REPORT_TO_PLEX` | on | Show ffmpeg's streams in Plex's dashboard, Tautulli and Tracearr. `0` turns it off |
 | `FFMPEG_PATH` | the image's ffmpeg | Another ffmpeg, for running from source |
 | `FFPROBE_PATH` | the ffprobe beside ffmpeg | Its ffprobe |

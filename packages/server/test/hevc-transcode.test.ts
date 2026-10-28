@@ -20,6 +20,7 @@ process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "hevc-transc
 const { attachWebSocketServer, closeWebSocketServer, mayStart, mayStartHevc, sessionHostUserId } = await import("../src/services/sync.js");
 const {
   recordSessionVideoCodec, recordHevcWithheld, isHevcSession, recordSessionAudioNeeds, recordWithheld, sessionNeeds,
+  recordSessionHdr,
 } = await import("../src/routes/plex.js");
 const { transcodeFrame } = await import("../src/services/media-versions.js");
 const { createSession } = await import("../src/middleware/auth.js");
@@ -336,14 +337,14 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
 {
   newRoom("caps-1");
   const all = { av1: true, opus: true, flac: true, av1Encode: true };
-  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, av1Encode: false, hdrScreen: false };
+  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, av1Encode: false };
   const host = await join("caps-1", "u-host", "host", true, all);
   const a = await join("caps-1", "u-a", "a", true, all);
   check("what a player decodes, a stream it starts may use", mayStart("u-host"),
-    { hevc: true, av1: true, opus: true, flac: true, ac3: false, eac3: false, av1Encode: true, hdrScreen: false });
-  const phone = await join("caps-1", "u-p", "p", false, { opus: true, av1Encode: true, hdrScreen: true });
+    { hevc: true, av1: true, opus: true, flac: true, ac3: false, eac3: false, hdr: false, av1Encode: true });
+  const phone = await join("caps-1", "u-p", "p", false, { opus: true, av1Encode: true, hdr: true });
   check("each player's own, AV1 on the GPU only with AV1 at all, HDR kept for a screen showing it", mayStart("u-p"),
-    { ...none, opus: true, hdrScreen: true });
+    { ...none, opus: true, hdr: true });
   check("leaving the others' alone", mayStart("u-a").av1, true);
   check("somebody in no room gets H.264 and AAC", mayStart("u-nobody"), none);
   phone.close();
@@ -418,6 +419,49 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
   const b = await join("caps-2", "u-b", "b", true, {});
   await sleep(60);
   check("one who doesn't follows the host's", b.seen.find((m) => m.type === "state")?.variant?.hlsSessionId, sid);
+  [host, a, b].forEach((x) => x.close());
+}
+
+{
+  // An HDR picture copied only for a screen that shows it. Everyone else gets
+  // the server's tone mapping, on the twin: Chrome's own mapping on a screen in
+  // SDR is dark, and lifting it in the page broke dark scenes into blocks
+  // (Endgame at 32:00, run 28).
+  newRoom("caps-3");
+  const host = await join("caps-3", "u-host", "host", true, { hdr: true });
+  const a = await join("caps-3", "u-a", "a", true, { hdr: true });
+  check("a screen that shows HDR may be sent it", mayStart("u-host").hdr, true);
+  const sid = crypto.randomUUID();
+  recordSessionVideoCodec(sid, "hevc");
+  recordSessionHdr(sid, true);
+  check("an HDR copy needs HEVC and a screen that shows HDR", sessionNeeds(sid), ["hevc", "hdr"]);
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: sid, position: 0, sessionOffset: 0, audioStreamId: 1, subtitleStreamId: 0,
+  });
+  await sleep(60);
+  [host, a].forEach((c) => c.clear());
+  const b = await join("caps-3", "u-b", "b", true, {});
+  await sleep(60);
+  const bState = b.seen.find((m) => m.type === "state")?.variant;
+  check("someone whose screen is in SDR lands on a stream of their own to bring up",
+    [bState?.variantKey, bState?.isOwner, bState?.hlsSessionId], ["1:0/h264", true, null]);
+  check("tone-mapped on the server", mayStart("u-b").hdr, false);
+  check("the host's stream is left as it is", [host.toldToRebuild(), a.seen.filter((m) => m.type === "variant").length], [false, 0]);
+  a.send({ type: "caps", hdr: false });
+  await sleep(60);
+  check("a screen that leaves HDR moves its viewer onto the twin",
+    a.seen.filter((m) => m.type === "variant").at(-1)?.variantKey, "1:0/h264");
+  a.send({ type: "caps", hdr: true });
+  await sleep(60);
+  check("and coming back doesn't bring HDR back before they join again", mayStart("u-a").hdr, false);
+  // An SDR stream made for a host whose screen is in SDR: needs HEVC, not
+  // HDR, so a viewer whose screen shows HDR shares it — SDR. No player has
+  // said its screen shows HDR yet (October's logs), so no third stream for it.
+  const sdrSid = crypto.randomUUID();
+  recordSessionVideoCodec(sdrSid, "hevc");
+  recordSessionHdr(sdrSid, false);
+  check("a tone-mapped HEVC stream needs HEVC only", sessionNeeds(sdrSid), ["hevc"]);
   [host, a, b].forEach((x) => x.close());
 }
 

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { getSessionToken } from "../lib/api";
-import { playerCaps, type Cap } from "../lib/codecs";
+import { hdrScreenQuery, playerCaps, type Cap } from "../lib/codecs";
 import { preferredQuality } from "../lib/quality";
 
 const MAX_RECONNECT_ATTEMPTS = 20;
@@ -679,6 +679,22 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
     [send],
   );
 
+  // A screen that stops showing HDR — HDR switched off, or the window taken
+  // to a screen in SDR — takes back "hdr", which moves this player onto a
+  // stream the server tone-mapped for it (codecs.ts Caps.hdr). Coming the
+  // other way it stays where it is: SDR shows as it should on any screen, and
+  // the room is told on joining again.
+  useEffect(() => {
+    if (!enabled) return;
+    const screen = hdrScreenQuery();
+    if (!screen) return;
+    const onChange = () => {
+      if (!screen.matches) send({ type: "caps", hdr: false });
+    };
+    screen.addEventListener?.("change", onChange);
+    return () => screen.removeEventListener?.("change", onChange);
+  }, [enabled, send]);
+
   useEffect(() => {
     let active = true;
 
@@ -704,7 +720,8 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             userId,
             username: usernameRef.current,
             // What this player may be sent beyond H.264 and AAC — see the
-            // server's mayStart: hevc, av1, opus, flac and av1Encode.
+            // server's mayStart: hevc, av1, opus, flac, ac3, eac3, hdr and
+            // av1Encode.
             ...playerCaps(),
           }),
         );

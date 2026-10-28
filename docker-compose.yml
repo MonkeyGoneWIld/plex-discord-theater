@@ -104,8 +104,12 @@ services:
       - FFMPEG_SEGMENT_MEMORY_MB=${FFMPEG_SEGMENT_MEMORY_MB:-}
       # off = a stream ffmpeg can't make fails, rather than going to Plex.
       - FFMPEG_FALLBACK_TO_PLEX=${FFMPEG_FALLBACK_TO_PLEX:-}
+      # With plex, AV1 files are still made here (Plex can't copy them, and
+      # its re-encode can come out as purple boxes); off = Plex's too.
+      - FFMPEG_FOR_AV1=${FFMPEG_FOR_AV1:-}
       # keep (the default): a re-encode for an HEVC player stays HDR, as the
-      # copy is. tonemap maps it to SDR, as Plex does. FFMPEG_TONEMAP is the
+      # copy is, on a screen showing HDR; on a screen in SDR it is mapped here,
+      # as Plex does. tonemap maps every one to SDR. FFMPEG_TONEMAP is the
       # curve for streams that are mapped: reinhard (default), mobius, hable,
       # bt2390, linear, gamma or clip.
       - FFMPEG_HDR_REENCODE=${FFMPEG_HDR_REENCODE:-}

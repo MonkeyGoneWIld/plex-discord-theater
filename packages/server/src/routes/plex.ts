@@ -54,7 +54,7 @@ import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
 import { markOriginalAudio } from "../services/original-language.js";
 import { audioNotes, type AudioDecision, type SourceAudio } from "../services/stream-audio.js";
 import {
-  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegHardware, ffmpegPgsOn, ffmpegPreviewsOn, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesAv1, gpuEncodesAv1Hdr, gpuEncodesHevc, hwDevice,
+  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegForAv1, ffmpegHardware, ffmpegPgsOn, ffmpegPreviewsOn, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesAv1, gpuEncodesAv1Hdr, gpuEncodesHevc, hwDevice,
   keepHdrOnReencode, localPath, lowPowerVaapi, lowPowerVaapiAv1, maxEncodes, readable, recheckHardware, sizeOnDisk, styledSubtitlesOn, tonemapAlgo, tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
@@ -4904,6 +4904,36 @@ setInterval(() => {
  * a request that is about to make two more. Falls back to Plex's own first file
  * if the lookup fails, which is the behaviour from before versions existed.
  */
+/**
+ * The file a track belongs to, by its stream id, or null when no file of the
+ * item has any of these. Stream ids belong to one file, so a request that names
+ * its tracks names its file too.
+ *
+ * Only a host that chose a copy on the title's page sends the copy. One that
+ * took a stream over — a window popped out of Discord, a viewer promoted —
+ * sends the room's tracks and nothing else, so its next stream (a track
+ * change, a restart) started on the default copy: Endgame on 28 October went
+ * from the 4K copy to the 1080p one with the 4K copy's audio id, and lost its
+ * subtitle. 0 names nothing (the default audio, or no subtitle).
+ */
+async function mediaIndexHolding(ratingKey: string, streamIds: unknown[]): Promise<number | null> {
+  const ids = streamIds.map(Number).filter((id) => Number.isInteger(id) && id > 0);
+  if (!ids.length) return null;
+  try {
+    const meta = await buildMeta(ratingKey);
+    const versions = meta?.versions as Array<{
+      mediaIndex?: number;
+      audioTracks?: Array<{ id: number }>;
+      subtitleTracks?: Array<{ id: number }>;
+    }> | undefined;
+    const holding = versions?.find((v) =>
+      [...(v.audioTracks ?? []), ...(v.subtitleTracks ?? [])].some((t) => ids.includes(t.id)));
+    return holding?.mediaIndex ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function defaultMediaIndex(ratingKey: string): Promise<number> {
   try {
     const meta = await buildMeta(ratingKey);
@@ -5156,8 +5186,9 @@ async function startWithFfmpeg(o: {
   mediaIndex: number;
   offsetS: number;
   audioStreamID: number | null;
-  /** What the driver's player decodes beyond H.264 and AAC (sync.ts mayStart). */
-  caps: PlayerCaps & { av1Encode: boolean };
+  /** What the driver's player decodes beyond H.264 and AAC, and whether its
+   *  screen shows HDR (sync.ts mayStart). */
+  caps: StartCaps;
   quality: number;
   fileKbps: number | null;
   audioTracks: SourceAudio[];
@@ -5325,6 +5356,7 @@ async function startWithFfmpeg(o: {
       av1Ok: AV1_TRANSCODE && o.caps.av1Encode && gpuEncodesAv1() && sessionWithheld(o.sessionId).length === 0,
       av1HdrOk: gpuEncodesAv1Hdr(), av1LowPower: lowPowerVaapiAv1(),
       kbps: o.transcodeKbps, peakKbps: o.peakKbps, maxWidth, maxHeight, keepHdr: keepHdrOnReencode(),
+      hdrScreen: !!o.caps.hdrScreen,
       tonemapper: tonemapper(), tonemapAlgo: tonemapAlgo(), burn: o.burnSubtitleId ?? null,
       audioChannels: audioChannels(), opusOk: o.caps.opus, preset: encodePreset(), lowPower: lowPowerVaapi(),
       gpuDecode: gpuDecodeOn() ? undefined : false, ...burnFiles,
@@ -5376,6 +5408,8 @@ async function startWithFfmpeg(o: {
       hdr: plan.hdrTrc ? `${plan.hdr} kept`
         : plan.tonemap ? `${plan.hdr} → SDR, ${plan.tonemap.algo} on ${plan.tonemap.via}${plan.tonemap.dovi ? " with its Dolby Vision" : ""}`
         : plan.hdr,
+      // Whether the driver's screen showed HDR, which decides whether HDR is kept.
+      ...(plan.hdr !== "SDR" ? { screen: o.caps.hdrScreen ? "HDR" : "SDR" } : {}),
       on: plan.hardware, preset: plan.preset ?? "default", decode: plan.gpuDecode ? "gpu" : "cpu",
       deinterlace: plan.interlaced, filled: plan.color.fill ?? "none",
       burn: plan.burn
@@ -5457,9 +5491,10 @@ let replacedStreams: typeof streamsDrivenBy = streamsDrivenBy;
 export function replaceStreamsForTests(streams: typeof streamsDrivenBy): void {
   replacedStreams = streams;
 }
-type StartCaps = PlayerCaps & { av1Encode: boolean };
+type StartCaps = PlayerCaps & { av1Encode: boolean; hdrScreen?: boolean };
 /** What a start may use beyond H.264 and AAC — mayStart, unless a test says otherwise. */
-let startCaps = (userId: string | null): StartCaps => userId !== null ? mayStart(userId) : { ...NO_CAPS, av1Encode: false };
+let startCaps = (userId: string | null): StartCaps => userId !== null ? mayStart(userId)
+  : { ...NO_CAPS, av1Encode: false, hdrScreen: false };
 /** For the tests, which have no room: what the player starting a stream decodes. */
 export function capsForTests(caps: StartCaps): void {
   startCaps = () => ({ ...caps });
@@ -5502,7 +5537,8 @@ router.get(
 
     // Which of the item's files to play, in order of who knows best: the client
     // that chose it (the host's detail page, on its first request), then this
-    // session's remembered answer, then the item's own default.
+    // session's remembered answer, then the file the requested tracks belong
+    // to, then the item's own default.
     //
     // That last fallback is not a formality. Every route into playback except
     // the detail page — the queue, auto-advance to the next episode, a viewer
@@ -5513,7 +5549,9 @@ router.get(
     const requestedMedia = Number(req.query.mediaIndex);
     const mediaIndex = Number.isInteger(requestedMedia) && requestedMedia >= 0
       ? requestedMedia
-      : sessionMediaIndex.get(sessionId) ?? (await defaultMediaIndex(ratingKey));
+      : sessionMediaIndex.get(sessionId)
+        ?? (await mediaIndexHolding(ratingKey, [req.query.audioStreamID, req.query.subtitleStreamID]))
+        ?? (await defaultMediaIndex(ratingKey));
     sessionMediaIndex.set(sessionId, mediaIndex);
 
     // Reuse the running transcode for this session rather than starting a new one.
@@ -5993,9 +6031,12 @@ router.get(
       // copied or re-encoded, a subtitle burned in — and Plex isn't asked for
       // anything. Whatever ffmpeg can't make, or won't start, is Plex's, as
       // before, with the reason in Stats for nerds — or, with
-      // FFMPEG_FALLBACK_TO_PLEX=off, fails to start.
+      // FFMPEG_FALLBACK_TO_PLEX=off, fails to start. An AV1 file's are made
+      // here with Plex making the rest, too (config.ts ffmpegForAv1): Plex's
+      // own re-encode of one was purple boxes.
       let fallback: string | null = null;
-      if (ffmpegEngineOn()) {
+      const av1ByFfmpeg = !ffmpegEngineOn() && version?.videoCodec?.toLowerCase() === "av1" && ffmpegForAv1();
+      if (ffmpegEngineOn() || av1ByFfmpeg) {
         const tried = ffmpegRefused(ratingKey)
           ? { fallback: "ffmpeg failed on this title lately" }
           : await startWithFfmpeg({
@@ -6008,7 +6049,7 @@ router.get(
               replaces: replacedStreams(userId, ratingKey).filter((id) => id !== sessionId),
             });
         if ("manifest" in tried) return tried.manifest;
-        if (!fallbackToPlex()) {
+        if (!av1ByFfmpeg && !fallbackToPlex()) {
           throw new Error(`ffmpeg couldn't make this stream, and FFMPEG_FALLBACK_TO_PLEX is off: ${tried.fallback}`);
         }
         fallback = tried.fallback;

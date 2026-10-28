@@ -5,7 +5,7 @@
  * bot.
  */
 import { selectStreams } from "../src/lib/selectStreams";
-import { versionOf, type PlexMeta, type StreamTrack } from "../src/lib/api";
+import { mediaIndexHolding, versionOf, type PlexMeta, type StreamTrack } from "../src/lib/api";
 
 let pass = 0;
 let fail = 0;
@@ -87,6 +87,28 @@ console.log("\n— Plex can't be reached —");
   bot(b);
   const err = await selectStreams("5", versionOf(old), { audioStreamID: 1, subtitleStreamID: 0 }).then(() => null, (e: Error) => e.message);
   check("the refusal is what's thrown, after one try at fresh details", [err, b.asked.length], ["Failed to set streams", 2]);
+}
+
+console.log("\n— which file a track belongs to —");
+{
+  // Endgame as it was on 28 October: the 1080p copy first, the 4K copy second,
+  // each with its own ids. A window popped out knew the room's audio track and
+  // nothing else.
+  const twoCopies = {
+    ratingKey: "20218", title: "Avengers: Endgame", partId: 74920,
+    versions: [
+      { mediaIndex: 1, partId: 74920, label: "1080p", resolution: "1080p", previewThumbs: true,
+        audioTracks: [track(389100, "English (EAC3 5.1)", "eac3")], subtitleTracks: [track(389101, "English (SRT)", "srt")] },
+      { mediaIndex: 0, partId: 87296, label: "4K", resolution: "4K", previewThumbs: true,
+        audioTracks: [track(389200, "English (TRUEHD 7.1)", "truehd")], subtitleTracks: [track(389202, "English (PGS)", "pgs")] },
+    ],
+  } as unknown as PlexMeta;
+  check("the room's audio names the 4K copy", mediaIndexHolding(twoCopies, 389200, 0), 0);
+  check("and its preview frames are that copy's", versionOf(twoCopies, mediaIndexHolding(twoCopies, 389200)).partId, 87296);
+  check("a subtitle names its copy too", mediaIndexHolding(twoCopies, 0, 389101), 1);
+  check("0 names nothing", mediaIndexHolding(twoCopies, 0, 0), undefined);
+  check("nor does a track of another title", mediaIndexHolding(twoCopies, 5), undefined);
+  check("nor anything on a title with one file", mediaIndexHolding(old, 1), undefined);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

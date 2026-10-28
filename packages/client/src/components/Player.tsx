@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, type CSSProperties, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback, type CSSProperties, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
 import Hls from "hls.js";
 import { HlsJsP2PEngine } from "p2p-media-loader-hlsjs";
@@ -17,7 +17,7 @@ import { PictureSubtitleLayer } from "./PictureSubtitleLayer";
 import { StyledSubtitleLayer } from "./StyledSubtitleLayer";
 import { SubtitleSettings } from "./SubtitleOffset";
 import { ZoomPanel } from "./ZoomPanel";
-import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchPlayedThreshold, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion } from "../lib/api";
+import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchPlayedThreshold, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion, mediaIndexHolding } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { capsUsed, markUnplayable, type Cap } from "../lib/codecs";
@@ -35,7 +35,7 @@ import {
   usePreferredQuality,
 } from "../lib/quality";
 import { readStreamNotes, type StreamNotes } from "../lib/streamNotes";
-import { getLevel, setLevel, MAX_LEVEL } from "../lib/audioBoost";
+import { getLevel, setLevel, MAX_LEVEL, routeOf, keepBoostRunning } from "../lib/audioBoost";
 import { carryTrackPrefs, describeWatched, endTrackSitting, isCommentary, mergeTrackPrefs, saveTrackPrefs, startingAudioPref, startingSubtitlePref, titleTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
@@ -1936,11 +1936,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // The live session, in state as well as in a ref — the ref is for the
   // listeners, this is what the version lookup below keys on.
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  // The file the session is actually playing, per the server. Only consulted
-  // when this client wasn't the one that chose it, which is everyone except the
-  // host who pressed Play — a co-host, a viewer, and a host who was promoted
-  // into a stream already running.
-  const [sessionMediaIndex, setSessionMediaIndex] = useState<number | null>(null);
+  // The file the session is actually playing, per the server, with the session
+  // and title it answers for. Only consulted when this client wasn't the one
+  // that chose it, which is everyone except the host who pressed Play — a
+  // co-host, a viewer, and a host who was promoted into a stream already
+  // running, or a window popped out of Discord.
+  const [sessionVersion, setSessionVersion] = useState<{ sessionId: string; ratingKey: string; index: number | null } | null>(null);
   const [recovering, setRecovering] = useState(false);
   // Every automatic recovery has been spent and the session is torn down: the
   // only ways forward are the manual Retry button or leaving.
@@ -2121,6 +2122,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const hostCatchUpShortSaidRef = useRef(false);
   /** Frames shown and dropped at the last health sample — see there. */
   const frameCountRef = useRef<{ shown: number; dropped: number; at: number } | null>(null);
+  /** Sound decoded by the last health sample, and where the clock was — see there. */
+  const audioDecodedRef = useRef<{ bytes: number; at: number } | null>(null);
+  /** Whether the stream playing has sound at all, from the codecs in its segments. */
+  const streamHasAudioRef = useRef(false);
+  /** Rebuilds this stream has had for playing without sound — see the health sample. */
+  const silentRebuildsRef = useRef(0);
   /** Whether a seek sent from here holds this player until the room says it
    *  runs: only while the room is playing, which is when it answers one. */
   const holdsForSeek = useCallback(
@@ -3173,6 +3180,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       return;
     }
     if (hostHeldRef.current) {
+      // Not the stream a skip is about to replace: what it would play is from
+      // before the skip, and its `playing` let go of the bar's hold on where
+      // the skip goes. On 28 October, Deadpool on the Plex engine played on
+      // from 3:35 for a moment after a skip to 1:00:20, and the bar then sat
+      // at 0:00 for the four seconds the new stream took. The new one plays
+      // when the room runs again, on the next tick after its manifest.
+      if (restartTimerRef.current !== null || isRestartPending()) return;
       hostHeldRef.current = false;
       if (v.paused) {
         logEvent("Sync", "the room runs, playing", snapshot(v));
@@ -3685,19 +3699,58 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * that manifest has parsed, so the answer is always already there.
    */
   useEffect(() => {
-    setSessionMediaIndex(null);
     if (!activeSessionId) return;
     let cancelled = false;
-    fetchSessionVersion(activeSessionId)
-      .then((r) => { if (!cancelled) setSessionMediaIndex(r.mediaIndex); })
-      .catch(() => { /* falls back to the item's default, which is usually right */ });
+    const sessionId = activeSessionId;
+    const ratingKey = item.ratingKey;
+    // No answer still settles the question for this session, on what was known
+    // before: a restart or a track change plays the same file as the stream it
+    // replaced.
+    const settle = (index: number | null) => setSessionVersion((was) => ({
+      sessionId,
+      ratingKey,
+      index: index ?? (was?.ratingKey === ratingKey ? was.index : null),
+    }));
+    fetchSessionVersion(sessionId)
+      .then((r) => { if (!cancelled) settle(r.mediaIndex); })
+      .catch(() => { if (!cancelled) settle(null); });
     return () => { cancelled = true; };
   }, [activeSessionId]);
 
-  // What this client believes is playing: its own choice if it made one,
-  // otherwise the session's. Undefined resolves to the item's default, which is
-  // the same file the server starts when nobody has said otherwise.
-  const effectiveMediaIndex = mediaIndex ?? sessionMediaIndex ?? undefined;
+  /**
+   * The file the room's stream plays, read off its tracks.
+   *
+   * Stream ids belong to one file, so the audio track the room is on names its
+   * file — and that is known the moment the assignment arrives, where the
+   * lookup above is a round trip later. Windows popped out of Discord asked for
+   * the default copy's preview frames in that gap (Project Hail Mary and
+   * Endgame on 28 October), then for the right ones.
+   */
+  const variantMediaIndex = useMemo(() => {
+    if (!itemMeta || itemMeta.ratingKey !== item.ratingKey) return undefined;
+    if (!variant || variant.ratingKey !== item.ratingKey) return undefined;
+    return mediaIndexHolding(itemMeta, variant.audioStreamId, variant.burnedSubtitleId);
+  }, [itemMeta, item.ratingKey, variant?.ratingKey, variant?.audioStreamId, variant?.burnedSubtitleId]);
+
+  // What this client believes is playing: its own choice if it made one;
+  // otherwise the server's answer for this stream; otherwise the file the
+  // room's tracks belong to; otherwise the last answer for this title. Undefined
+  // resolves to the item's default, which is the same file the server starts
+  // when nobody has said otherwise.
+  const knownVersion = sessionVersion?.ratingKey === item.ratingKey ? sessionVersion : null;
+  const sessionAnswered = !!activeSessionId && knownVersion?.sessionId === activeSessionId;
+  const effectiveMediaIndex = mediaIndex
+    ?? (sessionAnswered ? knownVersion?.index : null)
+    ?? variantMediaIndex
+    ?? knownVersion?.index
+    ?? undefined;
+  // Whether that is an answer or only the default for want of one. Preview
+  // frames wait for an answer rather than download a file nobody is watching.
+  const versionSettled = mediaIndex != null || variantMediaIndex != null || !activeSessionId || sessionAnswered;
+  // For the HLS effect, which must not re-run on it: the file a new stream of
+  // this title is for when this client never chose one — see urlFor.
+  const effectiveMediaIndexRef = useRef({ ratingKey: item.ratingKey, index: effectiveMediaIndex });
+  effectiveMediaIndexRef.current = { ratingKey: item.ratingKey, index: effectiveMediaIndex };
 
   /**
    * The subtitle this client is on, and whether it is one we draw ourselves.
@@ -4054,7 +4107,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * who didn't press Play.
    */
   useEffect(() => {
-    if (!itemMeta) return;
+    if (!itemMeta || !versionSettled) return;
     const version = versionOf(itemMeta, effectiveMediaIndex);
     // Null unless Plex actually has preview frames, so Controls renders a
     // plain timestamp rather than chasing images that don't exist.
@@ -4071,7 +4124,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       currentSubtitleStreamRef.current =
         version.subtitleTracks?.find((t) => t.selected)?.id ?? 0;
     }
-  }, [itemMeta, effectiveMediaIndex]);
+  }, [itemMeta, effectiveMediaIndex, versionSettled]);
 
   // Resolve the next episode in the series. Same effect discipline as markers
   // above: its own effect (so retryKey restarts don't blank it) keyed on
@@ -4372,7 +4425,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       subtitleStreamId: burned,
       // Only the client that owns the session chose a file; a viewer sending its
       // own idea of one would restart the host's transcode on a different track.
-      mediaIndex: sessionOwner ? mediaIndexRef.current : undefined,
+      // An owner that never chose one — a window popped out, a viewer promoted
+      // — sends the file it took over, or its next stream (a track change, a
+      // restart) started on the default copy: Endgame on 28 October went from
+      // the 4K copy to the 1080p one, with the 4K copy's audio id, and lost its
+      // subtitle on the way.
+      mediaIndex: sessionOwner
+        ? mediaIndexRef.current
+          ?? (effectiveMediaIndexRef.current.ratingKey === item.ratingKey ? effectiveMediaIndexRef.current.index : undefined)
+        : undefined,
     });
 
     async function start() {
@@ -4914,9 +4975,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // or Plex's declares them. An fMP4 stream's sound and picture come as
         // one track ("audiovideo"), its codecs joined.
         let streamCaps: Cap[] = [];
+        streamHasAudioRef.current = false;
+        silentRebuildsRef.current = 0;
+        audioDecodedRef.current = null;
         hls.on(Hls.Events.BUFFER_CODECS, (_e, data) => {
           const { video, audio } = splitCodecs(data as Parameters<typeof splitCodecs>[0]);
           streamCaps = capsUsed(video, audio);
+          streamHasAudioRef.current = !!audio;
         });
 
         // Copied or re-encoded, and how far a copied stream's playlist reaches.
@@ -5824,6 +5889,31 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             // which rebuild the pipeline instead of nudging the same broken one.
           }
 
+          // A manifest that never arrived. startLoad() has nothing to restart —
+          // it resumes loading the levels a parsed manifest listed, and there
+          // are none — so this spun for good: Project Hail Mary, popped out on
+          // 28 October, lost its first request to "Failed to fetch" and nothing
+          // ever asked again. Ask again, a little later each time; past the
+          // budget, the paths below rebuild the stream.
+          const manifestMissing = data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR
+            || data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT
+            || data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR;
+          if (manifestMissing && networkRetryRef.current < MAX_NETWORK_RETRIES) {
+            networkRetryRef.current++;
+            const inMs = Math.min(4000, 500 * 2 ** (networkRetryRef.current - 1));
+            logWarn("HLS", "the stream's manifest didn't load, asking again", {
+              attempt: networkRetryRef.current,
+              max: MAX_NETWORK_RETRIES,
+              details: data.details,
+              httpStatus: data.response?.code,
+              inMs,
+            });
+            setTimeout(() => {
+              if (mounted && hlsRef.current === hls) hls.loadSource(url);
+            }, inMs);
+            return;
+          }
+
           // NETWORK_ERROR: try hls.startLoad() first (transient failures)
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRetryRef.current < MAX_NETWORK_RETRIES) {
             networkRetryRef.current++;
@@ -6060,8 +6150,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           if (movedOn) caughtUpAtRef.current = Date.now();
           else setBuffering(false);
           // Frames are moving again, so the element's own clock is the truth
-          // once more and the bar can stop holding the seek target.
-          setRestartingTo(null);
+          // once more and the bar can stop holding the seek target — unless
+          // they are the old stream's, a skip's rebuild still to come: the
+          // bar held at 0:00 through it on 28 October (see steerHost).
+          if (restartTimerRef.current === null && !isRestartPending()) setRestartingTo(null);
           setHoldingFrame(false);
         };
         /**
@@ -6131,7 +6223,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           // Landed, with a picture: the bar can go by the element again, as
           // it does on `playing` — which a skip inside the buffer that never
           // stopped playing doesn't send.
-          if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && isPositionBuffered(video, video.currentTime)) {
+          if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && isPositionBuffered(video, video.currentTime) &&
+              restartTimerRef.current === null && !isRestartPending()) {
             setRestartingTo(null);
           }
         };
@@ -6302,6 +6395,40 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             frames.shown - lastFrames.shown < 2 * (frames.at - lastFrames.at)) {
           logWarn("Video", "the picture hardly moved while the time ran on", { ...frameDeltas, ...snapshot(v) });
         }
+        /**
+         * Sound decoded since the last sample, against how far the clock moved.
+         *
+         * Parasite on 28 October played its picture with no sound after a
+         * skip, and nothing in the log could say so: the clock ran, frames
+         * came, and the browser raised nothing. Chrome counts the sound it
+         * decodes; a stream with sound that decodes none while seconds play is
+         * silent for whoever is watching. A boost whose context has stopped is
+         * started again — silence too, whether or not sound is still decoded
+         * underneath it; otherwise the stream is rebuilt where it is, twice at
+         * most, which costs a second and brings the sound back.
+         */
+        const decoded = (v as HTMLVideoElement & { webkitAudioDecodedByteCount?: number }).webkitAudioDecodedByteCount;
+        const lastDecoded = audioDecodedRef.current;
+        audioDecodedRef.current = typeof decoded === "number" ? { bytes: decoded, at: v.currentTime } : null;
+        const audioDelta = typeof decoded === "number" && lastDecoded && decoded >= lastDecoded.bytes
+          ? { audioKB: Math.round((decoded - lastDecoded.bytes) / 1024), audioPlayedS: Number((v.currentTime - lastDecoded.at).toFixed(1)) }
+          : null;
+        const meantToBeHeard = !v.paused && !v.muted && getLevel(v) > 0 && streamHasAudioRef.current;
+        if (meantToBeHeard && keepBoostRunning(v)) {
+          // Said by keepBoostRunning.
+        } else if (meantToBeHeard && audioDelta && audioDelta.audioKB === 0 &&
+            audioDelta.audioPlayedS >= 5 && audioDelta.audioPlayedS <= 12) {
+          const route = routeOf(v);
+          if (activeHls && silentRebuildsRef.current < 2) {
+            silentRebuildsRef.current++;
+            logWarn("Audio", "no sound decoded while the picture played, rebuilding where it is", {
+              ...audioDelta, ...route, attempt: silentRebuildsRef.current, ...snapshot(v),
+            });
+            activeHls.recoverMediaError();
+          } else {
+            logWarn("Audio", "no sound decoded while the picture played", { ...audioDelta, ...route, ...snapshot(v) });
+          }
+        }
         const engine = engineStorageOf(hlsRef.current);
         logEvent("Health", "sample", {
           session: sessionIdRef.current?.substring(0, 8) ?? "none",
@@ -6322,6 +6449,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           ...(sync?.hostWaiting ? { roomWaiting: true } : {}),
           ...(amHost && hostHeldRef.current ? { heldForRoom: true } : {}),
           ...frameDeltas,
+          ...(audioDelta ?? {}),
+          ...routeOf(v),
           peers: stats.peers.size,
           p2pMB: stats.p2pBytes / 1e6,
           httpMB: stats.httpBytes / 1e6,

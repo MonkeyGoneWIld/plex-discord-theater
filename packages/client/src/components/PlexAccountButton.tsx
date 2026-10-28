@@ -145,7 +145,11 @@ export function PlexAccountButton({ compact = false, onHistoryChanged, onOpenExt
       setStatus({ linked: false, lastSyncAt: null, lastSyncError: null });
       setConfirmDisconnect(false);
       autoSyncStarted.current = false;
-      setMessage("Plex account disconnected. Local history was kept.");
+      // Done with, so the window goes. Left open, it turned into the sign-in
+      // screen under a line saying the account was gone, and read as Plex
+      // asking to be linked again.
+      setMessage(null);
+      setOpen(false);
       onHistoryChanged?.();
     } catch (err) {
       setMessage(err instanceof Error ? err.message : "Could not disconnect Plex");

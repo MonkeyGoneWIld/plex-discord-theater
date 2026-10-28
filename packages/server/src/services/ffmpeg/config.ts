@@ -101,6 +101,21 @@ export function ffmpegEngineOn(): boolean {
   return process.env.PLAYBACK_ENGINE?.trim().toLowerCase() === "ffmpeg" && found !== false;
 }
 
+/**
+ * With Plex making the streams (PLAYBACK_ENGINE unset), an AV1 file's are
+ * made here all the same — copied for a player that decodes AV1, re-encoded
+ * for one that doesn't — unless FFMPEG_FOR_AV1=off, or ffmpeg wasn't found at
+ * startup. Plex can't copy AV1 (its HLS is MPEG-TS), so it re-encodes every
+ * AV1 file, and on 28 October its re-encode of The 'Burbs (AV1 and Opus, on
+ * the 265K) came out as flickering purple boxes. This engine's copy of the
+ * same file played that night, and its re-encode on 21 October. Plex still
+ * makes whatever ffmpeg can't.
+ */
+export function ffmpegForAv1(): boolean {
+  return process.env.PLAYBACK_ENGINE?.trim().toLowerCase() !== "ffmpeg" && found !== false &&
+    !off(process.env.FFMPEG_FOR_AV1);
+}
+
 /** Whether ffmpeg runs, and its version line — for the [Config] line at startup. */
 export function checkFfmpeg(): Promise<{ ok: boolean; version: string | null; error: string | null }> {
   return new Promise((resolve) => {

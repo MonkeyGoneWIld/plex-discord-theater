@@ -688,6 +688,15 @@ export interface EncodeRequest {
   maxHeight: number;
   /** FFMPEG_HDR_REENCODE=keep: an HEVC re-encode of an HDR file stays HDR. */
   keepHdr: boolean;
+  /**
+   * The driver's screen is showing HDR now (the client's codecs.ts
+   * hdrScreen), so HDR is kept for it. A screen in SDR, as Windows runs
+   * them unless HDR is switched on, has the browser map HDR down itself, with
+   * SDR white at 203 nits — about a stop darker than Plex's mapping: Project
+   * Hail Mary's re-encode was dim in its dark scenes on 28 October. Mapped
+   * here instead, as Plex does. Unsaid (the tests): as keepHdr says.
+   */
+  hdrScreen?: boolean;
   /** What the GPU tone-maps with, as detectHardware found: OpenCL when it
    *  works there, else QSV's video engine. Unsaid, the video engine. */
   tonemapper?: Tonemapper;
@@ -828,13 +837,13 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
   const av1Out = !!req.av1Ok && req.hardware !== "software" && !burn;
   const hdr = hdrClass(video);
   const doviOnly = hdr === "DV P5" || hdr === "DV P10.0";
-  // HDR stays HDR (FFMPEG_HDR_REENCODE=keep) for a player that decodes HEVC:
-  // in AV1 10-bit where the stream is AV1 and the GPU makes 10 bits of it,
-  // else HEVC Main10. Otherwise it is mapped to SDR, in H.264 — Phase 0's
-  // tone-mapped chains, all into H.264 — on the GPU when it decodes the file,
-  // else on the CPU. A subtitle burned onto HDR would glare at full PQ
-  // brightness: that picture is tone-mapped too.
-  const keepHdr = hdr !== "SDR" && !doviOnly && hevcOut && req.keepHdr;
+  // HDR stays HDR (FFMPEG_HDR_REENCODE=keep) for a player that decodes HEVC
+  // and whose screen shows HDR (hdrScreen): in AV1 10-bit where the stream is
+  // AV1 and the GPU makes 10 bits of it, else HEVC Main10. Otherwise it is
+  // mapped to SDR, in AV1 or H.264 — on the GPU when it decodes the file, else
+  // on the CPU. A subtitle burned onto HDR would glare at full PQ brightness:
+  // that picture is tone-mapped too.
+  const keepHdr = hdr !== "SDR" && !doviOnly && hevcOut && req.keepHdr && req.hdrScreen !== false;
   let tonemap: { via: Tonemapper; algo: string; dovi: boolean } | null = null;
   if (hdr !== "SDR" && !keepHdr) {
     // QSV's video engine is QSV's own; VAAPI's GPU has OpenCL or nothing;

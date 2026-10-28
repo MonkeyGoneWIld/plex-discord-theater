@@ -245,6 +245,12 @@ interface RoomClient {
   /** Whether its player decodes AV1 on the GPU: a re-encode for it may be AV1. */
   av1Encode: boolean;
   /**
+   * Whether its screen is showing HDR now: a re-encode it drives keeps HDR
+   * (plan.ts hdrScreen), else is tone-mapped as Plex's are. Not a need:
+   * every player shows HDR, a screen in SDR only more darkly.
+   */
+  hdrScreen: boolean;
+  /**
    * Whether this client's player is short of picture — joining, back from a
    * pop-out, its picture stopped: under fifteen seconds in hand — and needs
    * the bot's upload more than a player well ahead does. See "loading".
@@ -808,8 +814,8 @@ export function streamsDrivenBy(userId: string | null, ratingKey: string): strin
  * the host as much as anybody (seatOf, sortByCaps). A user in no room gets
  * H.264 and AAC; there is nobody to ask.
  */
-export function mayStart(userId: string): PlayerCaps & { av1Encode: boolean } {
-  const may = { ...ALL_CAPS, av1Encode: true };
+export function mayStart(userId: string): PlayerCaps & { av1Encode: boolean; hdrScreen: boolean } {
+  const may = { ...ALL_CAPS, av1Encode: true, hdrScreen: true };
   let found = false;
   for (const room of rooms.values()) {
     for (const c of room.clients) {
@@ -818,9 +824,10 @@ export function mayStart(userId: string): PlayerCaps & { av1Encode: boolean } {
       const twin = c.variantKey !== null && isH264Twin(c.variantKey);
       for (const cap of PLAYER_CAPS) if (twin || !c.caps[cap]) may[cap] = false;
       if (twin || !c.av1Encode) may.av1Encode = false;
+      if (twin || !c.hdrScreen) may.hdrScreen = false;
     }
   }
-  return found ? may : { ...NO_CAPS, av1Encode: false };
+  return found ? may : { ...NO_CAPS, av1Encode: false, hdrScreen: false };
 }
 
 /** Whether a transcode started by this user may be HEVC — see mayStart. */
@@ -1884,6 +1891,7 @@ export function attachWebSocketServer(server: Server): void {
           quality: 0,
           caps: Object.fromEntries(PLAYER_CAPS.map((cap) => [cap, msg[cap] === true])) as unknown as PlayerCaps,
           av1Encode: msg.av1 === true && msg.av1Encode === true,
+          hdrScreen: msg.hdrScreen === true,
         };
         roomId = instanceId;
         room.clients.add(client);

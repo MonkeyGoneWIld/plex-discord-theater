@@ -1,12 +1,14 @@
 # FFmpeg Engine
 
-By default Plex makes every stream the Activity plays. With
+By default Plex makes the streams the Activity plays, except an AV1 file's,
+which Plex can't copy (see [`FFMPEG_FOR_AV1`](#ffmpeg_for_av1)). With
 `PLAYBACK_ENGINE=ffmpeg`, the container makes them itself, with its own ffmpeg,
 from the files on disk. Plex still provides the library, the metadata and the
 watch history, and it still makes any stream ffmpeg can't.
 
-It is optional. Leave `PLAYBACK_ENGINE` unset and nothing changes. The image is
-the same either way, so switching is a setting and a restart.
+It is optional. Leave `PLAYBACK_ENGINE` unset and Plex makes every other
+stream, as before. The image is the same either way, so switching is a setting
+and a restart.
 
 ---
 
@@ -16,8 +18,9 @@ the same either way, so switching is a setting and a restart.
   files are copied, HDR10, HLG and Dolby Vision 7 and 8 included, under the
   same rules as [Direct Stream](Configuration-Reference#direct_stream).
 - **Re-encodes keep HDR.** A stream re-encoded for bitrate or quality, for a
-  player that decodes HEVC, comes out as HDR10 HEVC Main10, so it looks like
-  the copy, only softer. Plex maps every re-encode to SDR.
+  player that decodes HEVC and a screen showing HDR, comes out in HDR10, so it
+  looks like the copy, only softer. Plex maps every re-encode to SDR, as this
+  does for a screen in SDR.
 - **Dolby Vision 5 in the right colours.** Plex copies it, and browsers show it
   purple and green. ffmpeg re-encodes it with its Dolby Vision metadata applied
   (on the GPU, where OpenCL works).
@@ -238,7 +241,8 @@ and `FFMPEG_PREVIEWS_MAX_GB` (20 by default) bounds the folder.
 | Stream | HDR |
 |---|---|
 | Copy | Kept, untouched, as in Plex mode |
-| Re-encode for a player that decodes HEVC | Kept: HDR10 HEVC Main10. `FFMPEG_HDR_REENCODE=tonemap` maps it to SDR instead, as Plex does. |
+| Re-encode for a player that decodes HEVC, on a screen showing HDR | Kept: HDR10, in HEVC Main10 or AV1 10-bit. `FFMPEG_HDR_REENCODE=tonemap` maps it to SDR instead, as Plex does. |
+| Re-encode for a screen in SDR | Mapped to SDR here, as Plex does. Windows runs an HDR monitor in SDR unless HDR is switched on, and a browser maps HDR to SDR darker than Plex. |
 | H.264 (a player that can't decode HEVC, such as Discord in Firefox) | Mapped to SDR |
 | A subtitle burned in | Mapped to SDR, so the subtitle isn't blinding |
 | Dolby Vision 5 | Mapped to SDR, with its metadata applied |
@@ -358,6 +362,16 @@ the disk. 512 by default; `0` reads every one from disk.
 On unless `off`. Off, a stream ffmpeg can't make fails to start instead of
 going to Plex, and the error says why. For testing.
 
+### `FFMPEG_FOR_AV1`
+
+On unless `off`. With Plex making the streams (`PLAYBACK_ENGINE` unset), an
+AV1 file's are still made here: copied, in fragmented MP4, for a player that
+decodes AV1, and re-encoded for one that doesn't, on the GPU when one is
+mapped in, else on the CPU. Plex can't copy AV1, because its streams are
+MPEG-TS, so it re-encodes every AV1 file, and on some servers that re-encode
+comes out as flickering purple boxes. Whatever ffmpeg can't make still goes to
+Plex. `off` leaves AV1 files to Plex too.
+
 ### `FFMPEG_HDR_REENCODE` · `FFMPEG_TONEMAP`
 
 `keep` (the default) or `tonemap`. See [HDR](#hdr). `FFMPEG_TONEMAP` is the
@@ -386,7 +400,8 @@ The stream caches (`DIRECT_STREAM_MEMORY_MB`, `STREAM_CACHE_DIR`,
 
 ## Going back to Plex
 
-Unset `PLAYBACK_ENGINE` and restart the container.
+Unset `PLAYBACK_ENGINE` and restart the container. AV1 files are still made
+here; [`FFMPEG_FOR_AV1=off`](#ffmpeg_for_av1) leaves them to Plex too.
 
 ## Next
 

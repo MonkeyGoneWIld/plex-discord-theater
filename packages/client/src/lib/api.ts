@@ -380,6 +380,19 @@ export function versionOf(meta: PlexMeta, mediaIndex?: number): ResolvedVersion 
   };
 }
 
+/**
+ * The file a track belongs to, by its stream id — stream ids belong to one
+ * file, so a track names its file. Undefined when no file of the title has any
+ * of them; 0 names nothing (the default audio, or no subtitle).
+ */
+export function mediaIndexHolding(meta: PlexMeta, ...streamIds: Array<number | null | undefined>): number | undefined {
+  const ids = streamIds.filter((id): id is number => id != null && id > 0);
+  if (!ids.length) return undefined;
+  return meta.versions?.find((v) =>
+    v.audioTracks.some((t) => ids.includes(t.id)) || v.subtitleTracks.some((t) => ids.includes(t.id)),
+  )?.mediaIndex;
+}
+
 /** A skippable intro/credits range detected by Plex. */
 export interface SkipMarker {
   type: "intro" | "credits";

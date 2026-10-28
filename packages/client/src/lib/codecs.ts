@@ -32,6 +32,16 @@ export interface Caps {
    * browser has answered (mediaCapabilities, asked at load); no until then.
    */
   av1Encode: boolean;
+  /**
+   * The screen is showing HDR now, so a re-encode keeps the film's HDR for
+   * this player (the server's plan.ts hdrScreen). Not a need. Windows runs
+   * an HDR monitor in SDR unless HDR is switched on, and doesn't switch it for
+   * a browser as video players do; in SDR, the browser maps HDR down with SDR
+   * white at 203 nits, about a stop darker than Plex: Project Hail Mary's
+   * re-encode was dim in its dark scenes on 28 October. The server maps it
+   * instead, as Plex does.
+   */
+  hdrScreen: boolean;
 }
 
 const failedKey = (cap: Cap) => `pdt:codec-failed:${cap}`;
@@ -87,7 +97,17 @@ export function playerCaps(): Caps {
     ac3: !failedHere("ac3") && supports('audio/mp4; codecs="ac-3"'),
     eac3: !failedHere("eac3") && supports('audio/mp4; codecs="ec-3"'),
     av1Encode: av1 && av1Smooth,
+    hdrScreen: hdrScreen(),
   };
+}
+
+/** Whether the screen is showing HDR now — see Caps. */
+export function hdrScreen(): boolean {
+  try {
+    return window.matchMedia("(dynamic-range: high)").matches;
+  } catch {
+    return false;
+  }
 }
 
 /** What a stream uses beyond H.264 and AAC, from the codecs hls.js found in it. */

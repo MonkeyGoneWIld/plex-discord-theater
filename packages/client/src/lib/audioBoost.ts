@@ -24,6 +24,8 @@
  * on exactly as it did before any of this existed.
  */
 
+import { logEvent, logWarn } from "./log";
+
 /** 200%. The point past which amplifying a normal mix is mostly clipping. */
 export const MAX_LEVEL = 2;
 
@@ -53,8 +55,14 @@ function context(): AudioContext | null {
       window.AudioContext ??
       (window as unknown as { webkitAudioContext?: AudioContextCtor }).webkitAudioContext;
     if (!Ctor) { unavailable = true; return null; }
-    ctx = new Ctor();
-    return ctx;
+    const made = new Ctor();
+    ctx = made;
+    // A context that stops is every boosted player gone silent while its
+    // picture plays on — said, so the log shows when and why.
+    made.addEventListener("statechange", () => {
+      logEvent("Audio", "the boost's audio context changed", { state: made.state });
+    });
+    return made;
   } catch {
     unavailable = true;
     return null;
@@ -104,6 +112,7 @@ async function buildGraph(video: HTMLMediaElement): Promise<GainNode | null> {
     source.connect(gain);
     gain.connect(audio.destination);
     gains.set(video, gain);
+    logEvent("Audio", "playing louder than 100% through Web Audio", routeOf(video));
     return gain;
   } catch {
     // The source may exist even though the rest failed, in which case the
@@ -179,6 +188,39 @@ export function getLevel(video: HTMLMediaElement): number {
   const stored = levels.get(video);
   if (stored != null && stored > 1 && video.volume >= 1) return stored;
   return video.volume;
+}
+
+/**
+ * How an element's sound reaches the speakers, for the logs: its level, and
+ * whether it goes through the boost's graph — and if so, whether that is
+ * running and what it adds before the sound is heard, which the browser does
+ * not allow for when it times the picture against it.
+ */
+export function routeOf(video: HTMLMediaElement): Record<string, string | number | boolean> {
+  const route: Record<string, string | number | boolean> = {
+    volumePct: Math.round(getLevel(video) * 100),
+    muted: video.muted,
+    boosted: gains.has(video),
+  };
+  if (gains.has(video) && ctx) {
+    route.audioContext = ctx.state;
+    route.sampleRate = ctx.sampleRate;
+    route.addsMs = Math.round(((ctx.baseLatency ?? 0) + (ctx.outputLatency ?? 0)) * 1000);
+  }
+  return route;
+}
+
+/**
+ * Start the boost's context again if it has stopped under a playing element.
+ * True when there was something to do — a boosted element whose graph is not
+ * running is silent, and nothing else will bring the sound back.
+ */
+export function keepBoostRunning(video: HTMLMediaElement): boolean {
+  if (!gains.has(video) || !ctx || ctx.state === "running") return false;
+  const audio = ctx;
+  logWarn("Audio", "the boost's audio context stopped under a playing player, starting it again", { state: audio.state });
+  void audio.resume().catch(() => { /* needs a gesture; the next one on the page will do */ });
+  return true;
 }
 
 /** Whether going past 100% is possible at all. False once it has been tried and failed. */

@@ -262,6 +262,21 @@ console.log("\n— AV1 re-encodes —");
     [keptArgs.includes("format=p010"), keptArgs.includes("format=nv12"), keptArgs.includes("-c:v av1_qsv"),
       keptArgs.includes("-color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc"), keptArgs.includes("-profile:v"),
       keptArgs.includes("-hls_segment_type fmp4")], [true, false, true, true, false, true]);
+  // Project Hail Mary on 28 October: kept HDR, on a screen in SDR, mapped
+  // down by the browser — dim in its dark scenes. Mapped here, as Plex does.
+  const sdrScreen = plan(hdr10, { keepHdr: true, av1HdrOk: true, hdrScreen: false });
+  check("HDR for a screen in SDR is tone-mapped here, as Plex's are, in AV1 8-bit",
+    sdrScreen.ok && [sdrScreen.codec, sdrScreen.hdrTrc, !!sdrScreen.tonemap], ["av1", null, true]);
+  const hdrScreen = plan(hdr10, { keepHdr: true, av1HdrOk: true, hdrScreen: true });
+  check("  and kept for a screen showing HDR", hdrScreen.ok && [hdrScreen.codec, hdrScreen.hdrTrc, hdrScreen.tonemap],
+    ["av1", "smpte2084", null]);
+  const p7 = plan(version({ colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc", DOVIPresent: true, DOVIProfile: 7 }),
+    { keepHdr: true, av1HdrOk: true, hdrScreen: false, tonemapper: "opencl" });
+  const p7Args = p7.ok ? encodeArgs(p7, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
+  check("  Dolby Vision 7 by its HDR10 layer, on OpenCL, labelled BT.709, 8 bits",
+    [p7.ok && p7.hdr, p7Args.includes("tonemap_opencl=tonemap=reinhard"), p7Args.includes("apply_dovi"),
+      p7Args.includes("-color_primaries bt709 -color_trc bt709 -colorspace bt709"), p7Args.includes("-c:v av1_qsv")],
+    ["DV P7", true, false, true, true]);
   const hlg = plan(version({ colorPrimaries: "bt2020", colorTrc: "arib-std-b67", colorSpace: "bt2020nc" }), { keepHdr: true, av1HdrOk: true });
   check("  and HLG as HLG", hlg.ok && [hlg.codec, hlg.hdrTrc], ["av1", "arib-std-b67"]);
   const keptHevc = plan(hdr10, { keepHdr: true });

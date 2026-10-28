@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type Hls from "hls.js";
 import HlsPkg from "hls.js";
 import { qualityLabel } from "../lib/quality";
+import { hdrScreen } from "../lib/codecs";
 import { codecFamily, codecName, splitCodecs } from "../lib/codecName";
 import { audioDetails, audioSummary, engineText, fileLines, playbackMode, type StreamNotes } from "../lib/streamNotes";
 import type { StreamTrack } from "../lib/api";
@@ -149,20 +150,40 @@ function formatBytes(bytes: number): string {
 /**
  * Picture subtitles, styled subtitles' scripts and fonts, and seek-bar
  * pictures shared with the other players on the same title (lib/sideShare):
- * how many are connected, and for each kind what came from them, what came
- * from the bot, and what this player sent them.
+ * how many are connected, then a table of each kind in use — what came from
+ * them, what came from the bot, and what this player sent them.
+ *
+ * A table because the three figures side by side are the point, and because
+ * written out as sentences they did not fit: on 28 October each kind's line ran
+ * to sixty characters in a column with room for forty-five, and "0 players"
+ * broke in two.
  */
-function sideShareLines(players: number, pgs: SideStats, styled: SideStats, previews: SideStats): Array<[string, string]> {
-  const line = (s: SideStats) =>
-    `${formatBytes(s.fromPlayers)} from players · ${formatBytes(s.fromBot)} from bot · ${formatBytes(s.sent)} sent`;
-  const used = (s: SideStats) => s.fromPlayers + s.fromBot + s.sent > 0;
-  if (!players && !used(pgs) && !used(styled) && !used(previews)) return [];
-  return [
-    ["Sharing subtitles, fonts and previews with", `${players} player${players === 1 ? "" : "s"}`],
-    ...(used(pgs) ? [["Picture subtitles", line(pgs)] as [string, string]] : []),
-    ...(used(styled) ? [["Styled subtitles and fonts", line(styled)] as [string, string]] : []),
-    ...(used(previews) ? [["Seek-bar pictures", line(previews)] as [string, string]] : []),
-  ];
+export function sideShareDetails(players: number, kinds: Array<[string, SideStats, string]>): {
+  lines: Array<[string, string]>;
+  table: React.ReactNode;
+} {
+  const used = kinds.filter(([, s]) => s.fromPlayers + s.fromBot + s.sent > 0);
+  if (!players && !used.length) return { lines: [], table: null };
+  const head = (text: string, title: string) => <span style={styles.shareHead} title={title}>{text}</span>;
+  return {
+    lines: [["Extras shared with", `${players} player${players === 1 ? "" : "s"}`]],
+    table: used.length ? (
+      <div style={styles.shareTable} data-share-table="">
+        <span />
+        {head("↓ players", "Came from other players")}
+        {head("↓ bot", "Came from the bot")}
+        {head("↑ sent", "Sent to other players")}
+        {used.map(([label, s, title]) => (
+          <div key={label} style={styles.shareRow}>
+            <span style={styles.shareLabel} title={title}>{label}</span>
+            <span style={styles.shareValue}>{formatBytes(s.fromPlayers)}</span>
+            <span style={styles.shareValue}>{formatBytes(s.fromBot)}</span>
+            <span style={styles.shareValue}>{formatBytes(s.sent)}</span>
+          </div>
+        ))}
+      </div>
+    ) : null,
+  };
 }
 
 const GRAPH_W = 300;
@@ -525,7 +546,14 @@ export function StatsOverlay({
 
   // What is playing, then where it is against the room and how it arrives,
   // then the seek bar's frames.
-  type Row = { label: string; value: string; health?: Health; section?: Section; details?: Array<[string, string, Health?]>; visual?: React.ReactNode; keep?: string };
+  // `extra` is shown under the details when the row is open: what doesn't read
+  // as label and value, such as the Peers table.
+  type Row = { label: string; value: string; health?: Health; section?: Section; details?: Array<[string, string, Health?]>; extra?: React.ReactNode; visual?: React.ReactNode; keep?: string };
+  const shared = sideShareDetails(sideShare.playerCount(), [
+    ["Picture subs", sideShare.statsFor("pgs"), "Picture subtitles (PGS), drawn by this player"],
+    ["Styled subs", sideShare.statsFor("styled"), "Styled subtitles' scripts and their fonts"],
+    ["Previews", sideShare.statsFor("previews"), "The seek bar's pictures"],
+  ]);
   const rows: Row[] = [
     {
       label: "Playback", value: mode ?? "—", health: modeHealth(mode), section: "playback",
@@ -542,7 +570,9 @@ export function StatsOverlay({
       details: [
         ["Source", source, copied === null ? "none" : copied ? "ok" : "warn"],
         ["Codec", codecName(snap?.videoCodec) ?? "—"],
-        ...(notes?.range ? [["Range", notes.range, notes.range.startsWith("SDR (") ? "warn" : "none"] as [string, string, Health]] : []),
+        // Mapped down from HDR is a loss only on a screen showing HDR; on one
+        // in SDR, the server's mapping is the better of the two (plan.ts).
+        ...(notes?.range ? [["Range", notes.range, notes.range.startsWith("SDR (") && hdrScreen() ? "warn" : "none"] as [string, string, Health]] : []),
         ...fileLines(notes?.videoFrom ?? null),
         ["Viewport", snap?.viewport ?? "—"],
       ],
@@ -588,10 +618,10 @@ export function StatsOverlay({
     ...(vpsRelay ? [] : [{
       label: "Peers", value: `${p2p.peers.size} peer${p2p.peers.size === 1 ? "" : "s"} · ${p2pRatio}% from peers`, section: "peers" as Section,
       details: [
-        ["Uploaded", formatBytes(p2p.uploadBytes)] as [string, string],
-        ...sideShareLines(sideShare.playerCount(), sideShare.statsFor("pgs"), sideShare.statsFor("styled"),
-          sideShare.statsFor("previews")),
+        ["Video sent to peers", formatBytes(p2p.uploadBytes)] as [string, string],
+        ...shared.lines,
       ],
+      extra: shared.table,
       visual: totalDelivered > 0 ? (
         <>
           <Bar parts={[[p2pRatio, PEERS], [100 - p2pRatio, SERVER]]} />
@@ -631,7 +661,7 @@ export function StatsOverlay({
   );
 
   function renderRow(row: Row) {
-          const expandable = !!row.section && !!row.details?.length;
+          const expandable = !!row.section && (!!row.details?.length || !!row.extra);
           const isOpen = expandable && open.has(row.section!);
           const line = (
             <>
@@ -657,7 +687,7 @@ export function StatsOverlay({
               {row.visual ? <div style={styles.visual}>{row.visual}</div> : null}
               {isOpen && (
                 <div style={styles.details}>
-                  {row.details!.map(([label, value, health], i) => (
+                  {(row.details ?? []).map(([label, value, health], i) => (
                     <div key={i} style={styles.row}>
                       <span style={styles.detailLabel}>{label}</span>
                       <span style={{ ...styles.value, color: HEALTH_COLORS[health ?? "none"].line }}>
@@ -665,6 +695,7 @@ export function StatsOverlay({
                       </span>
                     </div>
                   ))}
+                  {row.extra}
                 </div>
               )}
             </div>
@@ -893,5 +924,34 @@ const styles: Record<string, React.CSSProperties> = {
   valueKeep: {
     flexShrink: 0,
     whiteSpace: "pre",
+  },
+  // The Peers table: a label column that gives way first, then three figures
+  // that never break. Smaller than the lines above it so a phone's narrower
+  // panel still has room for all four.
+  shareTable: {
+    display: "grid",
+    gridTemplateColumns: "minmax(0, 1fr) auto auto auto",
+    columnGap: "10px",
+    rowGap: "1px",
+    fontSize: "11px",
+    padding: "3px 0 1px",
+    fontVariantNumeric: "tabular-nums",
+  },
+  shareRow: {
+    display: "contents",
+  },
+  shareHead: {
+    color: "rgba(255,255,255,0.4)",
+    textAlign: "right",
+    whiteSpace: "nowrap",
+  },
+  shareLabel: {
+    color: "rgba(255,255,255,0.4)",
+    overflowWrap: "anywhere",
+    minWidth: 0,
+  },
+  shareValue: {
+    textAlign: "right",
+    whiteSpace: "nowrap",
   },
 };

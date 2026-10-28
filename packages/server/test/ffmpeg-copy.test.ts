@@ -708,6 +708,31 @@ console.log("\n— AV1 and Opus, and FLAC, copied in fragmented MP4 for a player
   check("what it couldn't have said, so whoever can is given the copy",
     [plexRoutes.sessionWithheld(held.sid), plexRoutes.sessionNeeds(held.sid)], [["av1", "opus"], []]);
   await fetch(`${origin}/api/plex/hls/session/${held.sid}?reason=test`, { method: "DELETE" });
+
+  // With Plex making the streams, an AV1 file's are made here all the same
+  // (config.ts ffmpegForAv1): Plex's re-encode of The 'Burbs on 28 October
+  // was flickering purple boxes.
+  process.env.PLAYBACK_ENGINE = "plex";
+  plexRoutes.capsForTests({ ...none, av1: true, opus: true });
+  const plexAv1 = await copied("17");
+  check("with Plex making the streams, an AV1 file is still copied here for a player that decodes AV1, Plex never asked",
+    [plexAv1.notes.engine, plexAv1.notes.video, plexAv1.notes.audio, transcodeAsked()], ["ffmpeg", "copy", "copy", []]);
+  await fetch(`${origin}/api/plex/hls/session/${plexAv1.sid}?reason=test`, { method: "DELETE" });
+  plexRoutes.capsForTests(none);
+  const plexAv1Held = await copied("17");
+  check("  and re-encoded here for one that doesn't",
+    [plexAv1Held.notes.engine, plexAv1Held.notes.video, transcodeAsked()], ["ffmpeg", "transcode", []]);
+  await fetch(`${origin}/api/plex/hls/session/${plexAv1Held.sid}?reason=test`, { method: "DELETE" });
+  process.env.FFMPEG_FOR_AV1 = "off";
+  asked.length = 0;
+  plexStarts = true;
+  const plexMade = crypto.randomUUID();
+  await master("17", plexMade);
+  plexStarts = false;
+  check("  and with FFMPEG_FOR_AV1=off, left to Plex", transcodeAsked().includes("/video/:/transcode/universal/decision"), true);
+  await fetch(`${origin}/api/plex/hls/session/${plexMade}?reason=test`, { method: "DELETE" });
+  delete process.env.FFMPEG_FOR_AV1;
+  process.env.PLAYBACK_ENGINE = "ffmpeg";
   plexRoutes.capsForTests(none);
 }
 

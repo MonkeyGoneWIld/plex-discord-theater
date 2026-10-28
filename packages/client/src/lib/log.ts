@@ -213,6 +213,15 @@ export function initClientLogging(): void {
     clientId,
     ua: navigator.userAgent.slice(0, 180),
     screen: `${window.screen.width}x${window.screen.height}`,
+    // Whether it is showing HDR now, which decides whether a re-encode keeps
+    // HDR (codecs.ts hdrScreen).
+    hdrScreen: (() => {
+      try {
+        return window.matchMedia("(dynamic-range: high)").matches;
+      } catch {
+        return false;
+      }
+    })(),
   });
 }
 

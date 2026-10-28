@@ -1134,7 +1134,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /** The server's account of the stream playing — see StreamNotes. */
   const [streamNotes, setStreamNotes] = useState<StreamNotes | null>(null);
   const streamNotesRef = useRef<StreamNotes | null>(null);
-  /** HDR lit as its SDR grade would be, on a screen in SDR — see lib/hdrOnSdr. */
+  /** HDR lit as Plex's app for Windows shows it, on a screen in SDR — see lib/hdrOnSdr. */
   const [hdrLift, setHdrLift] = useState(false);
   /** This viewer's quality ceiling — see lib/quality.ts. */
   const quality = usePreferredQuality();
@@ -3070,7 +3070,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     };
   }, []);
 
-  // HDR on a screen in SDR, lit as its SDR grade would be (lib/hdrOnSdr).
+  // HDR on a screen in SDR, lit as Plex's app for Windows shows it (lib/hdrOnSdr).
   // Decided by the frames' own transfer once they come, by the server's word
   // before; again when the frames change size, and when the window moves to
   // a screen that shows HDR, or stops showing it. Logged once a stream's

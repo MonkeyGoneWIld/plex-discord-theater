@@ -134,6 +134,13 @@ function notePeak(key: string, running: number): void {
   peaks.set(key, running);
   if (peaks.size > PEAKS_KEPT) peaks.delete(peaks.keys().next().value!);
 }
+/** How long each recent download in parts waited for its first answer, ms, for the log — see firstByteMs. */
+const firstBytes = new Map<string, number>();
+function noteFirstByte(key: string, ms: number): void {
+  firstBytes.delete(key);
+  firstBytes.set(key, ms);
+  if (firstBytes.size > PEAKS_KEPT) firstBytes.delete(firstBytes.keys().next().value!);
+}
 /** Every download in parts under way: each one's way of starting more of its parts — see pumpSegmentParts. */
 const pumps = new Set<() => void>();
 
@@ -172,6 +179,13 @@ export function pumpSegmentParts(): void {
 /** The most of a segment's parts that downloaded at once, the last time it was fetched in parts. */
 export function partsPeak(key: string): number | undefined {
   return peaks.get(key);
+}
+
+/** How long a segment fetched in parts waited for its first part's answer,
+ *  ms, the last time: a wait long beside the time its bytes then took is
+ *  the way to the bot slow to answer, not short of speed. */
+export function firstByteMs(key: string): number | undefined {
+  return firstBytes.get(key);
 }
 
 /** How the download of a segment in parts is going, while it runs. */
@@ -282,6 +296,7 @@ export async function fetchInParts(
   let first: Response;
   try {
     first = await responses[0];
+    noteFirstByte(key, performance.now() - status.startedAt);
   } catch (err) {
     stopAll(err);
     finish();

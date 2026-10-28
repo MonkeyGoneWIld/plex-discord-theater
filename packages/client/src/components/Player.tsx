@@ -48,7 +48,7 @@ import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readi
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, JOIN_TOLERANCE_S, type HeldSegment } from "../lib/bufferAhead";
 import { arrivingKbps, backfillShare, backfillTitle, catchingUpTitle, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS } from "../lib/bufferTrim";
-import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
+import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
 import { nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
 import { installTakeFromPeer } from "../lib/takeFromPeer";
@@ -5024,11 +5024,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   const bytes = segmentBytesOf(segmentUrl);
                   const parts = partsAsked.get(segmentUrl) ?? (bytes ? partsFor(bytes) : 1);
                   if (asked !== undefined && now > asked) speeds.set(segmentUrl, (bytesLength * 8 * 1000) / (now - asked));
+                  const firstByte = firstByteMs(segmentUrl);
                   logEvent("Load", "segment in", {
                     seg: segIndexFromUrl(segmentUrl),
                     MB: (bytesLength / 1e6).toFixed(2),
                     from: downloadSource === "p2p" ? "another player" : parts > 1 ? `the bot, in ${parts}` : "the bot",
                     ...(downloadSource !== "p2p" && parts > 1 ? { partsAtOnce: partsPeak(segmentUrl) ?? "?" } : {}),
+                    // How long the bot took to answer its first part, of tookS.
+                    ...(downloadSource !== "p2p" && parts > 1 && firstByte !== undefined ? { firstByteS: (firstByte / 1000).toFixed(1) } : {}),
                     tookS: asked === undefined ? "?" : ((now - asked) / 1000).toFixed(1),
                     Mbps: asked === undefined ? "?" : ((bytesLength * 8) / ((now - asked) * 1000)).toFixed(1),
                     sinceStreamS: ((now - streamAskedAt) / 1000).toFixed(1),

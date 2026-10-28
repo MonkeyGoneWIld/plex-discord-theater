@@ -4,7 +4,7 @@
  * server's segmentPart does, at a pace per download.
  */
 import {
-  MAX_PARTS, fetchInParts, fetchInPartsLater, inBrowserCache, installSegmentParts, partBounds, partUrl, partsFor, partsPeak, pumpSegmentParts,
+  MAX_PARTS, fetchInParts, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, partBounds, partUrl, partsFor, partsPeak, pumpSegmentParts,
   keepLater, segmentBytesOf, segmentProgress,
 } from "../src/lib/segmentParts";
 import { keepStats, keepingSegments, keptSegment, stopKeepingSegments, useCacheStorageForTests } from "../src/lib/segmentKeep";
@@ -28,6 +28,8 @@ interface Bot {
   asked: string[];
   /** Per download, ms between chunks of 64 KB. */
   paceMs: number;
+  /** Per download, ms before it answers at all. */
+  answerMs: number;
   /** Answer every part with the whole segment, as a server that ignores parts would. */
   ignoresParts: boolean;
   /** Parts that fail halfway. */
@@ -42,7 +44,7 @@ interface Bot {
 function bot(): Bot {
   const started = Date.now();
   const b: Bot = {
-    asked: [], paceMs: 0, ignoresParts: false, breaks: new Set(), finished: new Map(), running: 0, mostAtOnce: 0,
+    asked: [], paceMs: 0, answerMs: 0, ignoresParts: false, breaks: new Set(), finished: new Map(), running: 0, mostAtOnce: 0,
     fetch: async (input, init) => {
       const url = String(input instanceof Request ? input.url : input);
       b.asked.push(url);
@@ -58,6 +60,7 @@ function bot(): Bot {
         ? [0, SEGMENT.length]
         : [Math.floor((SEGMENT.length * part) / parts), Math.floor((SEGMENT.length * (part + 1)) / parts)];
       const bytes = SEGMENT.subarray(from, to);
+      if (b.answerMs) await sleep(b.answerMs);
       if (signal?.aborted) { end(); throw new DOMException("aborted", "AbortError"); }
       let at = 0;
       const body = new ReadableStream<Uint8Array>({
@@ -118,6 +121,15 @@ console.log("\n— the parts run side by side —");
   const inParts = Date.now() - t;
   check("all of it", same(got, SEGMENT), true);
   check(`in parts it takes well under half as long (${inParts}ms against ${alone}ms)`, inParts < alone / 2, true);
+}
+
+console.log("\n— how long the bot took to answer, for the log —");
+{
+  const b = bot();
+  b.answerMs = 60;
+  await readAll(await fetchInParts(b.fetch, new Request(URL0), SEGMENT.length, 4, URL0));
+  const ms = firstByteMs(URL0) ?? -1;
+  check(`the wait for its first part's answer, ${Math.round(ms)} ms with the bot taking 60`, ms >= 55 && ms < 1000, true);
 }
 
 console.log("\n— a few parts at a time —");

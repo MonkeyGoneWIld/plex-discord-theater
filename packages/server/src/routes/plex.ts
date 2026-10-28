@@ -54,7 +54,7 @@ import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
 import { markOriginalAudio } from "../services/original-language.js";
 import { audioNotes, type AudioDecision, type SourceAudio } from "../services/stream-audio.js";
 import {
-  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegForAv1, ffmpegHardware, ffmpegPgsOn, ffmpegPreviewsOn, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesAv1, gpuEncodesAv1Hdr, gpuEncodesHevc, hwDevice,
+  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegForAv1, ffmpegHardware, ffmpegPgsOn, ffmpegPreviewsOn, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesAv1, gpuEncodesHevc, hwDevice,
   keepHdrOnReencode, localPath, lowPowerVaapi, lowPowerVaapiAv1, maxEncodes, readable, recheckHardware, sizeOnDisk, styledSubtitlesOn, tonemapAlgo, tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
@@ -5354,9 +5354,8 @@ async function startWithFfmpeg(o: {
       // Not for a stream whose copy was held back: that one is H.264 and AAC,
       // everyone else who can on a copy (sync.ts seatOf).
       av1Ok: AV1_TRANSCODE && o.caps.av1Encode && gpuEncodesAv1() && sessionWithheld(o.sessionId).length === 0,
-      av1HdrOk: gpuEncodesAv1Hdr(), av1LowPower: lowPowerVaapiAv1(),
+      av1LowPower: lowPowerVaapiAv1(),
       kbps: o.transcodeKbps, peakKbps: o.peakKbps, maxWidth, maxHeight, keepHdr: keepHdrOnReencode(),
-      hdrScreen: !!o.caps.hdrScreen,
       tonemapper: tonemapper(), tonemapAlgo: tonemapAlgo(), burn: o.burnSubtitleId ?? null,
       audioChannels: audioChannels(), opusOk: o.caps.opus, preset: encodePreset(), lowPower: lowPowerVaapi(),
       gpuDecode: gpuDecodeOn() ? undefined : false, ...burnFiles,
@@ -5384,8 +5383,7 @@ async function startWithFfmpeg(o: {
         started = await run(plan);
       }
     }
-    // The GPU's AV1 encoder wouldn't make this one: H.264 or HEVC, as before
-    // (HDR kept in HEVC Main10).
+    // The GPU's AV1 encoder wouldn't make this one: H.264 or HEVC, as before.
     if (!started.ok && plan.codec === "av1") {
       logEvent("FFmpeg", "AV1 encode didn't start; re-encoding without it", { session, ratingKey: o.ratingKey, why: started.why });
       const retry = planEncode(source, { ...ask, av1Ok: false, gpuDecode: plan.gpuDecode ? ask.gpuDecode : false });
@@ -5408,7 +5406,8 @@ async function startWithFfmpeg(o: {
       hdr: plan.hdrTrc ? `${plan.hdr} kept`
         : plan.tonemap ? `${plan.hdr} → SDR, ${plan.tonemap.algo} on ${plan.tonemap.via}${plan.tonemap.dovi ? " with its Dolby Vision" : ""}`
         : plan.hdr,
-      // Whether the driver's screen showed HDR, which decides whether HDR is kept.
+      // Whether the driver's screen showed HDR: one in SDR has its player
+      // brighten HDR kept (lib/hdrOnSdr).
       ...(plan.hdr !== "SDR" ? { screen: o.caps.hdrScreen ? "HDR" : "SDR" } : {}),
       on: plan.hardware, preset: plan.preset ?? "default", decode: plan.gpuDecode ? "gpu" : "cpu",
       deinterlace: plan.interlaced, filled: plan.color.fill ?? "none",

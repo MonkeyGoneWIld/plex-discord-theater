@@ -188,8 +188,6 @@ let mapper: Tonemapper | null = null;
 let hevcEncodes = false;
 /** The GPU encodes AV1 too: Intel Arc and Core Ultra, NVIDIA's RTX 40, AMD's RX 7000. */
 let av1Encodes = false;
-/** And at 10 bits, for an HDR picture kept (plan.ts av1HdrOk). */
-let av1Encodes10 = false;
 /** VAAPI's AV1 encoder only has its low-power form (Intel's), whatever H.264's has. */
 let av1LowPower = false;
 /** VAAPI's encoder only has its low-power form: newer Intel GPUs. */
@@ -209,14 +207,9 @@ export function gpuEncodesHevc(): boolean {
   return ffmpegHardware() !== "software" && hevcEncodes;
 }
 
-/** Whether re-encodes can be AV1: a GPU that encodes it at 8 bits. */
+/** Whether re-encodes can be AV1: a GPU that encodes it (8 bits is all asked). */
 export function gpuEncodesAv1(): boolean {
   return ffmpegHardware() !== "software" && av1Encodes;
-}
-
-/** And at 10 bits, so HDR kept can be AV1 rather than HEVC Main10. */
-export function gpuEncodesAv1Hdr(): boolean {
-  return gpuEncodesAv1() && av1Encodes10;
 }
 
 /** VAAPI's AV1 encoder in its low-power form (lowPower in plan.ts). */
@@ -313,16 +306,15 @@ export async function detectHardware(): Promise<{ hardware: Hardware; note: stri
   const want = (process.env.FFMPEG_HWACCEL?.trim() || "auto").toLowerCase();
   const done = (
     h: Hardware, note: string, m: Tonemapper = "software", hevc = h !== "software", lowPower = false,
-    av1: boolean | "low-power" = false, av1Ten = false,
+    av1: boolean | "low-power" = false,
   ) => {
     hardware = h;
     mapper = m;
     hevcEncodes = hevc;
     av1Encodes = !!av1;
-    av1Encodes10 = !!av1 && av1Ten;
     av1LowPower = av1 === "low-power";
     vaapiLowPower = lowPower;
-    return { hardware: h, note: `${note}${av1 ? `; AV1 ${av1Ten ? "in 8 and 10 bits (HDR kept is AV1)" : "in 8 bits only (HDR kept is HEVC)"}` : ""}` };
+    return { hardware: h, note: `${note}${av1 ? "; AV1 too, from SDR films" : ""}` };
   };
   if (["none", "software", "off", "cpu"].includes(want)) return done("software", "CPU (FFMPEG_HWACCEL=none)");
   if (!["auto", "qsv", "vaapi", "nvenc"].includes(want)) {
@@ -330,19 +322,18 @@ export async function detectHardware(): Promise<{ hardware: Hardware; note: stri
   }
   const testCard = ["-f", "lavfi", "-i", "testsrc2=s=320x240:r=24:d=1"];
   if (want === "nvenc") {
-    // AV1 has no profile to name: Main, which 8 and 10 bits both are.
+    // AV1 has no profile to name: Main, which 8 bits are.
     const nvenc = (codec: string, fmt: string, profile: string | null) => trial([
       "-hide_banner", "-nostdin", "-loglevel", "error", ...cudaInit(hwDevice()), ...testCard,
       "-vf", `format=${fmt === "p010" ? "p010le" : fmt},hwupload,scale_cuda=w=160:h=120:format=${fmt}`,
       "-c:v", codec, ...(profile ? ["-profile:v", profile] : []), "-f", "null", "-",
     ]);
-    const [h264, hevc, av1, av1Ten] = await Promise.all([
+    const [h264, hevc, av1] = await Promise.all([
       nvenc("h264_nvenc", "nv12", "high"), nvenc("hevc_nvenc", "p010", "main10"), nvenc("av1_nvenc", "nv12", null),
-      nvenc("av1_nvenc", "p010", null),
     ]);
     if (!h264.ok) return done("software", `CPU (NVENC didn't encode: ${h264.said || "no answer"})`);
     return done("nvenc", `NVIDIA NVENC (H.264${hevc.ok ? " and HEVC Main10" : `; not HEVC: ${hevc.said || "no answer"}`}), ` +
-      `tone mapping ${tonemapAlgo()} on the CPU (Dolby Vision 5 goes to Plex)`, "software", hevc.ok, false, av1.ok, av1Ten.ok);
+      `tone mapping ${tonemapAlgo()} on the CPU (Dolby Vision 5 goes to Plex)`, "software", hevc.ok, false, av1.ok);
   }
   deviceMissing = !fs.existsSync(hwDevice());
   if (deviceMissing) {
@@ -385,37 +376,34 @@ export async function detectHardware(): Promise<{ hardware: Hardware; note: stri
     }
     if (!h264.ok) return { ok: false as const, said: h264.said };
     // Intel's AV1 encoder is only low-power; AMD's only the full one.
-    const [hevc, cl, av1Full, av1Low, av1Full10, av1Low10] = await Promise.all([
+    const [hevc, cl, av1Full, av1Low] = await Promise.all([
       encodeVa("hevc_vaapi", "p010le", "main10", lowPower), opencl(false),
       encodeVa("av1_vaapi", "nv12", null, false), encodeVa("av1_vaapi", "nv12", null, true),
-      encodeVa("av1_vaapi", "p010le", null, false), encodeVa("av1_vaapi", "p010le", null, true),
     ]);
     const av1 = av1Full.ok || (av1Low.ok && "low-power");
-    const av1Ten = av1Full.ok ? av1Full10.ok : av1Low10.ok;
     // AV1 named too: the line said "H.264 and HEVC Main10" while AV1 was in use.
     const what = `VAAPI${lowPower ? ", low-power" : ""} (H.264${hevc.ok ? ", HEVC Main10" : ", not HEVC"}${av1 ? ", AV1" : ", not AV1"})`;
     return {
       ok: true as const,
       result: cl.ok
-        ? done("vaapi", `${what}, tone mapping ${tonemapAlgo()} on OpenCL`, "opencl", hevc.ok, lowPower, av1, av1Ten)
+        ? done("vaapi", `${what}, tone mapping ${tonemapAlgo()} on OpenCL`, "opencl", hevc.ok, lowPower, av1)
         : done("vaapi", `${what}, tone mapping ${tonemapAlgo()} on the CPU (Dolby Vision 5 goes to Plex)`,
-            "software", hevc.ok, lowPower, av1, av1Ten),
+            "software", hevc.ok, lowPower, av1),
     };
   };
   if (want === "vaapi") {
     const va = await vaapi();
     return va.ok ? va.result : done("software", `CPU (VAAPI didn't encode: ${va.said || "no answer"})`);
   }
-  const [hevc, h264, cl, av1, av1Ten] = await Promise.all([
+  const [hevc, h264, cl, av1] = await Promise.all([
     encode("hevc_qsv", "p010le", "main10"), encode("h264_qsv", "nv12", "high"), opencl(), encode("av1_qsv", "nv12", null),
-    encode("av1_qsv", "p010le", null),
   ]);
   if (hevc.ok && h264.ok) {
     const what = `Intel QSV (H.264, HEVC Main10${av1.ok ? ", AV1" : ", not AV1"})`;
     return cl.ok
-      ? done("qsv", `${what}, tone mapping ${tonemapAlgo()} on OpenCL`, "opencl", true, false, av1.ok, av1Ten.ok)
+      ? done("qsv", `${what}, tone mapping ${tonemapAlgo()} on OpenCL`, "opencl", true, false, av1.ok)
       : done("qsv", `${what}, tone mapping ${tonemapAlgo()} on QSV's video engine ` +
-          `(OpenCL didn't: ${cl.said || "no answer"}; Dolby Vision 5 goes to Plex)`, "vpp", true, false, av1.ok, av1Ten.ok);
+          `(OpenCL didn't: ${cl.said || "no answer"}; Dolby Vision 5 goes to Plex)`, "vpp", true, false, av1.ok);
   }
   const why = (!hevc.ok ? hevc.said : h264.said) || "no answer";
   if (want === "auto") {

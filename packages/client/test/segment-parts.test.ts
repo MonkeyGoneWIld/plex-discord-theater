@@ -85,10 +85,10 @@ async function readAll(res: Response): Promise<Uint8Array> {
 const same = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((v, i) => v === b[i]);
 
 console.log("\n— how a segment is split —");
-check("a 7 MB segment goes in fifteen parts", partsFor(7_200_400), 15);
-check("a 2.4 MB one in five", partsFor(2_400_000), 5);
+check("a 1.3 MB segment, four seconds of a 2.6 Mbps film, goes in nine parts", partsFor(1_300_000), 9);
+check("a 2.4 MB one in all sixteen", partsFor(2_400_000), 16);
 check("never more than the bot splits one into, sixteen", [partsFor(28_000_000), MAX_PARTS], [16, 16]);
-check("a small one in one", partsFor(400_000), 1);
+check("a small one in one", partsFor(100_000), 1);
 check("nothing known, one", partsFor(NaN), 1);
 check("the parts cover it end to end, the server's split",
   partBounds(10, 3), [[0, 3], [3, 6], [6, 10]]);

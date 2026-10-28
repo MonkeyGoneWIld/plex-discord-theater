@@ -25,8 +25,13 @@
 import { keepSegment, keepingSegments, keptSegment, roomToKeep } from "./segmentKeep";
 
 /** About how big each part is. Small enough that even a short segment is
- *  split, since every part runs at a download's pace. */
-const PART_BYTES = 500_000;
+ *  split, since every part runs at a download's pace. It was 500 KB: on 28
+ *  October each download ran at 0.7 to 1 Mbps in a start's first seconds,
+ *  and Bad Santa's 1.3 MB segments, in three parts, came in at 2.2 Mbps —
+ *  under the film's own 2.6 — so its picture waited 9 seconds to start. At
+ *  150 KB a segment comes in two to three times as fast as it plays, up to
+ *  the sixteen parts the bot splits one into. */
+const PART_BYTES = 150_000;
 /**
  * Parts per segment at most: as many as the bot will split one into
  * (MAX_SEGMENT_PARTS). All of them download at once for a segment fetched on

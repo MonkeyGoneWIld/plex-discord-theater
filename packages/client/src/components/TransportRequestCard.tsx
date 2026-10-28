@@ -49,7 +49,6 @@ const styles: Record<string, React.CSSProperties> = {
   // Matched to NextUpButton, which owns the shape of everything in this stack.
   container: {
     background: "rgba(0,0,0,0.85)",
-    backdropFilter: "blur(12px)",
     borderRadius: "12px",
     padding: "16px 20px",
     maxWidth: "280px",

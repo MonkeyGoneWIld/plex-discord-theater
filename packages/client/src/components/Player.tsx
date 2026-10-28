@@ -20,7 +20,8 @@ import { ZoomPanel } from "./ZoomPanel";
 import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchPlayedThreshold, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion, mediaIndexHolding } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
-import { capsUsed, markUnplayable, type Cap } from "../lib/codecs";
+import { capsUsed, hdrScreen, markUnplayable, type Cap } from "../lib/codecs";
+import { HDR_LIFT_ID, HDR_LIFT_TABLE, frameTransfer, notChromeOnComputer, rangeIsHdr } from "../lib/hdrOnSdr";
 import { splitCodecs } from "../lib/codecName";
 import { loadVolume, saveVolume, VOLUME_CHOSEN_EVENT } from "../lib/volume";
 import { readSameLanguageAhead, readSubtitlesAhead } from "../lib/subtitleReadAhead";
@@ -35,7 +36,7 @@ import {
   usePreferredQuality,
 } from "../lib/quality";
 import { readStreamNotes, type StreamNotes } from "../lib/streamNotes";
-import { getLevel, setLevel, MAX_LEVEL, routeOf, keepBoostRunning } from "../lib/audioBoost";
+import { getLevel, setLevel, MAX_LEVEL, routeOf, keepBoostRunning, releaseBoost } from "../lib/audioBoost";
 import { carryTrackPrefs, describeWatched, endTrackSitting, isCommentary, mergeTrackPrefs, saveTrackPrefs, startingAudioPref, startingSubtitlePref, titleTrackPrefs, tracksForNewItem, type TrackPrefs } from "../lib/trackPrefs";
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
@@ -62,7 +63,7 @@ import type { SyncState, SyncActions, QueueItem, Switching } from "../hooks/useS
 import type { PreviewStatus } from "../lib/previewStatus";
 import type { LastSegment } from "./StatsOverlay";
 import type { SubtitleLoadStatus, SubtitleShown } from "../lib/subtitleStatus";
-import type { SyncInfo } from "../lib/statsHealth";
+import { START_WATCH_S, type SyncInfo } from "../lib/statsHealth";
 import type { InviteResult } from "../hooks/useDiscord";
 
 const PING_INTERVAL_MS = 10_000; // 10s — matches Plex API recommendation for LAN timeline updates
@@ -657,6 +658,10 @@ function captureFrame(video: HTMLVideoElement | null): HTMLCanvasElement | null 
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
   try {
+    // As it was shown: HDR lit for a screen in SDR is a filter on the video
+    // (lib/hdrOnSdr), not in its frames.
+    const shown = getComputedStyle(video).filter;
+    if (shown && shown !== "none") ctx.filter = shown;
     ctx.drawImage(video, 0, 0);
   } catch {
     // Tainted or not yet renderable — no frame is better than a broken one.
@@ -1094,6 +1099,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /** When the stream that last showed a picture was built — see switchingFor. */
   const [streamShownAt, setStreamShownAt] = useState(0);
   const streamBuiltAtRef = useRef(0);
+  /**
+   * This stream's start, for Stats for nerds and the logs: from asking for it
+   * to its picture playing with the loading screen down, and its stops while
+   * playing in the START_WATCH_S after (lib/statsHealth startSummary).
+   */
+  const startRef = useRef<{
+    builtAt: number; tookMs: number | null; playingAt: number; stops: number; stoppedMs: number; stopSince: number; told: boolean;
+  } | null>(null);
   // Transient play/pause acknowledgement. `at` is part of the key so a rapid
   // second toggle restarts the animation instead of being swallowed by React
   // seeing the same value.
@@ -1121,6 +1134,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /** The server's account of the stream playing — see StreamNotes. */
   const [streamNotes, setStreamNotes] = useState<StreamNotes | null>(null);
   const streamNotesRef = useRef<StreamNotes | null>(null);
+  /** HDR lit as its SDR grade would be, on a screen in SDR — see lib/hdrOnSdr. */
+  const [hdrLift, setHdrLift] = useState(false);
   /** This viewer's quality ceiling — see lib/quality.ts. */
   const quality = usePreferredQuality();
   /** A lower quality to suggest, after a lot of buffering; null when not. */
@@ -2074,7 +2089,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * `guess` while `atS` is a joiner's first guess, before its playlist's
    * segments say where it lands: no countdown is shown from it.
    */
-  const roomWaitRef = useRef<{ atS: number; roomAtS: number; since: number; guess?: boolean } | null>(null);
+  const roomWaitRef = useRef<{ atS: number; roomAtS: number; since: number; guess?: boolean; pictureAt?: number } | null>(null);
   const [waitingForRoom, setWaitingForRoom] = useState(false);
   /** The backfill under way, for the loading screen — see the backfill
    *  effect: the stretch it fetches, `fromS` to `toS`; `reachedS`, how far
@@ -2186,6 +2201,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     logEvent("Sync", "done waiting for the room", {
       why,
       waitedMs: Date.now() - wait.since,
+      // Of it, with its picture in: "Catching up to host" on the screen.
+      withPictureMs: wait.pictureAt ? Date.now() - wait.pictureAt : 0,
       atS: Number(wait.atS.toFixed(2)),
     });
   }, []);
@@ -2324,6 +2341,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const roomS = sync.playing ? roomPositionNow(sync) : sync.position;
     const stalls = stallStatsRef.current;
     const live = stalls.key === itemRef.current.ratingKey;
+    const start = startRef.current;
+    const now = Date.now();
     return {
       role: host ? "host" : sync.isCoHost ? "co-host" : "viewer",
       driftS: host || !sameTitle ? null : video.currentTime - roomS,
@@ -2333,6 +2352,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       stalls: live
         ? { count: stalls.count, totalMs: stalls.totalMs + (stalls.since ? performance.now() - stalls.since : 0) }
         : { count: 0, totalMs: 0 },
+      start: start ? {
+        tookS: start.tookMs === null ? null : start.tookMs / 1000,
+        stops: start.stops,
+        stoppedS: (start.stoppedMs + (start.stopSince ? now - start.stopSince : 0)) / 1000,
+        watching: !!start.playingAt && now - start.playingAt < START_WATCH_S * 1000,
+      } : null,
     };
   }, []);
   const ownsSessionRef = useRef(isHost);
@@ -3041,8 +3066,52 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     return () => {
       video.removeEventListener("volumechange", onVolumeChange);
       window.removeEventListener(VOLUME_CHOSEN_EVENT, onChosen);
+      releaseBoost(video);
     };
   }, []);
+
+  // HDR on a screen in SDR, lit as its SDR grade would be (lib/hdrOnSdr).
+  // Decided by the frames' own transfer once they come, by the server's word
+  // before; again when the frames change size, and when the window moves to
+  // a screen that shows HDR, or stops showing it. Logged once a stream's
+  // frames are in, and again only if the answer changes.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    let screen: MediaQueryList | null = null;
+    try {
+      screen = window.matchMedia("(dynamic-range: high)");
+    } catch {
+      // No such query: a screen in SDR.
+    }
+    let told = "";
+    const decide = () => {
+      const frames = frameTransfer(video);
+      const hdr = frames ? frames !== "sdr" : rangeIsHdr(streamNotes?.range);
+      const notHere = !hdr ? null : hdrScreen() ? "the screen shows HDR" : notChromeOnComputer();
+      const lift = !!hdr && notHere === null;
+      setHdrLift(lift);
+      if (!hdr || video.readyState < 2) return;
+      const tell = `${lift}|${frames}|${notHere}`;
+      if (tell === told) return;
+      told = tell;
+      logEvent("Player", lift ? "lighting HDR for a screen in SDR" : "HDR shown as it comes", {
+        session: sessionIdRef.current?.substring(0, 8),
+        range: streamNotes?.range ?? "unknown",
+        frames: frames ?? "unread",
+        ...(notHere ? { why: notHere } : {}),
+      });
+    };
+    decide();
+    video.addEventListener("loadeddata", decide);
+    video.addEventListener("resize", decide);
+    screen?.addEventListener?.("change", decide);
+    return () => {
+      video.removeEventListener("loadeddata", decide);
+      video.removeEventListener("resize", decide);
+      screen?.removeEventListener?.("change", decide);
+    };
+  }, [streamNotes]);
 
   /**
    * Host: hold the picture while the room waits, and go on when it runs.
@@ -3274,6 +3343,23 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const seeksMs = useCallback((): number[] => (seeksMsRef.current ??= recentSeeksMs()), []);
   /** The seek to picture held here under way, if any: where to, since when, how far into its segment (seekTimed). */
   const heldSeekRef = useRef<{ t: number; at: number; fromKeyS: number | null } | null>(null);
+  /**
+   * How far past the room a follower joining it lands, to wait there while
+   * what it lands in comes: as far as its segments have been taking to come
+   * in, here or on the page before (catchUpLeadS). With nothing known of its
+   * connection — somebody joining for the first time in a while — on the
+   * room's own place, and its first picture decides (the settle on it): in
+   * step if what came in holds where the room has got to by then, else past
+   * the room to wait while that comes, by how fast its first segments came.
+   * On 28 October a viewer joining with nothing known landed by the old guess,
+   * 6 s past the room (7.5 at the next segment), had its picture 1.7 s later,
+   * its segments coming at 15.6 Mbps, and sat 7.3 s on "Catching up to host"
+   * for nothing. A host catching up goes by the guess as before.
+   */
+  const joinLeadS = useCallback((): number => {
+    const ms = networkSegmentMsRef.current ?? recentSegmentMs();
+    return ms === null && !isHostRef.current ? 0 : catchUpLeadS(ms);
+  }, []);
   const landPastRoom = useCallback((video: HTMLVideoElement, roomS: number, again = false): number | null => {
     const leadS = catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs());
     const end = video.seekable.length ? video.seekable.end(video.seekable.length - 1) : NaN;
@@ -3607,6 +3693,31 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // A seek inside the buffer leaves the last frame up — see seekingInBuffer.
       if (!v || !seekingInBuffer(v, seekingSince, (t) => pictureHeldAt(v, t))) {
         setNoPicture(!v || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA);
+      }
+      // This stream's start: its picture in and the loading screen down —
+      // playing, or still with a room that is paused — and, once they are
+      // over, how its first seconds went (startRef).
+      const start = startRef.current;
+      if (start && v) {
+        const now = Date.now();
+        if (start.tookMs === null && !loadingUpRef.current && v.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA &&
+            (!v.paused || !syncStateRef.current?.playing)) {
+          start.tookMs = now - start.builtAt;
+          start.playingAt = now;
+          logEvent("Sync", v.paused ? "ready to play, the loading screen down, the room paused" : "playing, the loading screen down", {
+            tookS: Number((start.tookMs / 1000).toFixed(1)),
+            posS: Number(v.currentTime.toFixed(2)),
+            session: sessionIdRef.current?.substring(0, 8),
+          });
+        } else if (start.playingAt && !start.told && now - start.playingAt >= START_WATCH_S * 1000) {
+          start.told = true;
+          const stoppedMs = start.stoppedMs + (start.stopSince ? now - start.stopSince : 0);
+          logEvent("Sync", start.stops ? `stopped in its first ${START_WATCH_S} s` : `no stops in its first ${START_WATCH_S} s`, {
+            stops: start.stops,
+            stoppedS: Number((stoppedMs / 1000).toFixed(1)),
+            startS: Number(((start.tookMs ?? 0) / 1000).toFixed(1)),
+          });
+        }
       }
       // Waiting ahead of a room that plays on: how long until it gets here.
       // Not from a joiner's first guess, which its segments then move: on 21
@@ -4514,8 +4625,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
         /**
          * A follower joining a film already playing starts loading where it
-         * will land — a little past the room, see the landing below — not at
-         * the start of the film. Left to the playlist, it fetched the film's
+         * will land — on the room or a little past it, see the landing below
+         * (joinLeadS) — not at the start of the film. Left to the playlist, it fetched the film's
          * first segments before going to the room: monkey26, rejoining May at
          * 3:03 on 12 October, took two first, and the test page's late joiner
          * spent eleven seconds on them.
@@ -4524,7 +4635,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         const joinsRoom = !(sessionOwner && !didAdoptRef.current) && aheadAtRebuildRef.current === null &&
           !!joining && joining.ratingKey === itemRef.current.ratingKey && joining.position > DRIFT_THRESHOLD_S;
         if (joinsRoom && joining && joining.playing && !joining.hostWaiting && (!isHostRef.current || hostCatchUpRef.current)) {
-          hlsConfig.startPosition = roomPositionNow(joining) + catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs());
+          hlsConfig.startPosition = roomPositionNow(joining) + joinLeadS();
         } else if (joinsRoom && joining && (joining.hostWaiting || !joining.playing)) {
           /**
            * And one coming onto a room standing still — held for this host
@@ -4998,6 +5109,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         playlistEdgeRef.current = null;
         streamShownRef.current = false;
         streamBuiltAtRef.current = Date.now();
+        startRef.current = { builtAt: streamBuiltAtRef.current, tookMs: null, playingAt: 0, stops: 0, stoppedMs: 0, stopSince: 0, told: false };
         // What the server says about this stream — copied or re-encoded, and
         // why — for Stats for nerds and the buffering hint. A new stream also
         // starts the buffering count over: its first seconds are loading.
@@ -5319,21 +5431,22 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             }
             /**
              * A follower lands a little past the room — as far as its last
-             * segment took to come in, 6 seconds with none yet — and waits
-             * there for it while that part comes. Landed on it, it played the
-             * first half second it had and stopped: monkey26 rejoining May
-             * on 12 October stopped three times in twenty seconds.
+             * segment took to come in — and waits there for it while that
+             * part comes. Landed on it, it played the first half second it
+             * had and stopped: monkey26 rejoining May on 12 October stopped
+             * three times in twenty seconds. With nothing known of its
+             * connection, on the room, and its first picture decides — see
+             * joinLeadS.
              */
-            const leadS = (!isHostRef.current || hostCatchUpRef.current) && !(sessionOwner && !didAdoptRef.current) && !sync.hostWaiting
-              ? catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs())
-              : 0;
+            const following = (!isHostRef.current || hostCatchUpRef.current) && !(sessionOwner && !didAdoptRef.current) && !sync.hostWaiting;
+            const leadS = following ? joinLeadS() : 0;
             if (syncPos > DRIFT_THRESHOLD_S) {
               logEvent("Sync", "landing on the room clock after a rebuild", {
                 ...(leadS ? {
                   aheadOfRoomS: leadS,
                   // What the lead went by: a segment's time here, or the page before's.
                   leadBy: networkSegmentMsRef.current !== null ? `${Math.round(networkSegmentMsRef.current)} ms here` : recentSegmentMs() !== null ? `${recentSegmentMs()} ms the page before` : "nothing",
-                } : {}),
+                } : following ? { aheadOfRoomS: 0, leadBy: "nothing yet: its first picture decides" } : {}),
                 fromS: video.currentTime,
                 toS: syncPos,
                 // Only whoever asked Plex for this transcode knows what it cost
@@ -6061,6 +6174,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             stalls.count++;
             stalls.since = performance.now();
           }
+          // And one in this stream's first seconds, its start's (startRef).
+          const start = startRef.current;
+          if (start?.playingAt && !start.stopSince && !video.paused && !video.seeking &&
+              Date.now() - start.playingAt < START_WATCH_S * 1000) {
+            start.stops++;
+            start.stopSince = Date.now();
+          }
           // Not for a seek inside the buffer, which is over in a moment: its
           // `waiting` flashed the loading screen over every such skip. One
           // that doesn't get going is caught by the poll's starved check.
@@ -6072,6 +6192,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           if (stalled.since) {
             stalled.totalMs += performance.now() - stalled.since;
             stalled.since = 0;
+          }
+          const start = startRef.current;
+          if (start?.stopSince) {
+            start.stoppedMs += Date.now() - start.stopSince;
+            start.stopSince = 0;
           }
           const firstPicture = !streamShownRef.current;
           if (firstPicture) setStreamShownAt(streamBuiltAtRef.current);
@@ -6098,8 +6223,26 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             // Anyone who just rebuilt into a running timeline, host included —
             // the seek above aimed at the clock, this closes whatever the
             // startup cost on top of it.
-            if (sync && sync.playing && !isHostRef.current && roomPositionNow(sync) - video.currentTime > LATE_START_S &&
-                !enoughHeldAt(video, roomPositionNow(sync))) {
+            const behindS = sync?.playing ? roomPositionNow(sync) - video.currentTime : 0;
+            const catchesUp = !!sync?.playing && !isHostRef.current && behindS > LATE_START_S &&
+              !enoughHeldAt(video, roomPositionNow(sync));
+            if (sync?.playing && !isHostRef.current) {
+              // In step or catching up, and what said so: how long its picture
+              // took, how far the room had gone on meanwhile, how much of where
+              // it is had come in, and how fast (joinLeadS).
+              const roomS = roomPositionNow(sync);
+              const speed = networkBytesPerSRef.current;
+              logEvent("Sync", catchesUp
+                ? "joined behind the room, without enough of where it is in: catching up with it"
+                : "joined in step with the room", {
+                pictureAfterS: Number(((Date.now() - streamBuiltAtRef.current) / 1000).toFixed(1)),
+                behindS: Number(behindS.toFixed(2)),
+                heldAtRoomS: Number(coveredAheadS(roomS, [...bufferedRanges(video.buffered), ...heldRanges(engineHeldRef.current)]).toFixed(1)),
+                lastSegmentMs: networkSegmentMsRef.current !== null ? Math.round(networkSegmentMsRef.current) : "none from the bot",
+                ...(speed ? { Mbps: Number(((speed * 8) / 1e6).toFixed(1)) } : {}),
+              });
+            }
+            if (catchesUp) {
               // A follower the room has gone on from further than it holds
               // enough of: past the room to wait for it, as any catch-up does.
               // Stepped to the edge of what it held instead, it played the
@@ -7405,6 +7548,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       if (!sync.playing) return;
       const room = roomPositionNow(sync, isHostRef.current && hostCatchUpRef.current ? Infinity : undefined);
       const here = video.readyState >= HTMLMediaElement.HAVE_METADATA ? video.currentTime : wait.atS;
+      // The picture in, the rest of the wait is the room's to come: how much
+      // of it is left says whether landing this far past the room was needed.
+      if (!wait.pictureAt && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && !video.seeking) {
+        wait.pictureAt = Date.now();
+        logEvent("Sync", "picture in while waiting ahead of the room", {
+          leftS: Number((here - room).toFixed(2)),
+          waitedMs: wait.pictureAt - wait.since,
+        });
+      }
       const outcome = roomWaitOutcome(here, room, SOFT_SYNC_DEAD_ZONE_S);
       if (outcome === "play") {
         stopWaitingForRoom("the room caught up");
@@ -8834,12 +8986,24 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           Deliberately no pointer cursor: the picture is a picture, and every
           player leaves the ordinary arrow over it. A hand belongs to the
           controls, which have their own. */}
+      {/* What HDR is drawn through on a screen in SDR — see hdrLift. Over
+          the element's own box only, not the margin a filter gets by default. */}
+      <svg width="0" height="0" aria-hidden="true" style={styles.filterDefs}>
+        <filter id={HDR_LIFT_ID} x="0" y="0" width="1" height="1" colorInterpolationFilters="sRGB">
+          <feComponentTransfer>
+            <feFuncR type="table" tableValues={HDR_LIFT_TABLE} />
+            <feFuncG type="table" tableValues={HDR_LIFT_TABLE} />
+            <feFuncB type="table" tableValues={HDR_LIFT_TABLE} />
+          </feComponentTransfer>
+        </filter>
+      </svg>
       <video
         ref={videoRef}
         style={{
           ...styles.video,
           ...zoomPictureStyle,
           ...(isPip ? { objectFit: "cover" as const } : {}),
+          ...(hdrLift ? { filter: `url(#${HDR_LIFT_ID})` } : {}),
         }}
         playsInline
         onClick={isPip ? undefined : togglePlayPause}
@@ -9069,6 +9233,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           sessionId={sessionIdRef.current}
           p2pStatsRef={p2pStatsRef}
           notes={streamNotes}
+          hdrLift={hdrLift}
           quality={quality}
           downloadedAheadS={downloadedAheadS}
           subtitle={{ track: activeSubtitleTrack, shown: subtitleShown, failed: sidecarFailed }}
@@ -9509,6 +9674,7 @@ const styles: Record<string, React.CSSProperties> = {
     height: "100%",
     objectFit: "contain",
   },
+  filterDefs: { position: "absolute", width: 0, height: 0, overflow: "hidden", pointerEvents: "none" },
   heldFrame: {
     position: "absolute",
     inset: 0,
@@ -9605,7 +9771,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "13px",
     fontWeight: 600,
     zIndex: 30,
-    backdropFilter: "blur(6px)",
     border: "1px solid rgba(255,255,255,0.12)",
     boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
   },
@@ -9637,7 +9802,6 @@ const styles: Record<string, React.CSSProperties> = {
     whiteSpace: "nowrap",
     zIndex: 16,
     pointerEvents: "none",
-    backdropFilter: "blur(6px)",
     border: "1px solid rgba(255,255,255,0.1)",
     boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
   },

@@ -11,7 +11,7 @@ import { sideShare, type SideStats } from "../lib/sideShare";
 import { subtitleDetails, subtitleSummary, type SubtitleLoadStatus, type SubtitleShown } from "../lib/subtitleStatus";
 import {
   HEALTH_COLORS, bufferFalling, bufferHealth, framesHealth, modeHealth, playbackWhy, previewHealth, pushSample, sparkLines,
-  speedHealth, stallsHealth, subtitleHealth, syncSummary, type Health, type SyncInfo,
+  speedHealth, stallsHealth, startSummary, subtitleHealth, syncSummary, type Health, type SyncInfo,
 } from "../lib/statsHealth";
 
 /**
@@ -45,6 +45,8 @@ interface StatsOverlayProps {
   p2pStatsRef: React.RefObject<P2PStats>;
   /** The server's own account of the stream — see StreamNotes. */
   notes: StreamNotes | null;
+  /** HDR lit for this screen in SDR — see lib/hdrOnSdr. */
+  hdrLift?: boolean;
   /** This viewer's quality ceiling, kbps, 0 for none. */
   quality: number;
   /** Seconds downloaded past the playhead, the browser's buffer and the P2P
@@ -243,7 +245,7 @@ function Bar({ parts, children }: { parts: Array<[number, string]>; children?: R
 }
 
 export function StatsOverlay({
-  videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRef, notes, quality, downloadedAheadS, subtitle, subtitleStatusRef,
+  videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRef, notes, hdrLift = false, quality, downloadedAheadS, subtitle, subtitleStatusRef,
   previewPartId = null, previewStatusRef, lastSegmentRef, downloadMeter, syncInfo, runtimeS = null, visible, onClose,
 }: StatsOverlayProps) {
   // Read by the poll, which is set up once.
@@ -509,6 +511,7 @@ export function StatsOverlay({
 
   const sync = syncInfo?.() ?? null;
   const syncLine = syncSummary(sync);
+  const startLine = startSummary(sync?.start);
 
   const bufferState = bufferHealth(snap?.aheadS ?? null, snap?.toEnd);
   // One number: everything downloaded ahead, in the browser's buffer or the
@@ -570,9 +573,10 @@ export function StatsOverlay({
       details: [
         ["Source", source, copied === null ? "none" : copied ? "ok" : "warn"],
         ["Codec", codecName(snap?.videoCodec) ?? "—"],
-        // Mapped down from HDR is a loss only on a screen showing HDR; on one
-        // in SDR, the server's mapping is the better of the two (plan.ts).
-        ...(notes?.range ? [["Range", notes.range, notes.range.startsWith("SDR (") && hdrScreen() ? "warn" : "none"] as [string, string, Health]] : []),
+        // Mapped down from HDR is a loss only on a screen showing HDR. HDR on
+        // a screen in SDR is lit by the player (lib/hdrOnSdr).
+        ...(notes?.range ? [["Range", `${notes.range}${hdrLift ? " · lit for this SDR screen" : ""}`,
+          notes.range.startsWith("SDR (") && hdrScreen() ? "warn" : "none"] as [string, string, Health]] : []),
         ...fileLines(notes?.videoFrom ?? null),
         ["Viewport", snap?.viewport ?? "—"],
       ],
@@ -599,6 +603,7 @@ export function StatsOverlay({
       label: "Sync", value: syncLine.text, health: syncLine.health, section: "sync",
       details: sync ? [
         ["Role", sync.role],
+        ...(startLine ? [["Start", startLine.text, startLine.health] as [string, string, Health]] : []),
         ["Playback rate", `${sync.rate.toFixed(2)}×`, Math.abs(sync.rate - 1) >= 0.005 ? "info" : "none"],
         ["Stalls", sync.stalls.count ? `${sync.stalls.count} · ${(sync.stalls.totalMs / 1000).toFixed(1)} s total` : "None", stallsHealth(sync.stalls)],
       ] : [],
@@ -786,7 +791,6 @@ const styles: Record<string, React.CSSProperties> = {
     width: "380px",
     maxWidth: "calc(100% - 40px)",
     background: "rgba(15,15,15,0.82)",
-    backdropFilter: "blur(12px)",
     border: "1px solid rgba(255,255,255,0.12)",
     borderRadius: "10px",
     color: "#f0f0f0",

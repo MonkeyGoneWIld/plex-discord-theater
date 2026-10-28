@@ -150,7 +150,6 @@ export const adjustmentStyles: Record<string, React.CSSProperties> = {
     background: "rgba(18,18,18,0.94)",
     border: "1px solid rgba(255,255,255,0.10)",
     boxShadow: "0 10px 34px rgba(0,0,0,0.55)",
-    backdropFilter: "blur(10px)",
     zIndex: 30,
     maxWidth: "min(92vw, 420px)",
   },

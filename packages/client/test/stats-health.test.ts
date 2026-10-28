@@ -4,7 +4,7 @@
  */
 import {
   RUN_OUT_SOON_S, bufferFalling, bufferHealth, framesHealth, modeHealth, playbackWhy, previewHealth, pushSample, sparkLines, speedHealth,
-  stallsHealth, subtitleHealth, syncSummary, type SyncInfo,
+  stallsHealth, startSummary, subtitleHealth, syncSummary, type SyncInfo,
 } from "../src/lib/statsHealth";
 import type { StreamNotes } from "../src/lib/streamNotes";
 import type { StreamTrack } from "../src/lib/api";
@@ -110,6 +110,18 @@ check("a minute of samples kept, the newest", [kept.length, kept[0], kept[59]], 
 check("a gap splits the line, the newest at the right edge",
   sparkLines([10, 20, null, 30], 40, 300, 23, 4), ["0.0,17.0 100.0,12.0", "300.0,7.0"]);
 check("nothing to draw, no line", sparkLines([null, null], 10, 300, 20), []);
+
+console.log("— start —");
+check("no stream yet", startSummary(null), null);
+check("still starting", startSummary({ tookS: null, stops: 0, stoppedS: 0, watching: false }), { text: "Starting…", health: "info" });
+check("quick, its first seconds going on", startSummary({ tookS: 2.34, stops: 0, stoppedS: 0, watching: true }),
+  { text: "2.3 s · no stops so far", health: "ok" });
+check("slow, no stops after", startSummary({ tookS: 9.1, stops: 0, stoppedS: 0, watching: false }),
+  { text: "9.1 s · no stops in its first 20 s", health: "warn" });
+check("quick, then a short stop", startSummary({ tookS: 1.8, stops: 1, stoppedS: 0.6, watching: true }),
+  { text: "1.8 s · stopped 1× in its first 20 s (0.6 s)", health: "warn" });
+check("quick, then stopped twice", startSummary({ tookS: 1.8, stops: 2, stoppedS: 3.42, watching: false }),
+  { text: "1.8 s · stopped 2× in its first 20 s (3.4 s)", health: "bad" });
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

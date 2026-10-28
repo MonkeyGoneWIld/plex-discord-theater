@@ -103,6 +103,46 @@ export interface SyncInfo {
   roomPlaying: boolean;
   /** Stops while playing on this title: how many, and how long in all. */
   stalls: { count: number; totalMs: number };
+  /** How this stream started — see StartInfo. */
+  start?: StartInfo | null;
+}
+
+/** How long after a stream starts its stops count as its start's — see startSummary. */
+export const START_WATCH_S = 20;
+/** Longer than this from asking for a stream to its picture playing is a slow start. */
+export const SLOW_START_S = 8;
+
+/** This stream's start — see Player's startRef. */
+export interface StartInfo {
+  /** From asking for the stream to its picture playing, the loading screen
+   *  down; null while it is still starting. */
+  tookS: number | null;
+  /** Stops while playing in its first START_WATCH_S, and how long they lasted in all. */
+  stops: number;
+  stoppedS: number;
+  /** Those first seconds still going on. */
+  watching: boolean;
+}
+
+/**
+ * The Start line under Sync: how long this stream took to play, and whether
+ * it stopped in its first START_WATCH_S — which says more of a start than its
+ * time alone: one quick to play that stops at once only looked quick.
+ */
+export function startSummary(start: StartInfo | null | undefined): { text: string; health: Health } | null {
+  if (!start) return null;
+  if (start.tookS === null) return { text: "Starting…", health: "info" };
+  const took = `${start.tookS.toFixed(1)} s`;
+  if (start.stops > 0) {
+    return {
+      text: `${took} · stopped ${start.stops}× in its first ${START_WATCH_S} s (${start.stoppedS.toFixed(1)} s)`,
+      health: stallsHealth({ count: start.stops, totalMs: start.stoppedS * 1000 }),
+    };
+  }
+  return {
+    text: `${took} · ${start.watching ? "no stops so far" : `no stops in its first ${START_WATCH_S} s`}`,
+    health: start.tookS > SLOW_START_S ? "warn" : "ok",
+  };
 }
 
 export function stallsHealth(stalls: { count: number; totalMs: number }): Health {

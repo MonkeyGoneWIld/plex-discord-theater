@@ -2227,7 +2227,6 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "15.5px 26px 20.5px",
     borderRadius: "999px",
     background: "rgba(0,0,0,0.55)",
-    backdropFilter: "blur(6px)",
   },
   /** A gesture: the D is the ground. An outline keeps the text legible where
    *  the arc runs thin without putting a second surface on top of the first. */
@@ -2388,11 +2387,15 @@ const styles: Record<string, React.CSSProperties> = {
   },
   backBtn: {
     ...QUIET_SURFACE,
-    // Blur is local to this small surface and keeps it readable on both bright
-    // and dark frames without the heavy black plate. The inline filter and
-    // transition below prevent the old delayed change after it appears.
-    backdropFilter: "blur(12px)",
-    WebkitBackdropFilter: "blur(12px)",
+    // No backdrop blur, here or on anything else over the picture
+    // (test/over-picture keeps it so). A blur is made of the picture under
+    // it, and while one is over the video Chrome stops showing the video as
+    // an overlay of its own and draws it itself, which can come out in other
+    // colours: Back changed colour a few seconds after it came up. Its blur
+    // came off on 20 September for that, went back the same day for
+    // contrast, and run 26 saw the change again. The top bar's scrim keeps
+    // it readable. The filter and transition below keep .btn's hover fade
+    // off it when it comes up under the pointer.
     display: "flex",
     alignItems: "center",
     height: "34px",
@@ -2795,7 +2798,6 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: "12px",
     background: "rgba(15,15,15,0.95)",
     border: "1px solid rgba(255,255,255,0.15)",
-    backdropFilter: "blur(12px)",
   },
   volumeVerticalWrap: {
     // The on-screen footprint of the rotated slider below. Fixed, so the slider

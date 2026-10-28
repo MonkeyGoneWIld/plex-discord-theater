@@ -35,6 +35,16 @@ const titlePageMs = new URLSearchParams(location.search).has("titlePage")
 /** ?followRole: this player's role is the room's, as the app has it — handed
  *  the host, or handing it over — rather than fixed by which player it is. */
 const followRole = new URLSearchParams(location.search).has("followRole");
+/** ?newcomer: nothing kept of how fast this player's segments came, as for
+ *  somebody joining for the first time in a while (lib/roomWait
+ *  recentSegmentMs). Before the player reads it. */
+if (new URLSearchParams(location.search).has("newcomer")) {
+  try {
+    localStorage.removeItem("pdt:lastSegmentMs");
+  } catch {
+    // Nothing kept to begin with.
+  }
+}
 
 // Muted for good, so the browser lets it play without anyone clicking in this
 // frame — and keeps letting it: un-muting a video that started muted without

@@ -28,7 +28,10 @@
 // stream there, and &manifestMs= has a new one's playlist take that long to
 // come, as Plex starting a copy does. stream=copy4 is the same with a
 // four-second keyframe interval, ~4 MB a segment, and stream=copy4long the
-// same five minutes long.
+// same five minutes long. stream=hdr is HEVC Main 10 marked PQ (HDR10), in
+// four-second segments, as the ffmpeg engine sends a re-encode that keeps HDR;
+// with &notes=1 its notes say HDR10, for the player to light it for a screen
+// in SDR (lib/hdrOnSdr).
 //
 // &cache=1 answers segments as the bot does, for the browser to keep five
 // minutes (Cache-Control) — and so for the page after a pop-out to find them.
@@ -64,8 +67,9 @@ const SMALL_STREAM = path.join(os.tmpdir(), "plex-theater-media-errors");
 const COPY_STREAM = path.join(os.tmpdir(), "plex-theater-copy-stream");
 const COPY4_STREAM = path.join(os.tmpdir(), "plex-theater-copy4-stream");
 const COPY4_LONG_STREAM = path.join(os.tmpdir(), "plex-theater-copy4long-stream");
+const HDR_STREAM = path.join(os.tmpdir(), "plex-theater-hdr-stream");
 /** Each copied stream's keyframe interval, which is its segments' length. */
-const SEGMENT_S = new Map([[COPY_STREAM, 10], [COPY4_STREAM, 4], [COPY4_LONG_STREAM, 4]]);
+const SEGMENT_S = new Map([[COPY_STREAM, 10], [COPY4_STREAM, 4], [COPY4_LONG_STREAM, 4], [HDR_STREAM, 4]]);
 /** How long each stream is, seconds: two minutes, but for the long one. */
 const LENGTH_S = new Map([[COPY4_LONG_STREAM, 300]]);
 const lengthOf = (dir: string) => LENGTH_S.get(dir) ?? 120;
@@ -85,11 +89,15 @@ for (const [dir, segmentS] of SEGMENT_S) {
   fs.mkdirSync(dir, { recursive: true });
   console.log("generating a copied-film stream in", dir);
   const gop = String(segmentS * 24);
+  const video = dir === HDR_STREAM
+    ? ["-c:v", "libx265", "-preset", "ultrafast", "-b:v", "4M", "-pix_fmt", "yuv420p10le", "-x265-params",
+      `log-level=error:keyint=${gop}:min-keyint=${gop}:scenecut=0:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:hdr10=1:max-cll=1000,400`]
+    : ["-c:v", "libx264", "-preset", "veryfast", "-b:v", "8M", "-maxrate", "8M", "-bufsize", "16M",
+      "-g", gop, "-keyint_min", gop, "-sc_threshold", "0", "-pix_fmt", "yuv420p"];
   const made = spawnSync("ffmpeg", [
     "-hide_banner", "-loglevel", "error", "-y",
     "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
-    "-t", String(lengthOf(dir)), "-c:v", "libx264", "-preset", "veryfast", "-b:v", "8M", "-maxrate", "8M", "-bufsize", "16M",
-    "-g", gop, "-keyint_min", gop, "-sc_threshold", "0", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+    "-t", String(lengthOf(dir)), ...video, "-c:a", "aac", "-b:a", "128k",
     "-f", "hls", "-hls_time", String(segmentS), "-hls_list_size", "0", "-hls_playlist_type", "vod",
     "-hls_segment_filename", path.join(dir, "seg%03d.ts"), path.join(dir, "index.m3u8"),
   ], { stdio: "inherit" });
@@ -314,7 +322,8 @@ const server = http.createServer(async (req, res) => {
     codecSaid.clear();
     p2pOn = url.searchParams.get("p2p") !== "0";
     const stream = url.searchParams.get("stream");
-    streamDir = stream === "copy" ? COPY_STREAM : stream === "copy4" ? COPY4_STREAM : stream === "copy4long" ? COPY4_LONG_STREAM : SMALL_STREAM;
+    streamDir = stream === "copy" ? COPY_STREAM : stream === "copy4" ? COPY4_STREAM : stream === "copy4long" ? COPY4_LONG_STREAM
+      : stream === "hdr" ? HDR_STREAM : SMALL_STREAM;
     partsOn = url.searchParams.get("parts") !== "0";
     cacheOn = url.searchParams.get("cache") === "1";
     cacheNone = url.searchParams.get("cache") === "none";
@@ -382,6 +391,8 @@ const server = http.createServer(async (req, res) => {
     const notes: Record<string, string> = {
       video: "copy", kbps: "8000", audio: "transcode", audioFrom: "EAC3 5.1", audioTo: "AAC 5.1", audioKbps: "384",
       audioReason: "Unsupported codec (EAC3)",
+      ...(streamDir === HDR_STREAM ? { video: "transcode", kbps: "4000", range: "HDR10 (kept)",
+        videoFrom: "HEVC Main 10 · 10-bit · HDR10 · 1280×720 · 24 fps" } : {}),
     };
     const media = new URL(url);
     media.searchParams.set("media", "1");

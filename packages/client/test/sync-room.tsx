@@ -637,6 +637,81 @@ function Runner() {
   }
 
   /**
+   * A viewer joining a film already playing for the first time in a while —
+   * nothing kept of how fast its segments came (?newcomer) — lands on the
+   * room's place, and its first picture decides: on a fast connection it
+   * plays in step from there, never showing "Catching up to host"; on 28
+   * October one landed 7.5 s past the room by a guess, had its picture 1.7 s
+   * later, and sat 7.3 s on it. On a slower one (`kbps` a download), whichever
+   * it is, it says which, and is together with the room after.
+   */
+  async function runNewJoiner(kbps: number | null) {
+    setRunning(true);
+    const out: string[] = [kbps
+      ? `— a viewer joining for the first time in a while, each download at ${kbps / 1000} Mbps —`
+      : "— a viewer joining for the first time in a while, on a fast connection —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      latest.clear();
+      events.clear();
+      // Segments at addresses no earlier run had: none is in the browser's cache.
+      await api("/api/test/reset?p2p=0&stream=copy4&event=1&eventS=120&fresh=1");
+      if (kbps) await api(`/api/test/flow?user=u-viewer&kbps=${kbps}`);
+      viewerQuery = "&latejoin&newcomer";
+      setHostOn(false);
+      setFrames(nextFrames(currentGen));
+      setHostOn(true);
+      await waitFor(() => { const h = latest.get("u-host"); return !!h && !h.paused && h.pos > 30; }, 90_000, "the host 30s in");
+      const joinedAt = Date.now();
+      (viewerFrame.current?.contentWindow as Window | null | undefined)?.postMessage({ kind: "press", press: ["Join"] }, "*");
+      // What its loading screen says until it plays, a tenth of a second at a time.
+      const said = new Set<string>();
+      let firstAt = 0;
+      while (Date.now() - joinedAt < 60_000) {
+        const shown = latest.get("u-viewer")?.loading;
+        if (shown) said.add(shown.replace(/\d+ s$/, "N s"));
+        firstAt = firstPlay("u-viewer") ?? 0;
+        if (firstAt) break;
+        await pause(100);
+      }
+      if (!firstAt) throw new Error("timed out waiting for the viewer to play");
+      await pause(20_000);
+      const all = events.get("u-viewer") ?? [];
+      const landing = all.find((e) => e.msg === "landing on the room clock after a rebuild");
+      const joined = all.find((e) => /^joined (in step|behind)/.test(e.msg));
+      const waits = all.filter((e) => e.msg === "done waiting for the room");
+      const withPictureMs = waits.reduce((n, e) => n + Number(e.data.withPictureMs ?? 0), 0);
+      const after = all.filter((e) => e.t >= firstAt);
+      const stops = after.filter((e) => e.tag === "Video" && /buffer starved/.test(e.msg) && e.data.paused === false);
+      const jumps = after.filter((e) => /heartbeat drift correction/.test(e.msg));
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      say(`first frame ${((firstAt - joinedAt) / 1000).toFixed(1)}s after joining; landed ${landing ? `${String(landing.data.aheadOfRoomS ?? "?")}s past the room (${String(landing.data.leadBy ?? "-")})` : "nowhere said"}`);
+      say(`    its loading screen said: ${[...said].join(" / ") || "nothing"}`);
+      if (joined) say(`    ${joined.msg} ${JSON.stringify(joined.data)}`);
+      for (const e of waits) say(`    waited for the room ${String(e.data.waitedMs)} ms, ${String(e.data.withPictureMs)} ms of it with its picture in (${String(e.data.why)})`);
+      say(`${landing?.data.aheadOfRoomS === 0 ? "PASS" : "FAIL"} with nothing known of its connection, it lands on the room's place`);
+      say(`${joined ? "PASS" : "FAIL"} and says on its first picture whether it is in step or catching up`);
+      if (!kbps) {
+        const catching = [...said].some((s) => /Catching up/.test(s));
+        say(`${joined && /^joined in step/.test(joined.msg) ? "PASS" : "FAIL"} fast enough, it joins in step`);
+        say(`${!catching && withPictureMs < 1000 ? "PASS" : "FAIL"} never showing "Catching up to host" (${withPictureMs} ms waited with its picture in)`);
+      }
+      say(`${stops.length <= 1 ? "PASS" : "FAIL"} it stops no more than once after it starts (${stops.length})`);
+      say(`${jumps.length === 0 ? "PASS" : "FAIL"} and is never jumped into what it hasn't got (${jumps.length})`);
+      say(`${Math.abs(v.pos - h.pos) < 1 && !v.paused ? "PASS" : "FAIL"} together twenty seconds on (${(v.pos - h.pos).toFixed(2)}s apart${v.paused ? ", the viewer paused" : ""})`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      viewerQuery = "";
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
    * The host back from a pop-out in a browser that can't play the room's
    * stream — HEVC, which the viewer plays — and put on a stream of its own,
    * from where the room is. On 18 October monkey26, back in Firefox, had the
@@ -2517,6 +2592,8 @@ function Runner() {
         <button disabled={running} onClick={() => void runPictureAfterRoom("start")}>Viewer's picture after the room starts</button>
         <button disabled={running} onClick={() => void runPictureAfterRoom("skip")}>Viewer's picture after the room skips on</button>
         <button disabled={running} onClick={() => void runLateJoin()}>Late joiner</button>
+        <button disabled={running} onClick={() => void runNewJoiner(null)}>New joiner, fast</button>
+        <button disabled={running} onClick={() => void runNewJoiner(3000)}>New joiner, modest</button>
         <button disabled={running} onClick={() => void runHandToJoiner()}>Host handed to a joiner</button>
         <button disabled={running} onClick={() => void runSkipBurst()}>Skips in a burst, in a copy</button>
         <button disabled={running} onClick={() => void runPopOut("host")}>Host pops out</button>

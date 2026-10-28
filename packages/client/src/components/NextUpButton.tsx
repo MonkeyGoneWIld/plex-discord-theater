@@ -35,7 +35,7 @@ export function NextUpButton({ item, source, onPlay, onDismiss }: NextUpButtonPr
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  container: { background: "rgba(0,0,0,0.85)", backdropFilter: "blur(12px)", borderRadius: "12px", padding: "16px 20px", maxWidth: "280px", border: "none", boxShadow: "none" },
+  container: { background: "rgba(0,0,0,0.85)", borderRadius: "12px", padding: "16px 20px", maxWidth: "280px", border: "none", boxShadow: "none" },
   label: { color: "#e5a00d", fontSize: "10px", fontWeight: 700, letterSpacing: "1px", textTransform: "uppercase", marginBottom: "6px" },
   title: { color: "#f0f0f0", fontSize: "14px", fontWeight: 600, marginBottom: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   buttons: { display: "flex", gap: "8px" },

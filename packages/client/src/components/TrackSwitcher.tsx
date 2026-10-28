@@ -264,7 +264,6 @@ const styles: Record<string, React.CSSProperties> = {
     minHeight: 0,
     boxSizing: "border-box",
     background: "rgba(13,13,13,0.95)",
-    backdropFilter: "blur(20px)",
     border: "1px solid rgba(255,255,255,0.1)",
     borderRadius: 12,
     padding: "clamp(14px, 3vw, 20px)",

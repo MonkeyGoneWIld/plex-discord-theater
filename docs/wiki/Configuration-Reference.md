@@ -277,8 +277,7 @@ of memory, lower both.
 
 ## Playback engine
 
-Who makes the streams. Unset, Plex does, except an AV1 file's (see
-`FFMPEG_FOR_AV1`). `PLAYBACK_ENGINE=ffmpeg` has this
+Who makes the streams. Unset, Plex does. `PLAYBACK_ENGINE=ffmpeg` has this
 container make them, from the files themselves, and leaves to Plex any stream
 ffmpeg can't make. It needs the library mounted into the container, a GPU
 for re-encodes (`/dev/dri` for Intel or AMD, or NVIDIA's runtime), and room in
@@ -301,8 +300,7 @@ covers the setup and how to check it.
 | `FFMPEG_PREVIEWS_MAX_GB` | 20 | Room for those previews; the least recently used go past it |
 | `FFMPEG_SEGMENT_MEMORY_MB` | 512 | Memory for the segments rooms are fetching now; `0` reads them from disk |
 | `FFMPEG_FALLBACK_TO_PLEX` | on | `off`: a stream ffmpeg can't make fails to start instead of going to Plex |
-| `FFMPEG_FOR_AV1` | on | With Plex making the streams, an AV1 file's are still made here: copied for players that decode AV1, else re-encoded. Plex can't copy AV1, and its re-encode can come out as purple boxes. `off`: Plex's too |
-| `FFMPEG_HDR_REENCODE` | `keep` | `keep`: re-encodes for HEVC players stay HDR on a screen showing HDR, and are mapped to SDR here, as Plex does, on a screen in SDR. `tonemap`: always mapped to SDR |
+| `FFMPEG_HDR_REENCODE` | `keep` | `keep`: re-encodes for HEVC players stay HDR, in HEVC Main10; on a screen in SDR the player lights them. `tonemap`: always mapped to SDR |
 | `FFMPEG_TONEMAP` | `reinhard` | The curve for streams mapped to SDR: `reinhard`, `mobius`, `hable`, `bt2390`, `linear`, `gamma` or `clip` |
 | `FFMPEG_REPORT_TO_PLEX` | on | Show ffmpeg's streams in Plex's dashboard, Tautulli and Tracearr. `0` turns it off |
 | `FFMPEG_PATH` | the image's ffmpeg | Another ffmpeg, for running from source |

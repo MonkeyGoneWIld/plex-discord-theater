@@ -24,7 +24,7 @@
  */
 import { plexFetch } from "../plex.js";
 import { logEvent } from "../logger.js";
-import { ffmpegEngineOn, ffmpegForAv1 } from "./config.js";
+import { ffmpegEngineOn } from "./config.js";
 
 export type ReportState = "playing" | "paused" | "buffering";
 
@@ -71,9 +71,7 @@ const said = new Set<string>();
 
 /** FFMPEG_REPORT_TO_PLEX: on unless 0, false, off or no. */
 export function reportsToPlex(): boolean {
-  // Streams made here with Plex making the rest, too: AV1 files' (config.ts
-  // ffmpegForAv1). Plex knows its own.
-  if (!ffmpegEngineOn() && !ffmpegForAv1()) return false;
+  if (!ffmpegEngineOn()) return false;
   const v = process.env.FFMPEG_REPORT_TO_PLEX?.trim().toLowerCase();
   return !(v === "0" || v === "false" || v === "off" || v === "no");
 }
@@ -96,7 +94,7 @@ export function startPlexReports(
   duration: (ratingKey: string) => Promise<number | undefined>,
 ): void {
   reportFrom(streams, duration);
-  if (timer || (!ffmpegEngineOn() && !ffmpegForAv1())) return;
+  if (timer || !ffmpegEngineOn()) return;
   timer = setInterval(() => void plexReportTick(), LOOK_MS);
   timer.unref();
 }

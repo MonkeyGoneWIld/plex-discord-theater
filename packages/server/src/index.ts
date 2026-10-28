@@ -29,7 +29,7 @@ import { anyRoomPlaying, attachWebSocketServer, closeWebSocketServer } from "./s
 import { directStreamCacheDir, directStreamMemoryBytes } from "./services/direct-stream.js";
 import { startDataCleanup } from "./services/data-cleanup.js";
 import { transcodeCacheBytes } from "./services/segment-prefetch.js";
-import { checkFfmpeg, detectHardware, ffmpegForAv1, ffmpegPreviewsOn, mediaPathMap, segmentMemoryBytes } from "./services/ffmpeg/config.js";
+import { checkFfmpeg, detectHardware, ffmpegPreviewsOn, mediaPathMap, segmentMemoryBytes } from "./services/ffmpeg/config.js";
 import { checkLibraryPaths, libraryReadabilityText } from "./services/ffmpeg/library-check.js";
 import { plexJSON } from "./services/plex.js";
 
@@ -336,23 +336,7 @@ function reportIntegrations(): void {
  */
 async function reportEngine(): Promise<void> {
   if (process.env.PLAYBACK_ENGINE?.trim().toLowerCase() !== "ffmpeg") {
-    if (!ffmpegForAv1()) {
-      console.log("[Config] playback engine: Plex");
-      return;
-    }
-    // AV1 files are made here even so (config.ts ffmpegForAv1), when
-    // ffmpeg is there to make them.
-    const found = await checkFfmpeg();
-    if (!found.ok) {
-      console.log(`[Config] playback engine: Plex, AV1 files too — ffmpeg not found (${found.error})`);
-      return;
-    }
-    const hw = await detectHardware();
-    console.log(
-      "[Config] playback engine: Plex, except AV1 files, made here with",
-      `${found.version}: copied for the players that decode AV1, re-encoded on ${hw.note} for the rest`,
-      "(FFMPEG_FOR_AV1=off leaves them to Plex)",
-    );
+    console.log("[Config] playback engine: Plex");
     return;
   }
   const found = await checkFfmpeg();

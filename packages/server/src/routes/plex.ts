@@ -54,7 +54,7 @@ import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
 import { markOriginalAudio } from "../services/original-language.js";
 import { audioNotes, type AudioDecision, type SourceAudio } from "../services/stream-audio.js";
 import {
-  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegForAv1, ffmpegHardware, ffmpegPgsOn, ffmpegPreviewsOn, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesAv1, gpuEncodesHevc, hwDevice,
+  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegHardware, ffmpegPgsOn, ffmpegPreviewsOn, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesAv1, gpuEncodesHevc, hwDevice,
   keepHdrOnReencode, localPath, lowPowerVaapi, lowPowerVaapiAv1, maxEncodes, readable, recheckHardware, sizeOnDisk, styledSubtitlesOn, tonemapAlgo, tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
@@ -6030,12 +6030,9 @@ router.get(
       // copied or re-encoded, a subtitle burned in — and Plex isn't asked for
       // anything. Whatever ffmpeg can't make, or won't start, is Plex's, as
       // before, with the reason in Stats for nerds — or, with
-      // FFMPEG_FALLBACK_TO_PLEX=off, fails to start. An AV1 file's are made
-      // here with Plex making the rest, too (config.ts ffmpegForAv1): Plex's
-      // own re-encode of one was purple boxes.
+      // FFMPEG_FALLBACK_TO_PLEX=off, fails to start.
       let fallback: string | null = null;
-      const av1ByFfmpeg = !ffmpegEngineOn() && version?.videoCodec?.toLowerCase() === "av1" && ffmpegForAv1();
-      if (ffmpegEngineOn() || av1ByFfmpeg) {
+      if (ffmpegEngineOn()) {
         const tried = ffmpegRefused(ratingKey)
           ? { fallback: "ffmpeg failed on this title lately" }
           : await startWithFfmpeg({
@@ -6048,15 +6045,28 @@ router.get(
               replaces: replacedStreams(userId, ratingKey).filter((id) => id !== sessionId),
             });
         if ("manifest" in tried) return tried.manifest;
-        if (!av1ByFfmpeg && !fallbackToPlex()) {
+        if (!fallbackToPlex()) {
           throw new Error(`ffmpeg couldn't make this stream, and FFMPEG_FALLBACK_TO_PLEX is off: ${tried.fallback}`);
         }
         fallback = tried.fallback;
       }
       await selectTracksForStart(ratingKey, mediaIndex, audioStreamID, subtitleId);
+      // Two of Plex's re-encodes to HEVC come out broken, so for these Plex is
+      // offered H.264 alone, as for a browser that can't play HEVC, and as
+      // Plex's own player in Firefox is:
+      // - an AV1 file, which Plex re-encodes whatever it is offered (its HLS
+      //   can't carry AV1): The 'Burbs on the 265K, 28 October, AV1 10-bit
+      //   through its VAAPI pipeline to HEVC 10-bit, played as flickering
+      //   purple boxes;
+      // - a subtitle burned in: Avengers: Endgame with its PGS, 28 October,
+      //   HEVC 10-bit with the subtitle laid over on the GPU (overlay_vaapi on
+      //   p010) to HEVC 10-bit, played its sound over a black picture, and
+      //   300, HEVC 10-bit too, looked the same. Without the subtitle the same
+      //   re-encode was fine.
+      const plexBreaksHevc = version?.videoCodec?.toLowerCase() === "av1" || subtitleMode === "burn";
       return fetchManifest(subtitleMode, {
         videoResolution: frame,
-        hevc: roomHevc && HEVC_TRANSCODE ? "encode" : roomHevc && copy ? "copy" : false,
+        hevc: plexBreaksHevc ? false : roomHevc && HEVC_TRANSCODE ? "encode" : roomHevc && copy ? "copy" : false,
         copy,
         copyKbps,
         transcodeKbps,

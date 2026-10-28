@@ -295,6 +295,8 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
 };
 
 const asked: string[] = [];
+/** What each decision asked of Plex offered to play (X-Plex-Client-Profile-Extra). */
+const profiles: string[] = [];
 /** Whether Plex's transcoder answers a start, for the checks on what is
  *  said of a stream ffmpeg left to it: otherwise a start fails. */
 let plexStarts = false;
@@ -363,6 +365,7 @@ const plex = http.createServer((req, res) => {
   // Plex's transcoder isn't really here: a start that reaches it fails, or
   // is answered with a playlist of nothing, re-encoded.
   if (plexStarts && url.pathname === "/video/:/transcode/universal/decision") {
+    profiles.push(String(req.headers["x-plex-client-profile-extra"] ?? ""));
     return send({ Metadata: [{ Media: [{ Part: [{ Stream: [{ streamType: 1, codec: "h264", decision: "transcode" }] }] }] }] });
   }
   if (plexStarts && url.pathname === "/video/:/transcode/universal/start.m3u8") {
@@ -709,29 +712,43 @@ console.log("\n— AV1 and Opus, and FLAC, copied in fragmented MP4 for a player
     [plexRoutes.sessionWithheld(held.sid), plexRoutes.sessionNeeds(held.sid)], [["av1", "opus"], []]);
   await fetch(`${origin}/api/plex/hls/session/${held.sid}?reason=test`, { method: "DELETE" });
 
-  // With Plex making the streams, an AV1 file's are made here all the same
-  // (config.ts ffmpegForAv1): Plex's re-encode of The 'Burbs on 28 October
-  // was flickering purple boxes.
+  // With Plex making the streams, nothing of an AV1 file is made here, and
+  // Plex is offered H.264 alone for it: its re-encode of The 'Burbs to HEVC
+  // on 28 October was flickering purple boxes. Nothing here needs ffmpeg, a
+  // GPU or the media mounted.
   process.env.PLAYBACK_ENGINE = "plex";
-  plexRoutes.capsForTests({ ...none, av1: true, opus: true });
-  const plexAv1 = await copied("17");
-  check("with Plex making the streams, an AV1 file is still copied here for a player that decodes AV1, Plex never asked",
-    [plexAv1.notes.engine, plexAv1.notes.video, plexAv1.notes.audio, transcodeAsked()], ["ffmpeg", "copy", "copy", []]);
-  await fetch(`${origin}/api/plex/hls/session/${plexAv1.sid}?reason=test`, { method: "DELETE" });
-  plexRoutes.capsForTests(none);
-  const plexAv1Held = await copied("17");
-  check("  and re-encoded here for one that doesn't",
-    [plexAv1Held.notes.engine, plexAv1Held.notes.video, transcodeAsked()], ["ffmpeg", "transcode", []]);
-  await fetch(`${origin}/api/plex/hls/session/${plexAv1Held.sid}?reason=test`, { method: "DELETE" });
-  process.env.FFMPEG_FOR_AV1 = "off";
+  plexRoutes.capsForTests({ ...none, av1: true, opus: true, hevc: true });
   asked.length = 0;
+  profiles.length = 0;
   plexStarts = true;
   const plexMade = crypto.randomUUID();
-  await master("17", plexMade);
+  const plexAv1 = await master("17", plexMade);
   plexStarts = false;
-  check("  and with FFMPEG_FOR_AV1=off, left to Plex", transcodeAsked().includes("/video/:/transcode/universal/decision"), true);
+  check("with Plex making the streams, an AV1 file is Plex's, even for a player that decodes AV1 and HEVC",
+    [plexAv1.text.includes("com.pdt.engine"), transcodeAsked().includes("/video/:/transcode/universal/decision")], [false, true]);
+  // Every decision asked for it: the copy first asked for, and Plex's
+  // re-encode after.
+  check("  and Plex is offered H.264 alone for it",
+    [...new Set(profiles.map((p) => p.match(/videoCodec=([a-z0-9,]+)/)?.[1]))], ["h264"]);
   await fetch(`${origin}/api/plex/hls/session/${plexMade}?reason=test`, { method: "DELETE" });
-  delete process.env.FFMPEG_FOR_AV1;
+  // And for a subtitle it burns in: Plex's HEVC with a PGS laid over on the
+  // GPU was a black picture (Avengers: Endgame, 28 October).
+  profiles.length = 0;
+  plexStarts = true;
+  const plexBurned = crypto.randomUUID();
+  await master("9", plexBurned, "?subtitles=burn&subtitleStreamID=21");
+  const burnedProfiles = profiles.splice(0);
+  const plexPlain = crypto.randomUUID();
+  await master("9", plexPlain);
+  plexStarts = false;
+  check("  as it is for a subtitle burned in, where the same film without one is offered HEVC",
+    [[...new Set(burnedProfiles.map((p) => p.match(/videoCodec=([a-z0-9,]+)/)?.[1]))], profiles.length > 0 && profiles.every((p) => /videoCodec=hevc/.test(p))],
+    [["h264"], true]);
+  for (const id of [plexBurned, plexPlain]) await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
+  // Its details were read with Plex making the streams, its PGS track one
+  // Plex burns in; read again for the checks below, where ffmpeg makes them
+  // and the player draws it.
+  plexRoutes.invalidateTitleDetailCaches("9");
   process.env.PLAYBACK_ENGINE = "ffmpeg";
   plexRoutes.capsForTests(none);
 }

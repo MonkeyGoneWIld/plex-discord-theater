@@ -18,12 +18,20 @@ export interface PresenceInput {
   artworkUrl: string | null;
 }
 
+/**
+ * What SET_ACTIVITY is sent. Fields with nothing to show are left out, never
+ * null: Discord rejects a null timestamps or assets with 4000 (invalid
+ * payload). Bot 1's logs from 21 to 28 October: 96% of pauses, 92% of title
+ * starts and every stop were followed by "presence delivery stopped code=4000"
+ * (the updates that sent nulls), against 9% of resumes and seeks. Each
+ * SET_ACTIVITY replaces the whole activity, so a field left out is cleared.
+ */
 export interface PresenceActivity {
   type: 3;
   details: string;
   state: string;
-  timestamps: { start: number; end: number } | null;
-  assets: { large_image: string; large_text: string } | null;
+  timestamps?: { start: number; end: number };
+  assets?: { large_image: string; large_text: string };
 }
 
 /** Local timeline state; only activity crosses the Discord RPC boundary. */
@@ -77,7 +85,7 @@ export function buildPresence(
   const state = input.connected && count > 0
     ? `${status} · ${count} ${count === 1 ? "person" : "people"} in room`
     : status;
-  let timestamps: PresenceActivity["timestamps"] = null;
+  let timestamps: PresenceActivity["timestamps"];
   if (
     showMedia && input.playing && Number.isFinite(nowMs) &&
     input.durationMs !== null && Number.isFinite(input.durationMs) && input.durationMs > 0 &&
@@ -106,11 +114,12 @@ export function buildPresence(
       type: 3,
       details,
       state: presenceText(state),
-      // Null, not omission: paused/private/idle updates must clear old fields.
-      timestamps,
-      assets: showMedia && input.artworkUrl
-        ? { large_image: input.artworkUrl, large_text: details }
-        : null,
+      // Left out, not null, when paused, private or idle: the update replaces
+      // the whole presence, which clears them (see PresenceActivity).
+      ...(timestamps ? { timestamps } : {}),
+      ...(showMedia && input.artworkUrl
+        ? { assets: { large_image: input.artworkUrl, large_text: details } }
+        : {}),
     },
   };
 }

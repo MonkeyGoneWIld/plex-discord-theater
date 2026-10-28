@@ -20,18 +20,29 @@ assert.equal(seek.activity.timestamps!.start, now - 60_800, "an explicit sub-sec
 const replacement = buildPresence({ ...input, ratingKey: "2", position: 60.5 }, now, first);
 assert.equal(replacement.activity.timestamps!.start, now - 60_500, "same-title media changes reset the anchor");
 const paused = buildPresence({ ...input, playing: false }, now + 5_000, first);
-assert.equal(paused.activity.timestamps, null, "pausing clears the running bar");
+assert.ok(!("timestamps" in paused.activity), "pausing clears the running bar, by leaving it out");
 assert.ok(paused.activity.state.includes(input.title!), "pausing must not remove the title from state");
 const resumed = buildPresence(input, now + 10_000, paused);
 assert.equal(resumed.activity.timestamps!.start, now - 50_000, "resuming excludes paused wall time");
 for (const change of [{ shareDetails: false }, { connected: false }, { ratingKey: null }]) {
   const activity = buildPresence({ ...input, ...change }, now, first).activity;
-  assert.equal(activity.assets, null);
-  assert.equal(activity.timestamps, null);
+  assert.ok(!("assets" in activity));
+  assert.ok(!("timestamps" in activity));
   assert.ok(!JSON.stringify(activity).includes(input.title!));
   assert.ok(!JSON.stringify(activity).includes(input.artworkUrl!));
 }
-assert.equal(buildPresence({ ...input, durationMs: null }, now).activity.timestamps, null);
+assert.ok(!("timestamps" in buildPresence({ ...input, durationMs: null }, now).activity));
+// Discord rejects a null field with 4000 (invalid payload): on bot 1 from 21
+// to 28 October, nearly every pause, title start and stop failed that way.
+const hasNull = (value: unknown): boolean =>
+  value === null || (typeof value === "object" && Object.values(value as object).some(hasNull));
+for (const change of [
+  {}, { playing: false }, { shareDetails: false }, { connected: false }, { ratingKey: null, title: null },
+  { durationMs: null }, { artworkUrl: null }, { participantCount: 0 },
+]) {
+  const activity = buildPresence({ ...input, ...change }, now, first).activity;
+  assert.ok(!hasNull(activity), `nothing null in what Discord is sent: ${JSON.stringify(change)}`);
+}
 const long = buildPresence({ ...input, title: "a".repeat(126) + "👨‍👩‍👧‍👦" }, now).activity.details;
 assert.ok(long.length <= 128 && !long.includes("\u200d"), "truncation preserves grapheme boundaries");
 
@@ -53,7 +64,8 @@ try {
   await settled();
   assert.equal(sent.length, 2);
   assert.ok(!JSON.stringify(sent[1]).includes(input.title!));
-  assert.equal(sent[1].assets, null, "latest privacy choice wins over queued metadata");
+  assert.ok(!("assets" in sent[1]), "latest privacy choice wins over queued metadata");
+  assert.ok(!sent.some(hasNull), "nothing null is sent");
   sender.update({ ...input, shareDetails: false });
   await settled();
   assert.equal(sent.length, 2, "successful identical updates are deduplicated");

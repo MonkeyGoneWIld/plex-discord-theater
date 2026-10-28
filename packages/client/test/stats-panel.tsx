@@ -3,13 +3,15 @@
 // desktop-sized player and a phone-sized one, with the Peers section full: two
 // video peers, three players sharing extras, and every kind of extra moving
 // both ways. On 28 October its lines ran past the panel and "0 players" broke
-// in two. The checks below measure what the browser laid out. Not part of the
+// in two. The Sync section's Start row and the Range line are at their longest
+// too. The checks below measure what the browser laid out. Not part of the
 // production entry.
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { StatsOverlay, type P2PStats } from "../src/components/StatsOverlay";
 import { sideShare } from "../src/lib/sideShare";
 import type { StreamNotes } from "../src/lib/streamNotes";
+import type { SyncInfo } from "../src/lib/statsHealth";
 
 const MB = 1024 * 1024;
 localStorage.setItem("pdt:statsOpen", JSON.stringify(["playback", "video", "audio", "subtitles", "sync", "connection", "peers", "thumbnails"]));
@@ -26,6 +28,11 @@ const notes: StreamNotes = {
   engine: "ffmpeg", encoder: "Intel Quick Sync (AV1), GPU decode", fallback: null,
   videoFrom: "HEVC Main 10 · 10-bit · Dolby Vision P7 · 3840×2160 · 23.976 fps", range: "HDR10",
 };
+const sync: SyncInfo = {
+  role: "viewer", driftS: -0.04, rate: 1, waitingForRoom: false, roomPlaying: true,
+  stalls: { count: 2, totalMs: 3100 },
+  start: { tookS: 12.4, stops: 2, stoppedS: 3.1, watching: false },
+};
 
 function Panel({ width, height }: { width: number; height: number }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -36,7 +43,8 @@ function Panel({ width, height }: { width: number; height: number }) {
       <video ref={videoRef} muted playsInline style={{ width: "100%", height: "100%" }} />
       <StatsOverlay
         videoRef={videoRef} hlsRef={hlsRef} vpsRelay={false} sessionId="04ea211a-b1d7-4a1a-bc07-2fd584eef156"
-        p2pStatsRef={p2pStatsRef} notes={notes} quality={0} visible onClose={() => {}}
+        p2pStatsRef={p2pStatsRef} notes={notes} hdrLift quality={0} visible onClose={() => {}}
+        syncInfo={() => sync}
       />
     </div>
   );

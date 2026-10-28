@@ -153,9 +153,12 @@ const edits: Array<[string, string]> = [
             startedAt: request.progress?.startTimestamp ?? now,
         };
         const peer = holder ?? busyHolder;
+        // Measured in this stream, or else in an earlier one or before a
+        // pop-out: every stream's peers start unmeasured (src/lib/peerSpeeds.ts).
+        const measured = peer.downloadBandwidth;
         const fromPeer = {
             left: request.totalBytes === undefined ? undefined : request.totalBytes - request.loadedBytes,
-            bitsPerS: peer.downloadBandwidth,
+            bitsPerS: measured > 0 ? measured : hooks.rememberedSpeed?.(peer.id) ?? 0,
         };
         if (!hooks.shouldTakeFromPeer(http, fromPeer, now)) return false;
         if (!holder) {
@@ -174,6 +177,7 @@ const edits: Array<[string, string]> = [
             ms: now - http.startedAt,
             left: fromPeer.left,
             peerBitsPerS: fromPeer.bitsPerS,
+            remembered: !(measured > 0) && fromPeer.bitsPerS > 0,
             started: request.status === "loading" && request.downloadSource === "p2p",
         });
         if (request.status !== "loading") this.loadThroughHttp(segment);
@@ -208,6 +212,7 @@ const edits: Array<[string, string]> = [
         const trackerClient = this.p2pLoaders.currentLoader.trackerClient;
         for (const peer of trackerClient.peers()) {
             ids.push(peer.id);
+            hooks.sawSpeed?.(peer.id, peer.downloadBandwidth);
             const status = peer.getSegmentStatus(segment);
             if (status === "loaded") {
                 if (peer.downloadingSegment) busy = true;

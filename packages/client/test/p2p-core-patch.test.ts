@@ -34,6 +34,10 @@ check("one not loading yet is offered to another player before the bot",
   /\/\/ High-demand request is not loading\s+\/\/ plex-discord-theater: p2pCorePatch\s+if \(this\.pdtShareFromPeer\(request, segment\)\) continue;\s+const shouldLoadThroughHttp/.test(patched), true);
 check("the segment playback waits on is looked at before anything else in the queue",
   /if \(this\.pdtTakeFromPeer\(request, segment\)\) continue;/.test(patched), true);
+check("a peer measured in an earlier stream, or before a pop-out, counts as measured (lib/peerSpeeds)",
+  /bitsPerS: measured > 0 \? measured : hooks\.rememberedSpeed\?\.\(peer\.id\) \?\? 0,/.test(patched), true);
+check("  and what each peer sends at is remembered for the next",
+  /ids\.push\(peer\.id\);\s+hooks\.sawSpeed\?\.\(peer\.id, peer\.downloadBandwidth\);/.test(patched), true);
 check("a segment playback asks for behind where the engine has the playhead starts at once",
   /this\.engineRequest = engineRequest;\s+\/\/ plex-discord-theater: p2pCorePatch.*\s+if \(segment\.endTime <= this\.playback\.position\) engineRequest\.markAsShouldBeStartedImmediately\(\);/.test(patched), true);
 check("applying it twice changes nothing", patchHybridLoader(patched), patched);

@@ -51,6 +51,7 @@ import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, inBrowserCache, ins
 import { nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
 import { installTakeFromPeer } from "../lib/takeFromPeer";
+import { peerIdPrefix } from "../lib/peerSpeeds";
 import { connectionsSeen, watchPeerConnections } from "../lib/peerConnections";
 import { RTC_CONFIG, joinSideSwarm, sideShare, trackerAnnounce } from "../lib/sideShare";
 import { axisZoomScale, zoomKey } from "../lib/videoZoom";
@@ -1045,6 +1046,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  /** Who this is, for its peer ids (lib/peerSpeeds) — read when a stream starts, which it doesn't restart. */
+  const selfUserIdRef = useRef(selfUserId);
+  selfUserIdRef.current = selfUserId;
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
   const [vpsRelay, setVpsRelay] = useState<boolean | null>(null); // null = not yet loaded
@@ -4607,6 +4611,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             ofMB: took.total === undefined ? "?" : (took.total / 1e6).toFixed(2),
             afterS: (took.ms / 1000).toFixed(1),
             peerMbps: took.peerBitsPerS > 0 ? (took.peerBitsPerS / 1e6).toFixed(1) : "unmeasured",
+            ...(took.remembered ? { measured: "in an earlier stream" } : {}),
           }));
           const HlsWithP2P = HlsJsP2PEngine.injectMixin(Hls);
           hls = new HlsWithP2P({
@@ -4615,6 +4620,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               core: {
                 swarmId: `pdt-${sessionId}`,
                 announceTrackers: [trackerAnnounce(token)],
+                // Who this player is, for the others to know it again in the
+                // next stream, and after a pop-out (lib/peerSpeeds).
+                trackerClientVersionPrefix: peerIdPrefix(selfUserIdRef.current),
                 // The engine keeps every segment it downloads so it can serve
                 // peers, and left to itself it will hold 4 GiB before evicting
                 // anything: its desktop default. Worse, for VOD it only evicts

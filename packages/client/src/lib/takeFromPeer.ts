@@ -4,6 +4,7 @@
  * the picture is waiting on, when our own download of it crawls; and one well
  * ahead of the playhead that another player already has.
  */
+import { rememberPeerSpeed, rememberedPeerSpeed } from "./peerSpeeds";
 import { segmentProgress } from "./segmentParts";
 
 /** A segment starting within this of the playhead is one playback waits on. */
@@ -177,6 +178,8 @@ export interface TookFromPeer {
   ms: number;
   left?: number;
   peerBitsPerS: number;
+  /** The peer's speed was from an earlier stream or page (lib/peerSpeeds), not this one's. */
+  remembered?: boolean;
   /** False when no peer could start it after all, and the bot carries on. */
   started: boolean;
 }
@@ -195,5 +198,7 @@ export function installTakeFromPeer(
     ownerOf,
     keepSharedOnPeer,
     tookFromPeer: onTook,
+    rememberedSpeed: rememberedPeerSpeed,
+    sawSpeed: rememberPeerSpeed,
   };
 }

@@ -2632,9 +2632,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // all, so its assignment always differs from the last title's — and the
     // host starting Avatar after Toy Story read as the host switching audio.
     const sameTitle = appliedVariantTitleRef.current === v.ratingKey;
-    // The same tracks in H.264 or as a copy, by what this player decodes
-    // (the server's seatOf), is no change of tracks.
-    const tracksOf = (key: string | null) => key?.replace(/\/h264$/, "") ?? null;
+    // The same tracks in H.264, for a screen in SDR or as a copy, by what
+    // this player decodes (the server's seatOf), is no change of tracks.
+    const tracksOf = (key: string | null) => key?.replace(/\/(h264|sdr)$/, "") ?? null;
     const movedBysomeoneElse =
       hadTracks && sameTitle && tracksOf(appliedVariantKeyRef.current) !== tracksOf(v.variantKey) && !askedForTracksRef.current;
     appliedVariantKeyRef.current = v.variantKey;

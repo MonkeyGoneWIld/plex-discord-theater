@@ -111,7 +111,7 @@ services:
       - FFMPEG_HDR_REENCODE=${FFMPEG_HDR_REENCODE:-}
       - FFMPEG_TONEMAP=${FFMPEG_TONEMAP:-}
       # HDR for a screen in SDR. browser (the default): the HEVC is sent as it
-      # is, labelled FFMPEG_HDR_ON_SDR_NITS (300 unless set, 100 to 1000) so
+      # is, labelled FFMPEG_HDR_ON_SDR_NITS (200 unless set, 100 to 1000) so
       # the player's own tone map shows it brighter. server: mapped to SDR here
       # from the film's 10 bits. HLG, Dolby Vision 5 and players without HEVC
       # are always mapped here.

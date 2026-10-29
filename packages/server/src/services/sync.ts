@@ -188,6 +188,15 @@ const H264_TWIN = "/h264";
 const isH264Twin = (key: string) => key.endsWith(H264_TWIN);
 
 /**
+ * On the end of a stream's key, the stream of the same tracks for whoever on
+ * it lacks only a screen that shows HDR: what their player decodes, made for a
+ * screen in SDR — on the ffmpeg engine the HEVC labelled for the browser to map
+ * (FFMPEG_HDR_ON_SDR_NITS), not the twin's H.264. Theirs alone — see seatOf.
+ */
+const SDR_COPY = "/sdr";
+const isSdrCopy = (key: string) => key.endsWith(SDR_COPY);
+
+/**
  * The subtitle a choice burns into the stream: the subtitle itself, unless the
  * client said it draws that one — then none, and the client shares the stream
  * with everyone else on that audio.
@@ -819,6 +828,8 @@ export function mayStart(userId: string): PlayerCaps & { av1Encode: boolean } {
       const twin = c.variantKey !== null && isH264Twin(c.variantKey);
       for (const cap of PLAYER_CAPS) if (twin || !c.caps[cap]) may[cap] = false;
       if (twin || !c.av1Encode) may.av1Encode = false;
+      // Whoever drives it now, it is for screens in SDR.
+      if (c.variantKey !== null && isSdrCopy(c.variantKey)) may.hdr = false;
     }
   }
   return found ? may : { ...NO_CAPS, av1Encode: false };
@@ -848,7 +859,8 @@ function whyMoved(from: Variant): string {
     : needsOf(from).join("+") || "its twin is running";
 }
 
-const plainKeyOf = (key: string) => (isH264Twin(key) ? key.slice(0, -H264_TWIN.length) : key);
+const plainKeyOf = (key: string) =>
+  isH264Twin(key) ? key.slice(0, -H264_TWIN.length) : isSdrCopy(key) ? key.slice(0, -SDR_COPY.length) : key;
 
 /**
  * The stream a client goes on when it is put on `key`. For someone who can't
@@ -861,21 +873,36 @@ const plainKeyOf = (key: string) => (isH264Twin(key) ? key.slice(0, -H264_TWIN.l
  * film. A stream not running while its twin is: the twin, unless the twin
  * holds back from this player something it would have in a copy.
  *
+ * Someone short only of a screen that shows HDR goes on the SDR copy instead
+ * of the twin, which would take from them HEVC and their audio as well: on
+ * 29 October Windows HDR switched off mid-film moved its viewer from the HDR
+ * copy to an H.264 re-encode the server had tone-mapped, not the labelled
+ * HEVC they got starting on a screen in SDR. A stream not running while its
+ * SDR copy is: the copy, on the twin's terms — not for a screen that shows HDR.
+ *
  * Only once a stream is known: one not yet running may well come up as what
  * everyone can play, and then everyone shares it.
  */
 function seatOf(room: Room, client: RoomClient, key: string): string {
   const plain = plainKeyOf(key);
   const twinKey = plain + H264_TWIN;
+  const sdrKey = plain + SDR_COPY;
   const twin = room.state.variants.get(twinKey);
-  const twinHoldsBack = () => {
-    const withheld = withheldOf(twin);
+  const sdr = room.state.variants.get(sdrKey);
+  const holdsBack = (s: Variant | undefined) => {
+    const withheld = withheldOf(s);
     return withheld.length > 0 && !lacksAny(client, withheld);
   };
-  if (key === twinKey) return twinHoldsBack() ? plain : key;
+  if (key === twinKey) return holdsBack(twin) ? plain : key;
+  if (key === sdrKey) return lacksAny(client, needsOf(sdr)) ? twinKey : key;
   const v = room.state.variants.get(plain);
-  if (v?.hlsSessionId) return lacksAny(client, needsOf(v)) ? twinKey : key;
-  return twin?.hlsSessionId && !twinHoldsBack() ? twinKey : key;
+  if (v?.hlsSessionId) {
+    const lacked = needsOf(v).filter((c) => !client.caps[c]);
+    if (lacked.length === 0) return key;
+    return lacked.length === 1 && lacked[0] === "hdr" ? seatOf(room, client, sdrKey) : twinKey;
+  }
+  if (sdr?.hlsSessionId && !lacksAny(client, needsOf(sdr)) && !holdsBack(sdr)) return sdrKey;
+  return twin?.hlsSessionId && !holdsBack(twin) ? twinKey : key;
 }
 
 /** Give a stream another key, everyone on it and waiting to come back to it with it. */
@@ -912,7 +939,7 @@ function followHost(room: Room, v: Variant): void {
  */
 function sortByCaps(room: Room, roomId: string, v: Variant): void {
   if (
-    !isH264Twin(v.key) && withheldOf(v).length > 0 && needsOf(v).length === 0 &&
+    !isH264Twin(v.key) && !isSdrCopy(v.key) && withheldOf(v).length > 0 && needsOf(v).length === 0 &&
     !room.state.variants.has(v.key + H264_TWIN)
   ) {
     rekeyVariant(room, v, v.key + H264_TWIN);
@@ -2439,9 +2466,12 @@ export function attachWebSocketServer(server: Server): void {
           // A start made H.264 and AAC only because the host can't take the
           // file as it is goes by its twin's key, the plain one being for a
           // copy (sortByCaps) — and a restart of it must not land on the copy
-          // somebody else drives.
+          // somebody else drives. Nor a restart on the SDR copy the host's
+          // screen going to SDR put them on (seatOf) on the HDR one.
           const plainKey = variantKeyOf(audioStreamId, burned, quality);
-          const hostKey = sessionWithheld(sid).length > 0 && sessionNeeds(sid).length === 0
+          const hostKey = !itemChanged && client.variantKey === plainKey + SDR_COPY && !sessionNeeds(sid).includes("hdr")
+            ? plainKey + SDR_COPY
+            : sessionWithheld(sid).length > 0 && sessionNeeds(sid).length === 0
             ? plainKey + H264_TWIN
             : plainKey;
           let hostVariant = room.state.variants.get(hostKey);

@@ -258,14 +258,17 @@ export function keepHdrOnReencode(): boolean {
 /**
  * HDR for a screen in SDR. Unset or "browser": the HEVC is sent as it is,
  * its HDR SEI left out and its init labelled this many nits at most
- * (FFMPEG_HDR_ON_SDR_NITS, 300 unless set), so the player's own tone map —
+ * (FFMPEG_HDR_ON_SDR_NITS, 200 unless set), so the player's own tone map —
  * which works from the picture's 10 bits — shows it brighter than its usual
  * 1000 (hdr-init.ts). "server": tone-mapped here to 8-bit H.264 instead.
+ * 200 because in Discord on 29 October (run 30) it came closest to Plex's app
+ * for Windows, about 15% brighter than 300; 100 looked the same as 200, Chrome
+ * mapping to nothing under its own SDR white, 203 nits.
  */
 export function hdrOnSdrNits(): number | null {
   if (process.env.FFMPEG_HDR_ON_SDR?.trim().toLowerCase() === "server") return null;
   const n = Number(process.env.FFMPEG_HDR_ON_SDR_NITS);
-  return Number.isFinite(n) && n > 0 ? Math.min(1000, Math.max(100, Math.round(n))) : 300;
+  return Number.isFinite(n) && n > 0 ? Math.min(1000, Math.max(100, Math.round(n))) : 200;
 }
 
 /** Whether ffmpeg runs these arguments to the end, and the last thing it said. */

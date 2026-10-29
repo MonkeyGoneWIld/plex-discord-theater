@@ -833,9 +833,9 @@ console.log("\nâ€” HDR10 for a screen in SDR, labelled for the browser to map â€
     delete process.env.FFMPEG_HDR_ON_SDR_NITS;
     return got;
   };
-  check("labelled 300 nits unless FFMPEG_HDR_ON_SDR_NITS says, 100 to 1,000; FFMPEG_HDR_ON_SDR=server for the server's tone map",
+  check("labelled 200 nits unless FFMPEG_HDR_ON_SDR_NITS says, 100 to 1,000; FFMPEG_HDR_ON_SDR=server for the server's tone map",
     [nits(undefined, undefined), nits("browser", "600"), nits(undefined, "5000"), nits(undefined, "50"), nits(undefined, "x"), nits("server", "600")],
-    [300, 600, 1000, 100, 300, null]);
+    [200, 600, 1000, 100, 200, null]);
 
   const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, av1Encode: false };
   const mapOf = (playlist: string) => playlist.match(/^#EXT-X-MAP:URI="([^"]+)"/m)?.[1] ?? null;
@@ -862,8 +862,8 @@ console.log("\nâ€” HDR10 for a screen in SDR, labelled for the browser to map â€
 
   plexRoutes.capsForTests({ ...none, hevc: true });
   const sdr = await copied("23");
-  check("for a player that decodes HEVC on a screen in SDR, the HEVC is copied as it is, in fMP4, mapped at 300 nits",
-    [sdr.notes.video, !!mapOf(sdr.playlist), sdr.notes.range], ["copy", true, "HDR10 (mapped at 300 nits)"]);
+  check("for a player that decodes HEVC on a screen in SDR, the HEVC is copied as it is, in fMP4, mapped at 200 nits",
+    [sdr.notes.video, !!mapOf(sdr.playlist), sdr.notes.range], ["copy", true, "HDR10 (mapped at 200 nits)"]);
   check("  needing HEVC, not a screen that shows HDR; whoever has one is given a copy of their own",
     [plexRoutes.sessionNeeds(sdr.sid), plexRoutes.sessionWithheld(sdr.sid)], [["hevc"], ["hdr"]]);
   const initRes = await fetch(origin + mapOf(sdr.playlist)!);
@@ -872,14 +872,14 @@ console.log("\nâ€” HDR10 for a screen in SDR, labelled for the browser to map â€
   const seg = Buffer.from(await (await fetch(origin + entries(sdr.playlist)[0].uri)).arrayBuffer());
   const whole = path.join(tmp, "hdr10-labelled.mp4");
   fs.writeFileSync(whole, Buffer.concat([init, seg]));
-  check("  the stream says 300 nits, brightest and mastered, and nothing says the film's 4,000 or 1,608",
-    peaks(whole), { luminance: [300], content: [300] });
+  check("  the stream says 200 nits, brightest and mastered, and nothing says the film's 4,000 or 1,608",
+    peaks(whole), { luminance: [200], content: [200] });
   // x265's own SEI, beside its HDR SEI, is in the film's hvcC.
   check("  hvcC's SEI left out of the init, which was in the film's",
     [fs.readFileSync(HDR10_FILM).includes("x265 (build"), init.includes("x265 (build")], [true, false]);
   check("  and it decodes", spawnSync("ffmpeg", ["-v", "error", "-i", whole, "-f", "null", "-"]).status, 0);
   check("labelled again it is the same, its boxes replaced rather than added to",
-    Buffer.from(labelInitForSdr(init, 300) ?? []).equals(init), true);
+    Buffer.from(labelInitForSdr(init, 200) ?? []).equals(init), true);
   check("and something with no HEVC in it isn't labelled", labelInitForSdr(Buffer.from("not an mp4 at all"), 300), null);
   await fetch(`${origin}/api/plex/hls/session/${sdr.sid}?reason=test`, { method: "DELETE" });
 

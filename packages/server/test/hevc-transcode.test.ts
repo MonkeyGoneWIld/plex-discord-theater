@@ -423,10 +423,10 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
 }
 
 {
-  // An HDR picture copied only for a screen that shows it. Everyone else gets
-  // the server's tone mapping, on the twin: Chrome's own mapping on a screen in
-  // SDR is dark, and lifting it in the page broke dark scenes into blocks
-  // (Endgame at 32:00, run 28).
+  // An HDR picture copied only for a screen that shows it. A screen in SDR
+  // gets a copy made for it — on the ffmpeg engine the HEVC labelled for the
+  // browser to map — not the twin's H.264 the server tone-mapped: Windows HDR
+  // switched off mid-film on 29 October moved its viewer there (run 30, A2).
   newRoom("caps-3");
   const host = await join("caps-3", "u-host", "host", true, { hdr: true });
   const a = await join("caps-3", "u-a", "a", true, { hdr: true });
@@ -445,16 +445,30 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
   await sleep(60);
   const bState = b.seen.find((m) => m.type === "state")?.variant;
   check("someone whose screen is in SDR lands on a stream of their own to bring up",
-    [bState?.variantKey, bState?.isOwner, bState?.hlsSessionId], ["1:0/h264", true, null]);
-  check("tone-mapped on the server", mayStart("u-b").hdr, false);
+    [bState?.variantKey, bState?.isOwner, bState?.hlsSessionId], ["1:0/sdr", true, null]);
+  check("in HEVC, made for a screen in SDR", [mayStart("u-b").hevc, mayStart("u-b").hdr], [true, false]);
   check("the host's stream is left as it is", [host.toldToRebuild(), a.seen.filter((m) => m.type === "variant").length], [false, 0]);
   a.send({ type: "caps", hdr: false });
   await sleep(60);
-  check("a screen that leaves HDR moves its viewer onto the twin",
-    a.seen.filter((m) => m.type === "variant").at(-1)?.variantKey, "1:0/h264");
+  check("a screen that leaves HDR moves its viewer onto the SDR copy, not the twin",
+    a.seen.filter((m) => m.type === "variant").at(-1)?.variantKey, "1:0/sdr");
   a.send({ type: "caps", hdr: true });
   await sleep(60);
   check("and coming back doesn't bring HDR back before they join again", mayStart("u-a").hdr, false);
+  // The copy brought up, labelled: it needs HEVC only, and stays the copy.
+  const labelled = crypto.randomUUID();
+  recordSessionVideoCodec(labelled, "hevc");
+  recordSessionHdr(labelled, false);
+  recordWithheld(labelled, ["hdr"]);
+  b.send({ type: "variant-session", hlsSessionId: labelled, sessionOffset: 0 });
+  await sleep(60);
+  check("nobody on the SDR copy is moved once it runs",
+    [a, b].map((c) => c.seen.filter((m) => m.type === "variant").at(-1)?.variantKey), ["1:0/sdr", "1:0/sdr"]);
+  [a, b].forEach((c) => c.clear());
+  b.send({ type: "caps", hevc: false });
+  await sleep(60);
+  check("a player on it that can't decode HEVC goes onto the twin",
+    b.seen.filter((m) => m.type === "variant").at(-1)?.variantKey, "1:0/h264");
   // An SDR stream made for a host whose screen is in SDR: needs HEVC, not
   // HDR, so a viewer whose screen shows HDR shares it — SDR. No player has
   // said its screen shows HDR yet (October's logs), so no third stream for it.
@@ -463,6 +477,59 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
   recordSessionHdr(sdrSid, false);
   check("a tone-mapped HEVC stream needs HEVC only", sessionNeeds(sdrSid), ["hevc"]);
   [host, a, b].forEach((x) => x.close());
+}
+
+console.log("\n— the host's screen leaves HDR mid-film —");
+{
+  newRoom("caps-4");
+  const host = await join("caps-4", "u-host", "host", true, { hdr: true });
+  const v = await join("caps-4", "u-v", "v", true, { hdr: true });
+  const sid = crypto.randomUUID();
+  recordSessionVideoCodec(sid, "hevc");
+  recordSessionHdr(sid, true);
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: sid, position: 0, sessionOffset: 0, audioStreamId: 1, subtitleStreamId: 0,
+  });
+  await sleep(60);
+  [host, v].forEach((c) => c.clear());
+  host.send({ type: "caps", hdr: false });
+  await sleep(60);
+  const told = host.seen.filter((m) => m.type === "variant").at(-1);
+  check("the host goes onto an SDR copy of their own to bring up",
+    [told?.variantKey, told?.isOwner, told?.hlsSessionId], ["1:0/sdr", true, null]);
+  check("in HEVC, made for a screen in SDR", [mayStart("u-host").hevc, mayStart("u-host").hdr], [true, false]);
+  const kept = v.seen.filter((m) => m.type === "variant").at(-1);
+  check("the viewer whose screen shows HDR keeps the HDR copy, now driving it",
+    [kept?.variantKey, kept?.isOwner, kept?.hlsSessionId], ["1:0", true, sid]);
+  const labelled = crypto.randomUUID();
+  recordSessionVideoCodec(labelled, "hevc");
+  recordSessionHdr(labelled, false);
+  recordWithheld(labelled, ["hdr"]);
+  [host, v].forEach((c) => c.clear());
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: labelled, position: 0, sessionOffset: 0, audioStreamId: 1, subtitleStreamId: 0,
+  });
+  await sleep(60);
+  check("the host's restart stays on the SDR copy",
+    host.seen.filter((m) => m.type === "variant").at(-1)?.variantKey, "1:0/sdr");
+  check("and leaves the HDR copy as it was",
+    v.seen.some((m) => m.type === "variant" && m.hlsSessionId === labelled), false);
+  const s = await join("caps-4", "u-s", "s", true, {});
+  const sState = s.seen.find((m) => m.type === "state")?.variant;
+  check("someone joining on a screen in SDR shares the host's SDR copy",
+    [sState?.variantKey, sState?.isOwner, sState?.hlsSessionId], ["1:0/sdr", false, labelled]);
+  // Other audio and back, the HDR copy gone meanwhile: HDR again, not the SDR copy.
+  v.send({ type: "set-tracks", audioStreamId: 2, subtitleStreamId: 0 });
+  await sleep(60);
+  v.clear();
+  v.send({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 0 });
+  await sleep(60);
+  const back = v.seen.filter((m) => m.type === "variant").at(-1);
+  check("a screen that shows HDR back on those tracks gets a copy of its own, not the SDR one",
+    [back?.variantKey, back?.isOwner, back?.hlsSessionId], ["1:0", true, null]);
+  [host, v, s].forEach((x) => x.close());
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

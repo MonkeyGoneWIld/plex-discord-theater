@@ -240,7 +240,7 @@ and `FFMPEG_PREVIEWS_MAX_GB` (20 by default) bounds the folder.
 |---|---|
 | Copy, for a screen that shows HDR | Kept, untouched, as in Plex mode |
 | Re-encode for a player that decodes HEVC, on a screen that shows HDR | Kept: HDR10, in HEVC Main10, never AV1. `FFMPEG_HDR_REENCODE=tonemap` maps it to SDR instead, as Plex does. |
-| A player that decodes HEVC, on a screen in SDR | HDR10 and Dolby Vision 7 and 8.1: sent as HDR (copied, or kept in HEVC Main10), labelled 300 nits for the browser to map. With `FFMPEG_HDR_ON_SDR=server`, and for HLG: mapped to SDR here from the film's 10 bits, into HEVC Main10 |
+| A player that decodes HEVC, on a screen in SDR | HDR10 and Dolby Vision 7 and 8.1: sent as HDR (copied, or kept in HEVC Main10), labelled 200 nits for the browser to map. With `FFMPEG_HDR_ON_SDR=server`, and for HLG: mapped to SDR here from the film's 10 bits, into HEVC Main10 |
 | H.264 (a player that can't decode HEVC, such as Discord in Firefox) | Mapped to SDR |
 | A subtitle burned in | Mapped to SDR, so the subtitle isn't blinding |
 | Dolby Vision 5 | Mapped to SDR, with its metadata applied |
@@ -260,10 +260,12 @@ app for Windows shows it. A page can't do better itself: what it can read of
 the picture is 8 bits, and lifting that bands dark scenes.
 
 So for a screen in SDR the stream is labelled a lower peak,
-`FFMPEG_HDR_ON_SDR_NITS` (300 by default): the HEVC's HDR SEI is left out of
-its frames and its init segment, and the init says 300 nits in `mdcv` and
-`clli` instead. Chrome then shows that face at grey 174, and reference white
-(203 nits) at 240; anything brighter than 300 nits is white. The stream is in
+`FFMPEG_HDR_ON_SDR_NITS` (200 by default): the HEVC's HDR SEI is left out of
+its frames and its init segment, and the init says 200 nits in `mdcv` and
+`clli` instead. Chrome then shows that face at grey 186, and reference white
+(203 nits) as white, as does anything brighter. A lower label is no brighter:
+Chrome maps to nothing under its own SDR white. At 300 the face is 174 and
+reference white 240, with white from 300 nits up. The stream is in
 fragmented MP4, where those boxes go. Closed captions are read from the file,
 so leaving the SEI out doesn't lose them.
 
@@ -282,8 +284,10 @@ In Plex mode Plex is asked for H.264 mapped to SDR, as Plex's own web player
 does on a screen in SDR. Stats for nerds shows the stream's range on the Range
 line, in amber when HDR reaches a screen in SDR.
 
-A screen that leaves HDR mid-film moves its viewer onto a mapped stream; one
-that comes back to HDR is sent HDR again after rejoining. A viewer whose screen
+A screen that leaves HDR mid-film moves its viewer onto a stream of their own
+made for a screen in SDR, the one they would have had starting on it: the
+labelled HEVC when their player decodes HEVC, not H.264. One that comes back
+to HDR is sent HDR again after rejoining. A viewer whose screen
 shows HDR, in a room whose host's doesn't, shares the host's mapped stream when
 both decode HEVC.
 
@@ -409,8 +413,8 @@ curve: `mobius` (default), `reinhard`, `hable`, `bt2390`, `linear`, `gamma` or
 
 `browser` (the default) or `server`. See
 [HDR on a screen in SDR](#hdr-on-a-screen-in-sdr). `FFMPEG_HDR_ON_SDR_NITS` is
-the peak the stream is labelled, 100 to 1000, 300 by default: lower is
-brighter, and anything above it is white.
+the peak the stream is labelled, 100 to 1000, 200 by default: lower is
+brighter, down to 200, and anything above it is white.
 
 ### `FFMPEG_REPORT_TO_PLEX`
 

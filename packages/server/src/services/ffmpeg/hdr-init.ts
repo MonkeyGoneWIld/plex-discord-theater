@@ -7,7 +7,9 @@
  * reference white (203 nits) lands at grey 188 of 255 and a 100-nit face at
  * 136, a stop or more under Plex's app for Windows. Labelled 300 nits the same
  * face is 174 and reference white 240 (measured in Chrome 156, 29 October), and
- * whatever is brighter than 300 nits is white.
+ * whatever is brighter than 300 nits is white; labelled 200, the default, 186
+ * and white. Lower is no brighter: Chrome maps to nothing under its own SDR
+ * white, 203 nits.
  *
  * Any mastering or light-level SEI in the stream outranks an MP4's own boxes,
  * whether in the frames or in the init's hvcC, so a labelled copy goes out with

@@ -173,7 +173,7 @@ If you would rather not build from source, a container image is published to
 GitHub Packages:
 
 ```bash
-docker pull ghcr.io/monkeygonewild/plex-discord-theater:1.2.2
+docker pull ghcr.io/monkeygonewild/plex-discord-theater:2.0.0
 ```
 
 The image is generic. Your `DISCORD_CLIENT_ID` is injected into the page by the

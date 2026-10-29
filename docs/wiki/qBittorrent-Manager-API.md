@@ -1,6 +1,6 @@
 # qBittorrent Manager API
 
-Plex Discord Theater v1.0.3 exposes a private, read-only API for
+Plex Discord Theater (v1.0.3 and later) exposes a private, read-only API for
 [`plex-qbt-manager`](https://github.com/MonkeyGoneWIld/plex-qbt-manager). It tells
 the manager how many connected viewers use each audio/subtitle stream and whether
 the Discord room is playing or paused. Plex remains the source of account
@@ -15,7 +15,7 @@ Choose a long random shared secret. In the Theater service:
 ```yaml
 services:
   plex-discord-theater:
-    image: ghcr.io/monkeygonewild/plex-discord-theater:1.0.3
+    image: ghcr.io/monkeygonewild/plex-discord-theater:2.0.0
     environment:
       - QBT_MANAGER_API_KEY=replace-with-the-shared-secret
 ```

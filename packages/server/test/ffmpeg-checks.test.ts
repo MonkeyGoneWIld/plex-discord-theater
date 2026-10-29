@@ -190,7 +190,7 @@ console.log("\n— AV1, Opus and FLAC copied, in fragmented MP4 —");
   const all = { audioStreamId: null, hevcOk: true, av1Ok: true, opusOk: true, flacOk: true, ac3Ok: true, eac3Ok: true };
   const av1 = planCopy(version({}, {}), all);
   check("10-bit AV1 with Opus 5.1, for a player that decodes both, is copied as it is, in fMP4",
-    av1.ok && [av1.codec, av1.audioCopy, av1.fmp4, copyNeeds(av1)], ["av1", true, true, ["av1", "opus"]]);
+    av1.ok && [av1.codec, av1.audioCopy, av1.fmp4, copyNeeds(av1)], ["av1", true, true, ["av1", "opus", "tenBit"]]);
   const why = (p: ReturnType<typeof planCopy>) => (p.ok ? "copy" : p.why);
   check("not for a player that can't decode AV1", why(planCopy(version({}, {}), { ...all, av1Ok: false })),
     "AV1: not decoded by this player");
@@ -203,11 +203,11 @@ console.log("\n— AV1, Opus and FLAC copied, in fragmented MP4 —");
   check("for one that can, H.264 with its Opus is fMP4", opus.ok && [opus.fmp4, copyNeeds(opus)], [true, ["opus"]]);
   const flac = (audio: Record<string, unknown>) => planCopy(version({ codec: "hevc" }, { codec: "flac", ...audio }), all);
   const flacCopied = (p: ReturnType<typeof planCopy>) => p.ok && [p.audioCopy, p.fmp4, copyNeeds(p)];
-  check("FLAC stereo at 1 Mbps is copied", flacCopied(flac({ channels: 2, bitrate: 1000 })), [true, true, ["hevc", "flac"]]);
+  check("FLAC stereo at 1 Mbps is copied", flacCopied(flac({ channels: 2, bitrate: 1000 })), [true, true, ["hevc", "flac", "tenBit"]]);
   check("FLAC 5.1 at 4 Mbps becomes AAC, sent to every viewer as it is",
-    flacCopied(flac({ channels: 6, bitrate: 4000 })), [false, false, ["hevc"]]);
+    flacCopied(flac({ channels: 6, bitrate: 4000 })), [false, false, ["hevc", "tenBit"]]);
   check("and with no bitrate said, stereo is copied and surround isn't",
-    [flacCopied(flac({ channels: 2 })), flacCopied(flac({ channels: 6 }))], [[true, true, ["hevc", "flac"]], [false, false, ["hevc"]]]);
+    [flacCopied(flac({ channels: 2 })), flacCopied(flac({ channels: 6 }))], [[true, true, ["hevc", "flac", "tenBit"]], [false, false, ["hevc", "tenBit"]]]);
   const sound = (audio: Record<string, unknown>, ask: Partial<typeof all> = {}) =>
     planCopy(version({ codec: "h264", bitDepth: 8 }, audio), { ...all, ...ask });
   const eac3 = sound({ codec: "eac3", channels: 8 });

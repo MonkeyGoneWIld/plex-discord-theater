@@ -33,6 +33,9 @@ export interface StreamNotes {
    *  from HDR10)". Null from a server that doesn't say. */
   videoFrom: string | null;
   range: string | null;
+  /** HDR labelled for each screen: the init this player has is its screen's
+   *  own, and another screen needs it asked for again. */
+  perScreen: boolean;
 }
 
 /** StreamNotes from hls.js's parsed session data, or null when the server sent
@@ -60,6 +63,7 @@ export function readStreamNotes(
     videoFrom: value("videoFrom"), range: value("range"),
     encoder: value("encoder"), fallback: value("fallback"),
     engine: value("engine") === "ffmpeg" ? "ffmpeg" : "plex",
+    perScreen: value("perScreen") === "1",
   };
 }
 

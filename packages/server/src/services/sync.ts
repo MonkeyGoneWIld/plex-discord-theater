@@ -194,7 +194,38 @@ const isH264Twin = (key: string) => key.endsWith(H264_TWIN);
  * (FFMPEG_HDR_ON_SDR_NITS), not the twin's H.264. Theirs alone — see seatOf.
  */
 const SDR_COPY = "/sdr";
-const isSdrCopy = (key: string) => key.endsWith(SDR_COPY);
+
+/**
+ * On the end of a stream's key, the stream of the same tracks for whoever on
+ * it decodes HEVC but not AV1 smoothly: H.265 of its own, not the twin's
+ * H.264, which would take from them the picture their player does play.
+ */
+const HEVC_OWN = "/hevc";
+
+/**
+ * On the end of a stream's key, the stream of the same tracks for whoever on
+ * it plays HEVC but drops frames on a 10-bit picture: HEVC Main, 8 bits, as
+ * Plex's own HEVC is. On 29 October blah0391's laptop dropped 9–39% of the
+ * frames of 10-bit HEVC in five sessions of fourteen, and never more than
+ * 2.2% of 8-bit; Deadpool in Plex's 8-bit HEVC on main, none.
+ */
+const EIGHT_BIT = "/8bit";
+
+/** The streams of their own a player is put on, short of something a stream needs (ownStreamFor). */
+const OWN_STREAMS = [SDR_COPY, HEVC_OWN, EIGHT_BIT] as const;
+const ownStreamOf = (key: string) => OWN_STREAMS.find((s) => key.endsWith(s)) ?? null;
+
+/**
+ * The stream of its own for someone short of `lacked` of what a stream
+ * needs: the SDR copy for a screen in SDR alone, HEVC for a player short of AV1
+ * or 10 bits but not of HEVC, 8-bit if 10 bits are what it lacks. Null for
+ * the twin: short of HEVC, or of the sound.
+ */
+function ownStreamFor(client: RoomClient, lacked: readonly PlayerCap[]): (typeof OWN_STREAMS)[number] | null {
+  if (lacked.length > 0 && lacked.every((c) => c === "hdr")) return SDR_COPY;
+  if (!client.caps.hevc || !lacked.every((c) => c === "av1" || c === "tenBit" || c === "hdr")) return null;
+  return lacked.includes("tenBit") || !client.caps.tenBit ? EIGHT_BIT : HEVC_OWN;
+}
 
 /**
  * The subtitle a choice burns into the stream: the subtitle itself, unless the
@@ -848,8 +879,12 @@ export function mayStart(userId: string): PlayerCaps & { av1Encode: boolean } {
       const twin = c.variantKey !== null && isH264Twin(c.variantKey);
       for (const cap of PLAYER_CAPS) if (twin || !c.caps[cap]) may[cap] = false;
       if (twin || !c.av1Encode) may.av1Encode = false;
-      // Whoever drives it now, it is for screens in SDR.
-      if (c.variantKey !== null && isSdrCopy(c.variantKey)) may.hdr = false;
+      // Whoever drives it now, it is for screens in SDR, players short of
+      // AV1, or of 10 bits.
+      const own = c.variantKey !== null ? ownStreamOf(c.variantKey) : null;
+      if (own === SDR_COPY) may.hdr = false;
+      if (own === HEVC_OWN || own === EIGHT_BIT) may.av1 = may.av1Encode = false;
+      if (own === EIGHT_BIT) may.tenBit = may.hdr = false;
     }
   }
   return found ? may : { ...NO_CAPS, av1Encode: false };
@@ -879,8 +914,10 @@ function whyMoved(from: Variant): string {
     : needsOf(from).join("+") || "its twin is running";
 }
 
-const plainKeyOf = (key: string) =>
-  isH264Twin(key) ? key.slice(0, -H264_TWIN.length) : isSdrCopy(key) ? key.slice(0, -SDR_COPY.length) : key;
+const plainKeyOf = (key: string) => {
+  const own = isH264Twin(key) ? H264_TWIN : ownStreamOf(key);
+  return own ? key.slice(0, -own.length) : key;
+};
 
 /**
  * The stream a client goes on when it is put on `key`. For someone who can't
@@ -900,28 +937,39 @@ const plainKeyOf = (key: string) =>
  * HEVC they got starting on a screen in SDR. A stream not running while its
  * SDR copy is: the copy, on the twin's terms — not for a screen that shows HDR.
  *
+ * The same for a player that plays HEVC but not AV1 smoothly, or not 10 bits:
+ * H.265 of its own (ownStreamFor), not H.264.
+ *
  * Only once a stream is known: one not yet running may well come up as what
  * everyone can play, and then everyone shares it.
  */
 function seatOf(room: Room, client: RoomClient, key: string): string {
   const plain = plainKeyOf(key);
   const twinKey = plain + H264_TWIN;
-  const sdrKey = plain + SDR_COPY;
   const twin = room.state.variants.get(twinKey);
-  const sdr = room.state.variants.get(sdrKey);
   const holdsBack = (s: Variant | undefined) => {
     const withheld = withheldOf(s);
     return withheld.length > 0 && !lacksAny(client, withheld);
   };
   if (key === twinKey) return holdsBack(twin) ? plain : key;
-  if (key === sdrKey) return lacksAny(client, needsOf(sdr)) ? twinKey : key;
-  const v = room.state.variants.get(plain);
+  /** Short of `lacked` on the stream at `from`: one of their own, or the twin. */
+  const elsewhere = (from: string, lacked: PlayerCap[]) => {
+    const own = ownStreamFor(client, lacked);
+    return own && plain + own !== from ? seatOf(room, client, plain + own) : twinKey;
+  };
+  const v = room.state.variants.get(key);
+  if (key !== plain) {
+    const lacked = needsOf(v).filter((c) => !client.caps[c]);
+    return lacked.length === 0 ? key : elsewhere(key, lacked);
+  }
   if (v?.hlsSessionId) {
     const lacked = needsOf(v).filter((c) => !client.caps[c]);
-    if (lacked.length === 0) return key;
-    return lacked.length === 1 && lacked[0] === "hdr" ? seatOf(room, client, sdrKey) : twinKey;
+    return lacked.length === 0 ? key : elsewhere(key, lacked);
   }
-  if (sdr?.hlsSessionId && !lacksAny(client, needsOf(sdr)) && !holdsBack(sdr)) return sdrKey;
+  for (const own of OWN_STREAMS) {
+    const s = room.state.variants.get(plain + own);
+    if (s?.hlsSessionId && !lacksAny(client, needsOf(s)) && !holdsBack(s)) return plain + own;
+  }
   return twin?.hlsSessionId && !holdsBack(twin) ? twinKey : key;
 }
 
@@ -958,11 +1006,14 @@ function followHost(room: Room, v: Variant): void {
  * Firefox, everybody else watched one.
  */
 function sortByCaps(room: Room, roomId: string, v: Variant): void {
-  if (
-    !isH264Twin(v.key) && !isSdrCopy(v.key) && withheldOf(v).length > 0 && needsOf(v).length === 0 &&
-    !room.state.variants.has(v.key + H264_TWIN)
-  ) {
+  const withheld = withheldOf(v);
+  const plain = !isH264Twin(v.key) && !ownStreamOf(v.key);
+  if (plain && withheld.length > 0 && needsOf(v).length === 0 && !room.state.variants.has(v.key + H264_TWIN)) {
     rekeyVariant(room, v, v.key + H264_TWIN);
+  } else if (plain && needsOf(v).includes("hevc") && (withheld.includes("av1") || withheld.includes("tenBit"))) {
+    // HEVC only because its driver is short of AV1, or of 10 bits: the same.
+    const own = withheld.includes("tenBit") ? EIGHT_BIT : HEVC_OWN;
+    if (!room.state.variants.has(v.key + own)) rekeyVariant(room, v, v.key + own);
   }
   const movers = membersOf(room, v.key).filter((c) => seatOf(room, c, v.key) !== v.key);
   if (movers.length === 0) return;
@@ -1936,7 +1987,8 @@ export function attachWebSocketServer(server: Server): void {
           // A joiner asks for their own quality once they are in, if they
           // have one; until then they watch what the host does.
           quality: 0,
-          caps: Object.fromEntries(PLAYER_CAPS.map((cap) => [cap, msg[cap] === true])) as unknown as PlayerCaps,
+          // 10 bits unless said otherwise: a player before it was asked plays them.
+          caps: Object.fromEntries(PLAYER_CAPS.map((cap) => [cap, cap === "tenBit" ? msg[cap] !== false : msg[cap] === true])) as unknown as PlayerCaps,
           av1Encode: msg.av1 === true && msg.av1Encode === true,
         };
         roomId = instanceId;
@@ -2506,10 +2558,14 @@ export function attachWebSocketServer(server: Server): void {
           // file as it is goes by its twin's key, the plain one being for a
           // copy (sortByCaps) — and a restart of it must not land on the copy
           // somebody else drives. Nor a restart on the SDR copy the host's
-          // screen going to SDR put them on (seatOf) on the HDR one.
+          // screen going to SDR put them on (seatOf) on the HDR one, or on the
+          // HEVC one their player's dropped frames put them on on AV1 or 10 bits.
           const plainKey = variantKeyOf(audioStreamId, burned, quality);
-          const hostKey = !itemChanged && client.variantKey === plainKey + SDR_COPY && !sessionNeeds(sid).includes("hdr")
-            ? plainKey + SDR_COPY
+          const ownNow = !itemChanged && client.variantKey?.startsWith(plainKey) ? ownStreamOf(client.variantKey) : null;
+          const stillOwn = ownNow !== null && client.variantKey === plainKey + ownNow &&
+            !sessionNeeds(sid).includes(ownNow === SDR_COPY ? "hdr" : ownNow === HEVC_OWN ? "av1" : "tenBit");
+          const hostKey = stillOwn
+            ? plainKey + ownNow
             : sessionWithheld(sid).length > 0 && sessionNeeds(sid).length === 0
             ? plainKey + H264_TWIN
             : plainKey;

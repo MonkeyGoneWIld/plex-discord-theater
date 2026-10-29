@@ -163,8 +163,23 @@ administrator API key is required.
   bitrate limit are copied, not re-encoded, for players that can decode them.
 - **HEVC transcodes:** a sharper picture at the same bitrate for players that
   decode HEVC, with Plex Pass and hardware encoding (or the ffmpeg engine).
-- **FFmpeg engine (optional):** streams made in the container on Intel Quick
-  Sync, HDR kept on HEVC re-encodes; Plex covers anything it can't make.
+- **FFmpeg engine (optional):** the container makes the streams itself, on
+  Intel Quick Sync, VAAPI or NVIDIA NVENC, and Plex covers anything it can't
+  make. Beyond what Plex's transcoder does:
+  - **PGS subtitles drawn by each player,** sharp at any size, instead of
+    burned into a re-encoded picture, so Blu-ray subtitles no longer stop a
+    film from being copied.
+  - **HDR kept.** Re-encodes stay HDR10, and one stream serves screens in HDR
+    and in SDR alike, each shown at its best, so everyone shares it peer to
+    peer.
+  - **More copied as it is:** AV1 video, and Opus, FLAC, AC3 and EAC3 sound,
+    for players that decode them; 7.1 is kept as Opus 7.1.
+  - **A stream for each device:** H.265 rather than H.264 wherever it plays,
+    and a lighter picture for a device that drops frames, without changing
+    anyone else's.
+  - **Dolby Vision 5 in true colour,** seeks anywhere in the film without a
+    restart, and seek previews for files Plex has none for.
+
   [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FFmpeg-Engine)
 - **Shared bandwidth:** viewers on the same stream pass segments to each other,
   peer to peer, which eases your upload.

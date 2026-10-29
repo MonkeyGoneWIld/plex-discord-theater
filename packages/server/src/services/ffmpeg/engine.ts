@@ -52,7 +52,7 @@ import { streamBandwidth, type Bandwidth } from "../stream-bandwidth.js";
 import { ffmpegPath, lookaheadS, maxEncodes } from "./config.js";
 import { cpuUse, gpuUse, readUse, sampleGpu, type GpuSample } from "./gpu-use.js";
 import { dropHot, hotSegment, keepHot } from "./hot-segments.js";
-import { labelInitForSdr } from "./hdr-init.js";
+import { labelInitForHdr, labelInitForSdr, type HdrMeta } from "./hdr-init.js";
 import { COPY_CLOCK_OFFSET_S } from "./plan.js";
 
 /** How far past the watcher a run is when its speed is logged, unless
@@ -111,6 +111,8 @@ interface Init {
   file: string;
   bytes: number;
   tracks: Mp4Track[];
+  /** HDR labelled for each screen: a screen in HDR's own (hdr-init.ts), as its file is a screen in SDR's. */
+  forHdr: Uint8Array | null;
 }
 
 interface Segment extends MeasuredSegment {
@@ -158,8 +160,10 @@ interface Run {
   encode: boolean;
   /** Segments in fragmented MP4 (plan.ts fmp4SegmentArgs), not MPEG-TS. */
   fmp4: boolean;
-  /** HDR for a screen in SDR: the peak its init is labelled, nits (hdr-init.ts). */
+  /** HDR labelled for each screen: the peak a screen in SDR's init says, nits (hdr-init.ts). */
   sdrPeakNits: number | null;
+  /** What a screen in HDR's init says of the film's HDR, when ffprobe could tell. */
+  hdrMeta: Promise<HdrMeta | null> | null;
   /** Its init segment, once ffmpeg has written it. */
   init: Init | null;
   /** The segments ffmpeg has announced, as fMP4 (announced). */
@@ -370,25 +374,33 @@ function announced(line: string, fmp4: boolean, seen: Set<string>): string | nul
 }
 
 /** An fMP4 run's init segment from its folder, served as `servedAs`; null
- *  until ffmpeg has written one that can be read. HDR for a screen in SDR is
- *  labelled there first (hdr-init.ts): nothing has been sent of it yet. */
+ *  until ffmpeg has written one that can be read. HDR labelled for each screen
+ *  is labelled there first, for a screen in SDR, and kept as a screen in HDR's
+ *  own beside it (hdr-init.ts): nothing has been sent of it yet. */
 async function readInit(run: Run, dir: string, servedAs: string): Promise<Init | null> {
   const file = path.join(dir, "init.mp4");
   try {
     let data: Uint8Array = await fs.promises.readFile(file);
+    const tracks = initTracks(data);
+    if (!tracks) return null;
+    let forHdr: Uint8Array | null = null;
     if (run.sdrPeakNits !== null) {
+      const meta = await run.hdrMeta;
       const labelled = labelInitForSdr(data, run.sdrPeakNits);
       if (labelled) {
+        forHdr = (meta ? labelInitForHdr(data, meta) : null) ?? data;
         await fs.promises.writeFile(file, labelled);
         data = labelled;
-      } else {
-        logEvent("FFmpeg", "couldn't label HDR for a screen in SDR: its init left as it was", {
-          session: short(run.sessionId), init: path.basename(servedAs), bytes: data.length,
-        });
       }
+      logEvent("FFmpeg", labelled ? "HDR labelled for each screen" : "couldn't label HDR for a screen in SDR: its init left as it was", {
+        session: short(run.sessionId), init: path.basename(servedAs), bytes: data.length,
+        ...(labelled ? {
+          sdr: `${run.sdrPeakNits} nits`,
+          hdr: meta ? `the film's${meta.mdcv ? ` ${Math.round(meta.mdcv[8] / 10_000)}-nit mastering` : ""}${meta.clli ? ` MaxCLL ${meta.clli[0]}` : ""}` : "as written",
+        } : {}),
+      });
     }
-    const tracks = initTracks(data);
-    return tracks ? { path: servedAs, file, bytes: data.length, tracks } : null;
+    return { path: servedAs, file, bytes: data.length, tracks, forHdr };
   } catch {
     return null;
   }
@@ -765,8 +777,10 @@ export async function startFfmpegRun(o: {
   encode?: boolean;
   /** Its arguments make fragmented MP4 (plan.ts fmp4SegmentArgs), not MPEG-TS. */
   fmp4?: boolean;
-  /** HDR for a screen in SDR: the peak to label its init, nits (plan.ts sdrPeakNits). */
+  /** HDR labelled for each screen: the peak to label a screen in SDR's init, nits (plan.ts sdrPeakNits). */
   sdrPeakNits?: number | null;
+  /** The film's HDR, for a screen in HDR's init (probe.ts probeHdrMeta). */
+  hdrMeta?: Promise<HdrMeta | null> | null;
   /** A copy's: the file's average. A re-encode's: its video target and its sound. */
   targetKbps?: number | null;
   offsetS: number;
@@ -791,7 +805,7 @@ export async function startFfmpegRun(o: {
   }
   const run: Run = {
     key, sessionId: o.sessionId, ratingKey: o.ratingKey, codec: o.codec, encode: !!o.encode,
-    fmp4: !!o.fmp4, sdrPeakNits: o.fmp4 && o.sdrPeakNits ? o.sdrPeakNits : null, init: null, seen: new Set(),
+    fmp4: !!o.fmp4, sdrPeakNits: o.fmp4 && o.sdrPeakNits ? o.sdrPeakNits : null, hdrMeta: o.hdrMeta ?? null, init: null, seen: new Set(),
     targetKbps: o.targetKbps && o.targetKbps > 0 ? o.targetKbps : null, averageKbps: null, dir,
     baseDir: `/video/:/transcode/universal/session/${key}/base/`,
     fromStart: o.fromStart ?? null, same, before: null,
@@ -956,12 +970,18 @@ export async function ffmpegPlaylist(
   return text;
 }
 
-/** A run's segment, from its folder: "gone" once the run has let it go. */
-export function ffmpegSegment(key: string, segPath: string): CopiedSegment | "gone" | null {
+/** A run's segment, from its folder: "gone" once the run has let it go. An
+ *  init asked for a screen in HDR is that screen's own, if it has one. */
+export function ffmpegSegment(key: string, segPath: string, screen: "sdr" | "hdr" = "sdr"): CopiedSegment | "gone" | null {
   const run = runs.get(key);
   if (!run) return null;
   // An fMP4 run's init segment, or its Before's.
   const init = [run.init, run.before?.init].find((i) => i?.path === segPath);
+  const forHdr = screen === "hdr" ? init?.forHdr : null;
+  if (forHdr) {
+    run.lastAlive = Date.now();
+    return { bytes: forHdr.length, read: async (start, end) => Buffer.from(forHdr.subarray(start, end)) };
+  }
   const seg: { file: string; bytes: number } | undefined = init ?? run.byPath.get(segPath);
   if (!seg) return null;
   run.lastAlive = Date.now();

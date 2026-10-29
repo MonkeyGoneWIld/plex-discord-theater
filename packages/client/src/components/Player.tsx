@@ -464,7 +464,7 @@ const FORWARD_BUFFER_FLUSH_S = 120;
 const LOADING_SCREEN_AFTER_MS = 500;
 /**
  * Frames dropped, of those due, over this many ten-second samples of play,
- * that put this player on H.264 (pictureCapRef). On 29 October a laptop
+ * that put this player on a lighter picture (pictureCapRef). On 29 October a laptop
  * dropped 33% of an AV1 and an HEVC re-encode and an Android phone 6% of an
  * HEVC one, both stuttering; a desktop dropped under 2% at worst, through a
  * stream rebuilt under it.
@@ -2163,6 +2163,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * room only — a lighter stream in it may play well.
    */
   const pictureCapRef = useRef<Cap | null>(null);
+  /** The screen this player's init segment was last asked for (xhrSetup): HDR
+   *  labelled for each screen is asked for again when the screen changes. */
+  const initScreenRef = useRef<"sdr" | "hdr" | null>(null);
   const droppedWindowsRef = useRef<Array<{ shown: number; dropped: number }>>([]);
   /** Sound decoded by the last health sample, and where the clock was — see there. */
   const audioDecodedRef = useRef<{ bytes: number; at: number } | null>(null);
@@ -2664,7 +2667,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const sameTitle = appliedVariantTitleRef.current === v.ratingKey;
     // The same tracks in H.264, for a screen in SDR or as a copy, by what
     // this player decodes (the server's seatOf), is no change of tracks.
-    const tracksOf = (key: string | null) => key?.replace(/\/(h264|sdr)$/, "") ?? null;
+    const tracksOf = (key: string | null) => key?.replace(/\/(h264|sdr|hevc|8bit)$/, "") ?? null;
     const movedBysomeoneElse =
       hadTracks && sameTitle && tracksOf(appliedVariantKeyRef.current) !== tracksOf(v.variantKey) && !askedForTracksRef.current;
     appliedVariantKeyRef.current = v.variantKey;
@@ -3120,14 +3123,38 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         });
       }
     };
+    /**
+     * HDR labelled for each screen, with the screen changed under it — HDR
+     * switched on or off, or the window taken to another screen: the stream
+     * is the same, and only its init is asked for again, for this screen
+     * (xhrSetup). The host's starts again from its picture, the room waiting
+     * there, as for a change of tracks; a viewer's, from where the room is.
+     */
+    const onScreen = () => {
+      const now = hdrScreen() ? "hdr" : "sdr";
+      if (!streamNotes?.perScreen || !sessionIdRef.current || initScreenRef.current === null || initScreenRef.current === now) return;
+      logEvent("Player", "the screen changed under HDR labelled for each screen: its init asked for again", {
+        session: sessionIdRef.current.substring(0, 8), from: initScreenRef.current, to: now,
+        atS: Number(video.currentTime.toFixed(2)),
+      });
+      initScreenRef.current = now;
+      if (ownsSessionRef.current) {
+        noteGoodPosition(video);
+        seekOffsetRef.current = video.currentTime;
+      }
+      holdFrameForSwitch();
+      setRetryKey((k) => k + 1);
+    };
     check();
     video.addEventListener("loadeddata", check);
     video.addEventListener("resize", check);
     screen?.addEventListener?.("change", check);
+    screen?.addEventListener?.("change", onScreen);
     return () => {
       video.removeEventListener("loadeddata", check);
       video.removeEventListener("resize", check);
       screen?.removeEventListener?.("change", check);
+      screen?.removeEventListener?.("change", onScreen);
     };
   }, [streamNotes]);
 
@@ -4679,6 +4706,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             // via ?key= query param. Sending Authorization to a cross-origin URL
             // triggers a CORS preflight that nginx's ?key= check would reject.
             const isSameOrigin = urlStr.startsWith("/") || urlStr.startsWith(location.origin);
+            // An ffmpeg stream's init segment for this screen: HDR labelled
+            // for each screen has one for a screen in SDR and one for HDR
+            // (the server's hdr-init.ts); its segments are the same for both.
+            if (isSameOrigin && urlStr.includes("/hls/seg?") && /init\.mp4/.test(decodeURIComponent(urlStr))) {
+              initScreenRef.current = hdrScreen() ? "hdr" : "sdr";
+              xhr.open("GET", `${urlStr}&screen=${initScreenRef.current}`, true);
+            }
             if (token && isSameOrigin) {
               xhr.setRequestHeader("Authorization", `Bearer ${token}`);
             }
@@ -5168,7 +5202,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           const { video, audio } = splitCodecs(data as Parameters<typeof splitCodecs>[0]);
           streamCaps = capsUsed(video, audio);
           streamHasAudioRef.current = !!audio;
-          pictureCapRef.current = streamCaps.find((c) => c === "hevc" || c === "av1") ?? null;
+          // What the room is told this player can't play smoothly, should it
+          // drop frames: AV1, which goes to HEVC; 10 bits of HEVC, which goes
+          // to 8; HEVC Main, which goes to H.264 (sync.ts ownStreamFor).
+          pictureCapRef.current = streamCaps.includes("av1") ? "av1"
+            : streamCaps.includes("hevc") ? /^(hvc1|hev1)\.[a-c]?2\./i.test(video ?? "") ? "tenBit" : "hevc"
+            : null;
         });
 
         // Copied or re-encoded, and how far a copied stream's playlist reaches.
@@ -6638,7 +6677,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           const shown = windows.reduce((n, w) => n + w.shown, 0);
           const dropped = windows.reduce((n, w) => n + w.dropped, 0);
           if (windows.length === DROPPED_WINDOWS && dropped >= DROPPED_SHARE * (shown + dropped)) {
-            pictureCapRef.current = null;
+            // Still dropping on the same stream after 10 bits are given up —
+            // Plex made it, and has no 8-bit one of its own — HEVC goes next.
+            pictureCapRef.current = pictureCap === "tenBit" ? "hevc" : null;
             windows.length = 0;
             logWarn("Video", "frames dropping as this device decodes the picture — asking the room for a stream without its codec", {
               codec: pictureCap, framesShown: shown, framesDropped: dropped,

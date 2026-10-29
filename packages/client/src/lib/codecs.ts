@@ -17,7 +17,7 @@
  */
 import { canPlayHevcTranscode, isHevcCodec, markHevcUnplayable } from "./hevc";
 
-export type Cap = "hevc" | "av1" | "opus" | "flac" | "ac3" | "eac3";
+export type Cap = "hevc" | "av1" | "opus" | "flac" | "ac3" | "eac3" | "tenBit";
 
 export interface Caps {
   hevc: boolean;
@@ -45,6 +45,14 @@ export interface Caps {
    * showing HDR (useSync).
    */
   hdr: boolean;
+  /**
+   * A 10-bit picture plays smoothly (the server's plan.ts PlayerCaps.tenBit).
+   * Said of every player, and taken back for the room when this one drops
+   * frames on one (Player.tsx pictureCapRef): on 29 October a laptop dropped
+   * 9–39% of 10-bit HEVC in five sessions of fourteen, and never more than
+   * 2.2% of 8-bit.
+   */
+  tenBit: boolean;
 }
 
 const failedKey = (cap: Cap) => `pdt:codec-failed:${cap}`;
@@ -101,6 +109,7 @@ export function playerCaps(): Caps {
     eac3: !failedHere("eac3") && supports('audio/mp4; codecs="ec-3"'),
     av1Encode: av1,
     hdr: hdrScreen(),
+    tenBit: true,
   };
 }
 

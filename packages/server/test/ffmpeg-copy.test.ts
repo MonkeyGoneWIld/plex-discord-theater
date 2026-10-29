@@ -467,12 +467,12 @@ console.log("\n— what a copy is judged on —");
     ], ["HLG for a screen in SDR", "DV P8.4 for a screen in SDR", "HDR10 for a screen in SDR"]);
     const hdr10 = planCopy(version({ colorTrc: "smpte2084" }), { audioStreamId: null, hevcOk: true, hdrOk: false, sdrPeakNits: 300 });
     const args = hdr10.ok ? copyArgs(hdr10, ["-i", "f.mkv"], 0, 60).join(" ") : "";
-    check("  needing HEVC, not a screen that shows HDR, its frames' HDR SEI left out",
+    check("  needing HEVC in 10 bits, not a screen that shows HDR, its frames' HDR SEI left out",
       [hdr10.ok && copyNeeds(hdr10), args.includes("-c:v copy -tag:v hvc1 -bsf:v filter_units=remove_types=39"),
-        args.includes("-hls_segment_type fmp4")], [["hevc"], true, true]);
+        args.includes("-hls_segment_type fmp4")], [["hevc", "tenBit"], true, true]);
     const shown = planCopy(version({ colorTrc: "smpte2084" }), { audioStreamId: null, hevcOk: true, hdrOk: true, sdrPeakNits: 300 });
-    check("  on a screen that shows HDR, as it is, in MPEG-TS, nothing left out",
-      shown.ok && [shown.sdrPeakNits, shown.fmp4, copyArgs(shown, ["-i", "f.mkv"], 0, 60).includes("-bsf:v")], [null, false, false]);
+    check("  on a screen that shows HDR, the same stream: labelled for each screen, its init its own (hdr-init.ts)",
+      shown.ok && [shown.sdrPeakNits, shown.fmp4, copyArgs(shown, ["-i", "f.mkv"], 0, 60).join(" ") === args], [300, true, true]);
   }
   check("neither is copied for a screen in SDR with FFMPEG_HDR_ON_SDR=server: the server tone-maps them", [
     why(version({ colorTrc: "smpte2084" }), true, null, false),
@@ -486,8 +486,8 @@ console.log("\n— what a copy is judged on —");
     const { copyNeeds } = await import("../src/services/ffmpeg/plan.js");
     const hdrCopy = planCopy(version({ colorTrc: "smpte2084" }), { audioStreamId: null, hevcOk: true, hdrOk: true });
     const sdrCopy = planCopy(version({}), { audioStreamId: null, hevcOk: true, hdrOk: true });
-    check("an HDR copy needs a screen that shows HDR, an SDR one doesn't",
-      [hdrCopy.ok && copyNeeds(hdrCopy), sdrCopy.ok && copyNeeds(sdrCopy)], [["hevc", "hdr"], ["hevc"]]);
+    check("an HDR copy not labelled for each screen needs a screen that shows HDR, an SDR one doesn't; both 10 bits",
+      [hdrCopy.ok && copyNeeds(hdrCopy), sdrCopy.ok && copyNeeds(sdrCopy)], [["hevc", "hdr", "tenBit"], ["hevc", "tenBit"]]);
   }
   check("but not profile 5, which has none",
     why(version({ DOVIPresent: true, DOVIProfile: 5 })), "Dolby Vision P5: tone mapping needed");
@@ -821,7 +821,7 @@ console.log("\n— AV1 and Opus, and FLAC, copied in fragmented MP4 for a player
   plexRoutes.capsForTests(none);
 }
 
-console.log("\n— HDR10 for a screen in SDR, labelled for the browser to map —");
+console.log("\n— HDR10 labelled for each screen: one stream for screens in SDR and HDR —");
 {
   const { hdrOnSdrNits } = await import("../src/services/ffmpeg/config.js");
   const { labelInitForSdr } = await import("../src/services/ffmpeg/hdr-init.js");
@@ -837,7 +837,7 @@ console.log("\n— HDR10 for a screen in SDR, labelled for the browser to map �
     [nits(undefined, undefined), nits("browser", "600"), nits(undefined, "5000"), nits(undefined, "50"), nits(undefined, "x"), nits("server", "600")],
     [200, 600, 1000, 100, 200, null]);
 
-  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, av1Encode: false };
+  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, tenBit: false, av1Encode: false };
   const mapOf = (playlist: string) => playlist.match(/^#EXT-X-MAP:URI="([^"]+)"/m)?.[1] ?? null;
   const copied = async (ratingKey: string) => {
     const sid = crypto.randomUUID();
@@ -860,12 +860,12 @@ console.log("\n— HDR10 for a screen in SDR, labelled for the browser to map �
     };
   };
 
-  plexRoutes.capsForTests({ ...none, hevc: true });
+  plexRoutes.capsForTests({ ...none, hevc: true, tenBit: true });
   const sdr = await copied("23");
   check("for a player that decodes HEVC on a screen in SDR, the HEVC is copied as it is, in fMP4, mapped at 200 nits",
-    [sdr.notes.video, !!mapOf(sdr.playlist), sdr.notes.range], ["copy", true, "HDR10 (mapped at 200 nits)"]);
-  check("  needing HEVC, not a screen that shows HDR; whoever has one is given a copy of their own",
-    [plexRoutes.sessionNeeds(sdr.sid), plexRoutes.sessionWithheld(sdr.sid)], [["hevc"], ["hdr"]]);
+    [sdr.notes.video, !!mapOf(sdr.playlist), sdr.notes.range, sdr.notes.perScreen], ["copy", true, "HDR10 (mapped at 200 nits)", "1"]);
+  check("  needing HEVC in 10 bits and nothing of the screen: one stream for screens in SDR and HDR",
+    [plexRoutes.sessionNeeds(sdr.sid), plexRoutes.sessionWithheld(sdr.sid)], [["hevc", "tenBit"], []]);
   const initRes = await fetch(origin + mapOf(sdr.playlist)!);
   const init = Buffer.from(await initRes.arrayBuffer());
   check("  its init served whole, as labelled", [initRes.status, init.length], [200, Number(mapOf(sdr.playlist)!.match(/&n=(\d+)$/)![1])]);
@@ -878,15 +878,24 @@ console.log("\n— HDR10 for a screen in SDR, labelled for the browser to map �
   check("  hvcC's SEI left out of the init, which was in the film's",
     [fs.readFileSync(HDR10_FILM).includes("x265 (build"), init.includes("x265 (build")], [true, false]);
   check("  and it decodes", spawnSync("ffmpeg", ["-v", "error", "-i", whole, "-f", "null", "-"]).status, 0);
+  const hdrInitRes = await fetch(origin + mapOf(sdr.playlist)! + "&screen=hdr");
+  const hdrInit = Buffer.from(await hdrInitRes.arrayBuffer());
+  const wholeHdr = path.join(tmp, "hdr10-for-hdr.mp4");
+  fs.writeFileSync(wholeHdr, Buffer.concat([hdrInit, seg]));
+  check("  asked for a screen in HDR, the same segments with an init of its own saying the film's 4,000 and 1,608",
+    [hdrInitRes.status, hdrInit.equals(init), peaks(wholeHdr)], [200, false, { luminance: [4000], content: [1608] }]);
+  check("  and that decodes too", spawnSync("ffmpeg", ["-v", "error", "-i", wholeHdr, "-f", "null", "-"]).status, 0);
+  check("  asked for a screen in SDR, or by a player that doesn't say, the labelled one",
+    [Buffer.from(await (await fetch(origin + mapOf(sdr.playlist)! + "&screen=sdr")).arrayBuffer()).equals(init), init.length > 0], [true, true]);
   check("labelled again it is the same, its boxes replaced rather than added to",
     Buffer.from(labelInitForSdr(init, 200) ?? []).equals(init), true);
   check("and something with no HEVC in it isn't labelled", labelInitForSdr(Buffer.from("not an mp4 at all"), 300), null);
   await fetch(`${origin}/api/plex/hls/session/${sdr.sid}?reason=test`, { method: "DELETE" });
 
-  plexRoutes.capsForTests({ ...none, hevc: true, hdr: true });
+  plexRoutes.capsForTests({ ...none, hevc: true, hdr: true, tenBit: true });
   const hdr = await copied("23");
-  check("on a screen that shows HDR it is copied as it is, in MPEG-TS, needing that screen",
-    [hdr.notes.video, !!mapOf(hdr.playlist), hdr.notes.range, plexRoutes.sessionNeeds(hdr.sid)], ["copy", false, "HDR10", ["hevc", "hdr"]]);
+  check("on a screen that shows HDR it is the same stream, labelled for each screen, needing nothing of the screen",
+    [hdr.notes.video, !!mapOf(hdr.playlist), hdr.notes.perScreen, plexRoutes.sessionNeeds(hdr.sid)], ["copy", true, "1", ["hevc", "tenBit"]]);
   await fetch(`${origin}/api/plex/hls/session/${hdr.sid}?reason=test`, { method: "DELETE" });
 
   process.env.FFMPEG_HDR_ON_SDR = "server";
@@ -1048,9 +1057,19 @@ console.log("\n— what a re-encode is made of —");
   check("  and labelled on the output by the encoder's name for it",
     pal.ok && encodeArgs(pal, ["-i", "f.mkv"], 0, 60, "").join(" ").includes("-color_trc gamma28"), true);
   const vc1Args = vc1.ok ? encodeArgs(vc1, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
-  check("  and handed to the GPU after the CPU's filters", vc1Args.includes(
-    "-vf setparams=color_primaries=smpte170m:color_trc=smpte170m:colorspace=smpte170m:range=tv," +
-    "bwdif=mode=send_frame,scale=720:480,format=p010le,hwupload=extra_hw_frames=64,format=qsv"), true);
+  check("  and handed to the GPU after the CPU's filters, in 8 bits as the film is: HEVC Main",
+    [vc1Args.includes(
+      "-vf setparams=color_primaries=smpte170m:color_trc=smpte170m:colorspace=smpte170m:range=tv," +
+      "bwdif=mode=send_frame,scale=720:480,format=nv12,hwupload=extra_hw_frames=64,format=qsv"),
+    vc1Args.includes("-profile:v main ")], [true, true]);
+  {
+    const ten = plan(version({}));
+    const eight = plan(version({ bitDepth: 8, profile: "main" }));
+    check("a 10-bit film re-encoded to HEVC is Main10; an 8-bit one Main, as Plex's HEVC is",
+      [ten.ok && ten.tenBit, eight.ok && eight.tenBit], [true, false]);
+    const dropped = plan(version({}), { tenBitOk: false });
+    check("  and for a player that drops frames on 10 bits, Main, in SDR", dropped.ok && [dropped.tenBit, dropped.hdrTrc], [false, null]);
+  }
 
   const subs = (more: Record<string, unknown> = {}) => ({ ...version({ colorTrc: "smpte2084", colorPrimaries: "bt2020", colorSpace: "bt2020nc" }),
     ...more });

@@ -20,7 +20,7 @@ process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "hevc-transc
 const { attachWebSocketServer, closeWebSocketServer, mayStart, mayStartHevc, sessionHostUserId } = await import("../src/services/sync.js");
 const {
   recordSessionVideoCodec, recordHevcWithheld, isHevcSession, recordSessionAudioNeeds, recordWithheld, sessionNeeds,
-  recordSessionHdr,
+  recordSessionHdr, recordSessionTenBit,
 } = await import("../src/routes/plex.js");
 const { transcodeFrame } = await import("../src/services/media-versions.js");
 const { createSession } = await import("../src/middleware/auth.js");
@@ -337,14 +337,14 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
 {
   newRoom("caps-1");
   const all = { av1: true, opus: true, flac: true, av1Encode: true };
-  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, av1Encode: false };
+  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, tenBit: false, av1Encode: false };
   const host = await join("caps-1", "u-host", "host", true, all);
   const a = await join("caps-1", "u-a", "a", true, all);
   check("what a player decodes, a stream it starts may use", mayStart("u-host"),
-    { hevc: true, av1: true, opus: true, flac: true, ac3: false, eac3: false, hdr: false, av1Encode: true });
+    { hevc: true, av1: true, opus: true, flac: true, ac3: false, eac3: false, hdr: false, tenBit: true, av1Encode: true });
   const phone = await join("caps-1", "u-p", "p", false, { opus: true, av1Encode: true, hdr: true });
   check("each player's own, AV1 on the GPU only with AV1 at all, HDR kept for a screen showing it", mayStart("u-p"),
-    { ...none, opus: true, hdr: true });
+    { ...none, opus: true, hdr: true, tenBit: true });
   check("leaving the others' alone", mayStart("u-a").av1, true);
   check("somebody in no room gets H.264 and AAC", mayStart("u-nobody"), none);
   phone.close();
@@ -365,14 +365,15 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
   const b = await join("caps-1", "u-b", "b", true, { opus: true, flac: true });
   await sleep(60);
   const bState = b.seen.find((m) => m.type === "state")?.variant;
-  check("someone who can't decode AV1 lands on a stream of their own to bring up",
-    [bState?.variantKey, bState?.isOwner, bState?.hlsSessionId], ["1:0/h264", true, null]);
-  check("in H.264 and AAC", mayStart("u-b"), none);
+  check("someone who can't decode AV1 but decodes HEVC lands on a stream of their own to bring up",
+    [bState?.variantKey, bState?.isOwner, bState?.hlsSessionId], ["1:0/hevc", true, null]);
+  check("in HEVC, with the sound they decode", mayStart("u-b"), { ...none, hevc: true, opus: true, flac: true, tenBit: true });
   check("the host's stream is left as it is", [host.toldToRebuild(), a.seen.filter((m) => m.type === "variant").length], [false, 0]);
-  const twinSid = crypto.randomUUID();
-  recordSessionVideoCodec(twinSid, "h264");
-  recordWithheld(twinSid, ["av1", "opus"]);
-  b.send({ type: "variant-session", hlsSessionId: twinSid, sessionOffset: 0 });
+  const hevcSid = crypto.randomUUID();
+  recordSessionVideoCodec(hevcSid, "hevc");
+  recordSessionTenBit(hevcSid, true);
+  recordWithheld(hevcSid, ["av1"]);
+  b.send({ type: "variant-session", hlsSessionId: hevcSid, sessionOffset: 0 });
   await sleep(60);
   const c = await join("caps-1", "u-c", "c", false, { av1: true });
   await sleep(60);
@@ -388,12 +389,33 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
   a.clear();
   a.send({ type: "caps", av1: false });
   await sleep(60);
-  check("withdrawing AV1 moves that viewer onto the twin", a.seen.filter((m) => m.type === "variant").at(-1)?.variantKey, "1:0/h264");
+  check("withdrawing AV1 moves that viewer onto the HEVC of their own that b drives",
+    a.seen.filter((m) => m.type === "variant").at(-1)?.variantKey, "1:0/hevc");
   check("for good, and AV1 re-encodes with it", [mayStart("u-a").av1, mayStart("u-a").av1Encode], [false, false]);
   a.send({ type: "caps", av1: true });
   await sleep(60);
   check("a client can't talk itself back into AV1", mayStart("u-a").av1, false);
   check("the host may still", mayStart("u-host").av1, true);
+
+  // Frames dropped on 10 bits of HEVC, then on 8.
+  [a, b].forEach((x) => x.clear());
+  a.send({ type: "caps", tenBit: false });
+  await sleep(60);
+  check("withdrawing 10 bits moves that viewer onto 8-bit HEVC of their own",
+    a.seen.filter((m) => m.type === "variant").at(-1)?.variantKey, "1:0/8bit");
+  check("which is HEVC Main, in SDR, never AV1", [mayStart("u-a").hevc, mayStart("u-a").tenBit, mayStart("u-a").hdr, mayStart("u-a").av1],
+    [true, false, false, false]);
+  check("leaving b on theirs", b.seen.filter((m) => m.type === "variant").length, 0);
+  const eightSid = crypto.randomUUID();
+  recordSessionVideoCodec(eightSid, "hevc");
+  recordSessionTenBit(eightSid, false);
+  recordWithheld(eightSid, ["av1", "tenBit"]);
+  a.send({ type: "variant-session", hlsSessionId: eightSid, sessionOffset: 0 });
+  await sleep(60);
+  a.clear();
+  a.send({ type: "caps", hevc: false });
+  await sleep(60);
+  check("and withdrawing HEVC after that, onto H.264", a.seen.filter((m) => m.type === "variant").at(-1)?.variantKey, "1:0/h264");
   [host, a, b, c, d].forEach((x) => x.close());
 }
 

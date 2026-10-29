@@ -61,7 +61,7 @@ import {
   ALL_CAPS, AUDIO_KBPS, HARDWARE_NAMES, NO_CAPS, copyArgs, copyNeeds, encodeArgs, encodeTargetKbps, hdrClass, hdrPicture, inputArgs, pickBurn,
   planCopy, planEncode, tonemapCurve, type AudioOut, type EncodeRequest, type PlayerCap, type PlayerCaps, type SourceStream, type SourceVersion,
 } from "../services/ffmpeg/plan.js";
-import { probe, probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
+import { probe, probeHdrMeta, probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
 import { prepareBurn, sidecarOnMount } from "../services/ffmpeg/burn-files.js";
 import { madePreview, makePreview, previewBody, previewPartOf, rememberPreviewPart } from "../services/ffmpeg/previews.js";
 import { pgsAhead, pgsBytes, pgsIndexOf, pgsStatus, type PgsSource } from "../services/ffmpeg/picture-subtitles.js";
@@ -4203,6 +4203,14 @@ export function recordSessionHdr(sessionId: string, hdr: boolean): void {
   else hdrSessions.delete(sessionId);
 }
 
+/** Sessions whose picture is 10 bits as it is sent (PlayerCaps.tenBit). */
+const tenBitSessions = new Set<string>();
+
+export function recordSessionTenBit(sessionId: string, tenBit: boolean): void {
+  if (tenBit) tenBitSessions.add(sessionId);
+  else tenBitSessions.delete(sessionId);
+}
+
 /** Whether a picture, as Plex describes it (PictureFacts), is HDR as a player
  *  shows it: Dolby Vision 8.2 and 10.2 are SDR underneath (plan.ts hdrPicture). */
 function hdrShown(picture: PictureFacts | null | undefined): boolean {
@@ -4211,8 +4219,9 @@ function hdrShown(picture: PictureFacts | null | undefined): boolean {
 
 /**
  * What this session's stream needs its players to decode beyond H.264 and AAC
- * in MPEG-TS (PlayerCaps): HEVC or AV1 by its picture, Opus or FLAC by its
- * sound, and a screen that shows HDR for an HDR picture. Whoever on it can't
+ * in MPEG-TS (PlayerCaps): HEVC or AV1 by its picture, and 10 bits played
+ * smoothly by one in 10 bits, Opus or FLAC by its sound, and a screen that
+ * shows HDR for an HDR picture not labelled for each screen. Whoever on it can't
  * is put on a stream of their own — see the sync server's seatOf.
  */
 export function sessionNeeds(sessionId: string): PlayerCap[] {
@@ -4220,6 +4229,7 @@ export function sessionNeeds(sessionId: string): PlayerCap[] {
   if (isHevcSession(sessionId)) needs.push("hevc");
   if (sessionVideoCodec.get(sessionId) === "av1") needs.push("av1");
   if (hdrSessions.has(sessionId)) needs.push("hdr");
+  if (tenBitSessions.has(sessionId)) needs.push("tenBit");
   return [...needs, ...(sessionAudioNeeds.get(sessionId) ?? [])];
 }
 
@@ -4374,6 +4384,7 @@ export function markTranscodeStopped(sessionId: string): void {
   sessionVideoCodec.delete(sessionId);
   sessionAudioNeeds.delete(sessionId);
   hdrSessions.delete(sessionId);
+  tenBitSessions.delete(sessionId);
   withheldFor.delete(sessionId);
   manifestCache.delete(sessionId);
   hostPingInfo.delete(sessionId);
@@ -5283,7 +5294,8 @@ async function startWithFfmpeg(o: {
     return toPlex("nothing to read the file from", "nothing to read the file from");
   }
   // ffprobe's streams, once per file, asked while the stream is planned.
-  const probed = probeOnce(`${fromMount ? local : source.partKey}:${source.fileSize ?? "?"}`, input);
+  const fileKey = `${fromMount ? local : source.partKey}:${source.fileSize ?? "?"}`;
+  const probed = probeOnce(fileKey, input);
   const tracksDiffer = async (used: Array<SourceStream | null | undefined>): Promise<string | null> => {
     const found = await probed;
     if (!found) {
@@ -5296,10 +5308,14 @@ async function startWithFfmpeg(o: {
   const durationS = source.durationS ?? null;
   const okFor = (c: PlayerCaps) => ({
     hevcOk: c.hevc, av1Ok: c.av1, opusOk: c.opus, flacOk: c.flac, ac3Ok: c.ac3, eac3Ok: c.eac3, hdrOk: c.hdr,
+    tenBitOk: c.tenBit,
   });
   const copyAsk = { audioStreamId: o.audioStreamID || null, ...okFor(o.caps), sdrPeakNits: hdrOnSdrNits(), audioChannels: audioChannels() };
-  /** HDR labelled for a screen in SDR (hdr-init.ts), for the log and Stats for nerds. */
+  /** HDR labelled for each screen (hdr-init.ts), for the log and Stats for nerds. */
   const mappedAt = (nits: number | null) => nits !== null ? ` (mapped at ${nits} nits)` : "";
+  /** What a screen in HDR is told of the film's HDR, when it is labelled for
+   *  each screen: its frames' own SEI goes for the label to count. */
+  const filmHdr = (nits: number | null) => nits !== null ? probeHdrMeta(fileKey, input) : Promise.resolve(null);
   const copyPlan = o.copy ? planCopy(source, copyAsk) : null;
   // What only the driver's player kept from being copied — an AV1 or HEVC
   // picture re-encoded, Opus, FLAC, AC3 or EAC3 made AAC, HDR tone-mapped for
@@ -5323,6 +5339,10 @@ async function startWithFfmpeg(o: {
   let encoder: string | null = null;
   /** A re-encode that kept the film's HDR (plan.ts planEncode). */
   let hdrKept = false;
+  /** A picture sent in 10 bits (PlayerCaps.tenBit). */
+  let tenBit = false;
+  /** HDR labelled for each screen (hdr-init.ts). */
+  let perScreen = false;
   if (copyPlan?.ok) {
     const differ = await tracksDiffer([copyPlan.video, copyPlan.audio]);
     if (differ) return toPlex(`tracks differ from Plex's: ${differ}`, "the file's tracks aren't Plex's", { why: differ });
@@ -5332,6 +5352,7 @@ async function startWithFfmpeg(o: {
       codec: copyPlan.codec,
       fmp4: copyPlan.fmp4,
       sdrPeakNits: copyPlan.sdrPeakNits,
+      hdrMeta: filmHdr(copyPlan.sdrPeakNits),
       targetKbps: o.fileKbps,
       offsetS: o.offsetS,
       args: copyArgs(copyPlan, input, o.offsetS, durationS),
@@ -5341,11 +5362,14 @@ async function startWithFfmpeg(o: {
     if (!started.ok) return toPlex(`ffmpeg didn't start: ${started.why}`, "run didn't start", { why: started.why });
     key = started.key;
     video = { ...copyPlan, kbps: o.fileKbps };
+    tenBit = copyPlan.tenBit;
+    perScreen = copyPlan.sdrPeakNits !== null;
     range = `${o.picture ? o.picture.hdr ?? "SDR" : copyPlan.hdr}${mappedAt(copyPlan.sdrPeakNits)}`;
     logEvent("FFmpeg", "copying", {
       session, ratingKey: o.ratingKey, fromS: o.offsetS, video: copyPlan.codec,
       hdr: copyPlan.sdrPeakNits !== null
-        ? `${copyPlan.hdr} for a screen in SDR, labelled ${copyPlan.sdrPeakNits} nits for the browser to map` : copyPlan.hdr,
+        ? `${copyPlan.hdr} labelled for each screen, SDR at ${copyPlan.sdrPeakNits} nits for the browser to map` : copyPlan.hdr,
+      bits: copyPlan.tenBit ? 10 : 8,
       audio: audioText(copyPlan),
       segments: copyPlan.fmp4 ? "fMP4" : "MPEG-TS",
       source: fromMount ? "mount" : "plex",
@@ -5399,7 +5423,7 @@ async function startWithFfmpeg(o: {
       av1Ok: AV1_TRANSCODE && o.caps.av1Encode && gpuEncodesAv1() && sessionWithheld(o.sessionId).length === 0,
       av1LowPower: lowPowerVaapiAv1(),
       kbps: o.transcodeKbps, peakKbps: o.peakKbps, maxWidth, maxHeight, keepHdr: keepHdrOnReencode(),
-      hdrOk: o.caps.hdr, sdrPeakNits: hdrOnSdrNits(), tonemapper: tonemapper(), tonemapAlgo: tonemapAlgo(), burn: o.burnSubtitleId ?? null,
+      hdrOk: o.caps.hdr, tenBitOk: o.caps.tenBit, sdrPeakNits: hdrOnSdrNits(), tonemapper: tonemapper(), tonemapAlgo: tonemapAlgo(), burn: o.burnSubtitleId ?? null,
       audioChannels: audioChannels(), opusOk: o.caps.opus, preset: encodePreset(), lowPower: lowPowerVaapi(),
       gpuDecode: gpuDecodeOn() ? undefined : false, ...burnFiles,
     };
@@ -5411,7 +5435,7 @@ async function startWithFfmpeg(o: {
     const run = (p: Extract<typeof plan, { ok: true }>) => startFfmpegRun({
       sessionId: o.sessionId, ratingKey: o.ratingKey, codec: p.codec, encode: true,
       // AV1 is made in fragmented MP4, as an AV1 copy is; so is Opus sound.
-      fmp4: p.fmp4, sdrPeakNits: p.sdrPeakNits,
+      fmp4: p.fmp4, sdrPeakNits: p.sdrPeakNits, hdrMeta: filmHdr(p.sdrPeakNits),
       targetKbps: encodeTargetKbps(p), offsetS: o.offsetS,
       args: encodeArgs(p, input, o.offsetS, durationS, hwDevice()),
       fromStart: fromStart(p), replaces: o.replaces,
@@ -5439,6 +5463,8 @@ async function startWithFfmpeg(o: {
     key = started.key;
     video = { ...plan, kbps: plan.kbps };
     hdrKept = plan.hdrTrc !== null && plan.sdrPeakNits === null;
+    tenBit = plan.tenBit;
+    perScreen = plan.sdrPeakNits !== null;
     range = plan.sdrPeakNits !== null ? `HDR10 (kept, mapped at ${plan.sdrPeakNits} nits)`
       : plan.hdrTrc ? `${plan.hdrTrc === "arib-std-b67" ? "HLG" : "HDR10"} (kept)`
       : plan.tonemap ? `SDR (tone-mapped from ${o.picture?.hdr ?? plan.hdr})` : "SDR";
@@ -5447,10 +5473,10 @@ async function startWithFfmpeg(o: {
     const curve = plan.tonemap && tonemapCurve(plan.tonemap.algo, plan.tonemap.via);
     logEvent("FFmpeg", "re-encoding", {
       session, ratingKey: o.ratingKey, fromS: o.offsetS, why: reason,
-      video: `${plan.video.codec} → ${plan.codec} ${plan.width}x${plan.height} ${plan.kbps}k (peak ${plan.peakKbps}k)`,
+      video: `${plan.video.codec} → ${plan.codec}${plan.codec === "hevc" ? plan.tenBit ? " Main10" : " Main" : ""} ${plan.width}x${plan.height} ${plan.kbps}k (peak ${plan.peakKbps}k)`,
       // Below what the quality level allows: matched to the source's own.
       matched: plan.sourceKbps ? `${plan.sourceKbps}k ${plan.video.codec} source; ${plan.askedKbps}k allowed` : "no",
-      hdr: plan.sdrPeakNits !== null ? `${plan.hdr} kept for a screen in SDR, labelled ${plan.sdrPeakNits} nits for the browser to map`
+      hdr: plan.sdrPeakNits !== null ? `${plan.hdr} kept, labelled for each screen, SDR at ${plan.sdrPeakNits} nits for the browser to map`
         : plan.hdrTrc ? `${plan.hdr} kept`
         : plan.tonemap && curve ? `${plan.hdr} → SDR, ${curve.algo}${curve.param === undefined ? "" : ` ${curve.param}`} on ${plan.tonemap.via}${plan.tonemap.dovi ? " with its Dolby Vision" : ""}`
         : plan.hdr,
@@ -5470,6 +5496,7 @@ async function startWithFfmpeg(o: {
   }
 
   recordSessionVideoCodec(o.sessionId, video.codec);
+  recordSessionTenBit(o.sessionId, tenBit);
   // An HDR copy, or a re-encode that kept HDR: whoever on it has a screen in
   // SDR gets a stream made for it (sync.ts seatOf). Not one labelled for a
   // screen in SDR already: anyone can watch that.
@@ -5478,7 +5505,7 @@ async function startWithFfmpeg(o: {
   // A re-encode's Opus 7.1 too: whoever on it doesn't decode Opus gets a
   // stream of their own (sync.ts seatOf).
   recordSessionAudioNeeds(o.sessionId, copyPlan?.ok && reason === null
-    ? copyNeeds(copyPlan).filter((c) => c !== "hevc" && c !== "av1" && c !== "hdr")
+    ? copyNeeds(copyPlan).filter((c) => c !== "hevc" && c !== "av1" && c !== "hdr" && c !== "tenBit")
     : video.audioOut?.codec === "opus" ? ["opus"] : []);
   const decided: AudioDecision | null = video.audio
     ? {
@@ -5498,6 +5525,7 @@ async function startWithFfmpeg(o: {
     quality: o.quality || null,
     videoFrom: o.picture?.text ?? null,
     range,
+    perScreen: perScreen ? 1 : null,
     ...audioNotes(decided, o.audioTracks, video.audioWhy),
   });
   const playlist = segProxyUrl(`${TRANSCODE_PREFIX}session/${key}/base/index.m3u8`, o.authToken);
@@ -5799,6 +5827,7 @@ router.get(
       sessionVideoCodec.delete(sessionId);
       sessionAudioNeeds.delete(sessionId);
       hdrSessions.delete(sessionId);
+      tenBitSessions.delete(sessionId);
       // Whether Plex is copying the video, which decides who serves it. A
       // decision that can't be read counts as copying when copying was allowed:
       // the measured playlist plays a re-encoded stream just as well, while
@@ -6334,7 +6363,8 @@ router.get("/hls/seg", async (req: Request, res: Response) => {
     const key = segKeyMatch[1];
     await serveMeasured(req, res, segPath, {
       playlist: (urlFor) => ffmpegPlaylist(key, urlFor),
-      segment: (path) => ffmpegSegment(key, path),
+      // An HDR picture labelled for each screen: its init for the player's (hdr-init.ts).
+      segment: (path) => ffmpegSegment(key, path, req.query.screen === "hdr" ? "hdr" : "sdr"),
     });
     return;
   }

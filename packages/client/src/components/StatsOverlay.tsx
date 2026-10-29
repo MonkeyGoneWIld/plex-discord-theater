@@ -484,12 +484,16 @@ export function StatsOverlay({
   // notes, the playlist says only whether the video is the original.
   const mode = playbackMode(notes) ?? (copied === null ? null : copied ? "Direct Stream" : "Transcode");
   const hdrStream = !!notes?.range && !notes.range.startsWith("SDR");
+  // HDR labelled for each screen, as this one has it: as it is on a screen in
+  // HDR, mapped at the peak it says on one in SDR (streamNotes perScreen).
+  const unmapped = (range: string) => range.replace(/ \(mapped at \d+ nits\)$/, "").replace(/, mapped at \d+ nits\)$/, ")");
+  const range = notes?.range && notes.perScreen && hdrScreen() ? unmapped(notes.range) : notes?.range ?? null;
   // "1080p" here; the full width × height is under Viewport and Frame.
   const videoSummary = [
     snap && snap.streamResolution !== "—" ? snap.streamResolution.replace(/^\d+×(\d+)$/, "$1p") : null,
     codecFamily(snap?.videoCodec),
     // The peak HDR is labelled for a screen in SDR is under Range.
-    hdrStream ? notes!.range!.replace(/ \/ .*$/, "").replace(/ \(mapped at \d+ nits\)$/, "").replace(/, mapped at \d+ nits\)$/, ")") : null,
+    hdrStream ? unmapped(notes!.range!.replace(/ \/ .*$/, "")) : null,
     streamBps ? mbps(streamBps) : null,
   ].filter(Boolean).join(" · ") || "—";
 
@@ -576,8 +580,10 @@ export function StatsOverlay({
         // at 300 nits"), is a loss only on a screen showing HDR; HDR as it
         // is, only on a screen in SDR, which the browser draws darker
         // (codecs.ts Caps.hdr).
-        ...(notes?.range ? [["Range", notes.range,
-          notes.range.startsWith("SDR (") || /[( ]mapped at \d+ nits\)$/.test(notes.range) ? hdrScreen() ? "warn" : "none"
+        // HDR labelled for each screen is as it should be on either.
+        ...(notes?.range && range ? [["Range", range,
+          notes.perScreen ? "none"
+            : notes.range.startsWith("SDR (") || /[( ]mapped at \d+ nits\)$/.test(notes.range) ? hdrScreen() ? "warn" : "none"
             : notes.range.startsWith("SDR") || hdrScreen() ? "none" : "warn"] as [string, string, Health]] : []),
         ...fileLines(notes?.videoFrom ?? null),
         ["Viewport", snap?.viewport ?? "—"],

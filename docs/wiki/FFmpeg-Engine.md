@@ -16,9 +16,22 @@ and a restart.
 - **The original picture whenever the player can decode it.** H.264 and HEVC
   files are copied, HDR10, HLG and Dolby Vision 7 and 8 included, under the
   same rules as [Direct Stream](Configuration-Reference#direct_stream).
+- **PGS subtitles drawn by the player.** Blu-ray subtitles are cut out of the
+  film and drawn by each player, sharp at any size, so a film with them is
+  still copied instead of re-encoded to burn them in.
+- **AV1, Opus, FLAC, AC3 and EAC3 copied as they are** for players that decode
+  them, in fragmented MP4. 7.1 sound a browser can't play is kept as Opus 7.1,
+  and PCM as FLAC.
 - **Re-encodes keep HDR.** A stream re-encoded for bitrate or quality, for a
   player that decodes HEVC, comes out as HDR10 HEVC Main10, so it looks like
   the copy, only softer. Plex maps every re-encode to SDR.
+- **One HDR stream for every screen.** Screens in HDR and in SDR share the
+  same stream, and with it each other's segments, peer to peer; each player is
+  told how to show it on its own screen.
+- **A stream for each device.** A player that decodes HEVC but not AV1 gets
+  H.265, not H.264; one that drops frames gets a lighter picture of its own
+  (see [Smooth playback](#smooth-playback-on-every-device)). Nobody else's
+  stream changes.
 - **Dolby Vision 5 in the right colours.** Plex copies it, and browsers show it
   purple and green. ffmpeg re-encodes it with its Dolby Vision metadata applied
   (on the GPU, where OpenCL works).
@@ -215,10 +228,15 @@ subtitles beside the film are read off the mount when they can be told apart
 (see above). Plex reads whatever can't be. `FFMPEG_SUBTITLES=off` leaves all of
 it to Plex, as without the engine.
 
-A subtitle burned into the picture — a picture subtitle, or a text one the
-player can't draw — is drawn by ffmpeg in a re-encode: a picture one from the
-film or from its file beside it, a text one by libass from its text, an ASS
-track with the fonts the film carries for it.
+PGS subtitles (Blu-ray's) are drawn by the player: the server cuts them out
+of the film once, and each player draws them over the picture, as sharp as
+the screen allows, and the film is copied as it would be without them.
+[`FFMPEG_PGS=off`](#ffmpeg_pgs) burns them in instead.
+
+A subtitle burned into the picture — VobSub or DVB, or a text one the player
+can't draw — is drawn by ffmpeg in a re-encode: a picture one from the film or
+from its file beside it, a text one by libass from its text, an ASS track with
+the fonts the film carries for it.
 
 ## Seek-bar previews
 
@@ -240,7 +258,7 @@ and `FFMPEG_PREVIEWS_MAX_GB` (20 by default) bounds the folder.
 |---|---|
 | Copy, for a screen that shows HDR | Kept, untouched, as in Plex mode |
 | Re-encode for a player that decodes HEVC, on a screen that shows HDR | Kept: HDR10, in HEVC Main10, never AV1. `FFMPEG_HDR_REENCODE=tonemap` maps it to SDR instead, as Plex does. |
-| A player that decodes HEVC, on a screen in SDR | HDR10 and Dolby Vision 7 and 8.1: sent as HDR (copied, or kept in HEVC Main10), labelled 200 nits for the browser to map. With `FFMPEG_HDR_ON_SDR=server`, and for HLG: mapped to SDR here from the film's 10 bits, into HEVC Main10 |
+| A player that decodes HEVC, on a screen in SDR | HDR10 and Dolby Vision 7 and 8.1: the same stream as a screen in HDR's, labelled 200 nits for the browser to map. With `FFMPEG_HDR_ON_SDR=server`, and for HLG: mapped to SDR here from the film's 10 bits, into HEVC Main10 |
 | H.264 (a player that can't decode HEVC, such as Discord in Firefox) | Mapped to SDR |
 | A subtitle burned in | Mapped to SDR, so the subtitle isn't blinding |
 | Dolby Vision 5 | Mapped to SDR, with its metadata applied |
@@ -262,7 +280,10 @@ the picture is 8 bits, and lifting that bands dark scenes.
 So for a screen in SDR the stream is labelled a lower peak,
 `FFMPEG_HDR_ON_SDR_NITS` (200 by default): the HEVC's HDR SEI is left out of
 its frames and its init segment, and the init says 200 nits in `mdcv` and
-`clli` instead. Chrome then shows that face at grey 186, and reference white
+`clli` instead. The segments are the same for every screen; only the init
+differs. A player on a screen in HDR is given one that says the film's own
+mastering display and light levels, so it shows the film as it was graded,
+and both screens share one stream and its segments, peer to peer. Chrome then shows that face at grey 186, and reference white
 (203 nits) as white, as does anything brighter. A lower label is no brighter:
 Chrome maps to nothing under its own SDR white. At 300 the face is 174 and
 reference white 240, with white from 300 nits up. The stream is in
@@ -284,12 +305,29 @@ In Plex mode Plex is asked for H.264 mapped to SDR, as Plex's own web player
 does on a screen in SDR. Stats for nerds shows the stream's range on the Range
 line, in amber when HDR reaches a screen in SDR.
 
-A screen that leaves HDR mid-film moves its viewer onto a stream of their own
-made for a screen in SDR, the one they would have had starting on it: the
-labelled HEVC when their player decodes HEVC, not H.264. One that comes back
-to HDR is sent HDR again after rejoining. A viewer whose screen
-shows HDR, in a room whose host's doesn't, shares the host's mapped stream when
-both decode HEVC.
+A screen that changes mid-film — HDR switched on or off, or the window moved
+to another screen — asks for its init again, for the screen it is on now, and
+carries on from where it was; when it is the host's, the room waits at that
+picture meanwhile. Where the stream can't be labelled (HLG, or
+`FFMPEG_HDR_ON_SDR=server`), a screen that leaves HDR moves its viewer onto a
+stream of their own made for a screen in SDR: HEVC when their player decodes
+HEVC, not H.264.
+
+## Smooth playback on every device
+
+Each player reports the frames it drops. One that drops 5% or more over half a
+minute is moved, alone, onto a lighter picture of the same film, one step at a
+time, until it plays smoothly:
+
+| Dropping frames on | Moves onto |
+|---|---|
+| AV1 | HEVC |
+| HEVC in 10 bits | HEVC Main in 8 bits, as Plex's own HEVC is (HDR mapped to SDR) |
+| HEVC in 8 bits | H.264 |
+
+An 8-bit film re-encoded to HEVC is made in 8 bits to begin with, and AV1 is
+sent only to players that decode it on their GPU. Everybody else stays on the
+stream they have.
 
 ## Plex's dashboard, Tautulli and Tracearr
 
@@ -391,6 +429,11 @@ On unless `off`. See [Subtitles](#subtitles).
 On unless `off`. See [Seek-bar previews](#seek-bar-previews).
 `FFMPEG_PREVIEWS_MAX_GB` is the room they get, 20 by default; past it the
 least recently used go.
+
+### `FFMPEG_PGS`
+
+`off` burns PGS subtitles into a re-encode instead of having each player draw
+them. See [Subtitles](#subtitles).
 
 ### `FFMPEG_SEGMENT_MEMORY_MB`
 

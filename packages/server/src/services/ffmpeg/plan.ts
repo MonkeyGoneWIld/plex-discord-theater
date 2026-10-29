@@ -151,11 +151,26 @@ export interface PlayerCaps {
    * versions are.
    */
   hdr: boolean;
+  /**
+   * A 10-bit picture plays smoothly: an HDR film, a 10-bit SDR file, an HDR
+   * film mapped to SDR in HEVC Main10. Said by every player that decodes HEVC
+   * or AV1, and taken back by one that keeps dropping frames on such a picture
+   * (the client's Player.tsx): blah0391's laptop dropped 10 to 39% of the
+   * frames of 10-bit HEVC in 5 of 14 streams from 22 to 29 October, and at
+   * most 2.2% of 8-bit ones, Plex's 8-bit HEVC of Deadpool included. Without
+   * it a player gets HEVC in 8 bits, a stream of its own (seatOf).
+   */
+  tenBit: boolean;
 }
 export type PlayerCap = keyof PlayerCaps;
-export const PLAYER_CAPS: readonly PlayerCap[] = ["hevc", "av1", "opus", "flac", "ac3", "eac3", "hdr"];
-export const NO_CAPS: PlayerCaps = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false };
-export const ALL_CAPS: PlayerCaps = { hevc: true, av1: true, opus: true, flac: true, ac3: true, eac3: true, hdr: true };
+export const PLAYER_CAPS: readonly PlayerCap[] = ["hevc", "av1", "opus", "flac", "ac3", "eac3", "hdr", "tenBit"];
+export const NO_CAPS: PlayerCaps = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, tenBit: false };
+export const ALL_CAPS: PlayerCaps = { hevc: true, av1: true, opus: true, flac: true, ac3: true, eac3: true, hdr: true, tenBit: true };
+
+/** The bits of a picture's samples: Plex's word, else its profile's. */
+export function pictureBits(video: { bitDepth?: number; profile?: string }): number {
+  return video.bitDepth ?? (/10/.test(video.profile ?? "") ? 10 : 8);
+}
 
 /**
  * Sound copied as it is, in fragmented MP4, for a player that decodes it: by
@@ -219,9 +234,13 @@ export type CopyPlan =
        *  into MPEG-TS for a browser, and an HDR label is in the init. */
       fmp4: boolean;
       hdr: string;
-      /** HDR for a screen in SDR, labelled this peak, nits, for the browser
-       *  to map (hdr-init.ts); null otherwise. */
+      /** HDR labelled for each screen as it is fetched: the film's own for a
+       *  screen that shows HDR, this peak, nits, for one in SDR, for the
+       *  browser to map (hdr-init.ts) — so both share the stream. Null
+       *  otherwise. */
       sdrPeakNits: number | null;
+      /** A 10-bit picture (PlayerCaps.tenBit). */
+      tenBit: boolean;
       width: number;
       height: number;
     }
@@ -240,6 +259,7 @@ export function planCopy(
   req: {
     audioStreamId: number | null; hevcOk: boolean; av1Ok?: boolean; opusOk?: boolean; flacOk?: boolean;
     ac3Ok?: boolean; eac3Ok?: boolean; hdrOk?: boolean; sdrPeakNits?: number | null; audioChannels?: number;
+    tenBitOk?: boolean;
   },
 ): CopyPlan {
   const no = (why: string): CopyPlan => ({ ok: false, why });
@@ -258,13 +278,17 @@ export function planCopy(
   if (codec === "hevc" && !req.hevcOk) return no("HEVC: not decoded by this player");
   if (codec === "av1" && (video.bitDepth ?? 8) > 10) return no(`${video.bitDepth}-bit AV1`);
   if (codec === "av1" && !req.av1Ok) return no("AV1: not decoded by this player");
+  const tenBit = pictureBits(video) > 8;
+  if (tenBit && req.tenBitOk === false) return no(`${pictureBits(video)}-bit picture: frames dropped on this player`);
   const hdr = hdrClass(video);
   // No HDR10 picture under the Dolby Vision: only a tone mapper that applies
   // it draws it right (Phase 2).
   if (hdr === "DV P5" || hdr === "DV P10.0") return no(`Dolby Vision ${hdr.slice(3)}: tone mapping needed`);
-  // For a screen in SDR: HEVC labelled for the browser to map, or else
+  // HEVC a browser maps is labelled as each screen fetches it, so screens in
+  // HDR and SDR share it, and its peers (hdr-init.ts): on 29 October the host
+  // in HDR and blah0391 in SDR had a copy each. Else, for a screen in SDR,
   // tone-mapped by the server (PlayerCaps.hdr).
-  const sdrPeakNits = hdrPicture(hdr) && !req.hdrOk && codec === "hevc" && browserMapped(hdr) && req.sdrPeakNits
+  const sdrPeakNits = hdrPicture(hdr) && codec === "hevc" && browserMapped(hdr) && req.sdrPeakNits
     ? req.sdrPeakNits : null;
   if (hdrPicture(hdr) && !req.hdrOk && sdrPeakNits === null) return no(`${hdr} for a screen in SDR`);
   const width = src.width ?? 0;
@@ -296,13 +320,14 @@ export function planCopy(
     fmp4: codec === "av1" || audioFmp4 || sdrPeakNits !== null,
     hdr,
     sdrPeakNits,
+    tenBit,
     width,
     height,
   };
 }
 
 /** What a copy needs its player to decode, beyond H.264 and AAC in MPEG-TS.
- *  HDR labelled for a screen in SDR any screen shows. */
+ *  HDR labelled for each screen any screen shows. */
 export function copyNeeds(plan: Extract<CopyPlan, { ok: true }>): PlayerCap[] {
   const needs: PlayerCap[] = [];
   if (plan.codec === "hevc") needs.push("hevc");
@@ -311,11 +336,13 @@ export function copyNeeds(plan: Extract<CopyPlan, { ok: true }>): PlayerCap[] {
   if (plan.audioCopy && audio) needs.push(audio);
   if (plan.audioOut && plan.audioOut.codec !== "aac") needs.push(plan.audioOut.codec);
   if (hdrPicture(plan.hdr) && plan.sdrPeakNits === null) needs.push("hdr");
+  if (plan.tenBit) needs.push("tenBit");
   return needs;
 }
 
 /** The frames' prefix SEI left out — mastering display, light level, HDR10+
- *  — so the init's label is the one a browser goes by (hdr-init.ts). Captions
+ *  — so the init's label, made for each screen, is the one a browser goes by
+ *  (hdr-init.ts). Captions
  *  are read from the file (embedded-subtitles.ts), not from these. */
 function sdrLabelArgs(plan: { sdrPeakNits: number | null }): string[] {
   return plan.sdrPeakNits !== null ? ["-bsf:v", "filter_units=remove_types=39"] : [];
@@ -772,9 +799,12 @@ export interface EncodeRequest {
   keepHdr: boolean;
   /** The driver's screen shows HDR (PlayerCaps.hdr): HDR is kept for it, */
   hdrOk?: boolean;
-  /** and for one that doesn't, labelled this peak, nits, for its browser to
-   *  map (hdrOnSdrNits, hdr-init.ts) — when the browser can (browserMapped). */
+  /** and labelled for each screen, one in SDR at this peak, nits, for its
+   *  browser to map (hdrOnSdrNits, hdr-init.ts) — when the browser can
+   *  (browserMapped). */
   sdrPeakNits?: number | null;
+  /** The driver plays 10-bit pictures smoothly (PlayerCaps.tenBit); unsaid, yes. */
+  tenBitOk?: boolean;
   /** What the GPU tone-maps with, as detectHardware found: OpenCL when it
    *  works there, else QSV's video engine. Unsaid, the video engine. */
   tonemapper?: Tonemapper;
@@ -794,6 +824,10 @@ export type EncodePlan =
       audioWhy: string | null;
       audioOut: AudioOut | null;
       codec: "h264" | "hevc" | "av1";
+      /** HEVC Main10 rather than Main: HDR kept, HDR mapped to SDR on the GPU,
+       *  or a 10-bit file — for a player that plays 10 bits smoothly
+       *  (PlayerCaps.tenBit). An 8-bit file is 8 bits, as Plex makes it. */
+      tenBit: boolean;
       /** Segments in fragmented MP4: AV1, as an AV1 copy is, and Opus sound,
        *  which MPEG-TS can't carry to hls.js; and HDR labelled in its init. */
       fmp4: boolean;
@@ -925,9 +959,10 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
   // mapped to SDR here, from the film's 10 bits — on the GPU when it decodes
   // the file, else on the CPU. A subtitle burned onto HDR would glare at full
   // PQ brightness: that picture is tone-mapped too.
-  const sdrPeakNits = hdrIn && !req.hdrOk && hevcOut && req.keepHdr && browserMapped(hdr) && req.sdrPeakNits
+  const tenBitOk = req.tenBitOk !== false;
+  const sdrPeakNits = hdrIn && hevcOut && tenBitOk && req.keepHdr && browserMapped(hdr) && req.sdrPeakNits
     ? req.sdrPeakNits : null;
-  const keepHdr = hdrIn && !doviOnly && hevcOut && req.keepHdr && (!!req.hdrOk || sdrPeakNits !== null);
+  const keepHdr = hdrIn && !doviOnly && hevcOut && tenBitOk && req.keepHdr && (!!req.hdrOk || sdrPeakNits !== null);
   let tonemap: { via: Tonemapper; algo: string; dovi: boolean } | null = null;
   if (hdrIn && !keepHdr) {
     // QSV's video engine is QSV's own; VAAPI's GPU has OpenCL or nothing;
@@ -949,6 +984,10 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
   // (tonemapx), and for everyone else.
   const codec = av1Out && hdr === "SDR" ? "av1"
     : hevcOut && (!tonemap || tonemap.via !== "software") ? "hevc" : "h264";
+  // 10 bits where the picture has them to keep; Deadpool's 8-bit H.264 had
+  // been made HEVC Main10 for nothing, which blah0391's laptop dropped a third
+  // of on 29 October, where Plex's 8-bit HEVC of it dropped none.
+  const tenBit = codec === "hevc" && tenBitOk && (keepHdr || !!tonemap || pictureBits(video) > 8);
   const audio = pickAudio(src, req.audioStreamId);
   if (audio === false) return no(`no audio track ${req.audioStreamId}`);
   const [w, h] = encodeFrame(
@@ -975,6 +1014,7 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
     audioWhy: audio && !audioCopy ? copiedAudio(audio, ALL_CAPS).why ?? "Re-encodes carry AAC or Opus only" : null,
     audioOut,
     codec,
+    tenBit,
     fmp4: codec === "av1" || audioOut?.codec === "opus" || sdrPeakNits !== null,
     hdr,
     sdrPeakNits,
@@ -1066,7 +1106,7 @@ export function encodeArgs(
   const W = plan.width;
   const H = plan.height;
   const hw = plan.hardware;
-  const fmt = plan.codec === "hevc" ? "p010" : "nv12";
+  const fmt = plan.tenBit ? "p010" : "nv12";
   const fill = plan.color.fill ? `${plan.color.fill},` : "";
   const tm = plan.tonemap;
   // peak=100 is the film's peak taken as 1,000 nits, whatever it says; SDR
@@ -1136,7 +1176,7 @@ export function encodeArgs(
   const peak = Math.max(plan.peakKbps, plan.kbps + 1);
   const rate = ["-b:v", `${plan.kbps}k`, "-maxrate", `${peak}k`, "-bufsize", `${peak * 2}k`];
   // AV1 is Main, which its encoders choose for 8 bits; NVENC's has no profile to name.
-  const profile = plan.codec === "av1" ? [] : ["-profile:v", plan.codec === "hevc" ? "main10" : "high"];
+  const profile = plan.codec === "av1" ? [] : ["-profile:v", plan.codec === "hevc" ? plan.tenBit ? "main10" : "main" : "high"];
   const encoder = hw === "qsv"
     ? ["-c:v", `${plan.codec}_qsv`, "-low_power", "1", ...profile, "-preset", plan.preset ?? "medium", ...rate, "-forced_idr", "1"]
     : hw === "vaapi"

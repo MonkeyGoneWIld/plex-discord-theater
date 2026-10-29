@@ -15,6 +15,10 @@
  * whether in the frames or in the init's hvcC, so a labelled copy goes out with
  * its frames' prefix SEI left out (plan.ts, filter_units) and its init made
  * over here: hvcC without its SEI arrays, and mdcv and clli saying `peakNits`.
+ *
+ * The same segments go to a screen in HDR, with an init of its own that says
+ * what the film says (labelInitForHdr): one stream for both, and only the init
+ * told apart, by the screen the player asks for it for.
  */
 
 const u16 = (b: Uint8Array, at: number) => (b[at] << 8) | b[at + 1];
@@ -99,6 +103,35 @@ function hdrBoxes(peakNits: number): Uint8Array[] {
   return [box("mdcv", mdcv), box("clli", clli)];
 }
 
+/** The film's own HDR10 metadata (probe.ts probeHdrMeta), as its boxes hold it. */
+export interface HdrMeta {
+  /** mdcv: green, blue, red and white x and y in 0.00002s, then its peak and
+   *  its least in 0.0001 nits. */
+  mdcv: number[] | null;
+  /** clli: its brightest pixel and brightest frame's average, nits. */
+  clli: [number, number] | null;
+}
+
+function filmBoxes(meta: HdrMeta): Uint8Array[] {
+  const out: Uint8Array[] = [];
+  if (meta.mdcv) {
+    const mdcv = new Uint8Array(24);
+    const m = new DataView(mdcv.buffer);
+    meta.mdcv.slice(0, 8).forEach((v, i) => m.setUint16(i * 2, v));
+    m.setUint32(16, meta.mdcv[8]);
+    m.setUint32(20, meta.mdcv[9]);
+    out.push(box("mdcv", mdcv));
+  }
+  if (meta.clli) {
+    const clli = new Uint8Array(4);
+    const c = new DataView(clli.buffer);
+    c.setUint16(0, meta.clli[0]);
+    c.setUint16(2, meta.clli[1]);
+    out.push(box("clli", clli));
+  }
+  return out;
+}
+
 /** A visual sample entry's own fields, before its boxes. */
 const VISUAL_ENTRY_FIELDS = 78;
 
@@ -109,6 +142,43 @@ const VISUAL_ENTRY_FIELDS = 78;
 export function labelInitForSdr(init: Uint8Array, peakNits: number): Uint8Array | null {
   const nits = Math.round(peakNits);
   if (!(nits > 0 && nits <= 10_000)) return null;
+  return withHevcEntry(init, (children) => {
+    const parts: Uint8Array[] = [];
+    let hvcc = false;
+    for (const ch of children) {
+      if (ch.type === "mdcv" || ch.type === "clli") continue;
+      if (ch.type === "hvcC") {
+        const body = hvccWithoutSei(init.subarray(ch.start, ch.end));
+        if (!body) return null;
+        parts.push(box("hvcC", body));
+        hvcc = true;
+      } else {
+        parts.push(init.subarray(ch.at, ch.end));
+      }
+    }
+    return hvcc ? [...parts, ...hdrBoxes(nits)] : null;
+  });
+}
+
+/**
+ * The init segment for a screen in HDR: its HEVC saying the film's own
+ * mastering display and light levels, which its frames no longer carry (see
+ * above); null when there's nothing of them to say or no HEVC entry this can
+ * read, and the init as ffmpeg wrote it goes instead.
+ */
+export function labelInitForHdr(init: Uint8Array, meta: HdrMeta): Uint8Array | null {
+  const film = filmBoxes(meta);
+  if (!film.length) return null;
+  return withHevcEntry(init, (children) => [
+    ...children
+      .filter((ch) => !(ch.type === "mdcv" && meta.mdcv) && !(ch.type === "clli" && meta.clli))
+      .map((ch) => init.subarray(ch.at, ch.end)),
+    ...film,
+  ]);
+}
+
+/** The init segment with its HEVC sample entry's boxes made over by `remake`. */
+function withHevcEntry(init: Uint8Array, remake: (children: Box[]) => Uint8Array[] | null): Uint8Array | null {
   const top = boxes(init, 0, init.length);
   const moov = top?.find((x) => x.type === "moov");
   if (!moov) return null;
@@ -125,21 +195,9 @@ export function labelInitForSdr(init: Uint8Array, peakNits: number): Uint8Array 
     if (!entry || entry.start + VISUAL_ENTRY_FIELDS > entry.end) continue;
     const children = boxes(init, entry.start + VISUAL_ENTRY_FIELDS, entry.end);
     if (!children) return null;
-    const parts: Uint8Array[] = [init.subarray(entry.at, entry.start + VISUAL_ENTRY_FIELDS)];
-    let hvcc = false;
-    for (const ch of children) {
-      if (ch.type === "mdcv" || ch.type === "clli") continue;
-      if (ch.type === "hvcC") {
-        const body = hvccWithoutSei(init.subarray(ch.start, ch.end));
-        if (!body) return null;
-        parts.push(box("hvcC", body));
-        hvcc = true;
-      } else {
-        parts.push(init.subarray(ch.at, ch.end));
-      }
-    }
-    if (!hvcc) return null;
-    parts.push(...hdrBoxes(nits));
+    const made = remake(children);
+    if (!made) return null;
+    const parts: Uint8Array[] = [init.subarray(entry.at, entry.start + VISUAL_ENTRY_FIELDS), ...made];
     const length = parts.reduce((n, p) => n + p.length, 0);
     const delta = length - (entry.end - entry.at);
     const out = new Uint8Array(init.length + delta);

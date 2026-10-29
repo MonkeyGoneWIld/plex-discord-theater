@@ -13,6 +13,7 @@
 import { spawn } from "node:child_process";
 import { LruMap } from "../lru.js";
 import { ffprobePath } from "./config.js";
+import type { HdrMeta } from "./hdr-init.js";
 import type { SourceStream } from "./plan.js";
 
 export interface ProbedStream {
@@ -79,6 +80,78 @@ export function probe(input: string[]): Promise<Probed | null> {
       }
     });
   });
+}
+
+/** "a/b" or a plain number, as ffprobe writes side data. */
+function ratio(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v !== "string") return null;
+  const [a, b] = v.split("/").map(Number);
+  const n = b === undefined ? a : a / b;
+  return Number.isFinite(n) ? n : null;
+}
+
+/** HDR10 metadata from ffprobe's side data, as hdr-init.ts's boxes hold it. */
+export function hdrMetaOf(sideData: Array<Record<string, unknown>>): HdrMeta | null {
+  const md = sideData.find((s) => s.side_data_type === "Mastering display metadata");
+  const cl = sideData.find((s) => s.side_data_type === "Content light level metadata");
+  const xy = ["green_x", "green_y", "blue_x", "blue_y", "red_x", "red_y", "white_point_x", "white_point_y"]
+    .map((k) => ratio(md?.[k]));
+  const peak = ratio(md?.max_luminance);
+  const least = ratio(md?.min_luminance);
+  const mdcv = md && xy.every((v) => v !== null && v >= 0 && v <= 1) && peak !== null && peak > 0 && least !== null && least >= 0
+    ? [...xy.map((v) => Math.round(v! * 50_000)), Math.round(peak * 10_000), Math.round(least * 10_000)]
+    : null;
+  const maxCll = ratio(cl?.max_content);
+  const maxFall = ratio(cl?.max_average);
+  const clli: [number, number] | null = cl && maxCll !== null && maxFall !== null && maxCll > 0 && maxCll <= 65_535 && maxFall >= 0 && maxFall <= 65_535
+    ? [Math.round(maxCll), Math.round(maxFall)] : null;
+  return mdcv || clli ? { mdcv, clli } : null;
+}
+
+const hdrChecked = new Map<string, Promise<HdrMeta | null>>();
+
+/**
+ * A file's HDR10 metadata — its stream's, else its first frame's SEI — once
+ * per file and size: null when it has none or ffprobe couldn't say.
+ */
+export function probeHdrMeta(key: string, input: string[]): Promise<HdrMeta | null> {
+  const hit = hdrChecked.get(key);
+  if (hit) return hit;
+  const asked = new Promise<HdrMeta | null>((resolve) => {
+    let out = "";
+    let child;
+    try {
+      child = spawn(ffprobePath(), [
+        "-hide_banner", "-v", "error", "-select_streams", "v:0", "-read_intervals", "%+#1",
+        "-show_entries", "stream=side_data_list:frame=side_data_list", "-show_frames",
+        "-of", "json", ...input,
+      ], { stdio: ["ignore", "pipe", "ignore"] });
+    } catch {
+      resolve(null);
+      return;
+    }
+    const timer = setTimeout(() => child.kill("SIGKILL"), PROBE_TIMEOUT_MS);
+    child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
+    child.on("error", () => { clearTimeout(timer); resolve(null); });
+    child.on("close", () => {
+      clearTimeout(timer);
+      try {
+        const json = JSON.parse(out) as {
+          streams?: Array<{ side_data_list?: Array<Record<string, unknown>> }>;
+          frames?: Array<{ side_data_list?: Array<Record<string, unknown>> }>;
+        };
+        resolve(hdrMetaOf([
+          ...(json.streams?.[0]?.side_data_list ?? []),
+          ...(json.frames ?? []).flatMap((f) => f.side_data_list ?? []),
+        ]));
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+  hdrChecked.set(key, asked);
+  return asked;
 }
 
 const KINDS: Record<number, string> = { 1: "video", 2: "audio", 3: "subtitle" };
@@ -159,4 +232,5 @@ export async function probeOnce(key: string, input: string[]): Promise<Probed | 
 /** For tests: forget every file's answer. */
 export function forgetProbes(): void {
   checked.clear();
+  hdrChecked.clear();
 }

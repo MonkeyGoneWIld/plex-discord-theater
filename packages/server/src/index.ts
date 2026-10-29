@@ -20,6 +20,7 @@ import logRoutes from "./routes/logs.js";
 import qbtManagerRoutes from "./routes/qbt-manager.js";
 import presenceRoutes from "./routes/presence.js";
 import { requireAuth, closeSessionDb } from "./middleware/auth.js";
+import { hlsLimiters } from "./middleware/hls-limit.js";
 import * as thumbCache from "./services/thumb-cache.js";
 import { startCacheWarmer, stopCacheWarmer } from "./services/cache-warmer.js";
 import { closeHistoryDb } from "./services/watch-history.js";
@@ -147,14 +148,10 @@ const thumbLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-const hlsLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: isDev ? 50000 : 3000,
-  standardHeaders: true,
-  legacyHeaders: false,
-  // No keyGenerator: the library's default already does exactly this, and a
-  // custom one trips its IPv6 validation warning (ERR_ERL_KEY_GEN_IPV6).
-});
+// Segments, not the parts they are asked for in — see hlsLimiters. No
+// keyGenerator: the library's default already does exactly this, and a custom
+// one trips its IPv6 validation warning (ERR_ERL_KEY_GEN_IPV6).
+const hlsLimiter = hlsLimiters(isDev ? 50000 : 3000);
 
 // Diagnostics ship on a timer from every connected client, so they'd eat most
 // of the general budget on their own. Own ceiling, sized for a full room.

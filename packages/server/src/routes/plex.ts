@@ -5584,7 +5584,11 @@ router.get(
     // Optional offset (seconds) — a real seek/restart. Parsed up front because a
     // request WITH an offset must start a fresh transcode at that position, while
     // one WITHOUT should reuse the session's existing transcode if it's alive.
-    const offsetSec = Math.round(parseFloat(req.query.offset as string));
+    // Down to the second, never up: the player goes on from exactly where it
+    // asked, inside the stream, and a stream begun after that point skips the
+    // difference. On 29 October an audio switch at 674.60 was re-encoded from
+    // 675, and everybody went on from 674.98.
+    const offsetSec = Math.floor(parseFloat(req.query.offset as string));
     let offset = Number.isFinite(offsetSec) && offsetSec > 0 ? String(offsetSec) : undefined;
 
     // Which of the item's files to play, in order of who knows best: the client

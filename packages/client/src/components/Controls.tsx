@@ -1202,7 +1202,24 @@ export function Controls({
    * until the room ran, since a player now holds its picture until then.
    */
   const firstPassInHand = previewPartId != null && takePreviewStart(previewPartId) !== null;
-  const beginFrames = started || firstPassInHand;
+  /**
+   * And a picture in, in a room that is paused: joining one, a viewer never
+   * plays until the room does, and its seek bar said "Waiting for playback"
+   * with 25 s downloaded (Android, 29 October). Not one held for a room that
+   * is starting — that wait is everybody's first segments.
+   */
+  const [pictureIn, setPictureIn] = useState(false);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || held) return;
+    const onPicture = () => {
+      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) setPictureIn(true);
+    };
+    onPicture();
+    video.addEventListener("loadeddata", onPicture);
+    return () => video.removeEventListener("loadeddata", onPicture);
+  }, [videoRef, held]);
+  const beginFrames = started || firstPassInHand || pictureIn;
   useEffect(() => {
     // No frames for this item: none kept for the last one are coming back.
     if (previewPartId == null) {

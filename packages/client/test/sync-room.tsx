@@ -587,6 +587,43 @@ function Runner() {
   }
 
   /**
+   * A viewer joining a paused room: its seek bar's frames come while it waits
+   * for the room to play. On 29 October an Android phone joining one said
+   * "Waiting for playback" with 25 s downloaded, until the room ran.
+   */
+  async function runPausedJoinPreviews() {
+    setRunning(true);
+    const out: string[] = ["— a viewer joining a paused room, and its seek bar's frames —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    try {
+      await startOnce("p2p=0&previews=1", {});
+      await pause(3_000);
+      hostKey(" ");
+      await waitFor(() => !!latest.get("u-host")?.paused && !!latest.get("u-viewer")?.paused, 10_000, "both to pause");
+      await pause(1_000);
+      const rejoinedAt = Date.now();
+      const frame = viewerFrame.current;
+      if (frame) frame.src = frame.src;
+      const after = (msg: RegExp, tag: string) => (events.get("u-viewer") ?? []).find((e) => e.t >= rejoinedAt && e.tag === tag && msg.test(e.msg));
+      try {
+        await waitFor(() => !!after(/^frame index ready$/, "Preview"), 30_000, "the viewer's seek-bar frames");
+      } catch {
+        // Said below.
+      }
+      const ready = after(/^frame index ready$/, "Preview");
+      say(`${ready ? "PASS" : "FAIL"} the viewer back in a paused room has its seek bar's frames${ready ? ` ${((ready.t - rejoinedAt) / 1000).toFixed(1)}s after joining` : " — none in 30 s"}`);
+      say(`${!after(/^playing$/, "Video") ? "PASS" : "FAIL"} without playing meanwhile`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
    * A viewer joining a film already playing, its downloads only a little
    * faster than the film — as monkey26 rejoining May at 3:03 on 12 October.
    * It started on the first half second it had, stopped, fell nine seconds
@@ -2726,6 +2763,7 @@ function Runner() {
         <button disabled={running} onClick={() => void runMemory(60, "&parts=0", true)}>Memory, engine full, skipping, no parts</button>
         <button disabled={running} onClick={() => void runAlonePopOut()}>Host alone pops out</button>
         <button disabled={running} onClick={() => void runPreviewAhead()}>Preview frames from the title's page</button>
+        <button disabled={running} onClick={() => void runPausedJoinPreviews()}>Joining a paused room: preview frames</button>
         <button disabled={running} onClick={() => void runSkipThenPause()}>Skip then pause</button>
         <button disabled={running} onClick={() => void runKeyframeStart()}>Keyframe start</button>
         <button disabled={running} onClick={() => void runBufferedSkip()}>Skip in the buffer</button>

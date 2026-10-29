@@ -27,9 +27,11 @@ export interface Caps {
   ac3: boolean;
   eac3: boolean;
   /**
-   * AV1 decoded by the GPU, so a re-encode may be made in AV1 for this player
-   * (not a need: anyone who decodes AV1 at all plays it). Known once the
-   * browser has answered (mediaCapabilities, asked at load); no until then.
+   * AV1 decoded by the GPU, so a re-encode may be made in AV1 for this player.
+   * Known once the browser has answered (mediaCapabilities, asked at load); no
+   * until then. And `av1` is said only with it: a laptop decoding AV1 in
+   * software dropped a third of Deadpool's frames on 29 October, sharing a
+   * stream re-encoded in AV1 for a desktop that decodes it on its GPU.
    */
   av1Encode: boolean;
   /**
@@ -89,7 +91,7 @@ try {
 
 /** What this player decodes, as the room is told on joining. */
 export function playerCaps(): Caps {
-  const av1 = !failedHere("av1") && AV1_CODECS.every((c) => supports(`video/mp4; codecs="${c}"`));
+  const av1 = !failedHere("av1") && AV1_CODECS.every((c) => supports(`video/mp4; codecs="${c}"`)) && av1Smooth;
   return {
     hevc: canPlayHevcTranscode(),
     av1,
@@ -97,7 +99,7 @@ export function playerCaps(): Caps {
     flac: !failedHere("flac") && supports('audio/mp4; codecs="flac"'),
     ac3: !failedHere("ac3") && supports('audio/mp4; codecs="ac-3"'),
     eac3: !failedHere("eac3") && supports('audio/mp4; codecs="ec-3"'),
-    av1Encode: av1 && av1Smooth,
+    av1Encode: av1,
     hdr: hdrScreen(),
   };
 }

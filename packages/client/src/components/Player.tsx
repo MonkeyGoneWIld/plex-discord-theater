@@ -462,6 +462,15 @@ const BACK_BUFFER_S = 30;
 const FORWARD_BUFFER_FLUSH_S = 120;
 /** Without data to play for this long, the loading screen goes up. */
 const LOADING_SCREEN_AFTER_MS = 500;
+/**
+ * Frames dropped, of those due, over this many ten-second samples of play,
+ * that put this player on H.264 (pictureCapRef). On 29 October a laptop
+ * dropped 33% of an AV1 and an HEVC re-encode and an Android phone 6% of an
+ * HEVC one, both stuttering; a desktop dropped under 2% at worst, through a
+ * stream rebuilt under it.
+ */
+const DROPPED_SHARE = 0.05;
+const DROPPED_WINDOWS = 3;
 /** The longest a player landing past the room looks in the browser's cache for
  *  what it will play there — see the landing on LEVEL_LOADED. A look is a
  *  moment; past this it lands as though nothing were held. */
@@ -2143,6 +2152,18 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const hostCatchUpShortSaidRef = useRef(false);
   /** Frames shown and dropped at the last health sample — see there. */
   const frameCountRef = useRef<{ shown: number; dropped: number; at: number } | null>(null);
+  /**
+   * The picture's codec beyond H.264 on this stream — HEVC or AV1 — and the
+   * last samples' frames while it played: a device that decodes it, but too
+   * slowly, drops a steady share of them. On 29 October a laptop dropped a
+   * third of Deadpool's frames as AV1 and as HEVC, unwatchable, and none of
+   * anything as H.264 on main. Past DROPPED_SHARE over DROPPED_WINDOWS
+   * samples, it is asked for no more here, as a codec that fails to decode
+   * is: the room puts this player on an H.264 stream of its own. For this
+   * room only — a lighter stream in it may play well.
+   */
+  const pictureCapRef = useRef<Cap | null>(null);
+  const droppedWindowsRef = useRef<Array<{ shown: number; dropped: number }>>([]);
   /** Sound decoded by the last health sample, and where the clock was — see there. */
   const audioDecodedRef = useRef<{ bytes: number; at: number } | null>(null);
   /** Whether the stream playing has sound at all, from the codecs in its segments. */
@@ -5141,10 +5162,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         streamHasAudioRef.current = false;
         silentRebuildsRef.current = 0;
         audioDecodedRef.current = null;
+        pictureCapRef.current = null;
+        droppedWindowsRef.current = [];
         hls.on(Hls.Events.BUFFER_CODECS, (_e, data) => {
           const { video, audio } = splitCodecs(data as Parameters<typeof splitCodecs>[0]);
           streamCaps = capsUsed(video, audio);
           streamHasAudioRef.current = !!audio;
+          pictureCapRef.current = streamCaps.find((c) => c === "hevc" || c === "av1") ?? null;
         });
 
         // Copied or re-encoded, and how far a copied stream's playlist reaches.
@@ -6602,6 +6626,28 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             frames.at - lastFrames.at >= 3 && frames.at - lastFrames.at <= 12 &&
             frames.shown - lastFrames.shown < 2 * (frames.at - lastFrames.at)) {
           logWarn("Video", "the picture hardly moved while the time ran on", { ...frameDeltas, ...snapshot(v) });
+        }
+        // Dropping frames for the codec — see pictureCapRef. Whole samples of
+        // play only: a seek or a rebuild drops a few of its own.
+        const pictureCap = pictureCapRef.current;
+        if (pictureCap && frames && lastFrames && !v.paused && !v.seeking && !document.hidden &&
+            frames.shown >= lastFrames.shown && frames.at - lastFrames.at >= 8 && frames.at - lastFrames.at <= 12) {
+          const windows = droppedWindowsRef.current;
+          windows.push({ shown: frames.shown - lastFrames.shown, dropped: frames.dropped - lastFrames.dropped });
+          if (windows.length > DROPPED_WINDOWS) windows.shift();
+          const shown = windows.reduce((n, w) => n + w.shown, 0);
+          const dropped = windows.reduce((n, w) => n + w.dropped, 0);
+          if (windows.length === DROPPED_WINDOWS && dropped >= DROPPED_SHARE * (shown + dropped)) {
+            pictureCapRef.current = null;
+            windows.length = 0;
+            logWarn("Video", "frames dropping as this device decodes the picture — asking the room for a stream without its codec", {
+              codec: pictureCap, framesShown: shown, framesDropped: dropped,
+              droppedPct: Math.round((100 * dropped) / (shown + dropped)),
+            });
+            syncActionsRef.current?.sendCodecsUnsupported([pictureCap]);
+          }
+        } else if (!pictureCap || v.paused || v.seeking) {
+          droppedWindowsRef.current = [];
         }
         /**
          * Sound decoded since the last sample, against how far the clock moved.

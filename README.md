@@ -342,6 +342,8 @@ services:
       # FFMPEG_PREVIEWS: "on"                        # previews for files Plex has none for
       # FFMPEG_HDR_REENCODE: "keep"                  # or "tonemap"
       # FFMPEG_TONEMAP: "mobius"
+      # FFMPEG_HDR_ON_SDR: "browser"                 # or "server": HDR on a screen in SDR
+      # FFMPEG_HDR_ON_SDR_NITS: "300"
       # FFMPEG_REPORT_TO_PLEX: "1"
 
       # ── Leave this alone: it matches the volume above ────────────────────

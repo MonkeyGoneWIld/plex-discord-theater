@@ -105,6 +105,15 @@ export function hdrPicture(hdr: string): boolean {
   return hdr !== "SDR" && hdr !== "DV P8.2" && hdr !== "DV P10.2";
 }
 
+/**
+ * Whether a browser on a screen in SDR maps a picture of this class itself,
+ * once its stream is labelled a lower peak (hdr-init.ts): PQ with an HDR10
+ * picture. HLG has no peak to label; Dolby Vision 5 and 10.0 no HDR10 picture.
+ */
+export function browserMapped(hdr: string): boolean {
+  return hdr === "HDR10" || hdr === "DV P7" || hdr === "DV P8.1";
+}
+
 /** Containers whose H.264 and HEVC copy cleanly into MPEG-TS. */
 const COPY_CONTAINERS = new Set(["mkv", "mp4", "m4v", "mov", "mpegts", "ts", "m2ts"]);
 /** And whose AV1 copies into fragmented MP4: a WebM's too. */
@@ -128,14 +137,18 @@ export interface PlayerCaps {
   eac3: boolean;
   /**
    * The screen shows HDR now, so an HDR picture is shown as it is. On a
-   * screen in SDR Chrome maps HDR's reference white to half the screen's
-   * light, a stop or more darker than Plex's players, and nothing done to
-   * the picture after that mends it: the player's lift on the 8-bit picture
-   * Chrome drew (28 October) matched the colours of Plex's app for Windows
-   * but broke dark scenes into bands and blocks — Avengers: Endgame at 32:00.
-   * So a player on such a screen is sent HDR tone-mapped by the server from
-   * the film's own 10 bits, as Plex's SDR versions are, which were clean in
-   * the same scene.
+   * screen in SDR Chrome maps HDR to SDR itself, from the picture's 10 bits,
+   * by a curve set by the peak the stream says it has: at the usual 1,000
+   * nits reference white lands at half the screen's light, a stop or more
+   * darker than Plex's players. Nothing done to the 8-bit picture a page
+   * gets mends that: the player's lift on it (28 October) matched the colours
+   * of Plex's app for Windows but broke dark scenes into bands and blocks —
+   * Avengers: Endgame at 32:00. So a player on such a screen is sent the HDR
+   * as it is, labelled a lower peak (config.ts hdrOnSdrNits, hdr-init.ts),
+   * which Chrome maps brighter at full precision (29 October); or, where a
+   * browser can't map it (browserMapped) or FFMPEG_HDR_ON_SDR=server says so,
+   * HDR tone-mapped by the server from the film's own 10 bits, as Plex's SDR
+   * versions are.
    */
   hdr: boolean;
 }
@@ -202,9 +215,13 @@ export type CopyPlan =
       /** What a converted track becomes; null when it is copied, or there is none. */
       audioOut: AudioOut | null;
       codec: "h264" | "hevc" | "av1";
-      /** In fragmented MP4 rather than MPEG-TS: AV1, Opus and FLAC don't go into MPEG-TS for a browser. */
+      /** In fragmented MP4 rather than MPEG-TS: AV1, Opus and FLAC don't go
+       *  into MPEG-TS for a browser, and an HDR label is in the init. */
       fmp4: boolean;
       hdr: string;
+      /** HDR for a screen in SDR, labelled this peak, nits, for the browser
+       *  to map (hdr-init.ts); null otherwise. */
+      sdrPeakNits: number | null;
       width: number;
       height: number;
     }
@@ -215,13 +232,14 @@ export type CopyPlan =
  * is the track the stream is for (0 or null: the item's choice, as Plex takes
  * it); `hevcOk`, `av1Ok`, `opusOk` and `flacOk` what the player driving it
  * decodes, and `hdrOk` whether its screen shows HDR (PlayerCaps);
+ * `sdrPeakNits` the peak HDR is labelled for one that doesn't (hdrOnSdrNits);
  * `audioChannels` FFMPEG_AUDIO_CHANNELS (convertedAudio).
  */
 export function planCopy(
   src: SourceVersion,
   req: {
     audioStreamId: number | null; hevcOk: boolean; av1Ok?: boolean; opusOk?: boolean; flacOk?: boolean;
-    ac3Ok?: boolean; eac3Ok?: boolean; hdrOk?: boolean; audioChannels?: number;
+    ac3Ok?: boolean; eac3Ok?: boolean; hdrOk?: boolean; sdrPeakNits?: number | null; audioChannels?: number;
   },
 ): CopyPlan {
   const no = (why: string): CopyPlan => ({ ok: false, why });
@@ -244,8 +262,11 @@ export function planCopy(
   // No HDR10 picture under the Dolby Vision: only a tone mapper that applies
   // it draws it right (Phase 2).
   if (hdr === "DV P5" || hdr === "DV P10.0") return no(`Dolby Vision ${hdr.slice(3)}: tone mapping needed`);
-  // Tone-mapped by the server for a screen in SDR: see PlayerCaps.hdr.
-  if (hdrPicture(hdr) && !req.hdrOk) return no(`${hdr} for a screen in SDR`);
+  // For a screen in SDR: HEVC labelled for the browser to map, or else
+  // tone-mapped by the server (PlayerCaps.hdr).
+  const sdrPeakNits = hdrPicture(hdr) && !req.hdrOk && codec === "hevc" && browserMapped(hdr) && req.sdrPeakNits
+    ? req.sdrPeakNits : null;
+  if (hdrPicture(hdr) && !req.hdrOk && sdrPeakNits === null) return no(`${hdr} for a screen in SDR`);
   const width = src.width ?? 0;
   const height = src.height ?? 0;
   // 4K is shown at 1080p, as Plex does: the activity can't show more.
@@ -272,14 +293,16 @@ export function planCopy(
     audioWhy: copied.why,
     audioOut,
     codec,
-    fmp4: codec === "av1" || audioFmp4,
+    fmp4: codec === "av1" || audioFmp4 || sdrPeakNits !== null,
     hdr,
+    sdrPeakNits,
     width,
     height,
   };
 }
 
-/** What a copy needs its player to decode, beyond H.264 and AAC in MPEG-TS. */
+/** What a copy needs its player to decode, beyond H.264 and AAC in MPEG-TS.
+ *  HDR labelled for a screen in SDR any screen shows. */
 export function copyNeeds(plan: Extract<CopyPlan, { ok: true }>): PlayerCap[] {
   const needs: PlayerCap[] = [];
   if (plan.codec === "hevc") needs.push("hevc");
@@ -287,8 +310,15 @@ export function copyNeeds(plan: Extract<CopyPlan, { ok: true }>): PlayerCap[] {
   const audio = audioCapOf(plan.audio?.codec);
   if (plan.audioCopy && audio) needs.push(audio);
   if (plan.audioOut && plan.audioOut.codec !== "aac") needs.push(plan.audioOut.codec);
-  if (hdrPicture(plan.hdr)) needs.push("hdr");
+  if (hdrPicture(plan.hdr) && plan.sdrPeakNits === null) needs.push("hdr");
   return needs;
+}
+
+/** The frames' prefix SEI left out — mastering display, light level, HDR10+
+ *  — so the init's label is the one a browser goes by (hdr-init.ts). Captions
+ *  are read from the file (embedded-subtitles.ts), not from these. */
+function sdrLabelArgs(plan: { sdrPeakNits: number | null }): string[] {
+  return plan.sdrPeakNits !== null ? ["-bsf:v", "filter_units=remove_types=39"] : [];
 }
 
 /** The track a stream is for (0 or null: the item's choice, as Plex takes it);
@@ -408,6 +438,7 @@ export function copyArgs(
     "-c:v", "copy",
     // HEVC in MP4 as Chrome's MSE takes it: parameter sets in the init.
     ...(plan.fmp4 && plan.codec === "hevc" ? ["-tag:v", "hvc1"] : []),
+    ...sdrLabelArgs(plan),
     ...audioArgs(plan),
     ...(plan.fmp4 ? fmp4SegmentArgs(segmentSeconds) : segmentArgs(offsetS, toS ?? durationS, segmentSeconds)),
   ];
@@ -739,8 +770,11 @@ export interface EncodeRequest {
   /** FFMPEG_HDR_REENCODE=keep: an HEVC re-encode of an HDR file stays HDR,
    *  for a player whose screen shows it. */
   keepHdr: boolean;
-  /** The driver's screen shows HDR (PlayerCaps.hdr): HDR is kept only for it. */
+  /** The driver's screen shows HDR (PlayerCaps.hdr): HDR is kept for it, */
   hdrOk?: boolean;
+  /** and for one that doesn't, labelled this peak, nits, for its browser to
+   *  map (hdrOnSdrNits, hdr-init.ts) — when the browser can (browserMapped). */
+  sdrPeakNits?: number | null;
   /** What the GPU tone-maps with, as detectHardware found: OpenCL when it
    *  works there, else QSV's video engine. Unsaid, the video engine. */
   tonemapper?: Tonemapper;
@@ -761,9 +795,12 @@ export type EncodePlan =
       audioOut: AudioOut | null;
       codec: "h264" | "hevc" | "av1";
       /** Segments in fragmented MP4: AV1, as an AV1 copy is, and Opus sound,
-       *  which MPEG-TS can't carry to hls.js. */
+       *  which MPEG-TS can't carry to hls.js; and HDR labelled in its init. */
       fmp4: boolean;
       hdr: string;
+      /** HDR kept for a screen in SDR, labelled this peak, nits, for the
+       *  browser to map (hdr-init.ts); null otherwise. */
+      sdrPeakNits: number | null;
       /** The HDR transfer written on the output (smpte2084 or arib-std-b67);
        *  null for SDR. */
       hdrTrc: string | null;
@@ -883,11 +920,14 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
   const hdrIn = hdrPicture(hdr);
   const doviOnly = hdr === "DV P5" || hdr === "DV P10.0";
   // HDR stays HDR (FFMPEG_HDR_REENCODE=keep) in HEVC Main10, for a player
-  // that decodes HEVC on a screen that shows HDR. Otherwise it is mapped to
-  // SDR here, from the film's 10 bits (PlayerCaps.hdr) — on the GPU when it
-  // decodes the file, else on the CPU. A subtitle burned onto HDR would
-  // glare at full PQ brightness: that picture is tone-mapped too.
-  const keepHdr = hdrIn && !doviOnly && hevcOut && req.keepHdr && !!req.hdrOk;
+  // that decodes HEVC on a screen that shows HDR — or on one in SDR whose
+  // browser maps it, labelled for that (PlayerCaps.hdr). Otherwise it is
+  // mapped to SDR here, from the film's 10 bits — on the GPU when it decodes
+  // the file, else on the CPU. A subtitle burned onto HDR would glare at full
+  // PQ brightness: that picture is tone-mapped too.
+  const sdrPeakNits = hdrIn && !req.hdrOk && hevcOut && req.keepHdr && browserMapped(hdr) && req.sdrPeakNits
+    ? req.sdrPeakNits : null;
+  const keepHdr = hdrIn && !doviOnly && hevcOut && req.keepHdr && (!!req.hdrOk || sdrPeakNits !== null);
   let tonemap: { via: Tonemapper; algo: string; dovi: boolean } | null = null;
   if (hdrIn && !keepHdr) {
     // QSV's video engine is QSV's own; VAAPI's GPU has OpenCL or nothing;
@@ -935,8 +975,9 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
     audioWhy: audio && !audioCopy ? copiedAudio(audio, ALL_CAPS).why ?? "Re-encodes carry AAC or Opus only" : null,
     audioOut,
     codec,
-    fmp4: codec === "av1" || audioOut?.codec === "opus",
+    fmp4: codec === "av1" || audioOut?.codec === "opus" || sdrPeakNits !== null,
     hdr,
+    sdrPeakNits,
     hdrTrc: !hdrIn || tonemap ? null
       : String(video.colorTrc ?? "").toLowerCase() === "arib-std-b67" ? "arib-std-b67" : "smpte2084",
     tonemap,
@@ -1138,6 +1179,7 @@ export function encodeArgs(
     ...encoder,
     ...tags,
     ...(plan.fmp4 && plan.codec === "hevc" ? ["-tag:v", "hvc1"] : []),
+    ...sdrLabelArgs(plan),
     "-aspect", `${W}:${H}`,
     "-force_key_frames:v", `expr:gte(t,n_forced*${ENCODE_SEGMENT_S})`,
     ...audioArgs(plan),

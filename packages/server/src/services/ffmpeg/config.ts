@@ -255,6 +255,19 @@ export function keepHdrOnReencode(): boolean {
   return process.env.FFMPEG_HDR_REENCODE?.trim().toLowerCase() !== "tonemap";
 }
 
+/**
+ * HDR for a screen in SDR. Unset or "browser": the HEVC is sent as it is,
+ * its HDR SEI left out and its init labelled this many nits at most
+ * (FFMPEG_HDR_ON_SDR_NITS, 300 unless set), so the player's own tone map —
+ * which works from the picture's 10 bits — shows it brighter than its usual
+ * 1000 (hdr-init.ts). "server": tone-mapped here to 8-bit H.264 instead.
+ */
+export function hdrOnSdrNits(): number | null {
+  if (process.env.FFMPEG_HDR_ON_SDR?.trim().toLowerCase() === "server") return null;
+  const n = Number(process.env.FFMPEG_HDR_ON_SDR_NITS);
+  return Number.isFinite(n) && n > 0 ? Math.min(1000, Math.max(100, Math.round(n))) : 300;
+}
+
 /** Whether ffmpeg runs these arguments to the end, and the last thing it said. */
 function trial(args: string[]): Promise<{ ok: boolean; said: string }> {
   return new Promise((resolve) => {

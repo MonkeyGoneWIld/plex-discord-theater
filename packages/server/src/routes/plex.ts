@@ -54,7 +54,7 @@ import { episodesInSameFile, sameFileRun } from "../services/episode-files.js";
 import { markOriginalAudio } from "../services/original-language.js";
 import { audioNotes, type AudioDecision, type SourceAudio } from "../services/stream-audio.js";
 import {
-  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegHardware, ffmpegPgsOn, ffmpegPreviewsOn, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesAv1, gpuEncodesHevc, hwDevice,
+  audioChannels, encodePreset, fallbackToPlex, ffmpegEngineOn, ffmpegHardware, ffmpegPgsOn, ffmpegPreviewsOn, ffmpegSubtitlesOn, gpuDecodeOn, gpuEncodesAv1, gpuEncodesHevc, hdrOnSdrNits, hwDevice,
   keepHdrOnReencode, localPath, lowPowerVaapi, lowPowerVaapiAv1, maxEncodes, readable, recheckHardware, sizeOnDisk, styledSubtitlesOn, tonemapAlgo, tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
@@ -5297,7 +5297,9 @@ async function startWithFfmpeg(o: {
   const okFor = (c: PlayerCaps) => ({
     hevcOk: c.hevc, av1Ok: c.av1, opusOk: c.opus, flacOk: c.flac, ac3Ok: c.ac3, eac3Ok: c.eac3, hdrOk: c.hdr,
   });
-  const copyAsk = { audioStreamId: o.audioStreamID || null, ...okFor(o.caps), audioChannels: audioChannels() };
+  const copyAsk = { audioStreamId: o.audioStreamID || null, ...okFor(o.caps), sdrPeakNits: hdrOnSdrNits(), audioChannels: audioChannels() };
+  /** HDR labelled for a screen in SDR (hdr-init.ts), for the log and Stats for nerds. */
+  const mappedAt = (nits: number | null) => nits !== null ? ` (mapped at ${nits} nits)` : "";
   const copyPlan = o.copy ? planCopy(source, copyAsk) : null;
   // What only the driver's player kept from being copied — an AV1 or HEVC
   // picture re-encoded, Opus, FLAC, AC3 or EAC3 made AAC, HDR tone-mapped for
@@ -5329,6 +5331,7 @@ async function startWithFfmpeg(o: {
       ratingKey: o.ratingKey,
       codec: copyPlan.codec,
       fmp4: copyPlan.fmp4,
+      sdrPeakNits: copyPlan.sdrPeakNits,
       targetKbps: o.fileKbps,
       offsetS: o.offsetS,
       args: copyArgs(copyPlan, input, o.offsetS, durationS),
@@ -5338,9 +5341,11 @@ async function startWithFfmpeg(o: {
     if (!started.ok) return toPlex(`ffmpeg didn't start: ${started.why}`, "run didn't start", { why: started.why });
     key = started.key;
     video = { ...copyPlan, kbps: o.fileKbps };
-    range = o.picture ? o.picture.hdr ?? "SDR" : copyPlan.hdr;
+    range = `${o.picture ? o.picture.hdr ?? "SDR" : copyPlan.hdr}${mappedAt(copyPlan.sdrPeakNits)}`;
     logEvent("FFmpeg", "copying", {
-      session, ratingKey: o.ratingKey, fromS: o.offsetS, video: copyPlan.codec, hdr: copyPlan.hdr,
+      session, ratingKey: o.ratingKey, fromS: o.offsetS, video: copyPlan.codec,
+      hdr: copyPlan.sdrPeakNits !== null
+        ? `${copyPlan.hdr} for a screen in SDR, labelled ${copyPlan.sdrPeakNits} nits for the browser to map` : copyPlan.hdr,
       audio: audioText(copyPlan),
       segments: copyPlan.fmp4 ? "fMP4" : "MPEG-TS",
       source: fromMount ? "mount" : "plex",
@@ -5394,7 +5399,7 @@ async function startWithFfmpeg(o: {
       av1Ok: AV1_TRANSCODE && o.caps.av1Encode && gpuEncodesAv1() && sessionWithheld(o.sessionId).length === 0,
       av1LowPower: lowPowerVaapiAv1(),
       kbps: o.transcodeKbps, peakKbps: o.peakKbps, maxWidth, maxHeight, keepHdr: keepHdrOnReencode(),
-      hdrOk: o.caps.hdr, tonemapper: tonemapper(), tonemapAlgo: tonemapAlgo(), burn: o.burnSubtitleId ?? null,
+      hdrOk: o.caps.hdr, sdrPeakNits: hdrOnSdrNits(), tonemapper: tonemapper(), tonemapAlgo: tonemapAlgo(), burn: o.burnSubtitleId ?? null,
       audioChannels: audioChannels(), opusOk: o.caps.opus, preset: encodePreset(), lowPower: lowPowerVaapi(),
       gpuDecode: gpuDecodeOn() ? undefined : false, ...burnFiles,
     };
@@ -5406,7 +5411,7 @@ async function startWithFfmpeg(o: {
     const run = (p: Extract<typeof plan, { ok: true }>) => startFfmpegRun({
       sessionId: o.sessionId, ratingKey: o.ratingKey, codec: p.codec, encode: true,
       // AV1 is made in fragmented MP4, as an AV1 copy is; so is Opus sound.
-      fmp4: p.fmp4,
+      fmp4: p.fmp4, sdrPeakNits: p.sdrPeakNits,
       targetKbps: encodeTargetKbps(p), offsetS: o.offsetS,
       args: encodeArgs(p, input, o.offsetS, durationS, hwDevice()),
       fromStart: fromStart(p), replaces: o.replaces,
@@ -5433,8 +5438,9 @@ async function startWithFfmpeg(o: {
     if (!started.ok) return toPlex(`ffmpeg didn't start: ${started.why}`, "run didn't start", { why: started.why });
     key = started.key;
     video = { ...plan, kbps: plan.kbps };
-    hdrKept = plan.hdrTrc !== null;
-    range = plan.hdrTrc ? `${plan.hdrTrc === "arib-std-b67" ? "HLG" : "HDR10"} (kept)`
+    hdrKept = plan.hdrTrc !== null && plan.sdrPeakNits === null;
+    range = plan.sdrPeakNits !== null ? `HDR10 (kept, mapped at ${plan.sdrPeakNits} nits)`
+      : plan.hdrTrc ? `${plan.hdrTrc === "arib-std-b67" ? "HLG" : "HDR10"} (kept)`
       : plan.tonemap ? `SDR (tone-mapped from ${o.picture?.hdr ?? plan.hdr})` : "SDR";
     encoder = `${HARDWARE_NAMES[plan.hardware]} · ${plan.gpuDecode ? "GPU" : "CPU"} decode`;
     // The curve the filter is given, not FFMPEG_TONEMAP's name for it.
@@ -5444,11 +5450,12 @@ async function startWithFfmpeg(o: {
       video: `${plan.video.codec} → ${plan.codec} ${plan.width}x${plan.height} ${plan.kbps}k (peak ${plan.peakKbps}k)`,
       // Below what the quality level allows: matched to the source's own.
       matched: plan.sourceKbps ? `${plan.sourceKbps}k ${plan.video.codec} source; ${plan.askedKbps}k allowed` : "no",
-      hdr: plan.hdrTrc ? `${plan.hdr} kept`
+      hdr: plan.sdrPeakNits !== null ? `${plan.hdr} kept for a screen in SDR, labelled ${plan.sdrPeakNits} nits for the browser to map`
+        : plan.hdrTrc ? `${plan.hdr} kept`
         : plan.tonemap && curve ? `${plan.hdr} → SDR, ${curve.algo}${curve.param === undefined ? "" : ` ${curve.param}`} on ${plan.tonemap.via}${plan.tonemap.dovi ? " with its Dolby Vision" : ""}`
         : plan.hdr,
       // Whether the driver's screen showed HDR: one in SDR is sent HDR
-      // tone-mapped (PlayerCaps.hdr).
+      // labelled for its browser to map, or tone-mapped (PlayerCaps.hdr).
       ...(plan.hdr !== "SDR" ? { screen: o.caps.hdr ? "HDR" : "SDR" } : {}),
       on: plan.hardware, preset: plan.preset ?? "default", decode: plan.gpuDecode ? "gpu" : "cpu",
       deinterlace: plan.interlaced, filled: plan.color.fill ?? "none",
@@ -5464,8 +5471,10 @@ async function startWithFfmpeg(o: {
 
   recordSessionVideoCodec(o.sessionId, video.codec);
   // An HDR copy, or a re-encode that kept HDR: whoever on it has a screen in
-  // SDR gets a stream tone-mapped for it (sync.ts seatOf).
-  recordSessionHdr(o.sessionId, copyPlan?.ok && reason === null ? hdrPicture(copyPlan.hdr) : hdrKept);
+  // SDR gets a stream made for it (sync.ts seatOf). Not one labelled for a
+  // screen in SDR already: anyone can watch that.
+  recordSessionHdr(o.sessionId, copyPlan?.ok && reason === null
+    ? hdrPicture(copyPlan.hdr) && copyPlan.sdrPeakNits === null : hdrKept);
   // A re-encode's Opus 7.1 too: whoever on it doesn't decode Opus gets a
   // stream of their own (sync.ts seatOf).
   recordSessionAudioNeeds(o.sessionId, copyPlan?.ok && reason === null

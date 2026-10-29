@@ -26,7 +26,7 @@ const notes: StreamNotes = {
   video: "transcode", reason: "4K source (player max 1080p)", kbps: 12000, quality: null,
   audio: "transcode", audioFrom: "TrueHD 7.1", audioTo: "Opus 7.1", audioKbps: 512, audioReason: "The player can't play TrueHD",
   engine: "ffmpeg", encoder: "Intel Quick Sync (AV1), GPU decode", fallback: null,
-  videoFrom: "HEVC Main 10 · 10-bit · Dolby Vision P7 · 3840×2160 · 23.976 fps", range: "HDR10",
+  videoFrom: "HEVC Main 10 · 10-bit · Dolby Vision P7 · 3840×2160 · 23.976 fps", range: "Dolby Vision P8.1 / HDR10 (mapped at 300 nits)",
 };
 const sync: SyncInfo = {
   role: "viewer", driftS: -0.04, rate: 1, waitingForRoom: false, roomPlaying: true,

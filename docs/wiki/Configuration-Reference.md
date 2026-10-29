@@ -300,7 +300,9 @@ covers the setup and how to check it.
 | `FFMPEG_PREVIEWS_MAX_GB` | 20 | Room for those previews; the least recently used go past it |
 | `FFMPEG_SEGMENT_MEMORY_MB` | 512 | Memory for the segments rooms are fetching now; `0` reads them from disk |
 | `FFMPEG_FALLBACK_TO_PLEX` | on | `off`: a stream ffmpeg can't make fails to start instead of going to Plex |
-| `FFMPEG_HDR_REENCODE` | `keep` | `keep`: HDR stays HDR, copied or in HEVC Main10, for HEVC players on screens that show HDR; for a screen in SDR the server maps it to SDR from the film's 10 bits, that viewer on a stream of their own. `tonemap`: re-encodes always mapped to SDR |
+| `FFMPEG_HDR_REENCODE` | `keep` | `keep`: HDR stays HDR, copied or in HEVC Main10, for HEVC players (for a screen in SDR, see `FFMPEG_HDR_ON_SDR`). `tonemap`: re-encodes always mapped to SDR |
+| `FFMPEG_HDR_ON_SDR` | `browser` | HDR for a screen in SDR. `browser`: HDR10 and Dolby Vision 7 and 8.1 in HEVC sent as they are, labelled `FFMPEG_HDR_ON_SDR_NITS` for the player's own tone map, which shows them brighter. `server`: mapped to SDR from the film's 10 bits here, that viewer on a stream of their own. HLG, Dolby Vision 5 and players without HEVC are always mapped here |
+| `FFMPEG_HDR_ON_SDR_NITS` | `300` | The peak HDR for a screen in SDR is labelled, 100 to 1000: lower is brighter, and above it is white |
 | `FFMPEG_TONEMAP` | `mobius` | The curve for streams mapped to SDR: `mobius` (at 0.5, close to Plex's app for Windows), `reinhard`, `hable`, `bt2390`, `linear`, `gamma` or `clip` |
 | `FFMPEG_REPORT_TO_PLEX` | on | Show ffmpeg's streams in Plex's dashboard, Tautulli and Tracearr. `0` turns it off |
 | `FFMPEG_PATH` | the image's ffmpeg | Another ffmpeg, for running from source |

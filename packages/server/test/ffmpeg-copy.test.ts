@@ -224,6 +224,19 @@ const EAC3_FILM = film("eac3.mkv", ["-c:a", "eac3", "-ac", "6", "-b:a", "384k"])
 /** PCM 7.1, standing in for TrueHD and DTS-HD MA 7.1, which no browser plays either. */
 const PCM71_FILM = film("pcm71.mkv", ["-c:a", "pcm_s16le", "-ac", "8"]);
 const PCM_FILM = film("pcm.mkv", ["-c:a", "pcm_s16le", "-ac", "2"]);
+/** HDR10 as x265 makes it: its mastering display (4,000 nits) and light
+ *  level (1,608) in SEI, in its frames and in hvcC, as Avengers: Endgame's are. */
+const HDR10_FILM = path.join(tmp, "hdr10.mkv");
+{
+  const r = spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-y",
+    "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+    "-t", "20", "-map", "0:v", "-map", "1:a", "-c:v", "libx265", "-preset", "ultrafast", "-g", "48",
+    "-x265-params", "log-level=none:hdr10=1:repeat-headers=1:" +
+      "master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(40000000,50):max-cll=1608,400",
+    "-pix_fmt", "yuv420p10le", "-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace", "bt2020nc",
+    "-c:a", "aac", "-ac", "2", HDR10_FILM]);
+  if (r.status !== 0) throw new Error(`couldn't make hdr10.mkv: ${r.stderr}`);
+}
 
 // ── Plex ─────────────────────────────────────────────────────────
 
@@ -292,6 +305,8 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
     { id: 81, streamType: 3, index: 0, codec: "eia_608", language: "English", languageCode: "eng" },
     { id: 82, streamType: 3, index: 2, codec: "srt", language: "English", languageCode: "eng" },
   ] },
+  23: { file: HDR10_FILM, plexPath: HDR10_FILM, codec: "hevc", width: 640, height: 360, audio: "aac", channels: 2,
+    hdr: { bitDepth: 10, colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc" } },
 };
 
 const asked: string[] = [];
@@ -434,7 +449,32 @@ console.log("\n— what a copy is judged on —");
     why(version({ colorTrc: "smpte2084" })), "copy");
   check("so is Dolby Vision 8.1, whose HDR10 picture is underneath",
     why(version({ DOVIPresent: true, DOVIProfile: 8, DOVIBLCompatID: 1 })), "copy");
-  check("neither is copied for a screen in SDR: the server tone-maps them", [
+  {
+    const { copyNeeds, copyArgs } = await import("../src/services/ffmpeg/plan.js");
+    const labelled = (v: ReturnType<typeof version>, more: Record<string, unknown> = {}) => {
+      const p = planCopy(v, { audioStreamId: null, hevcOk: true, hdrOk: false, sdrPeakNits: 300, ...more });
+      return p.ok ? [p.sdrPeakNits, p.fmp4] : p.why;
+    };
+    check("for a screen in SDR, HDR10 HEVC is copied labelled 300 nits for the browser to map, in fMP4, and so are Dolby Vision 8.1 and 7", [
+      labelled(version({ colorTrc: "smpte2084" })),
+      labelled(version({ DOVIPresent: true, DOVIProfile: 8, DOVIBLCompatID: 1 })),
+      labelled(version({ DOVIPresent: true, DOVIProfile: 7, colorTrc: "smpte2084" })),
+    ], [[300, true], [300, true], [300, true]]);
+    check("  but not HLG, which has no peak to label, Dolby Vision 8.4, which is HLG, or HDR10 in AV1", [
+      labelled(version({ colorTrc: "arib-std-b67" })),
+      labelled(version({ DOVIPresent: true, DOVIProfile: 8, DOVIBLCompatID: 4 })),
+      labelled(version({ codec: "av1", colorTrc: "smpte2084" }), { av1Ok: true }),
+    ], ["HLG for a screen in SDR", "DV P8.4 for a screen in SDR", "HDR10 for a screen in SDR"]);
+    const hdr10 = planCopy(version({ colorTrc: "smpte2084" }), { audioStreamId: null, hevcOk: true, hdrOk: false, sdrPeakNits: 300 });
+    const args = hdr10.ok ? copyArgs(hdr10, ["-i", "f.mkv"], 0, 60).join(" ") : "";
+    check("  needing HEVC, not a screen that shows HDR, its frames' HDR SEI left out",
+      [hdr10.ok && copyNeeds(hdr10), args.includes("-c:v copy -tag:v hvc1 -bsf:v filter_units=remove_types=39"),
+        args.includes("-hls_segment_type fmp4")], [["hevc"], true, true]);
+    const shown = planCopy(version({ colorTrc: "smpte2084" }), { audioStreamId: null, hevcOk: true, hdrOk: true, sdrPeakNits: 300 });
+    check("  on a screen that shows HDR, as it is, in MPEG-TS, nothing left out",
+      shown.ok && [shown.sdrPeakNits, shown.fmp4, copyArgs(shown, ["-i", "f.mkv"], 0, 60).includes("-bsf:v")], [null, false, false]);
+  }
+  check("neither is copied for a screen in SDR with FFMPEG_HDR_ON_SDR=server: the server tone-maps them", [
     why(version({ colorTrc: "smpte2084" }), true, null, false),
     why(version({ DOVIPresent: true, DOVIProfile: 8, DOVIBLCompatID: 1 }), true, null, false),
   ], ["HDR10 for a screen in SDR", "DV P8.1 for a screen in SDR"]);
@@ -781,6 +821,90 @@ console.log("\n— AV1 and Opus, and FLAC, copied in fragmented MP4 for a player
   plexRoutes.capsForTests(none);
 }
 
+console.log("\n— HDR10 for a screen in SDR, labelled for the browser to map —");
+{
+  const { hdrOnSdrNits } = await import("../src/services/ffmpeg/config.js");
+  const { labelInitForSdr } = await import("../src/services/ffmpeg/hdr-init.js");
+  const nits = (on: string | undefined, n: string | undefined) => {
+    if (on === undefined) delete process.env.FFMPEG_HDR_ON_SDR; else process.env.FFMPEG_HDR_ON_SDR = on;
+    if (n === undefined) delete process.env.FFMPEG_HDR_ON_SDR_NITS; else process.env.FFMPEG_HDR_ON_SDR_NITS = n;
+    const got = hdrOnSdrNits();
+    delete process.env.FFMPEG_HDR_ON_SDR;
+    delete process.env.FFMPEG_HDR_ON_SDR_NITS;
+    return got;
+  };
+  check("labelled 300 nits unless FFMPEG_HDR_ON_SDR_NITS says, 100 to 1,000; FFMPEG_HDR_ON_SDR=server for the server's tone map",
+    [nits(undefined, undefined), nits("browser", "600"), nits(undefined, "5000"), nits(undefined, "50"), nits(undefined, "x"), nits("server", "600")],
+    [300, 600, 1000, 100, 300, null]);
+
+  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, av1Encode: false };
+  const mapOf = (playlist: string) => playlist.match(/^#EXT-X-MAP:URI="([^"]+)"/m)?.[1] ?? null;
+  const copied = async (ratingKey: string) => {
+    const sid = crypto.randomUUID();
+    const m = await master(ratingKey, sid);
+    const variant = variantOf(m.text);
+    let playlist = "";
+    for (let i = 0; i < 40 && entries(playlist).length === 0; i++) {
+      playlist = await (await fetch(origin + variant)).text();
+      if (entries(playlist).length === 0) await sleep(250);
+    }
+    return { sid, notes: notesOf(m.text), playlist };
+  };
+  /** Every peak the stream and its first frames say, from mdcv and clli or SEI. */
+  const peaks = (file: string) => {
+    const out = spawnSync(process.env.FFPROBE_PATH || "ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_frames",
+      "-read_intervals", "%+#5", "-show_entries", "stream_side_data:frame_side_data", "-of", "json", file], { encoding: "utf8" }).stdout;
+    return {
+      luminance: [...new Set([...out.matchAll(/"max_luminance": "(\d+)\/10000"/g)].map((m) => Number(m[1]) / 10_000))],
+      content: [...new Set([...out.matchAll(/"max_content": (\d+)/g)].map((m) => Number(m[1])))],
+    };
+  };
+
+  plexRoutes.capsForTests({ ...none, hevc: true });
+  const sdr = await copied("23");
+  check("for a player that decodes HEVC on a screen in SDR, the HEVC is copied as it is, in fMP4, mapped at 300 nits",
+    [sdr.notes.video, !!mapOf(sdr.playlist), sdr.notes.range], ["copy", true, "HDR10 (mapped at 300 nits)"]);
+  check("  needing HEVC, not a screen that shows HDR; whoever has one is given a copy of their own",
+    [plexRoutes.sessionNeeds(sdr.sid), plexRoutes.sessionWithheld(sdr.sid)], [["hevc"], ["hdr"]]);
+  const initRes = await fetch(origin + mapOf(sdr.playlist)!);
+  const init = Buffer.from(await initRes.arrayBuffer());
+  check("  its init served whole, as labelled", [initRes.status, init.length], [200, Number(mapOf(sdr.playlist)!.match(/&n=(\d+)$/)![1])]);
+  const seg = Buffer.from(await (await fetch(origin + entries(sdr.playlist)[0].uri)).arrayBuffer());
+  const whole = path.join(tmp, "hdr10-labelled.mp4");
+  fs.writeFileSync(whole, Buffer.concat([init, seg]));
+  check("  the stream says 300 nits, brightest and mastered, and nothing says the film's 4,000 or 1,608",
+    peaks(whole), { luminance: [300], content: [300] });
+  // x265's own SEI, beside its HDR SEI, is in the film's hvcC.
+  check("  hvcC's SEI left out of the init, which was in the film's",
+    [fs.readFileSync(HDR10_FILM).includes("x265 (build"), init.includes("x265 (build")], [true, false]);
+  check("  and it decodes", spawnSync("ffmpeg", ["-v", "error", "-i", whole, "-f", "null", "-"]).status, 0);
+  check("labelled again it is the same, its boxes replaced rather than added to",
+    Buffer.from(labelInitForSdr(init, 300) ?? []).equals(init), true);
+  check("and something with no HEVC in it isn't labelled", labelInitForSdr(Buffer.from("not an mp4 at all"), 300), null);
+  await fetch(`${origin}/api/plex/hls/session/${sdr.sid}?reason=test`, { method: "DELETE" });
+
+  plexRoutes.capsForTests({ ...none, hevc: true, hdr: true });
+  const hdr = await copied("23");
+  check("on a screen that shows HDR it is copied as it is, in MPEG-TS, needing that screen",
+    [hdr.notes.video, !!mapOf(hdr.playlist), hdr.notes.range, plexRoutes.sessionNeeds(hdr.sid)], ["copy", false, "HDR10", ["hevc", "hdr"]]);
+  await fetch(`${origin}/api/plex/hls/session/${hdr.sid}?reason=test`, { method: "DELETE" });
+
+  process.env.FFMPEG_HDR_ON_SDR = "server";
+  plexRoutes.capsForTests({ ...none, hevc: true });
+  const sid = crypto.randomUUID();
+  asked.length = 0;
+  plexStarts = true;
+  const server = notesOf((await master("23", sid)).text);
+  plexStarts = false;
+  // Tone-mapped by tonemapx, which jellyfin-ffmpeg has and this one hasn't:
+  // left to Plex, as a re-encode that doesn't start is.
+  check("with FFMPEG_HDR_ON_SDR=server, not copied for a screen in SDR but tone-mapped, here by Plex",
+    [server.video === "copy", transcodeAsked().includes("/video/:/transcode/universal/decision")], [false, true]);
+  await fetch(`${origin}/api/plex/hls/session/${sid}?reason=test`, { method: "DELETE" });
+  delete process.env.FFMPEG_HDR_ON_SDR;
+  plexRoutes.capsForTests(none);
+}
+
 console.log("\n— a file that isn't mounted here —");
 {
   asked.length = 0;
@@ -853,6 +977,22 @@ console.log("\n— what a re-encode is made of —");
       "hwmap=derive_device=qsv,format=qsv,vpp_qsv=tonemap=1:format=p010"), true);
   check("so is HDR with FFMPEG_HDR_REENCODE=tonemap, on any screen",
     tonemapped(plan(version({ colorTrc: "smpte2084" }), { keepHdr: false })), ["hevc", null, "vpp", false]);
+  const labelledHdr = plan(version({ colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc" }),
+    { hdrOk: false, sdrPeakNits: 300, tonemapper: "opencl" });
+  check("unless FFMPEG_HDR_ON_SDR is server: then HDR10 for an HEVC player on a screen in SDR stays HDR, labelled 300 nits, in fMP4",
+    labelledHdr.ok && [labelledHdr.codec, labelledHdr.hdrTrc, labelledHdr.tonemap, labelledHdr.sdrPeakNits, labelledHdr.fmp4],
+    ["hevc", "smpte2084", null, 300, true]);
+  const labelledArgs = labelledHdr.ok ? encodeArgs(labelledHdr, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
+  check("  labelled HDR10 on the output, its HDR SEI left out, nothing tone-mapped",
+    [labelledArgs.includes("-color_trc smpte2084"), labelledArgs.includes("-tag:v hvc1 -bsf:v filter_units=remove_types=39"),
+      labelledArgs.includes("tonemap"), labelledArgs.includes("-hls_segment_type fmp4")], [true, true, false, true]);
+  check("  but tone-mapped as before for an H.264 player, with FFMPEG_HDR_REENCODE=tonemap, and for HLG", [
+    tonemapped(plan(version({ colorTrc: "smpte2084" }), { hdrOk: false, sdrPeakNits: 300, hevcOk: false })),
+    tonemapped(plan(version({ colorTrc: "smpte2084" }), { hdrOk: false, sdrPeakNits: 300, keepHdr: false })),
+    tonemapped(plan(version({ colorTrc: "arib-std-b67" }), { hdrOk: false, sdrPeakNits: 300 })),
+  ], [["h264", null, "vpp", false], ["hevc", null, "vpp", false], ["hevc", null, "vpp", false]]);
+  check("  and on a screen that shows HDR, kept unlabelled",
+    hdr10.ok && [hdr10.sdrPeakNits, hdr10.fmp4, hdrArgs.includes("-bsf:v")], [null, false, false]);
   const dv82 = plan(version({ DOVIPresent: true, DOVIProfile: 8, DOVIBLCompatID: 2 }), { hdrOk: false });
   check("Dolby Vision 8.2 is re-encoded as the SDR it is underneath, not tone-mapped",
     dv82.ok && [dv82.codec, dv82.hdrTrc, dv82.tonemap], ["hevc", null, null]);

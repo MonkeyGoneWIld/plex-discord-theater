@@ -488,7 +488,8 @@ export function StatsOverlay({
   const videoSummary = [
     snap && snap.streamResolution !== "—" ? snap.streamResolution.replace(/^\d+×(\d+)$/, "$1p") : null,
     codecFamily(snap?.videoCodec),
-    hdrStream ? notes!.range!.replace(/ \/ .*$/, "") : null,
+    // The peak HDR is labelled for a screen in SDR is under Range.
+    hdrStream ? notes!.range!.replace(/ \/ .*$/, "").replace(/ \(mapped at \d+ nits\)$/, "").replace(/, mapped at \d+ nits\)$/, ")") : null,
     streamBps ? mbps(streamBps) : null,
   ].filter(Boolean).join(" · ") || "—";
 
@@ -571,11 +572,12 @@ export function StatsOverlay({
       details: [
         ["Source", source, copied === null ? "none" : copied ? "ok" : "warn"],
         ["Codec", codecName(snap?.videoCodec) ?? "—"],
-        // Mapped down from HDR is a loss only on a screen showing HDR; HDR
-        // as it is, only on a screen in SDR, which the browser draws darker
+        // Mapped down from HDR, or labelled for the browser to map ("mapped
+        // at 300 nits"), is a loss only on a screen showing HDR; HDR as it
+        // is, only on a screen in SDR, which the browser draws darker
         // (codecs.ts Caps.hdr).
         ...(notes?.range ? [["Range", notes.range,
-          notes.range.startsWith("SDR (") ? hdrScreen() ? "warn" : "none"
+          notes.range.startsWith("SDR (") || /[( ]mapped at \d+ nits\)$/.test(notes.range) ? hdrScreen() ? "warn" : "none"
             : notes.range.startsWith("SDR") || hdrScreen() ? "none" : "warn"] as [string, string, Health]] : []),
         ...fileLines(notes?.videoFrom ?? null),
         ["Viewport", snap?.viewport ?? "—"],

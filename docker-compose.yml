@@ -104,13 +104,19 @@ services:
       - FFMPEG_SEGMENT_MEMORY_MB=${FFMPEG_SEGMENT_MEMORY_MB:-}
       # off = a stream ffmpeg can't make fails, rather than going to Plex.
       - FFMPEG_FALLBACK_TO_PLEX=${FFMPEG_FALLBACK_TO_PLEX:-}
-      # keep (the default): HDR stays HDR for an HEVC player on a screen that
-      # shows HDR; for a screen in SDR the server maps it to SDR from the
-      # film's 10 bits. tonemap maps every re-encode to SDR. FFMPEG_TONEMAP is
-      # the curve for streams that are mapped: mobius (default), reinhard,
-      # hable, bt2390, linear, gamma or clip.
+      # keep (the default): HDR stays HDR for an HEVC player (for a screen in
+      # SDR, see FFMPEG_HDR_ON_SDR). tonemap maps every re-encode to SDR.
+      # FFMPEG_TONEMAP is the curve for streams that are mapped: mobius
+      # (default), reinhard, hable, bt2390, linear, gamma or clip.
       - FFMPEG_HDR_REENCODE=${FFMPEG_HDR_REENCODE:-}
       - FFMPEG_TONEMAP=${FFMPEG_TONEMAP:-}
+      # HDR for a screen in SDR. browser (the default): the HEVC is sent as it
+      # is, labelled FFMPEG_HDR_ON_SDR_NITS (300 unless set, 100 to 1000) so
+      # the player's own tone map shows it brighter. server: mapped to SDR here
+      # from the film's 10 bits. HLG, Dolby Vision 5 and players without HEVC
+      # are always mapped here.
+      - FFMPEG_HDR_ON_SDR=${FFMPEG_HDR_ON_SDR:-}
+      - FFMPEG_HDR_ON_SDR_NITS=${FFMPEG_HDR_ON_SDR_NITS:-}
       # Tell Plex what ffmpeg is playing, so it shows in Plex's dashboard,
       # Tautulli and Tracearr. On unless set to 0.
       - FFMPEG_REPORT_TO_PLEX=${FFMPEG_REPORT_TO_PLEX:-}

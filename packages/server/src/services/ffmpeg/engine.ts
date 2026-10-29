@@ -52,6 +52,7 @@ import { streamBandwidth, type Bandwidth } from "../stream-bandwidth.js";
 import { ffmpegPath, lookaheadS, maxEncodes } from "./config.js";
 import { cpuUse, gpuUse, readUse, sampleGpu, type GpuSample } from "./gpu-use.js";
 import { dropHot, hotSegment, keepHot } from "./hot-segments.js";
+import { labelInitForSdr } from "./hdr-init.js";
 import { COPY_CLOCK_OFFSET_S } from "./plan.js";
 
 /** How far past the watcher a run is when its speed is logged, unless
@@ -157,6 +158,8 @@ interface Run {
   encode: boolean;
   /** Segments in fragmented MP4 (plan.ts fmp4SegmentArgs), not MPEG-TS. */
   fmp4: boolean;
+  /** HDR for a screen in SDR: the peak its init is labelled, nits (hdr-init.ts). */
+  sdrPeakNits: number | null;
   /** Its init segment, once ffmpeg has written it. */
   init: Init | null;
   /** The segments ffmpeg has announced, as fMP4 (announced). */
@@ -367,11 +370,23 @@ function announced(line: string, fmp4: boolean, seen: Set<string>): string | nul
 }
 
 /** An fMP4 run's init segment from its folder, served as `servedAs`; null
- *  until ffmpeg has written one that can be read. */
-async function readInit(dir: string, servedAs: string): Promise<Init | null> {
+ *  until ffmpeg has written one that can be read. HDR for a screen in SDR is
+ *  labelled there first (hdr-init.ts): nothing has been sent of it yet. */
+async function readInit(run: Run, dir: string, servedAs: string): Promise<Init | null> {
   const file = path.join(dir, "init.mp4");
   try {
-    const data = await fs.promises.readFile(file);
+    let data: Uint8Array = await fs.promises.readFile(file);
+    if (run.sdrPeakNits !== null) {
+      const labelled = labelInitForSdr(data, run.sdrPeakNits);
+      if (labelled) {
+        await fs.promises.writeFile(file, labelled);
+        data = labelled;
+      } else {
+        logEvent("FFmpeg", "couldn't label HDR for a screen in SDR: its init left as it was", {
+          session: short(run.sessionId), init: path.basename(servedAs), bytes: data.length,
+        });
+      }
+    }
     const tracks = initTracks(data);
     return tracks ? { path: servedAs, file, bytes: data.length, tracks } : null;
   } catch {
@@ -406,7 +421,7 @@ async function measure(run: Run, name: string): Promise<void> {
     return;
   }
   if (run.fmp4 && !run.init) {
-    run.init = await readInit(run.dir, `${run.baseDir}init.mp4`);
+    run.init = await readInit(run, run.dir, `${run.baseDir}init.mp4`);
     if (!run.init) {
       fail(run, "ffmpeg wrote no init segment that can be read");
       return;
@@ -616,7 +631,7 @@ async function measureBefore(run: Run, b: Before, name: string): Promise<void> {
     return;
   }
   if (run.fmp4 && !b.init) {
-    b.init = await readInit(b.dir, `${run.baseDir}binit.mp4`);
+    b.init = await readInit(run, b.dir, `${run.baseDir}binit.mp4`);
     if (!b.init) {
       b.failed = "ffmpeg wrote no init segment that can be read";
       return;
@@ -750,6 +765,8 @@ export async function startFfmpegRun(o: {
   encode?: boolean;
   /** Its arguments make fragmented MP4 (plan.ts fmp4SegmentArgs), not MPEG-TS. */
   fmp4?: boolean;
+  /** HDR for a screen in SDR: the peak to label its init, nits (plan.ts sdrPeakNits). */
+  sdrPeakNits?: number | null;
   /** A copy's: the file's average. A re-encode's: its video target and its sound. */
   targetKbps?: number | null;
   offsetS: number;
@@ -774,7 +791,7 @@ export async function startFfmpegRun(o: {
   }
   const run: Run = {
     key, sessionId: o.sessionId, ratingKey: o.ratingKey, codec: o.codec, encode: !!o.encode,
-    fmp4: !!o.fmp4, init: null, seen: new Set(),
+    fmp4: !!o.fmp4, sdrPeakNits: o.fmp4 && o.sdrPeakNits ? o.sdrPeakNits : null, init: null, seen: new Set(),
     targetKbps: o.targetKbps && o.targetKbps > 0 ? o.targetKbps : null, averageKbps: null, dir,
     baseDir: `/video/:/transcode/universal/session/${key}/base/`,
     fromStart: o.fromStart ?? null, same, before: null,

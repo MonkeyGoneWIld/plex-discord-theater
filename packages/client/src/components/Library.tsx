@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Search } from "./Search";
 import { FilterBar } from "./FilterBar";
 import { ScrollShelf } from "./ScrollShelf";
@@ -211,6 +211,18 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
       // trouble take the whole Home tab down with it.
       .catch(() => setContinueItems([]));
   }, [visible, isHomeTab, retryNonce, historyNonce]);
+  // And with every search, from any tab: a result watched part-way shows how
+  // far, as it does in Continue Watching.
+  useEffect(() => {
+    if (!visible || searchResults === null) return;
+    fetchContinueWatching()
+      .then(({ items: entries }) => setContinueItems(entries))
+      .catch(() => {});
+  }, [visible, searchResults]);
+  const progressByKey = useMemo(
+    () => new Map(continueItems.map((entry) => [entry.ratingKey, progressOf(entry)])),
+    [continueItems],
+  );
 
   // Full history — same refresh discipline, only while its own tab is open.
   useEffect(() => {
@@ -1080,6 +1092,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                             key={item.ratingKey}
                             item={item}
                             onClick={handleClick}
+                            progress={isSearching ? progressByKey.get(item.ratingKey) : undefined}
                             onSelectShow={handleShowClick}
                           />
                         ))}
@@ -1095,6 +1108,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
                     key={item.ratingKey}
                     item={item}
                     onClick={handleClick}
+                    progress={isSearching ? progressByKey.get(item.ratingKey) : undefined}
                     onSelectShow={handleShowClick}
                   />
                 ))}

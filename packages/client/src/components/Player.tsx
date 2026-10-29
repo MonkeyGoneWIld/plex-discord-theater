@@ -21,6 +21,7 @@ import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, f
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { capsUsed, frameTransfer, hdrScreen, hdrScreenQuery, markUnplayable, type Cap } from "../lib/codecs";
+import { cantKeepUp, nextDropRun, type DropSample } from "../lib/frameDrops";
 import { splitCodecs } from "../lib/codecName";
 import { loadVolume, saveVolume, VOLUME_CHOSEN_EVENT } from "../lib/volume";
 import { readSameLanguageAhead, readSubtitlesAhead } from "../lib/subtitleReadAhead";
@@ -462,15 +463,6 @@ const BACK_BUFFER_S = 30;
 const FORWARD_BUFFER_FLUSH_S = 120;
 /** Without data to play for this long, the loading screen goes up. */
 const LOADING_SCREEN_AFTER_MS = 500;
-/**
- * Frames dropped, of those due, over this many ten-second samples of play,
- * that put this player on a lighter picture (pictureCapRef). On 29 October a laptop
- * dropped 33% of an AV1 and an HEVC re-encode and an Android phone 6% of an
- * HEVC one, both stuttering; a desktop dropped under 2% at worst, through a
- * stream rebuilt under it.
- */
-const DROPPED_SHARE = 0.05;
-const DROPPED_WINDOWS = 3;
 /** The longest a player landing past the room looks in the browser's cache for
  *  what it will play there — see the landing on LEVEL_LOADED. A look is a
  *  moment; past this it lands as though nothing were held. */
@@ -2153,20 +2145,51 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /** Frames shown and dropped at the last health sample — see there. */
   const frameCountRef = useRef<{ shown: number; dropped: number; at: number } | null>(null);
   /**
-   * The picture's codec beyond H.264 on this stream — HEVC or AV1 — and the
-   * last samples' frames while it played: a device that decodes it, but too
-   * slowly, drops a steady share of them. On 29 October a laptop dropped a
-   * third of Deadpool's frames as AV1 and as HEVC, unwatchable, and none of
-   * anything as H.264 on main. Past DROPPED_SHARE over DROPPED_WINDOWS
-   * samples, it is asked for no more here, as a codec that fails to decode
-   * is: the room puts this player on an H.264 stream of its own. For this
-   * room only — a lighter stream in it may play well.
+   * What this player gives up of the picture on this stream should it drop
+   * frames — AV1, 10 bits of HEVC, or HEVC — and the last samples' frames
+   * while it played: a device that decodes it, but too slowly, drops a
+   * steady share of them. On 29 October a laptop dropped a third of
+   * Deadpool's frames as AV1 and as HEVC, unwatchable, and none of anything
+   * as H.264 on main. When every sample of a run drops them, with nothing
+   * else to blame (frameDrops.ts), it is asked for no more here: the room
+   * puts this player on a lighter stream of its own. For this room only — a
+   * lighter stream in it may play well.
    */
   const pictureCapRef = useRef<Cap | null>(null);
   /** The screen this player's init segment was last asked for (xhrSetup): HDR
    *  labelled for each screen is asked for again when the screen changes. */
   const initScreenRef = useRef<"sdr" | "hdr" | null>(null);
-  const droppedWindowsRef = useRef<Array<{ shown: number; dropped: number }>>([]);
+  const droppedWindowsRef = useRef<DropSample[]>([]);
+  /**
+   * When anything but decoding last could have dropped frames — the page
+   * hidden or shown, focus lost or back, a resize, fullscreen or picture-in-
+   * picture, a seek, buffering, a speed change, a stream loading — and
+   * whether focus is elsewhere now (tabbed out): no sample counts across
+   * either (frameDrops.ts).
+   */
+  const dropDisturbedAtRef = useRef(0);
+  const unfocusedRef = useRef(false);
+  useEffect(() => {
+    const video = videoRef.current;
+    const disturbed = () => { dropDisturbedAtRef.current = performance.now(); };
+    const blur = () => { unfocusedRef.current = true; disturbed(); };
+    const focus = () => { unfocusedRef.current = false; disturbed(); };
+    const onVideo = ["waiting", "stalled", "seeking", "ratechange", "loadstart", "enterpictureinpicture", "leavepictureinpicture"];
+    window.addEventListener("blur", blur);
+    window.addEventListener("focus", focus);
+    window.addEventListener("resize", disturbed);
+    document.addEventListener("visibilitychange", disturbed);
+    document.addEventListener("fullscreenchange", disturbed);
+    for (const e of onVideo) video?.addEventListener(e, disturbed);
+    return () => {
+      window.removeEventListener("blur", blur);
+      window.removeEventListener("focus", focus);
+      window.removeEventListener("resize", disturbed);
+      document.removeEventListener("visibilitychange", disturbed);
+      document.removeEventListener("fullscreenchange", disturbed);
+      for (const e of onVideo) video?.removeEventListener(e, disturbed);
+    };
+  }, []);
   /** Sound decoded by the last health sample, and where the clock was — see there. */
   const audioDecodedRef = useRef<{ bytes: number; at: number } | null>(null);
   /** Whether the stream playing has sound at all, from the codecs in its segments. */
@@ -6666,28 +6689,33 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             frames.shown - lastFrames.shown < 2 * (frames.at - lastFrames.at)) {
           logWarn("Video", "the picture hardly moved while the time ran on", { ...frameDeltas, ...snapshot(v) });
         }
-        // Dropping frames for the codec — see pictureCapRef. Whole samples of
-        // play only: a seek or a rebuild drops a few of its own.
+        // Dropping frames for the codec — see pictureCapRef and frameDrops.ts.
+        // Whole samples of play only, with the Activity in front and nothing
+        // else going on: a seek, a rebuild or a tab-out drops a few of its own.
         const pictureCap = pictureCapRef.current;
-        if (pictureCap && frames && lastFrames && !v.paused && !v.seeking && !document.hidden &&
-            frames.shown >= lastFrames.shown && frames.at - lastFrames.at >= 8 && frames.at - lastFrames.at <= 12) {
-          const windows = droppedWindowsRef.current;
-          windows.push({ shown: frames.shown - lastFrames.shown, dropped: frames.dropped - lastFrames.dropped });
-          if (windows.length > DROPPED_WINDOWS) windows.shift();
+        if (pictureCap && frames && lastFrames && frames.shown >= lastFrames.shown &&
+            frames.at - lastFrames.at >= 8 && frames.at - lastFrames.at <= 12) {
+          const seconds = frames.at - lastFrames.at;
+          const clean = !v.paused && !v.seeking && !document.hidden && !unfocusedRef.current && v.playbackRate === 1 &&
+            performance.now() - dropDisturbedAtRef.current > (seconds + 2) * 1000;
+          const windows = nextDropRun(droppedWindowsRef.current,
+            { shown: frames.shown - lastFrames.shown, dropped: frames.dropped - lastFrames.dropped, seconds, clean });
+          droppedWindowsRef.current = windows;
           const shown = windows.reduce((n, w) => n + w.shown, 0);
           const dropped = windows.reduce((n, w) => n + w.dropped, 0);
-          if (windows.length === DROPPED_WINDOWS && dropped >= DROPPED_SHARE * (shown + dropped)) {
+          if (cantKeepUp(windows)) {
             // Still dropping on the same stream after 10 bits are given up —
             // Plex made it, and has no 8-bit one of its own — HEVC goes next.
             pictureCapRef.current = pictureCap === "tenBit" ? "hevc" : null;
-            windows.length = 0;
+            droppedWindowsRef.current = [];
             logWarn("Video", "frames dropping as this device decodes the picture — asking the room for a stream without its codec", {
               codec: pictureCap, framesShown: shown, framesDropped: dropped,
               droppedPct: Math.round((100 * dropped) / (shown + dropped)),
+              eachPct: windows.map((w) => Math.round((100 * w.dropped) / (w.shown + w.dropped))).join(","),
             });
             syncActionsRef.current?.sendCodecsUnsupported([pictureCap]);
           }
-        } else if (!pictureCap || v.paused || v.seeking) {
+        } else {
           droppedWindowsRef.current = [];
         }
         /**

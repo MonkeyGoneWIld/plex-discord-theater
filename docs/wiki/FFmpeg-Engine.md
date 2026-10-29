@@ -315,9 +315,9 @@ HEVC, not H.264.
 
 ## Smooth playback on every device
 
-Each player reports the frames it drops. One that drops 5% or more over half a
-minute is moved, alone, onto a lighter picture of the same film, one step at a
-time, until it plays smoothly:
+Each player counts the frames it drops every ten seconds. One that drops 5% or
+more in each of three such samples in a row is moved, alone, onto a lighter
+picture of the same film, one step at a time, until it plays smoothly:
 
 | Dropping frames on | Moves onto |
 |---|---|
@@ -328,6 +328,12 @@ time, until it plays smoothly:
 An 8-bit film re-encoded to HEVC is made in 8 bits to begin with, and AV1 is
 sent only to players that decode it on their GPU. Everybody else stays on the
 stream they have.
+
+Only frames the decoder couldn't keep up with count. A sample is left out, and
+the run starts again, when the Activity is tabbed out, hidden or resized, goes
+fullscreen or pops out, or the film is paused, seeking, buffering, changing
+speed or loading a new stream. A stalled or frozen picture doesn't count
+either, nor does a single burst of drops between smooth stretches.
 
 ## Plex's dashboard, Tautulli and Tracearr
 

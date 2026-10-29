@@ -278,7 +278,7 @@ console.log("\n— AV1 re-encodes —");
     { tonemapper: "opencl" });
   const p7Args = p7Mapped.ok ? encodeArgs(p7Mapped, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
   check("  and mapped (FFMPEG_HDR_REENCODE=tonemap) on OpenCL, labelled BT.709, in HEVC Main10",
-    [p7Args.includes("tonemap_opencl=tonemap=mobius:param=0.5"), p7Args.includes("apply_dovi"),
+    [p7Args.includes("tonemap_opencl=tonemap=bt2390:param=0.5"), p7Args.includes("apply_dovi"),
       p7Args.includes("-color_primaries bt709 -color_trc bt709 -colorspace bt709"), p7Args.includes("-c:v hevc_qsv"),
       p7Args.includes("-profile:v main10")],
     [true, false, true, true, true]);

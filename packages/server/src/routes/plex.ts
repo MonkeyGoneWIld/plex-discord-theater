@@ -59,7 +59,7 @@ import {
 } from "../services/ffmpeg/config.js";
 import {
   ALL_CAPS, AUDIO_KBPS, HARDWARE_NAMES, NO_CAPS, copyArgs, copyNeeds, encodeArgs, encodeTargetKbps, hdrClass, hdrPicture, inputArgs, pickBurn,
-  planCopy, planEncode, type AudioOut, type EncodeRequest, type PlayerCap, type PlayerCaps, type SourceStream, type SourceVersion,
+  planCopy, planEncode, tonemapCurve, type AudioOut, type EncodeRequest, type PlayerCap, type PlayerCaps, type SourceStream, type SourceVersion,
 } from "../services/ffmpeg/plan.js";
 import { probe, probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
 import { prepareBurn, sidecarOnMount } from "../services/ffmpeg/burn-files.js";
@@ -5437,13 +5437,15 @@ async function startWithFfmpeg(o: {
     range = plan.hdrTrc ? `${plan.hdrTrc === "arib-std-b67" ? "HLG" : "HDR10"} (kept)`
       : plan.tonemap ? `SDR (tone-mapped from ${o.picture?.hdr ?? plan.hdr})` : "SDR";
     encoder = `${HARDWARE_NAMES[plan.hardware]} · ${plan.gpuDecode ? "GPU" : "CPU"} decode`;
+    // The curve the filter is given, not FFMPEG_TONEMAP's name for it.
+    const curve = plan.tonemap && tonemapCurve(plan.tonemap.algo, plan.tonemap.via);
     logEvent("FFmpeg", "re-encoding", {
       session, ratingKey: o.ratingKey, fromS: o.offsetS, why: reason,
       video: `${plan.video.codec} → ${plan.codec} ${plan.width}x${plan.height} ${plan.kbps}k (peak ${plan.peakKbps}k)`,
       // Below what the quality level allows: matched to the source's own.
       matched: plan.sourceKbps ? `${plan.sourceKbps}k ${plan.video.codec} source; ${plan.askedKbps}k allowed` : "no",
       hdr: plan.hdrTrc ? `${plan.hdr} kept`
-        : plan.tonemap ? `${plan.hdr} → SDR, ${plan.tonemap.algo} on ${plan.tonemap.via}${plan.tonemap.dovi ? " with its Dolby Vision" : ""}`
+        : plan.tonemap && curve ? `${plan.hdr} → SDR, ${curve.algo}${curve.param === undefined ? "" : ` ${curve.param}`} on ${plan.tonemap.via}${plan.tonemap.dovi ? " with its Dolby Vision" : ""}`
         : plan.hdr,
       // Whether the driver's screen showed HDR: one in SDR is sent HDR
       // tone-mapped (PlayerCaps.hdr).

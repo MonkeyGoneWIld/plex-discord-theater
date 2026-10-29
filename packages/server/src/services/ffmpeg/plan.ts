@@ -564,10 +564,20 @@ export type Tonemapper = "opencl" | "vpp" | "software";
  */
 const TONEMAP_PARAMS: Record<string, number> = { mobius: 0.5 };
 
-/** The tone mapper's curve and its setting (TONEMAP_PARAMS). */
-function tonemapCurve(algo: string): string {
-  const param = TONEMAP_PARAMS[algo];
-  return `tonemap=${algo}${param === undefined ? "" : `:param=${param}`}`;
+/**
+ * The curve and setting a tone mapper is given for `algo` (TONEMAP_PARAMS).
+ * Jellyfin's tonemap_opencl keeps a setting only for reinhard and bt2390 and
+ * puts 1.0 in place of any other (vf_tonemap_opencl.c, final_param); mobius
+ * at 1.0 divides 0 by 0 above HDR's reference white, so in run 29 (29
+ * October) the Tesseract in Avengers Assemble and the screens in Project Hail
+ * Mary came out black. There, mobius at 0.5 is bt2390 at 0.5: the same at 1,
+ * 10 and 50 nits (28, 73 and 142 of 255), 189 and 230 at 100 and 203 against
+ * mobius's 190 and 228, and 5 brighter from 300 to 500. tonemapx keeps
+ * mobius's own.
+ */
+export function tonemapCurve(algo: string, via: Tonemapper): { algo: string; param?: number } {
+  if (via === "opencl" && algo === "mobius") return { algo: "bt2390", param: 0.5 };
+  return { algo, param: TONEMAP_PARAMS[algo] };
 }
 
 export interface ColorLabels {
@@ -1020,7 +1030,10 @@ export function encodeArgs(
   const tm = plan.tonemap;
   // peak=100 is the film's peak taken as 1,000 nits, whatever it says; SDR
   // white is HDR's reference white, 203 nits (jellyfin-ffmpeg's tone mappers).
-  const curve = tm ? `${tonemapCurve(tm.algo)}:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=${fmt}` : "";
+  const tc = tm ? tonemapCurve(tm.algo, tm.via) : null;
+  const curve = tc
+    ? `tonemap=${tc.algo}${tc.param === undefined ? "" : `:param=${tc.param}`}:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=${fmt}`
+    : "";
   // On frames the GPU decoded: labels, deinterlace and scale, still there.
   const gpuIn = hw === "nvenc"
     ? `${fill}${plan.interlaced ? "bwdif_cuda=mode=send_frame," : ""}scale_cuda=w=${W}:h=${H}:format=${tm ? "p010" : fmt}`

@@ -831,13 +831,22 @@ console.log("\n— what a re-encode is made of —");
   const sdrScreen = plan(version({ colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc" }),
     { hdrOk: false, tonemapper: "opencl" });
   const sdrScreenArgs = sdrScreen.ok ? encodeArgs(sdrScreen, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ") : "";
-  check("  10 bits from the decoder to the encoder: OpenCL's mobius at 0.5, out as P010, labelled BT.709", [
+  check("  10 bits from the decoder to the encoder: OpenCL's bt2390 at 0.5, out as P010, labelled BT.709", [
     sdrScreenArgs.includes("-vf scale_vaapi=w=1920:h=1080:format=p010,hwmap=derive_device=opencl:mode=read," +
-      "tonemap_opencl=tonemap=mobius:param=0.5:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=p010," +
+      "tonemap_opencl=tonemap=bt2390:param=0.5:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=p010," +
       "hwmap=derive_device=vaapi:mode=write:reverse=1,format=vaapi,hwmap=derive_device=qsv,format=qsv"),
     sdrScreenArgs.includes("-c:v hevc_qsv -low_power 1 -profile:v main10"),
     sdrScreenArgs.includes("-color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv"),
   ], [true, true, true]);
+  // Run 29: tonemap_opencl puts 1.0 in place of a setting it doesn't keep, and
+  // mobius at 1.0 turned everything above 203 nits black.
+  const { tonemapCurve } = await import("../src/services/ffmpeg/plan.js");
+  const curves = ["reinhard", "mobius", "hable", "bt2390", "linear", "gamma", "clip"];
+  check("  OpenCL is given a setting only with a curve that keeps it, reinhard's or bt2390's",
+    curves.filter((c) => tonemapCurve(c, "opencl").param !== undefined)
+      .every((c) => ["reinhard", "bt2390"].includes(tonemapCurve(c, "opencl").algo)), true);
+  check("  and never mobius's, while tonemapx, which keeps it, has mobius at 0.5",
+    [tonemapCurve("mobius", "opencl").algo, tonemapCurve("mobius", "software")], ["bt2390", { algo: "mobius", param: 0.5 }]);
   const sdrVpp = plan(version({ colorTrc: "smpte2084" }), { hdrOk: false });
   check("  or QSV's video engine's, out as P010",
     sdrVpp.ok && encodeArgs(sdrVpp, ["-i", "f.mkv"], 0, 60, "/dev/dri/renderD128").join(" ").includes(
@@ -862,7 +871,7 @@ console.log("\n— what a re-encode is made of —");
   check("  by Phase 0's chain: OpenCL from VAAPI, its Dolby Vision applied, back to QSV, labelled BT.709", [
     p5Args.includes("-init_hw_device qsv=qs@va -init_hw_device opencl=ocl@va -filter_hw_device qs"),
     p5Args.includes("-vf scale_vaapi=w=1920:h=1080:format=p010,hwmap=derive_device=opencl:mode=read," +
-      "tonemap_opencl=tonemap=mobius:param=0.5:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=p010:apply_dovi=1," +
+      "tonemap_opencl=tonemap=bt2390:param=0.5:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=p010:apply_dovi=1," +
       "hwmap=derive_device=vaapi:mode=write:reverse=1,format=vaapi,hwmap=derive_device=qsv,format=qsv"),
     p5Args.includes("-c:v hevc_qsv"),
     p5Args.includes("-color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv"),
@@ -916,7 +925,7 @@ console.log("\n— what a re-encode is made of —");
   const graph = burnArgs[burnArgs.indexOf("-filter_complex") + 1] ?? "";
   check("  the picture brought down from OpenCL, the subtitle fitted to the frame, overlaid, and back up to QSV", graph,
     "[0:0]scale_vaapi=w=1920:h=1080:format=p010,hwmap=derive_device=opencl:mode=read," +
-    "tonemap_opencl=tonemap=mobius:param=0.5:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12,hwdownload,format=nv12[pic];" +
+    "tonemap_opencl=tonemap=bt2390:param=0.5:desat=0:peak=100:t=bt709:m=bt709:p=bt709:format=nv12,hwdownload,format=nv12[pic];" +
     "[0:2]scale=1920:1080:force_original_aspect_ratio=decrease[sub];" +
     "[pic][sub]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:eof_action=pass,hwupload=extra_hw_frames=64,format=qsv[v]");
   check("  mapped from the graph, with no -vf", [burnArgs.join(" ").includes("-map [v] -map 0:1"), burnArgs.includes("-vf")], [true, false]);

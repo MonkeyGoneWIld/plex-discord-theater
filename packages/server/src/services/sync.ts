@@ -380,6 +380,15 @@ interface RoomState {
   /** The moment everybody was last told about — see updateWaiting. */
   gatherAnnounced: number;
   /**
+   * What the host's stream is being rebuilt for while the room waits for it
+   * mid-film — a switch of its own ("audio", "subtitle", "quality") or
+   * anything else ("reload") — for whoever holds for it to say so (the
+   * client's SyncState.hostSwitching). Null while the room runs.
+   */
+  hostSwitching: string | null;
+  /** The reason everybody was last told about — see updateWaiting. */
+  hostSwitchingAnnounced: string | null;
+  /**
    * Where the host has just skipped to, while its picture gets there — see
    * the heartbeat. A host that has to rebuild its stream for a skip still
    * shows the place it is leaving until the new one is in, and the room took
@@ -514,6 +523,8 @@ function updateWaiting(room: Room, roomId: string | null, why: string): void {
   if (!running || !s.hostWaiting) closeGather(room);
   const waiting = running && s.hostWaiting;
   const changed = waiting !== s.waiting;
+  // A reason is for a wait, and goes with it.
+  if (!waiting) s.hostSwitching = null;
   if (changed) {
     // Before the flag flips, so the clock is read as it was running.
     if (waiting) s.position = interpolatedPosition(s);
@@ -522,17 +533,26 @@ function updateWaiting(room: Room, roomId: string | null, why: string): void {
     // Not "running" for a room that has just stopped or paused: it isn't.
     logEvent("Sync", waiting ? "room waiting" : running ? "room running" : "room no longer waiting", {
       room: roomId?.substring(0, 8) ?? "?",
-      ...(waiting ? { why, for: "the host" } : {}),
+      ...(waiting ? { why, for: "the host", ...(s.hostSwitching ? { switching: s.hostSwitching } : {}) } : {}),
       posS: Number(s.position.toFixed(2)),
     });
   }
   // Not while paused or stopped: the pause or stop says so itself, and a
   // "running" sent ahead of it would start everybody for a moment.
-  if (running && (changed || s.gatherAnnounced !== s.gatherSeq)) {
+  // And when the reason for a wait comes after the wait — the host stalled,
+  // then rebuilt its stream. Only while it waits: the clock stands still
+  // then, and its position is where it stands.
+  if (running && (changed || s.gatherAnnounced !== s.gatherSeq || (waiting && s.hostSwitchingAnnounced !== s.hostSwitching))) {
     s.gatherAnnounced = s.gatherSeq;
-    sendToAll(room, { type: "room-waiting", waiting, position: s.position, gather: s.gatherSeq });
+    s.hostSwitchingAnnounced = s.hostSwitching;
+    sendToAll(room, { type: "room-waiting", waiting, position: s.position, gather: s.gatherSeq, switching: s.hostSwitching });
   }
 }
+
+/** What a host's stream can be rebuilt for — see RoomState.hostSwitching. */
+const SWITCHINGS = ["audio", "subtitle", "quality", "reload"];
+const switchingOf = (v: unknown): string | null =>
+  typeof v === "string" && SWITCHINGS.includes(v) ? v : null;
 
 /**
  * Whether the host's picture is ready — see RoomState.hostWaiting. Its
@@ -946,6 +966,10 @@ function sortByCaps(room: Room, roomId: string, v: Variant): void {
   }
   const movers = membersOf(room, v.key).filter((c) => seatOf(room, c, v.key) !== v.key);
   if (movers.length === 0) return;
+  // Before they go: a stream left by its last player is gone below, and what
+  // it needed with it, and the log said "its twin is running" of a host moved
+  // off HDR (29 October).
+  const why = whyMoved(v);
   for (const c of movers) {
     const to = assignVariant(room, c, v.audioStreamId, v.subtitleStreamId, v.quality, false);
     if (c.isHost) followHost(room, to);
@@ -962,7 +986,7 @@ function sortByCaps(room: Room, roomId: string, v: Variant): void {
     from: v.key,
     to: [...to].join(","),
     who: movers.map((c) => c.username ?? c.userId).join(","),
-    why: whyMoved(v),
+    why,
   });
 }
 
@@ -1019,6 +1043,8 @@ function getOrCreateRoom(instanceId: string): Room {
         gatherSeq: 0,
         gatherOpen: false,
         gatherAnnounced: 0,
+        hostSwitching: null,
+        hostSwitchingAnnounced: null,
         seekHold: null,
         updatedAt: Date.now(),
         transportRevision: 0,
@@ -1938,6 +1964,8 @@ export function attachWebSocketServer(server: Server): void {
         // in the state below, the one word they need.
         const landedOn = client.variantKey ? room.state.variants.get(client.variantKey) : undefined;
         if (landedOn && seatOf(room, client, landedOn.key) !== landedOn.key) {
+          // Before the move, as in sortByCaps.
+          const why = whyMoved(landedOn);
           const to = assignVariant(room, client, landedOn.audioStreamId, landedOn.subtitleStreamId, landedOn.quality);
           if (isHost) followHost(room, to);
           logEvent("Sync", "a stream of their own, by what each can play", {
@@ -1945,7 +1973,7 @@ export function attachWebSocketServer(server: Server): void {
             from: landedOn.key,
             to: to.key,
             who: username ?? userId,
-            why: whyMoved(landedOn),
+            why,
             running: to.hlsSessionId !== null,
           });
         }
@@ -1973,6 +2001,8 @@ export function attachWebSocketServer(server: Server): void {
           playing: room.state.playing,
           position: interpolatedPosition(room.state),
           waiting: room.state.waiting,
+          // What the host's stream is being rebuilt for, while the room waits.
+          switching: room.state.waiting ? room.state.hostSwitching : null,
           gather: room.state.gatherSeq,
           hlsSessionId: room.state.hlsSessionId,
           sessionOffset: room.state.sessionOffset,
@@ -2437,6 +2467,15 @@ export function attachWebSocketServer(server: Server): void {
           // host's next heartbeat says when its picture is ready, and the room
           // starts with it; anybody whose picture isn't there yet catches up.
           if (room.state.playing) openGather(room);
+          // What the host restarted it for — their own quality, say, or
+          // anything else that rebuilt it mid-film — for whoever is held
+          // waiting for it without having been moved: see the client's
+          // SyncState.hostSwitching. Only for a restart; said already, with
+          // the wait, by a host that said so as its rebuild began.
+          const switching = restartOfLiveItem
+            ? switchingOf(msg.switching) ?? (room.state.waiting ? room.state.hostSwitching : null)
+            : null;
+          if (msg.waiting === true) room.state.hostSwitching = switching;
           setHostWaiting(room, roomId, msg.waiting === true, "a stream is starting");
           // Where Plex was asked to start transcoding. Usually the same as the
           // position, and deliberately a separate field because it isn't when a
@@ -2504,12 +2543,6 @@ export function attachWebSocketServer(server: Server): void {
             }
           }
           attachSession(room, hostVariant, sid, room.state.sessionOffset, roomId);
-          // What the host restarted it for — their own quality, say — for
-          // whoever is held waiting for it without having been moved: see the
-          // client's SyncState.hostSwitching. Only for a restart.
-          const switching = restartOfLiveItem && ["audio", "subtitle", "quality"].includes(msg.switching as string)
-            ? msg.switching as string
-            : null;
 
           broadcast(room, ws, {
             type: "play",
@@ -2687,11 +2720,12 @@ export function attachWebSocketServer(server: Server): void {
            * the length of a film, with a viewer who switched subtitles landing
            * neatly on the clock and therefore 12.73s ahead of the host too.
            *
-           * A host mid-restart doesn't reach here at all: it has no media, so it
-           * sends nothing, and the clock free-runs across the gap — which is the
-           * case that rule was reaching for, and it is handled where it belongs,
-           * by the restarting client landing on the clock once its manifest is
-           * ready.
+           * A host mid-restart has no media, so its ordinary heartbeats stop —
+           * which is the case that rule was reaching for. Mid-film it says so
+           * once as the rebuild begins, with where its last picture was and
+           * `waiting`, and the room waits there: the clock running on across
+           * the gap, with the host landing on it, skipped the length of the
+           * load for everybody (the client's rebuildHoldRef).
            */
           let reported = safePosition(msg.position, room.state.position);
           // Except a host still getting to where it skipped: its report is the
@@ -2735,9 +2769,14 @@ export function attachWebSocketServer(server: Server): void {
           room.state.positionConfirmed = true;
           room.state.updatedAt = Date.now();
           setTransport(room, msg.playing !== false);
+          // What its stream is being rebuilt for, said as the rebuild begins —
+          // see hostSwitching. Kept by the heartbeats that follow, which don't
+          // say it again.
+          if (msg.waiting === true && switchingOf(msg.switching)) room.state.hostSwitching = switchingOf(msg.switching);
           // Whether the host's picture is ready — see hostWaiting. Absent, from
           // a client that predates it, means it is.
-          setHostWaiting(room, roomId, msg.waiting === true, "the host is waiting for its stream");
+          setHostWaiting(room, roomId, msg.waiting === true, switchingOf(msg.switching)
+            ? "the host's stream is being rebuilt" : "the host is waiting for its stream");
           // With whether the room is waiting, so a host that missed the word it
           // was holding for hears it within a heartbeat.
           sendTo(ws, { type: "transport-state", playing: room.state.playing, transportRevision: room.state.transportRevision, waiting: room.state.waiting });

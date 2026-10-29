@@ -1215,6 +1215,69 @@ console.log("\n— the room is told what the host restarted for —");
   [host, a].forEach((c) => c.close());
 }
 
+console.log("\n— a host rebuilding its stream mid-film holds the room at its last picture —");
+{
+  const [host, a] = await room("inst-rebuild-hold", ["host", "a"]);
+  await startPlayback(host);
+  const rev = () => host.last("transport-state")?.transportRevision;
+  host.send({ type: "heartbeat", position: 390, playing: true, waiting: false, transportRevision: rev() });
+  await sleep(60);
+  // The clock runs on meanwhile, as it does between heartbeats.
+  await sleep(500);
+  a.clear();
+  // Its screen left HDR: the host says so as the rebuild begins, with where
+  // its picture was.
+  host.send({ type: "heartbeat", position: 390.06, playing: true, waiting: true, switching: "reload", transportRevision: rev() });
+  await sleep(60);
+  check("the room waits for the host's stream", a.last("room-waiting")?.waiting, true);
+  check("where the host's picture was, not where the clock had got to",
+    near(a.last("room-waiting")?.position, 390.06, 0.01), "ok");
+  check("and says why", a.last("room-waiting")?.switching, "reload");
+  await sleep(600);
+  check("the clock stands still through the load", near(await clockOf("inst-rebuild-hold"), 390.06, 0.01), "ok");
+  // Somebody joining meanwhile is told why too.
+  const late = new Client("u-late-rebuild", "late");
+  await late.connect("inst-rebuild-hold");
+  check("a joiner is told why the room waits", [late.last("state")?.waiting, late.last("state")?.switching], [true, "reload"]);
+  late.close();
+  await sleep(30);
+  // The new stream, announced as its playlist comes in — the host's own page
+  // says why again; an older one doesn't, and the reason stays.
+  a.clear();
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: uuid(), position: 390.06, sessionOffset: 388.85,
+    audioStreamId: 1, subtitleStreamId: 0, waiting: true,
+  });
+  await sleep(60);
+  check("the new stream goes on from where the room waits", near(a.last("play")?.position, 390.06, 0.01), "ok");
+  check("still saying why, though the announcement didn't", a.last("play")?.switching, "reload");
+  host.send({ type: "heartbeat", position: 390.06, playing: true, waiting: true, transportRevision: rev() });
+  await sleep(60);
+  check("nor the heartbeats that follow",
+    a.seen.filter((m) => m.type === "room-waiting").map((m) => [m.waiting, m.switching]), [[true, "reload"]]);
+  host.send({ type: "heartbeat", position: 390.06, playing: true, waiting: false, transportRevision: rev() });
+  await sleep(60);
+  check("the room runs once the host's picture is in, from there",
+    [a.last("room-waiting")?.waiting, near(a.last("room-waiting")?.position, 390.06, 0.01)], [false, "ok"]);
+  check("with nothing to say any more", a.last("room-waiting")?.switching, null);
+
+  // A stall first, then the rebuild it ends in: the reason comes after the wait.
+  a.clear();
+  host.send({ type: "heartbeat", position: 420, playing: true, waiting: true, transportRevision: rev() });
+  await sleep(60);
+  check("a stall says nothing of a switch", [a.last("room-waiting")?.waiting, a.last("room-waiting")?.switching], [true, null]);
+  host.send({ type: "heartbeat", position: 420, playing: true, waiting: true, switching: "audio", transportRevision: rev() });
+  await sleep(60);
+  check("the rebuild after it is told, still waiting", [a.count("room-waiting"), a.last("room-waiting")?.waiting, a.last("room-waiting")?.switching], [2, true, "audio"]);
+  host.send({ type: "heartbeat", position: 420, playing: true, waiting: true, switching: "anything", transportRevision: rev() });
+  await sleep(60);
+  check("and nothing but a switch is taken for one", [a.count("room-waiting"), a.last("room-waiting")?.switching], [2, "audio"]);
+  host.send({ type: "heartbeat", position: 420, playing: true, waiting: false, transportRevision: rev() });
+  await sleep(60);
+  [host, a].forEach((c) => c.close());
+}
+
 console.log("\n— a stream rebuilt while paused is announced paused —");
 {
   const [host, a] = await room("inst-paused-rebuild", ["host", "a"]);

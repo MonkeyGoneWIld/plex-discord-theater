@@ -59,7 +59,7 @@ const { attachWebSocketServer } = await import("../../server/src/services/sync.j
 const { createSession, getSessionUserId } = await import("../../server/src/middleware/auth.js");
 const { instanceHosts } = await import("../../server/src/routes/discord.js");
 const { progressivePreview } = await import("../../server/src/services/preview-stream.js");
-const { recordSessionVideoCodec, recordHevcWithheld } = await import("../../server/src/routes/plex.js");
+const { recordSessionVideoCodec, recordHevcWithheld, recordSessionHdr } = await import("../../server/src/routes/plex.js");
 
 const PORT = 3000;
 const SMALL_STREAM = path.join(os.tmpdir(), "plex-theater-media-errors");
@@ -144,6 +144,10 @@ const sessionStart = new Map<string, number>();
 /** Whether streams are HEVC, and who can't play it — see &hevc=1. */
 let hevcOn = false;
 const noHevc = new Set<string>();
+/** With &hevc=1, whether they are HDR too, and whose screen has left it —
+ *  POST /api/test/nohdr?user=u-host. */
+let hdrOn = false;
+const noHdr = new Set<string>();
 /** The sessions whose codec has been said, by whoever asked for each first. */
 const codecSaid = new Set<string>();
 /**
@@ -318,6 +322,8 @@ const server = http.createServer(async (req, res) => {
     sessionStart.clear();
     hevcOn = url.searchParams.get("hevc") === "1";
     noHevc.clear();
+    hdrOn = url.searchParams.get("hdr") === "1";
+    noHdr.clear();
     codecSaid.clear();
     p2pOn = url.searchParams.get("p2p") !== "0";
     const stream = url.searchParams.get("stream");
@@ -333,6 +339,10 @@ const server = http.createServer(async (req, res) => {
   }
   if (p === "/api/test/nohevc") {
     noHevc.add(url.searchParams.get("user") ?? "u-host");
+    return json(res, { ok: true });
+  }
+  if (p === "/api/test/nohdr") {
+    noHdr.add(url.searchParams.get("user") ?? "u-host");
     return json(res, { ok: true });
   }
   if (p === "/api/test/served") return json(res, served);
@@ -384,6 +394,10 @@ const server = http.createServer(async (req, res) => {
       const withheld = noHevc.has(user ?? "");
       recordSessionVideoCodec(sid, withheld ? "h264" : "hevc");
       recordHevcWithheld(sid, withheld);
+      // HDR kept for a screen that shows it, as the bot's copy of an HDR
+      // film is: for one asked for by a player whose screen doesn't, HDR
+      // labelled for the browser to map, as SDR to the room (&hdr=1).
+      if (hdrOn) recordSessionHdr(sid, url.searchParams.get("hdrOk") !== "0" && !noHdr.has(user ?? ""));
     }
   }
   if (/^\/api\/plex\/hls\/[^/]+\/[^/]+\/master\.m3u8$/.test(p) && notesOn && !url.searchParams.has("media")) {

@@ -529,8 +529,10 @@ const MIN_FORWARD_BUFFER_S = 30;
 /** The longest a switch is said for — see switchingFor. */
 const SWITCH_SAID_MAX_MS = 60_000;
 
-/** What the screen says while a stream is rebuilt for other tracks. */
-function switchingText(kind: "audio" | "subtitle" | "quality", byHost: boolean): string {
+/** What the screen says while a stream is rebuilt for other tracks, or
+ *  rebuilt mid-film for anything else ("reload"). */
+function switchingText(kind: Switching, byHost: boolean): string {
+  if (kind === "reload") return byHost ? "Host is reloading the video…" : "Reloading the video…";
   const what = kind === "audio" ? "audio" : kind === "quality" ? "quality" : "subtitles";
   return byHost ? `Host is switching ${what}…` : `Switching ${what}…`;
 }
@@ -1983,6 +1985,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /** Where the stream being brought up starts, once seekOffsetRef is spent —
    *  see hostPositionForRoom. */
   const restartTargetRef = useRef<number | null>(null);
+  /**
+   * Host: where its last picture was, while its own stream is rebuilt
+   * mid-film — a track or quality switch, its screen leaving HDR, a recovery.
+   * The room waits there for it, and it starts again from exactly there: see
+   * the HLS start. Null otherwise, and once the room runs again.
+   */
+  const rebuildHoldRef = useRef<number | null>(null);
   /** Whether the next stream this player brings up is for a skip — see
    *  skipLanding. Spent with seekOffsetRef. */
   const restartForSkipRef = useRef(false);
@@ -2742,6 +2751,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // return to an abandoned stream. Never both.
         asking: alreadyBuiltForThis ? "forced" : "state",
       });
+      // Where the host's picture is now, for the room to wait at while it
+      // comes onto this one (rebuildHoldRef): by the time the stream goes,
+      // the element no longer says.
+      if (isHostRef.current) noteGoodPosition(videoRef.current);
       holdFrameForSwitch();
       setFollowSessionId(v.hlsSessionId);
       if (alreadyBuiltForThis) setRetryKey((k) => k + 1);
@@ -3245,6 +3258,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // when the room runs again, on the next tick after its manifest.
       if (restartTimerRef.current !== null || isRestartPending()) return;
       hostHeldRef.current = false;
+      rebuildHoldRef.current = null;
       if (v.paused) {
         logEvent("Sync", "the room runs, playing", snapshot(v));
         v.play().catch(() => {});
@@ -4346,6 +4360,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       adopting: adoptSessionIdRef.current?.substring(0, 8) ?? "no",
     });
 
+    // Where this player's picture is, before the stream showing it goes — see
+    // rebuildHoldRef.
+    const shownBeforeS = videoRef.current && videoRef.current.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+      ? videoRef.current.currentTime : lastGoodPositionRef.current;
     destroyLocal();
 
     // A stream's current driver normally decides who creates a session. A new
@@ -4390,10 +4408,48 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // from where the room is. On 18 October monkey26, back in Firefox, had
     // the room wait for that stream's picture instead, and blah0391 stopped
     // with a minute and a half in hand.
+    const restartingOwn = sessionOwner && !didAdoptRef.current && streamedHereRef.current;
+
+    /**
+     * Except the host's stream rebuilt mid-film, under its picture — its
+     * tracks, its quality, its screen leaving HDR, a recovery — onto a stream
+     * of its own or one somebody else already drives, and not for a skip: the
+     * room waits at its last picture from now, and it starts again from
+     * exactly there. Before, the room's clock ran on through the load and the
+     * host landed on it, past what nobody had seen; a copy then went back to
+     * its first keyframe, before what everybody had. On 29 October the
+     * host's screen left HDR at 6:30.06, the room ran on to 6:31.26, and
+     * everybody started again at 6:28.85. Said now, not when the stream is
+     * in: the load is the gap. Kept by a rebuild that replaces one still
+     * loading.
+     */
     {
       const room = syncStateRef.current;
-      const restartingOwn = sessionOwner && !didAdoptRef.current && streamedHereRef.current;
-      hostCatchUpRef.current = !!sessionId && isHostRef.current && !restartingOwn &&
+      const forSkipNext = restartForSkipRef.current && seekOffsetRef.current !== null;
+      const continuing = !!sessionId && isHostRef.current && streamedHereRef.current && !didAdoptRef.current &&
+        !forSkipNext && !!prev && !titleChanged && !!room?.playing && room.ratingKey === item.ratingKey &&
+        (streamShownRef.current || rebuildHoldRef.current !== null);
+      // Its own starts where the picture was (the offset, below).
+      const atS = !continuing ? 0
+        : sessionOwner ? seekOffsetRef.current ?? lastGoodPositionRef.current
+        : rebuildHoldRef.current ?? shownBeforeS;
+      rebuildHoldRef.current = atS > 0 ? atS : null;
+      if (rebuildHoldRef.current !== null) {
+        const switching = switchingForRef.current;
+        const why: Switching = switching && !switching.byHost ? switching.kind : "reload";
+        hostToldWaitingRef.current = true;
+        logEvent("Sync", "the host's stream rebuilt mid-film: the room waits at its last picture", {
+          atS: Number(atS.toFixed(2)),
+          roomPosS: Number(roomPositionNow(room!).toFixed(2)),
+          onto: sessionOwner ? "its own" : "one already running",
+          for: why,
+        });
+        syncActionsRef.current?.sendHeartbeat(atS, true, true, why);
+      }
+    }
+    {
+      const room = syncStateRef.current;
+      hostCatchUpRef.current = !!sessionId && isHostRef.current && !restartingOwn && rebuildHoldRef.current === null &&
         !!room?.playing && !room.hostWaiting && room.ratingKey === item.ratingKey && room.position > DRIFT_THRESHOLD_S;
       if (hostCatchUpRef.current) {
         hostCatchUpSinceRef.current = Date.now();
@@ -4467,7 +4523,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       }
     }
     const startOffset = offset ?? 0;
-    restartTargetRef.current = startOffset;
+    // Onto somebody else's stream, where the picture stopped: rebuildHoldRef.
+    restartTargetRef.current = rebuildHoldRef.current ?? startOffset;
 
     // The offset is the single most useful number in a restart: a transcode
     // starting somewhere other than where playback was is the signature of a
@@ -5405,7 +5462,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             });
             video.currentTime = backAheadAt;
           } else if (rejoiningLiveRoom) {
-            let syncPos = roomPositionNow(sync);
+            // A host rebuilding mid-film, where the room waits for it — said
+            // when the rebuild began, and maybe not heard back yet.
+            let syncPos = rebuildHoldRef.current ?? roomPositionNow(sync);
             // Never before a stream this client started: there is nothing
             // there, and the picture would wait for ever. The room's clock
             // behind it is the room being wrong — see hostPositionForRoom.
@@ -5633,6 +5692,15 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             if (range.start > video.currentTime) video.currentTime = range.start;
             if (!isHostRef.current || !copiedStreamRef.current || !hostHeldRef.current || !video.paused) return;
             if (pictureStartFor(video.currentTime, range) >= video.currentTime) return;
+            // Not mid-film: everybody has seen what is before the place the
+            // host's stream was rebuilt from (rebuildHoldRef).
+            if (rebuildHoldRef.current !== null) {
+              logEvent("HLS", "not starting on the first segment's keyframe: the film goes on from where it was", {
+                fromS: Number(video.currentTime.toFixed(2)),
+                keyframeS: Number(range.start.toFixed(2)),
+              });
+              return;
+            }
             const stats = data.frag.stats;
             const loadMs = stats.loading.end - stats.loading.start;
             // How fast the engine fetched it, from when it asked for it.
@@ -6236,7 +6304,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               // half second left there, stopped for the rest, and was jumped
               // again.
               movedOn = catchUpWithRoom("its first picture came in after the room had gone on from it");
-            } else if (sync && sync.playing) {
+            } else if (sync && sync.playing && !(isHostRef.current && rebuildHoldRef.current !== null)) {
+              // Not a host the room has waited for, where its picture was
+              // (rebuildHoldRef): there is no startup to close.
               const target = roomPositionNow(sync);
               // No further than this player has buffered. Jumping past it — on
               // the very first frames, with one segment in — sent the player
@@ -7836,7 +7906,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         sessionQualityRef.current,
         waiting,
         // What this host restarted it for, for whoever waits for it.
-        switchingForRef.current && !switchingForRef.current.byHost ? switchingForRef.current.kind : null,
+        switchingForRef.current && !switchingForRef.current.byHost ? switchingForRef.current.kind
+          : rebuildHoldRef.current !== null ? "reload" : null,
       );
       return playing;
     }

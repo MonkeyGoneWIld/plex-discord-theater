@@ -1453,6 +1453,114 @@ function Runner() {
   }
 
   /**
+   * The host's screen leaving HDR mid-film, as Windows' HDR switched off does:
+   * the host goes onto a stream mapped for SDR — one of its own, or, with the
+   * viewer's screen in SDR all along, the one the viewer is on — and the room
+   * waits at the host's last picture while it comes. The host goes on from
+   * exactly there: nothing skipped for the load, nor gone back to the new
+   * stream's keyframe (on 29 October the room ran on 1.2 s while the host
+   * loaded, and everybody went back 2.4 s to the keyframe). The viewer is
+   * never sent back, and is told the host is reloading.
+   */
+  async function runHostLeavesHdr(viewerInSdr: boolean) {
+    setRunning(true);
+    const out: string[] = [viewerInSdr
+      ? "— the host's screen leaves HDR, onto the stream the viewer, in SDR, is on —"
+      : "— the host's screen leaves HDR mid-film —"];
+    const say = (line: string) => { out.push(line); setLines([...out]); };
+    setLines([...out]);
+    let sampler: ReturnType<typeof sampleBoth> | null = null;
+    const playing = (r: Report | undefined) => !!r && !r.paused && r.ready >= 3;
+    try {
+      hostQuery = "&hdrScreen";
+      viewerQuery = viewerInSdr ? "" : "&hdrScreen";
+      // A copy with a keyframe every four seconds, a new one's playlist a
+      // second and a half in coming, as Plex's are.
+      await startOnce("p2p=0&stream=copy4&event=1&hevc=1&hdr=1&manifestMs=1500", {}, 0, "",
+        // Its stream is mapped for its screen, as the bot's is.
+        viewerInSdr ? async () => { await api("/api/test/nohdr?user=u-viewer"); } : undefined);
+      await pause(12_000);
+      sampler = sampleBoth();
+      await pause(1_000);
+      await api("/api/test/nohdr?user=u-host");
+      const leftAt = Date.now();
+      (hostFixture() as { leaveHdr?: () => void } | null | undefined)?.leaveHdr?.();
+      await pause(2_000);
+      await waitFor(() => playing(latest.get("u-host")) && playing(latest.get("u-viewer")), 40_000, "both to play on");
+      await pause(5_000);
+      sampler.stop();
+      const after = sampler.samples.filter((x) => x.t >= leftAt);
+      // Where the host's picture stopped, and where it went on from.
+      const all = sampler.samples;
+      const from = all.findIndex((x) => x.t >= leftAt - 300);
+      const stopAt = all.findIndex((x, i) => i >= from && !playing(x.host));
+      const stopS = stopAt > 0 ? all[stopAt - 1].host.pos : NaN;
+      const resumed = (events.get("u-host") ?? []).find((e) => e.t >= leftAt && e.tag === "Video" && e.msg === "playing");
+      const resumeS = Number(resumed?.data.posS ?? NaN);
+      const moved = (events.get("u-host") ?? []).filter((e) => e.t >= leftAt &&
+        /^starting a stream for these tracks$|^moving onto this stream's transcode$/.test(e.msg)).map((e) => e.msg);
+      const held = (events.get("u-host") ?? []).find((e) => e.t >= leftAt && /rebuilt mid-film/.test(e.msg));
+      say(`    the host ${moved.join(", ") || "never moved"}; ${held ? `told the room to wait at ${Number(held.data.atS).toFixed(2)}s` : "never told the room to wait"}`);
+      const wanted = viewerInSdr ? "moving onto this stream's transcode" : "starting a stream for these tracks";
+      say(`${moved.includes(wanted) ? "PASS" : "FAIL"} the host goes onto ${viewerInSdr ? "the viewer's stream" : "a stream of its own"}`);
+      say(`    the host's picture stopped at ${stopS.toFixed(2)}s and went on from ${resumeS.toFixed(2)}s`);
+      const gapS = resumeS - stopS;
+      say(`${gapS <= 0.4 ? "PASS" : "FAIL"} the host skips nothing for the load (${gapS.toFixed(2)}s on)`);
+      say(`${gapS >= -0.2 ? "PASS" : "FAIL"} nor goes back to what it has shown (${gapS.toFixed(2)}s)`);
+      // The host's picture after that never goes back, nor jumps on.
+      const steps = (who: "host" | "viewer") => {
+        let back = 0;
+        let on = 0;
+        for (let i = 1; i < after.length; i++) {
+          const a = after[i - 1][who];
+          const b = after[i][who];
+          if (!playing(a) || !playing(b)) continue;
+          const d = b.pos - a.pos - (after[i].t - after[i - 1].t) / 1000;
+          back = Math.min(back, d);
+          on = Math.max(on, d);
+        }
+        return { back, on };
+      };
+      for (const who of ["host", "viewer"] as const) {
+        const { back, on } = steps(who);
+        say(`${back > -0.3 ? "PASS" : "FAIL"} the ${who} is never sent back (${back.toFixed(2)}s at most)`);
+        say(`${on < 0.6 ? "PASS" : "FAIL"} nor jumped on (${on.toFixed(2)}s at most)`);
+      }
+      // While its loading screen is up, if the wait is long enough for it —
+      // onto a stream already running, it often isn't.
+      const said = new Set(after.map((x) => x.viewer.loading).filter(Boolean));
+      const viewerHeldMs = after.filter((x) => !playing(x.viewer)).length * 100;
+      const toldWell = said.has("Host is reloading the video…") ? [...said].every((m) => m === "Host is reloading the video…")
+        : said.size === 0 && viewerHeldMs < 1_500;
+      say(`${toldWell ? "PASS" : "FAIL"} the viewer is told the host is reloading (${[...said].join(", ") || `nothing, held ${(viewerHeldMs / 1000).toFixed(1)}s`})`);
+      // What it said when, from the host's screen leaving HDR: on the first
+      // run on 29 October it said "Buffering…", and never again in five.
+      if (!toldWell) {
+        let last = "";
+        const changes: string[] = [];
+        for (const x of after) {
+          const now = `${x.viewer.loading ?? "-"}${x.viewer.paused ? " paused" : ""}${x.viewer.waiting ? " waiting" : ""}`;
+          if (now !== last) changes.push(`${((x.t - leftAt) / 1000).toFixed(1)}s ${now}`);
+          last = now;
+        }
+        say(`    ${changes.slice(0, 16).join(" → ")}`);
+      }
+      const h = latest.get("u-host")!;
+      const v = latest.get("u-viewer")!;
+      say(`${Math.abs(h.pos - v.pos) < 1 && playing(h) && playing(v) ? "PASS" : "FAIL"} and they play on together (${(h.pos - v.pos).toFixed(2)}s apart)`);
+    } catch (err) {
+      say(`FAIL ${String(err)}`);
+    } finally {
+      sampler?.stop();
+      hostQuery = "";
+      viewerQuery = "";
+      (window as unknown as { results?: string[]; events?: typeof events }).results = out;
+      (window as unknown as { events?: typeof events }).events = events;
+      setRunning(false);
+    }
+  }
+
+  /**
    * Everything the two players say while a film plays — on the loading
    * screen, over the held frame of a switch, in the corner — through each
    * thing the host or the viewer does, pressed in their own menus: what each
@@ -1465,7 +1573,7 @@ function Runner() {
     const out: string[] = ["— what each player is told —"];
     const say = (line: string) => { out.push(line); setLines([...out]); };
     setLines([...out]);
-    const SAID = /Host is switching (?:audio|subtitles|quality)…|Switching (?:audio|subtitles|quality)…|(?:Co-host|Host) is seeking…|Host paused the video|Loading…|Buffering…|Catching up to host · \d+ s|Host paused · Catching up to host · \d+%|Stream interrupted — Reconnecting\.\.\.|Stream lost|Reconnecting to the watch party…|Connection lost|Playback error[^\n]*/g;
+    const SAID = /Host is switching (?:audio|subtitles|quality)…|Switching (?:audio|subtitles|quality)…|(?:Host is r|R)eloading the video…|(?:Co-host|Host) is seeking…|Host paused the video|Loading…|Buffering…|Catching up to host · \d+ s|Host paused · Catching up to host · \d+%|Stream interrupted — Reconnecting\.\.\.|Stream lost|Reconnecting to the watch party…|Connection lost|Playback error[^\n]*/g;
     const saidIn = (r: Report) => r.text.match(SAID) ?? [];
     const press = (who: "host" | "viewer", labels: string[]) =>
       (who === "host" ? hostFrame : viewerFrame).current?.contentWindow?.postMessage({ kind: "press", press: labels }, "*");
@@ -2624,6 +2732,8 @@ function Runner() {
         <button disabled={running} onClick={() => void runRewind()}>Rewind</button>
         <button disabled={running} onClick={() => void runSeekingWords()}>Seeking words</button>
         <button disabled={running} onClick={() => void runMessages()}>Messages</button>
+        <button disabled={running} onClick={() => void runHostLeavesHdr(false)}>Host's screen leaves HDR</button>
+        <button disabled={running} onClick={() => void runHostLeavesHdr(true)}>Host's screen leaves HDR, viewer in SDR</button>
         <button disabled={running} onClick={() => void runSubtitleReads()}>Subtitles as read</button>
         <pre id="results">{lines.join("\n")}</pre>
       </div>

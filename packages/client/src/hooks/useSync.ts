@@ -65,10 +65,11 @@ export interface SuggestionItem {
  * a seek it can't serve in place, and keeps it alive. It says nothing about
  * control of the room.
  */
-/** A switch a stream is rebuilt for. */
-export type Switching = "audio" | "subtitle" | "quality";
+/** A switch a stream is rebuilt for — "reload" for anything else that
+ *  rebuilds the host's mid-film: their screen leaving HDR, a recovery. */
+export type Switching = "audio" | "subtitle" | "quality" | "reload";
 const switchingOf = (v: unknown): Switching | null =>
-  v === "audio" || v === "subtitle" || v === "quality" ? v : null;
+  v === "audio" || v === "subtitle" || v === "quality" || v === "reload" ? v : null;
 
 export interface StreamVariant {
   /** The title this assignment is for. Lets anything acting on a change of
@@ -180,8 +181,10 @@ export interface SyncState {
   /**
    * What the host is switching, while the room waits for the host's stream to
    * come back for it: their own quality, or tracks this player wasn't moved
-   * onto — what a player holding for the room says, rather than "Buffering…"
-   * as if the wait were its own. Null otherwise, and once the room runs.
+   * onto, or "reload" for anything else that rebuilt the host's stream
+   * mid-film — what a player holding for the room says, rather than
+   * "Buffering…" as if the wait were its own. Null otherwise, and once the
+   * room runs.
    */
   hostSwitching: Switching | null;
   /**
@@ -339,8 +342,9 @@ export interface SyncActions {
    *  bot meanwhile — see SyncState.othersLoading. Said again on reconnecting. */
   sendLoading: (short: boolean) => void;
   sendStop: () => void;
-  /** `waiting`: the host's picture isn't ready — SyncState.hostWaiting. */
-  sendHeartbeat: (position: number, playing: boolean, waiting?: boolean) => void;
+  /** `waiting`: the host's picture isn't ready — SyncState.hostWaiting.
+   *  `switching`: what it is rebuilt for, while it waits — hostSwitching. */
+  sendHeartbeat: (position: number, playing: boolean, waiting?: boolean, switching?: Switching | null) => void;
   acknowledgeTransport: (revision: number) => void;
   sendBrowse: (context: string) => void;
   sendQueueAdd: (item: QueueItem) => void;
@@ -618,8 +622,11 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         }));
       },
       acknowledgeTransport: (revision: number) => { appliedTransportRevision.current = revision; },
-      sendHeartbeat: (position: number, playing: boolean, waiting = false) => {
-        send({ type: "heartbeat", position, playing, waiting, transportRevision: appliedTransportRevision.current });
+      sendHeartbeat: (position: number, playing: boolean, waiting = false, switching: Switching | null = null) => {
+        send({
+          type: "heartbeat", position, playing, waiting, transportRevision: appliedTransportRevision.current,
+          ...(waiting && switching ? { switching } : {}),
+        });
         // Kept locally too. The server excludes a sender from its own
         // broadcast, and the host is the only client that heartbeats — so the
         // host's copy of the room's position stopped updating the moment it
@@ -763,7 +770,8 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
               position: (msg.position as number) ?? 0,
               positionAt: Date.now(),
               hostWaiting: msg.waiting === true,
-              hostSwitching: null,
+              // Joining while the host's stream is rebuilt mid-film.
+              hostSwitching: msg.waiting === true ? switchingOf(msg.switching) : null,
               gatherSeq: typeof msg.gather === "number" ? msg.gather : prev.gatherSeq,
               hlsSessionId: (msg.hlsSessionId as string) || null,
               sessionOffset: (msg.sessionOffset as number) ?? 0,
@@ -926,8 +934,9 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             setState((prev) => ({
               ...prev,
               hostWaiting: waiting,
-              // The room running again is the host's stream back.
-              hostSwitching: waiting ? prev.hostSwitching : null,
+              // The room running again is the host's stream back. Said with
+              // the wait when the host's stream is rebuilt mid-film.
+              hostSwitching: waiting ? switchingOf(msg.switching) ?? prev.hostSwitching : null,
               gatherSeq: typeof msg.gather === "number" ? msg.gather : prev.gatherSeq,
               position: typeof msg.position === "number" ? msg.position : prev.position,
               positionAt: waiting ? 0 : Date.now(),

@@ -84,6 +84,18 @@ HTMLMediaElement.prototype.play = function (this: HTMLMediaElement) {
   return play.call(this);
 };
 
+// ?hdrScreen: a screen showing HDR, which fixture.leaveHdr switches to SDR as
+// Windows does when its HDR is switched off mid-film — the query the player
+// and the room's caps read (lib/codecs hdrScreenQuery), told of the change.
+const hdrScreen = new URLSearchParams(location.search).has("hdrScreen")
+  ? Object.assign(new EventTarget(), { matches: true, media: "(dynamic-range: high)", onchange: null })
+  : null;
+if (hdrScreen) {
+  const matchMedia = window.matchMedia.bind(window);
+  window.matchMedia = (query: string) =>
+    query === "(dynamic-range: high)" ? hdrScreen as unknown as MediaQueryList : matchMedia(query);
+}
+
 // Looked at, as two people's players are, even when the browser running the
 // checks is in the background: the room doesn't wait for a player nobody is
 // looking at.
@@ -125,6 +137,12 @@ window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
 }) as typeof window.fetch;
 const fixture: Record<string, unknown> = { events, user, isHost };
 (window as unknown as { fixture: typeof fixture }).fixture = fixture;
+fixture.leaveHdr = () => {
+  if (!hdrScreen) return;
+  hdrScreen.matches = false;
+  events.push({ t: Date.now(), tag: "Fixture", msg: "the screen left HDR", data: {} });
+  hdrScreen.dispatchEvent(new Event("change"));
+};
 
 // Each of the media source's buffers on its own — the element's `buffered` is
 // only where they all overlap, so a picture with no sound reads as nothing.

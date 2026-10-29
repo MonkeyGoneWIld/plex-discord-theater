@@ -5,8 +5,8 @@ Current release: **v1.2.2**. Images are published as
 `ghcr.io/monkeygonewild/plex-discord-theater:1.2.2`.
 
 A Discord Activity for synchronized watch parties from a Plex Media Server. One
-person hosts, playback stays in lockstep for everyone in the voice channel, and
-each viewer can independently select audio tracks, subtitles and quality.
+person hosts, playback stays in lockstep for everyone in the room, and each
+viewer can independently select audio tracks, subtitles and quality.
 
 > [!WARNING]
 > **This project was built with AI.** It was developed primarily with
@@ -20,8 +20,8 @@ each viewer can independently select audio tracks, subtitles and quality.
 
 ## Overview
 
-Join a Discord voice channel, launch the Activity, and invite friends. Everyone
-in the channel joins the same room automatically.
+Launch the Activity from any voice or text channel and invite friends. Everyone
+in the channel joins the same room automatically, no voice call needed.
 
 The Activity provides a full Plex browser, including:
 
@@ -382,7 +382,7 @@ docker logs plex-discord-theater 2>&1 | grep Config
 
 ### 4. Launch in Discord
 
-Join a voice channel, click the **Activities** rocket, and pick the application.
+In a voice or text channel, open the **App Launcher** and pick the application.
 **Invite to Activity** brings others into the same room.
 
 Until the app is verified, friends need to be added under **App Testers** in the

@@ -315,9 +315,10 @@ HEVC, not H.264.
 
 ## Smooth playback on every device
 
-Each player counts the frames it drops every ten seconds. One that drops 5% or
-more in each of three such samples in a row is moved, alone, onto a lighter
-picture of the same film, one step at a time, until it plays smoothly:
+Each player counts the frames it drops every two seconds. One that drops 5% or
+more in four such checks in a row, eight seconds of play, is moved, alone,
+onto a lighter picture of the same film, one step at a time, until it plays
+smoothly. The device remembers it and is never sent that picture again:
 
 | Dropping frames on | Moves onto |
 |---|---|
@@ -326,14 +327,18 @@ picture of the same film, one step at a time, until it plays smoothly:
 | HEVC in 8 bits | H.264 |
 
 An 8-bit film re-encoded to HEVC is made in 8 bits to begin with, and AV1 is
-sent only to players that decode it on their GPU. Everybody else stays on the
-stream they have.
+sent only to players that decode it on their GPU. A device whose browser has
+seen HEVC, or its 10 bits, drop frames where the lighter picture didn't starts
+on the lighter stream. Everybody else stays on the stream they have.
 
-Only frames the decoder couldn't keep up with count. A sample is left out, and
-the run starts again, when the Activity is tabbed out, hidden or resized, goes
-fullscreen or pops out, or the film is paused, seeking, buffering, changing
-speed or loading a new stream. A stalled or frozen picture doesn't count
-either, nor does a single burst of drops between smooth stretches.
+Only frames the decoder couldn't keep up with count. A check is left out when
+the Activity is tabbed out, hidden or resized, goes fullscreen or pops out,
+when the film is paused, seeking, changing speed or loading a new stream, and
+when the page itself paints fewer frames than the film has: a busy or
+throttled computer drops frames whatever it plays, and a lighter stream
+wouldn't help. A stall or a frozen picture doesn't count either, and doesn't
+end the run. A smooth check does, so a single burst of drops never moves
+anyone.
 
 ## Plex's dashboard, Tautulli and Tracearr
 

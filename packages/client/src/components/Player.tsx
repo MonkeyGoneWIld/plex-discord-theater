@@ -21,7 +21,7 @@ import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, f
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { capsUsed, frameTransfer, hdrScreen, hdrScreenQuery, markUnplayable, type Cap } from "../lib/codecs";
-import { cantKeepUp, nextDropRun, type DropSample } from "../lib/frameDrops";
+import { cantKeepUp, DROP_TICK_S, nextDropRun, paintRate, type DropTick } from "../lib/frameDrops";
 import { splitCodecs } from "../lib/codecName";
 import { loadVolume, saveVolume, VOLUME_CHOSEN_EVENT } from "../lib/volume";
 import { readSameLanguageAhead, readSubtitlesAhead } from "../lib/subtitleReadAhead";
@@ -1043,6 +1043,9 @@ const PIP_MIN_WATCHED_SHARE = 0.25;
 
 export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, onSharePresenceDetails, subtitles, resumePosition, mediaIndex, audioStreamId, subtitleStreamId, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext, presentation = "full", onMinimize, onRestore }: PlayerProps) {
   const isPip = presentation === "pip";
+  /** isPip, for the health sample's timer. */
+  const isPipRef = useRef(isPip);
+  isPipRef.current = isPip;
   const pipPhone = useMediaQuery(PHONE_QUERY);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -2145,36 +2148,60 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /** Frames shown and dropped at the last health sample — see there. */
   const frameCountRef = useRef<{ shown: number; dropped: number; at: number } | null>(null);
   /**
-   * What this player gives up of the picture on this stream should it drop
-   * frames — AV1, 10 bits of HEVC, or HEVC — and the last samples' frames
-   * while it played: a device that decodes it, but too slowly, drops a
-   * steady share of them. On 29 October a laptop dropped a third of
-   * Deadpool's frames as AV1 and as HEVC, unwatchable, and none of anything
-   * as H.264 on main. When every sample of a run drops them, with nothing
-   * else to blame (frameDrops.ts), it is asked for no more here: the room
-   * puts this player on a lighter stream of its own. For this room only — a
-   * lighter stream in it may play well.
+   * What this player gives up of the picture on this stream should its
+   * decoder fall behind — AV1, 10 bits of HEVC, or HEVC: a device that
+   * decodes it, but too slowly, drops a steady share of its frames. When
+   * every tick of a run drops them, with nothing else to blame
+   * (frameDrops.ts), the room puts this player on a lighter stream of its
+   * own, and this device remembers it (markUnplayable): it is never offered
+   * that picture again.
    */
   const pictureCapRef = useRef<Cap | null>(null);
   /** The screen this player's init segment was last asked for (xhrSetup): HDR
    *  labelled for each screen is asked for again when the screen changes. */
   const initScreenRef = useRef<"sdr" | "hdr" | null>(null);
-  const droppedWindowsRef = useRef<DropSample[]>([]);
+  const droppedWindowsRef = useRef<DropTick[]>([]);
   /**
    * When anything but decoding last could have dropped frames — the page
    * hidden or shown, focus lost or back, a resize, fullscreen or picture-in-
-   * picture, a seek, buffering, a speed change, a stream loading — and
-   * whether focus is elsewhere now (tabbed out): no sample counts across
-   * either (frameDrops.ts).
+   * picture, a seek, a pause, a stream loading — and whether focus is
+   * elsewhere now (tabbed out): no tick counts across either (frameDrops.ts).
+   * A stall is not one: a decoder falling behind stalls with the buffer full,
+   * as the laptop did every few seconds on 29 October, and a tick of one has
+   * too few frames due to count anyway.
    */
   const dropDisturbedAtRef = useRef(0);
   const unfocusedRef = useRef(false);
+  /**
+   * Times the page has painted while the picture played: a page held to 15
+   * frames a second drops frames whatever the stream, and no lighter one
+   * helps (frameDrops.ts). Counted only while playing, so a paused player
+   * doesn't paint for nothing.
+   */
+  const paintsRef = useRef(0);
+  useEffect(() => {
+    const video = videoRef.current;
+    let frame = 0;
+    const paint = () => { paintsRef.current++; frame = requestAnimationFrame(paint); };
+    const start = () => { if (!frame) frame = requestAnimationFrame(paint); };
+    const stop = () => { cancelAnimationFrame(frame); frame = 0; };
+    video?.addEventListener("playing", start);
+    video?.addEventListener("pause", stop);
+    video?.addEventListener("ended", stop);
+    if (video && !video.paused) start();
+    return () => {
+      stop();
+      video?.removeEventListener("playing", start);
+      video?.removeEventListener("pause", stop);
+      video?.removeEventListener("ended", stop);
+    };
+  }, []);
   useEffect(() => {
     const video = videoRef.current;
     const disturbed = () => { dropDisturbedAtRef.current = performance.now(); };
     const blur = () => { unfocusedRef.current = true; disturbed(); };
     const focus = () => { unfocusedRef.current = false; disturbed(); };
-    const onVideo = ["waiting", "stalled", "seeking", "ratechange", "loadstart", "enterpictureinpicture", "leavepictureinpicture"];
+    const onVideo = ["seeking", "pause", "loadstart", "enterpictureinpicture", "leavepictureinpicture"];
     window.addEventListener("blur", blur);
     window.addEventListener("focus", focus);
     window.addEventListener("resize", disturbed);
@@ -2190,6 +2217,54 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       for (const e of onVideo) video?.removeEventListener(e, disturbed);
     };
   }, []);
+  /**
+   * Every DROP_TICK_S of play: whether this device's decoder keeps up with
+   * the picture (pictureCapRef, frameDrops.ts). Eight seconds of it falling
+   * behind, with the page painting freely, moves this player onto a lighter
+   * stream and keeps it off that picture on this device from then on.
+   */
+  const dropTickRef = useRef<{ shown: number; dropped: number; paints: number; at: number } | null>(null);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const v = videoRef.current;
+      const quality = v?.getVideoPlaybackQuality?.();
+      if (!v || !quality) { dropTickRef.current = null; return; }
+      const at = performance.now() / 1000;
+      const now = { shown: quality.totalVideoFrames - quality.droppedVideoFrames, dropped: quality.droppedVideoFrames, paints: paintsRef.current, at };
+      const last = dropTickRef.current;
+      dropTickRef.current = now;
+      const pictureCap = pictureCapRef.current;
+      // Not across a rebuilt stream, whose count starts again, nor a timer
+      // that ran late (a hidden page), which isn't a tick of play.
+      if (!pictureCap || !last || now.shown < last.shown || now.dropped < last.dropped) return;
+      const seconds = at - last.at;
+      if (seconds < 0.75 * DROP_TICK_S || seconds > 1.5 * DROP_TICK_S) return;
+      const clean = !v.paused && !v.seeking && !document.hidden && !unfocusedRef.current &&
+        Math.abs(v.playbackRate - 1) <= 0.1 && performance.now() - dropDisturbedAtRef.current > (seconds + 1) * 1000;
+      const run = nextDropRun(droppedWindowsRef.current, {
+        shown: now.shown - last.shown, dropped: now.dropped - last.dropped, painted: now.paints - last.paints, seconds, at, clean,
+      });
+      droppedWindowsRef.current = run;
+      if (!cantKeepUp(run)) return;
+      // Still dropping on the same stream after 10 bits are given up —
+      // Plex made it, and has no 8-bit one of its own — HEVC goes next.
+      pictureCapRef.current = pictureCap === "tenBit" ? "hevc" : null;
+      droppedWindowsRef.current = [];
+      const shown = run.reduce((n, t) => n + t.shown, 0);
+      const dropped = run.reduce((n, t) => n + t.dropped, 0);
+      logWarn("Video", "frames dropping as this device decodes the picture — asking the room for a stream without its codec, and keeping this device off it", {
+        codec: pictureCap, framesShown: shown, framesDropped: dropped,
+        droppedPct: Math.round((100 * dropped) / (shown + dropped)),
+        eachPct: run.map((t) => Math.round((100 * t.dropped) / (t.shown + t.dropped))).join(","),
+        pageFps: run.map((t) => paintRate(t.painted, t.seconds)).join(","),
+      });
+      markUnplayable([pictureCap]);
+      syncActionsRef.current?.sendCodecsUnsupported([pictureCap]);
+    }, DROP_TICK_S * 1000);
+    return () => clearInterval(timer);
+  }, []);
+  /** Paints at the last health sample, and when — the page's own frame rate, for the log. */
+  const healthPaintsRef = useRef<{ paints: number; at: number } | null>(null);
   /** Sound decoded by the last health sample, and where the clock was — see there. */
   const audioDecodedRef = useRef<{ bytes: number; at: number } | null>(null);
   /** Whether the stream playing has sound at all, from the codecs in its segments. */
@@ -6689,35 +6764,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             frames.shown - lastFrames.shown < 2 * (frames.at - lastFrames.at)) {
           logWarn("Video", "the picture hardly moved while the time ran on", { ...frameDeltas, ...snapshot(v) });
         }
-        // Dropping frames for the codec — see pictureCapRef and frameDrops.ts.
-        // Whole samples of play only, with the Activity in front and nothing
-        // else going on: a seek, a rebuild or a tab-out drops a few of its own.
-        const pictureCap = pictureCapRef.current;
-        if (pictureCap && frames && lastFrames && frames.shown >= lastFrames.shown &&
-            frames.at - lastFrames.at >= 8 && frames.at - lastFrames.at <= 12) {
-          const seconds = frames.at - lastFrames.at;
-          const clean = !v.paused && !v.seeking && !document.hidden && !unfocusedRef.current && v.playbackRate === 1 &&
-            performance.now() - dropDisturbedAtRef.current > (seconds + 2) * 1000;
-          const windows = nextDropRun(droppedWindowsRef.current,
-            { shown: frames.shown - lastFrames.shown, dropped: frames.dropped - lastFrames.dropped, seconds, clean });
-          droppedWindowsRef.current = windows;
-          const shown = windows.reduce((n, w) => n + w.shown, 0);
-          const dropped = windows.reduce((n, w) => n + w.dropped, 0);
-          if (cantKeepUp(windows)) {
-            // Still dropping on the same stream after 10 bits are given up —
-            // Plex made it, and has no 8-bit one of its own — HEVC goes next.
-            pictureCapRef.current = pictureCap === "tenBit" ? "hevc" : null;
-            droppedWindowsRef.current = [];
-            logWarn("Video", "frames dropping as this device decodes the picture — asking the room for a stream without its codec", {
-              codec: pictureCap, framesShown: shown, framesDropped: dropped,
-              droppedPct: Math.round((100 * dropped) / (shown + dropped)),
-              eachPct: windows.map((w) => Math.round((100 * w.dropped) / (w.shown + w.dropped))).join(","),
-            });
-            syncActionsRef.current?.sendCodecsUnsupported([pictureCap]);
-          }
-        } else {
-          droppedWindowsRef.current = [];
-        }
+        // The page's own frame rate since the last sample, whether it has
+        // focus, its size and where the player is: what held a laptop's page
+        // to 15 frames a second on 29 October, the log couldn't say.
+        const paintsNow = { paints: paintsRef.current, at: performance.now() / 1000 };
+        const lastPaints = healthPaintsRef.current;
+        healthPaintsRef.current = paintsNow;
+        const pageFps = lastPaints && !v.paused ? paintRate(paintsNow.paints - lastPaints.paints, paintsNow.at - lastPaints.at) : null;
         /**
          * Sound decoded since the last sample, against how far the clock moved.
          *
@@ -6772,6 +6825,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           ...(sync?.hostWaiting ? { roomWaiting: true } : {}),
           ...(amHost && hostHeldRef.current ? { heldForRoom: true } : {}),
           ...frameDeltas,
+          ...(pageFps != null ? { pageFps } : {}),
+          focused: document.hasFocus(),
+          ...(unfocusedRef.current ? { tabbedOut: true } : {}),
+          viewport: `${window.innerWidth}x${window.innerHeight}`,
+          ...(isPipRef.current ? { minimized: true } : {}),
           ...(audioDelta ?? {}),
           ...routeOf(v),
           peers: stats.peers.size,
@@ -8420,7 +8478,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const onKeyDown = (e: KeyboardEvent) => {
       const video = videoRef.current;
       if (!video) return;
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.target instanceof HTMLInputElement && e.target.type !== "range") return;
+      if (e.target instanceof HTMLTextAreaElement) return;
       // Chords with Ctrl/Cmd/Alt belong to the browser or OS (Ctrl+Shift+I =
       // DevTools, Ctrl+Shift+M = device toolbar) — never treat them as ours
       if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -8449,10 +8508,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         // and the canControl check live in there too.
         case "ArrowLeft":
           e.preventDefault();
+          e.stopPropagation();
+          dropFocus();
           controlsRef.current?.queueSkip(-10);
           break;
         case "ArrowRight":
           e.preventDefault();
+          e.stopPropagation();
+          dropFocus();
           controlsRef.current?.queueSkip(10);
           break;
         case "m":
@@ -8482,8 +8545,21 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           break;
       }
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    // A control clicked kept focus, and in Discord the arrow keys then walked
+    // the highlight from button to button instead of seeking. No control keeps
+    // focus after a click — a slider neither, so the arrows seek rather than
+    // move it — and the player's keys are taken before anything else sees them.
+    const dropFocus = () => {
+      const focused = document.activeElement;
+      if (focused instanceof HTMLButtonElement || (focused instanceof HTMLInputElement && focused.type === "range")) focused.blur();
+    };
+    const afterClick = () => setTimeout(dropFocus, 0);
+    window.addEventListener("pointerup", afterClick, true);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      window.removeEventListener("pointerup", afterClick, true);
+      window.removeEventListener("keydown", onKeyDown, true);
+    };
     // Everything the handler touches is a ref or a stable setter now that the
     // arrows go through controlsRef — the old handleHostSeek dep only existed to
     // keep the seek closure fresh, and rebinding the listener on every change of

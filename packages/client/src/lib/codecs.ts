@@ -16,6 +16,7 @@
  * gets what everyone can play.
  */
 import { canPlayHevcTranscode, isHevcCodec, markHevcUnplayable } from "./hevc";
+import { logEvent } from "./log";
 
 export type Cap = "hevc" | "av1" | "opus" | "flac" | "ac3" | "eac3" | "tenBit";
 
@@ -47,10 +48,9 @@ export interface Caps {
   hdr: boolean;
   /**
    * A 10-bit picture plays smoothly (the server's plan.ts PlayerCaps.tenBit).
-   * Said of every player, and taken back for the room when this one drops
-   * frames on one (Player.tsx pictureCapRef): on 29 October a laptop dropped
-   * 9–39% of 10-bit HEVC in five sessions of fourteen, and never more than
-   * 2.2% of 8-bit.
+   * Said unless this device's decoder fell behind on one before (Player.tsx
+   * pictureCapRef, remembered by markUnplayable), or the browser's own
+   * record says 10 bits drop frames here where 8 don't (smoothness).
    */
   tenBit: boolean;
 }
@@ -86,22 +86,48 @@ function supports(type: string): boolean {
 }
 
 let av1Smooth = false;
-// Asked once, at load: well before the room is joined.
+/**
+ * What the browser says of 1080p at 24 fps in each picture, asked once at
+ * load, well before the room is joined. Chromium keeps a record of how every
+ * codec, size and frame rate has played on this device — the frames it
+ * dropped, and whether the GPU decoded them — and answers "smooth" from it.
+ *
+ * HEVC, or its 10 bits, are only kept back when the lighter picture is
+ * smooth where they aren't: a page held to 15 frames a second drops frames
+ * whatever it plays (frameDrops.ts), and its record says so of H.264 too.
+ */
+const smoothness: { h264: boolean | null; hevc: boolean | null; tenBit: boolean | null } = { h264: null, hevc: null, tenBit: null };
 try {
   const mc = (navigator as Navigator & { mediaCapabilities?: MediaCapabilities }).mediaCapabilities;
-  void mc?.decodingInfo({
+  const ask = (codec: string, bitrate: number) => mc?.decodingInfo({
     type: "media-source",
-    video: { contentType: `video/mp4; codecs="${AV1_CODECS[0]}"`, width: 1920, height: 1080, bitrate: 6_000_000, framerate: 24 },
-  }).then((info) => { av1Smooth = info.supported && info.smooth && info.powerEfficient; }, () => {});
+    video: { contentType: `video/mp4; codecs="${codec}"`, width: 1920, height: 1080, bitrate, framerate: 24 },
+  }) ?? Promise.reject(new Error("no mediaCapabilities"));
+  void ask(AV1_CODECS[0], 6_000_000).then((info) => { av1Smooth = info.supported && info.smooth && info.powerEfficient; }, () => {});
+  void Promise.all([ask("avc1.640028", 8_000_000), ask("hvc1.1.6.L120.90", 8_000_000), ask("hvc1.2.4.L120.90", 8_000_000)])
+    .then(([h264, hevc, tenBit]) => {
+      smoothness.h264 = h264.supported ? h264.smooth : null;
+      smoothness.hevc = hevc.supported ? hevc.smooth : null;
+      smoothness.tenBit = tenBit.supported ? tenBit.smooth : null;
+      logEvent("Codecs", "the browser's record of smooth playback here, 1080p at 24 fps", {
+        h264: smoothness.h264 ?? "unsupported", hevc: smoothness.hevc ?? "unsupported", hevcTenBit: smoothness.tenBit ?? "unsupported",
+        av1: av1Smooth,
+      });
+    }, () => {});
 } catch {
-  // No mediaCapabilities: no AV1 re-encodes for this player.
+  // No mediaCapabilities: no AV1 re-encodes for this player, and nothing
+  // known ahead of the frames it drops.
 }
+
+/** Whether the browser's record keeps a picture back: not smooth where the lighter one is. */
+const rougherThan = (picture: boolean | null, lighter: boolean | null) => picture === false && lighter === true;
 
 /** What this player decodes, as the room is told on joining. */
 export function playerCaps(): Caps {
   const av1 = !failedHere("av1") && AV1_CODECS.every((c) => supports(`video/mp4; codecs="${c}"`)) && av1Smooth;
+  const hevc = canPlayHevcTranscode() && !rougherThan(smoothness.hevc, smoothness.h264);
   return {
-    hevc: canPlayHevcTranscode(),
+    hevc,
     av1,
     opus: !failedHere("opus") && supports('audio/mp4; codecs="opus"'),
     flac: !failedHere("flac") && supports('audio/mp4; codecs="flac"'),
@@ -109,7 +135,7 @@ export function playerCaps(): Caps {
     eac3: !failedHere("eac3") && supports('audio/mp4; codecs="ec-3"'),
     av1Encode: av1,
     hdr: hdrScreen(),
-    tenBit: true,
+    tenBit: !failedHere("tenBit") && !rougherThan(smoothness.tenBit, smoothness.hevc),
   };
 }
 
@@ -155,7 +181,8 @@ export function capsUsed(video: string | null | undefined, audio: string | null 
   return used;
 }
 
-/** This device said it decodes these and then didn't. Believed from now on. */
+/** This device said it decodes these and then didn't, or fell behind decoding
+ *  them (Player.tsx pictureCapRef). Believed from now on. */
 export function markUnplayable(caps: readonly Cap[]): void {
   for (const cap of caps) {
     if (cap === "hevc") {

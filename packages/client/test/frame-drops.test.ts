@@ -1,9 +1,9 @@
 /**
- * When a device can't keep up with decoding its picture (frameDrops.ts), on
- * the ten-second samples players logged, and when something else dropped the
- * frames: a tab-out, a stall, a spike.
+ * When a device's decoder can't keep up with its picture (frameDrops.ts), on
+ * what players logged, and when something else dropped the frames: a page
+ * held to 15 frames a second, a tab-out, a stall, a spike.
  */
-import { cantKeepUp, nextDropRun, DROPPED_SHARE, DROPPED_WINDOWS, type DropSample } from "../src/lib/frameDrops";
+import { cantKeepUp, nextDropRun, tickVerdict, DROP_TICK_S, type DropTick } from "../src/lib/frameDrops";
 
 let pass = 0;
 let fail = 0;
@@ -14,58 +14,72 @@ function check(name: string, actual: unknown, expected: unknown) {
   else { fail++; console.log(`  FAIL ${name}\n         expected ${e}\n         actual   ${a}`); }
 }
 
-/** Ten seconds of a 24 fps film with this share dropped. */
-const at = (pct: number, clean = true, due = 240): DropSample => {
-  const dropped = Math.round((due * pct) / 100);
-  return { shown: due - dropped, dropped, seconds: 10, clean };
-};
-/** Whether the samples, in order, ever put the player on a lighter stream. */
-function stepsDown(samples: DropSample[]): boolean {
-  let run: DropSample[] = [];
-  for (const s of samples) {
-    run = nextDropRun(run, s);
-    if (cantKeepUp(run)) return true;
+interface Spec { pct: number; fps?: number; pageFps?: number; clean?: boolean; due?: number }
+/** Ticks of play, one after another: a 24 fps film on a page painting at 60 unless said. */
+function ticks(...specs: Spec[]): DropTick[] {
+  return specs.map((s, i) => {
+    const due = s.due ?? Math.round((s.fps ?? 24) * DROP_TICK_S);
+    const dropped = Math.round((due * s.pct) / 100);
+    return { shown: due - dropped, dropped, painted: Math.round((s.pageFps ?? 60) * DROP_TICK_S), seconds: DROP_TICK_S, at: (i + 1) * DROP_TICK_S, clean: s.clean ?? true };
+  });
+}
+/** Seconds of play until the player steps down; null if it never does. */
+function stepsDownAfter(all: DropTick[]): number | null {
+  let run: DropTick[] = [];
+  for (const t of all) {
+    run = nextDropRun(run, t);
+    if (cantKeepUp(run)) return t.at;
+  }
+  return null;
+}
+/**
+ * The rule before (6266265): ten-second samples, every one of three in a row
+ * dropping 5% with a moving picture and nothing else going on — with no
+ * thought for how often the page painted.
+ */
+function stepsDownBefore(all: DropTick[]): boolean {
+  let run = 0;
+  for (let i = 0; i + 5 <= all.length; i += 5) {
+    const five = all.slice(i, i + 5);
+    const shown = five.reduce((n, t) => n + t.shown, 0);
+    const dropped = five.reduce((n, t) => n + t.dropped, 0);
+    const moving = shown + dropped >= 6 * 10;
+    run = five.every((t) => t.clean) && moving && dropped >= 0.05 * (shown + dropped) ? run + 1 : 0;
+    if (run >= 3) return true;
   }
   return false;
 }
-/** The rule before: the last three samples taken, dropping 5% between them — tabbed out or not, unless hidden. */
-function stepsDownBefore(samples: DropSample[]): boolean {
-  const run: DropSample[] = [];
-  for (const s of samples) {
-    run.push(s);
-    if (run.length > DROPPED_WINDOWS) run.shift();
-    const shown = run.reduce((n, w) => n + w.shown, 0);
-    const dropped = run.reduce((n, w) => n + w.dropped, 0);
-    if (run.length === DROPPED_WINDOWS && dropped >= DROPPED_SHARE * (shown + dropped)) return true;
-  }
-  return false;
-}
-const both = (samples: DropSample[]) => [stepsDownBefore(samples), stepsDown(samples)];
+const repeat = (n: number, s: Spec) => Array.from({ length: n }, () => s);
 
-console.log("— a device that can't keep up, as logged —");
-check("a laptop on 10-bit HEVC, 23 and 29 October: 36, 41, 45%", both([at(36), at(41), at(45)]), [true, true]);
-check("another, 17, 17, 15%", both([at(17), at(17), at(15)]), [true, true]);
-check("a third, 19, 20, 19%, after a quiet start", both([at(1), at(19), at(20), at(19)]), [true, true]);
-check("a laptop at 6, 8, 9%: still a stutter", both([at(6), at(8), at(9)]), [true, true]);
-check("on a 60 fps film", both([at(30, true, 600), at(30, true, 600), at(30, true, 600)]), [true, true]);
+console.log("— a decoder that can't keep up —");
+check("36% from the first tick, the page painting freely: eight seconds", stepsDownAfter(ticks(...repeat(15, { pct: 36 }))), 8);
+check("  and it would have before, after thirty", stepsDownBefore(ticks(...repeat(15, { pct: 36 }))), true);
+check("stalling every few seconds with the buffer full, as on 29 October: the stalls skipped, not the run broken",
+  stepsDownAfter(ticks({ pct: 36 }, { pct: 40, due: 6 }, { pct: 37 }, { pct: 0, due: 0 }, { pct: 35 }, { pct: 38 })), 12);
+check("a seek in the middle, skipped", stepsDownAfter(ticks({ pct: 36 }, { pct: 36 }, { pct: 50, clean: false }, { pct: 36 }, { pct: 36 })), 10);
+check("a phone at 8%", stepsDownAfter(ticks(...repeat(8, { pct: 8 }))), 8);
+check("a 60 fps film on a 60 Hz screen, a third dropped", stepsDownAfter(ticks(...repeat(6, { pct: 33, fps: 60, pageFps: 59 }))), 8);
 
 console.log("\n— frames dropped for something else —");
-check("a stall: three samples of no frames at all", both([at(0, true, 0), at(0, true, 0), at(0, true, 0)]), [true, false]);
-check("a frozen picture, a few frames due", both([at(50, true, 20), at(50, true, 20), at(50, true, 20)]), [true, false]);
-check("back from a tab-out: one sample at 33%, then none", both([at(33), at(0), at(0)]), [true, false]);
-check("one spike mid-run: 0, 20, 0%", both([at(0), at(20), at(0)]), [true, false]);
-check("5% on average, not every sample: 14, 0, 1%", both([at(14), at(0), at(1)]), [true, false]);
-check("three dropping samples, one taken while tabbed out, still on screen", both([at(30), at(30, false), at(30)]), [true, false]);
-check("dropping again after the break: three clean ones in a row", stepsDown([at(30), at(30, false), at(30), at(30), at(30)]), true);
-check("a desktop through a stream rebuilt under it, under 2%", both([at(2), at(1), at(2), at(0)]), [false, false]);
+check("the page held to 15 frames a second, 37.5% of a 24 fps film dropped (29 October)",
+  [stepsDownBefore(ticks(...repeat(15, { pct: 37.5, pageFps: 15 }))), stepsDownAfter(ticks(...repeat(15, { pct: 37.5, pageFps: 15 })))], [true, null]);
+check("held to 20, 17% dropped (23 October)",
+  [stepsDownBefore(ticks(...repeat(15, { pct: 17, pageFps: 20 }))), stepsDownAfter(ticks(...repeat(15, { pct: 17, pageFps: 20 })))], [true, null]);
+check("a 60 fps film on a page held to 30", stepsDownAfter(ticks(...repeat(10, { pct: 50, fps: 60, pageFps: 30 }))), null);
+check("a stall: ticks of no frames at all", stepsDownAfter(ticks(...repeat(10, { pct: 0, due: 0 }))), null);
+check("a frozen picture, a few frames due", stepsDownAfter(ticks(...repeat(10, { pct: 50, due: 8 }))), null);
+check("tabbed out, then one tick at 33% back, then none", stepsDownAfter(ticks({ pct: 40, clean: false }, { pct: 40, clean: false }, { pct: 33 }, { pct: 0 }, { pct: 0 })), null);
+check("one spike: 0, 20, 0%", stepsDownAfter(ticks({ pct: 0 }, { pct: 20 }, { pct: 0 }, { pct: 20 }, { pct: 0 })), null);
+check("a smooth tick ends the run: 30, 30, 30, 2, 30", stepsDownAfter(ticks({ pct: 30 }, { pct: 30 }, { pct: 30 }, { pct: 2 }, { pct: 30 })), null);
+check("dropping ticks too far apart, with nothing between to go by",
+  stepsDownAfter(ticks({ pct: 30 }, { pct: 30 }, ...repeat(10, { pct: 0, due: 0 }), { pct: 30 }, { pct: 30 })), null);
+check("a desktop through a stream rebuilt under it, under 2%", stepsDownAfter(ticks({ pct: 2 }, { pct: 1 }, { pct: 4 }, { pct: 0 }, { pct: 2 })), null);
 
-console.log("\n— the run —");
-{
-  const run = nextDropRun(nextDropRun([], at(20)), at(20));
-  check("two dropping samples aren't enough", [run.length, cantKeepUp(run)], [2, false]);
-  check("a quiet sample ends it", nextDropRun(run, at(4)), []);
-  check("it keeps the last three", nextDropRun(nextDropRun(run, at(20)), at(30)).map((s) => s.dropped), [48, 48, 72]);
-}
+console.log("\n— a tick —");
+check("what each says", [
+  tickVerdict(ticks({ pct: 36 })[0]), tickVerdict(ticks({ pct: 2 })[0]), tickVerdict(ticks({ pct: 37.5, pageFps: 15 })[0]),
+  tickVerdict(ticks({ pct: 36, clean: false })[0]), tickVerdict(ticks({ pct: 0, due: 4 })[0]),
+], ["dropping", "smooth", "skipped", "skipped", "skipped"]);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

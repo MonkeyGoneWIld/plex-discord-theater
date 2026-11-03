@@ -283,6 +283,12 @@ export interface StreamTrack {
    */
   original?: boolean;
   /**
+   * Audio only: for a track tagged with no language, the one the title was made
+   * in, when no track is tagged with it — so subtitles shown only over another
+   * language don't come up over it.
+   */
+  assumedLanguageCode?: string;
+  /**
    * Subtitles only: this one is text — a sidecar file, or text inside the media
    * file that Plex reads out — so the player draws it itself instead of Plex
    * burning it into the picture. Everyone drawing their own shares one stream.

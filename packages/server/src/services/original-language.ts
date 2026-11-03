@@ -63,14 +63,24 @@ function isCommentary(title?: string | null): boolean {
  * Mark the tracks in `originalLanguage` (ISO 639-1, from TMDB) as `original`.
  * Commentary never is. Nothing is marked when no track is in that language —
  * the player then goes by the file's own default.
+ *
+ * When none is, a track that names no language at all gets that language as
+ * `assumedLanguageCode`, for subtitles shown only over audio in another
+ * language. 3 from Hell's one track is untagged ("Unknown (AAC Stereo)"), and
+ * on 3 November English subtitles came up over its English: unknown counted as
+ * another language. 770 titles in the library have such a track.
  */
 export function markOriginalAudio(
-  tracks: Array<{ title?: string | null; languageCode?: string | null; original?: boolean }>,
+  tracks: Array<{ title?: string | null; languageCode?: string | null; original?: boolean; assumedLanguageCode?: string }>,
   originalLanguage: string | null,
 ): void {
   const want = shortCode(originalLanguage);
   if (!want) return;
   for (const t of tracks) {
     if (!isCommentary(t.title) && spokenLanguage(t) === want) t.original = true;
+  }
+  if (tracks.some((t) => t.original)) return;
+  for (const t of tracks) {
+    if (!isCommentary(t.title) && spokenLanguage(t) === null) t.assumedLanguageCode = want;
   }
 }

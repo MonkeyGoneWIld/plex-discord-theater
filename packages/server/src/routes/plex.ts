@@ -1297,9 +1297,10 @@ function rememberDuration(ratingKey: string, payload: Record<string, unknown>): 
  * offered a 4K file beside a lower copy (after it) and marked each version
  * `uhd`. 14 named each version's edition, from its file's name, in its label
  * and as `edition`: Project Hail Mary's 1.43 IMAX and IMAX 4K files were both
- * "4K · HEVC · 7.1".
+ * "4K · HEVC · 7.1". 15 gave an untagged audio track the title's original
+ * language as `assumedLanguageCode`, when no track has it.
  */
-export const META_PAYLOAD_VERSION = 14;
+export const META_PAYLOAD_VERSION = 15;
 
 /**
  * The subtitles the player is told it draws itself besides text: PGS and

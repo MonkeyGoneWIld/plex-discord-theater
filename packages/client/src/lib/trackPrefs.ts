@@ -299,6 +299,12 @@ function spokenIn(audio: StreamTrack, pref: TrackPref): boolean {
     ?? LANGUAGE_BY_NAME.get(normalizedText(pref.language))
     ?? null;
   if (named && wanted) return named === wanted;
+  // A track tagged with no language is taken to be in the one the title was
+  // made in, when the server knows it (see original-language on the server):
+  // unknown isn't another language.
+  if (!named && audio.assumedLanguageCode && !canonicalLanguageCode(audio.languageCode) && !normalizedText(audio.language)) {
+    return sameLanguage({ ...audio, languageCode: audio.assumedLanguageCode }, pref);
+  }
   return sameLanguage(audio, pref);
 }
 

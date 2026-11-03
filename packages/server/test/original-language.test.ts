@@ -44,5 +44,20 @@ check("nothing in that language marks nothing", none.map((t) => !!t.original), [
 markOriginalAudio(none, null);
 check("nor does no language", none.map((t) => !!t.original), [false]);
 
+console.log("\n— untagged audio —");
+const threeFromHell = [{ title: "Unknown (AAC Stereo)", languageCode: null }] as Array<{ title: string; languageCode: string | null; original?: boolean; assumedLanguageCode?: string }>;
+markOriginalAudio(threeFromHell, "en");
+check("3 from Hell's untagged track is taken to be in English, and isn't marked original",
+  threeFromHell.map((t) => [t.assumedLanguageCode ?? null, !!t.original]), [["en", false]]);
+const beside = [
+  { title: "Unknown (AAC Stereo)", languageCode: null },
+  { title: "English (AC3 5.1)", languageCode: "eng" },
+] as Array<{ title: string; languageCode: string | null; original?: boolean; assumedLanguageCode?: string }>;
+markOriginalAudio(beside, "en");
+check("not when another track is the original", beside.map((t) => t.assumedLanguageCode ?? null), [null, null]);
+const commentary = [{ title: "Commentary", languageCode: null }] as Array<{ title: string; languageCode: string | null; assumedLanguageCode?: string }>;
+markOriginalAudio(commentary, "en");
+check("nor for commentary", commentary.map((t) => t.assumedLanguageCode ?? null), [null]);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

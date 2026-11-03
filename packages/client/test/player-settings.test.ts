@@ -193,6 +193,14 @@ console.log("\n— subtitles only for foreign audio —");
     prefs.startingSubtitle(subs as never, prefs.loadSubtitlePref(), jpnAudio as never)?.id, 11);
   check("going by a track's title over its tag",
     prefs.startingSubtitle(subs as never, prefs.loadSubtitlePref(), mistagged as never)?.id, 11);
+  // 3 from Hell (2019): one untagged track, an English film.
+  const untagged = { id: 24, title: "Unknown (AAC Stereo)", language: null, languageCode: null, selected: false, assumedLanguageCode: "en" };
+  check("untagged audio in an English film gets none",
+    prefs.startingSubtitle(subs as never, prefs.loadSubtitlePref(), untagged as never), null);
+  check("untagged audio in a Japanese one gets English",
+    prefs.startingSubtitle(subs as never, prefs.loadSubtitlePref(), { ...untagged, assumedLanguageCode: "ja" } as never)?.id, 11);
+  check("and with nothing known about it, English as before",
+    prefs.startingSubtitle(subs as never, prefs.loadSubtitlePref(), { ...untagged, assumedLanguageCode: undefined } as never)?.id, 11);
   check("a new episode for a viewer follows it too",
     prefs.tracksForNewItem({ audioTracks: [engAudio, jpnAudio] as never, subtitleTracks: subs as never },
       { audio: { languageCode: "eng", language: "English" }, subtitle: prefs.loadSubtitlePref() },

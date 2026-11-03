@@ -39,10 +39,10 @@ const NO_AUDIO = {
 console.log("— what the server says about a stream —");
 check("a re-encode, with why and at what rate",
   readStreamNotes(sessionData({ video: "transcode", reason: "a picture subtitle is burned into it", kbps: "12000" })),
-  { video: "transcode", reason: "a picture subtitle is burned into it", kbps: 12000, quality: null, ...NO_AUDIO, engine: "plex" });
+  { video: "transcode", reason: "a picture subtitle is burned into it", kbps: 12000, quality: null, ...NO_AUDIO, engine: "plex", perScreen: false });
 check("a copy, with the file's own rate",
   readStreamNotes(sessionData({ video: "copy", kbps: "30660" })),
-  { video: "copy", reason: null, kbps: 30660, quality: null, ...NO_AUDIO, engine: "plex" });
+  { video: "copy", reason: null, kbps: 30660, quality: null, ...NO_AUDIO, engine: "plex", perScreen: false });
 check("a stream started under someone's quality setting says so",
   readStreamNotes(sessionData({ video: "transcode", kbps: "8000", quality: "8000" }))?.quality, 8000);
 check("nothing from a server that sends none", readStreamNotes(null), null);
@@ -61,7 +61,7 @@ const master = [
 ].join("\n");
 const parsed = M3U8Parser.parseMasterPlaylist(master, "http://localhost/master.m3u8");
 check("hls.js reads the server's notes out of the playlist intact",
-  readStreamNotes(parsed.sessionData), { video: "transcode", reason, kbps: 12000, quality: null, ...NO_AUDIO, engine: "plex" });
+  readStreamNotes(parsed.sessionData), { video: "transcode", reason, kbps: 12000, quality: null, ...NO_AUDIO, engine: "plex", perScreen: false });
 check("and still finds the stream in it", parsed.levels.length, 1);
 check("nor from notes it doesn't recognise", readStreamNotes(sessionData({ video: "maybe" })), null);
 check("a stream ffmpeg made says so", readStreamNotes(sessionData({ video: "copy", engine: "ffmpeg" }))?.engine, "ffmpeg");

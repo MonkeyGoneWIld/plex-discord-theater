@@ -280,6 +280,7 @@ console.log("\n— a host short of HEVC and E-AC3, viewers short of one (Rain Ma
 {
   newRoom("hevc-9");
   const host = await join("hevc-9", "u-host", "host", false);
+  const early = await join("hevc-9", "u-e", "e", true);
   // The host's start: HEVC re-encoded, E-AC3 made AAC, a copy being possible.
   const sid = crypto.randomUUID();
   recordSessionVideoCodec(sid, "h264");
@@ -289,6 +290,10 @@ console.log("\n— a host short of HEVC and E-AC3, viewers short of one (Rain Ma
     hlsSessionId: sid, position: 0, sessionOffset: 0,
     audioStreamId: 1, subtitleStreamId: 0,
   });
+  await sleep(60);
+  const eOn = early.seen.filter((m) => m.type === "variant").at(-1);
+  check("one who plays HEVC but not E-AC3, there at the start, gets a copy of its own", [eOn?.variantKey, eOn?.isOwner, eOn?.hlsSessionId], ["1:0", true, null]);
+  early.close();
   await sleep(60);
   const a = await join("hevc-9", "u-a", "a", true);
   await sleep(60);

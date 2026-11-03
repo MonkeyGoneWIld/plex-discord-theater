@@ -51,3 +51,25 @@ export function safeBackCutS(
   const cut = Math.min(wantS, limit);
   return cut > 0 ? cut : null;
 }
+
+/**
+ * Where a cut ahead of the playhead may start: the start of the first segment
+ * at or after `wantS`, so that only whole segments go, and fetched again
+ * they're appended as they were the first time. Null when no segment starts
+ * there, and nothing ahead can go.
+ *
+ * Cut part-way into one, the segment came back short. Snowden's x265 copy
+ * shows the first frames of each segment before its keyframe, and a cut at
+ * 2:06:06.54 on 2 November, ten seconds into what was buffered ahead of two
+ * minutes, left a twelfth of a second missing before that segment's keyframe
+ * once it was fetched again. Two minutes later the picture and sound stopped
+ * there and skipped it, as they had at 1:27:18 after the same.
+ */
+export function safeFrontCutS(
+  fragments: ReadonlyArray<FragmentSpan> | null | undefined,
+  wantS: number,
+): number | null {
+  if (!fragments) return null;
+  const first = fragments.find((f) => f.start >= wantS - 0.001);
+  return first ? first.start : null;
+}

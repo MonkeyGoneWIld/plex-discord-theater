@@ -19,7 +19,7 @@
 import { KEYFRAME_INTO_S, LAND_INTO_SEGMENT_S, MAX_KEYFRAME_WAIT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
-import { safeBackCutS } from "../src/lib/bufferTrim";
+import { safeBackCutS, safeFrontCutS } from "../src/lib/bufferTrim";
 import { roomPositionNow } from "../src/hooks/useSync";
 import { enoughToStart, nextSegmentInS, pictureAfterSeek, pictureStartFor } from "../src/lib/copyStart";
 import { AFTER_STOPS_S, MAX_EXTRA_WAIT_S, MAX_READY_CUSHION_AFTER_STOPS_S, MAX_READY_CUSHION_S, afterStopsS, comingInBytesPerS, lateByS, readiness } from "../src/lib/readyCushion";
@@ -104,6 +104,14 @@ check("just into the next segment, the one before is the limit", safeBackCutS(fr
 check("in the first segment, nothing behind can go", safeBackCutS(frags, 372, 371), null);
 check("in the second, up to the first", safeBackCutS(frags, 380, 379), 369.37);
 check("without segments, nothing", safeBackCutS(null, 393, 390), null);
+
+console.log("\n— a cut ahead of the playhead starts where a segment does —");
+// Snowden, 2 November: a cut at 7566.54, inside a segment, left a sliver
+// before its keyframe missing once it came back, and the picture stopped there.
+check("not part-way into a segment: from the next one", safeFrontCutS(frags, 388.63), 396.65);
+check("from a segment that starts there", safeFrontCutS(frags, 387.4), 387.4);
+check("past the last segment's start, nothing", safeFrontCutS(frags, 400), null);
+check("without segments, nothing", safeFrontCutS(null, 390), null);
 
 console.log("\n— what is arriving —");
 const samples: Array<[number, number]> = [[0, 1_000_000], [5_000, 2_000_000], [9_000, 1_000_000]];

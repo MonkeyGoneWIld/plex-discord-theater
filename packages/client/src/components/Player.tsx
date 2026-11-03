@@ -47,7 +47,7 @@ import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, JOIN_TOLERANCE_S, type HeldSegment } from "../lib/bufferAhead";
 import { arrivingKbps, backfillShare, backfillTitle, catchingUpTitle, loadingTitle } from "../lib/loadingMessage";
-import { safeBackCutS } from "../lib/bufferTrim";
+import { safeBackCutS, safeFrontCutS } from "../lib/bufferTrim";
 import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
 import { nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
@@ -869,6 +869,16 @@ function backCutS(hls: Hls, nowS: number, wantS: number): number | null {
 }
 
 /**
+ * Where a cut ahead of the playhead may start, at least `wantS`: on a
+ * segment's start, so only whole segments go — see lib/bufferTrim. Without
+ * the segments, `wantS`.
+ */
+function frontCutS(hls: Hls, wantS: number): number | null {
+  const fragments = levelFragments(hls);
+  return fragments ? safeFrontCutS(fragments, wantS) : wantS;
+}
+
+/**
  * Drop buffered media outside [currentTime − backS, currentTime +
  * FORWARD_BUFFER_S], returning what was trimmed.
  *
@@ -884,12 +894,13 @@ function trimMediaBuffer(hls: Hls, video: HTMLVideoElement, backS: number): Reco
   if (buffered.length === 0) return null;
   const now = video.currentTime;
   // This stream's back window — see backBufferFor — cut short of the segment
-  // before the one playing. The front one is always the full two minutes:
-  // whatever the browser has managed to buffer ahead inside it stays.
+  // before the one playing. The front one is always the full two minutes, cut
+  // where a segment starts: whatever the browser has managed to buffer ahead
+  // inside it stays.
   // Trimming it to a heavy stream's lowered target threw away twenty-five
   // seconds of picture at a time, which then had to be appended all over again.
   const backTarget = backCutS(hls, now, now - backS);
-  const frontTarget = now + FORWARD_BUFFER_FLUSH_S;
+  const frontWant = now + FORWARD_BUFFER_FLUSH_S;
   const start = buffered.start(0);
   const end = buffered.end(buffered.length - 1);
 
@@ -899,7 +910,8 @@ function trimMediaBuffer(hls: Hls, video: HTMLVideoElement, backS: number): Reco
     trimmed.backFromS = start;
     trimmed.backToS = backTarget;
   }
-  if (end > frontTarget + BUFFER_TRIM_SLACK_S) {
+  const frontTarget = end > frontWant + BUFFER_TRIM_SLACK_S ? frontCutS(hls, frontWant) : null;
+  if (frontTarget !== null && frontTarget < end) {
     hls.trigger(Hls.Events.BUFFER_FLUSHING, {
       startOffset: frontTarget,
       endOffset: Number.POSITIVE_INFINITY,
@@ -6551,8 +6563,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           const ranges = bufferedRanges(video.buffered);
           // A skip, not hls.js stepping over a gap a moment wide.
           if (ranges.length === 0 || ranges.some(([start, end]) => t >= start - 0.5 && t <= end + 0.5)) return;
-          const keepTo = t + SKIP_KEEP_AHEAD_S;
-          if (ranges[ranges.length - 1][1] > keepTo + BUFFER_TRIM_SLACK_S) {
+          // From a segment's start, as trimMediaBuffer cuts (lib/bufferTrim).
+          const keepTo = frontCutS(hls, t + SKIP_KEEP_AHEAD_S);
+          if (keepTo !== null && ranges[ranges.length - 1][1] > keepTo + BUFFER_TRIM_SLACK_S) {
             hls.trigger(Hls.Events.BUFFER_FLUSHING, { startOffset: keepTo, endOffset: Number.POSITIVE_INFINITY, type: null });
           }
           const behind = backCutS(hls, t, t - backWindowRef.current);

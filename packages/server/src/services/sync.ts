@@ -907,6 +907,9 @@ function withheldOf(v: Variant | undefined): PlayerCap[] {
 
 const lacksAny = (client: RoomClient, caps: readonly PlayerCap[]) => caps.some((c) => !client.caps[c]);
 
+/** What a stream needs of its players for its picture, rather than its sound. */
+const PICTURE_CAPS: ReadonlySet<PlayerCap> = new Set<PlayerCap>(["hevc", "av1", "tenBit", "hdr"]);
+
 /** For the log: why people on `from` were given another stream. */
 function whyMoved(from: Variant): string {
   return isH264Twin(from.key)
@@ -942,6 +945,14 @@ const plainKeyOf = (key: string) => {
  *
  * Only once a stream is known: one not yet running may well come up as what
  * everyone can play, and then everyone shares it.
+ *
+ * What a twin holds back is its picture, when that was re-encoded for want of
+ * something this player has: the sound of a copy is made for whoever brings it
+ * up. On 2 November waawee hosted Rain Man from Vesktop, short of HEVC and
+ * E-AC3, and monkey26, short of E-AC3 alone, watched the H.264 re-encode
+ * rather than a copy of their own with the sound made AAC, as theirs had been
+ * a minute before. Held back only sound, the twin holds it back from a player
+ * that decodes it, as before.
  */
 function seatOf(room: Room, client: RoomClient, key: string): string {
   const plain = plainKeyOf(key);
@@ -949,7 +960,8 @@ function seatOf(room: Room, client: RoomClient, key: string): string {
   const twin = room.state.variants.get(twinKey);
   const holdsBack = (s: Variant | undefined) => {
     const withheld = withheldOf(s);
-    return withheld.length > 0 && !lacksAny(client, withheld);
+    const picture = withheld.filter((c) => PICTURE_CAPS.has(c));
+    return withheld.length > 0 && !lacksAny(client, picture.length > 0 ? picture : withheld);
   };
   if (key === twinKey) return holdsBack(twin) ? plain : key;
   /** Short of `lacked` on the stream at `from`: one of their own, or the twin. */

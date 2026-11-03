@@ -276,6 +276,31 @@ console.log("\n— a host who can't decode HEVC starting an HEVC film —");
   [host, a, b, c].forEach((x) => x.close());
 }
 
+console.log("\n— a host short of HEVC and E-AC3, viewers short of one (Rain Man, 2 November) —");
+{
+  newRoom("hevc-9");
+  const host = await join("hevc-9", "u-host", "host", false);
+  // The host's start: HEVC re-encoded, E-AC3 made AAC, a copy being possible.
+  const sid = crypto.randomUUID();
+  recordSessionVideoCodec(sid, "h264");
+  recordWithheld(sid, ["hevc", "eac3"]);
+  host.send({
+    type: "play", ratingKey: "100", title: "A Film", subtitles: false,
+    hlsSessionId: sid, position: 0, sessionOffset: 0,
+    audioStreamId: 1, subtitleStreamId: 0,
+  });
+  await sleep(60);
+  const a = await join("hevc-9", "u-a", "a", true);
+  await sleep(60);
+  const aState = a.seen.find((m) => m.type === "state")?.variant;
+  check("one who plays HEVC but not E-AC3, joining, gets a copy of its own to bring up", [aState?.variantKey, aState?.isOwner, aState?.hlsSessionId], ["1:0", true, null]);
+  const b = await join("hevc-9", "u-b", "b", false, { eac3: true });
+  await sleep(60);
+  const bState = b.seen.find((m) => m.type === "state")?.variant;
+  check("one who plays E-AC3 but not HEVC shares the host's re-encode", [bState?.variantKey, bState?.hlsSessionId], ["1:0/h264", sid]);
+  [host, a, b].forEach((x) => x.close());
+}
+
 console.log("\n— a viewer moving from a player that can't decode HEVC to one that can —");
 {
   newRoom("hevc-8");

@@ -59,11 +59,11 @@ export function safeBackCutS(
  * there, and nothing ahead can go.
  *
  * Cut part-way into one, the segment came back short. Snowden's x265 copy
- * shows the first frames of each segment before its keyframe, and a cut at
- * 2:06:06.54 on 2 November, ten seconds into what was buffered ahead of two
- * minutes, left a twelfth of a second missing before that segment's keyframe
- * once it was fetched again. Two minutes later the picture and sound stopped
- * there and skipped it, as they had at 1:27:18 after the same.
+ * shows three frames of a segment before its keyframe, and on 2 November a
+ * cut two minutes ahead, at 2:06:06.54, a sixth of a second into the segment
+ * whose keyframe is at 2:06:06.37, took them; fetched again, the segment came
+ * back without them. Two minutes later the picture and sound stopped there
+ * and skipped the twelfth of a second, as they had at 1:27:18 after the same.
  */
 export function safeFrontCutS(
   fragments: ReadonlyArray<FragmentSpan> | null | undefined,

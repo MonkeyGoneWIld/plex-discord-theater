@@ -16,7 +16,7 @@
  * - A seek in front of a stream's first picture goes to it, and one waiting
  *   for its segment waits (lib/copyStart pictureAfterSeek).
  */
-import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, KEYFRAME_INTO_S, LAND_INTO_SEGMENT_S, MAX_KEYFRAME_WAIT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, waitsForRoom } from "../src/lib/roomWait";
+import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, KEYFRAME_INTO_S, LAND_INTO_SEGMENT_S, MAX_KEYFRAME_WAIT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../src/lib/bufferTrim";
@@ -188,6 +188,12 @@ console.log("\n— a follower going past the room lands where its segment has pi
   check("moved to the next segment: far enough in that hls.js calls off the one before",
     callsOffBefore(landingFor(27.167, copy4, Infinity), copy4[1]), true);
   check("and with one-second segments", callsOffBefore(landingFor(10.6, short, Infinity), short[0]), true);
+  // blah0391 on 4 November, back as host in a pop-out, pressed play before
+  // its picture came: the room went from 27:41 to 0, then to 20:40.
+  check("a page with no picture that has played nothing can't tell its place", heldNothingYet({ readyState: 0 }, 0), true);
+  check("…with its picture in, it can", heldNothingYet({ readyState: 2 }, 0), false);
+  check("…or having played somewhere", heldNothingYet({ readyState: 0 }, 1240.3), false);
+  check("…and with no element at all, it can't", heldNothingYet(null, 0), true);
   check("not past the limit", landingFor(27.167, copy4, 28), 27.167);
   check("in the last segment: where it was going", landingFor(35, copy4, Infinity), 35);
   check("outside the segments: where it was going", landingFor(50, copy4, Infinity), 50);

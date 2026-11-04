@@ -44,7 +44,7 @@ import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
 import { nudgedRate } from "../lib/softSync";
-import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, SLOW_SEEK_MS, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, firstGoLimitS, waitsForRoom } from "../lib/roomWait";
+import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, SLOW_SEEK_MS, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, firstGoLimitS, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, landingShortOfEnd, nextSegmentInS, pictureStartFor, pictureAfterSeek } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
@@ -2073,6 +2073,54 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    */
   const roomWaitRef = useRef<{ atS: number; roomAtS: number; since: number; guess?: boolean; pictureAt?: number } | null>(null);
   const [waitingForRoom, setWaitingForRoom] = useState(false);
+  /**
+   * A window the browser won't start with sound: Firefox's, popped out of
+   * Discord, before anything has been clicked in it. Its play() was refused,
+   * and the picture sat paused behind the loading screen, its buffer full,
+   * until play was pressed: on 4 November blah0391's pop-outs at 09:16:31 and
+   * 09:17:55 sat 51 and 15 s, where the same page back in Discord played at
+   * once. It starts without sound instead, which every browser allows, and the
+   * sound comes back with the first click or key in the window, which does
+   * nothing else.
+   */
+  const [soundHeldBack, setSoundHeldBack] = useState(false);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const play = HTMLMediaElement.prototype.play;
+    const startWithoutSound = function (this: HTMLMediaElement): Promise<void> {
+      return play.call(this).catch((err: unknown) => {
+        if ((err as { name?: string } | null)?.name !== "NotAllowedError" || this.muted) throw err;
+        logEvent("Video", "the browser won't start this window with sound: starting it without, until a click or key here", {});
+        this.muted = true;
+        setSoundHeldBack(true);
+        return play.call(this);
+      });
+    };
+    video.play = startWithoutSound;
+    return () => {
+      if (video.play === startWithoutSound) delete (video as unknown as { play?: unknown }).play;
+    };
+  }, []);
+  useEffect(() => {
+    if (!soundHeldBack) return;
+    const swallow = (e: Event) => { e.stopPropagation(); e.preventDefault(); };
+    const giveBack = (e: Event) => {
+      const video = videoRef.current;
+      if (video) video.muted = false;
+      setSoundHeldBack(false);
+      logEvent("Video", "sound on, with a click or key in the window", {});
+      // Only the sound: not a pause of the picture clicked, or of the room.
+      swallow(e);
+      if (e.type === "pointerdown") window.addEventListener("click", swallow, { capture: true, once: true });
+    };
+    window.addEventListener("pointerdown", giveBack, true);
+    window.addEventListener("keydown", giveBack, true);
+    return () => {
+      window.removeEventListener("pointerdown", giveBack, true);
+      window.removeEventListener("keydown", giveBack, true);
+    };
+  }, [soundHeldBack]);
   /** The backfill under way, for the loading screen — see the backfill
    *  effect: the stretch it fetches, `fromS` to `toS`; `reachedS`, how far
    *  back what is in goes; `partS`, the film in hand of the segment coming. */
@@ -2362,6 +2410,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const v = videoRef.current;
     // A seek in place is already where it is going, with or without frames.
     if (v?.seeking && v.readyState >= HTMLMediaElement.HAVE_METADATA) return v.currentTime;
+    // Nothing of this title played here yet — a page just opened, its stream
+    // still starting: the room's place, not the 0 this page has. On 4
+    // November blah0391, back as host in a pop-out, pressed play before its
+    // picture came, and the room went from 27:41 to 0 and then to 20:40, the
+    // start of its stream.
+    if (heldNothingYet(v, lastGoodPositionRef.current) && sync && sync.ratingKey === itemRef.current.ratingKey) {
+      return roomPositionNow(sync, Infinity);
+    }
     return positionForRoom();
   }, [isRestartPending, positionForRoom]);
   /**
@@ -9312,6 +9368,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         playsInline
         onClick={isPip ? undefined : togglePlayPause}
       />
+      {soundHeldBack && (
+        <div style={styles.soundHeldBack} role="status">
+          Sound is off: the browser didn't let this window start with it. Click anywhere to turn it on.
+        </div>
+      )}
 
       {isPip && !playbackEnded && (pipPhone || pipControlsVisible) && (
         <div style={styles.pipControls}>
@@ -9940,6 +10001,21 @@ const styles: Record<string, React.CSSProperties> = {
     // Invisible hit target: resizing remains available without painting the
     // diagonal grip over the video.
     background: "transparent",
+  },
+  soundHeldBack: {
+    position: "absolute",
+    top: 16,
+    left: "50%",
+    transform: "translateX(-50%)",
+    maxWidth: "calc(100% - 32px)",
+    padding: "8px 14px",
+    borderRadius: 8,
+    background: "rgba(0, 0, 0, 0.75)",
+    color: "#fff",
+    fontSize: 14,
+    textAlign: "center",
+    pointerEvents: "none",
+    zIndex: 30,
   },
   pipControls: {
     position: "absolute",

@@ -101,6 +101,16 @@ export function catchUpLeadS(lastSegmentMs: number | null): number {
   return Math.round(Math.min(20, Math.max(3, s)) * 10) / 10;
 }
 
+/**
+ * Whether a page has nothing of its title to tell its place by: no picture in
+ * the element (`readyState` under HAVE_CURRENT_DATA), and nothing played here
+ * (`lastGoodS`, the last place it played at, 0). A host's place is then the
+ * room's — see the player's hostPositionForRoom.
+ */
+export function heldNothingYet(video: { readyState: number } | null | undefined, lastGoodS: number): boolean {
+  return !(video && video.readyState >= 2) && !(lastGoodS > 0);
+}
+
 /** Less of its segment than this past a landing, and it is a sliver — see landingFor. */
 export const LAND_MIN_LEFT_S = 3;
 /**

@@ -46,7 +46,7 @@ Usage: node scripts/diagnose-ffmpeg.mjs <gpu|paths|file|rate|plex-visibility|all
   --out <dir>            Where reports and samples go (default /data/diagnose)
   --plex-url <url>       Overrides PLEX_URL.
   --plex-token <token>   Overrides PLEX_TOKEN.
-  --tonemap <name>       Tone mapping for H.264 re-encodes (default FFMPEG_TONEMAP or reinhard)
+  --tonemap <name>       Tone mapping for H.264 re-encodes (default FFMPEG_TONEMAP or mobius)
 
 paths
   --count <n>            Titles sampled per library (default 10)
@@ -115,8 +115,13 @@ const OUT_ROOT = path.resolve(args.out ?? (exists("/data") ? "/data/diagnose" : 
 const STAMP = new Date().toISOString().replace(/[:.]/g, "-");
 /** This script's own Plex client identifier, never the app's. */
 const DIAG_CLIENT = "pdt-diagnose-ffmpeg";
-/** The tone mapping the H.264 re-encodes use: reinhard looked closest to Plex's. */
-const TONEMAP = args.tonemap ?? process.env.FFMPEG_TONEMAP ?? "reinhard";
+/** The tone mapping the H.264 re-encodes use: the engine's (FFMPEG_TONEMAP, or
+ *  mobius — services/ffmpeg/config.ts tonemapAlgo). */
+const TONEMAP = args.tonemap ?? (process.env.FFMPEG_TONEMAP?.trim().toLowerCase() || "mobius");
+/** The re-encode bitrate and peak Plex is asked for, as the server asks
+ *  (routes/plex.ts): VIDEO_BITRATE_KBPS, and a peak of at least 33 Mbps. */
+const VIDEO_KBPS = Number(process.env.VIDEO_BITRATE_KBPS) > 0 ? Number(process.env.VIDEO_BITRATE_KBPS) : 20000;
+const PEAK_KBPS = Math.max(Number(process.env.VIDEO_PEAK_BITRATE_KBPS) > 0 ? Number(process.env.VIDEO_PEAK_BITRATE_KBPS) : 33000, VIDEO_KBPS);
 
 function needPlex() {
   if (!PLEX_URL || !PLEX_TOKEN) {
@@ -694,7 +699,7 @@ async function plexDecision(ratingKey, mediaIndex, offer) {
     params: {
       hasMDE: 1, path: `/library/metadata/${ratingKey}`, mediaIndex, partIndex: 0, protocol: "hls", fastSeek: 1,
       directPlay: 0, directStream: 1, directStreamAudio: 1, videoResolution: "1920x1080",
-      videoBitrate: copy ? 200000 : 12000, peakBitrate: copy ? 200000 : 20000, videoQuality: 99, autoAdjustQuality: 0,
+      videoBitrate: copy ? 200000 : VIDEO_KBPS, peakBitrate: copy ? 200000 : PEAK_KBPS, videoQuality: 99, autoAdjustQuality: 0,
       location: "lan", mediaBufferSize: 102400, secondsPerSegment: 3, subtitles: "none", transcodeSessionId: session,
     },
     headers: {

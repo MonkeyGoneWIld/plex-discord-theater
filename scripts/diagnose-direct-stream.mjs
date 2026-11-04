@@ -29,8 +29,9 @@
  * new enough Node or ffprobe on the host, run it in a throwaway container:
  *
  *   docker run --rm -it --network host -v "$PWD":/work -w /work node:22-alpine \
- *     sh -c "apk add --no-cache ffmpeg >/dev/null && node diagnose-direct-stream.mjs …" Run it from a machine on the
- * same network as Plex — remote fetches are throttled to real time. It uses its
+ *     sh -c "apk add --no-cache ffmpeg >/dev/null && node diagnose-direct-stream.mjs …"
+ *
+ * Run it from a machine on the same network as Plex — remote fetches are throttled to real time. It uses its
  * own client identifier, so it cannot disturb a room that is playing.
  *
  * Writes report.txt and report.json, plus the playlists and the segments around

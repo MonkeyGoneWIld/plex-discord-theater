@@ -147,6 +147,9 @@ check("at the end of the film, what is left is enough", enoughToStart(1, 1), tru
 // Dark Matter (173603), 4 November: Skip Credits to 2775.648, where the credits and the file end.
 check("a skip to the title's end lands a second short of it", landingShortOfEnd(2775.648, 2775.648), 2774.648);
 check("  and one past it, as 4,198 credits markers end", landingShortOfEnd(2780, 2775.648), 2774.648);
+// Run 29, A6: the room clock ran on 1.31 s while that skip loaded, and the
+// player landed on it, past the end. Where it lands after the rebuild is kept short too.
+check("  and so is where it lands after loading, the room's clock having run on", landingShortOfEnd(2774.648 + 1.31, 2775.648), 2774.648);
 check("  where it lands is enough to start on", enoughToStart(2775.648 - 2774.648, 2775.648 - 2774.648 - 0.25), true);
 check("a skip short of the end goes where it was asked", landingShortOfEnd(2714.083, 2775.648), 2714.083);
 check("with no end known, where it was asked", [landingShortOfEnd(2775.648, 0), landingShortOfEnd(2775.648, Infinity)], [2775.648, 2775.648]);

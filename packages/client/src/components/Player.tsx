@@ -5657,6 +5657,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
              */
             const following = (!isHostRef.current || hostCatchUpRef.current) && !(sessionOwner && !didAdoptRef.current) && !sync.hostWaiting;
             const leadS = following ? joinLeadS() : 0;
+            // Never past the title's end, where there is nothing to play and
+            // the picture waits for ever. The room's clock runs on while a
+            // skip to the end loads: Skip Credits on Dark Matter (run 29, A6,
+            // 4 November) went to 46:14.65, a second short of the end, and
+            // landed at 46:15.96 of 46:15.65 after 1.31 s of loading.
+            const endS = Math.min(runtimeRef.current, contentEndsAtRef.current ?? Infinity);
+            syncPos = landingShortOfEnd(syncPos, endS);
+            const landS = landingShortOfEnd(syncPos + leadS, endS);
             if (syncPos > DRIFT_THRESHOLD_S) {
               logEvent("Sync", "landing on the room clock after a rebuild", {
                 ...(leadS ? {
@@ -5680,13 +5688,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   : { joined: didAdoptRef.current ? "adopted" : "following" }),
                 role: isHostRef.current ? "host" : "viewer",
               });
-              video.currentTime = syncPos + leadS;
+              video.currentTime = landS;
               // Whatever is left is startup between here and the first frame,
               // which nothing can predict. Measured and closed once when frames
               // actually arrive — unless it is waited out ahead of the room.
               if (leadS) {
                 joinAheadOf = syncPos;
-                landingAhead = { atS: syncPos + leadS, roomAtS: syncPos, at: Date.now() };
+                landingAhead = { atS: landS, roomAtS: syncPos, at: Date.now() };
               } else joinSettleRef.current = true;
               // This player's own stream for a skip: on the next keyframe, if
               // where it lands leaves a sliver of its segment (skipLanding),

@@ -2647,6 +2647,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // broadcast, and seek to the room's current position on load like a viewer.
   const didAdoptRef = useRef(false);
   /**
+   * The stream this player drives, kept through a rebuild of its own for its
+   * screen leaving or entering HDR: the same stream, only its init asked for
+   * again. A new one put everybody on it, and nothing they had held carried
+   * over: on 4 November (F8) the host's screen went back to HDR and a viewer
+   * threw away 112 s of picture to load the same film again. One-shot.
+   */
+  const keepSessionForScreenRef = useRef<string | null>(null);
+  /**
    * Whether this player has started a stream since it mounted. A host's first
    * one, in a room playing on without it, is it taking the room over, and it
    * catches up with the room (hostCatchUpRef) — its later ones, a seek or a
@@ -3227,6 +3235,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       if (ownsSessionRef.current) {
         noteGoodPosition(video);
         seekOffsetRef.current = video.currentTime;
+        keepSessionForScreenRef.current = sessionIdRef.current;
       }
       holdFrameForSwitch();
       setRetryKey((k) => k + 1);
@@ -4517,7 +4526,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       });
     }
     let sessionId: string | null;
-    if (adoptSessionIdRef.current) {
+    // The one it drives, for this screen: see keepSessionForScreenRef.
+    const keptForScreen = keepSessionForScreenRef.current !== null && sessionOwner && !titleChanged
+      ? keepSessionForScreenRef.current : null;
+    keepSessionForScreenRef.current = null;
+    if (keptForScreen) {
+      sessionId = keptForScreen;
+      didAdoptRef.current = false;
+    } else if (adoptSessionIdRef.current) {
       // Adopt the live stream we were promoted into — reuse its transcode and
       // sync to the room position rather than restarting from the top. One-shot.
       sessionId = adoptSessionIdRef.current;
@@ -4705,7 +4721,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const urlFor = (burned: number, streamQuality: number) => hlsMasterUrl(item.ratingKey, sessionId, {
       quality: streamQuality,
       subtitles: burned !== 0,
-      offset: startOffset > 0 ? startOffset : undefined,
+      // Not for the stream kept for a new screen: the server serves that one as
+      // it is only when asked without one (routes/plex.ts, the master).
+      offset: startOffset > 0 && !keptForScreen ? startOffset : undefined,
       // The tracks this transcode is for. The server applies them to the item
       // under a lock immediately before starting, so two streams of the same
       // film can be brought up at once without stealing each other's selection.
@@ -4828,6 +4846,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
            */
           hlsConfig.startPosition = joining.position;
         }
+        // The stream kept for a new screen begins where its run began, long
+        // before the picture: loading starts at the picture instead.
+        if (keptForScreen && startOffset > 0) hlsConfig.startPosition = startOffset;
 
         let hls: Hls;
         /** This stream's P2P engine, in P2P mode. */
@@ -7126,7 +7147,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // stream of its own becomes an owner a moment before the host's stream
       // it was following is torn down here, and tried to stop it.
       const ownedThisSession = sessionOwner && ownsSessionRef.current;
-      if (!leavingPlayer && ownedThisSession && sessionIdRef.current && sessionRegisteredRef.current) {
+      if (sessionIdRef.current && keepSessionForScreenRef.current === sessionIdRef.current) {
+        logEvent("HLS", "effect cleanup keeping the session: the same stream, its init asked for again for this screen", {
+          session: sessionIdRef.current.substring(0, 8),
+        });
+        sessionIdRef.current = null;
+      } else if (!leavingPlayer && ownedThisSession && sessionIdRef.current && sessionRegisteredRef.current) {
         logEvent("HLS", "effect cleanup stopping session", {
           session: sessionIdRef.current.substring(0, 8),
           ...snapshot(videoRef.current),

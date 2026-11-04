@@ -4143,16 +4143,21 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   useEffect(() => {
     const v = variantRef.current;
     if (qualityCheckedFor !== item.ratingKey) return;
-    if (!v || v.ratingKey !== item.ratingKey || v.quality === quality) return;
+    // As it is now, not as this render had it: the effect above may have just
+    // taken the quality of the stream this player came back to, and the
+    // default it opened at would ask for that stream to be made again — what
+    // a page that keeps nothing (Firefox, run 29, C) opens at every time.
+    const want = preferredQuality();
+    if (!v || v.ratingKey !== item.ratingKey || v.quality === want) return;
     // The same copy at both qualities is no reason to reload the room for it.
     // Asked once the stream's notes say what it is.
-    if (!streamNotes || !qualityChangesStream(streamNotes, v.quality, quality)) return;
-    const key = `${v.variantKey}>${quality}`;
+    if (!streamNotes || !qualityChangesStream(streamNotes, v.quality, want)) return;
+    const key = `${v.variantKey}>${want}`;
     if (qualityAskedRef.current === key) return;
     qualityAskedRef.current = key;
     logEvent("Player", "asking for a stream at this quality", {
       from: v.variantKey,
-      quality: quality || "auto",
+      quality: want || "auto",
     });
     askedForTracksRef.current = true;
     syncActionsRef.current?.sendSetTracks(
@@ -4160,7 +4165,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       v.subtitleStreamId,
       // Drawn here unless it is the one the stream burns in.
       v.subtitleStreamId !== 0 && v.burnedSubtitleId === 0,
-      quality,
+      want,
     );
   }, [variant?.seq, quality, item.ratingKey, qualityCheckedFor, streamNotes]);
 

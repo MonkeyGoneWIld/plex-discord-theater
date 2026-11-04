@@ -1454,6 +1454,46 @@ console.log("\n— a viewer back from a pop-out is on their own stream again —
   [host, back, b].forEach((x) => x.close());
 }
 
+console.log("\n— the host back from a pop-out is on their own stream again —");
+{
+  // Run 29, C: blah0391, hosting Snowden on an 8 Mbps stream of their own with
+  // the viewer on another, popped out on Firefox, the old page going first.
+  // Their stream was stopped at the handover, and back 7 s later they were
+  // given a new one at the default quality.
+  const [host, a] = await room("inst-host-back", ["host", "a"]);
+  await startPlayback(host);
+  await ownStream(a);
+  host.send({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 0, drawn: false, quality: 8000 });
+  await sleep(60);
+  const sid = uuid();
+  host.send({ type: "variant-session", hlsSessionId: sid, sessionOffset: 0 });
+  await sleep(60);
+  check("the host is on a stream of its own", host.stream()?.key, "1:0@8000");
+  host.close();
+  await sleep(100);
+  const isHostIn = (c: Client, userId: string) =>
+    ((c.last("participants") ?? c.last("state"))?.participants as Array<{ userId: string; isHost: boolean }> | undefined)
+      ?.find((p) => p.userId === userId)?.isHost;
+  check("the viewer is host while they are away", isHostIn(a, "u-a"), true);
+  const back = new Client("u-host", "host");
+  await back.connect("inst-host-back");
+  await sleep(60);
+  const v = back.last("state")?.variant;
+  check("back, it lands on its own stream, still running", [v?.variantKey, v?.hlsSessionId], ["1:0@8000", sid]);
+  check("driving it, and told it is its own coming back", [v?.isOwner, v?.returning], [true, true]);
+  check("at the quality it was made at", v?.quality, 8000);
+  check("host again", isHostIn(back, "u-host"), true);
+  check("the viewer is still on theirs", a.stream()?.key, "2:0@8000");
+  // Discord for Windows: the page back opens before the old one has gone.
+  const again = new Client("u-host", "host");
+  await again.connect("inst-host-back");
+  await sleep(60);
+  const v2 = again.last("state")?.variant;
+  check("a page opened before the old one went lands on it too", [v2?.variantKey, v2?.hlsSessionId, v2?.returning], ["1:0@8000", sid, true]);
+  [again, a].forEach((x) => x.close());
+  await sleep(100);
+}
+
 console.log("\n— a viewer back from a dropped connection is on their own stream again —");
 {
   const [host, a] = await room("inst-back-blip", ["host", "a"]);

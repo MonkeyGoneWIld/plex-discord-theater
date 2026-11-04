@@ -511,6 +511,8 @@ interface OwnChoice {
   variantKey: string;
   subtitleStreamId: number;
   quality: number;
+  /** The host's stream, which is the room's too — see hostChoiceOf. */
+  host?: true;
 }
 
 interface AwayViewer extends OwnChoice {
@@ -1394,6 +1396,25 @@ function ownChoiceOf(room: Room, client: RoomClient): OwnChoice | null {
   };
 }
 
+/**
+ * What the host had, for them to come back to as a viewer does to theirs: the
+ * stream, the subtitle drawn over it and the quality it was made at. Run 29, C:
+ * blah0391, hosting Snowden on an 8 Mbps stream of their own, popped the
+ * activity out; their stream was stopped the moment the room was handed over,
+ * and back 7 s later they were given a new one at the default quality, their
+ * Firefox page having kept nothing of the one before (no storage there).
+ */
+function hostChoiceOf(room: Room, client: RoomClient): OwnChoice | null {
+  if (!client.isHost || !client.variantKey) return null;
+  return {
+    ratingKey: room.state.ratingKey,
+    variantKey: client.variantKey,
+    subtitleStreamId: client.subtitleStreamId,
+    quality: client.quality,
+    host: true,
+  };
+}
+
 /** Put a viewer back on their own choice, if its stream is still running for
  *  the same title. Whether they were. */
 function landOnOwnChoice(room: Room, client: RoomClient, choice: OwnChoice): boolean {
@@ -1637,7 +1658,7 @@ function positionForCommand(
  * pickSuccessor. The outgoing host's stream is the one to match, since that is
  * what the room is mostly on.
  */
-function handOverRoom(room: Room, roomId: string, leftVariantKey: string | null, leftName: string): void {
+function handOverRoom(room: Room, roomId: string, leftVariantKey: string | null, leftName: string, keepLeft = false): void {
   const newHost = pickSuccessor(room.clients, leftVariantKey)!;
   newHost.isHost = true;
   newHost.isCoHost = false;
@@ -1667,8 +1688,9 @@ function handOverRoom(room: Room, roomId: string, leftVariantKey: string | null,
     }
   }
   // The stream the outgoing host was driving, if they were the only one
-  // on it and it isn't the one inherited above, has nobody left.
-  if (leftVariantKey && leftVariantKey !== inheritedKey &&
+  // on it and it isn't the one inherited above, has nobody left — unless it
+  // is kept for them to come back to (hostChoiceOf), settled if they don't.
+  if (!keepLeft && leftVariantKey && leftVariantKey !== inheritedKey &&
       membersOf(room, leftVariantKey).length === 0) {
     destroyVariant(room, leftVariantKey);
   }
@@ -2066,7 +2088,7 @@ export function attachWebSocketServer(server: Server): void {
             // Before anything below forgets it. Dropped without the stream it
             // was on being settled, which kept a stream nobody was on running
             // until the room ended — now it is the stream they come back to.
-            choice = ownChoiceOf(room, existing);
+            choice = ownChoiceOf(room, existing) ?? hostChoiceOf(room, existing);
             existing.isHost = false; // prevent close handler from triggering host-left logic
             room.clients.delete(existing);
             existing.ws.close(1000, "Replaced by new connection");
@@ -2113,7 +2135,17 @@ export function attachWebSocketServer(server: Server): void {
         // Back to their own stream, if it is still running for this title.
         // Otherwise on the host's like anybody joining, and the one they left
         // goes as it would have when they left.
-        const returned = !isHost && choice !== null && landOnOwnChoice(room, client, choice);
+        // The host comes back to theirs as host, and the room's stream is
+        // theirs again, as it was before they went.
+        const returned = choice !== null && (!isHost || choice.host === true) && landOnOwnChoice(room, client, choice);
+        if (returned && isHost && client.variantKey && client.variantKey !== room.state.hostVariantKey) {
+          const own = room.state.variants.get(client.variantKey);
+          if (own) {
+            followHost(room, own);
+            room.state.hostSubtitleId = client.subtitleStreamId;
+            room.state.subtitles = client.subtitleStreamId !== 0;
+          }
+        }
         if (returned && choice) {
           logEvent("Sync", "a viewer came back to their own stream", {
             room: instanceId.substring(0, 8),
@@ -3198,6 +3230,8 @@ export function attachWebSocketServer(server: Server): void {
       // it is with it, even with nobody else on it — see holdAwayViewer.
       const choice = ownChoiceOf(room, closingClient);
       if (choice) holdAwayViewer(room, closingRoomId, closingClient, choice);
+      // The host's, kept the same way once the room is handed over below.
+      const hostChoice = choice ? null : hostChoiceOf(room, closingClient);
       // The stream they were watching may now be empty, or may have just lost
       // the client that was driving it. Done before succession so the successor
       // is chosen against an accurate picture of who is on what.
@@ -3233,7 +3267,8 @@ export function attachWebSocketServer(server: Server): void {
         persistProgress(room, closingClient.isWatching ? closingClient : undefined, "always");
 
         if (room.clients.size > 0) {
-          handOverRoom(room, closingRoomId, leftVariantKey, closingClient.username ?? closingClient.userId);
+          handOverRoom(room, closingRoomId, leftVariantKey, closingClient.username ?? closingClient.userId, hostChoice !== null);
+          if (hostChoice) holdAwayViewer(room, closingRoomId, closingClient, hostChoice);
         } else if (holdsWhenEmpty(room)) {
           holdEmptyRoom(room, closingRoomId, closingClient.username ?? closingClient.userId);
         } else {

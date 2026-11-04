@@ -4304,9 +4304,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     });
     // Hold the frame over the swap, as a track change does — only when the
     // ask below goes out (see the quality effect above), or the overlay would
-    // wait on a stream that never comes.
+    // wait on a stream that never comes: Rain Man and Snowden (run 29, A8
+    // retest), copies under 10 Mbps, sat a minute under "switching quality"
+    // with the sound going on, no new stream asked for (qualityChangesStream).
     const v = variantRef.current;
-    if (v && v.ratingKey === itemRef.current.ratingKey && v.quality !== kbps) beginSwitch("quality", false);
+    const notes = streamNotesRef.current;
+    if (v && v.ratingKey === itemRef.current.ratingKey && notes && qualityChangesStream(notes, v.quality, kbps)) {
+      beginSwitch("quality", false);
+    }
     const meta = itemMetaRef.current?.ratingKey === itemRef.current.ratingKey ? itemMetaRef.current : null;
     // Chosen for this title, so nothing is left to settle before asking — even
     // if its metadata never arrived to settle it.

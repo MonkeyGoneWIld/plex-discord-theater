@@ -27,10 +27,11 @@ import { loadVolume, saveVolume, VOLUME_CHOSEN_EVENT } from "../lib/volume";
 import { readSameLanguageAhead, readSubtitlesAhead } from "../lib/subtitleReadAhead";
 import {
   beginQualitySession,
-  endQualitySession,
+  carryQualityTo,
   lowerQualityFor,
   preferredQuality,
   qualityLabel,
+  endQualitySession,
   setPreferredQuality,
   usePreferredQuality,
 } from "../lib/quality";
@@ -1843,6 +1844,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // re-resolved without refetching (and without blanking the skip markers)
   // when the session's file turns out to be a different one.
   const [itemMeta, setItemMeta] = useState<PlexMeta | null>(null);
+  const itemMetaRef = useRef<PlexMeta | null>(null);
+  itemMetaRef.current = itemMeta;
   /**
    * How far this client's own subtitles are shifted, in milliseconds.
    *
@@ -4082,10 +4085,30 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * assignment, the burn-in has to be the one the server hears last.
    */
   const qualityAskedRef = useRef<string | null>(null);
-  // A player starts at the quality this viewer was watching at, if they are
+  // The show a title belongs to, for carrying a quality into its next episode.
+  const showOf = (meta: { grandparentRatingKey?: string } | null | undefined): string | null =>
+    meta?.grandparentRatingKey ?? null;
+  /**
+   * Whether this title keeps the quality chosen before it — see carryQualityTo.
+   * Settled once its metadata says what show it is from; until then nothing
+   * is asked for, so a stream at the wrong quality is never started and thrown
+   * away.
+   */
+  const [qualityCheckedFor, setQualityCheckedFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (itemMeta?.ratingKey !== item.ratingKey) return;
+    const before = preferredQuality();
+    const kept = carryQualityTo(item.ratingKey, showOf(itemMeta));
+    if (before !== kept) {
+      logEvent("Player", "quality back to Original for a different title", { from: before, ratingKey: item.ratingKey });
+    }
+    setQualityCheckedFor(item.ratingKey);
+  }, [itemMeta, item.ratingKey]);
+  // A player starts at the quality this viewer was watching at if they are
   // only just back — a pop-out, the Activity opened again — and otherwise at
-  // their default in Settings (lib/quality, SITTING_GAP_MS). Tracks carried
-  // past a language chosen in Settings end with the player.
+  // their default in Settings (lib/quality, SITTING_GAP_MS); either way only
+  // for the title it was chosen on and its show (carryQualityTo, above).
+  // Tracks carried past a language chosen in Settings end with the player.
   useEffect(() => {
     const before = preferredQuality();
     beginQualitySession();
@@ -4109,21 +4132,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       variant: v.variantKey,
       quality: v.quality || "Original",
     });
-    setPreferredQuality(v.quality);
+    setPreferredQuality(v.quality, { ratingKey: item.ratingKey, show: item.grandparentRatingKey ?? null });
   }, [variant?.seq, item.ratingKey]);
 
   useEffect(() => {
     const v = variantRef.current;
-    // As it is now, not as this render had it: on opening, the sitting's
-    // quality is put back in the effect above, after the render.
-    const want = preferredQuality();
-    if (!v || v.ratingKey !== item.ratingKey || v.quality === want) return;
-    const key = `${v.variantKey}>${want}`;
+    if (qualityCheckedFor !== item.ratingKey) return;
+    if (!v || v.ratingKey !== item.ratingKey || v.quality === quality) return;
+    const key = `${v.variantKey}>${quality}`;
     if (qualityAskedRef.current === key) return;
     qualityAskedRef.current = key;
     logEvent("Player", "asking for a stream at this quality", {
       from: v.variantKey,
-      quality: want || "auto",
+      quality: quality || "auto",
     });
     askedForTracksRef.current = true;
     syncActionsRef.current?.sendSetTracks(
@@ -4131,9 +4152,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       v.subtitleStreamId,
       // Drawn here unless it is the one the stream burns in.
       v.subtitleStreamId !== 0 && v.burnedSubtitleId === 0,
-      want,
+      quality,
     );
-  }, [variant?.seq, quality, item.ratingKey]);
+  }, [variant?.seq, quality, item.ratingKey, qualityCheckedFor]);
 
   /**
    * Notice a connection that can't keep up, and offer a lower quality.
@@ -4279,7 +4300,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // wait on a stream that never comes.
     const v = variantRef.current;
     if (v && v.ratingKey === itemRef.current.ratingKey && v.quality !== kbps) beginSwitch("quality", false);
-    setPreferredQuality(kbps);
+    const meta = itemMetaRef.current?.ratingKey === itemRef.current.ratingKey ? itemMetaRef.current : null;
+    // Chosen for this title, so nothing is left to settle before asking — even
+    // if its metadata never arrived to settle it.
+    setQualityCheckedFor(itemRef.current.ratingKey);
+    setPreferredQuality(kbps, {
+      ratingKey: itemRef.current.ratingKey,
+      show: showOf(meta) ?? itemRef.current.grandparentRatingKey ?? null,
+    });
   }, []);
 
   const burnAskedRef = useRef<string | null>(null);
@@ -4675,11 +4703,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
      * The ceiling this stream is made at: the assigned stream's own when this
      * client drives it, otherwise this viewer's choice — a host starting a
      * title, which has no assignment yet. A follower's URL starts nothing.
+     *
+     * A choice made on another title only carries to another episode of the
+     * same show (carryQualityTo), which takes its metadata to tell — nearly
+     * always cached by now.
      */
-    function qualityForStart(): number {
+    async function qualityForStart(): Promise<number> {
       const assigned = variantRef.current;
       if (assigned && assigned.ratingKey === item.ratingKey && assigned.isOwner) return assigned.quality;
-      return preferredQuality();
+      try {
+        return carryQualityTo(item.ratingKey, showOf(await fetchMeta(item.ratingKey)));
+      } catch {
+        return preferredQuality();
+      }
     }
     const urlFor = (burned: number, streamQuality: number) => hlsMasterUrl(item.ratingKey, sessionId, {
       quality: streamQuality,
@@ -4716,7 +4752,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       }
 
       const burned = await subtitleToBurn(item.ratingKey, chosenSubtitle);
-      const streamQuality = qualityForStart();
+      const streamQuality = await qualityForStart();
       if (!mounted) return;
       if (sessionOwner) {
         sessionBurnedRef.current = burned;

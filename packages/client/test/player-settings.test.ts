@@ -82,36 +82,42 @@ console.log("\n— what a player starts at —");
   const MIN = 60_000;
   quality.beginQualitySession(t0);
   check("a player starts at the default", quality.preferredQuality(), 8000);
-  quality.setPreferredQuality(20000);
+  quality.setPreferredQuality(20000, { ratingKey: "s1e1", show: "s1" });
   check("changing it while watching isn't saved as the default", quality.defaultQuality(), 8000);
+  check("but carries into the next episode", quality.carryQualityTo("s1e2", "s1"), 20000);
+  check("and something else starts at the default", quality.carryQualityTo("film", null), 8000);
+  quality.setPreferredQuality(0, { ratingKey: "s2e1", show: "s2" });
+  check("Original chosen over a lower default carries into the next episode too", quality.carryQualityTo("s2e2", "s2"), 0);
+  quality.setPreferredQuality(10000, { ratingKey: "rain-man", show: null });
   // Discord closes a page without it running anything: the player last said
   // it was open when the choice was made.
   quality.beginQualitySession(t0 + 45_000);
-  check("a page closed without a word, opened again, is where it was", quality.preferredQuality(), 20000);
+  check("a page closed without a word, opened again on the same film, is where it was",
+    [quality.preferredQuality(), quality.carryQualityTo("rain-man", null)], [10000, 10000]);
   quality.endQualitySession(t0 + MIN);
   check("with no player open, it is the default that shows", quality.preferredQuality(), 8000);
   // Part H, 4 November: a host and a viewer on 10 Mbps closed the Activity and
-  // opened it again, and popped it out, and came back at Original each time.
+  // opened it again, and came back at Original each time.
   quality.beginQualitySession(t0 + MIN + 30_000);
-  check("opened again 30 s later, it is where it was", quality.preferredQuality(), 20000);
+  check("opened again 30 s later on the same film, it is where it was", quality.carryQualityTo("rain-man", null), 10000);
   quality.endQualitySession(t0 + 2 * MIN);
-  quality.beginQualitySession(t0 + 22 * MIN);
-  check("and after 20 minutes away, for the next film", quality.preferredQuality(), 20000);
-  quality.setPreferredQuality(0);
-  quality.endQualitySession(t0 + 3 * 60 * MIN);
-  quality.beginQualitySession(t0 + 3 * 60 * MIN + 5_000);
-  check("Original chosen over a lower default is kept too", quality.preferredQuality(), 0);
-  quality.setPreferredQuality(12000);
+  quality.beginQualitySession(t0 + 2 * MIN + 10_000);
+  check("opened again on another film, it starts at the default", quality.carryQualityTo("snowden", null), 8000);
+  quality.setPreferredQuality(12000, { ratingKey: "s3e1", show: "s3" });
+  quality.endQualitySession(t0 + 3 * MIN);
+  quality.beginQualitySession(t0 + 23 * MIN);
+  check("20 minutes away, the next episode keeps it", quality.carryQualityTo("s3e2", "s3"), 12000);
   quality.endQualitySession(t0 + 4 * 60 * MIN);
   quality.beginQualitySession(t0 + 5 * 60 * MIN);
-  check("an hour away, it starts at the default again", quality.preferredQuality(), 8000);
-  quality.setPreferredQuality(12000);
+  check("an hour away, even the same show starts at the default", quality.carryQualityTo("s3e3", "s3"), 8000);
+  quality.setPreferredQuality(12000, { ratingKey: "s3e3", show: "s3" });
   quality.setDefaultQuality(4000);
   check("a default changed while a player is open doesn't restart it", quality.preferredQuality(), 12000);
   quality.endQualitySession(t0 + 6 * 60 * MIN);
   check("closing the player goes back to the default", quality.preferredQuality(), 4000);
   quality.beginQualitySession(t0 + 6 * 60 * MIN + 5_000);
-  check("a default chosen in Settings is where the next player starts, back soon or not", quality.preferredQuality(), 4000);
+  check("a default chosen in Settings is where the next player starts, back soon or not",
+    quality.carryQualityTo("s3e3", "s3"), 4000);
   quality.endQualitySession(t0 + 6 * 60 * MIN + 10_000);
 
   check("volume starts at half until one is chosen", volume.loadVolume(), 0.5);

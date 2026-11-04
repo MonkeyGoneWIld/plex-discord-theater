@@ -12,18 +12,18 @@ import { useSyncExternalStore } from "react";
  *
  * Two values. The default, chosen in Settings and saved on this device, is
  * where a viewer starts — Original unless someone on a slow connection has
- * said otherwise. A choice made while watching is the viewer's for the
- * sitting: through the next title, a pop-out, the Activity closed and opened
- * again. Away from the player for more than SITTING_GAP_MS, they start at the
- * default again: a connection that struggled one evening says nothing about
- * the next, and a ceiling nobody remembers setting quietly costs them picture
- * quality from then on.
+ * said otherwise. A choice made while watching lasts for the title it was
+ * made on and the other episodes of its show — the next episode is still the
+ * same evening with the same connection — and anything else starts at the
+ * default (carryQualityTo): a connection that struggled with one film says
+ * nothing about the next, and a ceiling nobody remembers setting quietly
+ * costs them picture quality from then on.
  *
- * Until 4 November a choice went with the player that made it, and only for
- * that title or show. In Part H a host and a viewer who had each chosen
- * 10 Mbps for Rain Man closed and opened the Activity five times in five
- * minutes, came back at Original every time, and chose 10 Mbps again; moving
- * on to Snowden, both were put back to Original and chose it again.
+ * It lasts through a pop-out, and the Activity closed and opened again, unless
+ * they were away from the player for more than SITTING_GAP_MS. Until
+ * 4 November it ended with the player: in Part H a host and a viewer who had
+ * each chosen 10 Mbps for Rain Man closed and opened the Activity five times
+ * in five minutes, came back at Original every time, and chose 10 Mbps again.
  */
 export const QUALITY_LEVELS_KBPS = [20000, 12000, 10000, 8000, 4000];
 
@@ -31,7 +31,8 @@ export const DEFAULT_QUALITY_KEY = "pdt:defaultQuality";
 
 /** Away from the player longer than this, a viewer starts at the default again. */
 export const SITTING_GAP_MS = 30 * 60 * 1000;
-/** Where the sitting's quality is kept, and when a player last had it open. */
+/** Where the sitting's quality is kept, what it was chosen on, and when a
+ *  player last had it open. */
 export const SITTING_QUALITY_KEY = "pdt:sittingQuality";
 /** How often an open player marks the sitting as still going: a page Discord
  *  closes runs nothing on its way out. */
@@ -55,10 +56,15 @@ let sittingUnder = 0;
 let markTimer: ReturnType<typeof setInterval> | null = null;
 
 let current = defaultQuality();
+/** Where the current ceiling was chosen: the title, and the show it is an
+ *  episode of (null for a film). */
+type ChosenFor = { ratingKey: string; show: string | null };
+let chosenFor: ChosenFor | null = null;
 const listeners = new Set<() => void>();
 
-function set(kbps: number): void {
+function set(kbps: number, where: ChosenFor | null): void {
   const next = QUALITY_LEVELS_KBPS.includes(kbps) ? kbps : 0;
+  chosenFor = where;
   if (next === current) return;
   current = next;
   for (const fn of listeners) fn();
@@ -67,21 +73,27 @@ function set(kbps: number): void {
 /** The sitting's quality as of `now`, a player open with it. */
 function markSitting(now = Date.now()): void {
   try {
-    localStorage.setItem(SITTING_QUALITY_KEY, JSON.stringify({ kbps: current, at: now, under: sittingUnder }));
+    localStorage.setItem(SITTING_QUALITY_KEY, JSON.stringify({ kbps: current, chosenFor, at: now, under: sittingUnder }));
   } catch {
     // Storage unavailable: it lasts as long as the page does.
   }
 }
 
-/** The quality of a sitting still going at `now`, if there is one. */
-function sittingQuality(now: number, under: number): number | null {
+/** The quality of a sitting still going at `now`, and what it was chosen on,
+ *  if there is one. */
+function sittingQuality(now: number, under: number): { kbps: number; chosenFor: ChosenFor | null } | null {
   try {
     const s = JSON.parse(localStorage.getItem(SITTING_QUALITY_KEY) ?? "null") as
-      { kbps?: unknown; at?: unknown; under?: unknown } | null;
+      { kbps?: unknown; chosenFor?: unknown; at?: unknown; under?: unknown } | null;
     if (!s || typeof s.kbps !== "number" || typeof s.at !== "number" || s.under !== under) return null;
     // A minute's grace the other way, for a clock set back since.
     const away = now - s.at;
-    return away > -60_000 && away <= SITTING_GAP_MS ? s.kbps : null;
+    if (!(away > -60_000 && away <= SITTING_GAP_MS)) return null;
+    const c = s.chosenFor as Partial<ChosenFor> | null | undefined;
+    const where = c && typeof c.ratingKey === "string"
+      ? { ratingKey: c.ratingKey, show: typeof c.show === "string" ? c.show : null }
+      : null;
+    return { kbps: s.kbps, chosenFor: where };
   } catch {
     return null;
   }
@@ -91,9 +103,12 @@ export function preferredQuality(): number {
   return current;
 }
 
-/** Choose a ceiling while watching: this viewer's for the sitting. */
-export function setPreferredQuality(kbps: number): void {
-  set(kbps);
+/**
+ * Choose a ceiling, watching `where` — what decides whether it carries into the
+ * next title (carryQualityTo).
+ */
+export function setPreferredQuality(kbps: number, where: ChosenFor | null = chosenFor): void {
+  set(kbps, where);
   if (playerOpen) markSitting();
 }
 
@@ -107,15 +122,17 @@ export function setDefaultQuality(kbps: number): void {
   } catch {
     // Storage unavailable: it lasts as long as the page does.
   }
-  if (!playerOpen) set(level);
+  if (!playerOpen) set(level, null);
 }
 
 /** A player opened at `now`: at the sitting's quality if this viewer is only
- *  just back, otherwise at the default. */
+ *  just back, otherwise at the default. Whether it carries into the title the
+ *  player opens on is carryQualityTo's to say, as for any title. */
 export function beginQualitySession(now = Date.now()): void {
   playerOpen = true;
   const fallback = defaultQuality();
-  set(sittingQuality(now, fallback) ?? fallback);
+  const back = sittingQuality(now, fallback);
+  set(back?.kbps ?? fallback, back?.chosenFor ?? null);
   sittingUnder = fallback;
   markSitting(now);
   if (markTimer) clearInterval(markTimer);
@@ -129,7 +146,28 @@ export function endQualitySession(now = Date.now()): void {
   markTimer = null;
   if (playerOpen) markSitting(now);
   playerOpen = false;
-  set(defaultQuality());
+  set(defaultQuality(), null);
+}
+
+/**
+ * The ceiling for a title starting in a player that is already open.
+ *
+ * Kept for the title it was chosen on and for other episodes of the same show —
+ * moving on to the next one is still the same evening with the same connection.
+ * Anything else is a fresh start, and starts at the default. Returns what
+ * applies.
+ */
+export function carryQualityTo(ratingKey: string, show: string | null): number {
+  if (!chosenFor) return current;
+  if (chosenFor.ratingKey === ratingKey) return current;
+  if (show !== null && chosenFor.show === show) {
+    chosenFor = { ratingKey, show };
+    if (playerOpen) markSitting();
+    return current;
+  }
+  set(defaultQuality(), null);
+  if (playerOpen) markSitting();
+  return current;
 }
 
 function subscribe(fn: () => void): () => void {

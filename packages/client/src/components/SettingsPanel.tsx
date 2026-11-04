@@ -178,7 +178,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
           </button>
         </div>
         <p style={styles.intro}>
-          What every stream starts with for you. Quality changed while watching stays with you through pop-outs, short breaks and the next title, until you've been away from the player for half an hour.
+          What every stream starts with for you. Quality changed while watching lasts for that title and the next episodes of its show, through pop-outs and short breaks, unless you've been away from the player for half an hour.
         </p>
 
         <section style={styles.section}>

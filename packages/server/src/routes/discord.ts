@@ -393,9 +393,12 @@ router.post("/register", (req: Request, res: Response) => {
     if (existingInstanceId && existing && existingInstanceId !== instanceId) {
       const sameGuild = (existing.guildId ?? "") === normalizedGuildId;
       // A DM instance has no guild to check against, so fall back to identity:
-      // only its own host may displace it.
+      // only its own host may displace it. A session whose guild list couldn't
+      // be read proves nothing — and one can be had on purpose, by authorizing
+      // without the guilds scope. Left alone, the old registration only waits
+      // for pruneStaleInstances; the new one is registered either way.
       const mayEvict = existing.guildId
-        ? sameGuild && (guildIsVerified || verifiedGuildIds === null)
+        ? sameGuild && guildIsVerified
         : existing.hostUserId === userId;
       if (mayEvict) {
         deleteInstanceStmt.run(existingInstanceId);

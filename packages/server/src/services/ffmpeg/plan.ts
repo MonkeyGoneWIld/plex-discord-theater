@@ -413,6 +413,10 @@ export function convertedAudio(audio: SourceStream, channels: number | undefined
  */
 export const COPY_CLOCK_OFFSET_S = 10;
 
+/** How long a copy's segments are, seconds: at least this, to the next keyframe.
+ *  The engine cuts one much longer into pieces about this long (split-segment.ts). */
+export const COPY_SEGMENT_S = 4;
+
 /** Where ffmpeg reads the file from: the mount, or Plex with the token in a header. */
 export function inputArgs(source: { local: string } | { url: string; token: string }): string[] {
   return "local" in source
@@ -447,7 +451,7 @@ export function copyArgs(
   input: string[],
   offsetS: number,
   durationS: number | null = null,
-  segmentSeconds = 4,
+  segmentSeconds = COPY_SEGMENT_S,
   toS: number | null = null,
 ): string[] {
   return [

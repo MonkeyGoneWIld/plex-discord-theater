@@ -53,7 +53,8 @@ import { ffmpegPath, lookaheadS, maxEncodes } from "./config.js";
 import { cpuUse, gpuUse, readUse, sampleGpu, type GpuSample } from "./gpu-use.js";
 import { dropHot, hotSegment, keepHot } from "./hot-segments.js";
 import { labelInitForHdr, labelInitForSdr, type HdrMeta } from "./hdr-init.js";
-import { COPY_CLOCK_OFFSET_S } from "./plan.js";
+import { COPY_CLOCK_OFFSET_S, COPY_SEGMENT_S } from "./plan.js";
+import { splitSegment } from "./split-segment.js";
 
 /** How far past the watcher a run is when its speed is logged, unless
  *  FFMPEG_LOOKAHEAD pauses it before. */
@@ -422,6 +423,59 @@ function spanOf(data: Buffer, init: Init | null): { start: number; end: number; 
   return span ? { ...span, listFrom: span.alignStart } : null;
 }
 
+type Span = NonNullable<ReturnType<typeof spanOf>>;
+
+/** A segment as listed, in film time: its span on the run's clock less `clockOffset`. */
+function segmentOf(servedAs: string, file: string, bytes: number, span: Span, clockOffset: number, init: Init | null): Segment {
+  const videoStart = span.start - clockOffset;
+  const audioStart = span.audioStart === null ? null : span.audioStart - clockOffset;
+  return {
+    path: servedAs,
+    file,
+    start: span.listFrom !== null ? span.listFrom - clockOffset
+      : audioStart === null ? videoStart : Math.min(videoStart, audioStart),
+    end: span.end - clockOffset,
+    videoStart,
+    audioStart,
+    bytes,
+    init,
+  };
+}
+
+/** A piece's name after its segment's: 00004aa.m4s, 00004ab.m4s… */
+const pieceName = (i: number) => String.fromCharCode(97 + Math.floor(i / 26) % 26, 97 + (i % 26));
+
+/**
+ * A copy's segment too long to list whole, cut into pieces (split-segment.ts),
+ * each written beside it; or the segment itself. With `notBeforeS` (on the
+ * run's clock), no cut before there.
+ */
+async function piecesOf(
+  run: Run, name: string, file: string, data: Buffer, init: Init | null, notBeforeS?: number,
+): Promise<Array<{ name: string; file: string; data: Buffer }>> {
+  const whole = [{ name, file, data }];
+  if (run.encode) return whole;
+  const pieces = splitSegment(data, init?.tracks ?? null, { pieceS: COPY_SEGMENT_S, notBeforeS });
+  if (!pieces) return whole;
+  const ext = path.extname(name);
+  const out = pieces.map((piece, i) => {
+    const pieceAs = `${path.basename(name, ext)}${pieceName(i)}${ext}`;
+    return { name: pieceAs, file: path.join(path.dirname(file), pieceAs), data: piece };
+  });
+  try {
+    await Promise.all(out.map((p) => fs.promises.writeFile(p.file, p.data)));
+  } catch {
+    return whole;
+  }
+  fs.promises.unlink(file).catch(() => {});
+  const span = spanOf(data, init);
+  logEvent("FFmpeg", "a segment too long to list whole, cut into pieces", {
+    session: short(run.sessionId), segment: path.basename(name), lengthS: span ? round3(span.end - span.start) : "?",
+    MB: round3(data.length / 1e6), pieces: pieces.length,
+  });
+  return out;
+}
+
 /** One segment ffmpeg has finished: measured, and listed. */
 async function measure(run: Run, name: string): Promise<void> {
   if (run.stopped || run.failed) return;
@@ -444,6 +498,7 @@ async function measure(run: Run, name: string): Promise<void> {
     logEvent("FFmpeg", "a segment had no video in it", { session: short(run.sessionId), segment: name, bytes: data.length });
     return;
   }
+  const first = run.clockOffset === null;
   if (run.clockOffset === null) {
     // The segments carry the film's own time plus COPY_CLOCK_OFFSET_S (plan.ts).
     // The first one opens on the keyframe at or before where the run was asked
@@ -468,22 +523,19 @@ async function measure(run: Run, name: string): Promise<void> {
       return;
     }
   }
-  const videoStart = span.start - run.clockOffset;
-  const audioStart = span.audioStart === null ? null : span.audioStart - run.clockOffset;
-  const seg: Segment = {
-    path: `${run.baseDir}${path.basename(name)}`,
-    file,
-    start: span.listFrom !== null ? span.listFrom - run.clockOffset
-      : audioStart === null ? videoStart : Math.min(videoStart, audioStart),
-    end: span.end - run.clockOffset,
-    videoStart,
-    audioStart,
-    bytes: data.length,
-    init: run.init,
-  };
-  run.segments.push(seg);
-  run.byPath.set(seg.path, seg);
-  keepHot(file, data);
+  // The run's first opens on the keyframe before where the player starts:
+  // the piece the player starts in keeps it, a second past there.
+  const clockOffset = run.clockOffset;
+  const pieces = await piecesOf(run, name, file, data, run.init, first ? run.offsetS + clockOffset + 1 : undefined);
+  if (run.stopped || run.failed) return;
+  for (const piece of pieces) {
+    const pieceSpan = piece.data === data ? span : spanOf(piece.data, run.init);
+    if (!pieceSpan) continue;
+    const seg = segmentOf(`${run.baseDir}${path.basename(piece.name)}`, piece.file, piece.data.length, pieceSpan, clockOffset, run.init);
+    run.segments.push(seg);
+    run.byPath.set(seg.path, seg);
+    keepHot(piece.file, piece.data);
+  }
   throttle(run);
   notify(run);
 }
@@ -656,21 +708,14 @@ async function measureBefore(run: Run, b: Before, name: string): Promise<void> {
     const filmStart = span.start - COPY_CLOCK_OFFSET_S;
     b.clockOffset = filmStart <= 1 && filmStart >= -30 ? COPY_CLOCK_OFFSET_S : span.start;
   }
-  const videoStart = span.start - b.clockOffset;
   // The run has that already.
-  if (videoStart >= b.toS - 0.001) return;
-  const audioStart = span.audioStart === null ? null : span.audioStart - b.clockOffset;
-  b.segments.push({
-    path: `${run.baseDir}b${path.basename(name)}`,
-    file,
-    start: span.listFrom !== null ? span.listFrom - b.clockOffset
-      : audioStart === null ? videoStart : Math.min(videoStart, audioStart),
-    end: span.end - b.clockOffset,
-    videoStart,
-    audioStart,
-    bytes: data.length,
-    init: b.init,
-  });
+  if (span.start - b.clockOffset >= b.toS - 0.001) return;
+  const clockOffset = b.clockOffset;
+  for (const piece of await piecesOf(run, name, file, data, b.init)) {
+    const pieceSpan = piece.data === data ? span : spanOf(piece.data, b.init);
+    if (!pieceSpan || pieceSpan.start - clockOffset >= b.toS - 0.001) continue;
+    b.segments.push(segmentOf(`${run.baseDir}b${path.basename(piece.name)}`, piece.file, piece.data.length, pieceSpan, clockOffset, b.init));
+  }
 }
 
 /**

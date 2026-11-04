@@ -12,7 +12,9 @@
  *
  * Every segment starts on a keyframe, so the start of the segment before the
  * one playing is always safe to cut to: the next keyframe after it is, at the
- * latest, the start of the segment playing.
+ * latest, the start of the segment playing. A copy's long segment comes in
+ * pieces of which only the first opens on a keyframe, so the player passes
+ * keyframe groups here, not the pieces (lib/keyframeGroups).
  */
 
 export interface FragmentSpan {

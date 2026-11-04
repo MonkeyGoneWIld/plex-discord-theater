@@ -14,6 +14,7 @@
  * the one needed, and the slack is the 0.3 s the rest of the player allows
  * for the same difference.
  */
+import { opensOnKeyframe } from "./keyframeGroups";
 
 /** How far past what is held a segment may end and still count as held. */
 export const NEXT_NEEDED_SLACK_S = 0.3;
@@ -25,11 +26,24 @@ export interface ListedSegment {
   gap?: boolean;
 }
 
-/** The URL of the first of `segments` not held up to `heldToS`, and not among those `held` by the engine. */
+/**
+ * The URL of the first of `segments` not held up to `heldToS`, and not among
+ * those `held` by the engine. For a piece of a copy's long segment that
+ * doesn't open on a keyframe, the first piece before it in its group that is
+ * neither `held` nor `buffered`: hls.js loads from there (lib/keyframeGroups).
+ */
 export function nextNeededSegment(
   segments: ReadonlyArray<ListedSegment>,
   heldToS: number,
   held: { has(url: string): boolean },
+  buffered: (segment: ListedSegment) => boolean = () => false,
 ): string | null {
-  return segments.find((s) => !s.gap && !(s.url && held.has(s.url)) && s.start + s.duration > heldToS + NEXT_NEEDED_SLACK_S)?.url ?? null;
+  let i = segments.findIndex((s) => !s.gap && !(s.url && held.has(s.url)) && s.start + s.duration > heldToS + NEXT_NEEDED_SLACK_S);
+  if (i < 0) return null;
+  while (i > 0 && !opensOnKeyframe(segments[i].url)) {
+    const before = segments[i - 1];
+    if (before.gap || (before.url && held.has(before.url)) || buffered(before)) break;
+    i--;
+  }
+  return segments[i].url ?? null;
 }

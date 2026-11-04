@@ -52,7 +52,8 @@ import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, JOIN_TOLERANC
 import { arrivingKbps, backfillShare, backfillTitle, catchingUpTitle, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../lib/bufferTrim";
 import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
-import { nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
+import { NEXT_NEEDED_SLACK_S, nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
+import { guardPieceLoads, keyframeGroups, leadInBytes, opensOnKeyframe } from "../lib/keyframeGroups";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
 import { installTakeFromPeer } from "../lib/takeFromPeer";
 import { peerIdPrefix } from "../lib/peerSpeeds";
@@ -818,29 +819,42 @@ function levelFragments(hls: Hls): Array<{ start: number; duration: number; gap?
  * day, 2.85 s before a keyframe, and the room waited 7.4 s for a second
  * 13 MB segment.
  */
-function skipLanding(atS: number, fragments: ReadonlyArray<{ start: number; duration: number; gap?: boolean }> | null): number {
-  const listed = fragments?.filter((f) => !f.gap) ?? [];
+function skipLanding(atS: number, fragments: ReadonlyArray<{ start: number; duration: number; url?: string; gap?: boolean }> | null): number {
+  // By keyframe groups: a copy's long segment comes in pieces (lib/keyframeGroups).
+  const listed = keyframeGroups(fragments)?.filter((f) => !f.gap) ?? [];
   const last = listed[listed.length - 1];
   return last ? landingFor(atS, listed, last.start + last.duration - 1) : atS;
 }
 
-/** Segments with the sizes a copy's playlist gives them (n=), for lib/roomWait's landingBySize. */
+/**
+ * Segments with the sizes a copy's playlist gives them (n=), for lib/roomWait's
+ * landingBySize: those in the browser's cache marked `cached`, and each piece of
+ * a copy's long segment with the pieces before it that have to come first.
+ */
 function sizedSegments(
   fragments: ReadonlyArray<{ start: number; duration: number; url?: string }> | null,
-): Array<{ start: number; duration: number; bytes: number | null }> | null {
-  return fragments ? fragments.map((f) => ({ start: f.start, duration: f.duration, bytes: segmentBytesOf(f.url ?? "") })) : null;
+  cached?: ReadonlySet<number>,
+): Array<{ start: number; duration: number; bytes: number | null; cached?: boolean; leadInBytes: number | null }> | null {
+  if (!fragments) return null;
+  const sized = fragments.map((f, k) => ({
+    start: f.start, duration: f.duration, url: f.url, bytes: segmentBytesOf(f.url ?? ""), ...(cached?.has(k) ? { cached: true } : {}),
+  }));
+  const leadIn = leadInBytes(sized);
+  return sized.map(({ url: _url, ...s }, k) => ({ ...s, leadInBytes: leadIn[k] }));
 }
 
 /**
  * Where a cut behind the playhead may end, at most `wantS`: never into the
  * segment before the one playing, since Chrome carries every cut on to the
- * next keyframe — see lib/bufferTrim. Without the segments, half a minute
- * back, which clears the longest gap between keyframes there is.
+ * next keyframe — see lib/bufferTrim. A copy's long segment comes in pieces,
+ * and only the first of each opens on a keyframe, so it goes by keyframe
+ * groups (lib/keyframeGroups). Without the segments, half a minute back,
+ * which clears the longest gap between keyframes there is.
  */
 function backCutS(hls: Hls, nowS: number, wantS: number): number | null {
   const fragments = levelFragments(hls);
   if (!fragments) return Math.min(wantS, nowS - BACK_BUFFER_S);
-  return safeBackCutS(fragments, nowS, wantS);
+  return safeBackCutS(keyframeGroups(fragments), nowS, wantS);
 }
 
 
@@ -881,12 +895,14 @@ function trimMediaBuffer(hls: Hls, video: HTMLVideoElement, backS: number): Reco
 /**
  * Pull the integer segment index out of an HLS segment URL — Plex/VPS segments
  * end in `00179.ts` (optionally `media-00179.ts`, optionally `?query`), the
- * ffmpeg engine's fMP4 ones in `00179.m4s`. Returns -1 when the shape is
- * unfamiliar, so callers can log "unknown" rather than NaN.
+ * ffmpeg engine's fMP4 ones in `00179.m4s`, and the pieces it cuts a long one
+ * into in `00179aa.m4s`, `00179ab.m4s`…, each read as the segment's number.
+ * Returns -1 when the shape is unfamiliar, so callers can log "unknown"
+ * rather than NaN.
  */
 function segIndexFromUrl(url: string | undefined | null): number {
   if (!url) return -1;
-  const m = url.match(/(\d+)\.(?:ts|m4s)(?:[?#&]|$)/);
+  const m = url.match(/(\d+)(?:[a-z]{2})?\.(?:ts|m4s)(?:[?#&]|$)/);
   return m ? parseInt(m[1], 10) : -1;
 }
 
@@ -3412,7 +3428,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           const frags = hlsRef.current ? levelFragments(hlsRef.current) : null;
           const limitS = Math.min(end - 1, roomS + MAX_WAIT_FOR_ROOM_S - 5);
           // Far enough for what it lands in to come first — lib/roomWait landingBySize.
-          const landS = landingFor(landingBySize(roomS + leadS, roomS, sizedSegments(frags), landingSpeed(), limitS), frags, limitS);
+          const landS = landingFor(landingBySize(roomS + leadS, roomS, sizedSegments(frags), landingSpeed(), limitS), keyframeGroups(frags), limitS);
           logEvent("Sync", "catching up: behind the room, going past it to wait there", {
             offS: Number(offS.toFixed(2)), leadS, toS: Number(landS.toFixed(2)), ...snapshot(v),
           });
@@ -3564,7 +3580,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const frags = hlsRef.current ? levelFragments(hlsRef.current) : null;
     const allS = Math.min(end - 1, roomS + MAX_WAIT_FOR_ROOM_S - 5);
     const limitS = fresh ? firstGoLimitS(allS, roomS) : allS;
-    return landingFor(landingBySize(roomS + leadS, roomS, sizedSegments(frags), landingSpeed(again), limitS, fresh), frags, limitS);
+    return landingFor(landingBySize(roomS + leadS, roomS, sizedSegments(frags), landingSpeed(again), limitS, fresh), keyframeGroups(frags), limitS);
   }, [landingSpeed]);
 
   /**
@@ -3603,7 +3619,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       const under = heldSeekRef.current;
       const inFlightMs = v.seeking && under ? performance.now() - under.at : 0;
       const keyS = behind && hlsRef.current && seeksSlow(seeksMs(), inFlightMs)
-        ? keyframeLanding(roomS, levelFragments(hlsRef.current))
+        ? keyframeLanding(roomS, keyframeGroups(levelFragments(hlsRef.current)))
         : null;
       const onKey = keyS !== null && enoughHeldAt(v, keyS);
       const leadS = behind && !onKey ? seekLeadS(seeksMs()) : 0;
@@ -3781,7 +3797,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // pictureAfterSeek. Paused, held or playing alike; nothing else steps a
       // seek.
       const pictureAt = v && v.seeking && v.readyState < HTMLMediaElement.HAVE_FUTURE_DATA
-        ? pictureAfterSeek(v.currentTime, bufferedRanges(v.buffered), hlsRef.current ? levelFragments(hlsRef.current) : null, MAX_HOLE_JUMP_S)
+        ? pictureAfterSeek(v.currentTime, bufferedRanges(v.buffered), hlsRef.current ? keyframeGroups(levelFragments(hlsRef.current)) : null, MAX_HOLE_JUMP_S)
         : null;
       if (pictureAt === null) { seekInFrontSince = 0; if (!v?.seeking) seekInFrontSteps = 0; }
       else if (!seekInFrontSince) seekInFrontSince = Date.now();
@@ -4955,7 +4971,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           if ((hlsRef.current as unknown) !== hls || video.readyState < HTMLMediaElement.HAVE_METADATA) return null;
           const frags = levelFragments(hls) as ListedSegment[] | null;
           if (!frags?.length) return null;
-          return nextNeededSegment(frags, video.currentTime + heldFromS(video.currentTime), engineHeldRef.current);
+          // A piece of a copy's long segment comes after the ones before it in
+          // its group, those not in the browser's buffer (lib/keyframeGroups).
+          return nextNeededSegment(frags, video.currentTime + heldFromS(video.currentTime), engineHeldRef.current,
+            (s) => coveredAheadS(s.start + 0.05, bufferedRanges(video.buffered)) >= s.duration - 0.1 - NEXT_NEEDED_SLACK_S);
         };
         /**
          * How many of a segment's parts download at once (lib/segmentParts).
@@ -5378,6 +5397,20 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
         hlsRef.current = hls;
 
+        // A copy's long segment comes in pieces, and only the first of each
+        // opens on a keyframe: hls.js loads a piece that doesn't follow on
+        // from the last one from its group's keyframe (lib/keyframeGroups).
+        const guarded = guardPieceLoads<import("hls.js").Fragment>(hls, (asked, instead) => {
+          if (opensOnKeyframe(instead.url)) {
+            logEvent("HLS", "a piece of a long segment asked for on its own: loading its group from the keyframe", {
+              askedS: Number(asked.start.toFixed(2)),
+              keyframeS: Number(instead.start.toFixed(2)),
+              pieces: (asked.sn as number) - (instead.sn as number),
+            });
+          }
+        });
+        if (!guarded) logWarn("HLS", "hls.js isn't as expected: a long segment's pieces may not play after a skip");
+
         // What this stream uses beyond H.264 and AAC — HEVC, AV1, Opus, FLAC
         // — from the codecs hls.js finds in the segments: no manifest of ours
         // or Plex's declares them. An fMP4 stream's sound and picture come as
@@ -5544,7 +5577,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // before this one; none at all for what is cached.
                 const roomNowS = roomNow();
                 const speed = networkBytesPerSRef.current ?? recentSegmentBytesPerS();
-                const sized = sizedSegments(frags)?.map((s, k) => (cached.has(k) ? { ...s, cached: true } : s)) ?? null;
+                const sized = sizedSegments(frags, cached);
                 const roomInCache = cached.has(segmentAt(roomNowS));
                 const bySizeS = landingBySize(roomInCache ? roomNowS : atS, roomNowS, sized, speed, limitS, true);
                 if (roomInCache) {
@@ -5567,7 +5600,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 // A sliver of a segment is only worth getting past when the
                 // next has to be fetched: out of the cache it is there at once.
                 const at = segmentAt(bySizeS);
-                const landS = cached.has(at) && cached.has(at + 1) ? bySizeS : landingFor(bySizeS, frags, limitS);
+                const landS = cached.has(at) && cached.has(at + 1) ? bySizeS : landingFor(bySizeS, keyframeGroups(frags), limitS);
                 if (landS !== bySizeS) {
                   const here = frags[at];
                   logEvent("Sync", "landing at the start of the next segment instead", {
@@ -6654,7 +6687,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           if (ranges.length === 0 || ranges.some(([start, end]) => t >= start - 0.5 && t <= end + 0.5)) return;
           // Everything ahead of where it goes: kept, the twenty seconds after it
           // met what was fetched again with a hole (lib/bufferTrim).
-          const from = skipCutS(levelFragments(hls), t);
+          const from = skipCutS(keyframeGroups(levelFragments(hls)), t);
           if (ranges[ranges.length - 1][1] > from) {
             hls.trigger(Hls.Events.BUFFER_FLUSHING, { startOffset: from, endOffset: Number.POSITIVE_INFINITY, type: null });
           }
@@ -6673,7 +6706,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           if (beforeMs >= SLOW_SEEK_MS) seeksMsRef.current = rememberSeekMs(seeksMs(), beforeMs);
           const t = video.currentTime;
           const heldHere = pictureHeldAt(video, t);
-          const frag = heldHere ? levelFragments(hls)?.find((f) => t >= f.start && t < f.start + f.duration) : undefined;
+          const frag = heldHere ? keyframeGroups(levelFragments(hls))?.find((f) => t >= f.start && t < f.start + f.duration) : undefined;
           heldSeekRef.current = heldHere ? { t, at: performance.now(), fromKeyS: frag ? t - frag.start : null } : null;
           if (mounted) freeRoomFor(video.currentTime);
           if (!mounted || !inParts || !startCovered) return;

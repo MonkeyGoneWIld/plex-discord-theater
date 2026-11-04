@@ -23,6 +23,7 @@ export interface Mp4Track {
   /** trex's: what a fragment that doesn't say uses. */
   defaultDuration: number;
   defaultSize: number;
+  defaultFlags: number;
 }
 
 export interface Mp4Span extends VideoSpan {
@@ -72,11 +73,11 @@ export function initTracks(b: Uint8Array): Mp4Track[] | null {
   const moov = boxes(b, 0, b.length).find((x) => x.type === "moov");
   if (!moov) return null;
   const inMoov = boxes(b, moov.start, moov.end);
-  const trex = new Map<number, { duration: number; size: number }>();
+  const trex = new Map<number, { duration: number; size: number; flags: number }>();
   const mvex = inMoov.find((x) => x.type === "mvex");
   for (const t of mvex ? boxes(b, mvex.start, mvex.end) : []) {
     if (t.type !== "trex" || t.end - t.start < 24) continue;
-    trex.set(u32(b, t.start + 4), { duration: u32(b, t.start + 12), size: u32(b, t.start + 16) });
+    trex.set(u32(b, t.start + 4), { duration: u32(b, t.start + 12), size: u32(b, t.start + 16), flags: u32(b, t.start + 20) });
   }
   const tracks: Mp4Track[] = [];
   for (const trak of inMoov.filter((x) => x.type === "trak")) {
@@ -92,7 +93,7 @@ export function initTracks(b: Uint8Array): Mp4Track[] | null {
     const defaults = trex.get(id);
     tracks.push({
       id, kind: handler === "vide" ? "video" : "audio", timescale,
-      defaultDuration: defaults?.duration ?? 0, defaultSize: defaults?.size ?? 0,
+      defaultDuration: defaults?.duration ?? 0, defaultSize: defaults?.size ?? 0, defaultFlags: defaults?.flags ?? 0,
     });
   }
   return tracks.length ? tracks : null;

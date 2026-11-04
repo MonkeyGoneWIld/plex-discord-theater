@@ -66,6 +66,11 @@ const HEVC_FILM = film("hevc.mkv", ["-c:a", "aac", "-ac", "2"], "libx265");
 /** AC3, a keyframe every 4 s, and B-frames: ffmpeg's seek to 32 s lands on the one at 28. */
 const LATE_SOUND_FILM = film("late-sound.mkv", ["-bf", "2", "-g", "96", "-keyint_min", "96", "-sc_threshold", "0",
   "-c:a", "ac3", "-ac", "6"]);
+/** A keyframe at 0 and 30 s only, as ratingKey 20578 opened on 4 November: in AAC (MPEG-TS), and Opus (fMP4). */
+const SPARSE_FILM = film("sparse.mkv", ["-bf", "2", "-g", "720", "-keyint_min", "720", "-sc_threshold", "0",
+  "-c:a", "aac", "-ac", "2"]);
+const SPARSE_OPUS_FILM = film("sparse-opus.mkv", ["-bf", "2", "-g", "720", "-keyint_min", "720", "-sc_threshold", "0",
+  "-c:a", "libopus", "-b:a", "96k"]);
 
 /**
  * A PGS subtitle (.sup) of white boxes: each shown from `from` to `to`
@@ -318,6 +323,8 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
   24: { file: EMPTY_CC_FILM, plexPath: EMPTY_CC_FILM, codec: "h264", width: 64, height: 36, audio: "aac", channels: 2, subs: [
     { id: 91, streamType: 3, index: 0, codec: "eia_608", language: "English", languageCode: "eng" },
   ] },
+  25: { file: SPARSE_FILM, plexPath: SPARSE_FILM, codec: "h264", width: 640, height: 360, audio: "aac", channels: 2 },
+  26: { file: SPARSE_OPUS_FILM, plexPath: SPARSE_OPUS_FILM, codec: "h264", width: 640, height: 360, audio: "opus", channels: 2 },
 };
 
 const asked: string[] = [];
@@ -2189,6 +2196,51 @@ console.log("\n— previews made by ffmpeg, keyframes off the mount, segments ke
   const offMeta = await (await fetch(`${origin}/api/plex/meta/2`)).json() as { previewThumbs?: boolean };
   check("with FFMPEG_PREVIEWS=off, none are made or offered", [off.status, offMeta.previewThumbs], [404, false]);
   delete process.env.FFMPEG_PREVIEWS;
+}
+
+console.log("\n— a film half a minute between keyframes —");
+{
+  // On 4 November ratingKey 20578's copy opened with one 97.6 MB segment of
+  // 28.9 s, which players took 20 and 32 s to have whole before showing anything.
+  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, av1Encode: false };
+  plexRoutes.capsForTests({ ...none, opus: true });
+  const mapOf = (playlist: string) => playlist.match(/^#EXT-X-MAP:URI="([^"]+)"/m)?.[1] ?? null;
+  /** A copy's playlist once it lists the first 30 s, the run's pause past 36 s letting it. */
+  const listing = async (ratingKey: string, query = "") => {
+    const variant = variantOf((await master(ratingKey, crypto.randomUUID(), query)).text);
+    let playlist = "";
+    for (let i = 0; i < 60; i++) {
+      playlist = await (await fetch(origin + variant)).text();
+      if (entries(playlist).reduce((s, e) => s + e.duration, 0) >= 29) break;
+      await sleep(250);
+    }
+    return playlist;
+  };
+  const bytesOf = async (uri: string) => Buffer.from(await (await fetch(origin + uri)).arrayBuffer());
+  const pieces = (list: Array<{ duration: number }>) => list.map((e) => e.duration <= 5);
+
+  for (const [rk, kind] of [["25", "MPEG-TS"], ["26", "fMP4"]] as const) {
+    const playlist = await listing(rk);
+    const list = entries(playlist).filter((e) => !e.uri.includes("gap"));
+    const opening = list.slice(0, list.findIndex((e, i) => list.slice(0, i + 1).reduce((s, x) => s + x.duration, 0) >= 29) + 1);
+    check(`${kind}: its first 30 s listed as pieces of 5 s or less, not one segment`,
+      [opening.length >= 6, pieces(opening)], [true, opening.map(() => true)]);
+    const got = await Promise.all(opening.map((e) => bytesOf(e.uri)));
+    check("  every piece served, as big as its URL says",
+      got.map((b, i) => b.length === Number(opening[i].uri.match(/&n=(\d+)$/)?.[1])), opening.map(() => true));
+    const joined = path.join(tmp, `sparse-${rk}.${kind === "fMP4" ? "mp4" : "ts"}`);
+    fs.writeFileSync(joined, Buffer.concat([...(kind === "fMP4" ? [await bytesOf(mapOf(playlist)!)] : []), ...got]));
+    const decoded = spawnSync("ffmpeg", ["-v", "error", "-i", joined, "-map", "0:v", "-f", "null", "-"], { encoding: "latin1" });
+    // The first line: MPEG-TS lists the stream again under its program.
+    const frames = Number(String(spawnSync("ffprobe", ["-v", "error", "-select_streams", "v", "-count_packets",
+      "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", joined]).stdout).trim().split(/\r?\n/)[0]);
+    const listedS = opening.reduce((s, e) => s + e.duration, 0);
+    check("  played one after another from the first, the picture decodes, a frame for every 1/24 s listed",
+      [decoded.status, decoded.stderr.trim(), Math.abs(frames - listedS * 24) <= 3 ? "all" : `${frames} for ${listedS} s`], [0, "", "all"]);
+  }
+  const resumed = entries(await listing("25", "?offset=21")).filter((e) => !e.uri.includes("gap"));
+  check("started 21 s in: the piece it starts in opens on the keyframe before, and the rest are short",
+    [resumed[0]?.duration >= 21, pieces(resumed.slice(1, 3))], [true, [true, true]]);
 }
 
 api.close();

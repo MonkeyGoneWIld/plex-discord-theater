@@ -203,7 +203,7 @@ const LAND_SPARE_S = 1;
 export function landingBySize(
   targetS: number,
   roomS: number,
-  segments: ReadonlyArray<{ start: number; duration: number; bytes: number | null; cached?: boolean }> | null | undefined,
+  segments: ReadonlyArray<{ start: number; duration: number; bytes: number | null; cached?: boolean; leadInBytes?: number | null }> | null | undefined,
   bytesPerS: number | null,
   limitS: number,
   firstGo = false,
@@ -215,8 +215,18 @@ export function landingBySize(
   if (!segments?.length) return targetS;
   const speed = bytesPerS && bytesPerS > 0 ? bytesPerS * (firstGo ? 1 : LAND_SPEED_MARGIN) : null;
   /** Seconds a segment takes to come in, fetched now; null when there is no telling. */
-  const takesS = (s: { bytes: number | null; cached?: boolean }): number | null =>
+  const ownS = (s: { bytes: number | null; cached?: boolean }): number | null =>
     s.cached ? 0 : speed && s.bytes && s.bytes > 0 ? s.bytes / speed : null;
+  /**
+   * The same for the segment a landing is in, which can only be played from
+   * once the pieces before it in its group have come too, if it is a piece of
+   * a copy's long segment (lib/keyframeGroups leadInBytes).
+   */
+  const takesS = (s: { bytes: number | null; cached?: boolean; leadInBytes?: number | null }): number | null => {
+    const own = ownS(s);
+    if (own === null || s.leadInBytes === undefined || s.leadInBytes === 0) return own;
+    return speed && s.leadInBytes !== null ? own + s.leadInBytes / speed : null;
+  };
   const segmentAt = (t: number) => segments.findIndex((s) => t >= s.start && t < s.start + s.duration);
   const nearS = roomS + LAND_SPARE_S;
   const near = nearS < targetS ? segmentAt(nearS) : -1;
@@ -233,7 +243,7 @@ export function landingBySize(
     let doneS = inS;
     let fits = true;
     for (let j = i + 1; j < segments.length && segments[j].start < fromS + LAND_LOOK_AHEAD_S && !(firstGo && j > i + 1); j++) {
-      const s = takesS(segments[j]);
+      const s = ownS(segments[j]);
       if (s === null) {
         // A size not known goes as it always did; a speed not known can't
         // say an uncached segment will come in time.
@@ -250,7 +260,7 @@ export function landingBySize(
   }
   const firstSeg = segments[first];
   const alone = roomS + catchUpLeadS(
-    !firstSeg.cached && bytesPerS && firstSeg.bytes ? (firstSeg.bytes / bytesPerS) * 1000 : null,
+    !firstSeg.cached && bytesPerS && firstSeg.bytes ? ((firstSeg.bytes + (firstSeg.leadInBytes ?? 0)) / bytesPerS) * 1000 : null,
   );
   return Math.max(targetS, Math.min(alone, limitS));
 }

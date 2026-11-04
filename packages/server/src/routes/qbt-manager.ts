@@ -43,7 +43,8 @@ router.get("/state", async (req, res) => {
     const streams = getQbtManagerStreams();
     res.json({ schema_version: 1, instance_id: instanceId, sequence: ++sequence,
       plex_server_id: plexServerId,
-      delivery_mode: process.env.VPS_RELAY_URL ? "vps_relay" : "direct_p2p", streams });
+      // The relay is used only with both its URL and its key (routes/plex.ts).
+      delivery_mode: process.env.VPS_RELAY_URL && process.env.VPS_RELAY_KEY ? "vps_relay" : "direct_p2p", streams });
   } catch {
     console.warn("[QbtIntegration] Plex identity unavailable; snapshot withheld");
     res.status(503).json({ error: "Plex identity unavailable" });

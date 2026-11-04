@@ -29,6 +29,9 @@ process.env.DIRECT_STREAM = "1";
 process.env.SUBTITLE_PREFETCH = "0";
 // Remuxes above this are re-encoded rather than copied. Title 950 is one.
 process.env.DIRECT_STREAM_MAX_KBPS = "20000";
+// The re-encode bitrate these checks were written against, not the default.
+process.env.VIDEO_BITRATE_KBPS = "12000";
+process.env.VIDEO_PEAK_BITRATE_KBPS = "20000";
 
 let pass = 0;
 let fail = 0;
@@ -181,7 +184,7 @@ const decisions: Array<{
   ratingKey: string; directStream: string | null; profile: string; subtitles: string | null; videoBitrate: string | null;
 }> = [];
 /** Each title's bitrate, kbps: 950 is over DIRECT_STREAM_MAX_KBPS, 960, 970
- *  and 945 over VIDEO_BITRATE_KBPS's default of 12000 but under the cap. */
+ *  and 945 over the VIDEO_BITRATE_KBPS of 12000 set above but under the cap. */
 const fileKbps = (ratingKey: string) =>
   ratingKey === "950" ? 31000 : ratingKey === "960" || ratingKey === "970" || ratingKey === UHD_TITLE ? 15000 : 8000;
 /** 945 is 4K, under the cap. */

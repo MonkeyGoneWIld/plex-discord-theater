@@ -279,16 +279,16 @@ services:
       # ── Defaults: change them only if you want to ────────────────────────
       # Re-encode bitrate in kbps, average and peak (keep the peak at least
       # the average). Each viewer downloads about this much.
-      VIDEO_BITRATE_KBPS: "12000"
-      VIDEO_PEAK_BITRATE_KBPS: "20000"
+      VIDEO_BITRATE_KBPS: "20000"
+      VIDEO_PEAK_BITRATE_KBPS: "33000"
       # Copy the original video when a player can decode it. "0" re-encodes
       # everything.
       DIRECT_STREAM: "1"
       # The highest average bitrate (kbps) a file may have and still be
-      # copied; bigger files are re-encoded. Unset, it is VIDEO_BITRATE_KBPS.
+      # copied; bigger files are re-encoded.
       # Every viewer pulls a copy at the file's own bitrate, so keep it
       # under your upload divided by how many usually watch.
-      # DIRECT_STREAM_MAX_KBPS: "20000"
+      DIRECT_STREAM_MAX_KBPS: "25000"
       # HEVC re-encodes for players that can decode HEVC. Needs Plex Pass
       # and hardware HEVC encoding in Plex; otherwise Plex sends H.264.
       HEVC_TRANSCODE: "1"

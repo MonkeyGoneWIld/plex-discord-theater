@@ -12,7 +12,7 @@ import path from "path";
 import fs from "node:fs";
 import { fileURLToPath } from "url";
 import discordRoutes, { closeInstanceDb } from "./routes/discord.js";
-import plexRoutes from "./routes/plex.js";
+import plexRoutes, { COPY_LIMIT_KBPS } from "./routes/plex.js";
 import seerrRoutes from "./routes/seerr.js";
 import historyRoutes from "./routes/history.js";
 import plexAccountRoutes from "./routes/plex-account.js";
@@ -308,9 +308,7 @@ function reportIntegrations(): void {
       on("VPS relay", !!(process.env.VPS_RELAY_URL && process.env.VPS_RELAY_KEY), "P2P mode"),
       on("HEVC", process.env.HEVC_TRANSCODE !== "0", "H.264 only"),
       on(
-        Number(process.env.DIRECT_STREAM_MAX_KBPS) > 0
-          ? `Direct Stream for files averaging up to ${Number(process.env.DIRECT_STREAM_MAX_KBPS)} kbps`
-          : "Direct Stream",
+        `Direct Stream for files averaging up to ${COPY_LIMIT_KBPS} kbps`,
         process.env.DIRECT_STREAM !== "0",
         "every title re-encoded",
       ),

@@ -132,8 +132,8 @@ const OUT_DIR = path.resolve(
 // The app's own values, from routes/plex.ts. Copied rather than imported so the
 // script runs without building the server; if those change, change these.
 const SECONDS_PER_SEGMENT = 3;
-const VIDEO_BITRATE_KBPS = process.env.VIDEO_BITRATE_KBPS || "12000";
-const VIDEO_PEAK_BITRATE_KBPS = process.env.VIDEO_PEAK_BITRATE_KBPS || "20000";
+const VIDEO_BITRATE_KBPS = process.env.VIDEO_BITRATE_KBPS || "20000";
+const VIDEO_PEAK_BITRATE_KBPS = process.env.VIDEO_PEAK_BITRATE_KBPS || "33000";
 /** The client profile the app sends, with the video codecs it offers. */
 const appProfile = (videoCodec = "h264") =>
   "add-transcode-target(type=videoProfile&context=streaming&protocol=hls&container=mpegts" +

@@ -124,8 +124,8 @@ services:
       # ── Tuning ──────────────────────────────────────────────────
       # Per-viewer bandwidth scales with the bitrate — the biggest lever there
       # is if your upload is tight.
-      - VIDEO_BITRATE_KBPS=${VIDEO_BITRATE_KBPS}
-      - VIDEO_PEAK_BITRATE_KBPS=${VIDEO_PEAK_BITRATE_KBPS}
+      - VIDEO_BITRATE_KBPS=${VIDEO_BITRATE_KBPS:-20000}
+      - VIDEO_PEAK_BITRATE_KBPS=${VIDEO_PEAK_BITRATE_KBPS:-33000}
       # HEVC transcodes for players that can decode them; anyone who can't
       # gets an H.264 stream of their own. Needs Plex Pass and hardware HEVC
       # encoding enabled in Plex; without them Plex keeps sending H.264.
@@ -137,8 +137,8 @@ services:
       - DIRECT_STREAM=${DIRECT_STREAM:-1}
       # Highest average bitrate (kbps) still copied; bigger files are
       # re-encoded so a home upload isn't asked for more than it has.
-      # Unset = VIDEO_BITRATE_KBPS.
-      - DIRECT_STREAM_MAX_KBPS=${DIRECT_STREAM_MAX_KBPS:-}
+      # Unset = 25000, or VIDEO_BITRATE_KBPS if that is higher.
+      - DIRECT_STREAM_MAX_KBPS=${DIRECT_STREAM_MAX_KBPS:-25000}
       # Films being played, kept so going back plays from here: copies in
       # memory up to DIRECT_STREAM_MEMORY_MB (6144) and the rest on disk in
       # STREAM_CACHE_DIR (/data/stream-cache) until the stream ends;

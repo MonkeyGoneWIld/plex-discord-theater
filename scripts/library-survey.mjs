@@ -241,7 +241,7 @@ async function readStreams(rows) {
 }
 
 function printStreams(rows) {
-  const copyLimit = Number(process.env.DIRECT_STREAM_MAX_KBPS) || Number(process.env.VIDEO_BITRATE_KBPS) || 12000;
+  const copyLimit = Number(process.env.DIRECT_STREAM_MAX_KBPS) || Math.max(25000, Number(process.env.VIDEO_BITRATE_KBPS) || 20000);
   const count = (f) => rows.filter(f).length;
   console.log(`\nHDR (of ${rows.length} titles)`);
   const kinds = {};

@@ -143,14 +143,13 @@ function envInt(name: string, fallback: number): number {
   return n;
 }
 
-// Transcode bitrate (kbps). The target is what Plex aims for on average; the
-// peak bounds spikes. Per-viewer bandwidth scales linearly with this, so it's
-// the single biggest bandwidth lever — 12000/20000 is visually solid 1080p
-// H.264 while costing 40%+ less than the old hardcoded 20000/100000.
-const VIDEO_BITRATE_KBPS = envInt("VIDEO_BITRATE_KBPS", 12000);
+// Re-encode bitrate (kbps). The target is what a re-encode aims for on
+// average; the peak bounds spikes. Per-viewer bandwidth scales linearly with
+// this, so it's the single biggest bandwidth lever. 20000/33000 by default.
+const VIDEO_BITRATE_KBPS = envInt("VIDEO_BITRATE_KBPS", 20000);
 const VIDEO_PEAK_BITRATE_KBPS = envInt(
   "VIDEO_PEAK_BITRATE_KBPS",
-  Math.max(20000, VIDEO_BITRATE_KBPS),
+  Math.max(33000, VIDEO_BITRATE_KBPS),
 );
 
 /**
@@ -183,7 +182,8 @@ const DIRECT_STREAM = process.env.DIRECT_STREAM !== "0";
 /**
  * The highest *average* bitrate a file may have and still be copied, in kbps.
  * Above it the file is re-encoded at VIDEO_BITRATE_KBPS instead. Unset, it is
- * VIDEO_BITRATE_KBPS itself.
+ * 25000, or VIDEO_BITRATE_KBPS where that is higher: a file is never
+ * re-encoded at more than it averages.
  *
  * A copy is the file's own bitrate, and every viewer pulls all of it from this
  * server: a 30 Mbps remux watched by two people is 60 Mbps of upload. A home
@@ -195,9 +195,9 @@ const DIRECT_STREAM = process.env.DIRECT_STREAM !== "0";
  * few seconds at a time, and judging it on those would rule out nearly every
  * Blu-ray. See COPY_ASK_KBPS for how Plex is kept from judging it on them.
  */
-const DIRECT_STREAM_MAX_KBPS = envInt("DIRECT_STREAM_MAX_KBPS", 0);
+const DIRECT_STREAM_MAX_KBPS = envInt("DIRECT_STREAM_MAX_KBPS", Math.max(25000, VIDEO_BITRATE_KBPS));
 /** The average-bitrate limit on copying in force — see DIRECT_STREAM_MAX_KBPS. */
-const COPY_LIMIT_KBPS = DIRECT_STREAM_MAX_KBPS > 0 ? DIRECT_STREAM_MAX_KBPS : VIDEO_BITRATE_KBPS;
+export const COPY_LIMIT_KBPS = DIRECT_STREAM_MAX_KBPS;
 /**
  * What a copy is asked of Plex at, once this server has decided by the file's
  * average that it may be copied.

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { getSessionToken } from "../lib/api";
 import { noteServerTime } from "../lib/serverClock";
 import { hdrScreenQuery, playerCaps, type Cap } from "../lib/codecs";
-import { preferredQuality } from "../lib/quality";
+import { adoptSitting, preferredQuality, setSittingSink } from "../lib/quality";
 import { logEvent } from "../lib/log";
 
 const MAX_RECONNECT_ATTEMPTS = 20;
@@ -748,8 +748,13 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             // server's mayStart: hevc, av1, opus, flac, ac3, eac3, hdr and
             // av1Encode.
             ...playerCaps(),
+            // Which browser, for the quality kept for it (lib/quality setSittingSink).
+            device: navigator.userAgent.slice(0, 200),
           }),
         );
+        setSittingSink((sitting) => {
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "sitting", value: sitting }));
+        });
         if (loadingRef.current) ws.send(JSON.stringify({ type: "loading", value: true }));
         setState((prev) => ({ ...prev, connected: true, hostDisconnected: false }));
       });
@@ -781,6 +786,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             }));
             break;
           case "state": {
+            if (msg.sitting) adoptSitting(msg.sitting);
             const roster = (msg.participants as Participant[]) || [];
             noteRole(
               roster.find((p) => p.userId === userId)?.isHost,

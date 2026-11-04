@@ -120,6 +120,49 @@ console.log("\n— what a player starts at —");
     quality.carryQualityTo("s3e3", "s3"), 4000);
   quality.endQualitySession(t0 + 6 * 60 * MIN + 10_000);
 
+  // Firefox keeps nothing for the Activity between pages (run 29, C again):
+  // the server keeps what each page last said and hands it to the next.
+  const said: { last: object | null } = { last: null };
+  quality.setSittingSink((s) => { said.last = s; });
+  // A choice is marked at the clock's now, so the pages here go by it too.
+  const t1 = Date.now();
+  store.clear();
+  quality.beginQualitySession(t1);
+  quality.carryQualityTo("snowden", null);
+  quality.setPreferredQuality(8000, { ratingKey: "snowden", show: null });
+  const popped = said.last;
+  check("a choice is said to the server as it is made", (popped as { kbps?: number } | null)?.kbps, 8000);
+  store.clear();
+  quality.beginQualitySession(t1 + 5_000);
+  check("a page that found nothing kept opens at the default", quality.carryQualityTo("snowden", null), 0);
+  quality.adoptSitting(popped, t1 + 6_000);
+  check("handed back what the page before had, it is at 8 Mbps again", quality.preferredQuality(), 8000);
+  quality.endQualitySession(t1 + 9_000);
+  store.clear();
+  quality.adoptSitting(popped, t1 + 10_000);
+  quality.beginQualitySession(t1 + 11_000);
+  check("handed back before its player opened, the same", quality.carryQualityTo("snowden", null), 8000);
+  quality.endQualitySession(t1 + 12_000);
+  store.clear();
+  quality.beginQualitySession(t1 + 20_000);
+  quality.carryQualityTo("rain-man", null);
+  quality.adoptSitting(popped, t1 + 21_000);
+  check("but not on another film", quality.preferredQuality(), 0);
+  quality.endQualitySession(t1 + 22_000);
+  store.clear();
+  quality.beginQualitySession(t1 + 50 * MIN);
+  quality.carryQualityTo("snowden", null);
+  quality.adoptSitting(popped, t1 + 50 * MIN + 1_000);
+  check("nor after more than half an hour away", quality.preferredQuality(), 0);
+  quality.setPreferredQuality(12000, { ratingKey: "snowden", show: null });
+  quality.endQualitySession(t1 + 51 * MIN);
+  quality.beginQualitySession(t1 + 51 * MIN + 5_000);
+  quality.carryQualityTo("snowden", null);
+  quality.adoptSitting(popped, t1 + 51 * MIN + 6_000);
+  check("and a browser that kept its own goes by that", quality.preferredQuality(), 12000);
+  quality.endQualitySession(t1 + 52 * MIN);
+  quality.setSittingSink(null);
+
   check("volume starts at half until one is chosen", volume.loadVolume(), 0.5);
   volume.saveVolume(0.3);
   check("the last volume used is remembered", volume.loadVolume(), 0.3);

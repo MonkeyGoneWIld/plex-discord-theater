@@ -70,22 +70,45 @@ function set(kbps: number, where: ChosenFor | null): void {
   for (const fn of listeners) fn();
 }
 
+/**
+ * Where the sitting goes besides this device's storage: the server, which
+ * hands it back to the next page this account opens in this browser (hooks/
+ * useSync). Firefox keeps nothing for the Activity between pages — on
+ * 4 November none of its pages found the last one's volume or quality — so a
+ * quality chosen there was gone after every pop-out (run 29, C again).
+ */
+let sittingSink: ((sitting: object) => void) | null = null;
+export function setSittingSink(fn: ((sitting: object) => void) | null): void {
+  sittingSink = fn;
+}
+
 /** The sitting's quality as of `now`, a player open with it. */
 function markSitting(now = Date.now()): void {
+  const sitting = { kbps: current, chosenFor, at: now, under: sittingUnder };
   try {
-    localStorage.setItem(SITTING_QUALITY_KEY, JSON.stringify({ kbps: current, chosenFor, at: now, under: sittingUnder }));
+    localStorage.setItem(SITTING_QUALITY_KEY, JSON.stringify(sitting));
   } catch {
     // Storage unavailable: it lasts as long as the page does.
   }
+  sittingSink?.(sitting);
 }
 
 /** The quality of a sitting still going at `now`, and what it was chosen on,
  *  if there is one. */
 function sittingQuality(now: number, under: number): { kbps: number; chosenFor: ChosenFor | null } | null {
   try {
-    const s = JSON.parse(localStorage.getItem(SITTING_QUALITY_KEY) ?? "null") as
-      { kbps?: unknown; chosenFor?: unknown; at?: unknown; under?: unknown } | null;
-    if (!s || typeof s.kbps !== "number" || typeof s.at !== "number" || s.under !== under) return null;
+    return readSitting(JSON.parse(localStorage.getItem(SITTING_QUALITY_KEY) ?? "null"), now, under);
+  } catch {
+    return null;
+  }
+}
+
+/** A sitting `raw` as kept, read as of `now` under the default `under`: null
+ *  if it isn't one, or has ended. */
+function readSitting(raw: unknown, now: number, under: number): { kbps: number; chosenFor: ChosenFor | null } | null {
+  {
+    const s = raw as { kbps?: unknown; chosenFor?: unknown; at?: unknown; under?: unknown } | null;
+    if (!s || typeof s !== "object" || typeof s.kbps !== "number" || typeof s.at !== "number" || s.under !== under) return null;
     // A minute's grace the other way, for a clock set back since.
     const away = now - s.at;
     if (!(away > -60_000 && away <= SITTING_GAP_MS)) return null;
@@ -94,9 +117,34 @@ function sittingQuality(now: number, under: number): { kbps: number; chosenFor: 
       ? { ratingKey: c.ratingKey, show: typeof c.show === "string" ? c.show : null }
       : null;
     return { kbps: s.kbps, chosenFor: where };
-  } catch {
-    return null;
   }
+}
+
+/** Whether the open player began on a sitting of this device's own. */
+let openedOnOwnSitting = false;
+/** The sitting the server handed back, for a player not yet open. */
+let sittingFromServer: unknown = null;
+/** The title the open player is on, as carryQualityTo was last told. */
+let openOn: ChosenFor | null = null;
+
+/**
+ * The sitting the server kept for this account in this browser (setSittingSink),
+ * `raw`, handed back on joining. Taken only by a player that found none of its
+ * own here, as one it had found — so over the same SITTING_GAP_MS, and for the
+ * same titles (carryQualityTo).
+ */
+export function adoptSitting(raw: unknown, now = Date.now()): void {
+  if (!playerOpen) {
+    sittingFromServer = raw;
+    return;
+  }
+  if (openedOnOwnSitting) return;
+  const back = readSitting(raw, now, sittingUnder);
+  if (!back) return;
+  openedOnOwnSitting = true;
+  set(back.kbps, back.chosenFor);
+  if (openOn) carryQualityTo(openOn.ratingKey, openOn.show);
+  markSitting(now);
 }
 
 export function preferredQuality(): number {
@@ -131,7 +179,11 @@ export function setDefaultQuality(kbps: number): void {
 export function beginQualitySession(now = Date.now()): void {
   playerOpen = true;
   const fallback = defaultQuality();
-  const back = sittingQuality(now, fallback);
+  const own = sittingQuality(now, fallback);
+  openedOnOwnSitting = own !== null;
+  const back = own ?? readSitting(sittingFromServer, now, fallback);
+  sittingFromServer = null;
+  openOn = null;
   set(back?.kbps ?? fallback, back?.chosenFor ?? null);
   sittingUnder = fallback;
   markSitting(now);
@@ -221,6 +273,7 @@ export function qualityForTracks(
 }
 
 export function carryQualityTo(ratingKey: string, show: string | null): number {
+  openOn = { ratingKey, show };
   if (!chosenFor) return current;
   if (chosenFor.ratingKey === ratingKey) return current;
   if (show !== null && chosenFor.show === show) {

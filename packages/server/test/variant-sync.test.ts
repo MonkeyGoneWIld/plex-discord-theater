@@ -1615,6 +1615,33 @@ console.log("\n— the host closes as a viewer is still coming in: the viewer is
   await sleep(100);
 }
 
+console.log("\n— a page is handed back the quality its account last had in that browser —");
+{
+  // Run 29, C again: blah0391 on Firefox chose 8 Mbps, popped out, and the
+  // page opened at Original, Firefox keeping nothing between pages.
+  instanceHosts.set("inst-sitting", { hostUserId: "u-host", guildId: null, channelId: null, createdAt: Date.now() });
+  const firefox = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:159.0) Gecko/20100101 Firefox/159.0";
+  const sitting = { kbps: 8000, chosenFor: { ratingKey: "100", show: null }, at: Date.now(), under: 0 };
+  const page = new Client("u-sit", "sit");
+  await page.connect("inst-sitting", { device: firefox });
+  check("nothing kept yet: none handed back", page.last("state")?.sitting, null);
+  page.send({ type: "sitting", value: sitting });
+  await sleep(40);
+  page.close();
+  await sleep(40);
+  const popOut = new Client("u-sit", "sit");
+  await popOut.connect("inst-sitting", { device: firefox });
+  check("the next page in that browser is handed it back", popOut.last("state")?.sitting, sitting);
+  const phone = new Client("u-sit", "sit");
+  await phone.connect("inst-sitting", { device: "Mozilla/5.0 (Linux; Android 14) Discord" });
+  check("but not a page in another browser", phone.last("state")?.sitting, null);
+  const other = new Client("u-other", "other");
+  await other.connect("inst-sitting", { device: firefox });
+  check("nor another account in the same one", other.last("state")?.sitting, null);
+  for (const c of [popOut, phone, other]) c.close();
+  await sleep(40);
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 closeWebSocketServer();
 server.close();

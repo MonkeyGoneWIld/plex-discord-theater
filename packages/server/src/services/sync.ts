@@ -1384,6 +1384,37 @@ function settleLeftStream(room: Room, key: string): void {
  * the host, for somebody not on a stream, and for somebody simply following
  * the host — who, coming back, follows the host as it is by then.
  */
+/**
+ * Each player's quality as it last said (the client's lib/quality sitting), by
+ * account and browser, handed back to the next page that account opens in that
+ * browser: Firefox keeps nothing for the Activity between pages, and on
+ * 4 November (run 29, C again) blah0391's 8 Mbps was gone after each pop-out,
+ * the page opening at Original. Kept as sent, and read by the page by its own
+ * rules — how long a sitting lasts, and which titles it is for. Held in memory
+ * only, the most recent SITTINGS_MAX.
+ */
+const sittings = new Map<string, unknown>();
+const SITTINGS_MAX = 500;
+/** The key a sitting is kept under: the account, and the browser it is in. */
+export function sittingKeyOf(userId: string, device: unknown): string | null {
+  return userId && typeof device === "string" && device.length > 0 ? `${userId}|${device.slice(0, 200)}` : null;
+}
+/** Keep `value`, a sitting as a page sent it, under `key`. */
+export function keepSitting(key: string, value: unknown): void {
+  const json = JSON.stringify(value ?? null);
+  if (json.length > 1000 || !value || typeof value !== "object") return;
+  sittings.delete(key);
+  sittings.set(key, JSON.parse(json) as unknown);
+  if (sittings.size > SITTINGS_MAX) {
+    const oldest = sittings.keys().next().value;
+    if (oldest !== undefined) sittings.delete(oldest);
+  }
+}
+/** The sitting kept under `key`, if any. */
+export function sittingFor(key: string | null): unknown {
+  return key === null ? null : sittings.get(key) ?? null;
+}
+
 function ownChoiceOf(room: Room, client: RoomClient): OwnChoice | null {
   if (client.isHost || !client.variantKey) return null;
   const s = room.state;
@@ -1877,6 +1908,8 @@ export function attachWebSocketServer(server: Server): void {
   wss.on("connection", (ws) => {
     let client: RoomClient | null = null;
     let roomId: string | null = null;
+    /** Where this page's quality is kept — see sittings. */
+    let sittingKey: string | null = null;
 
     let alive = true;
 
@@ -1957,6 +1990,7 @@ export function attachWebSocketServer(server: Server): void {
         const token = typeof msg.sessionToken === "string" ? msg.sessionToken : "";
         const instanceId = typeof msg.instanceId === "string" ? msg.instanceId : "";
         const userId = typeof msg.userId === "string" ? msg.userId : "";
+        sittingKey = sittingKeyOf(userId, msg.device);
         const rawUsername = msg.username;
         const username =
           typeof rawUsername === "string" && rawUsername.length > 0 && rawUsername.length <= 100
@@ -2195,6 +2229,8 @@ export function attachWebSocketServer(server: Server): void {
         const landed = client.variantKey ? room.state.variants.get(client.variantKey) : undefined;
         sendTo(ws, {
           type: "state",
+          // The quality this account last had in this browser.
+          sitting: sittingFor(sittingKey),
           // This server's clock, which a client's own may be well off: its
           // presence timer goes by this one (client lib/serverClock).
           serverNow: Date.now(),
@@ -2284,6 +2320,10 @@ export function attachWebSocketServer(server: Server): void {
       // the roster broadcast — it exists to order host succession, and pushing
       // a roster update every time somebody opened or closed the player would
       // be a lot of traffic for something nobody sees.
+      if (type === "sitting") {
+        if (sittingKey) keepSitting(sittingKey, msg.value);
+        return;
+      }
       if (type === "watching") {
         client.isWatching = msg.value !== false;
         // Back in the player: whatever countdown was running on their stream

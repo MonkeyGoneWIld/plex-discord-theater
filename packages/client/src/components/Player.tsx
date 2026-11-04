@@ -8782,7 +8782,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (playbackEnded) return true;
     const meta = itemMeta?.ratingKey === item.ratingKey ? itemMeta : null;
     return isWatchedThrough(positionReached(), itemDurationS(), meta?.markers ?? [], playedThresholdRef.current);
-  }, [playbackEnded, itemMeta, item.ratingKey, item.duration]);
+  }, [playbackEnded, itemMeta, item.ratingKey, item.duration, fileLength]);
 
   /** Where playback has got to. Mid-restart the element sits at 0 with nothing
    *  loaded, and the last position playback really reached is the truth. */
@@ -8873,7 +8873,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       return;
     }
     endPlayback();
-  }, [endPlayback, hasFinishedItem, item.ratingKey, item.duration, selfUserId, isPip, onMinimize]);
+  }, [endPlayback, hasFinishedItem, item.ratingKey, item.duration, fileLength, selfUserId, isPip, onMinimize]);
 
   /**
    * Choose tracks.

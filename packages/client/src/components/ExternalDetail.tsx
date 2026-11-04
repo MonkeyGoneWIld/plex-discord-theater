@@ -120,12 +120,16 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
   // TV: the full season list with per-season status, for the request grid.
   const [seerrTv, setSeerrTv] = useState<SeerrTv | null>(null);
   const [tvNonce, setTvNonce] = useState(0);
+  // The lookup failed (Seerr down, the network): said, rather than "Loading
+  // seasons…" for as long as the page is open.
+  const [tvFailed, setTvFailed] = useState(false);
   useEffect(() => {
     if (tmdbId == null || mediaType !== "tv") return;
     let cancelled = false;
+    setTvFailed(false);
     fetchSeerrTv(tmdbId)
       .then((tv) => { if (!cancelled) setSeerrTv(tv); })
-      .catch(() => {});
+      .catch(() => { if (!cancelled) setTvFailed(true); });
     return () => { cancelled = true; };
   }, [tmdbId, mediaType, tvNonce]);
 
@@ -248,7 +252,7 @@ export function ExternalDetail({ item, onBack, onSelectPerson }: ExternalDetailP
       {tmdbId != null && mediaType === "tv" && seerrTv?.configured !== false && (
         <div style={{ ...styles.seasonsWrap, ...(narrow ? styles.seasonsWrapNarrow : {}) }}>
           {seerrTv == null ? (
-            <div style={styles.summaryMuted}>Loading seasons…</div>
+            <div style={styles.summaryMuted}>{tvFailed ? "Couldn't load the seasons. Try again later." : "Loading seasons…"}</div>
           ) : seerrTv.seasons.length > 0 ? (
             <SeasonRequestGrid
               tmdbId={tmdbId}

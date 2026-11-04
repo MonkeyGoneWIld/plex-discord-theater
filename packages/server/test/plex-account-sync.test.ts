@@ -57,6 +57,8 @@ const adminOnlyHistory = new Set<string>();
 const rejectedProgressResets = new Map<string, number>();
 /** Plex's own watched marks (view count, last viewed, resume offset) by ratingKey. */
 const plexViewed = new Map<string, { viewCount: number; lastViewedAt: number; viewOffset?: number }>();
+/** Titles Plex answers 404 for: replaced by a new copy, or removed. */
+const goneFromPlex = new Set<string>();
 
 globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
   const url = new URL(typeof input === "string" || input instanceof URL ? input.toString() : input.url);
@@ -198,6 +200,9 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
           ],
         },
       });
+    }
+    if (url.pathname.startsWith("/library/metadata/") && goneFromPlex.has(url.pathname.split("/").pop()!)) {
+      return new Response("<html><head><title>Not Found</title></head><body><h1>404 Not Found</h1></body></html>", { status: 404 });
     }
     if (url.pathname.startsWith("/library/metadata/")) {
       const ratingKey = url.pathname.split("/").pop()!;
@@ -523,8 +528,15 @@ await history.recordProgress("discord-b", "62011", 40, { force: true });
 plexViewed.set("62011", { viewCount: 1, lastViewedAt: markedAt - 3600 });
 check("a newer Activity change still wins over an older mark", (await accounts.getPlexItemWatchedState("discord-b", "62011")).watched, false);
 plexViewed.set("62010", { viewCount: 1, lastViewedAt: markedAt });
-await accounts.syncPlexAccount("discord-a");
+// Played since the last sync, and since replaced in Plex by a new copy.
+goneFromPlex.add("62012");
+// discord-a was linked again to Plex account 99 above.
+remoteHistoryByAccount.set("99", [{ ratingKey: "62012", duration: 100_000, viewedAt: markedAt }, ...defaultRemoteHistory]);
+const syncPastGone = await accounts.syncPlexAccount("discord-a").then(() => "ok", (err: Error) => err.message);
+check("a title no longer in Plex doesn't fail the sync", syncPastGone, "ok");
 check("Sync brings a newly marked title in", history.getProgress("discord-a", "62010")?.watched, true);
+remoteHistoryByAccount.delete("99");
+goneFromPlex.clear();
 check("unlinked users do not take the server account's marks", (await accounts.getPlexItemWatchedState("discord-local", "62010")).watched, false);
 for (const key of ["62008", "62009", "62010", "62011"]) plexViewed.delete(key);
 

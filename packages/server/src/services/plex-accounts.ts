@@ -970,16 +970,22 @@ async function readMarkedWatched(
     if (!type) continue;
     let start = 0;
     for (;;) {
-      const data = await plexJSON<{ MediaContainer: { Metadata?: RemoteMetadata[] } }>(
-        `/library/sections/${dir.key}/all`,
-        {
-          type,
-          sort: "lastViewedAt:desc",
-          "X-Plex-Container-Start": String(start),
-          "X-Plex-Container-Size": String(HISTORY_PAGE_SIZE),
-        },
-        token,
-      );
+      let data: { MediaContainer: { Metadata?: RemoteMetadata[] } };
+      try {
+        data = await plexJSON<{ MediaContainer: { Metadata?: RemoteMetadata[] } }>(
+          `/library/sections/${dir.key}/all`,
+          {
+            type,
+            sort: "lastViewedAt:desc",
+            "X-Plex-Container-Start": String(start),
+            "X-Plex-Container-Size": String(HISTORY_PAGE_SIZE),
+          },
+          token,
+        );
+      } catch (err) {
+        if (goneFromPlex(err)) break;
+        throw err;
+      }
       const items = data.MediaContainer.Metadata || [];
       let done = items.length < HISTORY_PAGE_SIZE;
       for (const item of items) {
@@ -1134,6 +1140,16 @@ export async function pushProgressToPlex(
 const lastLivePush = new Map<string, number>();
 const syncInFlight = new Map<string, Promise<{ imported: number; exported: number }>>();
 
+/**
+ * Plex answering 404: the title, or the library, is no longer there — a file
+ * replaced by a new copy has a new ratingKey. One such title skipped, not the
+ * whole sync failed: the first Sync in a week (run 29, A10 retest) stopped on
+ * one with "Plex API error: 404" and brought nothing in.
+ */
+function goneFromPlex(err: unknown): boolean {
+  return err instanceof Error && /^Plex .*(?:error: 404\b|\(404\))/.test(err.message);
+}
+
 async function runWithConcurrency<T>(items: T[], count: number, work: (item: T) => Promise<void>): Promise<void> {
   let index = 0;
   const workers = Array.from({ length: Math.min(count, items.length) }, async () => {
@@ -1159,9 +1175,15 @@ export function syncPlexAccount(userId: string): Promise<{ imported: number; exp
         : Math.max(0, linked.row.last_sync_at! - INCREMENTAL_SYNC_OVERLAP_MS);
       const remote = await readRemoteState(linked.serverToken, linked.row.plex_user_id, sinceMs);
       let imported = 0;
+      let gone = 0;
       await runWithConcurrency([...remote.entries()], 8, async ([ratingKey, state]) => {
-        const merged = await mergeExternalProgress(userId, ratingKey, state);
-        if (merged.changed) imported++;
+        try {
+          const merged = await mergeExternalProgress(userId, ratingKey, state);
+          if (merged.changed) imported++;
+        } catch (err) {
+          if (!goneFromPlex(err)) throw err;
+          gone++;
+        }
       });
 
       // Initial sync reconciles every local row against the complete Plex map.
@@ -1177,8 +1199,16 @@ export function syncPlexAccount(userId: string): Promise<{ imported: number; exp
       await runWithConcurrency(toExport, 4, async (entry) => {
         const there = remote.get(entry.ratingKey);
         const clearWatchedState = !entry.watched && there?.watched === true;
-        if (await pushProgressToPlex(userId, entry, true, clearWatchedState)) exported++;
+        try {
+          if (await pushProgressToPlex(userId, entry, true, clearWatchedState)) exported++;
+        } catch (err) {
+          if (!goneFromPlex(err)) throw err;
+          gone++;
+        }
       });
+      if (gone > 0) {
+        console.log(`[Plex Account] Sync for ${userId.substring(0, 8)} skipped ${gone} title(s) no longer in Plex`);
+      }
       markSyncSuccess.run(Date.now(), HISTORY_SYNC_VERSION, userId);
       return { imported, exported };
     } catch (err) {

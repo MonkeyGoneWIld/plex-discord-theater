@@ -1531,6 +1531,8 @@ console.log("\n— a host alone who closes the Activity and opens it again carri
   await sleep(60);
   host.close();
   await sleep(100);
+  // Registering the new instance deletes the old one's record first.
+  instanceHosts.delete("inst-close-1");
   const back = new Client("u-host", "host");
   await back.connect("inst-close-2");
   const st = back.last("state");

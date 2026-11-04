@@ -481,6 +481,12 @@ interface Room {
   /** Everybody has left, and the room is kept for them — see holdEmptyRoom. */
   emptyHold?: ReturnType<typeof setTimeout>;
   /**
+   * Whose Activity the held room was, and where: noted when it is held,
+   * because opening the Activity again registers the new instance by
+   * deleting the old one's record — see carryHeldRoom.
+   */
+  heldFor?: { hostUserId: string; guildId: string | null; channelId: string | null };
+  /**
    * Viewers whose connection closed while they were on a choice of their own,
    * by Discord user id: what they were on, kept AWAY_HOLD_MS for them to come
    * back to. Without it a viewer back from a blip or a pop-out was put on the
@@ -1712,7 +1718,9 @@ function carryHeldRoom(
   let held: [string, Room] | null = null;
   for (const [id, r] of rooms) {
     if (id === toId || !r.emptyHold || r.clients.size > 0) continue;
-    const was = instanceHosts.get(id);
+    // Not instanceHosts: the new instance's registration has already deleted
+    // the old one's record (run 29, A8 retest, Rain Man reopened 10 s later).
+    const was = r.heldFor;
     if (was?.hostUserId !== userId || was.channelId !== to.channelId || was.guildId !== to.guildId) continue;
     held = [id, r];
   }
@@ -1747,6 +1755,10 @@ function holdsWhenEmpty(room: Room): boolean {
  */
 function holdEmptyRoom(room: Room, roomId: string, leftName: string): void {
   setHostWaiting(room, roomId, true, "everybody left");
+  const instance = instanceHosts.get(roomId);
+  room.heldFor = instance
+    ? { hostUserId: instance.hostUserId, guildId: instance.guildId, channelId: instance.channelId }
+    : undefined;
   logEvent("Sync", "last client left, holding the room for them to come back", {
     room: roomId.substring(0, 8),
     left: leftName,

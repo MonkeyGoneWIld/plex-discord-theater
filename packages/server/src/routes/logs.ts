@@ -68,8 +68,10 @@ router.post("/client", (req: Request, res: Response) => {
     let when = new Date(rawT + skewMs);
     if (Number.isNaN(when.getTime())) when = new Date();
     const level = String(entry.level ?? "log").toUpperCase().slice(0, 5);
-    // Newlines stripped: these go into a line-oriented file, and without this a
-    // client can write whatever it likes into it, forged timestamps included.
+    // Newlines stripped from the whole line (the client's id and its data's
+    // names and values as much as its tag and message): these go into a
+    // line-oriented file, and without this a client can write whatever it
+    // likes into it, forged timestamps included.
     const oneLine = (v: string) => v.replace(/[\r\n]+/g, " ");
     const tag = oneLine(String(entry.tag ?? "Client")).slice(0, 32);
     const msg = oneLine(String(entry.msg ?? "")).slice(0, MAX_MESSAGE_CHARS);
@@ -80,7 +82,7 @@ router.post("/client", (req: Request, res: Response) => {
         ? ` clientT=${rawDate.toISOString()}`
         : "";
     writeClientLine(
-      `${when.toISOString()}${levelTag} [client:${clientId}] [${tag}] ${msg}${renderData(entry.data)}${clientT} ip=${ip}`,
+      oneLine(`${when.toISOString()}${levelTag} [client:${clientId}] [${tag}] ${msg}${renderData(entry.data)}${clientT} ip=${ip}`),
     );
   }
 

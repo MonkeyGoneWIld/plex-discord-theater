@@ -10,6 +10,7 @@ import {
   carryQualityTo,
   lowerQualityFor,
   preferredQuality,
+  qualityChangesStream,
   qualityLabel,
   endQualitySession,
   setPreferredQuality,
@@ -126,6 +127,18 @@ setPreferredQuality(12000, { ratingKey: "s1e1", show: "s1" });
 endQualitySession();
 check("closing the player goes back to Original", preferredQuality(), 0);
 check("and starting the same show again starts there", carryQualityTo("s1e2", "s1"), 0);
+
+console.log("\n— a quality that would make the same copy again doesn't reload —");
+// Rain Man (run 29, A8 retest): a copy at 9,000 kbps.
+const copy = { video: "copy" as const, kbps: 9000 };
+check("Original to 10 Mbps is the same copy", qualityChangesStream(copy, 0, 10000), false);
+check("10 to 12 Mbps is the same copy", qualityChangesStream(copy, 10000, 12000), false);
+check("back to Original is the same copy", qualityChangesStream(copy, 12000, 0), false);
+check("under the file's bitrate it is made again", qualityChangesStream(copy, 0, 8000), true);
+check("and from there back up too", qualityChangesStream(copy, 8000, 0), true);
+check("a re-encode is made again", qualityChangesStream({ video: "transcode", kbps: 10000 }, 0, 12000), true);
+check("a copy of unknown bitrate is made again", qualityChangesStream({ video: "copy", kbps: null }, 0, 10000), true);
+check("before its notes are in, it is made again", qualityChangesStream(null, 0, 10000), true);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

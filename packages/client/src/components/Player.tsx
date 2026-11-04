@@ -30,6 +30,7 @@ import {
   carryQualityTo,
   lowerQualityFor,
   preferredQuality,
+  qualityChangesStream,
   qualityLabel,
   endQualitySession,
   setPreferredQuality,
@@ -4128,17 +4129,23 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   useEffect(() => {
     const v = variantRef.current;
     if (!v?.returning || v.ratingKey !== item.ratingKey || v.quality === preferredQuality()) return;
+    // Known once the stream's notes are in; a copy that is the same at both
+    // keeps the quality chosen (qualityChangesStream).
+    if (!streamNotes || !qualityChangesStream(streamNotes, v.quality, preferredQuality())) return;
     logEvent("Player", "back on its own stream, at the quality it was watching at", {
       variant: v.variantKey,
       quality: v.quality || "Original",
     });
     setPreferredQuality(v.quality, { ratingKey: item.ratingKey, show: item.grandparentRatingKey ?? null });
-  }, [variant?.seq, item.ratingKey]);
+  }, [variant?.seq, item.ratingKey, streamNotes]);
 
   useEffect(() => {
     const v = variantRef.current;
     if (qualityCheckedFor !== item.ratingKey) return;
     if (!v || v.ratingKey !== item.ratingKey || v.quality === quality) return;
+    // The same copy at both qualities is no reason to reload the room for it.
+    // Asked once the stream's notes say what it is.
+    if (!streamNotes || !qualityChangesStream(streamNotes, v.quality, quality)) return;
     const key = `${v.variantKey}>${quality}`;
     if (qualityAskedRef.current === key) return;
     qualityAskedRef.current = key;
@@ -4154,7 +4161,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       v.subtitleStreamId !== 0 && v.burnedSubtitleId === 0,
       quality,
     );
-  }, [variant?.seq, quality, item.ratingKey, qualityCheckedFor]);
+  }, [variant?.seq, quality, item.ratingKey, qualityCheckedFor, streamNotes]);
 
   /**
    * Notice a connection that can't keep up, and offer a lower quality.

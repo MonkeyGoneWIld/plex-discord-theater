@@ -157,6 +157,27 @@ export function endQualitySession(now = Date.now()): void {
  * Anything else is a fresh start, and starts at the default. Returns what
  * applies.
  */
+/**
+ * Whether going from one quality to another needs the stream made again. A
+ * copy of the file is what the server sends at Original and under any ceiling
+ * at or above the file's own bitrate (routes/plex.ts rules a copy out only for
+ * a file over the ceiling), so between those it would make the same copy
+ * again. Rain Man (run 29, A8 retest) is under 10 Mbps: Original to 10 Mbps,
+ * then to 12, each reloaded the room for the same copy. A re-encode, or a
+ * stream not yet loaded (no notes), is made again as before.
+ */
+export function qualityChangesStream(
+  notes: { video: "copy" | "transcode" | null; kbps: number | null } | null,
+  from: number,
+  to: number,
+): boolean {
+  if (from === to) return false;
+  const fileKbps = notes?.video === "copy" ? notes.kbps : null;
+  if (!fileKbps) return true;
+  const sameCopy = (kbps: number) => kbps === 0 || kbps >= fileKbps;
+  return !(sameCopy(from) && sameCopy(to));
+}
+
 export function carryQualityTo(ratingKey: string, show: string | null): number {
   if (!chosenFor) return current;
   if (chosenFor.ratingKey === ratingKey) return current;

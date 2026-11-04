@@ -67,6 +67,7 @@ import type { PreviewStatus } from "../lib/previewStatus";
 import type { LastSegment } from "./StatsOverlay";
 import type { SubtitleLoadStatus, SubtitleShown } from "../lib/subtitleStatus";
 import { START_WATCH_S, type SyncInfo } from "../lib/statsHealth";
+import { readAssignment } from "../lib/trackMove";
 import type { InviteResult } from "../hooks/useDiscord";
 
 const PING_INTERVAL_MS = 10_000; // 10s — matches Plex API recommendation for LAN timeline updates
@@ -2814,19 +2815,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     }
     const prevAudio = currentAudioStreamRef.current;
     const prevSubtitle = currentSubtitleStreamRef.current;
-    const hadTracks = appliedVariantKeyRef.current !== null;
-    // On the same title. A new title comes with its own file's tracks, ids and
-    // all, so its assignment always differs from the last title's — and the
-    // host starting Avatar after Toy Story read as the host switching audio.
-    const sameTitle = appliedVariantTitleRef.current === v.ratingKey;
-    // The same tracks in H.264, for a screen in SDR or as a copy, by what
-    // this player decodes (the server's seatOf), is no change of tracks.
-    const tracksOf = (key: string | null) => key?.replace(/\/(h264|sdr|hevc|8bit)$/, "") ?? null;
-    const movedBysomeoneElse =
-      hadTracks && sameTitle && tracksOf(appliedVariantKeyRef.current) !== tracksOf(v.variantKey) && !askedForTracksRef.current;
+    const { movedBy, stillAsked } = readAssignment(
+      {
+        variantKey: appliedVariantKeyRef.current,
+        ratingKey: appliedVariantTitleRef.current,
+        audioStreamId: prevAudio,
+        subtitleStreamId: prevSubtitle,
+        asked: askedForTracksRef.current,
+      },
+      v,
+    );
     appliedVariantKeyRef.current = v.variantKey;
     appliedVariantTitleRef.current = v.ratingKey;
-    askedForTracksRef.current = false;
+    askedForTracksRef.current = stillAsked;
 
     currentAudioStreamRef.current = v.audioStreamId || null;
     currentSubtitleStreamRef.current = v.subtitleStreamId;
@@ -2846,14 +2847,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // rebuild that follows is a bare loading spinner with no explanation — the
     // film simply stops for five seconds. Say which of the two it was, the same
     // way it reads for whoever asked.
-    if (movedBysomeoneElse) {
-      const audioChanged = prevAudio !== (v.audioStreamId || null);
+    if (movedBy) {
       logEvent("Player", "host moved this client onto other tracks", {
         to: v.variantKey,
-        audioChanged,
+        audioChanged: prevAudio !== (v.audioStreamId || null),
         subtitleChanged: prevSubtitle !== v.subtitleStreamId,
       });
-      beginSwitch(audioChanged ? "audio" : "subtitle", true);
+      beginSwitch(movedBy, true);
     }
 
     if (v.isOwner) {

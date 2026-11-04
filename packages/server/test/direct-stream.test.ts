@@ -736,7 +736,7 @@ console.log("\n— through the routes —");
   check("a file over the copy limit says that is why, and what it is re-encoded at",
     (await startNotes("950")).notes,
     {
-      video: "transcode", reason: "31 Mbps over 20 Mbps server cap", kbps: "12000", videoFrom: "H.264 · SDR · 1920×1080", range: "SDR",
+      video: "transcode", reason: "31 Mbps over 20 Mbps server cap", kbps: "12000", allowed: "12000", videoFrom: "H.264 · SDR · 1920×1080", range: "SDR",
       audio: "copy", audioFrom: "AAC Stereo",
     });
   const uhd = await startNotes(UHD_TITLE);
@@ -751,7 +751,7 @@ console.log("\n— through the routes —");
   check("a file averaging over it is re-encoded at it, without asking for a copy first, and the player told why",
     [capped.asked.directStream, capped.asked.videoBitrate, capped.notes],
     ["0", "8000", {
-      video: "transcode", reason: "15 Mbps over 8 Mbps quality cap", kbps: "8000", quality: "8000", videoFrom: "H.264 · SDR · 1920×1080", range: "SDR",
+      video: "transcode", reason: "15 Mbps over 8 Mbps quality cap", kbps: "8000", quality: "8000", allowed: "8000", videoFrom: "H.264 · SDR · 1920×1080", range: "SDR",
       audio: "copy", audioFrom: "AAC Stereo",
     }]);
   const fits = await startNotes("100", "?quality=12000");

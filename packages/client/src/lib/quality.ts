@@ -163,20 +163,45 @@ export function endQualitySession(now = Date.now()): void {
  * at or above the file's own bitrate (routes/plex.ts rules a copy out only for
  * a file over the ceiling), so between those it would make the same copy
  * again. Rain Man (run 29, A8 retest) is under 10 Mbps: Original to 10 Mbps,
- * then to 12, each reloaded the room for the same copy. A re-encode, or a
- * stream not yet loaded (no notes), is made again as before.
+ * then to 12, each reloaded the room for the same copy.
+ *
+ * A re-encode is made at the lower of what the ceiling allows and what the
+ * file's own picture needs (server ffmpeg/plan.ts sourceMatchedKbps, on both
+ * engines). One made under what was allowed (`allowed`) was set by the file,
+ * and any ceiling above it, and above the 720p level, makes it again as it is.
+ * Snowden for a player that can't decode HEVC (run 29, C): an H.264 re-encode
+ * at 4 Mbps, made again at 4 Mbps for 8 Mbps chosen. Not one re-encoded for
+ * the ceiling itself, which a higher one may let through as a copy; nor back
+ * to Original from a ceiling, whose rate the server alone knows. A stream not
+ * yet loaded (no notes) is made again as before.
  */
 export function qualityChangesStream(
-  notes: { video: "copy" | "transcode" | null; kbps: number | null } | null,
+  notes: StreamFacts | null,
   from: number,
   to: number,
 ): boolean {
   if (from === to) return false;
+  if (notes?.video === "transcode") {
+    const kbps = notes.kbps;
+    if (!kbps || !notes.allowed || kbps >= notes.allowed || notes.reason?.includes("quality cap")) return true;
+    const sameReencode = (c: number) => c > QUALITY_720P_KBPS && c > kbps;
+    return !((from === 0 || sameReencode(from)) && sameReencode(to));
+  }
   const fileKbps = notes?.video === "copy" ? notes.kbps : null;
   if (!fileKbps) return true;
   const sameCopy = (kbps: number) => kbps === 0 || kbps >= fileKbps;
   return !(sameCopy(from) && sameCopy(to));
 }
+
+/** What qualityChangesStream reads of a stream's notes (lib/streamNotes). */
+type StreamFacts = {
+  video: "copy" | "transcode" | null;
+  kbps: number | null;
+  allowed?: number | null;
+  reason?: string | null;
+};
+/** At this ceiling and under, the server re-encodes at 720p (routes/plex.ts). */
+const QUALITY_720P_KBPS = 4000;
 
 /**
  * The quality to send with a change of tracks: the chosen one, unless the
@@ -188,7 +213,7 @@ export function qualityChangesStream(
  * server took 302993:0@10000 for a new one and rebuilt it.
  */
 export function qualityForTracks(
-  notes: { video: "copy" | "transcode" | null; kbps: number | null } | null,
+  notes: StreamFacts | null,
   streamQuality: number,
   chosen: number,
 ): number {

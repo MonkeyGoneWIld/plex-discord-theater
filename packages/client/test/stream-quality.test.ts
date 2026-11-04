@@ -41,10 +41,10 @@ const NO_AUDIO = {
 console.log("— what the server says about a stream —");
 check("a re-encode, with why and at what rate",
   readStreamNotes(sessionData({ video: "transcode", reason: "a picture subtitle is burned into it", kbps: "12000" })),
-  { video: "transcode", reason: "a picture subtitle is burned into it", kbps: 12000, quality: null, ...NO_AUDIO, engine: "plex", perScreen: false });
+  { video: "transcode", reason: "a picture subtitle is burned into it", kbps: 12000, quality: null, allowed: null, ...NO_AUDIO, engine: "plex", perScreen: false });
 check("a copy, with the file's own rate",
   readStreamNotes(sessionData({ video: "copy", kbps: "30660" })),
-  { video: "copy", reason: null, kbps: 30660, quality: null, ...NO_AUDIO, engine: "plex", perScreen: false });
+  { video: "copy", reason: null, kbps: 30660, quality: null, allowed: null, ...NO_AUDIO, engine: "plex", perScreen: false });
 check("a stream started under someone's quality setting says so",
   readStreamNotes(sessionData({ video: "transcode", kbps: "8000", quality: "8000" }))?.quality, 8000);
 check("nothing from a server that sends none", readStreamNotes(null), null);
@@ -63,7 +63,7 @@ const master = [
 ].join("\n");
 const parsed = M3U8Parser.parseMasterPlaylist(master, "http://localhost/master.m3u8");
 check("hls.js reads the server's notes out of the playlist intact",
-  readStreamNotes(parsed.sessionData), { video: "transcode", reason, kbps: 12000, quality: null, ...NO_AUDIO, engine: "plex", perScreen: false });
+  readStreamNotes(parsed.sessionData), { video: "transcode", reason, kbps: 12000, quality: null, allowed: null, ...NO_AUDIO, engine: "plex", perScreen: false });
 check("and still finds the stream in it", parsed.levels.length, 1);
 check("nor from notes it doesn't recognise", readStreamNotes(sessionData({ video: "maybe" })), null);
 check("a stream ffmpeg made says so", readStreamNotes(sessionData({ video: "copy", engine: "ffmpeg" }))?.engine, "ffmpeg");
@@ -148,6 +148,18 @@ check("a copy the chosen quality makes again keeps its own", qualityForTracks(ra
 check("under the file's bitrate, the chosen one goes", qualityForTracks(rainMan, 0, 8000), 8000);
 check("on a re-encode, the chosen one goes", qualityForTracks({ video: "transcode", kbps: 7304 }, 8000, 10000), 10000);
 check("before its notes are in, the chosen one goes", qualityForTracks(null, 0, 10000), 10000);
+
+console.log("\n— a re-encode the file set, under a higher ceiling, isn't made again —");
+// Snowden (run 29, C), H.264 for a player without HEVC: 4 Mbps, 20 allowed.
+const snowden = { video: "transcode" as const, kbps: 4000, allowed: 20000, reason: "HEVC: not decoded by this player" };
+check("Original to 8 Mbps is the same re-encode", qualityChangesStream(snowden, 0, 8000), false);
+check("8 to 10 Mbps is the same re-encode", qualityChangesStream({ ...snowden, allowed: 8000 }, 8000, 10000), false);
+check("down to the 720p level it is made again", qualityChangesStream(snowden, 0, 4000), true);
+check("back to Original from a ceiling it is made again", qualityChangesStream({ ...snowden, allowed: 8000 }, 8000, 0), true);
+check("one the ceiling set is made again", qualityChangesStream({ ...snowden, kbps: 8000, allowed: 8000 }, 8000, 10000), true);
+check("one re-encoded for the ceiling is made again", qualityChangesStream({ video: "transcode", kbps: 7304, allowed: 8000, reason: "8.9 Mbps over 8 Mbps quality cap" }, 8000, 10000), true);
+check("from a server that doesn't say what was allowed, made again", qualityChangesStream({ video: "transcode", kbps: 4000 }, 0, 8000), true);
+check("a subtitle over it keeps the stream's own quality", qualityForTracks(snowden, 0, 8000), 0);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

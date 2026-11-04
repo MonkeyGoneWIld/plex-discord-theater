@@ -5340,6 +5340,9 @@ async function startWithFfmpeg(o: {
   };
   let key: string;
   let reason: string | null = null;
+  /** What the quality level allowed a re-encode, before it was matched to the
+   *  file (plan.ts sourceMatchedKbps); null for a copy. */
+  let allowedKbps: number | null = null;
   /** The stream's dynamic range, for Stats for nerds. */
   let range: string | null = null;
   /** What made the picture, for Stats for nerds: null for a copy. */
@@ -5469,6 +5472,7 @@ async function startWithFfmpeg(o: {
     if (!started.ok) return toPlex(`ffmpeg didn't start: ${started.why}`, "run didn't start", { why: started.why });
     key = started.key;
     video = { ...plan, kbps: plan.kbps };
+    allowedKbps = plan.askedKbps;
     hdrKept = plan.hdrTrc !== null && plan.sdrPeakNits === null;
     tenBit = plan.tenBit;
     perScreen = plan.sdrPeakNits !== null;
@@ -5530,6 +5534,7 @@ async function startWithFfmpeg(o: {
     reason,
     kbps: video.kbps,
     quality: o.quality || null,
+    allowed: reason === null ? null : allowedKbps,
     videoFrom: o.picture?.text ?? null,
     range,
     perScreen: perScreen ? 1 : null,
@@ -5718,7 +5723,7 @@ router.get(
     // Core manifest fetch logic — wrapped in a promise for in-flight deduplication
     const fetchManifest = async (
       subtitleMode: "burn" | "none",
-      { videoResolution, hevc, copy, copyKbps, transcodeKbps, peakKbps, notCopied, refused, quality, fileKbps, audioTracks, picture, fallback }: {
+      { videoResolution, hevc, copy, copyKbps, transcodeKbps, peakKbps, notCopied, refused, quality, fileKbps, audioTracks, picture, fallback, allowedKbps }: {
         videoResolution: string;
         /** Which way HEVC is offered: as what Plex encodes to, as something it
          *  may copy, or not at all. */
@@ -5744,6 +5749,9 @@ router.get(
         picture: PictureFacts | null;
         /** Why the ffmpeg engine left this stream to Plex, when it did. */
         fallback?: string | null;
+        /** What the viewer's ceiling (or the server's rate) allowed a
+         *  re-encode, before it was matched to the file (plexReencodeKbps). */
+        allowedKbps?: number | null;
       },
     ): Promise<string> => {
       const params: Record<string, string> = {
@@ -6035,6 +6043,9 @@ router.get(
         // Roughly what each viewer pulls: the file's own rate for a copy.
         kbps: videoCopied ? fileKbps : Number(params.videoBitrate),
         quality: quality || null,
+        // A re-encode under what was allowed was matched to the file, and a
+        // higher ceiling makes it again as it is (client lib/quality).
+        allowed: videoCopied ? null : allowedKbps ?? null,
         // The file's picture, and the stream's range: a copy's is the file's,
         // and Plex re-encodes to SDR, tone-mapping an HDR file.
         videoFrom: picture?.text ?? null,
@@ -6180,6 +6191,7 @@ router.get(
         copy: copy && !hdrForSdr,
         copyKbps,
         transcodeKbps: reencodeKbps,
+        allowedKbps: transcodeKbps,
         peakKbps: Math.max(reencodeKbps, Math.round(reencodeKbps * VIDEO_PEAK_BITRATE_KBPS / VIDEO_BITRATE_KBPS)),
         notCopied: copy && hdrForSdr ? `${version?.picture?.hdr} for a screen in SDR` : notCopied,
         refused: (asked) => refusedCopyReason(version, asked, roomHevc),

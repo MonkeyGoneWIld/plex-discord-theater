@@ -12,6 +12,10 @@ export interface StreamNotes {
   kbps: number | null;
   /** The viewer quality ceiling it was started under, if any. */
   quality: number | null;
+  /** What that ceiling, or the server's rate, allowed a re-encode before it
+   *  was matched to the file; null for a copy, or from a server that doesn't
+   *  say. */
+  allowed: number | null;
   /** What Plex does with the audio: copies it as it is, or converts it. Null
    *  from a server that doesn't say. */
   audio: "copy" | "transcode" | null;
@@ -56,7 +60,7 @@ export function readStreamNotes(
   if (video !== "copy" && video !== "transcode") return null;
   const audio = value("audio");
   return {
-    video, reason: value("reason"), kbps: num("kbps"), quality: num("quality"),
+    video, reason: value("reason"), kbps: num("kbps"), quality: num("quality"), allowed: num("allowed"),
     audio: audio === "copy" || audio === "transcode" ? audio : null,
     audioFrom: value("audioFrom"), audioTo: value("audioTo"), audioKbps: num("audioKbps"),
     audioReason: value("audioReason"),

@@ -86,12 +86,16 @@ affects only their own stream.
 | 20, 12, 10, 8 or 4 Mbps | A copy if the file's average bitrate fits under it; otherwise a re-encode at that bitrate, at 720p for 4 Mbps |
 
 A choice lasts for the title and the next episodes of its show, through a
-pop-out or a short break. After 30 minutes away, it returns to the viewer's
+pop-out or a short break. After 5 minutes away, it returns to the viewer's
 default, which they set in **Settings** on the home page.
 
-When playback stalls for 12 seconds or more within two minutes, the player
-suggests a lower quality with **Buffering a lot?** and a **Try** button.
-Closing it (**Not now**) hides the suggestion for 10 minutes.
+When a viewer's connection plainly can't keep up, the player suggests a lower
+quality with **Buffering a lot?** and a **Try** button. That takes at least
+three separate stalls adding up to 20 seconds within three minutes, while the
+connection brings in less than the stream needs. A single long wait, such as
+joining or seeking, doesn't count. The suggestion goes away by itself once
+playback runs 8 seconds without a stall with a few seconds buffered. Closing
+it (**Not now**) hides it for 10 minutes.
 
 A viewer on a stream of their own that can't keep up is offered **Switch to
 the host's**, which moves them onto the host's stream, which is already

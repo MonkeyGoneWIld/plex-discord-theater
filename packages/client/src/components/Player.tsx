@@ -68,6 +68,7 @@ import type { LastSegment } from "./StatsOverlay";
 import type { SubtitleLoadStatus, SubtitleShown } from "../lib/subtitleStatus";
 import { START_WATCH_S, type SyncInfo } from "../lib/statsHealth";
 import { readAssignment } from "../lib/trackMove";
+import { OFFER_WINDOW_MS, offerLower, starvedNow, takeOfferDown } from "../lib/bufferingOffer";
 import type { InviteResult } from "../hooks/useDiscord";
 
 const PING_INTERVAL_MS = 10_000; // 10s — matches Plex API recommendation for LAN timeline updates
@@ -325,24 +326,13 @@ const HOLE_JUMP_AFTER_MS = 3_000;
 
 /**
  * Buffering that keeps coming back is a connection that can't carry the
- * stream, and the answer to that is a lower quality — see lib/quality.ts. Seconds
- * spent starved within the window before it is offered.
+ * stream, and the answer to that is a lower quality — see lib/quality.ts and,
+ * for when it is offered and taken down again, lib/bufferingOffer.ts.
  */
-const REBUFFER_WINDOW_MS = 120_000;
-const REBUFFER_OFFER_S = 12;
 /** Not counted: the first seconds of a stream, which are loading, not stalling. */
 const REBUFFER_STARTUP_MS = 10_000;
 /** How long "not now" holds. */
 const REBUFFER_SNOOZE_MS = 10 * 60_000;
-/**
- * When the "buffering a lot?" hint takes itself down again: the connection has
- * caught up. Either this long without a stall and a few seconds in hand, or a
- * buffer so full there is plainly nothing to fix. It used to stay up until it
- * was answered, long after the buffering that raised it had stopped.
- */
-const REBUFFER_CALM_MS = 20_000;
-const REBUFFER_CALM_BUFFER_S = 10;
-const REBUFFER_HEALTHY_BUFFER_S = 30;
 
 /**
  * How far into an episode the next one's subtitles are read ahead, as a share
@@ -1119,9 +1109,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const offerLowerQualityRef = useRef<number | null>(null);
   offerLowerQualityRef.current = offerLowerQuality;
   /** When this player last stalled for want of data, for taking the hint down
-   *  once it has stopped — see REBUFFER_CALM_MS. */
+   *  once it has stopped — see lib/bufferingOffer, takeOfferDown. */
   const lastStarvedAtRef = useRef(0);
-  /** The seconds this player spent starved, recently — see REBUFFER_WINDOW_MS. */
+  /** The seconds this player spent starved, recently — see lib/bufferingOffer. */
   const starvedSecondsRef = useRef<number[]>([]);
   /** Until when starving isn't counted: a stream starting, or "not now". */
   const rebufferQuietUntilRef = useRef(0);
@@ -4245,42 +4235,44 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    *
    * Polled once a second while the room plays: a second spent with the
    * picture stopped for want of data counts, unless the stream has only just
-   * started or the player is seeking. REBUFFER_OFFER_S of those within
-   * REBUFFER_WINDOW_MS is buffering that isn't going away on its own.
+   * started or the player is seeking. When the stalls say the connection can't
+   * carry the stream is lib/bufferingOffer's to say.
    */
   useEffect(() => {
     const timer = setInterval(() => {
       const video = videoRef.current;
       const sync = syncStateRef.current;
       const now = Date.now();
+      if (!video) return;
+      const ahead = bufferAheadSeconds(video);
       // Up, and no longer needed: the buffer has caught up. Checked whatever the
       // room is doing — a pause is exactly when a slow connection fills it.
-      if (video && offerLowerQualityRef.current !== null) {
-        const ahead = bufferAheadSeconds(video);
-        const calm = now - lastStarvedAtRef.current >= REBUFFER_CALM_MS && ahead >= REBUFFER_CALM_BUFFER_S;
-        if (calm || ahead >= REBUFFER_HEALTHY_BUFFER_S) {
-          logEvent("Player", "buffering has stopped, taking the lower quality offer down", {
-            bufferAheadS: Number(ahead.toFixed(1)),
-            sinceStallS: Math.round((now - lastStarvedAtRef.current) / 1000),
-          });
-          starvedSecondsRef.current = [];
-          setOfferLowerQuality(null);
-        }
+      if (offerLowerQualityRef.current !== null && takeOfferDown(lastStarvedAtRef.current, now, ahead)) {
+        logEvent("Player", "buffering has stopped, taking the lower quality offer down", {
+          bufferAheadS: Number(ahead.toFixed(1)),
+          sinceStallS: Math.round((now - lastStarvedAtRef.current) / 1000),
+        });
+        starvedSecondsRef.current = [];
+        setOfferLowerQuality(null);
       }
-      // A host short of picture holds the whole room, its own video paused
-      // with everybody's: buffering too, and it was never counted — Firefox,
-      // hosting on 24 October, held the room 21 s and was offered nothing.
-      const holdingRoom = hostToldWaitingRef.current && !!video && !video.seeking;
-      if (!video || (!holdingRoom && (!sync?.playing || video.paused || video.seeking))) return;
-      const recent = starvedSecondsRef.current.filter((t) => now - t < REBUFFER_WINDOW_MS);
+      const starved = starvedNow({
+        isHost: isHostRef.current,
+        hostHoldingRoom: hostToldWaitingRef.current,
+        roomPlaying: !!sync?.playing,
+        paused: video.paused,
+        seeking: video.seeking,
+        bufferAheadS: ahead,
+        readyState: video.readyState,
+      });
+      if (starved === null) return;
+      const recent = starvedSecondsRef.current.filter((t) => now - t < OFFER_WINDOW_MS);
       starvedSecondsRef.current = recent;
       if (now < rebufferQuietUntilRef.current) return;
-      const starved = holdingRoom || (bufferAheadSeconds(video) < 0.5 &&
-        video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA);
       if (!starved) return;
       lastStarvedAtRef.current = now;
       recent.push(now);
-      if (recent.length < REBUFFER_OFFER_S) return;
+      // Up already: it stays until answered or the buffering is over.
+      if (offerLowerQualityRef.current !== null) return;
       const notes = streamNotesRef.current;
       const ceiling = preferredQuality();
       const nowKbps = Math.min(notes?.kbps ?? Infinity, ceiling || Infinity);
@@ -4288,6 +4280,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // P2P engine hands over from memory, and read 5000 kbps — its default —
       // through whole evenings of stalls.
       const measuredKbps = arrivingKbps(downloadSamplesRef.current, now) ?? 0;
+      if (!offerLower(recent, now, Number.isFinite(nowKbps) ? nowKbps : null, measuredKbps || null)) return;
       const suggest = lowerQualityFor(nowKbps, measuredKbps * 1000);
       if (suggest === null) return;
       logEvent("Player", "buffering a lot, offering a lower quality", {
@@ -4297,7 +4290,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         suggestKbps: suggest,
       });
       starvedSecondsRef.current = [];
-      if (offerLowerQualityRef.current === suggest) return;
       setOfferLowerQuality(suggest);
     }, 1000);
     return () => clearInterval(timer);

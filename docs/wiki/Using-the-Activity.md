@@ -198,7 +198,7 @@ without changing anyone else's, when:
   Firefox. You receive H.264 while everyone else keeps HEVC.
 
 A quality you choose lasts for the title and the next episodes of its show,
-through a pop-out or a short break. After 30 minutes away, it returns to your
+through a pop-out or a short break. After 5 minutes away, it returns to your
 default from **Settings**. See
 [Streaming and Quality](Streaming-and-Quality#quality) for details.
 
@@ -281,7 +281,7 @@ while.
 | **Stream lost**, with **Retry** and **Go Back** | The stream couldn't be restarted. Select **Retry**, or go back and start the title again. |
 | **Host is seeking…** | The host skipped, and your player is loading the new position. |
 | **Host is switching audio…** | The host changed tracks, and your player is moving to the new stream. |
-| **Buffering a lot?** | Playback has stalled several times. **Try** switches to the suggested quality; **Not now** hides the suggestion for 10 minutes. |
+| **Buffering a lot?** | Playback keeps stalling because your connection can't keep up with the stream. **Try** switches to the suggested quality; **Not now** hides the suggestion for 10 minutes. It goes away by itself once playback recovers. |
 | **Your stream can't keep up** | Your own stream (for your own tracks) is falling behind. **Switch to the host's** moves you to the host's stream; **Keep waiting** stays. |
 | **Session expired** | Your sign-in is older than 24 hours. Close the Activity and open it again. |
 | **Unknown instance** | Discord's record of this Activity window is out of date. Close the Activity and open it again. |

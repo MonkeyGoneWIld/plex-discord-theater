@@ -29,8 +29,10 @@ export const QUALITY_LEVELS_KBPS = [20000, 12000, 10000, 8000, 4000];
 
 export const DEFAULT_QUALITY_KEY = "pdt:defaultQuality";
 
-/** Away from the player longer than this, a viewer starts at the default again. */
-export const SITTING_GAP_MS = 30 * 60 * 1000;
+/** Away from the player longer than this, a viewer starts at the default again.
+ *  Long enough for a pop-out or the Activity opened again; 30 minutes until
+ *  4 November, which kept a quality chosen for a bad moment well past it. */
+export const SITTING_GAP_MS = 5 * 60 * 1000;
 /** Where the sitting's quality is kept, what it was chosen on, and when a
  *  player last had it open. */
 export const SITTING_QUALITY_KEY = "pdt:sittingQuality";

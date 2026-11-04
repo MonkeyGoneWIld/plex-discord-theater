@@ -42,7 +42,7 @@ import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
 import { LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, SLOW_SEEK_MS, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, waitsForRoom } from "../lib/roomWait";
-import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, nextSegmentInS, pictureStartFor, pictureAfterSeek } from "../lib/copyStart";
+import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, landingShortOfEnd, nextSegmentInS, pictureStartFor, pictureAfterSeek } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, JOIN_TOLERANCE_S, type HeldSegment } from "../lib/bufferAhead";
@@ -8370,7 +8370,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * host receives it and does any transcode work, then re-announces the new
    * session id via sendPlay on MANIFEST_PARSED.
    */
-  const handleSeekCommand = useCallback((positionSeconds: number) => {
+  const handleSeekCommand = useCallback((askedS: number) => {
+    // Never onto the last frame, where a player held for the room waits forever.
+    const positionSeconds = landingShortOfEnd(askedS, Math.min(runtimeRef.current, contentEndsAtRef.current ?? Infinity));
     // Anyone driving a stream takes the smart path for it — not just the host.
     // A co-host who forked onto their own tracks owns that transcode, and the
     // server excludes a sender from its own broadcast, so nothing would come

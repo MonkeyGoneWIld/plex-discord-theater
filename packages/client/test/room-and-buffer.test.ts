@@ -21,7 +21,7 @@ import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../s
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../src/lib/bufferTrim";
 import { roomPositionNow } from "../src/hooks/useSync";
-import { enoughToStart, nextSegmentInS, pictureAfterSeek, pictureStartFor } from "../src/lib/copyStart";
+import { enoughToStart, landingShortOfEnd, nextSegmentInS, pictureAfterSeek, pictureStartFor } from "../src/lib/copyStart";
 import { AFTER_STOPS_S, MAX_EXTRA_WAIT_S, MAX_READY_CUSHION_AFTER_STOPS_S, MAX_READY_CUSHION_S, afterStopsS, comingInBytesPerS, lateByS, readiness } from "../src/lib/readyCushion";
 
 let pass = 0;
@@ -143,6 +143,12 @@ check("three seconds ahead is enough to start on", enoughToStart(3), true);
 check("and 2.98", enoughToStart(2.98), true);
 check("but not two", enoughToStart(2), false);
 check("at the end of the film, what is left is enough", enoughToStart(1, 1), true);
+// Dark Matter (173603), 4 November: Skip Credits to 2775.648, where the credits and the file end.
+check("a skip to the title's end lands a second short of it", landingShortOfEnd(2775.648, 2775.648), 2774.648);
+check("  and one past it, as 4,198 credits markers end", landingShortOfEnd(2780, 2775.648), 2774.648);
+check("  where it lands is enough to start on", enoughToStart(2775.648 - 2774.648, 2775.648 - 2774.648 - 0.25), true);
+check("a skip short of the end goes where it was asked", landingShortOfEnd(2714.083, 2775.648), 2714.083);
+check("with no end known, where it was asked", [landingShortOfEnd(2775.648, 0), landingShortOfEnd(2775.648, Infinity)], [2775.648, 2775.648]);
 
 console.log("\n— a follower behind the room goes past it to wait —");
 // May on 12 October: the viewer's last segment took 5.6s, and the room was

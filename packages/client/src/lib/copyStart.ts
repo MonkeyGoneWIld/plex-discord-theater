@@ -33,6 +33,25 @@ export function enoughToStart(aheadS: number, leftS = Infinity): boolean {
   return aheadS + READY_TOLERANCE_S >= Math.min(READY_AHEAD_S, Math.max(0, leftS));
 }
 
+/** How far short of the title's end a skip to its end lands. */
+export const END_LANDING_S = 1;
+
+/**
+ * Where a skip to `targetS` lands, with the title ending at `endS`: short of
+ * the very end, so that it plays into the end and finishes. A player held for
+ * the room on the last frame has ended playback (`ended`) but never fires
+ * `ended`, which only comes from playing into the end. It never counts as
+ * ready either, so the room waits for it for good. On 4 November, Skip
+ * Credits on Dark Matter (173603) went to 46:15.65, where its credits and the
+ * file end. Held there for the end to load, it loaded forever. 28,603 of the
+ * library's 32,448 credits markers run to the end of the file. The seek bar's
+ * end and the arrow keys near it go there too.
+ */
+export function landingShortOfEnd(targetS: number, endS: number): number {
+  if (!(endS > END_LANDING_S) || !Number.isFinite(endS)) return targetS;
+  return Math.min(targetS, endS - END_LANDING_S);
+}
+
 /**
  * How long the next segment, `bytes` of it, will take to come in at the speed
  * the first did — at half that speed, since once the first is in the player

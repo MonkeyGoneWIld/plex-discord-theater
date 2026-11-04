@@ -44,7 +44,7 @@ import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
 import { nudgedRate } from "../lib/softSync";
-import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, SLOW_SEEK_MS, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, firstGoLimitS, waitsForRoom } from "../lib/roomWait";
+import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, playAskingWhenRefused, LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, SLOW_SEEK_MS, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, firstGoLimitS, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, landingShortOfEnd, nextSegmentInS, pictureStartFor, pictureAfterSeek } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
@@ -2082,28 +2082,43 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * once. It starts without sound instead, which every browser allows, and the
    * sound comes back with the first click or key in the window, which does
    * nothing else.
+   *
+   * A browser that won't start it even without sound asks for a click in the
+   * middle of the picture, where the loading screen was (playRefused) — see
+   * playAskingWhenRefused.
    */
   const [soundHeldBack, setSoundHeldBack] = useState(false);
+  const [playRefused, setPlayRefused] = useState(false);
+  const askedForClickRef = useRef(false);
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    const play = HTMLMediaElement.prototype.play;
-    const startWithoutSound = function (this: HTMLMediaElement): Promise<void> {
-      return play.call(this).catch((err: unknown) => {
-        if ((err as { name?: string } | null)?.name !== "NotAllowedError" || this.muted) throw err;
+    const startWithoutSound = playAskingWhenRefused<HTMLMediaElement>(HTMLMediaElement.prototype.play, {
+      soundHeldBack: () => {
         logEvent("Video", "the browser won't start this window with sound: starting it without, until a click or key here", {});
-        this.muted = true;
         setSoundHeldBack(true);
-        return play.call(this);
-      });
-    };
+      },
+      refused: () => {
+        if (askedForClickRef.current) return;
+        askedForClickRef.current = true;
+        logEvent("Video", "the browser won't start this window even without sound: asking for a click", {});
+        setPlayRefused(true);
+      },
+    });
     video.play = startWithoutSound;
+    const started = () => {
+      askedForClickRef.current = false;
+      setPlayRefused(false);
+    };
+    video.addEventListener("playing", started);
     return () => {
+      video.removeEventListener("playing", started);
       if (video.play === startWithoutSound) delete (video as unknown as { play?: unknown }).play;
     };
   }, []);
   useEffect(() => {
-    if (!soundHeldBack) return;
+    // Asked for a click to start, the click is the button's to take.
+    if (!soundHeldBack || playRefused) return;
     const swallow = (e: Event) => { e.stopPropagation(); e.preventDefault(); };
     const giveBack = (e: Event) => {
       const video = videoRef.current;
@@ -2120,7 +2135,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       window.removeEventListener("pointerdown", giveBack, true);
       window.removeEventListener("keydown", giveBack, true);
     };
-  }, [soundHeldBack]);
+  }, [soundHeldBack, playRefused]);
   /** The backfill under way, for the loading screen — see the backfill
    *  effect: the stretch it fetches, `fromS` to `toS`; `reachedS`, how far
    *  back what is in goes; `partS`, the film in hand of the segment coming. */
@@ -8592,6 +8607,26 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     setTapAck({ kind: resuming ? "play" : "pause", at: Date.now() });
   }, []);
 
+  /**
+   * The click a browser asked for before it would start this window
+   * (playRefused), with the sound on: as play pressed, for one who runs the
+   * room — from where the room is now (hostPositionForRoom), as blah0391's
+   * press did on 4 November at 09:58:56 — and for anybody else, their start.
+   */
+  const startAfterRefusal = useCallback(() => {
+    const video = videoRef.current;
+    askedForClickRef.current = false;
+    setPlayRefused(false);
+    setSoundHeldBack(false);
+    if (!video) return;
+    video.muted = false;
+    logEvent("Video", "started with the click the browser asked for", { paused: video.paused });
+    if (!video.paused) return;
+    const sync = syncStateRef.current;
+    if (canControlRef.current && !(sync?.playing && (sync.hostWaiting || roomWaitRef.current))) sendRoomResume(hostPositionForRoom());
+    else video.play().catch(() => {});
+  }, []);
+
   // Keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -9338,7 +9373,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       {/* Loading screen — whenever the picture should be moving and isn't, or
           there is no picture yet. "Loading…" or "Buffering…", nothing more —
           or, waiting ahead of the room, how long until it gets here. */}
-      {loadingShown && (
+      {playRefused && (
+        <button type="button" style={styles.clickToStart} onClick={startAfterRefusal}>
+          <span style={styles.clickToStartIcon} aria-hidden="true">{"\u25B6"}</span>
+          <span>Click to start</span>
+          <span style={styles.clickToStartNote}>The browser needs a click in this window before it can play.</span>
+        </button>
+      )}
+      {loadingShown && !playRefused && (
         <div style={styles.bufferingOverlay} role="status" aria-live="polite" data-loading-screen="">
           <div style={styles.bufferingSpinner} />
           <span style={styles.bufferingText}>
@@ -9368,7 +9410,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         playsInline
         onClick={isPip ? undefined : togglePlayPause}
       />
-      {soundHeldBack && (
+      {soundHeldBack && !playRefused && (
         <div style={styles.soundHeldBack} role="status">
           Sound is off: the browser didn't let this window start with it. Click anywhere to turn it on.
         </div>
@@ -10001,6 +10043,36 @@ const styles: Record<string, React.CSSProperties> = {
     // Invisible hit target: resizing remains available without painting the
     // diagonal grip over the video.
     background: "transparent",
+  },
+  clickToStart: {
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%, -50%)",
+    maxWidth: "calc(100% - 32px)",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: 8,
+    padding: "20px 28px",
+    border: "none",
+    borderRadius: 12,
+    background: "rgba(0, 0, 0, 0.75)",
+    color: "#fff",
+    fontSize: 18,
+    fontWeight: 600,
+    textAlign: "center",
+    cursor: "pointer",
+    zIndex: 40,
+  },
+  clickToStartIcon: {
+    fontSize: 44,
+    lineHeight: 1,
+  },
+  clickToStartNote: {
+    fontSize: 13,
+    fontWeight: 400,
+    opacity: 0.8,
   },
   soundHeldBack: {
     position: "absolute",

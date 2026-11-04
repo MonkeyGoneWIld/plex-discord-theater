@@ -16,7 +16,7 @@
  * - A seek in front of a stream's first picture goes to it, and one waiting
  *   for its segment waits (lib/copyStart pictureAfterSeek).
  */
-import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, KEYFRAME_INTO_S, LAND_INTO_SEGMENT_S, MAX_KEYFRAME_WAIT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, waitsForRoom } from "../src/lib/roomWait";
+import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, playAskingWhenRefused, KEYFRAME_INTO_S, LAND_INTO_SEGMENT_S, MAX_KEYFRAME_WAIT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../src/lib/bufferTrim";
@@ -478,5 +478,25 @@ console.log("\n— a player whose picture just came in waits a few seconds for t
     landingBySize(100 + catchUpLeadS(10_000), 100, film, 250_000, 125), 116);
 }
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail > 0 ? 1 : 0);
+// The Firefox pop-out on 4 November at 09:58: refused with sound, then
+// without, it sat paused behind the loading screen until play was pressed.
+void (async () => {
+  const notAllowed = () => Object.assign(new Error("refused"), { name: "NotAllowedError" });
+  const tryStart = async (allows: (muted: boolean) => boolean) => {
+    const seen: string[] = [];
+    const el = { muted: false };
+    const play = playAskingWhenRefused(function (this: { muted: boolean }) {
+      return allows(this.muted) ? Promise.resolve() : Promise.reject(notAllowed());
+    }, { soundHeldBack: () => seen.push("sound held back"), refused: () => seen.push("asks for a click") });
+    const started = await play.call(el).then(() => true, () => false);
+    return { started, muted: el.muted, seen };
+  };
+  check("a window let start with sound starts with it",
+    await tryStart(() => true), { started: true, muted: false, seen: [] });
+  check("one let start only without, starts without and says so",
+    await tryStart(m => m), { started: true, muted: true, seen: ["sound held back"] });
+  check("one not let start at all asks for a click",
+    await tryStart(() => false), { started: false, muted: true, seen: ["sound held back", "asks for a click"] });
+  console.log(`\n${pass} passed, ${fail} failed`);
+  process.exit(fail > 0 ? 1 : 0);
+})();

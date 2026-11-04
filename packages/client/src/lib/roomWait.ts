@@ -487,3 +487,33 @@ const KEYFRAME_NEAR_S = 0.5;
 export function seekTimed(fromKeyS: number | null): boolean {
   return fromKeyS === null || fromKeyS >= KEYFRAME_NEAR_S;
 }
+
+/**
+ * play() for a window a browser may not let start before something in it is
+ * clicked (NotAllowedError). Refused with sound, it starts without
+ * (`soundHeldBack`), which most browsers allow. Refused even without — the
+ * Firefox pop-out on 4 November at 09:58, which sat paused behind "Loading…"
+ * for 45 s until play was pressed — it says so (`refused`), for the page to
+ * ask for the click. Either way the refusal still reaches whoever called.
+ */
+export function playAskingWhenRefused<T extends { muted: boolean }>(
+  play: (this: T) => Promise<void>,
+  on: { soundHeldBack: () => void; refused: () => void },
+): (this: T) => Promise<void> {
+  const refusal = (err: unknown) => (err as { name?: string } | null)?.name === "NotAllowedError";
+  return function (this: T): Promise<void> {
+    return play.call(this).catch((err: unknown) => {
+      if (!refusal(err)) throw err;
+      if (this.muted) {
+        on.refused();
+        throw err;
+      }
+      this.muted = true;
+      on.soundHeldBack();
+      return play.call(this).catch((again: unknown) => {
+        if (refusal(again)) on.refused();
+        throw again;
+      });
+    });
+  };
+}

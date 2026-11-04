@@ -6,6 +6,8 @@
  * get subtly wrong in a way no one notices until a film won't play.
  */
 
+import { sourceMatchedKbps } from "./ffmpeg/plan.js";
+
 /** The parts of a Plex Media entry this rule looks at. */
 export interface VersionSource {
   /** Plex's own bucket: "4k", "1080", "720", "480", "sd". */
@@ -119,6 +121,44 @@ export function transcodeFrame(media: { width?: number | null; height?: number |
     return `${Math.max(1920, w)}x${Math.max(1080, h)}`;
   }
   return "1920x1080";
+}
+
+/**
+ * What Plex is asked to re-encode a version at: `askedKbps`, the server's
+ * transcode bitrate or the viewer's ceiling, but no more than the file's own
+ * picture needs in the codec it is made in (`outCodec`) at the size it comes
+ * out within `frame` — as the ffmpeg engine has it (ffmpeg/plan.ts
+ * sourceMatchedKbps).
+ *
+ * On the Plex engine every re-encode was made at the full bitrate. In Part H on
+ * 4 November that was 20 Mbps, for Rain Man's 8.9 Mbps Dolby Vision on a screen
+ * in SDR as for everything else, where the ffmpeg engine makes it at about 14.
+ * The picture stopped for want of data nine times on those streams, in a
+ * stream's first minute and mid-film, over connections that carried 8 to
+ * 12 Mbps.
+ */
+export function plexReencodeKbps(
+  askedKbps: number,
+  version: { width?: number | null; height?: number | null; bitrate?: number | null; videoCodec?: string | null } | null,
+  frame: string,
+  outCodec: "h264" | "hevc",
+): number {
+  const [boxW, boxH] = frame.split("x").map(Number);
+  const w = version?.width ?? 0;
+  const h = version?.height ?? 0;
+  // Plex shrinks a picture into the frame, keeping its shape, and never enlarges one.
+  const fit = w > 0 && h > 0 ? Math.min(1, boxW / w, boxH / h) : 1;
+  const outW = w > 0 ? Math.round(w * fit) : boxW;
+  const outH = h > 0 ? Math.round(h * fit) : boxH;
+  return sourceMatchedKbps({
+    askedKbps,
+    sourceKbps: version?.bitrate ?? null,
+    sourceCodec: version?.videoCodec ?? null,
+    outCodec,
+    sourcePixels: w * h,
+    outPixels: outW * outH,
+    outHeight: outH,
+  });
 }
 
 /** A video stream as Plex describes it, the parts that say what its picture is. */

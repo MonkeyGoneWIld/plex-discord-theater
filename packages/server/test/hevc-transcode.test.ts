@@ -22,7 +22,7 @@ const {
   recordSessionVideoCodec, recordHevcWithheld, isHevcSession, recordSessionAudioNeeds, recordWithheld, sessionNeeds,
   recordSessionHdr, recordSessionTenBit,
 } = await import("../src/routes/plex.js");
-const { transcodeFrame } = await import("../src/services/media-versions.js");
+const { plexReencodeKbps, transcodeFrame } = await import("../src/services/media-versions.js");
 const { createSession } = await import("../src/middleware/auth.js");
 const { instanceHosts } = await import("../src/routes/discord.js");
 
@@ -44,6 +44,23 @@ check("smaller files are never upscaled", transcodeFrame({ width: 1280, height: 
 check("1440p comes down to 1080p", transcodeFrame({ width: 2560, height: 1440 }), "1920x1080");
 check("4K comes down to 1080p", transcodeFrame({ width: 3840, height: 2160 }), "1920x1080");
 check("unknown size gets the old box", transcodeFrame({}), "1920x1080");
+
+console.log("\n— what Plex is asked to re-encode at —");
+// Part H, 4 November: Rain Man's 8.9 Mbps Dolby Vision for a screen in SDR,
+// asked at 20 Mbps like everything else on the Plex engine.
+const rainMan = { width: 1920, height: 1080, bitrate: 8900, videoCodec: "hevc" };
+check("an HEVC file in H.264: what its picture needs, not the most there is",
+  plexReencodeKbps(20000, rainMan, transcodeFrame(rainMan), "h264"), 14240);
+check("in HEVC, its own rate", plexReencodeKbps(20000, rainMan, transcodeFrame(rainMan), "hevc"), 8900);
+check("a viewer's lower ceiling is still the most", plexReencodeKbps(8000, rainMan, transcodeFrame(rainMan), "h264"), 8000);
+check("an H.264 file with a subtitle burned in: its own rate",
+  plexReencodeKbps(20000, { width: 1920, height: 800, bitrate: 12000, videoCodec: "h264" }, "1920x1080", "h264"), 12000);
+check("a 4K file made 1080p needs about a third, here still the most",
+  plexReencodeKbps(20000, { width: 3840, height: 2160, bitrate: 60000, videoCodec: "hevc" }, "1920x1080", "h264"), 20000);
+check("a DVD isn't given bits it never had",
+  plexReencodeKbps(20000, { width: 720, height: 480, bitrate: 6000, videoCodec: "mpeg2video" }, "1920x1080", "h264"), 3000);
+check("with its bitrate unknown, what was asked",
+  plexReencodeKbps(20000, { width: 1920, height: 1080, bitrate: null, videoCodec: "hevc" }, "1920x1080", "h264"), 20000);
 
 const server = http.createServer();
 attachWebSocketServer(server);

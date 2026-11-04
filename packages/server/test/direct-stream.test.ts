@@ -799,8 +799,9 @@ console.log("\n— through the routes —");
   check("one Plex answers with video is refused too", (await answer(27)).status, 404);
   const beforeBurn = decisions.length;
   const burnt = await start(22);
+  // At the file's own 8 Mbps, which is all its picture has (plexReencodeKbps).
   check("a picture subtitle (PGS) is burned in when asked, as the re-encode that needs — not asked for as a copy first",
-    [burnt.subtitles, burnt.directStream, burnt.videoBitrate, decisions.length - beforeBurn], ["burn", "0", "12000", 1]);
+    [burnt.subtitles, burnt.directStream, burnt.videoBitrate, decisions.length - beforeBurn], ["burn", "0", "8000", 1]);
   check("and so is text that couldn't be drawn", (await start(23)).subtitles, "burn");
 
   let began = Date.now();

@@ -7,7 +7,7 @@ import sharp from "sharp";
 import { progressivePreview } from "../services/preview-stream.js";
 import { sendPlaylist } from "../services/send-playlist.js";
 import { plexFetch, plexFetchSegment, plexJSON, plexUrl } from "../services/plex.js";
-import { isUhd, UHD_MIN_WIDTH, playableVersionOrder, resolutionLabel, channelLabel, editionOf, transcodeFrame, qualityKbps, pictureFacts, type PictureFacts, type PictureSource } from "../services/media-versions.js";
+import { isUhd, UHD_MIN_WIDTH, playableVersionOrder, resolutionLabel, channelLabel, editionOf, transcodeFrame, plexReencodeKbps, qualityKbps, pictureFacts, type PictureFacts, type PictureSource } from "../services/media-versions.js";
 import { startPrefetch, stopPrefetch, getCachedSegment, updatePrefetchPosition } from "../services/segment-prefetch.js";
 import {
   startDirectStream,
@@ -6169,13 +6169,18 @@ router.get(
       //   300, HEVC 10-bit too, looked the same. Without the subtitle the same
       //   re-encode was fine.
       const plexBreaksHevc = version?.videoCodec?.toLowerCase() === "av1" || subtitleMode === "burn";
+      const hevc = plexBreaksHevc || hdrForSdr ? false : roomHevc && HEVC_TRANSCODE ? "encode" : roomHevc && copy ? "copy" : false;
+      // A re-encode at no more than the file's picture needs (plexReencodeKbps):
+      // HEVC only when asked to encode to it; one offered for copying that Plex
+      // re-encodes is asked again for H.264.
+      const reencodeKbps = plexReencodeKbps(transcodeKbps, version, frame, hevc === "encode" ? "hevc" : "h264");
       return fetchManifest(subtitleMode, {
         videoResolution: frame,
-        hevc: plexBreaksHevc || hdrForSdr ? false : roomHevc && HEVC_TRANSCODE ? "encode" : roomHevc && copy ? "copy" : false,
+        hevc,
         copy: copy && !hdrForSdr,
         copyKbps,
-        transcodeKbps,
-        peakKbps,
+        transcodeKbps: reencodeKbps,
+        peakKbps: Math.max(reencodeKbps, Math.round(reencodeKbps * VIDEO_PEAK_BITRATE_KBPS / VIDEO_BITRATE_KBPS)),
         notCopied: copy && hdrForSdr ? `${version?.picture?.hdr} for a screen in SDR` : notCopied,
         refused: (asked) => refusedCopyReason(version, asked, roomHevc),
         quality,

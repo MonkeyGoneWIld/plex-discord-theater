@@ -1469,7 +1469,9 @@ function holdAwayViewer(room: Room, roomId: string, client: RoomClient, choice: 
   const timer = setTimeout(() => {
     if (room.away.get(client.userId)?.timer !== timer) return;
     room.away.delete(client.userId);
-    if (rooms.get(roomId) !== room || choice.ratingKey !== room.state.ratingKey) return;
+    // The room may have moved to another instance since (carryHeldRoom): it is
+    // the room that matters, not the id it was under.
+    if (![...rooms.values()].includes(room) || choice.ratingKey !== room.state.ratingKey) return;
     if (choice.variantKey === room.state.hostVariantKey) return;
     settleLeftStream(room, choice.variantKey);
   }, AWAY_HOLD_MS);

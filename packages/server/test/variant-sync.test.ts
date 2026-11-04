@@ -1590,6 +1590,39 @@ console.log("\n— a host alone who closes the Activity and opens it again carri
   await sleep(HOLD_MS + 200);
 }
 
+console.log("\n— a viewer's own stream, kept for them, still goes in time when the room moves —");
+{
+  // The viewer steps out (their stream kept for AWAY_HOLD_MS), then the host
+  // closes the Activity and opens it again, and the room moves to the new
+  // instance. The viewer's hold then ran out under the old instance's id, which
+  // no longer named the room, and their stream was left running.
+  const at = (channelId: string) => ({ hostUserId: "u-host", guildId: "g-carry", channelId, createdAt: Date.now() });
+  instanceHosts.set("inst-carry-1", at("c-carry"));
+  instanceHosts.set("inst-carry-2", at("c-carry"));
+  const host = new Client("u-host", "host");
+  await host.connect("inst-carry-1");
+  const a = new Client("u-a", "a");
+  await a.connect("inst-carry-1");
+  await startPlayback(host);
+  await ownStream(a);
+  a.close();
+  await sleep(100);
+  host.close();
+  await sleep(100);
+  instanceHosts.delete("inst-carry-1");
+  const back = new Client("u-host", "host");
+  await back.connect("inst-carry-2");
+  check("the room has moved", back.last("state")?.ratingKey, "100");
+  await sleep(AWAY_MS + 300);
+  const b = new Client("u-b", "b");
+  await b.connect("inst-carry-2");
+  b.send({ type: "set-tracks", audioStreamId: 2, subtitleStreamId: 0, quality: 8000 });
+  await sleep(60);
+  check("the viewer's stream went when their hold ran out", [b.stream()?.session, b.stream()?.owner], [null, true]);
+  [back, b].forEach((x) => x.close());
+  await sleep(HOLD_MS + 200);
+}
+
 console.log("\n— the host closes as a viewer is still coming in: the viewer is host —");
 {
   // Run 29, B: nothing playing, the host the last one out, the room ended,

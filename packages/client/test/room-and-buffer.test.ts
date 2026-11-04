@@ -21,6 +21,7 @@ import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../s
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../src/lib/bufferTrim";
 import { roomPositionNow } from "../src/hooks/useSync";
+import { nudgedRate } from "../src/lib/softSync";
 import { enoughToStart, landingShortOfEnd, nextSegmentInS, pictureAfterSeek, pictureStartFor } from "../src/lib/copyStart";
 import { AFTER_STOPS_S, MAX_EXTRA_WAIT_S, MAX_READY_CUSHION_AFTER_STOPS_S, MAX_READY_CUSHION_S, afterStopsS, comingInBytesPerS, lateByS, readiness } from "../src/lib/readyCushion";
 
@@ -414,6 +415,31 @@ console.log("\n— a seek in front of a stream's first picture —");
     pictureAfterSeek(100, [[111, 130]], [{ start: 98, duration: 20 }], 10), null);
   check("without the playlist, nothing", pictureAfterSeek(10, [[10.5, 20]], null, 10), null);
 }
+
+console.log("\n— a viewer a little out of step changes speed once, and seldom —");
+/** The speeds a viewer goes through over heartbeats that find it `aheads` ahead. */
+function speeds(aheads: number[], bufferS = 60): number[] {
+  let rate = 1;
+  const went: number[] = [];
+  for (const ahead of aheads) {
+    const next = nudgedRate(ahead, rate, bufferS);
+    if (next !== rate) went.push(next);
+    rate = next;
+  }
+  return went;
+}
+// y9k5itam on main, 4 November, its first eighty seconds: 0.99 and back, twice.
+check("in step with the host, a heartbeat's age is no reason to change speed",
+  speeds([0.29, 0.43, 0.34, 0.34, 0.34, 0.35, 0.37, 0.34, 0.44, 0.33]), []);
+// Two seconds ahead, closing at 4% over 5 s heartbeats.
+const closing: number[] = [];
+for (let ahead = 2; ahead > -0.3; ahead -= 0.2) closing.push(Number(ahead.toFixed(2)));
+check("two seconds out: one speed, then back to 1", speeds(closing), [0.96, 1]);
+check("held at its speed while the gap closes", nudgedRate(1.2, 0.96, 60), 0.96);
+check("…until it has closed", nudgedRate(0.14, 0.96, 60), 1);
+check("stronger only when the gap grows", nudgedRate(3, 0.96, 60), 0.94);
+check("behind with little loaded, it doesn't speed up", nudgedRate(-2, 1, 3), 1);
+check("behind with plenty, it does", nudgedRate(-2, 1, 60), 1.04);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

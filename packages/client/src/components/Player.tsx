@@ -41,6 +41,7 @@ import { carryTrackPrefs, describeWatched, endTrackSitting, isCommentary, mergeT
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
+import { nudgedRate } from "../lib/softSync";
 import { LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, SLOW_SEEK_MS, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, landingShortOfEnd, nextSegmentInS, pictureStartFor, pictureAfterSeek } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
@@ -133,20 +134,6 @@ const NO_REPEAT_KEYS = new Set([" ", "m", "M", "i", "I"]);
 const HARD_SYNC_DRIFT_S = 4;
 /** Inside this, we're in sync — don't touch the rate at all. */
 const SOFT_SYNC_DEAD_ZONE_S = 0.35;
-/**
- * Drift at which the rate nudge reaches its maximum. Matches HARD_SYNC_DRIFT_S,
- * so the adjustment ramps smoothly right up to the point where a seek takes over.
- */
-const SOFT_SYNC_FULL_SCALE_S = HARD_SYNC_DRIFT_S;
-/**
- * Largest speed change used to converge. 8% closes 4s of drift in under a
- * minute and is below the threshold where the pitch-corrected audio reads as
- * anything but normal — the point being that nobody should be able to tell this
- * is happening.
- */
-const MAX_RATE_ADJUST = 0.08;
-/** Never speed up into a buffer thinner than this: catching up is what drains it. */
-const SOFT_SYNC_MIN_BUFFER_S = 6;
 /**
  * How long the host's picture has to be stopped before the room is told to
  * wait for it. Long enough to let a seek inside the buffer or a decoder hiccup
@@ -7618,21 +7605,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // so the "correction" is itself a stutter — and at a fixed threshold the
       // room settles just under it and stays permanently out of step.
       stalledSeekSinceRef.current = null;
-      if (drift <= SOFT_SYNC_DEAD_ZONE_S) {
-        resetPlaybackRate(video);
-        return;
-      }
-      // Speeding up spends forward buffer. If there isn't any to spend, staying
-      // behind is better than starving — the room will wait for us via the
-      // host's own stall handling long before this matters.
-      if (signedDrift < 0 && bufferAheadSeconds(video) < SOFT_SYNC_MIN_BUFFER_S) {
-        resetPlaybackRate(video);
-        return;
-      }
-      const scale = Math.min(1, drift / SOFT_SYNC_FULL_SCALE_S);
-      const target = Math.round((1 + (signedDrift > 0 ? -1 : 1) * MAX_RATE_ADJUST * scale) * 1000) / 1000;
-      if (Math.abs(video.playbackRate - target) < 0.005) return;
-      video.playbackRate = target;
+      // One steady speed until the gap has closed, since every change of speed
+      // is heard — see nudgedRate. Speeding up spends forward buffer; without
+      // it, staying behind is better than starving.
+      const rate = nudgedRate(signedDrift, video.playbackRate, bufferAheadSeconds(video));
+      if (rate === 1) resetPlaybackRate(video);
+      else if (video.playbackRate !== rate) video.playbackRate = rate;
       return;
     }
 

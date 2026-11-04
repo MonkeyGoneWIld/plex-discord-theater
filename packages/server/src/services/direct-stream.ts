@@ -426,8 +426,9 @@ async function pump(s: CopySession): Promise<void> {
       await rest(s, res.status === 404 ? Math.min(1000, 100 * 2 ** misses++) : 2000);
       continue;
     }
-    missingSince = null;
-    misses = 0;
+    // A 200 isn't progress until it turns out to hold a segment: only then are
+    // the misses reset (below). Reset here, an answer that isn't MPEG-TS was
+    // asked for again ten times a second and never given up on.
 
     let data: Buffer;
     try {
@@ -664,6 +665,9 @@ export async function directStreamPlaylist(
   if (s.openGop && !s.handedOut) return null;
 
   const list = published(s);
+  // Given up on with nothing in: nothing ever will be, so the same — rather
+  // than "ask again" until the player's retries run out.
+  if (s.failed && list.length === 0) return null;
   // Nothing measured yet: say so, and hls.js asks again shortly. An empty
   // playlist would be an error to it, and a request left hanging past its own
   // timeout is one it stops waiting for.

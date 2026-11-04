@@ -150,6 +150,8 @@ const plexSessions = new Map<string, PlexSession>();
 const unreadable = new Set<string>();
 /** Paths answered 200 with JSON, as a misbehaving server might. */
 const notSegments = new Set<string>();
+/** How often those were asked for. */
+let notSegmentAsks = 0;
 
 function plexSession(key: string, offset: number, firstAudioLead = 0): PlexSession {
   const firstGop = keyframes.filter((k) => k * FRAME <= offset).length - 1;
@@ -377,7 +379,10 @@ const plex = http.createServer((req, res) => {
   }
   const seg = url.pathname.match(/^\/video\/:\/transcode\/universal\/session\/([0-9a-f-]{36})\/base\/(\d{5,})\.ts$/);
   if (seg && plexSessions.has(seg[1])) {
-    if (notSegments.has(url.pathname)) return send({});
+    if (notSegments.has(url.pathname)) {
+      notSegmentAsks++;
+      return send({});
+    }
     if (unreadable.has(url.pathname)) {
       res.writeHead(200);
       return res.end(Buffer.concat(Array.from({ length: 12 }, continuation)));
@@ -586,6 +591,11 @@ console.log("\n— Plex answering with something that isn't a segment —");
   ds.startDirectStream("s-json", key, "800", 0);
   await sleep(1500);
   notSegments.delete(pathOf(key, 3));
+  // Each answer that isn't a segment is a miss like a 404: asked for again
+  // less and less often (100, 200, 400 ms…), and given up on after a minute
+  // of them. Counted as progress, it was asked for ten times a second, for
+  // as long as Plex kept answering that way, and never given up on.
+  check("and asked for again less and less often, not ten times a second", notSegmentAsks <= 7 ? "yes" : notSegmentAsks, "yes");
   const playlist = (await ds.directStreamPlaylist(key, (p) => p))!;
   check("is waited out rather than taken for the end of the film",
     [playlist.includes("#EXT-X-ENDLIST"), entries(playlist).length > 3], [false, true]);
@@ -599,10 +609,27 @@ console.log("\n— a copy that can't be read —");
   unreadable.add(pathOf(key, 1));
   check("a title is copied until something goes wrong with it", ds.directStreamRefused("600"), false);
   ds.startDirectStream("s-broken", key, "600", 0);
+  const started = Date.now();
   const playlist = await ds.directStreamPlaylist(key, (p) => p);
-  check("the first playlist still arrives rather than hanging", typeof playlist, "string");
+  // Its one good segment is held back as the last (published() lists all but
+  // the last until the end), and nothing will follow it.
+  check("the first playlist is answered rather than left hanging: start over",
+    [playlist, Date.now() - started < 5000], [null, true]);
   check("and the title is re-encoded from its next start", ds.directStreamRefused("600"), true);
   ds.stopDirectStream("s-broken");
+}
+{
+  // Given up on before a single segment was in: nothing will ever be, so the
+  // player is sent to start over (410, on a re-encode now) rather than told to
+  // ask again (503), which only spent its retries on a copy that had failed.
+  const key = crypto.randomUUID();
+  plexSession(key, 0);
+  unreadable.add(pathOf(key, 0));
+  ds.startDirectStream("s-broken-first", key, "601", 0);
+  const playlist = await ds.directStreamPlaylist(key, (p) => p);
+  check("one that fails before it has anything sends the player to start over, not to ask again",
+    [playlist, ds.directStreamRefused("601")], [null, true]);
+  ds.stopDirectStream("s-broken-first");
 }
 
 // ── through the routes, as a player sees it ──────────────────────

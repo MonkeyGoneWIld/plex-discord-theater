@@ -1,102 +1,115 @@
 # Requirements
 
-Check these before starting. Most failed installs come down to one of the first
-three.
+Check these before you start. Each item links to the page where you set it up.
 
-## You need
+## Checklist
 
-| | Why | Notes |
+| Requirement | Details | Set up in |
 |---|---|---|
-| **A Plex Media Server** | The source of everything | Transcoding must work. Direct-play-only setups will not stream to browsers reliably. |
-| **Docker** | How this runs | Docker Compose v2 (`docker compose`, not `docker-compose`). |
-| **A public HTTPS endpoint** | Discord requirement | See [below](#the-https-requirement). |
-| **A Discord account you can make an app with** | The Activity itself | Free. See [Discord Application Setup](Discord-Application-Setup). |
-| **A Plex account token** | Library access | The server owner's token. See [Plex Setup](Plex-Setup). |
+| Plex Media Server | With its transcoder working | [Plex Setup](Plex-Setup) |
+| The Plex owner's token | The server owner's `X-Plex-Token` | [Plex Setup](Plex-Setup#get-plex_token) |
+| Docker with Compose v2 | `docker compose`, or a stack manager such as Portainer or Dockge. The published image is built for x86-64 (`linux/amd64`). | [Installation](Installation) |
+| A Discord application | Free, created in the Discord Developer Portal | [Discord Application Setup](Discord-Application-Setup) |
+| A public HTTPS address | Discord loads Activities only over HTTPS | [HTTPS and Reverse Proxy](HTTPS-and-Reverse-Proxy) |
+| Upload bandwidth | About 20–25 Mbps per viewer at the default quality | [Bandwidth](#bandwidth) |
 
-Building from source instead of using the container also needs **Node.js 24**.
+Running from source also needs Node.js 24 or later. See
+[Local Development](Local-Development).
 
-## Hardware, honestly
+## Server hardware
 
-The Activity itself is light. **Plex's transcoder is not.**
+The server itself is light. The work is in making the video streams:
 
-Every watch party is at minimum one transcode. What that costs depends entirely
-on your Plex hardware:
+- **Copying is cheap.** When a viewer's player can decode a file's video, the
+  video is copied as it is (Direct Stream) and only the audio is converted if
+  needed. Most H.264 and HEVC files up to 1080p are copied.
+- **Re-encoding needs a GPU.** Files above 1080p, files above the copy bitrate
+  limit, and streams for players that can't decode the file are re-encoded.
+  With hardware encoding, a 1080p re-encode runs comfortably on modest
+  hardware. On the CPU alone, one re-encode can occupy several cores, and a 4K
+  source may not keep up.
 
-- **With hardware transcoding** (Intel Quick Sync, NVENC, or a Plex Pass on
-  supported hardware) a 1080p transcode is comfortable on modest kit.
-- **Without it**, a single 1080p transcode can saturate several CPU cores. 4K
-  source material will likely not keep up at all.
+Where re-encodes run depends on the playback engine:
 
-Check Plex's own dashboard while a stream runs. If it says "Transcode (throttled)"
-or your CPU pins at 100%, that is your bottleneck, not this project.
+| Engine | Re-encodes run in | Hardware |
+|---|---|---|
+| Plex (default) | Plex's transcoder | Hardware acceleration in Plex, which needs Plex Pass and a supported GPU |
+| [FFmpeg engine](FFmpeg-Engine) | This container | A GPU mapped into the container: Intel Quick Sync or VAAPI through `/dev/dri`, or NVIDIA NVENC. Without one, re-encodes are H.264 on the CPU, two at a time. |
 
-With the [ffmpeg engine](FFmpeg-Engine), the work is done in this container
-instead of in Plex, on the same terms: copies cost almost nothing, and
-re-encodes want an Intel GPU with Quick Sync mapped in as `/dev/dri`. Without
-one they run on the CPU, H.264 only, two at a time by default.
-
-A stream is shared by everyone watching with the same audio track, picture
-subtitles and quality, so a room of four on the same tracks is one transcode,
-not four. With [Direct Stream](Configuration-Reference#direct_stream) on, most
-films aren't re-encoded at all: Plex copies the video and converts only the
-audio.
+Viewers with the same audio track, burned-in subtitles and quality share one
+stream, so a room of four on the same settings costs one stream, not four. See
+[Streaming and Quality](Streaming-and-Quality#shared-and-personal-streams).
 
 ### Memory and disk
 
-The server keeps the films being played so going back plays at once. By default
-that is up to **6 GB** of memory for copied films and **2 GB** for re-encoded
-ones, every stream together, and a copy past its 6 GB goes to disk until its
-stream ends, which is up to 13.5 GB an hour for a 30 Mbps Blu-ray. Both are
-adjustable; see [Stream caches](Configuration-Reference#stream-caches).
+The server keeps the films being played, so seeking back plays at once:
+
+| What | Default | Setting |
+|---|---|---|
+| Copied video in memory, all streams together | 6 GB | `DIRECT_STREAM_MEMORY_MB` |
+| Copied video beyond that, on disk until its stream ends | Up to about 11 GB per hour of film at the 25 Mbps copy limit | `STREAM_CACHE_DIR` |
+| Re-encoded video in memory, all streams together | 2 GB | `TRANSCODE_CACHE_MB` |
+
+With the FFmpeg engine, each stream's film is also written to
+`STREAM_CACHE_DIR` as it is made. On a server with less memory, lower both
+memory settings. See
+[Configuration Reference](Configuration-Reference#stream-caches).
 
 ## Bandwidth
 
-This is the constraint people underestimate.
+Each viewer downloads the stream from your server, so your upload speed is
+usually the limit. At the default settings, a viewer downloads:
 
-By default **each viewer downloads the stream from your server**. Players on the
-same stream share segments with each other once their buffers are full, which
-can save a good part of it, but it depends on their connections, so plan
-without it. At the default ~12 Mbps target:
-
-| Viewers | Upload needed |
+| Stream | Per viewer |
 |---|---|
-| 1 | ~12 Mbps |
-| 4 | ~48 Mbps |
-| 8 | ~96 Mbps |
+| Copied file (Direct Stream) | The file's own bitrate, up to 25 Mbps on average |
+| Re-encoded | Up to 20 Mbps on average, with peaks up to 33 Mbps |
 
-A copied film (Direct Stream) is the file's own bitrate instead, up to
-[`DIRECT_STREAM_MAX_KBPS`](Configuration-Reference#direct_stream_max_kbps): a
-30 Mbps remux for four viewers is up to 120 Mbps.
+Plan for this much upload:
 
-Most home connections do not have that upload headroom. Three options:
+| Viewers | Upload at the defaults |
+|---|---|
+| 1 | 20–25 Mbps |
+| 2 | 40–50 Mbps |
+| 4 | 80–100 Mbps |
+| 8 | 160–200 Mbps |
 
-1. **Lower the bitrate.** `VIDEO_BITRATE_KBPS=6000` roughly halves it, and a
-   lower `DIRECT_STREAM_MAX_KBPS` re-encodes the biggest files instead of
-   copying them. See
-   [Configuration Reference](Configuration-Reference#video-quality). A viewer on
-   a slow connection can also pick a lower quality for themselves.
-2. **Use the [VPS Relay](VPS-Relay).** Your server uploads *one* stream to a VPS,
-   which fans it out to the room. This is the right answer for rooms above three
-   or four people.
-3. **Keep the room small.**
+Viewers on the same stream also pass segments to each other, peer to peer,
+once their buffers are full. This can reduce your upload considerably, but it
+depends on each viewer's connection, so plan without it.
 
-## The HTTPS requirement
+If your upload is lower:
 
-Discord loads Activities inside an iframe and will not load an insecure origin.
-You need a real HTTPS URL pointing at the container.
+1. **Lower the defaults.** For example, `VIDEO_BITRATE_KBPS=8000`,
+   `VIDEO_PEAK_BITRATE_KBPS=12000` and `DIRECT_STREAM_MAX_KBPS=10000` keep each
+   viewer near 10 Mbps. Files above the copy limit are then re-encoded. See
+   [Streaming and Quality](Streaming-and-Quality#choosing-the-bitrate-limits).
+2. **Let viewers choose a lower quality.** Each viewer can choose 20, 12, 10, 8
+   or 4 Mbps for themselves in the player.
+3. **Use the [VPS Relay](VPS-Relay).** Your server uploads each stream once to a
+   VPS, and the VPS serves the room.
 
-Any of these work:
+## HTTPS
 
-- **Cloudflare Tunnel** — easiest, free, no port forwarding, no static IP.
-  A [named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/create-local-tunnel/)
-  gives you a stable address.
-- **A reverse proxy** you already run — nginx, Caddy, Traefik — with a
-  certificate from Let's Encrypt.
-- **Any other public HTTPS endpoint** that can reach the container.
+Discord refuses to load an Activity from an insecure address. You need a
+public HTTPS address that forwards to the container's port 3000. It must stay
+the same, because it is entered both in the Discord Developer Portal and in the
+server's settings. A Cloudflare Tunnel or an existing reverse proxy both work.
+See [HTTPS and Reverse Proxy](HTTPS-and-Reverse-Proxy).
 
-Whatever you choose, the address must be stable. If it changes you have to update
-the URL mapping in the Discord Developer Portal every time, which gets old fast.
+## Discord clients
+
+| Client | Support |
+|---|---|
+| Discord desktop app (Windows, macOS, Linux) | Full |
+| Discord in Chrome, Edge or another Chromium browser | Full |
+| Discord in Firefox | Full. Firefox can't decode HEVC, so it receives H.264. |
+| Discord on iOS and Android | Full, with a layout for phones |
+
+Each player reports what it can decode, and the server sends it a stream it
+can play. See
+[Streaming and Quality](Streaming-and-Quality#what-each-player-receives).
 
 ## Next
 
-→ [Installation](Installation)
+→ [Discord Application Setup](Discord-Application-Setup)

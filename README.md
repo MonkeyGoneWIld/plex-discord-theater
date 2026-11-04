@@ -167,8 +167,8 @@ administrator API key is required.
   Intel Quick Sync, VAAPI or NVIDIA NVENC, and Plex covers anything it can't
   make. Beyond what Plex's transcoder does:
   - **PGS subtitles drawn by each player,** sharp at any size, instead of
-    burned into a re-encoded picture, so Blu-ray subtitles no longer stop a
-    film from being copied.
+    burned into a re-encoded picture, so Blu-ray subtitles don't stop a film
+    from being copied.
   - **HDR kept.** Re-encodes stay HDR10, and one stream serves screens in HDR
     and in SDR alike, each shown at its best, so everyone shares it peer to
     peer.
@@ -212,12 +212,16 @@ administrator API key is required.
 - Plex Media Server with transcoding enabled
 - Docker
 - Optional, for the [ffmpeg engine](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FFmpeg-Engine):
-  the library mounted into the container, and an Intel GPU with Quick Sync for
-  re-encodes
+  the library mounted into the container, and a GPU for re-encodes (Intel Quick
+  Sync, VAAPI or NVIDIA NVENC)
 - A Discord application with Activities enabled
-- A public HTTPS address forwarding to port 3000: a
-  [Cloudflare Tunnel](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Installation#5-expose-it-over-https) is quickest, or
-  any reverse proxy that passes WebSockets. Discord will not load `localhost`.
+- A public HTTPS address forwarding to port 3000: a Cloudflare Tunnel is
+  quickest, or any reverse proxy that passes WebSockets. Discord will not load
+  `localhost`. See
+  [HTTPS and Reverse Proxy](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/HTTPS-and-Reverse-Proxy).
+
+The [Requirements](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Requirements)
+page covers hardware, and how much upload each viewer needs.
 
 ### 1. Discord application
 
@@ -259,7 +263,8 @@ services:
       # Optional, for the ffmpeg engine: your library, read-only, at the
       # path Plex has it.
       # - /mnt/media:/data/media:ro
-    # Optional, for the ffmpeg engine: Intel's GPU, for Quick Sync.
+    # Optional, for the ffmpeg engine: the GPU, for Intel Quick Sync or
+    # VAAPI. For NVIDIA NVENC, see the FFmpeg Engine page in the wiki.
     # devices:
     #   - /dev/dri:/dev/dri
     environment:
@@ -387,24 +392,38 @@ In a voice or text channel, open the **App Launcher** and pick the application.
 
 Until the app is verified, friends need to be added under **App Testers** in the
 Developer Portal and accept the invite
-([how](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup#adding-app-testers)).
+([how](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup#6-add-your-viewers-as-app-testers)).
+
+[First Launch](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/First-Launch)
+walks through the first watch party and checks that everything works.
 
 ## Documentation
 
-| | |
-|---|---|
-| [Installation](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Installation) | Full setup walkthrough |
-| [Discord Application Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup) | Creating the app, keeping it private, the 25-member limit, verification |
-| [Plex Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Plex-Setup) | Tokens, markers, preview thumbnails |
-| [Configuration Reference](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Configuration-Reference) | Every environment variable |
-| [FFmpeg Engine](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FFmpeg-Engine) | Making streams in the container, Quick Sync, HDR |
-| [Using the Activity](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Using-the-Activity) | End-user guide |
-| [Optional Integrations](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Optional-Integrations) | TMDB, TVDB, Seerr |
-| [VPS Relay](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/VPS-Relay) | Serving large rooms from one stream |
-| [Updating and Backups](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Updating-and-Backups) | Upgrades, data, restores |
-| [Local Development](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Local-Development) | Running from source, tech stack |
-| [Troubleshooting](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Troubleshooting) | When something breaks |
-| [FAQ](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FAQ) | Common questions |
+The [wiki](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki) follows
+the order you set things up in.
+
+| | Page | Covers |
+|---|---|---|
+| **Set up** | [Requirements](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Requirements) | Hardware, bandwidth, HTTPS and Discord clients |
+| | [Discord Application Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup) | Creating the application, keeping it private, app testers, verification |
+| | [Plex Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Plex-Setup) | Tokens, `PLEX_URL`, and the Plex settings that matter |
+| | [HTTPS and Reverse Proxy](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/HTTPS-and-Reverse-Proxy) | Cloudflare Tunnel, nginx, Caddy and Traefik |
+| | [Installation](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Installation) | The compose file, the required values, and checking it works |
+| | [First Launch](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/First-Launch) | Opening the Activity, inviting viewers, a checklist |
+| **Configure** | [Configuration Reference](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Configuration-Reference) | Every setting, with its default |
+| | [Streaming and Quality](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Streaming-and-Quality) | Copies and re-encodes, per-viewer streams, bitrate limits |
+| | [FFmpeg Engine](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FFmpeg-Engine) | Making streams in the container on a GPU, HDR, picture subtitles |
+| | [Optional Integrations](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Optional-Integrations) | Plex Discover, TMDB, TVDB, ratings, Seerr |
+| | [VPS Relay](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/VPS-Relay) | Serving large rooms from one upload |
+| | [qBittorrent Manager API](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/qBittorrent-Manager-API) | Lowering qBittorrent's upload while people watch |
+| **Use** | [Using the Activity](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Using-the-Activity) | The player, picture-in-picture, settings, messages |
+| | [Roles and Permissions](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Roles-and-Permissions) | Host, co-hosts and viewers |
+| | [Personal Plex Sync](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Personal-Plex-Sync) | Linking your own Plex account |
+| | [Requesting Titles](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Requesting-Titles) | Requests through Seerr |
+| **Maintain** | [Updating and Backups](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Updating-and-Backups) | Updates, settings changes, backups and restores |
+| | [Local Development](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Local-Development) | Running from source, the code's layout, tests |
+| **Help** | [Troubleshooting](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Troubleshooting) | Fixes, by where the problem appears |
+| | [FAQ](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FAQ) | Common questions |
 
 ## Data and privacy
 
@@ -413,7 +432,9 @@ Linked Plex accounts sign in on Plex's own page, and their tokens are encrypted
 at rest. Sessions, watch history, linked accounts and cached artwork live in
 SQLite on the data volume and survive updates; the films being played are kept
 only until their stream ends. Cache sizes and the background warm-up are in the
-[Configuration Reference](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Configuration-Reference#caching-and-performance).
+[Configuration Reference](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Configuration-Reference#caching-and-performance),
+and what to back up is in
+[Updating and Backups](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Updating-and-Backups#what-the-server-stores).
 
 ## License
 

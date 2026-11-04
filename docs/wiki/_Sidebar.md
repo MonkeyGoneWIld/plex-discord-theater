@@ -1,25 +1,30 @@
-**Getting started**
+**Set up**
 
-- [Home](Home)
-- [Requirements](Requirements)
-- [Installation](Installation)
-- [Discord Application Setup](Discord-Application-Setup)
-- [Plex Setup](Plex-Setup)
+1. [Requirements](Requirements)
+2. [Discord Application Setup](Discord-Application-Setup)
+3. [Plex Setup](Plex-Setup)
+4. [HTTPS and Reverse Proxy](HTTPS-and-Reverse-Proxy)
+5. [Installation](Installation)
+6. [First Launch](First-Launch)
+
+**Configure**
+
 - [Configuration Reference](Configuration-Reference)
+- [Streaming and Quality](Streaming-and-Quality)
+- [FFmpeg Engine](FFmpeg-Engine)
+- [Optional Integrations](Optional-Integrations)
+- [VPS Relay](VPS-Relay)
+- [qBittorrent Manager API](qBittorrent-Manager-API)
 
-**Using it**
+**Use**
 
 - [Using the Activity](Using-the-Activity)
-- [Hosts, Co-hosts and Viewers](Roles-and-Permissions)
+- [Roles and Permissions](Roles-and-Permissions)
 - [Personal Plex Sync](Personal-Plex-Sync)
 - [Requesting Titles](Requesting-Titles)
 
-**Going further**
+**Maintain**
 
-- [Optional Integrations](Optional-Integrations)
-- [FFmpeg Engine](FFmpeg-Engine)
-- [qBittorrent Manager API](qBittorrent-Manager-API)
-- [VPS Relay](VPS-Relay)
 - [Updating and Backups](Updating-and-Backups)
 - [Local Development](Local-Development)
 
@@ -27,3 +32,5 @@
 
 - [Troubleshooting](Troubleshooting)
 - [FAQ](FAQ)
+
+[Home](Home)

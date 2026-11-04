@@ -7144,8 +7144,13 @@ function rewriteManifestUrls(m3u8: string, authToken?: string, isSubManifest = f
   return result;
 }
 
-/** Stream a fetch response body to an Express response, with error logging. */
-async function pipeBody(
+/**
+ * Stream a fetch response body to an Express response, with error logging, at
+ * the player's pace: no more is read from Plex than the connection takes (a
+ * player reading slowly used to have the whole body held in memory for it),
+ * and none once the player has gone (it used to be read to the end regardless).
+ */
+export async function pipeBody(
   body: ReadableStream<Uint8Array> | null,
   res: Response,
 ): Promise<void> {
@@ -7158,11 +7163,21 @@ async function pipeBody(
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      if (res.writableEnded) {
+      if (res.writableEnded || res.destroyed) {
         await reader.cancel();
         break;
       }
-      res.write(value);
+      if (!res.write(value)) {
+        await new Promise<void>((resolve) => {
+          const go = () => {
+            res.off("drain", go);
+            res.off("close", go);
+            resolve();
+          };
+          res.on("drain", go);
+          res.on("close", go);
+        });
+      }
     }
     if (!res.writableEnded) res.end();
   } catch (err) {

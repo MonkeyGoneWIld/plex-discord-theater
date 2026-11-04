@@ -23,6 +23,8 @@ process.env.TMDB_API_KEY = "test-key";
 
 // ── a TMDB that answers for one person and nobody else ───────────
 const tmdbAsked: string[] = [];
+/** TMDB failing for a moment: every call answered 503. */
+let tmdbDown = false;
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: any, init?: any) => {
   // All three shapes fetch accepts. The server passes a URL object, which has
@@ -33,13 +35,15 @@ globalThis.fetch = (async (input: any, init?: any) => {
   if (!url.startsWith("https://api.themoviedb.org/")) return realFetch(input, init);
   const path = new URL(url).pathname.replace("/3", "");
   tmdbAsked.push(path);
+  if (tmdbDown) return new Response("", { status: 503 });
   const json = (body: unknown) =>
     new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
 
   if (path === "/search/person") {
     const q = new URL(url).searchParams.get("query") ?? "";
-    return json({ results: q.toLowerCase() === "sam bottoms" ? [{ id: 7 }] : [] });
+    return json({ results: q.toLowerCase() === "sam bottoms" ? [{ id: 7 }] : q.toLowerCase() === "ann down" ? [{ id: 8 }] : [] });
   }
+  if (path === "/person/8") return json({ id: 8, name: "Ann Down", biography: "Back again." });
   if (path === "/person/7") {
     return json({ id: 7, name: "Sam Bottoms", biography: "An actor.", profile_path: "/p.jpg",
                   birthday: "1955-10-17", deathday: "2008-12-16",
@@ -278,6 +282,18 @@ console.log("\n— somebody Plex has never heard of —");
   check("still answers", status, 200);
   check("with an empty filmography rather than an error", [body.movies, body.shows], [[], []]);
   check("and no biography", body.biography, null);
+}
+
+console.log("\n— TMDB down for a moment —");
+{
+  // A lookup that failed was kept as "nobody", so the person's biography and
+  // the rest of their career stayed missing until the server restarted.
+  tmdbDown = true;
+  const first = await getPerson("Ann Down");
+  tmdbDown = false;
+  const again = await getPerson("Ann Down");
+  check("a failed lookup isn't kept: the biography arrives once TMDB is back",
+    [first.body.biography, again.body.biography], [null, "Back again."]);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

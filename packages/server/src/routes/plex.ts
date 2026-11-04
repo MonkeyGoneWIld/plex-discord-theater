@@ -1650,13 +1650,15 @@ function tmdbCredits<T extends { name?: string; profile_path?: string | null }>(
 }
 
 /** The TMDB collection a movie belongs to, or null when it's a standalone film
- *  (or TMDB has no key/entry). Cached, misses included. */
+ *  (or TMDB has no key/entry). Cached, misses included; a request that failed
+ *  outright isn't, so TMDB being down for a moment doesn't stick. */
 async function tmdbMovieCollection(tmdbId: number): Promise<{ id: number; name: string } | null> {
   if (tmdbMovieCollectionCache.has(tmdbId)) return tmdbMovieCollectionCache.get(tmdbId)!;
   const data = await tmdbGet<{ belongs_to_collection?: { id: number; name: string } | null }>(
     `/movie/${tmdbId}`,
   );
-  const coll = data?.belongs_to_collection ?? null;
+  if (!data) return null;
+  const coll = data.belongs_to_collection ?? null;
   tmdbMovieCollectionCache.set(tmdbId, coll);
   return coll;
 }
@@ -1706,12 +1708,14 @@ async function originalLanguageOf(m: PlexMetadataItem, tmdbId: number | null): P
   }
 }
 
-/** Every film in a TMDB collection, or null on failure. Cached, misses included. */
+/** Every film in a TMDB collection, or null on failure. Cached, misses included;
+ *  a request that failed outright isn't. */
 async function tmdbCollectionParts(collectionId: number): Promise<{ name: string; parts: TmdbPart[] } | null> {
   if (tmdbCollectionCache.has(collectionId)) return tmdbCollectionCache.get(collectionId)!;
   const data = await tmdbGet<{ name?: string; parts?: TmdbPart[] }>(`/collection/${collectionId}`);
+  if (!data) return null;
   const result =
-    data && Array.isArray(data.parts) ? { name: data.name ?? "Collection", parts: data.parts } : null;
+    Array.isArray(data.parts) ? { name: data.name ?? "Collection", parts: data.parts } : null;
   tmdbCollectionCache.set(collectionId, result);
   return result;
 }
@@ -2630,7 +2634,9 @@ function isPerformance(credit: TmdbCredit): boolean {
 }
 
 /** TMDB person lookup by name, cached (misses included — a name TMDB doesn't
- *  know won't start knowing it on the next page view). */
+ *  know won't start knowing it on the next page view). A request that failed
+ *  outright isn't: kept, TMDB down for a moment left the person without a
+ *  biography or the rest of their career until the server restarted. */
 const tmdbPersonCache = new LruMap<string, TmdbPerson | null>(2_000);
 
 interface TmdbPerson {
@@ -2651,7 +2657,8 @@ async function tmdbPerson(name: string): Promise<TmdbPerson | null> {
   const search = await tmdbGet<{ results?: Array<{ id: number }> }>("/search/person", {
     query: name,
   });
-  const id = search?.results?.[0]?.id;
+  if (!search) return null;
+  const id = search.results?.[0]?.id;
   let result: TmdbPerson | null = null;
   if (id != null) {
     const p = await tmdbGet<{
@@ -2676,6 +2683,8 @@ async function tmdbPerson(name: string): Promise<TmdbPerson | null> {
         placeOfBirth: p.place_of_birth || null,
         knownFor: p.known_for_department || null,
       };
+    } else {
+      return null;
     }
   }
   tmdbPersonCache.set(key, result);

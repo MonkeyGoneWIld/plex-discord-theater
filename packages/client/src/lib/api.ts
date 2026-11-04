@@ -160,8 +160,11 @@ function cachedGet<T = unknown>(path: string): Promise<T> {
   const hit = apiCache.get(path);
   if (hit && Date.now() - hit.at < API_CACHE_TTL_MS) return hit.promise as Promise<T>;
   const promise = apiGet<T>(path);
-  // Failures shouldn't stick — drop the entry so the next call retries.
-  promise.catch(() => apiCache.delete(path));
+  // Failures shouldn't stick — drop the entry so the next call retries. Its
+  // own entry only: one that failed after it was replaced isn't the one kept.
+  promise.catch(() => {
+    if (apiCache.get(path)?.promise === promise) apiCache.delete(path);
+  });
   apiCache.delete(path); // re-insert at the end so eviction is oldest-first
   apiCache.set(path, { at: Date.now(), promise });
   if (apiCache.size > API_CACHE_MAX) {

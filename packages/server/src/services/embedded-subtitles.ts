@@ -674,7 +674,12 @@ function begin(opts: ReadOptions, read: (r: Reading) => Promise<void> = (r) => r
     wanted: [],
     listeners: new Set(),
   };
-  r.done = read(r).finally(() => {
+  // Never rejected: what waits on it, and the reads queued behind it, go on.
+  r.done = read(r).catch((err) => {
+    logEvent("Subtitles", "a subtitle read broke off", {
+      ratingKey: r.ratingKey, streamId: r.streamId, why: err instanceof Error ? err.message : String(err),
+    });
+  }).finally(() => {
     if (reading.get(r.streamId) === r) reading.delete(r.streamId);
     for (const w of r.windows) {
       w.open = false;
@@ -1243,6 +1248,13 @@ async function run(r: Reading, opts: ReadOptions): Promise<void> {
       changed(r);
     },
   }, details, along.map((a) => a.o.fromFile!));
+  } catch (err) {
+    // Broken here rather than by ffmpeg or Plex: the folder for the others
+    // read alongside couldn't be made, say. A read that failed, like any other.
+    result = {
+      raw: Buffer.alloc(0), stopped: false, firstByteMs: null,
+      failure: { why: err instanceof Error ? err.message : String(err) },
+    };
   } finally {
     // Those the pass didn't read are left to be asked for again.
     along.forEach((a, i) => a.settle(result?.along?.[i] ?? null));

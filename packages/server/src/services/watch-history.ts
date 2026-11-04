@@ -722,10 +722,10 @@ export function getProgress(userId: string, ratingKey: string): HistoryEntry | n
   return row ? toEntry(row) : null;
 }
 
-// One prepared statement per IN-list size, reused across calls. Episode counts
-// repeat heavily (every season of a show is usually the same length), so this
-// stays tiny while avoiding a re-prepare on each request.
-const manyStmtCache = new Map<number, ReturnType<typeof db.prepare>>();
+// One prepared statement per IN-list size, reused across calls: the 32 sizes
+// used last. Episode counts repeat heavily (every season of a show is usually
+// the same length), so this avoids a re-prepare on most requests.
+const manyStmtCache = new LruMap<number, ReturnType<typeof db.prepare>>(32);
 
 function progressManyStmt(count: number) {
   let stmt = manyStmtCache.get(count);

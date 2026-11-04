@@ -56,17 +56,58 @@ export async function plexFetch(
 
 const PLEX_SEGMENT_TIMEOUT_MS = 8_000;
 
+/**
+ * A segment or playlist from Plex. The timer covers only Plex's answer, so a
+ * proxied segment can stream for as long as its viewer takes; `signal`, when
+ * given, also covers the body.
+ */
 export async function plexFetchSegment(
   path: string,
   params?: Record<string, string>,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PLEX_SEGMENT_TIMEOUT_MS);
   try {
     return await fetch(plexUrl(path, params), {
       headers: PLEX_HEADERS,
-      signal: controller.signal,
+      signal: signal ? AbortSignal.any([controller.signal, signal]) : controller.signal,
     });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const PLEX_SEGMENT_READ_MS = 30_000;
+let segmentReadMs = PLEX_SEGMENT_READ_MS;
+/** Tests only: a shorter deadline for segmentFromPlex; none given, the usual one. */
+export function segmentReadMsForTests(ms = PLEX_SEGMENT_READ_MS): void {
+  segmentReadMs = ms;
+}
+
+/**
+ * A segment or playlist read whole, answer and body within 30 seconds; body is
+ * null when Plex answers anything but 2xx. Throws when the read fails, times
+ * out or `signal` aborts it.
+ *
+ * plexFetchSegment's own timer stops once Plex answers. A caller reading the
+ * body into memory had no deadline after that: a body that stopped partway
+ * held it until undici gave up, five minutes later.
+ */
+export async function segmentFromPlex(
+  path: string,
+  signal?: AbortSignal,
+): Promise<{ status: number; body: Buffer | null }> {
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), segmentReadMs);
+  try {
+    const res = await plexFetchSegment(path, undefined,
+      signal ? AbortSignal.any([deadline.signal, signal]) : deadline.signal);
+    if (!res.ok) {
+      res.body?.cancel().catch(() => {});
+      return { status: res.status, body: null };
+    }
+    return { status: res.status, body: Buffer.from(await res.arrayBuffer()) };
   } finally {
     clearTimeout(timer);
   }

@@ -137,7 +137,7 @@ Start the client with `npm run dev -w packages/client`, then open one of:
 
 | Fixture | Needs |
 |---|---|
-| `/test/audio-boost.html`, `/test/breadcrumbs.html`, `/test/gop-trim.html`, `/test/host-toast.html`, `/test/pip-interactions.html`, `/test/settings-panel.html`, `/test/stats-panel.html`, `/test/subtitle-panel.html`, `/test/sync-player.html` | Nothing more |
+| `/test/audio-boost.html`, `/test/breadcrumbs.html`, `/test/gop-trim.html`, `/test/host-toast.html`, `/test/library-loading.html`, `/test/pip-interactions.html`, `/test/season-detail.html`, `/test/settings-panel.html`, `/test/stats-panel.html`, `/test/subtitle-panel.html`, `/test/sync-player.html`, `/test/track-switcher.html` | Nothing more |
 | `/test/media-errors.html` | `node packages/client/test/media-errors-server.mjs`, which needs `ffmpeg` on the PATH the first time |
 | `/test/sync-room.html` | `npx tsx packages/client/test/sync-room-server.ts`, after the media-errors server has run once. It plays a room of players against the real sync server and P2P tracker. |
 

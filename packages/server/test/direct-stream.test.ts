@@ -148,6 +148,9 @@ interface PlexSession {
 const plexSessions = new Map<string, PlexSession>();
 /** Paths answered with something unreadable instead of a segment. */
 const unreadable = new Set<string>();
+/** Paths whose first request is answered with headers and part of a body,
+ *  then nothing more: a Plex that stopped sending partway. */
+const stalls = new Set<string>();
 /** Paths answered 200 with JSON, as a misbehaving server might. */
 const notSegments = new Set<string>();
 /** How often those were asked for. */
@@ -382,6 +385,11 @@ const plex = http.createServer((req, res) => {
     if (notSegments.has(url.pathname)) {
       notSegmentAsks++;
       return send({});
+    }
+    if (stalls.delete(url.pathname)) {
+      res.writeHead(200, { "Content-Type": "video/MP2T" });
+      res.write(continuation());
+      return;
     }
     if (unreadable.has(url.pathname)) {
       res.writeHead(200);
@@ -630,6 +638,22 @@ console.log("\n— a copy that can't be read —");
   check("one that fails before it has anything sends the player to start over, not to ask again",
     [playlist, ds.directStreamRefused("601")], [null, true]);
   ds.stopDirectStream("s-broken-first");
+}
+{
+  // A segment whose body stops partway: Plex answered, then sent nothing more.
+  // Its read had no deadline but undici's own five minutes between chunks, and
+  // the copy waited all that time on it.
+  const plexMod = await import("../src/services/plex.js");
+  plexMod.segmentReadMsForTests(500);
+  const key = crypto.randomUUID();
+  plexSession(key, 0);
+  stalls.add(pathOf(key, 0));
+  ds.startDirectStream("s-stalled", key, "602", 0);
+  const playlist = await ds.directStreamPlaylist(key, (p) => p);
+  check("a segment that stops arriving partway is asked for again, and the copy goes on",
+    typeof playlist === "string" && playlist !== "retry" && entries(playlist)[0]?.uri, pathOf(key, 0));
+  ds.stopDirectStream("s-stalled");
+  plexMod.segmentReadMsForTests();
 }
 
 // ── through the routes, as a player sees it ──────────────────────
@@ -922,6 +946,33 @@ console.log("\n— through the routes —");
 
   await plexRoutes.stopAllActiveSessions();
   api.close();
+}
+
+console.log("\n— a subtitle read that breaks before ffmpeg starts —");
+{
+  // Two of a file's subtitles read in one pass, and the folder for the one
+  // read alongside can't be made. The error was thrown on out of the read,
+  // unhandled, rather than the read being one that failed.
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on("unhandledRejection", onUnhandled);
+  const read = (id: string, index: number) => ({
+    streamId: id, ratingKey: "7300", mediaIndex: 0, withTrackSelected: <T>(start: () => Promise<T>) => start(),
+    fromFile: { file: path.join(os.tmpdir(), "no-film.mkv"), index, codec: "srt" },
+  });
+  const tmpVars = ["TMPDIR", "TMP", "TEMP"] as const;
+  const saved = tmpVars.map((k) => process.env[k]);
+  const nowhere = path.join(os.tmpdir(), "no-such-folder", "nor-this");
+  for (const k of tmpVars) process.env[k] = nowhere;
+  try {
+    embeddedSubs.prefetchEmbeddedSubtitles([read("7301", 2), read("7302", 3)]);
+  } finally {
+    tmpVars.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
+  }
+  await new Promise((r) => setTimeout(r, 500));
+  process.off("unhandledRejection", onUnhandled);
+  check("it is a read that failed, not an error thrown on",
+    [embeddedSubs.embeddedSubtitleState("7301")?.state ?? null, unhandled.length], ["unreadable", 0]);
 }
 
 plex.close();

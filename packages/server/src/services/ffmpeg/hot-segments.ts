@@ -18,13 +18,14 @@ function budget(): number {
 
 /** Keep a segment's bytes, by its file. */
 export function keepHot(file: string, data: Buffer): void {
-  const limit = budget();
-  if (data.length > limit) return;
   const had = hot.get(file);
   if (had) {
     hot.delete(file);
     held -= had.length;
   }
+  const limit = budget();
+  // Too big to keep: read from its file, not from what was kept for it before.
+  if (data.length > limit) return;
   hot.set(file, data);
   held += data.length;
   trim(limit);

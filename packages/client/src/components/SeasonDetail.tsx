@@ -299,7 +299,11 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                 ? Math.min(1, seen.positionMs / seen.durationMs)
                 : null;
             return (
-              <button
+              // The card opens the episode wherever it is clicked; its button
+              // is what a keyboard and a screen reader reach. The tick is a
+              // control of its own beside that button: inside it, it was read
+              // as part of the button's name and never as a checkbox.
+              <div
                 key={ep.ratingKey}
                 onClick={() => onSelectEpisode(ep)}
                 onMouseEnter={() => setHoveredKey(ep.ratingKey)}
@@ -310,6 +314,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                   ...(isHovered ? styles.episodeCardHover : {}),
                 }}
               >
+                <button type="button" style={{ ...styles.episodeOpen, ...(narrow ? styles.episodeCardNarrow : {}) }}>
                 <div style={{ ...styles.thumbWrap, ...(narrow ? styles.thumbWrapNarrow : {}) }}>
                   {ep.thumb ? (
                     <img
@@ -370,9 +375,10 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                     <p style={styles.episodeSummary}>{ep.summary}</p>
                   )}
                 </div>
-                <span
+                </button>
+                <button
+                  type="button"
                   role="checkbox"
-                  tabIndex={0}
                   aria-checked={watched}
                   aria-disabled={watchedBusy === ep.ratingKey}
                   aria-label={watched ? `Mark ${ep.title} unwatched` : `Mark ${ep.title} as watched`}
@@ -380,12 +386,7 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                     ? "Updating watched state..."
                     : watched ? "Watched — mark unwatched" : "Mark as watched"}
                   onClick={(e) => {
-                    e.stopPropagation();
-                    void toggleWatched(ep, watched);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key !== "Enter" && e.key !== " ") return;
-                    e.preventDefault();
+                    // Not the card's click too, which would open the episode.
                     e.stopPropagation();
                     void toggleWatched(ep, watched);
                   }}
@@ -396,8 +397,8 @@ export function SeasonDetail({ season, show, onSelectEpisode, onBack, onShowClic
                   }}
                 >
                   <WatchedCheckIcon />
-                </span>
-              </button>
+                </button>
+              </div>
             );
           })}
           {/* Below the list, not above it.
@@ -491,6 +492,12 @@ const styles: Record<string, React.CSSProperties> = {
     background: "rgba(255,255,255,0.03)",
     cursor: "pointer", color: "inherit", textAlign: "left", fontFamily: "inherit",
     transition: "all 0.2s ease", width: "100%",
+  },
+  /** The card's button: the still and the text, laid out as the card lays out
+   *  its three parts, and nothing of a button's own look. */
+  episodeOpen: {
+    display: "flex", gap: "14px", flex: 1, minWidth: 0, padding: 0, border: "none",
+    background: "none", cursor: "pointer", color: "inherit", textAlign: "left", fontFamily: "inherit",
   },
   episodeCardHover: {
     // Whole `border` shorthand, not just borderColor: the base style sets

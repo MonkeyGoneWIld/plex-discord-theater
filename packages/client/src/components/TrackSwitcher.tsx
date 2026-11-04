@@ -68,8 +68,14 @@ export function TrackSwitcher({
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // The title can change while its details are on their way: the next
+    // episode starts with this open. An answer for the one before is let go,
+    // and the old tracks aren't offered meanwhile.
+    let current = true;
+    setLoading(true);
     fetchMeta(ratingKey)
       .then((meta) => {
+        if (!current) return;
         const version = versionOf(meta, mediaIndex);
         setAudioTracks(version.audioTracks);
         setSubtitleTracks(version.subtitleTracks);
@@ -77,7 +83,8 @@ export function TrackSwitcher({
         setTitle({ ratingKey: meta.ratingKey, type: meta.type, grandparentRatingKey: meta.grandparentRatingKey });
       })
       .catch(console.error)
-      .finally(() => setLoading(false));
+      .finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
   }, [ratingKey, mediaIndex]);
 
   // What this client is on. Falls back to the item's own flags only when the

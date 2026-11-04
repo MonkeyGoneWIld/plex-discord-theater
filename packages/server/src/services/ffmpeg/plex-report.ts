@@ -59,7 +59,8 @@ interface Reported {
   postedAt: number;
   postedState: ReportState | null;
   postedPositionS: number;
-  posting: boolean;
+  /** The report on its way to Plex, if one is. */
+  posting: Promise<void> | null;
 }
 
 const reported = new Map<string, Reported>();
@@ -166,7 +167,7 @@ export async function plexReportTick(now = Date.now()): Promise<void> {
         postedAt: 0,
         postedState: null,
         postedPositionS: 0,
-        posting: false,
+        posting: null,
       };
       reported.set(s.key, r);
       logEvent("PlexReport", "showing a stream in Plex's Now Playing", {
@@ -180,12 +181,12 @@ export async function plexReportTick(now = Date.now()): Promise<void> {
     const clockS = r.postedState === "playing" ? r.postedPositionS + (now - r.postedAt) / 1000 : r.postedPositionS;
     const due = r.postedState !== s.state || Math.abs(s.positionS - clockS) > JUMP_S || now - r.postedAt >= EVERY_MS;
     if (!due) continue;
-    r.posting = true;
     r.postedAt = now;
     r.postedState = s.state;
     r.postedPositionS = s.positionS;
     const it = r;
-    posts.push(post(it, s.state, s.positionS).finally(() => { it.posting = false; }));
+    it.posting = post(it, s.state, s.positionS).finally(() => { it.posting = null; });
+    posts.push(it.posting);
   }
   for (const [key, r] of reported) {
     if (now - r.seenAt < GONE_MS) continue;
@@ -193,9 +194,15 @@ export async function plexReportTick(now = Date.now()): Promise<void> {
     logEvent("PlexReport", "telling Plex a stream stopped", {
       session: r.sessionId.substring(0, 8), ratingKey: r.ratingKey, client: r.clientId, atS: Math.round(r.positionS),
     });
-    posts.push(post(r, "stopped", r.positionS));
+    posts.push(postStopped(r));
   }
   await Promise.all(posts);
+}
+
+/** "stopped", once a report still on its way has got there: one landing after
+ *  it put the stream back in Now Playing. */
+function postStopped(r: Reported): Promise<void> {
+  return (r.posting ?? Promise.resolve()).then(() => post(r, "stopped", r.positionS));
 }
 
 /**
@@ -215,5 +222,5 @@ export async function reportAllStopped(): Promise<void> {
   if (!reportsToPlex()) return;
   const all = [...reported.values()];
   reported.clear();
-  await Promise.all(all.map((r) => post(r, "stopped", r.positionS)));
+  await Promise.all(all.map(postStopped));
 }

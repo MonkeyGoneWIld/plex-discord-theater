@@ -135,6 +135,10 @@ console.log("\n— segments kept in memory —");
     [true, false, { segments: 3, bytes: 30 }]);
   keepHot(path.join(run2, "e.ts"), Buffer.alloc(40));
   check("one bigger than all of it isn't kept", hotSegment(path.join(run2, "e.ts")), null);
+  keepHot(path.join(run2, "d.ts"), Buffer.alloc(40, 1));
+  check("  nor, written again that big, are the bytes kept for it before: they are stale",
+    [hotSegment(path.join(run2, "d.ts")), hotSegmentStats()], [null, { segments: 2, bytes: 20 }]);
+  keepHot(path.join(run2, "d.ts"), Buffer.alloc(10));
   dropHot(run1);
   check("a run's go when it ends, not another's whose name starts the same", hotSegmentStats(), { segments: 2, bytes: 20 });
   setHotBudget(0);

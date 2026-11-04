@@ -248,8 +248,17 @@ async function make(o: PreviewSource): Promise<string | null> {
   const file = fileFor(o.partId, o.fileSize);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, bif(made.frames, PREVIEW_INTERVAL_S * 1000));
-  fs.renameSync(tmp, file);
+  try {
+    fs.writeFileSync(tmp, bif(made.frames, PREVIEW_INTERVAL_S * 1000));
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    // Not left half-written: nothing else clears it, and a full disk needs the room.
+    fs.rmSync(tmp, { force: true });
+    logEvent("Preview", "couldn't keep the previews made", {
+      partId: o.partId, why: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
   const plexFrames = Math.floor(o.durationS / PREVIEW_INTERVAL_S);
   logEvent("Preview", "previews made by ffmpeg", {
     partId: o.partId, frames: made.frames.length, everyS: PREVIEW_INTERVAL_S,

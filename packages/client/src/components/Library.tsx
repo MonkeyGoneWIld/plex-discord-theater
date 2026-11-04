@@ -131,6 +131,10 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
   const [searchResetSignal, setSearchResetSignal] = useState(0);
   const rawSearchResults = useRef<PlexItem[] | null>(null);
   const [loading, setLoading] = useState(true);
+  // A library's titles are loading. Its own flag: the list of libraries and a
+  // search being cleared both end `loading`, and on that flag they ended the
+  // skeleton early, so "This library is empty" showed until the titles came.
+  const [itemsLoading, setItemsLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [genres, setGenres] = useState<Genre[]>([]);
   const [selectedGenres, setSelectedGenres] = useState<string[]>([]);
@@ -377,7 +381,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
     loadMoreAbort.current = null;
     setLoadingMore(false);
     const controller = new AbortController();
-    setLoading(true);
+    setItemsLoading(true);
     setItems([]);
     setTotalSize(0);
     setItemsError(null);
@@ -403,9 +407,14 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
         // set loading=false while its replacement was still in flight — with
         // items already emptied, that rendered "This library is empty" for a
         // moment before the real results arrived.
-        if (!controller.signal.aborted) setLoading(false);
+        if (!controller.signal.aborted) setItemsLoading(false);
       });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      // Left for another tab: no titles are loading. A load replacing this
+      // one sets it again in the same render.
+      setItemsLoading(false);
+    };
   }, [activeSection, isHomeTab, isHistoryTab, isWatchlistTab, selectedGenres, sort, retryNonce]);
 
   const handleLoadMore = useCallback(() => {
@@ -1023,7 +1032,7 @@ export function Library({ isHost, onSelect, onSelectPerson, activeSection, onAct
             ))}
           </div>
         )
-      ) : loading ? (
+      ) : loading || itemsLoading ? (
         <SkeletonGrid />
       ) : itemsError && !searchResults ? (
         <div style={styles.emptyState}>

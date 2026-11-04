@@ -55,7 +55,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { plexFetchSegment } from "./plex.js";
+import { segmentFromPlex } from "./plex.js";
 import { firstKeyframe, videoSpan } from "./ts-timestamps.js";
 import { logEvent } from "./logger.js";
 import { measuredPlaylist, round3 } from "./measured-playlist.js";
@@ -357,9 +357,7 @@ function fail(s: CopySession, reason: string, detail: Record<string, unknown> = 
  */
 async function primePlexPlaylist(s: CopySession): Promise<number> {
   try {
-    const res = await plexFetchSegment(`${s.baseDir}index.m3u8`);
-    await res.text().catch(() => "");
-    return res.status;
+    return (await segmentFromPlex(`${s.baseDir}index.m3u8`, s.abort.signal)).status;
   } catch {
     return 0;
   }
@@ -387,20 +385,17 @@ async function pump(s: CopySession): Promise<void> {
       continue;
     }
     const path = segmentPath(s, s.nextIndex);
-    let res: Awaited<ReturnType<typeof plexFetchSegment>>;
+    let res: Awaited<ReturnType<typeof segmentFromPlex>>;
     try {
-      res = await plexFetchSegment(path);
+      // Within a deadline: a body that stops partway is asked for again.
+      res = await segmentFromPlex(path, s.abort.signal);
     } catch {
       if (s.abort.signal.aborted) return;
       await rest(s, 1000);
       continue;
     }
-    if (s.abort.signal.aborted) {
-      res.body?.cancel().catch(() => {});
-      return;
-    }
-    if (!res.ok) {
-      res.body?.cancel().catch(() => {});
+    if (s.abort.signal.aborted) return;
+    if (!res.body) {
       // 404 is "not copied yet" — this has caught up with Plex, which copies
       // in bursts. Retry soon, then less often. Nothing for a minute is Plex
       // having stopped.
@@ -429,16 +424,7 @@ async function pump(s: CopySession): Promise<void> {
     // A 200 isn't progress until it turns out to hold a segment: only then are
     // the misses reset (below). Reset here, an answer that isn't MPEG-TS was
     // asked for again ten times a second and never given up on.
-
-    let data: Buffer;
-    try {
-      data = Buffer.from(await res.arrayBuffer());
-    } catch {
-      if (s.abort.signal.aborted) return;
-      await rest(s, 1000);
-      continue;
-    }
-    if (s.abort.signal.aborted) return;
+    const data = res.body;
 
     const span = videoSpan(data);
     if (!span) {

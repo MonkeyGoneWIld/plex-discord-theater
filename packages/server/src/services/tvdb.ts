@@ -145,12 +145,17 @@ async function fetchSeries(tvdbId: number): Promise<Map<number, TvdbEpisode[]> |
 
   const bySeason = new Map<number, TvdbEpisode[]>();
   let found = false;
+  let whole = true;
   for (let page = 0; page < MAX_PAGES; page++) {
     const body = (await authed(`/series/${tvdbId}/episodes/default?page=${page}`)) as
       | { data?: { episodes?: RawEpisode[] }; links?: { next?: string | null } }
       | null;
     const episodes = body?.data?.episodes;
-    if (!Array.isArray(episodes)) break;
+    if (!Array.isArray(episodes)) {
+      // A page the one before said was there, and it didn't come.
+      if (page > 0) whole = false;
+      break;
+    }
     found = true;
     for (const raw of episodes) {
       const ep = toEpisode(raw);
@@ -164,7 +169,9 @@ async function fetchSeries(tvdbId: number): Promise<Map<number, TvdbEpisode[]> |
   if (!found) return null;
 
   for (const list of bySeason.values()) list.sort((a, b) => a.episodeNumber - b.episodeNumber);
-  seriesCache.set(tvdbId, { at: Date.now(), bySeason });
+  // Part of a series is shown but not kept: kept, its later seasons were
+  // missing for the six hours.
+  if (whole) seriesCache.set(tvdbId, { at: Date.now(), bySeason });
   return bySeason;
 }
 

@@ -4,7 +4,7 @@
  * fetches them concurrently, and caches in memory for instant delivery.
  */
 
-import { plexFetchSegment } from "./plex.js";
+import { segmentFromPlex } from "./plex.js";
 import { videoSpan } from "./ts-timestamps.js";
 import { logEvent } from "./logger.js";
 
@@ -278,11 +278,11 @@ async function fetchWorker(session: PrefetchSession): Promise<void> {
       if (session.segmentCache.has(segPath)) continue;
 
       try {
-        const res = await plexFetchSegment(segPath);
+        // Within a deadline, so a body that stops partway can't hold a worker.
+        const res = await segmentFromPlex(segPath, session.abortController.signal);
         if (session.abortController.signal.aborted) return;
 
-        if (!res.ok) {
-          res.body?.cancel().catch(() => {});
+        if (!res.body) {
           // 404 = ahead of the transcode head (not produced yet). Un-mark it so a
           // later poll re-queues it once the head reaches it — dropping it forever
           // is what let the head stop being pulled and the buffer drain.
@@ -290,8 +290,7 @@ async function fetchWorker(session: PrefetchSession): Promise<void> {
           continue;
         }
 
-        const data = Buffer.from(await res.arrayBuffer());
-        if (session.abortController.signal.aborted) return;
+        const data = res.body;
 
         session.segmentCache.set(segPath, {
           data,
@@ -339,18 +338,17 @@ async function pollSubManifest(session: PrefetchSession): Promise<void> {
   const baseDir = `${TRANSCODE_BASE}session/${session.plexKey}/base/`;
 
   try {
-    const res = await plexFetchSegment(subManifestPath);
-    if (!res.ok) {
+    const res = await segmentFromPlex(subManifestPath, session.abortController.signal);
+    if (!res.body) {
       if (res.status === 404) {
         console.log("[Prefetch] Sub-manifest 404 — transcode may be dead, stopping poll for",
           session.plexKey.substring(0, 8));
         stopPrefetch(session.sessionId);
       }
-      res.body?.cancel().catch(() => {});
       return;
     }
 
-    const m3u8 = await res.text();
+    const m3u8 = res.body.toString("utf8");
     const segments = parseSegmentPaths(m3u8, baseDir);
     if (session.measured.size < MEASURE_FIRST) session.listedStartS = parseListedStarts(m3u8, baseDir);
 

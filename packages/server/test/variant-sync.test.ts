@@ -1550,6 +1550,31 @@ console.log("\n— a host alone who closes the Activity and opens it again carri
   await sleep(HOLD_MS + 200);
 }
 
+console.log("\n— the host closes as a viewer is still coming in: the viewer is host —");
+{
+  // Run 29, B: nothing playing, the host the last one out, the room ended,
+  // and the viewer came into a new one as its only person and not its host.
+  const [host] = await room("inst-hostless", ["host"]);
+  host.close();
+  await sleep(100);
+  const b = new Client("u-b", "b");
+  await b.connect("inst-hostless");
+  const roleOf = (c: Client, userId: string) =>
+    ((c.last("participants") ?? c.last("state"))?.participants as Array<{ userId: string; isHost: boolean }> | undefined)
+      ?.find((p) => p.userId === userId)?.isHost;
+  check("the one who came in is host", roleOf(b, "u-b"), true);
+  const back = new Client("u-host", "host");
+  await back.connect("inst-hostless");
+  await sleep(100);
+  check("the host back within the grace is host again", roleOf(back, "u-host"), true);
+  check("and the other is not", roleOf(b, "u-b"), false);
+  back.close();
+  await sleep(100);
+  check("the host gone again, the one left is host", roleOf(b, "u-b"), true);
+  b.close();
+  await sleep(100);
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 closeWebSocketServer();
 server.close();

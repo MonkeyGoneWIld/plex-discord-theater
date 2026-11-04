@@ -26,6 +26,14 @@ const WS_PING_INTERVAL_MS = 30_000;
 const HOST_RECONNECT_GRACE_MS = 15_000;
 
 /**
+ * A host who was the last one out of a room that then ended (nothing playing
+ * to hold it for), and when. Whoever comes in next is host, and hands it back
+ * if this host comes back within HOST_RECONNECT_GRACE_MS, as a host whose
+ * connection dropped gets it back from their successor.
+ */
+const lastHostOut = new Map<string, { userId: string; at: number }>();
+
+/**
  * How long a viewer's own stream — their own audio, a subtitle burned in, their
  * own quality — is kept for them once their connection has closed, for them to
  * come back to rather than to the host's. A network blip, or Discord reloading
@@ -1972,7 +1980,44 @@ export function attachWebSocketServer(server: Server): void {
         const room = getOrCreateRoom(instanceId);
         const reconnectingHost = room.hostReconnect;
         const reclaimingHost = reconnectingHost?.client.userId === userId;
-        const isHost = instance.hostUserId === userId || reclaimingHost;
+        let isHost = instance.hostUserId === userId || reclaimingHost;
+
+        // Somebody is always host. The host closing the Activity as a viewer
+        // was still loading into it (run 29, B: monkey26 at 06:03:14, blah0391
+        // in 3 s later) left the room to end with nobody in it, and the viewer
+        // came into a new one as its only person and not its host, the record
+        // still naming the one who had gone: "Host: —", and "Suggest to host"
+        // with nobody to suggest to. A room held for its host (emptyHold)
+        // waits for them, and is handed over if they don't come back.
+        // Only when the host named for it left it last: a viewer in before
+        // the host has arrived is waiting for them, not standing in for them.
+        const out = lastHostOut.get(instanceId);
+        if (out && isHost && out.userId === userId) lastHostOut.delete(instanceId);
+        const hostBackInTime = !isHost && !!out && out.userId === userId
+          && Date.now() - out.at <= HOST_RECONNECT_GRACE_MS;
+        const nobodyHost = !room.emptyHold
+          && !!out && out.userId === instance.hostUserId && out.userId !== userId
+          && ![...room.clients].some((c) => c.isHost && c.userId !== userId);
+        if (hostBackInTime || (!isHost && nobodyHost)) {
+          if (hostBackInTime) {
+            lastHostOut.delete(instanceId);
+            for (const existing of room.clients) {
+              if (!existing.isHost) continue;
+              existing.isHost = false;
+              existing.isCoHost = false;
+              room.coHostIds.delete(existing.userId);
+            }
+          }
+          isHost = true;
+          instance.hostUserId = userId;
+          updateInstanceHost(instanceId, userId);
+          logEvent("Sync", hostBackInTime
+            ? "the host is back in time, and is host again"
+            : "nobody was host, so the one who came in is", {
+            room: instanceId.substring(0, 8),
+            user: username ?? userId,
+          });
+        }
         // The host back to a room held for them — see holdEmptyRoom. It
         // waits for their picture, which they say when it is ready.
         if (room.emptyHold && isHost) {
@@ -3193,6 +3238,7 @@ export function attachWebSocketServer(server: Server): void {
           holdEmptyRoom(room, closingRoomId, closingClient.username ?? closingClient.userId);
         } else {
           endRoomStream(room, closingRoomId, "last client left, killing transcode", closingClient.username ?? closingClient.userId);
+          lastHostOut.set(closingRoomId, { userId: closingClient.userId, at: Date.now() });
         }
       }
 

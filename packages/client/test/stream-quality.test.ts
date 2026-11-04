@@ -11,6 +11,7 @@ import {
   lowerQualityFor,
   preferredQuality,
   qualityChangesStream,
+  qualityForTracks,
   qualityLabel,
   endQualitySession,
   setPreferredQuality,
@@ -139,6 +140,14 @@ check("and from there back up too", qualityChangesStream(copy, 8000, 0), true);
 check("a re-encode is made again", qualityChangesStream({ video: "transcode", kbps: 10000 }, 0, 12000), true);
 check("a copy of unknown bitrate is made again", qualityChangesStream({ video: "copy", kbps: null }, 0, 10000), true);
 check("before its notes are in, it is made again", qualityChangesStream(null, 0, 10000), true);
+
+console.log("\n— a subtitle turned on keeps the stream's own quality —");
+// Rain Man (run 29, B6): on its 8.9 Mbps copy at Original, 10 Mbps chosen.
+const rainMan = { video: "copy" as const, kbps: 8900 };
+check("a copy the chosen quality makes again keeps its own", qualityForTracks(rainMan, 0, 10000), 0);
+check("under the file's bitrate, the chosen one goes", qualityForTracks(rainMan, 0, 8000), 8000);
+check("on a re-encode, the chosen one goes", qualityForTracks({ video: "transcode", kbps: 7304 }, 8000, 10000), 10000);
+check("before its notes are in, the chosen one goes", qualityForTracks(null, 0, 10000), 10000);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

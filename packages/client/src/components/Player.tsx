@@ -31,6 +31,7 @@ import {
   lowerQualityFor,
   preferredQuality,
   qualityChangesStream,
+  qualityForTracks,
   qualityLabel,
   endQualitySession,
   setPreferredQuality,
@@ -8838,7 +8839,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       sameStream: !streamChanges,
       role: isHostRef.current ? "host" : canControlRef.current ? "cohost" : "viewer",
     });
-    syncActionsRef.current?.sendSetTracks(audio, subtitle, drawn);
+    const v = variantRef.current;
+    syncActionsRef.current?.sendSetTracks(audio, subtitle, drawn,
+      v && v.ratingKey === itemRef.current.ratingKey
+        ? qualityForTracks(streamNotesRef.current, v.quality, preferredQuality())
+        : preferredQuality());
   }, [item.ratingKey]);
 
 

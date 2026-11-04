@@ -178,6 +178,23 @@ export function qualityChangesStream(
   return !(sameCopy(from) && sameCopy(to));
 }
 
+/**
+ * The quality to send with a change of tracks: the chosen one, unless the
+ * stream this player is on already stands for it (qualityChangesStream), in
+ * which case the quality that stream was made at. The server keys a stream by
+ * its quality too, so the chosen one would read as another stream. Rain Man
+ * (run 29, B6): 10 Mbps chosen over its 8.9 Mbps copy, then an ASS subtitle
+ * turned on, which is drawn here and changes nothing about the stream; the
+ * server took 302993:0@10000 for a new one and rebuilt it.
+ */
+export function qualityForTracks(
+  notes: { video: "copy" | "transcode" | null; kbps: number | null } | null,
+  streamQuality: number,
+  chosen: number,
+): number {
+  return qualityChangesStream(notes, streamQuality, chosen) ? chosen : streamQuality;
+}
+
 export function carryQualityTo(ratingKey: string, show: string | null): number {
   if (!chosenFor) return current;
   if (chosenFor.ratingKey === ratingKey) return current;

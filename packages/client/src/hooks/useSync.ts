@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { getSessionToken } from "../lib/api";
+import { noteServerTime } from "../lib/serverClock";
 import { hdrScreenQuery, playerCaps, type Cap } from "../lib/codecs";
 import { preferredQuality } from "../lib/quality";
 
@@ -745,6 +746,8 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           return;
         }
 
+        // The server's time, for what other devices are shown — see serverClock.
+        if (typeof msg.serverNow === "number") noteServerTime(msg.serverNow);
         if (typeof msg.transportRevision === "number") {
           setState((prev) => ({ ...prev, transportRevision: msg.transportRevision as number }));
         }

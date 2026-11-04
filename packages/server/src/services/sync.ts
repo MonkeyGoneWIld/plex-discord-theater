@@ -2059,6 +2059,9 @@ export function attachWebSocketServer(server: Server): void {
         const landed = client.variantKey ? room.state.variants.get(client.variantKey) : undefined;
         sendTo(ws, {
           type: "state",
+          // This server's clock, which a client's own may be well off: its
+          // presence timer goes by this one (client lib/serverClock).
+          serverNow: Date.now(),
           ratingKey: room.state.ratingKey,
           title: room.state.title,
           subtitles: room.state.subtitles,
@@ -2847,11 +2850,12 @@ export function attachWebSocketServer(server: Server): void {
             ? "the host's stream is being rebuilt" : "the host is waiting for its stream");
           // With whether the room is waiting, so a host that missed the word it
           // was holding for hears it within a heartbeat.
-          sendTo(ws, { type: "transport-state", playing: room.state.playing, transportRevision: room.state.transportRevision, waiting: room.state.waiting });
+          sendTo(ws, { type: "transport-state", playing: room.state.playing, transportRevision: room.state.transportRevision, waiting: room.state.waiting, serverNow: Date.now() });
           // Throttled inside the history service — this fires every 5s per room.
           persistProgress(room, undefined, false);
           broadcast(room, ws, {
             type: "heartbeat",
+            serverNow: Date.now(),
             transportRevision: room.state.transportRevision,
             position: room.state.position,
             playing: room.state.playing,

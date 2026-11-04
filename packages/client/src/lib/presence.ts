@@ -1,4 +1,5 @@
 import { RPCErrorCodes } from "@discord/embedded-app-sdk";
+import { serverNow } from "./serverClock";
 
 export interface PresenceInput {
   ratingKey: string | null;
@@ -219,7 +220,7 @@ export function createPresenceSender(
   return {
     update(input) {
       if (stopped) return;
-      const next = buildPresence(input, Date.now(), latest);
+      const next = buildPresence(input, serverNow(), latest);
       const unchanged = samePresence(latest, next);
       // Even an unchanged payload can carry a new explicit-command version.
       latest = next;

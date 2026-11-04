@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mock } from "node:test";
 import { buildPresence, createPresenceSender } from "../src/lib/presence";
+import { noteServerTime } from "../src/lib/serverClock";
 import type { PresenceActivity, PresenceInput } from "../src/lib/presence";
 
 const now = 1_800_000_000_000;
@@ -103,6 +104,22 @@ try {
   await settled();
   assert.equal(permissionAttempts, 1, "permission rejection disables presence for this sender");
   forbidden.dispose();
+} finally {
+  mock.timers.reset();
+}
+// 4 November: the PC in Part F ran 25 s slow, and its presence timer was that
+// far off for everyone else. Its timestamps go by the room server's clock.
+mock.timers.enable({ apis: ["Date"], now });
+try {
+  noteServerTime(now + 25_000 - 120, now); // stamped by a server 25 s ahead, 120 ms on the way
+  noteServerTime(now + 25_000 - 40, now);
+  const sentOff: PresenceActivity[] = [];
+  const off = createPresenceSender(async ({ activity }) => { sentOff.push(activity); });
+  off.update(input);
+  await settled();
+  assert.equal(sentOff[0]?.timestamps?.start, now + 25_000 - 40 - input.position * 1_000,
+    "a slow clock's timer starts when the server's clock says");
+  off.dispose();
 } finally {
   mock.timers.reset();
 }

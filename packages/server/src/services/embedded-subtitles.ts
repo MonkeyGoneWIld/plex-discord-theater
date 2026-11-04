@@ -1168,8 +1168,15 @@ function keep(
   r: Reading, opts: ReadOptions, raw: Buffer, startedAt: number, stats: Record<string, unknown> = {},
 ): void {
   const details = { ratingKey: r.ratingKey, streamId: r.streamId };
-  const parsed = parseSubtitles(decodeSubtitle(raw));
-  if (!parsed || parsed.cues.length === 0) {
+  // Closed captions read to the film's end with not a line in them: the
+  // picture carries the caption channel but nothing was ever written to it.
+  // That is a subtitle with no lines, not one that can't be read. The
+  // Savages' (4129) on 3 November came to nothing after 44 s; taken as
+  // unreadable, the player asked for it burned in and Plex re-encoded the
+  // film at 20 Mbps to draw nothing on it.
+  const empty = raw.length === 0 && isCaptions(opts.fromFile?.codec);
+  const parsed = empty ? { format: "srt", cues: [] as Cue[] } : parseSubtitles(decodeSubtitle(raw));
+  if (!parsed || (parsed.cues.length === 0 && !empty)) {
     unreadable.set(r.streamId, Date.now());
     logEvent("Subtitles", "couldn't read an embedded subtitle out of the file", {
       ...details, why: raw.length === 0 ? "nothing came" : "not a subtitle that came",
@@ -1189,7 +1196,7 @@ function keep(
   }
   logEvent("Subtitles", "read an embedded subtitle out of the file", {
     ...details, by: opts.fromFile ? "ffmpeg" : "plex", format: parsed.format, cues: parsed.cues.length, bytes: raw.length,
-    ...stats, ms: Date.now() - startedAt,
+    ...(empty ? { note: "closed captions with nothing in them" } : {}), ...stats, ms: Date.now() - startedAt,
   });
 }
 

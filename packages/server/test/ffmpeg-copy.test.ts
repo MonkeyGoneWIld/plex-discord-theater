@@ -144,6 +144,9 @@ const onClock = (...s: number[]) => s.map((t) => Number((t - PGS_START).toFixed(
  * 7 s. With the SRT as a track of its own, and AAC_FILM's sound.
  */
 const CC_FILM = path.join(tmp, "captions.mkv");
+/** Closed captions with not a line in them: every frame carries the caption
+ *  channel, all padding, as The Savages' (4129) do. */
+const EMPTY_CC_FILM = path.join(tmp, "captions-empty.mkv");
 {
   const FPS = 30;
   /** A pair of EIA-608 bytes, each with odd parity. */
@@ -154,39 +157,43 @@ const CC_FILM = path.join(tmp, "captions.mkv");
   });
   const RCL = pair(0x14, 0x20), PAC = pair(0x14, 0x70), EOC = pair(0x14, 0x2f), EDM = pair(0x14, 0x2c);
   const text = (s: string) => pair(s.charCodeAt(0), s.charCodeAt(1));
-  const byFrame = new Map<number, number[]>([
+  /** A film whose frames carry these pairs, and padding in all the others. */
+  const captionsFilm = (film: string, byFrame: Map<number, number[]>) => {
+    const raw = film.replace(/\.mkv$/, ".h264");
+    let r = spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-y", "-f", "lavfi", "-i", `testsrc=size=64x36:rate=${FPS}:duration=60`,
+      "-c:v", "libx264", "-preset", "ultrafast", "-bf", "0", "-g", String(FPS), "-f", "h264", raw]);
+    if (r.status !== 0) throw new Error(`couldn't make ${path.basename(raw)}: ${r.stderr}`);
+    const es = fs.readFileSync(raw);
+    const starts: number[] = [];
+    for (let i = 0; i + 3 < es.length; i++) {
+      if (es[i] === 0 && es[i + 1] === 0 && es[i + 2] === 1) {
+        starts.push(i > 0 && es[i - 1] === 0 ? i - 1 : i);
+        i += 2;
+      }
+    }
+    // Before each frame's slice, an SEI with that frame's pair (or nothing: 0x80 0x80).
+    const out: Buffer[] = [];
+    let frame = 0;
+    starts.forEach((s, n) => {
+      const nal = es.subarray(s, starts[n + 1] ?? es.length);
+      const type = nal[nal[2] === 1 ? 3 : 4] & 0x1f;
+      if (type === 1 || type === 5) {
+        const cc = byFrame.get(frame++) ?? [0x80, 0x80];
+        const payload = [0xb5, 0x00, 0x31, ...Buffer.from("GA94"), 0x03, 0xc1, 0xff, 0xfc, cc[0], cc[1], 0xff];
+        out.push(Buffer.from([0, 0, 0, 1, 0x06, 0x04, payload.length, ...payload, 0x80]));
+      }
+      out.push(nal);
+    });
+    fs.writeFileSync(raw, Buffer.concat(out));
+    r = spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-y", "-framerate", String(FPS), "-i", raw, "-i", AAC_FILM,
+      "-i", path.join(tmp, "lines.srt"), "-map", "0:v", "-map", "1:a", "-map", "2", "-c", "copy", film]);
+    if (r.status !== 0) throw new Error(`couldn't make ${path.basename(film)}: ${r.stderr}`);
+  };
+  captionsFilm(CC_FILM, new Map<number, number[]>([
     [30, RCL], [31, PAC], [32, text("HI")], [60, EOC], [120, EDM],
     [150, RCL], [151, PAC], [152, text("OK")], [180, EOC], [210, EDM],
-  ]);
-  const raw = path.join(tmp, "captions.h264");
-  let r = spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-y", "-f", "lavfi", "-i", `testsrc=size=64x36:rate=${FPS}:duration=60`,
-    "-c:v", "libx264", "-preset", "ultrafast", "-bf", "0", "-g", String(FPS), "-f", "h264", raw]);
-  if (r.status !== 0) throw new Error(`couldn't make captions.h264: ${r.stderr}`);
-  const es = fs.readFileSync(raw);
-  const starts: number[] = [];
-  for (let i = 0; i + 3 < es.length; i++) {
-    if (es[i] === 0 && es[i + 1] === 0 && es[i + 2] === 1) {
-      starts.push(i > 0 && es[i - 1] === 0 ? i - 1 : i);
-      i += 2;
-    }
-  }
-  // Before each frame's slice, an SEI with that frame's pair (or nothing: 0x80 0x80).
-  const out: Buffer[] = [];
-  let frame = 0;
-  starts.forEach((s, n) => {
-    const nal = es.subarray(s, starts[n + 1] ?? es.length);
-    const type = nal[nal[2] === 1 ? 3 : 4] & 0x1f;
-    if (type === 1 || type === 5) {
-      const cc = byFrame.get(frame++) ?? [0x80, 0x80];
-      const payload = [0xb5, 0x00, 0x31, ...Buffer.from("GA94"), 0x03, 0xc1, 0xff, 0xfc, cc[0], cc[1], 0xff];
-      out.push(Buffer.from([0, 0, 0, 1, 0x06, 0x04, payload.length, ...payload, 0x80]));
-    }
-    out.push(nal);
-  });
-  fs.writeFileSync(raw, Buffer.concat(out));
-  r = spawnSync("ffmpeg", ["-hide_banner", "-v", "error", "-y", "-framerate", String(FPS), "-i", raw, "-i", AAC_FILM,
-    "-i", path.join(tmp, "lines.srt"), "-map", "0:v", "-map", "1:a", "-map", "2", "-c", "copy", CC_FILM]);
-  if (r.status !== 0) throw new Error(`couldn't make captions.mkv: ${r.stderr}`);
+  ]));
+  captionsFilm(EMPTY_CC_FILM, new Map());
 }
 /** Black, with the SRT and the ASS in it: what is burned in shows. */
 const BLACK_FILM = path.join(tmp, "black.mkv");
@@ -307,6 +314,10 @@ const titles: Record<string, { file: string; plexPath: string; codec: string; wi
   ] },
   23: { file: HDR10_FILM, plexPath: HDR10_FILM, codec: "hevc", width: 640, height: 360, audio: "aac", channels: 2,
     hdr: { bitDepth: 10, colorPrimaries: "bt2020", colorTrc: "smpte2084", colorSpace: "bt2020nc" } },
+  // Closed captions with nothing in them (91).
+  24: { file: EMPTY_CC_FILM, plexPath: EMPTY_CC_FILM, codec: "h264", width: 64, height: 36, audio: "aac", channels: 2, subs: [
+    { id: 91, streamType: 3, index: 0, codec: "eia_608", language: "English", languageCode: "eng" },
+  ] },
 };
 
 const asked: string[] = [];
@@ -1774,7 +1785,17 @@ console.log("\n— closed captions, read out of the picture —");
   check("  read out of the picture by ffmpeg, on the film's clock, where subtitles sit",
     [a.complete, a.cues?.map((c) => [c.start, c.end, c.text]), a.cues?.map((c) => (c as { top?: boolean }).top ?? false)],
     [true, [[2, 4, "HI"], [6, 7, "OK"]], [false, false]]);
-  const cues = (srt: string) => parseSubtitles(srt)?.cues.map((c) => [c.start, c.end, c.text]) ?? srt.trim().slice(-200);
+  // The Savages' (4129) on 3 November: captions with nothing in them were
+  // taken as unreadable, and the player asked Plex to burn them in.
+  let empty: Answer & { status?: number } = {};
+  for (let i = 0; i < 60 && !empty.complete && empty.status !== 404; i++) {
+    if (i) await sleep(250);
+    const res = await fetch(`${origin}/api/plex/subtitles/91?ratingKey=24&mediaIndex=0`);
+    empty = { ...(res.ok ? await res.json() as Answer : {}), status: res.status };
+  }
+  check("  with nothing in them, read to the end: a subtitle of no lines, not an unreadable one",
+    [empty.status, empty.complete, empty.cues], [200, true, []]);
+  const cues =(srt: string) => parseSubtitles(srt)?.cues.map((c) => [c.start, c.end, c.text]) ?? srt.trim().slice(-200);
   const run = (sub: { file: string; startS: number }, from: number) => {
     const r = spawnSync(process.env.FFMPEG_PATH || "ffmpeg", subtitleReadArgs({ ...sub, index: 0, codec: "eia_608" }, from, [], []));
     return r.status === 0 ? String(r.stdout) : String(r.stderr);

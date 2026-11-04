@@ -78,17 +78,41 @@ console.log("\n— what a player starts at —");
   check("Original, until a default is chosen", [quality.defaultQuality(), quality.preferredQuality()], [0, 0]);
   quality.setDefaultQuality(8000);
   check("a default chosen with no player open is what the next one starts at", quality.preferredQuality(), 8000);
-  quality.beginQualitySession();
-  quality.setPreferredQuality(20000, { ratingKey: "s1e1", show: "s1" });
+  const t0 = Date.now();
+  const MIN = 60_000;
+  quality.beginQualitySession(t0);
+  check("a player starts at the default", quality.preferredQuality(), 8000);
+  quality.setPreferredQuality(20000);
   check("changing it while watching isn't saved as the default", quality.defaultQuality(), 8000);
-  check("but carries into the next episode", quality.carryQualityTo("s1e2", "s1"), 20000);
-  check("and something else starts at the default", quality.carryQualityTo("film", null), 8000);
-  quality.setPreferredQuality(0, { ratingKey: "s2e1", show: "s2" });
-  check("Original chosen over a lower default carries into the next episode too", quality.carryQualityTo("s2e2", "s2"), 0);
+  // Discord closes a page without it running anything: the player last said
+  // it was open when the choice was made.
+  quality.beginQualitySession(t0 + 45_000);
+  check("a page closed without a word, opened again, is where it was", quality.preferredQuality(), 20000);
+  quality.endQualitySession(t0 + MIN);
+  check("with no player open, it is the default that shows", quality.preferredQuality(), 8000);
+  // Part H, 4 November: a host and a viewer on 10 Mbps closed the Activity and
+  // opened it again, and popped it out, and came back at Original each time.
+  quality.beginQualitySession(t0 + MIN + 30_000);
+  check("opened again 30 s later, it is where it was", quality.preferredQuality(), 20000);
+  quality.endQualitySession(t0 + 2 * MIN);
+  quality.beginQualitySession(t0 + 22 * MIN);
+  check("and after 20 minutes away, for the next film", quality.preferredQuality(), 20000);
+  quality.setPreferredQuality(0);
+  quality.endQualitySession(t0 + 3 * 60 * MIN);
+  quality.beginQualitySession(t0 + 3 * 60 * MIN + 5_000);
+  check("Original chosen over a lower default is kept too", quality.preferredQuality(), 0);
+  quality.setPreferredQuality(12000);
+  quality.endQualitySession(t0 + 4 * 60 * MIN);
+  quality.beginQualitySession(t0 + 5 * 60 * MIN);
+  check("an hour away, it starts at the default again", quality.preferredQuality(), 8000);
+  quality.setPreferredQuality(12000);
   quality.setDefaultQuality(4000);
-  check("a default changed while a player is open doesn't restart it", quality.preferredQuality(), 0);
-  quality.resetPreferredQuality();
+  check("a default changed while a player is open doesn't restart it", quality.preferredQuality(), 12000);
+  quality.endQualitySession(t0 + 6 * 60 * MIN);
   check("closing the player goes back to the default", quality.preferredQuality(), 4000);
+  quality.beginQualitySession(t0 + 6 * 60 * MIN + 5_000);
+  check("a default chosen in Settings is where the next player starts, back soon or not", quality.preferredQuality(), 4000);
+  quality.endQualitySession(t0 + 6 * 60 * MIN + 10_000);
 
   check("volume starts at half until one is chosen", volume.loadVolume(), 0.5);
   volume.saveVolume(0.3);

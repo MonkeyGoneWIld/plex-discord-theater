@@ -178,7 +178,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
           </button>
         </div>
         <p style={styles.intro}>
-          What every stream starts with for you. Quality changed while watching lasts until you close the player.
+          What every stream starts with for you. Quality changed while watching stays with you through pop-outs, short breaks and the next title, until you've been away from the player for half an hour.
         </p>
 
         <section style={styles.section}>

@@ -454,6 +454,10 @@ interface AccountMediaMetadata {
   grandparentThumb?: string;
   leafCount?: number;
   childCount?: number;
+  /** Read with a linked account's own server token, these are that account's. */
+  viewCount?: number;
+  viewOffset?: number;
+  lastViewedAt?: number;
 }
 
 export interface PlexWatchlistItem {
@@ -668,6 +672,16 @@ export async function getPlexItemWatchedState(
     throw new Error("This Plex item does not support watched state");
   }
   const members = await watchedMembers(item, ratingKey, linked?.serverToken);
+  if (linked) {
+    // A title marked watched in Plex's own app has a view count for that
+    // account but no play-history event, so a sync never brought it here.
+    // 3 Days to Kill (run 29, A10), marked watched in Plex, still showed
+    // unwatched when opened in the Activity.
+    await runWithConcurrency(members, 12, async (member) => {
+      const state = markedWatched(member);
+      if (state) await mergeExternalProgress(userId, member.ratingKey!, state, member);
+    });
+  }
   const watchedCount = members.reduce(
     (count, member) => count + (getProgress(userId, member.ratingKey!)?.watched ? 1 : 0),
     0,
@@ -921,6 +935,69 @@ interface RemoteState {
   updatedAt: number;
 }
 
+/**
+ * Plex's own watched mark on a title read with the account's token: a view
+ * count, with no resume offset (a title being played again keeps its count but
+ * has an offset, and Continue Watching carries that one). Plex sets its
+ * last-viewed time when the mark is made, so a newer Activity change still wins.
+ */
+function markedWatched(item: RemoteMetadata): RemoteState | null {
+  if (!item.ratingKey || !/^\d+$/.test(item.ratingKey)) return null;
+  if (!item.viewCount || item.viewOffset || !item.lastViewedAt) return null;
+  return {
+    positionMs: item.duration || 0,
+    durationMs: item.duration || 0,
+    watched: true,
+    updatedAt: item.lastViewedAt * 1000,
+  };
+}
+
+/**
+ * Titles marked watched in Plex's own apps since the last sync. Marking adds
+ * no play-history event, so the history read never sees them; the library,
+ * newest viewed first, does.
+ */
+async function readMarkedWatched(
+  remote: Map<string, RemoteState>,
+  token: string,
+  sinceMs: number | null,
+): Promise<void> {
+  const sections = await plexJSON<{
+    MediaContainer: { Directory?: Array<{ key: string; type: string }> };
+  }>("/library/sections", undefined, token);
+  for (const dir of sections.MediaContainer.Directory ?? []) {
+    const type = dir.type === "movie" ? "1" : dir.type === "show" ? "4" : null;
+    if (!type) continue;
+    let start = 0;
+    for (;;) {
+      const data = await plexJSON<{ MediaContainer: { Metadata?: RemoteMetadata[] } }>(
+        `/library/sections/${dir.key}/all`,
+        {
+          type,
+          sort: "lastViewedAt:desc",
+          "X-Plex-Container-Start": String(start),
+          "X-Plex-Container-Size": String(HISTORY_PAGE_SIZE),
+        },
+        token,
+      );
+      const items = data.MediaContainer.Metadata || [];
+      let done = items.length < HISTORY_PAGE_SIZE;
+      for (const item of items) {
+        const seconds = item.lastViewedAt || 0;
+        if (seconds <= 0 || (sinceMs != null && seconds * 1000 < sinceMs)) {
+          done = true;
+          break;
+        }
+        const state = markedWatched(item);
+        const old = state && remote.get(item.ratingKey!);
+        if (state && (!old || old.updatedAt < state.updatedAt)) remote.set(item.ratingKey!, state);
+      }
+      start += items.length;
+      if (done) break;
+    }
+  }
+}
+
 function putRemote(map: Map<string, RemoteState>, item: RemoteMetadata, watched: boolean): void {
   if (!item.ratingKey || !/^\d+$/.test(item.ratingKey)) return;
   const seconds = item.viewedAt || item.lastViewedAt || item.updatedAt || 0;
@@ -974,6 +1051,7 @@ async function readRemoteState(
       || (totalSize == null && items.length < HISTORY_PAGE_SIZE)
     ) break;
   }
+  await readMarkedWatched(remote, token, sinceMs);
 
   // Plex history contains completed plays. Its home hubs carry the user's
   // current partial positions, including an unfinished rewatch of an item that

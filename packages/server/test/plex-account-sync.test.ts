@@ -55,6 +55,8 @@ const historyPageStarts: Array<{ accountId: string; start: number }> = [];
 const deletedRemoteHistory = new Set<string>();
 const adminOnlyHistory = new Set<string>();
 const rejectedProgressResets = new Map<string, number>();
+/** Plex's own watched marks (view count, last viewed, resume offset) by ratingKey. */
+const plexViewed = new Map<string, { viewCount: number; lastViewedAt: number; viewOffset?: number }>();
 
 globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
   const url = new URL(typeof input === "string" || input instanceof URL ? input.toString() : input.url);
@@ -115,6 +117,13 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
     }
     if (url.pathname === "/library/sections") {
       return Response.json({ MediaContainer: { Directory: [{ key: "1", title: "Movies", type: "movie" }] } });
+    }
+    if (url.pathname === "/library/sections/1/all") {
+      const start = Number(url.searchParams.get("X-Plex-Container-Start") || 0);
+      const viewed = [...plexViewed.entries()]
+        .map(([ratingKey, mark]) => ({ ratingKey, type: "movie", title: `Title ${ratingKey}`, duration: 100_000, ...mark }))
+        .sort((a, b) => b.lastViewedAt - a.lastViewedAt);
+      return Response.json({ MediaContainer: { Metadata: viewed.slice(start, start + 100) } });
     }
     if (url.pathname === "/status/sessions/history/all") {
       const accountId = url.searchParams.get("accountID") || "default";
@@ -199,6 +208,7 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
             ratingKey, title: `Title ${ratingKey}`, type, duration: 100_000,
             thumb: `/library/metadata/${ratingKey}/thumb/1`,
             guid: `plex://movie/provider-${ratingKey}`,
+            ...(plexViewed.get(ratingKey) ?? {}),
           }],
         },
       });
@@ -501,6 +511,22 @@ check(
   ),
   false,
 );
+
+console.log("\n— a title marked watched in Plex's own app (no play-history event) —");
+const markedAt = Math.floor(Date.now() / 1000);
+plexViewed.set("62008", { viewCount: 1, lastViewedAt: markedAt });
+check("opening it shows it watched", (await accounts.getPlexItemWatchedState("discord-b", "62008")).watched, true);
+check("and the Activity's history has it watched", history.getProgress("discord-b", "62008")?.watched, true);
+plexViewed.set("62009", { viewCount: 1, lastViewedAt: markedAt, viewOffset: 30_000 });
+check("one being played again in Plex is not shown watched", (await accounts.getPlexItemWatchedState("discord-b", "62009")).watched, false);
+await history.recordProgress("discord-b", "62011", 40, { force: true });
+plexViewed.set("62011", { viewCount: 1, lastViewedAt: markedAt - 3600 });
+check("a newer Activity change still wins over an older mark", (await accounts.getPlexItemWatchedState("discord-b", "62011")).watched, false);
+plexViewed.set("62010", { viewCount: 1, lastViewedAt: markedAt });
+await accounts.syncPlexAccount("discord-a");
+check("Sync brings a newly marked title in", history.getProgress("discord-a", "62010")?.watched, true);
+check("unlinked users do not take the server account's marks", (await accounts.getPlexItemWatchedState("discord-local", "62010")).watched, false);
+for (const key of ["62008", "62009", "62010", "62011"]) plexViewed.delete(key);
 
 accounts.unlinkPlexAccount("discord-a");
 check("disconnect removes only a", accounts.getPlexAccountStatus("discord-a").linked, false);

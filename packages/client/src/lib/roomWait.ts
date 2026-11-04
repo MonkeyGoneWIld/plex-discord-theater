@@ -169,6 +169,12 @@ const LAND_SPARE_S = 1;
  * first segment took 16 s was sent the guess's most, 20 s past the room, and
  * sat out all 20; what it landed in needed 18 of them, and on a faster
  * connection a few would have done.
+ *
+ * A `firstGo` — a player whose picture has just come in, after joining or a
+ * skip, that hasn't stopped since — goes by the speed as it came, needs only
+ * the segment after the one it lands in to come in time, and lands no further
+ * than FIRST_GO_MAX_LEAD_S past the room. The care is for a player that has
+ * stopped again after landing, whose connection is shown not to keep up.
  */
 export function landingBySize(
   targetS: number,
@@ -176,9 +182,14 @@ export function landingBySize(
   segments: ReadonlyArray<{ start: number; duration: number; bytes: number | null; cached?: boolean }> | null | undefined,
   bytesPerS: number | null,
   limitS: number,
+  firstGo = false,
 ): number {
+  if (firstGo) {
+    limitS = firstGoLimitS(limitS, roomS);
+    targetS = Math.min(targetS, limitS);
+  }
   if (!segments?.length) return targetS;
-  const speed = bytesPerS && bytesPerS > 0 ? bytesPerS * LAND_SPEED_MARGIN : null;
+  const speed = bytesPerS && bytesPerS > 0 ? bytesPerS * (firstGo ? 1 : LAND_SPEED_MARGIN) : null;
   /** Seconds a segment takes to come in, fetched now; null when there is no telling. */
   const takesS = (s: { bytes: number | null; cached?: boolean }): number | null =>
     s.cached ? 0 : speed && s.bytes && s.bytes > 0 ? s.bytes / speed : null;
@@ -197,7 +208,7 @@ export function landingBySize(
     // The ones after it, each needed when the room gets to it.
     let doneS = inS;
     let fits = true;
-    for (let j = i + 1; j < segments.length && segments[j].start < fromS + LAND_LOOK_AHEAD_S; j++) {
+    for (let j = i + 1; j < segments.length && segments[j].start < fromS + LAND_LOOK_AHEAD_S && !(firstGo && j > i + 1); j++) {
       const s = takesS(segments[j]);
       if (s === null) {
         // A size not known goes as it always did; a speed not known can't
@@ -218,6 +229,37 @@ export function landingBySize(
     !firstSeg.cached && bytesPerS && firstSeg.bytes ? (firstSeg.bytes / bytesPerS) * 1000 : null,
   );
   return Math.max(targetS, Math.min(alone, limitS));
+}
+
+/**
+ * The furthest past the room a player whose picture has just come in, after
+ * joining or a skip, goes to wait for it: a first go (landingBySize). On
+ * 4 November four went 14 to 20 s past the room and had their picture in 2 to
+ * 8 s, then sat on "Catching up to host" for the rest: on main ixvgp8mo went
+ * 14.3 s past and had its picture in 2.3, and unhdosjp 16.4 and 6.3; on bot 2
+ * yo52s4nx 19.4 and 8.0; and on 2 November 6wovzu6q 20 and 4.3. Each went by
+ * its first segment's speed. That segment came while the others in the room
+ * were still filling their buffers at full speed, before they eased off for
+ * it, and ixvgp8mo's spent 1.7 of its 3.8 s waiting for the bot's first
+ * answer. ixvgp8mo's next segments came at 7 and 31 Mbps against the 4.3 it
+ * went by, and unhdosjp's at 12, 7 and 10 against 6.7. The longest any join
+ * took to get its picture was 8 s, on a PC running three Discord clients. One
+ * that comes too late stops, and lands again with the care of a second go.
+ */
+export const FIRST_GO_MAX_LEAD_S = 8;
+
+/** The limit `limitS` of a first go's landing, `roomS` the room's place: FIRST_GO_MAX_LEAD_S past it at most. */
+export function firstGoLimitS(limitS: number, roomS: number): number {
+  return Math.min(limitS, roomS + FIRST_GO_MAX_LEAD_S);
+}
+
+/**
+ * A segment's download time, `ms`, less its wait for the bot's first answer,
+ * `firstByteMs`: the time its bytes took, which is the connection's speed. The
+ * wait is the bot's, and each segment after waits a fraction of it.
+ */
+export function transferMs(ms: number, firstByteMs: number | undefined): number {
+  return firstByteMs !== undefined && firstByteMs > 0 && firstByteMs < ms ? ms - firstByteMs : ms;
 }
 
 /** How far back a segment from the bot counts towards a landing's speed, and the least of one that does — see landingBytesPerS. */

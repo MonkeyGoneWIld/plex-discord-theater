@@ -42,7 +42,7 @@ import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
 import { nudgedRate } from "../lib/softSync";
-import { LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, SLOW_SEEK_MS, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, waitsForRoom } from "../lib/roomWait";
+import { FIRST_GO_MAX_LEAD_S, LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, SLOW_SEEK_MS, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, firstGoLimitS, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, landingShortOfEnd, nextSegmentInS, pictureStartFor, pictureAfterSeek } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
@@ -3486,15 +3486,22 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    */
   const joinLeadS = useCallback((): number => {
     const ms = networkSegmentMsRef.current ?? recentSegmentMs();
-    return ms === null && !isHostRef.current ? 0 : catchUpLeadS(ms);
+    if (isHostRef.current) return catchUpLeadS(ms);
+    // A first go: no further than FIRST_GO_MAX_LEAD_S (lib/roomWait), however
+    // slow the page before's last segment was.
+    return ms === null ? 0 : Math.min(catchUpLeadS(ms), FIRST_GO_MAX_LEAD_S);
   }, []);
-  const landPastRoom = useCallback((video: HTMLVideoElement, roomS: number, again = false): number | null => {
-    const leadS = catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs());
+  /** Where past the room to land. A `firstGo` — the picture just in, after a
+   *  join or a skip — no further than FIRST_GO_MAX_LEAD_S (lib/roomWait). */
+  const landPastRoom = useCallback((video: HTMLVideoElement, roomS: number, again = false, firstGo = false): number | null => {
+    const fresh = firstGo && !again;
+    const leadS = Math.min(catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs()), fresh ? FIRST_GO_MAX_LEAD_S : Infinity);
     const end = video.seekable.length ? video.seekable.end(video.seekable.length - 1) : NaN;
     if (!Number.isFinite(end) || roomS + leadS >= end - 1) return null;
     const frags = hlsRef.current ? levelFragments(hlsRef.current) : null;
-    const limitS = Math.min(end - 1, roomS + MAX_WAIT_FOR_ROOM_S - 5);
-    return landingFor(landingBySize(roomS + leadS, roomS, sizedSegments(frags), landingSpeed(again), limitS), frags, limitS);
+    const allS = Math.min(end - 1, roomS + MAX_WAIT_FOR_ROOM_S - 5);
+    const limitS = fresh ? firstGoLimitS(allS, roomS) : allS;
+    return landingFor(landingBySize(roomS + leadS, roomS, sizedSegments(frags), landingSpeed(again), limitS, fresh), frags, limitS);
   }, [landingSpeed]);
 
   /**
@@ -3515,7 +3522,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * comes (landPastRoom). Forward only, so nothing is shown twice, and once,
    * so nothing stutters. Whether it moved.
    */
-  const catchUpWithRoom = useCallback((why: string, again = false): boolean => {
+  const catchUpWithRoom = useCallback((why: string, again = false, firstGo = false): boolean => {
     const v = videoRef.current;
     const sync = syncStateRef.current;
     if (!v || isHostRef.current || !sync?.playing || sync.hostWaiting || !sync.connected) return false;
@@ -3555,7 +3562,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       return true;
     }
     if (roomS <= hereS) return false;
-    const landS = landPastRoom(v, roomS, again);
+    const landS = landPastRoom(v, roomS, again, firstGo);
     if (landS !== null) {
       logEvent("Sync", "catching up with the room, going past it to wait there", {
         why,
@@ -5153,7 +5160,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   networkBytesPerSRef.current = comingInBytesPerS(meterReadingsRef.current, Date.now()) ?? (bytesLength * 1000) / Math.max(1, ms);
                   if (downloadSource !== "p2p") {
                     const kept = botSegmentsRef.current;
-                    kept.push({ at: Date.now(), bytes: bytesLength, ms });
+                    // Its bytes' time: the wait for the bot's first answer isn't the connection's.
+                    kept.push({ at: Date.now(), bytes: bytesLength, ms: transferMs(ms, firstByteMs(segmentUrl)) });
                     while (kept.length && Date.now() - kept[0].at > LAND_FASTEST_WITHIN_MS) kept.shift();
                   }
                   // For the page after this one, at most every ten seconds.
@@ -5407,9 +5415,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             const frags = data.details.fragments;
             if (wait && Math.abs(wait.atS - atS) < 0.01 && video.readyState < HTMLMediaElement.HAVE_METADATA && frags.length > 0) {
               const last = frags[frags.length - 1];
-              const limitS = Math.min(last.start + last.duration - 1, roomAtS + MAX_WAIT_FOR_ROOM_S - 5);
               const segmentAt = (t: number) => frags.findIndex((f) => t >= f.start && t < f.start + f.duration);
               const roomNow = () => roomAtS + (Date.now() - landedAt) / 1000;
+              // A page's first landing: a first go (lib/roomWait FIRST_GO_MAX_LEAD_S).
+              const limitS = firstGoLimitS(Math.min(last.start + last.duration - 1, roomAtS + MAX_WAIT_FOR_ROOM_S - 5), roomNow());
               /**
                * What of the stretch from the room's place the browser already
                * holds: a page back from a pop-out finds the page before's
@@ -5449,7 +5458,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                 const speed = networkBytesPerSRef.current ?? recentSegmentBytesPerS();
                 const sized = sizedSegments(frags)?.map((s, k) => (cached.has(k) ? { ...s, cached: true } : s)) ?? null;
                 const roomInCache = cached.has(segmentAt(roomNowS));
-                const bySizeS = landingBySize(roomInCache ? roomNowS : atS, roomNowS, sized, speed, limitS);
+                const bySizeS = landingBySize(roomInCache ? roomNowS : atS, roomNowS, sized, speed, limitS, true);
                 if (roomInCache) {
                   let cachedToS = roomNowS;
                   for (let k = segmentAt(roomNowS); cached.has(k); k++) cachedToS = frags[k].start + frags[k].duration;
@@ -6460,7 +6469,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
               // Stepped to the edge of what it held instead, it played the
               // half second left there, stopped for the rest, and was jumped
               // again.
-              movedOn = catchUpWithRoom("its first picture came in after the room had gone on from it");
+              movedOn = catchUpWithRoom("its first picture came in after the room had gone on from it", false, true);
             } else if (sync && sync.playing && !(isHostRef.current && rebuildHoldRef.current !== null)) {
               // Not a host the room has waited for, where its picture was
               // (rebuildHoldRef): there is no startup to close.
@@ -6509,7 +6518,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             if (behindS > (firstPicture ? LATE_START_S : HARD_SYNC_DRIFT_S)) {
               movedOn = catchUpWithRoom(firstPicture
                 ? "its first picture came in after the room had started"
-                : "its picture came in after the room had gone on from it");
+                : "its picture came in after the room had gone on from it", false, true);
             }
           }
           if (movedOn) caughtUpAtRef.current = Date.now();

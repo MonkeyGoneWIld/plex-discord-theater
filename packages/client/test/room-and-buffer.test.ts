@@ -16,7 +16,7 @@
  * - A seek in front of a stream's first picture goes to it, and one waiting
  *   for its segment waits (lib/copyStart pictureAfterSeek).
  */
-import { KEYFRAME_INTO_S, LAND_INTO_SEGMENT_S, MAX_KEYFRAME_WAIT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, waitsForRoom } from "../src/lib/roomWait";
+import { FIRST_GO_MAX_LEAD_S, KEYFRAME_INTO_S, LAND_INTO_SEGMENT_S, MAX_KEYFRAME_WAIT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../src/lib/bufferTrim";
@@ -440,6 +440,25 @@ check("…until it has closed", nudgedRate(0.14, 0.96, 60), 1);
 check("stronger only when the gap grows", nudgedRate(3, 0.96, 60), 0.94);
 check("behind with little loaded, it doesn't speed up", nudgedRate(-2, 1, 3), 1);
 check("behind with plenty, it does", nudgedRate(-2, 1, 60), 1.04);
+
+
+console.log("\n— a player whose picture just came in waits a few seconds for the room, not twenty —");
+{
+  // A film of 4 s segments, 2.5 MB each: 5 Mbps. The room is at 100.
+  const film = Array.from({ length: 60 }, (_, k) => ({ start: k * 4, duration: 4, bytes: 2_500_000 }));
+  // ixvgp8mo on main, 4 November: its first segment, 2.06 MB, took 3.8 s,
+  // 1.7 of them waiting for the bot's first answer.
+  check("a segment's speed is its bytes' time, not the wait for the bot", transferMs(3800, 1700), 2100);
+  check("…with no wait known, all of it", transferMs(3800, undefined), 3800);
+  const bytesPerS = (2_060_000 * 1000) / transferMs(3800, 1700);
+  check("a joiner on a connection faster than the film lands a segment on, and waits 4 s",
+    Number(landingBySize(100 + catchUpLeadS(3800), 100, film, bytesPerS, 125, true).toFixed(2)), 104.1);
+  // A connection slower than the film: 2 Mbps.
+  check("on one slower than the film, a first go still waits no more than " + FIRST_GO_MAX_LEAD_S + " s",
+    landingBySize(100 + catchUpLeadS(10_000), 100, film, 250_000, 125, true), 100 + FIRST_GO_MAX_LEAD_S);
+  check("having stopped again after landing, it lands with the care it always did",
+    landingBySize(100 + catchUpLeadS(10_000), 100, film, 250_000, 125), 116);
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

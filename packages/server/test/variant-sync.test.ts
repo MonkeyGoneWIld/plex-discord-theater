@@ -1516,6 +1516,38 @@ console.log("\n— a message far bigger than any real one is refused —");
   [host, b].forEach((x) => x.close());
 }
 
+console.log("\n— a host alone who closes the Activity and opens it again carries on —");
+{
+  // Discord gives the Activity a new instance once the last person in it has
+  // closed it (run 29, A8): the room held for them is under the old one.
+  const at = (channelId: string) => ({ hostUserId: "u-host", guildId: "g-close", channelId, createdAt: Date.now() });
+  instanceHosts.set("inst-close-1", at("c-close"));
+  instanceHosts.set("inst-close-2", at("c-close"));
+  instanceHosts.set("inst-close-3", at("c-elsewhere"));
+  const host = new Client("u-host", "host");
+  await host.connect("inst-close-1");
+  const sid = await startPlayback(host);
+  host.send({ type: "heartbeat", position: 600, playing: true, waiting: false, transportRevision: host.last("transport-state")?.transportRevision });
+  await sleep(60);
+  host.close();
+  await sleep(100);
+  const back = new Client("u-host", "host");
+  await back.connect("inst-close-2");
+  const st = back.last("state");
+  check("opened again in the same channel, it is on the same film and stream", [st?.ratingKey, st?.hlsSessionId], ["100", sid]);
+  check("where it was", near(st?.position, 600, 1), "ok");
+  check("driving it", st?.variant?.isOwner, true);
+  await sleep(HOLD_MS + 200);
+  check("and it isn't ended when the hold runs out", (await clockOf("inst-close-2")) > 0, true);
+  back.close();
+  await sleep(100);
+  const elsewhere = new Client("u-host", "host");
+  await elsewhere.connect("inst-close-3");
+  check("opened in another channel, it starts afresh", elsewhere.last("state")?.ratingKey ?? null, null);
+  elsewhere.close();
+  await sleep(HOLD_MS + 200);
+}
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 closeWebSocketServer();
 server.close();

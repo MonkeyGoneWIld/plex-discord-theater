@@ -1690,6 +1690,48 @@ function handOverRoom(room: Room, roomId: string, leftVariantKey: string | null,
   }
 }
 
+/**
+ * Move the room held for a host who closed the Activity alone (holdEmptyRoom)
+ * to the instance they have just opened it in, `toId`, if it is in the same
+ * voice channel.
+ *
+ * Discord keeps an Activity's instance through a pop-out, but gives it a new
+ * one once the last person in it has closed it. In run 29 (A8, 4 November) a
+ * host alone on Rain Man closed the Activity and opened it again 14, 7 and 8 s
+ * later; each time they came to an empty room under the new instance while
+ * theirs waited under the old one until it ended, and they had to start the
+ * film again. Moved, it is the room a pop-out comes back to: its stream, its
+ * place, and the host carrying on from it.
+ */
+function carryHeldRoom(
+  toId: string,
+  to: { guildId: string | null; channelId: string | null },
+  userId: string,
+): void {
+  if (!to.channelId) return;
+  let held: [string, Room] | null = null;
+  for (const [id, r] of rooms) {
+    if (id === toId || !r.emptyHold || r.clients.size > 0) continue;
+    const was = instanceHosts.get(id);
+    if (was?.hostUserId !== userId || was.channelId !== to.channelId || was.guildId !== to.guildId) continue;
+    held = [id, r];
+  }
+  if (!held) return;
+  const [fromId, room] = held;
+  rooms.delete(fromId);
+  rooms.set(toId, room);
+  // Its streams' pings find the room by its instance.
+  for (const v of room.state.variants.values()) {
+    if (v.hlsSessionId) startSessionPing(toId, v.hlsSessionId);
+  }
+  logEvent("Sync", "the host opened the Activity again, and their room comes with them", {
+    from: fromId.substring(0, 8),
+    to: toId.substring(0, 8),
+    ratingKey: room.state.ratingKey,
+    roomPosS: Number(room.state.position.toFixed(2)),
+  });
+}
+
 /** Whether a room everybody has just left has anything to keep for them. */
 function holdsWhenEmpty(room: Room): boolean {
   return !!room.state.ratingKey && (!!room.state.hlsSessionId || room.state.variants.size > 0);
@@ -1909,6 +1951,11 @@ export function attachWebSocketServer(server: Server): void {
         // Someone is using this instance, so it isn't stale. Without this the
         // 24h TTL counted from first registration and reaped live parties.
         touchInstance(instanceId);
+
+        // The host opening the Activity again after closing it alone: the
+        // room held for them is under the instance they closed — see
+        // carryHeldRoom.
+        if (!rooms.has(instanceId) && instance.hostUserId === userId) carryHeldRoom(instanceId, instance, userId);
 
         const room = getOrCreateRoom(instanceId);
         const reconnectingHost = room.hostReconnect;

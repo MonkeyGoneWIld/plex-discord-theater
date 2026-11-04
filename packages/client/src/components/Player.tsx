@@ -47,7 +47,7 @@ import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, JOIN_TOLERANCE_S, type HeldSegment } from "../lib/bufferAhead";
 import { arrivingKbps, backfillShare, backfillTitle, catchingUpTitle, loadingTitle } from "../lib/loadingMessage";
-import { safeBackCutS, safeFrontCutS } from "../lib/bufferTrim";
+import { safeBackCutS, skipCutS } from "../lib/bufferTrim";
 import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
 import { nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
@@ -227,11 +227,6 @@ const HOST_CATCH_UP_STEP_S = 0.75;
  * the host's word.
  */
 const HOST_CATCH_UP_MAX_MS = 60_000;
-/**
- * How much of what the browser's buffer holds after the place a skip goes to
- * it keeps, when the skip lands outside it — see freeRoomFor.
- */
-const SKIP_KEEP_AHEAD_S = 20;
 /**
  * In hand, under which a player is short of picture — joining, back from a
  * pop-out, its picture stopped — and tells the room, for the others to ease
@@ -868,19 +863,10 @@ function backCutS(hls: Hls, nowS: number, wantS: number): number | null {
   return safeBackCutS(fragments, nowS, wantS);
 }
 
-/**
- * Where a cut ahead of the playhead may start, at least `wantS`: on a
- * segment's start, so only whole segments go — see lib/bufferTrim. Without
- * the segments, `wantS`.
- */
-function frontCutS(hls: Hls, wantS: number): number | null {
-  const fragments = levelFragments(hls);
-  return fragments ? safeFrontCutS(fragments, wantS) : wantS;
-}
 
 /**
- * Drop buffered media outside [currentTime − backS, currentTime +
- * FORWARD_BUFFER_S], returning what was trimmed.
+ * Drop buffered media more than backS behind the playhead, returning what
+ * was trimmed. Nothing ahead of it.
  *
  * hls.js's own back-buffer eviction is switched off (backBufferLength is
  * Infinity): it cuts a fixed distance behind the playhead, which on a heavy
@@ -894,13 +880,12 @@ function trimMediaBuffer(hls: Hls, video: HTMLVideoElement, backS: number): Reco
   if (buffered.length === 0) return null;
   const now = video.currentTime;
   // This stream's back window — see backBufferFor — cut short of the segment
-  // before the one playing. The front one is always the full two minutes, cut
-  // where a segment starts: whatever the browser has managed to buffer ahead
-  // inside it stays.
-  // Trimming it to a heavy stream's lowered target threw away twenty-five
-  // seconds of picture at a time, which then had to be appended all over again.
+  // before the one playing. Nothing ahead of the playhead is cut: hls.js
+  // fetches no more than maxBufferLength ahead, and what is cut ahead and
+  // fetched again comes back with a hole where it meets what was kept
+  // (lib/bufferTrim). Snowden stopped at 2:06:55 on 3 November where this cut
+  // two minutes ahead, the last segment it had fetched.
   const backTarget = backCutS(hls, now, now - backS);
-  const frontWant = now + FORWARD_BUFFER_FLUSH_S;
   const start = buffered.start(0);
   const end = buffered.end(buffered.length - 1);
 
@@ -909,16 +894,6 @@ function trimMediaBuffer(hls: Hls, video: HTMLVideoElement, backS: number): Reco
     hls.trigger(Hls.Events.BUFFER_FLUSHING, { startOffset: 0, endOffset: backTarget, type: null });
     trimmed.backFromS = start;
     trimmed.backToS = backTarget;
-  }
-  const frontTarget = end > frontWant + BUFFER_TRIM_SLACK_S ? frontCutS(hls, frontWant) : null;
-  if (frontTarget !== null && frontTarget < end) {
-    hls.trigger(Hls.Events.BUFFER_FLUSHING, {
-      startOffset: frontTarget,
-      endOffset: Number.POSITIVE_INFINITY,
-      type: null,
-    });
-    trimmed.frontFromS = frontTarget;
-    trimmed.frontToS = end;
   }
   return Object.keys(trimmed).length > 0 ? { ...trimmed, spanBeforeS: end - start } : null;
 }
@@ -6553,7 +6528,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
          * heavy copy — the buffer refuses the segment, and hls.js empties it
          * all and loads again: blah0391's rewind of twenty seconds on 13
          * October took 2.7 s that way, with the room waiting, for picture the
-         * P2P engine had in memory all along. So what it holds well past the
+         * P2P engine had in memory all along. So what it holds ahead of the
          * place the skip goes to, and well behind it, goes first. The engine
          * keeps all of it (ENGINE_MEMORY_MIB), and hands it back in a moment
          * when the picture gets there — P2P mode only, with the engine there.
@@ -6563,10 +6538,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           const ranges = bufferedRanges(video.buffered);
           // A skip, not hls.js stepping over a gap a moment wide.
           if (ranges.length === 0 || ranges.some(([start, end]) => t >= start - 0.5 && t <= end + 0.5)) return;
-          // From a segment's start, as trimMediaBuffer cuts (lib/bufferTrim).
-          const keepTo = frontCutS(hls, t + SKIP_KEEP_AHEAD_S);
-          if (keepTo !== null && ranges[ranges.length - 1][1] > keepTo + BUFFER_TRIM_SLACK_S) {
-            hls.trigger(Hls.Events.BUFFER_FLUSHING, { startOffset: keepTo, endOffset: Number.POSITIVE_INFINITY, type: null });
+          // Everything ahead of where it goes: kept, the twenty seconds after it
+          // met what was fetched again with a hole (lib/bufferTrim).
+          const from = skipCutS(levelFragments(hls), t);
+          if (ranges[ranges.length - 1][1] > from) {
+            hls.trigger(Hls.Events.BUFFER_FLUSHING, { startOffset: from, endOffset: Number.POSITIVE_INFINITY, type: null });
           }
           const behind = backCutS(hls, t, t - backWindowRef.current);
           if (behind !== null && ranges[0][0] < behind - BUFFER_TRIM_SLACK_S) {

@@ -53,23 +53,24 @@ export function safeBackCutS(
 }
 
 /**
- * Where a cut ahead of the playhead may start: the start of the first segment
- * at or after `wantS`, so that only whole segments go, and fetched again
- * they're appended as they were the first time. Null when no segment starts
- * there, and nothing ahead can go.
+ * Where a skip to `tS`, somewhere the buffer doesn't hold, cuts what is held
+ * ahead of it: from the start of the segment `tS` is in, so that nothing ahead
+ * of where it goes is kept. `tS` itself without the segments.
  *
- * Cut part-way into one, the segment came back short. Snowden's x265 copy
- * shows three frames of a segment before its keyframe, and on 2 November a
- * cut two minutes ahead, at 2:06:06.54, a sixth of a second into the segment
- * whose keyframe is at 2:06:06.37, took them; fetched again, the segment came
- * back without them. Two minutes later the picture and sound stopped there
- * and skipped the twelfth of a second, as they had at 1:27:18 after the same.
+ * Whatever is cut ahead of the playhead and fetched again comes back short of
+ * its first frames where it meets what was kept — the frames of an x265 copy's
+ * segment shown before its keyframe, which the cut takes and the browser
+ * doesn't show again — and the picture and sound stop there. Cutting where a
+ * segment starts didn't help. Snowden's buffer, cut two minutes ahead at
+ * 2:06:55.81 on 3 November, stopped there two minutes later and skipped a
+ * fifth of a second, as it had at 1:27:18 and 2:06:06 on 2 November, cut
+ * part-way into segments. Avengers: Endgame, sent back half a minute to before
+ * what was held, kept the twenty seconds ahead it held and fetched the rest
+ * again; both versions stopped where they met, a second each time. So a
+ * skip's cut takes everything ahead, and the segments come back one after
+ * another as they did the first time, and nothing else cuts ahead at all.
  */
-export function safeFrontCutS(
-  fragments: ReadonlyArray<FragmentSpan> | null | undefined,
-  wantS: number,
-): number | null {
-  if (!fragments) return null;
-  const first = fragments.find((f) => f.start >= wantS - 0.001);
-  return first ? first.start : null;
+export function skipCutS(fragments: ReadonlyArray<FragmentSpan> | null | undefined, tS: number): number {
+  const holding = fragments?.find((f) => f.start <= tS + 0.001 && tS < f.start + f.duration);
+  return holding ? Math.min(holding.start, tS) : tS;
 }

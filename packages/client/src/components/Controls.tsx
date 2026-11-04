@@ -161,6 +161,10 @@ const PREVIEW_PASS_BUFFER_S = [0, 10, 25, 45];
 
 /** How often to look again while the buffer is under a pass's mark. */
 const PREVIEW_BUFFER_POLL_MS = 500;
+/** How many times a pass that broke off is asked for again, and after how
+ *  long — see readOn. */
+const PREVIEW_PASS_RETRIES = 3;
+const PREVIEW_RETRY_MS = 2_000;
 
 /**
  * How many decoded frames to keep. Scrubbing back over ground you've already
@@ -725,16 +729,26 @@ export function Controls({
       // the video found the bar hidden, and the click that should have paused
       // only revealed it.
       if (event.type === "pointerdown") {
+        // A mouse press on the picture with the bar hidden reveals it once it
+        // has clicked (onClickReveal), not now. Revealed now, the overlay
+        // took pointer events before the button came up, the press and the
+        // release landed on different things, and the browser clicked
+        // neither: resuming after a minute's pause without moving the mouse
+        // only brought the bar up (3 November), and took a second click.
+        if ((event as PointerEvent).pointerType === "mouse" && !visibleRef.current) return;
         revealTapRef.current = (event as PointerEvent).pointerType !== "mouse" && !visibleRef.current;
         if ((event as PointerEvent).pointerType !== "mouse") overBarRef.current = false;
       }
       if (event.type === "touchstart" && (event as TouchEvent).touches.length > 1) revealTapRef.current = false;
       resetHideTimer();
     };
+    const onClickReveal = () => resetHideTimer();
     parent.addEventListener("pointerdown", onReveal);
     parent.addEventListener("touchstart", onReveal, { passive: true });
+    parent.addEventListener("click", onClickReveal);
     resetHideTimer();
     return () => {
+      parent.removeEventListener("click", onClickReveal);
       parent.removeEventListener("mousemove", onMove);
       parent.removeEventListener("pointermove", onPointerMove);
       parent.removeEventListener("mouseleave", onLeave);
@@ -1292,13 +1306,13 @@ export function Controls({
       }
     };
 
-    const read = async () => {
-      transferStartedAt = performance.now();
+    const read = async (again = false) => {
+      if (!again) transferStartedAt = performance.now();
       let bytes = status.bytes;
-      // Taken up again, kept while the controls were away: it goes on from
-      // the pass it was in.
-      const resumed = !!parked;
-      if (parked) {
+      // Taken up again, kept while the controls were away or after a pass
+      // broke off: it goes on from the pass it was in.
+      const resumed = !!parked || again;
+      if (parked && !again) {
         logEvent("Preview", "frames kept while the controls were away", {
           partId: previewPartId, ready: progressive.frames()?.ready ?? 0, passesDone: progressive.passesDone(),
         });
@@ -1465,10 +1479,31 @@ export function Controls({
       }
     };
 
-    read().catch(() => {
+    /**
+     * A pass cut off part way comes again from where it was, its frames
+     * already here passed over. Snowden's third, at 23:30:14 on 3 November,
+     * broke off as a skip rebuilt the stream two seconds later — Plex had sent
+     * the bot all of it — and with nothing asking for it again the previews
+     * stayed at 648 of 4,044 frames for the rest of the film, "failed · per
+     * frame".
+     */
+    let breaks = 0;
+    const readOn = (again: boolean) => read(again).catch((err: unknown) => {
+      if (cancelled) return;
+      const ready = reader.frames()?.ready ?? 0;
+      if (reader === progressive && progressive.frames() && breaks < PREVIEW_PASS_RETRIES) {
+        breaks++;
+        logEvent("Preview", "a pass broke off, asking for it again", {
+          partId: previewPartId, pass: progressive.passesDone(), ready, attempt: breaks, error: String(err),
+        });
+        setTimeout(() => { if (!cancelled) void readOn(true); }, PREVIEW_RETRY_MS);
+        return;
+      }
       // The per-frame path is still there.
-      if (!cancelled) status.state = "failed";
+      status.state = "failed";
+      logEvent("Preview", "frames failed", { partId: previewPartId, ready, error: String(err) });
     });
+    void readOn(false);
 
     return () => {
       cancelled = true;

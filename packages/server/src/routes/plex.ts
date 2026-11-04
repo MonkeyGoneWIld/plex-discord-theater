@@ -4139,6 +4139,12 @@ const OUR_CLIENT_ID = "plex-discord-theater";
 const plexTranscodeKeys = new Map<string, string>();
 /** Maps our session UUID → the ratingKey being played (needed for timeline stopped). */
 const sessionRatingKeys = new Map<string, string>();
+/**
+ * Every session a master manifest was asked for since this server started.
+ * One that isn't here is from before a restart: its stream went with the old
+ * process, and the ping says so (`known: false`) for its player to rebuild it.
+ */
+const sessionsStarted = new Set<string>();
 
 /** Whether any stream of this title is running now. */
 function titleIsStreaming(ratingKey: string): boolean {
@@ -5707,6 +5713,7 @@ router.get(
     const subtitleStreamID = trackNum(req.query.subtitleStreamID);
 
     console.log("[HLS] Master manifest requested for ratingKey:", ratingKey, "session:", sessionId.substring(0, 8), offset ? `offset:${offset}s` : "");
+    sessionsStarted.add(sessionId);
 
     // Core manifest fetch logic — wrapped in a promise for in-flight deduplication
     const fetchManifest = async (
@@ -6509,6 +6516,15 @@ router.get("/hls/ping/:sessionId", async (req: Request, res: Response) => {
   const sessionId = req.params.sessionId as string;
   if (!UUID_RE.test(sessionId)) {
     res.status(400).json({ error: "Invalid session ID" });
+    return;
+  }
+
+  // A stream from before this server last started: nothing of it is left here,
+  // and every segment of it now answers 404 as if it were still coming. On 4
+  // November Snowden played out its buffer after a restart and waited on them
+  // for good. Its player rebuilds it where it is.
+  if (!sessionsStarted.has(sessionId)) {
+    res.json({ ok: true, known: false });
     return;
   }
 

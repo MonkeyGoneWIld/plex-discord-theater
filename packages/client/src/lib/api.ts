@@ -1095,7 +1095,7 @@ export async function pingSession(
   timeMs?: number,
   playing?: boolean,
   bufferAheadS?: number,
-): Promise<void> {
+): Promise<{ known: boolean }> {
   const params = new URLSearchParams();
   if (timeMs != null && Number.isFinite(timeMs)) params.set("time", String(Math.round(timeMs)));
   // The server uses this to tell an intentional pause (frozen position, expected)
@@ -1108,7 +1108,10 @@ export async function pingSession(
     params.set("buffer", bufferAheadS.toFixed(1));
   }
   const qs = params.toString();
-  await apiGet(`/api/plex/hls/ping/${encodeURIComponent(sessionId)}${qs ? `?${qs}` : ""}`);
+  const answer = await apiGet<{ known?: boolean } | null>(`/api/plex/hls/ping/${encodeURIComponent(sessionId)}${qs ? `?${qs}` : ""}`);
+  // False only for a stream from before the server last started — see the ping
+  // in routes/plex.ts.
+  return { known: answer?.known !== false };
 }
 
 /**

@@ -124,6 +124,12 @@ check("the first timeline carries its duration", await timelineDuration(CACHED, 
 const beforePing = timelines.length;
 await (await fetch(`${base}/hls/ping/${cachedSession}?time=60000&playing=1`)).text();
 check("so does a ping's timeline", await timelineDuration(CACHED, "playing", beforePing), "7200000");
+// E7, 4 November: after a restart the bot had no record of Snowden's stream,
+// and its player waited on it for good. The ping says so, for it to rebuild.
+const pingKnown = async (sid: string) =>
+  ((await (await fetch(`${base}/hls/ping/${sid}?time=60000&playing=1`)).json()) as { known?: boolean }).known;
+check("a ping for a stream this server started doesn't call it unknown", await pingKnown(cachedSession), undefined);
+check("one for a stream from before it started does", await pingKnown(crypto.randomUUID()), false);
 await plexRoutes.notifyPlexStopped(CACHED, cachedSession);
 check("so does the stopped timeline", await timelineDuration(CACHED, "stopped"), "7200000");
 check("…all without asking Plex for the metadata again", metadataRequests.filter((rk) => rk === CACHED).length, pageAsked);

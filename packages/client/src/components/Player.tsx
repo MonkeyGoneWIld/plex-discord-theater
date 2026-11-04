@@ -2677,12 +2677,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         pingIntervalRef.current = setInterval(() => {
           if (!sessionIdRef.current) return;
           const v = videoRef.current;
+          const pinged = sessionIdRef.current;
           pingSession(
-            sessionIdRef.current,
+            pinged,
             v ? v.currentTime * 1000 : undefined,
             v ? !v.paused : undefined,
             v ? bufferAheadSeconds(v) : undefined,
-          ).catch(() => {});
+          ).then((answer) => onPingAnswer(pinged, answer.known)).catch(() => {});
         }, PING_INTERVAL_MS);
       }
     } else if (!variant.isOwner && wasOwner) {
@@ -6686,12 +6687,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
            */
           const playhead =
             v && v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA ? v : null;
+          const pinged = sessionIdRef.current;
           pingSession(
-            sessionIdRef.current,
+            pinged,
             playhead ? playhead.currentTime * 1000 : undefined,
             playhead ? !playhead.paused : undefined,
             playhead ? bufferAheadSeconds(playhead) : undefined,
-          ).catch(console.error);
+          ).then((answer) => onPingAnswer(pinged, answer.known)).catch(console.error);
         }, PING_INTERVAL_MS);
       }
 
@@ -8362,6 +8364,30 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // dep array would evaluate it during render, before this const is initialised.
   const handleHostSeekRef = useRef(handleHostSeek);
   handleHostSeekRef.current = handleHostSeek;
+  const handleSeekRestartRef = useRef(handleSeekRestart);
+  handleSeekRestartRef.current = handleSeekRestart;
+  /** The stream the server last said it had no record of: rebuilt once. */
+  const forgottenSessionRef = useRef<string | null>(null);
+  /**
+   * The keep-alive ping's answer, for the stream this player drives. One the
+   * server has no record of is from before it last started, and nothing of it
+   * is left there: on 4 November (E7) the bot restarted under Snowden, which
+   * played out its 40 s of buffer and then waited for good on segments that
+   * answer 404. Rebuilt where it is, the room with it when this is the host.
+   * Only once this player has its picture, which is after the server was asked
+   * for the stream: the first ping can come before that.
+   */
+  function onPingAnswer(sessionId: string, known: boolean) {
+    if (known || sessionId !== sessionIdRef.current || forgottenSessionRef.current === sessionId) return;
+    const v = videoRef.current;
+    if (!v || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !ownsSessionRef.current) return;
+    forgottenSessionRef.current = sessionId;
+    logWarn("Host", "the server has no record of this stream (it restarted), rebuilding it here", {
+      session: sessionId.substring(0, 8),
+      ...snapshot(v),
+    });
+    handleSeekRestartRef.current(v.currentTime, isHostRef.current);
+  }
 
   /**
    * Seek entry point for whoever is driving. The host owns the Plex transcode so

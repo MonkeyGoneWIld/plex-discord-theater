@@ -64,6 +64,9 @@ export function findIndexedLibraryItem(query: LibraryIndexQuery): IndexedLibrary
   if (!query.title) return null;
 
   const wanted = titleKey(query.title);
+  // No Latin letters or digits to compare by (a title in another script): ""
+  // would be every other such title, and part of every title there is.
+  if (!wanted) return null;
   const exactTitle = (byTitle.get(typeKey(query.type, wanted)) ?? []).find(
     (item) => query.year == null || item.year == null || Math.abs(item.year - query.year) <= 1,
   );
@@ -72,6 +75,9 @@ export function findIndexedLibraryItem(query: LibraryIndexQuery): IndexedLibrary
   if (query.year != null) {
     const loose = (byYear.get(typeKey(query.type, query.year)) ?? []).find((item) => {
       const candidate = titleKey(item.title);
+      // A short one is part of too many others to mean anything ("It" in
+      // "Detroit"), and an empty one is part of all of them.
+      if (Math.min(candidate.length, wanted.length) < 4) return false;
       return candidate.includes(wanted) || wanted.includes(candidate);
     });
     if (loose) return loose;

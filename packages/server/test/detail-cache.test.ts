@@ -60,6 +60,22 @@ check("library index retains title and same-year fallback matching", () => {
   assert.equal(index.findIndexedLibraryItem({ tmdbId: 2, title: "Daredevil", type: "show", year: 2015 }), loose);
 });
 
+check("library index doesn't match a title with nothing in common", () => {
+  // Titles are compared by their Latin letters and digits only. One with none
+  // (Japanese, Cyrillic…) compared as "", which is part of every title, so it
+  // matched whatever else came out that year; and a two-letter one matched any
+  // title it is part of ("It" in "Detroit").
+  const film = { ratingKey: "40", title: "Some Film", type: "movie", year: 2001 };
+  const japanese = { ratingKey: "41", title: "千と千尋の神隠し", type: "movie", year: 2001 };
+  const detroit = { ratingKey: "42", title: "Detroit", type: "movie", year: 2017 };
+  index.replaceLibraryIndex([film, japanese, detroit]);
+  assert.equal(index.findIndexedLibraryItem({ tmdbId: 3, title: "風の谷のナウシカ", type: "movie", year: 2001 }), null);
+  assert.equal(index.findIndexedLibraryItem({ tmdbId: 4, title: "Some Other Film", type: "movie", year: 2001 }), null);
+  assert.equal(index.findIndexedLibraryItem({ tmdbId: 5, title: "It", type: "movie", year: 2017 }), null);
+  // What is the same is still found.
+  assert.equal(index.findIndexedLibraryItem({ tmdbId: 6, title: "Some Film", type: "movie", year: 2001 }), film);
+});
+
 cache.writeDetailCache("meta", "restart-check", { title: "Still here" });
 cache.closeDetailCache();
 check("detail rows survive closing and reopening the database", () => {

@@ -103,9 +103,23 @@ export function catchUpLeadS(lastSegmentMs: number | null): number {
 
 /** Less of its segment than this past a landing, and it is a sliver — see landingFor. */
 export const LAND_MIN_LEFT_S = 3;
-/** How far into the next segment a landing moved there goes, so that it is
- *  that segment the player fetches, not the end of the one before it. */
-export const LAND_INTO_SEGMENT_S = 0.1;
+/**
+ * How far past its own place in a segment hls.js still counts a seek as in
+ * it (its maxFragLookUpTolerance, set to this in the player). A segment it is
+ * fetching is called off by a seek only past its end by more than this.
+ */
+export const HLS_LOOKUP_TOLERANCE_S = 0.25;
+/**
+ * How far into the next segment a landing moved there goes, so that it is
+ * that segment the player fetches, not the end of the one before it — and far
+ * enough that hls.js calls off its fetch of the one before (past
+ * HLS_LOOKUP_TOLERANCE_S). At 0.1 s in it didn't: on 4 November fqddsy3m,
+ * joining Rain Man, landed 0.1 s into seg 2 with seg 1 coming in; seg 1 came
+ * in all the same, 4.1 MB at 06:20:00.19, and only then seg 2, in 1.8 s, 0.44
+ * s after the room had got to the landing. A landing counts on its segment
+ * being fetched from the moment it lands.
+ */
+export const LAND_INTO_SEGMENT_S = HLS_LOOKUP_TOLERANCE_S + 0.05;
 
 /**
  * Where a follower going a little past the room lands: at `targetS`, unless

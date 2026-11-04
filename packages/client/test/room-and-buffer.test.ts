@@ -16,7 +16,7 @@
  * - A seek in front of a stream's first picture goes to it, and one waiting
  *   for its segment waits (lib/copyStart pictureAfterSeek).
  */
-import { FIRST_GO_MAX_LEAD_S, KEYFRAME_INTO_S, LAND_INTO_SEGMENT_S, MAX_KEYFRAME_WAIT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, waitsForRoom } from "../src/lib/roomWait";
+import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, KEYFRAME_INTO_S, LAND_INTO_SEGMENT_S, MAX_KEYFRAME_WAIT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../src/lib/bufferTrim";
@@ -179,6 +179,15 @@ console.log("\n— a follower going past the room lands where its segment has pi
   const short = [{ start: 10, duration: 1 }, { start: 11, duration: 1 }, { start: 12, duration: 1 }];
   check("one-second segments: only the last half second of one is a sliver", at(landingFor(10.6, short, Infinity)), at(11 + LAND_INTO_SEGMENT_S));
   check("and more than that isn't", landingFor(10.4, short, Infinity), 10.4);
+  // hls.js calls off its fetch of the segment a seek leaves only for one past
+  // that segment's end by more than its lookup tolerance (onMediaSeeking).
+  // fqddsy3m on 4 November landed 0.1 s into seg 2 with seg 1 coming in, and
+  // seg 2 waited for all of seg 1.
+  const callsOffBefore = (landS: number, before: { start: number; duration: number }) =>
+    landS > before.start + before.duration + HLS_LOOKUP_TOLERANCE_S;
+  check("moved to the next segment: far enough in that hls.js calls off the one before",
+    callsOffBefore(landingFor(27.167, copy4, Infinity), copy4[1]), true);
+  check("and with one-second segments", callsOffBefore(landingFor(10.6, short, Infinity), short[0]), true);
   check("not past the limit", landingFor(27.167, copy4, 28), 27.167);
   check("in the last segment: where it was going", landingFor(35, copy4, Infinity), 35);
   check("outside the segments: where it was going", landingFor(50, copy4, Infinity), 50);
@@ -455,7 +464,7 @@ console.log("\n— a player whose picture just came in waits a few seconds for t
   check("…with no wait known, all of it", transferMs(3800, undefined), 3800);
   const bytesPerS = (2_060_000 * 1000) / transferMs(3800, 1700);
   check("a joiner on a connection faster than the film lands a segment on, and waits 4 s",
-    Number(landingBySize(100 + catchUpLeadS(3800), 100, film, bytesPerS, 125, true).toFixed(2)), 104.1);
+    Number(landingBySize(100 + catchUpLeadS(3800), 100, film, bytesPerS, 125, true).toFixed(2)), Number((104 + LAND_INTO_SEGMENT_S).toFixed(2)));
   // A connection slower than the film: 2 Mbps.
   check("on one slower than the film, a first go still waits no more than " + FIRST_GO_MAX_LEAD_S + " s",
     landingBySize(100 + catchUpLeadS(10_000), 100, film, 250_000, 125, true), 100 + FIRST_GO_MAX_LEAD_S);

@@ -3,6 +3,7 @@ import { getSessionToken } from "../lib/api";
 import { noteServerTime } from "../lib/serverClock";
 import { hdrScreenQuery, playerCaps, type Cap } from "../lib/codecs";
 import { preferredQuality } from "../lib/quality";
+import { logEvent } from "../lib/log";
 
 const MAX_RECONNECT_ATTEMPTS = 20;
 /** Suggestions held for the host. Bounded so a viewer holding the button down
@@ -466,6 +467,22 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
 } {
   const [state, setState] = useState<SyncState>(INITIAL_STATE);
   const wsRef = useRef<WebSocket | null>(null);
+  /**
+   * The role this player was last told it has, so each change is logged once.
+   * Run 29, B: the server made blah0391 host when the host left, twice, yet
+   * their page still offered "Suggest to host" and the People list showed no
+   * host; nothing on the player's side said what it had been told.
+   */
+  const toldRoleRef = useRef<{ isHost: boolean; host: string | null } | null>(null);
+  const noteRole = (isHost: boolean | undefined, host: string | null, via: string, people?: number) => {
+    if (isHost === undefined) return;
+    const was = toldRoleRef.current;
+    if (was && was.isHost === isHost && was.host === host) return;
+    toldRoleRef.current = { isHost, host };
+    logEvent("Sync", isHost ? "this player is the host" : "this player is not the host", {
+      via, host: host ?? "none", ...(people !== undefined ? { people } : {}),
+    });
+  };
   const appliedTransportRevision = useRef<number | undefined>(undefined);
   /**
    * When this client last started holding for an answer from the room — a
@@ -763,7 +780,15 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
                 : {}),
             }));
             break;
-          case "state":
+          case "state": {
+            const roster = (msg.participants as Participant[]) || [];
+            noteRole(
+              roster.find((p) => p.userId === userId)?.isHost,
+              roster.find((p) => p.isHost)?.username ?? null,
+              "state",
+              roster.length,
+            );
+          }
             setState((prev) => ({
               ...prev,
               ratingKey: (msg.ratingKey as string) || null,
@@ -823,6 +848,12 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           }
           case "participants": {
             const participants = (msg.participants as Participant[]) || [];
+            noteRole(
+              participants.find((p) => p.userId === userId)?.isHost,
+              participants.find((p) => p.isHost)?.username ?? null,
+              "roster",
+              participants.length,
+            );
             setState((prev) => ({
               ...prev,
               participants,
@@ -1080,6 +1111,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             setState((prev) => ({ ...prev, hostDisconnected: false }));
             break;
           case "host-promoted":
+            noteRole(true, (msg.hostUsername as string) || null, "host-promoted");
             setState((prev) => ({
               ...prev,
               isHost: true,
@@ -1091,6 +1123,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
             }));
             break;
           case "host-changed":
+            noteRole(false, (msg.hostUsername as string) || null, "host-changed");
             setState((prev) => ({
               ...prev,
               isHost: false,

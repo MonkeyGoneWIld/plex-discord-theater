@@ -414,7 +414,7 @@ export function convertedAudio(audio: SourceStream, channels: number | undefined
 export const COPY_CLOCK_OFFSET_S = 10;
 
 /** How long a copy's segments are, seconds: at least this, to the next keyframe.
- *  The engine cuts one much longer into pieces about this long (split-segment.ts). */
+ *  The engine cuts a big one into pieces (split-segment.ts). */
 export const COPY_SEGMENT_S = 4;
 
 /** Where ffmpeg reads the file from: the mount, or Plex with the token in a header. */

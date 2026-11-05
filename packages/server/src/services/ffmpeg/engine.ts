@@ -53,7 +53,7 @@ import { ffmpegPath, lookaheadS, maxEncodes } from "./config.js";
 import { cpuUse, gpuUse, readUse, sampleGpu, type GpuSample } from "./gpu-use.js";
 import { dropHot, hotSegment, keepHot } from "./hot-segments.js";
 import { labelInitForHdr, labelInitForSdr, type HdrMeta } from "./hdr-init.js";
-import { COPY_CLOCK_OFFSET_S, COPY_SEGMENT_S } from "./plan.js";
+import { COPY_CLOCK_OFFSET_S } from "./plan.js";
 import { splitSegment } from "./split-segment.js";
 
 /** How far past the watcher a run is when its speed is logged, unless
@@ -446,7 +446,7 @@ function segmentOf(servedAs: string, file: string, bytes: number, span: Span, cl
 const pieceName = (i: number) => String.fromCharCode(97 + Math.floor(i / 26) % 26, 97 + (i % 26));
 
 /**
- * A copy's segment too long to list whole, cut into pieces (split-segment.ts),
+ * A copy's segment too big to list whole, cut into pieces (split-segment.ts),
  * each written beside it; or the segment itself. With `notBeforeS` (on the
  * run's clock), no cut before there.
  */
@@ -455,7 +455,7 @@ async function piecesOf(
 ): Promise<Array<{ name: string; file: string; data: Buffer }>> {
   const whole = [{ name, file, data }];
   if (run.encode) return whole;
-  const pieces = splitSegment(data, init?.tracks ?? null, { pieceS: COPY_SEGMENT_S, notBeforeS });
+  const pieces = splitSegment(data, init?.tracks ?? null, { notBeforeS });
   if (!pieces) return whole;
   const ext = path.extname(name);
   const out = pieces.map((piece, i) => {
@@ -469,7 +469,7 @@ async function piecesOf(
   }
   fs.promises.unlink(file).catch(() => {});
   const span = spanOf(data, init);
-  logEvent("FFmpeg", "a segment too long to list whole, cut into pieces", {
+  logEvent("FFmpeg", "a segment too big to list whole, cut into pieces", {
     session: short(run.sessionId), segment: path.basename(name), lengthS: span ? round3(span.end - span.start) : "?",
     MB: round3(data.length / 1e6), pieces: pieces.length,
   });

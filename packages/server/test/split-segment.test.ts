@@ -1,8 +1,10 @@
 /**
- * A copy's long segments cut into pieces (ffmpeg/split-segment.ts): a film
+ * A copy's big segments cut into pieces (ffmpeg/split-segment.ts): a film
  * with a keyframe every 30 s, copied by real ffmpeg with the engine's own
  * arguments, in MPEG-TS and in fMP4; each long segment cut, and its pieces
  * read back by ffprobe as the very frames ffmpeg wrote, in the same order.
+ * The film is small, so pieces are asked for at a size that makes them about
+ * 4 s (`about4s`); left to the engine's sizes, it isn't cut at all.
  *
  * Skipped where there is no ffmpeg.
  */
@@ -11,7 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { copyArgs, planCopy } from "../src/services/ffmpeg/plan.js";
-import { splitSegment } from "../src/services/ffmpeg/split-segment.js";
+import { SPLIT_OVER_BYTES, splitSegment } from "../src/services/ffmpeg/split-segment.js";
 import { initTracks, mp4Span } from "../src/services/mp4-timestamps.js";
 import { videoSpan } from "../src/services/ts-timestamps.js";
 
@@ -65,6 +67,8 @@ function packets(file: string, stream: "v" | "a"): string[] {
 }
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
+/** Pieces of about 4 s of a 30 s segment, however small it is. */
+const about4s = (segment: Buffer) => ({ pieceBytes: segment.length / 7.5, splitOverBytes: 0 });
 
 console.log("\n— fMP4: Opus copied, as on 4 November —");
 {
@@ -74,7 +78,9 @@ console.log("\n— fMP4: Opus copied, as on 4 November —");
   const first = fs.readFileSync(path.join(dir, segments[0]));
   check("ffmpeg's first segment is the whole first 30 s, as the film has no keyframe sooner",
     round1(mp4Span(tracks, first)!.end - mp4Span(tracks, first)!.start), 30);
-  const pieces = splitSegment(first, tracks, { pieceS: 4 })!;
+  check("left whole at the engine's sizes: 30 s, but under SPLIT_OVER_BYTES, it comes in about as fast as pieces",
+    [first.length < SPLIT_OVER_BYTES, splitSegment(first, tracks)], [true, null]);
+  const pieces = splitSegment(first, tracks, about4s(first))!;
   const spans = pieces.map((p) => mp4Span(tracks, p)!);
   check("cut into pieces of about 4 s", spans.map((s) => round1(s.end - s.start) >= 3 && round1(s.end - s.start) <= 4.5),
     spans.map(() => true));
@@ -101,13 +107,18 @@ console.log("\n— fMP4: Opus copied, as on 4 November —");
   check("  decoded from the first piece on without an error", [decoded.status, decoded.stderr.trim()], [0, ""]);
 
   const second = fs.readFileSync(path.join(dir, segments[1]));
-  check("the next segment, the last 30 s, is cut too", (splitSegment(second, tracks, { pieceS: 4 }) ?? []).length >= 7, true);
+  check("the next segment, the last 30 s, is cut too", (splitSegment(second, tracks, about4s(second)) ?? []).length >= 7, true);
   check("but not with no cut allowed until near its end: nothing left to cut",
-    splitSegment(first, tracks, { pieceS: 4, notBeforeS: mp4Span(tracks, first)!.end - 0.5 }), null);
-  const late = splitSegment(first, tracks, { pieceS: 4, notBeforeS: 10 + 21 })!;
+    splitSegment(first, tracks, { ...about4s(first), notBeforeS: mp4Span(tracks, first)!.end - 0.5 }), null);
+  const late = splitSegment(first, tracks, { ...about4s(first), notBeforeS: 10 + 21 })!;
   const lateSpans = late.map((p) => mp4Span(tracks, p)!);
   check("a run's first segment, the player starting 21 s in: no cut before there, so its piece has the keyframe",
-    [lateSpans[0].start < 10.1, lateSpans[0].end >= 31, late.length], [true, true, 3]);
+    [lateSpans[0].start < 10.1, lateSpans[0].end >= 31, late.length >= 2 && late.length <= 3], [true, true, true]);
+  check("  and the pieces after it about 4 s again, not a second each",
+    lateSpans.slice(1, -1).every((s) => s.end - s.start >= 3), true);
+  const fromStart = splitSegment(first, tracks, { ...about4s(first), notBeforeS: 10 + 1 })!.map((p) => mp4Span(tracks, p)!);
+  check("a run from the start: its first piece a share like the rest, not the second before where it starts",
+    round1(fromStart[0].end - fromStart[0].start) >= 3, true);
 }
 
 console.log("\n— MPEG-TS: AAC copied —");
@@ -115,12 +126,15 @@ console.log("\n— MPEG-TS: AAC copied —");
   const { dir, segments } = copied(film("aac.mkv", ["-c:a", "aac", "-b:a", "64k", "-ac", "1"]), "aac");
   const first = fs.readFileSync(path.join(dir, segments[0]));
   check("ffmpeg's first segment is the whole first 30 s", round1(videoSpan(first)!.end - videoSpan(first)!.start), 30);
-  const pieces = splitSegment(first, null, { pieceS: 4 })!;
+  check("left whole at the engine's sizes", splitSegment(first, null), null);
+  const pieces = splitSegment(first, null, about4s(first))!;
   const spans = pieces.map((p) => videoSpan(p)!);
   check("cut into seven or eight pieces of about 4 s",
     [pieces.length >= 7 && pieces.length <= 8, spans.every((s) => s.end - s.start >= 3 && s.end - s.start <= 4.6)], [true, true]);
   const pids = (p: Buffer) => [0, 1, 2, 3].map((k) => ((p[k * 188 + 1] & 0x1f) << 8) | p[k * 188 + 2]);
   check("  each opening with the segment's tables, its PAT among them", pieces.map((p) => pids(p).includes(0)), pieces.map(() => true));
+  const share = first.length / 7.5;
+  check("  each about a share of its bytes", pieces.map((p) => p.length > share * 0.5 && p.length < share * 1.6), pieces.map(() => true));
   const whole = path.join(dir, "whole.ts");
   const cut = path.join(dir, "cut.ts");
   fs.writeFileSync(whole, first);
@@ -138,7 +152,7 @@ console.log("\n— MPEG-TS: AAC copied —");
 console.log("\n— segments the film's keyframes keep short —");
 {
   const { dir, segments } = copied(film("short.mkv", ["-c:a", "aac", "-b:a", "64k", "-ac", "1"], 48), "aac");
-  const lists = segments.map((s) => splitSegment(fs.readFileSync(path.join(dir, s)), null, { pieceS: 4 }));
+  const lists = segments.map((s) => splitSegment(fs.readFileSync(path.join(dir, s)), null));
   check("a keyframe every 2 s: every segment left whole", [segments.length >= 14, lists.every((l) => l === null)], [true, true]);
 }
 

@@ -1,5 +1,5 @@
 /**
- * A copy's long segments, listed as pieces about a segment long.
+ * A copy's big segments, listed as pieces of about PIECE_BYTES.
  *
  * A copy is cut only where the film has a keyframe (plan.ts copyArgs), and
  * some films go half a minute without one. On 4 November ratingKey 20578 opened
@@ -7,13 +7,22 @@
  * which a player has to have whole before it shows anything, so the picture
  * took 33 and 36 s to come up, and the buffer grew 30 s at a time instead of 4.
  *
- * So a segment longer than SPLIT_OVER_S is cut again here into pieces of about
- * `pieceS` each, at frame boundaries, its frames as ffmpeg wrote them. Only the
- * first piece opens on a keyframe. Played on from the piece before, a piece
- * is decoded like the rest of its segment would have been. A player that
- * jumps into one finds no keyframe in it and loads the pieces before it until
- * it has one: hls.js's backtracking, for segments that don't start with a
- * keyframe.
+ * So a segment of SPLIT_OVER_BYTES or more is cut again here into pieces of
+ * about PIECE_BYTES, at frame boundaries, its frames as ffmpeg wrote them.
+ * Only the first piece opens on a keyframe. Played on from the piece before,
+ * a piece is decoded like the rest of its segment would have been; a player
+ * that jumps into one loads its group from the keyframe piece (the client's
+ * lib/keyframeGroups).
+ *
+ * By size, not length. Cut into pieces of about 4 s, as it was on 4 November,
+ * 3 from Hell's 3.4 MB first segment came as a 10 KB piece and two of 1.4 and
+ * 1.9 MB: a player fetches a segment in parts of 150 KB, sixteen at most at
+ * once (the client's segmentParts), so those came in 10 and 13 parts at 4.6
+ * and 6.7 Mbps where the whole one had come in 16 at 14, and its start took
+ * 6.2 s instead of 3.7. Starts from the beginning ran a second slower that
+ * evening (median 4.7 s, from 3.7 and 3.9 the two days before). A piece of
+ * 4 MB is sixteen parts of 250 KB; a segment under 6 MB comes in about as
+ * fast whole, however long it is.
  *
  * MPEG-TS is cut at the packet where a picture starts, ffmpeg writing each
  * PES whole, and every piece but the first gets the segment's PAT and PMT
@@ -23,13 +32,18 @@
  */
 import type { Mp4Track } from "../mp4-timestamps.js";
 
-/** A segment longer than this, seconds, is cut into pieces. Two of a copy's
- *  four-second segments: a keyframe a little late is no reason. */
-export const SPLIT_OVER_S = 8;
+/** About how big a piece is, bytes: sixteen of a player's 150 KB parts and more. */
+export const PIECE_BYTES = 4_000_000;
+/** A segment smaller than this, bytes, is listed whole: it comes in about as fast. */
+export const SPLIT_OVER_BYTES = 6_000_000;
+/** No piece shorter than this, seconds. */
+export const MIN_PIECE_S = 1;
 
 export interface SplitOptions {
-  /** About how long each piece is, seconds. */
-  pieceS: number;
+  /** About how big each piece is, bytes: PIECE_BYTES. */
+  pieceBytes?: number;
+  /** Smaller than this, bytes, a segment is left whole: SPLIT_OVER_BYTES. */
+  splitOverBytes?: number;
   /** No cut before this, seconds on the segment's clock: a run's first
    *  segment, whose keyframe is before where the player starts, so that the
    *  piece the player starts in has it. */
@@ -37,39 +51,35 @@ export interface SplitOptions {
 }
 
 /**
- * The pieces of a segment too long to list whole, in order; null to list it as
- * it is — short enough, or not laid out as ffmpeg lays it out. `tracks` is
+ * The pieces of a segment too big to list whole, in order; null to list it as
+ * it is — small enough, or not laid out as ffmpeg lays it out. `tracks` is
  * the run's init segment's (fMP4); null for MPEG-TS.
  */
-export function splitSegment(data: Uint8Array, tracks: readonly Mp4Track[] | null, o: SplitOptions): Buffer[] | null {
+export function splitSegment(data: Uint8Array, tracks: readonly Mp4Track[] | null, o: SplitOptions = {}): Buffer[] | null {
   return tracks ? splitMp4(data, tracks, o) : splitTs(data, o);
 }
 
 /**
  * Where to cut, as indexes into `dts` (the pictures' decode times in order,
- * seconds) of a segment that ends at `endS`: pieces about `pieceS` long, each
- * at the first picture at or past its share; with `notBeforeS`, the first cut
- * there and the rest shared out after it. Empty for none.
+ * seconds) of a segment of `total` bytes that ends at `endS`, `at` being where
+ * in its bytes each picture is: at the first picture a piece's share of the
+ * bytes past where the piece began, and a second or more past it; none before
+ * `notBeforeS`, the piece there running on from the keyframe; and none leaving
+ * less than half a piece, or a second, at the end. Empty for none.
  */
-function cutsAt(dts: readonly number[], endS: number, o: SplitOptions): number[] {
-  if (dts.length < 2 || endS - dts[0] <= SPLIT_OVER_S) return [];
+function cutsAt(dts: readonly number[], at: readonly number[], total: number, endS: number, o: SplitOptions): number[] {
+  if (dts.length < 2 || total < (o.splitOverBytes ?? SPLIT_OVER_BYTES)) return [];
+  const pieces = Math.round(total / (o.pieceBytes ?? PIECE_BYTES));
+  if (pieces < 2) return [];
+  const share = total / pieces;
+  const notBefore = o.notBeforeS ?? -Infinity;
   const cuts: number[] = [];
-  // Nothing shorter than a second at the end.
-  const room = (i: number) => i < dts.length && endS - dts[i] >= 1;
-  let i = 1;
-  let from = dts[0];
-  if (o.notBeforeS !== undefined && o.notBeforeS > from) {
-    while (i < dts.length && dts[i] < o.notBeforeS) i++;
-    if (!room(i)) return [];
+  let from = 0;
+  for (let i = 1; i < dts.length; i++) {
+    if (dts[i] < notBefore || at[i] - at[from] < share || dts[i] - dts[from] < MIN_PIECE_S) continue;
+    if (total - at[i] < share / 2 || endS - dts[i] < MIN_PIECE_S) break;
     cuts.push(i);
-    from = dts[i++];
-  }
-  const pieces = Math.max(1, Math.round((endS - from) / o.pieceS));
-  const step = (endS - from) / pieces;
-  for (let k = 1; k < pieces; k++) {
-    while (i < dts.length && dts[i] < from + k * step) i++;
-    if (!room(i)) break;
-    cuts.push(i++);
+    from = i;
   }
   return cuts;
 }
@@ -113,7 +123,7 @@ function splitTs(b: Uint8Array, o: SplitOptions): Buffer[] | null {
   if (head <= 0 || head > PACKET * 8 || starts.length < 2) return null;
   // One frame on from the last, to its end.
   const frame = (dts[dts.length - 1] - dts[0]) / (dts.length - 1);
-  const cuts = cutsAt(dts, dts[dts.length - 1] + frame, o);
+  const cuts = cutsAt(dts, starts, b.length, dts[dts.length - 1] + frame, o);
   if (!cuts.length) return null;
   const tables = Buffer.from(b.subarray(0, head));
   const bounds = [0, ...cuts.map((c) => starts[c]), b.length];
@@ -293,15 +303,21 @@ function splitMp4(b: Uint8Array, tracks: readonly Mp4Track[], o: SplitOptions): 
   const scale = v.track.timescale;
   const dts = v.samples.map((s) => s.dts / scale);
   const last = v.samples[v.samples.length - 1];
-  const cuts = cutsAt(dts, (last.dts + last.duration) / scale, o);
+  // Where each picture is in the segment's bytes: the pictures' share of
+  // them, the sound sharing out alongside.
+  const videoBytes = v.samples.reduce((n, s) => n + s.size, 0);
+  const at: number[] = [];
+  let sum = 0;
+  for (const s of v.samples) { at.push((sum / videoBytes) * b.length); sum += s.size; }
+  const cuts = cutsAt(dts, at, b.length, (last.dts + last.duration) / scale, o);
   if (!cuts.length) return null;
-  const at = [-Infinity, ...cuts.map((c) => dts[c]), Infinity];
+  const bounds = [-Infinity, ...cuts.map((c) => dts[c]), Infinity];
   const stypBox = top.find((x) => x.type === "styp");
   const styp = stypBox ? b.subarray(stypBox.at, stypBox.end) : null;
-  return at.slice(1).map((end, j) => writePiece(b, styp, read.mfhd, read.trafs.map((traf) => ({
+  return bounds.slice(1).map((end, j) => writePiece(b, styp, read.mfhd, read.trafs.map((traf) => ({
     traf,
     samples: traf === v
       ? v.samples.slice(j === 0 ? 0 : cuts[j - 1], j < cuts.length ? cuts[j] : undefined)
-      : traf.samples.filter((s) => s.dts / traf.track.timescale >= at[j] && s.dts / traf.track.timescale < end),
+      : traf.samples.filter((s) => s.dts / traf.track.timescale >= bounds[j] && s.dts / traf.track.timescale < end),
   }))));
 }

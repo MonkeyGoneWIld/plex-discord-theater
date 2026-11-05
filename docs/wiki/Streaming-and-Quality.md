@@ -93,7 +93,9 @@ When a viewer's connection plainly can't keep up, the player suggests a lower
 quality with **Buffering a lot?** and a **Try** button. That takes at least
 three separate stalls adding up to 20 seconds within three minutes, while the
 connection brings in less than the stream needs. A single long wait, such as
-joining or seeking, doesn't count. The suggestion goes away by itself once
+joining or seeking, doesn't count. When a stalled viewer skips ahead of the
+room to wait there for the stream, that wait counts as part of the stall. The
+suggestion goes away by itself once
 playback runs 8 seconds without a stall with a few seconds buffered. Closing
 it (**Not now**) hides it for 10 minutes.
 

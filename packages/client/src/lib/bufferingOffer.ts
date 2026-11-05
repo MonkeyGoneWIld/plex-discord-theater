@@ -42,6 +42,9 @@ export interface PlayerNow {
   seeking: boolean;
   bufferAheadS: number;
   readyState: number;
+  /** A viewer whose picture stopped for want of data, gone past the room to
+   *  wait there for it (Player's catchUpAfterStop), and waiting still. */
+  waitingOutStall: boolean;
 }
 
 /**
@@ -50,8 +53,15 @@ export interface PlayerNow {
  * short of picture holds the whole room, its own video paused with
  * everybody's: buffering too — Firefox, hosting on 24 October, held the room
  * 21 s and was offered nothing.
+ *
+ * So is a viewer waiting, paused and seeking, past the room for the data its
+ * picture stopped for: on 5 November a laptop on 12 Angry Men, short of a
+ * 20 Mbps stream, stopped five times in three minutes and waited 44 s that
+ * way. Only the second or so before each wait counted, and it was never
+ * offered.
  */
 export function starvedNow(p: PlayerNow): boolean | null {
+  if (p.waitingOutStall && p.roomPlaying) return true;
   // The host's only: a viewer that took over a stream while the room waited
   // for its host kept the word, and every second it played after counted.
   const holdingRoom = p.isHost && p.hostHoldingRoom && !p.seeking;

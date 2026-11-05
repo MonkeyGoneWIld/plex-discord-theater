@@ -2084,7 +2084,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * `guess` while `atS` is a joiner's first guess, before its playlist's
    * segments say where it lands: no countdown is shown from it.
    */
-  const roomWaitRef = useRef<{ atS: number; roomAtS: number; since: number; guess?: boolean; pictureAt?: number } | null>(null);
+  // forData: the wait is a stall's, its picture having stopped for want of
+  // data (catchUpAfterStop) — what "Buffering a lot?" counts.
+  const roomWaitRef = useRef<{ atS: number; roomAtS: number; since: number; guess?: boolean; pictureAt?: number; forData?: boolean } | null>(null);
   const [waitingForRoom, setWaitingForRoom] = useState(false);
   /**
    * A window the browser won't start with sound: Firefox's, popped out of
@@ -3760,7 +3762,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (starvedMs < (stuck ? STUCK_CATCH_UP_AFTER_MS : STARVED_CATCH_UP_AFTER_MS)) return;
     const why = caughtUpAtRef.current ? "the room went past where it caught up to before its picture came"
       : stuck ? "its picture stuck with the buffer ahead" : "its picture stopped for want of data";
-    if (catchUpWithRoom(why, !!caughtUpAtRef.current)) caughtUpAtRef.current = Date.now();
+    if (catchUpWithRoom(why, !!caughtUpAtRef.current)) {
+      caughtUpAtRef.current = Date.now();
+      // Any wait now is this one's (catchUpWithRoom makes none while one is on).
+      if (!stuck && roomWaitRef.current) roomWaitRef.current.forData = true;
+    }
   }, [catchUpWithRoom]);
 
   /**
@@ -4314,7 +4320,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    *
    * Polled once a second while the room plays: a second spent with the
    * picture stopped for want of data counts, unless the stream has only just
-   * started or the player is seeking. When the stalls say the connection can't
+   * started or the player is seeking — but a wait past the room for the data
+   * a stall wanted counts, seeking or not. When the stalls say the connection can't
    * carry the stream is lib/bufferingOffer's to say.
    */
   useEffect(() => {
@@ -4342,6 +4349,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         seeking: video.seeking,
         bufferAheadS: ahead,
         readyState: video.readyState,
+        waitingOutStall: !!roomWaitRef.current?.forData,
       });
       if (starved === null) return;
       const recent = starvedSecondsRef.current.filter((t) => now - t < OFFER_WINDOW_MS);

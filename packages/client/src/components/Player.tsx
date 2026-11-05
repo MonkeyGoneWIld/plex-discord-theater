@@ -71,6 +71,7 @@ import type { SubtitleLoadStatus, SubtitleShown } from "../lib/subtitleStatus";
 import { START_WATCH_S, type SyncInfo } from "../lib/statsHealth";
 import { readAssignment } from "../lib/trackMove";
 import { OFFER_WINDOW_MS, offerLower, starvedNow, takeOfferDown } from "../lib/bufferingOffer";
+import { ownStreamStart } from "../lib/ownStreamStart";
 import type { InviteResult } from "../hooks/useDiscord";
 
 const PING_INTERVAL_MS = 10_000; // 10s — matches Plex API recommendation for LAN timeline updates
@@ -92,18 +93,6 @@ const DRIFT_THRESHOLD_S = 2;
 const JOIN_SETTLE_TOLERANCE_S = 0.75;
 /** Buffer below which a stream is starving rather than merely behind. */
 const STARVED_BUFFER_S = 1.5;
-/**
- * How long a stream may fail to keep up before its viewer is offered a way out.
- *
- * Twenty seconds is long enough to ride out a stall that resolves itself and
- * short enough that nobody sits watching a frozen frame wondering whether it
- * is coming back. The offer is only ever an offer: switching would discard a
- * deliberate choice of subtitles or audio, which is not a decision to make on
- * somebody's behalf.
- */
-const STARVED_OFFER_MS = 20_000;
-/** How often the check below runs. */
-const STARVED_POLL_MS = 1_000;
 
 /**
  * How long an unanswered pause request stays on screen.
@@ -1822,11 +1811,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const joinSettleRef = useRef(false);
   // When this client's stream started running dry, or null while it is healthy.
   const starvedSinceRef = useRef<number | null>(null);
-  // Whether to offer the way back to the host's stream.
-  const [offerHostStream, setOfferHostStream] = useState(false);
-  // Whether this client is on the host's stream — the one that is by definition
-  // already running, and so the thing to suggest falling back to.
-  const ownsHostStreamRef = useRef(true);
   // The variant this client has already acted on, so an assignment that moves it
   // somewhere new can be told from a re-announcement of the same stream.
   const appliedVariantKeyRef = useRef<string | null>(null);
@@ -2903,13 +2887,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     currentAudioStreamRef.current = v.audioStreamId || null;
     currentSubtitleStreamRef.current = v.subtitleStreamId;
     subtitlesOnRef.current = v.subtitleStreamId !== 0;
-    // Whether this is the room's own stream. Only used to decide whether
-    // "switch back to the host's tracks" is advice worth giving — so the host
-    // is always on it by construction, and must never be offered its own
-    // stream as an escape from itself. Said outright rather than inferred from
-    // the session id, which the host may not have echoed to itself yet.
-    ownsHostStreamRef.current =
-      isHostRef.current || v.hlsSessionId === (syncStateRef.current?.hlsSessionId ?? null);
     // A stream that has just been rebuilt is not starving yet.
     starvedSinceRef.current = null;
     setError(null);
@@ -4830,13 +4807,19 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     /** The first stream of a title, which lands like a skip's — see skipLanding. */
     const startingTitle = !prev || titleChanged;
     if (sessionOwner && offset === null) {
-      const fallback = lastGoodPositionRef.current;
-      if (fallback > 0) {
-        logWarn("HLS", "no pending offset on restart, resuming from last known position", {
-          resumeAtS: fallback,
+      // Its last picture of this title, or — a viewer that has shown none —
+      // where the room is (lib/ownStreamStart).
+      const room = syncStateRef.current;
+      const start = ownStreamStart(lastGoodPositionRef.current, isHostRef.current,
+        room && room.ratingKey === item.ratingKey ? roomPositionNow(room) : null);
+      if (start) {
+        logWarn("HLS", start.from === "room"
+          ? "no pending offset for a stream of its own, starting where the room is"
+          : "no pending offset on restart, resuming from last known position", {
+          resumeAtS: Number(start.atS.toFixed(2)),
           session: sessionId.substring(0, 8),
         });
-        offset = fallback;
+        offset = start.atS;
       }
     }
     const startOffset = offset ?? 0;
@@ -8165,47 +8148,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     };
   }, [waitingForRoom, syncState?.playing]);
 
-  /**
-   * Watch for a stream that cannot keep up, and offer the way out.
-   *
-   * Starvation is a capacity problem — the server is being asked to transcode
-   * more than it can manage, which on a real evening was two HDR streams plus a
-   * library scan. Nothing this client does to its own playhead will fix that, so
-   * the only useful answer is the host's stream: it is already running, so
-   * joining it starts no new work at all.
-   *
-   * Polled rather than driven by heartbeats, which arrive every five seconds and
-   * would make a twenty-second threshold mean anything between twenty and
-   * twenty-five.
-   */
-  useEffect(() => {
-    const timer = setInterval(() => {
-      const video = videoRef.current;
-      const sync = syncStateRef.current;
-      // Only worth offering to somebody who is on a stream of their own, while
-      // the room is actually playing. The host's own stream failing is a
-      // different problem with no better stream to point at.
-      // Nor to someone on their own stream for its quality: the host's tracks
-      // at that quality are the same stream, and the answer to a connection
-      // that can't keep up is the lower-quality hint instead.
-      if (!video || !sync?.playing || ownsHostStreamRef.current || video.paused || preferredQuality() > 0) {
-        starvedSinceRef.current = null;
-        setOfferHostStream(false);
-        return;
-      }
-      const healthy = bufferAheadSeconds(video) >= STARVED_BUFFER_S;
-      if (healthy) {
-        starvedSinceRef.current = null;
-        setOfferHostStream(false);
-        return;
-      }
-      const since = starvedSinceRef.current ?? Date.now();
-      starvedSinceRef.current = since;
-      if (Date.now() - since >= STARVED_OFFER_MS) setOfferHostStream(true);
-    }, STARVED_POLL_MS);
-    return () => clearInterval(timer);
-  }, []);
-
   // Full seek recovery: restart the Plex transcode with an offset so segments
   // exist at the target position. Used when the target can't be reached in-place.
   // `broadcast` is false when we're applying a seek that came *from* someone else
@@ -9940,46 +9882,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           >
             {"\u2715"}
           </button>
-        </div>
-      )}
-
-      {/* This client's stream has been unable to keep up for long enough that it
-          plainly isn't recovering on its own. The host's stream is already
-          running, so moving onto it costs the server nothing — but it means
-          giving up the tracks that were chosen, so it stays a choice. */}
-      {!isPip && offerHostStream && (
-        <div style={styles.confirmBackdrop} onClick={() => setOfferHostStream(false)}>
-          <div style={styles.confirmDialog} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.confirmTitle}>Your stream can't keep up</div>
-            <p style={styles.confirmText}>
-              Your audio and subtitles need their own stream, and the server is
-              struggling to produce it. Switching to the host's puts you on one
-              that is already running — you'll lose the tracks you picked.
-            </p>
-            <div style={styles.confirmActions}>
-              <button className="btn"
-                style={styles.confirmCancelBtn}
-                onClick={() => setOfferHostStream(false)}
-              >
-                Keep waiting
-              </button>
-              <button className="btn"
-                style={styles.confirmEndBtn}
-                onClick={() => {
-                  logEvent("Player", "viewer took the offer to rejoin the host's stream", {
-                    starvedForMs: starvedSinceRef.current
-                      ? Date.now() - starvedSinceRef.current
-                      : 0,
-                  });
-                  setOfferHostStream(false);
-                  starvedSinceRef.current = null;
-                  syncActionsRef.current?.sendRejoinHost();
-                }}
-              >
-                Switch to the host's
-              </button>
-            </div>
-          </div>
         </div>
       )}
 

@@ -387,9 +387,6 @@ export interface SyncActions {
   sendSetTracks: (audioStreamId: number, subtitleStreamId: number, drawn: boolean, quality?: number) => void;
   /** Stream owner → room: the transcode I just brought up for my variant. */
   sendVariantSession: (hlsSessionId: string, sessionOffset: number) => void;
-  /** Move onto whatever the host is watching, whatever its tracks are. Used by
-   *  the offer shown when this client's own stream can't keep up. */
-  sendRejoinHost: () => void;
   /** Withdraw codecs reported on joining (lib/codecs), after a stream that
    *  used them failed to decode here: this player moves onto one without. */
   sendCodecsUnsupported: (caps: Cap[]) => void;
@@ -690,7 +687,6 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
         send({ type: "set-tracks", audioStreamId, subtitleStreamId, drawn, quality }),
       sendVariantSession: (hlsSessionId: string, sessionOffset: number) =>
         send({ type: "variant-session", hlsSessionId, sessionOffset }),
-      sendRejoinHost: () => send({ type: "rejoin-host" }),
       sendCodecsUnsupported: (caps: Cap[]) =>
         send({ type: "caps", ...Object.fromEntries(caps.map((cap) => [cap, false])) }),
       sendPlayItem: (ratingKey: string) => send({ type: "play-item", ratingKey }),

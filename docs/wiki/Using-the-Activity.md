@@ -282,7 +282,6 @@ while.
 | **Host is seeking…** | The host skipped, and your player is loading the new position. |
 | **Host is switching audio…** | The host changed tracks, and your player is moving to the new stream. |
 | **Buffering a lot?** | Playback keeps stalling because your connection can't keep up with the stream. **Try** switches to the suggested quality; **Not now** hides the suggestion for 10 minutes. It goes away by itself once playback recovers. |
-| **Your stream can't keep up** | Your own stream (for your own tracks) is falling behind. **Switch to the host's** moves you to the host's stream; **Keep waiting** stays. |
 | **The picture has stopped on this device, though the video is here.** | Your device's video decoder has stopped. Quit Discord fully (right-click its icon by the clock, then **Quit Discord**) and open it again. Closing the Activity isn't enough. |
 | **Session expired** | Your sign-in is older than 24 hours. Close the Activity and open it again. |
 | **Unknown instance** | Discord's record of this Activity window is out of date. Close the Activity and open it again. |

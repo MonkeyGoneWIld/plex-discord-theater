@@ -99,10 +99,6 @@ suggestion goes away by itself once
 playback runs 8 seconds without a stall with a few seconds buffered. Closing
 it (**Not now**) hides it for 10 minutes.
 
-A viewer on a stream of their own that can't keep up is offered **Switch to
-the host's**, which moves them onto the host's stream, which is already
-running. They lose the tracks they picked; **Keep waiting** stays put.
-
 ## Choosing the bitrate limits
 
 | Setting | Default | Controls |

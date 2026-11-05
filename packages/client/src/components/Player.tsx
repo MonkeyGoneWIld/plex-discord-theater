@@ -50,7 +50,7 @@ import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, land
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, JOIN_TOLERANCE_S, type HeldSegment } from "../lib/bufferAhead";
-import { arrivingKbps, backfillShare, backfillTitle, catchingUpTitle, loadingTitle } from "../lib/loadingMessage";
+import { backfillShare, backfillTitle, catchingUpTitle, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../lib/bufferTrim";
 import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
 import { NEXT_NEEDED_SLACK_S, nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
@@ -70,7 +70,7 @@ import type { LastSegment } from "./StatsOverlay";
 import type { SubtitleLoadStatus, SubtitleShown } from "../lib/subtitleStatus";
 import { START_WATCH_S, type SyncInfo } from "../lib/statsHealth";
 import { readAssignment } from "../lib/trackMove";
-import { OFFER_WINDOW_MS, offerLower, starvedNow, takeOfferDown } from "../lib/bufferingOffer";
+import { connectionKbps, OFFER_WINDOW_MS, offerLower, starvedNow, takeOfferDown } from "../lib/bufferingOffer";
 import { ownStreamStart } from "../lib/ownStreamStart";
 import type { InviteResult } from "../hooks/useDiscord";
 
@@ -1549,8 +1549,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     /** When a download last failed, other than by being called off. */
     lastErrorAt: 0,
   });
-  /** Bytes arriving, as [when, bytes] per chunk — see arrivingKbps. */
+  /** Bytes arriving, as [when, bytes] per chunk — see connectionKbps — and
+   *  when the stream they are for started. */
   const downloadSamplesRef = useRef<Array<[number, number]>>([]);
+  const downloadSinceRef = useRef(0);
   /** The segments the engine is fetching, by URL, as [start, end] in film
    *  time — see the in-place seek's watchdog. */
   const inFlightRef = useRef(new Map<string, [number, number]>());
@@ -4308,6 +4310,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       const now = Date.now();
       if (!video) return;
       const ahead = bufferAheadSeconds(video);
+      // What is really arriving, over the last three minutes of this stream
+      // (lib/bufferingOffer, connectionKbps) — measured every second, which
+      // keeps the samples to those minutes. hls.js's own estimate times
+      // fragments the P2P engine hands over from memory, and read 5000 kbps —
+      // its default — through whole evenings of stalls.
+      const measuredKbps = connectionKbps(downloadSamplesRef.current, now, downloadSinceRef.current) ?? 0;
       // Up, and no longer needed: the buffer has caught up. Checked whatever the
       // room is doing — a pause is exactly when a slow connection fills it.
       if (offerLowerQualityRef.current !== null && takeOfferDown(lastStarvedAtRef.current, now, ahead)) {
@@ -4340,10 +4348,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       const notes = streamNotesRef.current;
       const ceiling = preferredQuality();
       const nowKbps = Math.min(notes?.kbps ?? Infinity, ceiling || Infinity);
-      // What is really arriving. hls.js's own estimate times fragments the
-      // P2P engine hands over from memory, and read 5000 kbps — its default —
-      // through whole evenings of stalls.
-      const measuredKbps = arrivingKbps(downloadSamplesRef.current, now) ?? 0;
       if (!offerLower(recent, now, Number.isFinite(nowKbps) ? nowKbps : null, measuredKbps || null)) return;
       const suggest = lowerQualityFor(nowKbps, measuredKbps * 1000);
       if (suggest === null) return;
@@ -4848,6 +4852,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     manifestParsedAtRef.current = 0;
     pictureShownRef.current = false;
     downloadSamplesRef.current = [];
+    downloadSinceRef.current = Date.now();
 
     const chosenSubtitle = currentSubtitleStreamRef.current ?? subtitleStreamId ?? 0;
     /**

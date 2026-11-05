@@ -96,8 +96,11 @@ check("an audio decision it doesn't recognise is none",
   readStreamNotes(sessionData({ video: "copy", audio: "maybe" }))?.audio, null);
 
 console.log("\n— which quality to offer someone buffering —");
-check("on a 30 Mbps remux over a 14 Mbps connection: the highest under three quarters of it",
+check("on a 30 Mbps remux over a 14 Mbps connection: the highest within four fifths of it",
   lowerQualityFor(30660, 14_000_000), 10000);
+// Pirates of the Caribbean, 5 November: 4 Mbps was suggested.
+check("on a 24.7 Mbps copy over 10.5 Mbps: 8 Mbps, not the lowest", lowerQualityFor(24693, 10_500_000), 8000);
+check("over 12.5 Mbps: 10 Mbps", lowerQualityFor(24693, 12_500_000), 10000);
 check("with nothing measured, the next level down", lowerQualityFor(30660, 0), 20000);
 check("on a 12 Mbps re-encode, the next one down: 10 Mbps, as Plex offers", lowerQualityFor(12000, 0), 10000);
 check("the lowest when even that is more than the connection has carried",

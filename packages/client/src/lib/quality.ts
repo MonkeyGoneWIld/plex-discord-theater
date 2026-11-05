@@ -305,8 +305,15 @@ export function qualityLabel(kbps: number): string {
 }
 
 /**
+ * The share of the connection a suggested level may take. It was three
+ * quarters, and on 5 November 10.5 Mbps fell short of 8 Mbps by a hair:
+ * 4 Mbps was suggested.
+ */
+const FITS_SHARE = 0.8;
+
+/**
  * The level to suggest to someone buffering on a stream of `nowKbps`: the
- * highest one under three quarters of what their connection has been measured
+ * highest one within FITS_SHARE of what their connection has been measured
  * at — the lowest, if even that is more — or, with nothing measured, simply the
  * next one down. Null when there is nothing lower.
  *
@@ -317,5 +324,5 @@ export function lowerQualityFor(nowKbps: number, measuredBps: number): number | 
   const below = QUALITY_LEVELS_KBPS.filter((l) => l <= nowKbps * 0.9);
   if (below.length === 0) return null;
   if (!(measuredBps > 0)) return below[0];
-  return below.find((l) => l * 1000 <= measuredBps * 0.75) ?? below[below.length - 1];
+  return below.find((l) => l * 1000 <= measuredBps * FITS_SHARE) ?? below[below.length - 1];
 }

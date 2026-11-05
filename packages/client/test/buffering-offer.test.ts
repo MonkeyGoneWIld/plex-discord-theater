@@ -3,7 +3,7 @@
  * player plainly can't keep its buffer and won't without a lower quality, and
  * taken down soon after the buffering stops.
  */
-import { offerLower, starvedNow, takeOfferDown, type PlayerNow } from "../src/lib/bufferingOffer";
+import { connectionKbps, offerLower, starvedNow, takeOfferDown, type PlayerNow } from "../src/lib/bufferingOffer";
 
 let pass = 0;
 let fail = 0;
@@ -51,8 +51,11 @@ console.log("\n— when it is offered —");
 const now = 10_000_000;
 check("not for one long stall: a join, a seek, a stream started again",
   offerLower(stalls([15], 0, now), now, 20000, 8000), false);
-check("not for two", offerLower(stalls([12, 12], 30, now), now, 20000, 8000), false);
-check("not for a few short ones", offerLower(stalls([3, 3, 3, 3], 20, now), now, 20000, 8000), false);
+check("not for two short ones", offerLower(stalls([3, 3], 30, now), now, 20000, 8000), false);
+check("not for a few short ones, under 12 s in all", offerLower(stalls([2, 2, 2, 2, 2], 20, now), now, 20000, 8000), false);
+// 5 November, Pirates of the Caribbean: 26 s over two stretches before it
+// came, 43 s after the stalls began.
+check("for two that come back, 12 s in all", offerLower(stalls([6, 6], 15, now), now, 24693, 10500), true);
 check("for stalls that keep coming, on a connection short of the stream",
   offerLower(stalls([7, 7, 7], 30, now), now, 20000, 8000), true);
 check("and with nothing measured, on the stalls alone", offerLower(stalls([7, 7, 7], 30, now), now, 20000, null), true);
@@ -83,7 +86,25 @@ console.log("\n— 12 Angry Men, 5 November, the laptop —");
     if (offeredAt === null && offerLower(seconds, now, 19953, 12600)) offeredAt = t;
   }
   check("five stalls and their waits, 3 minutes: offered", offeredAt !== null, true);
-  check("by the third stall's wait, not before", offeredAt !== null && offeredAt > 65 && offeredAt < 100, true);
+  check("at its second stall, a minute in", offeredAt !== null && offeredAt >= 55 && offeredAt <= 65, true);
+}
+
+console.log("\n— what the connection brings in —");
+{
+  // Pirates of the Caribbean, 5 November: 10.5 Mbps over three minutes, in
+  // ten-second stretches of 2 to 23, the last 8 s of them at 7.9.
+  const t0 = 30_000_000;
+  const samples: Array<[number, number]> = [];
+  const earlierBytes = (10_500_000 * 180 - 7_900_000 * 8) / 172 / 8;
+  for (let t = 0; t < 172; t++) samples.push([t0 + t * S, earlierBytes]);
+  for (let t = 172; t < 180; t++) samples.push([t0 + t * S, 7_900_000 / 8]);
+  check("over the last three minutes, not the last 8 s", connectionKbps(samples, t0 + 180 * S, t0 - 60 * S), 10500);
+  const young: Array<[number, number]> = [];
+  for (let t = 0; t < 30; t++) young.push([t0 + t * S, 12_000_000 / 8]);
+  check("a stream 30 s old, over its 30 s", connectionKbps(young, t0 + 30 * S, t0), 12000);
+  const old: Array<[number, number]> = [[t0, 50_000_000], [t0 + 200 * S, 1_000_000]];
+  connectionKbps(old, t0 + 200 * S, t0 - 600 * S);
+  check("what came in over three minutes ago is dropped", old.length, 1);
 }
 
 console.log("\n— when it goes —");

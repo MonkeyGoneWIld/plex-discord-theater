@@ -9,13 +9,15 @@
 /** Stalls further back than this are forgotten. */
 export const OFFER_WINDOW_MS = 180_000;
 /**
- * Offered for stalls that keep coming back: this many, apart, within the
- * window, and this many seconds stalled in all. One long stall is a join, a
- * seek or a stream made again, not a connection; until 4 November 12 s of any
- * kind within two minutes offered it.
+ * Offered for stalls that come back: this many, apart, within the window, and
+ * this many seconds stalled in all. One long stall is a join, a seek or a
+ * stream made again, not a connection. Until 4 November 12 s of any kind
+ * within two minutes offered it, a single wait included; then 20 s over three
+ * stalls, and on 5 November Pirates of the Caribbean stalled for 43 s before
+ * it came.
  */
-export const OFFER_STALLS = 3;
-export const OFFER_STARVED_S = 20;
+export const OFFER_STALLS = 2;
+export const OFFER_STARVED_S = 12;
 /** Seconds stalled further apart than this are separate stalls. */
 const SAME_STALL_GAP_MS = 2_000;
 /**
@@ -90,6 +92,25 @@ export function offerLower(
   // Not measured, it goes by the stalls alone.
   if (streamKbps !== null && arrivingKbps !== null && arrivingKbps >= streamKbps * CARRIES_MARGIN) return false;
   return true;
+}
+
+/** Under this long a stream has too little behind it to say much. */
+const LEAST_MEASURED_MS = 8_000;
+
+/**
+ * What this player's connection has brought in, kbps: all it downloaded over
+ * the window, or since its stream started if that's sooner, from `samples`
+ * as [when (ms), bytes]; null with nothing. Old entries are dropped as it
+ * goes. The last 8 s alone swing too far — on 5 November, at 2 to 23 Mbps
+ * in ten-second stretches, they read 7.9 Mbps on a connection that had
+ * brought in 10.5 over three minutes, and 4 Mbps was suggested.
+ */
+export function connectionKbps(samples: Array<[number, number]>, nowMs: number, streamSinceMs: number): number | null {
+  while (samples.length && nowMs - samples[0][0] > OFFER_WINDOW_MS) samples.shift();
+  if (samples.length === 0) return null;
+  const spanMs = Math.max(LEAST_MEASURED_MS, Math.min(OFFER_WINDOW_MS, nowMs - streamSinceMs));
+  const bytes = samples.reduce((n, [, b]) => n + b, 0);
+  return Math.round((bytes * 8) / spanMs);
 }
 
 /** Whether the hint, up, should go: the buffering that raised it is over. */

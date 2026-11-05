@@ -89,7 +89,7 @@ In Portainer or Dockge, deploy the stack.
 | Tag | Follows |
 |---|---|
 | `latest` | The newest release |
-| A version, such as `2.0.0` | That release only |
+| A version, such as `2.1.0` | That release only |
 
 ## Build from source
 

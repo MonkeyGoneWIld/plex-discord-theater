@@ -1,8 +1,8 @@
 # Plex Discord Theater
 
-Current release: **v2.0.0**. Images are published as
+Current release: **v2.1.0**. Images are published as
 `ghcr.io/monkeygonewild/plex-discord-theater:latest` and
-`ghcr.io/monkeygonewild/plex-discord-theater:2.0.0`.
+`ghcr.io/monkeygonewild/plex-discord-theater:2.1.0`.
 
 A Discord Activity for synchronized watch parties from a Plex Media Server. One
 person hosts, playback stays in lockstep for everyone in the room, and each
@@ -74,7 +74,9 @@ changing anyone else's, and their choices carry into the next episode.
 
 A viewer on a slow connection can pick a lower quality and get a stream of
 their own, and a player that can't decode HEVC gets an H.264 stream of its own,
-so nobody else's picture is lowered for them.
+so nobody else's picture is lowered for them. A viewer whose playback keeps
+stalling is offered a quality their connection can carry (**Buffering a
+lot?**).
 
 Subtitles are drawn by each player, styled the way Plex draws them. Their size,
 position, colour, background and font can be changed from the subtitle button

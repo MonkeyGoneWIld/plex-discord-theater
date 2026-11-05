@@ -2202,7 +2202,13 @@ console.log("\n— a film half a minute between keyframes —");
 {
   // On 4 November ratingKey 20578's copy opened with one 97.6 MB segment of
   // 28.9 s, which players took 20 and 32 s to have whole before showing anything.
-  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, av1Encode: false };
+  // A segment is cut by size (split-segment.ts): 4 MB pieces, from 6 MB. This
+  // film is a few MB a minute, so they're scaled to it — a piece about 4 s of
+  // it, and a segment of 6 s' worth or more cut.
+  const engine = await import("../src/services/ffmpeg/engine.js");
+  const perS = fs.statSync(SPARSE_FILM).size / 60;
+  engine.splitSizesForTests({ pieceBytes: Math.round(perS * 4), splitOverBytes: Math.round(perS * 6) });
+  const none ={ hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, av1Encode: false };
   plexRoutes.capsForTests({ ...none, opus: true });
   const mapOf = (playlist: string) => playlist.match(/^#EXT-X-MAP:URI="([^"]+)"/m)?.[1] ?? null;
   /** A copy's playlist once it lists the first 30 s, the run's pause past 36 s letting it. */
@@ -2241,6 +2247,7 @@ console.log("\n— a film half a minute between keyframes —");
   const resumed = entries(await listing("25", "?offset=21")).filter((e) => !e.uri.includes("gap"));
   check("started 21 s in: the piece it starts in opens on the keyframe before, and the rest are short",
     [resumed[0]?.duration >= 21, pieces(resumed.slice(1, 3))], [true, [true, true]]);
+  engine.splitSizesForTests({});
 }
 
 api.close();

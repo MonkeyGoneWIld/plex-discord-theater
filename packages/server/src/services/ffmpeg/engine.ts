@@ -442,6 +442,14 @@ function segmentOf(servedAs: string, file: string, bytes: number, span: Span, cl
   };
 }
 
+/** The sizes a copy's segments are cut by, when a test sets them (splitSizesForTests). */
+let splitSizes: { pieceBytes?: number; splitOverBytes?: number } = {};
+
+/** For tests: the sizes a copy's segments are cut by (split-segment.ts), scaled to a test film. */
+export function splitSizesForTests(sizes: { pieceBytes?: number; splitOverBytes?: number }): void {
+  splitSizes = sizes;
+}
+
 /** A piece's name after its segment's: 00004aa.m4s, 00004ab.m4s… */
 const pieceName = (i: number) => String.fromCharCode(97 + Math.floor(i / 26) % 26, 97 + (i % 26));
 
@@ -455,7 +463,7 @@ async function piecesOf(
 ): Promise<Array<{ name: string; file: string; data: Buffer }>> {
   const whole = [{ name, file, data }];
   if (run.encode) return whole;
-  const pieces = splitSegment(data, init?.tracks ?? null, { notBeforeS });
+  const pieces = splitSegment(data, init?.tracks ?? null, { ...splitSizes, notBeforeS });
   if (!pieces) return whole;
   const ext = path.extname(name);
   const out = pieces.map((piece, i) => {

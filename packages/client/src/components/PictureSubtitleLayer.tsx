@@ -5,6 +5,7 @@ import { logEvent, logWarn } from "../lib/log";
 import { PgsReader, decodeRle, displayAt, mergeDisplays, type PgsDisplay, type PgsObject } from "../lib/pgs";
 import type { CoveredSpan } from "../lib/subtitleCues";
 import { mergedSpans, type SubtitleLoadStatus } from "../lib/subtitleStatus";
+import { retryDelayMs } from "../lib/retryLater";
 
 /**
  * PGS subtitles (a Blu-ray's) this client draws itself, from the pictures the
@@ -26,7 +27,8 @@ import { mergedSpans, type SubtitleLoadStatus } from "../lib/subtitleStatus";
  * every line before that is here, so a quiet stretch is quiet rather than
  * "Loading subtitles…", which is only for where the cut hasn't been yet. One
  * that can't be cut has the player ask for a stream with it burned in instead
- * (onUnavailable).
+ * (onUnavailable); a request that failed for the moment is made again first
+ * (lib/retryLater).
  *
  * One made before comes in pieces of about a megabyte: the one where the
  * picture is first, then the next couple of minutes', then — while the video
@@ -198,6 +200,26 @@ export function PictureSubtitleLayer({
       logWarn("Subtitles", "a picture subtitle couldn't be drawn here; asking for it burned in", { streamId, why });
       onUnavailableRef.current?.();
     };
+    /** Failures in a row, of asking and of reading. */
+    const failedInARow = { ask: 0, read: 0 };
+    /** Pieces aren't read again before this, after a failure. */
+    let readAgainAt = 0;
+    /** How long to wait to try again after `err`; a failure that isn't the
+     *  connection's for the moment, or a fourth in a row, is burned in
+     *  (lib/retryLater). */
+    const tryAgainIn = (what: "ask" | "read", err: unknown): number | null => {
+      if (cancelled) return null;
+      const wait = retryDelayMs(err, failedInARow[what]);
+      if (wait === null) {
+        fail(String(err));
+        return null;
+      }
+      failedInARow[what]++;
+      logEvent("Subtitles", "a picture subtitle's request failed; trying again", {
+        streamId, what, why: String(err), inS: wait / 1000, tries: failedInARow[what],
+      });
+      return wait;
+    };
 
     /** Whether the pieces the browser kept from before have been looked for. */
     let lookedInCache = false;
@@ -310,12 +332,15 @@ export function PictureSubtitleLayer({
 
     /** Read what is worth reading now; done once all of it is cut and had. */
     const pump = async () => {
-      if (busy || cancelled || done || !latest) return;
+      if (busy || cancelled || done || !latest || Date.now() < readAgainAt) return;
       busy = true;
       try {
         await read();
+        failedInARow.read = 0;
       } catch (err) {
-        fail(String(err));
+        // Read again by the next ask, or the watch once all of it is cut.
+        const wait = tryAgainIn("read", err);
+        if (wait !== null) readAgainAt = Date.now() + wait;
         return;
       } finally {
         busy = false;
@@ -343,6 +368,7 @@ export function PictureSubtitleLayer({
             fail(s.failed);
             return;
           }
+          failedInARow.ask = 0;
           latest = s;
           // How far each cut has read, though nothing new was written.
           if (!done) respan(s.pieces);
@@ -350,7 +376,10 @@ export function PictureSubtitleLayer({
           await pump();
           if (!cancelled && !s.done) next = setTimeout(ask, ASK_MS);
         })
-        .catch((err) => fail(String(err)));
+        .catch((err) => {
+          const wait = tryAgainIn("ask", err);
+          if (wait !== null) next = setTimeout(ask, wait);
+        });
     };
 
     // The first ask starts the cut from where the picture is, so it waits

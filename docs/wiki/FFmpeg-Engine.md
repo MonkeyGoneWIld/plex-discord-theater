@@ -316,6 +316,15 @@ the page itself draws fewer frames than the film has, because a busy or
 throttled computer drops frames whatever it plays. One smooth check ends the
 run, so a single burst of dropped frames never moves anyone.
 
+A decoder can also stop altogether: the video has downloaded, but no picture
+comes out of it, or only a frame every few seconds, and none count as dropped.
+After 10 seconds of that, with the Activity in view and at least 3 seconds of
+video downloaded, the player gives up the picture it is on, AV1 or all of
+HEVC, remembers that, and moves to a stream without it. If the picture is
+already H.264, or is still stuck after the move, the player tells the viewer
+to quit Discord fully and open it again. The decoder belongs to Discord, and
+closing the Activity doesn't restart it.
+
 ## Plex dashboard, Tautulli and Tracearr
 
 Plex doesn't know about streams it isn't making, so the server reports them to

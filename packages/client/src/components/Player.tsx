@@ -22,6 +22,7 @@ import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { capsUsed, frameTransfer, hdrScreen, hdrScreenQuery, markUnplayable, type Cap } from "../lib/codecs";
 import { cantKeepUp, DROP_TICK_S, nextDropRun, paintRate, type DropTick } from "../lib/frameDrops";
+import { lookVerdict, STUCK_TICK_S, stuckLongEnough, stuckSince, type PictureLook } from "../lib/stuckPicture";
 import { splitCodecs } from "../lib/codecName";
 import { loadVolume, saveVolume, VOLUME_CHOSEN_EVENT } from "../lib/volume";
 import { readSameLanguageAhead, readSubtitlesAhead } from "../lib/subtitleReadAhead";
@@ -169,6 +170,11 @@ const CATCH_UP_AGAIN_MS = 3_000;
  * behind, it goes to where the room is first — see catchUpWithRoom.
  */
 const LATE_START_S = 1;
+/** What a viewer whose decoder has stopped is told (lib/stuckPicture): only a
+ *  restart of what plays it gets that back. */
+const STUCK_PICTURE_TEXT = /discord\//i.test(typeof navigator === "undefined" ? "" : navigator.userAgent)
+  ? "The picture has stopped on this device, though the video is here. Quit Discord fully (right-click its icon by the clock, then Quit Discord) and open it again."
+  : "The picture has stopped on this device, though the video is here. Close the app fully and open it again.";
 /** How long "Host is seeking…" shows, at least, for a skip that needs no loading. */
 const HOST_SEEKING_FLASH_MS = 1400;
 /**
@@ -2096,6 +2102,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    */
   const [soundHeldBack, setSoundHeldBack] = useState(false);
   const [playRefused, setPlayRefused] = useState(false);
+  /** This device's decoder has stopped, on a stream with nothing lighter: the
+   *  viewer is told to restart Discord (lib/stuckPicture). */
+  const [decoderStuck, setDecoderStuck] = useState(false);
+  const decoderStuckRef = useRef(false);
   const askedForClickRef = useRef(false);
   useEffect(() => {
     const video = videoRef.current;
@@ -2307,6 +2317,59 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       markUnplayable([pictureCap]);
       syncActionsRef.current?.sendCodecsUnsupported([pictureCap]);
     }, DROP_TICK_S * 1000);
+    return () => clearInterval(timer);
+  }, []);
+  /**
+   * Every STUCK_TICK_S: whether this device's decoder has stopped giving
+   * pictures with the video in hand (lib/stuckPicture). STUCK_S of it gives
+   * up the codec the picture is on — AV1, or all of HEVC: a stopped decoder
+   * costs a restart, so 8 bits of it aren't tried first — on this device, as
+   * frames dropping does. On H.264, with nothing lighter, or once that is
+   * given up and the picture is still stuck, the viewer is told to restart
+   * Discord: its decoder is shared by every page it opens, and nothing else
+   * gets it back.
+   */
+  const pictureLookRef = useRef<PictureLook | null>(null);
+  const stuckSinceRef = useRef<number | null>(null);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const v = videoRef.current;
+      const quality = v?.getVideoPlaybackQuality?.();
+      if (!v || !quality) { pictureLookRef.current = null; stuckSinceRef.current = null; return; }
+      const now: PictureLook = {
+        at: performance.now() / 1000, hidden: document.hidden, paused: v.paused, seeking: v.seeking,
+        readyState: v.readyState, hasVideo: v.videoWidth > 0, aheadS: bufferAheadSeconds(v), time: v.currentTime,
+        shown: quality.totalVideoFrames - quality.droppedVideoFrames, dropped: quality.droppedVideoFrames,
+      };
+      const last = pictureLookRef.current;
+      pictureLookRef.current = now;
+      if (last && decoderStuckRef.current && lookVerdict(last, now) === "moving") {
+        decoderStuckRef.current = false;
+        setDecoderStuck(false);
+        logEvent("Video", "the picture is moving again on this device");
+      }
+      const since = stuckSince(stuckSinceRef.current, last, now);
+      stuckSinceRef.current = since;
+      if (!last || since === null || !stuckLongEnough(since, now)) return;
+      stuckSinceRef.current = null;
+      const cap = pictureCapRef.current;
+      const takeBack: Cap[] = cap === "av1" ? ["av1"] : cap === "hevc" || cap === "tenBit" ? ["hevc"] : [];
+      const facts = {
+        how: lookVerdict(last, now), codec: cap ?? "h264", stuckS: Math.round(now.at - since), framesShown: now.shown,
+        ...snapshot(v),
+      };
+      if (takeBack.length) {
+        pictureCapRef.current = null;
+        logWarn("Video", "the picture is stuck on this device with the video in hand — asking the room for a stream without its codec, and keeping this device off it", facts);
+        markUnplayable(takeBack);
+        syncActionsRef.current?.sendCodecsUnsupported(takeBack);
+        return;
+      }
+      if (decoderStuckRef.current) return;
+      decoderStuckRef.current = true;
+      logWarn("Video", "the picture is stuck on this device with the video in hand, with nothing lighter to play — telling the viewer to restart Discord", facts);
+      setDecoderStuck(true);
+    }, STUCK_TICK_S * 1000);
     return () => clearInterval(timer);
   }, []);
   /** Paints at the last health sample, and when — the page's own frame rate, for the log. */
@@ -9409,7 +9472,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         <div style={styles.bufferingOverlay} role="status" aria-live="polite" data-loading-screen="">
           <div style={styles.bufferingSpinner} />
           <span style={styles.bufferingText}>
-            {seekLoading ? seekingText
+            {decoderStuck ? STUCK_PICTURE_TEXT
+              : seekLoading ? seekingText
               : switchingFor ? switchingText(switchingFor.kind, switchingFor.byHost)
               : heldForHostSwitch ? switchingText(heldForHostSwitch, true)
               : loadingText}
@@ -9438,6 +9502,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       {soundHeldBack && !playRefused && (
         <div style={styles.soundHeldBack} role="status">
           Sound is off: the browser didn't let this window start with it. Click anywhere to turn it on.
+        </div>
+      )}
+      {decoderStuck && !loadingShown && (
+        <div style={{ ...styles.soundHeldBack, ...(soundHeldBack && !playRefused ? { top: 64 } : {}) }} role="alert">
+          {STUCK_PICTURE_TEXT}
         </div>
       )}
 

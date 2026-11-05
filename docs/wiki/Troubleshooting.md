@@ -174,6 +174,16 @@ amber, then red, as a viewer's connection falls behind.
   [Choosing the bitrate limits](Streaming-and-Quality#choosing-the-bitrate-limits),
   or set up the [VPS Relay](VPS-Relay).
 
+### The loading screen never goes away, though the video has loaded
+
+The video has downloaded (**Stats for nerds** shows a full buffer), but the
+device's video decoder has stopped giving pictures. Once it stops, nothing
+plays in that Discord until Discord restarts, even films that played before.
+After 10 seconds the player moves the viewer off AV1 or HEVC. If the picture
+is still stuck, it shows **The picture has stopped on this device**. Quit
+Discord fully (right-click its icon by the clock, then **Quit Discord**) and
+open it again. Closing and reopening the Activity isn't enough.
+
 ### A stream is re-encoded when it could be copied
 
 The **Playback** row in **Stats for nerds** says why. Every reason is listed in

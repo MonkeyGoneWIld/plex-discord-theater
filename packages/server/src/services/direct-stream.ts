@@ -672,8 +672,10 @@ export async function directStreamPlaylist(
   return text;
 }
 
-/** The most parts a segment is served in — see segmentPart. */
-export const MAX_SEGMENT_PARTS = 16;
+/** The most parts a segment is served in — see segmentPart. As many as a
+ *  player asks for at most (the client's lib/segmentParts MAX_PARTS, which
+ *  says why thirty-two): a part past it is refused. */
+export const MAX_SEGMENT_PARTS = 32;
 
 /**
  * Part `part` of `parts` of a segment: the bytes from ⌊size × part / parts⌋ up

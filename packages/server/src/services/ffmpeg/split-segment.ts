@@ -16,8 +16,8 @@
  *
  * By size, not length. Cut into pieces of about 4 s, as it was on 4 November,
  * 3 from Hell's 3.4 MB first segment came as a 10 KB piece and two of 1.4 and
- * 1.9 MB: a player fetches a segment in parts of 150 KB, sixteen at most at
- * once (the client's segmentParts), so those came in 10 and 13 parts at 4.6
+ * 1.9 MB: a player fetched a segment in parts of 150 KB, sixteen at most at
+ * once then (the client's segmentParts), so those came in 10 and 13 parts at 4.6
  * and 6.7 Mbps where the whole one had come in 16 at 14, and its start took
  * 6.2 s instead of 3.7. Starts from the beginning ran a second slower that
  * evening (median 4.7 s, from 3.7 and 3.9 the two days before).
@@ -35,7 +35,9 @@
  * stopped for 51 to 54; in pieces of 4 MB none under a second, as before
  * then, in 14.7 s and stopped for 27.5; in pieces of about 12 MB of segments
  * of 18 MB or more, in 10.5 s and 26; not cut at all, in 10.7 s and 21. Much
- * past 12 MB a piece comes in hardly faster, and a long segment is still cut:
+ * past 12 MB a piece came in hardly faster, in sixteen parts. In thirty-two,
+ * as since (segmentParts), cut like that it started in 7.5 s and stopped for
+ * 7.3, and not cut, in 7.5 s and 1.5. But a long segment is still cut:
  * 20578's first, 97.6 MB in 28.9 s, is eight pieces of 3.6 s, of which a
  * start needs three. No piece is shorter than a second, and the last is never
  * more than half a share over. A player shows nothing of a piece until all of

@@ -30,7 +30,7 @@ import { keepSegment, keepingSegments, keptSegment, roomToKeep } from "./segment
  *  and Bad Santa's 1.3 MB segments, in three parts, came in at 2.2 Mbps —
  *  under the film's own 2.6 — so its picture waited 9 seconds to start. At
  *  150 KB a segment comes in two to three times as fast as it plays, up to
- *  the sixteen parts the bot splits one into. */
+ *  the thirty-two parts the bot splits one into. */
 const PART_BYTES = 150_000;
 /**
  * Parts per segment at most: as many as the bot will split one into
@@ -45,8 +45,22 @@ const PART_BYTES = 150_000;
  * five, 2.8 in three. The picture waited 13 seconds to start, and 9 after
  * the skip. A minute later the same connection ran 43 to 55 Mbps with more
  * downloads at once.
+ *
+ * Then 16. On 6 November Steins;Gate's sixth segment, 106 MB in 11.8 s, came
+ * in pieces of about 12 MB (the server's split-segment.ts), each in sixteen
+ * parts of 750 KB, and over a connection like Discord's proxy
+ * (test/start-speed.html) the picture stopped there for 26 s. A part takes a
+ * second and more to get going and runs at about 2 Mbps after, so sixteen
+ * came to about 22 Mbps — as downloads of 5 MB or more in sixteen parts did
+ * through the proxy, 22.2 at the median, 3 to 6 November. A viewer's
+ * downloads ran faster together the more parts were in flight: 12.6 Mbps at
+ * the median with 12 to 17, 17.4 with 21 to 25, 21.7 with 25 to 33 (1,835
+ * downloads). In thirty-two parts the stretch stopped for 7.3 s, the film
+ * started in 7.5 s, not 10.5, and played its first 45 s in 60 s, not 82;
+ * over a slower connection, 25 Mbps in all, it stopped for 29.5 s, not 43,
+ * and started in 12.7 s, not 15.3.
  */
-export const MAX_PARTS = 16;
+export const MAX_PARTS = 32;
 /** Parts of a segment downloading at once beside another segment: two
  *  segments' worth is as many downloads as one on its own. */
 export const PARTS_AT_ONCE_BESIDE = 8;

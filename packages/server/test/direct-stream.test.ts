@@ -410,6 +410,9 @@ await new Promise<void>((r) => plex.listen(0, "127.0.0.1", r));
 process.env.PLEX_URL = `http://127.0.0.1:${(plex.address() as AddressInfo).port}`;
 
 const ds = await import("../src/services/direct-stream.js");
+console.log("\n— a segment in parts —");
+check("in as many as thirty-two, the last ending where the segment does", ds.partBounds(3200, 31, 32), [3100, 3200]);
+check("and no more", ds.partBounds(3200, 0, 33), null);
 const { START_KBPS, START_S } = await import("../src/services/stream-bandwidth.js");
 /** A time past the start of any stream started so far. */
 const pastStart = () => Date.now() + START_S * 1000;

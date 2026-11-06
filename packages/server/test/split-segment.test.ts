@@ -4,7 +4,9 @@
  * arguments, in MPEG-TS and in fMP4; each long segment cut, and its pieces
  * read back by ffprobe as the very frames ffmpeg wrote, in the same order.
  * The film is small, so pieces are asked for at a size that makes them about
- * 4 s (`about4s`); left to the engine's sizes, it isn't cut at all.
+ * 4 s (`about4s`); left to the engine's sizes, it isn't cut at all. Segments
+ * as big as Steins;Gate's, x264's filler making up their bytes, are cut at the
+ * engine's own sizes.
  *
  * Skipped where there is no ffmpeg.
  */
@@ -44,6 +46,21 @@ function film(name: string, audio: string[], gop = 720): string {
     "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
     "-t", "60", "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast", "-bf", "2",
     "-g", String(gop), "-keyint_min", String(gop), "-sc_threshold", "0", "-pix_fmt", "yuv420p", ...audio, name]);
+  return path.join(tmp, name);
+}
+
+/**
+ * `seconds` of a picture with a keyframe at its start only, at `mbps` all
+ * through, x264's filler making up what the picture doesn't need, with Opus.
+ */
+function heavy(name: string, seconds: number, mbps: number): string {
+  const rate = `${mbps * 1000}k`;
+  run(["ffmpeg", "-hide_banner", "-v", "error", "-y",
+    "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+    "-t", String(seconds), "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+    "-g", "100000", "-keyint_min", "100000", "-sc_threshold", "0",
+    "-b:v", rate, "-minrate", rate, "-maxrate", rate, "-bufsize", `${mbps * 500}k`, "-x264-params", "filler=1",
+    "-pix_fmt", "yuv420p", "-c:a", "libopus", "-b:a", "64k", "-ac", "1", name]);
   return path.join(tmp, name);
 }
 
@@ -122,12 +139,13 @@ console.log("\n— fMP4: Opus copied, as on 4 November —");
   check("a run from the start: its first piece a share like the rest, not the second before where it starts",
     round1(fromStart[0].end - fromStart[0].start) >= 3, true);
 
-  // A share of its bytes under a second of film, as at the start of
-  // Steins;Gate (22 to 72 Mbps), where a piece of 4 MB is a few pictures.
+  // A share of its bytes under a second of film, as in Steins;Gate's sixth
+  // segment (72 Mbps): pieces a second long, not a few pictures each, as every
+  // piece is a download that takes a second and more to get going.
   const fine = splitSegment(first, tracks, halfSecond(first))!;
-  const fineShare = first.length / 60;
-  check("a share of its bytes half a second of film: pieces of a share, not of a second and more",
-    [fine.length >= 55, fine.every((p) => p.length > fineShare * 0.5 && p.length < fineShare * 1.6)], [true, true]);
+  const fineSpans = fine.map((p) => mp4Span(tracks, p)!);
+  check("a share of its bytes half a second of film: pieces of a second, not of a share",
+    [fine.length >= 25 && fine.length <= 30, fineSpans.every((s) => s.end - s.start >= 0.9)], [true, true]);
   fs.writeFileSync(cut, Buffer.concat([init, ...fine]));
   check("  its pictures and sound the ones ffmpeg wrote, decoded without an error",
     [packets(cut, "v").join("|") === before.join("|"), packets(cut, "a").join("|") === sound.join("|"),
@@ -163,9 +181,9 @@ console.log("\n— MPEG-TS: AAC copied —");
     [packets(alone, "v").length > 80, packets(alone, "v").some((l) => l.endsWith(",K"))], [true, false]);
 
   const fine = splitSegment(first, null, halfSecond(first))!;
-  const fineShare = first.length / 60;
-  check("a share of its bytes half a second of film: pieces of a share, not of a second and more",
-    [fine.length >= 55, fine.every((p) => p.length > fineShare * 0.5 && p.length < fineShare * 1.6)], [true, true]);
+  const fineSpans = fine.map((p) => videoSpan(p)!);
+  check("a share of its bytes half a second of film: pieces of a second, not of a share",
+    [fine.length >= 25 && fine.length <= 30, fineSpans.every((s) => s.end - s.start >= 0.9)], [true, true]);
   fs.writeFileSync(cut, Buffer.concat(fine));
   const decode = (file: string) => spawnSync("ffmpeg", ["-v", "error", "-i", file, "-f", "null", "-"], { encoding: "latin1" })
     .stderr.replace(/@ [0-9a-f]+\]/g, "]").trim();
@@ -173,6 +191,39 @@ console.log("\n— MPEG-TS: AAC copied —");
     [packets(cut, "v").join("|") === before.join("|"), packets(cut, "a").join("|") === packets(whole, "a").join("|"),
       decode(cut) === decode(whole)],
     [true, true, true]);
+}
+
+console.log("\n— Steins;Gate's opening, at the engine's own sizes —");
+{
+  // Its second segment, 16.7 MB in 4.4 s, and its sixth, 106 MB in 11.8 s,
+  // as the bot copied them on 6 November. Every piece is a download through
+  // Discord's proxy, a second and more before it gets going: cut into 4 and
+  // 25 that night, it took 19 s to start and stopped for 69 at the sixth.
+  const second = copied(heavy("second.mkv", 4.4, 30), "opus");
+  const secondSeg = fs.readFileSync(path.join(second.dir, second.segments[0]));
+  const secondTracks = initTracks(fs.readFileSync(path.join(second.dir, "init.mp4")))!;
+  check("its second segment made as big as it was: 15 to 18 MB, one segment",
+    [secondSeg.length > 15e6 && secondSeg.length < 18e6, second.segments.length], [true, 1]);
+  check("  left whole", splitSegment(secondSeg, secondTracks), null);
+
+  const sixth = copied(heavy("sixth.mkv", 11.8, 72), "opus");
+  const big = fs.readFileSync(path.join(sixth.dir, sixth.segments[0]));
+  const bigTracks = initTracks(fs.readFileSync(path.join(sixth.dir, "init.mp4")))!;
+  check("its sixth made as big as it was: 102 to 114 MB, one segment",
+    [big.length > 102e6 && big.length < 114e6, sixth.segments.length], [true, 1]);
+  const pieces = splitSegment(big, bigTracks) ?? [];
+  const spans = pieces.map((p) => mp4Span(bigTracks, p)!);
+  check("  cut into nine pieces of about 12 MB, each over a second",
+    [pieces.length, pieces.every((p) => p.length > 8e6 && p.length < 16e6), spans.every((s) => s.end - s.start >= 1)],
+    [9, true, true]);
+  const whole = path.join(sixth.dir, "whole.mp4");
+  const cut = path.join(sixth.dir, "cut.mp4");
+  const init = fs.readFileSync(path.join(sixth.dir, "init.mp4"));
+  fs.writeFileSync(whole, Buffer.concat([init, big]));
+  fs.writeFileSync(cut, Buffer.concat([init, ...pieces]));
+  check("  its pictures and sound the ones ffmpeg wrote",
+    [packets(cut, "v").join("|") === packets(whole, "v").join("|"), packets(cut, "a").join("|") === packets(whole, "a").join("|")],
+    [true, true]);
 }
 
 console.log("\n— segments the film's keyframes keep short —");

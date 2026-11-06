@@ -20,18 +20,26 @@
  * once (the client's segmentParts), so those came in 10 and 13 parts at 4.6
  * and 6.7 Mbps where the whole one had come in 16 at 14, and its start took
  * 6.2 s instead of 3.7. Starts from the beginning ran a second slower that
- * evening (median 4.7 s, from 3.7 and 3.9 the two days before). A piece of
- * 4 MB is sixteen parts of 250 KB; a segment under 6 MB comes in about as
- * fast whole, however long it is.
+ * evening (median 4.7 s, from 3.7 and 3.9 the two days before).
  *
- * About 4 MB whatever the film's bitrate. No piece was shorter than a second,
- * and on 6 November Steins;Gate's first episode, which opens at 22 to 72 Mbps,
- * came in pieces that weren't: its first segment, 11.3 MB in 4.2 s, as 3.8
- * and 7.5 MB, its second, 16.7 MB, as 4.3, 4.2 and 8.2 — the last second of
- * each, whatever it held, was never cut — and its sixth, 106 MB in 11.8 s, as
- * eleven of 9.6 MB. A player shows nothing of a piece until all of it is in.
- * Now a piece is as short as a quarter of a second, a few pictures, and the
- * last one is never more than half a share over.
+ * And not small. Each download through Discord's proxy takes a second and
+ * more to get going, whatever its size, and its parts about 2 Mbps each after
+ * that: 727 of them on 6 November took 1.4 s and a second more for each
+ * 3.7 MB, pieces of 2 to 5 MB coming in at 13 to 15 Mbps and those of 5 to
+ * 20 MB at 21 to 23. Cut into pieces of 4 MB as short as a quarter of a
+ * second, Steins;Gate's first episode, which opens at 22 to 72 Mbps, took 19 s
+ * to start at 03:23 UTC that day, its first two segments of 11.3 and 16.7 MB
+ * in seven pieces, and stopped for 69 s 26 s in, where its sixth, 106 MB in
+ * 11.8 s, came in 25. Played over a connection like the proxy (the client's
+ * test/start-speed.html), cut like that it started in 15.7 to 18.2 s and
+ * stopped for 51 to 54; in pieces of 4 MB none under a second, as before
+ * then, in 14.7 s and stopped for 27.5; in pieces of about 12 MB of segments
+ * of 18 MB or more, in 10.5 s and 26; not cut at all, in 10.7 s and 21. Much
+ * past 12 MB a piece comes in hardly faster, and a long segment is still cut:
+ * 20578's first, 97.6 MB in 28.9 s, is eight pieces of 3.6 s, of which a
+ * start needs three. No piece is shorter than a second, and the last is never
+ * more than half a share over. A player shows nothing of a piece until all of
+ * it is in.
  *
  * MPEG-TS is cut at the packet where a picture starts, ffmpeg writing each
  * PES whole, and every piece but the first gets the segment's PAT and PMT
@@ -41,18 +49,20 @@
  */
 import type { Mp4Track } from "../mp4-timestamps.js";
 
-/** About how big a piece is, bytes: sixteen of a player's 150 KB parts and more. */
-export const PIECE_BYTES = 4_000_000;
-/** A segment smaller than this, bytes, is listed whole: it comes in about as fast. */
-export const SPLIT_OVER_BYTES = 6_000_000;
-/** No piece shorter than this, seconds: a few pictures, however big they are. */
-export const MIN_PIECE_S = 0.25;
+/** About how big a piece is, bytes: past this one comes in hardly faster. */
+export const PIECE_BYTES = 12_000_000;
+/** A segment smaller than this, bytes, is listed whole: a piece and a half. */
+export const SPLIT_OVER_BYTES = 18_000_000;
+/** No piece shorter than this, seconds, however big a second of it is. */
+export const MIN_PIECE_S = 1;
 
 export interface SplitOptions {
   /** About how big each piece is, bytes: PIECE_BYTES. */
   pieceBytes?: number;
   /** Smaller than this, bytes, a segment is left whole: SPLIT_OVER_BYTES. */
   splitOverBytes?: number;
+  /** No piece shorter than this, seconds: MIN_PIECE_S. */
+  minPieceS?: number;
   /** No cut before this, seconds on the segment's clock: a run's first
    *  segment, whose keyframe is before where the player starts, so that the
    *  piece the player starts in has it. */
@@ -81,12 +91,13 @@ function cutsAt(dts: readonly number[], at: readonly number[], total: number, en
   const pieces = Math.round(total / (o.pieceBytes ?? PIECE_BYTES));
   if (pieces < 2) return [];
   const share = total / pieces;
+  const shortest = o.minPieceS ?? MIN_PIECE_S;
   const notBefore = o.notBeforeS ?? -Infinity;
   const cuts: number[] = [];
   let from = 0;
   for (let i = 1; i < dts.length; i++) {
-    if (dts[i] < notBefore || at[i] - at[from] < share || dts[i] - dts[from] < MIN_PIECE_S) continue;
-    if (total - at[i] < share / 2 || endS - dts[i] < MIN_PIECE_S) break;
+    if (dts[i] < notBefore || at[i] - at[from] < share || dts[i] - dts[from] < shortest) continue;
+    if (total - at[i] < share / 2 || endS - dts[i] < shortest) break;
     cuts.push(i);
     from = i;
   }

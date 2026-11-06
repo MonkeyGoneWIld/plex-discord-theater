@@ -48,6 +48,16 @@
 // films: /api/plex/preview/<part>/index sends them a pass at a time as the
 // bot does, each after &previewDelayMs= (Plex reading the file out), and
 // /api/test/previews lists who was sent which pass.
+//
+// stream=sg is shaped like Steins;Gate's first episode as the bot copied it on
+// 6 November (see makeSgStream), listed as the bot lists a copy, its big
+// segments cut into pieces by the bot's own split-segment.ts: &split=4,6,1 for
+// pieces of about 4 MB of segments of 6 MB or more, none under a second;
+// &split=none for none cut; unset, split-segment.ts's own sizes. And
+//   POST /api/test/flow?user=u-host&kbps=2000&latencyMs=300&slowMs=1030
+// holds each of a user's downloads as one through Discord's proxy is: its
+// first byte after latencyMs, the rest from slowMs after that, at kbps.
+// /api/test/streams says when each user first asked for the stream.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
@@ -60,6 +70,9 @@ const { createSession, getSessionUserId } = await import("../../server/src/middl
 const { instanceHosts } = await import("../../server/src/routes/discord.js");
 const { progressivePreview } = await import("../../server/src/services/preview-stream.js");
 const { recordSessionVideoCodec, recordHevcWithheld, recordSessionHdr } = await import("../../server/src/routes/plex.js");
+const { measuredPlaylist } = await import("../../server/src/services/measured-playlist.js");
+const { initTracks, mp4Span } = await import("../../server/src/services/mp4-timestamps.js");
+const { splitSegment } = await import("../../server/src/services/ffmpeg/split-segment.js");
 
 const PORT = 3000;
 const SMALL_STREAM = path.join(os.tmpdir(), "plex-theater-media-errors");
@@ -67,10 +80,11 @@ const COPY_STREAM = path.join(os.tmpdir(), "plex-theater-copy-stream");
 const COPY4_STREAM = path.join(os.tmpdir(), "plex-theater-copy4-stream");
 const COPY4_LONG_STREAM = path.join(os.tmpdir(), "plex-theater-copy4long-stream");
 const HDR_STREAM = path.join(os.tmpdir(), "plex-theater-hdr-stream");
+const SG_STREAM = path.join(os.tmpdir(), "plex-theater-sg-stream");
 /** Each copied stream's keyframe interval, which is its segments' length. */
 const SEGMENT_S = new Map([[COPY_STREAM, 10], [COPY4_STREAM, 4], [COPY4_LONG_STREAM, 4], [HDR_STREAM, 4]]);
 /** How long each stream is, seconds: two minutes, but for the long one. */
-const LENGTH_S = new Map([[COPY4_LONG_STREAM, 300]]);
+const LENGTH_S = new Map([[COPY4_LONG_STREAM, 300], [SG_STREAM, 121]]);
 const lengthOf = (dir: string) => LENGTH_S.get(dir) ?? 120;
 /**
  * The room every player of a check joins. A new one for each check: the
@@ -102,6 +116,134 @@ for (const [dir, segmentS] of SEGMENT_S) {
   ], { stdio: "inherit" });
   if (made.status !== 0) { console.error("ffmpeg failed — is it on the PATH?"); process.exit(1); }
 }
+
+/** The copy's clock: the film's own plus this, as the bot's copies are (plan.ts COPY_CLOCK_OFFSET_S). */
+const SG_CLOCK_S = 10;
+/**
+ * Steins;Gate's first episode as the bot copied it on 6 November: its first
+ * six segments as long and as big as they were — 11.3, 16.7, 10.3, 7.6 and
+ * 5.6 MB, then 106 MB in 11.8 s, the film going 12 s without a keyframe at 72
+ * Mbps — and four-second ones at 2.5 Mbps after, two minutes in all. Each
+ * stretch is [pictures at 23.976 a second, MB with its sound]. The first two
+ * segments have the most in their last second, as the film's had: cut with
+ * pieces of 4 MB, none under a second, they came as 3.8 and 7.5 MB, and as
+ * 4.3, 4.2 and 8.2.
+ *
+ * H.264 at a constant rate padded out with filler, so a test pattern comes to
+ * the size the film did, each stretch opening on a keyframe; cut, as fMP4, as
+ * the bot cuts a copy (plan.ts fmp4SegmentArgs), on the copy's clock.
+ */
+const SG_SECTIONS: Array<[number, number]> = [[76, 5.94], [24, 5.37], [81, 11.83], [24, 4.85], [99, 10.25], [115, 7.59],
+  [91, 5.6], [283, 105.87], ...Array.from({ length: 22 }, (): [number, number] => [96, 1.25])];
+function makeSgStream(dir: string) {
+  console.log("generating a Steins;Gate-shaped stream in", dir);
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  const ffmpeg = (args: string[]) => {
+    const r = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", ...args], { encoding: "latin1", cwd: dir });
+    if (r.status !== 0) { console.error("ffmpeg failed — is it on the PATH?", r.stderr); process.exit(1); }
+  };
+  const fps = 24000 / 1001;
+  const soundBytesPerS = 128_000 / 8 + 1_500;
+  const list: string[] = [];
+  let frames = 0;
+  for (const [i, [count, mb]] of SG_SECTIONS.entries()) {
+    const s = count / fps;
+    const want = mb * 1e6 - soundBytesPerS * s;
+    let kbps = (want * 8) / s / 1000;
+    const name = `s${String(i).padStart(2, "0")}.mkv`;
+    // The encoder comes in a little under the rate it is given: asked again until it's within 2%.
+    for (let pass = 0; pass < 3; pass++) {
+      const rate = `${Math.round(kbps)}k`;
+      ffmpeg(["-f", "lavfi", "-i", "testsrc2=size=640x360:rate=24000/1001", "-frames:v", String(count),
+        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-level", "4.1",
+        "-g", "100000", "-keyint_min", "100000", "-sc_threshold", "0",
+        "-b:v", rate, "-minrate", rate, "-maxrate", rate, "-bufsize", `${Math.round(kbps / 2)}k`,
+        "-x264-params", "filler=1", "-pix_fmt", "yuv420p", "-an", name]);
+      const got = fs.statSync(path.join(dir, name)).size;
+      if (Math.abs(got - want) / want < 0.02) break;
+      kbps *= want / got;
+    }
+    list.push(`file '${name}'`);
+    frames += count;
+  }
+  fs.writeFileSync(path.join(dir, "list.txt"), list.join("\n") + "\n");
+  ffmpeg(["-f", "concat", "-safe", "0", "-i", "list.txt",
+    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", (frames / fps).toFixed(3),
+    "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+    "-output_ts_offset", String(SG_CLOCK_S), "-f", "hls", "-hls_segment_type", "fmp4", "-hls_time", "3.9375",
+    "-hls_list_size", "0", "-hls_fmp4_init_filename", "init.mp4", "-hls_segment_filename", "%05d.m4s",
+    "-hls_segment_options", "movflags=+frag_discont+negative_cts_offsets:use_editlist=0", "index.m3u8"]);
+  for (const f of fs.readdirSync(dir)) if (/^s\d+\.mkv$|^list\.txt$/.test(f)) fs.rmSync(path.join(dir, f));
+  fs.writeFileSync(path.join(dir, "made"), "");
+}
+
+/** A piece's name after its segment's, as the bot's: 00005aa.m4s, 00005ab.m4s… (engine.ts pieceName). */
+const pieceName = (i: number) => String.fromCharCode(97 + Math.floor(i / 26) % 26, 97 + (i % 26));
+/** stream=sg as this check lists it: where its pieces are, its playlist, and what was cut how. */
+let sgRun: { id: number; dir: string; playlist: string; layout: string[] } | null = null;
+/** The segments read, kept: a part of one is a read of all of it otherwise. */
+const sgRead = new Map<string, Buffer>();
+/**
+ * stream=sg laid out as the bot lays out a copy from its start (engine.ts):
+ * each segment cut into pieces as split-segment.ts cuts it — with `split`'s
+ * sizes, "MB,MB,s" (piece, over, shortest), or none with "none" — none in the
+ * first one's first second, and each listed at its measured times on the
+ * film's clock, every one's size on its URL (measured-playlist.ts).
+ */
+function layOutSg(split: string | null) {
+  const runs = path.join(SG_STREAM, "runs");
+  fs.rmSync(runs, { recursive: true, force: true });
+  sgRead.clear();
+  const id = resets;
+  const dir = path.join(runs, String(id));
+  fs.mkdirSync(dir, { recursive: true });
+  const init = fs.readFileSync(path.join(SG_STREAM, "init.mp4"));
+  const tracks = initTracks(init);
+  if (!tracks) throw new Error("no tracks in the init segment");
+  const sizes = split && split !== "none" ? split.split(",").map(Number) : null;
+  const options = sizes
+    ? { pieceBytes: sizes[0] * 1e6, splitOverBytes: sizes[1] * 1e6, ...(sizes[2] ? { minPieceS: sizes[2] } : {}) }
+    : {};
+  const base = `/api/test/stream/sg/${id}`;
+  const segments = [];
+  const layout: string[] = [];
+  const names = fs.readdirSync(SG_STREAM).filter((f) => /^\d{5}\.m4s$/.test(f)).sort();
+  for (const [i, name] of names.entries()) {
+    const data = fs.readFileSync(path.join(SG_STREAM, name));
+    const pieces = split === "none" ? null : splitSegment(data, tracks, { ...options, notBeforeS: i === 0 ? SG_CLOCK_S + 1 : undefined });
+    const list = pieces ? pieces.map((d, j) => ({ name: `${name.slice(0, 5)}${pieceName(j)}.m4s`, data: d })) : [{ name, data }];
+    const said: string[] = [];
+    for (const piece of list) {
+      if (pieces) fs.writeFileSync(path.join(dir, piece.name), piece.data);
+      const span = mp4Span(tracks, piece.data);
+      if (!span) throw new Error(`no times in ${piece.name}`);
+      said.push(`${(piece.data.length / 1e6).toFixed(1)}MB/${(span.end - span.start).toFixed(2)}s`);
+      segments.push({
+        path: `${base}/${piece.name}`, start: span.alignStart - SG_CLOCK_S, end: span.end - SG_CLOCK_S,
+        videoStart: span.start - SG_CLOCK_S, audioStart: span.audioStart === null ? null : span.audioStart - SG_CLOCK_S,
+        bytes: piece.data.length, init: { path: `${base}/init.mp4`, bytes: init.length },
+      });
+    }
+    if (i < 7) layout.push(`${name}: ${said.join(" ")}`);
+  }
+  const playlist = measuredPlaylist({
+    segments, published: segments.length, offsetS: 0, ended: true, targetDuration: 0, urlFor: (p, bytes) => `${p}?n=${bytes}`,
+  }).text;
+  sgRun = { id, dir, playlist, layout };
+  console.log(`[sg] split ${split ?? "as split-segment.ts has it"}: ${segments.length} listed\n  ${layout.join("\n  ")}`);
+}
+/** A file of stream=sg's: one of this run's pieces, or a segment or the init segment as they are. */
+function sgFile(id: number, name: string): Buffer | null {
+  const piece = path.join(SG_STREAM, "runs", String(id), name);
+  const file = fs.existsSync(piece) ? piece : path.join(SG_STREAM, name);
+  if (!fs.existsSync(file)) return null;
+  const kept = sgRead.get(file) ?? fs.readFileSync(file);
+  sgRead.set(file, kept);
+  return kept;
+}
+if (!fs.existsSync(path.join(SG_STREAM, "made"))) makeSgStream(SG_STREAM);
+
 let streamDir = SMALL_STREAM;
 /** Whether the playlist gives segment sizes, for the players to fetch in parts. */
 let partsOn = true;
@@ -122,6 +264,18 @@ const paceMs = new Map<string, number>();
 const nextSlot = new Map<string, number>();
 /** Each user's speed per download, kbps — unset is as fast as the disk. */
 const flowKbps = new Map<string, number>();
+/** How long each of a user's downloads takes to its first byte, ms, and then
+ *  to get going past its first SLOW_AFTER_BYTES — Discord's proxy's, about
+ *  0.3 and another second (split-segment.ts has the measurements). */
+const latencyMs = new Map<string, number>();
+const slowMs = new Map<string, number>();
+const SLOW_AFTER_BYTES = 16_384;
+/** When each user first asked for the stream, since the last reset. */
+const streamsAsked: Array<{ user: string; at: number }> = [];
+const lateAnswer = async (who: string | null) => {
+  const ms = latencyMs.get(who ?? "") ?? 0;
+  if (ms) await new Promise((r) => setTimeout(r, ms));
+};
 /** Every download's together, kbps, and when the shared connection is next free. */
 let uploadKbps = 0;
 let uploadFreeAt = 0;
@@ -291,8 +445,14 @@ const server = http.createServer(async (req, res) => {
     const kbps = Number(url.searchParams.get("kbps") ?? 0);
     if (kbps > 0) flowKbps.set(who, kbps);
     else flowKbps.delete(who);
+    for (const [key, map] of [["latencyMs", latencyMs], ["slowMs", slowMs]] as const) {
+      const ms = Number(url.searchParams.get(key) ?? 0);
+      if (ms > 0) map.set(who, ms);
+      else map.delete(who);
+    }
     return json(res, { ok: true });
   }
+  if (p === "/api/test/streams") return json(res, streamsAsked);
   if (p === "/api/test/upload") {
     uploadKbps = Number(url.searchParams.get("kbps") ?? 0);
     uploadFreeAt = 0;
@@ -308,6 +468,7 @@ const server = http.createServer(async (req, res) => {
   if (p === "/api/test/reset") {
     instance = `sync-room-${++resets}`;
     stallUntil.clear(); paceMs.clear(); nextSlot.clear(); flowKbps.clear(); served.length = 0;
+    latencyMs.clear(); slowMs.clear(); streamsAsked.length = 0;
     uploadKbps = 0;
     uploadFreeAt = 0;
     previewsOn = url.searchParams.get("previews") === "1";
@@ -328,14 +489,16 @@ const server = http.createServer(async (req, res) => {
     p2pOn = url.searchParams.get("p2p") !== "0";
     const stream = url.searchParams.get("stream");
     streamDir = stream === "copy" ? COPY_STREAM : stream === "copy4" ? COPY4_STREAM : stream === "copy4long" ? COPY4_LONG_STREAM
-      : stream === "hdr" ? HDR_STREAM : SMALL_STREAM;
+      : stream === "hdr" ? HDR_STREAM : stream === "sg" ? SG_STREAM : SMALL_STREAM;
+    sgRun = null;
+    if (streamDir === SG_STREAM) layOutSg(url.searchParams.get("split"));
     partsOn = url.searchParams.get("parts") !== "0";
     cacheOn = url.searchParams.get("cache") === "1";
     cacheNone = url.searchParams.get("cache") === "none";
     urlTag = url.searchParams.get("fresh") === "1" ? `&r=${Date.now()}` : "";
     subtitleReads.clear();
     subtitleReadPace = Number(url.searchParams.get("subPace") ?? 3) || 3;
-    return json(res, { ok: true, p2p: p2pOn, stream: path.basename(streamDir), parts: partsOn });
+    return json(res, { ok: true, p2p: p2pOn, stream: path.basename(streamDir), parts: partsOn, layout: sgRun?.layout });
   }
   if (p === "/api/test/nohevc") {
     noHevc.add(url.searchParams.get("user") ?? "u-host");
@@ -419,6 +582,14 @@ const server = http.createServer(async (req, res) => {
     ].join("\n"));
   }
 
+  // stream=sg: listed as the bot lists a copy it has made to the end.
+  if (/^\/api\/plex\/hls\/[^/]+\/[^/]+\/master\.m3u8$/.test(p) && sgRun) {
+    if (!streamsAsked.some((s) => s.user === (user ?? "?"))) streamsAsked.push({ user: user ?? "?", at: Date.now() });
+    await lateAnswer(user);
+    if (res.destroyed) return;
+    res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
+    return res.end(sgRun.playlist);
+  }
   // The stream: a media playlist straight away, as a copy of Plex's would be.
   const segmentS = SEGMENT_S.get(streamDir);
   if (/^\/api\/plex\/hls\/[^/]+\/[^/]+\/master\.m3u8$/.test(p) && eventList && segmentS) {
@@ -455,7 +626,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "application/vnd.apple.mpegurl" });
     return res.end(playlist);
   }
-  const seg = p.match(/^\/api\/test\/stream\/(seg\d+\.ts)$/);
+  const seg = p.match(/^\/api\/test\/stream\/(?:sg\/(\d+)\/)?(seg\d+\.ts|\d{5}(?:[a-z]{2})?\.m4s|init\.mp4)$/);
   if (seg) {
     const who = user ?? "unknown";
     const asked = Date.now();
@@ -474,13 +645,17 @@ const server = http.createServer(async (req, res) => {
       await new Promise((r) => setTimeout(r, Math.min(200, until - Date.now())));
     }
     const held = Date.now() - asked;
-    const file = path.join(streamDir, seg[1]);
-    if (!fs.existsSync(file)) return json(res, { error: "no such segment" }, 404);
+    const name = seg[2];
+    const file = path.join(streamDir, name);
+    const kept = seg[1] ? sgFile(Number(seg[1]), name) : fs.existsSync(file) ? fs.readFileSync(file) : null;
+    if (!kept) return json(res, { error: "no such segment" }, 404);
+    await lateAnswer(who);
+    if (res.destroyed) return;
     // The bot's answers: a part, the rest of one from a byte on, or the lot.
-    const whole = fs.readFileSync(file);
+    const whole = kept;
     let body = whole;
     let status = 200;
-    const headers: Record<string, string | number> = { "Content-Type": "video/mp2t" };
+    const headers: Record<string, string | number> = { "Content-Type": name.endsWith(".ts") ? "video/mp2t" : "video/mp4" };
     // As the bot's (routes/plex.ts setSegmentCacheHeaders).
     if (cacheOn) headers["Cache-Control"] = "public, max-age=300, immutable";
     if (cacheNone) headers["Cache-Control"] = "no-store";
@@ -505,11 +680,21 @@ const server = http.createServer(async (req, res) => {
     // Bigger with a shared connection: each turn on it costs a timer, and
     // small turns waste what one download alone could have used.
     const chunk = uploadKbps ? 65_536 : 16_384;
+    // Past its first few packets, one through the proxy takes a while to get going.
+    const slow = slowMs.get(who) ?? 0;
+    let pacedFrom = sentFrom;
+    let going = !slow;
     let sent = 0;
-    for (let at = 0; at < body.length && !res.destroyed; at += chunk) {
-      const piece = body.subarray(at, at + chunk);
+    for (let at = 0; at < body.length && !res.destroyed;) {
+      if (!going && at >= SLOW_AFTER_BYTES) {
+        going = true;
+        await new Promise((r) => setTimeout(r, slow));
+        pacedFrom = Date.now() - (kbps ? (at * 8) / kbps : 0);
+      }
+      const piece = body.subarray(at, going ? at + chunk : Math.min(at + chunk, SLOW_AFTER_BYTES));
+      at += piece.length;
       if (kbps) {
-        const due = sentFrom + ((at + piece.length) * 8) / kbps;
+        const due = pacedFrom + (at * 8) / kbps;
         if (due > Date.now()) await new Promise((r) => setTimeout(r, due - Date.now()));
       }
       // Its turn on the one connection everybody's downloads share: sent at
@@ -527,7 +712,7 @@ const server = http.createServer(async (req, res) => {
     const cut = res.destroyed;
     res.end();
     served.push({
-      user: who, seg: seg[1], at: Date.now(), heldMs: held, sent, cut, askedAt: asked,
+      user: who, seg: name, at: Date.now(), heldMs: held, sent, cut, askedAt: asked,
       part: parts ? `${url.searchParams.get("part")}/${parts}` : range ? `from ${range[1]}` : undefined,
       bytes: body.length, ms: Date.now() - sentFrom,
     });

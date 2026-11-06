@@ -1,8 +1,8 @@
 /**
  * A copy's segments that don't open on a keyframe.
  *
- * The bot cuts a copied segment longer than eight seconds into pieces of
- * about four (server: ffmpeg/split-segment.ts), named after it: 00012aa.m4s,
+ * The bot cuts a copied segment of 18 MB or more into pieces of about 12 MB,
+ * none under a second (server: ffmpeg/split-segment.ts), named after it: 00012aa.m4s,
  * 00012ab.m4s, and so on. Only the first, "aa", opens on the keyframe. The
  * rest carry on from the piece before, and the browser drops a piece that
  * doesn't follow straight on from the last one appended, because it has

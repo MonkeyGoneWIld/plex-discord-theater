@@ -17,8 +17,8 @@ interface DiscordState {
    *  call, where there is no channel invite to create. */
   canInvite: boolean;
   /** Whether Discord shows the Activity small: in its own picture-in-picture,
-   *  or as a tile in a call's grid. The Player copies its picture onto a
-   *  canvas then (see its <video>). */
+   *  or as a tile in a call's grid. The Player draws its picture with the
+   *  page then (see its <video>). */
   smallInDiscord: boolean;
   /**
    * Open Discord's invite dialog for the channel this activity is running in.

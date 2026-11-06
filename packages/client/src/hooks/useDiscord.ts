@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { DiscordSDK } from "@discord/embedded-app-sdk";
+import { DiscordSDK, Common } from "@discord/embedded-app-sdk";
 import { apiPost, setSessionToken } from "../lib/api";
 import { initClientLogging, logEvent } from "../lib/log";
 import { checkCacheStorage } from "../lib/storageCheck";
@@ -16,6 +16,10 @@ interface DiscordState {
   /** Whether this launch context has a channel to invite into — false in a DM
    *  call, where there is no channel invite to create. */
   canInvite: boolean;
+  /** Whether Discord shows the Activity small: in its own picture-in-picture,
+   *  or as a tile in a call's grid. The Player draws its picture with the
+   *  page then (see its <video>). */
+  smallInDiscord: boolean;
   /**
    * Open Discord's invite dialog for the channel this activity is running in.
    *
@@ -91,6 +95,7 @@ export function useDiscord(): DiscordState {
     instanceId: null,
     error: null,
     canInvite: false,
+    smallInDiscord: false,
   });
   const initRef = useRef(false);
   // Held so the invite command can be issued long after init — the SDK is
@@ -277,6 +282,20 @@ export function useDiscord(): DiscordState {
           // SDK documents openInviteDialog as throwing INVALID_CHANNEL without
           // a guild. Hidden is better than present and broken.
           canInvite: sdk.guildId != null,
+          smallInDiscord: false,
+        });
+
+        // Where Discord shows the Activity: whole, in its own picture-in-picture,
+        // or as a tile in a call's grid. Nothing waits on it, and a client that
+        // doesn't say leaves the Activity taken as shown whole.
+        const layouts: Record<number, string> = { [-1]: "unhandled", 0: "focused", 1: "pip", 2: "grid" };
+        sdk.subscribe("ACTIVITY_LAYOUT_MODE_UPDATE", ({ layout_mode }) => {
+          logEvent("Discord", "layout", { mode: layouts[layout_mode] ?? String(layout_mode) });
+          if (!mountedRef.current) return;
+          const small = layout_mode === Common.LayoutModeTypeObject.PIP || layout_mode === Common.LayoutModeTypeObject.GRID;
+          setState((prev) => (prev.smallInDiscord === small ? prev : { ...prev, smallInDiscord: small }));
+        }).catch((err) => {
+          logEvent("Discord", "layout unknown", { reason: err instanceof Error ? err.message : String(err) });
         });
       } catch (err) {
         if (!mountedRef.current) return;

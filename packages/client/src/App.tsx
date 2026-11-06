@@ -100,7 +100,7 @@ function isFlatView(v: View): boolean {
 }
 
 export function App() {
-  const { isReady, isHost, userId, username, instanceId, error, canInvite, openInvite, openExternalLink, setPresence } =
+  const { isReady, isHost, userId, username, instanceId, error, canInvite, smallInDiscord, openInvite, openExternalLink, setPresence } =
     useDiscord();
   const [viewStack, setViewStack] = useState<View[]>([{ kind: "library" }]);
   const view = viewStack[viewStack.length - 1];
@@ -1307,6 +1307,7 @@ export function App() {
             subtitleStreamId={activePlayerView.subtitleStreamId}
             onBack={handleActivePlayerBack}
             presentation={view.kind === "player" ? "full" : "pip"}
+            smallInDiscord={smallInDiscord}
             onMinimize={handleMinimizePlayer}
             onRestore={handleRestorePlayer}
             // Finishing an episode lands on the show, not on the episode that

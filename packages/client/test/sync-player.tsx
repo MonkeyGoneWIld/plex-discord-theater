@@ -314,7 +314,11 @@ function Room() {
     <Player key={mount} item={item} isHost={host} selfUserId={user} subtitles={false}
       resumePosition={mount === 0 ? resume : undefined}
       sharePresenceDetails={false} onSharePresenceDetails={() => {}} onBack={() => {}}
-      syncState={state} syncActions={actions} presentation="full" />
+      syncState={state} syncActions={actions} presentation={pipView ? "pip" : "full"} smallInDiscord={smallInDiscord} />
   );
 }
+// ?pip shows the player as the Activity's own PiP; ?small, as Discord shows the
+// Activity in its own (Player's <video>).
+const pipView = new URLSearchParams(location.search).has("pip");
+const smallInDiscord = new URLSearchParams(location.search).has("small");
 createRoot(document.getElementById("root")!).render(<Room />);

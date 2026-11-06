@@ -954,6 +954,10 @@ interface PlayerProps {
   onMinimize?: () => void;
   /** Restore PiP to the full player. Invoked only by an intentional double-click. */
   onRestore?: () => void;
+  /** Discord shows the Activity small: in its own picture-in-picture, or as a
+   *  tile in a call's grid (useDiscord). The picture is drawn as in this
+   *  player's PiP then — see the <video>. */
+  smallInDiscord?: boolean;
 }
 
 const PIP_DEFAULT_ASPECT = 16 / 9;
@@ -1019,7 +1023,7 @@ function defaultPipDock(): PipDock {
  */
 const PIP_MIN_WATCHED_SHARE = 0.25;
 
-export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, onSharePresenceDetails, subtitles, resumePosition, mediaIndex, audioStreamId, subtitleStreamId, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext, presentation = "full", onMinimize, onRestore }: PlayerProps) {
+export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, onSharePresenceDetails, subtitles, resumePosition, mediaIndex, audioStreamId, subtitleStreamId, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext, presentation = "full", onMinimize, onRestore, smallInDiscord = false }: PlayerProps) {
   const isPip = presentation === "pip";
   /** isPip, for the health sample's timer. */
   const isPipRef = useRef(isPip);
@@ -9443,13 +9447,26 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
           Deliberately no pointer cursor: the picture is a picture, and every
           player leaves the ordinary arrow over it. A hand belongs to the
-          controls, which have their own. */}
+          controls, which have their own.
+
+          In a PiP, this player's or Discord's, the picture is drawn with the
+          rest of the page. Left to itself, Chrome hands a playing video to the
+          GPU to show on its own, as an overlay, and where something rounds its
+          corners, as both PiPs do, it shows it under the page through a hole
+          cut for it. In Vesktop (Discord's web client in Electron 44.9.3,
+          Chrome 152) both PiPs went black on 6 November, the subtitles still
+          drawn over them and a corner of the picture showing; in Discord's
+          own client they played. Any filter, even one that changes nothing,
+          draws the video in a layer of its own, and Chrome takes overlays only
+          from the top layer it composites (viz's OverlayProcessorWin). The
+          full player keeps the overlay: it played there, and costs least. */}
       <video
         ref={videoRef}
         style={{
           ...styles.video,
           ...zoomPictureStyle,
           ...(isPip ? { objectFit: "cover" as const } : {}),
+          ...(isPip || smallInDiscord ? { filter: "brightness(1)" } : {}),
         }}
         playsInline
         onClick={isPip ? undefined : togglePlayPause}

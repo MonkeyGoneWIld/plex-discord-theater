@@ -89,6 +89,8 @@ async function dragTo(left: number, top: number, cancel = false, mobile = false)
 function Fixture() {
   const [generation, setGeneration] = useState(0);
   const [mode, setMode] = useState<"full" | "pip">("pip");
+  // Discord showing the Activity in its own PiP.
+  const [small, setSmall] = useState(false);
   const [host, setHost] = useState(false);
   const [others, setOthers] = useState(false);
   const [current, setCurrent] = useState<{ item: PlexItem; resumePosition?: number }>({ item });
@@ -244,6 +246,17 @@ function Fixture() {
       check(!document.body.textContent?.includes("End stream?"), "Finished host Back showed a warning");
       check(!surface(), "Finished host Back did not end the stream");
       pass("Host Back after finishing ends the stream, even with others watching");
+      // The picture is drawn with the page in this PiP and wherever Discord
+      // shows the Activity small, and handed to the GPU on its own in the full
+      // player, as before (Player's <video>).
+      reset(); await pause();
+      check(getComputedStyle(video()).filter !== "none", "The PiP's picture isn't drawn with the page");
+      setMode("full"); await pause();
+      check(getComputedStyle(video()).filter === "none", "The full player's picture is drawn with the page");
+      setSmall(true); await pause();
+      check(getComputedStyle(video()).filter !== "none", "The picture isn't drawn with the page in Discord's own PiP");
+      setSmall(false);
+      pass("The picture is drawn with the page in a PiP, this one or Discord's, and not in the full player");
       streaming = true;
       reset(true, "pip", false); await pause(800);
       hlsLog.length = 0;
@@ -258,7 +271,7 @@ function Fixture() {
       setResults((lines) => [...lines, `FAIL ${String(error)}`]);
     } finally {
       streaming = false;
-      reset(); setRunning(false);
+      setSmall(false); reset(); setRunning(false);
     }
   }
   const state = { participants: host && others ? [{ userId: "other", username: "Other viewer" }] : [], queue: [], commandSeq: 0, stateSeq: 0, seekSeq: 0, connected: false } as unknown as SyncState;
@@ -275,7 +288,7 @@ function Fixture() {
       <pre aria-live="polite">{results.join("\n")}</pre>
     </main>
     <div id="rect">{geometry}</div>
-    {!closed && <Player key={generation} item={current.item} resumePosition={current.resumePosition} isHost={host} selfUserId="self" subtitles={false} sharePresenceDetails={false} onSharePresenceDetails={() => {}} onBack={leave} syncState={state} presentation={mode} onMinimize={minimize} onRestore={restore} />}
+    {!closed && <Player key={generation} item={current.item} resumePosition={current.resumePosition} isHost={host} selfUserId="self" subtitles={false} sharePresenceDetails={false} onSharePresenceDetails={() => {}} onBack={leave} syncState={state} presentation={mode} smallInDiscord={small} onMinimize={minimize} onRestore={restore} />}
   </>;
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);

@@ -16,9 +16,9 @@
  * - A seek in front of a stream's first picture goes to it, and one waiting
  *   for its segment waits (lib/copyStart pictureAfterSeek).
  */
-import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, playAskingWhenRefused, KEYFRAME_INTO_S, LAND_INTO_SEGMENT_S, MAX_KEYFRAME_WAIT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, waitsForRoom } from "../src/lib/roomWait";
+import { FIRST_GO_MAX_LEAD_S, SECOND_GO_MAX_LEAD_S, secondGoLanding, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, playAskingWhenRefused, KEYFRAME_INTO_S, LAND_INTO_SEGMENT_S, MAX_KEYFRAME_WAIT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
-import { arrivingKbps, loadingTitle } from "../src/lib/loadingMessage";
+import { arrivingKbps, loadingScreenSays, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../src/lib/bufferTrim";
 import { roomPositionNow } from "../src/hooks/useSync";
 import { nudgedRate } from "../src/lib/softSync";
@@ -88,6 +88,35 @@ check("nor does a paused one", roomPositionNow({ position: 100, playing: false, 
 console.log("\n— the loading screen says loading or buffering, and nothing else —");
 check("before the picture has moved", loadingTitle(false), "Loading…");
 check("once it has", loadingTitle(true), "Buffering…");
+
+console.log("\n— a wait for the room is said over a switch —");
+{
+  const says = (forRoom: string | null) => loadingScreenSays({
+    stuck: null, seeking: null, forRoom, switching: "Switching quality…", otherwise: "Buffering…",
+  });
+  // 6 November: ax0ywjio, having taken a lower quality, sat 22 s ahead of the room on "Switching quality…".
+  check("waiting ahead of the room after a switch: how long", says("Catching up to host · 20 s"), "Catching up to host · 20 s");
+  check("not waiting: the switch", says(null), "Switching quality…");
+  check("a seek still first", loadingScreenSays({ stuck: null, seeking: "Host is seeking…", forRoom: "Catching up to host · 5 s", switching: null, otherwise: "" }), "Host is seeking…");
+}
+
+console.log("\n— a second go lands no further than SECOND_GO_MAX_LEAD_S past the room —");
+{
+  // 6 November, ax0ywjio on the 12 Mbps copy of 20578: 2.95 s segments of
+  // about 4.4 MB from 1871.04, the room at 1884.58, the last seconds at 9.2 Mbps.
+  const at = (t: number) => Math.round(t * 100) / 100;
+  const roomS = 1884.58, bps = 9.2e6 / 8;
+  const segs = Array.from({ length: 30 }, (_, k) => ({ start: 1871.04 + 2.95 * k, duration: 2.95, bytes: 4.4e6 }));
+  const bySize = landingBySize(roomS + 4.6, roomS, segs, bps, roomS + 25);
+  check("by the next 20 s alone, past the limit (22.8 s that day)", bySize - roomS > SECOND_GO_MAX_LEAD_S, true);
+  const landS = secondGoLanding(bySize, roomS, segs, bps);
+  check("a second go: at the start of the segment the limit falls in", at(landS), at(1871.04 + 2.95 * 8 + LAND_INTO_SEGMENT_S));
+  check("which comes in before the room gets there", landS - roomS >= 4.4e6 / (bps * 0.8) + 1, true);
+  check("a landing within the limit, as it was", secondGoLanding(roomS + 6, roomS, segs, bps), roomS + 6);
+  const heavy = [{ start: roomS - 1, duration: 30, bytes: 20e6 }];
+  check("a segment needing longer than the limit: as far as it needs", at(secondGoLanding(roomS + 28, roomS, heavy, 1e6)), at(roomS + 20e6 / 0.8e6 + 1));
+  check("no speed: at the limit", secondGoLanding(roomS + 20, roomS, segs, null), roomS + SECOND_GO_MAX_LEAD_S);
+}
 
 console.log("\n— a cut behind the playhead stops short of the segment before it —");
 // Pressure, 04:50:08: playing at 393.63 in a segment that ran 387.4–396.65,

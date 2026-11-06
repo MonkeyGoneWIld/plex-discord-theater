@@ -288,6 +288,46 @@ export function firstGoLimitS(limitS: number, roomS: number): number {
 }
 
 /**
+ * The furthest past the room a second go goes — a player that stopped again
+ * after landing past it (landingBytesPerS `again`) — unless the segment there
+ * needs longer than that to come in. It goes by the speed of the last few
+ * seconds, and slower than the stream, all of the next 20 s coming in time
+ * (LAND_LOOK_AHEAD_S) put it far past the room: on 6 November ax0ywjio, on
+ * the 12 Mbps copy of 20578 just after taking that quality, went by 9.2 Mbps
+ * and landed 22.8 s past the room. Its picture there came in 2.3 s, the next
+ * segments at 16.8 Mbps, and it sat 20.3 s on the loading screen with its
+ * picture in. One whose connection is that slow stops again, and lands again.
+ */
+export const SECOND_GO_MAX_LEAD_S = 12;
+
+/**
+ * Where a second go lands: `landS`, landingBySize's, if it is no further than
+ * SECOND_GO_MAX_LEAD_S past the room `roomS`. Else at the start of the
+ * segment that limit falls in, or as far into it as that segment needs to come
+ * in, at `bytesPerS` less a fifth, before the room gets there; and if it needs
+ * longer than the limit, as far as it needs, never past `landS`. With no
+ * speed or size to go by, at the limit.
+ */
+export function secondGoLanding(
+  landS: number,
+  roomS: number,
+  segments: ReadonlyArray<{ start: number; duration: number; bytes: number | null; cached?: boolean; leadInBytes?: number | null }> | null | undefined,
+  bytesPerS: number | null,
+): number {
+  const capS = roomS + SECOND_GO_MAX_LEAD_S;
+  if (landS <= capS) return landS;
+  const seg = segments?.find((s) => capS >= s.start && capS < s.start + s.duration);
+  if (!seg) return capS;
+  const speed = bytesPerS && bytesPerS > 0 ? bytesPerS * LAND_SPEED_MARGIN : null;
+  const needS = seg.cached ? roomS + LAND_SPARE_S
+    : speed && seg.bytes && seg.bytes > 0 ? roomS + (seg.bytes + (seg.leadInBytes ?? 0)) / speed + LAND_SPARE_S
+    : null;
+  if (needS === null) return capS;
+  if (needS > capS) return Math.min(landS, needS);
+  return Math.max(seg.start + LAND_INTO_SEGMENT_S, needS);
+}
+
+/**
  * A segment's download time, `ms`, less its wait for the bot's first answer,
  * `firstByteMs`: the time its bytes took, which is the connection's speed. The
  * wait is the bot's, and each segment after waits a fraction of it.

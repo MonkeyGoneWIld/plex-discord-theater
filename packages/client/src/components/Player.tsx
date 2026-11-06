@@ -46,12 +46,12 @@ import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
 import { nudgedRate } from "../lib/softSync";
-import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, playAskingWhenRefused, LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, SLOW_SEEK_MS, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, firstGoLimitS, waitsForRoom } from "../lib/roomWait";
+import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, secondGoLanding,playAskingWhenRefused, LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, SLOW_SEEK_MS, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, firstGoLimitS, waitsForRoom } from "../lib/roomWait";
 import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, landingShortOfEnd, nextSegmentInS, pictureStartFor, pictureAfterSeek } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, JOIN_TOLERANCE_S, type HeldSegment } from "../lib/bufferAhead";
-import { backfillShare, backfillTitle, catchingUpTitle, loadingTitle } from "../lib/loadingMessage";
+import { backfillShare, backfillTitle, catchingUpTitle, loadingScreenSays, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../lib/bufferTrim";
 import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
 import { NEXT_NEEDED_SLACK_S, nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
@@ -3709,7 +3709,11 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const frags = hlsRef.current ? levelFragments(hlsRef.current) : null;
     const allS = Math.min(end - 1, roomS + MAX_WAIT_FOR_ROOM_S - 5);
     const limitS = fresh ? firstGoLimitS(allS, roomS) : allS;
-    return landingFor(landingBySize(roomS + leadS, roomS, sizedSegments(frags), landingSpeed(again), limitS, fresh), keyframeGroups(frags), limitS);
+    const sized = sizedSegments(frags);
+    const speed = landingSpeed(again);
+    const bySize = landingBySize(roomS + leadS, roomS, sized, speed, limitS, fresh);
+    // A second go no further than SECOND_GO_MAX_LEAD_S past the room (lib/roomWait).
+    return landingFor(again ? secondGoLanding(bySize, roomS, sized, speed) : bySize, keyframeGroups(frags), limitS);
   }, [landingSpeed]);
 
   /**
@@ -4031,6 +4035,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    */
   const [noPicture, setNoPicture] = useState(true);
   const [loadingText, setLoadingText] = useState(() => loadingTitle(false));
+  /** Whether loadingText is a wait for the room, which a switch's words don't hide (loadingScreenSays). */
+  const [loadingForRoom, setLoadingForRoom] = useState(false);
   useEffect(() => {
     let seekingSince = 0;
     const id = window.setInterval(() => {
@@ -4081,6 +4087,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       if (fill) fill.shown = Math.max(fill.shown, backfillShare(fill));
       setLoadingText(fill ? backfillTitle(fill.shown)
         : leftS !== null && leftS > 0 ? catchingUpTitle(leftS) : loadingTitle(pictureShownRef.current));
+      setLoadingForRoom(!!fill || (leftS !== null && leftS > 0));
     }, 250);
     return () => window.clearInterval(id);
   }, []);
@@ -9512,11 +9519,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         <div style={styles.bufferingOverlay} role="status" aria-live="polite" data-loading-screen="">
           <div style={styles.bufferingSpinner} />
           <span style={styles.bufferingText}>
-            {decoderStuck ? STUCK_PICTURE_TEXT
-              : seekLoading ? seekingText
-              : switchingFor ? switchingText(switchingFor.kind, switchingFor.byHost)
-              : heldForHostSwitch ? switchingText(heldForHostSwitch, true)
-              : loadingText}
+            {loadingScreenSays({
+              stuck: decoderStuck ? STUCK_PICTURE_TEXT : null,
+              seeking: seekLoading ? seekingText : null,
+              forRoom: loadingForRoom ? loadingText : null,
+              switching: switchingFor ? switchingText(switchingFor.kind, switchingFor.byHost)
+                : heldForHostSwitch ? switchingText(heldForHostSwitch, true) : null,
+              otherwise: loadingText,
+            })}
           </span>
         </div>
       )}

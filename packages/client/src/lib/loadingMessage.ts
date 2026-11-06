@@ -20,6 +20,24 @@ export function catchingUpTitle(leftS: number): string {
 }
 
 /**
+ * What the loading screen says, the first there is: a picture stuck, a seek,
+ * a wait for the room (catchingUpTitle, backfillTitle), a switch of tracks
+ * or quality, else `otherwise` (loadingTitle). The room's wait comes before
+ * the switch: on 6 November a viewer that had taken a lower quality sat 22 s
+ * ahead of the room reading "Switching quality…", with nothing to say it was
+ * waiting for the host to get there.
+ */
+export function loadingScreenSays(o: {
+  stuck: string | null;
+  seeking: string | null;
+  forRoom: string | null;
+  switching: string | null;
+  otherwise: string;
+}): string {
+  return o.stuck ?? o.seeking ?? o.forRoom ?? o.switching ?? o.otherwise;
+}
+
+/**
  * How much of a backfill is in, 0 to 1 — the room paused while this player
  * waited ahead of it, and it is fetching what it jumped over, `fromS` to
  * `toS`, backwards (Player's backfill): `reachedS` is how far back what is in

@@ -7,7 +7,7 @@ import { codecFamily, codecName, splitCodecs } from "../lib/codecName";
 import { audioDetails, audioSummary, engineText, fileLines, playbackMode, type StreamNotes } from "../lib/streamNotes";
 import type { StreamTrack } from "../lib/api";
 import { previewDetails, previewSummary, type PreviewStatus } from "../lib/previewStatus";
-import { sideShare, type SideStats } from "../lib/sideShare";
+import { sideShare } from "../lib/sideShare";
 import { subtitleDetails, subtitleSummary, type SubtitleLoadStatus, type SubtitleShown } from "../lib/subtitleStatus";
 import {
   HEALTH_COLORS, bufferFalling, bufferHealth, framesHealth, modeHealth, playbackWhy, previewHealth, pushSample, sparkLines,
@@ -147,38 +147,55 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** What one kind of data came from, and went to: other viewers (peers) and the server. */
+export interface Traffic {
+  fromPeers: number;
+  fromServer: number;
+  toPeers: number;
+}
+
 /**
- * Picture subtitles, styled subtitles' scripts and fonts, and seek-bar
- * pictures shared with the other players on the same title (lib/sideShare):
- * how many are connected, then a table of each kind in use — what came from
- * them, what came from the bot, and what this player sent them.
+ * Where this player's data came from and went, kind by kind — the video, its
+ * subtitles, the seek bar's previews — and all of it together for the bar.
+ *
+ * It said "players" for some peers and "peers" for others, and "Extras shared
+ * with" for the subtitles and previews: two meshes, as the code has them, that
+ * a viewer has no reason to tell apart. The bar was the video's alone. Now
+ * every peer is a peer, the bar is everything received, and the table has a
+ * line for each kind.
  *
  * A table because the three figures side by side are the point, and because
  * written out as sentences they did not fit: on 28 October each kind's line ran
- * to sixty characters in a column with room for forty-five, and "0 players"
- * broke in two.
+ * to sixty characters in a column with room for forty-five.
  */
-export function sideShareDetails(players: number, kinds: Array<[string, SideStats, string]>): {
-  lines: Array<[string, string]>;
+export function peerTraffic(kinds: Array<[string, Traffic, string]>): {
+  total: Traffic;
+  /** The share of everything received that came from peers, 0 to 100. */
+  fromPeersPct: number;
   table: React.ReactNode;
 } {
-  const used = kinds.filter(([, s]) => s.fromPlayers + s.fromBot + s.sent > 0);
-  if (!players && !used.length) return { lines: [], table: null };
+  const total = kinds.reduce((t, [, k]) => ({
+    fromPeers: t.fromPeers + k.fromPeers, fromServer: t.fromServer + k.fromServer, toPeers: t.toPeers + k.toPeers,
+  }), { fromPeers: 0, fromServer: 0, toPeers: 0 });
+  const received = total.fromPeers + total.fromServer;
+  const fromPeersPct = received > 0 ? Math.round((total.fromPeers / received) * 100) : 0;
+  const used = kinds.filter(([, k]) => k.fromPeers + k.fromServer + k.toPeers > 0);
   const head = (text: string, title: string) => <span style={styles.shareHead} title={title}>{text}</span>;
   return {
-    lines: [["Extras shared with", `${players} player${players === 1 ? "" : "s"}`]],
+    total,
+    fromPeersPct,
     table: used.length ? (
       <div style={styles.shareTable} data-share-table="">
         <span />
-        {head("↓ players", "Came from other players")}
-        {head("↓ bot", "Came from the bot")}
-        {head("↑ sent", "Sent to other players")}
-        {used.map(([label, s, title]) => (
+        {head("From peers", "Received from other viewers")}
+        {head("From server", "Received from the server")}
+        {head("To peers", "Sent to other viewers")}
+        {used.map(([label, k, title]) => (
           <div key={label} style={styles.shareRow}>
             <span style={styles.shareLabel} title={title}>{label}</span>
-            <span style={styles.shareValue}>{formatBytes(s.fromPlayers)}</span>
-            <span style={styles.shareValue}>{formatBytes(s.fromBot)}</span>
-            <span style={styles.shareValue}>{formatBytes(s.sent)}</span>
+            <span style={styles.shareValue}>{formatBytes(k.fromPeers)}</span>
+            <span style={styles.shareValue}>{formatBytes(k.fromServer)}</span>
+            <span style={styles.shareValue}>{formatBytes(k.toPeers)}</span>
           </div>
         ))}
       </div>
@@ -472,8 +489,6 @@ export function StatsOverlay({
 
   const history = historyRef.current;
   const p2p = p2pStatsRef.current;
-  const totalDelivered = p2p.p2pBytes + p2p.httpBytes;
-  const p2pRatio = totalDelivered > 0 ? Math.round((p2p.p2pBytes / totalDelivered) * 100) : 0;
 
   // The server's word on the stream beats the playlist-type guess, which can't
   // say why or at what rate.
@@ -555,11 +570,19 @@ export function StatsOverlay({
   // `extra` is shown under the details when the row is open: what doesn't read
   // as label and value, such as the Peers table.
   type Row = { label: string; value: string; health?: Health; section?: Section; details?: Array<[string, string, Health?]>; extra?: React.ReactNode; visual?: React.ReactNode; keep?: string };
-  const shared = sideShareDetails(sideShare.playerCount(), [
-    ["Picture subs", sideShare.statsFor("pgs"), "Picture subtitles (PGS), drawn by this player"],
-    ["Styled subs", sideShare.statsFor("styled"), "Styled subtitles' scripts and their fonts"],
-    ["Previews", sideShare.statsFor("previews"), "The seek bar's pictures"],
+  // The video by its P2P engine; subtitles and previews by lib/sideShare.
+  const side = (...kinds: Array<"pgs" | "styled" | "previews">): Traffic => kinds.map((k) => sideShare.statsFor(k))
+    .reduce((t, k) => ({ fromPeers: t.fromPeers + k.fromPlayers, fromServer: t.fromServer + k.fromBot, toPeers: t.toPeers + k.sent }),
+      { fromPeers: 0, fromServer: 0, toPeers: 0 });
+  const traffic = peerTraffic([
+    ["Video", { fromPeers: p2p.p2pBytes, fromServer: p2p.httpBytes, toPeers: p2p.uploadBytes }, "The picture and sound"],
+    ["Subtitles", side("pgs", "styled"), "Picture subtitles, and styled subtitles' scripts and fonts"],
+    ["Previews", side("previews"), "The seek bar's preview pictures"],
   ]);
+  const received = traffic.total.fromPeers + traffic.total.fromServer;
+  // Other viewers this player is connected to, for the video or the rest:
+  // mostly the same people, on two connections.
+  const connected = Math.max(p2p.peers.size, sideShare.playerCount());
   const rows: Row[] = [
     {
       label: "Playback", value: mode ?? "—", health: modeHealth(mode), section: "playback",
@@ -629,18 +652,15 @@ export function StatsOverlay({
       visual: <Graph values={history.speed} max={graphMax(history.speed, 1_000_000, streamBps ?? 0)} health={speedState} height={26} level={streamBps} />,
     },
     ...(vpsRelay ? [] : [{
-      label: "Peers", value: `${p2p.peers.size} peer${p2p.peers.size === 1 ? "" : "s"} · ${p2pRatio}% from peers`, section: "peers" as Section,
-      details: [
-        ["Video sent to peers", formatBytes(p2p.uploadBytes)] as [string, string],
-        ...shared.lines,
-      ],
-      extra: shared.table,
-      visual: totalDelivered > 0 ? (
+      label: "Peers", section: "peers" as Section,
+      value: `${connected} connected · ${traffic.fromPeersPct}% from peers`,
+      extra: traffic.table,
+      visual: received > 0 ? (
         <>
-          <Bar parts={[[p2pRatio, PEERS], [100 - p2pRatio, SERVER]]} />
+          <Bar parts={[[traffic.fromPeersPct, PEERS], [100 - traffic.fromPeersPct, SERVER]]} />
           <div style={styles.legend}>
-            <span style={{ color: PEERS }}>peers {formatBytes(p2p.p2pBytes)}</span>
-            <span style={{ color: SERVER_TEXT }}>server {formatBytes(p2p.httpBytes)}</span>
+            <span style={{ color: PEERS }}>From peers {formatBytes(traffic.total.fromPeers)}</span>
+            <span style={{ color: SERVER_TEXT }}>From server {formatBytes(traffic.total.fromServer)}</span>
           </div>
         </>
       ) : null,

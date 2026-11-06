@@ -1,11 +1,11 @@
 // Manual/DOM regression fixture: npm run dev -w packages/client, then open
 // /test/stats-panel.html. Stats for nerds with every section open, on a
 // desktop-sized player and a phone-sized one, with the Peers section full: two
-// video peers, three players sharing extras, and every kind of extra moving
-// both ways. On 28 October its lines ran past the panel and "0 players" broke
-// in two. The Sync section's Start row and the Range line are at their longest
-// too. The checks below measure what the browser laid out. Not part of the
-// production entry.
+// peers on the video, three on subtitles and previews, and every kind of data
+// moving both ways. On 28 October its lines ran past the panel; on 6 November
+// it said "players" for peers and its bar was the video's alone. The Sync
+// section's Start row and the Range line are at their longest too. The checks
+// below measure what the browser laid out. Not part of the production entry.
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { StatsOverlay, type P2PStats } from "../src/components/StatsOverlay";
@@ -73,10 +73,17 @@ function measure(): string[] {
       .filter((c) => (c as HTMLElement).getBoundingClientRect().height > lineH && (c as HTMLElement).textContent!.length > 0)
       .map((c) => c.textContent);
     out.push(`${broken.length ? "FAIL" : "PASS"} ${w}px: no cell of the table broken over lines${broken.length ? ` (${broken.join(", ")})` : ""}`);
-    const lines = [...panel.querySelectorAll<HTMLElement>("span")].filter((s) => /^\d+ players?$/.test(s.textContent ?? ""));
-    const lh = lines.length ? parseFloat(getComputedStyle(lines[0]).lineHeight) || 16 : 16;
-    const split = lines.filter((s) => s.getBoundingClientRect().height > lh * 1.5);
-    out.push(`${lines.length && !split.length ? "PASS" : "FAIL"} ${w}px: "3 players" on one line`);
+    // A line for each kind, headed in plain words.
+    const cells = [...table.querySelectorAll<HTMLElement>("span")].map((s) => s.textContent);
+    const heads = cells.slice(1, 4);
+    const kinds = [...table.children].filter((c) => (c as HTMLElement).style.display === "contents").map((c) => c.firstElementChild!.textContent);
+    out.push(`${JSON.stringify([heads, kinds]) === JSON.stringify([["From peers", "From server", "To peers"], ["Video", "Subtitles", "Previews"]]) ? "PASS" : "FAIL"} ${w}px: columns ${heads.join(" / ")}; lines ${kinds.join(", ")}`);
+    // Everything received, the video's and the rest: 1108.4 MB from peers, 435.9 from the server.
+    const text = panel.textContent ?? "";
+    const value = [...panel.querySelectorAll<HTMLElement>("span")].find((s) => /^\d+ connected · \d+% from peers$/.test(s.textContent ?? ""));
+    const lh = value ? parseFloat(getComputedStyle(value).lineHeight) || 16 : 16;
+    out.push(`${value?.textContent === "3 connected · 72% from peers" && value.getBoundingClientRect().height <= lh * 1.5 ? "PASS" : "FAIL"} ${w}px: "${value?.textContent}" on one line, of all data`);
+    out.push(`${text.includes("From peers 1108.4 MB") && text.includes("From server 435.9 MB") && !/player|Extras|bot/i.test(text.slice(text.indexOf("Peers"))) ? "PASS" : "FAIL"} ${w}px: the bar is all data, and nothing says players, extras or bot`);
   });
   return out;
 }

@@ -66,7 +66,9 @@ import { probe, probeHdrMeta, probeOnce, trackMismatch } from "../services/ffmpe
 import { prepareBurn, sidecarOnMount } from "../services/ffmpeg/burn-files.js";
 import { madePreview, makePreview, previewBody, previewPartOf, rememberPreviewPart } from "../services/ffmpeg/previews.js";
 import { pgsAhead, pgsBytes, pgsIndexOf, pgsStatus, type PgsSource } from "../services/ffmpeg/picture-subtitles.js";
-import { fontFile, fontsOfFilm, styledAss, type SubtitleFont } from "../services/ffmpeg/styled-subtitles.js";
+import {
+  fontFile, fontsOfFilm, fontUses, keptFontNames, styledAss, type SubtitleFont,
+} from "../services/ffmpeg/styled-subtitles.js";
 import {
   ffmpegEncodesRunning,
   ffmpegKeyRetired,
@@ -3550,6 +3552,8 @@ interface StyledScript {
   text: string;
   gz?: Buffer;
   logged?: boolean;
+  /** When each of the film's fonts is drawn with (fontUses), for the fonts it was worked out for. */
+  uses?: { fonts: string; by: Map<string, Array<[number, number]>> };
 }
 const styledScripts = new LruMap<string, StyledScript>(12);
 
@@ -3641,7 +3645,10 @@ async function assFonts(ratingKey: string, mediaIndex: number, fingerprint: stri
  *   { state: "reading" }  until the read of it out of the film is done;
  *   { state: "plain" }    with STYLED_SUBTITLES=off;
  *   { state: "styled", v, bytes, fonts }  its script is /ass/:streamId/script
- *                         with `v`, and its fonts /subtitle-fonts/:id.
+ *                         with `v`, and its fonts /subtitle-fonts/:id; each
+ *                         font's `uses`, the stretches of film it is drawn
+ *                         with, none for one no line uses (missing when its
+ *                         names couldn't be read).
  *
  * 404 when it isn't an ASS subtitle, or can't be had.
  */
@@ -3669,7 +3676,17 @@ router.get("/ass/:streamId", async (req: Request, res: Response) => {
       fonts: fonts.length, fontNames: fonts.map((f) => f.name).join(", ") || "none",
     });
   }
-  res.json({ state: "styled", v: script.v, bytes: Buffer.byteLength(script.text), fonts });
+  // When each font is drawn with, so a player fetches those its picture's
+  // next minute needs first, and the rest as it has picture to spare.
+  const ids = fonts.map((f) => f.id).join(",");
+  if (script.uses?.fonts !== ids) {
+    script.uses = { fonts: ids, by: fontUses(script.text, fonts.map((f) => ({ id: f.id, names: keptFontNames(f.id) }))) };
+  }
+  const uses = script.uses.by;
+  res.json({
+    state: "styled", v: script.v, bytes: Buffer.byteLength(script.text),
+    fonts: fonts.map((f) => (uses.has(f.id) ? { ...f, uses: uses.get(f.id) } : f)),
+  });
 });
 
 /** GET /api/plex/ass/:streamId/script?ratingKey=&mediaIndex=&v= — the script,

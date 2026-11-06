@@ -9785,6 +9785,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         hidden={loadingShown}
         onLook={handleAssLook}
         statusRef={subtitleStatusRef}
+        pictureAheadS={downloadedAheadS}
       />
       {/* A PGS subtitle, drawn from the pictures the server cuts out of the
           film rather than burned in. */}

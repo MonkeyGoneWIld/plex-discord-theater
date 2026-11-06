@@ -919,7 +919,11 @@ export function fetchSubtitleCues(
 export type AssStatus =
   | { state: "reading" }
   | { state: "plain" }
-  | { state: "styled"; v: string; bytes: number; fonts: Array<{ id: string; name: string; bytes: number }> };
+  | {
+    state: "styled"; v: string; bytes: number;
+    /** Each with the stretches of film it is drawn with (lib/subtitleFonts). */
+    fonts: Array<{ id: string; name: string; bytes: number; uses?: Array<[number, number]> }>;
+  };
 
 export function fetchAssStatus(streamId: number, ratingKey: string, mediaIndex: number | undefined): Promise<AssStatus> {
   return apiGet(`/api/plex/ass/${streamId}?${pgsQuery(ratingKey, mediaIndex, {})}`);

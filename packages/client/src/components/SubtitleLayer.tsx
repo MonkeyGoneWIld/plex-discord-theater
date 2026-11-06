@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { fetchSubtitleCues, type SubtitleCue } from "../lib/api";
 import { logEvent, logWarn } from "../lib/log";
-import { activeCues, coveredAhead, longestCue, sameCues, withStretch, type CoveredSpan } from "../lib/subtitleCues";
+import {
+  activeCues, coveredAhead, keepLines, keptLines, longestCue, placeToAsk, sameCues, withStretch, type CoveredSpan,
+} from "../lib/subtitleCues";
 import { SUBTITLE_COLORS, SUBTITLE_FONTS, useSubtitleStyle, type SubtitleStyle } from "../lib/subtitleStyle";
 import type { SubtitleLoadStatus } from "../lib/subtitleStatus";
 
@@ -244,9 +246,14 @@ interface SubtitleLayerProps {
   hidden?: boolean;
   /** Kept up to date with how far this one has loaded, for Stats for nerds. */
   statusRef?: React.MutableRefObject<SubtitleLoadStatus | null>;
+  /** Where the picture is heading after a skip, the film's own time, while it
+   *  loads there: its lines are asked for then (lib/subtitleCues placeToAsk). */
+  headingToS?: number | null;
 }
 
-export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offsetMs, onUnavailable, hidden = false, statusRef }: SubtitleLayerProps) {
+export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offsetMs, onUnavailable, hidden = false, statusRef, headingToS = null }: SubtitleLayerProps) {
+  const headingRef = useRef(headingToS);
+  headingRef.current = headingToS;
   const style = useSubtitleStyle();
   const [cues, setCues] = useState<SubtitleCue[]>([]);
   // Plex is still reading this one out of the media file: where every line is
@@ -272,6 +279,17 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
       streamId, state: "loading", lines: 0, covered: null, startedAt, firstLinesMs: null, completeMs: null,
     };
     if (statusRef) statusRef.current = status;
+    // All of it came before, for this layer or one before it: drawn at once.
+    const key = `${streamId}:${ratingKey ?? ""}:${mediaIndex ?? ""}`;
+    const had = keptLines<SubtitleCue>(key);
+    if (had) {
+      setCues([...had]);
+      Object.assign(status, { state: "complete", lines: had.length, firstLinesMs: 0, completeMs: 0 });
+      logEvent("Subtitles", "drawing a sidecar here, its lines kept from before", { streamId, cues: had.length });
+      return () => {
+        if (statusRef && statusRef.current === status) statusRef.current = null;
+      };
+    }
     // What has come so far, where it is all there, and the last answer's name.
     let known: SubtitleCue[] = [];
     let spans: CoveredSpan[] | null = null;
@@ -281,18 +299,31 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
     // The film's own time for what is on screen: a line shown later by the
     // viewer's offset is one the file has earlier.
     const where = () => Math.max(0, (videoRef.current?.currentTime ?? 0) - offsetRef.current / 1000);
+    // A place no lines were known for, asked about: since when, for the log.
+    let gap: { at: number; since: number } | null = null;
+    const sayIfIn = (complete: boolean) => {
+      if (!gap || (!complete && (!spans || coveredAhead(spans, gap.at) === null))) return;
+      logEvent("Subtitles", "lines in hand where none were known", {
+        streamId, at: Math.round(gap.at), waitedMs: Date.now() - gap.since,
+        // Whether the picture had got there first, its lines missing meanwhile.
+        pictureThere: Math.abs(where() - gap.at) < 2,
+      });
+      gap = null;
+    };
 
-    const ask = () => {
+    const ask = (place?: number) => {
       clearTimeout(next);
       if (asking) return;
       asking = true;
-      const at = where();
+      const at = place ?? where();
       fetchSubtitleCues(streamId, ratingKey, mediaIndex, true, { at, since: sig })
         .then((r) => {
           asking = false;
           if (cancelled) return;
           if (r.complete !== false) {
             clearInterval(watch);
+            keepLines(key, r.cues);
+            sayIfIn(true);
             setCues(r.cues);
             setCovered(null);
             Object.assign(status, {
@@ -314,6 +345,7 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
           sig = r.sig;
           spans = r.covered ?? [];
           setCovered(spans);
+          sayIfIn(false);
           const ahead = coveredAhead(spans, where());
           Object.assign(status, { state: "reading", lines: known.length, covered: spans });
           if (ahead !== null && status.firstLinesMs === null) status.firstLinesMs = Date.now() - startedAt;
@@ -344,12 +376,17 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
     };
     ask();
     // A skip to somewhere nothing is known about is asked about at once, not
-    // at the next turn — and "Loading subtitles…" is shown or not by where
-    // the picture is now.
+    // at the next turn, and where it is heading as soon as that is known,
+    // not once the picture gets there — and "Loading subtitles…" is shown or
+    // not by where the picture is now.
     watch = setInterval(() => {
       const at = where();
       setPlace(at);
-      if (spans && coveredAhead(spans, at) === null) ask();
+      const heading = headingRef.current === null ? null : Math.max(0, headingRef.current - offsetRef.current / 1000);
+      const askAt = placeToAsk(spans, at, heading);
+      if (askAt === null) return;
+      if (!gap || Math.abs(gap.at - askAt) > 1) gap = { at: askAt, since: Date.now() };
+      ask(askAt);
     }, WATCH_PLACE_MS);
     return () => {
       cancelled = true;

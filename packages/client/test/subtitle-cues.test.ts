@@ -2,7 +2,10 @@
  * lib/subtitleCues: which lines are up, and what a player knows of a subtitle
  * still being read.
  */
-import { activeCues, coveredAhead, longestCue, withStretch, type CoveredSpan, type TimedCue } from "../src/lib/subtitleCues";
+import {
+  activeCues, coveredAhead, KEPT_SUBTITLES, keepLines, keptLines, longestCue, placeToAsk, plainLinesDraw, withStretch,
+  type CoveredSpan, type TimedCue,
+} from "../src/lib/subtitleCues";
 
 let pass = 0;
 let fail = 0;
@@ -36,6 +39,33 @@ console.log("\n— an answer for one stretch —");
   check("one ending where it starts is kept", withStretch([line(40, 50, "before")], 50, 600, []).length, 1);
   check("and the answer's lines are drawn", activeCues(merged, 300.5, longestCue(merged)).map((c) => c.text), ["300"]);
 }
+
+console.log("\n— where to ask, after a skip —");
+{
+  // Pirates on 6 November: lines read around 2:06:45, then a skip to 2:17:37.
+  const spans: CoveredSpan[] = [[7576, 7726]];
+  check("a skip's target not known: asked for before the picture gets there", placeToAsk(spans, 7616, 8257), 8257);
+  check("its target known: where the picture is, if that isn't", placeToAsk([[7576, 7726], [8228, 8378]], 7800, 8257), 7800);
+  check("both known: nowhere", placeToAsk([[7576, 7726], [8228, 8378]], 7616, 8257), null);
+  check("no skip, the picture somewhere not known: there", placeToAsk(spans, 8000, null), 8000);
+  check("before the first answer: nowhere, that one is asked anyway", placeToAsk(null, 0, 8257), null);
+}
+
+console.log("\n— lines kept —");
+{
+  keepLines("a", [line(1, 2)]);
+  check("kept once all have come", keptLines("a"), [line(1, 2)]);
+  check("none for one never kept", keptLines("b"), null);
+  for (let i = 0; i < KEPT_SUBTITLES; i++) keepLines(`n${i}`, [line(i, i + 1)]);
+  check(`only the last ${KEPT_SUBTITLES}`, [keptLines("a"), keptLines("n0") !== null, keptLines(`n${KEPT_SUBTITLES - 1}`) !== null], [null, true, true]);
+}
+
+console.log("\n— the plain lines of an ASS subtitle —");
+check("drawn styled, its drawing up: not drawn", plainLinesDraw({ styled: true, styledUp: true, inPip: false }), false);
+check("drawn styled, its drawing not up yet (a PiP just closed): drawn till it is",
+  plainLinesDraw({ styled: true, styledUp: false, inPip: false }), true);
+check("in a PiP: drawn", plainLinesDraw({ styled: true, styledUp: true, inPip: true }), true);
+check("not drawn styled: drawn", plainLinesDraw({ styled: false, styledUp: false, inPip: false }), true);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

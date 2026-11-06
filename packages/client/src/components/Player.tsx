@@ -26,6 +26,7 @@ import { lookVerdict, STUCK_TICK_S, stuckLongEnough, stuckSince, type PictureLoo
 import { splitCodecs } from "../lib/codecName";
 import { loadVolume, saveVolume, VOLUME_CHOSEN_EVENT } from "../lib/volume";
 import { readSameLanguageAhead, readSubtitlesAhead } from "../lib/subtitleReadAhead";
+import { plainLinesDraw } from "../lib/subtitleCues";
 import {
   beginQualitySession,
   carryQualityTo,
@@ -2005,6 +2006,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // How the ASS subtitle drawn here is drawn, as StyledSubtitleLayer found it:
   // as its script has it, or as plain lines in this viewer's look.
   const [assLook, setAssLook] = useState<{ id: number; look: "text" | "styled" } | null>(null);
+  // Whether StyledSubtitleLayer has a drawing up — see lib/subtitleCues plainLinesDraw.
+  const [styledUp, setStyledUp] = useState(false);
   const handleAssLook = useCallback((id: number, look: "text" | "styled") => {
     setAssLook((prev) => (prev?.id === id && prev.look === look ? prev : { id, look }));
   }, []);
@@ -9870,7 +9873,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       {/* Subtitles this client draws, because Plex was told not to burn them
           in — the only kind there is anything to adjust about. */}
       <SubtitleLayer
-        streamId={drawnPicture || (drawnStyled && !copyPicture) ? null : drawnSubtitleId}
+        streamId={drawnPicture || !plainLinesDraw({ styled: drawnStyled, styledUp, inPip: copyPicture }) ? null : drawnSubtitleId}
         ratingKey={item.ratingKey}
         mediaIndex={effectiveMediaIndex}
         videoRef={videoRef}
@@ -9878,6 +9881,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         onUnavailable={() => setSidecarFailed(true)}
         hidden={loadingShown || assLookHere === "pending"}
         statusRef={subtitleStatusRef}
+        headingToS={restartingTo}
       />
       {/* An ASS subtitle, drawn as its script has it, with the film's fonts,
           rather than as plain lines — as Plex draws them. Not in a PiP, this
@@ -9894,6 +9898,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         offsetMs={subtitleOffsetMs}
         hidden={loadingShown}
         onLook={handleAssLook}
+        onDrawing={setStyledUp}
         statusRef={subtitleStatusRef}
         pictureAheadS={downloadedAheadS}
       />

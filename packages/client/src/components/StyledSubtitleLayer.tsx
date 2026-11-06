@@ -62,6 +62,8 @@ interface StyledSubtitleLayerProps {
   /** Seconds of picture downloaded ahead of the playhead, the P2P engine's
    *  too; the video's own buffer without it. */
   pictureAheadS?: () => number;
+  /** Told whether a drawing is up, so the plain lines stay until it is. */
+  onDrawing?: (up: boolean) => void;
 }
 
 interface Jassub {
@@ -132,7 +134,7 @@ function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
 }
 
 export function StyledSubtitleLayer({
-  streamId, ratingKey, mediaIndex, videoRef, offsetMs, hidden = false, onLook, statusRef, pictureAheadS,
+  streamId, ratingKey, mediaIndex, videoRef, offsetMs, hidden = false, onLook, statusRef, pictureAheadS, onDrawing,
 }: StyledSubtitleLayerProps) {
   const offsetRef = useRef(offsetMs);
   offsetRef.current = offsetMs;
@@ -141,6 +143,9 @@ export function StyledSubtitleLayer({
   const onLookRef = useRef(onLook);
   onLookRef.current = onLook;
   const [drawing, setDrawing] = useState<JASSUB | null>(null);
+  const onDrawingRef = useRef(onDrawing);
+  onDrawingRef.current = onDrawing;
+  useEffect(() => { onDrawingRef.current?.(drawing !== null); }, [drawing]);
 
   useEffect(() => {
     if (streamId === null) return;

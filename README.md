@@ -1,8 +1,8 @@
 # Plex Discord Theater
 
-Current release: **v2.1.0**. Images are published as
+Current release: **v2.1.1**. Images are published as
 `ghcr.io/monkeygonewild/plex-discord-theater:latest` and
-`ghcr.io/monkeygonewild/plex-discord-theater:2.1.0`.
+`ghcr.io/monkeygonewild/plex-discord-theater:2.1.1`.
 
 A Discord Activity for synchronized watch parties from a Plex Media Server. One
 person hosts, playback stays in lockstep for everyone in the room, and each

@@ -246,17 +246,25 @@ function Fixture() {
       check(!document.body.textContent?.includes("End stream?"), "Finished host Back showed a warning");
       check(!surface(), "Finished host Back did not end the stream");
       pass("Host Back after finishing ends the stream, even with others watching");
-      // The picture is drawn with the page in this PiP and wherever Discord
-      // shows the Activity small, and handed to the GPU on its own in the full
-      // player, as before (Player's <video>).
+      // In this PiP and wherever Discord shows the Activity small, the picture
+      // is copied onto a canvas over the video, clicks going through it to the
+      // video; the full player shows the video itself (Player's <video>).
+      const copy = () => surface().querySelector<HTMLCanvasElement>("canvas[data-picture-copy]");
+      const fittedAlike = () => getComputedStyle(copy()!).objectFit === getComputedStyle(video()).objectFit
+        && getComputedStyle(copy()!).transform === getComputedStyle(video()).transform;
       reset(); await pause();
-      check(getComputedStyle(video()).filter !== "none", "The PiP's picture isn't drawn with the page");
+      check(copy(), "The PiP's picture isn't copied onto a canvas");
+      check(video().compareDocumentPosition(copy()!) & Node.DOCUMENT_POSITION_FOLLOWING, "The copy isn't over the video");
+      check(getComputedStyle(copy()!).position === "absolute" && getComputedStyle(copy()!).zIndex === "0", "The copy isn't between the video and the rest");
+      check(getComputedStyle(copy()!).pointerEvents === "none", "The copy takes the video's clicks");
+      check(fittedAlike(), "The PiP's copy isn't fitted as its video is");
       setMode("full"); await pause();
-      check(getComputedStyle(video()).filter === "none", "The full player's picture is drawn with the page");
+      check(!copy(), "The full player's picture is copied onto a canvas");
       setSmall(true); await pause();
-      check(getComputedStyle(video()).filter !== "none", "The picture isn't drawn with the page in Discord's own PiP");
+      check(copy(), "The picture isn't copied onto a canvas in Discord's own PiP");
+      check(fittedAlike(), "The copy in Discord's PiP isn't fitted as its video is");
       setSmall(false);
-      pass("The picture is drawn with the page in a PiP, this one or Discord's, and not in the full player");
+      pass("The picture is copied onto a canvas over the video in a PiP, this one or Discord's, and not in the full player");
       streaming = true;
       reset(true, "pip", false); await pause(800);
       hlsLog.length = 0;

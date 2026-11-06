@@ -955,8 +955,8 @@ interface PlayerProps {
   /** Restore PiP to the full player. Invoked only by an intentional double-click. */
   onRestore?: () => void;
   /** Discord shows the Activity small: in its own picture-in-picture, or as a
-   *  tile in a call's grid (useDiscord). The picture is drawn as in this
-   *  player's PiP then — see the <video>. */
+   *  tile in a call's grid (useDiscord). The picture is copied onto a canvas
+   *  then, as in this player's PiP — see the <video>. */
   smallInDiscord?: boolean;
 }
 
@@ -1921,6 +1921,84 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     transformOrigin: "center",
     transition: zoomPhone && zoomMode === "fill" ? "transform 340ms ease-out" : undefined,
   };
+  /** In a PiP, this player's or Discord's, the picture is copied onto a canvas
+   *  over the video, a frame at a time, and that is what shows — see the
+   *  <video>. */
+  const copyPicture = isPip || smallInDiscord;
+  const pictureCopyRef = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const video = videoRef.current;
+    const canvas = pictureCopyRef.current;
+    const ctx = canvas?.getContext("2d", { alpha: false });
+    if (!copyPicture || !video || !canvas || !ctx) return;
+    const byFrame = typeof video.requestVideoFrameCallback === "function";
+    let stopped = false;
+    let pending: number | null = null;
+    let copied = false;
+    const copy = () => {
+      pending = null;
+      if (stopped) return;
+      const { videoWidth, videoHeight } = video;
+      if (videoWidth > 0 && videoHeight > 0 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        // As sharp as it is shown, and never past the film's own size.
+        const dpr = window.devicePixelRatio || 1;
+        const scale = Math.min(1, Math.max((canvas.clientWidth * dpr) / videoWidth, (canvas.clientHeight * dpr) / videoHeight));
+        const width = Math.max(1, Math.round(videoWidth * scale));
+        const height = Math.max(1, Math.round(videoHeight * scale));
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width;
+          canvas.height = height;
+        }
+        try {
+          ctx.drawImage(video, 0, 0, width, height);
+          if (!copied) {
+            copied = true;
+            // Whether the copy has a picture in it, from an 8 x 8 of it.
+            const probe = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+            let lit = -1;
+            if (probe) {
+              probe.canvas.width = probe.canvas.height = 8;
+              probe.drawImage(canvas, 0, 0, 8, 8);
+              const px = probe.getImageData(0, 0, 8, 8).data;
+              lit = 0;
+              for (let i = 0; i < px.length; i += 4) if (px[i] + px[i + 1] + px[i + 2] > 48) lit++;
+            }
+            logEvent("Player", "picture copied onto a canvas", {
+              why: isPip ? "pip" : "small in Discord", width, height, byFrame, litOf64: lit,
+            });
+          }
+        } catch {
+          // Not drawable yet; the next frame is.
+        }
+      }
+      next();
+    };
+    const next = () => {
+      if (stopped || pending !== null) return;
+      pending = byFrame ? video.requestVideoFrameCallback(copy) : requestAnimationFrame(copy);
+    };
+    // A frame shown with no new one presented, as after a seek while paused,
+    // and a new stream's first, which a callback asked of the old one may miss.
+    const now = () => {
+      if (pending !== null) {
+        if (byFrame) video.cancelVideoFrameCallback(pending);
+        else cancelAnimationFrame(pending);
+        pending = null;
+      }
+      copy();
+    };
+    const events = ["loadeddata", "seeked", "playing", "resize"];
+    for (const name of events) video.addEventListener(name, now);
+    copy();
+    return () => {
+      stopped = true;
+      for (const name of events) video.removeEventListener(name, now);
+      if (pending !== null) {
+        if (byFrame) video.cancelVideoFrameCallback(pending);
+        else cancelAnimationFrame(pending);
+      }
+    };
+  }, [copyPicture, isPip]);
   /** A sidecar that could not be read, so the offer to adjust it is withdrawn
    *  rather than left pointing at subtitles that never arrived. */
   const [sidecarFailed, setSidecarFailed] = useState(false);
@@ -9449,28 +9527,38 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           player leaves the ordinary arrow over it. A hand belongs to the
           controls, which have their own.
 
-          In a PiP, this player's or Discord's, the picture is drawn with the
-          rest of the page. Left to itself, Chrome hands a playing video to the
-          GPU to show on its own, as an overlay, and where something rounds its
-          corners, as both PiPs do, it shows it under the page through a hole
-          cut for it. In Vesktop (Discord's web client in Electron 44.9.3,
-          Chrome 152) both PiPs went black on 6 November, the subtitles still
+          In a PiP, this player's or Discord's, the picture is copied onto a
+          canvas over the video, a frame at a time, and that is what shows. In
+          Vesktop (Discord's web client in Electron 44.9.3, Chrome 152, on
+          Windows) both PiPs went black on 6 November, the subtitles still
           drawn over them and a corner of the picture showing; in Discord's
-          own client they played. Any filter, even one that changes nothing,
-          draws the video in a layer of its own, and Chrome takes overlays only
-          from the top layer it composites (viz's OverlayProcessorWin). The
-          full player keeps the overlay: it played there, and costs least. */}
+          own client they played. Where it can, Chrome hands a playing video to
+          the GPU to show on its own, and where something rounds its corners,
+          as both PiPs do, shows it under the page through a hole cut for it.
+          Most likely the hole came out where it should and the picture didn't.
+          A filter that changes nothing, which should have kept Chrome from
+          doing that, left both PiPs black there all the same. A canvas is
+          drawn with the page, whatever Chrome does with the video it covers.
+          The full player shows the video itself: it played there, and that
+          costs least. */}
       <video
         ref={videoRef}
         style={{
           ...styles.video,
           ...zoomPictureStyle,
           ...(isPip ? { objectFit: "cover" as const } : {}),
-          ...(isPip || smallInDiscord ? { filter: "brightness(1)" } : {}),
         }}
         playsInline
         onClick={isPip ? undefined : togglePlayPause}
       />
+      {copyPicture && (
+        <canvas
+          ref={pictureCopyRef}
+          aria-hidden="true"
+          data-picture-copy=""
+          style={{ ...styles.pictureCopy, ...zoomPictureStyle, ...(isPip ? { objectFit: "cover" as const } : {}) }}
+        />
+      )}
       {soundHeldBack && !playRefused && (
         <div style={styles.soundHeldBack} role="status">
           Sound is off: the browser didn't let this window start with it. Click anywhere to turn it on.
@@ -10151,6 +10239,19 @@ const styles: Record<string, React.CSSProperties> = {
     width: "100%",
     height: "100%",
     objectFit: "contain",
+  },
+  pictureCopy: {
+    position: "absolute",
+    inset: 0,
+    width: "100%",
+    height: "100%",
+    // Black where the picture isn't, as the player is, so that nothing of a
+    // video shown wrongly under it comes through.
+    background: "#000",
+    // Clicks go to the video under it.
+    pointerEvents: "none",
+    // Over the video, under everything else.
+    zIndex: 0,
   },
   heldFrame: {
     position: "absolute",

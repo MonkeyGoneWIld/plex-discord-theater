@@ -9870,7 +9870,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       {/* Subtitles this client draws, because Plex was told not to burn them
           in — the only kind there is anything to adjust about. */}
       <SubtitleLayer
-        streamId={drawnPicture || drawnStyled ? null : drawnSubtitleId}
+        streamId={drawnPicture || (drawnStyled && !copyPicture) ? null : drawnSubtitleId}
         ratingKey={item.ratingKey}
         mediaIndex={effectiveMediaIndex}
         videoRef={videoRef}
@@ -9880,9 +9880,14 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         statusRef={subtitleStatusRef}
       />
       {/* An ASS subtitle, drawn as its script has it, with the film's fonts,
-          rather than as plain lines — as Plex draws them. */}
+          rather than as plain lines — as Plex draws them. Not in a PiP, this
+          player's or Discord's: there the plain lines are drawn instead (just
+          above). On 6 November, in both of Discord's clients, Steins;Gate's
+          PiP was black under the lines this drew, with the picture under it
+          copied fine, and showed with the subtitles off. Out of the PiP it
+          draws again, its fonts kept. */}
       <StyledSubtitleLayer
-        streamId={drawnAss ? drawnSubtitleId : null}
+        streamId={drawnAss && !copyPicture ? drawnSubtitleId : null}
         ratingKey={item.ratingKey}
         mediaIndex={effectiveMediaIndex}
         videoRef={videoRef}

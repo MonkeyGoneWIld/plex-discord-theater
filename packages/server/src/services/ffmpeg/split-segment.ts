@@ -24,6 +24,15 @@
  * 4 MB is sixteen parts of 250 KB; a segment under 6 MB comes in about as
  * fast whole, however long it is.
  *
+ * About 4 MB whatever the film's bitrate. No piece was shorter than a second,
+ * and on 6 November Steins;Gate's first episode, which opens at 22 to 72 Mbps,
+ * came in pieces that weren't: its first segment, 11.3 MB in 4.2 s, as 3.8
+ * and 7.5 MB, its second, 16.7 MB, as 4.3, 4.2 and 8.2 — the last second of
+ * each, whatever it held, was never cut — and its sixth, 106 MB in 11.8 s, as
+ * eleven of 9.6 MB. A player shows nothing of a piece until all of it is in.
+ * Now a piece is as short as a quarter of a second, a few pictures, and the
+ * last one is never more than half a share over.
+ *
  * MPEG-TS is cut at the packet where a picture starts, ffmpeg writing each
  * PES whole, and every piece but the first gets the segment's PAT and PMT
  * first. fMP4 has its one moof and mdat written again as one per piece, each
@@ -36,8 +45,8 @@ import type { Mp4Track } from "../mp4-timestamps.js";
 export const PIECE_BYTES = 4_000_000;
 /** A segment smaller than this, bytes, is listed whole: it comes in about as fast. */
 export const SPLIT_OVER_BYTES = 6_000_000;
-/** No piece shorter than this, seconds. */
-export const MIN_PIECE_S = 1;
+/** No piece shorter than this, seconds: a few pictures, however big they are. */
+export const MIN_PIECE_S = 0.25;
 
 export interface SplitOptions {
   /** About how big each piece is, bytes: PIECE_BYTES. */
@@ -63,9 +72,9 @@ export function splitSegment(data: Uint8Array, tracks: readonly Mp4Track[] | nul
  * Where to cut, as indexes into `dts` (the pictures' decode times in order,
  * seconds) of a segment of `total` bytes that ends at `endS`, `at` being where
  * in its bytes each picture is: at the first picture a piece's share of the
- * bytes past where the piece began, and a second or more past it; none before
- * `notBeforeS`, the piece there running on from the keyframe; and none leaving
- * less than half a piece, or a second, at the end. Empty for none.
+ * bytes past where the piece began, and MIN_PIECE_S or more past it; none
+ * before `notBeforeS`, the piece there running on from the keyframe; and none
+ * leaving less than half a piece, or MIN_PIECE_S, at the end. Empty for none.
  */
 function cutsAt(dts: readonly number[], at: readonly number[], total: number, endS: number, o: SplitOptions): number[] {
   if (dts.length < 2 || total < (o.splitOverBytes ?? SPLIT_OVER_BYTES)) return [];

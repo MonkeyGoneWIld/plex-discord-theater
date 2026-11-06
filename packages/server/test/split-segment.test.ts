@@ -69,6 +69,8 @@ function packets(file: string, stream: "v" | "a"): string[] {
 const round1 = (n: number) => Math.round(n * 10) / 10;
 /** Pieces of about 4 s of a 30 s segment, however small it is. */
 const about4s = (segment: Buffer) => ({ pieceBytes: segment.length / 7.5, splitOverBytes: 0 });
+/** Pieces of a size a 30 s segment has in half a second. */
+const halfSecond = (segment: Buffer) => ({ pieceBytes: segment.length / 60, splitOverBytes: 0 });
 
 console.log("\n— fMP4: Opus copied, as on 4 November —");
 {
@@ -119,6 +121,18 @@ console.log("\n— fMP4: Opus copied, as on 4 November —");
   const fromStart = splitSegment(first, tracks, { ...about4s(first), notBeforeS: 10 + 1 })!.map((p) => mp4Span(tracks, p)!);
   check("a run from the start: its first piece a share like the rest, not the second before where it starts",
     round1(fromStart[0].end - fromStart[0].start) >= 3, true);
+
+  // A share of its bytes under a second of film, as at the start of
+  // Steins;Gate (22 to 72 Mbps), where a piece of 4 MB is a few pictures.
+  const fine = splitSegment(first, tracks, halfSecond(first))!;
+  const fineShare = first.length / 60;
+  check("a share of its bytes half a second of film: pieces of a share, not of a second and more",
+    [fine.length >= 55, fine.every((p) => p.length > fineShare * 0.5 && p.length < fineShare * 1.6)], [true, true]);
+  fs.writeFileSync(cut, Buffer.concat([init, ...fine]));
+  check("  its pictures and sound the ones ffmpeg wrote, decoded without an error",
+    [packets(cut, "v").join("|") === before.join("|"), packets(cut, "a").join("|") === sound.join("|"),
+      spawnSync("ffmpeg", ["-v", "error", "-i", cut, "-f", "null", "-"], { encoding: "latin1" }).stderr.trim()],
+    [true, true, ""]);
 }
 
 console.log("\n— MPEG-TS: AAC copied —");
@@ -147,6 +161,18 @@ console.log("\n— MPEG-TS: AAC copied —");
   fs.writeFileSync(alone, pieces[3]);
   check("  a piece on its own reads as the frames in it, none a keyframe",
     [packets(alone, "v").length > 80, packets(alone, "v").some((l) => l.endsWith(",K"))], [true, false]);
+
+  const fine = splitSegment(first, null, halfSecond(first))!;
+  const fineShare = first.length / 60;
+  check("a share of its bytes half a second of film: pieces of a share, not of a second and more",
+    [fine.length >= 55, fine.every((p) => p.length > fineShare * 0.5 && p.length < fineShare * 1.6)], [true, true]);
+  fs.writeFileSync(cut, Buffer.concat(fine));
+  const decode = (file: string) => spawnSync("ffmpeg", ["-v", "error", "-i", file, "-f", "null", "-"], { encoding: "latin1" })
+    .stderr.replace(/@ [0-9a-f]+\]/g, "]").trim();
+  check("  its pictures and sound the ones ffmpeg wrote, decoded as the whole one is",
+    [packets(cut, "v").join("|") === before.join("|"), packets(cut, "a").join("|") === packets(whole, "a").join("|"),
+      decode(cut) === decode(whole)],
+    [true, true, true]);
 }
 
 console.log("\n— segments the film's keyframes keep short —");

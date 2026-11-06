@@ -33,6 +33,7 @@ import {
   prefetchEmbeddedSubtitles,
   readEmbeddedSubtitle,
   embeddedSubtitleText,
+  embeddedSubtitleKeptAt,
   isCaptions,
   type EmbeddedSubtitle,
   type FileSubtitle,
@@ -3078,11 +3079,13 @@ async function embeddedSubtitle(
 ): Promise<EmbeddedSubtitle> {
   const copied = ["ass", "ssa"].includes((codec ?? "").toLowerCase());
   const fromFile = await subtitleFile(ratingKey, mediaIndex, Number(streamId));
+  const durationMs = Number((await buildMeta(ratingKey).catch(() => null))?.duration);
   return readEmbeddedSubtitle({
     streamId,
     ratingKey,
     mediaIndex,
     fingerprint,
+    durationS: durationMs > 0 ? durationMs / 1000 : null,
     withTrackSelected: (start) => withItemLock(ratingKey, async () => {
       await selectTracksForStart(ratingKey, mediaIndex, null, Number(streamId));
       return start();
@@ -3318,10 +3321,13 @@ async function prefetchSubtitles(
   subtitlesPrefetched.set(key, Date.now());
 
   let version: MediaVersion | null = null;
+  let durationS: number | null = null;
   try {
     const meta = await buildMeta(ratingKey);
     const versions = meta?.versions as MediaVersion[] | undefined;
     version = versions?.find((v) => v.mediaIndex === mediaIndex) ?? null;
+    const durationMs = Number(meta?.duration);
+    durationS = durationMs > 0 ? durationMs / 1000 : null;
   } catch {
     // Nothing to go on; nothing is read ahead.
   }
@@ -3372,6 +3378,7 @@ async function prefetchSubtitles(
       ratingKey,
       mediaIndex,
       fingerprint,
+      durationS,
       fromFile: files[i],
       withTrackSelected: (start) => withItemLock(ratingKey, async () => {
         before = await currentSubtitleSelection(ratingKey, mediaIndex);
@@ -3567,16 +3574,27 @@ async function assTrack(req: Request): Promise<{
  * An ASS subtitle's script, whole: as the read of it out of the film kept it
  * (embedded-subtitles.ts) — started here if nothing has started it — or the
  * sidecar's file. "reading" until that read is done; null when it can't be had.
+ *
+ * `ask`: through embeddedSubtitle even when it is kept, for one kept short of
+ * the film's end to be read again first (its recheck). Kept here by when it was
+ * kept, so a read again is handed out, not the script made before it.
  */
-async function assScript(t: NonNullable<Awaited<ReturnType<typeof assTrack>>>): Promise<StyledScript | "reading" | null> {
-  const key = `${t.streamId}:${t.fingerprint ?? ""}`;
-  const hit = styledScripts.get(key);
+async function assScript(
+  t: NonNullable<Awaited<ReturnType<typeof assTrack>>>, ask = false,
+): Promise<StyledScript | "reading" | null> {
+  let sub: Awaited<ReturnType<typeof embeddedSubtitle>> | null = null;
+  if (t.embedded && ask) {
+    sub = await embeddedSubtitle(t.ratingKey, t.mediaIndex, t.streamId, t.fingerprint, t.codec);
+    if (sub.state === "unreadable") return null;
+  }
+  const keyNow = () => `${t.streamId}:${t.fingerprint ?? ""}:${t.embedded ? embeddedSubtitleKeptAt(t.streamId) ?? "" : ""}`;
+  const hit = styledScripts.get(keyNow());
   if (hit) return hit;
   let text: string | null;
   if (t.embedded) {
     text = embeddedSubtitleText(t.streamId, t.fingerprint);
     if (text === null) {
-      const sub = await embeddedSubtitle(t.ratingKey, t.mediaIndex, t.streamId, t.fingerprint, t.codec);
+      sub ??= await embeddedSubtitle(t.ratingKey, t.mediaIndex, t.streamId, t.fingerprint, t.codec);
       if (sub.state === "unreadable") return null;
       text = embeddedSubtitleText(t.streamId, t.fingerprint);
       if (text === null) return sub.state === "reading" ? "reading" : null;
@@ -3591,7 +3609,7 @@ async function assScript(t: NonNullable<Awaited<ReturnType<typeof assTrack>>>): 
     typeset: styledAss(text),
     text,
   };
-  styledScripts.set(key, script);
+  styledScripts.set(keyNow(), script);
   return script;
 }
 
@@ -3630,7 +3648,7 @@ async function assFonts(ratingKey: string, mediaIndex: number, fingerprint: stri
 router.get("/ass/:streamId", async (req: Request, res: Response) => {
   res.setHeader("Cache-Control", "no-store");
   const t = await assTrack(req);
-  const script = t ? await assScript(t) : null;
+  const script = t ? await assScript(t, true) : null;
   if (!t || script === null) {
     res.status(404).json({ error: "No such ASS subtitle" });
     return;

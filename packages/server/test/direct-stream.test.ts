@@ -840,7 +840,10 @@ console.log("\n— through the routes —");
 
   check("the player gets a text subtitle inside the file as text to draw",
     await answer(21), { status: 200, cues: 2, complete: true });
-  check("read out of the file once", [subtitleReads, (await answer(21)).cues, subtitleReads], [1, 2, 1]);
+  // Its lines end well before the film does, and Plex's answer can just stop
+  // short as if done: asked for again, it is read once more, to be sure.
+  check("read out of the file once, and once more to be sure where it ends",
+    [subtitleReads, (await answer(21)).cues, subtitleReads, (await answer(21)).cues, subtitleReads], [1, 2, 2, 2, 2]);
   check("through Plex's subtitle-only transcode, never the one that sends the film", wrongEndpointReads, 0);
   const kept = new Database(path.join(process.env.THUMB_CACHE_DIR!, "subtitles.sqlite"), { readonly: true });
   check("and kept on disk, so a restart doesn't read the file again",
@@ -896,7 +899,8 @@ console.log("\n— through the routes —");
   const switchedBody = (await switched.json()) as { cues: unknown[]; complete?: boolean };
   check("so switching to it is answered at once, complete",
     [switchedBody.cues.length, switchedBody.complete, Date.now() - began < 1000], [2, true, true]);
-  check("and reads nothing more", subtitleReads - readsBefore, 2);
+  // Read again once, as its lines end well before the film does (above).
+  check("and reads nothing more than that one again", subtitleReads - readsBefore, 3);
   const keptRaw = new Database(path.join(process.env.THUMB_CACHE_DIR!, "subtitles.sqlite"), { readonly: true });
   check("what Plex sent is kept with the cues, for a better parser to read again",
     keptRaw.prepare("SELECT raw IS NOT NULL AS raw, fingerprint, parser_version AS v FROM embedded_subtitles WHERE stream_id = '33'").get(),

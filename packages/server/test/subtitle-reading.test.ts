@@ -23,6 +23,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
+import { gzipSync } from "node:zlib";
 import Database from "better-sqlite3";
 import { matroskaWithSubtitles, type FixtureLine } from "./mkv-fixture.js";
 
@@ -63,6 +64,9 @@ interface Sub {
   lines: FixtureLine[];
   /** Plex can't read this one out. */
   fails?: boolean;
+  /** Plex's first read of it ends here, film seconds, as if it were done: as
+   *  Steins;Gate's did on 18 October, at 18:34 of 23:57. */
+  cutFirst?: number;
 }
 
 /** A line every ten seconds from 0:20: the srt ones with every seventh in
@@ -146,6 +150,21 @@ title("806", "mp4", [sub(90, "mov_text")], null);
   const subs = [sub(89, "srt")];
   title("805", "mkv", subs, { durationS: DURATION, tracks: mkvTracks(subs) });
 }
+// 807: one Plex's first read stops short of; 808: one kept short from before;
+// 809: one whose lines end with 20 minutes of credits to go.
+{
+  const subs = [sub(91, "ass", { cutFirst: 3000 })];
+  title("807", "mkv", subs, { durationS: DURATION, tracks: mkvTracks(subs), subtitleCues: false });
+}
+{
+  const subs = [sub(92, "ass")];
+  title("808", "mkv", subs, { durationS: DURATION, tracks: mkvTracks(subs), subtitleCues: false });
+}
+{
+  const subs = [sub(93, "ass")];
+  subs[0].lines = subs[0].lines.filter((l) => l.start < 6000);
+  title("809", "mkv", subs, { durationS: DURATION, tracks: mkvTracks(subs), subtitleCues: false });
+}
 const allSubs = new Map(Object.values(titles).flatMap((t) => t.subs).map((s) => [String(s.id), s]));
 
 // ── The fake Plex ─────────────────────────────────────────────────
@@ -155,6 +174,8 @@ const selected: Record<string, string> = {};
 interface PlexRead { session: string; id: string; offset: number; stopped: boolean; done: boolean; open: boolean }
 const reads: PlexRead[] = [];
 const stops: string[] = [];
+/** Subtitles whose first read (cutFirst) has been. */
+const cutDone = new Set<string>();
 let partRanges = 0;
 
 const plex = http.createServer((req, res) => {
@@ -206,7 +227,9 @@ const plex = http.createServer((req, res) => {
     reads.push(read);
     res.on("close", () => { read.open = false; });
     const held = s.codec === "ass" && offset > 0;
-    const lines = s.lines.filter((l) => l.start >= offset);
+    const endAt = s.cutFirst !== undefined && !cutDone.has(id) ? s.cutFirst : DURATION;
+    cutDone.add(id);
+    const lines = s.lines.filter((l) => l.start >= offset && l.start < endAt);
     res.writeHead(200, { "Content-Type": "application/octet-stream" });
     res.write(ASS_HEADER);
     let sent = 0;
@@ -217,7 +240,7 @@ const plex = http.createServer((req, res) => {
     const write = (text: string) => { if (read.open) res.write(text); };
     const timer = setInterval(() => {
       const at = offset + (Date.now() - began) * PACE;
-      const finished = at >= DURATION;
+      const finished = at >= endAt;
       if (read.stopped) {
         clearInterval(timer);
         read.done = true;
@@ -393,6 +416,78 @@ console.log("\n— a player that doesn't say where it is —");
 {
   const a = await ask(89, "805");
   check("is answered as before: within the wait, with what has come", [a.status, a.complete, a.ms < 4500, a.cues.length > 0, a.covered], [200, false, true, true, undefined]);
+}
+
+// ── A read that stops short ───────────────────────────────────────
+
+const keptRow = (id: number) => {
+  const db = new Database(path.join(process.env.THUMB_CACHE_DIR!, "subtitles.sqlite"), { readonly: true });
+  try {
+    return db.prepare("SELECT whole FROM embedded_subtitles WHERE stream_id = ?").get(String(id)) as { whole: number | null } | undefined ?? null;
+  } catch {
+    return null; // no such column: kept with nothing to say whether it is whole
+  } finally {
+    db.close();
+  }
+};
+const lastStart = (a: Answer) => a.cues.reduce((m, c) => Math.max(m, c.start), 0);
+/** Every Plex read of it over, and what came of it kept. */
+const readsOver = async (id: number) => {
+  await until(() => readsOf(id).every((r) => r.done), 15_000);
+  await sleep(200);
+};
+
+console.log("\n— a read Plex stops short, as if it were done —");
+{
+  const lines = titles["807"].subs[0].lines;
+  const first = await ask(91, "807");
+  check("what came is drawn meanwhile, up to where Plex stopped", [first.complete, lastStart(first) < 3000], [true, true]);
+  check("but not kept as the whole subtitle", keptRow(91)?.whole, 0);
+  const whole = await until(async () => (await ask(91, "807")).cues.length === lines.length, 20_000);
+  check("asked for again, it is read again, and has every line", whole, true);
+  await readsOver(91);
+  check("Plex read it twice, from the start each time", readsOf(91).map((r) => r.offset), [0, 0]);
+  check("kept as the whole subtitle now", keptRow(91)?.whole, 1);
+  await ask(91, "807");
+  check("and not read a third time", readsOf(91).length, 2);
+}
+
+console.log("\n— one kept short from before, as on main since 18 October —");
+{
+  // As the read before this fix kept it: Plex's lines to 50:00 of 2:00:00,
+  // nothing to say whether it was all of it.
+  const s = titles["808"].subs[0];
+  const raw = ASS_HEADER + s.lines.filter((l) => l.start < 3000).map((l) => plexLine(s, l)).join("");
+  const db = new Database(path.join(process.env.THUMB_CACHE_DIR!, "subtitles.sqlite"));
+  db.prepare(`INSERT INTO embedded_subtitles (stream_id, rating_key, format, cues_json, cached_at, parser_version, raw, fingerprint)
+    VALUES ('92', '808', 'ass', '[]', ?, 0, ?, NULL)`).run(Date.now() - 86_400_000, gzipSync(raw));
+  db.close();
+  const script = async () => {
+    const st = await fetch(`${origin}/api/plex/ass/92?ratingKey=808`).then((r) => r.json()) as { state: string; v?: string };
+    if (st.state !== "styled") return "";
+    return fetch(`${origin}/api/plex/ass/92/script?ratingKey=808&v=${st.v}`).then((r) => r.text());
+  };
+  const dialogue = (text: string) => text.match(/^Dialogue:/gm)?.length ?? 0;
+  const firstText = await script();
+  check("its styled script is handed out meanwhile", dialogue(firstText) > 0, true);
+  const all = await until(async () => dialogue(await script()) === s.lines.length, 20_000);
+  check("asked for, it is read again, and the script handed out has every line", all, true);
+  await readsOver(92);
+  check("read once, from the start", readsOf(92).map((r) => r.offset), [0]);
+  check("and kept as the whole subtitle", keptRow(92)?.whole, 1);
+}
+
+console.log("\n— one whose lines end with the credits to go —");
+{
+  const lines = titles["809"].subs[0].lines;
+  await until(async () => (await ask(93, "809")).complete === true, 15_000);
+  await readsOver(93);
+  const a = await ask(93, "809");
+  await readsOver(93);
+  check("read again once, to tell", readsOf(93).length, 2);
+  check("and, ending where it did, kept as the whole subtitle", [keptRow(93)?.whole, a.cues.length], [1, lines.length]);
+  await ask(93, "809");
+  check("not read a third time", readsOf(93).length, 2);
 }
 
 // ── One Plex can't read ───────────────────────────────────────────

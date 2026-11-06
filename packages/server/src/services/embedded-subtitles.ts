@@ -49,6 +49,14 @@
  * file in the same pass (companions): each subtitle is spread across the whole
  * film, so one read of it is all of them, where one each was the film read
  * three times over.
+ *
+ * A read is kept as the whole subtitle only when it is known to have gone to
+ * the end (`whole`): ffmpeg through the file, or Plex with lines to near the
+ * film's end. Plex's answer can just stop, as if it were done: on 18 October
+ * it stopped 5 minutes short in Steins;Gate's first episode, and that was kept
+ * as all of it — every player lost the subtitle at 18:34, every time, for
+ * weeks. One that stops well short is drawn meanwhile and read again the next
+ * time it is asked for (recheck); one kept from before `whole` was too.
  */
 
 import Database from "better-sqlite3";
@@ -105,6 +113,13 @@ const PLEX_NOT_FOR_S = 120;
 const PASS_MAX = 6;
 /** Where someone said they were counts for this long. */
 const WANTED_FOR_MS = 30_000;
+/**
+ * Lines stopping more than this before the film's end, read by Plex, may be a
+ * read that stopped short — or a film whose credits run on without lines. It
+ * is read again once to tell (recheck). Steins;Gate's cut reads on main stopped
+ * 3 to 13 minutes short; a full anime subtitle runs into the preview.
+ */
+const SHORT_OF_END_S = 120;
 /** How often a read is checked for whether it should stop, between lines. */
 const STOP_CHECK_MS = 1_000;
 
@@ -132,6 +147,8 @@ for (const column of [
   "parser_version INTEGER NOT NULL DEFAULT 0",
   "raw BLOB",
   "fingerprint TEXT",
+  // 1: known to be the whole subtitle (see keep). Null: kept from before this.
+  "whole INTEGER",
 ]) {
   try {
     db.exec(`ALTER TABLE embedded_subtitles ADD COLUMN ${column}`);
@@ -149,10 +166,13 @@ interface Row {
 const readStmt = db.prepare<[string], Row>(
   "SELECT rating_key, cues_json, parser_version, raw, fingerprint FROM embedded_subtitles WHERE stream_id = ?",
 );
+const keptStmt = db.prepare<[string], { cached_at: number; whole: number | null }>(
+  "SELECT cached_at, whole FROM embedded_subtitles WHERE stream_id = ?",
+);
 const writeStmt = db.prepare(`
   INSERT OR REPLACE INTO embedded_subtitles
-    (stream_id, rating_key, format, cues_json, cached_at, parser_version, raw, fingerprint)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    (stream_id, rating_key, format, cues_json, cached_at, parser_version, raw, fingerprint, whole)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const reparsedStmt = db.prepare(
   "UPDATE embedded_subtitles SET format = ?, cues_json = ?, parser_version = ? WHERE stream_id = ?",
@@ -163,6 +183,8 @@ const reparsedStmt = db.prepare(
 const ready = new LruMap<string, { cues: Cue[]; fingerprint: string | null }>(100);
 /** Stream ids Plex couldn't read out, with when. */
 const unreadable = new LruMap<string, number>(500);
+/** Stream ids read again this run because their lines stopped short: once. */
+const rechecked = new Set<string>();
 
 /** Seconds: where every line has come, from and to — to null for the end. */
 export type Span = [number, number | null];
@@ -205,6 +227,8 @@ interface Reading {
   wanted: Array<{ at: number; t: number }>;
   /** Told whenever what there is to draw changes. */
   listeners: Set<() => void>;
+  /** A read again of one kept (recheck). */
+  recheck?: boolean;
 }
 const reading = new Map<string, Reading>();
 
@@ -223,6 +247,16 @@ export function embeddedSubtitleText(streamId: string, fingerprint?: string | nu
     const row = readStmt.get(streamId);
     if (!row?.raw || !sameFile(row.fingerprint, fingerprint ?? null)) return null;
     return decodeSubtitle(gunzipSync(row.raw));
+  } catch {
+    return null;
+  }
+}
+
+/** When what is kept of one was kept: a new time once a read again replaces
+ *  it, for what is made from its text to be made again. Null: nothing kept. */
+export function embeddedSubtitleKeptAt(streamId: string): number | null {
+  try {
+    return keptStmt.get(streamId)?.cached_at ?? null;
   } catch {
     return null;
   }
@@ -281,6 +315,8 @@ export interface ReadOptions {
   /** Which file the subtitle is inside, so cues kept from an earlier version of
    *  it aren't served for this one. Null when it isn't known. */
   fingerprint?: string | null;
+  /** The film's length, seconds: whether a read went to near its end. */
+  durationS?: number | null;
   /**
    * Runs the start of the request with the subtitle selected on the item and
    * nothing else allowed to change that until it returns: Plex takes no stream
@@ -362,10 +398,18 @@ export function graphPath(file: string): string {
  */
 export async function readEmbeddedSubtitle(opts: ReadOptions, at?: number): Promise<EmbeddedSubtitle> {
   const known = embeddedSubtitleState(opts.streamId, opts.fingerprint);
+  const waitMs = opts.waitMs ?? ANSWER_WAIT_MS;
+  if (known?.state === "ready") {
+    // What is kept is drawn while it is read again, and the answer waits on
+    // that read as on a first one.
+    const again = reading.get(opts.streamId) ?? recheck(opts, known.cues);
+    if (!again) return known;
+    await settled(again, () => false, waitMs);
+    return embeddedSubtitleState(opts.streamId, opts.fingerprint) ?? known;
+  }
   if (known && known.state !== "reading") return known;
 
   const r = reading.get(opts.streamId) ?? begin(opts);
-  const waitMs = opts.waitMs ?? ANSWER_WAIT_MS;
   if (at === undefined) {
     await settled(r, () => false, waitMs);
   } else {
@@ -374,6 +418,40 @@ export async function readEmbeddedSubtitle(opts: ReadOptions, at?: number): Prom
   }
   return embeddedSubtitleState(opts.streamId, opts.fingerprint)
     ?? { state: "reading", cues: linesSoFar(r), covered: covered(r) };
+}
+
+/** Where the last line of these ends, seconds. */
+function lastEnd(cues: Cue[]): number {
+  return cues.reduce((m, c) => Math.max(m, c.end), 0);
+}
+
+/**
+ * A read again of a kept subtitle not known to be whole whose lines stop well
+ * before the film's end (SHORT_OF_END_S): once a run, one at a time. Null when
+ * there is nothing to doubt, or it waits for its turn.
+ */
+function recheck(opts: ReadOptions, cues: Cue[]): Reading | null {
+  if (!opts.durationS || rechecked.has(opts.streamId)) return null;
+  const lastEndS = lastEnd(cues);
+  const shortS = opts.durationS - lastEndS;
+  if (shortS <= SHORT_OF_END_S) return null;
+  let kept: { cached_at: number; whole: number | null } | undefined;
+  try {
+    kept = keptStmt.get(opts.streamId);
+  } catch {
+    return null;
+  }
+  if (!kept || kept.whole === 1) return null;
+  // Each is the film read through: never two side by side.
+  if ([...reading.values()].some((x) => x.recheck)) return null;
+  rechecked.add(opts.streamId);
+  logEvent("Subtitles", "a kept subtitle stops well before the film's end, reading it again", {
+    ratingKey: opts.ratingKey, streamId: opts.streamId, linesToS: Math.round(lastEndS), filmS: Math.round(opts.durationS),
+    keptAt: new Date(kept.cached_at).toISOString(), by: opts.fromFile ? "ffmpeg" : "plex",
+  });
+  const r = begin(opts, (x) => run(x, opts, { lastEndS }));
+  r.recheck = true;
+  return r;
 }
 
 /** Until `done` holds, the read is over, or `ms` have gone by. */
@@ -870,6 +948,9 @@ interface ReadResult {
   /** Ended early, by `stopped`. */
   stopped: boolean;
   firstByteMs: number | null;
+  /** Which read it was: ffmpeg's ends only at the file's end, Plex's can stop
+   *  short as if it were done. */
+  by: "ffmpeg" | "plex";
 }
 
 /**
@@ -967,7 +1048,7 @@ async function ffmpegRead(
   const stderr: string[] = [];
   let finished = false;
   const result = (failure: ReadResult["failure"]): ReadResult => ({
-    raw: Buffer.concat(chunks), failure, stopped, firstByteMs,
+    raw: Buffer.concat(chunks), failure, stopped, firstByteMs, by: "ffmpeg",
     along: alongFiles.map((file) => {
       if (!finished) return null;
       try {
@@ -1060,7 +1141,7 @@ async function plexRead(
   let bytes = 0;
   let firstByteMs: number | null = null;
   const result = (failure: ReadResult["failure"]): ReadResult =>
-    ({ raw: Buffer.concat(chunks), failure, stopped, firstByteMs });
+    ({ raw: Buffer.concat(chunks), failure, stopped, firstByteMs, by: "plex" });
 
   try {
     // Plex answers once it has started, and has read which subtitle is
@@ -1168,9 +1249,18 @@ function companions(opts: ReadOptions): ReadOptions[] {
   return out;
 }
 
-/** What a read from the start came to: its cues kept, or why it is unreadable. */
+/**
+ * What a read from the start came to: its cues kept, or why it is unreadable.
+ *
+ * Kept as the whole subtitle (`whole`) when it is known to be: read by ffmpeg
+ * through the file, its lines going to near the film's end, or read again and
+ * stopping where it did before (`again`, a recheck's). Otherwise it is kept for
+ * drawing, and read again the next time it is asked for. A read again by Plex
+ * that comes to less than what is kept leaves what is kept.
+ */
 function keep(
   r: Reading, opts: ReadOptions, raw: Buffer, startedAt: number, stats: Record<string, unknown> = {},
+  how: { by: "ffmpeg" | "plex"; again?: { lastEndS: number } },
 ): void {
   const details = { ratingKey: r.ratingKey, streamId: r.streamId };
   // Closed captions read to the film's end with not a line in them: the
@@ -1189,24 +1279,39 @@ function keep(
     });
     return;
   }
+  const lastEndS = lastEnd(parsed.cues);
+  const shortS = opts.durationS ? Math.max(0, opts.durationS - lastEndS) : null;
+  const again = how.again;
+  if (again && how.by === "plex" && lastEndS < again.lastEndS - 1) {
+    logEvent("Subtitles", "read again, a subtitle came to less than is kept: what is kept stays", {
+      ...details, linesToS: Math.round(lastEndS), keptToS: Math.round(again.lastEndS), ms: Date.now() - startedAt,
+    });
+    return;
+  }
+  const whole = how.by === "ffmpeg" || shortS === null || shortS <= SHORT_OF_END_S ||
+    (!!again && lastEndS <= again.lastEndS + 1);
   const fingerprint = opts.fingerprint ?? null;
   ready.set(r.streamId, { cues: parsed.cues, fingerprint });
   try {
     writeStmt.run(
       r.streamId, r.ratingKey, parsed.format, JSON.stringify(parsed.cues), Date.now(),
-      SUBTITLE_PARSER_VERSION, gzipSync(raw), fingerprint,
+      SUBTITLE_PARSER_VERSION, gzipSync(raw), fingerprint, whole ? 1 : 0,
     );
   } catch (err) {
     console.warn("[Subtitles] couldn't keep a read-out subtitle:", err);
   }
-  logEvent("Subtitles", "read an embedded subtitle out of the file", {
-    ...details, by: opts.fromFile ? "ffmpeg" : "plex", format: parsed.format, cues: parsed.cues.length, bytes: raw.length,
+  logEvent("Subtitles", again ? "read a kept subtitle again" : "read an embedded subtitle out of the file", {
+    ...details, by: how.by, format: parsed.format, cues: parsed.cues.length, bytes: raw.length,
+    ...(shortS !== null ? { linesToS: Math.round(lastEndS), shortOfEndS: Math.round(shortS) } : {}),
+    ...(again ? { keptToS: Math.round(again.lastEndS) } : {}),
+    whole,
     ...(empty ? { note: "closed captions with nothing in them" } : {}), ...stats, ms: Date.now() - startedAt,
   });
 }
 
-/** The read from the start: what is drawn until it's done, and what is kept. */
-async function run(r: Reading, opts: ReadOptions): Promise<void> {
+/** The read from the start: what is drawn until it's done, and what is kept.
+ *  `again`: a read again of one kept (recheck), whose lines went to there. */
+async function run(r: Reading, opts: ReadOptions, again?: { lastEndS: number }): Promise<void> {
   const startedAt = Date.now();
   const details: Record<string, unknown> = { ratingKey: r.ratingKey, streamId: r.streamId };
   let firstLineMs: number | null = null;
@@ -1225,7 +1330,8 @@ async function run(r: Reading, opts: ReadOptions): Promise<void> {
     const came = new Promise<Buffer | null>((resolve) => { settle = resolve; });
     begin(o, async (cr) => {
       const raw = await came;
-      if (raw) keep(cr, o, raw, startedAt, { inPassWith: r.streamId });
+      // ffmpeg's pass, gone through to the file's end.
+      if (raw) keep(cr, o, raw, startedAt, { inPassWith: r.streamId }, { by: "ffmpeg" });
     });
     return { o, settle };
   });
@@ -1252,24 +1358,34 @@ async function run(r: Reading, opts: ReadOptions): Promise<void> {
     // Broken here rather than by ffmpeg or Plex: the folder for the others
     // read alongside couldn't be made, say. A read that failed, like any other.
     result = {
-      raw: Buffer.alloc(0), stopped: false, firstByteMs: null,
+      raw: Buffer.alloc(0), stopped: false, firstByteMs: null, by: opts.fromFile ? "ffmpeg" : "plex",
       failure: { why: err instanceof Error ? err.message : String(err) },
     };
   } finally {
     // Those the pass didn't read are left to be asked for again.
     along.forEach((a, i) => a.settle(result?.along?.[i] ?? null));
   }
+  if (again && (result.failure || result.stopped)) {
+    // What is kept stays, to be drawn as before.
+    logEvent("Subtitles", "couldn't read a kept subtitle again: what is kept stays", {
+      ...details, why: result.failure?.why ?? "stopped", ms: Date.now() - startedAt,
+    });
+    return;
+  }
   if (result.failure) {
     fail(result.failure.why, result.failure.extra);
     return;
   }
-  keep(r, opts, result.raw, startedAt, { firstByteMs: result.firstByteMs, firstLineMs });
+  // Ended before the end, by asking: not the whole of it, and not unreadable.
+  if (result.stopped) return;
+  keep(r, opts, result.raw, startedAt, { firstByteMs: result.firstByteMs, firstLineMs }, { by: result.by, again });
 }
 
 /** For tests: forget everything known, on disk too. */
 export function resetEmbeddedSubtitles(): void {
   ready.clear();
   unreadable.clear();
+  rechecked.clear();
   prefetchQueue.length = 0;
   db.exec("DELETE FROM embedded_subtitles");
 }

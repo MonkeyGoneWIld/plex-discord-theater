@@ -142,6 +142,14 @@
            select dropdowns) in a dark palette instead of the default light one. */
         color-scheme: dark;
       }
+      /* While the full player is up, the page under it doesn't scroll and the
+         gutter kept for its scrollbar above is given back. Kept, it showed as
+         a grey strip down the right edge of the picture all through a film,
+         in Discord's own PiP too. */
+      html:has([data-presentation="full"]) {
+        scrollbar-gutter: auto;
+        overflow: hidden;
+      }
       html::-webkit-scrollbar, body::-webkit-scrollbar {
         width: 8px;
       }

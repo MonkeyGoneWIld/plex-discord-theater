@@ -16,7 +16,7 @@
  * - A seek in front of a stream's first picture goes to it, and one waiting
  *   for its segment waits (lib/copyStart pictureAfterSeek).
  */
-import { FIRST_GO_MAX_LEAD_S, SECOND_GO_MAX_LEAD_S, secondGoLanding, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, playAskingWhenRefused, KEYFRAME_INTO_S, LAND_INTO_SEGMENT_S, MAX_KEYFRAME_WAIT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, waitsForRoom } from "../src/lib/roomWait";
+import { EARLY_STOP_MS, stopIsFirstGo, FIRST_GO_MAX_LEAD_S, SECOND_GO_MAX_LEAD_S, secondGoLanding, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, playAskingWhenRefused, KEYFRAME_INTO_S, LAND_INTO_SEGMENT_S, MAX_KEYFRAME_WAIT_S, MAX_SEEK_LEAD_S, MAX_WAIT_FOR_ROOM_S, SEEK_LEAD_UNKNOWN_S, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, waitsForRoom } from "../src/lib/roomWait";
 import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../src/lib/bufferAhead";
 import { arrivingKbps, loadingScreenSays, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../src/lib/bufferTrim";
@@ -98,6 +98,18 @@ console.log("\n— a wait for the room is said over a switch —");
   check("waiting ahead of the room after a switch: how long", says("Catching up to host · 20 s"), "Catching up to host · 20 s");
   check("not waiting: the switch", says(null), "Switching quality…");
   check("a seek still first", loadingScreenSays({ stuck: null, seeking: "Host is seeking…", forRoom: "Catching up to host · 5 s", switching: null, otherwise: "" }), "Host is seeking…");
+}
+
+console.log("\n— a stop soon after a stream's first picture is a first go —");
+{
+  // 7 November, Avatar Aang: two viewers stopped for want of data 23 s after
+  // the stream began and landed 20.0 and 18.9 s past the room.
+  const shownAt = 1_000_000;
+  check("23 s after the first picture: a first go, FIRST_GO_MAX_LEAD_S past the room at most",
+    [stopIsFirstGo(false, shownAt, shownAt + 23_000), FIRST_GO_MAX_LEAD_S], [true, 8]);
+  check("not a stop again after its catch-up, which goes further if it must", stopIsFirstGo(true, shownAt, shownAt + 23_000), false);
+  check("nor one well into the stream", stopIsFirstGo(false, shownAt, shownAt + EARLY_STOP_MS + 1), false);
+  check("nor before any picture", stopIsFirstGo(false, 0, 23_000), false);
 }
 
 console.log("\n— a second go lands no further than SECOND_GO_MAX_LEAD_S past the room —");

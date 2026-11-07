@@ -46,7 +46,7 @@ import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
 import { nudgedRate } from "../lib/softSync";
-import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, secondGoLanding,playAskingWhenRefused, LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, SLOW_SEEK_MS, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, firstGoLimitS, waitsForRoom } from "../lib/roomWait";
+import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, secondGoLanding,playAskingWhenRefused, LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, SLOW_SEEK_MS, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, firstGoLimitS, waitsForRoom, stopIsFirstGo } from "../lib/roomWait";
 import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, landingShortOfEnd, nextSegmentInS, pictureStartFor, pictureAfterSeek } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
 import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readiness } from "../lib/readyCushion";
@@ -2126,6 +2126,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   const [fileLength, setFileLength] = useState<{ ratingKey: string; s: number } | null>(null);
   /** Whether the current stream has shown a frame here yet. */
   const streamShownRef = useRef(false);
+  /** When this stream's first picture came (Date.now()), 0 before it: a stop soon after is a first go (lib/roomWait stopIsFirstGo). */
+  const streamShownAtMsRef = useRef(0);
   /** The title's runtime, kept current every render — see itemDurationS. */
   const runtimeRef = useRef(0);
   // seekSeq of the last seek this client has already acted on. Seeded from the
@@ -3830,7 +3832,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (starvedMs < (stuck ? STUCK_CATCH_UP_AFTER_MS : STARVED_CATCH_UP_AFTER_MS)) return;
     const why = caughtUpAtRef.current ? "the room went past where it caught up to before its picture came"
       : stuck ? "its picture stuck with the buffer ahead" : "its picture stopped for want of data";
-    if (catchUpWithRoom(why, !!caughtUpAtRef.current)) {
+    if (catchUpWithRoom(why, !!caughtUpAtRef.current, stopIsFirstGo(!!caughtUpAtRef.current, streamShownAtMsRef.current, Date.now()))) {
       caughtUpAtRef.current = Date.now();
       // Any wait now is this one's (catchUpWithRoom makes none while one is on).
       if (!stuck && roomWaitRef.current) roomWaitRef.current.forData = true;
@@ -5592,6 +5594,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         copiedStreamRef.current = false;
         playlistEdgeRef.current = null;
         streamShownRef.current = false;
+        streamShownAtMsRef.current = 0;
         streamBuiltAtRef.current = Date.now();
         startRef.current = { builtAt: streamBuiltAtRef.current, tookMs: null, playingAt: 0, stops: 0, stoppedMs: 0, stopSince: 0, told: false };
         // What the server says about this stream — copied or re-encoded, and
@@ -6703,7 +6706,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             start.stopSince = 0;
           }
           const firstPicture = !streamShownRef.current;
-          if (firstPicture) setStreamShownAt(streamBuiltAtRef.current);
+          if (firstPicture) {
+            setStreamShownAt(streamBuiltAtRef.current);
+            streamShownAtMsRef.current = Date.now();
+          }
           streamShownRef.current = true;
           coverStart();
           noteGoodPosition(video);

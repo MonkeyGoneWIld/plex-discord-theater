@@ -288,6 +288,21 @@ export function firstGoLimitS(limitS: number, roomS: number): number {
 }
 
 /**
+ * How long after a stream's first picture a stop of it is a first go too —
+ * no further than FIRST_GO_MAX_LEAD_S past the room. On 7 November two
+ * viewers of Avatar Aang stopped for want of data 23 s after its stream
+ * began and landed 20.0 and 18.9 s past the room, sitting that long on the
+ * loading screen. A stop again after that one goes further if it must
+ * (secondGoLanding).
+ */
+export const EARLY_STOP_MS = 60_000;
+
+/** Whether a stop, the first since a catch-up (`again` false), `shownAtMs` the stream's first picture, is a first go. */
+export function stopIsFirstGo(again: boolean, shownAtMs: number, nowMs: number): boolean {
+  return !again && shownAtMs > 0 && nowMs - shownAtMs < EARLY_STOP_MS;
+}
+
+/**
  * The furthest past the room a second go goes — a player that stopped again
  * after landing past it (landingBytesPerS `again`) — unless the segment there
  * needs longer than that to come in. It goes by the speed of the last few

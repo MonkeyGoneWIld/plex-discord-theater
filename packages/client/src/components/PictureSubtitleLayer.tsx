@@ -271,9 +271,10 @@ export function PictureSubtitleLayer({
               ? await sideShare.get(pgsKey(streamId, whole, p.id), {
                 bytes: p.bytes,
                 urgent,
-                http: (signal) => fetchPgsBytes(streamId, ratingKey, mediaIndex, p.id, 0, whole, signal),
+                http: (signal, onBytes) => fetchPgsBytes(streamId, ratingKey, mediaIndex, p.id, 0, whole, signal, onBytes),
               })
-              : await fetchPgsBytes(streamId, ratingKey, mediaIndex, p.id, from, whole);
+              : await fetchPgsBytes(streamId, ratingKey, mediaIndex, p.id, from, whole, undefined,
+                (n) => sideShare.countBot("pgs", n));
           } finally {
             reading.delete(k);
           }

@@ -370,6 +370,12 @@ export class SideShare {
     return { ...this.stats[kind] };
   }
 
+  /** Bytes from the bot as they come, for Stats for nerds' Peers table; a
+   *  picture subtitle's piece still being cut is read past get(). */
+  countBot(kind: SideKind, bytes: number): void {
+    this.stats[kind].fromBot += bytes;
+  }
+
   /** Kept, from the bot or the browser's cache: sent on to whoever asks.
    *  `from` the bot is counted as such. */
   put(key: string, bytes: Uint8Array, from?: "bot"): void {
@@ -413,13 +419,21 @@ export class SideShare {
     bytes?: number | null;
     urgent?: boolean;
     check?: (bytes: Uint8Array) => boolean | Promise<boolean>;
-    http: (signal: AbortSignal) => Promise<Uint8Array>;
+    /** `onBytes` as they come, when it can say. */
+    http: (signal: AbortSignal, onBytes: (bytes: number) => void) => Promise<Uint8Array>;
   }): Promise<Uint8Array> {
     const kept = this.peek(key);
     if (kept) return kept;
+    // Counted as it comes, not once all of it is here: Stats for nerds showed
+    // nothing of a subtitle under Peers until it had all come (7 November).
     const fromBot = async (signal: AbortSignal) => {
-      const bytes = await o.http(signal);
-      this.put(key, bytes, "bot");
+      let counted = 0;
+      const bytes = await o.http(signal, (n) => {
+        counted += n;
+        this.countBot(kindOf(key), n);
+      });
+      this.countBot(kindOf(key), Math.max(0, bytes.length - counted));
+      this.put(key, bytes);
       return bytes;
     };
     if (!this.othersHave(key)) return fromBot(new AbortController().signal);
@@ -494,11 +508,11 @@ export class SideShare {
           key, bytes: bytes.length,
         });
         p.has.delete(key);
+        // Counted as it came: not what it said it was, so not from players.
+        this.stats[kindOf(key)].fromPlayers -= bytes.length;
         continue;
       }
       if (bytes) {
-        const kind = kindOf(key);
-        this.stats[kind].fromPlayers += bytes.length;
         this.put(key, bytes);
         return bytes;
       }
@@ -566,6 +580,8 @@ export class SideShare {
       }
       a.buf.set(body, a.got);
       a.got += body.length;
+      // As it comes (see get).
+      this.stats[kindOf(a.key)].fromPlayers += body.length;
       a.lastAt = this.now();
       if (a.got === a.buf.length) {
         const ms = Math.max(1, a.lastAt - a.startedAt);

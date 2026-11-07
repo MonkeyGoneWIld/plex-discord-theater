@@ -1010,12 +1010,30 @@ export function fetchPgsStatus(
  */
 export async function fetchPgsBytes(
   streamId: number, ratingKey: string, mediaIndex: number | undefined, piece: number, from: number,
-  v: string | null = null, signal?: AbortSignal,
+  v: string | null = null, signal?: AbortSignal, onBytes?: (bytes: number) => void,
 ): Promise<Uint8Array> {
   const path = pgsPiecePath(streamId, ratingKey, mediaIndex, piece, from, v);
   const res = await fetch(`${BASE}${path}`, { headers: authHeaders(), cache: v ? "default" : "no-store", signal });
   if (!res.ok) await throwApiError(res, path);
-  return new Uint8Array(await res.arrayBuffer());
+  if (!onBytes || !res.body) return new Uint8Array(await res.arrayBuffer());
+  // Told as they come, for Stats for nerds (lib/sideShare countBot).
+  const reader = res.body.getReader();
+  const parts: Uint8Array[] = [];
+  let length = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    length += value.length;
+    onBytes(value.length);
+  }
+  const out = new Uint8Array(length);
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
 }
 
 function pgsPiecePath(

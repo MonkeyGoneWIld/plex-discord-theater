@@ -237,6 +237,44 @@ async function main() {
     check("and it is gone", b.playerCount(), 0);
   }
 
+  console.log("Counted as it comes, not once it is all here");
+  {
+    // 7 November: Stats for nerds showed a subtitle under Peers only once
+    // all of it had come.
+    const b = new SideShare();
+    const x = new FakeConn("x");
+    b.addPlayer("x", x);
+    const key = pgsKey(2, "v", 0);
+    x.emit("data", word({ t: "have", keys: [key] }));
+    const asking = b.get(key, { bytes: 1000, http: botFor(bytesOf(10)).http });
+    await sleep(0);
+    const want = words(x).find((w) => w.t === "want")!;
+    x.emit("data", word({ t: "size", id: want.id, bytes: 1000 }));
+    x.emit("data", chunk(want.id!, bytesOf(400)));
+    check("from a player: 400 of 1000 bytes counted while the rest comes", b.statsFor("pgs").fromPlayers, 400);
+    x.emit("data", chunk(want.id!, bytesOf(600)));
+    await asking;
+    check("and all of it once here, once", b.statsFor("pgs").fromPlayers, 1000);
+
+    const c = new SideShare();
+    let more = () => {};
+    const asked = c.get(pgsKey(2, "v", 1), {
+      http: async (_signal, onBytes) => {
+        onBytes(300);
+        await new Promise<void>((r) => { more = r; });
+        onBytes(200);
+        return bytesOf(500);
+      },
+    }).catch(() => null);
+    await sleep(0);
+    check("from the bot: what has come, counted as it comes", c.statsFor("pgs").fromBot, 300);
+    more();
+    await asked;
+    check("and all of it once here, once", c.statsFor("pgs").fromBot, 500);
+    c.countBot?.("pgs", 50);
+    check("a piece still being cut, read past get(), counted too", c.statsFor("pgs").fromBot, 550);
+  }
+
   console.log("Sending as fast as the connection takes it");
   {
     const a = new SideShare();

@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 
-type Answer = { type: string; body: string };
+type Answer = { type: string; body: string; status?: number };
 const answers = new Map<string, Answer>();
 const asked: string[] = [];
 const plex = http.createServer((req, res) => {
@@ -18,6 +18,7 @@ const plex = http.createServer((req, res) => {
   u.searchParams.delete("X-Plex-Token");
   asked.push(`${u.pathname}${u.search}`);
   const a = answers.get(u.pathname) ?? { type: "application/json", body: JSON.stringify({ path: u.pathname }) };
+  res.statusCode = a.status ?? 200;
   res.setHeader("Content-Type", a.type);
   res.end(a.body);
 });
@@ -78,6 +79,29 @@ console.log("\n— the segment proxy —");
   check("nor a segment carrying a query of its own", [query.status, query.asked], [400, []]);
   const other = await get(seg("/video/:/transcode/universal/decision"));
   check("nor anything else under the transcoder", [other.status, other.asked], [400, []]);
+}
+
+console.log("\n— segments where Discord's cache may keep them —");
+{
+  // Discord's proxy is a Cloudflare Worker, and Cloudflare keeps only what a
+  // path's extension says it may (routes/plex EDGE_SEGMENT_ROUTE).
+  const auth = { headers: { Authorization: `Bearer ${token}` } };
+  const firstUrl = async (url: string) =>
+    (await (await fetch(base + url, auth)).text()).split("\n").find((l) => l && !l.startsWith("#")) ?? "";
+  const url = await firstUrl(seg(`${SESSION}/index.m3u8`));
+  check("a playlist names its segments at /hls/seg.mp4", url.startsWith("/api/plex/hls/seg.mp4?p="), true);
+  asked.length = 0;
+  const r = await fetch(base + url, auth);
+  await r.arrayBuffer();
+  check("which hands them on, for any cache to keep",
+    [r.status, r.headers.get("cache-control"), asked], [200, "public, max-age=300, immutable", [`${SESSION}/00012.ts`]]);
+  answers.set(`${SESSION}/00013.ts`, { type: "text/plain", body: "", status: 404 });
+  const ahead = await fetch(base + `/api/plex/hls/seg.mp4?p=${encodeURIComponent(`${SESSION}/00013.ts`)}`, auth);
+  await ahead.arrayBuffer();
+  check("and one not there yet is kept by none", [ahead.status >= 400, ahead.headers.get("cache-control")], [true, "no-store"]);
+  const safari = await firstUrl(`${seg(`${SESSION}/index.m3u8`)}&token=${token}`);
+  check("Safari's own player, its token in each URL, stays at /hls/seg",
+    [safari.startsWith("/api/plex/hls/seg?p="), safari.includes("&token=")], [true, true]);
 }
 
 console.log("\n— the thumbnail proxy —");

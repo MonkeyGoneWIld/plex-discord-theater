@@ -160,6 +160,32 @@ function noteFirstByte(key: string, ms: number): void {
   firstBytes.set(key, ms);
   if (firstBytes.size > PEAKS_KEPT) firstBytes.delete(firstBytes.keys().next().value!);
 }
+/**
+ * What Discord's cache said of each recent segment, for the log — see
+ * edgeCacheOf. Counts of its answers (CF-Cache-Status), a part each.
+ */
+const edgeAnswers = new Map<string, { hit: number; of: number; said: string }>();
+function noteEdge(key: string, response: Response): void {
+  const said = response.headers.get("cf-cache-status");
+  if (!said) return;
+  const was = edgeAnswers.get(key) ?? { hit: 0, of: 0, said };
+  edgeAnswers.delete(key);
+  edgeAnswers.set(key, { hit: was.hit + (said === "HIT" ? 1 : 0), of: was.of + 1, said });
+  if (edgeAnswers.size > PEAKS_KEPT) edgeAnswers.delete(edgeAnswers.keys().next().value!);
+}
+/**
+ * What Discord's cache (the Cloudflare in front of the Activity: the server's
+ * EDGE_SEGMENT_ROUTE) said of a segment the last time it was fetched — "HIT",
+ * "MISS", "3/8 HIT" for one in parts — or undefined when nothing came through
+ * it (no such header: the bot reached without Discord's proxy, as from a
+ * browser outside Discord).
+ */
+export function edgeCacheOf(key: string): string | undefined {
+  const a = edgeAnswers.get(key);
+  if (!a) return undefined;
+  if (a.of === 1) return a.said;
+  return a.hit === a.of ? "HIT" : a.hit === 0 ? a.said : `${a.hit}/${a.of} HIT`;
+}
 /** Every download in parts under way: each one's way of starting more of its parts — see pumpSegmentParts. */
 const pumps = new Set<() => void>();
 
@@ -246,6 +272,10 @@ async function fetchKeeping(
   const response = mark
     ? await fetchInParts(native, request, mark.bytes, mark.parts, mark.key, mark.atOnce)
     : await native(request);
+  if (!mark) {
+    edgeAnswers.delete(request.url);
+    noteEdge(request.url, response);
+  }
   if (response.status !== 200 || !response.body || !keepingSegments() || !roomToKeep()) return response;
   const [handedOn, toKeep] = response.body.tee();
   void keepSegment(request.url, toKeep, response.headers.get("Content-Type"), mark?.bytes ?? segmentBytesOf(request.url));
@@ -270,7 +300,12 @@ export async function fetchInParts(
   key: string = request.url,
   atOnce: PartsAtOnce = () => parts,
 ): Promise<Response> {
-  if (parts <= 1) return fetchFn(request);
+  if (parts <= 1) {
+    edgeAnswers.delete(key);
+    const whole = await fetchFn(request);
+    noteEdge(key, whole);
+    return whole;
+  }
   const bounds = partBounds(bytes, parts);
   // One per part: the engine calling off the request, or a part failing,
   // calls off all of them; a first part that turns out to be the whole
@@ -302,13 +337,14 @@ export async function fetchInParts(
     const i = responses.length;
     const pending = fetchFn(partUrl(request.url, i, parts), { headers, signal: stops[i].signal, cache: request.cache });
     // Nothing from one part's failure is waited on by the others.
-    pending.catch(() => {});
+    pending.then((r) => noteEdge(key, r), () => {});
     responses.push(pending);
     return i;
   };
   /** Parts asked for and not yet in. */
   let running = 0;
   peaks.delete(key);
+  edgeAnswers.delete(key);
   for (const most = allowed(); responses.length < most; running++) launch();
   notePeak(key, running);
 

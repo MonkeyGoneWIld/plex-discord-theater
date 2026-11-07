@@ -167,6 +167,7 @@ app.use("/api/integrations/qbt-manager", qbtManagerRoutes);
 app.use("/api/token", authLimiter);
 app.use("/api/register", authLimiter);
 app.use("/api/plex/hls/seg", hlsLimiter);
+app.use("/api/plex/hls/seg.mp4", hlsLimiter);
 app.use("/api/plex/hls/ping", hlsLimiter);
 app.use("/api/plex/thumb", thumbLimiter);
 app.use("/api/logs", logLimiter);

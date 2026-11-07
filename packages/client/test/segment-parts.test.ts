@@ -4,7 +4,7 @@
  * server's segmentPart does, at a pace per download.
  */
 import {
-  MAX_PARTS, fetchInParts, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, partBounds, partUrl, partsFor, partsPeak, pumpSegmentParts,
+  MAX_PARTS, edgeCacheOf, fetchInParts, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, partBounds, partUrl, partsFor, partsPeak, pumpSegmentParts,
   keepLater, segmentBytesOf, segmentProgress,
 } from "../src/lib/segmentParts";
 import { readFileSync } from "node:fs";
@@ -138,6 +138,33 @@ console.log("\n— how long the bot took to answer, for the log —");
   await readAll(await fetchInParts(b.fetch, new Request(URL0), SEGMENT.length, 4, URL0));
   const ms = firstByteMs(URL0) ?? -1;
   check(`the wait for its first part's answer, ${Math.round(ms)} ms with the bot taking 60`, ms >= 55 && ms < 1000, true);
+}
+
+console.log("\n— what Discord's cache said of it, for the log —");
+{
+  // Each part answered by Discord's cache in front of the bot with what it
+  // said of that part (CF-Cache-Status), or nothing — the server's
+  // EDGE_SEGMENT_ROUTE.
+  const through = (said: (part: number) => string | null) => {
+    const b = bot();
+    return async (input: RequestInfo | URL, init?: RequestInit) => {
+      const r = await b.fetch(input, init);
+      const s = said(Number(new URL(String(input instanceof Request ? input.url : input)).searchParams.get("part") ?? 0));
+      const h = new Headers(r.headers);
+      if (s) h.set("CF-Cache-Status", s);
+      return new Response(r.body, { status: r.status, headers: h });
+    };
+  };
+  await readAll(await fetchInParts(through(() => "HIT"), new Request(URL0), SEGMENT.length, 4, URL0));
+  check("every part from Discord's copy", edgeCacheOf(URL0), "HIT");
+  await readAll(await fetchInParts(through((p) => (p < 3 ? "HIT" : "MISS")), new Request(URL0), SEGMENT.length, 4, URL0));
+  check("fetched again, only what this time said: three of the four", edgeCacheOf(URL0), "3/4 HIT");
+  await readAll(await fetchInParts(through(() => "MISS"), new Request(URL0), SEGMENT.length, 4, URL0));
+  check("none of them", edgeCacheOf(URL0), "MISS");
+  await readAll(await fetchInParts(through(() => "DYNAMIC"), new Request(URL0), SEGMENT.length, 1, URL0));
+  check("a whole segment, at a path Cloudflare keeps nothing of", edgeCacheOf(URL0), "DYNAMIC");
+  await readAll(await fetchInParts(through(() => null), new Request(URL0), SEGMENT.length, 4, URL0));
+  check("and nothing said when it came by no cache", edgeCacheOf(URL0), undefined);
 }
 
 console.log("\n— a few parts at a time —");

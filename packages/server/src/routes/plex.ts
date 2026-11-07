@@ -6409,7 +6409,12 @@ async function serveMeasured(
   if (whole) res.send(whole);
 }
 
-router.get("/hls/seg", async (req: Request, res: Response) => {
+router.get(["/hls/seg", "/hls/seg.mp4"], async (req: Request, res: Response) => {
+  // What isn't a segment is never kept by Discord's cache (EDGE_SEGMENT_ROUTE):
+  // Cloudflare keeps a 404 or 410 three minutes unless told, and a segment
+  // asked for just ahead of its transcode would stay missing for everyone.
+  // A segment's own headers replace it (setSegmentCacheHeaders).
+  if (req.path === "/hls/seg.mp4") res.setHeader("Cache-Control", "no-store");
   const rawPath = req.query.p;
   if (!rawPath || typeof rawPath !== "string") {
     if (DEBUG) console.log("[HLS seg] Missing p param. Query:", req.query);
@@ -7136,6 +7141,23 @@ async function fetchExternalImage(url: string): Promise<globalThis.Response> {
  */
 const TRANSCODE_PREFIX = "/video/:/transcode/universal/";
 
+/**
+ * Where a player asks for a segment: the /hls/seg route under a name ending
+ * in .mp4, for the cache in front of the Activity. Discord's proxy is a
+ * Cloudflare Worker, which reads through Cloudflare's cache, and Cloudflare
+ * keeps only what a path's extension says it may — .mp4 and .js, not .ts,
+ * .m4s or none. On 6 November the app's script through discordsays.com came
+ * back MISS, then HIT, while every viewer's /hls/seg?p=… came to the bot. A
+ * segment is the same bytes for every viewer of a stream (public, 5 minutes:
+ * setSegmentCacheHeaders), so the first in each of Cloudflare's data centres
+ * fetches it from here and the rest are handed Discord's copy. Its
+ * Content-Type still says what it is.
+ *
+ * Not for playlists, which grow, nor for Safari's native player, whose URLs
+ * carry its own token and would be a copy for each viewer.
+ */
+const EDGE_SEGMENT_ROUTE = "/api/plex/hls/seg.mp4";
+
 function segProxyUrl(plexPath: string, authToken?: string): string {
   if (VPS_RELAY_URL && VPS_RELAY_KEY && !plexPath.endsWith(".m3u8")) {
     // VPS mode: only route .ts segments through VPS, NOT sub-manifests.
@@ -7150,7 +7172,9 @@ function segProxyUrl(plexPath: string, authToken?: string): string {
     // Absolute URLs to the VPS would be blocked by Discord's iframe CSP.
     return `/theater/seg${plexPath}?key=${encodeURIComponent(VPS_RELAY_KEY)}`;
   }
-  // No VPS, or sub-manifest — proxy through Express
+  // No VPS, or sub-manifest — proxy through Express. A segment at
+  // EDGE_SEGMENT_ROUTE, for Discord's cache to keep (see there).
+  if (!plexPath.endsWith(".m3u8") && !authToken) return `${EDGE_SEGMENT_ROUTE}?p=${encodeURIComponent(plexPath)}`;
   let url = `/api/plex/hls/seg?p=${encodeURIComponent(plexPath)}`;
   if (authToken) url += `&token=${encodeURIComponent(authToken)}`;
   return url;

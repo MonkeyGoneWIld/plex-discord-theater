@@ -53,7 +53,7 @@ import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readi
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, JOIN_TOLERANCE_S, type HeldSegment } from "../lib/bufferAhead";
 import { backfillShare, backfillTitle, catchingUpTitle, loadingScreenSays, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../lib/bufferTrim";
-import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
+import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, edgeCacheOf, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
 import { NEXT_NEEDED_SLACK_S, nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
 import { guardPieceLoads, keyframeGroups, leadInBytes, opensOnKeyframe } from "../lib/keyframeGroups";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
@@ -5062,7 +5062,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             // An ffmpeg stream's init segment for this screen: HDR labelled
             // for each screen has one for a screen in SDR and one for HDR
             // (the server's hdr-init.ts); its segments are the same for both.
-            if (isSameOrigin && urlStr.includes("/hls/seg?") && /init\.mp4/.test(decodeURIComponent(urlStr))) {
+            // (/hls/seg.mp4 for Discord's cache — the server's EDGE_SEGMENT_ROUTE.)
+            if (isSameOrigin && /\/hls\/seg(?:\.mp4)?\?/.test(urlStr) && /init\.mp4/.test(decodeURIComponent(urlStr))) {
               initScreenRef.current = hdrScreen() ? "hdr" : "sdr";
               xhr.open("GET", `${urlStr}&screen=${initScreenRef.current}`, true);
             }
@@ -5492,6 +5493,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                     Mbps: asked === undefined ? "?" : ((bytesLength * 8) / ((now - asked) * 1000)).toFixed(1),
                     sinceStreamS: ((now - streamAskedAt) / 1000).toFixed(1),
                     ...(downloadSource !== "p2p" && asked !== undefined && cameFromCache(bytesLength, now - asked) ? { cache: "the browser's" } : {}),
+                    // What Discord's cache said of it (lib/segmentParts edgeCacheOf).
+                    ...(downloadSource !== "p2p" && edgeCacheOf(segmentUrl) ? { edge: edgeCacheOf(segmentUrl) } : {}),
                   });
                 });
                 hls.p2pEngine.addEventListener("onPeerConnect", ({ peerId }) => {

@@ -17,6 +17,21 @@
  * line. Its speed only changes if the gap grows.
  */
 
+/**
+ * Up to this far from 1, the sound is played faster or slower as it is, its
+ * pitch moving with it, instead of stretched to keep its pitch. The browser's
+ * stretching, cutting the sound into pieces and overlapping them, is what was
+ * heard as static by viewers being nudged, mostly at the start of a stream
+ * (7 November, Avatar). Played as it is, 3% is half a semitone, and the nudges
+ * are mostly 1 or 2%: what a turntable or Kodi's sync to the screen does.
+ */
+export const PITCH_FREE_UP_TO = 0.03;
+
+/** Whether the browser should keep the sound's pitch at `rate`. */
+export function keepsPitch(rate: number): boolean {
+  return rate === 1 || Math.abs(rate - 1) > PITCH_FREE_UP_TO + 1e-9;
+}
+
 /** Further than this from the room, a nudge starts. */
 export const NUDGE_START_S = 0.6;
 /** Once nudging, it stops this close to the room. */

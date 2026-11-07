@@ -21,7 +21,7 @@ import { coveredAheadS, forgetEvicted, heldRanges, type HeldSegment } from "../s
 import { arrivingKbps, loadingScreenSays, loadingTitle } from "../src/lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../src/lib/bufferTrim";
 import { roomPositionNow } from "../src/hooks/useSync";
-import { nudgedRate } from "../src/lib/softSync";
+import { PITCH_FREE_UP_TO, keepsPitch, nudgedRate } from "../src/lib/softSync";
 import { enoughToStart, landingShortOfEnd, nextSegmentInS, pictureAfterSeek, pictureStartFor } from "../src/lib/copyStart";
 import { AFTER_STOPS_S, MAX_EXTRA_WAIT_S, MAX_READY_CUSHION_AFTER_STOPS_S, MAX_READY_CUSHION_S, afterStopsS, comingInBytesPerS, lateByS, readiness } from "../src/lib/readyCushion";
 
@@ -495,6 +495,9 @@ const closing: number[] = [];
 for (let ahead = 2; ahead > -0.3; ahead -= 0.2) closing.push(Number(ahead.toFixed(2)));
 check("two seconds out: one speed, then back to 1", speeds(closing), [0.96, 1]);
 check("held at its speed while the gap closes", nudgedRate(1.2, 0.96, 60), 0.96);
+// 7 November, Avatar: viewers nudged at 0.98 to 1.02 heard static.
+check("a nudge of up to 3% plays the sound as it is, not stretched", [0.98, 0.99, 1.01, 1.02, 0.97, 1.03].map(keepsPitch), [false, false, false, false, false, false]);
+check("  a bigger one keeps its pitch, and 1 is left as it was", [keepsPitch(1.04), keepsPitch(0.92), keepsPitch(1), PITCH_FREE_UP_TO], [true, true, true, 0.03]);
 check("…until it has closed", nudgedRate(0.14, 0.96, 60), 1);
 check("stronger only when the gap grows", nudgedRate(3, 0.96, 60), 0.94);
 check("behind with little loaded, it doesn't speed up", nudgedRate(-2, 1, 3), 1);

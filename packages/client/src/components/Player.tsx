@@ -45,7 +45,7 @@ import { carryTrackPrefs, describeWatched, endTrackSitting, isCommentary, mergeT
 import type { PlexItem, PlexMeta, SkipMarker } from "../lib/api";
 import { DEFAULT_PLAYED_THRESHOLD, isWatchedThrough } from "../lib/watchedThrough";
 import { roomPositionNow } from "../hooks/useSync";
-import { nudgedRate } from "../lib/softSync";
+import { keepsPitch, nudgedRate } from "../lib/softSync";
 import { FIRST_GO_MAX_LEAD_S, HLS_LOOKUP_TOLERANCE_S, heldNothingYet, secondGoLanding,playAskingWhenRefused, LAND_FASTEST_WITHIN_MS, LAND_INTO_SEGMENT_S, LAND_LOOK_AHEAD_S, MAX_WAIT_FOR_ROOM_S, SLOW_SEEK_MS, cameFromCache, catchUpLeadS, keyframeLanding, landingBySize, landingBytesPerS, landingFor, recentSeeksMs, recentSegmentBytesPerS, recentSegmentMs, rememberSeekMs, rememberSegmentMs, resumeAheadAt, roomWaitOutcome, seekLeadS, seekTimed, seeksSlow, settleForward, transferMs, firstGoLimitS, waitsForRoom, stopIsFirstGo } from "../lib/roomWait";
 import { MAX_START_BACK_S, READY_AHEAD_S, READY_TOLERANCE_S, enoughToStart, landingShortOfEnd, nextSegmentInS, pictureStartFor, pictureAfterSeek } from "../lib/copyStart";
 import { dropParkedPreview } from "../lib/previewKeep";
@@ -597,6 +597,14 @@ function plexLengthWrong(plexS: number, fileS: number): boolean {
 
 function resetPlaybackRate(video: HTMLVideoElement | null): void {
   if (video && video.playbackRate !== 1) video.playbackRate = 1;
+  if (video && video.preservesPitch === false) video.preservesPitch = true;
+}
+
+/** A nudge's speed, its sound played as it is when it is a small one (softSync keepsPitch). */
+function nudgePlaybackRate(video: HTMLVideoElement, rate: number): void {
+  const keep = keepsPitch(rate);
+  if (video.preservesPitch !== keep) video.preservesPitch = keep;
+  if (video.playbackRate !== rate) video.playbackRate = rate;
 }
 
 /** Whether the video has enough buffered data at `t` to play from there. */
@@ -7916,7 +7924,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // it, staying behind is better than starving.
       const rate = nudgedRate(signedDrift, video.playbackRate, bufferAheadSeconds(video));
       if (rate === 1) resetPlaybackRate(video);
-      else if (video.playbackRate !== rate) video.playbackRate = rate;
+      else nudgePlaybackRate(video, rate);
       return;
     }
 

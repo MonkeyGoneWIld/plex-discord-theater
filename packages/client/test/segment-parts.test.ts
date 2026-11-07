@@ -4,7 +4,7 @@
  * server's segmentPart does, at a pace per download.
  */
 import {
-  MAX_PARTS, edgeCacheOf, fetchInParts, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, partBounds, partUrl, partsFor, partsPeak, pumpSegmentParts,
+  MAX_PARTS, edgeCacheOf, edgeTotals, fetchInParts, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, partBounds, partUrl, partsFor, partsPeak, pumpSegmentParts,
   keepLater, segmentBytesOf, segmentProgress,
 } from "../src/lib/segmentParts";
 import { readFileSync } from "node:fs";
@@ -149,9 +149,13 @@ console.log("\n— what Discord's cache said of it, for the log —");
     const b = bot();
     return async (input: RequestInfo | URL, init?: RequestInit) => {
       const r = await b.fetch(input, init);
-      const s = said(Number(new URL(String(input instanceof Request ? input.url : input)).searchParams.get("part") ?? 0));
+      const q = new URL(String(input instanceof Request ? input.url : input)).searchParams;
+      const part = Number(q.get("part") ?? 0);
+      const s = said(part);
       const h = new Headers(r.headers);
+      const [from, to] = partBounds(SEGMENT.length, Number(q.get("parts") ?? 1))[part];
       if (s) h.set("CF-Cache-Status", s);
+      h.set("Content-Length", String(to - from));
       return new Response(r.body, { status: r.status, headers: h });
     };
   };
@@ -165,6 +169,19 @@ console.log("\n— what Discord's cache said of it, for the log —");
   check("a whole segment, at a path Cloudflare keeps nothing of", edgeCacheOf(URL0), "DYNAMIC");
   await readAll(await fetchInParts(through(() => null), new Request(URL0), SEGMENT.length, 4, URL0));
   check("and nothing said when it came by no cache", edgeCacheOf(URL0), undefined);
+
+  // The page's running count, which the health log carries: the "segment in"
+  // log is a stream's first four segments only.
+  const before = edgeTotals();
+  await readAll(await fetchInParts(through((p) => (p < 3 ? "HIT" : "MISS")), new Request(URL0), SEGMENT.length, 4, URL0));
+  const after = edgeTotals();
+  const [, threeEnd] = partBounds(SEGMENT.length, 4)[2];
+  check("the page's running count: four more answers, three of them HITs",
+    [after.of - before.of, after.hit - before.hit], [4, 3]);
+  check("and their bytes: the segment's, three parts of it Discord's",
+    [after.bytes - before.bytes, after.hitBytes - before.hitBytes], [SEGMENT.length, threeEnd]);
+  await readAll(await fetchInParts(through(() => null), new Request(URL0), SEGMENT.length, 4, URL0));
+  check("what came by no cache is not counted", edgeTotals().of, after.of);
 }
 
 console.log("\n— a few parts at a time —");

@@ -53,7 +53,7 @@ import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readi
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, JOIN_TOLERANCE_S, type HeldSegment } from "../lib/bufferAhead";
 import { backfillShare, backfillTitle, catchingUpTitle, loadingScreenSays, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../lib/bufferTrim";
-import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, edgeCacheOf, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
+import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, edgeCacheOf, edgeTotals, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
 import { NEXT_NEEDED_SLACK_S, nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
 import { guardPieceLoads, keyframeGroups, leadInBytes, opensOnKeyframe } from "../lib/keyframeGroups";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
@@ -7097,6 +7097,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           }
         }
         const engine = engineStorageOf(hlsRef.current);
+        const edge = edgeTotals();
         logEvent("Health", "sample", {
           session: sessionIdRef.current?.substring(0, 8) ?? "none",
           role: amHost ? "host" : "viewer",
@@ -7126,6 +7127,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           peers: stats.peers.size,
           p2pMB: stats.p2pBytes / 1e6,
           httpMB: stats.httpBytes / 1e6,
+          // What Discord's cache has handed this page, of all it answered
+          // (lib/segmentParts edgeTotals): the rest came from the bot.
+          ...(edge.of ? {
+            edge: `${edge.hit}/${edge.of} HIT`,
+            edgeHitMB: (edge.hitBytes / 1e6).toFixed(1),
+            edgeMB: (edge.bytes / 1e6).toFixed(1),
+          } : {}),
           ...heapSample(),
           // Where the memory is: what the engine counts as kept (MiB as MB),
           // and what is being kept for the page after this one.

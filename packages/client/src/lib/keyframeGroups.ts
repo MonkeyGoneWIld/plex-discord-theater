@@ -93,10 +93,14 @@ export interface LoadableFragment {
  * keyframe, or follows straight on from `previous` (the last one hls.js
  * buffered, null after a seek or a stop). Otherwise the next piece of its group
  * after `previous`, when that is in the same group before it; and otherwise
- * the group's keyframe piece.
+ * the group's keyframe piece. `appended`, the last one the browser was given
+ * and still holds, counts as following on when hls.js has forgotten its own.
  */
-export function loadInstead<F extends LoadableFragment>(frag: F, previous: F | null, fragments: ReadonlyArray<F>): F {
+export function loadInstead<F extends LoadableFragment>(
+  frag: F, previous: F | null, fragments: ReadonlyArray<F>, appended: F | null = null,
+): F {
   if (typeof frag.sn !== "number" || opensOnKeyframe(frag.url) || !fragments.length) return frag;
+  if (appended && appended.level === frag.level && appended.sn === frag.sn - 1) return frag;
   const sameLevel = previous !== null && previous.level === frag.level && typeof previous.sn === "number";
   if (sameLevel && previous!.sn === frag.sn - 1) return frag;
   const first = fragments[0].sn;
@@ -135,9 +139,43 @@ export function guardPieceLoads<F extends LoadableFragment>(
   const sc = (hls as { streamController?: StreamController<F> } | null)?.streamController;
   const load = sc?.loadFragment;
   if (!sc || typeof load !== "function" || !("fragPrevious" in sc)) return false;
+  // The last piece the browser was given since the last skip, while it still
+  // holds it up to where the asked one begins: what follows it is loaded as
+  // asked. hls.js forgets its own (fragPrevious) on more than a skip. On
+  // 7 November, with no skip, every player on Avatar loaded the keyframe
+  // piece at 1306.62 s again over the one it held, the browser was left a
+  // tenth of a second short near its end, and all four stopped there 43 s
+  // later; on 6 November, the same at 712 s.
+  let appended: F | null = null;
+  const media = () => (hls as { media?: HTMLMediaElement | null }).media ?? null;
+  const watched = new WeakSet<object>();
+  const watch = () => {
+    const m = media();
+    if (!m || watched.has(m) || typeof m.addEventListener !== "function") return;
+    watched.add(m);
+    m.addEventListener("seeking", () => { appended = null; });
+  };
+  const on = (hls as { on?: (event: string, fn: (event: string, data: { frag?: F & { type?: string } }) => void) => void }).on;
+  if (typeof on === "function") {
+    on.call(hls, "hlsFragBuffered", (_e, data) => {
+      watch();
+      const f = data?.frag;
+      if (f && typeof f.sn === "number" && (f.type ?? "main") === "main") appended = f;
+    });
+    on.call(hls, "hlsMediaDetaching", () => { appended = null; });
+  }
+  const followsHeld = (frag: F) => {
+    const b = media()?.buffered;
+    const start = (frag as { start?: number }).start;
+    if (!appended || !b || typeof start !== "number") return null;
+    const t = start - 0.05;
+    for (let i = 0; i < b.length; i++) if (t >= b.start(i) && t < b.end(i)) return appended;
+    return null;
+  };
   sc.loadFragment = function (this: StreamController<F>, frag, level, targetBufferTime) {
+    watch();
     const fragments = level?.details?.fragments;
-    const instead = fragments ? loadInstead(frag, this.fragPrevious ?? null, fragments) : frag;
+    const instead = fragments ? loadInstead(frag, this.fragPrevious ?? null, fragments, followsHeld(frag)) : frag;
     if (instead !== frag) {
       this.fragmentTracker?.removeFragment?.(instead);
       onInstead?.(frag, instead);

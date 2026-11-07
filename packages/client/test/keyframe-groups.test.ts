@@ -99,6 +99,33 @@ console.log("\n— what hls.js loads after a skip —");
     loads, [8, 9, 10, 11, 12]);
   check("  each loaded again though hls.js may have it, as the browser needs the keyframe first", removed, [8, 9, 10, 11]);
   check("  and each heard of", heard, [[12, 8], [12, 9], [12, 10], [12, 11]]);
+  {
+    // 7 November: hls.js forgot the piece it had last loaded, with no skip.
+    const loaded: number[] = [];
+    const handlers = new Map<string, (e: string, data: { frag?: F }) => void>();
+    const seekers: Array<() => void> = [];
+    const media = {
+      buffered: { length: 1, start: () => 32.91, end: () => at(11).start },
+      addEventListener: (event: string, fn: () => void) => { if (event === "seeking") seekers.push(fn); },
+    };
+    const c2 = {
+      fragPrevious: null as F | null,
+      fragmentTracker: { removeFragment: () => {} },
+      loadFragment(frag: F) { loaded.push(frag.sn); },
+    };
+    const h2 = { streamController: c2, media, on: (event: string, fn: (e: string, data: { frag?: F }) => void) => handlers.set(event, fn) };
+    guardPieceLoads<F>(h2);
+    handlers.get("hlsFragBuffered")?.("hlsFragBuffered", { frag: at(10) });
+    c2.loadFragment(at(11), level, 44);
+    check("the piece after the one last given the browser, still held: as asked, though hls.js forgot it", loaded, [11]);
+    seekers.forEach((f) => f());
+    c2.loadFragment(at(11), level, 44);
+    check("  but after a skip, from the group's first piece", loaded, [11, 8]);
+    media.buffered.end = () => at(11).start - 1;
+    handlers.get("hlsFragBuffered")?.("hlsFragBuffered", { frag: at(10) });
+    c2.loadFragment(at(11), level, 44);
+    check("  and when the browser no longer holds its end, from the first piece", loaded, [11, 8, 8]);
+  }
   check("nothing wrapped where hls.js isn't as expected", [guardPieceLoads({}), guardPieceLoads(null), guardPieceLoads({ streamController: { loadFragment() {} } })],
     [false, false, false]);
 }

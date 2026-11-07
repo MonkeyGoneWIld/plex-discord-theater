@@ -687,7 +687,8 @@ export function Controls({
     // Nor from under a mouse resting on a bar. Someone aiming at a button who
     // paused over it for three seconds saw the bar fade, and their click went
     // through to the picture and paused the room (21 Oct). Moving off the bar
-    // starts the countdown again.
+    // starts the countdown again. The bottom bar only ([data-keeps-bar]): a
+    // mouse resting on the top one kept everything up all film (7 November).
     hideTimer.current = setTimeout(() => {
       if (!draggingRef.current && !overBarRef.current) setVisible(false);
     }, HIDE_DELAY_MS);
@@ -699,7 +700,7 @@ export function Controls({
     const onMove = () => resetHideTimer();
     // A mouse only: a tap leaves no pointer resting anywhere.
     const onPointerMove = (event: PointerEvent) => {
-      if (event.pointerType === "mouse") overBarRef.current = !!(event.target as Element | null)?.closest?.("[data-scrim]");
+      if (event.pointerType === "mouse") overBarRef.current = !!(event.target as Element | null)?.closest?.("[data-keeps-bar]");
     };
     const onLeave = () => {
       overBarRef.current = false;
@@ -1847,6 +1848,7 @@ export function Controls({
           ...(phone ? styles.bottomBarPhone : {}),
         }}
         data-scrim=""
+        data-keeps-bar=""
       >
         {/* The scrub bar. On a phone it is the bottom row, with elapsed and
             remaining either side of it — see progressRowPhone. */}

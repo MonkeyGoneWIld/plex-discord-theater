@@ -62,7 +62,8 @@ import {
   ALL_CAPS, AUDIO_KBPS, aboveHd as aboveHdSize, HARDWARE_NAMES, NO_CAPS, copyArgs, copyNeeds, encodeArgs, encodeTargetKbps, hdrClass, hdrPicture, inputArgs, pickBurn,
   planCopy, planEncode, tonemapCurve, type AudioOut, type EncodeRequest, type PlayerCap, type PlayerCaps, type SourceStream, type SourceVersion,
 } from "../services/ffmpeg/plan.js";
-import { probe, probeHdrMeta, probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
+import { probe, probeExtradata, probeHdrMeta, probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
+import { bitmapCodecOf, vobsubHeader } from "../services/ffmpeg/bitmap-subtitles.js";
 import { prepareBurn, sidecarOnMount } from "../services/ffmpeg/burn-files.js";
 import { madePreview, makePreview, previewBody, previewPartOf, rememberPreviewPart } from "../services/ffmpeg/previews.js";
 import { pgsAhead, pgsBytes, pgsIndexOf, pgsStatus, type PgsSource } from "../services/ffmpeg/picture-subtitles.js";
@@ -1397,16 +1398,18 @@ function isEmbeddedText(s: PlexStream): boolean {
 }
 
 /**
- * Whether this is a PGS subtitle (a Blu-ray's), in the file or beside it.
+ * Whether this is a picture subtitle the player draws: PGS (a Blu-ray's), in
+ * the file or beside it; VobSub (a DVD's) or DVB (a broadcast's), in the file.
  *
  * With the ffmpeg engine (FFMPEG_PGS) the player draws those itself, from the
  * .sup the /pgs route cuts out of the film, rather than having them burned
  * into a re-encode: PGS was most of what kept a copyable film from being
- * copied. VobSub and DVB are still burned in.
+ * copied. VobSub and DVB are made PGS as they are cut (bitmap-subtitles.ts).
+ * A VobSub beside the film (.idx and .sub) is still burned in.
  */
-function isPgs(s: PlexStream): boolean {
+function isDrawnPicture(s: PlexStream): boolean {
   const kind = (s.codec || s.format || "").toLowerCase();
-  return kind === "pgs" || kind === "hdmv_pgs_subtitle";
+  return kind === "pgs" || kind === "hdmv_pgs_subtitle" || (!s.key && bitmapCodecOf(kind) !== null);
 }
 
 /**
@@ -1445,9 +1448,9 @@ function mapSubtitleTracks(streams: PlexStream[]) {
        * burned in instead, so it is never shown twice or not at all. So does
        * PGS with the ffmpeg engine (`picture`), from the /pgs route.
        */
-      external: isSidecarText(s) || isEmbeddedText(s) || (isPgs(s) && ffmpegPgsOn()),
+      external: isSidecarText(s) || isEmbeddedText(s) || (isDrawnPicture(s) && ffmpegPgsOn()),
       /** Pictures rather than text: drawn from the /pgs route's .sup. */
-      picture: isPgs(s) && ffmpegPgsOn() ? true : undefined,
+      picture: isDrawnPicture(s) && ffmpegPgsOn() ? true : undefined,
       /**
        * A file of its own, as opposed to a track inside the media file —
        * fetched from somewhere else, most often, and so not necessarily timed
@@ -3725,8 +3728,14 @@ router.get("/subtitle-fonts/:id", (req: Request, res: Response) => {
   res.sendFile(file);
 });
 
+/** A picture subtitle's kind, as a log or the player says it. */
+function pictureKindOf(codec: string | null | undefined): string {
+  const bitmap = bitmapCodecOf(codec);
+  return bitmap === "vobsub" ? "VobSub" : bitmap === "dvb" ? "DVB" : "PGS";
+}
+
 /**
- * Where a PGS subtitle comes from: its track in the film, checked against the
+ * Where a picture subtitle comes from: its track in the film, checked against the
  * file as a stream's are (probe.ts), or the .sup beside it — off the mount,
  * else from Plex. Null when it can't be had.
  */
@@ -3771,7 +3780,17 @@ async function pgsSource(ratingKey: string, mediaIndex: number, streamId: number
   if (fromMount && !indexed) {
     logEvent("Subtitles", "a picture subtitle isn't in the film's index; ffmpeg reads the film for it", { ratingKey, streamId });
   }
-  return { kind: "film", input, index: sub.index, indexed };
+  // A VobSub or DVB track, made PGS as it is cut: a VobSub's colours and
+  // canvas are in its header (the .idx's text).
+  const codec = bitmapCodecOf(sub.codec);
+  const bitmap = codec && {
+    codec,
+    header: codec === "vobsub"
+      ? vobsubHeader(await probeExtradata(`${fromMount ? local : source.partKey}:${source.fileSize ?? "?"}:${sub.index}`, input, sub.index))
+      : null,
+    filmHeight: source.height ?? null,
+  };
+  return { kind: "film", input, index: sub.index, indexed, bitmap };
 }
 
 /** The PGS subtitle a /pgs request names, and what its cut is called. */
@@ -4233,7 +4252,7 @@ export function recordSessionVideoCodec(sessionId: string, codec: string): void 
 /** Whether this session's video is (or may be) HEVC. */
 export function isHevcSession(sessionId: string): boolean {
   const codec = sessionVideoCodec.get(sessionId);
-  return codec !== undefined && codec !== "h264" && codec !== "av1";
+  return codec !== undefined && codec !== "h264" && codec !== "av1" && codec !== "vp9";
 }
 
 /** What an ffmpeg session's sound needs: Opus, FLAC, AC3 or EAC3, copied as
@@ -4253,6 +4272,9 @@ export function recordSessionHdr(sessionId: string, hdr: boolean): void {
   if (hdr) hdrSessions.add(sessionId);
   else hdrSessions.delete(sessionId);
 }
+
+/** What a copy needs of a player for its picture, rather than its sound (copyNeeds). */
+const PICTURE_NEEDS: ReadonlySet<PlayerCap> = new Set<PlayerCap>(["hevc", "av1", "vp9", "hi10", "hdr", "tenBit", "uhd"]);
 
 /** Sessions whose picture is 10 bits as it is sent (PlayerCaps.tenBit). */
 const tenBitSessions = new Set<string>();
@@ -4287,6 +4309,9 @@ export function sessionNeeds(sessionId: string): PlayerCap[] {
   const needs: PlayerCap[] = [];
   if (isHevcSession(sessionId)) needs.push("hevc");
   if (sessionVideoCodec.get(sessionId) === "av1") needs.push("av1");
+  if (sessionVideoCodec.get(sessionId) === "vp9") needs.push("vp9");
+  // A copy of 10-bit H.264: only a re-encode to HEVC or AV1 is 10 bits otherwise.
+  if (sessionVideoCodec.get(sessionId) === "h264" && tenBitSessions.has(sessionId)) needs.push("hi10");
   if (hdrSessions.has(sessionId)) needs.push("hdr");
   if (tenBitSessions.has(sessionId)) needs.push("tenBit");
   if (uhdSessions.has(sessionId)) needs.push("uhd");
@@ -5218,6 +5243,9 @@ const mbpsText = (kbps: number) => `${(kbps / 1000).toFixed(kbps % 1000 ? 1 : 0)
  * the last case here is that one: a file is judged on its peaks, which can be
  * twice its average.
  */
+/** Why an open-GOP H.264 film is re-encoded: Plex's copy of one doesn't play. */
+const OPEN_GOP = "Open-GOP keyframes";
+
 function refusedCopyReason(version: VersionFacts | null, askedKbps: number, roomHevc: boolean): string {
   const codec = version?.videoCodec?.toLowerCase() ?? null;
   if (codec && codec !== "h264" && codec !== "hevc") {
@@ -5303,6 +5331,8 @@ async function startWithFfmpeg(o: {
   /** Whether the file may be copied, and why not. */
   copy: boolean;
   notCopied: string | null;
+  /** H.264 whose keyframes aren't IDR frames (keyframes.ts): copied in fMP4. */
+  openGop?: boolean;
   /** A re-encode's: target and peak kbps, largest picture, and HEVC allowed. */
   transcodeKbps: number;
   peakKbps: number;
@@ -5369,9 +5399,12 @@ async function startWithFfmpeg(o: {
   const durationS = source.durationS ?? null;
   const okFor = (c: PlayerCaps) => ({
     hevcOk: c.hevc, av1Ok: c.av1, opusOk: c.opus, flacOk: c.flac, ac3Ok: c.ac3, eac3Ok: c.eac3, hdrOk: c.hdr,
-    tenBitOk: c.tenBit, uhdOk: c.uhd === true,
+    tenBitOk: c.tenBit, uhdOk: c.uhd === true, hi10Ok: c.hi10 === true, vp9Ok: c.vp9 === true,
   });
-  const copyAsk = { audioStreamId: o.audioStreamID || null, ...okFor(o.caps), sdrPeakNits: hdrOnSdrNits(), audioChannels: audioChannels() };
+  const copyAsk = {
+    audioStreamId: o.audioStreamID || null, ...okFor(o.caps), sdrPeakNits: hdrOnSdrNits(), audioChannels: audioChannels(),
+    openGop: o.openGop === true,
+  };
   /** HDR labelled for each screen (hdr-init.ts), for the log and Stats for nerds. */
   const mappedAt = (nits: number | null) => nits !== null ? ` (mapped at ${nits} nits)` : "";
   /** What a screen in HDR is told of the film's HDR, when it is labelled for
@@ -5389,7 +5422,7 @@ async function startWithFfmpeg(o: {
     if (lost.length) recordWithheld(o.sessionId, [...new Set<PlayerCap>([...sessionWithheld(o.sessionId), ...lost])]);
   }
   let video: {
-    codec: "h264" | "hevc" | "av1"; width: number; height: number; audio: SourceStream | null; audioCopy: boolean;
+    codec: "h264" | "hevc" | "av1" | "vp9"; width: number; height: number; audio: SourceStream | null; audioCopy: boolean;
     audioWhy: string | null; audioOut: AudioOut | null; kbps: number | null;
   };
   let key: string;
@@ -5571,7 +5604,7 @@ async function startWithFfmpeg(o: {
   // A re-encode's Opus 7.1 too: whoever on it doesn't decode Opus gets a
   // stream of their own (sync.ts seatOf).
   recordSessionAudioNeeds(o.sessionId, copyPlan?.ok && reason === null
-    ? copyNeeds(copyPlan).filter((c) => c !== "hevc" && c !== "av1" && c !== "hdr" && c !== "tenBit" && c !== "uhd")
+    ? copyNeeds(copyPlan).filter((c) => !PICTURE_NEEDS.has(c))
     : video.audioOut?.codec === "opus" ? ["opus"] : []);
   const decided: AudioDecision | null = video.audio
     ? {
@@ -6166,7 +6199,7 @@ router.get(
         // burned in when it couldn't be drawn — Plex failed to read it out.
         const burned = subtitleId ? await subtitleTrackOf(ratingKey, mediaIndex, subtitleId) : null;
         notCopied = burned?.picture
-          ? "Subtitle burn-in (PGS)"
+          ? `Subtitle burn-in (${pictureKindOf(burned.codec)})`
           : burned?.external
             ? "Subtitle burn-in (text unreadable)"
             : "Subtitle burn-in (image-based)";
@@ -6179,14 +6212,13 @@ router.get(
           ratingKey, session: sessionId.substring(0, 8), kbps, capKbps: COPY_LIMIT_KBPS,
         });
       } else if (directStreamRefused(ratingKey)) notCopied = "Direct Stream failed earlier";
-      else if (
-        version?.videoCodec?.toLowerCase() === "h264" && version.partKey &&
-        (await fileKeyframes(version.partKey, version.fileSize, await mountedFile(ratingKey, mediaIndex))) === "not-idr"
-      ) {
-        // An open-GOP Blu-ray: see services/keyframes.ts.
-        notCopied = "Open-GOP keyframes";
-      }
-      const copy = notCopied === null;
+      // An open-GOP Blu-ray (services/keyframes.ts): the ffmpeg engine copies
+      // it in fMP4, whose index marks every keyframe as a place to start and
+      // cut, as Plex's MPEG-TS didn't (8 October). Plex's engine re-encodes it.
+      const openGop = notCopied === null && version?.videoCodec?.toLowerCase() === "h264" && !!version.partKey &&
+        (await fileKeyframes(version.partKey, version.fileSize, await mountedFile(ratingKey, mediaIndex))) === "not-idr";
+      if (openGop && !ffmpegEngineOn()) notCopied = OPEN_GOP;
+      let copy = notCopied === null;
       recordHevcWithheld(sessionId, copy && !roomHevc && version?.videoCodec?.toLowerCase() === "hevc");
       const frame = quality && quality <= QUALITY_720P_KBPS ? "1280x720" : transcodeFrame(version ?? {}, caps.uhd === true);
       // With PLAYBACK_ENGINE=ffmpeg, the stream is made here, from the file —
@@ -6203,7 +6235,7 @@ router.get(
               burnSubtitleId: subtitleMode === "burn" && subtitleId ? subtitleId : null,
               quality, fileKbps: kbps, audioTracks: version?.audioTracks ?? [],
               authToken: req.query.token as string | undefined,
-              copy, notCopied, transcodeKbps, peakKbps, frame, hevcEncode: roomHevc && HEVC_TRANSCODE,
+              copy, notCopied, openGop, transcodeKbps, peakKbps, frame, hevcEncode: roomHevc && HEVC_TRANSCODE,
               picture: version?.picture ?? null,
               replaces: replacedStreams(userId, ratingKey).filter((id) => id !== sessionId),
             });
@@ -6212,6 +6244,11 @@ router.get(
           throw new Error(`ffmpeg couldn't make this stream, and FFMPEG_FALLBACK_TO_PLEX is off: ${tried.fallback}`);
         }
         fallback = tried.fallback;
+      }
+      // Left to Plex, an open-GOP film is re-encoded: its copy doesn't play.
+      if (openGop && copy) {
+        copy = false;
+        notCopied = OPEN_GOP;
       }
       // Plex keeps a picture at its own size when the frame allows it.
       recordSessionUhd(sessionId, caps.uhd === true && aboveHd(version));

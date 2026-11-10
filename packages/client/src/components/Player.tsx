@@ -2442,7 +2442,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       if (!last || since === null || !stuckLongEnough(since, now)) return;
       stuckSinceRef.current = null;
       const cap = pictureCapRef.current;
-      const takeBack: Cap[] = cap === "av1" ? ["av1"] : cap === "hevc" || cap === "tenBit" ? ["hevc"] : [];
+      const takeBack: Cap[] = cap === "av1" || cap === "vp9" || cap === "hi10" ? [cap] : cap === "hevc" || cap === "tenBit" ? ["hevc"] : [];
       const facts = {
         how: lookVerdict(last, now), codec: cap ?? "h264", stuckS: Math.round(now.at - since), framesShown: now.shown,
         ...snapshot(v),
@@ -5596,9 +5596,12 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           streamCaps = capsUsed(video, audio);
           streamHasAudioRef.current = !!audio;
           // What the room is told this player can't play smoothly, should it
-          // drop frames: AV1, which goes to HEVC; 10 bits of HEVC, which goes
-          // to 8; HEVC Main, which goes to H.264 (sync.ts ownStreamFor).
+          // drop frames: AV1 or VP9, which go to HEVC; 10 bits of H.264 or
+          // HEVC, which go to 8; HEVC Main, which goes to H.264 (sync.ts
+          // ownStreamFor).
           pictureCapRef.current = streamCaps.includes("av1") ? "av1"
+            : streamCaps.includes("vp9") ? "vp9"
+            : streamCaps.includes("hi10") ? "hi10"
             : streamCaps.includes("hevc") ? /^(hvc1|hev1)\.[a-c]?2\./i.test(video ?? "") ? "tenBit" : "hevc"
             : null;
         });

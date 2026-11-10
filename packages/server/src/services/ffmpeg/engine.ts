@@ -523,9 +523,8 @@ async function measure(run: Run, name: string): Promise<void> {
     });
     if (run.encode && run.proc?.pid) run.gpuAtStart = sampleGpu(run.proc.pid);
     // A plain I-frame where a copy opens: an open-GOP Blu-ray, which browsers
-    // can't start from (keyframes.ts). Plex's engine handles those. Read from
-    // MPEG-TS only: an fMP4 copy of H.264 (its Opus or FLAC kept) relies on
-    // the file's own check before the start (keyframes.ts).
+    // can't start from in MPEG-TS (keyframes.ts). One the file's own check
+    // found goes in fMP4 (plan.ts planCopy openGop); this is for one it missed.
     if (!run.encode && !run.fmp4 && run.codec === "h264" && firstKeyframe(data) === "not-idr" && !run.handedOut) {
       fail(run, "its keyframes aren't IDR frames (open GOP)");
       return;

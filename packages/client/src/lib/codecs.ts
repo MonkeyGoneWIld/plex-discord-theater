@@ -18,7 +18,7 @@
 import { canPlayHevcTranscode, isHevcCodec, markHevcUnplayable } from "./hevc";
 import { logEvent } from "./log";
 
-export type Cap = "hevc" | "av1" | "opus" | "flac" | "ac3" | "eac3" | "tenBit" | "uhd";
+export type Cap = "hevc" | "av1" | "opus" | "flac" | "ac3" | "eac3" | "tenBit" | "uhd" | "hi10" | "vp9";
 
 export interface Caps {
   hevc: boolean;
@@ -60,6 +60,14 @@ export interface Caps {
    * smoothly here where 1080p does (smoothness).
    */
   uhd: boolean;
+  /**
+   * 10-bit H.264 (High 10) is decoded (the server's PlayerCaps.hi10): the
+   * browser says it is supported and smooth here. Chromium decodes it in
+   * software.
+   */
+  hi10: boolean;
+  /** VP9 in fMP4, 8 and 10 bits (the server's PlayerCaps.vp9). */
+  vp9: boolean;
 }
 
 const failedKey = (cap: Cap) => `pdt:codec-failed:${cap}`;
@@ -93,6 +101,11 @@ function supports(type: string): boolean {
 }
 
 let av1Smooth = false;
+/** 10-bit H.264 at 1080p, as the browser says: supported and smooth. */
+let hi10Smooth = false;
+/** High 10 at level 4.0, 1080p; VP9 profiles 0 and 2 (8 and 10 bits). */
+const HI10_CODEC = "avc1.6E0028";
+const VP9_CODECS = ["vp09.00.40.08", "vp09.02.40.10"];
 /**
  * What the browser says of 1080p at 24 fps in each picture, asked once at
  * load, well before the room is joined. Chromium keeps a record of how every
@@ -122,6 +135,7 @@ try {
       });
     }, () => {});
   void ask(AV1_CODECS[0], 6_000_000).then((info) => { av1Smooth = info.supported && info.smooth && info.powerEfficient; }, () => {});
+  void ask(HI10_CODEC, 8_000_000).then((info) => { hi10Smooth = info.supported && info.smooth; }, () => {});
   void Promise.all([ask("avc1.640028", 8_000_000), ask("hvc1.1.6.L120.90", 8_000_000), ask("hvc1.2.4.L120.90", 8_000_000)])
     .then(([h264, hevc, tenBit]) => {
       smoothness.h264 = h264.supported ? h264.smooth : null;
@@ -129,7 +143,7 @@ try {
       smoothness.tenBit = tenBit.supported ? tenBit.smooth : null;
       logEvent("Codecs", "the browser's record of smooth playback here, 1080p at 24 fps", {
         h264: smoothness.h264 ?? "unsupported", hevc: smoothness.hevc ?? "unsupported", hevcTenBit: smoothness.tenBit ?? "unsupported",
-        av1: av1Smooth,
+        av1: av1Smooth, h264TenBit: hi10Smooth,
       });
     }, () => {});
 } catch {
@@ -156,6 +170,8 @@ export function playerCaps(): Caps {
     tenBit: !failedHere("tenBit") && !rougherThan(smoothness.tenBit, smoothness.hevc),
     uhd: !failedHere("uhd") && !rougherThan(smoothness.uhdH264, smoothness.h264) &&
       !(hevc && rougherThan(smoothness.uhdHevc, smoothness.hevc)),
+    hi10: !failedHere("hi10") && supports(`video/mp4; codecs="${HI10_CODEC}"`) && hi10Smooth,
+    vp9: !failedHere("vp9") && VP9_CODECS.every((c) => supports(`video/mp4; codecs="${c}"`)),
   };
 }
 
@@ -194,6 +210,8 @@ export function capsUsed(video: string | null | undefined, audio: string | null 
   const used: Cap[] = [];
   if (isHevcCodec(video)) used.push("hevc");
   if (/^av01/i.test(video ?? "")) used.push("av1");
+  if (/^vp0?9/i.test(video ?? "")) used.push("vp9");
+  if (/^avc[13]\.6e/i.test(video ?? "")) used.push("hi10");
   if (/^opus/i.test(audio ?? "")) used.push("opus");
   if (/^(flac|fLaC)/i.test(audio ?? "")) used.push("flac");
   if (/^(ac-3|mp4a\.a5)/i.test(audio ?? "")) used.push("ac3");

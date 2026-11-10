@@ -154,6 +154,51 @@ export function probeHdrMeta(key: string, input: string[]): Promise<HdrMeta | nu
   return asked;
 }
 
+const extradataRead = new Map<string, Promise<string | null>>();
+
+/** ffprobe's hex dump of some data ("00000000: 2320 5673 ...  # Vs..."): its bytes. */
+export function hexDumpBytes(dump: string): Buffer {
+  const hex = dump.split("\n").map((line) => /^[0-9a-f]{8}: ?((?:[0-9a-f]{2,4} )*[0-9a-f]{2,4})/i.exec(line)?.[1] ?? "").join("");
+  return Buffer.from(hex.replace(/\s+/g, ""), "hex");
+}
+
+/**
+ * A stream's codec extradata as text, once per `key`: a VobSub's .idx header,
+ * with its palette and canvas. Null when it has none or ffprobe couldn't say.
+ */
+export function probeExtradata(key: string, input: string[], index: number): Promise<string | null> {
+  const hit = extradataRead.get(key);
+  if (hit) return hit;
+  const asked = new Promise<string | null>((resolve) => {
+    let out = "";
+    let child;
+    try {
+      child = spawn(ffprobePath(), [
+        "-hide_banner", "-v", "error", "-select_streams", String(index),
+        "-show_entries", "stream=extradata", "-show_data", "-of", "json", ...input,
+      ], { stdio: ["ignore", "pipe", "ignore"] });
+    } catch {
+      resolve(null);
+      return;
+    }
+    const timer = setTimeout(() => child.kill("SIGKILL"), PROBE_TIMEOUT_MS);
+    child.stdout.on("data", (d: Buffer) => { out += d.toString(); });
+    child.on("error", () => { clearTimeout(timer); resolve(null); });
+    child.on("close", () => {
+      clearTimeout(timer);
+      try {
+        const dump = (JSON.parse(out) as { streams?: Array<{ extradata?: string }> }).streams?.[0]?.extradata;
+        const bytes = dump ? hexDumpBytes(dump) : null;
+        resolve(bytes?.length ? bytes.toString("latin1") : null);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+  extradataRead.set(key, asked);
+  return asked;
+}
+
 const KINDS: Record<number, string> = { 1: "video", 2: "audio", 3: "subtitle" };
 
 /** Plex's codec names that aren't ffprobe's. */

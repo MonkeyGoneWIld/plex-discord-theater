@@ -10,13 +10,18 @@ setting and a restart.
 
 ## What it adds
 
-- **More files copied as they are.** H.264, HEVC and AV1, 4K included, are
-  copied for players that decode them, HDR10, HLG and Dolby Vision 7 and 8
+- **More files copied as they are.** H.264, HEVC, AV1 and VP9, 4K included,
+  are copied for players that decode them, HDR10, HLG and Dolby Vision 7 and 8
   included. Opus, FLAC, AC3 and EAC3 sound is copied for players that play it;
   7.1 sound a browser can't play becomes Opus 7.1, and PCM becomes FLAC.
-- **PGS subtitles drawn by the player.** Blu-ray subtitles are cut out of the
-  film and drawn by each player, sharp at any size, so a film with them is
-  still copied instead of re-encoded to burn them in.
+  10-bit H.264 (common in anime) is copied for a player whose browser says it
+  decodes it smoothly. A Blu-ray's H.264 with open GOPs is copied too, in
+  fragmented MP4; the Plex engine re-encodes it.
+- **Picture subtitles drawn by the player.** Blu-ray (PGS), DVD (VobSub) and
+  broadcast (DVB) subtitles in the film are cut out of it and drawn by each
+  player, so a film with them is still copied instead of re-encoded to burn
+  them in. VobSub and DVB are converted to PGS as they are cut, in the colours
+  ffmpeg would burn in.
 - **HDR kept in re-encodes.** A re-encode for a player that decodes HEVC stays
   HDR10, in HEVC Main10. Plex maps every re-encode to SDR.
 - **One HDR stream for every screen.** Screens in HDR and in SDR share the same
@@ -227,12 +232,13 @@ To make these fail instead, for testing, set
   on the mount, all of a file's in one pass. Subtitle files beside the film are
   read from the mount when they can be matched (see above). Plex reads anything
   that can't be. `FFMPEG_SUBTITLES=off` leaves all of it to Plex.
-- **PGS subtitles** are cut out of the film once, and each player draws them
-  over the picture, so the film is copied as if it had none.
-  `FFMPEG_PGS_MAX_GB` (2 by default) limits the disk they use.
+- **Picture subtitles** (PGS, and VobSub or DVB inside the film) are cut out of
+  the film once, and each player draws them over the picture, so the film is
+  copied as if it had none. VobSub and DVB are converted to PGS as they are
+  cut. `FFMPEG_PGS_MAX_GB` (2 by default) limits the disk they use.
   `FFMPEG_PGS=off` burns them in instead.
-- **Subtitles that must be burned in** (VobSub, DVB, or a text subtitle the
-  player can't draw) are drawn by ffmpeg in a re-encode: picture subtitles from
+- **Subtitles that must be burned in** (a VobSub beside the film, or a text
+  subtitle the player can't draw) are drawn by ffmpeg in a re-encode: picture subtitles from
   the film or the file beside it, text subtitles by libass from their text,
   with the fonts the film carries.
 

@@ -171,9 +171,10 @@ above the copy limit, or a codec the player can't decode. See
 Open **Stats for nerds** (press `I`): its **Playback** row says why. The most
 common reasons are:
 
-- **A picture subtitle has to be burned in.** VobSub always has to be. PGS has
-  to be with the Plex engine; the FFmpeg engine has each player draw it
-  instead.
+- **A picture subtitle has to be burned in.** With the Plex engine, PGS,
+  VobSub and DVB always are. The FFmpeg engine has each player draw PGS, and
+  VobSub or DVB inside the film, instead. A VobSub beside the film (`.idx` and
+  `.sub`) is still burned in.
 - **The file is above the copy limit** (`DIRECT_STREAM_MAX_KBPS`, 25 Mbps by
   default), or above the quality the viewer chose.
 - **The file is above 1080p and this player can't decode it smoothly.** That

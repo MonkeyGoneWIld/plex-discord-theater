@@ -32,8 +32,9 @@ Otherwise the stream is re-encoded. Other reasons for a re-encode:
 
 | Reason | Why |
 |---|---|
-| A picture subtitle (PGS, VobSub) is on, with the Plex engine | It can only be burned into the picture. With the FFmpeg engine, each player draws PGS subtitles itself. |
-| The file is H.264 from a Blu-ray with open GOPs, with the Plex engine | A copy's segments can't start on a clean frame |
+| A picture subtitle (PGS, VobSub, DVB) is on, with the Plex engine | It can only be burned into the picture. With the FFmpeg engine, each player draws PGS, and VobSub or DVB inside the film, itself. |
+| The file is H.264 from a Blu-ray with open GOPs, with the Plex engine | Plex's copy of it doesn't play. The FFmpeg engine copies it. |
+| The file is 10-bit H.264 or VP9, and the player's browser doesn't say it decodes it (or the Plex engine is used) | Only the FFmpeg engine copies them, for players that decode them |
 | A copy of the title failed earlier | It stays re-encoded until the server restarts |
 
 Text subtitles (SRT, ASS, WebVTT) are drawn by each player, so they never

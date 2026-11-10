@@ -116,7 +116,7 @@ export function browserMapped(hdr: string): boolean {
 
 /** Containers whose H.264 and HEVC copy cleanly into MPEG-TS. */
 const COPY_CONTAINERS = new Set(["mkv", "mp4", "m4v", "mov", "mpegts", "ts", "m2ts"]);
-/** And whose AV1 copies into fragmented MP4: a WebM's too. */
+/** And whose AV1 or VP9 copies into fragmented MP4: a WebM's too. */
 const FMP4_CONTAINERS = new Set([...COPY_CONTAINERS, "webm"]);
 
 /**
@@ -168,11 +168,19 @@ export interface PlayerCaps {
    * Player.tsx); without it a player gets 1080p, a stream of its own (seatOf).
    */
   uhd: boolean;
+  /**
+   * 10-bit H.264 (High 10, as anime often is) is decoded: Chromium does it in
+   * software where it says it can. Asked of the browser; a player that says
+   * nothing of it has it re-encoded, as before.
+   */
+  hi10: boolean;
+  /** VP9 is decoded, in 8 and 10 bits: copied in fMP4, as AV1 is. */
+  vp9: boolean;
 }
 export type PlayerCap = keyof PlayerCaps;
-export const PLAYER_CAPS: readonly PlayerCap[] = ["hevc", "av1", "opus", "flac", "ac3", "eac3", "hdr", "tenBit", "uhd"];
-export const NO_CAPS: PlayerCaps = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, tenBit: false, uhd: false };
-export const ALL_CAPS: PlayerCaps = { hevc: true, av1: true, opus: true, flac: true, ac3: true, eac3: true, hdr: true, tenBit: true, uhd: true };
+export const PLAYER_CAPS: readonly PlayerCap[] = ["hevc", "av1", "opus", "flac", "ac3", "eac3", "hdr", "tenBit", "uhd", "hi10", "vp9"];
+export const NO_CAPS: PlayerCaps = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, tenBit: false, uhd: false, hi10: false, vp9: false };
+export const ALL_CAPS: PlayerCaps = { hevc: true, av1: true, opus: true, flac: true, ac3: true, eac3: true, hdr: true, tenBit: true, uhd: true, hi10: true, vp9: true };
 
 /** Above 1080p — 2K DCI wide (2048) or 16:10 tall (1200) — as PlayerCaps.uhd has it. */
 export function aboveHd(width: number | null | undefined, height: number | null | undefined): boolean {
@@ -241,8 +249,8 @@ export type CopyPlan =
       audioWhy: string | null;
       /** What a converted track becomes; null when it is copied, or there is none. */
       audioOut: AudioOut | null;
-      codec: "h264" | "hevc" | "av1";
-      /** In fragmented MP4 rather than MPEG-TS: AV1, Opus and FLAC don't go
+      codec: "h264" | "hevc" | "av1" | "vp9";
+      /** In fragmented MP4 rather than MPEG-TS: AV1, VP9, Opus and FLAC don't go
        *  into MPEG-TS for a browser, and an HDR label is in the init. */
       fmp4: boolean;
       hdr: string;
@@ -264,22 +272,25 @@ export type CopyPlan =
  * it); `hevcOk`, `av1Ok`, `opusOk` and `flacOk` what the player driving it
  * decodes, and `hdrOk` whether its screen shows HDR (PlayerCaps);
  * `sdrPeakNits` the peak HDR is labelled for one that doesn't (hdrOnSdrNits);
- * `audioChannels` FFMPEG_AUDIO_CHANNELS (convertedAudio).
+ * `audioChannels` FFMPEG_AUDIO_CHANNELS (convertedAudio); `openGop` an H.264
+ * film whose keyframes aren't IDR frames (keyframes.ts), copied in fMP4.
  */
 export function planCopy(
   src: SourceVersion,
   req: {
     audioStreamId: number | null; hevcOk: boolean; av1Ok?: boolean; opusOk?: boolean; flacOk?: boolean;
     ac3Ok?: boolean; eac3Ok?: boolean; hdrOk?: boolean; sdrPeakNits?: number | null; audioChannels?: number;
-    tenBitOk?: boolean; uhdOk?: boolean;
+    tenBitOk?: boolean; uhdOk?: boolean; openGop?: boolean; hi10Ok?: boolean; vp9Ok?: boolean;
   },
 ): CopyPlan {
   const no = (why: string): CopyPlan => ({ ok: false, why });
   const video = src.streams.find((s) => s.streamType === 1);
   if (!video || video.index == null) return no("no video stream");
   const codec = (video.codec ?? "").toLowerCase();
-  if (codec !== "h264" && codec !== "hevc" && codec !== "av1") return no(`video is ${codec || "unknown"}`);
-  if (codec === "h264" && (video.bitDepth ?? 8) > 8) return no(`${video.bitDepth}-bit H.264`);
+  if (codec !== "h264" && codec !== "hevc" && codec !== "av1" && codec !== "vp9") return no(`video is ${codec || "unknown"}`);
+  if (codec === "h264" && (video.bitDepth ?? 8) > 10) return no(`${video.bitDepth}-bit H.264`);
+  // High 10 for a player that decodes it (PlayerCaps.hi10).
+  if (codec === "h264" && (video.bitDepth ?? 8) > 8 && !req.hi10Ok) return no("10-bit H.264: not decoded by this player");
   // Field by field, as TV is broadcast: Chrome's decoder gave up on the first
   // segment of Cunk on Shakespeare's 1080i copy on 21 October, for both
   // players and every retry, and a picture it did decode would be combed.
@@ -290,6 +301,8 @@ export function planCopy(
   if (codec === "hevc" && !req.hevcOk) return no("HEVC: not decoded by this player");
   if (codec === "av1" && (video.bitDepth ?? 8) > 10) return no(`${video.bitDepth}-bit AV1`);
   if (codec === "av1" && !req.av1Ok) return no("AV1: not decoded by this player");
+  if (codec === "vp9" && (video.bitDepth ?? 8) > 10) return no(`${video.bitDepth}-bit VP9`);
+  if (codec === "vp9" && !req.vp9Ok) return no("VP9: not decoded by this player");
   const tenBit = pictureBits(video) > 8;
   if (tenBit && req.tenBitOk === false) return no(`${pictureBits(video)}-bit picture: frames dropped on this player`);
   const hdr = hdrClass(video);
@@ -310,7 +323,7 @@ export function planCopy(
   // or 4K screen it shows every pixel.
   if (aboveHd(width, height) && req.uhdOk === false) return no("Above 1080p: this player can't decode it smoothly");
   const container = (src.container ?? "").toLowerCase();
-  if (!(codec === "av1" ? FMP4_CONTAINERS : COPY_CONTAINERS).has(container)) return no(`${(container || "unknown").toUpperCase()} container not supported`);
+  if (!(codec === "av1" || codec === "vp9" ? FMP4_CONTAINERS : COPY_CONTAINERS).has(container)) return no(`${(container || "unknown").toUpperCase()} container not supported`);
 
   const audio = pickAudio(src, req.audioStreamId);
   if (audio === false) return no(`no audio track ${req.audioStreamId}`);
@@ -331,7 +344,10 @@ export function planCopy(
     audioWhy: copied.why,
     audioOut,
     codec,
-    fmp4: codec === "av1" || audioFmp4 || sdrPeakNits !== null,
+    // An open-GOP Blu-ray's plain I-frames are sync samples in fMP4, places a
+    // browser starts and cuts at; hls.js's MPEG-TS gave it none past the first
+    // (keyframes.ts).
+    fmp4: codec === "av1" || codec === "vp9" || audioFmp4 || sdrPeakNits !== null || (codec === "h264" && req.openGop === true),
     hdr,
     sdrPeakNits,
     tenBit,
@@ -346,6 +362,8 @@ export function copyNeeds(plan: Extract<CopyPlan, { ok: true }>): PlayerCap[] {
   const needs: PlayerCap[] = [];
   if (plan.codec === "hevc") needs.push("hevc");
   if (plan.codec === "av1") needs.push("av1");
+  if (plan.codec === "vp9") needs.push("vp9");
+  if (plan.codec === "h264" && plan.tenBit) needs.push("hi10");
   const audio = audioCapOf(plan.audio?.codec);
   if (plan.audioCopy && audio) needs.push(audio);
   if (plan.audioOut && plan.audioOut.codec !== "aac") needs.push(plan.audioOut.codec);

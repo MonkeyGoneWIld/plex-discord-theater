@@ -233,9 +233,12 @@ const ownStreamOf = (key: string) => OWN_STREAMS.find((s) => key.endsWith(s)) ??
  * 10 bits or 4K but not of HEVC (at 1080p, by its caps: mayStart), 8-bit if
  * 10 bits are what it lacks. Null for the twin: short of HEVC, or of the sound.
  */
+/** What a player that decodes HEVC is given its own HEVC stream for, lacking it. */
+const OWN_HEVC_FOR: ReadonlySet<PlayerCap> = new Set<PlayerCap>(["av1", "vp9", "hi10", "tenBit", "hdr", "uhd"]);
+
 function ownStreamFor(client: RoomClient, lacked: readonly PlayerCap[]): (typeof OWN_STREAMS)[number] | null {
   if (lacked.length > 0 && lacked.every((c) => c === "hdr")) return SDR_COPY;
-  if (!client.caps.hevc || !lacked.every((c) => c === "av1" || c === "tenBit" || c === "hdr" || c === "uhd")) return null;
+  if (!client.caps.hevc || !lacked.every((c) => OWN_HEVC_FOR.has(c))) return null;
   return lacked.includes("tenBit") || !client.caps.tenBit ? EIGHT_BIT : HEVC_OWN;
 }
 
@@ -933,7 +936,7 @@ function withheldOf(v: Variant | undefined): PlayerCap[] {
 const lacksAny = (client: RoomClient, caps: readonly PlayerCap[]) => caps.some((c) => !client.caps[c]);
 
 /** What a stream needs of its players for its picture, rather than its sound. */
-const PICTURE_CAPS: ReadonlySet<PlayerCap> = new Set<PlayerCap>(["hevc", "av1", "tenBit", "hdr", "uhd"]);
+const PICTURE_CAPS: ReadonlySet<PlayerCap> = new Set<PlayerCap>(["hevc", "av1", "vp9", "hi10", "tenBit", "hdr", "uhd"]);
 
 /** For the log: why people on `from` were given another stream. */
 function whyMoved(from: Variant): string {
@@ -1047,8 +1050,8 @@ function sortByCaps(room: Room, roomId: string, v: Variant): void {
   const plain = !isH264Twin(v.key) && !ownStreamOf(v.key);
   if (plain && withheld.length > 0 && needsOf(v).length === 0 && !room.state.variants.has(v.key + H264_TWIN)) {
     rekeyVariant(room, v, v.key + H264_TWIN);
-  } else if (plain && needsOf(v).includes("hevc") && (withheld.includes("av1") || withheld.includes("tenBit") || withheld.includes("uhd"))) {
-    // HEVC only because its driver is short of AV1, of 10 bits, or of 4K: the same.
+  } else if (plain && needsOf(v).includes("hevc") && withheld.some((c) => c !== "hdr" && OWN_HEVC_FOR.has(c))) {
+    // HEVC only because its driver is short of AV1, VP9, 10 bits or 4K: the same.
     const own = withheld.includes("tenBit") ? EIGHT_BIT : HEVC_OWN;
     if (!room.state.variants.has(v.key + own)) rekeyVariant(room, v, v.key + own);
   }

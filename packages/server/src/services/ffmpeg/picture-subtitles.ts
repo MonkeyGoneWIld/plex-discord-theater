@@ -53,6 +53,7 @@ import { logEvent } from "../logger.js";
 import {
   fileRanges, mkvBlocks, mkvSubtitleIndex, openFileRanges, subtitleTrackFor, type PlexSubtitleStream,
 } from "../mkv-subtitles.js";
+import { BitmapToSup, TsPes, type BitmapSource } from "./bitmap-subtitles.js";
 import { ffmpegPath } from "./config.js";
 
 /** A piece for where the player is starts this far before it: a line up when
@@ -135,22 +136,29 @@ export interface PgsStatus {
  */
 export interface PgsIndexed {
   at: number[];
+  /** How long each is up, where the index says: a VobSub's, when its packet doesn't. */
+  durations?: Array<number | null>;
   read(from: number, to: number): Promise<Array<Uint8Array | null> | null>;
 }
 
 /** Where the subtitle comes from: a track in the film, or a file of its own.
- *  A film's read through its index when it can be (`indexed`). */
+ *  A film's read through its index when it can be (`indexed`); a VobSub or
+ *  DVB track's (`bitmap`) made PGS as it is cut (bitmap-subtitles.ts). */
 export type PgsSource =
-  | { kind: "film"; input: string[]; index: number; indexed?: PgsIndexed | null }
+  | { kind: "film"; input: string[]; index: number; indexed?: PgsIndexed | null; bitmap?: BitmapSource | null }
   | { kind: "file"; bytes: () => Promise<Buffer | null> };
 
 /** Display sets read through the index at a time: a minute or so of a film's. */
 const INDEX_SETS = 48;
+/** A VobSub's or DVB's packets read before a piece, for what is up as it
+ *  starts: through the index, and by ffmpeg. */
+const BITMAP_LEAD_SETS = 8;
+const BITMAP_LEAD_S = 30;
 /** How much of a display set's block is read at first: most are 5 to 30 KB. */
 const BLOCK_GUESS_BYTES = 64 * 1024;
 
 /**
- * A PGS track of a Matroska film mounted here as the file's index has it
+ * A PGS, VobSub or DVB track of a Matroska film mounted here as the file's index has it
  * (mkv-subtitles.ts), for its display sets to be read alone (cutFromIndex).
  * `key`: what the index is kept under; `streams`: Plex's subtitle streams in
  * the file, to line its tracks up with; `startS`: the film's first time, which
@@ -163,7 +171,7 @@ export async function pgsIndexOf(
   const index = await mkvSubtitleIndex(key, size, fileRanges(film));
   if (!index) return null;
   const track = subtitleTrackFor(index, streams, streamId, "picture");
-  const entries = track && /PGS/i.test(track.codec)
+  const entries = track && /PGS|VOBSUB|DVBSUB/i.test(track.codec)
     ? [...index.entries.get(track.number) ?? []].sort((a, b) => a.start - b.start)
     : [];
   if (!track || entries.length === 0) return null;
@@ -172,6 +180,7 @@ export async function pgsIndexOf(
   const shift = Math.round((startS ?? 0) / index.tick);
   return {
     at: entries.map((e) => (Math.round(e.start / index.tick) - shift) * index.tick),
+    durations: entries.map((e) => (e.end === null ? null : e.end - e.start)),
     read: async (from, to) => {
       const file = await openFileRanges(film);
       if (!file) return null;
@@ -410,6 +419,21 @@ function statusOf(job: Job): PgsStatus {
  * stderr (-debug_ts): how far the cut has read, lines or none (reachOf).
  */
 export function pgsArgs(input: string[], index: number, fromS: number, toS: number | null, out: string): string[] {
+  return cutArgs(input, index, fromS, toS, ["-f", "sup", "-y", out]);
+}
+
+/**
+ * The same for a VobSub or DVB track, to stdout in MPEG-TS: what of a
+ * container carries each packet's time with it, as it is, to be made PGS here
+ * (bitmap-subtitles.ts).
+ */
+export function bitmapArgs(input: string[], index: number, fromS: number, toS: number | null): string[] {
+  return cutArgs(input, index, fromS, toS, [
+    "-muxdelay", "0", "-muxpreload", "0", "-mpegts_copyts", "1", "-f", "mpegts", "pipe:1",
+  ]);
+}
+
+function cutArgs(input: string[], index: number, fromS: number, toS: number | null, out: string[]): string[] {
   return [
     "-hide_banner", "-nostdin", "-nostats", "-loglevel", "info", "-debug_ts",
     ...(fromS > 0 ? ["-ss", fromS.toFixed(3)] : []),
@@ -419,7 +443,7 @@ export function pgsArgs(input: string[], index: number, fromS: number, toS: numb
     "-map", `0:${index}`, "-c:s", "copy",
     // Each display set on disk as it is cut, for the player asking as it grows.
     "-flush_packets", "1",
-    "-f", "sup", "-y", out,
+    ...out,
     "-map", "0:v:0?", "-c", "copy", "-f", "null", "-",
   ];
 }
@@ -472,6 +496,10 @@ async function cutFromIndex(job: Job, piece: Piece, indexed: PgsIndexed): Promis
   const from = first === -1 ? indexed.at.length : first;
   let to = piece.toS === null ? indexed.at.length : indexed.at.findIndex((t) => t >= piece.toS!);
   if (to === -1) to = indexed.at.length;
+  // A VobSub's or DVB's, made PGS: read from a few sets before (BitmapToSup).
+  const bitmap = job.source?.kind === "film" ? job.source.bitmap ?? null : null;
+  const made = bitmap ? new BitmapToSup(bitmap, piece.fromS) : null;
+  const lead = made ? Math.max(0, from - BITMAP_LEAD_SETS) : from;
   try {
     fs.mkdirSync(path.dirname(piece.file), { recursive: true });
     fs.writeFileSync(piece.file, "");
@@ -482,7 +510,7 @@ async function cutFromIndex(job: Job, piece: Piece, indexed: PgsIndexed): Promis
   piece.started = true;
   let last: number | null = null;
   const began = Date.now();
-  for (let i = from; i < to; i += INDEX_SETS) {
+  for (let i = lead; i < to; i += INDEX_SETS) {
     if (jobs.get(job.key) !== job || piece.stopped) break;
     if (Date.now() - job.lastAsked > IDLE_MS) {
       piece.failed = "nobody asked for it";
@@ -497,6 +525,11 @@ async function cutFromIndex(job: Job, piece: Piece, indexed: PgsIndexed): Promis
       blocks ? null : { at: i, from: i, why: "the file couldn't be read" };
     for (let k = 0; !bad && k < end - i; k++) {
       const block = blocks![k];
+      if (made) {
+        if (!block) bad = { at: i + k, from: i + k, why: "a packet wasn't where the index said" };
+        else sets.push(made.push(block, indexed.at[i + k], indexed.durations?.[i + k] ?? null));
+        continue;
+      }
       const set = block && supOfBlock(block, indexed.at[i + k]);
       const numbers = block && compositionsOf(block);
       if (!block) bad = { at: i + k, from: i + k, why: "a display set wasn't where the index said" };
@@ -507,6 +540,12 @@ async function cutFromIndex(job: Job, piece: Piece, indexed: PgsIndexed): Promis
         sets.push(set);
         last = numbers[1];
       }
+    }
+    // A line's end, once the next packet shows it comes first; up to where
+    // ffmpeg cuts on from, if this one stops here.
+    if (made) {
+      sets.push(bad ? made.finish(indexed.at[bad.from] ?? piece.fromS)
+        : end < indexed.at.length ? made.until(indexed.at[end]) : Buffer.alloc(0));
     }
     if (sets.length) {
       const bytes = Buffer.concat(sets);
@@ -530,6 +569,11 @@ async function cutFromIndex(job: Job, piece: Piece, indexed: PgsIndexed): Promis
     piece.reachedS = end < indexed.at.length ? indexed.at[end] : null;
   }
   if (piece.stopped) piece.toS = Math.max(piece.fromS, piece.reachedS ?? piece.fromS);
+  const rest = made?.finish(piece.toS);
+  if (rest?.length) {
+    await fs.promises.appendFile(piece.file, rest);
+    piece.bytes += rest.length;
+  }
   piece.done = true;
   piece.reachedS = null;
   job.by.add("index");
@@ -565,13 +609,26 @@ async function cut(job: Job, piece: Piece): Promise<void> {
     return;
   }
   piece.started = true;
+  // A VobSub or DVB track comes out in MPEG-TS, made PGS here as it does.
+  const made = source.bitmap ? new BitmapToSup(source.bitmap, piece.fromS) : null;
+  const pes = made ? new TsPes() : null;
+  const write = (bytes: Buffer) => {
+    if (bytes.length) fs.appendFileSync(piece.file, bytes);
+  };
+  const madeOf = (packets: Array<{ atS: number | null; payload: Uint8Array }>) => {
+    for (const p of packets) if (p.atS !== null) write(made!.push(p.payload, p.atS));
+  };
   await new Promise<void>((resolve) => {
     let said = "";
     let proc: ChildProcess;
     try {
       fs.mkdirSync(path.dirname(piece.file), { recursive: true });
-      proc = spawn(ffmpegPath(), pgsArgs(source.input, source.index, piece.fromS, piece.toS, piece.file),
-        { stdio: ["ignore", "ignore", "pipe"] });
+      if (made) fs.writeFileSync(piece.file, "");
+      proc = made
+        ? spawn(ffmpegPath(), bitmapArgs(source.input, source.index, Math.max(0, piece.fromS - BITMAP_LEAD_S), piece.toS),
+          { stdio: ["ignore", "pipe", "pipe"] })
+        : spawn(ffmpegPath(), pgsArgs(source.input, source.index, piece.fromS, piece.toS, piece.file),
+          { stdio: ["ignore", "ignore", "pipe"] });
     } catch (err) {
       piece.failed = err instanceof Error ? err.message : String(err);
       resolve();
@@ -579,10 +636,26 @@ async function cut(job: Job, piece: Piece): Promise<void> {
     }
     piece.proc = proc;
     const began = Date.now();
+    proc.stdout?.on("data", (d: Buffer) => {
+      try {
+        madeOf(pes!.push(d));
+      } catch (err) {
+        piece.failed = piece.failed ?? `the track couldn't be made PGS: ${err instanceof Error ? err.message : String(err)}`;
+        proc.kill("SIGKILL");
+      }
+    });
     const measure = (closed = false) => {
       // How far it had read, then what is on disk: all of that is in it.
       const seen = closed ? piece.seenS : piece.seenBefore ?? null;
       piece.seenBefore = piece.seenS;
+      // A line's end held back, written once the film is read past it.
+      if (made && seen !== null && !piece.failed) {
+        try {
+          write(made.until(seen - REACH_SLACK_S));
+        } catch {
+          // Written at the end, or not at all.
+        }
+      }
       try {
         piece.bytes = fs.statSync(piece.file).size;
       } catch {
@@ -611,6 +684,11 @@ async function cut(job: Job, piece: Piece): Promise<void> {
     proc.on("close", (code, signal) => {
       clearInterval(watch);
       piece.proc = null;
+      try {
+        if (made && !piece.failed) madeOf(pes!.flush());
+      } catch {
+        // What was made is kept.
+      }
       measure(true);
       if (piece.stopped && !piece.failed) {
         // Has everything before where it had read to.
@@ -620,6 +698,14 @@ async function cut(job: Job, piece: Piece): Promise<void> {
         piece.done = true;
       } else {
         piece.failed = piece.failed ?? `ffmpeg exited ${code ?? signal}${said.trim() ? `: ${said.trim().split("\n").pop()}` : ""}`;
+      }
+      if (made && piece.done) {
+        try {
+          write(made.finish(piece.toS));
+          piece.bytes = fs.statSync(piece.file).size;
+        } catch {
+          // Without its last end.
+        }
       }
       piece.reachedS = null;
       resolve();

@@ -405,11 +405,11 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
 {
   newRoom("caps-1");
   const all = { av1: true, opus: true, flac: true, av1Encode: true };
-  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, tenBit: false, uhd: false, av1Encode: false };
+  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, tenBit: false, uhd: false, hi10: false, vp9: false, av1Encode: false };
   const host = await join("caps-1", "u-host", "host", true, all);
   const a = await join("caps-1", "u-a", "a", true, all);
   check("what a player decodes, a stream it starts may use", mayStart("u-host"),
-    { hevc: true, av1: true, opus: true, flac: true, ac3: false, eac3: false, hdr: false, tenBit: true, uhd: true, av1Encode: true });
+    { hevc: true, av1: true, opus: true, flac: true, ac3: false, eac3: false, hdr: false, tenBit: true, uhd: true, hi10: false, vp9: false, av1Encode: true });
   const phone = await join("caps-1", "u-p", "p", false, { opus: true, av1Encode: true, hdr: true });
   check("each player's own, AV1 on the GPU only with AV1 at all, HDR kept for a screen showing it", mayStart("u-p"),
     { ...none, opus: true, hdr: true, tenBit: true, uhd: true });
@@ -423,6 +423,13 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
   recordSessionVideoCodec(sid, "av1");
   recordSessionAudioNeeds(sid, ["opus"]);
   check("an AV1 copy with its Opus needs both", sessionNeeds(sid), ["av1", "opus"]);
+  const vp9Sid = crypto.randomUUID();
+  recordSessionVideoCodec(vp9Sid, "vp9");
+  check("a VP9 copy needs VP9, and isn't HEVC", [sessionNeeds(vp9Sid), isHevcSession(vp9Sid)], [["vp9"], false]);
+  const hi10Sid = crypto.randomUUID();
+  recordSessionVideoCodec(hi10Sid, "h264");
+  recordSessionTenBit(hi10Sid, true);
+  check("a copy of 10-bit H.264 needs 10-bit H.264", sessionNeeds(hi10Sid), ["hi10", "tenBit"]);
   check("and isn't HEVC", isHevcSession(sid), false);
   host.send({
     type: "play", ratingKey: "100", title: "A Film", subtitles: false,
@@ -485,6 +492,33 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
   await sleep(60);
   check("and withdrawing HEVC after that, onto H.264", a.seen.filter((m) => m.type === "variant").at(-1)?.variantKey, "1:0/h264");
   [host, a, b, c, d].forEach((x) => x.close());
+}
+
+console.log("\n— 10-bit H.264 and VP9, by what each player says it decodes —");
+{
+  newRoom("caps-hi10");
+  const host = await join("caps-hi10", "u-host", "host", true, { hi10: true, vp9: true });
+  check("a player that says it decodes them may start copies of them",
+    [mayStart("u-host").hi10, mayStart("u-host").vp9], [true, true]);
+  const sid = crypto.randomUUID();
+  recordSessionVideoCodec(sid, "h264");
+  recordSessionTenBit(sid, true);
+  host.send({
+    type: "play", ratingKey: "500", title: "An Anime", subtitles: false,
+    hlsSessionId: sid, position: 0, sessionOffset: 0, audioStreamId: 1, subtitleStreamId: 0,
+  });
+  await sleep(60);
+  const stateOf = async (userId: string, caps: Record<string, unknown>) => {
+    const c = await join("caps-hi10", userId, userId, false, caps);
+    await sleep(60);
+    const v = c.seen.find((m) => m.type === "state")?.variant;
+    c.close();
+    return v?.variantKey;
+  };
+  check("one that decodes it shares the host's copy", await stateOf("u-same", { hi10: true }), "1:0");
+  check("one that doesn't, but decodes HEVC, gets HEVC of its own", await stateOf("u-hevc", { hevc: true }), "1:0/hevc");
+  check("one that decodes neither gets 8-bit H.264 of its own", await stateOf("u-plain", { hevc: false }), "1:0/h264");
+  host.close();
 }
 
 {

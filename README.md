@@ -168,14 +168,15 @@ administrator API key is required.
 - **FFmpeg engine (optional):** the container makes the streams itself, on
   Intel Quick Sync, VAAPI or NVIDIA NVENC, and Plex covers anything it can't
   make. Beyond what Plex's transcoder does:
-  - **PGS subtitles drawn by each player,** sharp at any size, instead of
-    burned into a re-encoded picture, so Blu-ray subtitles don't stop a film
-    from being copied.
+  - **Picture subtitles drawn by each player** (PGS, and VobSub or DVB in the
+    film), instead of burned into a re-encoded picture, so Blu-ray, DVD and
+    broadcast subtitles don't stop a film from being copied.
   - **HDR kept.** Re-encodes stay HDR10, and one stream serves screens in HDR
     and in SDR alike, each shown at its best, so everyone shares it peer to
     peer.
-  - **More copied as it is:** AV1 video, and Opus, FLAC, AC3 and EAC3 sound,
-    for players that decode them; 7.1 is kept as Opus 7.1.
+  - **More copied as it is:** AV1, VP9 and 10-bit H.264 video, Blu-ray H.264
+    with open GOPs, and Opus, FLAC, AC3 and EAC3 sound, for players that decode
+    them; 7.1 is kept as Opus 7.1.
   - **A stream for each device:** H.265 rather than H.264 wherever it plays,
     and a lighter picture for a device that drops frames, without changing
     anyone else's.

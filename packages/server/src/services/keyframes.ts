@@ -18,8 +18,16 @@
  * Even where a browser does start from such a keyframe, a stream begun
  * mid-film has its segments arrive out of order, and each loses the two frames
  * it shares with the one before: the picture has a hole every segment, and
- * hls.js loads the same segments over and over trying to fill them. A film
- * like that is re-encoded instead, which puts an IDR frame at every keyframe.
+ * hls.js loads the same segments over and over trying to fill them. Plex's
+ * engine re-encodes a film like that, which puts an IDR frame at every
+ * keyframe.
+ *
+ * The ffmpeg engine copies it in fragmented MP4 instead (plan.ts planCopy
+ * openGop), whose index marks each of those I-frames a sync sample: a place
+ * the browser starts and cuts at. In Chrome 157 on 10 November an open-GOP
+ * H.264 copy cut so played from the start and from part way in, kept playing
+ * after what was behind it was cut, and skipped into stretches it didn't have,
+ * the frames after each skip whole and no segment loaded twice.
  *
  * Told from the start of the file, before Plex is asked for anything: the
  * first few megabytes — off the mount with the ffmpeg engine, through Plex

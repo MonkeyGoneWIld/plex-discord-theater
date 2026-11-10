@@ -173,9 +173,10 @@ Quality is always your own, the host's included.
 Viewers on the same audio track share one stream. Choosing another audio
 track gives you a stream of your own, so two people can watch the same film in
 different languages, in sync. Text subtitles are drawn by each player, so they
-never change anyone's stream. A picture subtitle (PGS or VobSub) that must be
-burned into the picture gives you a stream of your own; with the server's
-[FFmpeg engine](FFmpeg-Engine), PGS subtitles are drawn by your player instead.
+never change anyone's stream. A picture subtitle (PGS, VobSub or DVB) that must
+be burned into the picture gives you a stream of your own; with the server's
+[FFmpeg engine](FFmpeg-Engine), PGS subtitles, and VobSub or DVB inside the
+film, are drawn by your player instead.
 
 Your choices carry into the next episode when it has the same tracks, so you
 set them once per series. A commentary track stays with its title only.

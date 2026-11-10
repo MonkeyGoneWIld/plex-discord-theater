@@ -55,7 +55,13 @@ export function subtitleSummary(
 
 /** How a subtitle drawn by the player is drawn. */
 function renderer(track: StreamTrack, styled: boolean): string {
-  if (track.picture) return "PGS bitmaps";
+  if (track.picture) {
+    // A VobSub or DVB track is made PGS by the server: its own kind is said.
+    const codec = (track.codec ?? "").toLowerCase();
+    if (codec === "vobsub" || codec === "dvd_subtitle") return "VobSub bitmaps · as PGS";
+    if (codec === "dvb_subtitle" || codec === "dvbsub") return "DVB bitmaps · as PGS";
+    return "PGS bitmaps";
+  }
   if (styled) return "libass (full ASS styling)";
   return track.sidecar ? "Text · external file" : "Text · embedded";
 }

@@ -510,7 +510,7 @@ console.log("\n— what a copy is judged on —");
   check("but not profile 5, which has none",
     why(version({ DOVIPresent: true, DOVIProfile: 5 })), "Dolby Vision P5: tone mapping needed");
   check("nor HEVC for a player that can't decode it", why(version({}), false), "HEVC: not decoded by this player");
-  check("nor 10-bit H.264", why(version({ codec: "h264" })), "10-bit H.264");
+  check("nor 10-bit H.264", why(version({ codec: "h264" })), "10-bit H.264: not decoded by this player");
   check("nor what MPEG-TS can't carry from an AVI", why(version({}, { container: "avi" })), "AVI container not supported");
   const chosen = planCopy(version({}), { audioStreamId: 13, hevcOk: true });
   check("the track asked for is the one taken, and AAC is copied",
@@ -2012,6 +2012,7 @@ console.log("\n— what the upload budget is told of each stream (qbt-manager sn
     ws.send(JSON.stringify({ type: "join", sessionToken: token, instanceId: id, userId, username: "host" }));
     for (let i = 0; i < 80 && !seen.some((m) => m.type === "state"); i++) await sleep(25);
     return {
+      id,
       play: (ratingKey: string, hlsSessionId: string, positionS: number, offsetS = positionS) => ws.send(JSON.stringify({
         type: "play", ratingKey, title: `Film ${ratingKey}`, subtitles: false, hlsSessionId,
         position: positionS, sessionOffset: offsetS, audioStreamId: 0, subtitleStreamId: 0,
@@ -2021,6 +2022,19 @@ console.log("\n— what the upload budget is told of each stream (qbt-manager sn
         method: "DELETE", headers: { Authorization: `Bearer ${token}` },
       }),
     };
+  }
+  /** A viewer in room `id`, who says what it is told to. */
+  async function viewerIn(id: string) {
+    const userId = `${id}-viewer`;
+    const token = createSession(userId, null);
+    const ws = new WebSocket(`${origin.replace(/^http/, "ws")}/ws?token=${token}`);
+    sockets.push(ws);
+    const seen: Stream[] = [];
+    ws.on("message", (d) => seen.push(JSON.parse(String(d))));
+    await new Promise<void>((r, j) => { ws.once("open", () => r()); ws.once("error", j); });
+    ws.send(JSON.stringify({ type: "join", sessionToken: token, instanceId: id, userId, username: "viewer" }));
+    for (let i = 0; i < 80 && !seen.some((m) => m.type === "state"); i++) await sleep(25);
+    return { send: (m: Record<string, unknown>) => ws.send(JSON.stringify(m)) };
   }
   /** The room's stream on `sid` once `ready` says so, as the manager is sent it. */
   async function streamOn(sid: string, ready: (s: Stream) => boolean = () => true): Promise<Stream | undefined> {
@@ -2127,9 +2141,35 @@ console.log("\n— what the upload budget is told of each stream (qbt-manager sn
     "state_age_seconds", "state_revision", "variant_id", "viewer_count",
   ]);
 
+  // A room on two streams of one title: the host's, and a viewer's own on
+  // other tracks, as a player that can't decode the host's 10-bit picture
+  // gets one (Ghost Stories, 10 November). Plex listed the title twice.
+  const two = await room();
+  const F = crypto.randomUUID();
+  await master("1", F);
+  two.play("1", F, 0);
+  await streamOn(F, (s) => s.plex_client_id !== null);
+  const viewer = await viewerIn(two.id);
+  viewer.send({ type: "watching", value: true });
+  viewer.send({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 0 });
+  const G = crypto.randomUUID();
+  await master("1", G);
+  viewer.send({ type: "variant-session", hlsSessionId: G, sessionOffset: 0 });
+  const own = await streamOn(G, (s) => s.engine === "ffmpeg" && s.plex_client_id !== null);
+  // Three of the reporter's looks, a second apart, with both streams up.
+  await sleep(3_000);
+  const players = new Set(timelines.filter((t) => t.q.ratingKey === "1")
+    .map((t) => t.h["x-plex-client-identifier"])
+    .filter((c) => c === `plex-discord-theater-${F}` || c === `plex-discord-theater-${G}`));
+  const hosts = await streamOn(F);
+  check("a room on two streams of a title is one row in Plex's Now Playing, on the first stream's player",
+    [own?.variant_id !== hosts?.variant_id, [...players]], [true, [`plex-discord-theater-${F}`]]);
+  check("  and the manager is told that row for each of them",
+    [hosts?.plex_client_id, own?.plex_client_id], [`plex-discord-theater-${F}`, `plex-discord-theater-${F}`]);
+
   for (const ws of sockets) ws.terminate();
   closeWebSocketServer();
-  for (const id of [A, B, C, D]) await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
+  for (const id of [A, B, C, D, F, G]) await fetch(`${origin}/api/plex/hls/session/${id}?reason=test`, { method: "DELETE" });
 }
 
 console.log("\n— previews made by ffmpeg, keyframes off the mount, segments kept in memory —");

@@ -11,10 +11,10 @@
  * so Tautulli offers no Terminate for it and Plex never says it was ended:
  * it is stopped from the activity.
  *
- * One row a stream: its room, its tracks and quality (a variant), and its
- * title — through the new session every seek starts it on, which reported
- * as a session of its own would be a stop and a new play in Tautulli's
- * history at every seek. Each is reported from the room's clock, so a pop-out
+ * One row a room and title, however many streams the room makes of it (a
+ * variant each: tracks, quality, what a player can decode) — through the new
+ * session every seek starts it on, which reported as a session of its own
+ * would be a stop and a new play in Tautulli's history at every seek. Each is reported from the room's clock, so a pop-out
  * or a host gone quiet doesn't stop the reports: every EVERY_MS while it
  * plays, is paused or waits for somebody's picture (buffering), and at once
  * when that changes or it jumps (a seek); "stopped" once it has been gone
@@ -30,7 +30,7 @@ export type ReportState = "playing" | "paused" | "buffering";
 
 /** A stream ffmpeg is making for a room, as the room has it now. */
 export interface StreamNow {
-  /** Its room, variant and title: the same through every seek's new session. */
+  /** Its room and title: the same through every seek's new session, and for each of the room's streams. */
   key: string;
   sessionId: string;
   ratingKey: string;
@@ -233,11 +233,12 @@ function postStopped(r: Reported, again = true, attempt = 0): Promise<void> {
 }
 
 /**
- * The player a stream (StreamNow.key) is reported to Plex as: its
+ * The player a room's title (StreamNow.key) is reported to Plex as: its
  * Player@machineIdentifier in /status/sessions, the same through every seek.
  * Null before its first report, and with FFMPEG_REPORT_TO_PLEX off. For the
  * upload budget (routes/qbt-manager.ts), which takes that row of Plex's as
- * the Theater's own rather than counting the stream twice.
+ * the Theater's own rather than counting the stream twice — the same row for
+ * every stream of the room's, each of which the manager counts on its own figure.
  */
 export function plexClientIdOf(key: string): string | null {
   if (!reportsToPlex()) return null;

@@ -665,8 +665,9 @@ export function getQbtManagerStreams() {
  * What the manager is told of a stream ffmpeg makes, which Plex can't tell it
  * (Phase 6): its bitrate, measured here (ffmpegBandwidth), and the player it
  * is reported to Plex as (plex-report.ts), whose row in Plex's sessions is
- * this stream's and no other. Nothing for one of Plex's, so neither a manager
- * that predates these nor Plex mode sees any change.
+ * its room's: one for every stream the room makes of the title, which the
+ * manager counts each on its own figure. Nothing for one of Plex's, so
+ * neither a manager that predates these nor Plex mode sees any change.
  */
 function ffmpegStreamFacts(roomId: string, room: Room, variant: Variant): {
   engine?: "ffmpeg";
@@ -676,7 +677,7 @@ function ffmpegStreamFacts(roomId: string, room: Room, variant: Variant): {
 } {
   const sid = variant.hlsSessionId;
   if (!sid || !room.state.ratingKey || !ffmpegSessionKnown(sid)) return {};
-  const clientId = plexClientIdOf(ffmpegStreamKey(roomId, variant.key, room.state.ratingKey));
+  const clientId = plexClientIdOf(ffmpegStreamKey(roomId, room.state.ratingKey));
   if (!isFfmpegSession(sid)) {
     // Its run stopped, and the next one not taken up yet. A host alone on its
     // variant who seeks past what is made, or whose player recovers, stops the
@@ -702,30 +703,34 @@ function ffmpegStreamFacts(roomId: string, room: Room, variant: Variant): {
   };
 }
 
-/** A room's variant of a title, as Plex's Now Playing has it: one stream
- *  through every seek's new session. */
-function ffmpegStreamKey(instanceId: string, variantKey: string, ratingKey: string): string {
-  return `${instanceId}:${variantKey}:${ratingKey}`;
+/** A room's title, as Plex's Now Playing has it: one row however many
+ *  streams the room makes of it, through every seek's new session. */
+function ffmpegStreamKey(instanceId: string, ratingKey: string): string {
+  return `${instanceId}:${ratingKey}`;
 }
 
 /**
- * The streams ffmpeg is making that somebody watches, for Plex's Now Playing
- * (ffmpeg/plex-report.ts). One a room's variant and title, keyed so that a
- * seek's new session is the same stream; the host's while the host is away
- * from the player too, as the room keeps it for them.
+ * What ffmpeg is making that somebody watches, for Plex's Now Playing
+ * (ffmpeg/plex-report.ts): one a room and title, keyed so that a seek's new
+ * session is the same row. A room watching on two streams — a viewer on an
+ * 8-bit stream of their own beside the host's 10-bit copy, as Ghost Stories
+ * on 10 November — was two rows of the same title on the same player name,
+ * which read as one stream shown twice. The host's stream while it is one of
+ * ffmpeg's, the host's while they are away from the player too, as the room
+ * keeps it for them; otherwise the first one somebody watches.
  */
 function ffmpegStreamsNow(): StreamNow[] {
   const out: StreamNow[] = [];
   for (const [instanceId, room] of rooms) {
     const s = room.state;
     if (!s.ratingKey) continue;
+    const live = [...s.variants.values()].filter((v) =>
+      v.hlsSessionId !== null && isFfmpegSession(v.hlsSessionId) &&
+      (v.key === s.hostVariantKey || membersOf(room, v.key).some((c) => c.isWatching)));
+    const v = live.find((x) => x.key === s.hostVariantKey) ?? live[0];
+    if (!v?.hlsSessionId) continue;
     const state: ReportState = !s.playing ? "paused" : s.waiting || !s.positionConfirmed ? "buffering" : "playing";
-    const positionS = interpolatedPosition(s);
-    for (const v of s.variants.values()) {
-      if (!v.hlsSessionId || !isFfmpegSession(v.hlsSessionId)) continue;
-      if (v.key !== s.hostVariantKey && !membersOf(room, v.key).some((c) => c.isWatching)) continue;
-      out.push({ key: ffmpegStreamKey(instanceId, v.key, s.ratingKey), sessionId: v.hlsSessionId, ratingKey: s.ratingKey, positionS, state });
-    }
+    out.push({ key: ffmpegStreamKey(instanceId, s.ratingKey), sessionId: v.hlsSessionId, ratingKey: s.ratingKey, positionS: interpolatedPosition(s), state });
   }
   return out;
 }

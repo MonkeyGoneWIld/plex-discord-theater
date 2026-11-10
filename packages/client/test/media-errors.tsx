@@ -33,7 +33,6 @@ const episode = (ratingKey: string): PlexItem => ({
 const next: PlexItem = { ...episode("next"), title: "Episode Two", index: 2 };
 window.fetch = async (input) => {
   const url = String(input);
-  if (url.includes("/api/plex/config")) return Response.json({ vpsRelay: true });
   if (url.includes("/played-threshold")) return Response.json({ threshold: 0.9 });
   if (url.includes("/meta/")) return Response.json({ ...episode("x"), partId: null, markers: [], genres: [], versions: [], audioTracks: [], subtitleTracks: [] });
   if (url.includes("/siblings/")) return Response.json({ episode: true, prev: null, next });
@@ -156,7 +155,7 @@ function Fixture() {
     {scenario && (
       <Player key={scenario.key} item={episode(scenario.ratingKey)} isHost selfUserId="self" subtitles={false}
         sharePresenceDetails={false} onSharePresenceDetails={() => {}} onBack={() => setScenario(null)}
-        syncState={state} syncActions={syncActions} presentation="full" />
+        syncState={state} syncActions={syncActions} presentation="full" peerToPeer={false} />
     )}
   </>;
 }

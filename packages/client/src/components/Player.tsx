@@ -17,7 +17,7 @@ import { PictureSubtitleLayer } from "./PictureSubtitleLayer";
 import { StyledSubtitleLayer } from "./StyledSubtitleLayer";
 import { SubtitleSettings } from "./SubtitleOffset";
 import { ZoomPanel } from "./ZoomPanel";
-import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchConfig, fetchPlayedThreshold, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion, mediaIndexHolding } from "../lib/api";
+import { hlsMasterUrl, pingSession, stopSession, getSessionToken, fetchPlayedThreshold, fetchMeta, fetchSiblingEpisodes, invalidateMeta, versionOf, fetchSessionVersion, mediaIndexHolding } from "../lib/api";
 import { formatMediaTitle } from "../lib/format";
 import { logEvent, logWarn, logError } from "../lib/log";
 import { capsUsed, frameTransfer, hdrScreen, hdrScreenQuery, markUnplayable, type Cap } from "../lib/codecs";
@@ -897,7 +897,7 @@ function trimMediaBuffer(hls: Hls, video: HTMLVideoElement, backS: number): Reco
 }
 
 /**
- * Pull the integer segment index out of an HLS segment URL — Plex/VPS segments
+ * Pull the integer segment index out of an HLS segment URL — Plex's segments
  * end in `00179.ts` (optionally `media-00179.ts`, optionally `?query`), the
  * ffmpeg engine's fMP4 ones in `00179.m4s`, and the pieces it cuts a long one
  * into in `00179aa.m4s`, `00179ab.m4s`…, each read as the segment's number.
@@ -967,6 +967,12 @@ interface PlayerProps {
    *  tile in a call's grid (useDiscord). The picture is copied onto a canvas
    *  then, as in this player's PiP — see the <video>. */
   smallInDiscord?: boolean;
+  /**
+   * Whether the players share segments with each other (P2P), as they always
+   * do in the app. Off only in the DOM fixtures under test/, whose streams
+   * reach plain hls.js over XHR from a server of their own.
+   */
+  peerToPeer?: boolean;
 }
 
 const PIP_DEFAULT_ASPECT = 16 / 9;
@@ -1032,7 +1038,7 @@ function defaultPipDock(): PipDock {
  */
 const PIP_MIN_WATCHED_SHARE = 0.25;
 
-export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, onSharePresenceDetails, subtitles, resumePosition, mediaIndex, audioStreamId, subtitleStreamId, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext, presentation = "full", onMinimize, onRestore, smallInDiscord = false }: PlayerProps) {
+export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, onSharePresenceDetails, subtitles, resumePosition, mediaIndex, audioStreamId, subtitleStreamId, onBack, onFinished, onInvite, syncState, syncActions, onPlayNext, presentation = "full", onMinimize, onRestore, smallInDiscord = false, peerToPeer = true }: PlayerProps) {
   const isPip = presentation === "pip";
   /** isPip, for the health sample's timer. */
   const isPipRef = useRef(isPip);
@@ -1048,7 +1054,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   selfUserIdRef.current = selfUserId;
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
-  const [vpsRelay, setVpsRelay] = useState<boolean | null>(null); // null = not yet loaded
   const [buffering, setBuffering] = useState(true);
   // "Host is seeking…", raised on each seek somebody else makes and cleared
   // once the picture is back (see effect below).
@@ -4108,20 +4113,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     return () => window.clearInterval(id);
   }, []);
 
-  // Fetch VPS relay config once on mount — HLS init waits for this
-  useEffect(() => {
-    fetchConfig()
-      .then((config) => setVpsRelay(config.vpsRelay))
-      .catch(() => setVpsRelay(false)); // default to non-VPS (P2P mode) if config fails
-  }, []);
-
-  // In P2P mode, picture subtitles, styled subtitles' fonts and previews from
+  // Picture subtitles, styled subtitles' fonts and previews from
   // the other players on this title when they have them, as the film's
   // segments are (lib/sideShare).
   useEffect(() => {
-    if (vpsRelay !== false) return;
+    if (!peerToPeer) return;
     return joinSideSwarm(item.ratingKey, { announce: [trackerAnnounce(getSessionToken())], rtcConfig: RTC_CONFIG });
-  }, [vpsRelay, item.ratingKey]);
+  }, [peerToPeer, item.ratingKey]);
   // Alone in the room: what can wait isn't held for other players.
   const othersInRoom = (syncState?.participants ?? []).filter((p) => p.userId !== selfUserId).length;
   useEffect(() => {
@@ -4704,17 +4702,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
 
   // Single HLS session — no mid-stream switching
   useEffect(() => {
-    // Wait for the VPS relay config before touching anything. It arrives a beat
-    // after mount, so this effect always runs once with vpsRelay still null and
-    // then again once it resolves — and the state below is consumed on read:
-    // the adopted session id and the resume offset are both one-shot. Bailing
-    // out here rather than inside start() is what keeps the second run from
-    // finding them already spent (which started every resume at 0:00).
-    //
-    // It also avoids a double HLS start: initializing on the false default and
-    // then tearing down and re-initializing when the real config lands.
-    if (vpsRelay === null) return;
-
     let mounted = true;
     // Where this stream stops being the title — set by endAtBreak, below, once
     // a fragment past the point the title counts as finished won't play.
@@ -4733,7 +4720,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // good transcode and rebuffered for five seconds over a value it no longer
     // reads. subtitlesOnRef carries the real answer, and a genuine track change
     // rebuilds through the stream assignment.
-    const deps = { ratingKey: item.ratingKey, followSessionId, retryKey, vpsRelay };
+    const deps = { ratingKey: item.ratingKey, followSessionId, retryKey, peerToPeer };
     const prev = hlsDepsRef.current;
     const changed = prev
       ? (Object.keys(deps) as Array<keyof typeof deps>).filter((k) => deps[k] !== prev[k])
@@ -4953,7 +4940,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       offsetS: startOffset,
       lastGoodPosS: lastGoodPositionRef.current,
       subtitles: subtitlesOnRef.current,
-      vpsRelay,
+      ...(peerToPeer ? {} : { p2p: false }),
       roomPosS: syncStateRef.current?.position ?? "none",
     });
     // A new stream: the loading screen starts over from "Starting the stream".
@@ -5070,10 +5057,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           levelLoadingRetryDelay: 1000,
           startFragPrefetch: true,
           xhrSetup: (xhr: XMLHttpRequest, urlStr: string) => {
-            // Only send auth header to same-origin requests (manifests, pings).
-            // VPS segment URLs are absolute (https://vps/seg/...) and authenticated
-            // via ?key= query param. Sending Authorization to a cross-origin URL
-            // triggers a CORS preflight that nginx's ?key= check would reject.
+            // Only send auth header to same-origin requests (manifests, pings):
+            // sent to another origin, it would need a CORS preflight.
             const isSameOrigin = urlStr.startsWith("/") || urlStr.startsWith(location.origin);
             // An ffmpeg stream's init segment for this screen: HDR labelled
             // for each screen has one for a screen in SDR and one for HDR
@@ -5178,8 +5163,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
          *  LEVEL_LOADED. */
         let skipLandingAt: number | null = null;
 
-        if (!vpsRelay) {
-          // P2P mode — peers share segments via WebRTC. Copied segments come
+        if (peerToPeer) {
+          // Peers share segments via WebRTC. Copied segments come
           // in parts (lib/segmentParts), and the one the picture waits on is
           // taken from another player when our own download of it crawls
           // (p2pCorePatch.ts, lib/takeFromPeer).
@@ -5561,7 +5546,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             },
           });
         } else {
-          // VPS mode — segments come from VPS cache, no P2P needed
+          // The DOM fixtures' streams: plain hls.js — see peerToPeer.
           hls = new Hls(hlsConfig);
         }
 
@@ -7483,7 +7468,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     };
     // setRestartPending is a stable useCallback with no deps; listing it keeps
     // the lint rule honest without changing when this effect runs.
-  }, [item.ratingKey, subtitles, destroyLocal, followSessionId, retryKey, vpsRelay, setRestartPending]);
+  }, [item.ratingKey, subtitles, destroyLocal, followSessionId, retryKey, peerToPeer, setRestartPending]);
 
   // Viewer: respond to explicit host commands (play/pause/resume/seek)
   // Does NOT fire on heartbeats — both clients share the same HLS stream
@@ -9832,12 +9817,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
         </div>
       )}
 
-      {vpsRelay !== null && (
-        <StatsOverlay
+      <StatsOverlay
           visible={!isPip && showStats}
           videoRef={videoRef}
           hlsRef={hlsRef}
-          vpsRelay={vpsRelay}
           sessionId={sessionIdRef.current}
           p2pStatsRef={p2pStatsRef}
           notes={streamNotes}
@@ -9853,7 +9836,6 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           syncInfo={statsSync}
           onClose={() => setShowStats(false)}
         />
-      )}
 
       {!isPip && <Controls
         videoRef={videoRef}

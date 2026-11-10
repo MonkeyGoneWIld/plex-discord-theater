@@ -1138,14 +1138,6 @@ export function stopSession(sessionId: string, reason?: string): Promise<void> {
   return apiDelete(`/api/plex/hls/session/${encodeURIComponent(sessionId)}${qs}`);
 }
 
-export interface AppConfig {
-  vpsRelay: boolean;
-}
-
-export function fetchConfig(): Promise<AppConfig> {
-  return apiGet("/api/plex/config");
-}
-
 /** Fraction of runtime (0-1) at which the Plex server counts a video as watched. */
 export async function fetchPlayedThreshold(): Promise<number> {
   const { threshold } = await apiGet<{ threshold: number }>("/api/plex/played-threshold");

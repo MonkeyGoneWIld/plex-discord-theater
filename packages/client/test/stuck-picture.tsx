@@ -30,7 +30,6 @@ const episode: PlexItem = {
 };
 window.fetch = async (input) => {
   const url = String(input);
-  if (url.includes("/api/plex/config")) return Response.json({ vpsRelay: true });
   if (url.includes("/played-threshold")) return Response.json({ threshold: 0.9 });
   if (url.includes("/meta/")) return Response.json({ ...episode, partId: null, markers: [], genres: [], versions: [], audioTracks: [], subtitleTracks: [] });
   if (url.includes("/siblings/")) return Response.json({ episode: true, prev: null, next: null });
@@ -53,7 +52,7 @@ const state = { participants: [], queue: [], commandSeq: 0, stateSeq: 0, seekSeq
 createRoot(document.getElementById("root")!).render(
   <Player item={episode} isHost selfUserId="self" subtitles={false}
     sharePresenceDetails={false} onSharePresenceDetails={() => {}} onBack={() => {}}
-    syncState={state} syncActions={syncActions} presentation="full" />,
+    syncState={state} syncActions={syncActions} presentation="full" peerToPeer={false} />,
 );
 
 const startedAt = performance.now();

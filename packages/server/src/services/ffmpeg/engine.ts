@@ -34,8 +34,8 @@
  * is; a title that keeps dying is left to Plex.
  *
  * The URLs are Plex-shaped — /video/:/transcode/universal/session/<key>/base/
- * — with a key of this server's own, so the segment route, the VPS relay's
- * nginx rule and the player all work unchanged. Nothing with one of these keys
+ * — with a key of this server's own, so the segment route and the player
+ * work unchanged. Nothing with one of these keys
  * is ever sent to Plex.
  */
 import { spawn, type ChildProcess } from "node:child_process";

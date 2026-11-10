@@ -55,8 +55,6 @@ const app = express();
 app.set("trust proxy", 1);
 const PORT = parseInt(process.env.PORT || "3000", 10);
 
-// VPS relay origin for CSP — allow browser to fetch segments from VPS
-const vpsRelayOrigin = process.env.VPS_RELAY_URL?.replace(/\/$/, "");
 
 app.use(
   helmet({
@@ -72,7 +70,7 @@ app.use(
         fontSrc: ["'self'", "https://fonts.gstatic.com"],
         // blob: — hls.js attaches its MediaSource via URL.createObjectURL, so
         // without it the <video> src is refused.
-        mediaSrc: ["'self'", "blob:", ...(vpsRelayOrigin ? [vpsRelayOrigin] : [])],
+        mediaSrc: ["'self'", "blob:"],
         // data: — Vite inlines any asset under 4 KB, which is five of the six
         // ratings icons. Under 'self' alone they were blocked and rendered as
         // broken images, while the one file over the limit loaded fine.
@@ -80,7 +78,7 @@ app.use(
         // hls.js builds its transmuxer worker from a blob. Refused, it falls
         // back to demuxing on the main thread — silently, no error, just jank.
         workerSrc: ["'self'", "blob:"],
-        connectSrc: ["'self'", "https://discord.com", "https://*.discord.com", "https://*.discordsays.com", "wss://*.discord.gg", "wss://*.discordsays.com", "wss:", "ws:", ...(vpsRelayOrigin ? [vpsRelayOrigin] : [])],
+        connectSrc: ["'self'", "https://discord.com", "https://*.discord.com", "https://*.discordsays.com", "wss://*.discord.gg", "wss://*.discordsays.com", "wss:", "ws:"],
         // Discord embeds Activities in an iframe from *.discordsays.com —
         // frame-ancestors must allow it or the browser blocks the embed
         frameAncestors: ["'self'", "https://discord.com", "https://*.discord.com", "https://*.discordsays.com"],
@@ -299,6 +297,12 @@ app.get("*", (req, res) => {
 function reportIntegrations(): void {
   const on = (name: string, enabled: boolean, note = "") =>
     `${enabled ? "✓" : "·"} ${name}${enabled || !note ? "" : ` (${note})`}`;
+  // The VPS relay is gone: Discord's proxy, and its cache, is the relay now.
+  // A server still given its settings says they do nothing, rather than
+  // leaving whoever set them to wonder why the relay sees no traffic.
+  if (process.env.VPS_RELAY_URL || process.env.VPS_RELAY_KEY) {
+    console.warn("[Config] VPS_RELAY_URL and VPS_RELAY_KEY are no longer used: segments go through Discord's proxy, which caches them for every viewer, and the players share them. They can be removed.");
+  }
   console.log(
     "[Config]",
     [
@@ -306,7 +310,6 @@ function reportIntegrations(): void {
       on("TVDB", !!process.env.TVDB_API_KEY?.trim(), "missing-episode lists fall back to TMDB numbering"),
       on("Requests", !!process.env.SEERR_URL, "Seerr request flow off"),
       on("Discover", !!process.env.PLEX_ACCOUNT_TOKEN, "online search detail may 401"),
-      on("VPS relay", !!(process.env.VPS_RELAY_URL && process.env.VPS_RELAY_KEY), "P2P mode"),
       on("HEVC", process.env.HEVC_TRANSCODE !== "0", "H.264 only"),
       on(
         `Direct Stream for files averaging up to ${COPY_LIMIT_KBPS} kbps`,

@@ -220,27 +220,6 @@ export function requireAuth(
   res: Response,
   next: NextFunction,
 ): void {
-  // VPS relay key bypass — segments proxied from the VPS have ?key= instead
-  // of a Bearer token.  Scoped to the segment proxy endpoint ONLY so the key
-  // cannot be used to access other Plex API routes (library browsing, metadata,
-  // search, etc.).  Uses constant-time comparison to prevent timing attacks.
-  const vpsKey = process.env.VPS_RELAY_KEY;
-  if (
-    vpsKey &&
-    typeof req.query.key === "string" &&
-    req.originalUrl.startsWith("/api/plex/hls/seg")
-  ) {
-    const keyBuf = Buffer.from(req.query.key);
-    const expectedBuf = Buffer.from(vpsKey);
-    if (
-      keyBuf.length === expectedBuf.length &&
-      crypto.timingSafeEqual(keyBuf, expectedBuf)
-    ) {
-      next();
-      return;
-    }
-  }
-
   const header = req.headers.authorization;
   const token = header?.startsWith("Bearer ")
     ? header.slice(7)

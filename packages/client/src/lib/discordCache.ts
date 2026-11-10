@@ -2,8 +2,8 @@
  * How much of what came over HTTP Discord's own cache sent (the Cloudflare in
  * front of the activity, which keeps the server's segments: EDGE_SEGMENT_ROUTE)
  * against the server, for Stats for nerds. From segmentParts' edgeTotals, its
- * answers since the page opened. Null when nothing came through it: the VPS
- * relay, or a browser outside Discord.
+ * answers since the page opened. Null when nothing came through it: a browser
+ * outside Discord.
  */
 export interface DiscordCacheShare {
   /** The share of the bytes Discord's cache sent, 0 to 100. */

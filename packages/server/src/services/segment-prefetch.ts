@@ -233,7 +233,7 @@ function overBudget(session: PrefetchSession): boolean {
  *
  * Bytes are the real bound (see CACHE_BUDGET_BYTES); the entry count is a
  * secondary one. Served segments go first — the client already has them, and
- * with a VPS relay they are in nginx's cache too — then oldest-first regardless.
+ * Discord's cache keeps them for the other viewers — then oldest-first regardless.
  */
 function evictIfNeeded(session: PrefetchSession): void {
   if (!overBudget(session)) return;

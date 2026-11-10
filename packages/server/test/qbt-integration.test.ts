@@ -55,12 +55,11 @@ assert.equal(second.sequence, first.sequence + 1);
 assert.equal(second.instance_id, first.instance_id);
 assert.equal(first.delivery_mode, "direct_p2p");
 assert.equal(JSON.stringify(first).includes("secret") || JSON.stringify(first).includes("token"), false);
-// The relay is used only with both its URL and its key (routes/plex.ts); with
-// the URL alone segments go out from here and the players share them.
+// The VPS relay is gone: a server still given its settings goes on saying
+// direct_p2p, which managers up to v1.2.5 require.
 process.env.VPS_RELAY_URL = "https://relay.invalid";
-assert.equal(((await (await authorized()).json()) as Msg).delivery_mode, "direct_p2p");
 process.env.VPS_RELAY_KEY = "relay-key";
-assert.equal(((await (await authorized()).json()) as Msg).delivery_mode, "vps_relay");
+assert.equal(((await (await authorized()).json()) as Msg).delivery_mode, "direct_p2p");
 delete process.env.VPS_RELAY_URL;
 delete process.env.VPS_RELAY_KEY;
 const clients: Client[] = [];

@@ -630,7 +630,7 @@ export function updateDirectStreamPosition(sessionId: string, positionS: number)
  * than an empty list it would only reload in twelve seconds.
  *
  * `urlFor` turns a Plex segment path into the URL clients fetch it from, which
- * is routes/plex.ts's business (the proxy, or the VPS relay). It is given the
+ * is routes/plex.ts's business (the proxy). It is given the
  * segment's size too, which the player uses to fetch it in parts — see
  * segmentPart.
  */

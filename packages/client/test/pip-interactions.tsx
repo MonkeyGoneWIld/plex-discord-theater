@@ -13,9 +13,11 @@ const next = { ...item, ratingKey: "pip-fixture-next", title: "The next chapter"
 const resumed: PlexItem = { ratingKey: "pip-fixture-resumed", title: "Half watched", type: "movie", thumb: null };
 // A runtime to measure a lone host's watching against: a quarter is 25s.
 const timed: PlexItem = { ...item, ratingKey: "pip-fixture-timed", title: "A hundred seconds", duration: 100_000 };
-// Off for everything but the resume check. While /config goes unanswered the
-// player never starts a stream, which keeps the gesture checks free of network
-// noise; the resume check needs the stream start, where the offset is chosen.
+// Off for everything but the resume check. While the title's details go
+// unanswered the player never makes its stream (it waits on them for the
+// quality to ask for), which keeps the gesture checks free of network noise;
+// the resume check needs the stream start, where the offset is chosen, and
+// that comes before.
 let streaming = false;
 // The player's own account of each stream it starts, and at what offset.
 const hlsLog: Array<{ msg: string; data: Record<string, unknown> }> = [];
@@ -28,10 +30,13 @@ console.log = (...args: unknown[]) => {
 };
 window.fetch = async (input) => {
   const url = String(input);
-  if (url.includes("/config")) return streaming ? Response.json({ vpsRelay: true }) : new Promise<Response>(() => {});
   if (url.includes("/played-threshold")) return Response.json({ threshold: 0.9 });
   if (url.includes("/siblings/")) return Response.json({ episode: true, prev: null, next });
-  if (url.includes("/meta/")) return Response.json({ ...item, partId: null, markers: [], genres: [], versions: [], audioTracks: [], subtitleTracks: [] });
+  if (url.includes("/meta/")) {
+    return streaming
+      ? Response.json({ ...item, partId: null, markers: [], genres: [], versions: [], audioTracks: [], subtitleTracks: [] })
+      : new Promise<Response>(() => {});
+  }
   return Response.json({});
 };
 const pause = (ms = 400) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -296,7 +301,7 @@ function Fixture() {
       <pre aria-live="polite">{results.join("\n")}</pre>
     </main>
     <div id="rect">{geometry}</div>
-    {!closed && <Player key={generation} item={current.item} resumePosition={current.resumePosition} isHost={host} selfUserId="self" subtitles={false} sharePresenceDetails={false} onSharePresenceDetails={() => {}} onBack={leave} syncState={state} presentation={mode} smallInDiscord={small} onMinimize={minimize} onRestore={restore} />}
+    {!closed && <Player key={generation} item={current.item} resumePosition={current.resumePosition} isHost={host} selfUserId="self" subtitles={false} sharePresenceDetails={false} onSharePresenceDetails={() => {}} onBack={leave} syncState={state} presentation={mode} smallInDiscord={small} onMinimize={minimize} onRestore={restore} peerToPeer={false} />}
   </>;
 }
 createRoot(document.getElementById("root")!).render(<Fixture />);

@@ -91,7 +91,7 @@ import { reportAllStopped } from "../services/ffmpeg/plex-report.js";
 const router = Router();
 
 /** The Discord user behind this request, from the session token requireAuth
- *  already validated. Null for the VPS relay key, which carries no user. */
+ *  already validated. Null for a request that carries none. */
 function sessionUserId(req: Request): string | null {
   const header = req.headers.authorization;
   const token = header?.startsWith("Bearer ")
@@ -133,11 +133,6 @@ const plexBase = process.env.PLEX_URL?.replace(/\/$/, "") ?? "";
 const PLEX_URL_REGEX = new RegExp(escapeRegExp(plexBase) + "(/[^\\s]{1,500})", "g");
 const RELATIVE_URL_REGEX = /^(?!#)(?!https?:\/\/)(?!\/api\/plex\/)(.{1,500}\.(?:m3u8|ts).{0,200})$/gm;
 const PLEX_TOKEN_REGEX = /[?&]X-Plex-Token=[^&\s]*/g;
-
-// VPS relay config — when set, HLS segment URLs point to the VPS
-// instead of proxying through this Express server.
-const VPS_RELAY_URL = process.env.VPS_RELAY_URL?.replace(/\/$/, "");
-const VPS_RELAY_KEY = process.env.VPS_RELAY_KEY;
 
 /** Parse a positive-integer env var, falling back to a default. */
 function envInt(name: string, fallback: number): number {
@@ -459,16 +454,6 @@ interface PlexTag {
 }
 
 // ─── Library browsing ────────────────────────────────────────────
-
-/**
- * GET /api/plex/config
- * Returns client-facing configuration (VPS relay status, etc.)
- */
-router.get("/config", (_req: Request, res: Response) => {
-  res.json({
-    vpsRelay: !!(VPS_RELAY_URL && VPS_RELAY_KEY),
-  });
-});
 
 /**
  * GET /api/plex/played-threshold
@@ -6320,7 +6305,7 @@ router.get(
  */
 /**
  * Transcoded .ts segments are immutable for the life of a session — allow
- * clients and the VPS nginx cache to reuse them for 5 minutes so hls.js
+ * clients and Discord's cache (EDGE_SEGMENT_ROUTE) to reuse them for 5 minutes so hls.js
  * recovery/retry refetches and multi-viewer fan-out don't hit Plex again.
  * Sub-manifests grow as the transcode progresses and must never be cached.
  */
@@ -6381,7 +6366,7 @@ async function serveMeasured(
   if (segPath.endsWith(".m3u8")) {
     const authToken = req.query.token as string | undefined;
     // Each segment's size rides on its URL, for the player to fetch it in
-    // parts — see segmentPart. Only through here: the relay serves whole files.
+    // parts — see segmentPart.
     const playlist = await stream.playlist((path, bytes) => {
       const url = segProxyUrl(path, authToken);
       return url.startsWith("/api/") ? `${url}&n=${bytes}` : url;
@@ -7209,21 +7194,7 @@ const TRANSCODE_PREFIX = "/video/:/transcode/universal/";
 const EDGE_SEGMENT_ROUTE = "/api/plex/hls/seg.mp4";
 
 function segProxyUrl(plexPath: string, authToken?: string): string {
-  if (VPS_RELAY_URL && VPS_RELAY_KEY && !plexPath.endsWith(".m3u8")) {
-    // VPS mode: only route .ts segments through VPS, NOT sub-manifests.
-    // Sub-manifests (.m3u8) must stay on Express so rewriteManifestUrls() can
-    // rewrite their bare filenames (e.g. "00000.ts") into full proxied URLs.
-    // If sub-manifests went to VPS, hls.js would resolve "00000.ts" relative to
-    // the VPS URL, dropping the ?key= query param (RFC 3986) → nginx 403.
-    // Sub-manifests are ~2KB so routing them through Express has negligible
-    // bandwidth impact.
-    // Use relative path (/theater/seg/...) so requests go through Discord's
-    // Activity proxy (which forwards to theater.zuby.website via URL Mapping).
-    // Absolute URLs to the VPS would be blocked by Discord's iframe CSP.
-    return `/theater/seg${plexPath}?key=${encodeURIComponent(VPS_RELAY_KEY)}`;
-  }
-  // No VPS, or sub-manifest — proxy through Express. A segment at
-  // EDGE_SEGMENT_ROUTE, for Discord's cache to keep (see there).
+  // A segment at EDGE_SEGMENT_ROUTE, for Discord's cache to keep (see there).
   if (!plexPath.endsWith(".m3u8") && !authToken) return `${EDGE_SEGMENT_ROUTE}?p=${encodeURIComponent(plexPath)}`;
   let url = `/api/plex/hls/seg?p=${encodeURIComponent(plexPath)}`;
   if (authToken) url += `&token=${encodeURIComponent(authToken)}`;

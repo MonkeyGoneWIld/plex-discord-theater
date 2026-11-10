@@ -42,7 +42,6 @@ export interface LastSegment {
 interface StatsOverlayProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   hlsRef: React.RefObject<Hls | null>;
-  vpsRelay: boolean;
   sessionId: string | null;
   p2pStatsRef: React.RefObject<P2PStats>;
   /** The server's own account of the stream — see StreamNotes. */
@@ -262,7 +261,7 @@ function Bar({ parts, children }: { parts: Array<[number, string]>; children?: R
 }
 
 export function StatsOverlay({
-  videoRef, hlsRef, vpsRelay, sessionId, p2pStatsRef, notes, quality, downloadedAheadS, subtitle, subtitleStatusRef,
+  videoRef, hlsRef, sessionId, p2pStatsRef, notes, quality, downloadedAheadS, subtitle, subtitleStatusRef,
   previewPartId = null, previewStatusRef, lastSegmentRef, downloadMeter, syncInfo, runtimeS = null, visible, onClose,
 }: StatsOverlayProps) {
   // Read by the poll, which is set up once.
@@ -559,11 +558,10 @@ export function StatsOverlay({
   // Where the last segment came from, not the room's way of sharing them: it
   // said "P2P mesh" with every segment coming from the server (18 Oct).
   const last = lastSegmentRef?.current ?? null;
-  const delivery = !last
-    ? vpsRelay ? "VPS relay" : "—"
+  const delivery = !last ? "—"
     : last.fromPeer ? "Peer (WebRTC)"
     : last.fromCache ? "Local cache"
-    : vpsRelay ? "VPS relay (HTTP)" : "Server (HTTP)";
+    : "Server (HTTP)";
   const graphMax = (values: Array<number | null>, floor: number, also = 0) =>
     Math.max(floor, also, ...values.filter((v): v is number => v !== null)) * 1.15;
 
@@ -655,7 +653,7 @@ export function StatsOverlay({
       ],
       visual: <Graph values={history.speed} max={graphMax(history.speed, 1_000_000, streamBps ?? 0)} health={speedState} height={26} level={streamBps} />,
     },
-    ...(vpsRelay ? [] : [{
+    {
       label: "Peers", section: "peers" as Section,
       value: `${connected} connected · ${traffic.fromPeersPct}% from peers`,
       extra: traffic.table,
@@ -668,7 +666,7 @@ export function StatsOverlay({
           </div>
         </>
       ) : null,
-    }]),
+    },
     ...(cache ? [{
       label: "Discord cache", section: "peers" as Section,
       value: `${cache.pct}% · ${formatBytes(cache.fromCache)} of ${formatBytes(cache.fromCache + cache.fromServer)}`,

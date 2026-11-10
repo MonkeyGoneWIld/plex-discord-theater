@@ -536,7 +536,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (p === "/api/plex/config") return json(res, { vpsRelay: false });
   if (p === "/api/plex/played-threshold") return json(res, { threshold: 0.9 });
   if (p.startsWith("/api/plex/meta/")) return json(res, meta(p.split("/").pop()!));
   if (p.startsWith("/api/plex/siblings/")) return json(res, { episode: false, prev: null, next: null });

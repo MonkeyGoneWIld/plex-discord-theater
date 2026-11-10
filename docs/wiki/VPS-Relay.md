@@ -13,7 +13,12 @@ in the repository.
 
 Without the relay, every viewer downloads the stream from your home server,
 so your upload grows with the room. Viewers on the same stream share some
-segments peer to peer, but that depends on their connections.
+segments peer to peer, but that depends on their connections. Since v2.2.0,
+Discord's own proxy also keeps a copy of each segment for a short time, so
+viewers who reach Discord through the same data center often get it from
+there and not from your server. With two viewers, about half the segments
+came from Discord's copy in testing. Viewers in other regions still each
+download from your server.
 
 | Viewers | Upload at 20 Mbps each |
 |---|---|

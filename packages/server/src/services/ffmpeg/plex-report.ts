@@ -46,6 +46,14 @@ const LOOK_MS = 1_000;
 const JUMP_S = 5;
 /** Gone this long before Plex hears it stopped: a seek's restart is back sooner. */
 const GONE_MS = 15_000;
+/**
+ * A "stopped" Plex didn't take is sent again after each of these. Plex keeps a
+ * paused stream in Now Playing until it is told it stopped, and drops it on
+ * its own only hours later: Ali G on 8 November, paused, then left, stayed
+ * there for hours. It was told once, and a report that failed was said in the
+ * log only the first time, so nothing showed it. Exported for the tests.
+ */
+export const STOP_RETRY_MS = [15_000, 60_000, 5 * 60_000, 15 * 60_000];
 
 interface Reported {
   ratingKey: string;
@@ -106,7 +114,8 @@ function sayOnce(cause: string, msg: string, fields: Record<string, unknown>): v
   logEvent("PlexReport", msg, fields);
 }
 
-async function post(r: Reported, state: ReportState | "stopped", positionS: number): Promise<void> {
+/** Null when Plex took it; otherwise why not. */
+async function post(r: Reported, state: ReportState | "stopped", positionS: number): Promise<string | null> {
   try {
     const duration = await durationOf?.(r.ratingKey).catch(() => undefined);
     const res = await plexFetch(
@@ -133,14 +142,18 @@ async function post(r: Reported, state: ReportState | "stopped", positionS: numb
       sayOnce(`status ${res.status}`, "Plex refused a timeline report; streams may not show in Now Playing", {
         status: res.status, body: body.slice(0, 160) || "none",
       });
+      return `status ${res.status}`;
     } else if (/terminationCode|terminationText/.test(body)) {
       // Never seen in Phase 0, where Tautulli had nothing to terminate with.
       sayOnce(`terminated ${r.clientId}`, "Plex says a stream was ended there; it plays on until stopped from the activity", {
         client: r.clientId, ratingKey: r.ratingKey, body: body.slice(0, 200),
       });
     }
+    return null;
   } catch (err) {
-    sayOnce("unreachable", "couldn't tell Plex what is playing", { error: err instanceof Error ? err.message : String(err) });
+    const error = err instanceof Error ? err.message : String(err);
+    sayOnce("unreachable", "couldn't tell Plex what is playing", { error });
+    return error;
   }
 }
 
@@ -185,7 +198,7 @@ export async function plexReportTick(now = Date.now()): Promise<void> {
     r.postedState = s.state;
     r.postedPositionS = s.positionS;
     const it = r;
-    it.posting = post(it, s.state, s.positionS).finally(() => { it.posting = null; });
+    it.posting = post(it, s.state, s.positionS).then(() => {}).finally(() => { it.posting = null; });
     posts.push(it.posting);
   }
   for (const [key, r] of reported) {
@@ -200,9 +213,23 @@ export async function plexReportTick(now = Date.now()): Promise<void> {
 }
 
 /** "stopped", once a report still on its way has got there: one landing after
- *  it put the stream back in Now Playing. */
-function postStopped(r: Reported): Promise<void> {
-  return (r.posting ?? Promise.resolve()).then(() => post(r, "stopped", r.positionS));
+ *  it put the stream back in Now Playing. Sent again until Plex takes it
+ *  (STOP_RETRY_MS), every failure said; `again` says none is sent again. */
+function postStopped(r: Reported, again = true, attempt = 0): Promise<void> {
+  return (r.posting ?? Promise.resolve()).then(async () => {
+    const failed = await post(r, "stopped", r.positionS);
+    const fields = { session: r.sessionId.substring(0, 8), ratingKey: r.ratingKey, client: r.clientId, attempt: attempt + 1 };
+    if (!failed) {
+      if (attempt > 0) logEvent("PlexReport", "Plex took a stream's stop, sent again", fields);
+      return;
+    }
+    const wait = again ? STOP_RETRY_MS[attempt] : undefined;
+    logEvent("PlexReport", wait === undefined
+      ? "Plex didn't take a stream's stop; it may show in Now Playing until Plex drops it"
+      : "Plex didn't take a stream's stop; sending it again", { ...fields, error: failed, ...(wait ? { inS: wait / 1000 } : {}) });
+    if (wait === undefined) return;
+    setTimeout(() => void postStopped(r, again, attempt + 1), wait).unref?.();
+  });
 }
 
 /**
@@ -222,5 +249,5 @@ export async function reportAllStopped(): Promise<void> {
   if (!reportsToPlex()) return;
   const all = [...reported.values()];
   reported.clear();
-  await Promise.all(all.map(postStopped));
+  await Promise.all(all.map((r) => postStopped(r, false)));
 }

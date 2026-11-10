@@ -21,9 +21,17 @@ function check(name: string, actual: unknown, expected: unknown) {
 
 /** The states reported, in the order Plex got them. */
 const arrived: string[] = [];
+/** "stopped" reports Plex answers with a 500, as one it couldn't take. */
+let refuseStops = 0;
 const plex = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://x");
   if (url.pathname === "/:/timeline") arrived.push(url.searchParams.get("state") ?? "?");
+  if (url.pathname === "/:/timeline" && url.searchParams.get("state") === "stopped" && refuseStops > 0) {
+    refuseStops--;
+    res.statusCode = 500;
+    res.end();
+    return;
+  }
   res.setHeader("Content-Type", "application/json");
   res.end("{}");
 });
@@ -73,6 +81,29 @@ letGo();
 await Promise.all([again, down]);
 await settle();
 check("the same", arrived, ["playing", "stopped"]);
+
+console.log("\n— a stop Plex doesn't take —");
+{
+  // 8 November, Ali G: paused, then left, and in Now Playing for hours.
+  report.STOP_RETRY_MS.splice(0, report.STOP_RETRY_MS.length, 50, 50);
+  arrived.length = 0;
+  refuseStops = 2;
+  now = stream(40);
+  await report.plexReportTick(3_000_000);
+  now = [];
+  await report.plexReportTick(3_000_000 + 20_000);
+  await new Promise((r) => setTimeout(r, 400));
+  check("sent again until Plex takes it", arrived, ["playing", "stopped", "stopped", "stopped"]);
+  arrived.length = 0;
+  refuseStops = 5;
+  now = stream(50);
+  await report.plexReportTick(4_000_000);
+  now = [];
+  await report.plexReportTick(4_000_000 + 20_000);
+  await new Promise((r) => setTimeout(r, 400));
+  check("  but not for ever", arrived, ["playing", "stopped", "stopped", "stopped"]);
+  refuseStops = 0;
+}
 
 plex.close();
 console.log(`\n${pass} passed, ${fail} failed`);

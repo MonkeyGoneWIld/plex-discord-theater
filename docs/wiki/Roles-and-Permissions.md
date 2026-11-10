@@ -28,7 +28,7 @@ A co-host's episode change is carried out by the host's player.
 ## Who is host
 
 The person who opens the Activity first in a channel is the host. After that,
-the role moves in three ways.
+the role moves in four ways.
 
 ### The host hands it over
 
@@ -36,6 +36,32 @@ The host opens the people list and selects **Make host** beside someone. The
 same list makes people co-hosts, up to 50 per room.
 
 ![The people list, with Co-host and Make host beside a viewer](https://raw.githubusercontent.com/MonkeyGoneWIld/plex-discord-theater/main/docs/screenshots/people.png)
+
+### Someone asks for it
+
+A host who stays in the Activity but walks away leaves everyone else unable
+to play or pick anything. Anyone else can select **Request host** in the
+people list. The host sees who asked and a countdown, with **Give host** and
+**Decline**. If the host doesn't answer in 5 minutes, the role passes to the
+person who asked.
+
+- **The host is away:** the countdown is 1 minute, and drops to 1 minute if
+  the host goes away while it runs. Away means the Activity has been hidden
+  for 30 seconds, or nothing has been touched for 3 minutes while nothing
+  plays. Discord's own idle status can't be read by an Activity.
+- **One request at a time:** everyone else sees who asked and the time left.
+- **The host declines, or uses the Activity while it counts down:** nobody
+  can ask for 15 minutes, and the person who asked can't ask again for 2 hours.
+  A person who can't ask sees how long is left when they select the button.
+- **The role passes on:** nobody can ask the new host for 15 minutes. A host
+  who lost the role to the countdown can select **Take host back** within
+  10 minutes.
+- **Who asked leaves, or the role moves another way:** the request ends.
+
+The person who asked can shrink the countdown or hide it, and see it again
+from the people list. All of this belongs to one Activity: a new one, after
+everyone leaves or in another channel, starts fresh. Set `HOST_REQUESTS=off`
+to turn it off.
 
 ### The host leaves
 

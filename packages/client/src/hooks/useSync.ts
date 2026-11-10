@@ -4,6 +4,7 @@ import { noteServerTime } from "../lib/serverClock";
 import { hdrScreenQuery, playerCaps, type Cap } from "../lib/codecs";
 import { adoptSitting, preferredQuality, setSittingSink } from "../lib/quality";
 import { logEvent } from "../lib/log";
+import { fromMessage as fromHostRequest, type HostRequestView } from "../lib/hostRequest";
 
 const MAX_RECONNECT_ATTEMPTS = 20;
 /** Suggestions held for the host. Bounded so a viewer holding the button down
@@ -220,6 +221,8 @@ export interface SyncState {
    * film — each of which is answered by the same single press.
    */
   transportRequest: TransportRequest | null;
+  /** Asking an away host for the role: this player's view (lib/hostRequest). */
+  hostRequest: HostRequestView | null;
   /** Everyone currently in the room, with their roles. Refreshed by the server
    *  on join, leave, and any role change. */
   participants: Participant[];
@@ -371,6 +374,14 @@ export interface SyncActions {
   sendPromoteHost: (userId: string) => void;
   /** Host: grant or revoke transport control for a viewer. */
   sendSetCoHost: (userId: string, value: boolean) => void;
+  /** Not the host: ask for the role (lib/hostRequest). */
+  sendHostRequest: () => void;
+  /** Host: answer a request for the role. `present`: by using the activity. */
+  answerHostRequest: (accept: boolean, present?: boolean) => void;
+  /** A host the role was taken from while away: take it back. */
+  reclaimHost: () => void;
+  /** Whether this player looks away from the activity (lib/away). */
+  sendActivityAway: (away: boolean) => void;
   /** Host or co-host: request a subtitle track. The host applies it. */
   /**
    * "Put me on these tracks."
@@ -432,6 +443,7 @@ const INITIAL_STATE: SyncState = {
   hostUsername: null,
   suggestions: [],
   transportRequest: null,
+  hostRequest: null,
   commandSeq: 0,
   stateSeq: 0,
   sessionOffset: 0,
@@ -680,6 +692,10 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       sendPromoteHost: (targetUserId: string) => send({ type: "promote-host", userId: targetUserId }),
       sendSetCoHost: (targetUserId: string, value: boolean) =>
         send({ type: "set-cohost", userId: targetUserId, value }),
+      sendHostRequest: () => send({ type: "host-request" }),
+      answerHostRequest: (accept: boolean, present = false) => send({ type: "host-request-answer", accept, present }),
+      reclaimHost: () => send({ type: "host-reclaim" }),
+      sendActivityAway: (away: boolean) => send({ type: "activity-away", away }),
       // The viewer's own quality goes with every track change, unasked: the
       // server takes a missing one as "no ceiling", so a subtitle change would
       // otherwise put them back on the full-rate stream.
@@ -846,6 +862,11 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
           case "others-loading": {
             const othersLoading = msg.value === true;
             setState((prev) => (prev.othersLoading === othersLoading ? prev : { ...prev, othersLoading }));
+            break;
+          }
+          case "host-request": {
+            const hostRequest = fromHostRequest(msg as Record<string, unknown>, Date.now());
+            setState((prev) => ({ ...prev, hostRequest }));
             break;
           }
           case "participants": {

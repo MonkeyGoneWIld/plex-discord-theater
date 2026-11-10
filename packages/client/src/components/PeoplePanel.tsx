@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Participant } from "../hooks/useSync";
+import { clock, requestButton, SHOW_REQUEST_EVENT, waitText, type HostRequestView } from "../lib/hostRequest";
 import type { InviteResult } from "../hooks/useDiscord";
 import { InviteButton } from "./InviteButton";
 import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -19,6 +20,10 @@ interface PeoplePanelProps {
   onClose: () => void;
   sharePresenceDetails: boolean;
   onSharePresenceDetails: (share: boolean) => void;
+  /** Asking an away host for the role (lib/hostRequest). Omit: no button. */
+  hostRequest?: HostRequestView | null;
+  onRequestHost?: () => void;
+  onReclaimHost?: () => void;
 }
 
 function roleLabel(p: Participant): string | null {
@@ -37,7 +42,21 @@ export function PeoplePanel({
   onClose,
   sharePresenceDetails,
   onSharePresenceDetails,
+  hostRequest = null,
+  onRequestHost,
+  onReclaimHost,
 }: PeoplePanelProps) {
+  // The request button's countdowns tick; a wait shows only once pressed.
+  const [, tick] = useState(0);
+  const [showWait, setShowWait] = useState(false);
+  const button = isHost || !onRequestHost ? null : requestButton(hostRequest, selfUserId, Date.now());
+  const ticking = !!button && button.kind !== "ask";
+  useEffect(() => {
+    if (!ticking) return;
+    const t = setInterval(() => tick((n) => n + 1), 1_000);
+    return () => clearInterval(t);
+  }, [ticking]);
+  useEffect(() => { if (button?.kind !== "wait") setShowWait(false); }, [button?.kind]);
   // Handing over the host role loses you all control, so it takes two taps.
   const [confirmingPromote, setConfirmingPromote] = useState<string | null>(null);
   // Discord's mobile client keeps its own bar pinned over the top of the
@@ -70,6 +89,43 @@ export function PeoplePanel({
         {onInvite && !phone && (
           <div style={styles.inviteRow}>
             <InviteButton onInvite={onInvite} />
+          </div>
+        )}
+
+        {/* Asking an away host for the role. One request at a time, so a
+            pending one shows who asked and the time left; a wait shows only
+            once pressed. */}
+        {button && (
+          <div style={styles.requestRow}>
+            {button.kind === "ask" && (
+              <button className="btn" style={styles.requestBtn} onClick={() => onRequestHost?.()}>Request host</button>
+            )}
+            {button.kind === "mine" && (
+              <button className="btn" style={styles.requestBtn}
+                onClick={() => { window.dispatchEvent(new Event(SHOW_REQUEST_EVENT)); onClose(); }}>
+                Requested · {clock(button.leftMs)}
+              </button>
+            )}
+            {button.kind === "theirs" && (
+              <button className="btn" style={styles.requestOff} disabled>
+                {button.name} asked · {clock(button.leftMs)}
+              </button>
+            )}
+            {button.kind === "wait" && (
+              <button className="btn" style={styles.requestOff} onClick={() => setShowWait((v) => !v)}>Request host</button>
+            )}
+            {button.kind === "reclaim" && (
+              <button className="btn" style={styles.requestBtn} onClick={() => { onReclaimHost?.(); onClose(); }}>
+                Take host back · {clock(button.leftMs)}
+              </button>
+            )}
+            <p style={styles.requestHelp}>
+              {button.kind === "ask" && "Asks the host for the role. If they don't answer in 5 minutes (1 if they're away), it passes to you."}
+              {button.kind === "mine" && "Waiting for the host. Press to see the countdown."}
+              {button.kind === "theirs" && "One request at a time. The host has until then to answer."}
+              {button.kind === "wait" && showWait && waitText(button.why, button.leftMs)}
+              {button.kind === "reclaim" && "The role passed on while you were away."}
+            </p>
           </div>
         )}
 
@@ -180,6 +236,10 @@ const styles: Record<string, React.CSSProperties> = {
   promoteBtn: { padding: "4px 8px", borderRadius: "6px", border: "1px solid rgba(229,160,13,0.4)", background: "transparent", color: "#e5a00d", fontSize: "11px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
   confirmBtn: { padding: "4px 8px", borderRadius: "6px", border: "none", background: "#e5a00d", color: "#000", fontSize: "11px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
   inviteRow: { padding: "10px 16px 12px", borderBottom: "1px solid rgba(255,255,255,0.06)" },
+  requestRow: { padding: "10px 16px 4px", borderBottom: "1px solid rgba(255,255,255,0.06)" },
+  requestBtn: { width: "100%", padding: "8px 10px", borderRadius: "8px", border: "1px solid rgba(229,160,13,0.4)", background: "transparent", color: "#e5a00d", fontSize: "12px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontVariantNumeric: "tabular-nums" },
+  requestOff: { width: "100%", padding: "8px 10px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.03)", color: "#666", fontSize: "12px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit", fontVariantNumeric: "tabular-nums" },
+  requestHelp: { color: "#777", fontSize: "11px", lineHeight: 1.5, margin: "6px 0 6px", minHeight: "1em" },
   presencePreference: { display: "flex", alignItems: "flex-start", gap: "10px", padding: "14px 16px", borderTop: "1px solid rgba(255,255,255,0.06)", cursor: "pointer", flexShrink: 0 },
   presenceLabel: { display: "block", color: "#ddd", fontSize: "12px", fontWeight: 600 },
   presenceHelp: { display: "block", color: "#888", fontSize: "11px", lineHeight: 1.5, marginTop: "5px" },

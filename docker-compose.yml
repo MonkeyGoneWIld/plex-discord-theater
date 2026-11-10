@@ -62,6 +62,9 @@ services:
       - SEERR_URL=${SEERR_URL}
       # Restrict the activity to named Discord servers. Empty = any server.
       - ALLOWED_GUILD_IDS=${ALLOWED_GUILD_IDS}
+      # Anyone may ask an away host for the host role; it passes to them if
+      # the host doesn't answer. On unless set to off.
+      - HOST_REQUESTS=${HOST_REQUESTS:-}
       # Route HLS segments through a VPS so your home connection uploads one
       # stream instead of one per viewer. See docs/vps-relay-setup.md.
       - VPS_RELAY_URL=${VPS_RELAY_URL}

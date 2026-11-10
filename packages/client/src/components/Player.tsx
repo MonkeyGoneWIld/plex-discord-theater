@@ -10009,6 +10009,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
             setShowPeoplePanel(false);
           }}
           onSetCoHost={(uid, value) => syncActions?.sendSetCoHost(uid, value)}
+          hostRequest={syncState.hostRequest}
+          onRequestHost={syncActions ? () => syncActions.sendHostRequest() : undefined}
+          onReclaimHost={() => syncActions?.reclaimHost()}
           onInvite={onInvite}
           onClose={() => setShowPeoplePanel(false)}
         />

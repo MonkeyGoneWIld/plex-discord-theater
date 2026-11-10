@@ -331,6 +331,8 @@ services:
       # SEERR_URL: "https://requests.example.com"
       # Only these Discord servers may use it: server IDs, comma-separated.
       # ALLOWED_GUILD_IDS: "123456789012345678,234567890123456789"
+      # Anyone may ask an away host for the host role. On unless off.
+      # HOST_REQUESTS: "off"
       # A stable key for linked Plex accounts; keep it across deployments.
       # Without it, DISCORD_CLIENT_SECRET is used. Set it before anyone links
       # a Plex account: adding or changing it later means everyone relinks.

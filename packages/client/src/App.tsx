@@ -11,6 +11,8 @@ import { ExternalDetail } from "./components/ExternalDetail";
 import { PersonDetail } from "./components/PersonDetail";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PeoplePanel } from "./components/PeoplePanel";
+import { HostRequestOverlay } from "./components/HostRequestOverlay";
+import { useActivityAway } from "./lib/away";
 import { InviteButton } from "./components/InviteButton";
 import { PlexAccountButton } from "./components/PlexAccountButton";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -129,6 +131,8 @@ export function App() {
   });
 
   const effectiveIsHost = syncState.isHost ?? isHost;
+  // Away from the activity: a request for a host's role counts down from 1 minute (lib/away).
+  useActivityAway(syncState.playing, (away) => syncActions.sendActivityAway(away));
 
   // Toast when promoted to host: on a genuine handover only, and only while
   // it is so (lib/usePromotedToast).
@@ -1101,9 +1105,22 @@ export function App() {
             setShowPeoplePanel(false);
           }}
           onSetCoHost={(uid, value) => syncActions.sendSetCoHost(uid, value)}
+          hostRequest={syncState.hostRequest}
+          onRequestHost={() => syncActions.sendHostRequest()}
+          onReclaimHost={() => syncActions.reclaimHost()}
           onClose={() => setShowPeoplePanel(false)}
         />
       )}
+
+      {/* Asking an away host for the role: the host's prompt, the asker's countdown. */}
+      <HostRequestOverlay
+        view={syncState.hostRequest}
+        selfUserId={userId}
+        isHost={effectiveIsHost}
+        hostName={syncState.hostUsername}
+        onAnswer={(accept, present) => syncActions.answerHostRequest(accept, present)}
+        onReclaim={() => syncActions.reclaimHost()}
+      />
 
       {/* The banners a page sits under. One layer, measured as a whole (see
           observeTopBanners), so a page tucks under both when both show. */}

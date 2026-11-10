@@ -2,6 +2,10 @@ import { WebSocketServer, WebSocket, type RawData } from "ws";
 import type { Server } from "http";
 import { isValidSession, getSessionUserId } from "../middleware/auth.js";
 import { instanceHosts, updateInstanceHost, touchInstance } from "../routes/discord.js";
+import {
+  declineRequest, dropRequest, handedOver, hostWentAway, mayReclaim, newHostRequests, startRequest, viewFor, whyNot,
+  type HostRequests,
+} from "./hostRequests.js";
 import { plexFetch } from "./plex.js";
 import { durationFor, sessionNeeds, sessionWithheld, getPlexTranscodeKey, getSessionClientId, getSessionRatingKey, markTranscodeStopped, notifyPlexStopped, isSessionStopping, markSessionStopping, clearSessionStopping, terminatePlexSession, pingPlexTranscode, stopTranscodeSession, protectSession, releaseSession } from "../routes/plex.js";
 import { createTracker, handleTrackerSocket, destroyTracker } from "./tracker.js";
@@ -256,6 +260,8 @@ interface RoomClient {
   isHost: boolean;
   /** Granted by the host; allows transport control (pause/resume/seek) only. */
   isCoHost: boolean;
+  /** The activity sees this player away (its lib/away): hidden, or nothing touched while paused. */
+  activityAway?: boolean;
   /** When this client last asked the host to pause or resume. See
    *  TRANSPORT_REQUEST_COOLDOWN_MS. */
   lastTransportRequestAt?: number;
@@ -502,6 +508,9 @@ interface Room {
    * mid-film.
    */
   away: Map<string, AwayViewer>;
+  /** Asking an away host for the role: services/hostRequests. */
+  hostRequests: HostRequests;
+  hostRequestTimer?: ReturnType<typeof setTimeout>;
 }
 
 /** A viewer's own choice of stream and subtitle — see ownChoiceOf. */
@@ -1141,6 +1150,7 @@ function getOrCreateRoom(instanceId: string): Room {
       coHostIds: new Set(),
       lastForcedPersistAt: 0,
       away: new Map(),
+      hostRequests: newHostRequests(),
     };
     rooms.set(instanceId, room);
   }
@@ -1190,6 +1200,133 @@ function participantsOf(room: Room) {
 /** Push the roster to everyone — call after any membership or role change. */
 function broadcastParticipants(room: Room): void {
   sendToAll(room, { type: "participants", participants: participantsOf(room) });
+  sendHostRequests(room);
+}
+
+/**
+ * Hand the host role from `from` to `target`: by the host (promote-host), or
+ * by a request for it (services/hostRequests). `why` is for the log.
+ */
+function transferHost(room: Room, roomId: string, from: RoomClient, target: RoomClient, why: string): void {
+  // Bank the outgoing host's position before the roles swap. Their
+  // close handler won't do it — by then `isHost` is false, so the
+  // branch that persists progress is skipped and the watch they were
+  // in the middle of would resume from wherever they last happened to
+  // be written, or not at all.
+  persistProgress(room, undefined, "always");
+
+  // Hand over. The outgoing host keeps transport control as a co-host:
+  // passing the role is usually "you drive for a bit", not "I am done
+  // here", and dropping straight to a plain viewer took the pause button
+  // off the person who had been running the room a second earlier. The
+  // new host can still remove it from the people panel like any other
+  // grant.
+  from.isHost = false;
+  from.isCoHost = true;
+  room.coHostIds.add(from.userId);
+  target.isHost = true;
+  target.isCoHost = false;
+  // Host outranks co-host, so the grant is spent rather than remembered
+  // — otherwise handing the role back would silently restore it.
+  room.coHostIds.delete(target.userId);
+  // The new host's picture is its own, and its heartbeat says.
+  setHostWaiting(room, roomId, false, "new host");
+
+  // "The host's stream" follows the host. Without this the room went on
+  // treating the *previous* host's stream as the one a host track change
+  // carries to, so the new host's next change reached straight into an
+  // audience they had nothing to do with — while leaving the people
+  // actually watching with them untouched.
+  let transferredVariant: Variant | null = null;
+  if (target.variantKey) {
+    room.state.hostVariantKey = target.variantKey;
+    const hv = room.state.variants.get(target.variantKey);
+    if (hv) {
+      // Hosting and driving the host stream have to move together.
+      // Leaving the old driver here produced an impossible client
+      // state after a manual handoff: `isHost=true` but
+      // `variant.isOwner=false`. The promoted host could change its
+      // local item with Next, but only a stream owner creates and
+      // announces the new transcode, so the room stayed on the old
+      // episode while their UI walked through later ones. Its track
+      // ids consequently belonged to another episode too, leaving no
+      // audio or subtitle row selected in the switcher.
+      hv.ownerUserId = target.userId;
+      transferredVariant = hv;
+      room.state.hostSubtitleId = target.subtitleStreamId;
+      room.state.subtitles = target.subtitleStreamId !== 0;
+      if (hv.hlsSessionId) {
+        room.state.hlsSessionId = hv.hlsSessionId;
+        room.state.sessionOffset = hv.sessionOffset;
+      }
+    }
+  }
+
+  const instance = instanceHosts.get(roomId);
+  if (instance) instance.hostUserId = target.userId;
+  updateInstanceHost(roomId, target.userId);
+
+  // Handover is a prime suspect for a stream dying: the promoted client
+  // adopts a transcode it didn't start, and its idea of the position
+  // comes from room state rather than its own playhead.
+  logEvent("Sync", "host transferred", {
+    room: roomId.substring(0, 8),
+    from: from.username ?? from.userId,
+    why,
+    to: target.username ?? target.userId,
+    roomPosS: room.state.position,
+    session: room.state.hlsSessionId?.substring(0, 8) ?? "none",
+  });
+
+  sendTo(target.ws, { type: "host-promoted", hostUsername: target.username });
+  for (const c of room.clients) {
+    if (c !== target) sendTo(c.ws, { type: "host-changed", hostUsername: target.username });
+  }
+  // Tell every watcher who drives this still-running stream now. The
+  // new host adopts it in place; the old driver stops acting as owner.
+  if (transferredVariant) announceVariant(room, transferredVariant);
+  broadcastParticipants(room);
+}
+
+/**
+ * Each player's view of asking for the host role (services/hostRequests). A
+ * request whose asker has gone, or whose host is no longer the host, ends here.
+ */
+function sendHostRequests(room: Room): void {
+  const hr = room.hostRequests;
+  const host = [...room.clients].find((c) => c.isHost) ?? null;
+  const a = hr.active;
+  if (a && (!host || host.userId !== a.hostId || ![...room.clients].some((c) => c.userId === a.requesterId))) {
+    dropRequest(hr);
+    clearTimeout(room.hostRequestTimer);
+    logEvent("Sync", "a request for the host role ended: who asked left, or the role moved", { requester: a.requesterName ?? a.requesterId });
+  }
+  const now = Date.now();
+  for (const c of room.clients) {
+    sendTo(c.ws, viewFor(hr, c.userId, { isHost: c.isHost, hasHost: !!host, now }));
+  }
+}
+
+/** The countdown on a request for the host role, to its end. */
+function timeHostRequest(room: Room, roomId: string): void {
+  clearTimeout(room.hostRequestTimer);
+  const a = room.hostRequests.active;
+  if (!a) return;
+  room.hostRequestTimer = setTimeout(() => {
+    const now = Date.now();
+    const hr = room.hostRequests;
+    if (hr.active !== a) return;
+    if (now < a.endsAt) { timeHostRequest(room, roomId); return; }
+    const host = [...room.clients].find((c) => c.isHost && c.userId === a.hostId);
+    const asker = [...room.clients].find((c) => c.userId === a.requesterId);
+    if (!host || !asker) { sendHostRequests(room); return; }
+    logEvent("Sync", "the host didn't answer a request for the role: passing it on", {
+      room: roomId.substring(0, 8), from: host.username ?? host.userId, to: asker.username ?? asker.userId,
+      away: !!host.activityAway,
+    });
+    handedOver(hr, now, host.userId);
+    transferHost(room, roomId, host, asker, "request not answered");
+  }, Math.max(0, a.endsAt - Date.now()) + 50);
 }
 
 function sendTo(ws: WebSocket, msg: object): void {
@@ -1791,6 +1928,9 @@ function carryHeldRoom(
   const [fromId, room] = held;
   rooms.delete(fromId);
   rooms.set(toId, room);
+  // A new activity: none of the old one's requests or waits (hostRequests).
+  clearTimeout(room.hostRequestTimer);
+  room.hostRequests = newHostRequests();
   // Its streams' pings find the room by its instance.
   for (const v of room.state.variants.values()) {
     if (v.hlsSessionId) startSessionPing(toId, v.hlsSessionId);
@@ -2516,6 +2656,61 @@ export function attachWebSocketServer(server: Server): void {
         return;
       }
 
+      // Asking for the host role (services/hostRequests): any joined client.
+      if (type === "activity-away") {
+        client.activityAway = msg.away === true;
+        if (client.isHost && client.activityAway && hostWentAway(room.hostRequests, Date.now())) {
+          timeHostRequest(room, roomId);
+          sendHostRequests(room);
+        }
+        return;
+      }
+      if (type === "host-request") {
+        const now = Date.now();
+        const host = [...room.clients].find((c) => c.isHost) ?? null;
+        if (whyNot(room.hostRequests, client.userId, { isHost: client.isHost, hasHost: !!host, now }) || !host) {
+          sendHostRequests(room);
+          return;
+        }
+        const a = startRequest(room.hostRequests, { id: client.userId, name: client.username }, host.userId, !!host.activityAway, now);
+        logEvent("Sync", "a request for the host role", {
+          room: roomId.substring(0, 8), by: client.username ?? client.userId, host: host.username ?? host.userId,
+          away: !!host.activityAway, waitS: Math.round((a.endsAt - now) / 1000),
+        });
+        timeHostRequest(room, roomId);
+        sendHostRequests(room);
+        return;
+      }
+      if (type === "host-request-answer") {
+        const a = room.hostRequests.active;
+        if (!client.isHost || !a || a.hostId !== client.userId) return;
+        const now = Date.now();
+        const asker = [...room.clients].find((c) => c.userId === a.requesterId);
+        clearTimeout(room.hostRequestTimer);
+        if (msg.accept === true && asker) {
+          logEvent("Sync", "the host gave the role to who asked", { room: roomId.substring(0, 8), to: asker.username ?? asker.userId });
+          handedOver(room.hostRequests, now, null);
+          transferHost(room, roomId, client, asker, "request accepted");
+          return;
+        }
+        declineRequest(room.hostRequests, now);
+        logEvent("Sync", "the host declined a request for the role", {
+          room: roomId.substring(0, 8), by: a.requesterName ?? a.requesterId,
+          how: msg.accept === false && msg.present === true ? "used the activity" : "declined",
+        });
+        sendHostRequests(room);
+        return;
+      }
+      if (type === "host-reclaim") {
+        const now = Date.now();
+        const host = [...room.clients].find((c) => c.isHost) ?? null;
+        if (!host || host === client || !mayReclaim(room.hostRequests, client.userId, now)) return;
+        logEvent("Sync", "the host the role was taken from took it back", { room: roomId.substring(0, 8), by: client.username ?? client.userId });
+        handedOver(room.hostRequests, now, null);
+        transferHost(room, roomId, host, client, "taken back");
+        return;
+      }
+
       // Viewer → host: suggest a title. Allowed for any joined client (host
       // or viewer), unlike the rest of the control messages below.
       if (type === "suggest") {
@@ -3105,83 +3300,7 @@ export function attachWebSocketServer(server: Server): void {
           const target = [...room.clients].find((c) => c.userId === targetId);
           if (!target || target === client) break;
 
-          // Bank the outgoing host's position before the roles swap. Their
-          // close handler won't do it — by then `isHost` is false, so the
-          // branch that persists progress is skipped and the watch they were
-          // in the middle of would resume from wherever they last happened to
-          // be written, or not at all.
-          persistProgress(room, undefined, "always");
-
-          // Hand over. The outgoing host keeps transport control as a co-host:
-          // passing the role is usually "you drive for a bit", not "I am done
-          // here", and dropping straight to a plain viewer took the pause button
-          // off the person who had been running the room a second earlier. The
-          // new host can still remove it from the people panel like any other
-          // grant.
-          client.isHost = false;
-          client.isCoHost = true;
-          room.coHostIds.add(client.userId);
-          target.isHost = true;
-          target.isCoHost = false;
-          // Host outranks co-host, so the grant is spent rather than remembered
-          // — otherwise handing the role back would silently restore it.
-          room.coHostIds.delete(target.userId);
-          // The new host's picture is its own, and its heartbeat says.
-          setHostWaiting(room, roomId, false, "new host");
-
-          // "The host's stream" follows the host. Without this the room went on
-          // treating the *previous* host's stream as the one a host track change
-          // carries to, so the new host's next change reached straight into an
-          // audience they had nothing to do with — while leaving the people
-          // actually watching with them untouched.
-          let transferredVariant: Variant | null = null;
-          if (target.variantKey) {
-            room.state.hostVariantKey = target.variantKey;
-            const hv = room.state.variants.get(target.variantKey);
-            if (hv) {
-              // Hosting and driving the host stream have to move together.
-              // Leaving the old driver here produced an impossible client
-              // state after a manual handoff: `isHost=true` but
-              // `variant.isOwner=false`. The promoted host could change its
-              // local item with Next, but only a stream owner creates and
-              // announces the new transcode, so the room stayed on the old
-              // episode while their UI walked through later ones. Its track
-              // ids consequently belonged to another episode too, leaving no
-              // audio or subtitle row selected in the switcher.
-              hv.ownerUserId = target.userId;
-              transferredVariant = hv;
-              room.state.hostSubtitleId = target.subtitleStreamId;
-              room.state.subtitles = target.subtitleStreamId !== 0;
-              if (hv.hlsSessionId) {
-                room.state.hlsSessionId = hv.hlsSessionId;
-                room.state.sessionOffset = hv.sessionOffset;
-              }
-            }
-          }
-
-          const instance = instanceHosts.get(roomId);
-          if (instance) instance.hostUserId = target.userId;
-          updateInstanceHost(roomId, target.userId);
-
-          // Handover is a prime suspect for a stream dying: the promoted client
-          // adopts a transcode it didn't start, and its idea of the position
-          // comes from room state rather than its own playhead.
-          logEvent("Sync", "host transferred", {
-            room: roomId.substring(0, 8),
-            from: client.username ?? client.userId,
-            to: target.username ?? target.userId,
-            roomPosS: room.state.position,
-            session: room.state.hlsSessionId?.substring(0, 8) ?? "none",
-          });
-
-          sendTo(target.ws, { type: "host-promoted", hostUsername: target.username });
-          for (const c of room.clients) {
-            if (c !== target) sendTo(c.ws, { type: "host-changed", hostUsername: target.username });
-          }
-          // Tell every watcher who drives this still-running stream now. The
-          // new host adopts it in place; the old driver stops acting as owner.
-          if (transferredVariant) announceVariant(room, transferredVariant);
-          broadcastParticipants(room);
+          transferHost(room, roomId, client, target, "handed over");
           break;
         }
         case "set-cohost": {

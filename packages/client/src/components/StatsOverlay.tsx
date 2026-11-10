@@ -8,6 +8,8 @@ import { audioDetails, audioSummary, engineText, fileLines, playbackMode, type S
 import type { StreamTrack } from "../lib/api";
 import { previewDetails, previewSummary, type PreviewStatus } from "../lib/previewStatus";
 import { sideShare } from "../lib/sideShare";
+import { edgeTotals } from "../lib/segmentParts";
+import { discordCacheShare } from "../lib/discordCache";
 import { subtitleDetails, subtitleSummary, type SubtitleLoadStatus, type SubtitleShown } from "../lib/subtitleStatus";
 import {
   HEALTH_COLORS, bufferFalling, bufferHealth, framesHealth, modeHealth, playbackWhy, previewHealth, pushSample, sparkLines,
@@ -580,6 +582,8 @@ export function StatsOverlay({
     ["Previews", side("previews"), "The seek bar's preview pictures"],
   ]);
   const received = traffic.total.fromPeers + traffic.total.fromServer;
+  // What came over HTTP, from Discord's cache or the server (lib/discordCache).
+  const cache = discordCacheShare(edgeTotals());
   // Other viewers this player is connected to, for the video or the rest:
   // mostly the same people, on two connections.
   const connected = Math.max(p2p.peers.size, sideShare.playerCount());
@@ -665,6 +669,23 @@ export function StatsOverlay({
         </>
       ) : null,
     }]),
+    ...(cache ? [{
+      label: "Discord cache", section: "peers" as Section,
+      value: `${cache.pct}% · ${formatBytes(cache.fromCache)} of ${formatBytes(cache.fromCache + cache.fromServer)}`,
+      details: [
+        ["From Discord's cache", `${formatBytes(cache.fromCache)} · ${cache.hits} of ${cache.downloads} downloads`],
+        ["From the server", `${formatBytes(cache.fromServer)} · ${cache.downloads - cache.hits} downloads`],
+      ] as Array<[string, string]>,
+      visual: (
+        <>
+          <Bar parts={[[cache.pct, DISCORD], [100 - cache.pct, SERVER]]} />
+          <div style={styles.legend}>
+            <span style={{ color: DISCORD_TEXT }}>From Discord {formatBytes(cache.fromCache)}</span>
+            <span style={{ color: SERVER_TEXT }}>From server {formatBytes(cache.fromServer)}</span>
+          </div>
+        </>
+      ),
+    }] : []),
     {
       label: "Thumbnails", section: "thumbnails", health: thumbsState,
       value: previewSummary(thumbs, previewPartId !== null),
@@ -768,6 +789,9 @@ const BUFFER_GRAPH_FLOOR_S = 40;
 const PEERS = HEALTH_COLORS.info.line;
 const SERVER = "#3c5a80";
 const SERVER_TEXT = "#8aa3c2";
+/** Discord's own cache: its blurple. */
+const DISCORD = "#5865f2";
+const DISCORD_TEXT = "#9aa2ff";
 const SUBTITLE_COLOR = "#9b8fe0";
 const THUMBS_COLOR = "#d9a441";
 

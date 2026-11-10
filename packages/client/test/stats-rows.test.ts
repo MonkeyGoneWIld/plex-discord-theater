@@ -8,6 +8,7 @@ import { clock, previewDetails, previewSummary, type PreviewStatus } from "../sr
 import { coverageText, mergedSpans, subtitleDetails, subtitleSummary, type SubtitleLoadStatus } from "../src/lib/subtitleStatus";
 import { audioDetails, audioSummary, fileLines, type StreamNotes } from "../src/lib/streamNotes";
 import type { StreamTrack } from "../src/lib/api";
+import { discordCacheShare } from "../src/lib/discordCache";
 
 let pass = 0;
 let fail = 0;
@@ -107,6 +108,14 @@ const converted = notes({ audio: "transcode", audioFrom: "EAC3 5.1", audioTo: "A
 check("converted: from what, to what (why is under Playback)", [audioSummary(converted), audioDetails(converted)],
   ["EAC3 5.1 → AAC 5.1", [["Source", "EAC3 5.1"], ["Output", "AAC 5.1 · 384 kbps"]]]);
 check("a server that doesn't say", [audioSummary(null), audioDetails(null)], ["—", []]);
+
+console.log("\n— Discord cache —");
+check("nothing through Discord's proxy: no row", discordCacheShare({ hit: 0, of: 0, hitBytes: 0, bytes: 0 }), null);
+check("half the bytes from Discord's cache",
+  discordCacheShare({ hit: 3, of: 8, hitBytes: 50_000_000, bytes: 100_000_000 }),
+  { pct: 50, fromCache: 50_000_000, fromServer: 50_000_000, hits: 3, downloads: 8 });
+check("downloads with no length said: 0%, not a division by nothing",
+  discordCacheShare({ hit: 1, of: 2, hitBytes: 0, bytes: 0 })?.pct, 0);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

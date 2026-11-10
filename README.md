@@ -185,10 +185,8 @@ administrator API key is required.
 
   [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FFmpeg-Engine)
 - **Shared bandwidth:** viewers on the same stream pass segments to each other,
-  peer to peer, which eases your upload.
-- **VPS relay (optional):** your home connection uploads one stream and a VPS
-  serves the whole room.
-  [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/VPS-Relay)
+  peer to peer, and Discord's proxy caches each segment for the other viewers
+  it serves, which eases your upload.
 - **qBittorrent upload limits (optional):**
   [plex-qbt-manager](https://github.com/MonkeyGoneWIld/plex-qbt-manager) makes
   room in qBittorrent's upload while the room plays.
@@ -339,10 +337,6 @@ services:
       # a Plex account: adding or changing it later means everyone relinks.
       # Make one with `openssl rand -hex 32`.
       # PLEX_LINK_SECRET: "64-hex-characters-from-openssl"
-      # Route video through a VPS, so your upload carries one stream for
-      # the whole room. See the VPS Relay page in the wiki.
-      # VPS_RELAY_URL: "https://relay.example.com"
-      # VPS_RELAY_KEY: "a-long-random-secret"
       # plex-qbt-manager's THEATER_API_KEY, for its upload limits.
       # QBT_MANAGER_API_KEY: "a-long-random-secret"
       # Password for the maintenance command that stops every stream the
@@ -419,7 +413,6 @@ the order you set things up in.
 | | [Streaming and Quality](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Streaming-and-Quality) | Copies and re-encodes, per-viewer streams, bitrate limits |
 | | [FFmpeg Engine](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FFmpeg-Engine) | Making streams in the container on a GPU, HDR, picture subtitles |
 | | [Optional Integrations](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Optional-Integrations) | Plex Discover, TMDB, TVDB, ratings, Seerr |
-| | [VPS Relay](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/VPS-Relay) | Serving large rooms from one upload |
 | | [qBittorrent Manager API](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/qBittorrent-Manager-API) | Lowering qBittorrent's upload while people watch |
 | **Use** | [Using the Activity](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Using-the-Activity) | The player, picture-in-picture, settings, messages |
 | | [Roles and Permissions](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Roles-and-Permissions) | Host, co-hosts and viewers |

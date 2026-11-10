@@ -11,7 +11,6 @@ nothing else is affected.
 | [TVDB](#tvdb) | `TVDB_API_KEY` | Missing-episode lists numbered as Sonarr numbers them | You use Sonarr |
 | [Seerr](#seerr) | `SEERR_URL` | **Request** buttons | You run Overseerr or Jellyseerr |
 | [qBittorrent manager](qBittorrent-Manager-API) | `QBT_MANAGER_API_KEY` | Upload limits that follow the room | You run plex-qbt-manager |
-| [VPS relay](VPS-Relay) | `VPS_RELAY_URL`, `VPS_RELAY_KEY` | One upload from home for the whole room | Your upload is too small for the room |
 
 ## Check what is on
 
@@ -20,7 +19,7 @@ docker compose logs plex-discord-theater | grep Config
 ```
 
 ```text
-[Config] ✓ TMDB   ✓ TVDB   ✓ Requests   ✓ Discover   · VPS relay (P2P mode)   …
+[Config] ✓ TMDB   ✓ TVDB   ✓ Requests   ✓ Discover   …
 ```
 
 `✓` means configured; `·` means not configured. Settings take effect when the
@@ -95,4 +94,4 @@ See [Requesting Titles](Requesting-Titles) for how viewers use it.
 
 ## Next
 
-→ [VPS Relay](VPS-Relay) · [qBittorrent Manager API](qBittorrent-Manager-API)
+→ [qBittorrent Manager API](qBittorrent-Manager-API)

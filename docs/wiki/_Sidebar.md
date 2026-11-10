@@ -13,7 +13,6 @@
 - [Streaming and Quality](Streaming-and-Quality)
 - [FFmpeg Engine](FFmpeg-Engine)
 - [Optional Integrations](Optional-Integrations)
-- [VPS Relay](VPS-Relay)
 - [qBittorrent Manager API](qBittorrent-Manager-API)
 
 **Use**

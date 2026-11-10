@@ -106,8 +106,9 @@ No. Without Plex Pass:
 There is no fixed limit: your upload speed decides. At the default settings,
 plan for 20 to 25 Mbps per viewer. Viewers on the same stream share one
 re-encode, and pass segments to each other peer to peer, which helps but
-shouldn't be counted on. Above four or five viewers, consider the
-[VPS Relay](VPS-Relay). See [Bandwidth](Requirements#bandwidth).
+shouldn't be counted on. Discord's proxy also caches each segment, so viewers
+it serves from the same data centre mostly get theirs from Discord rather than
+from your server. See [Bandwidth](Requirements#bandwidth).
 
 ### Why is it limited to servers with fewer than 25 members?
 

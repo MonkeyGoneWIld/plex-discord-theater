@@ -17,25 +17,30 @@ The manager also accepts:
 
 ```dotenv
 DYNAMIC_UPLOAD_ENABLED=true
-THEATER_BANDWIDTH_FACTOR=0.8
+THEATER_EXTRA_VIEWER_FACTOR=0.1
 THEATER_POLL_INTERVAL_SECONDS=5
 THEATER_TIMEOUT_SECONDS=3
 THEATER_STALE_SECONDS=30
 ```
 
-The factor estimates P2P savings **only for variants with at least two viewers**.
-A single-viewer variant always reserves one Plex stream's bandwidth. For three
-12 Mbps variants with 3, 2 and 1 viewers, factor 0.8 gives
+The weighting applies **only to variants with at least two viewers**. A
+single-viewer variant always reserves one stream's bandwidth. Discord's proxy
+caches each segment for the other viewers it serves, and the players share
+segments with each other, so later viewers of a variant cost little. With
+`THEATER_SHARED_BASE` or `THEATER_EXTRA_VIEWER_FACTOR` set (a manager newer
+than v1.2.5), a shared variant reserves
+`bandwidth × base × (1 + factor × (viewers − 1))`, at most
+`bandwidth × THEATER_MAX_WEIGHT`. For three 12 Mbps variants with 3, 2 and 1
+viewers, base 1 and factor 0.1 give `12×1.2 + 12×1.1 + 12 = 39.6 Mbps`. With
+neither set, `THEATER_BANDWIDTH_FACTOR` is used as before: factor 0.8 gives
 `12×3×0.8 + 12×2×0.8 + 12 = 60 Mbps`. The manager adds ordinary remote Plex
 bandwidth, applies its global `BANDWIDTH_MULTIPLIER`, and converts Mbps to MiB/s
 for the upload budget. Viewer counts measure connected users with the player
 open, including host and buffering viewers; browsing/voice-only users do not
 count. Counts are per audio/subtitle variant, not per room total.
 
-Theater's `VPS_RELAY_URL` determines delivery mode. When set, the manager reserves
-one home-upload feed per occupied variant, without the per-viewer P2P factor.
-Leave relay off for direct P2P delivery. The factor is an estimate, not measured
-P2P traffic; it can be tuned independently of the global bandwidth multiplier.
+The weighting is an estimate, not measured traffic; it can be tuned
+independently of the global bandwidth multiplier.
 
 The manager obtains account identity and bandwidth from Plex with its existing
 token. It matches the real Plex server ID and exact HLS session ID or transcode

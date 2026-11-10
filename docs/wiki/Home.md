@@ -31,7 +31,6 @@ Work through these pages in order. Each one ends with a link to the next.
 | [Streaming and Quality](Streaming-and-Quality) | How streams are made, bitrates, and what each viewer receives |
 | [FFmpeg Engine](FFmpeg-Engine) | Making streams in the container instead of in Plex |
 | [Optional Integrations](Optional-Integrations) | Plex Discover, TMDB, TVDB and Seerr |
-| [VPS Relay](VPS-Relay) | Serving a large room from a VPS |
 | [qBittorrent Manager API](qBittorrent-Manager-API) | Sharing upload bandwidth with qBittorrent |
 
 ## Use

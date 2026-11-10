@@ -72,9 +72,9 @@ back on the host's stream.
 - A viewer's own stream is kept for 15 seconds after they leave, so a quick
   reconnect continues it.
 - Streams nobody is watching are stopped after 5 minutes.
-- Viewers on the same stream pass segments to each other, peer to peer, which
-  reduces your upload. With the [VPS Relay](VPS-Relay), the relay serves
-  segments instead.
+- Viewers on the same stream pass segments to each other, peer to peer, and
+  Discord's proxy caches each segment for the other viewers it serves, which
+  both reduce your upload.
 
 ## Quality
 
@@ -124,8 +124,7 @@ players' buffers absorb the peaks.
 | 5 Mbps | `4000` | `6000` | `5000` |
 
 Lower limits mean more files are re-encoded instead of copied, which uses more
-GPU or CPU time. For larger rooms, the [VPS Relay](VPS-Relay) keeps the
-quality and moves the upload to a VPS.
+GPU or CPU time.
 
 Plex counts the server as a remote player, and applies your remote streaming
 limits to it, unless its network is listed under **Settings → Network → LAN

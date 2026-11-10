@@ -128,7 +128,7 @@ docker compose logs plex-discord-theater | grep Config
 ```
 
 ```text
-[Config] ✓ TMDB   ✓ TVDB   ✓ Requests   ✓ Discover   · VPS relay (P2P mode)   ✓ HEVC   ✓ Direct Stream for files averaging up to 25000 kbps   · Guild allowlist (open to any Discord server)
+[Config] ✓ TMDB   ✓ TVDB   ✓ Requests   ✓ Discover   ✓ HEVC   ✓ Direct Stream for files averaging up to 25000 kbps   · Guild allowlist (open to any Discord server)
 [Config] films being played: copied ones kept until the stream ends, 6144 MB in memory (DIRECT_STREAM_MEMORY_MB) and the rest on disk at /data/stream-cache (STREAM_CACHE_DIR); re-encoded ones 2048 MB in memory (TRANSCODE_CACHE_MB), the rest on Plex's disk
 [Config] playback engine: Plex
 ```

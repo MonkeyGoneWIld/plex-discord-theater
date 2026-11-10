@@ -144,8 +144,6 @@ caches apply to both engines.
 | `TVDB_API_KEY` | None | Missing-episode lists numbered as Sonarr numbers them. See [Optional Integrations](Optional-Integrations#tvdb). |
 | `TVDB_PIN` | None | Only for a TVDB subscriber key |
 | `SEERR_URL` | None | The address of Overseerr or Jellyseerr, for the **Request** button. See [Requesting Titles](Requesting-Titles). |
-| `VPS_RELAY_URL` | None | The relay's public address. See [VPS Relay](VPS-Relay). |
-| `VPS_RELAY_KEY` | None | The secret shared with the relay. The relay is used only when both relay settings are set. |
 
 ## Caching and performance
 

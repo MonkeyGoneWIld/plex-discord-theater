@@ -76,8 +76,10 @@ Plan for this much upload:
 | 8 | 160–200 Mbps |
 
 Viewers on the same stream also pass segments to each other, peer to peer,
-once their buffers are full. This can reduce your upload considerably, but it
-depends on each viewer's connection, so plan without it.
+once their buffers are full, and Discord's proxy caches each segment, so
+viewers it serves from the same data centre mostly get theirs from Discord
+rather than from your server. This can reduce your upload considerably, but it
+depends on where and how each viewer connects, so plan without it.
 
 If your upload is lower:
 
@@ -87,8 +89,6 @@ If your upload is lower:
    [Streaming and Quality](Streaming-and-Quality#choosing-the-bitrate-limits).
 2. **Let viewers choose a lower quality.** Each viewer can choose 20, 12, 10, 8
    or 4 Mbps for themselves in the player.
-3. **Use the [VPS Relay](VPS-Relay).** Your server uploads each stream once to a
-   VPS, and the VPS serves the room.
 
 ## HTTPS
 

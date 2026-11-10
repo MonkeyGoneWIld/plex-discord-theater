@@ -19,7 +19,6 @@ the startup summary: which features are on, and why any are off.
 | [Playback](#playback) | Titles that don't play, buffering, copies and re-encodes, subtitles |
 | [Rooms and connection](#rooms-and-connection) | Reconnecting, expired sessions, sync |
 | [FFmpeg engine](#ffmpeg-engine) | The GPU, library paths, previews, Plex's dashboard |
-| [VPS relay](#vps-relay) | Relay errors |
 | [Logs](#logs) | Collecting logs, and reporting a problem |
 
 ## Setup and startup
@@ -171,8 +170,7 @@ amber, then red, as a viewer's connection falls behind.
   stream of their own. After repeated buffering the player suggests one.
 - **Everyone struggles:** your upload is the limit. Lower the bitrate limits
   as described in
-  [Choosing the bitrate limits](Streaming-and-Quality#choosing-the-bitrate-limits),
-  or set up the [VPS Relay](VPS-Relay).
+  [Choosing the bitrate limits](Streaming-and-Quality#choosing-the-bitrate-limits).
 
 ### The loading screen never goes away, though the video has loaded
 
@@ -363,15 +361,6 @@ under the account of `PLEX_TOKEN`, as the player **Plex Discord Theater**, and
 Plex lists them as Direct Play. Plex can't stop them: stop them from the
 Activity. See
 [Plex dashboard, Tautulli and Tracearr](FFmpeg-Engine#plex-dashboard-tautulli-and-tracearr).
-
-## VPS relay
-
-| Problem | Cause |
-|---|---|
-| Segments return 403 | `VPS_RELAY_KEY` differs between the VPS and the server, or Cloudflare blocks the VPS's address |
-| Segments return 502 | The VPS can't reach your server: check DNS, the firewall and the proxy |
-| Playback stutters through the relay | nginx on the VPS sends requests straight to Plex instead of to the Activity server |
-| Discord blocks the relay's segments | The `/theater` URL mapping is missing. See [Add the Discord URL mapping](VPS-Relay#4-add-the-discord-url-mapping). |
 
 ## Logs
 

@@ -65,10 +65,6 @@ services:
       # Anyone may ask an away host for the host role; it passes to them if
       # the host doesn't answer. On unless set to off.
       - HOST_REQUESTS=${HOST_REQUESTS:-}
-      # Route HLS segments through a VPS so your home connection uploads one
-      # stream instead of one per viewer. See docs/vps-relay-setup.md.
-      - VPS_RELAY_URL=${VPS_RELAY_URL}
-      - VPS_RELAY_KEY=${VPS_RELAY_KEY}
 
       # ── Playback engine ─────────────────────────────────────────
       # plex (the default) has Plex make every stream. ffmpeg makes them in

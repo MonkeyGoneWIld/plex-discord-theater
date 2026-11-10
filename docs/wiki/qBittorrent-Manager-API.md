@@ -34,7 +34,7 @@ services:
       DYNAMIC_UPLOAD_ENABLED: "true"
       THEATER_URL: "http://plex-discord-theater:3000"
       THEATER_API_KEY: "the-shared-secret"
-      THEATER_BANDWIDTH_FACTOR: "0.8"
+      THEATER_EXTRA_VIEWER_FACTOR: "0.1"
       THEATER_POLL_INTERVAL_SECONDS: "5"
       THEATER_TIMEOUT_SECONDS: "3"
       THEATER_STALE_SECONDS: "30"
@@ -51,7 +51,13 @@ services:
 | `THEATER_POLL_INTERVAL_SECONDS` | The shortest time between requests to the API. The manager's own `POLLING_INTERVAL` can make it longer. |
 | `THEATER_TIMEOUT_SECONDS` | How long one request may take |
 | `THEATER_STALE_SECONDS` | How long the last good answer is trusted. After that, the manager counts the Theater's streams as needing nothing until it gets a fresh answer. A failure never drops qBittorrent to its minimum upload limit. |
-| `THEATER_BANDWIDTH_FACTOR` | The share of each extra viewer's bandwidth to reserve, allowing for peer-to-peer sharing |
+| `THEATER_SHARED_BASE` | A stream with two or more viewers, in streams' worth of bandwidth, before extra viewers are added. Unset, `1` |
+| `THEATER_EXTRA_VIEWER_FACTOR` | What each viewer after the first adds to a shared stream, as a share of the base: `0.1` is 10% more per viewer. Unset, `0.1` |
+| `THEATER_MAX_WEIGHT` | The most a shared stream can reserve, in streams' worth of bandwidth. Unset, no limit |
+| `THEATER_BANDWIDTH_FACTOR` | The share of each viewer's bandwidth to reserve for a shared stream while neither `THEATER_SHARED_BASE` nor `THEATER_EXTRA_VIEWER_FACTOR` is set |
+
+The first three need a manager newer than v1.2.5. Setting `THEATER_SHARED_BASE`
+or `THEATER_EXTRA_VIEWER_FACTOR` turns them on.
 
 ## How bandwidth is reserved
 
@@ -63,18 +69,19 @@ in the voice channel, don't count.
 |---|---|
 | None | The previous reservation, for the manager's stop grace period, then nothing |
 | One | The stream's bandwidth |
-| Two or more | The stream's bandwidth × viewers × `THEATER_BANDWIDTH_FACTOR` |
+| Two or more | The stream's bandwidth × `THEATER_SHARED_BASE` × (1 + `THEATER_EXTRA_VIEWER_FACTOR` × (viewers − 1)), at most × `THEATER_MAX_WEIGHT`. With neither of the first two set: the stream's bandwidth × viewers × `THEATER_BANDWIDTH_FACTOR` |
 
-For example, three 20 Mbps streams with 3, 2 and 1 viewers and a factor of 0.8
-reserve `20×3×0.8 + 20×2×0.8 + 20 = 100 Mbps`. The manager adds other remote
-Plex sessions, then applies its global `BANDWIDTH_MULTIPLIER`.
+Discord's proxy caches each segment for the other viewers it serves, and the
+players pass segments to each other, so a stream's later viewers cost your
+upload far less than its first. For example, three 20 Mbps streams with 3, 2
+and 1 viewers reserve `20×1.2 + 20×1.1 + 20 = 66 Mbps` with a base of 1 and a
+factor of 0.1, or `20×3×0.8 + 20×2×0.8 + 20 = 100 Mbps` with only
+`THEATER_BANDWIDTH_FACTOR` at 0.8. The manager adds other remote Plex sessions,
+then applies its global `BANDWIDTH_MULTIPLIER`.
 
 The manager matches each stream to its Plex session and replaces that row in
 its calculation, so the server's streams aren't counted twice and other streams
 on the same Plex account are still counted. No Plex user setting is needed.
-
-With the [VPS Relay](VPS-Relay), each stream in use counts once, for the
-single upload to the relay, whatever the number of viewers.
 
 ### The server's own figures
 
@@ -155,8 +162,8 @@ commit it to a repository.
   viewers are included while they exist; streams of closed rooms are removed.
 - `sequence` increases with each response and starts again when
   `instance_id` changes, which happens when the server restarts.
-- `delivery_mode` is `vps_relay` when both relay settings are set, and
-  `direct_p2p` otherwise.
+- `delivery_mode` is always `direct_p2p`. It is kept for managers up to
+  v1.2.5, which require it; later ones don't read it.
 - The response contains no Plex token, no API key and no list of viewers.
 
 To inspect what the manager does with the snapshot (freshness, matching, Plex

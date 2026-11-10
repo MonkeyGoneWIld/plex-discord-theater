@@ -82,7 +82,7 @@ packages/
     src/middleware/  Sign-in checks and request limits
     test/            Tests
 scripts/             Diagnosis scripts run inside the container
-docs/                Screenshots, this wiki's source, the VPS relay guide
+docs/                Screenshots, this wiki's source
 ```
 
 ## How it works
@@ -94,7 +94,7 @@ docs/                Screenshots, this wiki's source, the VPS relay guide
 | Direct Stream | `services/direct-stream.ts` | Plex copying the video instead of re-encoding it. The server builds the playlist from the segments as they arrive, and keeps them in memory and then on disk until the stream ends. |
 | FFmpeg engine | `services/ffmpeg/` | The server's own ffmpeg reads the library files directly. See [FFmpeg Engine](FFmpeg-Engine). |
 | Streams per room | `services/sync.ts` | A room has a stream for each combination of audio track, burned-in subtitle and quality in use, shared by everyone on it |
-| Peer-to-peer | `p2p-media-loader`, `services/tracker.ts` | Viewers on the same stream share segments, unless a VPS relay is set. The library is patched as it is bundled, by `packages/client/p2pCorePatch.ts`. |
+| Peer-to-peer | `p2p-media-loader`, `services/tracker.ts` | Viewers on the same stream share segments. The library is patched as it is bundled, by `packages/client/p2pCorePatch.ts`. |
 | qBittorrent manager API | `routes/qbt-manager.ts` | See [qBittorrent Manager API](qBittorrent-Manager-API) |
 
 The two largest files are `packages/server/src/routes/plex.ts`, for the Plex

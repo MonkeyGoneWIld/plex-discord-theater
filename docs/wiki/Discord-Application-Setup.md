@@ -60,16 +60,6 @@ use in `REDIRECT_URI` and `ALLOWED_ORIGINS`.
 
 ![Activity URL Mappings, with the root mapping set](https://raw.githubusercontent.com/MonkeyGoneWIld/plex-discord-theater/main/docs/screenshots/portal-url-mappings.png)
 
-If you will use the [VPS Relay](VPS-Relay), also select **Add Another URL
-Mapping** and add the relay's host:
-
-| Prefix | Target |
-|---|---|
-| `/theater` | `relay.example.com` |
-
-Without this mapping, Discord's proxy blocks the video segments the relay
-serves.
-
 ## 5. Keep the application private
 
 By default, anyone with an install link can add your application to their own

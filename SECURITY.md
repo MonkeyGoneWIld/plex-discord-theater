@@ -31,8 +31,6 @@ It stays because the exposure here is narrow:
   (`http: false, udp: false, ws: false`) and is handed sockets that the app has
   already upgraded and authenticated with a session token, so it isn't
   reachable by an unauthenticated caller.
-- P2P is the fallback path. With `VPS_RELAY_URL` configured, segments go through
-  the relay and the peer mesh isn't used at all.
 
 Worth re-checking whenever `bittorrent-tracker` releases: the fix has to come
 from it dropping `ip` or `ip` shipping a patch.

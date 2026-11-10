@@ -132,6 +132,7 @@ RUN set -eux; \
 # Copy built artifacts
 COPY --from=build /app/packages/server/dist packages/server/dist
 COPY --from=build /app/packages/client/dist packages/client/dist
+COPY --from=build /app/packages/client/dist-admin packages/client/dist-admin
 # Run with `docker exec <container> node scripts/<name>.mjs`.
 COPY scripts/diagnose-ffmpeg.mjs scripts/library-survey.mjs scripts/
 

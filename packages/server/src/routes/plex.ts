@@ -27,6 +27,7 @@ import { fileKeyframes } from "../services/keyframes.js";
 import { sessionHostUserId, sessionHasOtherWatchers, mayStart, mayStartTranscode, roomPositionForSession, streamsDrivenBy } from "../services/sync.js";
 import { getSessionUserId } from "../middleware/auth.js";
 import { LruMap } from "../services/lru.js";
+import { rememberStreamNotes } from "../services/stream-notes.js";
 import { parseSubtitles, type Cue } from "../services/subtitles.js";
 import {
   decodeSubtitle,
@@ -5252,8 +5253,10 @@ function refusedCopyReason(version: VersionFacts | null, askedKbps: number, room
  * re-encoded, why, and at what bitrate — "Stats for nerds" shows them. In the
  * playlist rather than an API of its own because everyone on the stream loads
  * this same playlist, so a viewer who joined later sees what the driver did.
+ * Kept by session for the admin page too (services/stream-notes.ts).
  */
-function streamNotes(notes: Record<string, string | number | null>): string[] {
+function streamNotes(sessionId: string, notes: Record<string, string | number | null>): string[] {
+  rememberStreamNotes(sessionId, notes);
   return Object.entries(notes)
     .filter(([, v]) => v !== null && v !== "")
     .map(([k, v]) => `#EXT-X-SESSION-DATA:DATA-ID="com.pdt.${k}",VALUE="${String(v).replace(/["\r\n]/g, "'")}"`);
@@ -5600,7 +5603,7 @@ async function startWithFfmpeg(o: {
         bitrate: video.audioCopy ? null : video.audioOut?.kbps ?? AUDIO_KBPS,
       }
     : null;
-  const notes = streamNotes({
+  const notes = streamNotes(o.sessionId, {
     engine: "ffmpeg",
     encoder,
     video: reason === null ? "copy" : "transcode",
@@ -6109,7 +6112,7 @@ router.get(
           ratingKey, session: sessionId.substring(0, 8), askedKbps, why: reason,
         });
       }
-      const notes = streamNotes({
+      const notes = streamNotes(sessionId, {
         fallback: fallback ?? null,
         video: videoCopied ? "copy" : "transcode",
         reason,

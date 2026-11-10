@@ -1086,6 +1086,107 @@ function sortByCaps(room: Room, roomId: string, v: Variant): void {
   });
 }
 
+/** A room as the admin page shows it (admin/data.ts): plain data, nothing live. */
+export interface AdminRoom {
+  id: string;
+  ratingKey: string | null;
+  title: string | null;
+  playing: boolean;
+  positionS: number;
+  waiting: boolean;
+  hostWaiting: boolean;
+  /** Seconds since the last play, pause or seek. */
+  stateAgeS: number;
+  /** Seconds since the host's last heartbeat; null before the first. */
+  hostHeartbeatAgeS: number | null;
+  hostVariantKey: string | null;
+  hostSubtitleId: number;
+  coHostIds: string[];
+  queue: Array<{ ratingKey: string; title: string; type: string }>;
+  /** For a room nobody is in, kept for its host to come back to. */
+  heldFor: { hostUserId: string; guildId: string | null; channelId: string | null } | null;
+  clients: Array<{
+    userId: string;
+    username: string | null;
+    role: "host" | "co-host" | "viewer";
+    connected: boolean;
+    watching: boolean;
+    away: boolean;
+    loading: boolean;
+    joinedAt: number;
+    variantKey: string | null;
+    subtitleStreamId: number;
+    quality: number;
+    caps: PlayerCap[];
+    av1Encode: boolean;
+  }>;
+  /** Viewers who left a stream of their own a moment ago, kept for them. */
+  away: Array<{ userId: string; ratingKey: string | null; variantKey: string; quality: number }>;
+  variants: Array<{
+    key: string;
+    audioStreamId: number;
+    subtitleStreamId: number;
+    quality: number;
+    hlsSessionId: string | null;
+    sessionOffset: number;
+    ownerUserId: string | null;
+    /** Seconds nobody has watched it; null while somebody does. */
+    idleS: number | null;
+  }>;
+}
+
+/** Every room, for the admin page. */
+export function adminRooms(now = Date.now()): AdminRoom[] {
+  const tick = performance.now();
+  return [...rooms].map(([id, room]) => {
+    const s = room.state;
+    return {
+      id,
+      ratingKey: s.ratingKey,
+      title: s.title,
+      playing: s.playing,
+      positionS: interpolatedPosition(s),
+      waiting: s.waiting,
+      hostWaiting: s.hostWaiting,
+      stateAgeS: Math.max(0, tick - s.transportChangedAt) / 1000,
+      hostHeartbeatAgeS: s.hostHeartbeatAt === null ? null : Math.max(0, tick - s.hostHeartbeatAt) / 1000,
+      hostVariantKey: s.hostVariantKey,
+      hostSubtitleId: s.hostSubtitleId,
+      coHostIds: [...room.coHostIds],
+      queue: s.queue.map((q) => ({ ratingKey: q.ratingKey, title: q.title, type: q.type })),
+      heldFor: room.heldFor ?? null,
+      clients: [...room.clients].map((c) => ({
+        userId: c.userId,
+        username: c.username,
+        role: c.isHost ? "host" : c.isCoHost ? "co-host" : "viewer",
+        connected: c.ws.readyState === WebSocket.OPEN,
+        watching: c.isWatching,
+        away: c.activityAway === true,
+        loading: c.loading === true,
+        joinedAt: c.joinedAt,
+        variantKey: c.variantKey,
+        subtitleStreamId: c.subtitleStreamId,
+        quality: c.quality,
+        caps: PLAYER_CAPS.filter((cap) => c.caps[cap]),
+        av1Encode: c.av1Encode,
+      })),
+      away: [...room.away].map(([userId, a]) => ({
+        userId, ratingKey: a.ratingKey, variantKey: a.variantKey, quality: a.quality,
+      })),
+      variants: [...s.variants.values()].map((v) => ({
+        key: v.key,
+        audioStreamId: v.audioStreamId,
+        subtitleStreamId: v.subtitleStreamId,
+        quality: v.quality,
+        hlsSessionId: v.hlsSessionId,
+        sessionOffset: v.sessionOffset,
+        ownerUserId: v.ownerUserId,
+        idleS: v.idleSince === null ? null : Math.max(0, now - v.idleSince) / 1000,
+      })),
+    };
+  });
+}
+
 /**
  * Where the room playing this stream of this title is now; null when none is.
  * For a stream asked for with no place, that isn't running any more.

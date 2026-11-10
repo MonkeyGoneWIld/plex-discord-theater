@@ -182,4 +182,4 @@ Portal, and `REDIRECT_URI` and `ALLOWED_ORIGINS`.
 
 ## Next
 
-→ [Local Development](Local-Development)
+→ [Admin Page](Admin-Page)

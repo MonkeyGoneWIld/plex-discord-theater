@@ -19,6 +19,7 @@ import plexAccountRoutes from "./routes/plex-account.js";
 import logRoutes from "./routes/logs.js";
 import qbtManagerRoutes from "./routes/qbt-manager.js";
 import presenceRoutes from "./routes/presence.js";
+import { startAdminServer } from "./admin/server.js";
 import { requireAuth, closeSessionDb } from "./middleware/auth.js";
 import { hlsLimiters } from "./middleware/hls-limit.js";
 import * as thumbCache from "./services/thumb-cache.js";
@@ -381,9 +382,15 @@ const server = app.listen(PORT, () => {
 
 attachWebSocketServer(server);
 
+// The admin page, on a port of its own (ADMIN_PORT), with ADMIN_PASSWORD set.
+const adminServer = startAdminServer(PORT);
+
 async function shutdown(signal: string) {
   console.log(`${signal} received, shutting down gracefully`);
   stopCacheWarmer();
+  // Its live feeds hold their connections open; they would keep it up.
+  adminServer?.close();
+  adminServer?.closeAllConnections();
   const { stopAllActiveSessions } = await import("./routes/plex.js");
   await Promise.race([
     stopAllActiveSessions(),

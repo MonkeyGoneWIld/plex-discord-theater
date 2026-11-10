@@ -342,6 +342,10 @@ in Plex's dashboard, and so in Tautulli and Tracearr:
 - Plex labels them **Direct Play** at the file's own bitrate, because it has no
   way to know about the engine's encode.
 - Plex and Tautulli can't stop them. Stop them from the Activity.
+- A room is one entry, however many streams it makes of the title: a viewer
+  on other tracks, or on a version their player can decode, is part of the
+  room's entry, so Tautulli counts one play. The [Admin Page](Admin-Page)
+  shows each stream.
 
 `FFMPEG_REPORT_TO_PLEX=0` turns this off.
 

@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "dev:admin": "vite -c vite.admin.config.ts",
+    "build": "vite build && vite build -c vite.admin.config.ts",
     "preview": "vite preview"
   },
   "dependencies": {

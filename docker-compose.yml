@@ -18,6 +18,9 @@ services:
       context: .
     ports:
       - "${PORT:-3000}:${PORT:-3000}"
+      # The admin page, with ADMIN_PASSWORD set. Plain HTTP: publish it on
+      # your LAN address only, e.g. "192.168.1.10:3050:3050".
+      # - "${ADMIN_PORT:-3050}:${ADMIN_PORT:-3050}"
 
     # Everything below is read from your .env file. Copy .env.example to .env
     # and fill in the required block; the rest can stay empty, and each one
@@ -179,6 +182,9 @@ services:
       # has running on Plex, for clearing stuck ones by hand. Empty, it is
       # accepted only from inside the container, which suits most people.
       - ADMIN_SECRET=${ADMIN_SECRET}
+      # The admin page's password; off while empty. Its port: see ports above.
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - ADMIN_PORT=${ADMIN_PORT:-3050}
       - QBT_MANAGER_API_KEY=${QBT_MANAGER_API_KEY:-}
 
     volumes:

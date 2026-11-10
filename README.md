@@ -199,6 +199,10 @@ administrator API key is required.
   limited to your own Discord servers.
 - **Diagnostic logs:** every viewer's player events land in the server's log
   file, with tokens redacted, so a stream that failed can be traced afterwards.
+- **Admin page (optional):** on a port of its own, every room live: who is in
+  it, each stream and why it is copied or re-encoded, then the details behind
+  it; and the logs and settings, secrets hidden.
+  [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Admin-Page)
 
 ## Installation
 
@@ -256,6 +260,8 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
+      # The admin page (ADMIN_PASSWORD below). Plain HTTP: your LAN only.
+      # - "192.168.1.10:3050:3050"
     volumes:
       - app-data:/data
       # Optional: keep copied films on an SSD instead (and set
@@ -342,6 +348,8 @@ services:
       # Password for the maintenance command that stops every stream the
       # bot has on Plex. Unset, it works only from inside the container.
       # ADMIN_SECRET: "a-long-random-secret"
+      # The admin page on port 3050: rooms, streams, logs and settings, live.
+      # ADMIN_PASSWORD: "a-long-password"
 
       # ── Optional: the ffmpeg engine ──────────────────────────────────────
       # Set PLAYBACK_ENGINE above to "ffmpeg" and uncomment the library
@@ -419,6 +427,7 @@ the order you set things up in.
 | | [Personal Plex Sync](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Personal-Plex-Sync) | Linking your own Plex account |
 | | [Requesting Titles](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Requesting-Titles) | Requests through Seerr |
 | **Maintain** | [Updating and Backups](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Updating-and-Backups) | Updates, settings changes, backups and restores |
+| | [Admin Page](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Admin-Page) | What is playing, for whom, and why, live; logs and settings |
 | | [Local Development](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Local-Development) | Running from source, the code's layout, tests |
 | **Help** | [Troubleshooting](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Troubleshooting) | Fixes, by where the problem appears |
 | | [FAQ](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FAQ) | Common questions |

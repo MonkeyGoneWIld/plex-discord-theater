@@ -48,7 +48,7 @@ The server doesn't start without these.
 |---|---|---|
 | `ALLOWED_GUILD_IDS` | Any server | Discord server IDs allowed to use the Activity, separated by commas. Membership is checked with Discord. While it is set, launches from DMs are refused. |
 | `HOST_REQUESTS` | On | Lets anyone ask an away host for the host role, which passes to them if the host doesn't answer. See [Roles and Permissions](Roles-and-Permissions). `off` turns it off. |
-| `ADMIN_SECRET` | None | Password for the maintenance command `DELETE /api/plex/hls/sessions`, which stops every stream the server has running in Plex. The request needs a signed-in session. Without this setting it is accepted only from inside the container; with it, also from requests carrying an `X-Admin-Secret` header. Most installations leave it empty. |
+| `ADMIN_SECRET` | None | Password for the maintenance command `DELETE /api/plex/hls/sessions`, which stops every stream the server has running in Plex. The request needs a signed-in session. Without this setting it is accepted only from inside the container; with it, also from requests carrying an `X-Admin-Secret` header. Most installations leave it empty. It is not the admin page's password: see `ADMIN_PASSWORD`. |
 | `QBT_MANAGER_API_KEY` | None | Turns on the read-only API for plex-qbt-manager. Use the same value as its `THEATER_API_KEY`. See [qBittorrent Manager API](qBittorrent-Manager-API). |
 
 To find a Discord server ID, turn on **Developer Mode** in Discord under
@@ -173,6 +173,16 @@ so it never pushes out artwork people opened. The first pass on a large library
 can take several hours. With `WARM_CACHE_MAX_ITEMS=all` on a large library,
 raise `THUMB_CACHE_MAX_SIZE` as well. On a small server, `WARM_CACHE=0` is a
 reasonable choice.
+
+## Admin page
+
+See [Admin Page](Admin-Page).
+
+| Setting | Default | Description |
+|---|---|---|
+| `ADMIN_PASSWORD` | None | Turns the admin page on, and is its password. Use 12 characters or more. |
+| `ADMIN_PORT` | `3050` | The admin page's port. It can't be `PORT`. Publish it in the compose file's `ports:`. |
+| `ADMIN_HOST` | `0.0.0.0` | The address it listens on inside the container. |
 
 ## Logging
 

@@ -176,7 +176,8 @@ common reasons are:
   instead.
 - **The file is above the copy limit** (`DIRECT_STREAM_MAX_KBPS`, 25 Mbps by
   default), or above the quality the viewer chose.
-- **The file is 4K.** It is re-encoded to 1080p.
+- **The file is above 1080p and this player can't decode it smoothly.** That
+  player gets a 1080p re-encode of its own; everyone else gets the file as it is.
 - **The player can't decode the codec**, such as HEVC in Discord in Firefox.
 - **Plex treats the server as remote.** See
   [LAN Networks](Plex-Setup#lan-networks).

@@ -229,13 +229,13 @@ const ownStreamOf = (key: string) => OWN_STREAMS.find((s) => key.endsWith(s)) ??
 
 /**
  * The stream of its own for someone short of `lacked` of what a stream
- * needs: the SDR copy for a screen in SDR alone, HEVC for a player short of AV1
- * or 10 bits but not of HEVC, 8-bit if 10 bits are what it lacks. Null for
- * the twin: short of HEVC, or of the sound.
+ * needs: the SDR copy for a screen in SDR alone, HEVC for a player short of AV1,
+ * 10 bits or 4K but not of HEVC (at 1080p, by its caps: mayStart), 8-bit if
+ * 10 bits are what it lacks. Null for the twin: short of HEVC, or of the sound.
  */
 function ownStreamFor(client: RoomClient, lacked: readonly PlayerCap[]): (typeof OWN_STREAMS)[number] | null {
   if (lacked.length > 0 && lacked.every((c) => c === "hdr")) return SDR_COPY;
-  if (!client.caps.hevc || !lacked.every((c) => c === "av1" || c === "tenBit" || c === "hdr")) return null;
+  if (!client.caps.hevc || !lacked.every((c) => c === "av1" || c === "tenBit" || c === "hdr" || c === "uhd")) return null;
   return lacked.includes("tenBit") || !client.caps.tenBit ? EIGHT_BIT : HEVC_OWN;
 }
 
@@ -933,7 +933,7 @@ function withheldOf(v: Variant | undefined): PlayerCap[] {
 const lacksAny = (client: RoomClient, caps: readonly PlayerCap[]) => caps.some((c) => !client.caps[c]);
 
 /** What a stream needs of its players for its picture, rather than its sound. */
-const PICTURE_CAPS: ReadonlySet<PlayerCap> = new Set<PlayerCap>(["hevc", "av1", "tenBit", "hdr"]);
+const PICTURE_CAPS: ReadonlySet<PlayerCap> = new Set<PlayerCap>(["hevc", "av1", "tenBit", "hdr", "uhd"]);
 
 /** For the log: why people on `from` were given another stream. */
 function whyMoved(from: Variant): string {
@@ -1047,8 +1047,8 @@ function sortByCaps(room: Room, roomId: string, v: Variant): void {
   const plain = !isH264Twin(v.key) && !ownStreamOf(v.key);
   if (plain && withheld.length > 0 && needsOf(v).length === 0 && !room.state.variants.has(v.key + H264_TWIN)) {
     rekeyVariant(room, v, v.key + H264_TWIN);
-  } else if (plain && needsOf(v).includes("hevc") && (withheld.includes("av1") || withheld.includes("tenBit"))) {
-    // HEVC only because its driver is short of AV1, or of 10 bits: the same.
+  } else if (plain && needsOf(v).includes("hevc") && (withheld.includes("av1") || withheld.includes("tenBit") || withheld.includes("uhd"))) {
+    // HEVC only because its driver is short of AV1, of 10 bits, or of 4K: the same.
     const own = withheld.includes("tenBit") ? EIGHT_BIT : HEVC_OWN;
     if (!room.state.variants.has(v.key + own)) rekeyVariant(room, v, v.key + own);
   }
@@ -2302,7 +2302,7 @@ export function attachWebSocketServer(server: Server): void {
           // have one; until then they watch what the host does.
           quality: 0,
           // 10 bits unless said otherwise: a player before it was asked plays them.
-          caps: Object.fromEntries(PLAYER_CAPS.map((cap) => [cap, cap === "tenBit" ? msg[cap] !== false : msg[cap] === true])) as unknown as PlayerCaps,
+          caps: Object.fromEntries(PLAYER_CAPS.map((cap) => [cap, cap === "tenBit" || cap === "uhd" ? msg[cap] !== false : msg[cap] === true])) as unknown as PlayerCaps,
           av1Encode: msg.av1 === true && msg.av1Encode === true,
         };
         roomId = instanceId;

@@ -23,7 +23,7 @@ A file is copied when all of these are true:
 |---|---|
 | Direct Stream is on | `DIRECT_STREAM`, on |
 | The player decodes the video: H.264, or HEVC on a player that decodes HEVC. With the FFmpeg engine, also AV1 on a player that decodes AV1. | — |
-| The picture is 1080p or smaller (up to 2048 × 1200). 4K files are re-encoded to 1080p. | — |
+| Above 1080p (2048 × 1200), the player decodes it smoothly. A player that can't gets a 1080p re-encode of its own. | — |
 | The file's average bitrate is within the copy limit | `DIRECT_STREAM_MAX_KBPS`, 25000 |
 | The file's average bitrate is within the viewer's chosen quality | Original |
 | No subtitle has to be burned into the picture | — |

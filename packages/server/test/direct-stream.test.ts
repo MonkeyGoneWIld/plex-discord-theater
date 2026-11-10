@@ -798,7 +798,16 @@ console.log("\n— through the routes —");
     });
   const uhd = await startNotes(UHD_TITLE);
   check("a 4K file under the copy limit is still re-encoded, without asking for a copy, and says it is 4K",
-    [uhd.asked.directStream, uhd.notes.video, uhd.notes.reason], ["0", "transcode", "4K source (player max 1080p)"]);
+    [uhd.asked.directStream, uhd.notes.video, uhd.notes.reason], ["0", "transcode", "4K: this player can't decode it smoothly"]);
+  {
+    const routes = await import("../src/routes/plex.js");
+    const { NO_CAPS } = await import("../src/services/ffmpeg/plan.js");
+    routes.capsForTests({ ...NO_CAPS, uhd: true, av1Encode: false });
+    const uhdOk = await startNotes(UHD_TITLE);
+    check("  for a player that decodes 4K it is asked for as a copy, at its own size",
+      [uhdOk.asked.directStream, uhdOk.notes.video], ["1", "copy"]);
+    routes.capsForTests({ ...NO_CAPS, av1Encode: false });
+  }
   check("one Plex declined to copy says so, without blaming a bitrate it was asked well over",
     (await startNotes("970")).notes.reason,
     "Declined by Plex");

@@ -7,7 +7,7 @@
  * to identify the right track.
  */
 import { describeWatched, isPartialSubtitle, matchAudioTrack, matchSubtitleTrack, matchVersion, mergeTrackPrefs, plexAudioChoice, plexSubtitleChoice, rememberTitleVersion, titleTrackPrefs, titleVersionPref, tracksForNewItem, type AudioPref, type SubtitlePref } from "../src/lib/trackPrefs";
-import { hlsMasterUrl, shownDownscaled, type PlexVersion, type StreamTrack } from "../src/lib/api";
+import { hlsMasterUrl, isUhdVersion, type PlexVersion, type StreamTrack } from "../src/lib/api";
 
 let pass = 0;
 let fail = 0;
@@ -456,11 +456,7 @@ console.log("\n— the version picked for a film or a show —");
   const film = [file(1, "1080p · H264 · 5.1", "1080p", false), file(0, "4K · HEVC · 7.1", "4K", true)];
   const movie = { ratingKey: "500", type: "movie" };
   check("nothing picked: the default", matchVersion(film, titleVersionPref(movie)), null);
-  check("a 1080p copy beside a 4K one: no warning", shownDownscaled(film, 1), false);
-  check("the 4K one picked: the warning", shownDownscaled(film, 0), true);
-  check("a title only in 4K (Andor): none", shownDownscaled([file(0, "4K · HEVC · 5.1", "4K", true)], 0), false);
-  check("two 4K copies and nothing lower: none", shownDownscaled([file(0, "4K · HEVC", "4K", true), file(1, "4K · H264", "4K", true)], 1), false);
-  check("an older server's 4K label counts", shownDownscaled([{ ...file(1, "1080p", "1080p", false), uhd: undefined }, { ...file(0, "4K", "4K", true), uhd: undefined }], 0), true);
+  check("an older server's 4K label counts", isUhdVersion({ ...file(0, "4K", "4K", true), uhd: undefined }), true);
   rememberTitleVersion(movie, film[1]);
   check("the 4K pick is kept for the film", matchVersion(film, titleVersionPref(movie))?.mediaIndex, 0);
   check("and not for another film", titleVersionPref({ ratingKey: "501", type: "movie" }), null);

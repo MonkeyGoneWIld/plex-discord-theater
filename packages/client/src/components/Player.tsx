@@ -2363,6 +2363,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * stream and keeps it off that picture on this device from then on.
    */
   const dropTickRef = useRef<{ shown: number; dropped: number; paints: number; at: number } | null>(null);
+  /** 4K given up on this device for dropping frames: what drops next is the codec's. */
+  const uhdDroppedRef = useRef(false);
   useEffect(() => {
     const timer = setInterval(() => {
       const v = videoRef.current;
@@ -2372,7 +2374,10 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       const now = { shown: quality.totalVideoFrames - quality.droppedVideoFrames, dropped: quality.droppedVideoFrames, paints: paintsRef.current, at };
       const last = dropTickRef.current;
       dropTickRef.current = now;
-      const pictureCap = pictureCapRef.current;
+      // Above 1080p, 4K is given up first: the same codec at 1080p may well
+      // keep up (PlayerCaps.uhd). Once, then the codec, as before.
+      const pictureCap: Cap | null = (v.videoWidth > 2048 || v.videoHeight > 1200) && !uhdDroppedRef.current
+        ? "uhd" : pictureCapRef.current;
       // Not across a rebuilt stream, whose count starts again, nor a timer
       // that ran late (a hidden page), which isn't a tick of play.
       if (!pictureCap || !last || now.shown < last.shown || now.dropped < last.dropped) return;
@@ -2387,7 +2392,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       if (!cantKeepUp(run)) return;
       // Still dropping on the same stream after 10 bits are given up —
       // Plex made it, and has no 8-bit one of its own — HEVC goes next.
-      pictureCapRef.current = pictureCap === "tenBit" ? "hevc" : null;
+      if (pictureCap === "uhd") uhdDroppedRef.current = true;
+      else pictureCapRef.current = pictureCap === "tenBit" ? "hevc" : null;
       droppedWindowsRef.current = [];
       const shown = run.reduce((n, t) => n + t.shown, 0);
       const dropped = run.reduce((n, t) => n + t.dropped, 0);

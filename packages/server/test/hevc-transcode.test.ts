@@ -20,7 +20,7 @@ process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "hevc-transc
 const { attachWebSocketServer, closeWebSocketServer, mayStart, mayStartHevc, sessionHostUserId } = await import("../src/services/sync.js");
 const {
   recordSessionVideoCodec, recordHevcWithheld, isHevcSession, recordSessionAudioNeeds, recordWithheld, sessionNeeds,
-  recordSessionHdr, recordSessionTenBit,
+  recordSessionHdr, recordSessionTenBit, recordSessionUhd,
 } = await import("../src/routes/plex.js");
 const { plexReencodeKbps, transcodeFrame } = await import("../src/services/media-versions.js");
 const { createSession } = await import("../src/middleware/auth.js");
@@ -41,9 +41,30 @@ check("a 1088-row x265 encode keeps its rows", transcodeFrame({ width: 1920, hei
 check("16:10 is let through", transcodeFrame({ width: 1920, height: 1200 }), "1920x1200");
 check("2K DCI scope is let through", transcodeFrame({ width: 2048, height: 858 }), "2048x1080");
 check("smaller files are never upscaled", transcodeFrame({ width: 1280, height: 720 }), "1920x1080");
-check("1440p comes down to 1080p", transcodeFrame({ width: 2560, height: 1440 }), "1920x1080");
-check("4K comes down to 1080p", transcodeFrame({ width: 3840, height: 2160 }), "1920x1080");
-check("unknown size gets the old box", transcodeFrame({}), "1920x1080");
+check("1440p stays 1440p", transcodeFrame({ width: 2560, height: 1440 }), "2560x1440");
+check("4K stays 4K", transcodeFrame({ width: 3840, height: 2160 }), "3840x2160");
+check("unknown size gets a 4K box, never upscaled into", transcodeFrame({}), "3840x2160");
+check("for a player that can't decode 4K smoothly: 1440p and 4K come down to 1080p",
+  [transcodeFrame({ width: 2560, height: 1440 }, false), transcodeFrame({ width: 3840, height: 2160 }, false), transcodeFrame({}, false)],
+  ["1920x1080", "1920x1080", "1920x1080"]);
+check("  and a 1088-row encode still keeps its rows", transcodeFrame({ width: 1920, height: 1088 }, false), "1920x1088");
+
+console.log("\n— 4K copied for a player that decodes it —");
+{
+  const { planCopy, copyNeeds } = await import("../src/services/ffmpeg/plan.js");
+  const uhdFile = {
+    container: "mkv", width: 3840, height: 2160, bitrateKbps: 40000, durationS: 100,
+    streams: [
+      { streamType: 1, index: 0, codec: "hevc", bitDepth: 10, profile: "main 10", colorTrc: "bt709" },
+      { streamType: 2, index: 1, id: 2, codec: "aac", channels: 2, selected: true },
+    ],
+  } as unknown as Parameters<typeof planCopy>[0];
+  const yes = planCopy(uhdFile, { audioStreamId: null, hevcOk: true, uhdOk: true });
+  check("copied at its own size", yes.ok && [yes.width, yes.height], [3840, 2160]);
+  check("  and the stream needs 4K of its players", yes.ok && copyNeeds(yes).includes("uhd"), true);
+  const no = planCopy(uhdFile, { audioStreamId: null, hevcOk: true, uhdOk: false });
+  check("not for a player that can't decode it smoothly", no.ok ? "copied" : no.why, "Above 1080p: this player can't decode it smoothly");
+}
 
 console.log("\n— what Plex is asked to re-encode at —");
 // Part H, 4 November: Rain Man's 8.9 Mbps Dolby Vision for a screen in SDR,
@@ -384,14 +405,14 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
 {
   newRoom("caps-1");
   const all = { av1: true, opus: true, flac: true, av1Encode: true };
-  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, tenBit: false, av1Encode: false };
+  const none = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, tenBit: false, uhd: false, av1Encode: false };
   const host = await join("caps-1", "u-host", "host", true, all);
   const a = await join("caps-1", "u-a", "a", true, all);
   check("what a player decodes, a stream it starts may use", mayStart("u-host"),
-    { hevc: true, av1: true, opus: true, flac: true, ac3: false, eac3: false, hdr: false, tenBit: true, av1Encode: true });
+    { hevc: true, av1: true, opus: true, flac: true, ac3: false, eac3: false, hdr: false, tenBit: true, uhd: true, av1Encode: true });
   const phone = await join("caps-1", "u-p", "p", false, { opus: true, av1Encode: true, hdr: true });
   check("each player's own, AV1 on the GPU only with AV1 at all, HDR kept for a screen showing it", mayStart("u-p"),
-    { ...none, opus: true, hdr: true, tenBit: true });
+    { ...none, opus: true, hdr: true, tenBit: true, uhd: true });
   check("leaving the others' alone", mayStart("u-a").av1, true);
   check("somebody in no room gets H.264 and AAC", mayStart("u-nobody"), none);
   phone.close();
@@ -414,7 +435,7 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
   const bState = b.seen.find((m) => m.type === "state")?.variant;
   check("someone who can't decode AV1 but decodes HEVC lands on a stream of their own to bring up",
     [bState?.variantKey, bState?.isOwner, bState?.hlsSessionId], ["1:0/hevc", true, null]);
-  check("in HEVC, with the sound they decode", mayStart("u-b"), { ...none, hevc: true, opus: true, flac: true, tenBit: true });
+  check("in HEVC, with the sound they decode", mayStart("u-b"), { ...none, hevc: true, opus: true, flac: true, tenBit: true, uhd: true });
   check("the host's stream is left as it is", [host.toldToRebuild(), a.seen.filter((m) => m.type === "variant").length], [false, 0]);
   const hevcSid = crypto.randomUUID();
   recordSessionVideoCodec(hevcSid, "hevc");
@@ -464,6 +485,33 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
   await sleep(60);
   check("and withdrawing HEVC after that, onto H.264", a.seen.filter((m) => m.type === "variant").at(-1)?.variantKey, "1:0/h264");
   [host, a, b, c, d].forEach((x) => x.close());
+}
+
+{
+  // A 4K copy: whoever can't decode 4K smoothly gets 1080p of their own.
+  newRoom("caps-4k");
+  const host = await join("caps-4k", "u-host", "host", true, {});
+  const sid = crypto.randomUUID();
+  recordSessionVideoCodec(sid, "hevc");
+  recordSessionUhd(sid, true);
+  check("a 4K copy needs 4K of its players", sessionNeeds(sid), ["hevc", "uhd"]);
+  host.send({
+    type: "play", ratingKey: "400", title: "A 4K Film", subtitles: false,
+    hlsSessionId: sid, position: 0, sessionOffset: 0, audioStreamId: 1, subtitleStreamId: 0,
+  });
+  await sleep(60);
+  const a = await join("caps-4k", "u-a", "a", true, {});
+  const b = await join("caps-4k", "u-b", "b", true, { uhd: false });
+  await sleep(60);
+  const stateOf = (c: Client) => c.seen.find((m) => m.type === "state")?.variant?.variantKey;
+  check("a player that says nothing of 4K shares the copy; one that can't, HEVC of its own",
+    [stateOf(a), stateOf(b)], ["1:0", "1:0/hevc"]);
+  check("  at 1080p", mayStart("u-b").uhd, false);
+  a.clear();
+  a.send({ type: "caps", uhd: false });
+  await sleep(60);
+  check("frames dropped on 4K: onto that 1080p stream", a.seen.filter((m) => m.type === "variant").at(-1)?.variantKey, "1:0/hevc");
+  [host, a, b].forEach((x) => x.close());
 }
 
 {

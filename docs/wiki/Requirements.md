@@ -22,9 +22,10 @@ The server itself is light. The work is in making the video streams:
 
 - **Copying is cheap.** When a viewer's player can decode a file's video, the
   video is copied as it is (Direct Stream) and only the audio is converted if
-  needed. Most H.264 and HEVC files up to 1080p are copied.
-- **Re-encoding needs a GPU.** Files above 1080p, files above the copy bitrate
-  limit, and streams for players that can't decode the file are re-encoded.
+  needed. Most H.264 and HEVC files are copied, 4K included.
+- **Re-encoding needs a GPU.** Files above the copy bitrate limit, and streams
+  for players that can't decode the file, are re-encoded, at the file's own
+  size: a 4K re-encode is about four times the work of a 1080p one.
   With hardware encoding, a 1080p re-encode runs comfortably on modest
   hardware. On the CPU alone, one re-encode can occupy several cores, and a 4K
   source may not keep up.

@@ -23,7 +23,7 @@ shared.stats.previews = { fromPlayers: 0, fromBot: 21.8 * MB, sent: 999 };
 for (const id of ["a1", "b2", "c3"]) shared.players.set(id, {});
 
 const notes: StreamNotes = {
-  video: "transcode", reason: "4K source (player max 1080p)", kbps: 12000, quality: null,
+  video: "transcode", reason: "4K: this player can't decode it smoothly", kbps: 12000, quality: null,
   audio: "transcode", audioFrom: "TrueHD 7.1", audioTo: "Opus 7.1", audioKbps: 512, audioReason: "The player can't play TrueHD",
   engine: "ffmpeg", encoder: "Intel Quick Sync (AV1), GPU decode", fallback: null,
   videoFrom: "HEVC Main 10 · 10-bit · Dolby Vision P7 · 3840×2160 · 23.976 fps", range: "Dolby Vision P8.1 / HDR10 (mapped at 300 nits)",

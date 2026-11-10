@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, backdropThumbUrl, shownDownscaled, versionOf, type Credit, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
+import { fetchMeta, fetchProgress, invalidateMeta, posterThumbUrl, backdropThumbUrl, versionOf, type Credit, type HistoryEntry, type PlexItem, type PlexMeta } from "../lib/api";
 import { selectStreams } from "../lib/selectStreams";
 import { formatAirDate, formatTimecode } from "../lib/format";
 import { useMediaQuery, NARROW_QUERY } from "../lib/useMediaQuery";
@@ -706,14 +706,6 @@ export function MovieDetail({ item, isHost, onPlay, onBack, onSuggest, onShowCli
               </div>
               )}
 
-              {/* A 4K copy picked over one that needs no bringing down. Not for
-                  a title that only comes in 4K: there is nothing to choose. */}
-              {meta && shownDownscaled(meta.versions, selectedVersion) && (
-                <p style={styles.downscaleNote} role="note">
-                  This activity streams at up to 1080p. The 4K version will be downscaled to 1080p during playback.
-                </p>
-              )}
-
               {error && <p style={styles.errorText}>{error}</p>}
               {/* The page still shows everything the card knew, so this is a
                   note about what's missing rather than a dead end. */}
@@ -1348,14 +1340,5 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#e74c3c",
     fontSize: "14px",
     marginBottom: "8px",
-  },
-  /** Under the pickers, across the column: a lighter red than errorText, for
-   *  reading over a dark backdrop. Drawn into trackRow's bottom margin. */
-  downscaleNote: {
-    color: "#ff6b6b",
-    fontSize: "14px",
-    fontWeight: 500,
-    lineHeight: 1.45,
-    margin: "-6px 0 20px",
   },
 };

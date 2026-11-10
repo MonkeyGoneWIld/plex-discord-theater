@@ -40,7 +40,8 @@ const PENDING_MS = 4_000;
  * a line changes, at the canvas's size on screen times the screen's pixel
  * ratio, unlimited: 1440 lines on a 1440p screen. Your Lie in April's opening
  * karaoke dropped a tenth of its frames in the Discord app on one on 24
- * October. 1080 is the film's own size.
+ * October. 1080 lines keep a subtitle sharp on any screen, a 4K film's too;
+ * drawn at 2160, the same karaoke would cost four times as much.
  */
 const MAX_RENDER_HEIGHT = 1080;
 

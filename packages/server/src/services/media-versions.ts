@@ -89,15 +89,15 @@ export function resolutionLabel(media: VersionSource): string {
 
 /**
  * The largest picture a transcode of this file may come out at, as Plex's
- * `videoResolution` takes it: "1920x1080" unless the file is only just bigger.
+ * `videoResolution` takes it: the file's own size, for a player that decodes
+ * pictures above 1080p smoothly (PlayerCaps.uhd), and nothing is ever made
+ * larger, since the box only grows.
  *
- * A flat 1920x1080 shrinks every file that is a few rows over it. A 1920x1088
- * encode — common for x265, which pads to a multiple of 16 — came out at
- * 1906x1080: every pixel resampled to lose eight rows, softening the whole
- * picture for nothing. So a file up to 2K DCI wide (2048) and 16:10 tall (1200)
- * is let through at its own size. Anything larger still comes down to 1080p —
- * 1440p and 4K cost far more to encode and carry than they give back at these
- * bitrates — and nothing is ever made larger, since the box only grows.
+ * For a player that doesn't, "1920x1080" unless the file is only just bigger:
+ * a flat 1920x1080 shrank every file a few rows over it. A 1920x1088 encode —
+ * common for x265, which pads to a multiple of 16 — came out at 1906x1080,
+ * every pixel resampled to lose eight rows. So a file up to 2K DCI wide (2048)
+ * and 16:10 tall (1200) is let through at its own size.
  */
 /**
  * The ceilings a viewer may put on their own stream ("Quality" in the player),
@@ -114,13 +114,13 @@ export function qualityKbps(v: unknown): number {
   return QUALITY_LEVELS_KBPS.includes(n) ? n : 0;
 }
 
-export function transcodeFrame(media: { width?: number | null; height?: number | null }): string {
+export function transcodeFrame(media: { width?: number | null; height?: number | null }, uhd = true): string {
   const w = media.width ?? 0;
   const h = media.height ?? 0;
-  if (w > 0 && h > 0 && w <= 2048 && h <= 1200) {
+  if (w > 0 && h > 0 && (uhd || (w <= 2048 && h <= 1200))) {
     return `${Math.max(1920, w)}x${Math.max(1080, h)}`;
   }
-  return "1920x1080";
+  return uhd ? "3840x2160" : "1920x1080";
 }
 
 /**
@@ -271,12 +271,11 @@ export function channelLabel(channels: number | undefined | null): string | null
  *
  * Every file is offered, best first, so index 0 is the default — with one
  * exception to "best": a 4K file goes after every lower-resolution copy of the
- * same title. The activity shows at most 1080p, so a 4K file is brought down to
- * it, and costs the server a 4K decode for each one watching. It is offered all
- * the same, behind a warning on the title page, because a 4K release is not
- * always the same film as the 1080p one beside it — another cut, another
- * grade. It used to be left out whenever a lower copy existed. When 4K is the
- * only copy it is simply the default.
+ * same title. Not for its picture, which a player that decodes 4K is sent as
+ * it is, but for what it costs: a 4K file carries several times the bits,
+ * mostly more than DIRECT_STREAM_MAX_KBPS, so it is re-encoded at 4K, four
+ * times the work of 1080p, and each viewer downloads more. Picked on the
+ * title page, it plays at 4K. When 4K is the only copy it is the default.
  *
  * Plex's own order is by when the file was added, which has nothing to do with
  * which one anyone wants.

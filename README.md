@@ -161,8 +161,8 @@ administrator API key is required.
 
 ## For server owners
 
-- **Original picture:** H.264 and HEVC files up to 1080p and within your
-  bitrate limit are copied, not re-encoded, for players that can decode them.
+- **Original picture:** H.264 and HEVC files within your bitrate limit, 4K
+  included, are copied, not re-encoded, for players that can decode them.
 - **HEVC transcodes:** a sharper picture at the same bitrate for players that
   decode HEVC, with Plex Pass and hardware encoding (or the ffmpeg engine).
 - **FFmpeg engine (optional):** the container makes the streams itself, on

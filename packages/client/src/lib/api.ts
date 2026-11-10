@@ -318,8 +318,8 @@ export interface StreamTrack {
  * One of the files Plex holds for a title.
  *
  * Best first, so versions[0] is the default — except that a 4K file comes
- * after every lower-resolution copy of the same title, since the activity
- * shows at most 1080p (see shownDownscaled).
+ * after every lower-resolution copy of the same title, for what it costs to
+ * carry (the server's playableVersionOrder). Picked, it plays at 4K.
  *
  * Tracks and part id are per-version: a second file is a different set of audio
  * and subtitle streams with different ids, not the same ones again.
@@ -363,17 +363,6 @@ export interface ResolvedVersion {
  */
 export function isUhdVersion(v: Pick<PlexVersion, "uhd" | "resolution">): boolean {
   return v.uhd ?? v.resolution === "4K";
-}
-
-/**
- * Whether the version `mediaIndex` of a title is a 4K file that the activity
- * brings down to 1080p while a copy that needs no bringing down is there to
- * pick instead — what the title page warns about. Not a title that only comes
- * in 4K (Andor): there is nothing else to choose.
- */
-export function shownDownscaled(versions: readonly PlexVersion[] | undefined, mediaIndex: number | null | undefined): boolean {
-  const chosen = versions?.find((v) => v.mediaIndex === mediaIndex);
-  return !!chosen && isUhdVersion(chosen) && versions!.some((v) => !isUhdVersion(v));
 }
 
 export function versionOf(meta: PlexMeta, mediaIndex?: number): ResolvedVersion {

@@ -10,7 +10,7 @@ setting and a restart.
 
 ## What it adds
 
-- **More files copied as they are.** H.264, HEVC and AV1 up to 1080p are
+- **More files copied as they are.** H.264, HEVC and AV1, 4K included, are
   copied for players that decode them, HDR10, HLG and Dolby Vision 7 and 8
   included. Opus, FLAC, AC3 and EAC3 sound is copied for players that play it;
   7.1 sound a browser can't play becomes Opus 7.1, and PCM becomes FLAC.

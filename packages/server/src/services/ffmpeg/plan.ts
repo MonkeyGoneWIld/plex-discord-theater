@@ -161,11 +161,23 @@ export interface PlayerCaps {
    * it a player gets HEVC in 8 bits, a stream of its own (seatOf).
    */
   tenBit: boolean;
+  /**
+   * A picture above 1080p plays smoothly: a 4K file is copied, or re-encoded,
+   * at its own size. Said unless the browser says this device can't decode
+   * 4K smoothly, or it kept dropping frames on such a picture (the client's
+   * Player.tsx); without it a player gets 1080p, a stream of its own (seatOf).
+   */
+  uhd: boolean;
 }
 export type PlayerCap = keyof PlayerCaps;
-export const PLAYER_CAPS: readonly PlayerCap[] = ["hevc", "av1", "opus", "flac", "ac3", "eac3", "hdr", "tenBit"];
-export const NO_CAPS: PlayerCaps = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, tenBit: false };
-export const ALL_CAPS: PlayerCaps = { hevc: true, av1: true, opus: true, flac: true, ac3: true, eac3: true, hdr: true, tenBit: true };
+export const PLAYER_CAPS: readonly PlayerCap[] = ["hevc", "av1", "opus", "flac", "ac3", "eac3", "hdr", "tenBit", "uhd"];
+export const NO_CAPS: PlayerCaps = { hevc: false, av1: false, opus: false, flac: false, ac3: false, eac3: false, hdr: false, tenBit: false, uhd: false };
+export const ALL_CAPS: PlayerCaps = { hevc: true, av1: true, opus: true, flac: true, ac3: true, eac3: true, hdr: true, tenBit: true, uhd: true };
+
+/** Above 1080p — 2K DCI wide (2048) or 16:10 tall (1200) — as PlayerCaps.uhd has it. */
+export function aboveHd(width: number | null | undefined, height: number | null | undefined): boolean {
+  return (width ?? 0) > 2048 || (height ?? 0) > 1200;
+}
 
 /** The bits of a picture's samples: Plex's word, else its profile's. */
 export function pictureBits(video: { bitDepth?: number; profile?: string }): number {
@@ -259,7 +271,7 @@ export function planCopy(
   req: {
     audioStreamId: number | null; hevcOk: boolean; av1Ok?: boolean; opusOk?: boolean; flacOk?: boolean;
     ac3Ok?: boolean; eac3Ok?: boolean; hdrOk?: boolean; sdrPeakNits?: number | null; audioChannels?: number;
-    tenBitOk?: boolean;
+    tenBitOk?: boolean; uhdOk?: boolean;
   },
 ): CopyPlan {
   const no = (why: string): CopyPlan => ({ ok: false, why });
@@ -293,8 +305,10 @@ export function planCopy(
   if (hdrPicture(hdr) && !req.hdrOk && sdrPeakNits === null) return no(`${hdr} for a screen in SDR`);
   const width = src.width ?? 0;
   const height = src.height ?? 0;
-  // 4K is shown at 1080p, as Plex does: the activity can't show more.
-  if (width > 2048 || height > 1200) return no("Above 1080p");
+  // 4K is copied at its own size for a player that decodes it smoothly
+  // (PlayerCaps.uhd). The activity is a browser page: full screen on a 1440p
+  // or 4K screen it shows every pixel.
+  if (aboveHd(width, height) && req.uhdOk === false) return no("Above 1080p: this player can't decode it smoothly");
   const container = (src.container ?? "").toLowerCase();
   if (!(codec === "av1" ? FMP4_CONTAINERS : COPY_CONTAINERS).has(container)) return no(`${(container || "unknown").toUpperCase()} container not supported`);
 
@@ -337,6 +351,7 @@ export function copyNeeds(plan: Extract<CopyPlan, { ok: true }>): PlayerCap[] {
   if (plan.audioOut && plan.audioOut.codec !== "aac") needs.push(plan.audioOut.codec);
   if (hdrPicture(plan.hdr) && plan.sdrPeakNits === null) needs.push("hdr");
   if (plan.tenBit) needs.push("tenBit");
+  if (aboveHd(plan.width, plan.height)) needs.push("uhd");
   return needs;
 }
 

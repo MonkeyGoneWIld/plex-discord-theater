@@ -59,7 +59,7 @@ import {
   keepHdrOnReencode, localPath, lowPowerVaapi, lowPowerVaapiAv1, maxEncodes, readable, recheckHardware, sizeOnDisk, styledSubtitlesOn, tonemapAlgo, tonemapper,
 } from "../services/ffmpeg/config.js";
 import {
-  ALL_CAPS, AUDIO_KBPS, HARDWARE_NAMES, NO_CAPS, copyArgs, copyNeeds, encodeArgs, encodeTargetKbps, hdrClass, hdrPicture, inputArgs, pickBurn,
+  ALL_CAPS, AUDIO_KBPS, aboveHd as aboveHdSize, HARDWARE_NAMES, NO_CAPS, copyArgs, copyNeeds, encodeArgs, encodeTargetKbps, hdrClass, hdrPicture, inputArgs, pickBurn,
   planCopy, planEncode, tonemapCurve, type AudioOut, type EncodeRequest, type PlayerCap, type PlayerCaps, type SourceStream, type SourceVersion,
 } from "../services/ffmpeg/plan.js";
 import { probe, probeHdrMeta, probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
@@ -297,8 +297,8 @@ interface PlexMedia {
  * The playable versions of an item, best first.
  *
  * The order is decided by playableVersionOrder — including the rule that puts
- * a 4K copy after every lower-resolution one, since the activity shows at
- * most 1080p. Everything here is the Plex-shaped mapping around that answer.
+ * a 4K copy after every lower-resolution one, for what it costs to carry.
+ * Everything here is the Plex-shaped mapping around that answer.
  *
  * `mediaIndex` is the position in Plex's own Media array: it is what the
  * transcode decision takes, so it stays tied to the original list rather than
@@ -311,7 +311,7 @@ interface MediaVersion {
   /** The cut its file's name says it is — IMAX, Extended… — see editionOf. */
   edition: string | null;
   resolution: string;
-  /** A 4K file, which the activity shows at 1080p (isUhd). */
+  /** A 4K file (isUhd). */
   uhd: boolean;
   /** The file's own picture size, for sizing its transcode — see transcodeFrame. */
   width: number | null;
@@ -4262,6 +4262,14 @@ export function recordSessionTenBit(sessionId: string, tenBit: boolean): void {
   else tenBitSessions.delete(sessionId);
 }
 
+/** Sessions whose picture is above 1080p as it is sent (PlayerCaps.uhd). */
+const uhdSessions = new Set<string>();
+
+export function recordSessionUhd(sessionId: string, uhd: boolean): void {
+  if (uhd) uhdSessions.add(sessionId);
+  else uhdSessions.delete(sessionId);
+}
+
 /** Whether a picture, as Plex describes it (PictureFacts), is HDR as a player
  *  shows it: Dolby Vision 8.2 and 10.2 are SDR underneath (plan.ts hdrPicture). */
 function hdrShown(picture: PictureFacts | null | undefined): boolean {
@@ -4281,6 +4289,7 @@ export function sessionNeeds(sessionId: string): PlayerCap[] {
   if (sessionVideoCodec.get(sessionId) === "av1") needs.push("av1");
   if (hdrSessions.has(sessionId)) needs.push("hdr");
   if (tenBitSessions.has(sessionId)) needs.push("tenBit");
+  if (uhdSessions.has(sessionId)) needs.push("uhd");
   return [...needs, ...(sessionAudioNeeds.get(sessionId) ?? [])];
 }
 
@@ -4436,6 +4445,7 @@ export function markTranscodeStopped(sessionId: string): void {
   sessionAudioNeeds.delete(sessionId);
   hdrSessions.delete(sessionId);
   tenBitSessions.delete(sessionId);
+  uhdSessions.delete(sessionId);
   withheldFor.delete(sessionId);
   manifestCache.delete(sessionId);
   hostPingInfo.delete(sessionId);
@@ -5195,8 +5205,9 @@ async function versionFacts(ratingKey: string, mediaIndex: number): Promise<Vers
   }
 }
 
-/** Larger than the activity shows — 1080p — so never copied; see plan.ts planCopy. */
-const aboveHd = (v: VersionFacts | null) => (v?.width ?? 0) > 2048 || (v?.height ?? 0) > 1200;
+/** Above 1080p: copied, and re-encoded at its own size, only for a player
+ *  that decodes it smoothly (PlayerCaps.uhd); see plan.ts planCopy. */
+const aboveHd = (v: VersionFacts | null) => aboveHdSize(v?.width, v?.height);
 
 const mbpsText = (kbps: number) => `${(kbps / 1000).toFixed(kbps % 1000 ? 1 : 0)} Mbps`;
 
@@ -5214,7 +5225,6 @@ function refusedCopyReason(version: VersionFacts | null, askedKbps: number, room
   }
   if (codec === "hevc" && !roomHevc) return "HEVC: not decoded by this player";
   if (codec === "h264" && (version?.bitDepth ?? 8) > 8) return `${version!.bitDepth}-bit H.264: no browser decoder`;
-  if (aboveHd(version)) return "Above 1080p (player max 1080p)";
   // Asked above any peak, the bitrate wasn't it — see COPY_ASK_KBPS.
   if (askedKbps >= COPY_ASK_KBPS) return "Declined by Plex";
   if (version?.bitrate) {
@@ -5359,7 +5369,7 @@ async function startWithFfmpeg(o: {
   const durationS = source.durationS ?? null;
   const okFor = (c: PlayerCaps) => ({
     hevcOk: c.hevc, av1Ok: c.av1, opusOk: c.opus, flacOk: c.flac, ac3Ok: c.ac3, eac3Ok: c.eac3, hdrOk: c.hdr,
-    tenBitOk: c.tenBit,
+    tenBitOk: c.tenBit, uhdOk: c.uhd === true,
   });
   const copyAsk = { audioStreamId: o.audioStreamID || null, ...okFor(o.caps), sdrPeakNits: hdrOnSdrNits(), audioChannels: audioChannels() };
   /** HDR labelled for each screen (hdr-init.ts), for the log and Stats for nerds. */
@@ -5552,6 +5562,7 @@ async function startWithFfmpeg(o: {
 
   recordSessionVideoCodec(o.sessionId, video.codec);
   recordSessionTenBit(o.sessionId, tenBit);
+  recordSessionUhd(o.sessionId, aboveHdSize(video.width, video.height));
   // An HDR copy, or a re-encode that kept HDR: whoever on it has a screen in
   // SDR gets a stream made for it (sync.ts seatOf). Not one labelled for a
   // screen in SDR already: anyone can watch that.
@@ -5560,7 +5571,7 @@ async function startWithFfmpeg(o: {
   // A re-encode's Opus 7.1 too: whoever on it doesn't decode Opus gets a
   // stream of their own (sync.ts seatOf).
   recordSessionAudioNeeds(o.sessionId, copyPlan?.ok && reason === null
-    ? copyNeeds(copyPlan).filter((c) => c !== "hevc" && c !== "av1" && c !== "hdr" && c !== "tenBit")
+    ? copyNeeds(copyPlan).filter((c) => c !== "hevc" && c !== "av1" && c !== "hdr" && c !== "tenBit" && c !== "uhd")
     : video.audioOut?.codec === "opus" ? ["opus"] : []);
   const decided: AudioDecision | null = video.audio
     ? {
@@ -5684,8 +5695,7 @@ router.get(
     // the detail page — the queue, auto-advance to the next episode, a viewer
     // following the room — sends nothing, and Plex's own index 0 is the *4K*
     // copy on exactly the titles this feature exists for. Defaulting to 0 there
-    // would transcode 4K for a room that can only be shown 1080p, which is the
-    // one outcome the whole rule is meant to prevent.
+    // would send the 4K file, and its cost, to a room nobody picked it for.
     const requestedMedia = Number(req.query.mediaIndex);
     const mediaIndex = Number.isInteger(requestedMedia) && requestedMedia >= 0
       ? requestedMedia
@@ -5888,6 +5898,7 @@ router.get(
       sessionAudioNeeds.delete(sessionId);
       hdrSessions.delete(sessionId);
       tenBitSessions.delete(sessionId);
+      uhdSessions.delete(sessionId);
       // Whether Plex is copying the video, which decides who serves it. A
       // decision that can't be read counts as copying when copying was allowed:
       // the measured playlist plays a re-encoded stream just as well, while
@@ -6145,11 +6156,11 @@ router.get(
       // what does is the reason the player shows.
       let notCopied: string | null = null;
       if (!DIRECT_STREAM) notCopied = "Direct Stream disabled";
-      else if (aboveHd(version)) {
-        // Never sent as it is, at any bitrate: the activity shows 1080p at
-        // most, so a 4K file under the server limit is still re-encoded, and
-        // raising the limit never sends one.
-        notCopied = (version?.width ?? 0) >= UHD_MIN_WIDTH ? "4K source (player max 1080p)" : "Above 1080p (player max 1080p)";
+      else if (aboveHd(version) && !caps.uhd) {
+        // 4K is sent as it is to a player that decodes it smoothly; this one
+        // gets 1080p (PlayerCaps.uhd).
+        notCopied = (version?.width ?? 0) >= UHD_MIN_WIDTH
+          ? "4K: this player can't decode it smoothly" : "Above 1080p: this player can't decode it smoothly";
       } else if (subtitleMode === "burn") {
         // Picture subtitles (PGS, VobSub) can only be burned in. A text one is
         // burned in when it couldn't be drawn — Plex failed to read it out.
@@ -6177,7 +6188,7 @@ router.get(
       }
       const copy = notCopied === null;
       recordHevcWithheld(sessionId, copy && !roomHevc && version?.videoCodec?.toLowerCase() === "hevc");
-      const frame = quality && quality <= QUALITY_720P_KBPS ? "1280x720" : transcodeFrame(version ?? {});
+      const frame = quality && quality <= QUALITY_720P_KBPS ? "1280x720" : transcodeFrame(version ?? {}, caps.uhd === true);
       // With PLAYBACK_ENGINE=ffmpeg, the stream is made here, from the file —
       // copied or re-encoded, a subtitle burned in — and Plex isn't asked for
       // anything. Whatever ffmpeg can't make, or won't start, is Plex's, as
@@ -6202,6 +6213,8 @@ router.get(
         }
         fallback = tried.fallback;
       }
+      // Plex keeps a picture at its own size when the frame allows it.
+      recordSessionUhd(sessionId, caps.uhd === true && aboveHd(version));
       await selectTracksForStart(ratingKey, mediaIndex, audioStreamID, subtitleId);
       // HDR for a screen in SDR is Plex's to map to SDR, as its own player in
       // a browser on such a screen has it done: a re-encode, in H.264, which

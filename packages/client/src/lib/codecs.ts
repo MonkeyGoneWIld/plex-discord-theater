@@ -18,7 +18,7 @@
 import { canPlayHevcTranscode, isHevcCodec, markHevcUnplayable } from "./hevc";
 import { logEvent } from "./log";
 
-export type Cap = "hevc" | "av1" | "opus" | "flac" | "ac3" | "eac3" | "tenBit";
+export type Cap = "hevc" | "av1" | "opus" | "flac" | "ac3" | "eac3" | "tenBit" | "uhd";
 
 export interface Caps {
   hevc: boolean;
@@ -53,6 +53,13 @@ export interface Caps {
    * record says 10 bits drop frames here where 8 don't (smoothness).
    */
   tenBit: boolean;
+  /**
+   * A picture above 1080p plays smoothly (the server's plan.ts PlayerCaps.uhd):
+   * a 4K file is sent at its own size. Said unless this device dropped frames
+   * on one before (Player.tsx), or the browser says 4K doesn't decode
+   * smoothly here where 1080p does (smoothness).
+   */
+  uhd: boolean;
 }
 
 const failedKey = (cap: Cap) => `pdt:codec-failed:${cap}`;
@@ -96,13 +103,24 @@ let av1Smooth = false;
  * smooth where they aren't: a page held to 15 frames a second drops frames
  * whatever it plays (frameDrops.ts), and its record says so of H.264 too.
  */
-const smoothness: { h264: boolean | null; hevc: boolean | null; tenBit: boolean | null } = { h264: null, hevc: null, tenBit: null };
+const smoothness: {
+  h264: boolean | null; hevc: boolean | null; tenBit: boolean | null; uhdH264: boolean | null; uhdHevc: boolean | null;
+} = { h264: null, hevc: null, tenBit: null, uhdH264: null, uhdHevc: null };
 try {
   const mc = (navigator as Navigator & { mediaCapabilities?: MediaCapabilities }).mediaCapabilities;
-  const ask = (codec: string, bitrate: number) => mc?.decodingInfo({
+  const ask = (codec: string, bitrate: number, width = 1920, height = 1080) => mc?.decodingInfo({
     type: "media-source",
-    video: { contentType: `video/mp4; codecs="${codec}"`, width: 1920, height: 1080, bitrate, framerate: 24 },
+    video: { contentType: `video/mp4; codecs="${codec}"`, width, height, bitrate, framerate: 24 },
   }) ?? Promise.reject(new Error("no mediaCapabilities"));
+  // 4K: unsupported where 1080p is supported is as good as not smooth.
+  void Promise.all([ask("avc1.640033", 40_000_000, 3840, 2160), ask("hvc1.2.4.L153.90", 40_000_000, 3840, 2160)])
+    .then(([h264, hevc]) => {
+      smoothness.uhdH264 = h264.supported && h264.smooth;
+      smoothness.uhdHevc = hevc.supported && hevc.smooth;
+      logEvent("Codecs", "the browser's record of smooth playback here, 4K at 24 fps", {
+        h264: smoothness.uhdH264, hevcTenBit: smoothness.uhdHevc,
+      });
+    }, () => {});
   void ask(AV1_CODECS[0], 6_000_000).then((info) => { av1Smooth = info.supported && info.smooth && info.powerEfficient; }, () => {});
   void Promise.all([ask("avc1.640028", 8_000_000), ask("hvc1.1.6.L120.90", 8_000_000), ask("hvc1.2.4.L120.90", 8_000_000)])
     .then(([h264, hevc, tenBit]) => {
@@ -136,6 +154,8 @@ export function playerCaps(): Caps {
     av1Encode: av1,
     hdr: hdrScreen(),
     tenBit: !failedHere("tenBit") && !rougherThan(smoothness.tenBit, smoothness.hevc),
+    uhd: !failedHere("uhd") && !rougherThan(smoothness.uhdH264, smoothness.h264) &&
+      !(hevc && rougherThan(smoothness.uhdHevc, smoothness.hevc)),
   };
 }
 

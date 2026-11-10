@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Participant } from "../hooks/useSync";
-import { clock, requestButton, SHOW_REQUEST_EVENT, waitText, type HostRequestView } from "../lib/hostRequest";
+import { clock, openedPeoplePanel, requestButton, SHOW_REQUEST_EVENT, waitText, type HostRequestView } from "../lib/hostRequest";
 import type { InviteResult } from "../hooks/useDiscord";
 import { InviteButton } from "./InviteButton";
 import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -57,6 +57,7 @@ export function PeoplePanel({
     return () => clearInterval(t);
   }, [ticking]);
   useEffect(() => { if (button?.kind !== "wait") setShowWait(false); }, [button?.kind]);
+  useEffect(() => openedPeoplePanel(), []);
   // Handing over the host role loses you all control, so it takes two taps.
   const [confirmingPromote, setConfirmingPromote] = useState<string | null>(null);
   // Discord's mobile client keeps its own bar pinned over the top of the
@@ -103,12 +104,14 @@ export function PeoplePanel({
             {button.kind === "mine" && (
               <button className="btn" style={styles.requestBtn}
                 onClick={() => { window.dispatchEvent(new Event(SHOW_REQUEST_EVENT)); onClose(); }}>
-                Requested · {clock(button.leftMs)}
+                Host requested · {clock(button.leftMs)}
               </button>
             )}
             {button.kind === "theirs" && (
-              <button className="btn" style={styles.requestOff} disabled>
-                {button.name} asked · {clock(button.leftMs)}
+              <button className="btn" style={{ ...styles.requestOff, ...styles.requestSplit }} disabled title={button.name}>
+                <span style={styles.requestLead}>Requested by&nbsp;</span>
+                <span style={styles.requestName}>{button.name}</span>
+                <span style={styles.requestTime}>&nbsp;· {clock(button.leftMs)}</span>
               </button>
             )}
             {button.kind === "wait" && (
@@ -116,15 +119,15 @@ export function PeoplePanel({
             )}
             {button.kind === "reclaim" && (
               <button className="btn" style={styles.requestBtn} onClick={() => { onReclaimHost?.(); onClose(); }}>
-                Take host back · {clock(button.leftMs)}
+                Reclaim host · {clock(button.leftMs)}
               </button>
             )}
             <p style={styles.requestHelp}>
-              {button.kind === "ask" && "Asks the host for the role. If they don't answer in 5 minutes (1 if they're away), it passes to you."}
-              {button.kind === "mine" && "Waiting for the host. Press to see the countdown."}
-              {button.kind === "theirs" && "One request at a time. The host has until then to answer."}
-              {button.kind === "wait" && showWait && waitText(button.why, button.leftMs)}
-              {button.kind === "reclaim" && "The role passed on while you were away."}
+              {button.kind === "ask" && "If the host does not respond within 5 minutes (1 minute if away), host transfers to you."}
+              {button.kind === "mine" && "Awaiting a response from the host. Select to view the request."}
+              {button.kind === "theirs" && "Only one host request can be active at a time."}
+              {button.kind === "wait" && (showWait ? waitText(button.why, button.leftMs) : "Requests are currently unavailable. Select for details.")}
+              {button.kind === "reclaim" && "Host was transferred while you were away."}
             </p>
           </div>
         )}
@@ -239,6 +242,10 @@ const styles: Record<string, React.CSSProperties> = {
   requestRow: { padding: "10px 16px 4px", borderBottom: "1px solid rgba(255,255,255,0.06)" },
   requestBtn: { width: "100%", padding: "8px 10px", borderRadius: "8px", border: "1px solid rgba(229,160,13,0.4)", background: "transparent", color: "#e5a00d", fontSize: "12px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontVariantNumeric: "tabular-nums" },
   requestOff: { width: "100%", padding: "8px 10px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.03)", color: "#666", fontSize: "12px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit", fontVariantNumeric: "tabular-nums" },
+  requestSplit: { display: "flex", justifyContent: "center", whiteSpace: "nowrap" },
+  requestLead: { flexShrink: 0 },
+  requestName: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" },
+  requestTime: { flexShrink: 0 },
   requestHelp: { color: "#777", fontSize: "11px", lineHeight: 1.5, margin: "6px 0 6px", minHeight: "1em" },
   presencePreference: { display: "flex", alignItems: "flex-start", gap: "10px", padding: "14px 16px", borderTop: "1px solid rgba(255,255,255,0.06)", cursor: "pointer", flexShrink: 0 },
   presenceLabel: { display: "block", color: "#ddd", fontSize: "12px", fontWeight: 600 },

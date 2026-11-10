@@ -77,10 +77,31 @@ export function requestButton(v: HostRequestView | null, selfId: string | null, 
 /** Said when a player who can't ask presses the button. */
 export function waitText(why: "declined" | "you-declined" | "protected", leftMs: number): string {
   const t = clock(leftMs);
-  if (why === "you-declined") return `The host turned down your request. You can ask again in ${t}.`;
-  if (why === "declined") return `The host just turned down a request. Anyone can ask again in ${t}.`;
-  return `The host role just changed hands. You can ask for it in ${t}.`;
+  if (why === "you-declined") return `The host declined your request. You can request again in ${t}.`;
+  if (why === "declined") return `The host recently declined a request. Requests reopen in ${t}.`;
+  return `Host was recently transferred. Requests reopen in ${t}.`;
 }
 
-/** The overlay's opener: the People tab's "Requested" button shows the asker's countdown again. */
+/** The overlay's opener: the People panel's "Requested" button shows the asker's countdown again. */
 export const SHOW_REQUEST_EVENT = "pdt-show-host-request";
+
+/**
+ * Whether a People panel is open: the overlay stands aside for it, since the
+ * panel says the same and the overlay would sit over its header.
+ */
+let panelsOpen = 0;
+const panelListeners = new Set<() => void>();
+export function peoplePanelOpen(): boolean { return panelsOpen > 0; }
+export function subscribePeoplePanel(fn: () => void): () => void {
+  panelListeners.add(fn);
+  return () => { panelListeners.delete(fn); };
+}
+/** A People panel opened; the function it returns says it closed. */
+export function openedPeoplePanel(): () => void {
+  panelsOpen++;
+  for (const fn of panelListeners) fn();
+  return () => {
+    panelsOpen--;
+    for (const fn of panelListeners) fn();
+  };
+}

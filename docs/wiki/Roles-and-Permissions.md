@@ -41,7 +41,7 @@ same list makes people co-hosts, up to 50 per room.
 
 A host who stays in the Activity but walks away leaves everyone else unable
 to play or pick anything. Anyone else can select **Request host** in the
-people list. The host sees who asked and a countdown, with **Give host** and
+people list. The host sees who asked and a countdown, with **Accept** and
 **Decline**. If the host doesn't answer in 5 minutes, the role passes to the
 person who asked.
 
@@ -54,12 +54,12 @@ person who asked.
   can ask for 15 minutes, and the person who asked can't ask again for 2 hours.
   A person who can't ask sees how long is left when they select the button.
 - **The role passes on:** nobody can ask the new host for 15 minutes. A host
-  who lost the role to the countdown can select **Take host back** within
+  who lost the role to the countdown can select **Reclaim host** within
   10 minutes.
 - **Who asked leaves, or the role moves another way:** the request ends.
 
-The person who asked can shrink the countdown or hide it, and see it again
-from the people list. All of this belongs to one Activity: a new one, after
+The person who asked can minimize or hide the countdown, and reopen it from
+the people list. All of this belongs to one Activity: a new one, after
 everyone leaves or in another channel, starts fresh. Set `HOST_REQUESTS=off`
 to turn it off.
 

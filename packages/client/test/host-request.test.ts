@@ -43,7 +43,7 @@ check("the role taken from me: take it back",
 console.log("\n— what it says —");
 check("clock", [clock(61_000), clock(5 * 60_000), clock(2 * 3_600_000), clock(400)], ["1:01", "5:00", "2:00:00", "0:01"]);
 check("a wait, once pressed", waitText("you-declined", 7_200_000),
-  "The host turned down your request. You can ask again in 2:00:00.");
+  "The host declined your request. You can request again in 2:00:00.");
 
 console.log("\n— away —");
 check("here", isAway({ hiddenForMs: 0, idleForMs: 10 * 60_000, playing: true }), false);

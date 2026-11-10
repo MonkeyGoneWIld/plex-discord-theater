@@ -1,14 +1,18 @@
-import { useEffect, useRef, useState } from "react";
-import { clock, msUntil, SHOW_REQUEST_EVENT, type HostRequestView } from "../lib/hostRequest";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { QUIET_SURFACE } from "../lib/surface";
+import {
+  clock, msUntil, peoplePanelOpen, SHOW_REQUEST_EVENT, subscribePeoplePanel, type HostRequestView,
+} from "../lib/hostRequest";
 
 /**
  * Asking an away host for the role, on screen (lib/hostRequest):
- *  - the host: who asked, the countdown, Give host / Decline. Using the
- *    activity while it counts down answers no: they are there.
- *  - who asked: the countdown, which they can shrink to a pill or hide and
- *    see again from the People tab.
- *  - a host the countdown took the role from: Take host back, for a while.
- * None of it blocks the film.
+ *  - the host: who asked, the countdown, Accept / Decline. Using the
+ *    activity while it counts down declines: they are there.
+ *  - who asked: the countdown, which they can minimize or hide and see again
+ *    from the People panel.
+ *  - a host the countdown took the role from: Reclaim host, for a while.
+ * Below the top bar, at the right, and never over the People panel, which
+ * says the same; styled as the pause request's card (TransportRequestCard).
  */
 interface Props {
   view: HostRequestView | null;
@@ -23,11 +27,22 @@ interface Props {
 const SETTLE_MS = 1_500;
 const NOTE_MS = 8_000;
 
+/** "Lead-in " + a name that gives way first, as TransportRequestCard. */
+function Heading({ lead, name }: { lead: string; name: string }) {
+  return (
+    <div style={styles.heading}>
+      <span style={styles.lead}>{lead}</span>
+      <strong style={styles.name} title={name}>{name}</strong>
+    </div>
+  );
+}
+
 export function HostRequestOverlay({ view, selfUserId, isHost, hostName, onAnswer, onReclaim }: Props) {
   const [, tick] = useState(0);
   const [mineShown, setMineShown] = useState<"open" | "pill" | "hidden">("open");
   const [reclaimHidden, setReclaimHidden] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const panelOpen = useSyncExternalStore(subscribePeoplePanel, peoplePanelOpen);
 
   const now = Date.now();
   const active = view?.on ? view.active : null;
@@ -35,6 +50,7 @@ export function HostRequestOverlay({ view, selfUserId, isHost, hostName, onAnswe
   const mine = !!active && active.requesterId === selfUserId && !isHost;
   const reclaimMs = view?.on && view.reclaimUntil !== null && !isHost ? msUntil(view, view.reclaimUntil, now) : 0;
   const counting = forMe || mine || reclaimMs > 0;
+  const host = hostName || "the host";
 
   useEffect(() => {
     if (!counting) return;
@@ -42,7 +58,7 @@ export function HostRequestOverlay({ view, selfUserId, isHost, hostName, onAnswe
     return () => clearInterval(t);
   }, [counting]);
 
-  // A new request of mine opens; the People tab's button opens it again.
+  // A new request of mine opens; the People panel's button opens it again.
   const activeKey = active ? `${active.requesterId}:${active.endsAt}` : null;
   useEffect(() => { if (mine) setMineShown("open"); }, [mine, active?.requesterId]);
   useEffect(() => {
@@ -56,8 +72,8 @@ export function HostRequestOverlay({ view, selfUserId, isHost, hostName, onAnswe
   const wasMine = useRef(false);
   useEffect(() => {
     if (wasMine.current && !mine) {
-      if (isHost) setNote("You're the host now.");
-      else if (view?.blocked?.why === "you-declined") setNote(`${hostName || "The host"} turned down your request.`);
+      if (isHost) setNote("You are now the host.");
+      else if (view?.blocked?.why === "you-declined") setNote(`${hostName || "The host"} declined your host request.`);
     }
     wasMine.current = mine;
   }, [mine, isHost, view?.blocked?.why, hostName]);
@@ -90,17 +106,19 @@ export function HostRequestOverlay({ view, selfUserId, isHost, hostName, onAnswe
     };
   }, [forMe, activeKey]);
 
+  if (panelOpen) return null;
+
   if (forMe && active) {
-    const left = clock(msUntil(view!, active.endsAt, now));
     return (
-      <div data-host-request style={styles.wrap}>
+      <div data-host-request style={styles.wrap} role="alertdialog" aria-label="Host request">
         <div style={styles.card}>
-          <div style={styles.title}>{active.requesterName || "Someone"} is asking to be host</div>
-          <div style={styles.body}>
-            It passes to them in <b style={styles.time}>{left}</b> unless you answer. Using the activity answers no.
-          </div>
+          <Heading lead="Host requested by " name={active.requesterName || "a viewer"} />
+          <p style={styles.body}>
+            Transfers in <b style={styles.time}>{clock(msUntil(view!, active.endsAt, now))}</b> unless you respond.
+            Using the Activity declines the request.
+          </p>
           <div style={styles.row}>
-            <button className="btn" style={styles.primary} onClick={() => onAnswer(true)}>Give host</button>
+            <button className="btn" style={styles.primary} onClick={() => onAnswer(true)}>Accept</button>
             <button className="btn" style={styles.secondary} onClick={() => onAnswer(false)}>Decline</button>
           </div>
         </div>
@@ -112,21 +130,24 @@ export function HostRequestOverlay({ view, selfUserId, isHost, hostName, onAnswe
     const left = clock(msUntil(view!, active.endsAt, now));
     if (mineShown === "pill") {
       return (
-        <div data-host-request style={styles.wrap}>
+        <div data-host-request style={styles.wrap} role="status">
           <div style={styles.pill}>
-            <button className="btn" style={styles.pillBtn} onClick={() => setMineShown("open")}>Host in {left}</button>
-            <button className="btn" style={styles.pillX} aria-label="Hide" onClick={() => setMineShown("hidden")}>&times;</button>
+            <button className="btn" style={styles.pillBtn} onClick={() => setMineShown("open")}>
+              Host request · <span style={styles.time}>{left}</span>
+            </button>
+            <button className="btn" style={styles.pillX} aria-label="Hide" title="Hide" onClick={() => setMineShown("hidden")}>&times;</button>
           </div>
         </div>
       );
     }
     return (
-      <div data-host-request style={styles.wrap}>
+      <div data-host-request style={styles.wrap} role="status">
         <div style={styles.card}>
-          <div style={styles.title}>Asked {hostName || "the host"} for host</div>
-          <div style={styles.body}>
-            It's yours in <b style={styles.time}>{left}</b> unless they answer. The People tab shows this again.
-          </div>
+          <Heading lead="Host request sent to " name={host} />
+          <p style={styles.body}>
+            Host transfers to you in <b style={styles.time}>{left}</b> if there is no response. Reopen this
+            from the People panel.
+          </p>
           <div style={styles.row}>
             <button className="btn" style={styles.secondary} onClick={() => setMineShown("pill")}>Minimize</button>
             <button className="btn" style={styles.secondary} onClick={() => setMineShown("hidden")}>Hide</button>
@@ -138,14 +159,15 @@ export function HostRequestOverlay({ view, selfUserId, isHost, hostName, onAnswe
 
   if (reclaimMs > 0 && !reclaimHidden) {
     return (
-      <div data-host-request style={styles.wrap}>
+      <div data-host-request style={styles.wrap} role="status">
         <div style={styles.card}>
-          <div style={styles.title}>Host passed to {hostName || "someone else"}</div>
-          <div style={styles.body}>
-            They asked while you were away. You can take it back for <b style={styles.time}>{clock(reclaimMs)}</b>.
-          </div>
+          <Heading lead="Host transferred to " name={hostName || "another viewer"} />
+          <p style={styles.body}>
+            Their request went unanswered while you were away. You can reclaim host
+            for <b style={styles.time}>{clock(reclaimMs)}</b>.
+          </p>
           <div style={styles.row}>
-            <button className="btn" style={styles.primary} onClick={onReclaim}>Take host back</button>
+            <button className="btn" style={styles.primary} onClick={onReclaim}>Reclaim host</button>
             <button className="btn" style={styles.secondary} onClick={() => setReclaimHidden(true)}>Dismiss</button>
           </div>
         </div>
@@ -155,8 +177,8 @@ export function HostRequestOverlay({ view, selfUserId, isHost, hostName, onAnswe
 
   if (note) {
     return (
-      <div data-host-request style={styles.wrap}>
-        <div style={styles.pill}><span style={styles.noteText}>{note}</span></div>
+      <div data-host-request style={styles.wrap} role="status">
+        <div style={styles.note}>{note}</div>
       </div>
     );
   }
@@ -164,25 +186,48 @@ export function HostRequestOverlay({ view, selfUserId, isHost, hostName, onAnswe
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  // Below the top bar (16px + its row + 16px, under Discord's own chrome) and
+  // clear of its buttons; above the player, whose layer is 50.
   wrap: {
-    position: "fixed", left: "50%", transform: "translateX(-50%)", top: "calc(var(--sait, 0px) + 56px)",
-    zIndex: 120, width: "min(360px, calc(100vw - 32px))", display: "flex", justifyContent: "center", pointerEvents: "none",
+    position: "fixed", top: "calc(var(--sait, 0px) + 76px)", right: "calc(var(--sair, 0px) + 16px)",
+    zIndex: 90, width: "min(300px, calc(100vw - 32px))", display: "flex", justifyContent: "flex-end",
+    pointerEvents: "none",
   },
   card: {
-    pointerEvents: "auto", width: "100%", background: "rgba(26,26,26,0.96)", border: "1px solid rgba(229,160,13,0.35)",
-    borderRadius: "10px", padding: "12px 14px", boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
+    pointerEvents: "auto", width: "100%", boxSizing: "border-box",
+    background: "rgba(0,0,0,0.85)", borderRadius: "12px", padding: "14px 16px",
+    border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 2px 12px rgba(0,0,0,0.5)",
   },
-  title: { color: "#f0f0f0", fontSize: "13px", fontWeight: 700 },
-  body: { color: "#aaa", fontSize: "12px", lineHeight: 1.5, marginTop: "4px" },
-  time: { color: "#e5a00d", fontVariantNumeric: "tabular-nums" },
-  row: { display: "flex", gap: "8px", marginTop: "10px", justifyContent: "flex-end" },
-  primary: { padding: "6px 12px", borderRadius: "6px", border: "none", background: "#e5a00d", color: "#000", fontSize: "12px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
-  secondary: { padding: "6px 12px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#ccc", fontSize: "12px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
+  heading: { display: "flex", alignItems: "baseline", color: "#f0f0f0", fontSize: "14px" },
+  lead: { flexShrink: 0, whiteSpace: "pre" },
+  name: { fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  body: { color: "#aaa", fontSize: "12px", lineHeight: 1.5, margin: "6px 0 0" },
+  time: { color: "#e5a00d", fontWeight: 600, fontVariantNumeric: "tabular-nums" },
+  row: { display: "flex", gap: "8px", marginTop: "12px" },
+  primary: {
+    flex: 1, padding: "8px", borderRadius: "6px", border: "none", background: "#e5a00d", color: "#000",
+    fontSize: "12px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+  },
+  secondary: {
+    ...QUIET_SURFACE, flex: 1, padding: "8px", borderRadius: "6px", color: "#aaa",
+    fontSize: "12px", cursor: "pointer", fontFamily: "inherit",
+  },
   pill: {
-    pointerEvents: "auto", display: "flex", alignItems: "center", gap: "2px", background: "rgba(26,26,26,0.96)",
-    border: "1px solid rgba(229,160,13,0.35)", borderRadius: "999px", padding: "4px 6px 4px 12px",
+    pointerEvents: "auto", display: "flex", alignItems: "center", background: "rgba(0,0,0,0.85)",
+    border: "1px solid rgba(255,255,255,0.1)", borderRadius: "999px", padding: "2px 4px 2px 12px",
+    boxShadow: "0 2px 12px rgba(0,0,0,0.5)",
   },
-  pillBtn: { background: "none", border: "none", color: "#e5a00d", fontSize: "12px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontVariantNumeric: "tabular-nums" },
-  pillX: { background: "none", border: "none", color: "#888", fontSize: "16px", cursor: "pointer", fontFamily: "inherit", padding: "0 6px" },
-  noteText: { color: "#ddd", fontSize: "12px", padding: "2px 8px 2px 0" },
+  pillBtn: {
+    background: "none", border: "none", color: "#f0f0f0", fontSize: "12px", fontWeight: 600, padding: "6px 4px",
+    cursor: "pointer", fontFamily: "inherit", whiteSpace: "nowrap",
+  },
+  pillX: {
+    background: "none", border: "none", color: "#888", fontSize: "16px", lineHeight: 1, padding: "4px 8px",
+    cursor: "pointer", fontFamily: "inherit",
+  },
+  note: {
+    pointerEvents: "auto", background: "rgba(0,0,0,0.85)", border: "1px solid rgba(255,255,255,0.1)",
+    borderRadius: "10px", padding: "10px 14px", color: "#f0f0f0", fontSize: "13px", overflowWrap: "anywhere",
+    boxShadow: "0 2px 12px rgba(0,0,0,0.5)",
+  },
 };

@@ -1,3 +1,5 @@
+**[Home](Home)**
+
 **Set up**
 
 1. [Requirements](Requirements)
@@ -7,14 +9,6 @@
 5. [Installation](Installation)
 6. [First Launch](First-Launch)
 
-**Configure**
-
-- [Configuration Reference](Configuration-Reference)
-- [Streaming and Quality](Streaming-and-Quality)
-- [FFmpeg Engine](FFmpeg-Engine)
-- [Optional Integrations](Optional-Integrations)
-- [qBittorrent Manager API](qBittorrent-Manager-API)
-
 **Use**
 
 - [Using the Activity](Using-the-Activity)
@@ -22,15 +16,18 @@
 - [Personal Plex Sync](Personal-Plex-Sync)
 - [Requesting Titles](Requesting-Titles)
 
-**Maintain**
+**Run the server**
 
+- [Streaming and Quality](Streaming-and-Quality)
+- [FFmpeg Engine](FFmpeg-Engine)
+- [Dashboard](Dashboard)
+- [Configuration Reference](Configuration-Reference)
+- [Optional Integrations](Optional-Integrations)
+- [qBittorrent Manager API](qBittorrent-Manager-API)
 - [Updating and Backups](Updating-and-Backups)
-- [Dashboard](Admin-Page)
-- [Local Development](Local-Development)
 
 **Help**
 
 - [Troubleshooting](Troubleshooting)
 - [FAQ](FAQ)
-
-[Home](Home)
+- [Local Development](Local-Development)

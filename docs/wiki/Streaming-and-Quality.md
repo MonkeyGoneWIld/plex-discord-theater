@@ -1,135 +1,146 @@
 # Streaming and Quality
 
-This page explains how the server turns a file into a stream for each viewer,
-what decides the picture each viewer gets, and how to set the bitrate limits
-for your upload.
+This page explains how a file becomes a stream for each viewer, what decides
+the picture each viewer gets, and how to set the bitrate limits for your
+upload.
 
-## Copy or re-encode
+## The three ways a title plays
 
-For each stream, the server either copies the original video or re-encodes it:
+| Mode | Video | Audio | Cost to your server |
+|---|---|---|---|
+| **Direct play** | Sent unchanged | Sent unchanged | Almost none |
+| **Direct stream** | Sent unchanged | Converted to a format the player plays | Almost none |
+| **Transcode** | Re-encoded | Unchanged or converted | GPU or CPU time |
 
-| | Copy (Direct Stream) | Re-encode |
-|---|---|---|
-| Picture | The original, untouched | Encoded again, at up to `VIDEO_BITRATE_KBPS` |
-| Server cost | Almost none | GPU or CPU time |
-| Each viewer downloads | The file's own bitrate | Up to the re-encode bitrate |
+The server always prefers to send the video unchanged. It transcodes only when
+it has to, and only for the viewers who need it.
 
-Sound is copied when the player can play it, and converted when it can't, in
-either case.
+To see which mode a stream is in, press **I** in the player for **Stats for
+nerds**. The **Playback** row says the mode and, for a transcode, the reason.
+The [Dashboard](Dashboard) shows the same for every stream in every room.
 
-A file is copied when all of these are true:
+## When video is sent unchanged
 
-| Condition | Default |
+A file's video is sent unchanged when all of these are true:
+
+| Condition | Setting |
 |---|---|
-| Direct Stream is on | `DIRECT_STREAM`, on |
-| The player decodes the video: H.264, or HEVC on a player that decodes HEVC. With the FFmpeg engine, also AV1 on a player that decodes AV1. | — |
-| Above 1080p (2048 × 1200), the player decodes it smoothly. A player that can't gets a 1080p re-encode of its own. | — |
-| The file's average bitrate is within the copy limit | `DIRECT_STREAM_MAX_KBPS`, 25000 |
-| The file's average bitrate is within the viewer's chosen quality | Original |
+| Direct streaming is on | `DIRECT_STREAM`, on by default |
+| The viewer's device can play the video codec: H.264, or HEVC where the device plays it. With the [FFmpeg engine](FFmpeg-Engine), also AV1 and VP9. | — |
+| For video above 1080p, the device plays that size smoothly | — |
+| The file's average bitrate is within your limit | `DIRECT_STREAM_MAX_KBPS`, 25000 by default |
+| The file's average bitrate is within the quality the viewer chose | **Original** by default |
 | No subtitle has to be burned into the picture | — |
 
-Otherwise the stream is re-encoded. Other reasons for a re-encode:
-
-| Reason | Why |
-|---|---|
-| A picture subtitle (PGS, VobSub, DVB) is on, with the Plex engine | It can only be burned into the picture. With the FFmpeg engine, each player draws PGS, and VobSub or DVB inside the film, itself. |
-| The file is H.264 from a Blu-ray with open GOPs, with the Plex engine | Plex's copy of it doesn't play. The FFmpeg engine copies it. |
-| The file is 10-bit H.264 | Discord's player doesn't decode it |
-| The file is VP9, and the player's browser doesn't say it decodes it (or the Plex engine is used) | Only the FFmpeg engine copies it, for players that decode it |
-| A copy of the title failed earlier | It stays re-encoded until the server restarts |
-
 Text subtitles (SRT, ASS, WebVTT) are drawn by each player, so they never
-prevent a copy.
+force a transcode.
 
-To see what a stream is, press **I** in the player for **Stats for nerds**. Its
-**Playback** row says whether the stream is copied or re-encoded, and why.
+## When video is transcoded
 
-## What each player receives
+| Reason | Detail |
+|---|---|
+| The file is over your bitrate limit | Its average bitrate is above `DIRECT_STREAM_MAX_KBPS` |
+| The viewer chose a lower quality | The file doesn't fit under the quality they picked |
+| The device can't play the codec | For example, HEVC in Firefox, which gets H.264 |
+| The device can't play 4K smoothly | It gets a 1080p stream of its own |
+| The file is 10-bit H.264 | Discord's player doesn't play it |
+| A picture subtitle is on, with the Plex engine | PGS, VobSub and DVB subtitles can only be burned in by Plex. The FFmpeg engine has each player draw them. |
+| A Blu-ray H.264 file with open GOPs, with the Plex engine | Plex's unchanged copy of it doesn't play. The FFmpeg engine sends it unchanged. |
+| An earlier attempt to send the title unchanged failed | It stays transcoded until the server restarts |
 
-When a player joins, it reports what it can decode: HEVC, AV1, 10-bit video,
-HDR, and sound formats. The server gives it a stream it can play:
+A transcode is HEVC for a device that plays HEVC (`HEVC_TRANSCODE`, on by
+default), and H.264 otherwise. With the FFmpeg engine, a device that plays AV1
+in hardware can receive AV1 (`AV1_TRANSCODE`). With the Plex engine, HEVC
+transcodes need Plex Pass and hardware HEVC encoding in Plex. Without them,
+Plex sends H.264.
 
-- A player that can't decode the host's stream gets a version of its own,
-  made automatically: H.264 instead of HEVC, SDR instead of HDR, or 8-bit
-  instead of 10-bit. Nobody else's stream changes.
-- Discord in Firefox can't decode HEVC, so it receives H.264.
-- A re-encode is HEVC for a player that decodes HEVC (`HEVC_TRANSCODE`), and
-  H.264 otherwise. With the FFmpeg engine, a player that decodes AV1 in
-  hardware can receive AV1 (`AV1_TRANSCODE`).
+## What each viewer receives
 
-With the Plex engine, HEVC re-encodes need Plex Pass and hardware HEVC
-encoding in Plex. Without them, Plex sends H.264.
+When a player joins, it tells the server what it can play: HEVC, AV1, 10-bit
+video, 4K, HDR, and audio formats. The server gives it a stream that suits it.
+
+- A viewer whose device can't play the room's stream gets a version of their
+  own, made automatically: H.264 instead of HEVC, SDR instead of HDR, 8-bit
+  instead of 10-bit, or 1080p instead of 4K.
+- Nobody else's stream changes when that happens.
+- Audio the player can't play is converted, for that stream only.
 
 ## Shared and personal streams
 
-Viewers who choose the same audio track, the same burned-in subtitle and the
-same quality share one stream. Text subtitles are drawn by each player, so they
-don't split a stream.
+Viewers who have the same audio track and the same quality share one stream.
+Subtitles drawn by the player don't split a stream.
 
-A viewer who chooses differently gets a stream of their own, and nobody else's
-picture changes. Choosing the same tracks and quality as the host puts them
-back on the host's stream.
+A viewer who chooses a different audio track or quality gets a stream of their
+own. Choosing the same as the host again puts them back on the host's stream.
 
 - A viewer's own stream is kept for 15 seconds after they leave, so a quick
   reconnect continues it.
-- Streams nobody is watching are stopped after 5 minutes.
-- Viewers on the same stream pass segments to each other, peer to peer, and
-  Discord's proxy caches each segment for the other viewers it serves, which
-  both reduce your upload.
+- A stream nobody is watching is stopped after 5 minutes.
+
+### How a full room is delivered
+
+Video reaches viewers through Discord's proxy, which caches each piece.
+Viewers on the same stream also pass pieces to each other, peer to peer. So the
+second and later viewers of a stream get most of their video from Discord's
+cache and from each other, not from your server.
+
+The player's **Stats for nerds** shows this under **Peers** and **Discord
+cache**. The [Dashboard](Dashboard) shows it for every session, live and in
+its history.
 
 ## Quality
 
-Each viewer chooses a quality in the player's settings menu. The choice
-affects only their own stream.
+Each viewer chooses a quality in the player's settings menu. It affects only
+their own stream.
 
-| Quality | Stream |
+| Quality | What they get |
 |---|---|
-| Original | A copy when the file can be copied; otherwise a re-encode at `VIDEO_BITRATE_KBPS` |
-| 20, 12, 10, 8 or 4 Mbps | A copy if the file's average bitrate fits under it; otherwise a re-encode at that bitrate, at 720p for 4 Mbps |
+| **Original** | The file unchanged when possible; otherwise a transcode at `VIDEO_BITRATE_KBPS` |
+| 20, 12, 10, 8 or 4 Mbps | The file unchanged if its average bitrate fits under that; otherwise a transcode at that bitrate (720p at 4 Mbps) |
 
 A choice lasts for the title and the next episodes of its show, through a
 pop-out or a short break. After 5 minutes away, it returns to the viewer's
 default, which they set in **Settings** on the home page.
 
-When a viewer's connection plainly can't keep up, the player suggests a lower
-quality with **Buffering a lot?** and a **Try** button. That takes at least
-two separate stalls adding up to 12 seconds within three minutes, while the
-connection brings in less than the stream needs. A single long wait, such as
-joining or seeking, doesn't count. When a stalled viewer skips ahead of the
-room to wait there for the stream, that wait counts as part of the stall. The
-suggested quality is the highest that fits in four fifths of what the
-connection brought in over those three minutes. The suggestion goes away by
-itself once playback runs 8 seconds without a stall with a few seconds
-buffered. Closing
-it (**Not now**) hides it for 10 minutes.
+### Buffering a lot?
 
-## Choosing the bitrate limits
+When a viewer's connection can't keep up, the player suggests a lower quality
+with a **Try** button.
+
+- It appears after at least two separate stalls, adding up to 12 seconds
+  within three minutes, while the connection brings in less than the stream
+  needs. A single long wait, such as joining or seeking, doesn't count.
+- It suggests the highest quality that fits in four fifths of what the
+  connection managed over those three minutes.
+- It goes away by itself once playback runs smoothly again. **Not now** hides
+  it for 10 minutes.
+
+## Choosing your bitrate limits
 
 | Setting | Default | Controls |
 |---|---|---|
-| `VIDEO_BITRATE_KBPS` | `20000` | The average bitrate of a re-encode |
-| `VIDEO_PEAK_BITRATE_KBPS` | `33000` | The peak bitrate of a re-encode |
-| `DIRECT_STREAM_MAX_KBPS` | `25000` | The highest average bitrate a file may have and still be copied |
+| `VIDEO_BITRATE_KBPS` | `20000` | The average bitrate of a transcode |
+| `VIDEO_PEAK_BITRATE_KBPS` | `33000` | The peak bitrate of a transcode |
+| `DIRECT_STREAM_MAX_KBPS` | `25000` | The highest average bitrate a file may have and still be sent unchanged |
 
-Every viewer downloads their stream from your server, so divide your upload by
-the number of people who usually watch, and set the limits below that figure.
-Only the average counts toward the copy limit: a film averaging 18 Mbps with
-short peaks above 60 Mbps is still copied under a 25 Mbps limit, because the
-players' buffers absorb the peaks.
+Set them from your upload speed and how many separate streams you usually
+have. Only the average counts toward the direct-play limit: a film averaging
+18 Mbps with short peaks above 60 Mbps is still sent unchanged under a 25 Mbps
+limit, because the players' buffers absorb the peaks.
 
-| Upload per viewer | `VIDEO_BITRATE_KBPS` | `VIDEO_PEAK_BITRATE_KBPS` | `DIRECT_STREAM_MAX_KBPS` |
+| Upload you can spare per stream | `VIDEO_BITRATE_KBPS` | `VIDEO_PEAK_BITRATE_KBPS` | `DIRECT_STREAM_MAX_KBPS` |
 |---|---|---|---|
 | 25 Mbps or more | `20000` | `33000` | `25000` (the defaults) |
 | 15 Mbps | `12000` | `20000` | `15000` |
 | 10 Mbps | `8000` | `12000` | `10000` |
 | 5 Mbps | `4000` | `6000` | `5000` |
 
-Lower limits mean more files are re-encoded instead of copied, which uses more
-GPU or CPU time.
+Lower limits mean more files are transcoded, which uses more GPU or CPU time.
 
-Plex counts the server as a remote player, and applies your remote streaming
-limits to it, unless its network is listed under **Settings → Network → LAN
-Networks**. See [Plex Setup](Plex-Setup#lan-networks).
+> [!NOTE]
+> Plex treats the server as a remote player, and applies your remote streaming
+> limits to it, unless its network is listed under **Settings → Network → LAN
+> Networks**. See [Plex Setup](Plex-Setup#lan-networks).
 
 ## Next
 

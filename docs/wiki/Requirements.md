@@ -1,102 +1,102 @@
 # Requirements
 
-Check these before you start. Each item links to the page where you set it up.
+Check these before you start. Each row links to the page where you set it up.
 
 ## Checklist
 
-| Requirement | Details | Set up in |
+| You need | Details | Set up in |
 |---|---|---|
-| Plex Media Server | With its transcoder working | [Plex Setup](Plex-Setup) |
-| The Plex owner's token | The server owner's `X-Plex-Token` | [Plex Setup](Plex-Setup#get-plex_token) |
-| Docker with Compose v2 | `docker compose`, or a stack manager such as Portainer or Dockge. The published image is built for x86-64 (`linux/amd64`). | [Installation](Installation) |
+| A Plex Media Server | With its transcoder working | [Plex Setup](Plex-Setup) |
+| The Plex owner's token | The server owner's `X-Plex-Token` | [Plex Setup](Plex-Setup) |
+| Docker with Compose v2 | `docker compose`, or a stack manager such as Portainer, Dockge or Dockhand. The published image is built for x86-64 (`linux/amd64`). | [Installation](Installation) |
 | A Discord application | Free, created in the Discord Developer Portal | [Discord Application Setup](Discord-Application-Setup) |
-| A public HTTPS address | Discord loads Activities only over HTTPS | [HTTPS and Reverse Proxy](HTTPS-and-Reverse-Proxy) |
-| Upload bandwidth | About 20–25 Mbps per viewer at the default quality | [Bandwidth](#bandwidth) |
+| A public HTTPS address | Discord only loads Activities over HTTPS | [HTTPS and Reverse Proxy](HTTPS-and-Reverse-Proxy) |
+| Enough upload speed | About 20 to 25 Mbps for a room at the default quality. See [Upload speed](#upload-speed). | This page |
 
 Running from source also needs Node.js 24 or later. See
 [Local Development](Local-Development).
 
 ## Server hardware
 
-The server itself is light. The work is in making the video streams:
+The server itself is light. The work is in making the video streams, and most
+of the time there is very little of it.
 
-- **Copying is cheap.** When a viewer's player can decode a file's video, the
-  video is copied as it is (Direct Stream) and only the audio is converted if
-  needed. Most H.264 and HEVC files are copied, 4K included.
-- **Re-encoding needs a GPU.** Files above the copy bitrate limit, and streams
-  for players that can't decode the file, are re-encoded, at the file's own
-  size: a 4K re-encode is about four times the work of a 1080p one.
-  With hardware encoding, a 1080p re-encode runs comfortably on modest
-  hardware. On the CPU alone, one re-encode can occupy several cores, and a 4K
-  source may not keep up.
+- **Direct play is cheap.** When a viewer's device can play a file's video, the
+  video is sent unchanged and only the audio is converted if needed. Most
+  H.264 and HEVC files play this way, 4K included.
+- **Transcoding needs a GPU.** A file above your bitrate limit, or a viewer
+  whose device can't play the file, needs a transcode. With hardware encoding,
+  a 1080p transcode runs comfortably on modest hardware. On the CPU alone, one
+  transcode can occupy several cores, and a 4K source may not keep up. A
+  transcode keeps the file's own size, so a 4K transcode is about four times
+  the work of a 1080p one.
 
-Where re-encodes run depends on the playback engine:
+Where transcodes run depends on the playback engine you choose:
 
-| Engine | Re-encodes run in | Hardware |
+| Engine | Transcodes run in | What it needs |
 |---|---|---|
-| Plex (default) | Plex's transcoder | Hardware acceleration in Plex, which needs Plex Pass and a supported GPU |
-| [FFmpeg engine](FFmpeg-Engine) | This container | A GPU mapped into the container: Intel Quick Sync or VAAPI through `/dev/dri`, or NVIDIA NVENC. Without one, re-encodes are H.264 on the CPU, two at a time. |
+| Plex (the default) | Plex's transcoder | Hardware acceleration turned on in Plex, which needs Plex Pass and a supported GPU |
+| [FFmpeg engine](FFmpeg-Engine) | This container | Your library mounted into the container, and a GPU: Intel Quick Sync or VAAPI through `/dev/dri`, or NVIDIA NVENC. Without a GPU, transcodes are H.264 on the CPU, two at a time. |
 
-Viewers with the same audio track, burned-in subtitles and quality share one
-stream, so a room of four on the same settings costs one stream, not four. See
+Viewers with the same audio track and quality share one stream, so a room of
+four on the same settings costs one stream, not four. See
 [Streaming and Quality](Streaming-and-Quality#shared-and-personal-streams).
 
 ### Memory and disk
 
-The server keeps the films being played, so seeking back plays at once:
+The server keeps the films being played, so seeking backwards is instant.
 
-| What | Default | Setting |
+| What is kept | Default | Setting |
 |---|---|---|
-| Copied video in memory, all streams together | 6 GB | `DIRECT_STREAM_MEMORY_MB` |
-| Copied video beyond that, on disk until its stream ends | Up to about 11 GB per hour of film at the 25 Mbps copy limit | `STREAM_CACHE_DIR` |
-| Re-encoded video in memory, all streams together | 2 GB | `TRANSCODE_CACHE_MB` |
+| Direct-play video in memory, all streams together | 6 GB | `DIRECT_STREAM_MEMORY_MB` |
+| Direct-play video beyond that, on disk until its stream ends | About 11 GB per hour of film at the 25 Mbps limit | `STREAM_CACHE_DIR` |
+| Transcoded video in memory, all streams together | 2 GB | `TRANSCODE_CACHE_MB` |
 
 With the FFmpeg engine, each stream's film is also written to
 `STREAM_CACHE_DIR` as it is made. On a server with less memory, lower both
 memory settings. See
 [Configuration Reference](Configuration-Reference#stream-caches).
 
-## Bandwidth
+## Upload speed
 
-Each viewer downloads the stream from your server, so your upload speed is
-usually the limit. At the default settings, a viewer downloads:
+Your upload speed is usually the limit. At the default settings, one stream
+needs:
 
-| Stream | Per viewer |
+| Stream | Bitrate |
 |---|---|
-| Copied file (Direct Stream) | The file's own bitrate, up to 25 Mbps on average |
-| Re-encoded | Up to 20 Mbps on average, with peaks up to 33 Mbps |
+| Direct play | The file's own bitrate, up to 25 Mbps on average |
+| Transcode | Up to 20 Mbps on average, with peaks up to 33 Mbps |
 
-Plan for this much upload:
+A full room does not cost that much per viewer. Video reaches viewers through
+Discord's proxy, which caches it, and viewers on the same stream pass pieces to
+each other. The second and later viewers of a stream get most of their video
+that way, not from your server. How much depends on where your viewers are, so
+plan like this:
 
-| Viewers | Upload at the defaults |
+| Situation | Plan for |
 |---|---|
-| 1 | 20–25 Mbps |
-| 2 | 40–50 Mbps |
-| 4 | 80–100 Mbps |
-| 8 | 160–200 Mbps |
+| Everyone on the same stream | One stream's bitrate, plus a margin |
+| Viewers on streams of their own (another audio track, a lower quality, a device that needs a transcode) | One stream's bitrate for each of those streams |
 
-Viewers on the same stream also pass segments to each other, peer to peer,
-once their buffers are full, and Discord's proxy caches each segment, so
-viewers it serves from the same data centre mostly get theirs from Discord
-rather than from your server. This can reduce your upload considerably, but it
-depends on where and how each viewer connects, so plan without it.
+The [Dashboard](Dashboard) shows, live and for every past session, how much of
+the data came from your server, from Discord's cache and from other viewers.
 
-If your upload is lower:
+If your upload is limited:
 
 1. **Lower the defaults.** For example, `VIDEO_BITRATE_KBPS=8000`,
    `VIDEO_PEAK_BITRATE_KBPS=12000` and `DIRECT_STREAM_MAX_KBPS=10000` keep each
-   viewer near 10 Mbps. Files above the copy limit are then re-encoded. See
-   [Streaming and Quality](Streaming-and-Quality#choosing-the-bitrate-limits).
-2. **Let viewers choose a lower quality.** Each viewer can choose 20, 12, 10, 8
+   stream near 10 Mbps. Files above the direct-play limit are then transcoded.
+   See [Streaming and Quality](Streaming-and-Quality#choosing-your-bitrate-limits).
+2. **Let viewers choose a lower quality.** Each viewer can pick 20, 12, 10, 8
    or 4 Mbps for themselves in the player.
 
 ## HTTPS
 
 Discord refuses to load an Activity from an insecure address. You need a
 public HTTPS address that forwards to the container's port 3000. It must stay
-the same, because it is entered both in the Discord Developer Portal and in the
-server's settings. A Cloudflare Tunnel or an existing reverse proxy both work.
-See [HTTPS and Reverse Proxy](HTTPS-and-Reverse-Proxy).
+the same, because you enter it both in the Discord Developer Portal and in the
+server's settings. A Cloudflare Tunnel or your existing reverse proxy both
+work. See [HTTPS and Reverse Proxy](HTTPS-and-Reverse-Proxy).
 
 ## Discord clients
 
@@ -104,12 +104,12 @@ See [HTTPS and Reverse Proxy](HTTPS-and-Reverse-Proxy).
 |---|---|
 | Discord desktop app (Windows, macOS, Linux) | Full |
 | Discord in Chrome, Edge or another Chromium browser | Full |
-| Discord in Firefox | Full. Firefox can't decode HEVC, so it receives H.264. |
-| Discord on iOS and Android | Full, with a layout for phones |
+| Discord in Firefox | Full. Firefox can't play HEVC, so it receives H.264. |
+| Discord on iOS and Android | Full, with a layout made for phones |
 
-Each player reports what it can decode, and the server sends it a stream it
-can play. See
-[Streaming and Quality](Streaming-and-Quality#what-each-player-receives).
+Each player tells the server what it can play, and the server sends it a
+stream that suits it. See
+[Streaming and Quality](Streaming-and-Quality#what-each-viewer-receives).
 
 ## Next
 

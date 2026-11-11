@@ -11,7 +11,7 @@ Check these before you start. Each row links to the page where you set it up.
 | Docker with Compose v2 | `docker compose`, or a stack manager such as Portainer, Dockge or Dockhand. The published image is built for x86-64 (`linux/amd64`). | [Installation](Installation) |
 | A Discord application | Free, created in the Discord Developer Portal | [Discord Application Setup](Discord-Application-Setup) |
 | A public HTTPS address | Discord only loads Activities over HTTPS | [HTTPS and Reverse Proxy](HTTPS-and-Reverse-Proxy) |
-| Enough upload speed | About 20 to 25 Mbps for a room at the default quality. See [Upload speed](#upload-speed). | This page |
+| Enough upload speed | A file played unchanged needs its own bitrate, and a transcode about 20 Mbps. See [Upload speed](#upload-speed). | This page |
 
 Running from source also needs Node.js 24 or later. See
 [Local Development](Local-Development).
@@ -49,7 +49,7 @@ The server keeps the films being played, so seeking backwards is instant.
 | What is kept | Default | Setting |
 |---|---|---|
 | Direct-play video in memory, all streams together | 6 GB | `DIRECT_STREAM_MEMORY_MB` |
-| Direct-play video beyond that, on disk until its stream ends | About 11 GB per hour of film at the 25 Mbps limit | `STREAM_CACHE_DIR` |
+| Direct-play video beyond that, on disk until its stream ends | The size of the part watched: about 11 GB per hour for a 25 Mbps film, 36 GB for an 80 Mbps one | `STREAM_CACHE_DIR` |
 | Transcoded video in memory, all streams together | 2 GB | `TRANSCODE_CACHE_MB` |
 
 With the FFmpeg engine, each stream's film is also written to
@@ -64,8 +64,8 @@ needs:
 
 | Stream | Bitrate |
 |---|---|
-| Direct play | The file's own bitrate, up to 25 Mbps on average |
-| Transcode | Up to 20 Mbps on average, with peaks up to 33 Mbps |
+| Direct play | The file's own bitrate. Files averaging up to 100 Mbps play unchanged. |
+| Transcode | Up to 20 Mbps on average. Short peaks can go much higher. |
 
 A full room does not cost that much per viewer. Video reaches viewers through
 Discord's proxy, which caches it, and viewers on the same stream pass pieces to
@@ -83,9 +83,12 @@ the data came from your server, from Discord's cache and from other viewers.
 
 If your upload is limited:
 
-1. **Lower the defaults.** For example, `VIDEO_BITRATE_KBPS=8000`,
-   `VIDEO_PEAK_BITRATE_KBPS=12000` and `DIRECT_STREAM_MAX_KBPS=10000` keep each
-   stream near 10 Mbps. Files above the direct-play limit are then transcoded.
+1. **Lower the limits.** The defaults let nearly every file play unchanged,
+   4K remuxes included. If your upload can't carry your largest files, lower
+   `DIRECT_STREAM_MAX_KBPS`: files above it are transcoded at
+   `VIDEO_BITRATE_KBPS`. For example, `DIRECT_STREAM_MAX_KBPS=10000`,
+   `VIDEO_BITRATE_KBPS=8000` and `VIDEO_PEAK_BITRATE_KBPS=12000` keep each
+   stream near 10 Mbps.
    See [Streaming and Quality](Streaming-and-Quality#choosing-your-bitrate-limits).
 2. **Let viewers choose a lower quality.** Each viewer can pick 20, 12, 10, 8
    or 4 Mbps for themselves in the player.

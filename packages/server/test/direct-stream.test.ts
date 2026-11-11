@@ -793,7 +793,7 @@ console.log("\n— through the routes —");
   check("a file over the copy limit says that is why, and what it is re-encoded at",
     (await startNotes("950")).notes,
     {
-      video: "transcode", reason: "31 Mbps over 20 Mbps server cap", kbps: "12000", allowed: "12000", videoFrom: "H.264 · SDR · 1920×1080", range: "SDR",
+      video: "transcode", reason: "31 Mbps over 20 Mbps server cap", kbps: "12000", allowed: "12000", videoFrom: "H.264 · SDR · 1920×1080", videoTo: "H.264", range: "SDR",
       audio: "copy", audioFrom: "AAC Stereo",
     });
   const uhd = await startNotes(UHD_TITLE);
@@ -817,7 +817,7 @@ console.log("\n— through the routes —");
   check("a file averaging over it is re-encoded at it, without asking for a copy first, and the player told why",
     [capped.asked.directStream, capped.asked.videoBitrate, capped.notes],
     ["0", "8000", {
-      video: "transcode", reason: "15 Mbps over 8 Mbps quality cap", kbps: "8000", quality: "8000", allowed: "8000", videoFrom: "H.264 · SDR · 1920×1080", range: "SDR",
+      video: "transcode", reason: "15 Mbps over 8 Mbps quality cap", kbps: "8000", quality: "8000", allowed: "8000", videoFrom: "H.264 · SDR · 1920×1080", videoTo: "H.264", range: "SDR",
       audio: "copy", audioFrom: "AAC Stereo",
     }]);
   const fits = await startNotes("100", "?quality=12000");
@@ -916,7 +916,7 @@ console.log("\n— through the routes —");
   const keptRaw = new Database(path.join(process.env.THUMB_CACHE_DIR!, "subtitles.sqlite"), { readonly: true });
   check("what Plex sent is kept with the cues, for a better parser to read again",
     keptRaw.prepare("SELECT raw IS NOT NULL AS raw, fingerprint, parser_version AS v FROM embedded_subtitles WHERE stream_id = '33'").get(),
-    { raw: 1, fingerprint: "1:1000", v: 2 });
+    { raw: 1, fingerprint: "1:1000", v: 3 });
   keptRaw.close();
 
   console.log("\n— what is read ahead first —");

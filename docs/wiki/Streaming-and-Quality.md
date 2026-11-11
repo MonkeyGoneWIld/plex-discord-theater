@@ -28,7 +28,7 @@ A file's video is sent unchanged when all of these are true:
 | Direct streaming is on | `DIRECT_STREAM`, on by default |
 | The viewer's device can play the video codec: H.264, or HEVC where the device plays it. With the [FFmpeg engine](FFmpeg-Engine), also AV1 and VP9. | — |
 | For video above 1080p, the device plays that size smoothly | — |
-| The file's average bitrate is within your limit | `DIRECT_STREAM_MAX_KBPS`, 25000 by default |
+| The file's average bitrate is within your limit | `DIRECT_STREAM_MAX_KBPS`, 100000 by default |
 | The file's average bitrate is within the quality the viewer chose | **Original** by default |
 | No subtitle has to be burned into the picture | — |
 
@@ -120,17 +120,22 @@ with a **Try** button.
 | Setting | Default | Controls |
 |---|---|---|
 | `VIDEO_BITRATE_KBPS` | `20000` | The average bitrate of a transcode |
-| `VIDEO_PEAK_BITRATE_KBPS` | `33000` | The peak bitrate of a transcode |
-| `DIRECT_STREAM_MAX_KBPS` | `25000` | The highest average bitrate a file may have and still be sent unchanged |
+| `VIDEO_PEAK_BITRATE_KBPS` | `200000` | The peak bitrate of a transcode |
+| `DIRECT_STREAM_MAX_KBPS` | `100000` | The highest average bitrate a file may have and still be sent unchanged |
 
-Set them from your upload speed and how many separate streams you usually
-have. Only the average counts toward the direct-play limit: a film averaging
-18 Mbps with short peaks above 60 Mbps is still sent unchanged under a 25 Mbps
-limit, because the players' buffers absorb the peaks.
+The defaults let nearly every file play unchanged, 4K remuxes included, and
+leave a transcode's peaks almost unbounded. That gives the best picture and
+suits a fast upload. If yours is limited, set the limits from your upload
+speed and how many separate streams you usually have.
+
+Only the average counts toward the direct-play limit: a film averaging 18 Mbps
+with short peaks above 60 Mbps is still sent unchanged under a 25 Mbps limit,
+because the players' buffers absorb the peaks.
 
 | Upload you can spare per stream | `VIDEO_BITRATE_KBPS` | `VIDEO_PEAK_BITRATE_KBPS` | `DIRECT_STREAM_MAX_KBPS` |
 |---|---|---|---|
-| 25 Mbps or more | `20000` | `33000` | `25000` (the defaults) |
+| 100 Mbps or more | `20000` | `200000` | `100000` (the defaults) |
+| 25 Mbps | `20000` | `33000` | `25000` |
 | 15 Mbps | `12000` | `20000` | `15000` |
 | 10 Mbps | `8000` | `12000` | `10000` |
 | 5 Mbps | `4000` | `6000` | `5000` |

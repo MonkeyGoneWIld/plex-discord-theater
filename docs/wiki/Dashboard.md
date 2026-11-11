@@ -11,13 +11,17 @@ password.
 ## Turn it on
 
 1. Set `ADMIN_PASSWORD` to a password of 12 characters or more.
-2. Publish its port in the compose file. Publish it on your LAN address only:
+2. Publish its port in the compose file:
 
    ```yaml
    ports:
      - "3000:3000"
-     - "192.168.1.10:3050:3050"
+     - "3050:3050"
    ```
+
+   Keep this port on your local network: don't forward it on your router or
+   route it through your tunnel. To publish it on one address of the server
+   only, put that address in front, as in `"<server address>:3050:3050"`.
 
 3. Restart the container. The log says where it listens:
 

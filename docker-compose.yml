@@ -1,212 +1,110 @@
-# Two ways to run this, from one file.
-#
+# Two ways to run this, from one file:
 #   docker compose up -d            builds from this checkout
-#   docker compose pull && up -d    uses the published image instead
+#   docker compose pull && up -d    uses the published image
 #
-# `image` names the result either way, so a local build is tagged the same as
-# the published one and `pull` has something to fetch.
-#
-# Deploying through Portainer or Dockge instead? The README carries a
-# self-contained version of this with every value inline, so no .env is needed.
+# Settings are read from your .env file: copy .env.example to .env and fill in
+# the required block. Deploying through Portainer, Dockge or Dockhand instead?
+# The README has a self-contained version with every value inline.
 services:
   app:
     container_name: plex-discord-theater
-    # Pin to a release tag (e.g. :1.0.0) if you would rather updates be
-    # deliberate than automatic.
-    image: ghcr.io/monkeygonewild/plex-discord-theater:latest
+    image: ghcr.io/monkeygonewild/plex-discord-theater:latest # Pin a release tag, such as :2.2.0, for deliberate updates.
     build:
       context: .
+    restart: unless-stopped
     ports:
       - "${PORT:-3000}:${PORT:-3000}"
-      # The admin page, with ADMIN_PASSWORD set. Plain HTTP: publish it on
-      # your LAN address only, e.g. "192.168.1.10:3050:3050".
-      # - "${ADMIN_PORT:-3050}:${ADMIN_PORT:-3050}"
-
-    # Everything below is read from your .env file. Copy .env.example to .env
-    # and fill in the required block; the rest can stay empty, and each one
-    # simply turns its feature off — except Direct Stream and HEVC, which are
-    # on unless set to 0. See .env.example for what each does.
-    #
-    # All of it is read at runtime, DISCORD_CLIENT_ID included — the server
-    # hands that one to the browser on each request rather than it being
-    # compiled in, so changing any of these needs a restart, not a rebuild.
+      # - "${ADMIN_PORT:-3050}:${ADMIN_PORT:-3050}" # The dashboard (set ADMIN_PASSWORD). Keep it on your local network.
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Lets PLEX_URL=http://host.docker.internal:32400 reach Plex on this machine.
+    volumes:
+      - app-data:/data # Databases, caches, logs and the video being played. Kept across updates.
+      # - /path/to/ssd/theater-stream-cache:/cache/stream # Optional: keep video being played on an SSD (set STREAM_CACHE_DIR=/cache/stream).
+      # - /path/to/media:/data/media:ro # FFmpeg engine: your library, read-only, at the path Plex has it (or set MEDIA_PATH_MAP).
+    # devices: # FFmpeg engine: the GPU, for Intel Quick Sync or VAAPI.
+    #   - /dev/dri:/dev/dri
     environment:
       # ── Required ────────────────────────────────────────────────
       - NODE_ENV=production
-      - PLEX_URL=${PLEX_URL}
-      - PLEX_TOKEN=${PLEX_TOKEN}
-      - DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}
-      - DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}
-      - REDIRECT_URI=${REDIRECT_URI}
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
-      - PORT=${PORT:-3000}
-      # Where the SQLite databases and logs live — matches the volume below.
-      - THUMB_CACHE_DIR=/data
+      - DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID} # From the Discord Developer Portal: Application ID.
+      - DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET} # From the Discord Developer Portal: Client Secret.
+      - PLEX_URL=${PLEX_URL} # Plex as this container reaches it. Never localhost.
+      - PLEX_TOKEN=${PLEX_TOKEN} # Your Plex server's X-Plex-Token.
+      - REDIRECT_URI=${REDIRECT_URI} # Your public HTTPS address, no trailing slash.
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS} # The same address.
+      - PORT=${PORT:-3000} # The port the server listens on.
+      - THUMB_CACHE_DIR=/data # Leave as it is: it matches the volume above.
 
-      # ── Optional integrations ───────────────────────────────────
-      # All off unless set. The server prints which are live at startup:
-      #   docker compose logs | grep Config
-      #
-      # Your plex.tv ACCOUNT token (not the server token above). Enables detail
-      # pages for titles you don't own, and signs in to Seerr as you.
-      - PLEX_ACCOUNT_TOKEN=${PLEX_ACCOUNT_TOKEN}
-      # Stable encryption key for per-user Plex account links. Falls back to
-      # DISCORD_CLIENT_SECRET when unset.
-      - PLEX_LINK_SECRET=${PLEX_LINK_SECRET}
-      # Collections, "More Like This", and cast/crew pages.
-      - TMDB_API_KEY=${TMDB_API_KEY}
-      # Correct season numbering for the missing-episode list. TVDB is what
-      # Sonarr monitors, so without this the list falls back to TMDB, which
-      # sometimes disagrees about which season an episode belongs to.
-      # TVDB_PIN is only needed for a user-supported subscriber key.
-      - TVDB_API_KEY=${TVDB_API_KEY}
-      - TVDB_PIN=${TVDB_PIN}
-      # Overseerr / Jellyseerr URL — enables the Request button.
-      - SEERR_URL=${SEERR_URL}
-      # Restrict the activity to named Discord servers. Empty = any server.
-      - ALLOWED_GUILD_IDS=${ALLOWED_GUILD_IDS}
-      # Anyone may ask an away host for the host role; it passes to them if
-      # the host doesn't answer. On unless set to off.
-      - HOST_REQUESTS=${HOST_REQUESTS:-}
+      # ── Streaming ───────────────────────────────────────────────
+      - DIRECT_STREAM=${DIRECT_STREAM:-1} # Send the original video unchanged when a device can play it. 0 transcodes everything.
+      - DIRECT_STREAM_MAX_KBPS=${DIRECT_STREAM_MAX_KBPS:-100000} # Highest average bitrate (kbps) a file may have and still be sent unchanged.
+      - VIDEO_BITRATE_KBPS=${VIDEO_BITRATE_KBPS:-20000} # Average bitrate of a transcode (kbps).
+      - VIDEO_PEAK_BITRATE_KBPS=${VIDEO_PEAK_BITRATE_KBPS:-200000} # Peak bitrate of a transcode (kbps).
+      - HEVC_TRANSCODE=${HEVC_TRANSCODE:-1} # HEVC transcodes for devices that play HEVC. 0 keeps them H.264.
+      - AV1_TRANSCODE=${AV1_TRANSCODE:-} # FFmpeg engine: AV1 transcodes for devices that play AV1 in hardware. 0 turns it off.
+      - DIRECT_STREAM_MEMORY_MB=${DIRECT_STREAM_MEMORY_MB:-} # Memory for video sent unchanged, all streams together. Default 6144.
+      - TRANSCODE_CACHE_MB=${TRANSCODE_CACHE_MB:-} # Memory for transcoded video, all streams together. Default 2048.
+      - STREAM_CACHE_DIR=${STREAM_CACHE_DIR:-} # Where video being played is kept on disk. Default /data/stream-cache. Emptied at every start.
+      - SUBTITLE_PREFETCH=${SUBTITLE_PREFETCH:-} # 0 stops reading a title's other subtitles ahead.
+      - STYLED_SUBTITLES=${STYLED_SUBTITLES:-} # off draws ASS subtitles as plain lines.
 
-      # ── Playback engine ─────────────────────────────────────────
-      # plex (the default) has Plex make every stream. ffmpeg makes them in
-      # this container instead, from the files themselves: copies of the
-      # original picture, HDR included, and re-encodes on the GPU (Intel Quick
-      # Sync, VAAPI or NVIDIA NVENC) when one is mapped in under `devices`
-      # below, else on the CPU. Each stream's whole film is made ahead into
-      # STREAM_CACHE_DIR: leave room for it. Anything it can't make is left to
-      # Plex. Uncomment the media mount and `devices` below with it. See the
-      # wiki's FFmpeg Engine page.
-      - PLAYBACK_ENGINE=${PLAYBACK_ENGINE:-}
-      # Only when the library is mounted at other paths than Plex's own:
-      # "plex path=>path here", comma-separated, e.g. /media=>/data/media
-      - MEDIA_PATH_MAP=${MEDIA_PATH_MAP:-}
-      # auto (the default) uses Intel QSV when it works, else VAAPI, else the
-      # CPU; qsv, vaapi, nvenc or none choose. FFMPEG_HWACCEL_DEVICE is the
-      # render node. FFMPEG_HW_DECODE=off decodes on the CPU.
-      - FFMPEG_HWACCEL=${FFMPEG_HWACCEL:-}
-      - FFMPEG_HWACCEL_DEVICE=${FFMPEG_HWACCEL_DEVICE:-}
-      - FFMPEG_HW_DECODE=${FFMPEG_HW_DECODE:-}
-      # Re-encodes at once; past it, Plex makes the stream. Copies don't count.
-      # Empty = 6 on the GPU, 2 on the CPU.
-      - FFMPEG_MAX_ENCODES=${FFMPEG_MAX_ENCODES:-}
-      # ultrafast to veryslow; empty = each encoder's own.
-      - FFMPEG_PRESET=${FFMPEG_PRESET:-}
-      # Empty = the whole film made ahead; seconds = held that far ahead.
-      - FFMPEG_LOOKAHEAD=${FFMPEG_LOOKAHEAD:-}
-      # 6 = surround the player can't play becomes 5.1 AAC, not stereo.
-      - FFMPEG_AUDIO_CHANNELS=${FFMPEG_AUDIO_CHANNELS:-}
-      # off = text subtitles read by Plex, not out of the file here.
-      - FFMPEG_SUBTITLES=${FFMPEG_SUBTITLES:-}
-      # off = no seek-bar previews made for files Plex has none for.
-      - FFMPEG_PREVIEWS=${FFMPEG_PREVIEWS:-}
-      - FFMPEG_PREVIEWS_MAX_GB=${FFMPEG_PREVIEWS_MAX_GB:-}
-      # Memory for the segments rooms are fetching now. Empty = 512.
-      - FFMPEG_SEGMENT_MEMORY_MB=${FFMPEG_SEGMENT_MEMORY_MB:-}
-      # off = a stream ffmpeg can't make fails, rather than going to Plex.
-      - FFMPEG_FALLBACK_TO_PLEX=${FFMPEG_FALLBACK_TO_PLEX:-}
-      # keep (the default): HDR stays HDR for an HEVC player (for a screen in
-      # SDR, see FFMPEG_HDR_ON_SDR). tonemap maps every re-encode to SDR.
-      # FFMPEG_TONEMAP is the curve for streams that are mapped: mobius
-      # (default), reinhard, hable, bt2390, linear, gamma or clip.
-      - FFMPEG_HDR_REENCODE=${FFMPEG_HDR_REENCODE:-}
-      - FFMPEG_TONEMAP=${FFMPEG_TONEMAP:-}
-      # HDR for a screen in SDR. browser (the default): the HEVC is sent as it
-      # is, labelled FFMPEG_HDR_ON_SDR_NITS (200 unless set, 100 to 1000) so
-      # the player's own tone map shows it brighter. server: mapped to SDR here
-      # from the film's 10 bits. HLG, Dolby Vision 5 and players without HEVC
-      # are always mapped here.
-      - FFMPEG_HDR_ON_SDR=${FFMPEG_HDR_ON_SDR:-}
-      - FFMPEG_HDR_ON_SDR_NITS=${FFMPEG_HDR_ON_SDR_NITS:-}
-      # Tell Plex what ffmpeg is playing, so it shows in Plex's dashboard,
-      # Tautulli and Tracearr. On unless set to 0.
-      - FFMPEG_REPORT_TO_PLEX=${FFMPEG_REPORT_TO_PLEX:-}
+      # ── Recommended ─────────────────────────────────────────────
+      - PLEX_ACCOUNT_TOKEN=${PLEX_ACCOUNT_TOKEN} # Your plex.tv account token: pages for titles you don't own, and Seerr sign-in.
+      - TMDB_API_KEY=${TMDB_API_KEY} # Collections, More Like This and cast pages.
+      - TVDB_API_KEY=${TVDB_API_KEY} # Missing-episode lists numbered as Sonarr numbers them.
+      - TVDB_PIN=${TVDB_PIN} # Only for a TVDB subscriber key.
 
-      # ── Tuning ──────────────────────────────────────────────────
-      # Per-viewer bandwidth scales with the bitrate — the biggest lever there
-      # is if your upload is tight.
-      - VIDEO_BITRATE_KBPS=${VIDEO_BITRATE_KBPS:-20000}
-      - VIDEO_PEAK_BITRATE_KBPS=${VIDEO_PEAK_BITRATE_KBPS:-33000}
-      # HEVC transcodes for players that can decode them; anyone who can't
-      # gets an H.264 stream of their own. Needs Plex Pass and hardware HEVC
-      # encoding enabled in Plex; without them Plex keeps sending H.264.
-      # On unless set to 0.
-      - HEVC_TRANSCODE=${HEVC_TRANSCODE:-1}
-      # Copy the original video instead of re-encoding it, for players that
-      # can decode it. Files averaging over DIRECT_STREAM_MAX_KBPS are still
-      # re-encoded. On unless set to 0.
-      - DIRECT_STREAM=${DIRECT_STREAM:-1}
-      # Highest average bitrate (kbps) still copied; bigger files are
-      # re-encoded so a home upload isn't asked for more than it has.
-      # Unset = 25000, or VIDEO_BITRATE_KBPS if that is higher.
-      - DIRECT_STREAM_MAX_KBPS=${DIRECT_STREAM_MAX_KBPS:-25000}
-      # Films being played, kept so going back plays from here: copies in
-      # memory up to DIRECT_STREAM_MEMORY_MB (6144) and the rest on disk in
-      # STREAM_CACHE_DIR (/data/stream-cache) until the stream ends;
-      # re-encodes TRANSCODE_CACHE_MB (2048) in memory. Point STREAM_CACHE_DIR
-      # at an SSD — see the commented volume below.
-      - DIRECT_STREAM_MEMORY_MB=${DIRECT_STREAM_MEMORY_MB:-}
-      - STREAM_CACHE_DIR=${STREAM_CACHE_DIR:-}
-      - TRANSCODE_CACHE_MB=${TRANSCODE_CACHE_MB:-}
-      # 0 = don't read a title's other subtitles out of the file ahead of
-      # anyone picking them. On unless set to 0.
-      - SUBTITLE_PREFETCH=${SUBTITLE_PREFETCH:-}
-      - THUMB_CACHE_TTL_MS=${THUMB_CACHE_TTL_MS}
-      # Image cache size, with a unit: 500M, 10G (the default), 2T.
-      - THUMB_CACHE_MAX_SIZE=${THUMB_CACHE_MAX_SIZE}
-      - THUMB_CACHE_MAX_MB=${THUMB_CACHE_MAX_MB}
-      # Background pre-fetch of detail-page data and artwork, seasons and
-      # episodes included, so opening a title is a cache hit instead of several
-      # round trips. WARM_CACHE=0 turns it off; WARM_CACHE_ARTWORK=0 and
-      # WARM_CACHE_EPISODES=0 turn off those parts.
-      - WARM_CACHE=${WARM_CACHE}
-      - WARM_CACHE_MAX_ITEMS=${WARM_CACHE_MAX_ITEMS}
-      - WARM_CACHE_DELAY_MS=${WARM_CACHE_DELAY_MS}
-      - WARM_CACHE_INTERVAL_MIN=${WARM_CACHE_INTERVAL_MIN}
-      - WARM_CACHE_ARTWORK=${WARM_CACHE_ARTWORK}
-      - WARM_CACHE_EPISODES=${WARM_CACHE_EPISODES}
+      # ── Optional ────────────────────────────────────────────────
+      - SEERR_URL=${SEERR_URL} # The Request button, through Overseerr or Jellyseerr.
+      - ALLOWED_GUILD_IDS=${ALLOWED_GUILD_IDS} # Only these Discord servers may use it: server IDs, comma-separated.
+      - HOST_REQUESTS=${HOST_REQUESTS:-} # off stops viewers asking an away host for the host role.
+      - PLEX_LINK_SECRET=${PLEX_LINK_SECRET} # A stable key for linked Plex accounts. Defaults to DISCORD_CLIENT_SECRET.
+      - QBT_MANAGER_API_KEY=${QBT_MANAGER_API_KEY:-} # plex-qbt-manager's THEATER_API_KEY, for its upload limits.
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-} # Turns on the dashboard. Use 12 characters or more.
+      - ADMIN_PORT=${ADMIN_PORT:-3050} # The dashboard's port.
+      - ADMIN_HOST=${ADMIN_HOST:-} # The address the dashboard listens on. Default 0.0.0.0.
+      - ADMIN_SECRET=${ADMIN_SECRET} # Password for the maintenance command that stops every stream on Plex.
 
-      # ── Diagnostics ─────────────────────────────────────────────
-      # Server and client events are written to /data/logs, so a stream that
-      # died can be read back after the container logs have rolled away.
-      - LOG_TO_FILE=${LOG_TO_FILE}
-      - LOG_DIR=${LOG_DIR}
-      - LOG_MAX_FILE_MB=${LOG_MAX_FILE_MB}
-      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS}
-      # DEBUG=1 adds a line per HLS segment, keep-alive and prefetch poll —
-      # useful while chasing a specific stream, and roughly five times the log
-      # volume the rest of the time.
-      - DEBUG=${DEBUG:-}
-      # Password for one maintenance command that stops every stream the bot
-      # has running on Plex, for clearing stuck ones by hand. Empty, it is
-      # accepted only from inside the container, which suits most people.
-      - ADMIN_SECRET=${ADMIN_SECRET}
-      # The admin page's password; off while empty. Its port: see ports above.
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
-      - ADMIN_PORT=${ADMIN_PORT:-3050}
-      - QBT_MANAGER_API_KEY=${QBT_MANAGER_API_KEY:-}
+      # ── The FFmpeg engine (optional) ────────────────────────────
+      - PLAYBACK_ENGINE=${PLAYBACK_ENGINE:-} # ffmpeg makes the streams in this container. Default plex.
+      - MEDIA_PATH_MAP=${MEDIA_PATH_MAP:-} # Only if Plex sees the library at other paths: Plex's path=>path here, comma-separated.
+      - FFMPEG_HWACCEL=${FFMPEG_HWACCEL:-} # auto (default), qsv, vaapi, nvenc, or none for the CPU.
+      - FFMPEG_HWACCEL_DEVICE=${FFMPEG_HWACCEL_DEVICE:-} # The GPU's render node. Default /dev/dri/renderD128.
+      - FFMPEG_HW_DECODE=${FFMPEG_HW_DECODE:-} # off decodes on the CPU and keeps encoding on the GPU.
+      - FFMPEG_MAX_ENCODES=${FFMPEG_MAX_ENCODES:-} # Transcodes at once. Default 6 on a GPU, 2 on the CPU.
+      - FFMPEG_PRESET=${FFMPEG_PRESET:-} # ultrafast to veryslow. Default: each encoder's own.
+      - FFMPEG_LOOKAHEAD=${FFMPEG_LOOKAHEAD:-} # Seconds each stream is made ahead. Default: the whole film.
+      - FFMPEG_AUDIO_CHANNELS=${FFMPEG_AUDIO_CHANNELS:-} # 2 converts surround a device can't play to stereo. Default 6.
+      - FFMPEG_SUBTITLES=${FFMPEG_SUBTITLES:-} # off leaves reading text subtitles to Plex.
+      - FFMPEG_PGS=${FFMPEG_PGS:-} # off burns Blu-ray and DVD subtitles in.
+      - FFMPEG_PGS_MAX_GB=${FFMPEG_PGS_MAX_GB:-} # Disk for those subtitles. Default 2.
+      - FFMPEG_PREVIEWS=${FFMPEG_PREVIEWS:-} # off stops making seek-bar previews.
+      - FFMPEG_PREVIEWS_MAX_GB=${FFMPEG_PREVIEWS_MAX_GB:-} # Disk for previews. Default 20.
+      - FFMPEG_SEGMENT_MEMORY_MB=${FFMPEG_SEGMENT_MEMORY_MB:-} # Memory for the video rooms are fetching now. Default 512.
+      - FFMPEG_HDR_REENCODE=${FFMPEG_HDR_REENCODE:-} # keep (default) or tonemap.
+      - FFMPEG_TONEMAP=${FFMPEG_TONEMAP:-} # The curve used when HDR is mapped to SDR. Default mobius.
+      - FFMPEG_HDR_ON_SDR=${FFMPEG_HDR_ON_SDR:-} # HDR on an SDR screen: browser (default) or server.
+      - FFMPEG_HDR_ON_SDR_NITS=${FFMPEG_HDR_ON_SDR_NITS:-} # The peak HDR is labelled with for an SDR screen. Default 200.
+      - FFMPEG_REPORT_TO_PLEX=${FFMPEG_REPORT_TO_PLEX:-} # 0 stops showing the engine's streams in Plex's dashboard.
+      - FFMPEG_FALLBACK_TO_PLEX=${FFMPEG_FALLBACK_TO_PLEX:-} # off makes a stream the engine can't make fail. For testing.
 
-    volumes:
-      # SQLite (sessions, watch history, linked Plex accounts, detail metadata,
-      # thumbnail cache), logs, and the stream cache of films being played
-      # unless STREAM_CACHE_DIR points elsewhere. A named volume keeps them
-      # across rebuilds; swap for a host path (e.g. ./data:/data) if you'd
-      # rather have them somewhere you can browse.
-      - app-data:/data
-      # A copied film being played past DIRECT_STREAM_MEMORY_MB goes to disk,
-      # up to 13.5 GB an hour for a 30 Mbps Blu-ray. To keep that on an SSD,
-      # mount one here and set STREAM_CACHE_DIR=/cache/stream in .env.
-      # - /path/to/ssd/theater-stream-cache:/cache/stream
-      # PLAYBACK_ENGINE=ffmpeg: your library, read-only, at the path Plex has
-      # it (or set MEDIA_PATH_MAP). Without it, ffmpeg reads each file from
-      # Plex over the network instead, which works but seeks slower.
-      # - /path/to/media:/data/media:ro
+      # ── Caches and warm-up ──────────────────────────────────────
+      - THUMB_CACHE_TTL_MS=${THUMB_CACHE_TTL_MS} # How long artwork is kept. Default 90 days.
+      - THUMB_CACHE_MAX_SIZE=${THUMB_CACHE_MAX_SIZE} # Artwork cache size, with a unit: 500M, 10G (default), 2T.
+      - THUMB_CACHE_MAX_MB=${THUMB_CACHE_MAX_MB} # The older form of the size, in megabytes.
+      - WARM_CACHE=${WARM_CACHE} # 0 turns off preparing title pages in the background.
+      - WARM_CACHE_MAX_ITEMS=${WARM_CACHE_MAX_ITEMS} # Titles kept prepared. Default 600, or all.
+      - WARM_CACHE_DELAY_MS=${WARM_CACHE_DELAY_MS} # Pause after each request to Plex. Default 250.
+      - WARM_CACHE_INTERVAL_MIN=${WARM_CACHE_INTERVAL_MIN} # Minutes between passes. Default 240.
+      - WARM_CACHE_ARTWORK=${WARM_CACHE_ARTWORK} # 0 leaves artwork to load when first shown.
+      - WARM_CACHE_EPISODES=${WARM_CACHE_EPISODES} # 0 skips seasons and episodes.
 
-    # PLAYBACK_ENGINE=ffmpeg: Intel's GPU, for re-encodes on Quick Sync.
-    # devices:
-    #   - /dev/dri:/dev/dri
-    restart: unless-stopped
+      # ── Logging ─────────────────────────────────────────────────
+      - LOG_TO_FILE=${LOG_TO_FILE} # 0 logs to the console only.
+      - LOG_DIR=${LOG_DIR} # Where log files are written. Default /data/logs.
+      - LOG_MAX_FILE_MB=${LOG_MAX_FILE_MB} # Size at which a day's log continues in a new file. Default 64.
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS} # Days of logs kept. Default 7.
+      - DEBUG=${DEBUG:-} # 1 logs every request in detail. About five times the volume.
     logging:
       driver: json-file
       options:

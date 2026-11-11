@@ -431,7 +431,10 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
   recordSessionTenBit(hi10Sid, true);
   check("a copy of 10-bit H.264 needs 10-bit H.264", sessionNeeds(hi10Sid), ["hi10", "tenBit"]);
   // What the dashboard is told a re-encode is sent as.
-  const { videoOutText } = await import("../src/routes/plex.js");
+  const { videoOutText, COPY_LIMIT_KBPS, TRANSCODE_PEAK_KBPS } = await import("../src/routes/plex.js");
+  check("left unset, files averaging up to 100 Mbps are sent unchanged, and a re-encode may peak at 200",
+    [process.env.DIRECT_STREAM_MAX_KBPS, process.env.VIDEO_PEAK_BITRATE_KBPS, COPY_LIMIT_KBPS, TRANSCODE_PEAK_KBPS],
+    [undefined, undefined, 100_000, 200_000]);
   check("a re-encode's output, for the dashboard: the codec it is sent in, not the file's",
     [videoOutText("av1", false, 1860, 1044), videoOutText("hevc", true, 3840, 2160), videoOutText("hevc", false, 1440, 1080),
       videoOutText("h264", false), videoOutText("av1", true, 1920, 1080), videoOutText("unknown", false), videoOutText(undefined, false)],

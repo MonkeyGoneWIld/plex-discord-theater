@@ -109,8 +109,8 @@ docker cp plex-discord-theater:/data/logs ./logs
 ### Disk space
 
 Streams are the largest use of disk. Video sent unchanged is kept in memory up to
-6 GB for all streams together, and on disk after that, at up to about 11 GB an
-hour for a 25 Mbps film. The FFmpeg engine writes its streams to the same
+6 GB for all streams together, and on disk after that, at about 11 GB an
+hour for a 25 Mbps film and 36 GB for an 80 Mbps one. The FFmpeg engine writes its streams to the same
 folder. Each stream's files are removed when it ends. If the data volume is on
 a small or slow disk, move them to an SSD with `STREAM_CACHE_DIR`; see
 [Stream caches](Configuration-Reference#stream-caches).

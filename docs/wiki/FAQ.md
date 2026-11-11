@@ -110,8 +110,8 @@ No. Without Plex Pass:
 
 ### How many people can watch at once?
 
-There is no fixed limit: your upload speed decides. At the default settings a
-stream needs 20 to 25 Mbps. Viewers on the same stream share it: Discord's
+There is no fixed limit: your upload speed decides. A file played unchanged
+needs its own bitrate, and a transcode about 20 Mbps. Viewers on the same stream share it: Discord's
 proxy caches the video, and viewers pass pieces to each other, so the second
 and later viewers get most of theirs without it coming from your server. Each
 viewer on a stream of their own needs that stream's bitrate as well. See
@@ -189,7 +189,7 @@ common reasons are:
   VobSub and DVB always are. The FFmpeg engine has each player draw PGS, and
   VobSub or DVB inside the film, instead. A VobSub beside the film (`.idx` and
   `.sub`) is still burned in.
-- **The file is above your bitrate limit** (`DIRECT_STREAM_MAX_KBPS`, 25 Mbps
+- **The file is above your bitrate limit** (`DIRECT_STREAM_MAX_KBPS`, 100 Mbps
   by default), or above the quality the viewer chose.
 - **The file is 10-bit H.264**, which Discord's player doesn't play.
 - **The file is above 1080p and this player can't decode it smoothly.** That

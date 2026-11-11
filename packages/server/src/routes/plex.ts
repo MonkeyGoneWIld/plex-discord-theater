@@ -145,11 +145,11 @@ function envInt(name: string, fallback: number): number {
 
 // Re-encode bitrate (kbps). The target is what a re-encode aims for on
 // average; the peak bounds spikes. Per-viewer bandwidth scales linearly with
-// this, so it's the single biggest bandwidth lever. 20000/33000 by default.
+// this, so it's the single biggest bandwidth lever. 20000/200000 by default.
 const VIDEO_BITRATE_KBPS = envInt("VIDEO_BITRATE_KBPS", 20000);
 const VIDEO_PEAK_BITRATE_KBPS = envInt(
   "VIDEO_PEAK_BITRATE_KBPS",
-  Math.max(33000, VIDEO_BITRATE_KBPS),
+  Math.max(200000, VIDEO_BITRATE_KBPS),
 );
 
 /**
@@ -182,7 +182,7 @@ const DIRECT_STREAM = process.env.DIRECT_STREAM !== "0";
 /**
  * The highest *average* bitrate a file may have and still be copied, in kbps.
  * Above it the file is re-encoded at VIDEO_BITRATE_KBPS instead. Unset, it is
- * 25000, or VIDEO_BITRATE_KBPS where that is higher: a file is never
+ * 100000, or VIDEO_BITRATE_KBPS where that is higher: a file is never
  * re-encoded at more than it averages.
  *
  * A copy is the file's own bitrate, and every viewer pulls all of it from this
@@ -195,9 +195,11 @@ const DIRECT_STREAM = process.env.DIRECT_STREAM !== "0";
  * few seconds at a time, and judging it on those would rule out nearly every
  * Blu-ray. See COPY_ASK_KBPS for how Plex is kept from judging it on them.
  */
-const DIRECT_STREAM_MAX_KBPS = envInt("DIRECT_STREAM_MAX_KBPS", Math.max(25000, VIDEO_BITRATE_KBPS));
+const DIRECT_STREAM_MAX_KBPS = envInt("DIRECT_STREAM_MAX_KBPS", Math.max(100000, VIDEO_BITRATE_KBPS));
 /** The average-bitrate limit on copying in force — see DIRECT_STREAM_MAX_KBPS. */
 export const COPY_LIMIT_KBPS = DIRECT_STREAM_MAX_KBPS;
+/** A re-encode's peak in force — see VIDEO_PEAK_BITRATE_KBPS. */
+export const TRANSCODE_PEAK_KBPS = VIDEO_PEAK_BITRATE_KBPS;
 /**
  * What a copy is asked of Plex at, once this server has decided by the file's
  * average that it may be copied.

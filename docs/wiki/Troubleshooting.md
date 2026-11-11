@@ -383,8 +383,8 @@ After 10 wrong attempts from one address, sign-in is refused for 15 minutes.
 - `ADMIN_PASSWORD` must be set. Without it the dashboard is off, and the log
   says `dashboard off`.
 - Its port must be published in the compose file. The dashboard listens on
-  3050 inside the container: `"192.168.1.10:3050:3050"` publishes it on that
-  LAN address.
+  3050 inside the container: `"3050:3050"` publishes it on the same port of
+  the server.
 - Open it with `http://`, not `https://`, at the port on the left of the
   mapping.
 

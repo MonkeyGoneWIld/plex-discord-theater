@@ -30,7 +30,7 @@ The server doesn't start without these.
 |---|---|
 | `DISCORD_CLIENT_ID` | The Application ID from the Discord Developer Portal. Not secret: it is sent to every viewer's browser. |
 | `DISCORD_CLIENT_SECRET` | The Client Secret from **OAuth2**. Secret. |
-| `PLEX_URL` | Plex's address as the container reaches it, for example `http://192.168.1.50:32400`. Never `localhost`. See [Plex Setup](Plex-Setup#choose-plex_url). |
+| `PLEX_URL` | Plex's address as the container reaches it, for example `http://host.docker.internal:32400` for Plex on the same machine. Never `localhost`. See [Plex Setup](Plex-Setup#choose-plex_url). |
 | `PLEX_TOKEN` | The Plex server owner's token. See [Plex Setup](Plex-Setup#get-plex_token). |
 | `REDIRECT_URI` | Your public HTTPS address, for example `https://watch.example.com`, without a trailing slash. It must match the URL mapping in the Discord Developer Portal. |
 | `ALLOWED_ORIGINS` | The addresses allowed to call the server, normally the same as `REDIRECT_URI`. Separate several with commas. |
@@ -63,9 +63,9 @@ How streams are made and how much each viewer downloads. See
 | Setting | Default | Description |
 |---|---|---|
 | `VIDEO_BITRATE_KBPS` | `20000` | Average bitrate of a transcode, in kbps. Each viewer of a transcoded stream downloads about this much. |
-| `VIDEO_PEAK_BITRATE_KBPS` | `33000`, or `VIDEO_BITRATE_KBPS` if higher | Peak bitrate of a transcode. A transcode's peak is never below its average. |
+| `VIDEO_PEAK_BITRATE_KBPS` | `200000`, or `VIDEO_BITRATE_KBPS` if higher | Peak bitrate of a transcode. A transcode's peak is never below its average. |
 | `DIRECT_STREAM` | On | Sends the original video unchanged when the device can play it. `0` transcodes every title. |
-| `DIRECT_STREAM_MAX_KBPS` | `25000`, or `VIDEO_BITRATE_KBPS` if higher | The highest average bitrate a file may have and still be sent unchanged. Larger files are transcoded. |
+| `DIRECT_STREAM_MAX_KBPS` | `100000`, or `VIDEO_BITRATE_KBPS` if higher | The highest average bitrate a file may have and still be sent unchanged. Larger files are transcoded. |
 | `HEVC_TRANSCODE` | On | Transcodes to HEVC for players that decode it. With the Plex engine this needs Plex Pass and hardware HEVC encoding. `0` keeps every transcode H.264. |
 | `AV1_TRANSCODE` | On | FFmpeg engine only: transcodes to AV1 for players that decode it in hardware, when the GPU encodes AV1. `0` turns it off. |
 
@@ -83,7 +83,7 @@ Together, the defaults can use 8 GB of memory while films play. On a server
 with less memory, lower both values.
 
 Video sent unchanged is kept until its stream ends, so its disk use grows to
-the size of the part watched: up to about 11 GB per hour at the 25 Mbps limit. Seeking
+the size of the part watched: about 11 GB per hour for a 25 Mbps film, and 36 GB for an 80 Mbps one. Seeking
 back reads from this folder, so an SSD helps. To use one, mount it and point
 `STREAM_CACHE_DIR` at it:
 

@@ -29,7 +29,7 @@ setting and a restart.
 |---|---|
 | Your library, mounted read-only | At the path Plex uses, or mapped with [`MEDIA_PATH_MAP`](#2-map-the-library-paths). Without the mount, FFmpeg reads each file from Plex over the network, which works but makes seeks slower. |
 | A GPU, for transcodes | `/dev/dri` for Intel Quick Sync or VAAPI, or the NVIDIA Container Toolkit for NVENC. Without a GPU, transcodes are H.264 on the CPU. Video sent unchanged needs no GPU. |
-| Disk space for streams | Each stream's film is written to `STREAM_CACHE_DIR` and kept until the stream ends. At the default limits, allow about 11 GB per hour of film. `FFMPEG_LOOKAHEAD` limits how far ahead each stream is made. |
+| Disk space for streams | Each stream's film is written to `STREAM_CACHE_DIR` and kept until the stream ends. Allow the size of what is being played: about 11 GB per hour for a 25 Mbps film, 36 GB for an 80 Mbps one. `FFMPEG_LOOKAHEAD` limits how far ahead each stream is made. |
 | Plex, set up as usual | For the library, and for the streams the engine leaves to Plex. Keep [Plex's transcoder](Plex-Setup#transcoder) working. |
 
 The image includes Jellyfin's build of FFmpeg, Intel's media and OpenCL

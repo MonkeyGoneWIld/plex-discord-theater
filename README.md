@@ -164,7 +164,7 @@ Follow Plex's
 
 ### 3. Deploy with Docker Compose
 
-Fill in the six required values. Everything else has a sensible default.
+Fill in the six values under **Required**. Everything else works as it is. `PLEX_URL` as written reaches a Plex server on the same machine; if yours runs elsewhere, use its local network address.
 
 ```yaml
 services:
@@ -174,38 +174,68 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
-      # The dashboard, on your LAN only (set ADMIN_PASSWORD below).
-      # - "192.168.1.10:3050:3050"
+      # - "3050:3050" # The dashboard (set ADMIN_PASSWORD below). Keep it on your local network.
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Lets PLEX_URL below reach Plex on this machine.
     volumes:
       - app-data:/data
+      # - /path/to/ssd/theater-stream-cache:/cache/stream # Optional: keep the video being played on an SSD (set STREAM_CACHE_DIR to "/cache/stream").
+      # - /mnt/media:/data/media:ro # FFmpeg engine: your library, read-only, at the path Plex has it.
+    # devices: # FFmpeg engine: the GPU, for Intel Quick Sync or VAAPI. For NVIDIA, see the wiki.
+    #   - /dev/dri:/dev/dri
     environment:
-      # ── Required ──────────────────────────────────────────────
-      # From the Discord Developer Portal.
-      DISCORD_CLIENT_ID: ""
-      DISCORD_CLIENT_SECRET: ""
-      # Your Plex server as the container reaches it, and its token.
-      PLEX_URL: "http://192.168.1.50:32400"
-      PLEX_TOKEN: ""
-      # Your public HTTPS address, with no trailing slash.
-      REDIRECT_URI: "https://watch.example.com"
-      ALLOWED_ORIGINS: "https://watch.example.com"
+      # ── Required ─────────────────────────────────────────────────────────
+      DISCORD_CLIENT_ID: "" # From the Discord Developer Portal: Application ID.
+      DISCORD_CLIENT_SECRET: "" # From the Discord Developer Portal: Client Secret.
+      PLEX_URL: "http://host.docker.internal:32400" # Plex on this machine. If Plex runs elsewhere, use its local network address.
+      PLEX_TOKEN: "" # Your Plex server's X-Plex-Token.
+      REDIRECT_URI: "https://watch.example.com" # Your public HTTPS address, with no trailing slash.
+      ALLOWED_ORIGINS: "https://watch.example.com" # The same address.
 
-      # ── Recommended: complete title and cast pages ────────────
-      # Your plex.tv account token (not the server token above).
-      # PLEX_ACCOUNT_TOKEN: ""
-      # Free key from https://www.themoviedb.org/settings/api
-      # TMDB_API_KEY: ""
+      # ── Streaming: the defaults, change them only if you want to ─────────
+      DIRECT_STREAM: "1" # Send the original video unchanged when a device can play it. "0" transcodes everything.
+      DIRECT_STREAM_MAX_KBPS: "100000" # Highest average bitrate (kbps) a file may have and still be sent unchanged.
+      VIDEO_BITRATE_KBPS: "20000" # Average bitrate of a transcode (kbps).
+      VIDEO_PEAK_BITRATE_KBPS: "200000" # Peak bitrate of a transcode (kbps).
+      HEVC_TRANSCODE: "1" # HEVC transcodes for devices that play HEVC. "0" keeps them H.264.
+      DIRECT_STREAM_MEMORY_MB: "6144" # Memory for video sent unchanged, all streams together.
+      TRANSCODE_CACHE_MB: "2048" # Memory for transcoded video, all streams together.
+      STREAM_CACHE_DIR: "/data/stream-cache" # Where the video being played is kept on disk. Emptied at every start.
+      PLAYBACK_ENGINE: "plex" # Who makes the streams: "plex", or "ffmpeg" (see the FFmpeg engine below).
 
-      # ── Optional ──────────────────────────────────────────────
-      # Limit the Activity to these Discord servers (IDs, comma-separated).
-      # ALLOWED_GUILD_IDS: ""
-      # The Request button, through Overseerr or Jellyseerr.
-      # SEERR_URL: "https://requests.example.com"
-      # The dashboard on port 3050. Use 12 characters or more.
-      # ADMIN_PASSWORD: ""
+      # ── Recommended: complete title, cast and Discover pages ─────────────
+      # PLEX_ACCOUNT_TOKEN: "" # Your plex.tv account token (not the server token): pages for titles you don't own, and Seerr sign-in.
+      # TMDB_API_KEY: "" # Collections, More Like This and cast pages. Free at themoviedb.org/settings/api.
+      # TVDB_API_KEY: "" # Missing-episode lists numbered as Sonarr numbers them. Free at thetvdb.com/api-information.
+      # TVDB_PIN: "" # Only for a TVDB subscriber key.
 
-      # Leave this as it is: it matches the volume above.
-      THUMB_CACHE_DIR: "/data"
+      # ── Optional ─────────────────────────────────────────────────────────
+      # SEERR_URL: "https://requests.example.com" # The Request button, through Overseerr or Jellyseerr. Needs PLEX_ACCOUNT_TOKEN.
+      # ALLOWED_GUILD_IDS: "" # Only these Discord servers may use it: server IDs, comma-separated.
+      # HOST_REQUESTS: "off" # Stops viewers asking an away host for the host role.
+      # PLEX_LINK_SECRET: "" # A stable key for linked Plex accounts. Make one with: openssl rand -hex 32
+      # QBT_MANAGER_API_KEY: "" # plex-qbt-manager's THEATER_API_KEY, for its upload limits.
+      # ADMIN_PASSWORD: "" # Turns on the dashboard on port 3050. Use 12 characters or more.
+      # ADMIN_SECRET: "" # Password for the maintenance command that stops every stream on Plex.
+
+      # ── Optional: the FFmpeg engine ──────────────────────────────────────
+      # Set PLAYBACK_ENGINE above to "ffmpeg", and uncomment the library mount and devices at the top.
+      # MEDIA_PATH_MAP: "/media=>/data/media" # Only if Plex sees the library at other paths: Plex's path=>the path here.
+      # FFMPEG_HWACCEL: "auto" # What transcodes run on: auto, qsv, vaapi, nvenc, or none for the CPU.
+      # FFMPEG_HWACCEL_DEVICE: "/dev/dri/renderD128" # The GPU's render node.
+      # FFMPEG_MAX_ENCODES: "6" # Transcodes at once. Default: 6 on a GPU, 2 on the CPU.
+      # FFMPEG_PRESET: "" # Speed against quality: ultrafast to veryslow. Default: each encoder's own.
+      # FFMPEG_LOOKAHEAD: "" # Seconds each stream is made ahead. Default: the whole film.
+      # FFMPEG_AUDIO_CHANNELS: "6" # "2" converts surround a device can't play to stereo.
+      # FFMPEG_PGS: "on" # Blu-ray and DVD subtitles drawn by the player. "off" burns them in.
+      # FFMPEG_PREVIEWS: "on" # Seek-bar previews for files Plex has none for.
+      # FFMPEG_HDR_REENCODE: "keep" # "tonemap" maps HDR to SDR in every transcode.
+      # FFMPEG_TONEMAP: "mobius" # The curve used when HDR is mapped to SDR.
+      # FFMPEG_HDR_ON_SDR: "browser" # HDR on an SDR screen: "browser" or "server".
+      # FFMPEG_HDR_ON_SDR_NITS: "200" # The peak HDR is labelled with for an SDR screen.
+      # FFMPEG_REPORT_TO_PLEX: "1" # Shows the engine's streams in Plex's dashboard and Tautulli.
+
+      THUMB_CACHE_DIR: "/data" # Leave as it is: it matches the volume above.
 
 volumes:
   app-data:
@@ -215,7 +245,7 @@ volumes:
 docker compose up -d
 ```
 
-Every setting, including bitrates, caches and the FFmpeg engine, is in the
+Every setting is explained in the
 [Configuration Reference](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Configuration-Reference).
 
 ### 4. Launch it in Discord

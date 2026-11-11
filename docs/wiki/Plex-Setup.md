@@ -74,9 +74,9 @@ different from the address you use in your browser.
 
 | Your setup | PLEX_URL |
 |---|---|
-| Plex on another machine | Its LAN address, for example `http://192.168.1.50:32400` |
+| Plex on another machine | That machine's local network address, with port 32400 |
 | Plex in Docker on the same host, on a shared Docker network | The Plex container's name, for example `http://plex:32400` |
-| Plex on the same host, not in Docker | The host's LAN address, or `http://host.docker.internal:32400` |
+| Plex on the same machine, in Docker or not | `http://host.docker.internal:32400`, with the `extra_hosts` line from the [compose file](Installation#1-create-the-compose-file) |
 
 > [!IMPORTANT]
 > Don't use `http://localhost:32400`. Inside the container, `localhost` is the

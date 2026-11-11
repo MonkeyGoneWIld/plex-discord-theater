@@ -27,35 +27,34 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Lets PLEX_URL below reach Plex on this machine.
     volumes:
       - app-data:/data
     environment:
-      # Required
-      DISCORD_CLIENT_ID: ""
-      DISCORD_CLIENT_SECRET: ""
-      PLEX_URL: "http://192.168.1.50:32400"
-      PLEX_TOKEN: ""
-      REDIRECT_URI: "https://watch.example.com"
-      ALLOWED_ORIGINS: "https://watch.example.com"
+      DISCORD_CLIENT_ID: "" # From the Discord Developer Portal: Application ID.
+      DISCORD_CLIENT_SECRET: "" # From the Discord Developer Portal: Client Secret.
+      PLEX_URL: "http://host.docker.internal:32400" # Plex on this machine. If Plex runs elsewhere, use its local network address.
+      PLEX_TOKEN: "" # Your Plex server's X-Plex-Token.
+      REDIRECT_URI: "https://watch.example.com" # Your public HTTPS address, with no trailing slash.
+      ALLOWED_ORIGINS: "https://watch.example.com" # The same address.
 
-      # Recommended
-      # PLEX_ACCOUNT_TOKEN: ""
-      # TMDB_API_KEY: ""
+      # PLEX_ACCOUNT_TOKEN: "" # Recommended: pages for titles you don't own, and Seerr sign-in.
+      # TMDB_API_KEY: "" # Recommended: collections, More Like This and cast pages.
 
-      # Streaming defaults. Change them only if you want to.
-      VIDEO_BITRATE_KBPS: "20000"
-      VIDEO_PEAK_BITRATE_KBPS: "33000"
-      DIRECT_STREAM_MAX_KBPS: "25000"
+      DIRECT_STREAM_MAX_KBPS: "100000" # Highest average bitrate (kbps) a file may have and still be sent unchanged.
+      VIDEO_BITRATE_KBPS: "20000" # Average bitrate of a transcode (kbps).
+      VIDEO_PEAK_BITRATE_KBPS: "200000" # Peak bitrate of a transcode (kbps).
 
-      # Keeps the server's data on the volume above. Leave as it is.
-      THUMB_CACHE_DIR: "/data"
+      THUMB_CACHE_DIR: "/data" # Leave as it is: it matches the volume above.
 
 volumes:
   app-data:
 ```
 
-Every other setting is optional. They are all listed in the
-[Configuration Reference](Configuration-Reference).
+The [README](https://github.com/MonkeyGoneWIld/plex-discord-theater#3-deploy-with-docker-compose)
+has the same file with every optional setting, the FFmpeg engine's included.
+Each one is explained in the [Configuration Reference](Configuration-Reference).
 
 ### 2. Fill in the required values
 
@@ -63,7 +62,7 @@ Every other setting is optional. They are all listed in the
 |---|---|
 | `DISCORD_CLIENT_ID` | The Application ID from the Developer Portal |
 | `DISCORD_CLIENT_SECRET` | The Client Secret from the Developer Portal |
-| `PLEX_URL` | Plex's address as the container reaches it. Never `localhost`, which is the container itself. |
+| `PLEX_URL` | Plex's address as the container reaches it. `http://host.docker.internal:32400` reaches Plex on the same machine. If Plex runs elsewhere, use its local network address. Never `localhost`, which is the container itself. See [Plex Setup](Plex-Setup#choose-plex_url). |
 | `PLEX_TOKEN` | The server owner's Plex token |
 | `REDIRECT_URI` | Your public address, with `https://` and no trailing slash |
 | `ALLOWED_ORIGINS` | The same address. For more than one, separate them with commas. |
@@ -127,7 +126,7 @@ docker compose logs plex-discord-theater | grep Config
 ```
 
 ```text
-[Config] ✓ TMDB   ✓ TVDB   ✓ Requests   ✓ Discover   ✓ HEVC   ✓ Direct Stream for files averaging up to 25000 kbps   · Guild allowlist (open to any Discord server)
+[Config] ✓ TMDB   ✓ TVDB   ✓ Requests   ✓ Discover   ✓ HEVC   ✓ Direct Stream for files averaging up to 100000 kbps   · Guild allowlist (open to any Discord server)
 [Config] films being played: copied ones kept until the stream ends, 6144 MB in memory (DIRECT_STREAM_MEMORY_MB) and the rest on disk at /data/stream-cache (STREAM_CACHE_DIR); re-encoded ones 2048 MB in memory (TRANSCODE_CACHE_MB), the rest on Plex's disk
 [Config] playback engine: Plex
 ```

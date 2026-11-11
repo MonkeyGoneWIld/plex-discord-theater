@@ -1389,3 +1389,22 @@ export function resetEmbeddedSubtitles(): void {
   prefetchQueue.length = 0;
   db.exec("DELETE FROM embedded_subtitles");
 }
+
+/** What is kept, for the admin page: how many, of how many titles, the newest. */
+export function embeddedSubtitleSummary(limit = 200): {
+  count: number; titles: number; bytes: number;
+  items: Array<{ streamId: string; ratingKey: string; format: string; whole: boolean | null; bytes: number; cachedAt: number }>;
+} {
+  const totals = db.prepare(`SELECT COUNT(*) AS n, COUNT(DISTINCT rating_key) AS titles,
+      COALESCE(SUM(length(cues_json) + COALESCE(length(raw), 0)), 0) AS bytes FROM embedded_subtitles`)
+    .get() as { n: number; titles: number; bytes: number };
+  const items = (db.prepare(`SELECT stream_id, rating_key, format, whole,
+      length(cues_json) + COALESCE(length(raw), 0) AS bytes, cached_at
+    FROM embedded_subtitles ORDER BY cached_at DESC LIMIT ?`).all(limit) as Array<{
+      stream_id: string; rating_key: string; format: string; whole: number | null; bytes: number; cached_at: number }>)
+    .map((r) => ({
+      streamId: r.stream_id, ratingKey: r.rating_key, format: r.format,
+      whole: r.whole === null ? null : r.whole === 1, bytes: r.bytes, cachedAt: r.cached_at,
+    }));
+  return { count: totals.n, titles: totals.titles, bytes: totals.bytes, items };
+}

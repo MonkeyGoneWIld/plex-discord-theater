@@ -98,3 +98,197 @@ export interface LogResult { file: string | null; lines: LogLine[]; scanned: num
 
 export interface Setting { name: string; set: boolean; value: string | null; secret: boolean }
 export interface SettingsView { settings: Setting[]; system: Record<string, string | number | null> }
+
+// ─── The history (packages/server/src/admin/recorder.ts) ─────────
+
+export interface Play {
+  id: number;
+  roomId: string;
+  ratingKey: string;
+  title: string | null;
+  guildId: string | null;
+  channelId: string | null;
+  hostUserId: string | null;
+  hostName: string | null;
+  startedAt: number;
+  endedAt: number | null;
+  endReason: string | null;
+  endBy: string | null;
+  startPosS: number | null;
+  lastPosS: number | null;
+  playedS: number;
+  peakViewers: number;
+}
+
+export interface PlaySummary extends Play {
+  viewers: number;
+  names: string[];
+  streams: number;
+  reencoded: number;
+  bytes: number;
+  stalls: number;
+}
+
+export interface PlayViewer extends ViewerData {
+  userId: string;
+  username: string | null;
+  role: string | null;
+  firstSeen: number;
+  lastSeen: number;
+}
+
+export interface PlayStream {
+  id: number;
+  hlsSessionId: string;
+  variantKey: string | null;
+  engine: string | null;
+  decision: string | null;
+  reason: string | null;
+  summary: string | null;
+  audioStreamId: number | null;
+  subtitleStreamId: number | null;
+  quality: number | null;
+  ownerUserId: string | null;
+  offsetS: number | null;
+  kbps: number | null;
+  notes: Notes;
+  startedAt: number;
+  endedAt: number | null;
+  peakViewers: number;
+}
+
+export interface PlayEvent {
+  id: number;
+  at: number;
+  kind: string;
+  userId: string | null;
+  username: string | null;
+  posS: number | null;
+  detail: Record<string, unknown> | null;
+}
+
+export interface PlayDetail {
+  play: Play;
+  viewers: PlayViewer[];
+  streams: PlayStream[];
+  events: PlayEvent[];
+}
+
+export interface PersonSummary extends ViewerData {
+  userId: string;
+  username: string | null;
+  firstSeen: number;
+  lastSeen: number;
+  plays: number;
+  hosted: number;
+  launches: number;
+  requests: number;
+  lastTitle: string | null;
+}
+
+export interface PersonPlay extends Play, ViewerData {
+  role: string | null;
+  firstSeen: number;
+  lastSeen: number;
+}
+
+export interface TitleRequest {
+  id: number;
+  at: number;
+  userId: string | null;
+  username: string | null;
+  mediaType: string;
+  tmdbId: number;
+  seasons: number[] | "all" | null;
+  title: string | null;
+  outcome: string;
+  status: number | null;
+  error: string | null;
+}
+
+export interface PersonPlace {
+  guildId: string | null;
+  channelId: string | null;
+  launches: number;
+  joins: number;
+  first: number;
+  last: number;
+}
+
+export interface PersonDetail {
+  person: PersonSummary;
+  plays: PersonPlay[];
+  requests: TitleRequest[];
+  places: PersonPlace[];
+}
+
+export interface PlaceChannel {
+  guildId: string | null;
+  channelId: string | null;
+  launches: number;
+  joins: number;
+  people: number;
+  names: Array<{ userId: string; username: string | null }>;
+  plays: number;
+  playedS: number;
+  first: number | null;
+  last: number | null;
+}
+
+export interface PlaceGuild extends Omit<PlaceChannel, "channelId" | "names"> {
+  channels: PlaceChannel[];
+}
+
+export interface UsageRow {
+  id: number;
+  at: number;
+  kind: string;
+  roomId: string | null;
+  userId: string | null;
+  username: string | null;
+  guildId: string | null;
+  channelId: string | null;
+}
+
+export interface CacheItem {
+  name: string;
+  title: string | null;
+  ratingKey: string | null;
+  bytes: number | null;
+  at: number | null;
+  detail?: string;
+}
+
+export interface CacheView {
+  id: string;
+  name: string;
+  what: string;
+  where: string;
+  bytes: number;
+  limitBytes: number | null;
+  items: number;
+  kept: string;
+  list: CacheItem[];
+  listNote: string | null;
+}
+
+export interface CacheSums {
+  plays?: number;
+  httpBytes: number;
+  edgeBytes: number;
+  edgeHitBytes: number;
+  p2pBytes: number;
+  botBytes: number;
+  hitShare: number | null;
+}
+
+export interface CachesResult {
+  at: number;
+  caches: CacheView[];
+  discord: {
+    day: CacheSums;
+    week: CacheSums;
+    all: CacheSums;
+    titles: Array<CacheSums & { ratingKey: string; title: string | null }>;
+  } | null;
+}

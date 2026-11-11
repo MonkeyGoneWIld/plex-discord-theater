@@ -1,26 +1,7 @@
 import { useState } from "react";
-import type { Client, Overview, Room, Stream, ViewerData } from "./types";
-import { ago, bytes, clock, quality, rate, short, utc } from "./format";
-
-/** What each note a stream's playlist carries is, in words (routes/plex.ts, streamNotes). */
-const NOTE_LABELS: Record<string, string> = {
-  engine: "Engine",
-  encoder: "Encoder",
-  fallback: "Why Plex makes it",
-  video: "Video",
-  reason: "Why the video is re-encoded",
-  kbps: "Video bitrate (kbps)",
-  quality: "Quality",
-  allowed: "Bitrate allowed (kbps)",
-  videoFrom: "Source video",
-  range: "Dynamic range",
-  perScreen: "Per screen",
-  audio: "Audio",
-  audioFrom: "Source audio",
-  audioTo: "Audio sent",
-  audioKbps: "Audio bitrate (kbps)",
-  audioReason: "Why the audio is converted",
-};
+import type { Client, Overview, Room, Stream } from "./types";
+import { ago, clock, quality, rate, short, utc } from "./format";
+import { BufferingCell, DataCell, NOTE_LABELS } from "./parts";
 
 /** What a player can decode (ffmpeg/plan.ts, PLAYER_CAPS), in words. */
 const CAP_LABELS: Record<string, string> = {
@@ -117,29 +98,6 @@ function status(c: Client): { text: string; tone: string } {
   if (c.loading) return { text: "Buffering", tone: "warn" };
   if (c.watching) return { text: "Watching", tone: "good" };
   return { text: "Browsing", tone: "muted" };
-}
-
-/** What a viewer got, and from where: the bot, Discord's cache, other viewers. */
-function DataCell({ d }: { d: ViewerData }) {
-  const total = d.httpBytes + d.p2pBytes;
-  return (
-    <>
-      <strong className="nowrap">{bytes(total)}</strong>
-      <div className="muted small nowrap">From the bot {bytes(d.botBytes)}</div>
-      <div className="muted small nowrap">Discord's cache {bytes(d.edgeHitBytes)}</div>
-      <div className="muted small nowrap">Other viewers {bytes(d.p2pBytes)}</div>
-    </>
-  );
-}
-
-function BufferingCell({ d }: { d: ViewerData }) {
-  if (d.stalls === 0 && d.errors === 0) return <>None</>;
-  return (
-    <>
-      {d.stalls > 0 && <div className="nowrap">{d.stalls} {d.stalls === 1 ? "time" : "times"}, {clock(d.stalledMs / 1000)}</div>}
-      {d.errors > 0 && <div className="muted small">{d.errors} player {d.errors === 1 ? "error" : "errors"}</div>}
-    </>
-  );
 }
 
 function People({ room }: { room: Room }) {

@@ -248,6 +248,55 @@ check("who asked for what, and what came of it; its name looked up after",
   rec.requests().map((r) => [r.username ?? r.userId, r.mediaType, r.tmdbId, r.seasons, r.outcome, r.status, r.title]),
   [["333", "tv", 1399, [1, 2], "already requested", 409, null], ["crispymage", "movie", 129, null, "requested", 2, "Spirited Away"]]);
 
+console.log("\n— people, places, Discord's cache —");
+const everyone = rec.people();
+// crispymage's request is the latest anybody was seen; Paprika and Perfect
+// Blue were played with no room behind them, so hosted, but watched by nobody.
+check("everybody seen, the latest first: what they watched, hosted, launched and asked for",
+  everyone.map((p) => [p.userId, p.username, p.plays, p.hosted, p.launches, p.requests]),
+  [["222", "crispymage", 1, 0, 0, 1], ["111", "artemidorus", 1, 3, 1, 0]]);
+check("  with what they had, all of it", [everyone[0].httpBytes, everyone[0].edgeHitBytes, everyone[0].botBytes, everyone[0].stalls, everyone[0].lastTitle],
+  [12e6, 4e6, 8e6, 1, "Ghost Stories"]);
+check("  found by a name or an ID; a page at a time; wildcards only characters",
+  [rec.people({ q: "crispy" }).map((p) => p.userId), rec.people({ q: "111" }).map((p) => p.userId),
+    rec.people({ limit: 1, offset: 1 }).map((p) => p.userId), rec.people({ q: "%" }).length],
+  [["222"], ["111"], ["111"], 0]);
+const crispy = rec.person("222")!;
+check("one person: each play they were in, as what, with their own data; what they asked for; where",
+  [crispy.plays.map((p) => [p.title, p.role, p.httpBytes, p.hostName]), crispy.requests.map((r) => r.title),
+    crispy.places.map((p) => [p.guildId, p.channelId, p.launches, p.joins])],
+  [[["Ghost Stories", "viewer", 12e6, "artemidorus"]], ["Spirited Away"], [["G1", "C1", 0, 1]]]);
+check("  and nobody by an ID never seen", rec.person("404"), null);
+const places = rec.places();
+check("each server, and each of its channels: launches, joins, who, plays",
+  places.map((g) => [g.guildId, g.launches, g.joins, g.people, g.plays,
+    g.channels.map((c) => [c.channelId, c.launches, c.joins, c.names.map((n) => n.username), c.plays])]),
+  [["G1", 1, 2, 2, 3, [["C1", 1, 2, ["crispymage", "artemidorus"], 3]]]]);
+const dc = rec.discordCache();
+check("what Discord's cache handed players, of all they fetched, and what the bot sent",
+  [dc.all.httpBytes, dc.all.edgeHitBytes, dc.all.botBytes, dc.all.p2pBytes, dc.all.hitShare, dc.all.plays],
+  [14e6, 4e6, 10e6, 3e6, 4 / 9, 1]);
+check("  by title, the most first", dc.titles.map((x) => [x.title, x.httpBytes, x.plays]).slice(0, 1), [["Ghost Stories", 14e6, 1]]);
+const later = rec.discordCache(t + 2 * 86_400_000);
+check("  over the last day and week, by when each play began", [later.day.httpBytes, later.day.hitShare, later.week.httpBytes],
+  [0, null, 14e6]);
+check("the titles and plays it knows, for the caches page",
+  [[...rec.titles(["58860", "nope"])], [...rec.sessions(["S1", "nope"])].map(([k, v]) => [k, v.title])],
+  [[["58860", "Ghost Stories"]], [["S1", "Ghost Stories"]]]);
+check("title requests found by title, name or TMDB ID",
+  [rec.requests({ q: "spirited" }).map((r) => r.tmdbId), rec.requests({ q: "1399" }).map((r) => r.tmdbId), rec.requests({ q: "crispy" }).length],
+  [[129], [1399], 1]);
+rec.request({ at: t, userId: "444", mediaType: "movie", tmdbId: 4977, seasons: null, outcome: "requested", status: 2, error: null });
+rec.clientLog({ at: t, userId: "444", clientId: "pageN", entries: [] });
+(R1.clients as Any[]).push(client("444", "nightowl"));
+rooms = [R1];
+step(2_000);
+check("  one from somebody not yet seen is named once they are",
+  [rec.requests()[0].username, rec.requests({ q: "nightowl" }).map((r) => r.tmdbId)], ["nightowl", [4977]]);
+(R1.clients as Any[]).pop();
+rooms = [];
+step(2_000);
+
 console.log("\n— the server stopping, and one that died —");
 rooms = [{ ...structuredClone(R1), id: "R2", ratingKey: "80001", title: "Tokyo Godfathers" }];
 step(2_000);

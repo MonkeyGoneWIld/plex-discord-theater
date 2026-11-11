@@ -252,6 +252,11 @@ function dataDir(): string {
   return path.join(data, "subtitles-pgs");
 }
 
+/** FFMPEG_PGS_MAX_GB, in bytes. */
+export function pictureSubtitlesMaxBytes(): number {
+  return maxBytes();
+}
+
 function maxBytes(): number {
   const gb = Number(process.env.FFMPEG_PGS_MAX_GB);
   return (Number.isFinite(gb) && gb > 0 ? gb : DEFAULT_MAX_GB) * 1024 ** 3;

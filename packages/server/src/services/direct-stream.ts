@@ -580,6 +580,24 @@ export function startDirectStream(
   });
 }
 
+/** Each film being copied now, and what of it is kept where, for the admin page. */
+export function directStreamSessions(): Array<{
+  sessionId: string; ratingKey: string; segments: number; memoryBytes: number; diskBytes: number;
+  positionS: number; startedAt: number; ended: boolean; failed: boolean;
+}> {
+  return [...sessions.values()].map((s) => ({
+    sessionId: s.sessionId,
+    ratingKey: s.ratingKey,
+    segments: s.segments.length,
+    memoryBytes: s.segments.reduce((sum, seg) => sum + (seg.data?.length ?? 0), 0),
+    diskBytes: s.segments.reduce((sum, seg) => sum + (seg.file ? seg.bytes : 0), 0),
+    positionS: s.positionS,
+    startedAt: s.startedAt,
+    ended: s.ended,
+    failed: s.failed,
+  }));
+}
+
 export function stopDirectStream(sessionId: string): void {
   const s = sessions.get(sessionId);
   if (!s) return;

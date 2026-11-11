@@ -116,6 +116,7 @@ export interface PlaySummary {
   guildId: string | null;
   channelId: string | null;
   hostUserId: string | null;
+  hostName: string | null;
   startedAt: number;
   endedAt: number | null;
   endReason: string | null;
@@ -248,6 +249,12 @@ function parse(v: unknown): unknown {
   } catch {
     return null;
   }
+}
+
+/** A search: as typed, and as a LIKE pattern whose wildcards are only characters. */
+function search(q: unknown): { q: string | null; like: string | null } {
+  const text = typeof q === "string" && q.trim() ? q.trim().slice(0, 100) : null;
+  return { q: text, like: text ? `%${text.replace(/[\\%_]/g, (m) => `\\${m}`)}%` : null };
 }
 
 /** A list's page: newest first, before an id. */
@@ -781,10 +788,9 @@ export class Recorder {
 
   history(opts: { limit?: unknown; before?: unknown; q?: unknown } = {}): PlaySummary[] {
     const before = Number.isInteger(Number(opts.before)) && Number(opts.before) > 0 ? Number(opts.before) : null;
-    const q = typeof opts.q === "string" && opts.q.trim() ? opts.q.trim().slice(0, 100) : null;
-    const like = q ? `%${q.replace(/[\\%_]/g, (m) => `\\${m}`)}%` : null;
+    const { q, like } = search(opts.q);
     const rows = this.st(`
-      SELECT p.*,
+      SELECT p.*, ${HOST_NAME},
         (SELECT COUNT(*) FROM play_viewers v WHERE v.play_id = p.id) AS viewers,
         (SELECT json_group_array(COALESCE(v.username, v.user_id)) FROM play_viewers v WHERE v.play_id = p.id) AS names,
         (SELECT COUNT(*) FROM play_streams s WHERE s.play_id = p.id) AS streams,
@@ -803,7 +809,7 @@ export class Recorder {
 
   /** One play, whole: its viewers, streams and every line of its history. */
   play(id: number) {
-    const r = this.st("SELECT * FROM plays WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+    const r = this.st(`SELECT p.*, ${HOST_NAME} FROM plays p WHERE p.id = ?`).get(id) as Record<string, unknown> | undefined;
     if (!r) return null;
     const viewers = (this.st("SELECT * FROM play_viewers WHERE play_id = ? ORDER BY first_seen").all(id) as Array<Record<string, unknown>>)
       .map((v) => ({
@@ -846,10 +852,19 @@ export class Recorder {
       }));
   }
 
-  requests(opts: { limit?: unknown; before?: unknown } = {}) {
+  requests(opts: { limit?: unknown; before?: unknown; q?: unknown; userId?: string } = {}) {
     const before = Number(opts.before) > 0 ? Number(opts.before) : null;
-    return (this.st(`SELECT * FROM requests WHERE (@before IS NULL OR id < @before) ORDER BY id DESC LIMIT @limit`)
-      .all({ before, limit: page(opts.limit) }) as Array<Record<string, unknown>>)
+    const { q, like } = search(opts.q);
+    // A request from somebody not yet seen in a room has no name; the one
+    // they were seen by since stands in.
+    return (this.st(`SELECT r.*, COALESCE(r.username, pe.username) AS username
+        FROM requests r LEFT JOIN people pe ON pe.user_id = r.user_id
+        WHERE (@before IS NULL OR r.id < @before)
+        AND (@userId IS NULL OR r.user_id = @userId)
+        AND (@like IS NULL OR r.title LIKE @like ESCAPE '\\' OR COALESCE(r.username, pe.username) LIKE @like ESCAPE '\\'
+             OR r.user_id = @q OR CAST(r.tmdb_id AS TEXT) = @q)
+        ORDER BY r.id DESC LIMIT @limit`)
+      .all({ before, q, like, userId: opts.userId ?? null, limit: page(opts.limit) }) as Array<Record<string, unknown>>)
       .map((r) => ({
         id: Number(r.id), at: Number(r.at), userId: (r.user_id as string | null) ?? null,
         username: (r.username as string | null) ?? null, mediaType: String(r.media_type), tmdbId: Number(r.tmdb_id),
@@ -857,6 +872,240 @@ export class Recorder {
         outcome: String(r.outcome), status: (r.status as number | null) ?? null, error: (r.error as string | null) ?? null,
       }));
   }
+
+  /** Everybody seen, most recently first, with what they have watched and had. */
+  people(opts: { q?: unknown; limit?: unknown; offset?: unknown } = {}): PersonSummary[] {
+    const { q, like } = search(opts.q);
+    const offset = Math.max(0, Math.floor(Number(opts.offset)) || 0);
+    return (this.st(`${PEOPLE_SELECT}
+      WHERE (@like IS NULL OR pe.username LIKE @like ESCAPE '\\' OR pe.user_id = @q)
+      ORDER BY pe.last_seen DESC LIMIT @limit OFFSET @offset`)
+      .all({ q, like, limit: page(opts.limit), offset }) as Array<Record<string, unknown>>).map(personOf);
+  }
+
+  /** One person: their totals, every play they were in, their requests, where they used it. */
+  person(userId: string) {
+    const row = this.st(`${PEOPLE_SELECT} WHERE pe.user_id = @userId`).get({ userId }) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    const plays = (this.st(`SELECT p.*, ${HOST_NAME}, v.role AS v_role, v.first_seen AS v_first, v.last_seen AS v_last, v.watched_s AS v_watched,
+        v.http_bytes AS v_http, v.p2p_bytes AS v_p2p, v.edge_bytes AS v_edge, v.edge_hit_bytes AS v_hit,
+        v.stalls AS v_stalls, v.stalled_ms AS v_stalled, v.errors AS v_errors
+      FROM play_viewers v JOIN plays p ON p.id = v.play_id WHERE v.user_id = ? ORDER BY p.id DESC LIMIT 500`)
+      .all(userId) as Array<Record<string, unknown>>)
+      .map((r) => ({
+        ...playOf(r),
+        role: (r.v_role as string | null) ?? null,
+        firstSeen: Number(r.v_first),
+        lastSeen: Number(r.v_last),
+        ...viewerData({
+          watchedS: Number(r.v_watched), httpBytes: Number(r.v_http), p2pBytes: Number(r.v_p2p),
+          edgeBytes: Number(r.v_edge), edgeHitBytes: Number(r.v_hit), stalls: Number(r.v_stalls),
+          stalledMs: Number(r.v_stalled), errors: Number(r.v_errors), dirty: false,
+        }),
+      }));
+    const places = (this.st(`SELECT guild_id, channel_id, SUM(kind = 'launch') AS launches, SUM(kind = 'join') AS joins,
+        MIN(at) AS first, MAX(at) AS last
+      FROM usage WHERE user_id = ? GROUP BY guild_id, channel_id ORDER BY last DESC`).all(userId) as Array<Record<string, unknown>>)
+      .map((r) => ({
+        guildId: (r.guild_id as string | null) ?? null, channelId: (r.channel_id as string | null) ?? null,
+        launches: Number(r.launches), joins: Number(r.joins), first: Number(r.first), last: Number(r.last),
+      }));
+    return { person: personOf(row), plays, requests: this.requests({ userId, limit: 500 }), places };
+  }
+
+  /** Every Discord server the Activity was used in, and each of its channels. */
+  places(): PlaceGuild[] {
+    const usage = this.st(`SELECT guild_id, channel_id, SUM(kind = 'launch') AS launches, SUM(kind = 'join') AS joins,
+        COUNT(DISTINCT user_id) AS people, MIN(at) AS first, MAX(at) AS last
+      FROM usage GROUP BY guild_id, channel_id`).all() as Array<Record<string, unknown>>;
+    const plays = this.st(`SELECT guild_id, channel_id, COUNT(*) AS plays, COALESCE(SUM(played_s), 0) AS played_s,
+        MIN(started_at) AS first, MAX(updated_at) AS last
+      FROM plays GROUP BY guild_id, channel_id`).all() as Array<Record<string, unknown>>;
+    const guildPeople = new Map((this.st(`SELECT guild_id, COUNT(DISTINCT user_id) AS n FROM usage GROUP BY guild_id`)
+      .all() as Array<{ guild_id: string | null; n: number }>).map((r) => [r.guild_id ?? "", r.n] as const));
+    const who = this.st(`SELECT u.guild_id, u.channel_id, u.user_id, COALESCE(pe.username, MAX(u.username)) AS name, MAX(u.at) AS last
+      FROM usage u LEFT JOIN people pe ON pe.user_id = u.user_id
+      GROUP BY u.guild_id, u.channel_id, u.user_id ORDER BY last DESC`).all() as Array<Record<string, unknown>>;
+    const key = (g: unknown, c: unknown) => `${g ?? ""}|${c ?? ""}`;
+    const channels = new Map<string, PlaceChannel>();
+    const channelOf = (g: unknown, c: unknown): PlaceChannel => {
+      let ch = channels.get(key(g, c));
+      if (!ch) {
+        ch = { guildId: (g as string | null) ?? null, channelId: (c as string | null) ?? null, launches: 0, joins: 0,
+          people: 0, names: [], plays: 0, playedS: 0, first: null, last: null };
+        channels.set(key(g, c), ch);
+      }
+      return ch;
+    };
+    const span = (ch: PlaceChannel, first: unknown, last: unknown) => {
+      const f = Number(first), l = Number(last);
+      if (Number.isFinite(f)) ch.first = ch.first === null ? f : Math.min(ch.first, f);
+      if (Number.isFinite(l)) ch.last = ch.last === null ? l : Math.max(ch.last, l);
+    };
+    for (const r of usage) {
+      const ch = channelOf(r.guild_id, r.channel_id);
+      ch.launches = Number(r.launches);
+      ch.joins = Number(r.joins);
+      ch.people = Number(r.people);
+      span(ch, r.first, r.last);
+    }
+    for (const r of plays) {
+      const ch = channelOf(r.guild_id, r.channel_id);
+      ch.plays = Number(r.plays);
+      ch.playedS = Math.round(Number(r.played_s));
+      span(ch, r.first, r.last);
+    }
+    for (const r of who) {
+      const ch = channelOf(r.guild_id, r.channel_id);
+      if (ch.names.length < 30) ch.names.push({ userId: String(r.user_id), username: (r.name as string | null) ?? null });
+    }
+    const guilds = new Map<string, PlaceGuild>();
+    for (const ch of channels.values()) {
+      const g = ch.guildId ?? "";
+      let guild = guilds.get(g);
+      if (!guild) {
+        guild = { guildId: ch.guildId, launches: 0, joins: 0, people: guildPeople.get(g) ?? 0, plays: 0, playedS: 0,
+          first: null, last: null, channels: [] };
+        guilds.set(g, guild);
+      }
+      guild.launches += ch.launches;
+      guild.joins += ch.joins;
+      guild.plays += ch.plays;
+      guild.playedS += ch.playedS;
+      if (ch.first !== null) guild.first = guild.first === null ? ch.first : Math.min(guild.first, ch.first);
+      if (ch.last !== null) guild.last = guild.last === null ? ch.last : Math.max(guild.last, ch.last);
+      guild.channels.push(ch);
+    }
+    for (const g of guilds.values()) g.channels.sort((a, b) => (b.last ?? 0) - (a.last ?? 0));
+    return [...guilds.values()].sort((a, b) => (b.last ?? 0) - (a.last ?? 0));
+  }
+
+  /**
+   * What players were given over HTTP, how much of it Discord's cache answered
+   * and how much came from other viewers, by when the play started: the last
+   * day, week, and all of it; and the titles that took the most.
+   */
+  discordCache(now = this.now()) {
+    const sums = (since: number | null) => {
+      const r = this.st(`SELECT COALESCE(SUM(v.http_bytes), 0) AS http, COALESCE(SUM(v.edge_bytes), 0) AS edge,
+          COALESCE(SUM(v.edge_hit_bytes), 0) AS hit, COALESCE(SUM(v.p2p_bytes), 0) AS p2p, COUNT(DISTINCT p.id) AS plays
+        FROM play_viewers v JOIN plays p ON p.id = v.play_id WHERE (@since IS NULL OR p.started_at >= @since)`)
+        .get({ since }) as Record<string, number>;
+      return cacheSums(r);
+    };
+    const titles = (this.st(`SELECT p.rating_key, MAX(p.title) AS title, COUNT(DISTINCT p.id) AS plays,
+        COALESCE(SUM(v.http_bytes), 0) AS http, COALESCE(SUM(v.edge_bytes), 0) AS edge,
+        COALESCE(SUM(v.edge_hit_bytes), 0) AS hit, COALESCE(SUM(v.p2p_bytes), 0) AS p2p
+      FROM play_viewers v JOIN plays p ON p.id = v.play_id
+      GROUP BY p.rating_key ORDER BY SUM(v.http_bytes + v.p2p_bytes) DESC LIMIT 50`).all() as Array<Record<string, unknown>>)
+      .map((r) => ({ ratingKey: String(r.rating_key), title: (r.title as string | null) ?? null, ...cacheSums(r as Record<string, number>) }));
+    return { day: sums(now - 86_400_000), week: sums(now - 7 * 86_400_000), all: sums(null), titles };
+  }
+
+  /** Titles by their keys, as the history has them. */
+  titles(ratingKeys: string[]): Map<string, string> {
+    const out = new Map<string, string>();
+    const stmt = this.st("SELECT title FROM plays WHERE rating_key = ? AND title IS NOT NULL ORDER BY id DESC LIMIT 1");
+    for (const k of new Set(ratingKeys)) {
+      const row = stmt.get(k) as { title: string } | undefined;
+      if (row) out.set(k, row.title);
+    }
+    return out;
+  }
+
+  /** The play each stream session was part of, by its session id. */
+  sessions(sessionIds: string[]): Map<string, { playId: number; title: string | null; ratingKey: string }> {
+    const out = new Map<string, { playId: number; title: string | null; ratingKey: string }>();
+    const stmt = this.st(`SELECT p.id, p.title, p.rating_key FROM play_streams s JOIN plays p ON p.id = s.play_id
+      WHERE s.hls_session_id = ? ORDER BY s.id DESC LIMIT 1`);
+    for (const id of new Set(sessionIds)) {
+      const row = stmt.get(id) as { id: number; title: string | null; rating_key: string } | undefined;
+      if (row) out.set(id, { playId: row.id, title: row.title, ratingKey: row.rating_key });
+    }
+    return out;
+  }
+}
+
+/** The host's name, as last seen, beside a play (as p). */
+const HOST_NAME = "(SELECT pe.username FROM people pe WHERE pe.user_id = p.host_user_id) AS host_name";
+
+const PEOPLE_SELECT = `
+  SELECT pe.user_id, pe.username, pe.first_seen, pe.last_seen,
+    COALESCE(v.plays, 0) AS plays, COALESCE(v.watched_s, 0) AS watched_s, COALESCE(v.http, 0) AS http,
+    COALESCE(v.p2p, 0) AS p2p, COALESCE(v.edge, 0) AS edge, COALESCE(v.hit, 0) AS hit,
+    COALESCE(v.stalls, 0) AS stalls, COALESCE(v.stalled_ms, 0) AS stalled_ms, COALESCE(v.errors, 0) AS errors,
+    (SELECT COUNT(*) FROM plays p WHERE p.host_user_id = pe.user_id) AS hosted,
+    (SELECT COUNT(*) FROM usage u WHERE u.user_id = pe.user_id AND u.kind = 'launch') AS launches,
+    (SELECT COUNT(*) FROM requests r WHERE r.user_id = pe.user_id) AS requests,
+    (SELECT p.title FROM play_viewers lv JOIN plays p ON p.id = lv.play_id WHERE lv.user_id = pe.user_id
+      ORDER BY lv.last_seen DESC LIMIT 1) AS last_title
+  FROM people pe
+  LEFT JOIN (SELECT user_id, COUNT(*) AS plays, SUM(watched_s) AS watched_s, SUM(http_bytes) AS http,
+      SUM(p2p_bytes) AS p2p, SUM(edge_bytes) AS edge, SUM(edge_hit_bytes) AS hit, SUM(stalls) AS stalls,
+      SUM(stalled_ms) AS stalled_ms, SUM(errors) AS errors
+    FROM play_viewers GROUP BY user_id) v ON v.user_id = pe.user_id`;
+
+export interface PersonSummary extends ViewerData {
+  userId: string;
+  username: string | null;
+  firstSeen: number;
+  lastSeen: number;
+  plays: number;
+  hosted: number;
+  launches: number;
+  requests: number;
+  lastTitle: string | null;
+}
+
+function personOf(r: Record<string, unknown>): PersonSummary {
+  return {
+    userId: String(r.user_id),
+    username: (r.username as string | null) ?? null,
+    firstSeen: Number(r.first_seen),
+    lastSeen: Number(r.last_seen),
+    plays: Number(r.plays),
+    hosted: Number(r.hosted),
+    launches: Number(r.launches),
+    requests: Number(r.requests),
+    lastTitle: (r.last_title as string | null) ?? null,
+    ...viewerData({
+      watchedS: Number(r.watched_s), httpBytes: Number(r.http), p2pBytes: Number(r.p2p), edgeBytes: Number(r.edge),
+      edgeHitBytes: Number(r.hit), stalls: Number(r.stalls), stalledMs: Number(r.stalled_ms), errors: Number(r.errors),
+      dirty: false,
+    }),
+  };
+}
+
+export interface PlaceChannel {
+  guildId: string | null;
+  channelId: string | null;
+  launches: number;
+  joins: number;
+  people: number;
+  /** The people who came, most recently first; 30 at most. */
+  names: Array<{ userId: string; username: string | null }>;
+  plays: number;
+  playedS: number;
+  first: number | null;
+  last: number | null;
+}
+
+export interface PlaceGuild extends Omit<PlaceChannel, "channelId" | "names"> {
+  channels: PlaceChannel[];
+}
+
+function cacheSums(r: Record<string, number>) {
+  const http = Number(r.http), edge = Number(r.edge), hit = Number(r.hit), p2p = Number(r.p2p);
+  return {
+    plays: r.plays === undefined ? undefined : Number(r.plays),
+    httpBytes: http,
+    edgeBytes: edge,
+    edgeHitBytes: hit,
+    p2pBytes: p2p,
+    botBytes: Math.max(0, http - hit),
+    /** Of what Discord's proxy answered with a cache status, the share its cache had. */
+    hitShare: edge > 0 ? hit / edge : null,
+  };
 }
 
 function viewerData(v: ViewerTotals): ViewerData {
@@ -884,6 +1133,7 @@ function playOf(r: Record<string, unknown>) {
     guildId: (r.guild_id as string | null) ?? null,
     channelId: (r.channel_id as string | null) ?? null,
     hostUserId: (r.host_user_id as string | null) ?? null,
+    hostName: (r.host_name as string | null) ?? null,
     startedAt: Number(r.started_at),
     endedAt: (r.ended_at as number | null) ?? null,
     endReason: (r.end_reason as string | null) ?? null,

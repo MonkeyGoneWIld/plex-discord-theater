@@ -7,6 +7,7 @@ import rateLimit from "express-rate-limit";
 import { AdminSessions, cookieToken, passwordMatches, requireAdmin, sessionCookie, SESSION_MS } from "./auth.js";
 import { logFiles, overview, readLog, settingsView } from "./data.js";
 import { Recorder } from "./recorder.js";
+import { cachesView } from "./caches.js";
 import { numberSetting } from "../services/env-settings.js";
 import { logEvent } from "../services/logger.js";
 import { setAdminHooks } from "../services/admin-hooks.js";
@@ -194,7 +195,31 @@ export function createAdminApp(opts: AdminOptions): express.Express {
     res.json({ usage: recorder!.usage({ limit: req.query.limit, before: req.query.before }) });
   });
   app.get("/api/requests", admin, recorded, (req: Request, res: Response) => {
-    res.json({ requests: recorder!.requests({ limit: req.query.limit, before: req.query.before }) });
+    res.json({ requests: recorder!.requests({ limit: req.query.limit, before: req.query.before, q: req.query.q }) });
+  });
+  app.get("/api/people", admin, recorded, (req: Request, res: Response) => {
+    res.json({ people: recorder!.people({ q: req.query.q, limit: req.query.limit, offset: req.query.offset }) });
+  });
+  app.get("/api/people/:id", admin, recorded, (req: Request, res: Response) => {
+    const id = String(req.params.id);
+    const person = /^\d{1,25}$/.test(id) ? recorder!.person(id) : null;
+    if (!person) {
+      res.status(404).json({ error: "Nobody by that ID" });
+      return;
+    }
+    res.json(person);
+  });
+  app.get("/api/places", admin, recorded, (_req: Request, res: Response) => {
+    res.json({ guilds: recorder!.places() });
+  });
+  // What each cache holds. Without the history, titles are named only where
+  // the details cache knows them, and Discord's cache isn't known.
+  app.get("/api/caches", admin, async (_req: Request, res: Response) => {
+    try {
+      res.json(await cachesView(recorder));
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   app.use("/api", (_req, res) => {

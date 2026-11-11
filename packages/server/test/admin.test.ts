@@ -59,7 +59,8 @@ const login = (password: string) => fetch(`${origin}/api/login`, {
 });
 
 console.log("\n— nothing without signing in —");
-for (const p of ["/api/overview", "/api/live", "/api/logs", "/api/logs/files", "/api/settings", "/api/history", "/api/history/1", "/api/usage", "/api/requests"]) {
+for (const p of ["/api/overview", "/api/live", "/api/logs", "/api/logs/files", "/api/settings", "/api/history", "/api/history/1", "/api/usage",
+  "/api/requests", "/api/people", "/api/people/111", "/api/places", "/api/caches"]) {
   const res = await fetch(origin + p);
   check(`${p}: 401`, [res.status, ((await res.json()) as { error?: string }).error], [401, "Sign in first"]);
 }
@@ -79,6 +80,15 @@ const get = (p: string) => fetch(origin + p, { headers: { Cookie: cookie } });
 check("  and the page knows it is signed in", await (await get("/api/session")).json(), { signedIn: true });
 const noHistory = await get("/api/history");
 check("  without a recorder, no history, and it says so", [noHistory.status, await noHistory.json()], [503, { error: "Nothing is recorded" }]);
+// The caches page works without the history: a seek-bar preview on disk.
+fs.mkdirSync(path.join(process.env.THUMB_CACHE_DIR, "previews"), { recursive: true });
+fs.writeFileSync(path.join(process.env.THUMB_CACHE_DIR, "previews", "4021-320-i2.bif"), Buffer.alloc(1234));
+type Caches = { caches: Array<{ id: string; bytes: number; items: number; list: Array<{ name: string; bytes: number }> }>; discord: unknown };
+const caches = (await (await get("/api/caches")).json()) as Caches;
+const previews = caches.caches.find((c) => c.id === "previews");
+check("  the caches, without the history: each one, and what it holds",
+  [caches.caches.map((c) => c.id), previews?.items, previews?.bytes, previews?.list.map((i) => i.name), caches.discord],
+  [["stream", "ffmpeg", "art", "details", "subtitles", "pgs", "previews", "fonts"], 1, 1234, ["4021-320-i2.bif"], null]);
 const noStore = (await get("/api/overview")).headers.get("cache-control");
 check("  the API's answers are never cached", noStore, "no-store");
 
@@ -188,6 +198,22 @@ console.log("\n— the history, from the live room —");
   const usage = (await (await hget("/api/usage")).json()) as { usage: Array<{ kind: string; userId: string; guildId: string }> };
   check("  who came, where", usage.usage.map((u) => [u.kind, u.userId, u.guildId]).sort(), [["join", "111", "999000"], ["join", "222", "999000"]]);
   check("  and title requests, none yet", await (await hget("/api/requests")).json(), { requests: [] });
+  type People = { people: Array<{ userId: string; username: string; plays: number; hosted: number }> };
+  check("  everybody seen", ((await (await hget("/api/people")).json()) as People).people.map((p) => [p.userId, p.username, p.plays, p.hosted]).sort(),
+    [["111", "artemidorus", 1, 1], ["222", "crispymage", 1, 0]]);
+  type Person = { person: { username: string }; plays: Array<{ title: string; role: string }>; places: Array<{ guildId: string; channelId: string }> };
+  const person = (await (await hget("/api/people/222")).json()) as Person;
+  check("  one person: what they watched, where",
+    [person.person.username, person.plays.map((p) => [p.title, p.role]), person.places.map((p) => [p.guildId, p.channelId])],
+    ["crispymage", [["Ghost Stories", "viewer"]], [["999000", "888000"]]]);
+  check("  nobody by an ID never seen, or one that isn't an ID",
+    [(await hget("/api/people/404")).status, (await hget("/api/people/abc")).status], [404, 404]);
+  type Places = { guilds: Array<{ guildId: string; channels: Array<{ channelId: string; joins: number; plays: number }> }> };
+  check("  each server and channel",
+    ((await (await hget("/api/places")).json()) as Places).guilds.map((g) => [g.guildId, g.channels.map((ch) => [ch.channelId, ch.joins, ch.plays])]),
+    [["999000", [["888000", 2, 1]]]]);
+  type Cached = { discord: { all: { plays: number } } | null };
+  check("  and the caches, with what Discord's cache handed players", ((await (await hget("/api/caches")).json()) as Cached).discord?.all.plays, 1);
   withHistory.close();
   recorder.close();
 }

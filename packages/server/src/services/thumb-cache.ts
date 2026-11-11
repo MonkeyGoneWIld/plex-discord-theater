@@ -140,6 +140,19 @@ export function usage(): { bytes: number; maxBytes: number } {
   return { bytes: totalBytes, maxBytes: MAX_BYTES };
 }
 
+/** What is kept, for the admin page: how many, how long for, the newest. */
+export function thumbCacheSummary(limit = 100): {
+  count: number; oldest: number | null; newest: number | null; ttlMs: number;
+  items: Array<{ path: string; bytes: number; cachedAt: number }>;
+} {
+  const totals = db.prepare("SELECT COUNT(*) AS n, MIN(cached_at) AS oldest, MAX(cached_at) AS newest FROM thumbs")
+    .get() as { n: number; oldest: number | null; newest: number | null };
+  const items = (db.prepare("SELECT path, length(data) AS bytes, cached_at FROM thumbs ORDER BY cached_at DESC LIMIT ?")
+    .all(limit) as Array<{ path: string; bytes: number; cached_at: number }>)
+    .map((r) => ({ path: r.path, bytes: r.bytes, cachedAt: r.cached_at }));
+  return { count: totals.n, oldest: totals.oldest, newest: totals.newest, ttlMs: TTL_MS, items };
+}
+
 /** Drop expired rows. On a timer rather than on every write — see SWEEP_INTERVAL_MS. */
 function sweepExpired(): void {
   const gone = stmtDeleteExpired.all(Date.now() - TTL_MS);

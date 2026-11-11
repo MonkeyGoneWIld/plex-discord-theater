@@ -90,7 +90,7 @@ crispy({ type: "variant-session", hlsSessionId: encode, sessionOffset: 0 });
 
 // A film, everyone on one copy.
 const film = "i-204417-fixture";
-instanceHosts.set(film, { hostUserId: "200000000000000001", guildId: "777000222", channelId: "666000222", createdAt: Date.now() - 95 * 60_000 });
+instanceHosts.set(film, { hostUserId: "200000000000000001", guildId: "777000222", channelId: "666000222", createdAt: Date.now() - 55 * 60_000 });
 const filmCopy = crypto.randomUUID();
 rememberStreamNotes(filmCopy, {
   fallback: "", video: "copy", kbps: 18450, quality: "Original", videoFrom: "H.264 High 1920x1080", range: "SDR", audio: "copy", audioFrom: "AAC 5.1",
@@ -129,4 +129,17 @@ const feed = () => {
 };
 setTimeout(feed, 3_000);
 setInterval(feed, 10_000);
+
+// For the Requests and Caches pages: a few requests, and files in the caches.
+recorder.request({ at: Date.now() - 30 * 60_000, userId: "402115789012345678", mediaType: "movie", tmdbId: 129,
+  seasons: null, outcome: "requested", status: 2, error: null, title: Promise.resolve("Spirited Away") });
+recorder.request({ at: Date.now() - 12 * 60_000, userId: "402115789012345679", mediaType: "tv", tmdbId: 95396,
+  seasons: [1, 2], outcome: "already requested", status: 409, error: null, title: Promise.resolve("Severance") });
+recorder.request({ at: Date.now() - 2 * 60_000, userId: "200000000000000002", mediaType: "tv", tmdbId: 1399,
+  seasons: "all", outcome: "failed", status: 500, error: "Seerr: no Sonarr server is set up", title: Promise.resolve("Game of Thrones") });
+const cacheDir = process.env.THUMB_CACHE_DIR!;
+fs.mkdirSync(path.join(cacheDir, "previews"), { recursive: true });
+fs.writeFileSync(path.join(cacheDir, "previews", "123456-320-i2.bif"), Buffer.alloc(3_400_000));
+fs.mkdirSync(path.join(cacheDir, "subtitles-pgs"), { recursive: true });
+fs.writeFileSync(path.join(cacheDir, "subtitles-pgs", "58860-7.sup"), Buffer.alloc(820_000));
 console.log(`Admin fixture on http://localhost:${port} (password: ADMIN_PASSWORD, or the fixture's default)`);

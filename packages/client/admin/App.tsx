@@ -4,18 +4,32 @@ import type { Overview } from "./types";
 import { NowPlaying } from "./NowPlaying";
 import { Logs } from "./Logs";
 import { Settings } from "./Settings";
+import { History } from "./History";
+import { People } from "./People";
+import { Places } from "./Places";
+import { Requests } from "./Requests";
+import { Caches } from "./Caches";
 import { utcTime } from "./format";
 
-type Tab = "now" | "logs" | "settings";
+type Tab = "now" | "history" | "people" | "places" | "requests" | "caches" | "logs" | "settings";
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: "now", label: "Now playing" },
+  { id: "history", label: "History" },
+  { id: "people", label: "People" },
+  { id: "places", label: "Servers" },
+  { id: "requests", label: "Requests" },
+  { id: "caches", label: "Caches" },
   { id: "logs", label: "Logs" },
   { id: "settings", label: "Settings" },
 ];
 
-function tabFromHash(): Tab {
-  const h = location.hash.replace("#", "");
-  return h === "logs" || h === "settings" ? h : "now";
+/** `#history/12`: the History tab, play 12. */
+interface Route { tab: Tab; id: string | null }
+
+function routeFromHash(): Route {
+  const [h, id] = location.hash.replace("#", "").split("/");
+  const tab = TABS.find((t) => t.id === h)?.id ?? "now";
+  return { tab, id: id ? decodeURIComponent(id) : null };
 }
 
 function SignIn({ onDone }: { onDone: () => void }) {
@@ -53,7 +67,8 @@ function SignIn({ onDone }: { onDone: () => void }) {
 
 export function App() {
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
-  const [tab, setTab] = useState<Tab>(tabFromHash);
+  const [route, setRoute] = useState<Route>(routeFromHash);
+  const { tab, id } = route;
   const [data, setData] = useState<Overview | null>(null);
   const [live, setLive] = useState<"connecting" | "live" | "lost">("connecting");
   const [problem, setProblem] = useState<string | null>(null);
@@ -65,7 +80,10 @@ export function App() {
 
   useEffect(() => {
     api.session().then((s) => setSignedIn(s.signedIn)).catch(() => setSignedIn(false));
-    const onHash = () => setTab(tabFromHash());
+    const onHash = () => {
+      setRoute(routeFromHash());
+      scrollTo(0, 0);
+    };
     addEventListener("hashchange", onHash);
     return () => removeEventListener("hashchange", onHash);
   }, []);
@@ -123,6 +141,11 @@ export function App() {
       )}
       <main className="content">
         {tab === "now" && <NowPlaying data={data} />}
+        {tab === "history" && <History key={id ?? ""} id={id} onError={onError} />}
+        {tab === "people" && <People key={id ?? ""} id={id} onError={onError} />}
+        {tab === "places" && <Places onError={onError} />}
+        {tab === "requests" && <Requests onError={onError} />}
+        {tab === "caches" && <Caches onError={onError} />}
         {tab === "logs" && <Logs onError={onError} />}
         {tab === "settings" && <Settings onError={onError} />}
       </main>

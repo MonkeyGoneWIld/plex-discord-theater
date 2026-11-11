@@ -168,6 +168,46 @@ export function writeSeasonEpisodes(seasonKey: string, payload: unknown): void {
   writeSeasonStmt.run(seasonKey, JSON.stringify(payload), Date.now());
 }
 
+/** What is kept, for the admin page: how many of each, and the newest titles. */
+export function detailCacheSummary(limit = 200): {
+  meta: number; related: number; seasons: number; bytes: number;
+  items: Array<{ ratingKey: string; title: string | null; type: string | null; year: number | null; bytes: number; cachedAt: number }>;
+} {
+  const count = (sql: string) => (db.prepare(sql).get() as { n: number }).n;
+  const items = (db.prepare(`SELECT rating_key, json_extract(payload_json, '$.title') AS title,
+      json_extract(payload_json, '$.type') AS type, json_extract(payload_json, '$.year') AS year,
+      length(payload_json) AS bytes, cached_at
+    FROM detail_cache WHERE kind = 'meta' ORDER BY cached_at DESC LIMIT ?`).all(limit) as Array<{
+      rating_key: string; title: unknown; type: unknown; year: unknown; bytes: number; cached_at: number }>)
+    .map((r) => ({
+      ratingKey: r.rating_key,
+      title: typeof r.title === "string" ? r.title : null,
+      type: typeof r.type === "string" ? r.type : null,
+      year: typeof r.year === "number" ? r.year : null,
+      bytes: r.bytes,
+      cachedAt: r.cached_at,
+    }));
+  return {
+    meta: count("SELECT COUNT(*) AS n FROM detail_cache WHERE kind = 'meta'"),
+    related: count("SELECT COUNT(*) AS n FROM detail_cache WHERE kind = 'related'"),
+    seasons: count("SELECT COUNT(*) AS n FROM season_episodes"),
+    bytes: count(`SELECT COALESCE((SELECT SUM(length(payload_json)) FROM detail_cache), 0)
+      + COALESCE((SELECT SUM(length(payload_json)) FROM season_episodes), 0) AS n`),
+    items,
+  };
+}
+
+/** The titles of these items, as their details have them. */
+export function detailCacheTitles(ratingKeys: string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  const stmt = db.prepare("SELECT json_extract(payload_json, '$.title') AS title FROM detail_cache WHERE kind = 'meta' AND rating_key = ?");
+  for (const key of new Set(ratingKeys)) {
+    const row = stmt.get(key) as { title: unknown } | undefined;
+    if (typeof row?.title === "string") out.set(key, row.title);
+  }
+  return out;
+}
+
 export function closeDetailCache(): void {
   db.close();
 }

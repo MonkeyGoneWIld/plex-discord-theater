@@ -97,18 +97,18 @@ Plex makes the streams unless you use the [FFmpeg engine](FFmpeg-Engine), so
 its transcoder must work. Under **Settings → Transcoder**:
 
 - Turn on **Use hardware acceleration when available** if you have Plex Pass
-  and a supported GPU. Without it, one 1080p re-encode can occupy several CPU
+  and a supported GPU. Without it, one 1080p transcode can occupy several CPU
   cores.
-- Turn on **Enable HEVC video encoding** for sharper re-encodes for players
+- Turn on **Enable HEVC video encoding** for sharper transcodes for players
   that decode HEVC (`HEVC_TRANSCODE`, on by default). It needs Plex Pass and
   hardware HEVC encoding; without it, Plex sends H.264. Copying HEVC files
   needs neither.
 
 ![Settings → Transcoder, with hardware acceleration and HEVC encoding on](https://raw.githubusercontent.com/MonkeyGoneWIld/plex-discord-theater/main/docs/screenshots/plex-transcoder.png)
 
-With Direct Stream, on by default, Plex copies the video whenever the player
+With direct streaming, on by default, Plex sends the video unchanged whenever the player
 can decode it and converts only the audio, which costs very little. The
-transcoder is still needed for re-encodes; see
+transcoder is still needed for transcodes; see
 [Streaming and Quality](Streaming-and-Quality).
 
 With the FFmpeg engine, the container makes the streams, and Plex's transcoder

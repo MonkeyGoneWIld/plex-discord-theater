@@ -47,8 +47,9 @@ If the Activity isn't listed, ask the server owner to add you as an
 | Zoom | How the picture fills your screen. See [Zoom](#zoom). |
 | Subtitle timing and look | Move subtitles earlier or later in 50 ms steps, and change their size, position, colour, background and font |
 | Volume | Your own volume, up to 200% for quiet soundtracks |
-| Stats for nerds | Codec, bitrate, frames, audio, subtitles, sync, buffer, connection and peers, and whether the video is copied or re-encoded and why |
+| Stats for nerds | Codec, bitrate, frames, audio, subtitles, sync, buffer, connection, peers and Discord's cache, and whether the video is sent unchanged or transcoded and why |
 | Ask to pause or resume | Asks the host and co-hosts. See [Ask the host to pause](#ask-the-host-to-pause). |
+| Request host | In the people list. Asks to take over when the host is away. See [Roles and Permissions](Roles-and-Permissions#someone-asks-for-it). |
 
 Audio, subtitles, quality and zoom are in the player's settings menu. Subtitle
 timing and look have their own button in the player bar.
@@ -195,7 +196,7 @@ without changing anyone else's, when:
 
 - **You choose a lower quality** for a slow connection. If playback stalls
   often, the player suggests one (**Buffering a lot?**).
-- **Your player can't decode the room's video**, such as HEVC in Discord in
+- **Your device can't play the room's video**, such as HEVC in Discord in
   Firefox. You receive H.264 while everyone else keeps HEVC.
 
 A quality you choose lasts for the title and the next episodes of its show,

@@ -62,6 +62,13 @@ chooses, in order: someone on the host's stream, a co-host, someone watching,
 then whoever joined earliest. A host who comes back within 15 seconds gets the
 role back. See [Roles and Permissions](Roles-and-Permissions#who-is-host).
 
+### What if the host walks away?
+
+Anyone can select **Request host** at the foot of the people list. The host
+gets five minutes to answer, or one minute if the Activity sees they are away.
+If they don't answer, the role passes to whoever asked. See
+[Someone asks for it](Roles-and-Permissions#someone-asks-for-it).
+
 ### Can someone in the room take control?
 
 Only with a role the host gives them. The server checks every control against
@@ -91,24 +98,24 @@ in Plex.
 
 No. Without Plex Pass:
 
-- **Plex re-encodes on the CPU, in H.264 only.** Hardware transcoding and HEVC
-  encoding are Plex Pass features, and a 1080p re-encode on the CPU can take
+- **Plex transcodes on the CPU, in H.264 only.** Hardware transcoding and HEVC
+  encoding are Plex Pass features, and a 1080p transcode on the CPU can take
   several cores.
-- **The [FFmpeg engine](FFmpeg-Engine) doesn't need it.** It re-encodes on the
+- **The [FFmpeg engine](FFmpeg-Engine) doesn't need it.** It transcodes on the
   container's own GPU, with Intel Quick Sync, VAAPI or NVIDIA NVENC.
-- **Copies need neither.** When a file can be
-  [copied](Streaming-and-Quality#copy-or-re-encode), nothing is re-encoded.
+- **Direct play needs neither.** When a file's video can be
+  [sent unchanged](Streaming-and-Quality#when-video-is-sent-unchanged), nothing is transcoded.
 - **Skip Intro and Skip Credits** need Plex's intro and credits markers, which
   Plex creates only with Plex Pass.
 
 ### How many people can watch at once?
 
-There is no fixed limit: your upload speed decides. At the default settings,
-plan for 20 to 25 Mbps per viewer. Viewers on the same stream share one
-re-encode, and pass segments to each other peer to peer, which helps but
-shouldn't be counted on. Discord's proxy also caches each segment, so viewers
-it serves from the same data centre mostly get theirs from Discord rather than
-from your server. See [Bandwidth](Requirements#bandwidth).
+There is no fixed limit: your upload speed decides. At the default settings a
+stream needs 20 to 25 Mbps. Viewers on the same stream share it: Discord's
+proxy caches the video, and viewers pass pieces to each other, so the second
+and later viewers get most of theirs without it coming from your server. Each
+viewer on a stream of their own needs that stream's bitrate as well. See
+[Upload speed](Requirements#upload-speed).
 
 ### Why is it limited to servers with fewer than 25 members?
 
@@ -126,10 +133,10 @@ domain. See [HTTPS and Reverse Proxy](HTTPS-and-Reverse-Proxy).
 
 ### Should I use the FFmpeg engine?
 
-It is optional. It suits you if you want re-encodes on a GPU without Plex
-Pass, HDR kept in re-encodes, or picture subtitles without a re-encode. It
-needs read access to the library's files, and a GPU for re-encodes. See
-[What it adds](FFmpeg-Engine#what-it-adds).
+It is optional. It suits you if you want transcodes on a GPU without Plex
+Pass, HDR kept in transcodes, or picture subtitles without a transcode. It
+needs read access to the library's files, and a GPU for transcodes. See
+[Plex engine or FFmpeg engine?](FFmpeg-Engine#plex-engine-or-ffmpeg-engine).
 
 ### Can I run it without Docker?
 
@@ -137,7 +144,7 @@ Yes, with Node.js 24 or later: `npm install`, `npm run build` and `npm start`.
 Docker is recommended, because the image includes the FFmpeg engine's ffmpeg,
 GPU drivers and subtitle fonts. From source, the engine uses the `ffmpeg` on
 your `PATH`, or
-[`FFMPEG_PATH`](FFmpeg-Engine#ffmpeg_path-and-ffprobe_path).
+[`FFMPEG_PATH`](FFmpeg-Engine#settings).
 
 ### Can I use the published image with my own Discord application?
 
@@ -151,6 +158,12 @@ Yes, with `ALLOWED_GUILD_IDS`. The server checks each person's membership with
 Discord, and refuses DMs while the setting is in use. See
 [Access and security](Configuration-Reference#access-and-security).
 
+### How do I see what is playing and why?
+
+Turn on the [Dashboard](Dashboard). It shows every room live, each stream and
+why it is direct or transcoded, where the data is coming from, and a history
+of every session.
+
 ### Does it work with Jellyfin or Emby?
 
 No. It is built around Plex's library, metadata, streams and watch history.
@@ -161,13 +174,13 @@ No. It is built around Plex's library, metadata, streams and watch history.
 
 Browsers can't play most library files as they are, often because of the file
 format rather than the video. Everything is sent to the player as HLS
-segments. When the player can decode the video, it is copied into those
-segments unchanged, and only the sound is converted when it has to be. The
-video is re-encoded when it can't be copied, for example a 4K file, a file
-above the copy limit, or a codec the player can't decode. See
-[Copy or re-encode](Streaming-and-Quality#copy-or-re-encode).
+segments. When the device can play the video, it is put into those segments
+unchanged, 4K included, and only the audio is converted when it has to be. The
+video is transcoded only when it can't be sent unchanged, for example a file
+above your bitrate limit or a codec the device can't play. See
+[The three ways a title plays](Streaming-and-Quality#the-three-ways-a-title-plays).
 
-### Why is my stream re-encoded when it could be copied?
+### Why is my stream transcoded when it could be sent unchanged?
 
 Open **Stats for nerds** (press `I`): its **Playback** row says why. The most
 common reasons are:
@@ -176,10 +189,11 @@ common reasons are:
   VobSub and DVB always are. The FFmpeg engine has each player draw PGS, and
   VobSub or DVB inside the film, instead. A VobSub beside the film (`.idx` and
   `.sub`) is still burned in.
-- **The file is above the copy limit** (`DIRECT_STREAM_MAX_KBPS`, 25 Mbps by
-  default), or above the quality the viewer chose.
+- **The file is above your bitrate limit** (`DIRECT_STREAM_MAX_KBPS`, 25 Mbps
+  by default), or above the quality the viewer chose.
+- **The file is 10-bit H.264**, which Discord's player doesn't play.
 - **The file is above 1080p and this player can't decode it smoothly.** That
-  player gets a 1080p re-encode of its own; everyone else gets the file as it is.
+  player gets a 1080p transcode of its own; everyone else gets the file as it is.
 - **The player can't decode the codec**, such as HEVC in Discord in Firefox.
 - **Plex treats the server as remote.** See
   [LAN Networks](Plex-Setup#lan-networks).

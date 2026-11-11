@@ -16,9 +16,10 @@ the startup summary: which features are on, and why any are off.
 | [Setup and startup](#setup-and-startup) | The container, its health check and Plex connection |
 | [Discord](#discord) | The App Launcher, blank pages, presence |
 | [Library and title pages](#library-and-title-pages) | Empty library, missing descriptions, ratings, requests |
-| [Playback](#playback) | Titles that don't play, buffering, copies and re-encodes, subtitles |
+| [Playback](#playback) | Titles that don't play, buffering, direct play and transcodes, subtitles |
 | [Rooms and connection](#rooms-and-connection) | Reconnecting, expired sessions, sync |
 | [FFmpeg engine](#ffmpeg-engine) | The GPU, library paths, previews, Plex's dashboard |
+| [Dashboard](#dashboard) | Signing in, and reaching the page |
 | [Logs](#logs) | Collecting logs, and reporting a problem |
 
 ## Setup and startup
@@ -144,9 +145,9 @@ startup summary says `online search detail may 401`.
 1. **Look at the message in the player.** [Messages you may
    see](Using-the-Activity#messages-you-may-see) explains each one.
 2. **Try the title in Plex.** Play it in Plex Web at a lower quality, which
-   makes Plex re-encode it. If Plex can't play it, the Activity can't either
+   makes Plex transcode it. If Plex can't play it, the Activity can't either
    with the Plex engine.
-3. **Check the server's load.** A CPU at 100% during a re-encode means the
+3. **Check the server's load.** A CPU at 100% during a transcode means the
    hardware can't keep up. See [Requirements](Requirements#server-hardware).
 4. **Read the log** from around that time. The players' own log lines are in
    the same file:
@@ -159,10 +160,12 @@ startup summary says `online search detail may 401`.
 
 ### Playback stutters or buffers often
 
-Usually the cause is bandwidth. Each viewer downloads their stream from your
-server, at the file's own bitrate for a copy, or up to `VIDEO_BITRATE_KBPS` for
-a re-encode. In **Stats for nerds** (press `I`), the **Connection** row turns
-amber, then red, as a viewer's connection falls behind.
+Usually the cause is bandwidth: the viewer's download, or your upload. A
+stream needs the file's own bitrate when its video is sent unchanged, or up to
+`VIDEO_BITRATE_KBPS` for a transcode. In **Stats for nerds** (press `I`), the
+**Connection** row turns amber, then red, as a viewer's connection falls
+behind. The [Dashboard](Dashboard) shows each viewer's buffering, and how much
+of the room's data your server is sending.
 
 ![Stats for nerds, with the buffer and connection graphs](https://raw.githubusercontent.com/MonkeyGoneWIld/plex-discord-theater/main/docs/screenshots/stats.png)
 
@@ -170,7 +173,7 @@ amber, then red, as a viewer's connection falls behind.
   stream of their own. After repeated buffering the player suggests one.
 - **Everyone struggles:** your upload is the limit. Lower the bitrate limits
   as described in
-  [Choosing the bitrate limits](Streaming-and-Quality#choosing-the-bitrate-limits).
+  [Choosing your bitrate limits](Streaming-and-Quality#choosing-your-bitrate-limits).
 
 ### The loading screen never goes away, though the video has loaded
 
@@ -182,20 +185,22 @@ is still stuck, it shows **The picture has stopped on this device**. Quit
 Discord fully (right-click its icon by the clock, then **Quit Discord**) and
 open it again. Closing and reopening the Activity isn't enough.
 
-### A stream is re-encoded when it could be copied
+### A stream is transcoded when it could be sent unchanged
 
 The **Playback** row in **Stats for nerds** says why. Every reason is listed in
-[Copy or re-encode](Streaming-and-Quality#copy-or-re-encode).
+[When video is transcoded](Streaming-and-Quality#when-video-is-transcoded).
 
-![Stats for nerds on a re-encoded stream, with the reason under Playback](https://raw.githubusercontent.com/MonkeyGoneWIld/plex-discord-theater/main/docs/screenshots/stats-reencoded.png)
+![Stats for nerds on a transcoded stream, with the reason under Playback](https://raw.githubusercontent.com/MonkeyGoneWIld/plex-discord-theater/main/docs/screenshots/stats-reencoded.png)
 
 Two reasons are easy to miss:
 
 - **Plex treats the server as remote**, and applies your remote streaming
   limits. Plex's log shows `(WAN)` beside the server's requests. See
   [LAN Networks](Plex-Setup#lan-networks).
-- **The player can't decode HEVC.** Discord in Firefox can't, so that viewer
+- **The device can't play HEVC.** Discord in Firefox can't, so that viewer
   receives H.264 of their own. The Discord app can.
+- **The file is 10-bit H.264.** Discord's player doesn't play it, so it is
+  always transcoded.
 
 ### Buffering when the host changes
 
@@ -220,8 +225,8 @@ The rest of the room keeps playing meanwhile. See
 ### The server uses more memory while a film plays
 
 This is expected, up to a limit. Recent parts of each stream are kept in
-memory so that skipping back plays at once: up to 6 GB for copies
-(`DIRECT_STREAM_MEMORY_MB`) and 2 GB for re-encodes (`TRANSCODE_CACHE_MB`),
+memory so that skipping back plays at once: up to 6 GB for video sent
+unchanged (`DIRECT_STREAM_MEMORY_MB`) and 2 GB for transcodes (`TRANSCODE_CACHE_MB`),
 for all streams together. On a small server, lower them; see
 [Stream caches](Configuration-Reference#stream-caches).
 
@@ -299,13 +304,13 @@ docker compose logs | grep 'playback engine'
 | `ffmpeg wanted (PLAYBACK_ENGINE=ffmpeg) but not found` | The image has no ffmpeg at `FFMPEG_PATH`. Pull the current image, and remove `FFMPEG_PATH`. |
 | **Stats for nerds** shows **Engine: Plex (ffmpeg fallback)** for one stream | The engine left that stream to Plex. The log has an `[FFmpeg] … left to Plex` line with the reason; see [When a stream goes to Plex](FFmpeg-Engine#when-a-stream-goes-to-plex). |
 
-### Re-encodes run on the CPU
+### Transcodes run on the CPU
 
 The startup line says `re-encodes on CPU (…)`, with the reason in brackets:
 
 | Reason | Fix |
 |---|---|
-| `no /dev/dri/renderD128; /dev/dri has: …` | The GPU isn't mapped into the container. Add `/dev/dri:/dev/dri` under `devices:`. If Docker runs in a Proxmox LXC or a virtual machine, pass the GPU through to it first. The server looks for the GPU again before each re-encode, so no restart is needed. |
+| `no /dev/dri/renderD128; /dev/dri has: …` | The GPU isn't mapped into the container. Add `/dev/dri:/dev/dri` under `devices:`. If Docker runs in a Proxmox LXC or a virtual machine, pass the GPU through to it first. The server looks for the GPU again before each transcode, so no restart is needed. |
 | `Intel QSV didn't encode: …`, `VAAPI didn't encode: …` or `NVENC didn't encode: …` | The GPU is there, but a test encode failed. Run the GPU check below, which tests each step separately. |
 | An NVIDIA GPU that isn't found | Install the NVIDIA Container Toolkit on the host, and start the container with `runtime: nvidia` and `NVIDIA_DRIVER_CAPABILITIES=compute,video,utility`. See [Set it up](FFmpeg-Engine#1-mount-the-library-and-the-gpu). |
 
@@ -313,17 +318,17 @@ The startup line says `re-encodes on CPU (…)`, with the reason in brackets:
 docker exec -it plex-discord-theater node scripts/diagnose-ffmpeg.mjs gpu
 ```
 
-### Some files fail to re-encode on the GPU
+### Some files fail to transcode on the GPU
 
 A GPU's decoder can fail on files its encoder handles. Set
-[`FFMPEG_HW_DECODE=off`](FFmpeg-Engine#ffmpeg_hw_decode) to decode on the CPU
+[`FFMPEG_HW_DECODE=off`](FFmpeg-Engine#settings) to decode on the CPU
 and keep encoding on the GPU.
 
 ### The stream cache disk fills up
 
 The engine writes each stream to `STREAM_CACHE_DIR` as it makes it, and
 deletes it when the stream ends. Give that folder room for the streams that
-play at once, or set [`FFMPEG_LOOKAHEAD`](FFmpeg-Engine#ffmpeg_lookahead) to
+play at once, or set [`FFMPEG_LOOKAHEAD`](FFmpeg-Engine#settings) to
 keep each stream only a few minutes ahead of its room.
 
 ### No seek-bar previews
@@ -334,10 +339,10 @@ film. The log has a `[Preview] previews made by ffmpeg` line when they are
 ready. None are made when the file can't be read from the library mount, or
 with `FFMPEG_PREVIEWS=off`.
 
-### intel_gpu_top shows nothing during a re-encode
+### intel_gpu_top shows nothing during a transcode
 
 `intel_gpu_top` can show the GPU idle while it encodes. Read the `gpu=` field
-on the re-encode's `[FFmpeg] run stopped` line instead, which comes from the
+on the transcode's `[FFmpeg] run stopped` line instead, which comes from the
 kernel's record of the process's GPU time: for example
 `gpu=video 34%, render 12% over 95.2 s (…)`, or
 `gpu=none: ffmpeg had no GPU open, so the CPU did the work`.
@@ -361,6 +366,32 @@ under the account of `PLEX_TOKEN`, as the player **Plex Discord Theater**, and
 Plex lists them as Direct Play. Plex can't stop them: stop them from the
 Activity. See
 [Plex dashboard, Tautulli and Tracearr](FFmpeg-Engine#plex-dashboard-tautulli-and-tracearr).
+
+## Dashboard
+
+### The dashboard refuses the password
+
+The password must match `ADMIN_PASSWORD` exactly. If you keep it in a `.env`
+file and it contains a `$` or a `#`, Docker Compose changes it before the
+server sees it: `$name` is read as a variable. Wrap the value in single
+quotes, `ADMIN_PASSWORD='pa$$word#1'`, and recreate the container.
+
+After 10 wrong attempts from one address, sign-in is refused for 15 minutes.
+
+### The dashboard does not open
+
+- `ADMIN_PASSWORD` must be set. Without it the dashboard is off, and the log
+  says `dashboard off`.
+- Its port must be published in the compose file. The dashboard listens on
+  3050 inside the container: `"192.168.1.10:3050:3050"` publishes it on that
+  LAN address.
+- Open it with `http://`, not `https://`, at the port on the left of the
+  mapping.
+
+### Posters or running times are missing
+
+They come from Plex. A title that has since been removed from Plex shows a
+plain tile and no running time.
 
 ## Logs
 

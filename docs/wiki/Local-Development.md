@@ -95,7 +95,7 @@ docs/                Screenshots, this wiki's source
 |---|---|---|
 | Rooms | `services/sync.ts` | A WebSocket protocol. The server checks every control message against the sender's role, so a modified client can't control a room it doesn't host. |
 | Plex engine | `routes/plex.ts` | Plex's HLS transcoder, through the server. The Plex token never reaches a browser. |
-| Direct Stream | `services/direct-stream.ts` | Plex copying the video instead of re-encoding it. The server builds the playlist from the segments as they arrive, and keeps them in memory and then on disk until the stream ends. |
+| Direct Stream | `services/direct-stream.ts` | Plex copying the video instead of transcoding it. The server builds the playlist from the segments as they arrive, and keeps them in memory and then on disk until the stream ends. |
 | FFmpeg engine | `services/ffmpeg/` | The server's own ffmpeg reads the library files directly. See [FFmpeg Engine](FFmpeg-Engine). |
 | Streams per room | `services/sync.ts` | A room has a stream for each combination of audio track, burned-in subtitle and quality in use, shared by everyone on it |
 | Peer-to-peer | `p2p-media-loader`, `services/tracker.ts` | Viewers on the same stream share segments. The library is patched as it is bundled, by `packages/client/p2pCorePatch.ts`. |

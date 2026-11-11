@@ -62,12 +62,12 @@ How streams are made and how much each viewer downloads. See
 
 | Setting | Default | Description |
 |---|---|---|
-| `VIDEO_BITRATE_KBPS` | `20000` | Average bitrate of a re-encode, in kbps. Each viewer of a re-encoded stream downloads about this much. |
-| `VIDEO_PEAK_BITRATE_KBPS` | `33000`, or `VIDEO_BITRATE_KBPS` if higher | Peak bitrate of a re-encode. A re-encode's peak is never below its average. |
-| `DIRECT_STREAM` | On | Copies the original video when the player can decode it. `0` re-encodes every title. |
-| `DIRECT_STREAM_MAX_KBPS` | `25000`, or `VIDEO_BITRATE_KBPS` if higher | The highest average bitrate a file may have and still be copied. Larger files are re-encoded. |
-| `HEVC_TRANSCODE` | On | Re-encodes to HEVC for players that decode it. With the Plex engine this needs Plex Pass and hardware HEVC encoding. `0` keeps every re-encode H.264. |
-| `AV1_TRANSCODE` | On | FFmpeg engine only: re-encodes to AV1 for players that decode it in hardware, when the GPU encodes AV1. `0` turns it off. |
+| `VIDEO_BITRATE_KBPS` | `20000` | Average bitrate of a transcode, in kbps. Each viewer of a transcoded stream downloads about this much. |
+| `VIDEO_PEAK_BITRATE_KBPS` | `33000`, or `VIDEO_BITRATE_KBPS` if higher | Peak bitrate of a transcode. A transcode's peak is never below its average. |
+| `DIRECT_STREAM` | On | Sends the original video unchanged when the device can play it. `0` transcodes every title. |
+| `DIRECT_STREAM_MAX_KBPS` | `25000`, or `VIDEO_BITRATE_KBPS` if higher | The highest average bitrate a file may have and still be sent unchanged. Larger files are transcoded. |
+| `HEVC_TRANSCODE` | On | Transcodes to HEVC for players that decode it. With the Plex engine this needs Plex Pass and hardware HEVC encoding. `0` keeps every transcode H.264. |
+| `AV1_TRANSCODE` | On | FFmpeg engine only: transcodes to AV1 for players that decode it in hardware, when the GPU encodes AV1. `0` turns it off. |
 
 ## Stream caches
 
@@ -75,15 +75,15 @@ The server keeps the films being played, so seeking back plays at once.
 
 | Setting | Default | Description |
 |---|---|---|
-| `DIRECT_STREAM_MEMORY_MB` | `6144` | Memory for copied video, all streams together. A copy beyond it continues on disk. |
-| `STREAM_CACHE_DIR` | `/data/stream-cache` | Where copies beyond that memory, and the FFmpeg engine's streams, are written. Each stream's folder is deleted when the stream ends, and the whole folder is emptied when the server starts, so give it a folder of its own. |
-| `TRANSCODE_CACHE_MB` | `2048` | Memory for re-encoded video, all streams together. Plex keeps the rest of a re-encode on its own disk. |
+| `DIRECT_STREAM_MEMORY_MB` | `6144` | Memory for video sent unchanged, all streams together. Beyond it, a stream continues on disk. |
+| `STREAM_CACHE_DIR` | `/data/stream-cache` | Where video beyond that memory, and the FFmpeg engine's streams, are written. Each stream's folder is deleted when the stream ends, and the whole folder is emptied when the server starts, so give it a folder of its own. |
+| `TRANSCODE_CACHE_MB` | `2048` | Memory for transcoded video, all streams together. Plex keeps the rest of a transcode on its own disk. |
 
 Together, the defaults can use 8 GB of memory while films play. On a server
 with less memory, lower both values.
 
-A copy is kept until its stream ends, so its disk use grows to the size of the
-part watched: up to about 11 GB per hour at the 25 Mbps copy limit. Seeking
+Video sent unchanged is kept until its stream ends, so its disk use grows to
+the size of the part watched: up to about 11 GB per hour at the 25 Mbps limit. Seeking
 back reads from this folder, so an SSD helps. To use one, mount it and point
 `STREAM_CACHE_DIR` at it:
 
@@ -107,18 +107,18 @@ setting below is explained in [FFmpeg Engine](FFmpeg-Engine#settings).
 | `FFMPEG_HWACCEL` | `auto` | `auto`, `qsv`, `vaapi`, `nvenc`, or `none` for the CPU |
 | `FFMPEG_HWACCEL_DEVICE` | `/dev/dri/renderD128` | The render node for Quick Sync and VAAPI, or the GPU number for NVENC |
 | `FFMPEG_HW_DECODE` | On | `off`: the GPU encodes and the CPU decodes |
-| `FFMPEG_MAX_ENCODES` | 6 on a GPU, 2 on the CPU | Re-encodes at once. Beyond it, Plex makes the stream. Copies don't count. |
+| `FFMPEG_MAX_ENCODES` | 6 on a GPU, 2 on the CPU | Transcodes at once. Beyond it, Plex makes the stream. Video sent unchanged doesn't count. |
 | `FFMPEG_PRESET` | Each encoder's own | `ultrafast` to `veryslow`: speed against quality |
 | `FFMPEG_LOOKAHEAD` | The whole film | Seconds each stream is made ahead of the room |
 | `FFMPEG_AUDIO_CHANNELS` | `6` (5.1) | `2`: surround sound the player can't play becomes stereo instead of 5.1 |
 | `FFMPEG_SUBTITLES` | On | `off`: Plex reads text subtitles instead of the engine |
-| `FFMPEG_PGS` | On | `off`: PGS subtitles are burned into a re-encode instead of drawn by each player |
+| `FFMPEG_PGS` | On | `off`: PGS subtitles are burned into a transcode instead of drawn by each player |
 | `FFMPEG_PGS_MAX_GB` | `2` | Disk kept for PGS subtitles cut out of films; the least recently used go first |
 | `FFMPEG_PREVIEWS` | On | `off`: no seek-bar previews for files Plex has none for |
 | `FFMPEG_PREVIEWS_MAX_GB` | `20` | Disk kept for those previews; the least recently used go first |
 | `FFMPEG_SEGMENT_MEMORY_MB` | `512` | Memory for the segments rooms are fetching now. `0` reads each from disk. |
 | `FFMPEG_FALLBACK_TO_PLEX` | On | `off`: a stream the engine can't make fails instead of going to Plex. For testing. |
-| `FFMPEG_HDR_REENCODE` | `keep` | `keep`: re-encodes stay HDR for players that decode HEVC. `tonemap`: always mapped to SDR. |
+| `FFMPEG_HDR_REENCODE` | `keep` | `keep`: transcodes stay HDR for players that decode HEVC. `tonemap`: always mapped to SDR. |
 | `FFMPEG_HDR_ON_SDR` | `browser` | HDR on a screen in SDR: `browser` lets the player map it; `server` maps it to SDR in the container |
 | `FFMPEG_HDR_ON_SDR_NITS` | `200` | The peak brightness HDR is labelled with for a screen in SDR, 100 to 1000 |
 | `FFMPEG_TONEMAP` | `mobius` | The curve used to map HDR to SDR: `mobius`, `reinhard`, `hable`, `bt2390`, `linear`, `gamma` or `clip` |
@@ -176,7 +176,7 @@ reasonable choice.
 
 ## Dashboard
 
-See [Dashboard](Admin-Page).
+The owner's page for seeing what is playing and why. See [Dashboard](Dashboard).
 
 | Setting | Default | Description |
 |---|---|---|

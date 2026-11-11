@@ -7,7 +7,7 @@ the manager how many viewers watch each stream, and whether each room is
 playing or paused.
 
 Plex remains the manager's source for account identity, and for the bandwidth
-of streams Plex re-encodes. For streams where Plex has no useful figure, the
+of streams Plex transcodes. For streams where Plex has no useful figure, the
 server provides its own; see [The server's own figures](#the-servers-own-figures).
 
 ## Connect the containers
@@ -29,7 +29,7 @@ In the manager service:
 ```yaml
 services:
   plex-qbt-manager:
-    image: ghcr.io/monkeygonewild/plex-qbt-manager:1.0.0
+    image: ghcr.io/monkeygonewild/plex-qbt-manager:1.3.0
     environment:
       DYNAMIC_UPLOAD_ENABLED: "true"
       THEATER_URL: "http://plex-discord-theater:3000"
@@ -56,8 +56,9 @@ services:
 | `THEATER_MAX_WEIGHT` | The most a shared stream can reserve, in streams' worth of bandwidth. Unset, no limit |
 | `THEATER_BANDWIDTH_FACTOR` | The share of each viewer's bandwidth to reserve for a shared stream while neither `THEATER_SHARED_BASE` nor `THEATER_EXTRA_VIEWER_FACTOR` is set |
 
-The first three need a manager newer than v1.2.5. Setting `THEATER_SHARED_BASE`
-or `THEATER_EXTRA_VIEWER_FACTOR` turns them on.
+`THEATER_SHARED_BASE`, `THEATER_EXTRA_VIEWER_FACTOR` and `THEATER_MAX_WEIGHT`
+need plex-qbt-manager v1.3.0 or newer. Setting either of the first two turns
+the shared estimate on.
 
 ## How bandwidth is reserved
 
@@ -88,7 +89,7 @@ on the same Plex account are still counted. No Plex user setting is needed.
 For two kinds of stream, the server reports its own `bandwidth_kbps`, and the
 manager uses it instead of Plex's:
 
-- **Direct Stream copies.** Plex's figure for a copy is how fast it hands
+- **Video Plex sends unchanged.** Plex's figure for it is how fast it hands
   segments to the server over the LAN, which can be many times the film's
   bitrate, not what a viewer downloads.
 - **[FFmpeg engine](FFmpeg-Engine) streams.** Plex lists them without a
@@ -96,7 +97,7 @@ manager uses it instead of Plex's:
   aren't counted twice.
 
 The figure is one number for the whole stream: the file's average bitrate for
-a copy, and the video target plus the audio for a re-encode. When the file's
+video sent unchanged, and the video target plus the audio for a transcode. When the file's
 bitrate isn't known, it is the average of the first 30 seconds. Because the
 figure doesn't change during the stream, the manager adjusts qBittorrent only
 when streams start and stop. A stream without a figure yet counts as needing

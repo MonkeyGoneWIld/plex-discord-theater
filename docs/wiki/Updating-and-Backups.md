@@ -86,7 +86,7 @@ keeps it in the `app-data` volume.
 | `previews/` | Seek-bar previews made by the FFmpeg engine, up to `FFMPEG_PREVIEWS_MAX_GB` (20 GB) | No |
 | `subtitles-pgs/` | Picture subtitles read out of media files by the FFmpeg engine, up to `FFMPEG_PGS_MAX_GB` (2 GB) | No |
 | `subtitle-fonts/` | Fonts read out of media files for styled subtitles | No |
-| `stream-cache/` | Copied films while they play | No: emptied at every start |
+| `stream-cache/` | The video being played, while it plays | No: emptied at every start |
 | `diagnose/` | Reports from the FFmpeg diagnosis script | No |
 | `logs/` | The server's logs | No |
 
@@ -108,7 +108,7 @@ docker cp plex-discord-theater:/data/logs ./logs
 
 ### Disk space
 
-Streams are the largest use of disk. Copied films are kept in memory up to
+Streams are the largest use of disk. Video sent unchanged is kept in memory up to
 6 GB for all streams together, and on disk after that, at up to about 11 GB an
 hour for a 25 Mbps film. The FFmpeg engine writes its streams to the same
 folder. Each stream's files are removed when it ends. If the data volume is on
@@ -183,4 +183,4 @@ Portal, and `REDIRECT_URI` and `ALLOWED_ORIGINS`.
 
 ## Next
 
-→ [Dashboard](Admin-Page)
+→ [Dashboard](Dashboard)

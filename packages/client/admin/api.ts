@@ -1,6 +1,6 @@
 import type {
   CachesResult, LogFile, LogResult, Overview, PersonDetail, PersonSummary, PlaceGuild, PlayDetail, PlaySummary,
-  SettingsView, TitleRequest, UsageRow,
+  SettingsView, TitleRequest, UsageRow, Graphs, HistorySummary, TrimCounts
 } from "./types";
 
 /** A query string of the values given. */
@@ -46,4 +46,16 @@ export const api = {
   usage: (q: { before?: number; limit?: number }) => call<{ usage: UsageRow[] }>(`/api/usage${qs(q)}`),
   requests: (q: { q?: string; before?: number; limit?: number }) => call<{ requests: TitleRequest[] }>(`/api/requests${qs(q)}`),
   caches: () => call<CachesResult>("/api/caches"),
+  graphs: (days: number) => call<Graphs>(`/api/graphs${qs({ days })}`),
+  historyFile: (days?: number) => call<{ summary: HistorySummary; trim: TrimCounts | null }>(`/api/history-file${qs({ days })}`),
+  trim: (days: number) => call<TrimCounts & { bytesBefore: number; bytesAfter: number }>("/api/history-file/trim", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ days }),
+  }),
 };
+
+/** A list as a file to download: history, people, usage or requests, as CSV or JSON, honouring a search. */
+export function exportUrl(kind: "history" | "people" | "usage" | "requests", format: "csv" | "json", q?: string): string {
+  return `/api/export/${kind}.${format}${qs({ q })}`;
+}

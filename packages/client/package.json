@@ -18,6 +18,7 @@
     "process": "^0.11.10",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "recharts": "^3.10.1",
     "vite-plugin-node-polyfills": "^0.25.0"
   },
   "devDependencies": {

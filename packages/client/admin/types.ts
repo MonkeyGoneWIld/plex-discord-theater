@@ -292,3 +292,64 @@ export interface CachesResult {
     titles: Array<CacheSums & { ratingKey: string; title: string | null }>;
   } | null;
 }
+
+// ─── Graphs and the history file ────────────────────────────────
+
+export interface GraphDay {
+  /** Midnight UTC. */
+  day: number;
+  plays: number;
+  playedS: number;
+  peakViewers: number;
+  people: number;
+  watchedS: number;
+  httpBytes: number;
+  edgeBytes: number;
+  edgeHitBytes: number;
+  botBytes: number;
+  p2pBytes: number;
+  stalls: number;
+  stalledMs: number;
+  errors: number;
+  streams: number;
+  copies: number;
+  reencodes: number;
+  requests: number;
+  launches: number;
+}
+
+export interface Graphs {
+  days: number;
+  from: number;
+  to: number;
+  totals: Omit<GraphDay, "day" | "peakViewers"> & { hitShare: number | null };
+  daily: GraphDay[];
+  hours: Array<{ hour: number; plays: number; playedS: number }>;
+  weekdays: Array<{ weekday: number; plays: number; playedS: number }>;
+  titles: Array<{ ratingKey: string; title: string | null; plays: number; people: number; watchedS: number }>;
+  people: Array<{ userId: string; username: string | null; plays: number; watchedS: number; bytes: number }>;
+  servers: Array<{ guildId: string | null; plays: number; people: number; watchedS: number }>;
+  reasons: Array<{ reason: string; streams: number }>;
+}
+
+export interface HistorySummary {
+  path: string;
+  bytes: number;
+  plays: number;
+  open: number;
+  events: number;
+  usage: number;
+  requests: number;
+  people: number;
+  first: number | null;
+  last: number | null;
+}
+
+export interface TrimCounts {
+  before: number;
+  plays: number;
+  events: number;
+  usage: number;
+  requests: number;
+  people: number;
+}

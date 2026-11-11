@@ -60,10 +60,13 @@ const login = (password: string) => fetch(`${origin}/api/login`, {
 
 console.log("\n— nothing without signing in —");
 for (const p of ["/api/overview", "/api/live", "/api/logs", "/api/logs/files", "/api/settings", "/api/history", "/api/history/1", "/api/usage",
-  "/api/requests", "/api/people", "/api/people/111", "/api/places", "/api/caches"]) {
+  "/api/requests", "/api/people", "/api/people/111", "/api/places", "/api/caches", "/api/graphs", "/api/history-file",
+  "/api/export/history.csv", "/api/export/admin.sqlite"]) {
   const res = await fetch(origin + p);
   check(`${p}: 401`, [res.status, ((await res.json()) as { error?: string }).error], [401, "Sign in first"]);
 }
+const unsignedTrim = await fetch(`${origin}/api/history-file/trim`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{\"days\":1}" });
+check("/api/history-file/trim: 401", unsignedTrim.status, 401);
 const wrong = await login("not it");
 check("a wrong password: 401 and no cookie", [wrong.status, wrong.headers.get("set-cookie")], [401, null]);
 const forged = await fetch(`${origin}/api/overview`, { headers: { Cookie: `pdt_admin=${"a".repeat(64)}` } });
@@ -80,6 +83,8 @@ const get = (p: string) => fetch(origin + p, { headers: { Cookie: cookie } });
 check("  and the page knows it is signed in", await (await get("/api/session")).json(), { signedIn: true });
 const noHistory = await get("/api/history");
 check("  without a recorder, no history, and it says so", [noHistory.status, await noHistory.json()], [503, { error: "Nothing is recorded" }]);
+check("  nor graphs, files or the history file",
+  [(await get("/api/graphs")).status, (await get("/api/export/history.csv")).status, (await get("/api/history-file")).status], [503, 503, 503]);
 // The caches page works without the history: a seek-bar preview on disk.
 fs.mkdirSync(path.join(process.env.THUMB_CACHE_DIR, "previews"), { recursive: true });
 fs.writeFileSync(path.join(process.env.THUMB_CACHE_DIR, "previews", "4021-320-i2.bif"), Buffer.alloc(1234));
@@ -214,6 +219,69 @@ console.log("\n— the history, from the live room —");
     [["999000", [["888000", 2, 1]]]]);
   type Cached = { discord: { all: { plays: number } } | null };
   check("  and the caches, with what Discord's cache handed players", ((await (await hget("/api/caches")).json()) as Cached).discord?.all.plays, 1);
+
+  console.log("\n— graphs, files, the history file —");
+  type G = { days: number; daily: unknown[]; totals: { plays: number; people: number; reencodes: number } };
+  const graphs = (await (await hget("/api/graphs?days=7")).json()) as G;
+  check("graphs: a week by day, and its totals", [graphs.days, graphs.daily.length, graphs.totals.plays, graphs.totals.people, graphs.totals.reencodes],
+    [7, 7, 1, 2, 1]);
+  check("  a period it can't use: 30 days", ((await (await hget("/api/graphs?days=soon")).json()) as G).days, 30);
+  const csv = await hget("/api/export/history.csv");
+  const csvBytes = Buffer.from(await csv.arrayBuffer());
+  const csvLines = csvBytes.toString("utf8").replace(/^\uFEFF/, "").split("\r\n");
+  check("the history as CSV: a file to save, UTF-8 with its mark, a line a play",
+    [csv.status, csv.headers.get("content-type"), /^attachment; filename="theater-history-\d{8}-\d{4}\.csv"$/.test(csv.headers.get("content-disposition") ?? ""),
+      csvBytes.subarray(0, 3).toString("hex"), csvLines[0].split(",").slice(0, 4), csvLines.length],
+    [200, "text/csv; charset=utf-8", true, "efbbbf", ["id", "started_utc", "ended_utc", "title"], 3]);
+  check("  each play's title, where, who", [csvLines[1].split(",")[3], csvLines[1].split(",")[5], csvLines[1].split(",")[11]],
+    ["Ghost Stories", "999000", "artemidorus; crispymage"]);
+  const none = (await (await hget("/api/export/history.csv?q=nobody")).text()).split("\r\n");
+  check("  honouring the list's search", none.length, 2);
+  type J = { search: string | null; truncated: boolean; plays: Array<{ title: string; viewers: unknown[]; streams: Array<{ decision: string }>; events: unknown[] }> };
+  const hj = (await (await hget("/api/export/history.json")).json()) as J;
+  check("the history as JSON: each play whole, its viewers, streams and lines",
+    [hj.search, hj.truncated, hj.plays.map((p) => [p.title, p.viewers.length, p.streams.map((s) => s.decision), p.events.length > 0])],
+    [null, false, [["Ghost Stories", 2, ["transcode"], true]]]);
+  check("  people, and launches and joins, too",
+    [((await (await hget("/api/export/people.json")).json()) as { people: unknown[] }).people.length,
+      (await (await hget("/api/export/usage.csv")).text()).split("\r\n").filter(Boolean).length],
+    [2, 3]);
+  recorder.request({ at: Date.now(), userId: "222", mediaType: "movie", tmdbId: 129, seasons: null, outcome: "failed", status: 500,
+    error: "=HYPERLINK(\"http://evil.test\",\"x\")" });
+  const rq = (await (await hget("/api/export/requests.csv")).text()).split("\r\n")[1];
+  check("  text a spreadsheet would run as a formula stays text", rq.endsWith(`"'=HYPERLINK(""http://evil.test"",""x"")"`), true);
+  check("  a file it doesn't make",
+    [(await hget("/api/export/nope.csv")).status, (await hget("/api/export/history.xml")).status, await (await hget("/api/export/history")).json()],
+    [404, 404, { error: "No such export" }]);
+  const copy = await hget("/api/export/admin.sqlite");
+  const copyBytes = Buffer.from(await copy.arrayBuffer());
+  check("the whole history file, to save",
+    [copy.status, copy.headers.get("content-type"), /filename="theater-admin-\d{8}-\d{4}\.sqlite"/.test(copy.headers.get("content-disposition") ?? ""),
+      copyBytes.subarray(0, 15).toString("latin1")],
+    [200, "application/vnd.sqlite3", true, "SQLite format 3"]);
+  type F = { summary: { plays: number; open: number; requests: number; bytes: number }; trim: { before: number; plays: number; requests: number } | null };
+  const file = (await (await hget("/api/history-file")).json()) as F;
+  check("the history file: what it holds", [file.summary.plays, file.summary.open, file.summary.requests, file.summary.bytes > 0, file.trim],
+    [1, 1, 1, true, null]);
+  const askedAt = Date.now();
+  const preview = ((await (await hget("/api/history-file?days=1")).json()) as F).trim;
+  check("  and what removing what's older than a day would remove: none of it",
+    [preview && Math.abs(preview.before - (askedAt - 86_400_000)) < 5_000, { ...preview, before: 0 }],
+    [true, { before: 0, plays: 0, events: 0, usage: 0, requests: 0, people: 0 }]);
+  const post = (body: string) => fetch(`${at}/api/history-file/trim`, { method: "POST", headers: { Cookie: c, "Content-Type": "application/json" }, body });
+  const bad = await Promise.all(["{}", "{\"days\":0}", "{\"days\":\"x\"}", "{\"days\":1.5}", "{\"days\":4000}"].map(post));
+  check("removing old history: only with how many days to keep, 1 to 3650",
+    [bad.map((r) => r.status), ((await bad[0].json()) as { error: string }).error], [[400, 400, 400, 400, 400], "Say how many days to keep: 1 to 3650"]);
+  const logged = console.log;
+  const lines: string[] = [];
+  console.log = (...a: unknown[]) => { lines.push(a.join(" ")); };
+  const removed = await post("{\"days\":1}");
+  console.log = logged;
+  const r = (await removed.json()) as { plays: number; bytesBefore: number; bytesAfter: number };
+  check("  it removes what's older, keeps what is going on, and logs it",
+    [removed.status, r.plays, r.bytesBefore > 0, ((await (await hget("/api/history-file")).json()) as F).summary.plays,
+      lines.some((l) => l.startsWith("[Admin] History older than 1 days removed: 0 plays"))],
+    [200, 0, true, 1, true]);
   withHistory.close();
   recorder.close();
 }

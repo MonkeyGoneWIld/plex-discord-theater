@@ -15,6 +15,12 @@
   --bad-soft: #fbe6e6;
   --info: #1b6fa8;
   --info-soft: #e2f0fa;
+  /* Chart series, in this order (validated for colour vision and contrast on --surface), and chart chrome */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --grid: #e6e8ec;
+  --axis: #c3c7ce;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
   color-scheme: light;
 }
@@ -36,6 +42,11 @@
     --bad-soft: #3a1919;
     --info: #5db2ec;
     --info-soft: #132a3b;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --grid: #262b33;
+    --axis: #3a414b;
     color-scheme: dark;
   }
 }
@@ -220,8 +231,57 @@ a:hover { text-decoration: underline; }
 .where, .table td.mono { white-space: nowrap; overflow-wrap: normal; }
 .table td.title-cell { min-width: 160px; }
 
-/* Eight tabs don't fit beside the brand and the live dot: a row of their own. */
-@media (max-width: 1180px) {
+/* Graphs, downloads, the history file */
+.period { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.period .muted { margin-left: 6px; }
+.stale { opacity: .5; transition: opacity .2s; }
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(460px, 100%), 1fr)); gap: 16px; }
+.charts + .charts, .tiles + .charts, .note + .charts { margin-top: 16px; }
+.tiles + .note { margin-top: 16px; }
+.chart-card { min-width: 0; }
+.chart-card.wide { grid-column: 1 / -1; }
+.chart-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.chart-sub { margin: 2px 0 0; }
+.chart { width: 100%; margin-top: 12px; }
+.chart-table { margin-top: 8px; max-height: 360px; overflow-y: auto; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; list-style: none; margin: 10px 0 0; padding: 0; font-size: 12.5px; color: var(--muted); }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.chart-tip {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  font-size: 12.5px; box-shadow: 0 4px 16px rgba(0, 0, 0, .14); min-width: 160px;
+}
+.tip-title { color: var(--muted); margin-bottom: 4px; }
+.tip-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.tip-row strong { font-variant-numeric: tabular-nums; }
+.tip-key { display: inline-block; width: 12px; height: 2px; border-radius: 1px; }
+.bars { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 2px; }
+.bar-row {
+  display: grid; grid-template-columns: minmax(0, 36%) minmax(0, 1fr) auto; align-items: center; gap: 10px;
+  width: 100%; padding: 5px 6px; border-radius: 6px; background: none; color: var(--text); font-weight: 400; text-align: left;
+}
+button.bar-row:hover, button.bar-row:focus-visible { background: var(--surface-2); }
+.bar-name { font-size: 13px; overflow-wrap: anywhere; }
+.bar-track { height: 16px; }
+.bar-fill { display: block; height: 100%; min-width: 2px; border-radius: 0 4px 4px 0; }
+.bar-value { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.table th.num, .table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.downloads { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; padding-bottom: 2px; }
+a.button {
+  display: inline-block; border-radius: 6px; padding: 7px 14px; font-weight: 500; text-decoration: none;
+  background: var(--accent); color: #fff;
+}
+a.button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+a.button.small { padding: 4px 10px; font-size: 12.5px; }
+a.button:hover { text-decoration: none; filter: brightness(1.08); }
+a.button.ghost:hover { filter: none; background: var(--surface-2); }
+button.danger { background: var(--bad); color: #fff; }
+.history-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 0; }
+.confirm { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--bad); border-radius: 8px; background: var(--bad-soft); }
+.confirm p { margin: 0 0 8px; }
+.confirm-actions { display: flex; gap: 8px; }
+
+/* Nine tabs don't fit beside the brand and the live dot: a row of their own. */
+@media (max-width: 1300px) {
   .topbar { flex-wrap: wrap; height: auto; padding: 8px 24px 0; gap: 4px 16px; }
   .tabs { order: 3; width: 100%; height: 40px; }
 }

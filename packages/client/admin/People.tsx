@@ -2,7 +2,8 @@ import { useState } from "react";
 import { api } from "./api";
 import type { PersonSummary } from "./types";
 import { clock, utc } from "./format";
-import { BufferingCell, DataCell, useLoad, Where } from "./parts";
+import { BufferingCell, DataCell, Downloads, useLoad, Where } from "./parts";
+import { MiniChart } from "./lazy";
 import { RequestRows } from "./Requests";
 
 const PAGE = 50;
@@ -22,6 +23,8 @@ function PeopleList({ onError }: { onError: (e: unknown) => void }) {
   const { data, busy } = useLoad(() => api.people({ q: query, offset, limit: PAGE }), [query, offset], onError);
   const people = data?.people ?? [];
   return (
+    <>
+    <MiniChart kind="people" onError={onError} />
     <section className="card">
       <form className="toolbar" onSubmit={(e) => { e.preventDefault(); setQuery(q); setOffset(0); }}>
         <label className="grow">
@@ -30,6 +33,7 @@ function PeopleList({ onError }: { onError: (e: unknown) => void }) {
         </label>
         <button type="submit">Find</button>
         {query && <button type="button" className="ghost" onClick={() => { setQ(""); setQuery(""); setOffset(0); }}>Show all</button>}
+        <Downloads kind="people" q={query} />
       </form>
       {busy && !data ? <p className="empty">Loading…</p> : people.length === 0 ? (
         <p className="empty">{query ? "Nobody matches." : "Nobody has been seen since the admin page was turned on."}</p>
@@ -51,6 +55,7 @@ function PeopleList({ onError }: { onError: (e: unknown) => void }) {
         <button className="ghost" disabled={people.length < PAGE} onClick={() => setOffset(offset + PAGE)}>Older</button>
       </div>
     </section>
+    </>
   );
 }
 

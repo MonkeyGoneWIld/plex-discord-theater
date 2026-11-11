@@ -39,8 +39,11 @@ const { attachWebSocketServer } = await import("../src/services/sync.js");
 const { createSession } = await import("../src/middleware/auth.js");
 const { instanceHosts } = await import("../src/routes/discord.js");
 const { WebSocket } = await import("ws");
+const { backfill } = await import("./admin-fixture-history.js");
 
-// Its history, recorded as on a real server, into the fixture's own folder.
+// Its history, recorded as on a real server, into the fixture's own folder:
+// six weeks of it made up first, for the graphs.
+await backfill(adminDbPath(), Date.now());
 const recorder = new Recorder({ dbPath: adminDbPath() });
 setAdminHooks(recorder);
 recorder.start();

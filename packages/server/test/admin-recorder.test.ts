@@ -319,6 +319,120 @@ check("a play a crashed server never ended ends where it was last seen",
   [after.title, after.endReason, after.endedAt === lastSeen], ["Millennium Actress", "server restarted", true]);
 next.close();
 
+console.log("\n— graphs, the history file, removing old history —");
+// A recorder of its own, on a clock of its own: a play 40 days back, one
+// still going since then, and two plays of one title on two days.
+const DAY = 86_400_000;
+const D = Math.floor(t / DAY) + 10;
+let g = (D - 40) * DAY + 12 * 3_600_000;
+let gRooms: Any[] = [];
+const gInst = new Map<string, Inst>();
+const graphPath = path.join(process.env.THUMB_CACHE_DIR, "graphs.sqlite");
+const gr = new Recorder({ dbPath: graphPath, now: () => g, instances: () => gInst,
+  source: () => ({ at: g, totals: {}, rooms: gRooms }) as unknown as Overview });
+const gStep = (ms: number) => { g += ms; gr.tick(g); };
+const room = (id: string, ratingKey: string, title: string, guildId: string, people: Array<[string, string]>, streams: Any[]): Any => ({
+  ...structuredClone(R1), id, ratingKey, title, positionS: 0,
+  discord: { guildId, channelId: `${guildId}-c`, hostUserId: people[0][0], startedAt: g },
+  clients: people.map(([id, name], i) => client(id, name, { role: i === 0 ? "host" : "viewer" })),
+  streams,
+});
+const open = (r: Any) => { gInst.set(r.id as string, { hostUserId: (r.discord as Any).hostUserId as string, guildId: (r.discord as Any).guildId as string,
+  channelId: (r.discord as Any).channelId as string, createdAt: g }); gRooms.push(r); gStep(10); };
+const close = (id: string) => { gRooms = gRooms.filter((r) => r.id !== id); gStep(2_000); };
+
+open(room("GP", "P1", "Paprika", "G7", [["555", "oldtimer"]], [stream("v0", "S60", { viewers: ["555"], decision: "copy" })]));
+open(room("GB", "B1", "Perfect Blue", "G9", [["666", "nightlight"]], [stream("v0", "S61", { viewers: ["666"], decision: "copy" })]));
+for (let i = 0; i < 3; i++) gStep(2_000);
+close("GP");
+const paprikaId = gr.history({ q: "paprika" })[0].id;
+
+// Day D, 20:00 UTC: two watching, a re-encode and a copy, and their data.
+g = D * DAY + 20 * 3_600_000;
+gr.tick(g);
+open(room("GA", "A1", "Akira", "G7", [["111", "artemidorus"], ["222", "crispymage"]], [
+  stream("v0", "S70", { viewers: ["111"], decision: "transcode", reason: "Their player can't play HEVC" }),
+  stream("v1", "S71", { viewers: ["222"], decision: "copy" }),
+]));
+for (let i = 0; i < 5; i++) gStep(2_000);
+const gHealth = (o: Any, at: number) => ({ t: at, level: "LOG", tag: "Health", msg: "sample", data: { session: "S71", ...o } });
+gr.clientLog({ at: g, userId: "222", clientId: "pageG", entries: [
+  gHealth({ httpMB: 0, p2pMB: 0, edgeHitMB: "0", edgeMB: "0" }, g - 8_000),
+  gHealth({ httpMB: 6, p2pMB: 1, edgeHitMB: "2.0", edgeMB: "4.0" }, g),
+] });
+gStep(2_000);
+close("GA");
+
+// Day D + 1, 03:00 UTC: the same title somewhere else, and a request.
+g = (D + 1) * DAY + 3 * 3_600_000;
+gr.tick(g);
+open(room("GC", "A1", "Akira", "G8", [["333", "owlet"]], [stream("v0", "S72", { viewers: ["333"], decision: "copy" })]));
+for (let i = 0; i < 2; i++) gStep(2_000);
+close("GC");
+gr.request({ at: g, userId: "333", mediaType: "movie", tmdbId: 149, seasons: null, outcome: "requested", status: 2, error: null });
+
+const week = gr.graphs({ days: 7 });
+const dayOf = (d: number) => week.daily.find((x) => x.day === d * DAY)!;
+check("graphs: a day for each of the last 7, UTC, the last one today",
+  [week.days, week.daily.length, week.daily[6].day, week.from, week.to], [7, 7, (D + 1) * DAY, (D - 5) * DAY, (D + 2) * DAY]);
+check("  each play on the day it began: plays, people, launches, streams and how",
+  [dayOf(D), dayOf(D + 1)].map((x) => [x.plays, x.people, x.peakViewers, x.launches, x.streams, x.copies, x.reencodes, x.requests]),
+  [[1, 2, 2, 1, 2, 1, 1, 0], [1, 1, 1, 1, 1, 1, 0, 1]]);
+check("  each viewer's watching, and their data and where it came from",
+  [dayOf(D).watchedS, dayOf(D).httpBytes, dayOf(D).edgeBytes, dayOf(D).edgeHitBytes, dayOf(D).botBytes, dayOf(D).p2pBytes],
+  [gr.play(gr.history({ q: "crispymage" })[0].id)!.viewers.reduce((s, v) => s + v.watchedS, 0), 6e6, 4e6, 2e6, 4e6, 1e6]);
+check("  the days without any, all naught", week.daily.slice(0, 5).every((x) => x.plays === 0 && x.launches === 0), true);
+check("  the totals: plays, people, launches, requests, Discord's share",
+  [week.totals.plays, week.totals.people, week.totals.launches, week.totals.requests, week.totals.hitShare, week.totals.reencodes],
+  [2, 3, 2, 1, 0.5, 1]);
+check("  by hour and weekday, UTC",
+  [week.hours.filter((h) => h.plays).map((h) => h.hour), week.weekdays.filter((w) => w.plays).map((w) => w.weekday)],
+  [[3, 20], [new Date(D * DAY).getUTCDay(), new Date((D + 1) * DAY).getUTCDay()].sort()]);
+check("  the most watched titles, people and servers; why streams were re-encoded",
+  [week.titles.map((x) => [x.ratingKey, x.title, x.plays, x.people]), week.people.map((x) => x.userId).sort(),
+    week.servers.map((x) => x.guildId).sort(), week.reasons],
+  [[["A1", "Akira", 2, 3]], ["111", "222", "333"], ["G7", "G8"], [{ reason: "Their player can't play HEVC", streams: 1 }]]);
+const all = gr.graphs({ days: 0 });
+check("  all of it: from the first day anything happened",
+  [all.days, all.daily.length, all.daily[0].day, all.totals.plays, all.titles.map((x) => x.title).sort()],
+  [0, 42, (D - 40) * DAY, 4, ["Akira", "Paprika", "Perfect Blue"]]);
+check("  a period not a number is 30 days; one too long, ten years",
+  [gr.graphs({ days: "lots" }).days, gr.graphs({ days: -3 }).days, gr.graphs({ days: 99_999 }).days, gr.graphs({ days: 99_999 }).daily.length],
+  [30, 30, 3650, 3650]);
+
+const sum0 = gr.summary();
+check("the history file: where, how big, what it holds, from when",
+  [sum0.path, sum0.bytes > 0, sum0.plays, sum0.open, sum0.people, sum0.requests, sum0.first, sum0.last],
+  [graphPath, true, 4, 1, 5, 1, (D - 40) * DAY + 12 * 3_600_000, g]);
+const cutoff = (D - 30) * DAY;
+const preview = gr.trimPreview(cutoff);
+const paprikaLines = gr.play(paprikaId)!.events.length;
+check("what removing the history before a day would remove: a play that ended before it, its lines, its people",
+  [preview.plays, preview.events === paprikaLines && paprikaLines > 0, preview.usage, preview.requests, preview.people],
+  [1, true, 4, 0, 1]);
+check("  and nothing is gone yet", gr.summary().plays, 4);
+const trimmed = gr.trim(cutoff);
+check("removing it removes just that, and says how big the file was and is",
+  [trimmed.plays, trimmed.people, trimmed.bytesBefore > 0, trimmed.bytesAfter > 0, gr.play(paprikaId), gr.person("555")],
+  [1, 1, true, true, null, null]);
+check("  a play still going is kept, from however long ago, and its people",
+  [gr.history().map((p) => p.title).sort(), gr.person("666")?.person.userId, gr.summary().plays, gr.summary().open],
+  [["Akira", "Akira", "Perfect Blue"], "666", 3, 1]);
+check("  the launches and joins from before it are gone, the rest kept",
+  [gr.usage().every((u) => u.at >= cutoff), gr.usage().length > 0], [true, true]);
+gRooms.push(room("GQ", "P1", "Paprika", "G7", [["555", "oldtimer"]], [stream("v0", "S62", { viewers: ["555"], decision: "copy" })]));
+gStep(2_000);
+check("  somebody removed is written again when next seen", gr.person("555")?.person.username, "oldtimer");
+
+const snap = gr.snapshot();
+const snapPath = path.join(process.env.THUMB_CACHE_DIR, "snap.sqlite");
+fs.writeFileSync(snapPath, snap);
+const sdb = new Database(snapPath, { readonly: true });
+check("a copy of the whole history file, as it is: it opens, with every play",
+  [snap.subarray(0, 15).toString("latin1"), (sdb.prepare("SELECT COUNT(*) AS n FROM plays").get() as Any).n], ["SQLite format 3", 4]);
+sdb.close();
+gr.close();
+
 // ─── What reaches it ─────────────────────────────────────────────
 const express = (await import("express")).default;
 const { createSession, requireAuth } = await import("../src/middleware/auth.js");

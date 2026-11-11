@@ -20,6 +20,9 @@ import type { ClientLogEntry, ClientLogEvent, RequestEvent, TransportEvent } fro
 export const RECORD_EVERY_MS = 2_000;
 /** A longer gap between looks (the process paused) isn't counted as watched. */
 const MAX_TICK_GAP_MS = 10_000;
+const DAY_MS = 86_400_000;
+/** The most days a graph covers: ten years. */
+export const MAX_GRAPH_DAYS = 3_650;
 /** Enough for a long film with a lot going on; a runaway player can't fill the disk. */
 const MAX_EVENTS_PER_PLAY = 5_000;
 const MAX_ERROR_EVENTS_PER_PLAY = 200;
@@ -1024,6 +1027,274 @@ export class Recorder {
     }
     return out;
   }
+
+  // ─── Graphs, the file, trimming ──────────────────────────────
+
+  /**
+   * The history by UTC day over the last `days` days (0: all of it): plays,
+   * people, the data sent and where from, streams, buffering, requests and
+   * launches; plays by hour and weekday; the titles, people and servers most
+   * watched; and why streams were re-encoded. A play counts on the day, hour
+   * and weekday it started.
+   */
+  graphs(opts: { days?: unknown } = {}, now = this.now()): Graphs {
+    const asked = Math.floor(Number(opts.days ?? 30));
+    const days = Number.isFinite(asked) && asked >= 0 ? Math.min(asked, MAX_GRAPH_DAYS) : 30;
+    const today = Math.floor(now / DAY_MS);
+    let first = today - Math.max(1, days) + 1;
+    if (days === 0) {
+      const r = this.st(`SELECT MIN(at) AS at FROM (SELECT MIN(started_at) AS at FROM plays
+          UNION ALL SELECT MIN(at) FROM usage UNION ALL SELECT MIN(at) FROM requests)`).get() as { at: number | null };
+      first = r.at === null ? today : Math.max(today - MAX_GRAPH_DAYS + 1, Math.min(today, Math.floor(r.at / DAY_MS)));
+    }
+    const from = first * DAY_MS;
+    const byDay = new Map<number, GraphDay>();
+    for (let d = first; d <= today; d++) byDay.set(d, emptyDay(d * DAY_MS));
+    const rows = (sql: string) => this.st(sql).all({ from }) as Array<Record<string, unknown>>;
+    const each = (sql: string, fill: (g: GraphDay, r: Record<string, unknown>) => void) => {
+      for (const r of rows(sql)) {
+        const g = byDay.get(int(r.d));
+        if (g) fill(g, r);
+      }
+    };
+    const DAY = "CAST(started_at / 86400000 AS INTEGER)";
+    each(`SELECT ${DAY} AS d, COUNT(*) AS plays, COALESCE(SUM(played_s), 0) AS played, MAX(peak_viewers) AS peak
+      FROM plays WHERE started_at >= @from GROUP BY d`, (g, r) => {
+      g.plays = int(r.plays);
+      g.playedS = Math.round(int(r.played));
+      g.peakViewers = int(r.peak);
+    });
+    each(`SELECT CAST(p.started_at / 86400000 AS INTEGER) AS d, COUNT(DISTINCT v.user_id) AS people,
+        SUM(v.watched_s) AS watched, SUM(v.http_bytes) AS http, SUM(v.edge_bytes) AS edge, SUM(v.edge_hit_bytes) AS hit,
+        SUM(MAX(0, v.http_bytes - v.edge_hit_bytes)) AS bot, SUM(v.p2p_bytes) AS p2p,
+        SUM(v.stalls) AS stalls, SUM(v.stalled_ms) AS stalled, SUM(v.errors) AS errors
+      FROM play_viewers v JOIN plays p ON p.id = v.play_id WHERE p.started_at >= @from GROUP BY d`, (g, r) => {
+      g.people = int(r.people);
+      g.watchedS = Math.round(int(r.watched));
+      g.httpBytes = int(r.http);
+      g.edgeBytes = int(r.edge);
+      g.edgeHitBytes = int(r.hit);
+      g.botBytes = int(r.bot);
+      g.p2pBytes = int(r.p2p);
+      g.stalls = int(r.stalls);
+      g.stalledMs = int(r.stalled);
+      g.errors = int(r.errors);
+    });
+    each(`SELECT ${DAY} AS d, COUNT(*) AS streams, SUM(decision = 'copy') AS copies, SUM(decision = 'transcode') AS reencodes
+      FROM play_streams WHERE started_at >= @from GROUP BY d`, (g, r) => {
+      g.streams = int(r.streams);
+      g.copies = int(r.copies);
+      g.reencodes = int(r.reencodes);
+    });
+    each(`SELECT CAST(at / 86400000 AS INTEGER) AS d, COUNT(*) AS n FROM requests WHERE at >= @from GROUP BY d`,
+      (g, r) => { g.requests = int(r.n); });
+    each(`SELECT CAST(at / 86400000 AS INTEGER) AS d, COUNT(*) AS n FROM usage WHERE kind = 'launch' AND at >= @from GROUP BY d`,
+      (g, r) => { g.launches = int(r.n); });
+
+    const daily = [...byDay.values()];
+    const sum = (k: keyof GraphDay) => daily.reduce((s, g) => s + g[k], 0);
+    const people = this.st(`SELECT COUNT(DISTINCT v.user_id) AS n FROM play_viewers v JOIN plays p ON p.id = v.play_id
+      WHERE p.started_at >= @from`).get({ from }) as { n: number };
+    const edge = sum("edgeBytes");
+    const totals = {
+      plays: sum("plays"), playedS: sum("playedS"), watchedS: sum("watchedS"), people: int(people.n),
+      httpBytes: sum("httpBytes"), edgeBytes: edge, edgeHitBytes: sum("edgeHitBytes"), botBytes: sum("botBytes"),
+      p2pBytes: sum("p2pBytes"), hitShare: edge > 0 ? sum("edgeHitBytes") / edge : null,
+      stalls: sum("stalls"), stalledMs: sum("stalledMs"), errors: sum("errors"),
+      streams: sum("streams"), copies: sum("copies"), reencodes: sum("reencodes"),
+      requests: sum("requests"), launches: sum("launches"),
+    };
+
+    const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, plays: 0, playedS: 0 }));
+    for (const r of rows(`SELECT CAST(started_at / 3600000 AS INTEGER) % 24 AS h, COUNT(*) AS plays,
+        COALESCE(SUM(played_s), 0) AS played FROM plays WHERE started_at >= @from GROUP BY h`)) {
+      const h = hours[int(r.h)];
+      if (h) Object.assign(h, { plays: int(r.plays), playedS: Math.round(int(r.played)) });
+    }
+    // 1 January 1970 was a Thursday: day 0 is weekday 4, Sunday being 0.
+    const weekdays = Array.from({ length: 7 }, (_, weekday) => ({ weekday, plays: 0, playedS: 0 }));
+    for (const r of rows(`SELECT (${DAY} + 4) % 7 AS w, COUNT(*) AS plays, COALESCE(SUM(played_s), 0) AS played
+        FROM plays WHERE started_at >= @from GROUP BY w`)) {
+      const w = weekdays[int(r.w)];
+      if (w) Object.assign(w, { plays: int(r.plays), playedS: Math.round(int(r.played)) });
+    }
+
+    const titles = rows(`SELECT p.rating_key AS k, MAX(p.title) AS title, COUNT(DISTINCT p.id) AS plays,
+        COUNT(DISTINCT v.user_id) AS people, COALESCE(SUM(v.watched_s), 0) AS watched
+      FROM plays p LEFT JOIN play_viewers v ON v.play_id = p.id WHERE p.started_at >= @from
+      GROUP BY p.rating_key ORDER BY watched DESC, plays DESC LIMIT 10`)
+      .map((r) => ({ ratingKey: String(r.k), title: (r.title as string | null) ?? null, plays: int(r.plays),
+        people: int(r.people), watchedS: Math.round(int(r.watched)) }));
+    const topPeople = rows(`SELECT v.user_id AS id, COALESCE(pe.username, MAX(v.username)) AS name, COUNT(*) AS plays,
+        SUM(v.watched_s) AS watched, SUM(v.http_bytes + v.p2p_bytes) AS bytes
+      FROM play_viewers v JOIN plays p ON p.id = v.play_id LEFT JOIN people pe ON pe.user_id = v.user_id
+      WHERE p.started_at >= @from GROUP BY v.user_id ORDER BY watched DESC, plays DESC LIMIT 10`)
+      .map((r) => ({ userId: String(r.id), username: (r.name as string | null) ?? null, plays: int(r.plays),
+        watchedS: Math.round(int(r.watched)), bytes: int(r.bytes) }));
+    const servers = rows(`SELECT p.guild_id AS g, COUNT(DISTINCT p.id) AS plays, COUNT(DISTINCT v.user_id) AS people,
+        COALESCE(SUM(v.watched_s), 0) AS watched
+      FROM plays p LEFT JOIN play_viewers v ON v.play_id = p.id WHERE p.started_at >= @from
+      GROUP BY p.guild_id ORDER BY watched DESC, plays DESC LIMIT 10`)
+      .map((r) => ({ guildId: (r.g as string | null) ?? null, plays: int(r.plays), people: int(r.people),
+        watchedS: Math.round(int(r.watched)) }));
+    const reasons = rows(`SELECT COALESCE(reason, 'No reason given') AS reason, COUNT(*) AS n FROM play_streams
+      WHERE decision = 'transcode' AND started_at >= @from GROUP BY 1 ORDER BY n DESC, reason LIMIT 8`)
+      .map((r) => ({ reason: String(r.reason), streams: int(r.n) }));
+
+    return { days, from, to: (today + 1) * DAY_MS, totals, daily, hours, weekdays, titles, people: topPeople, servers, reasons };
+  }
+
+  /** The history file: how big it is, what it holds, and from when. */
+  summary(): HistorySummary {
+    const size = (f: string) => {
+      try {
+        return fs.statSync(f).size;
+      } catch {
+        return 0;
+      }
+    };
+    const count = (sql: string) => int((this.st(sql).get() as { n: number }).n);
+    const span = this.st(`SELECT MIN(at) AS first, MAX(at) AS last FROM (
+        SELECT started_at AS at FROM plays UNION ALL SELECT at FROM usage UNION ALL SELECT at FROM requests)`)
+      .get() as { first: number | null; last: number | null };
+    return {
+      path: this.db.name,
+      bytes: size(this.db.name) + size(`${this.db.name}-wal`),
+      plays: count("SELECT COUNT(*) AS n FROM plays"),
+      open: count("SELECT COUNT(*) AS n FROM plays WHERE ended_at IS NULL"),
+      events: count("SELECT COUNT(*) AS n FROM events"),
+      usage: count("SELECT COUNT(*) AS n FROM usage"),
+      requests: count("SELECT COUNT(*) AS n FROM requests"),
+      people: count("SELECT COUNT(*) AS n FROM people"),
+      first: span.first ?? null,
+      last: span.last ?? null,
+    };
+  }
+
+  /**
+   * What removing the history from before `before` would remove: plays that
+   * ended before it, with their viewers, streams and lines; launches, joins
+   * and requests from before it; and people seen only before it. A play still
+   * going is never removed.
+   */
+  trimPreview(before: number): TrimCounts {
+    const one = (sql: string) => int((this.st(sql).get({ before }) as { n: number }).n);
+    return {
+      before,
+      plays: one(`SELECT COUNT(*) AS n FROM plays p WHERE ${OLD_PLAY}`),
+      events: one(`SELECT COUNT(*) AS n FROM events e WHERE ${OLD_EVENT}`),
+      usage: one("SELECT COUNT(*) AS n FROM usage WHERE at < @before"),
+      requests: one("SELECT COUNT(*) AS n FROM requests WHERE at < @before"),
+      people: one(`SELECT COUNT(*) AS n FROM people pe WHERE ${OLD_PERSON}`),
+    };
+  }
+
+  /** Remove the history from before `before` (see trimPreview), then shrink the file. */
+  trim(before: number): TrimCounts & { bytesBefore: number; bytesAfter: number } {
+    const bytesBefore = this.summary().bytes;
+    const counts = this.trimPreview(before);
+    this.db.transaction(() => {
+      // People first: who is left with nothing is judged on what is still there.
+      this.st(`DELETE FROM people WHERE user_id IN (SELECT pe.user_id FROM people pe WHERE ${OLD_PERSON})`).run({ before });
+      this.st(`DELETE FROM events WHERE id IN (SELECT e.id FROM events e WHERE ${OLD_EVENT})`).run({ before });
+      this.st(`DELETE FROM play_viewers WHERE play_id IN (SELECT p.id FROM plays p WHERE ${OLD_PLAY})`).run({ before });
+      this.st(`DELETE FROM play_streams WHERE play_id IN (SELECT p.id FROM plays p WHERE ${OLD_PLAY})`).run({ before });
+      this.st(`DELETE FROM plays WHERE id IN (SELECT p.id FROM plays p WHERE ${OLD_PLAY})`).run({ before });
+      this.st("DELETE FROM usage WHERE at < @before").run({ before });
+      this.st("DELETE FROM requests WHERE at < @before").run({ before });
+    })();
+    // Names written recently are written again only after a while: those
+    // removed must be written the next time they are seen.
+    this.names.clear();
+    this.db.exec("VACUUM");
+    this.db.pragma("wal_checkpoint(TRUNCATE)");
+    return { ...counts, bytesBefore, bytesAfter: this.summary().bytes };
+  }
+
+  /** The whole history, as one SQLite file. */
+  snapshot(): Buffer {
+    return this.db.serialize();
+  }
+}
+
+/** A play to remove when trimming (as p): ended, before @before. */
+const OLD_PLAY = "p.ended_at IS NOT NULL AND p.ended_at < @before";
+/** A line to remove (as e): of a play removed, or of no play and before @before. */
+const OLD_EVENT = `(e.play_id IN (SELECT p.id FROM plays p WHERE ${OLD_PLAY}) OR (e.play_id IS NULL AND e.at < @before))`;
+/** Somebody to remove (as pe): last seen before @before, and in nothing kept. */
+const OLD_PERSON = `pe.last_seen < @before
+  AND NOT EXISTS (SELECT 1 FROM play_viewers v JOIN plays p ON p.id = v.play_id
+    WHERE v.user_id = pe.user_id AND NOT (${OLD_PLAY}))
+  AND NOT EXISTS (SELECT 1 FROM usage u WHERE u.user_id = pe.user_id AND u.at >= @before)
+  AND NOT EXISTS (SELECT 1 FROM requests r WHERE r.user_id = pe.user_id AND r.at >= @before)`;
+
+const int = (v: unknown): number => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+};
+
+export interface GraphDay {
+  /** Midnight UTC. */
+  day: number;
+  plays: number;
+  playedS: number;
+  peakViewers: number;
+  people: number;
+  watchedS: number;
+  httpBytes: number;
+  edgeBytes: number;
+  edgeHitBytes: number;
+  botBytes: number;
+  p2pBytes: number;
+  stalls: number;
+  stalledMs: number;
+  errors: number;
+  streams: number;
+  copies: number;
+  reencodes: number;
+  requests: number;
+  launches: number;
+}
+
+function emptyDay(day: number): GraphDay {
+  return { day, plays: 0, playedS: 0, peakViewers: 0, people: 0, watchedS: 0, httpBytes: 0, edgeBytes: 0, edgeHitBytes: 0,
+    botBytes: 0, p2pBytes: 0, stalls: 0, stalledMs: 0, errors: 0, streams: 0, copies: 0, reencodes: 0, requests: 0, launches: 0 };
+}
+
+export interface Graphs {
+  days: number;
+  from: number;
+  to: number;
+  totals: Omit<GraphDay, "day" | "peakViewers"> & { hitShare: number | null };
+  daily: GraphDay[];
+  hours: Array<{ hour: number; plays: number; playedS: number }>;
+  weekdays: Array<{ weekday: number; plays: number; playedS: number }>;
+  titles: Array<{ ratingKey: string; title: string | null; plays: number; people: number; watchedS: number }>;
+  people: Array<{ userId: string; username: string | null; plays: number; watchedS: number; bytes: number }>;
+  servers: Array<{ guildId: string | null; plays: number; people: number; watchedS: number }>;
+  reasons: Array<{ reason: string; streams: number }>;
+}
+
+export interface HistorySummary {
+  path: string;
+  bytes: number;
+  plays: number;
+  open: number;
+  events: number;
+  usage: number;
+  requests: number;
+  people: number;
+  first: number | null;
+  last: number | null;
+}
+
+export interface TrimCounts {
+  before: number;
+  plays: number;
+  events: number;
+  usage: number;
+  requests: number;
+  people: number;
 }
 
 /** The host's name, as last seen, beside a play (as p). */

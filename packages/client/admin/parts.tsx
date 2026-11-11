@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { exportUrl } from "./api";
 import type { Notes, PlayEvent, ViewerData } from "./types";
 import { bytes, clock, quality, short } from "./format";
 
@@ -74,6 +75,17 @@ export function Where({ guildId, channelId }: { guildId: string | null; channelI
   return (
     <span className="mono where" title={`Server ${guildId ?? "?"} · channel ${channelId ?? "?"}`}>
       {short(guildId ?? "?", 10)} · {short(channelId ?? "?", 10)}
+    </span>
+  );
+}
+
+/** A list as a file: CSV for a spreadsheet, JSON for a script; what a search found, or all of it. */
+export function Downloads({ kind, q }: { kind: "history" | "people" | "usage" | "requests"; q?: string }) {
+  return (
+    <span className="downloads">
+      <span className="muted small">{q ? "Download what's found" : "Download all"}</span>
+      <a className="button ghost small" href={exportUrl(kind, "csv", q)} download>CSV</a>
+      <a className="button ghost small" href={exportUrl(kind, "json", q)} download>JSON</a>
     </span>
   );
 }

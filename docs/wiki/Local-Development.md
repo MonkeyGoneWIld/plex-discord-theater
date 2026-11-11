@@ -60,7 +60,7 @@ each time it starts; for longer work, use a named tunnel as described in
 |---|---|
 | `npm run dev` | Server and client, with reloading |
 | `npm run build` | Builds the client and the admin page, then the server |
-| `npm run dev:admin` | The admin page on 3050 with made-up rooms, recording a history as they play, with a few requests and cached files (build it first); password `admin-fixture` unless `ADMIN_PASSWORD` is set |
+| `npm run dev:admin` | The admin page on 3050 with made-up rooms, recording a history as they play, after six made-up weeks of it for the graphs, with a few requests and cached files (build it first); password `admin-fixture` unless `ADMIN_PASSWORD` is set |
 | `npm run dev:admin -w packages/client` | The admin page on 5174, reloading as you change it, against the server on 3050 |
 | `npm start` | Runs the built server |
 | `npm test` | Runs the test suite |

@@ -204,7 +204,9 @@ administrator API key is required.
   it; and the logs and settings, secrets hidden. It keeps a history of every
   play: who watched, the data each got and from where, their buffering, and
   everything that changed. It also shows each person, each Discord server and
-  channel the bot is used in, who requested what, and what each cache holds.
+  channel the bot is used in, who requested what, and what each cache holds;
+  graphs of all of it by day; each list as CSV or JSON; and the history kept
+  until you remove the oldest of it.
   [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Admin-Page)
 
 ## Installation
@@ -430,7 +432,7 @@ the order you set things up in.
 | | [Personal Plex Sync](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Personal-Plex-Sync) | Linking your own Plex account |
 | | [Requesting Titles](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Requesting-Titles) | Requests through Seerr |
 | **Maintain** | [Updating and Backups](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Updating-and-Backups) | Updates, settings changes, backups and restores |
-| | [Admin Page](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Admin-Page) | What is playing, for whom, and why, live; history, people, servers, requests, caches, logs and settings |
+| | [Admin Page](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Admin-Page) | What is playing, for whom, and why, live; history, graphs, people, servers, requests, caches, logs and settings |
 | | [Local Development](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Local-Development) | Running from source, the code's layout, tests |
 | **Help** | [Troubleshooting](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Troubleshooting) | Fixes, by where the problem appears |
 | | [FAQ](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FAQ) | Common questions |

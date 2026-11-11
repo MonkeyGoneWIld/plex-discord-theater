@@ -6,7 +6,8 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { AdminSessions, cookieToken, passwordMatches, requireAdmin, sessionCookie, SESSION_MS } from "./auth.js";
 import { logFiles, overview, readLog, settingsView } from "./data.js";
-import { Recorder } from "./recorder.js";
+import { MAX_GRAPH_DAYS, Recorder } from "./recorder.js";
+import { EXPORTS, exportFile, exportName, type ExportKind } from "./export.js";
 import { cachesView } from "./caches.js";
 import { numberSetting } from "../services/env-settings.js";
 import { logEvent } from "../services/logger.js";
@@ -211,6 +212,52 @@ export function createAdminApp(opts: AdminOptions): express.Express {
   });
   app.get("/api/places", admin, recorded, (_req: Request, res: Response) => {
     res.json({ guilds: recorder!.places() });
+  });
+  // Graphs: the history by day, over the last ?days= days (0: all of it).
+  app.get("/api/graphs", admin, recorded, (req: Request, res: Response) => {
+    res.json(recorder!.graphs({ days: req.query.days }));
+  });
+  // The history file, and what removing what is older than ?days= days would remove.
+  const trimDays = (v: unknown): number | null => {
+    const n = Number(v);
+    return Number.isInteger(n) && n >= 1 && n <= MAX_GRAPH_DAYS ? n : null;
+  };
+  app.get("/api/history-file", admin, recorded, (req: Request, res: Response) => {
+    const days = trimDays(req.query.days);
+    res.json({ summary: recorder!.summary(), trim: days ? recorder!.trimPreview(Date.now() - days * 86_400_000) : null });
+  });
+  // Removes it, and can't be undone: only when the page asks, with how many days to keep.
+  app.post("/api/history-file/trim", admin, recorded, (req: Request, res: Response) => {
+    const days = trimDays((req.body as { days?: unknown } | undefined)?.days);
+    if (!days) {
+      res.status(400).json({ error: `Say how many days to keep: 1 to ${MAX_GRAPH_DAYS}` });
+      return;
+    }
+    const removed = recorder!.trim(Date.now() - days * 86_400_000);
+    console.log(`[Admin] History older than ${days} days removed: ${removed.plays} plays, ${removed.events} lines, `
+      + `${removed.usage} launches and joins, ${removed.requests} requests, ${removed.people} people; `
+      + `${removed.bytesBefore} → ${removed.bytesAfter} bytes`);
+    res.json(removed);
+  });
+  // The lists as files: history, people, usage or requests, .csv or .json,
+  // honouring ?q=; and the whole history as admin.sqlite.
+  app.get("/api/export/:file", admin, recorded, (req: Request, res: Response) => {
+    const file = String(req.params.file);
+    if (file === "admin.sqlite") {
+      res.setHeader("Content-Type", "application/vnd.sqlite3");
+      res.setHeader("Content-Disposition", `attachment; filename="${exportName("admin", "sqlite")}"`);
+      res.send(recorder!.snapshot());
+      return;
+    }
+    const m = /^([a-z]+)\.(csv|json)$/.exec(file);
+    if (!m || !(EXPORTS as readonly string[]).includes(m[1])) {
+      res.status(404).json({ error: "No such export" });
+      return;
+    }
+    const format = m[2] as "csv" | "json";
+    res.setHeader("Content-Type", format === "csv" ? "text/csv; charset=utf-8" : "application/json; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${exportName(m[1], format)}"`);
+    res.send(exportFile(recorder!, m[1] as ExportKind, format, req.query.q));
   });
   // What each cache holds. Without the history, titles are named only where
   // the details cache knows them, and Discord's cache isn't known.

@@ -3,9 +3,10 @@ import { api } from "./api";
 import type { PlayDetail, PlayEvent, PlayStream, PlaySummary } from "./types";
 import { bytes, clock, quality, rate, utc, utcTime } from "./format";
 import {
-  BufferingCell, DataCell, eventText, eventTone, GROUP_LABELS, groupOf, NotesList, useLoad, Where, Who,
+  BufferingCell, DataCell, Downloads, eventText, eventTone, GROUP_LABELS, groupOf, NotesList, useLoad, Where, Who,
   type EventGroup,
 } from "./parts";
+import { MiniChart } from "./lazy";
 
 const PAGE = 50;
 
@@ -35,6 +36,8 @@ function PlayList({ onError }: { onError: (e: unknown) => void }) {
   const { data, busy } = useLoad(() => api.history({ q: query, before, limit: PAGE }), [query, before], onError);
   const plays = data?.plays ?? [];
   return (
+    <>
+    <MiniChart kind="plays" onError={onError} />
     <section className="card">
       <form className="toolbar" onSubmit={(e) => { e.preventDefault(); setQuery(q); setPages([undefined]); }}>
         <label className="grow">
@@ -43,6 +46,7 @@ function PlayList({ onError }: { onError: (e: unknown) => void }) {
         </label>
         <button type="submit">Find</button>
         {query && <button type="button" className="ghost" onClick={() => { setQ(""); setQuery(""); setPages([undefined]); }}>Show all</button>}
+        <Downloads kind="history" q={query} />
       </form>
       {busy && !data ? <p className="empty">Loading…</p> : plays.length === 0 ? (
         <p className="empty">{query ? "Nothing matches." : "Nothing has played since the admin page was turned on."}</p>
@@ -66,6 +70,7 @@ function PlayList({ onError }: { onError: (e: unknown) => void }) {
         <button className="ghost" disabled={plays.length < PAGE} onClick={() => setPages([...pages, plays[plays.length - 1].id])}>Older</button>
       </div>
     </section>
+    </>
   );
 }
 

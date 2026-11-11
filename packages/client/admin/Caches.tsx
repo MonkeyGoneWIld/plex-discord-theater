@@ -3,6 +3,7 @@ import { api } from "./api";
 import type { CacheSums, CacheView, CachesResult } from "./types";
 import { bytes, utc, utcTime } from "./format";
 import { useLoad } from "./parts";
+import { MiniChart } from "./lazy";
 
 const share = (n: number | null) => (n === null ? "—" : `${Math.round(n * 100)}%`);
 
@@ -17,6 +18,7 @@ export function Caches({ onError }: { onError: (e: unknown) => void }) {
         <button className="ghost" onClick={reload} disabled={busy}>{busy ? "Reading…" : "Read again"}</button>
       </div>
       <Discord d={data.discord} />
+      {data.discord && <MiniChart kind="data" onError={onError} />}
       {data.caches.map((c) => <CacheCard key={c.id} c={c} />)}
     </>
   );

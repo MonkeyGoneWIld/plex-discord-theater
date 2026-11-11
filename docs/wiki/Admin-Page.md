@@ -93,7 +93,9 @@ A room on two streams, such as a viewer whose player can't decode the host's
 Every play, newest first: the title, the Discord server and channel, the host,
 who watched, how long it played, its streams, the data sent and how many
 times a picture stopped. Search finds a title, a person's name or Discord ID,
-or a server or channel ID.
+or a server or channel ID. Above the list, plays per day over the last 30
+days. **CSV** and **JSON** download every play the search finds; the JSON
+has each play whole, with its viewers, streams and everything that happened.
 
 Opening a play shows:
 
@@ -108,19 +110,41 @@ Opening a play shows:
   streams and tracks, and buffering and errors. Opening a line shows its
   details.
 
+### Graphs
+
+The history over the last 7 days, 30 days, 90 days, a year, or all of it.
+Days are UTC, and a play counts on the day it started. Over 120 days the
+charts go by week, and over two years by month.
+
+- At the top: plays and time played, time watched by everybody, people,
+  launches and requests, the data players got and how much of it came from
+  Discord's cache, the share of streams re-encoded, and buffering.
+- Per day: plays; time watched; data, split into what came from the bot,
+  from Discord's cache and from other viewers; streams copied or re-encoded;
+  buffering; launches and requests.
+- Why streams were re-encoded, the most common reason first.
+- Plays by hour of the day and by weekday, UTC.
+- The most watched titles, who watched most, and the Discord servers it was
+  watched in. Picking a person opens them.
+
+Pointing at a column shows its numbers. **Show as a table** shows a chart's
+numbers as a table instead.
+
 ### People
 
 Everybody the bot has seen, the latest first: their Discord ID, plays, plays
 hosted, launches of the Activity, time watched, data, buffering, requests,
 and the last thing they watched. Opening a person shows where they used the
 bot, every play they were in (as host, co-host or viewer, with their own
-data), and every title they asked for.
+data), and every title they asked for. Above the list, who watched most over
+the last 30 days; **CSV** and **JSON** download everybody the search finds.
 
 ### Servers
 
 Each Discord server the Activity was used in, and each of its channels: how
 many times it was launched there, who joined, and the plays and time played.
-Below, every launch and join, newest first.
+Below, every launch and join, newest first, which **CSV** and **JSON**
+download.
 
 Discord tells the bot a server's and a channel's ID, not their names. To match
 one in Discord, turn on Developer Mode, then right-click the server or channel
@@ -132,7 +156,8 @@ Every title asked for through Seerr, newest first: who asked, the title, film
 or series, the seasons, its TMDB ID, and what came of it. A request made shows
 Seerr's status for the title (pending, processing, available...); one already
 asked for, or failed, shows what Seerr answered. Search finds a title, a
-person's name or Discord ID, or a TMDB ID.
+person's name or Discord ID, or a TMDB ID. **CSV** and **JSON** download
+every request the search finds.
 
 ### Caches
 
@@ -147,8 +172,9 @@ it can be told:
 
 At the top, **Discord's cache:** of what players fetched over the last day,
 the last week and all the history, how much Discord's cache answered and how
-much the bot sent; and the same for each title. It comes from what players
-report, so it needs the history.
+much the bot sent; and the same for each title. Below it, the data players
+got per day over the last 30 days, and where it came from. It comes from what
+players report, so it needs the history.
 
 ### Logs
 
@@ -159,8 +185,23 @@ Times are UTC.
 
 ### Settings
 
-The version, Node.js, uptime and memory. Then every setting the server reads,
-with its value, or "Not set" for one left at its default.
+The version, Node.js, uptime and memory. Then the history: where
+`admin.sqlite` is, its size, what it holds, and from when.
+
+- **A copy of the history (admin.sqlite)** downloads the whole file as it is,
+  for a backup or your own queries.
+- **Remove old history** keeps the last so many days (1 to 3650). **See what
+  would go** shows what would be removed: the plays that ended before then,
+  with their viewers, streams and lines, the launches, joins and requests
+  from before then, and people seen only before then. A play still going is
+  never removed. **Remove them** removes them, which can't be undone, then
+  shrinks the file and says how big it was and is. The server's log says
+  what was removed.
+
+Nothing is removed unless you do it here.
+
+Then every setting the server reads, with its value, or "Not set" for one
+left at its default.
 
 ## What is recorded
 
@@ -208,10 +249,21 @@ A signed-in browser can also read all of it as JSON:
 | `/api/usage` | Launches and joins, newest first. `?before=<id>` is the next page. |
 | `/api/requests` | Title requests, newest first. `?q=` finds a title, a name or ID, or a TMDB ID. |
 | `/api/caches` | Each cache and what it holds, and Discord's cache (this one works without the history) |
+| `/api/graphs` | The history by UTC day, with totals, hours, weekdays and top tens. `?days=` is the period: 30 unless given, 0 for all of it. |
+| `/api/history-file` | Where `admin.sqlite` is, its size and what it holds. With `?days=`, what removing what is older would remove. |
+| `/api/export/<list>.csv`, `.json` | `history`, `people`, `usage` or `requests`, all of it, as a file. `?q=` is the list's search. At most 200,000 rows. |
+| `/api/export/admin.sqlite` | A copy of the whole history file |
 
-Nothing is removed from `admin.sqlite` yet. To start over, stop the bot and
-delete the file. If the server is stopped without warning, its plays still
-open end where they were last seen when the bot starts again. Without
+`POST /api/history-file/trim` with `{"days": N}` removes what is older than N
+days, as **Remove them** does.
+
+CSV files are UTF-8 and open in a spreadsheet. Text that a spreadsheet would
+run as a formula (starting with `=`, `+`, `-` or `@`) is written with a `'`
+in front, since names and titles come from anybody.
+
+Old history is removed only from the Settings page. To start over, stop the
+bot and delete the file. If the server is stopped without warning, its plays
+still open end where they were last seen when the bot starts again. Without
 `ADMIN_PASSWORD`, nothing is recorded.
 
 ## Next

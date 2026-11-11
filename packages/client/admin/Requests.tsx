@@ -2,7 +2,7 @@ import { useState } from "react";
 import { api } from "./api";
 import type { TitleRequest } from "./types";
 import { utc } from "./format";
-import { useLoad, Who } from "./parts";
+import { Downloads, useLoad, Who } from "./parts";
 
 const PAGE = 50;
 
@@ -83,6 +83,7 @@ export function Requests({ onError }: { onError: (e: unknown) => void }) {
         </label>
         <button type="submit">Find</button>
         {query && <button type="button" className="ghost" onClick={() => { setQ(""); setQuery(""); setPages([undefined]); }}>Show all</button>}
+        <Downloads kind="requests" q={query} />
       </form>
       {busy && !data ? <p className="empty">Loading…</p> : requests.length === 0 ? (
         <p className="empty">{query ? "Nothing matches." : "Nobody has asked for anything since the admin page was turned on."}</p>

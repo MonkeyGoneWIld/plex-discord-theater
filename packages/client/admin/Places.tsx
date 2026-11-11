@@ -2,7 +2,7 @@ import { useState } from "react";
 import { api } from "./api";
 import type { PlaceGuild, UsageRow } from "./types";
 import { clock, utc } from "./format";
-import { useLoad, Who } from "./parts";
+import { Downloads, useLoad, Who } from "./parts";
 
 const PAGE = 50;
 
@@ -81,7 +81,10 @@ function Launches({ onError }: { onError: (e: unknown) => void }) {
   const rows: UsageRow[] = data?.usage ?? [];
   return (
     <section className="card">
-      <h3>Launches and joins</h3>
+      <div className="room-head">
+        <h3>Launches and joins</h3>
+        <Downloads kind="usage" />
+      </div>
       {busy && !data ? <p className="empty">Loading…</p> : rows.length === 0 ? <p className="empty">None yet.</p> : (
         <div className="table-wrap">
           <table className="table">

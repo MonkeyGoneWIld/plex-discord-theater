@@ -9,12 +9,14 @@ import { People } from "./People";
 import { Places } from "./Places";
 import { Requests } from "./Requests";
 import { Caches } from "./Caches";
+import { GraphsTab } from "./lazy";
 import { utcTime } from "./format";
 
-type Tab = "now" | "history" | "people" | "places" | "requests" | "caches" | "logs" | "settings";
+type Tab = "now" | "history" | "graphs" | "people" | "places" | "requests" | "caches" | "logs" | "settings";
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: "now", label: "Now playing" },
   { id: "history", label: "History" },
+  { id: "graphs", label: "Graphs" },
   { id: "people", label: "People" },
   { id: "places", label: "Servers" },
   { id: "requests", label: "Requests" },
@@ -142,6 +144,7 @@ export function App() {
       <main className="content">
         {tab === "now" && <NowPlaying data={data} />}
         {tab === "history" && <History key={id ?? ""} id={id} onError={onError} />}
+        {tab === "graphs" && <GraphsTab onError={onError} />}
         {tab === "people" && <People key={id ?? ""} id={id} onError={onError} />}
         {tab === "places" && <Places onError={onError} />}
         {tab === "requests" && <Requests onError={onError} />}

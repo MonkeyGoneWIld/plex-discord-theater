@@ -47,7 +47,7 @@ Work through these pages in order. Each one ends with a link to the next.
 | Page | Covers |
 |---|---|
 | [Updating and Backups](Updating-and-Backups) | Updating, the data volume, backup and restore |
-| [Admin Page](Admin-Page) | What is playing, for whom and why, live; history, people, servers, requests, caches, logs and settings |
+| [Admin Page](Admin-Page) | What is playing, for whom and why, live; history, graphs, people, servers, requests, caches, logs and settings |
 | [Local Development](Local-Development) | Running from source and contributing |
 | [Troubleshooting](Troubleshooting) | Symptoms, causes and fixes |
 | [FAQ](FAQ) | Short answers to common questions |

@@ -76,6 +76,21 @@ export interface Room {
   discord: { guildId: string | null; channelId: string | null; hostUserId: string | null; startedAt: number | null };
   streams: Stream[];
   playId?: number | null;
+  /** Delivery over the last minutes: [time, server, Discord cache, peers], bits a second. */
+  flow?: { stepS: number; windowS: number; points: Array<[number, number, number, number]> } | null;
+}
+
+/** A title's poster and running time (admin/titles.ts). */
+export interface TitleInfo {
+  ratingKey: string;
+  type: string | null;
+  title: string | null;
+  show: string | null;
+  season: number | null;
+  episode: number | null;
+  year: number | null;
+  durationS: number | null;
+  poster: boolean;
 }
 
 export interface Overview {
@@ -126,6 +141,9 @@ export interface PlaySummary extends Play {
   streams: number;
   reencoded: number;
   bytes: number;
+  botBytes: number;
+  cacheBytes: number;
+  p2pBytes: number;
   stalls: number;
 }
 

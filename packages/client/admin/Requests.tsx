@@ -7,7 +7,7 @@ import { Downloads, useLoad, Who } from "./parts";
 const PAGE = 50;
 
 function seasons(s: TitleRequest["seasons"]): string {
-  if (s === "all") return "Every season";
+  if (s === "all") return "All seasons";
   if (!s || s.length === 0) return "—";
   return `${s.length === 1 ? "Season" : "Seasons"} ${s.join(", ")}`;
 }
@@ -43,8 +43,8 @@ export function RequestRows({ requests, showWho = true }: { requests: TitleReque
       <table className="table">
         <thead>
           <tr>
-            <th>When</th>{showWho && <th>Who</th>}{showWho && <th>Discord ID</th>}<th>Title</th><th>Type</th>
-            <th>Seasons</th><th>TMDB ID</th><th>Outcome</th><th>Seerr's answer</th>
+            <th>Time</th>{showWho && <th>User</th>}{showWho && <th>Discord user ID</th>}<th>Title</th><th>Type</th>
+            <th>Seasons</th><th>TMDB ID</th><th>Result</th><th>Seerr status</th>
           </tr>
         </thead>
         <tbody>
@@ -54,7 +54,7 @@ export function RequestRows({ requests, showWho = true }: { requests: TitleReque
               {showWho && <td><Who id={r.userId} name={r.username} /></td>}
               {showWho && <td className="mono">{r.userId ?? "—"}</td>}
               <td><strong>{r.title ?? "Unknown title"}</strong></td>
-              <td>{r.mediaType === "tv" ? "Series" : r.mediaType === "movie" ? "Film" : r.mediaType}</td>
+              <td>{r.mediaType === "tv" ? "Series" : r.mediaType === "movie" ? "Movie" : r.mediaType}</td>
               <td>{seasons(r.seasons)}</td>
               <td className="mono">{r.tmdbId}</td>
               <td>{outcome(r)}</td>
@@ -75,23 +75,29 @@ export function Requests({ onError }: { onError: (e: unknown) => void }) {
   const { data, busy } = useLoad(() => api.requests({ q: query, before, limit: PAGE }), [query, before], onError);
   const requests = data?.requests ?? [];
   return (
+    <>
+      <div className="page-head">
+        <h1>Requests</h1>
+        <p className="muted">Every title requested through Seerr from the Activity, newest first.</p>
+      </div>
     <section className="card">
       <form className="toolbar" onSubmit={(e) => { e.preventDefault(); setQuery(q); setPages([undefined]); }}>
         <label className="grow">
-          <span>Find a title, a person's name or Discord ID, or a TMDB ID</span>
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Severance, crispymage, 95396…" />
+          <span>Search by title, user name, Discord user ID or TMDB ID</span>
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search requests" />
         </label>
-        <button type="submit">Find</button>
-        {query && <button type="button" className="ghost" onClick={() => { setQ(""); setQuery(""); setPages([undefined]); }}>Show all</button>}
+        <button type="submit">Search</button>
+        {query && <button type="button" className="ghost" onClick={() => { setQ(""); setQuery(""); setPages([undefined]); }}>Clear</button>}
         <Downloads kind="requests" q={query} />
       </form>
       {busy && !data ? <p className="empty">Loading…</p> : requests.length === 0 ? (
-        <p className="empty">{query ? "Nothing matches." : "Nobody has asked for anything since the admin page was turned on."}</p>
+        <p className="empty">{query ? "No requests match this search." : "No requests have been recorded yet."}</p>
       ) : <RequestRows requests={requests} />}
       <div className="pager">
         <button className="ghost" disabled={pages.length < 2} onClick={() => setPages(pages.slice(0, -1))}>Newer</button>
         <button className="ghost" disabled={requests.length < PAGE} onClick={() => setPages([...pages, requests[requests.length - 1].id])}>Older</button>
       </div>
     </section>
+    </>
   );
 }

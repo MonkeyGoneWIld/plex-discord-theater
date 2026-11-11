@@ -1,6 +1,6 @@
 import type {
   CachesResult, LogFile, LogResult, Overview, PersonDetail, PersonSummary, PlaceGuild, PlayDetail, PlaySummary,
-  SettingsView, TitleRequest, UsageRow, Graphs, HistorySummary, TrimCounts
+  SettingsView, TitleInfo, TitleRequest, UsageRow, Graphs, HistorySummary, TrimCounts
 } from "./types";
 
 /** A query string of the values given. */
@@ -31,6 +31,7 @@ export const api = {
   }),
   logout: () => call<{ ok: true }>("/api/logout", { method: "POST" }),
   overview: () => call<Overview>("/api/overview"),
+  titles: (keys: string[]) => call<{ titles: Record<string, TitleInfo | null> }>(`/api/titles${qs({ keys: keys.join(",") })}`),
   logFiles: () => call<{ files: LogFile[] }>("/api/logs/files"),
   logs: (q: { file?: string; q?: string; level?: string; tag?: string; limit?: number }) => {
     const p = new URLSearchParams();

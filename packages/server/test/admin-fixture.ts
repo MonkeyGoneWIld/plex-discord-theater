@@ -19,7 +19,7 @@ const at = (s: number) => new Date(Date.now() - s * 1000).toISOString();
 fs.writeFileSync(path.join(logDir, `theater-${day}.log`), [
   `${at(300)} [Discord] instance registered room=i-156985 guild=999000111 channel=888000111`,
   `${at(290)} [FFmpeg] copying session=1dcef3c0 ratingKey=58861 fromS=0 video=hevc hdr=SDR bits=10 audio=ac3 2ch → aac 2ch 256k`,
-  `${at(288)} [Sync] a stream of their own, by what each can play room=i-156985 from=427812:0 to=427812:0/8bit who=crispymage why=hevc+tenBit`,
+  `${at(288)} [Sync] a stream of their own, by what each can play room=i-156985 from=427812:0 to=427812:0/8bit who=robin why=hevc+tenBit`,
   `${at(287)} [FFmpeg] re-encoding session=0e9e5924 ratingKey=58861 why=10-bit picture: frames dropped on this player video=hevc → hevc Main 4000k`,
   `${at(286)} [PlexReport] showing a stream in Plex's Now Playing session=1dcef3c0 ratingKey=58861`,
   `${at(200)} [WARN] [HLS] Stop refused — others are still on this stream session=eec5874e reason=effect-cleanup`,
@@ -47,7 +47,34 @@ await backfill(adminDbPath(), Date.now());
 const recorder = new Recorder({ dbPath: adminDbPath() });
 setAdminHooks(recorder);
 recorder.start();
-const server = http.createServer(createAdminApp({ password, recorder }));
+// Posters and running times, made up: a coloured card with the title's first letters.
+const FIXTURE_TITLES: Record<string, [string, string, number, string | null, number | null, number | null]> = {
+  "58859": ["episode", "The Night Taxi", 24, "Ghost Stories", 1, 1], "58860": ["episode", "The Red Paper", 24, "Ghost Stories", 1, 2],
+  "58861": ["episode", "The Piano", 24, "Ghost Stories", 1, 3], "80001": ["movie", "Perfect Blue", 81, null, null, null],
+  "80002": ["movie", "Paprika", 90, null, null, null], "80003": ["movie", "Tokyo Godfathers", 92, null, null, null],
+  "173951": ["movie", "The Long Goodbye", 112, null, null, null], "95397": ["episode", "Good News About Hell", 57, "Severance", 1, 1],
+  "129": ["movie", "Spirited Away", 125, null, null, null], "80004": ["movie", "Millennium Actress", 87, null, null, null],
+};
+const fixtureTitles = {
+  info: async (ratingKey: string) => {
+    const f = FIXTURE_TITLES[ratingKey];
+    return f ? { ratingKey, type: f[0], title: f[1], show: f[3], season: f[4], episode: f[5], year: f[0] === "movie" ? 1990 + (Number(ratingKey) % 30) : null,
+      durationS: f[2] * 60, poster: true } : null;
+  },
+  poster: async (ratingKey: string) => {
+    const f = FIXTURE_TITLES[ratingKey];
+    if (!f) return null;
+    const name = f[3] ?? f[1];
+    const hue = (Number(ratingKey) * 47) % 360;
+    const letters = name.split(/\s+/).map((w) => w[0]).join("").slice(0, 3).toUpperCase();
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 450"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">`
+      + `<stop offset="0" stop-color="hsl(${hue} 55% 42%)"/><stop offset="1" stop-color="hsl(${(hue + 40) % 360} 60% 18%)"/></linearGradient></defs>`
+      + `<rect width="300" height="450" fill="url(#g)"/><text x="150" y="250" font-family="Georgia, serif" font-size="96" font-weight="700" `
+      + `fill="rgba(255,255,255,.9)" text-anchor="middle">${letters}</text></svg>`;
+    return { type: "image/svg+xml", body: Buffer.from(svg) };
+  },
+};
+const server = http.createServer(createAdminApp({ password, recorder, titles: fixtureTitles }));
 attachWebSocketServer(server);
 await new Promise<void>((r) => server.listen(port, "127.0.0.1", r));
 const origin = `http://127.0.0.1:${port}`;
@@ -69,19 +96,19 @@ async function join(roomId: string, userId: string, username: string) {
 // A room on two streams of an episode: the host's 10-bit copy, and a viewer's
 // own 8-bit re-encode, their player dropping 10-bit frames.
 const ghosts = "i-156985-fixture";
-instanceHosts.set(ghosts, { hostUserId: "131481943547052032", guildId: "999000111", channelId: "888000111", createdAt: Date.now() - 40 * 60_000 });
+instanceHosts.set(ghosts, { hostUserId: "100000000000000001", guildId: "999000111", channelId: "888000111", createdAt: Date.now() - 40 * 60_000 });
 const copy = crypto.randomUUID();
 rememberStreamNotes(copy, {
   engine: "ffmpeg", video: "copy", kbps: 3837, quality: "Original", videoFrom: "HEVC Main 10 1440x1080", range: "SDR",
   audio: "transcode", audioFrom: "AC3 2.0", audioTo: "AAC 2.0 256 kbps", audioKbps: 256, audioReason: "AC3 isn't played by Discord's browser",
 });
-const host = await join(ghosts, "131481943547052032", "artemidorus");
+const host = await join(ghosts, "100000000000000001", "alex");
 host({ type: "play", ratingKey: "58861", title: "Ghost Stories — S01E03", subtitles: false, hlsSessionId: copy,
   position: 312, sessionOffset: 0, audioStreamId: 0, subtitleStreamId: 0 });
-await join(ghosts, "402115789012345678", "u7i5lj6g");
-await join(ghosts, "402115789012345679", "oyv7oikp");
-const crispy = await join(ghosts, "402115789012345680", "crispymage");
-crispy({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 0 });
+await join(ghosts, "402115789012345678", "kit");
+await join(ghosts, "402115789012345679", "jo");
+const robin = await join(ghosts, "402115789012345680", "robin");
+robin({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 0 });
 const encode = crypto.randomUUID();
 rememberStreamNotes(encode, {
   engine: "ffmpeg", encoder: "qsv", video: "transcode", reason: "10-bit picture: frames dropped on this player",
@@ -89,7 +116,7 @@ rememberStreamNotes(encode, {
   audio: "copy", audioFrom: "AAC 2.0",
 });
 await sleep(100);
-crispy({ type: "variant-session", hlsSessionId: encode, sessionOffset: 0 });
+robin({ type: "variant-session", hlsSessionId: encode, sessionOffset: 0 });
 
 // A film, everyone on one copy.
 const film = "i-204417-fixture";
@@ -111,7 +138,7 @@ await join(idle, "300000000000000001", "lurker");
 
 // Each viewer's player, saying every 10 seconds what it has had: some from
 // the bot, some from Discord's cache, some from other viewers.
-const viewers = ["131481943547052032", "402115789012345678", "402115789012345679", "402115789012345680", "200000000000000001", "200000000000000002"];
+const viewers = ["100000000000000001", "402115789012345678", "402115789012345679", "402115789012345680", "200000000000000001", "200000000000000002"];
 let sampled = 0;
 const feed = () => {
   sampled++;

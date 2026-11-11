@@ -29,7 +29,7 @@ function check(name: string, actual: unknown, expected: unknown) {
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const { Recorder } = await import("../src/admin/recorder.js");
+const { Recorder, flowSeries } = await import("../src/admin/recorder.js");
 const { setAdminHooks, adminHooks } = await import("../src/services/admin-hooks.js");
 type Overview = import("../src/admin/data.js").Overview;
 type Inst = { hostUserId: string; guildId: string | null; channelId: string | null; createdAt: number };
@@ -45,7 +45,7 @@ const client = (userId: string, username: string, o: Any = {}) => ({
 const stream = (variantKey: string, hlsSessionId: string, o: Any = {}) => ({
   variantKey, hlsSessionId, audioStreamId: 1, subtitleStreamId: 0, quality: 0, ownerUserId: null,
   sessionOffset: 0, idleS: null, viewers: [] as string[], isHostStream: variantKey === "v0", engine: "ffmpeg",
-  decision: null, reason: null, summary: "Starting — no details yet", kbps: null, kbpsSource: null,
+  decision: null, reason: null, summary: "Starting: details pending", kbps: null, kbpsSource: null,
   plexTranscodeKey: null, plexClientId: null, notes: {}, notesAt: null, ...o,
 });
 const R1: Any = {
@@ -53,7 +53,7 @@ const R1: Any = {
   hostWaiting: false, stateAgeS: 0, hostHeartbeatAgeS: 0, hostVariantKey: "v0", hostSubtitleId: 0, coHostIds: [],
   queue: [], heldFor: null, away: [],
   discord: { guildId: "G1", channelId: "C1", hostUserId: "111", startedAt: t },
-  clients: [client("111", "artemidorus", { role: "host" })],
+  clients: [client("111", "alex", { role: "host" })],
   streams: [stream("v0", "S1", { viewers: ["111"] })],
 };
 let rooms: Any[] = [];
@@ -64,7 +64,7 @@ const dbPath = path.join(process.env.THUMB_CACHE_DIR, "admin.sqlite");
 const rec = new Recorder({ dbPath, now: () => t, source, instances: () => instances });
 const started = t;
 const transport = (o: Any) => rec.transport({
-  at: t, roomId: "R1", type: "play", userId: "111", username: "artemidorus", role: "host", fromS: 0, toS: 0,
+  at: t, roomId: "R1", type: "play", userId: "111", username: "alex", role: "host", fromS: 0, toS: 0,
   ratingKey: "58860", title: "Ghost Stories", ...o,
 } as Parameters<typeof rec.transport>[0]);
 const step = (ms: number) => { t += ms; rec.tick(t); };
@@ -82,7 +82,7 @@ check("a launch of the Activity is logged once, with its server, channel and hos
   usage0.filter((u) => u.kind === "launch").map((u) => [u.roomId, u.guildId, u.channelId, u.userId]),
   [["R1", "G1", "C1", "111"]]);
 check("  and the host's joining the room, by name",
-  usage0.filter((u) => u.kind === "join").map((u) => [u.userId, u.username, u.guildId]), [["111", "artemidorus", "G1"]]);
+  usage0.filter((u) => u.kind === "join").map((u) => [u.userId, u.username, u.guildId]), [["111", "alex", "G1"]]);
 const play1 = rec.history()[0];
 check("the host's play opens a play of the title, where it is in Discord",
   [play1.title, play1.ratingKey, play1.roomId, play1.guildId, play1.channelId, play1.hostUserId, play1.endedAt],
@@ -91,7 +91,7 @@ check("  with what happened, in order", kinds(play1.id), ["play", "joined", "str
 
 console.log("\n— watching, and a viewer joining —");
 step(2_000);
-(R1.clients as Any[]).push(client("222", "crispymage"));
+(R1.clients as Any[]).push(client("222", "robin"));
 (R1.streams as Any[])[0] = stream("v0", "S1", { viewers: ["111", "222"] });
 step(2_000);
 check("watched time counts while the room plays", rec.play(play1.id)!.viewers.map((v) => [v.userId, v.watchedS]),
@@ -107,7 +107,7 @@ check("the most watching at once", rec.history()[0].peakViewers, 2);
 console.log("\n— a stream's details, its restarts —");
 (R1.streams as Any[])[0] = stream("v0", "S1", {
   viewers: ["111", "222"], decision: "transcode", reason: "10-bit picture: frames dropped on this player",
-  summary: "Re-encoded: 10-bit picture: frames dropped on this player", kbps: 4000,
+  summary: "Transcode: 10-bit picture: frames dropped on this player", kbps: 4000,
   notes: { engine: "ffmpeg", video: "transcode", reason: "10-bit picture: frames dropped on this player" }, notesAt: t,
 });
 step(2_000);
@@ -115,7 +115,7 @@ const s1 = rec.play(play1.id)!.streams[0];
 check("why a stream is re-encoded, when its playlist says", [s1.hlsSessionId, s1.decision, s1.reason, s1.kbps, s1.notes.video],
   ["S1", "transcode", "10-bit picture: frames dropped on this player", 4000, "transcode"]);
 check("  and the line saying it started says it too",
-  (eventsOf(play1.id, "stream started")[0].detail as Any).summary, "Re-encoded: 10-bit picture: frames dropped on this player");
+  (eventsOf(play1.id, "stream started")[0].detail as Any).summary, "Transcode: 10-bit picture: frames dropped on this player");
 (R1.streams as Any[])[0] = { ...(R1.streams as Any[])[0], sessionOffset: 600 };
 R1.positionS = 600;
 step(2_000);
@@ -123,7 +123,7 @@ check("a stream started again further on, after a seek",
   eventsOf(play1.id, "stream restarted").map((e) => [(e.detail as Any).fromOffsetS, (e.detail as Any).toOffsetS]), [[0, 600]]);
 
 console.log("\n— what a viewer changes —");
-(R1.clients as Any[])[1] = client("222", "crispymage", { subtitleStreamId: 3, quality: 2, variantKey: "v1" });
+(R1.clients as Any[])[1] = client("222", "robin", { subtitleStreamId: 3, quality: 2, variantKey: "v1" });
 (R1.streams as Any[])[0] = { ...(R1.streams as Any[])[0], viewers: ["111"] };
 (R1.streams as Any[])[1] = stream("v1", "S2", { ownerUserId: "222", audioStreamId: 2, subtitleStreamId: 3, viewers: ["222"] });
 step(2_000);
@@ -132,7 +132,7 @@ check("their stream, subtitles and quality, each from what to what",
     .map((e) => [e.kind, (e.detail as Any).from, (e.detail as Any).to]),
   [["stream changed", "v0", "v1"], ["subtitles", 0, 3], ["quality", 0, 2]]);
 check("  and the stream of their own that it made, by whom", eventsOf(play1.id, "stream started").map((e) => [(e.detail as Any).variant, e.username]),
-  [["v0", null], ["v1", "crispymage"]]);
+  [["v0", null], ["v1", "robin"]]);
 (R1.streams as Any[])[1] = stream("v1", "S3", { ownerUserId: "222", viewers: ["222"] });
 step(2_000);
 check("a stream back under a new session is a restart, not an end",
@@ -192,6 +192,20 @@ const ov = rec.annotate({ at: t, totals: {}, rooms: [structuredClone(R1)] } as u
 const live222 = ov.rooms[0].clients.find((c) => c.userId === "222")?.data;
 check("each viewer's play so far", [ov.rooms[0].playId, live222?.httpBytes, live222?.botBytes, live222?.stalls, live222?.watchedS],
   [play1.id, 12e6, 8e6, 1, 16]);
+const flow = ov.rooms[0].flow;
+check("  and the room's delivery over the last minutes: a point every 10 s, the server, Discord's cache and peers each",
+  [flow?.stepS, flow?.windowS, (flow?.points.length ?? 0) > 0, flow?.points.every((p) => p.length === 4 && p.every((n) => n >= 0))],
+  [10, 30, true, true]);
+{
+  // 1 Mbps from the server and 2 Mbps from Discord's cache, said every 10 s.
+  const base = 1_800_000_000_000;
+  const samples = [0, 10, 20, 30, 40].map((s) => ({ t: base + s * 1000, bot: s * 125_000, hit: s * 250_000, p2p: 0 }));
+  const series = flowSeries(samples, base + 43_000).points;
+  check("  a rate is the change in what players have had, averaged over half a minute",
+    [series.length, series[0], series[series.length - 1]],
+    [5, [base, 0, 0, 0], [base + 40_000, 1_000_000, 2_000_000, 0]]);
+  check("  nothing said yet: no points", flowSeries([], base).points, []);
+}
 
 console.log("\n— seeks, the room waiting, leaving, the end —");
 transport({ type: "seek", fromS: 100, toS: 400 });
@@ -199,12 +213,12 @@ R1.waiting = true;
 step(2_000);
 R1.waiting = false;
 step(2_000);
-(R1.clients as Any[])[1] = client("222", "crispymage", { away: true, subtitleStreamId: 3, quality: 2, variantKey: "v1" });
+(R1.clients as Any[])[1] = client("222", "robin", { away: true, subtitleStreamId: 3, quality: 2, variantKey: "v1" });
 step(2_000);
-(R1.clients as Any[])[1] = client("222", "crispymage", { connected: false, away: true, subtitleStreamId: 3, quality: 2, variantKey: "v1" });
+(R1.clients as Any[])[1] = client("222", "robin", { connected: false, away: true, subtitleStreamId: 3, quality: 2, variantKey: "v1" });
 step(2_000);
 check("a seek from where to where, by whom", eventsOf(play1.id, "seek").map((e) => [e.username, (e.detail as Any).fromS, (e.detail as Any).toS]),
-  [["artemidorus", 100, 400]]);
+  [["alex", 100, 400]]);
 check("  the room holding everybody, for how long", eventsOf(play1.id, "room waited").map((e) => (e.detail as Any).ms), [2000]);
 check("  away from Discord, then gone", rec.play(play1.id)!.events.filter((e) => e.userId === "222").slice(-2).map((e) => e.kind),
   ["away from Discord", "left"]);
@@ -212,7 +226,7 @@ transport({ type: "stop", fromS: 700 });
 const ended = rec.play(play1.id)!;
 check("a stop ends the play: by whom, where, and every stream with it",
   [ended.play.endReason, ended.play.endBy, ended.play.endedAt === t, ended.streams.every((s) => s.endedAt !== null), kinds(play1.id).slice(-2)],
-  ["stopped", "artemidorus", true, true, ["stop", "ended"]]);
+  ["stopped", "alex", true, true, ["stop", "ended"]]);
 R1.ratingKey = null;
 R1.title = null;
 step(2_000);
@@ -231,8 +245,11 @@ console.log("\n— the history's list —");
 const list = rec.history();
 check("newest first: viewers by name, streams, re-encoded ones, data and stalls",
   [list[2].names, list[2].streams, list[2].reencoded, list[2].bytes, list[2].stalls],
-  [["artemidorus", "crispymage"], 3, 1, 2e6 + 15e6, 1]);
-check("  found by a viewer's name, or a title", [rec.history({ q: "crispy" }).map((p) => p.title), rec.history({ q: "paprika" }).map((p) => p.title)],
+  [["alex", "robin"], 3, 1, 2e6 + 15e6, 1]);
+check("  and where its data came from: the server, Discord's cache, other viewers",
+  [list[2].botBytes + list[2].cacheBytes + list[2].p2pBytes === list[2].bytes, list[2].cacheBytes > 0, list[2].p2pBytes],
+  [true, true, rec.play(list[2].id)!.viewers.reduce((s, v) => s + v.p2pBytes, 0)]);
+check("  found by a viewer's name, or a title", [rec.history({ q: "robi" }).map((p) => p.title), rec.history({ q: "paprika" }).map((p) => p.title)],
   [["Ghost Stories"], ["Paprika"]]);
 check("  a page at a time", rec.history({ limit: 1, before: list[0].id }).map((p) => p.title), ["Paprika"]);
 check("  a search's wildcards are only characters", rec.history({ q: "%" }).length, 0);
@@ -246,32 +263,32 @@ named("Spirited Away");
 await sleep(10);
 check("who asked for what, and what came of it; its name looked up after",
   rec.requests().map((r) => [r.username ?? r.userId, r.mediaType, r.tmdbId, r.seasons, r.outcome, r.status, r.title]),
-  [["333", "tv", 1399, [1, 2], "already requested", 409, null], ["crispymage", "movie", 129, null, "requested", 2, "Spirited Away"]]);
+  [["333", "tv", 1399, [1, 2], "already requested", 409, null], ["robin", "movie", 129, null, "requested", 2, "Spirited Away"]]);
 
 console.log("\n— people, places, Discord's cache —");
 const everyone = rec.people();
-// crispymage's request is the latest anybody was seen; Paprika and Perfect
+// robin's request is the latest anybody was seen; Paprika and Perfect
 // Blue were played with no room behind them, so hosted, but watched by nobody.
 check("everybody seen, the latest first: what they watched, hosted, launched and asked for",
   everyone.map((p) => [p.userId, p.username, p.plays, p.hosted, p.launches, p.requests]),
-  [["222", "crispymage", 1, 0, 0, 1], ["111", "artemidorus", 1, 3, 1, 0]]);
+  [["222", "robin", 1, 0, 0, 1], ["111", "alex", 1, 3, 1, 0]]);
 check("  with what they had, all of it", [everyone[0].httpBytes, everyone[0].edgeHitBytes, everyone[0].botBytes, everyone[0].stalls, everyone[0].lastTitle],
   [12e6, 4e6, 8e6, 1, "Ghost Stories"]);
 check("  found by a name or an ID; a page at a time; wildcards only characters",
-  [rec.people({ q: "crispy" }).map((p) => p.userId), rec.people({ q: "111" }).map((p) => p.userId),
+  [rec.people({ q: "robi" }).map((p) => p.userId), rec.people({ q: "111" }).map((p) => p.userId),
     rec.people({ limit: 1, offset: 1 }).map((p) => p.userId), rec.people({ q: "%" }).length],
   [["222"], ["111"], ["111"], 0]);
-const crispy = rec.person("222")!;
+const robin = rec.person("222")!;
 check("one person: each play they were in, as what, with their own data; what they asked for; where",
-  [crispy.plays.map((p) => [p.title, p.role, p.httpBytes, p.hostName]), crispy.requests.map((r) => r.title),
-    crispy.places.map((p) => [p.guildId, p.channelId, p.launches, p.joins])],
-  [[["Ghost Stories", "viewer", 12e6, "artemidorus"]], ["Spirited Away"], [["G1", "C1", 0, 1]]]);
+  [robin.plays.map((p) => [p.title, p.role, p.httpBytes, p.hostName]), robin.requests.map((r) => r.title),
+    robin.places.map((p) => [p.guildId, p.channelId, p.launches, p.joins])],
+  [[["Ghost Stories", "viewer", 12e6, "alex"]], ["Spirited Away"], [["G1", "C1", 0, 1]]]);
 check("  and nobody by an ID never seen", rec.person("404"), null);
 const places = rec.places();
 check("each server, and each of its channels: launches, joins, who, plays",
   places.map((g) => [g.guildId, g.launches, g.joins, g.people, g.plays,
     g.channels.map((c) => [c.channelId, c.launches, c.joins, c.names.map((n) => n.username), c.plays])]),
-  [["G1", 1, 2, 2, 3, [["C1", 1, 2, ["crispymage", "artemidorus"], 3]]]]);
+  [["G1", 1, 2, 2, 3, [["C1", 1, 2, ["robin", "alex"], 3]]]]);
 const dc = rec.discordCache();
 check("what Discord's cache handed players, of all they fetched, and what the bot sent",
   [dc.all.httpBytes, dc.all.edgeHitBytes, dc.all.botBytes, dc.all.p2pBytes, dc.all.hitShare, dc.all.plays],
@@ -284,7 +301,7 @@ check("the titles and plays it knows, for the caches page",
   [[...rec.titles(["58860", "nope"])], [...rec.sessions(["S1", "nope"])].map(([k, v]) => [k, v.title])],
   [[["58860", "Ghost Stories"]], [["S1", "Ghost Stories"]]]);
 check("title requests found by title, name or TMDB ID",
-  [rec.requests({ q: "spirited" }).map((r) => r.tmdbId), rec.requests({ q: "1399" }).map((r) => r.tmdbId), rec.requests({ q: "crispy" }).length],
+  [rec.requests({ q: "spirited" }).map((r) => r.tmdbId), rec.requests({ q: "1399" }).map((r) => r.tmdbId), rec.requests({ q: "robi" }).length],
   [[129], [1399], 1]);
 rec.request({ at: t, userId: "444", mediaType: "movie", tmdbId: 4977, seasons: null, outcome: "requested", status: 2, error: null });
 rec.clientLog({ at: t, userId: "444", clientId: "pageN", entries: [] });
@@ -350,7 +367,7 @@ const paprikaId = gr.history({ q: "paprika" })[0].id;
 // Day D, 20:00 UTC: two watching, a re-encode and a copy, and their data.
 g = D * DAY + 20 * 3_600_000;
 gr.tick(g);
-open(room("GA", "A1", "Akira", "G7", [["111", "artemidorus"], ["222", "crispymage"]], [
+open(room("GA", "A1", "Akira", "G7", [["111", "alex"], ["222", "robin"]], [
   stream("v0", "S70", { viewers: ["111"], decision: "transcode", reason: "Their player can't play HEVC" }),
   stream("v1", "S71", { viewers: ["222"], decision: "copy" }),
 ]));
@@ -380,7 +397,7 @@ check("  each play on the day it began: plays, people, launches, streams and how
   [[1, 2, 2, 1, 2, 1, 1, 0], [1, 1, 1, 1, 1, 1, 0, 1]]);
 check("  each viewer's watching, and their data and where it came from",
   [dayOf(D).watchedS, dayOf(D).httpBytes, dayOf(D).edgeBytes, dayOf(D).edgeHitBytes, dayOf(D).botBytes, dayOf(D).p2pBytes],
-  [gr.play(gr.history({ q: "crispymage" })[0].id)!.viewers.reduce((s, v) => s + v.watchedS, 0), 6e6, 4e6, 2e6, 4e6, 1e6]);
+  [gr.play(gr.history({ q: "robin" })[0].id)!.viewers.reduce((s, v) => s + v.watchedS, 0), 6e6, 4e6, 2e6, 4e6, 1e6]);
 check("  the days without any, all naught", week.daily.slice(0, 5).every((x) => x.plays === 0 && x.launches === 0), true);
 check("  the totals: plays, people, launches, requests, Discord's share",
   [week.totals.plays, week.totals.people, week.totals.launches, week.totals.requests, week.totals.hitShare, week.totals.reencodes],
@@ -517,8 +534,8 @@ async function join(userId: string, username: string) {
   for (let i = 0; i < 80 && !seen.some((m) => m.type === "state"); i++) await sleep(25);
   return (m: Record<string, unknown>) => ws.send(JSON.stringify(m));
 }
-const host = await join("111", "artemidorus");
-const viewer = await join("222", "crispymage");
+const host = await join("111", "alex");
+const viewer = await join("222", "robin");
 host({ type: "watching", value: true });
 host({ type: "play", ratingKey: "58860", title: "Ghost Stories", subtitles: false, hlsSessionId: crypto.randomUUID(),
   position: 0, sessionOffset: 0, audioStreamId: 0, subtitleStreamId: 0 });
@@ -530,7 +547,7 @@ host({ type: "stop" });
 for (let i = 0; i < 40 && !heard.transport.some((e) => e.type === "stop"); i++) await sleep(25);
 check("the recorder hears what the room acted on, by whom; not a viewer's pause it refused",
   heard.transport.map((e) => [e.type, e.username, e.role, e.ratingKey]),
-  [["play", "artemidorus", "host", "58860"], ["seek", "artemidorus", "host", "58860"], ["stop", "artemidorus", "host", "58860"]]);
+  [["play", "alex", "host", "58860"], ["seek", "alex", "host", "58860"], ["stop", "alex", "host", "58860"]]);
 const seek = heard.transport.find((e) => e.type === "seek");
 check("  a seek: to where", seek?.toS, 300);
 check("  a stop: the title it stopped", heard.transport.at(-1)?.title, "Ghost Stories");

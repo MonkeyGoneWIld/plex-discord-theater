@@ -11,8 +11,8 @@ type Inst = { hostUserId: string; guildId: string | null; channelId: string | nu
 
 const DAY = 86_400_000;
 const PEOPLE: Array<[string, string]> = [
-  ["131481943547052032", "artemidorus"], ["402115789012345678", "u7i5lj6g"], ["402115789012345679", "oyv7oikp"],
-  ["402115789012345680", "crispymage"], ["200000000000000001", "nightowl"], ["200000000000000002", "marlowe"],
+  ["100000000000000001", "alex"], ["402115789012345678", "kit"], ["402115789012345679", "jo"],
+  ["402115789012345680", "robin"], ["200000000000000001", "nightowl"], ["200000000000000002", "marlowe"],
   ["300000000000000001", "lurker"], ["300000000000000002", "velvetfog"], ["300000000000000003", "quietstorm"],
 ];
 const TITLES: Array<[string, string, number]> = [

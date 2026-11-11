@@ -11,21 +11,23 @@ import { Requests } from "./Requests";
 import { Caches } from "./Caches";
 import { GraphsTab } from "./lazy";
 import { utcTime } from "./format";
+import { Icon, Logo } from "./icons";
 
 type Tab = "now" | "history" | "graphs" | "people" | "places" | "requests" | "caches" | "logs" | "settings";
-const TABS: Array<{ id: Tab; label: string }> = [
-  { id: "now", label: "Now playing" },
-  { id: "history", label: "History" },
-  { id: "graphs", label: "Graphs" },
-  { id: "people", label: "People" },
-  { id: "places", label: "Servers" },
-  { id: "requests", label: "Requests" },
-  { id: "caches", label: "Caches" },
-  { id: "logs", label: "Logs" },
-  { id: "settings", label: "Settings" },
+const TABS: Array<{ id: Tab; label: string; group: "Monitor" | "Library" | "System" }> = [
+  { id: "now", label: "Now Playing", group: "Monitor" },
+  { id: "history", label: "History", group: "Monitor" },
+  { id: "graphs", label: "Statistics", group: "Monitor" },
+  { id: "people", label: "Users", group: "Library" },
+  { id: "places", label: "Discord Servers", group: "Library" },
+  { id: "requests", label: "Requests", group: "Library" },
+  { id: "caches", label: "Caches", group: "System" },
+  { id: "logs", label: "Logs", group: "System" },
+  { id: "settings", label: "Settings", group: "System" },
 ];
+const GROUPS = ["Monitor", "Library", "System"] as const;
 
-/** `#history/12`: the History tab, play 12. */
+/** `#history/12`: the History page, session 12. */
 interface Route { tab: Tab; id: string | null }
 
 function routeFromHash(): Route {
@@ -53,8 +55,8 @@ function SignIn({ onDone }: { onDone: () => void }) {
           setBusy(false);
         }
       }}>
-        <h1>Theater admin</h1>
-        <p className="muted">Sign in with the server's ADMIN_PASSWORD.</p>
+        <div className="signin-brand"><Logo size={40} /><h1>Theater Dashboard</h1></div>
+        <p className="muted">Sign in with the password set in the server's <span className="mono">ADMIN_PASSWORD</span>.</p>
         <label className="stack">
           <span>Password</span>
           <input type="password" autoFocus autoComplete="current-password" value={password}
@@ -111,47 +113,64 @@ export function App() {
     return () => es.close();
   }, [signedIn]);
 
+  // The browser tab says what is playing, so it can be told at a glance.
+  const sessions = data?.rooms.filter((r) => r.ratingKey).length ?? 0;
+  useEffect(() => {
+    document.title = sessions > 0 ? `(${sessions}) Theater Dashboard` : "Theater Dashboard";
+  }, [sessions]);
+
   if (signedIn === null) return <p className="empty">Loading…</p>;
   if (!signedIn) return <SignIn onDone={() => setSignedIn(true)} />;
 
   return (
     <div className="shell">
-      <header className="topbar">
-        <div className="brand">Theater admin</div>
-        <nav className="tabs" role="tablist">
-          {TABS.map((t) => (
-            <a key={t.id} href={`#${t.id}`} role="tab" aria-selected={tab === t.id}
-              className={tab === t.id ? "tab active" : "tab"}>{t.label}</a>
+      <aside className="sidebar">
+        <a className="brand" href="#now"><Logo /><span>Theater<br /><small>Dashboard</small></span></a>
+        <nav aria-label="Pages">
+          {GROUPS.map((g) => (
+            <div key={g} className="nav-group">
+              <div className="nav-label">{g}</div>
+              {TABS.filter((t) => t.group === g).map((t) => (
+                <a key={t.id} href={`#${t.id}`} title={t.label} aria-label={t.label} aria-current={tab === t.id ? "page" : undefined}
+                  className={tab === t.id ? "nav-item active" : "nav-item"}>
+                  <Icon name={t.id} />
+                  <span>{t.label}</span>
+                  {t.id === "now" && sessions > 0 && <span className="nav-count">{sessions}</span>}
+                </a>
+              ))}
+            </div>
           ))}
         </nav>
-        <div className="topbar-right">
-          <span className={`live ${live}`} title={data ? `Updated ${utcTime(data.at)} UTC` : ""}>
+        <div className="sidebar-foot">
+          <span className={`live ${live}`} title={data ? `Last update ${utcTime(data.at)} UTC` : ""}>
             <span className="dot" />{live === "live" ? "Live" : live === "lost" ? "Reconnecting…" : "Connecting…"}
             {data && <span className="muted"> · {utcTime(data.at)} UTC</span>}
           </span>
-          <button className="ghost" onClick={async () => {
+          <button className="ghost signout" onClick={async () => {
             await api.logout().catch(() => {});
             setSignedIn(false);
             setData(null);
-          }}>Sign out</button>
+          }}><Icon name="signout" size={16} />Sign out</button>
         </div>
-      </header>
-      {problem && (
-        <div className="banner" role="alert">
-          {problem} <button className="link" onClick={() => setProblem(null)}>Dismiss</button>
-        </div>
-      )}
-      <main className="content">
-        {tab === "now" && <NowPlaying data={data} />}
-        {tab === "history" && <History key={id ?? ""} id={id} onError={onError} />}
-        {tab === "graphs" && <GraphsTab onError={onError} />}
-        {tab === "people" && <People key={id ?? ""} id={id} onError={onError} />}
-        {tab === "places" && <Places onError={onError} />}
-        {tab === "requests" && <Requests onError={onError} />}
-        {tab === "caches" && <Caches onError={onError} />}
-        {tab === "logs" && <Logs onError={onError} />}
-        {tab === "settings" && <Settings onError={onError} />}
-      </main>
+      </aside>
+      <div className="main">
+        {problem && (
+          <div className="banner" role="alert">
+            <Icon name="alert" size={16} /> {problem} <button className="link" onClick={() => setProblem(null)}>Dismiss</button>
+          </div>
+        )}
+        <main className="content">
+          {tab === "now" && <NowPlaying data={data} />}
+          {tab === "history" && <History key={id ?? ""} id={id} onError={onError} />}
+          {tab === "graphs" && <GraphsTab onError={onError} />}
+          {tab === "people" && <People key={id ?? ""} id={id} onError={onError} />}
+          {tab === "places" && <Places onError={onError} />}
+          {tab === "requests" && <Requests onError={onError} />}
+          {tab === "caches" && <Caches onError={onError} />}
+          {tab === "logs" && <Logs onError={onError} />}
+          {tab === "settings" && <Settings onError={onError} />}
+        </main>
+      </div>
     </div>
   );
 }

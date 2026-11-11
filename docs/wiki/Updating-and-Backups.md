@@ -79,7 +79,7 @@ keeps it in the `app-data` volume.
 | `watch-history.sqlite` | The Activity's watch history and history settings | Yes |
 | `instances.sqlite` | Each Activity window's channel and host | Optional |
 | `sessions.sqlite` | Sign-ins, each valid for 24 hours | Optional |
-| `admin.sqlite` | The admin page's history: plays, viewers, streams, launches, requests | Optional |
+| `admin.sqlite` | The dashboard's history: plays, viewers, streams, launches, requests | Optional |
 | `detail-cache.sqlite` | Title details from Plex Discover, TMDB and TVDB | No: cache warming rebuilds it |
 | `thumb-cache.sqlite` | Artwork, up to `THUMB_CACHE_MAX_SIZE` (10 GB) | No: fetched again when needed |
 | `subtitles.sqlite` | Text subtitles read out of media files | No |
@@ -183,4 +183,4 @@ Portal, and `REDIRECT_URI` and `ALLOWED_ORIGINS`.
 
 ## Next
 
-→ [Admin Page](Admin-Page)
+→ [Dashboard](Admin-Page)

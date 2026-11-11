@@ -12,8 +12,8 @@ const PERIODS = [
   { days: 7, label: "7 days" },
   { days: 30, label: "30 days" },
   { days: 90, label: "90 days" },
-  { days: 365, label: "A year" },
-  { days: 0, label: "All" },
+  { days: 365, label: "1 year" },
+  { days: 0, label: "All time" },
 ];
 
 interface Bucket extends GraphDay {
@@ -58,12 +58,15 @@ export function Graphs({ onError }: { onError: (e: unknown) => void }) {
   const { data, busy } = useLoad(() => api.graphs(days), [days], onError);
   return (
     <>
+      <div className="page-head">
+        <h1>Statistics</h1>
+        <p className="muted">Trends across the recorded history. Days are UTC, and a session counts on the day it started.</p>
+      </div>
       <div className="period" role="group" aria-label="Period">
         {PERIODS.map((p) => (
           <button key={p.days} className={`chip ${days === p.days ? "on" : ""}`} aria-pressed={days === p.days}
             onClick={() => setDays(p.days)}>{p.label}</button>
         ))}
-        <span className="muted small">Days are UTC; a play counts on the day it started.</span>
       </div>
       {!data ? <p className="empty">{busy ? "Loading…" : "Couldn't read the history."}</p> : (
         <div className={busy ? "stale" : ""}>
@@ -90,13 +93,13 @@ function GraphsBody({ g }: { g: GraphData }) {
   }));
   const one = (key: string, label: string): Series[] => [{ key, label, color: COLORS[0] }];
   const data: Series[] = [
-    { key: "bot", label: "From the bot", color: COLORS[0] },
-    { key: "hit", label: "From Discord's cache", color: COLORS[1] },
-    { key: "p2p", label: "From other viewers", color: COLORS[2] },
+    { key: "bot", label: "Server", color: COLORS[0] },
+    { key: "hit", label: "Discord cache", color: COLORS[1] },
+    { key: "p2p", label: "Peers", color: COLORS[2] },
   ];
   const streams: Series[] = [
-    { key: "copies", label: "Copied", color: COLORS[0] },
-    { key: "reencodes", label: "Re-encoded", color: COLORS[1] },
+    { key: "copies", label: "Direct", color: COLORS[0] },
+    { key: "reencodes", label: "Transcoded", color: COLORS[1] },
   ];
   const asks: Series[] = [
     { key: "launches", label: "Launches", color: COLORS[0] },
@@ -107,79 +110,79 @@ function GraphsBody({ g }: { g: GraphData }) {
   const weekRows = [1, 2, 3, 4, 5, 6, 0].map((w) => ({ ...g.weekdays[w], label: WEEKDAYS[w].slice(0, 3), title: WEEKDAYS[w] }));
   const titleRows = g.titles.map((x) => ({ ...x, name: x.title ?? `Plex item ${x.ratingKey}` }));
   const peopleRows = g.people.map((x) => ({ ...x, name: x.username ?? x.userId }));
-  const serverRows = g.servers.map((x) => ({ ...x, name: x.guildId ?? "No server" }));
+  const serverRows = g.servers.map((x) => ({ ...x, name: x.guildId ?? "Direct message" }));
   const table = (series: Series[], fmt: (n: number) => string, r: Array<Record<string, unknown>> = chartRows, label = by === "day" ? "Day" : by === "week" ? "Week of" : "Month") =>
     <SeriesTable rows={r} label={label} labelKey="label" series={series} fmt={fmt} />;
 
   return (
     <>
       <div className="tiles">
-        <Tile label="Plays" value={count(t.plays)} sub={`${hours(t.playedS)} played`} />
-        <Tile label="Time watched" value={hours(t.watchedS)} sub="by everybody, added up" />
-        <Tile label="People" value={count(t.people)} sub={`${count(t.launches)} launches, ${count(t.requests)} requests`} />
-        <Tile label="Data players got" value={bytes(t.httpBytes + t.p2pBytes)}
-          sub={`${share(t.hitShare)} of what they fetched came from Discord's cache`} />
-        <Tile label="Re-encoded" value={t.streams ? share(t.reencodes / t.streams) : "—"}
+        <Tile label="Sessions" value={count(t.plays)} sub={`${hours(t.playedS)} of playback`} />
+        <Tile label="Watch time" value={hours(t.watchedS)} sub="Combined across all viewers" />
+        <Tile label="Users" value={count(t.people)} sub={`${count(t.launches)} launches · ${count(t.requests)} requests`} />
+        <Tile label="Data delivered" value={bytes(t.httpBytes + t.p2pBytes)}
+          sub={`${share(t.hitShare)} of HTTP data served by Discord's cache`} />
+        <Tile label="Transcoded streams" value={t.streams ? share(t.reencodes / t.streams) : "—"}
           sub={`${count(t.reencodes)} of ${count(t.streams)} streams`} />
-        <Tile label="Buffering" value={`${count(t.stalls)} ${t.stalls === 1 ? "time" : "times"}`}
-          sub={`${clock(t.stalledMs / 1000)} in all; ${count(t.errors)} player errors`} />
+        <Tile label="Buffering" value={`${count(t.stalls)} ${t.stalls === 1 ? "event" : "events"}`}
+          sub={`${clock(t.stalledMs / 1000)} in total · ${count(t.errors)} player errors`} />
       </div>
 
       {t.plays === 0 && t.launches === 0 && t.requests === 0 && (
-        <p className="note">Nothing was recorded in this period.</p>
+        <p className="note">No activity was recorded in this period.</p>
       )}
 
       <div className="charts">
-        <ChartCard title={`Plays ${per}`} series={one("plays", "Plays")} table={table(one("plays", "Plays"), count)}>
-          <Columns rows={chartRows} x="label" series={one("plays", "Plays")} fmt={count} tipTitle={tipTitle} />
+        <ChartCard title={`Sessions ${per}`} series={one("plays", "Sessions")} table={table(one("plays", "Sessions"), count)}>
+          <Columns rows={chartRows} x="label" series={one("plays", "Sessions")} fmt={count} tipTitle={tipTitle} />
         </ChartCard>
-        <ChartCard title={`Time watched ${per}`} sub="Each viewer's time, added up" series={one("watchedH", "Hours watched")}
-          table={table(one("watchedS", "Time watched"), hours)}>
+        <ChartCard title={`Watch time ${per}`} sub="Combined across all viewers" series={one("watchedH", "Hours watched")}
+          table={table(one("watchedS", "Watch time"), hours)}>
           <Columns rows={chartRows} x="label" series={one("watchedH", "Hours watched")} fmt={(n) => hours(n * 3600)}
             axisFmt={(n) => `${count(n)} h`} decimals tipTitle={tipTitle} />
         </ChartCard>
-        <ChartCard title={`Data ${per}, and where it came from`} sub="What players say they got" series={data}
+        <ChartCard title={`Data delivered ${per}, by source`} sub="As reported by the players" series={data}
           table={table(data, inUnit)} wide>
           <Columns rows={chartRows} x="label" series={data} fmt={inUnit} axisFmt={unitAxis} decimals stacked tipTitle={tipTitle} height={240} />
         </ChartCard>
-        <ChartCard title={`Streams ${per}`} sub="Copied from the file, or re-encoded" series={streams} table={table(streams, count)}>
+        <ChartCard title={`Streams ${per}`} sub="Sent unchanged (direct) or transcoded" series={streams} table={table(streams, count)}>
           <Columns rows={chartRows} x="label" series={streams} fmt={count} stacked tipTitle={tipTitle} />
         </ChartCard>
-        <ChartCard title="Why streams were re-encoded" series={one("streams", "Streams")}
-          table={<SeriesTable rows={g.reasons} label="Why" labelKey="reason" series={one("streams", "Streams")} fmt={count} />}>
-          {g.reasons.length === 0 ? <p className="muted">None was re-encoded.</p>
+        <ChartCard title="Transcode reasons" series={one("streams", "Streams")}
+          table={<SeriesTable rows={g.reasons} label="Reason" labelKey="reason" series={one("streams", "Streams")} fmt={count} />}>
+          {g.reasons.length === 0 ? <p className="muted">No stream was transcoded in this period.</p>
             : <Bars rows={g.reasons} nameKey="reason" valueKey="streams" label="Streams" fmt={count} />}
         </ChartCard>
-        <ChartCard title={`Buffering ${per}`} sub="Times a viewer's picture stopped, waiting for data" series={one("stalls", "Times")}
-          table={table([{ key: "stalls", label: "Times", color: COLORS[0] }], count)}>
-          <Columns rows={chartRows} x="label" series={one("stalls", "Times")} fmt={count} tipTitle={tipTitle} />
+        <ChartCard title={`Buffering ${per}`} sub="Times a viewer's playback stopped to wait for data" series={one("stalls", "Events")}
+          table={table([{ key: "stalls", label: "Events", color: COLORS[0] }], count)}>
+          <Columns rows={chartRows} x="label" series={one("stalls", "Events")} fmt={count} tipTitle={tipTitle} />
         </ChartCard>
         <ChartCard title={`Launches and requests ${per}`} series={asks} table={table(asks, count)}>
           <Columns rows={chartRows} x="label" series={asks} fmt={count} tipTitle={tipTitle} />
         </ChartCard>
-        <ChartCard title="Plays by hour" sub="Hour of the day, UTC" series={one("plays", "Plays")}
-          table={table(one("plays", "Plays"), count, hourRows, "Hour (UTC)")}>
-          <Columns rows={hourRows} x="label" series={one("plays", "Plays")} fmt={count} tipTitle={tipTitle} />
+        <ChartCard title="Sessions by hour" sub="Hour of the day, UTC" series={one("plays", "Sessions")}
+          table={table(one("plays", "Sessions"), count, hourRows, "Hour (UTC)")}>
+          <Columns rows={hourRows} x="label" series={one("plays", "Sessions")} fmt={count} tipTitle={tipTitle} />
         </ChartCard>
-        <ChartCard title="Plays by weekday" sub="UTC" series={one("plays", "Plays")}
-          table={table(one("plays", "Plays"), count, weekRows, "Day")}>
-          <Columns rows={weekRows} x="label" series={one("plays", "Plays")} fmt={count} tipTitle={tipTitle} />
+        <ChartCard title="Sessions by weekday" sub="UTC" series={one("plays", "Sessions")}
+          table={table(one("plays", "Sessions"), count, weekRows, "Day")}>
+          <Columns rows={weekRows} x="label" series={one("plays", "Sessions")} fmt={count} tipTitle={tipTitle} />
         </ChartCard>
-        <ChartCard title="Most watched titles" sub="By time watched" series={one("watchedS", "Time watched")}
-          table={<TopTable rows={titleRows} cols={[["Plays", "plays", count], ["People", "people", count], ["Time watched", "watchedS", hours]]} />}>
-          {titleRows.length === 0 ? <p className="muted">Nothing yet.</p>
-            : <Bars rows={titleRows} nameKey="name" valueKey="watchedS" label="Time watched" fmt={hours} />}
+        <ChartCard title="Most watched titles" sub="By combined watch time" series={one("watchedS", "Watch time")}
+          table={<TopTable rows={titleRows} cols={[["Sessions", "plays", count], ["Users", "people", count], ["Watch time", "watchedS", hours]]} />}>
+          {titleRows.length === 0 ? <p className="muted">No data yet.</p>
+            : <Bars rows={titleRows} nameKey="name" valueKey="watchedS" label="Watch time" fmt={hours} />}
         </ChartCard>
-        <ChartCard title="Who watched most" sub="By time watched; pick one to open them" series={one("watchedS", "Time watched")}
-          table={<TopTable rows={peopleRows} cols={[["Plays", "plays", count], ["Time watched", "watchedS", hours], ["Data", "bytes", bytes]]} />}>
-          {peopleRows.length === 0 ? <p className="muted">Nobody yet.</p>
-            : <Bars rows={peopleRows} nameKey="name" valueKey="watchedS" label="Time watched" fmt={hours}
+        <ChartCard title="Most active users" sub="By watch time. Select a user to open their page." series={one("watchedS", "Watch time")}
+          table={<TopTable rows={peopleRows} cols={[["Sessions", "plays", count], ["Watch time", "watchedS", hours], ["Data received", "bytes", bytes]]} />}>
+          {peopleRows.length === 0 ? <p className="muted">No data yet.</p>
+            : <Bars rows={peopleRows} nameKey="name" valueKey="watchedS" label="Watch time" fmt={hours}
               onPick={(r) => { location.hash = `people/${String(r.userId)}`; }} />}
         </ChartCard>
-        <ChartCard title="Servers" sub="Discord servers by time watched in them" series={one("watchedS", "Time watched")}
-          table={<TopTable rows={serverRows} cols={[["Plays", "plays", count], ["People", "people", count], ["Time watched", "watchedS", hours]]} />}>
-          {serverRows.length === 0 ? <p className="muted">None yet.</p>
-            : <Bars rows={serverRows} nameKey="name" valueKey="watchedS" label="Time watched" fmt={hours}
+        <ChartCard title="Most active servers" sub="Discord servers by combined watch time" series={one("watchedS", "Watch time")}
+          table={<TopTable rows={serverRows} cols={[["Sessions", "plays", count], ["Users", "people", count], ["Watch time", "watchedS", hours]]} />}>
+          {serverRows.length === 0 ? <p className="muted">No data yet.</p>
+            : <Bars rows={serverRows} nameKey="name" valueKey="watchedS" label="Watch time" fmt={hours}
               onPick={() => { location.hash = "places"; }} />}
         </ChartCard>
       </div>
@@ -220,12 +223,12 @@ function TopTable({ rows, cols }: {
 export function MiniChart({ kind, onError }: { kind: "plays" | "people" | "data"; onError: (e: unknown) => void }) {
   const { data } = useLoad(() => api.graphs(30), [], onError);
   if (!data) return null;
-  const more = <>The last 30 days, UTC · <a href="#graphs">More graphs</a></>;
+  const more = <>Last 30 days, UTC · <a href="#graphs">All statistics</a></>;
   const rows = data.daily.map((d) => ({ ...d, label: dayName(d.day), title: fullDay(d.day) }));
   if (kind === "plays") {
-    const s: Series[] = [{ key: "plays", label: "Plays", color: COLORS[0] }];
+    const s: Series[] = [{ key: "plays", label: "Sessions", color: COLORS[0] }];
     return (
-      <ChartCard title="Plays per day" sub={more} series={s} table={<SeriesTable rows={rows} label="Day" labelKey="label" series={s} fmt={count} />}>
+      <ChartCard title="Sessions per day" sub={more} series={s} table={<SeriesTable rows={rows} label="Day" labelKey="label" series={s} fmt={count} />}>
         <Columns rows={rows} x="label" series={s} fmt={count} height={140} tipTitle={tipTitle} />
       </ChartCard>
     );
@@ -233,10 +236,10 @@ export function MiniChart({ kind, onError }: { kind: "plays" | "people" | "data"
   if (kind === "people") {
     const top = data.people.slice(0, 5).map((x) => ({ ...x, name: x.username ?? x.userId }));
     return (
-      <ChartCard title="Who watched most" sub={more} series={[{ key: "watchedS", label: "Time watched", color: COLORS[0] }]}
-        table={<TopTable rows={top} cols={[["Plays", "plays", count], ["Time watched", "watchedS", hours], ["Data", "bytes", bytes]]} />}>
-        {top.length === 0 ? <p className="muted">Nobody watched anything.</p>
-          : <Bars rows={top} nameKey="name" valueKey="watchedS" label="Time watched" fmt={hours}
+      <ChartCard title="Most active users" sub={more} series={[{ key: "watchedS", label: "Watch time", color: COLORS[0] }]}
+        table={<TopTable rows={top} cols={[["Sessions", "plays", count], ["Watch time", "watchedS", hours], ["Data received", "bytes", bytes]]} />}>
+        {top.length === 0 ? <p className="muted">No watch time recorded.</p>
+          : <Bars rows={top} nameKey="name" valueKey="watchedS" label="Watch time" fmt={hours}
             onPick={(r) => { location.hash = `people/${String(r.userId)}`; }} />}
       </ChartCard>
     );
@@ -245,13 +248,13 @@ export function MiniChart({ kind, onError }: { kind: "plays" | "people" | "data"
   const inUnit = (n: number) => `${n >= 100 ? Math.round(n) : n >= 10 ? n.toFixed(1) : n.toFixed(2)} ${unit.label}`;
   const unitAxis = (n: number) => `${count(n)} ${unit.label}`;
   const s: Series[] = [
-    { key: "bot", label: "From the bot", color: COLORS[0] },
-    { key: "hit", label: "From Discord's cache", color: COLORS[1] },
-    { key: "p2p", label: "From other viewers", color: COLORS[2] },
+    { key: "bot", label: "Server", color: COLORS[0] },
+    { key: "hit", label: "Discord cache", color: COLORS[1] },
+    { key: "p2p", label: "Peers", color: COLORS[2] },
   ];
   const dataRows = rows.map((r) => ({ ...r, bot: r.botBytes / unit.div, hit: r.edgeHitBytes / unit.div, p2p: r.p2pBytes / unit.div }));
   return (
-    <ChartCard title="Data per day, and where it came from" sub={more} series={s}
+    <ChartCard title="Data delivered per day, by source" sub={more} series={s}
       table={<SeriesTable rows={dataRows} label="Day" labelKey="label" series={s} fmt={inUnit} />}>
       <Columns rows={dataRows} x="label" series={s} fmt={inUnit} axisFmt={unitAxis} decimals stacked height={170} tipTitle={tipTitle} />
     </ChartCard>

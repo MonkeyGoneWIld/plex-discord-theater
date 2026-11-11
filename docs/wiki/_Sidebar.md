@@ -25,7 +25,7 @@
 **Maintain**
 
 - [Updating and Backups](Updating-and-Backups)
-- [Admin Page](Admin-Page)
+- [Dashboard](Admin-Page)
 - [Local Development](Local-Development)
 
 **Help**

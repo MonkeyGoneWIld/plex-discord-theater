@@ -28,7 +28,7 @@ export interface StreamView {
   decision: "copy" | "transcode" | null;
   /** Why it is re-encoded, as the player's Stats for nerds says it. */
   reason: string | null;
-  /** The one line: "Direct copy", "Re-encoded: …". */
+  /** The one line: "Direct play", "Transcode: …". */
   summary: string;
   /** What one viewer of it downloads. */
   kbps: number | null;
@@ -68,6 +68,8 @@ export interface RoomView extends Omit<AdminRoom, "variants" | "clients"> {
   streams: StreamView[];
   /** Its play in the history, while the admin page records. */
   playId?: number | null;
+  /** Its delivery over the last minutes, by source (admin/recorder.ts flowSeries). */
+  flow?: { stepS: number; windowS: number; points: Array<[number, number, number, number]> } | null;
 }
 
 export interface Overview {
@@ -86,14 +88,14 @@ export interface Overview {
   rooms: RoomView[];
 }
 
-/** "Direct copy", "Re-encoded: <why>", from a stream's notes. */
+/** "Direct play", "Direct stream: audio converted", "Transcode: <why>", from a stream's notes: the words Stats for nerds uses. */
 export function summaryOf(notes: Record<string, string | number>): string {
   const audio = notes.audio === "transcode"
     ? `; audio converted${notes.audioReason ? ` (${notes.audioReason})` : ""}`
     : "";
-  if (notes.video === "copy") return `Direct copy${audio}`;
-  if (notes.video === "transcode") return `Re-encoded: ${notes.reason ?? "reason not stated"}${audio}`;
-  return "Starting — no details yet";
+  if (notes.video === "copy") return audio ? `Direct stream${audio.replace("; ", ": ")}` : "Direct play";
+  if (notes.video === "transcode") return `Transcode: ${notes.reason ?? "no reason reported"}${audio}`;
+  return "Starting: details pending";
 }
 
 export function overview(now = Date.now()): Overview {

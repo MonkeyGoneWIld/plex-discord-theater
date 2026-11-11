@@ -61,7 +61,7 @@ const login = (password: string) => fetch(`${origin}/api/login`, {
 console.log("\n— nothing without signing in —");
 for (const p of ["/api/overview", "/api/live", "/api/logs", "/api/logs/files", "/api/settings", "/api/history", "/api/history/1", "/api/usage",
   "/api/requests", "/api/people", "/api/people/111", "/api/places", "/api/caches", "/api/graphs", "/api/history-file",
-  "/api/export/history.csv", "/api/export/admin.sqlite"]) {
+  "/api/export/history.csv", "/api/export/admin.sqlite", "/api/titles?keys=1", "/api/poster/1"]) {
   const res = await fetch(origin + p);
   check(`${p}: 401`, [res.status, ((await res.json()) as { error?: string }).error], [401, "Sign in first"]);
 }
@@ -115,7 +115,7 @@ async function join(userId: string, username: string) {
   for (let i = 0; i < 80 && !seen.some((m) => m.type === "state"); i++) await sleep(25);
   return (m: Record<string, unknown>) => ws.send(JSON.stringify(m));
 }
-const host = await join("111", "artemidorus");
+const host = await join("111", "alex");
 const sid = crypto.randomUUID();
 rememberStreamNotes(sid, {
   engine: "ffmpeg", video: "transcode", reason: "10-bit picture: frames dropped on this player",
@@ -124,7 +124,7 @@ rememberStreamNotes(sid, {
 host({ type: "watching", value: true });
 host({ type: "play", ratingKey: "58860", title: "Ghost Stories", subtitles: false, hlsSessionId: sid,
   position: 0, sessionOffset: 0, audioStreamId: 0, subtitleStreamId: 0 });
-const viewer = await join("222", "crispymage");
+const viewer = await join("222", "robin");
 viewer({ type: "watching", value: true });
 type Overview = {
   totals: Record<string, number>;
@@ -146,17 +146,18 @@ check("the room: its title, and where in Discord it is",
   ["Ghost Stories", "999000", "888000", "111"]);
 check("  who is in it, by name, Discord id and role",
   room?.clients.map((c) => [c.username, c.userId, c.role, c.watching]),
-  [["artemidorus", "111", "host", true], ["crispymage", "222", "viewer", true]]);
+  [["alex", "111", "host", true], ["robin", "222", "viewer", true]]);
 const s = room?.streams[0];
 check("  its stream: re-encoded, why, and who watches it",
   [s?.hlsSessionId, s?.decision, s?.reason, s?.viewers, s?.isHostStream],
   [sid, "transcode", "10-bit picture: frames dropped on this player", ["111", "222"], true]);
 check("  in one line, the audio too",
-  s?.summary, "Re-encoded: 10-bit picture: frames dropped on this player; audio converted (AC3 isn't played here)");
+  s?.summary, "Transcode: 10-bit picture: frames dropped on this player; audio converted (AC3 isn't played here)");
 check("  the playlist's notes for the details, an empty one left out",
   [s?.notes.kbps, "range" in (s?.notes ?? {})], [4000, false]);
-check("a copy, in one line", summaryOf({ video: "copy" }), "Direct copy");
-check("a stream whose playlist isn't made yet", summaryOf({}), "Starting — no details yet");
+check("a copy, in one line", [summaryOf({ video: "copy" }), summaryOf({ video: "copy", audio: "transcode", audioReason: "AC3" })],
+  ["Direct play", "Direct stream: audio converted (AC3)"]);
+check("a stream whose playlist isn't made yet", summaryOf({}), "Starting: details pending");
 
 const live = await fetch(`${origin}/api/live`, { headers: { Cookie: cookie } });
 const reader = live.body!.getReader();
@@ -177,7 +178,13 @@ console.log("\n— the history, from the live room —");
 {
   const { Recorder } = await import("../src/admin/recorder.js");
   const recorder = new Recorder({ dbPath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "admin-hist-")), "admin.sqlite") });
-  const withHistory = http.createServer(createAdminApp({ password: PASSWORD, distDir: emptyDist, recorder }));
+  // Posters and running times, as Plex would give them.
+  const titles = {
+    info: async (k: string) => (k === "58860" ? { ratingKey: k, type: "episode", title: "The Red Paper", show: "Ghost Stories", season: 1, episode: 2,
+      year: null, durationS: 1440, poster: true } : null),
+    poster: async (k: string) => (k === "58860" ? { type: "image/png", body: Buffer.from([1, 2, 3]) } : null),
+  };
+  const withHistory = http.createServer(createAdminApp({ password: PASSWORD, distDir: emptyDist, recorder, titles }));
   await new Promise<void>((r) => withHistory.listen(0, "127.0.0.1", r));
   const at = `http://127.0.0.1:${(withHistory.address() as AddressInfo).port}`;
   const c = ((await fetch(`${at}/api/login`, { method: "POST", headers: { "Content-Type": "application/json" },
@@ -189,28 +196,39 @@ console.log("\n— the history, from the live room —");
   const plays = (await (await hget("/api/history")).json()) as Plays;
   const p0 = plays.plays[0];
   check("the room's play, as it goes: where, who, its streams",
-    [p0?.title, p0?.guildId, p0?.names, p0?.streams, p0?.reencoded], ["Ghost Stories", "999000", ["artemidorus", "crispymage"], 1, 1]);
+    [p0?.title, p0?.guildId, p0?.names, p0?.streams, p0?.reencoded], ["Ghost Stories", "999000", ["alex", "robin"], 1, 1]);
   type Play = { viewers: Array<{ username: string; watchedS: number }>; streams: Array<{ decision: string; reason: string }>; events: Array<{ kind: string }> };
   const one = (await (await hget(`/api/history/${p0?.id}`)).json()) as Play;
   check("  the whole of it: each viewer, each stream and why", [one.viewers.map((v) => v.username), one.streams.map((s) => [s.decision, s.reason])],
-    [["artemidorus", "crispymage"], [["transcode", "10-bit picture: frames dropped on this player"]]]);
+    [["alex", "robin"], [["transcode", "10-bit picture: frames dropped on this player"]]]);
   check("  a play there isn't", [(await hget("/api/history/999999")).status, (await hget("/api/history/abc")).status], [404, 404]);
   type Live = { rooms: Array<{ id: string; playId: number | null; clients: Array<{ userId: string; data?: { watchedS: number } }> }> };
   const liveRoom = ((await (await hget("/api/overview")).json()) as Live).rooms.find((r) => r.id === roomId);
   check("  the Now playing page: each viewer's play so far",
     [liveRoom?.playId === p0?.id, liveRoom?.clients.map((cl) => [cl.userId, typeof cl.data?.watchedS])],
     [true, [["111", "number"], ["222", "number"]]]);
+  check("  and the room's delivery, for its graph", Array.isArray((liveRoom as unknown as { flow?: { points: unknown[] } })?.flow?.points), true);
+  type Titles = { titles: Record<string, { show: string; durationS: number } | null> };
+  const info = (await (await hget("/api/titles?keys=58860,99,abc,58860")).json()) as Titles;
+  check("a title's poster and running time, by Plex item; what isn't an item is left out",
+    [Object.keys(info.titles).sort(), info.titles["58860"]?.show, info.titles["58860"]?.durationS, info.titles["99"]],
+    [["58860", "99"], "Ghost Stories", 1440, null]);
+  const poster = await hget("/api/poster/58860");
+  check("  its poster: the picture, kept by the browser for a day",
+    [poster.status, poster.headers.get("content-type"), poster.headers.get("cache-control"), (await poster.arrayBuffer()).byteLength],
+    [200, "image/png", "private, max-age=86400", 3]);
+  check("  none for a title without one, or what isn't an item", [(await hget("/api/poster/99")).status, (await hget("/api/poster/abc")).status], [404, 404]);
   const usage = (await (await hget("/api/usage")).json()) as { usage: Array<{ kind: string; userId: string; guildId: string }> };
   check("  who came, where", usage.usage.map((u) => [u.kind, u.userId, u.guildId]).sort(), [["join", "111", "999000"], ["join", "222", "999000"]]);
   check("  and title requests, none yet", await (await hget("/api/requests")).json(), { requests: [] });
   type People = { people: Array<{ userId: string; username: string; plays: number; hosted: number }> };
   check("  everybody seen", ((await (await hget("/api/people")).json()) as People).people.map((p) => [p.userId, p.username, p.plays, p.hosted]).sort(),
-    [["111", "artemidorus", 1, 1], ["222", "crispymage", 1, 0]]);
+    [["111", "alex", 1, 1], ["222", "robin", 1, 0]]);
   type Person = { person: { username: string }; plays: Array<{ title: string; role: string }>; places: Array<{ guildId: string; channelId: string }> };
   const person = (await (await hget("/api/people/222")).json()) as Person;
   check("  one person: what they watched, where",
     [person.person.username, person.plays.map((p) => [p.title, p.role]), person.places.map((p) => [p.guildId, p.channelId])],
-    ["crispymage", [["Ghost Stories", "viewer"]], [["999000", "888000"]]]);
+    ["robin", [["Ghost Stories", "viewer"]], [["999000", "888000"]]]);
   check("  nobody by an ID never seen, or one that isn't an ID",
     [(await hget("/api/people/404")).status, (await hget("/api/people/abc")).status], [404, 404]);
   type Places = { guilds: Array<{ guildId: string; channels: Array<{ channelId: string; joins: number; plays: number }> }> };
@@ -234,7 +252,7 @@ console.log("\n— the history, from the live room —");
       csvBytes.subarray(0, 3).toString("hex"), csvLines[0].split(",").slice(0, 4), csvLines.length],
     [200, "text/csv; charset=utf-8", true, "efbbbf", ["id", "started_utc", "ended_utc", "title"], 3]);
   check("  each play's title, where, who", [csvLines[1].split(",")[3], csvLines[1].split(",")[5], csvLines[1].split(",")[11]],
-    ["Ghost Stories", "999000", "artemidorus; crispymage"]);
+    ["Ghost Stories", "999000", "alex; robin"]);
   const none = (await (await hget("/api/export/history.csv?q=nobody")).text()).split("\r\n");
   check("  honouring the list's search", none.length, 2);
   type J = { search: string | null; truncated: boolean; plays: Array<{ title: string; viewers: unknown[]; streams: Array<{ decision: string }>; events: unknown[] }> };
@@ -321,7 +339,7 @@ check("  the system: its Node.js and uptime", [settings.system.node, typeof sett
 
 console.log("\n— the page —");
 const page = await fetch(`${origin}/`);
-check("not built: says so", [page.status, (await page.text()).includes("isn't built")], [503, true]);
+check("not built: says so", [page.status, (await page.text()).includes("has not been built")], [503, true]);
 const unknown = await get("/api/nothing");
 check("an API path that isn't one: 404", unknown.status, 404);
 const built = fs.mkdtempSync(path.join(os.tmpdir(), "admin-built-"));

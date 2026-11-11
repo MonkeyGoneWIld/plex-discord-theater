@@ -144,13 +144,13 @@ export async function cachesView(recorder: Recorder | null): Promise<{
   const caches: CacheView[] = [
     {
       id: "stream",
-      name: "Films being copied",
-      what: "Segments of each film the bot copies for a room, kept while it plays so a skip back is served at once.",
+      name: "Direct-play segments",
+      what: "Segments of titles being sent unchanged (direct play), kept during playback so seeking backwards is instant.",
       where: streamDir,
       bytes: sum(copyFolders) + copies.reduce((s, c) => s + c.memoryBytes, 0),
       limitBytes: null,
       items: copies.length,
-      kept: "In memory first, then on disk; each stream's go when it ends, and the folder is emptied when the bot starts.",
+      kept: "Held in memory first, then on disk. Removed when the stream ends; the folder is cleared when the server starts.",
       list: copies.map((c): CacheItem => ({
         name: c.sessionId,
         ratingKey: c.ratingKey,
@@ -167,13 +167,13 @@ export async function cachesView(recorder: Recorder | null): Promise<{
     },
     {
       id: "ffmpeg",
-      name: "FFmpeg's streams",
-      what: "Segments FFmpeg made for each stream it runs: on disk, and the ones rooms fetch now in memory.",
+      name: "FFmpeg stream segments",
+      what: "Segments produced by FFmpeg for each active stream, on disk, with the most recently requested held in memory.",
       where: runsDir,
       bytes: sum(runFolders),
       limitBytes: null,
       items: runFolders.length,
-      kept: `Each stream's go when it ends. In memory: ${hot.segments} segments, ${mb(hot.bytes)} of ${mb(segmentMemoryBytes())} (FFMPEG_SEGMENT_MEMORY_MB).`,
+      kept: `Removed when the stream ends. In memory: ${hot.segments} segments, ${mb(hot.bytes)} of ${mb(segmentMemoryBytes())} (FFMPEG_SEGMENT_MEMORY_MB).`,
       list: runFolders.slice(0, LIST).map((f) => {
         const play = sessionPlays.get(f.name);
         return {
@@ -186,12 +186,12 @@ export async function cachesView(recorder: Recorder | null): Promise<{
     {
       id: "art",
       name: "Artwork",
-      what: "Posters, backdrops and portraits from Plex and TMDB, so pages open without asking Plex again.",
+      what: "Posters, backdrops and cast photos from Plex and TMDB, so pages load without contacting Plex again.",
       where: path.join(data, "thumb-cache.sqlite"),
       bytes: artUse.bytes,
       limitBytes: artUse.maxBytes,
       items: art.count,
-      kept: `Each for ${Math.round(art.ttlMs / 86_400_000)} days (THUMB_CACHE_TTL_MS); past THUMB_CACHE_MAX_SIZE the oldest go.`,
+      kept: `${Math.round(art.ttlMs / 86_400_000)} days per image (THUMB_CACHE_TTL_MS). Above THUMB_CACHE_MAX_SIZE, the oldest are removed first.`,
       list: art.items.map((a) => {
         const key = ratingKeyOfArt(a.path);
         return { name: a.path, ratingKey: key, title: title(key), bytes: a.bytes, at: a.cachedAt };
@@ -201,12 +201,12 @@ export async function cachesView(recorder: Recorder | null): Promise<{
     {
       id: "details",
       name: "Title details",
-      what: "What each title's page shows, from Plex, Plex Discover, TMDB and TVDB: cast, ratings, related titles, seasons.",
+      what: "Metadata for each title page, from Plex, Plex Discover, TMDB and TVDB: cast, ratings, related titles and seasons.",
       where: path.join(data, "detail-cache.sqlite"),
       bytes: details.bytes,
       limitBytes: null,
       items: details.meta + details.related + details.seasons,
-      kept: `${details.meta} titles' details, ${details.related} titles' related lists, ${details.seasons} seasons' episodes. Used again for a week, and refreshed when Plex changes the title; cache warming fills it.`,
+      kept: `Details for ${details.meta} titles, related lists for ${details.related} titles, episode lists for ${details.seasons} seasons. Reused for one week and refreshed when Plex updates the title. Filled in advance by cache warming.`,
       list: details.items.map((d) => ({
         name: d.ratingKey, ratingKey: d.ratingKey, title: d.title, bytes: d.bytes, at: d.cachedAt,
         detail: [d.type, d.year].filter(Boolean).join(", ") || undefined,
@@ -216,12 +216,12 @@ export async function cachesView(recorder: Recorder | null): Promise<{
     {
       id: "subtitles",
       name: "Text subtitles",
-      what: "Subtitles read out of media files, so the next viewer gets them at once.",
+      what: "Text subtitles extracted from media files, so the next viewer receives them immediately.",
       where: path.join(data, "subtitles.sqlite"),
       bytes: subs.bytes,
       limitBytes: null,
       items: subs.count,
-      kept: `${subs.count} subtitle tracks of ${subs.titles} titles. Kept; read again if the file changes.`,
+      kept: `${subs.count} subtitle tracks across ${subs.titles} titles. Kept indefinitely and extracted again if the file changes.`,
       list: subs.items.map((s) => ({
         name: `Stream ${s.streamId}`, ratingKey: s.ratingKey, title: title(s.ratingKey), bytes: s.bytes, at: s.cachedAt,
         detail: `${s.format.toUpperCase()}${s.whole === false ? ", read in part so far" : ""}`,
@@ -230,25 +230,25 @@ export async function cachesView(recorder: Recorder | null): Promise<{
     },
     {
       id: "pgs",
-      name: "Picture subtitles",
-      what: "DVD and Blu-ray subtitles cut out of media files by FFmpeg, for the player to draw.",
+      name: "Image subtitles",
+      what: "DVD and Blu-ray (image-based) subtitles extracted from media files by FFmpeg and rendered by the player.",
       where: path.join(data, "subtitles-pgs"),
       bytes: sum(pgs),
       limitBytes: pictureSubtitlesMaxBytes(),
       items: pgs.length,
-      kept: "Past FFMPEG_PGS_MAX_GB the least recently used go; one nobody has played for 60 days goes.",
+      kept: "Above FFMPEG_PGS_MAX_GB, the least recently used are removed first. Unused for 60 days: removed.",
       list: pgs.slice(0, LIST).map((f) => ({ name: f.name, ratingKey: null, title: null, bytes: f.bytes, at: f.at })),
       listNote: note(LIST, pgs.length),
     },
     {
       id: "previews",
       name: "Seek-bar previews",
-      what: "Pictures for the seek bar, made by FFmpeg for files Plex has none for.",
+      what: "Seek-bar preview thumbnails generated by FFmpeg for files that have none in Plex.",
       where: path.join(data, "previews"),
       bytes: sum(previews),
       limitBytes: previewsMaxBytes(),
       items: previews.length,
-      kept: "Past FFMPEG_PREVIEWS_MAX_GB the least recently used go.",
+      kept: "Above FFMPEG_PREVIEWS_MAX_GB, the least recently used are removed first.",
       list: previews.slice(0, LIST).map((f) => {
         const key = previewKey(f.name);
         return { name: f.name, ratingKey: key, title: title(key), bytes: f.bytes, at: f.at };
@@ -258,12 +258,12 @@ export async function cachesView(recorder: Recorder | null): Promise<{
     {
       id: "fonts",
       name: "Subtitle fonts",
-      what: "Fonts carried by media files, for styled subtitles.",
+      what: "Fonts embedded in media files, used to render styled subtitles.",
       where: path.join(data, "subtitle-fonts"),
       bytes: sum(fonts),
       limitBytes: null,
       items: fonts.length,
-      kept: "Kept.",
+      kept: "Kept indefinitely.",
       list: fonts.slice(0, LIST).map((f) => ({ name: f.name, ratingKey: null, title: null, bytes: f.bytes, at: f.at })),
       listNote: note(LIST, fonts.length),
     },

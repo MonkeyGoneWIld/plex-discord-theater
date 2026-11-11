@@ -59,9 +59,9 @@ each time it starts; for longer work, use a named tunnel as described in
 | Command | Does |
 |---|---|
 | `npm run dev` | Server and client, with reloading |
-| `npm run build` | Builds the client and the admin page, then the server |
-| `npm run dev:admin` | The admin page on 3050 with made-up rooms, recording a history as they play, after six made-up weeks of it for the graphs, with a few requests and cached files (build it first); password `admin-fixture` unless `ADMIN_PASSWORD` is set |
-| `npm run dev:admin -w packages/client` | The admin page on 5174, reloading as you change it, against the server on 3050 |
+| `npm run build` | Builds the client and the dashboard, then the server |
+| `npm run dev:admin` | The dashboard on 3050 with made-up rooms, recording a history as they play, after six made-up weeks of it for the graphs, with a few requests and cached files (build it first); password `admin-fixture` unless `ADMIN_PASSWORD` is set |
+| `npm run dev:admin -w packages/client` | The dashboard on 5174, reloading as you change it, against the server on 3050 |
 | `npm start` | Runs the built server |
 | `npm test` | Runs the test suite |
 | `npx tsc --noEmit -p packages/server` | Type-checks the server |
@@ -76,9 +76,9 @@ packages/
     src/hooks/       Discord sign-in (useDiscord) and the room connection (useSync)
     src/lib/         Playback helpers: quality, subtitles, previews, P2P, settings
     test/            Tests, and browser fixtures run by hand
-    admin/           The admin page, built into dist-admin/
+    admin/           The dashboard, built into dist-admin/
   server/            Express and WebSocket server
-    src/admin/       The admin page's server, on its own port
+    src/admin/       The dashboard's server, on its own port
     src/routes/      Plex, Discord sign-in, history, Plex accounts, Seerr,
                      presence, logs, the qBittorrent manager API
     src/services/    Rooms, Plex, Direct Stream, subtitles, caches, P2P tracker

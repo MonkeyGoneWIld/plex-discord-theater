@@ -38,7 +38,7 @@ export function ChartCard({ title, sub, series, table, children, wide }: {
           {sub && <p className="muted small chart-sub">{sub}</p>}
         </div>
         <button className="link small" onClick={() => setAsTable(!asTable)} aria-pressed={asTable}>
-          {asTable ? "Show the chart" : "Show as a table"}
+          {asTable ? "Show chart" : "Show table"}
         </button>
       </header>
       {!asTable && series && series.length > 1 && (

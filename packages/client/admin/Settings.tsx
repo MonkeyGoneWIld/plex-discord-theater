@@ -7,12 +7,12 @@ const SYSTEM_LABELS: Record<string, string> = {
   version: "Version",
   node: "Node.js",
   platform: "Platform",
-  pid: "Process id",
+  pid: "Process ID",
   startedAt: "Started",
-  uptimeS: "Up for",
-  rssMB: "Memory in use (MB)",
+  uptimeS: "Uptime",
+  rssMB: "Memory usage (MB)",
   heapUsedMB: "JavaScript heap (MB)",
-  logDir: "Log folder",
+  logDir: "Log directory",
 };
 
 export function Settings({ onError }: { onError: (e: unknown) => void }) {
@@ -30,6 +30,10 @@ export function Settings({ onError }: { onError: (e: unknown) => void }) {
 
   return (
     <>
+      <div className="page-head">
+        <h1>Settings</h1>
+        <p className="muted">Server status, the history database, and every environment setting the server reads.</p>
+      </div>
       <section className="card">
         <h3>System</h3>
         <dl className="grid">
@@ -42,7 +46,7 @@ export function Settings({ onError }: { onError: (e: unknown) => void }) {
       <section className="card">
         <div className="toolbar">
           <label className="grow">
-            <span>Find a setting</span>
+            <span>Filter settings</span>
             <input type="search" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="e.g. FFMPEG" />
           </label>
           <label className="check">
@@ -59,7 +63,7 @@ export function Settings({ onError }: { onError: (e: unknown) => void }) {
               <tr key={s.name}>
                 <td className="mono">{s.name}</td>
                 <td className={s.set ? (s.secret ? "muted" : "mono") : "muted"}>
-                  {s.set ? s.value : "Not set (default)"}
+                  {s.set ? s.value : "Not set (default applies)"}
                 </td>
               </tr>
             ))}
@@ -90,8 +94,8 @@ function HistoryFile({ onError }: { onError: (e: unknown) => void }) {
   if (none) {
     return (
       <section className="card">
-        <h3>History</h3>
-        <p className="muted">{none}. The history needs ADMIN_PASSWORD set and a data folder the bot can write to.</p>
+        <h3>History database</h3>
+        <p className="muted">{none}. History recording needs ADMIN_PASSWORD set and a writable data folder.</p>
       </section>
     );
   }
@@ -101,27 +105,27 @@ function HistoryFile({ onError }: { onError: (e: unknown) => void }) {
   const nothing = preview && preview.plays + preview.events + preview.usage + preview.requests + preview.people === 0;
   return (
     <section className="card">
-      <h3>History</h3>
+      <h3>History database</h3>
       <dl className="grid">
         <dt>File</dt><dd className="mono">{summary.path}</dd>
         <dt>Size</dt><dd>{bytes(summary.bytes)}</dd>
-        <dt>Holds</dt>
+        <dt>Contents</dt>
         <dd>
-          {summary.plays} plays ({summary.open} playing now), {summary.events} lines of what happened,
-          {" "}{summary.usage} launches and joins, {summary.requests} requests, {summary.people} people
+          {summary.plays} sessions ({summary.open} in progress), {summary.events} timeline events,
+          {" "}{summary.usage} launches and joins, {summary.requests} requests, {summary.people} users
         </dd>
-        <dt>From</dt><dd>{summary.first ? `${utc(summary.first)} to ${utc(summary.last)}` : "Nothing yet"}</dd>
+        <dt>Period covered</dt><dd>{summary.first ? `${utc(summary.first)} to ${utc(summary.last)}` : "No data yet"}</dd>
       </dl>
 
-      <h4>Download</h4>
+      <h4>Backup</h4>
       <p className="history-actions">
-        <a className="button ghost" href="/api/export/admin.sqlite" download>A copy of the history (admin.sqlite)</a>
+        <a className="button ghost" href="/api/export/admin.sqlite" download>Download database (admin.sqlite)</a>
         <span className="muted small">
-          Taken as you click, for a backup or your own queries. Each list downloads as CSV or JSON from its own page.
+          A snapshot taken when you click, for backup or your own queries. Each list can also be exported as CSV or JSON from its page.
         </span>
       </p>
 
-      <h4>Remove old history</h4>
+      <h4>Delete old history</h4>
       <form className="toolbar" onSubmit={(e) => {
         e.preventDefault();
         setDone(null);
@@ -129,32 +133,32 @@ function HistoryFile({ onError }: { onError: (e: unknown) => void }) {
         api.historyFile(n).then((f) => { setSummary(f.summary); setPreview(f.trim); }).catch(fail).finally(() => setBusy(false));
       }}>
         <label>
-          <span>Keep the last (days)</span>
+          <span>Keep the most recent (days)</span>
           <input type="number" min={1} max={MAX_DAYS} step={1} value={days} onChange={(e) => { setDays(e.target.value); setPreview(null); }} />
         </label>
-        <button type="submit" className="ghost" disabled={!valid || busy}>See what would go</button>
+        <button type="submit" className="ghost" disabled={!valid || busy}>Preview deletion</button>
       </form>
       {!valid && <p className="error small">A whole number of days, 1 to {MAX_DAYS}.</p>}
       {preview && (
         <div className="confirm" role="alert">
-          {nothing ? <p>Nothing is older than {utc(preview.before)}.</p> : (
+          {nothing ? <p>There is nothing older than {utc(preview.before)} to delete.</p> : (
             <>
               <p>
-                From before {utc(preview.before)}: <strong>{preview.plays} plays</strong>, with their viewers, streams and
-                {" "}{preview.events} lines of what happened; {preview.usage} launches and joins; {preview.requests} requests; and
-                {" "}{preview.people} people seen only then. A play still going stays.
+                This deletes everything recorded before {utc(preview.before)}: <strong>{preview.plays} sessions</strong> with
+                their viewers, streams and {preview.events} timeline events; {preview.usage} launches and joins;
+                {" "}{preview.requests} requests; and {preview.people} users not seen since. Sessions in progress are kept.
               </p>
-              <p><strong>This can't be undone.</strong> Download a copy first to keep it.</p>
+              <p><strong>This cannot be undone.</strong> Download the database first if you want to keep a copy.</p>
               <div className="confirm-actions">
                 <button className="danger" disabled={busy} onClick={() => {
                   setBusy(true);
                   api.trim(n).then((r) => {
                     setPreview(null);
-                    setDone(`Removed ${r.plays} plays, ${r.events} lines, ${r.usage} launches and joins, ${r.requests} requests `
+                    setDone(`Deleted ${r.plays} sessions, ${r.events} timeline events, ${r.usage} launches and joins, ${r.requests} requests `
                       + `and ${r.people} people. The file went from ${bytes(r.bytesBefore)} to ${bytes(r.bytesAfter)}.`);
                     return load();
                   }).catch(fail).finally(() => setBusy(false));
-                }}>{busy ? "Removing…" : "Remove them"}</button>
+                }}>{busy ? "Deleting…" : "Delete permanently"}</button>
                 <button className="ghost" disabled={busy} onClick={() => setPreview(null)}>Cancel</button>
               </div>
             </>

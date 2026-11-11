@@ -8,6 +8,7 @@ import { AdminSessions, cookieToken, passwordMatches, requireAdmin, sessionCooki
 import { logFiles, overview, readLog, settingsView } from "./data.js";
 import { MAX_GRAPH_DAYS, Recorder } from "./recorder.js";
 import { EXPORTS, exportFile, exportName, type ExportKind } from "./export.js";
+import { okRatingKey, plexTitles, type TitleSource } from "./titles.js";
 import { cachesView } from "./caches.js";
 import { numberSetting } from "../services/env-settings.js";
 import { logEvent } from "../services/logger.js";
@@ -30,6 +31,8 @@ export interface AdminOptions {
   liveEveryMs?: number;
   /** The history (admin.sqlite); without one, the page shows only what is live. */
   recorder?: Recorder;
+  /** Posters and running times; Plex's, unless the tests give their own. */
+  titles?: TitleSource;
 }
 
 /**
@@ -81,13 +84,13 @@ export function createAdminApp(opts: AdminOptions): express.Express {
   app.post("/api/login", loginLimiter, (req: Request, res: Response) => {
     const given = (req.body as { password?: unknown } | undefined)?.password;
     if (!passwordMatches(given, opts.password)) {
-      logEvent("Admin", "a wrong password at the admin page's sign-in", { from: req.ip ?? "unknown" });
+      logEvent("Admin", "dashboard sign-in failed: wrong password", { from: req.ip ?? "unknown" });
       res.status(401).json({ error: "Wrong password" });
       return;
     }
     const token = sessions.create();
     res.setHeader("Set-Cookie", sessionCookie(req, token));
-    logEvent("Admin", "signed in to the admin page", { from: req.ip ?? "unknown" });
+    logEvent("Admin", "dashboard sign-in", { from: req.ip ?? "unknown" });
     res.json({ ok: true, expiresInS: Math.floor(SESSION_MS / 1000) });
   });
 
@@ -110,6 +113,26 @@ export function createAdminApp(opts: AdminOptions): express.Express {
 
   app.get("/api/overview", admin, (_req, res) => {
     res.json(live());
+  });
+
+  // What the page shows of titles beside their names: ?keys=1,2,3, up to 60.
+  const titles = opts.titles ?? plexTitles();
+  app.get("/api/titles", admin, async (req: Request, res: Response) => {
+    const keys = [...new Set(String(req.query.keys ?? "").split(",").filter(okRatingKey))].slice(0, 60);
+    const found = await Promise.all(keys.map((k) => titles.info(k).catch(() => null)));
+    res.json({ titles: Object.fromEntries(keys.map((k, i) => [k, found[i]])) });
+  });
+  // A title's poster, as Plex has it, kept by the browser for a day.
+  app.get("/api/poster/:ratingKey", admin, async (req: Request, res: Response) => {
+    const key = String(req.params.ratingKey);
+    const poster = okRatingKey(key) ? await titles.poster(key).catch(() => null) : null;
+    if (!poster) {
+      res.status(404).json({ error: "No poster" });
+      return;
+    }
+    res.setHeader("Content-Type", poster.type);
+    res.setHeader("Cache-Control", "private, max-age=86400");
+    res.send(poster.body);
   });
 
   // Server-sent events: the rooms every LIVE_EVERY_MS, for as long as the
@@ -284,7 +307,7 @@ export function createAdminApp(opts: AdminOptions): express.Express {
   } else {
     app.get("*", (_req, res) => {
       res.status(503).type("text/plain").send(
-        "The admin page isn't built. Run: npm run build -w packages/client\n",
+        "The dashboard has not been built. Run: npm run build -w packages/client\n",
       );
     });
   }
@@ -314,13 +337,13 @@ export function adminDbPath(): string {
 export function startAdminServer(mainPort: number): AdminHandle | null {
   const password = process.env.ADMIN_PASSWORD ?? "";
   if (!password.trim()) {
-    logEvent("Admin", "admin page off: set ADMIN_PASSWORD to turn it on");
+    logEvent("Admin", "dashboard off: set ADMIN_PASSWORD to turn it on");
     return null;
   }
   const port = numberSetting("ADMIN_PORT", 3050, 1);
   const host = process.env.ADMIN_HOST?.trim() || "0.0.0.0";
   if (port === mainPort) {
-    logEvent("Admin", "admin page off: ADMIN_PORT is the Activity's own port; give it one of its own", { port });
+    logEvent("Admin", "dashboard off: ADMIN_PORT is the Activity's own port; give it one of its own", { port });
     return null;
   }
   if (password.length < 12) {
@@ -334,7 +357,7 @@ export function startAdminServer(mainPort: number): AdminHandle | null {
   } catch (err) {
     // The live pages work without it.
     recorder = null;
-    logEvent("Admin", "the admin page's history couldn't be opened; it shows only what is live", {
+    logEvent("Admin", "the dashboard's history couldn't be opened; it shows only what is live", {
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -344,11 +367,11 @@ export function startAdminServer(mainPort: number): AdminHandle | null {
   };
   const server = http.createServer(createAdminApp({ password, recorder: recorder ?? undefined }));
   server.on("error", (err: NodeJS.ErrnoException) => {
-    logEvent("Admin", "admin page couldn't start; the bot goes on without it", { port, host, error: err.code ?? err.message });
+    logEvent("Admin", "dashboard couldn't start; the server goes on without it", { port, host, error: err.code ?? err.message });
     if (!server.listening) stopRecording();
   });
   server.listen(port, host, () => {
-    logEvent("Admin", "admin page listening", { url: `http://${host === "0.0.0.0" ? "localhost" : host}:${port}` });
+    logEvent("Admin", "dashboard listening", { url: `http://${host === "0.0.0.0" ? "localhost" : host}:${port}` });
   });
   return {
     server,

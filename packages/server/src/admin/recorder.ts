@@ -80,6 +80,52 @@ interface OpenPlay {
   lastTick: number;
   streams: Map<string, StreamRow>;
   viewers: Map<string, ViewerTotals>;
+  /** What its players have had, at each look: for the dashboard's live graph. */
+  flow: FlowSample[];
+}
+
+/** Everything a play's players have had by one moment, by where it came from. */
+export interface FlowSample { t: number; bot: number; hit: number; p2p: number }
+
+/** How much of a room's delivery is kept for its graph, each point's spacing, and what a point averages over. */
+export const FLOW_KEEP_MS = 10 * 60_000;
+export const FLOW_STEP_MS = 10_000;
+export const FLOW_WINDOW_MS = 30_000;
+
+/** A room's delivery over the last minutes: [time, from the server, from Discord's cache, from other viewers], bits a second. */
+export interface RoomFlow {
+  stepS: number;
+  windowS: number;
+  points: Array<[number, number, number, number]>;
+}
+
+/**
+ * The rate of each source at each step, from the totals at each look. Players
+ * say what they have had every 10 seconds, so a total climbs in steps: each
+ * point is the average over FLOW_WINDOW_MS before it.
+ */
+export function flowSeries(samples: FlowSample[], now: number): RoomFlow {
+  const points: RoomFlow["points"] = [];
+  const out: RoomFlow = { stepS: FLOW_STEP_MS / 1000, windowS: FLOW_WINDOW_MS / 1000, points };
+  if (samples.length === 0) return out;
+  const at = (t: number): FlowSample | null => {
+    let found: FlowSample | null = null;
+    for (const s of samples) {
+      if (s.t > t) break;
+      found = s;
+    }
+    return found;
+  };
+  const last = Math.floor(now / FLOW_STEP_MS) * FLOW_STEP_MS;
+  for (let g = last - FLOW_KEEP_MS; g <= last; g += FLOW_STEP_MS) {
+    const cur = at(g);
+    if (!cur) continue;
+    const prev = at(g - FLOW_WINDOW_MS) ?? samples[0];
+    const seconds = Math.max(FLOW_STEP_MS, cur.t - prev.t) / 1000;
+    const bps = (a: number, b: number) => Math.max(0, Math.round(((a - b) * 8) / seconds));
+    points.push([g, bps(cur.bot, prev.bot), bps(cur.hit, prev.hit), bps(cur.p2p, prev.p2p)]);
+  }
+  return out;
 }
 
 interface ClientSnap {
@@ -133,6 +179,10 @@ export interface PlaySummary {
   streams: number;
   reencoded: number;
   bytes: number;
+  /** Of `bytes`: what the server sent, what Discord's cache answered, what other viewers shared. */
+  botBytes: number;
+  cacheBytes: number;
+  p2pBytes: number;
   stalls: number;
 }
 
@@ -350,6 +400,7 @@ export class Recorder {
       for (const room of ov.rooms) {
         present.add(room.id);
         this.observeRoom(room, at);
+        this.sampleFlow(room.id, at);
       }
       for (const roomId of [...this.open.keys()]) {
         if (!present.has(roomId)) this.closePlay(roomId, at, "room closed", null);
@@ -560,7 +611,7 @@ export class Recorder {
       .run(roomId, ratingKey, title, guildId, channelId, hostUserId, at, at, posS, posS).lastInsertRowid);
     const play: OpenPlay = {
       id, ratingKey, events: 0, errorEvents: 0, playedS: 0, peak: 0, lastTick: at,
-      streams: new Map(), viewers: new Map(),
+      streams: new Map(), viewers: new Map(), flow: [],
     };
     this.open.set(roomId, play);
     return play;
@@ -777,10 +828,26 @@ export class Recorder {
   // ─── For the admin page ─────────────────────────────────────────
 
   /** Each viewer's totals in their room's play so far, for the Now playing page. */
+  /** One more look at what a room's players have had, for its graph. */
+  private sampleFlow(roomId: string, at: number): void {
+    const play = this.open.get(roomId);
+    if (!play) return;
+    const s: FlowSample = { t: at, bot: 0, hit: 0, p2p: 0 };
+    for (const v of play.viewers.values()) {
+      s.bot += Math.max(0, v.httpBytes - v.edgeHitBytes);
+      s.hit += v.edgeHitBytes;
+      s.p2p += v.p2pBytes;
+    }
+    play.flow.push(s);
+    const oldest = at - FLOW_KEEP_MS - FLOW_WINDOW_MS - FLOW_STEP_MS;
+    while (play.flow.length > 1 && play.flow[0].t < oldest) play.flow.shift();
+  }
+
   annotate(ov: Overview): Overview {
     for (const room of ov.rooms) {
       const play = this.open.get(room.id);
       room.playId = play?.id ?? null;
+      room.flow = play ? flowSeries(play.flow, ov.at) : null;
       for (const c of room.clients) {
         const v = play?.viewers.get(c.userId);
         if (v) c.data = viewerData(v);
@@ -799,6 +866,9 @@ export class Recorder {
         (SELECT COUNT(*) FROM play_streams s WHERE s.play_id = p.id) AS streams,
         (SELECT COUNT(*) FROM play_streams s WHERE s.play_id = p.id AND s.decision = 'transcode') AS reencoded,
         (SELECT COALESCE(SUM(v.http_bytes + v.p2p_bytes), 0) FROM play_viewers v WHERE v.play_id = p.id) AS bytes,
+        (SELECT COALESCE(SUM(MAX(0, v.http_bytes - v.edge_hit_bytes)), 0) FROM play_viewers v WHERE v.play_id = p.id) AS bot,
+        (SELECT COALESCE(SUM(MIN(v.http_bytes, v.edge_hit_bytes)), 0) FROM play_viewers v WHERE v.play_id = p.id) AS hit,
+        (SELECT COALESCE(SUM(v.p2p_bytes), 0) FROM play_viewers v WHERE v.play_id = p.id) AS p2p,
         (SELECT COALESCE(SUM(v.stalls), 0) FROM play_viewers v WHERE v.play_id = p.id) AS stalls
       FROM plays p
       WHERE (@before IS NULL OR p.id < @before)
@@ -807,7 +877,8 @@ export class Recorder {
                AND (v.username LIKE @like ESCAPE '\\' OR v.user_id = @q)))
       ORDER BY p.id DESC LIMIT @limit`).all({ before, like, q, limit: page(opts.limit) }) as Array<Record<string, unknown>>;
     return rows.map((r) => ({ ...playOf(r), viewers: Number(r.viewers), names: (parse(r.names) as string[] | null) ?? [],
-      streams: Number(r.streams), reencoded: Number(r.reencoded), bytes: Number(r.bytes), stalls: Number(r.stalls) }));
+      streams: Number(r.streams), reencoded: Number(r.reencoded), bytes: Number(r.bytes), botBytes: Number(r.bot),
+      cacheBytes: Number(r.hit), p2pBytes: Number(r.p2p), stalls: Number(r.stalls) }));
   }
 
   /** One play, whole: its viewers, streams and every line of its history. */

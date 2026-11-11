@@ -1,11 +1,12 @@
-# Admin Page
+# Dashboard
 
-A page for the server's owner that shows what the bot is doing right now:
-every room, who is in it, each stream and why it is copied or re-encoded, the
-server's logs and its settings. It also keeps a history of every play, of
-everybody who used the bot and where, of title requests, and shows what each
-cache holds. It runs on a port of its own, apart from the Activity, and only
-once a password is set.
+The Theater dashboard is a page for the server's owner. It shows what is
+playing right now in every room: who is watching, each stream and why it is
+sent unchanged or transcoded, and where the data is coming from. It also
+keeps a history of every session, every user, the Discord servers the
+Activity is used in, title requests, statistics, the caches, the server's
+logs and its settings. It runs on a port of its own, apart from the Activity,
+and only once a password is set.
 
 ## Turning it on
 
@@ -22,7 +23,7 @@ once a password is set.
 3. Restart the container. The log says where it listens:
 
    ```text
-   [Admin] admin page listening url=http://localhost:3050
+   [Admin] dashboard listening url=http://localhost:3050
    ```
 
 4. Open `http://<server>:3050` and sign in with the password.
@@ -38,7 +39,7 @@ See [Configuration Reference](Configuration-Reference#access-and-security).
 
 ## Keeping it private
 
-- The page is plain HTTP. Keep it on your LAN or a VPN. Don't route it
+- The dashboard is plain HTTP. Keep it on your LAN or a VPN. Don't route it
   through the tunnel or reverse proxy that serves the Activity. If you put it
   behind HTTPS of your own, its cookie is marked Secure.
 - The Activity's port never serves the page or its API, so Discord's proxy
@@ -52,65 +53,69 @@ See [Configuration Reference](Configuration-Reference#access-and-security).
 
 ## What it shows
 
-### Now playing
+### Now Playing
 
-Updated every 2 seconds.
+Updated every 2 seconds. The browser tab shows how many sessions are active.
 
-- **Totals:** rooms, people connected and watching, streams copied and
-  re-encoded, and the upload: one feed per stream somebody watches, before
-  Discord's cache and peer sharing take their share.
-- **Each room:**
-  - its title, whether it plays, is paused or waits for somebody, and where
-    it is;
-  - the Discord server, channel and host, by ID, and when it started;
-  - when somebody last played, paused or sought;
-  - when the host was last heard from;
-  - the queue.
-- **Each stream:** one line saying whether it is a direct copy or re-encoded,
-  and why, in the words the player's Stats for nerds uses. Also the engine,
-  bitrate, quality and who watches it. Select it for the details:
-  - its HLS session and tracks;
-  - who drives it;
-  - its Plex transcode key;
-  - the player Plex's Now Playing lists it under;
-  - everything its playlist told the players about it.
-- **People:**
-  - name and Discord ID;
-  - role;
-  - whether they are watching, buffering, away from Discord or disconnected;
-  - which stream they are on, their subtitle and quality;
-  - what their player can decode;
-  - when they joined;
-  - how long they have watched, the data their player has had (from the bot,
-    Discord's cache and other viewers), and their buffering, so far in this
-    play.
+- **At the top:** active sessions, viewers, streams (direct and
+  transcoding), the server's upload right now with its trend, the share of
+  delivery taken off the server by Discord's cache and by viewers sharing
+  with each other, and buffering across active sessions.
+- **Each session:**
+  - the title's poster, its name, and whether it is playing, paused or
+    buffering;
+  - a progress bar with the position, the running time and the time left;
+  - the host, how many are watching, the Discord server and channel by ID,
+    and when the room opened;
+  - the bitrate its players need, the data delivered so far, and buffering,
+    in green, amber or red;
+  - **Delivery, last 10 minutes:** a live graph of what the players
+    received each moment from the server, from Discord's cache and from
+    other viewers, against the bitrate they need (the dashed line). Players
+    report every 10 seconds, so each point is a 30-second average;
+  - **Where the data came from:** the session's total, split the same way.
+- **Each stream:** Direct play (nothing converted), Direct stream (audio
+  converted) or Transcode, with the reason in a sentence, as the player's
+  Stats for nerds says it. Also its video and audio from source to output,
+  the engine, bitrate, quality and who is watching it. Select it for the
+  technical details: its HLS session and tracks, who requested it, its Plex
+  transcode key, the player Plex's Now Playing lists it under, and every
+  property its playlist carries.
+- **Viewers:** name and role, whether they are watching, buffering, away or
+  disconnected, which stream they are on, how long they have watched, the
+  data they received with its split, and their buffering. Select a viewer
+  for their Discord user ID, quality limit, subtitle track, what their
+  player can decode, and when they joined.
 
 A room on two streams, such as a viewer whose player can't decode the host's
 10-bit HEVC and is given an 8-bit stream of their own, shows both streams.
 
 ### History
 
-Every play, newest first: the title, the Discord server and channel, the host,
-who watched, how long it played, its streams, the data sent and how many
-times a picture stopped. Search finds a title, a person's name or Discord ID,
-or a server or channel ID. Above the list, plays per day over the last 30
-days. **CSV** and **JSON** download every play the search finds; the JSON
-has each play whole, with its viewers, streams and everything that happened.
+Every session, newest first, each with its poster: the title, when it
+started, the host, the Discord server and channel, who watched, how long it
+played, whether its streams were direct or transcoded, the data delivered
+with its split by source, and whether playback was smooth. Search finds a
+title, a viewer's name or Discord user ID, or a server or channel ID. Above
+the list, sessions per day over the last 30 days. **CSV** and **JSON**
+export every session the search finds; the JSON has each session whole, with
+its viewers, streams and timeline.
 
-Opening a play shows:
+Opening a session shows:
 
-- **Its viewers:** each person's role, how long they watched, the data their
-  player got (from the bot, from Discord's cache, from other viewers) and
-  their buffering.
-- **Its streams:** each one copied or re-encoded, and why. Opening one shows
-  its tracks, who it was made for, where in the title it starts, and what its
-  playlist told the players.
-- **What happened:** every line in order, with the time (UTC) and where in
-  the title it was. Buttons above the list show or hide playback, people,
-  streams and tracks, and buffering and errors. Opening a line shows its
-  details.
+- **At the top:** its poster, how it ended, time played, viewers, streams,
+  data delivered and buffering, then where the data came from.
+- **Viewers:** each person's role, how long they watched, the data they
+  received with its split, and their buffering.
+- **Streams:** each one Direct play, Direct stream or Transcode, and why.
+  Opening one shows its tracks, who requested it, where in the title it
+  starts, and the properties its playlist carried.
+- **Timeline:** every event in order, with the time (UTC) and the playback
+  position, marked by kind. Buttons above the list show or hide playback,
+  viewers, streams and tracks, and buffering and errors. Opening an event
+  shows its details.
 
-### Graphs
+### Statistics
 
 The history over the last 7 days, 30 days, 90 days, a year, or all of it.
 Days are UTC, and a play counts on the day it started. Over 120 days the
@@ -127,10 +132,10 @@ charts go by week, and over two years by month.
 - The most watched titles, who watched most, and the Discord servers it was
   watched in. Picking a person opens them.
 
-Pointing at a column shows its numbers. **Show as a table** shows a chart's
+Pointing at a column shows its numbers. **Show table** shows a chart's
 numbers as a table instead.
 
-### People
+### Users
 
 Everybody the bot has seen, the latest first: their Discord ID, plays, plays
 hosted, launches of the Activity, time watched, data, buffering, requests,
@@ -139,7 +144,7 @@ bot, every play they were in (as host, co-host or viewer, with their own
 data), and every title they asked for. Above the list, who watched most over
 the last 30 days; **CSV** and **JSON** download everybody the search finds.
 
-### Servers
+### Discord Servers
 
 Each Discord server the Activity was used in, and each of its channels: how
 many times it was launched there, who joined, and the plays and time played.
@@ -188,13 +193,13 @@ Times are UTC.
 The version, Node.js, uptime and memory. Then the history: where
 `admin.sqlite` is, its size, what it holds, and from when.
 
-- **A copy of the history (admin.sqlite)** downloads the whole file as it is,
+- **Download database (admin.sqlite)** downloads the whole file as it is,
   for a backup or your own queries.
-- **Remove old history** keeps the last so many days (1 to 3650). **See what
-  would go** shows what would be removed: the plays that ended before then,
+- **Delete old history** keeps the most recent days you choose (1 to 3650).
+  **Preview deletion** shows what would be removed: the plays that ended before then,
   with their viewers, streams and lines, the launches, joins and requests
   from before then, and people seen only before then. A play still going is
-  never removed. **Remove them** removes them, which can't be undone, then
+  never removed. **Delete permanently** removes them, which can't be undone, then
   shrinks the file and says how big it was and is. The server's log says
   what was removed.
 
@@ -249,13 +254,15 @@ A signed-in browser can also read all of it as JSON:
 | `/api/usage` | Launches and joins, newest first. `?before=<id>` is the next page. |
 | `/api/requests` | Title requests, newest first. `?q=` finds a title, a name or ID, or a TMDB ID. |
 | `/api/caches` | Each cache and what it holds, and Discord's cache (this one works without the history) |
+| `/api/titles` | A title's poster and running time, by Plex item: `?keys=1,2,3` |
+| `/api/poster/<item>` | A title's poster, as Plex has it |
 | `/api/graphs` | The history by UTC day, with totals, hours, weekdays and top tens. `?days=` is the period: 30 unless given, 0 for all of it. |
 | `/api/history-file` | Where `admin.sqlite` is, its size and what it holds. With `?days=`, what removing what is older would remove. |
 | `/api/export/<list>.csv`, `.json` | `history`, `people`, `usage` or `requests`, all of it, as a file. `?q=` is the list's search. At most 200,000 rows. |
 | `/api/export/admin.sqlite` | A copy of the whole history file |
 
 `POST /api/history-file/trim` with `{"days": N}` removes what is older than N
-days, as **Remove them** does.
+days, as **Delete permanently** does.
 
 CSV files are UTF-8 and open in a spreadsheet. Text that a spreadsheet would
 run as a formula (starting with `=`, `+`, `-` or `@`) is written with a `'`

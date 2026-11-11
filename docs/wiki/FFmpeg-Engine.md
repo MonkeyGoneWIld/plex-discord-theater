@@ -14,8 +14,8 @@ setting and a restart.
   are copied for players that decode them, HDR10, HLG and Dolby Vision 7 and 8
   included. Opus, FLAC, AC3 and EAC3 sound is copied for players that play it;
   7.1 sound a browser can't play becomes Opus 7.1, and PCM becomes FLAC.
-  10-bit H.264 (common in anime) is copied for a player whose browser says it
-  decodes it smoothly. A Blu-ray's H.264 with open GOPs is copied too, in
+  10-bit H.264 (common in anime) is always re-encoded: Discord's player
+  doesn't decode it. A Blu-ray's H.264 with open GOPs is copied too, in
   fragmented MP4; the Plex engine re-encodes it.
 - **Picture subtitles drawn by the player.** Blu-ray (PGS), DVD (VobSub) and
   broadcast (DVB) subtitles in the film are cut out of it and drawn by each
@@ -344,7 +344,7 @@ in Plex's dashboard, and so in Tautulli and Tracearr:
 - Plex and Tautulli can't stop them. Stop them from the Activity.
 - A room is one entry, however many streams it makes of the title: a viewer
   on other tracks, or on a version their player can decode, is part of the
-  room's entry, so Tautulli counts one play. The [Admin Page](Admin-Page)
+  room's entry, so Tautulli counts one play. The [Dashboard](Admin-Page)
   shows each stream.
 
 `FFMPEG_REPORT_TO_PLEX=0` turns this off.

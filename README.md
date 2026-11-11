@@ -174,7 +174,7 @@ administrator API key is required.
   - **HDR kept.** Re-encodes stay HDR10, and one stream serves screens in HDR
     and in SDR alike, each shown at its best, so everyone shares it peer to
     peer.
-  - **More copied as it is:** AV1, VP9 and 10-bit H.264 video, Blu-ray H.264
+  - **More copied as it is:** AV1 and VP9 video, Blu-ray H.264
     with open GOPs, and Opus, FLAC, AC3 and EAC3 sound, for players that decode
     them; 7.1 is kept as Opus 7.1.
   - **A stream for each device:** H.265 rather than H.264 wherever it plays,
@@ -199,14 +199,15 @@ administrator API key is required.
   limited to your own Discord servers.
 - **Diagnostic logs:** every viewer's player events land in the server's log
   file, with tokens redacted, so a stream that failed can be traced afterwards.
-- **Admin page (optional):** on a port of its own, every room live: who is in
+- **Dashboard (optional):** on a port of its own, every room live: who is in
   it, each stream and why it is copied or re-encoded, then the details behind
   it; and the logs and settings, secrets hidden. It keeps a history of every
   play: who watched, the data each got and from where, their buffering, and
   everything that changed. It also shows each person, each Discord server and
   channel the bot is used in, who requested what, and what each cache holds;
-  graphs of all of it by day; each list as CSV or JSON; and the history kept
-  until you remove the oldest of it.
+  statistics by day; each list as CSV or JSON; and the history kept until you
+  delete the oldest of it. Each session shows its poster, its progress, and a
+  live graph of delivery from the server, Discord's cache and other viewers.
   [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Admin-Page)
 
 ## Installation
@@ -265,7 +266,7 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
-      # The admin page (ADMIN_PASSWORD below). Plain HTTP: your LAN only.
+      # The dashboard (ADMIN_PASSWORD below). Plain HTTP: your LAN only.
       # - "192.168.1.10:3050:3050"
     volumes:
       - app-data:/data
@@ -353,7 +354,7 @@ services:
       # Password for the maintenance command that stops every stream the
       # bot has on Plex. Unset, it works only from inside the container.
       # ADMIN_SECRET: "a-long-random-secret"
-      # The admin page on port 3050: rooms, streams, logs and settings, live.
+      # The dashboard on port 3050: rooms, streams, logs and settings, live.
       # ADMIN_PASSWORD: "a-long-password"
 
       # ── Optional: the ffmpeg engine ──────────────────────────────────────
@@ -432,7 +433,7 @@ the order you set things up in.
 | | [Personal Plex Sync](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Personal-Plex-Sync) | Linking your own Plex account |
 | | [Requesting Titles](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Requesting-Titles) | Requests through Seerr |
 | **Maintain** | [Updating and Backups](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Updating-and-Backups) | Updates, settings changes, backups and restores |
-| | [Admin Page](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Admin-Page) | What is playing, for whom, and why, live; history, graphs, people, servers, requests, caches, logs and settings |
+| | [Dashboard](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Admin-Page) | What is playing, for whom, and why, live, with posters and delivery graphs; history, statistics, users, servers, requests, caches, logs and settings |
 | | [Local Development](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Local-Development) | Running from source, the code's layout, tests |
 | **Help** | [Troubleshooting](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Troubleshooting) | Fixes, by where the problem appears |
 | | [FAQ](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FAQ) | Common questions |

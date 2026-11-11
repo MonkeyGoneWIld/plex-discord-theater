@@ -15,8 +15,8 @@ export const PROMOTED_TOAST_MS = 2000;
  * opened. Starting something is not being handed it.
  *
  * The timer belongs to the toast, not to the role: cleared by the role's next
- * change, it left waawee told they were the host for the rest of the episode
- * when artemidorus's connection dropped and took the room back 1.7 s later
+ * change, it left sam told they were the host for the rest of the episode
+ * when alex's connection dropped and took the room back 1.7 s later
  * (27 Oct, within the grace).
  */
 export function usePromotedToast(isHost: boolean | null): boolean {

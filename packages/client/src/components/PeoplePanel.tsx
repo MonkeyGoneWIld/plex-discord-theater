@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Participant } from "../hooks/useSync";
-import { clock, openedPeoplePanel, requestButton, SHOW_REQUEST_EVENT, waitText, type HostRequestView } from "../lib/hostRequest";
+import { clock, msUntil, openedPeoplePanel, requestButton, SHOW_REQUEST_EVENT, waitText, type HostRequestView } from "../lib/hostRequest";
 import type { InviteResult } from "../hooks/useDiscord";
 import { InviteButton } from "./InviteButton";
 import { useMediaQuery, PHONE_QUERY } from "../lib/useMediaQuery";
@@ -23,6 +23,8 @@ interface PeoplePanelProps {
   /** Asking an away host for the role (lib/hostRequest). Omit: no button. */
   hostRequest?: HostRequestView | null;
   onRequestHost?: () => void;
+  /** The host's answer to a request, from the panel. Omit: the panel doesn't ask. */
+  onAnswerHostRequest?: (accept: boolean) => void;
   onReclaimHost?: () => void;
 }
 
@@ -44,13 +46,17 @@ export function PeoplePanel({
   onSharePresenceDetails,
   hostRequest = null,
   onRequestHost,
+  onAnswerHostRequest,
   onReclaimHost,
 }: PeoplePanelProps) {
   // The request button's countdowns tick; a wait shows only once pressed.
   const [, tick] = useState(0);
   const [showWait, setShowWait] = useState(false);
   const button = isHost || !onRequestHost ? null : requestButton(hostRequest, selfUserId, Date.now());
-  const ticking = !!button && button.kind !== "ask";
+  // The host's own prompt, said here as well: the card over the page stands
+  // aside while this panel is open.
+  const asked = isHost && hostRequest?.on && hostRequest.active && onAnswerHostRequest ? hostRequest.active : null;
+  const ticking = (!!button && button.kind !== "ask") || !!asked;
   useEffect(() => {
     if (!ticking) return;
     const t = setInterval(() => tick((n) => n + 1), 1_000);
@@ -93,46 +99,7 @@ export function PeoplePanel({
           </div>
         )}
 
-        {/* Asking an away host for the role. One request at a time, so a
-            pending one shows who asked and the time left; a wait shows only
-            once pressed. */}
-        {button && (
-          <div style={styles.requestRow}>
-            {button.kind === "ask" && (
-              <button className="btn" style={styles.requestBtn} onClick={() => onRequestHost?.()}>Request host</button>
-            )}
-            {button.kind === "mine" && (
-              <button className="btn" style={styles.requestBtn}
-                onClick={() => { window.dispatchEvent(new Event(SHOW_REQUEST_EVENT)); onClose(); }}>
-                Host requested · {clock(button.leftMs)}
-              </button>
-            )}
-            {button.kind === "theirs" && (
-              <button className="btn" style={{ ...styles.requestOff, ...styles.requestSplit }} disabled title={button.name}>
-                <span style={styles.requestLead}>Requested by&nbsp;</span>
-                <span style={styles.requestName}>{button.name}</span>
-                <span style={styles.requestTime}>&nbsp;· {clock(button.leftMs)}</span>
-              </button>
-            )}
-            {button.kind === "wait" && (
-              <button className="btn" style={styles.requestOff} onClick={() => setShowWait((v) => !v)}>Request host</button>
-            )}
-            {button.kind === "reclaim" && (
-              <button className="btn" style={styles.requestBtn} onClick={() => { onReclaimHost?.(); onClose(); }}>
-                Reclaim host · {clock(button.leftMs)}
-              </button>
-            )}
-            <p style={styles.requestHelp}>
-              {button.kind === "ask" && "If the host does not respond within 5 minutes (1 minute if away), host transfers to you."}
-              {button.kind === "mine" && "Awaiting a response from the host. Select to view the request."}
-              {button.kind === "theirs" && "Only one host request can be active at a time."}
-              {button.kind === "wait" && (showWait ? waitText(button.why, button.leftMs) : "Requests are currently unavailable. Select for details.")}
-              {button.kind === "reclaim" && "Host was transferred while you were away."}
-            </p>
-          </div>
-        )}
-
-        <div style={styles.list}>
+        <div style={styles.list} data-people-list="">
           {ordered.map((p) => {
             const isSelf = p.userId === selfUserId;
             const label = roleLabel(p);
@@ -181,6 +148,63 @@ export function PeoplePanel({
             );
           })}
         </div>
+
+        {/* Asking an away host for the role. One request at a time, so a
+            pending one shows who asked and the time left; a wait shows only
+            once pressed. */}
+        {button && (
+          <div style={styles.requestRow}>
+            {button.kind === "ask" && (
+              <button className="btn" style={styles.requestBtn} onClick={() => onRequestHost?.()}>Request host</button>
+            )}
+            {button.kind === "mine" && (
+              <button className="btn" style={styles.requestBtn}
+                onClick={() => { window.dispatchEvent(new Event(SHOW_REQUEST_EVENT)); onClose(); }}>
+                Host requested · {clock(button.leftMs)}
+              </button>
+            )}
+            {button.kind === "theirs" && (
+              <button className="btn" style={{ ...styles.requestOff, ...styles.requestSplit }} disabled title={button.name}>
+                <span style={styles.requestLead}>Requested by&nbsp;</span>
+                <span style={styles.requestName}>{button.name}</span>
+                <span style={styles.requestTime}>&nbsp;· {clock(button.leftMs)}</span>
+              </button>
+            )}
+            {button.kind === "wait" && (
+              <button className="btn" style={styles.requestOff} onClick={() => setShowWait((v) => !v)}>Request host</button>
+            )}
+            {button.kind === "reclaim" && (
+              <button className="btn" style={styles.requestBtn} onClick={() => { onReclaimHost?.(); onClose(); }}>
+                Reclaim host · {clock(button.leftMs)}
+              </button>
+            )}
+            <p style={styles.requestHelp}>
+              {button.kind === "ask" && "If the host does not respond within 5 minutes (1 minute if away), host transfers to you."}
+              {button.kind === "mine" && "Awaiting a response from the host. Select to view the request."}
+              {button.kind === "theirs" && "Only one host request can be active at a time."}
+              {button.kind === "wait" && (showWait ? waitText(button.why, button.leftMs) : "Requests are currently unavailable. Select for details.")}
+              {button.kind === "reclaim" && "Host was transferred while you were away."}
+            </p>
+          </div>
+        )}
+
+        {/* The host's side of a request: who asked, the time left, and the
+            answer. The same as the card over the page, which stands aside
+            while this panel is open. */}
+        {asked && (
+          <div style={styles.requestRow}>
+            <div style={{ ...styles.requestOff, ...styles.requestSplit, cursor: "default", color: "#ddd" }} title={asked.requesterName ?? undefined}>
+              <span style={styles.requestLead}>Host requested by&nbsp;</span>
+              <span style={styles.requestName}>{asked.requesterName || "a viewer"}</span>
+              <span style={styles.requestTime}>&nbsp;· {clock(msUntil(hostRequest!, asked.endsAt, Date.now()))}</span>
+            </div>
+            <div style={styles.answerRow}>
+              <button className="btn" style={styles.hostAccept} onClick={() => onAnswerHostRequest?.(true)}>Accept</button>
+              <button className="btn" style={styles.hostDecline} onClick={() => onAnswerHostRequest?.(false)}>Decline</button>
+            </div>
+            <p style={styles.requestHelp}>Host transfers when the countdown ends unless you respond.</p>
+          </div>
+        )}
 
         <label style={styles.presencePreference}>
           <input
@@ -239,7 +263,11 @@ const styles: Record<string, React.CSSProperties> = {
   promoteBtn: { padding: "4px 8px", borderRadius: "6px", border: "1px solid rgba(229,160,13,0.4)", background: "transparent", color: "#e5a00d", fontSize: "11px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
   confirmBtn: { padding: "4px 8px", borderRadius: "6px", border: "none", background: "#e5a00d", color: "#000", fontSize: "11px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
   inviteRow: { padding: "10px 16px 12px", borderBottom: "1px solid rgba(255,255,255,0.06)" },
-  requestRow: { padding: "10px 16px 4px", borderBottom: "1px solid rgba(255,255,255,0.06)" },
+  // At the foot of the panel, above the Discord preference: the roster first.
+  requestRow: { padding: "10px 16px 4px", borderTop: "1px solid rgba(255,255,255,0.06)", flexShrink: 0 },
+  answerRow: { display: "flex", gap: "8px", marginTop: "8px" },
+  hostAccept: { flex: 1, padding: "8px", borderRadius: "6px", border: "none", background: "#e5a00d", color: "#000", fontSize: "12px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
+  hostDecline: { flex: 1, padding: "8px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.15)", background: "transparent", color: "#aaa", fontSize: "12px", cursor: "pointer", fontFamily: "inherit" },
   requestBtn: { width: "100%", padding: "8px 10px", borderRadius: "8px", border: "1px solid rgba(229,160,13,0.4)", background: "transparent", color: "#e5a00d", fontSize: "12px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontVariantNumeric: "tabular-nums" },
   requestOff: { width: "100%", padding: "8px 10px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.03)", color: "#666", fontSize: "12px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit", fontVariantNumeric: "tabular-nums" },
   requestSplit: { display: "flex", justifyContent: "center", whiteSpace: "nowrap" },

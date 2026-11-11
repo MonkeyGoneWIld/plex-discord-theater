@@ -2,7 +2,8 @@ import { useEffect, useRef } from "react";
 
 /**
  * Whether this player looks away from the activity: hidden for HIDDEN_MS, or
- * nothing touched for IDLE_MS while nothing plays. A host away has a request
+ * nothing touched for IDLE_MS, whether or not the film is playing (a host who
+ * left it running is as gone as one who paused). A host away has a request
  * for their role count down from 1 minute rather than 5 (services/hostRequests).
  * Discord's own idle status isn't something an activity can read.
  */
@@ -10,14 +11,12 @@ export const HIDDEN_MS = 30_000;
 export const IDLE_MS = 3 * 60_000;
 const LOOK_MS = 5_000;
 
-export function isAway(o: { hiddenForMs: number; idleForMs: number; playing: boolean }): boolean {
-  return o.hiddenForMs >= HIDDEN_MS || (!o.playing && o.idleForMs >= IDLE_MS);
+export function isAway(o: { hiddenForMs: number; idleForMs: number }): boolean {
+  return o.hiddenForMs >= HIDDEN_MS || o.idleForMs >= IDLE_MS;
 }
 
 /** Calls `onChange` each time this player goes away or comes back. */
-export function useActivityAway(playing: boolean, onChange: (away: boolean) => void): void {
-  const playingRef = useRef(playing);
-  playingRef.current = playing;
+export function useActivityAway(onChange: (away: boolean) => void): void {
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
 
@@ -30,7 +29,6 @@ export function useActivityAway(playing: boolean, onChange: (away: boolean) => v
       const next = isAway({
         hiddenForMs: hiddenAt === null ? 0 : now - hiddenAt,
         idleForMs: now - lastInput,
-        playing: playingRef.current,
       });
       if (next !== away) {
         away = next;

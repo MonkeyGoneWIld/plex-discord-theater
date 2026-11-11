@@ -88,7 +88,7 @@ export function pictureStartFor(
  * front of the picture of a stream's first segment, which is in already, so
  * nothing more is coming for it. A copy's picture starts on the keyframe
  * before the point it was started from and its sound on that point, and the
- * element has nothing to play until both are there: on 18 October monkey26
+ * element has nothing to play until both are there: on 18 October jordan
  * landed on the room at 5914.90 in a copy whose first segment, all in, played
  * from 5914.98, and sat seeking with two minutes in hand, the room waiting on
  * it, until somebody skipped. Null when the place is in the buffer; when it

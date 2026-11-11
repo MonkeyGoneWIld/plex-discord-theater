@@ -8,7 +8,7 @@ interface TransportRequestCardProps {
 }
 
 /**
- * "Pause requested by monkey26" — shown to whoever can act on it.
+ * "Pause requested by jordan" — shown to whoever can act on it.
  *
  * A card rather than a dialog. Someone is watching a film behind this, and a
  * request is not an interruption worth taking the screen for: nothing is

@@ -87,6 +87,12 @@ console.log("\n— one request at a time, and a no —");
   cy.send({ type: "host-request" });
   await sleep(60);
   check("a second asker waits for the first", cy.view(), { asker: "bea", blocked: "asked" });
+  // What a page from before 11 November sent when the host touched anything.
+  host.send({ type: "host-request-answer", accept: false, present: true });
+  host.send({ type: "host-request-answer" });
+  await sleep(60);
+  check("the host using the activity answers nothing: only their own Decline does", [bea.view(), cy.view()],
+    [{ asker: "bea", blocked: "asked" }, { asker: "bea", blocked: "asked" }]);
   host.send({ type: "host-request-answer", accept: false });
   await sleep(60);
   check("declined: the asker waits longest, everyone else too", [bea.view(), cy.view()],

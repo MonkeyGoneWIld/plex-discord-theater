@@ -510,7 +510,7 @@ console.log("\n— what a copy is judged on —");
   check("but not profile 5, which has none",
     why(version({ DOVIPresent: true, DOVIProfile: 5 })), "Dolby Vision P5: tone mapping needed");
   check("nor HEVC for a player that can't decode it", why(version({}), false), "HEVC: not decoded by this player");
-  check("nor 10-bit H.264", why(version({ codec: "h264" })), "10-bit H.264: not decoded by this player");
+  check("nor 10-bit H.264", why(version({ codec: "h264" })), "10-bit H.264: not decoded by Discord's player");
   check("nor what MPEG-TS can't carry from an AVI", why(version({}, { container: "avi" })), "AVI container not supported");
   const chosen = planCopy(version({}), { audioStreamId: 13, hevcOk: true });
   check("the track asked for is the one taken, and AAC is copied",

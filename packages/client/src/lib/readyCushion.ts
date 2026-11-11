@@ -4,7 +4,7 @@
  *
  * Three seconds in hand is enough to start on (lib/copyStart), and with the
  * film coming in barely faster than it plays, it is a stop three seconds
- * later. On 13 October blah0391, back from a pop-out with nobody else in the
+ * later. On 13 October casey, back from a pop-out with nobody else in the
  * room, went on with 3 seconds in hand and stopped three times in sixteen
  * seconds: the film had segments of 23 MB coming, and its downloads ran at 11
  * to 40 Mbps. The first start that night did the same, at 5 seconds. A stop

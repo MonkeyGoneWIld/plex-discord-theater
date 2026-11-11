@@ -625,7 +625,7 @@ function Runner() {
 
   /**
    * A viewer joining a film already playing, its downloads only a little
-   * faster than the film — as monkey26 rejoining May at 3:03 on 12 October.
+   * faster than the film — as jordan rejoining May at 3:03 on 12 October.
    * It started on the first half second it had, stopped, fell nine seconds
    * behind, was jumped into a segment it hadn't got, stopped again, and once
    * more: three stops in twenty seconds. A viewer behind the room now goes a
@@ -751,13 +751,13 @@ function Runner() {
   /**
    * The host back from a pop-out in a browser that can't play the room's
    * stream — HEVC, which the viewer plays — and put on a stream of its own,
-   * from where the room is. On 18 October monkey26, back in Firefox, had the
-   * room wait for that stream's picture, and blah0391 stopped with a minute
+   * from where the room is. On 18 October jordan, back in Firefox, had the
+   * room wait for that stream's picture, and casey stopped with a minute
    * and a half in hand. It catches up with the room as one back on the
    * room's own stream does, and the room plays on without it until then.
    *
    * `slow`: its stream comes in little faster than it plays, and soon after it
-   * catches up, for a while, slower — as monkey26's re-encode did later that
+   * catches up, for a while, slower — as jordan's re-encode did later that
    * day, when it was in step with 8.8 s in hand, ran dry 9 s on, and the room
    * waited 14 s for it. It catches up again, the room playing on.
    */
@@ -849,7 +849,7 @@ function Runner() {
 
   /**
    * The host handing the room to a viewer who has only just joined, as
-   * blah0391 handed monkey26 the room on 16 October. Its picture wasn't moving
+   * casey handed jordan the room on 16 October. Its picture wasn't moving
    * yet — still loading, and waiting a little past the room for it — so it was
    * never told to play, its first heartbeat said it was paused, and the room
    * paused for everybody, 12.6 and 15 seconds until somebody pressed play.
@@ -916,10 +916,10 @@ function Runner() {
 
   /**
    * The host skipping again and again in a copied film, faster than each new
-   * stream comes. On 16 October blah0391 skipped twelve times in sixteen
+   * stream comes. On 16 October casey skipped twelve times in sixteen
    * seconds: each stream a newer skip had replaced still told the room where
    * it began, the room went there — to 46:35 after a skip to 20:02 — and ended
-   * ten minutes from where the last skip went, with monkey26 stuck for half a
+   * ten minutes from where the last skip went, with jordan stuck for half a
    * minute. Now everybody plays from where the last skip went.
    */
   async function runSkipBurst() {
@@ -990,7 +990,7 @@ function Runner() {
    */
   /**
    * `slowBack`: the popped player's first segments back come nine seconds
-   * late, as monkey26's did on 12 October — the room is past where it landed
+   * late, as jordan's did on 12 October — the room is past where it landed
    * before it has anything to show there.
    */
   async function runPopOut(who: "host" | "viewer", comeBack: "fast" | "slow" | "long" = "fast") {
@@ -1008,7 +1008,7 @@ function Runner() {
       await pause(15_000);
       const before = latest.get(popped)!.pos;
       // "long": longer than the room's clock used to run on without the
-      // host's word — thirty seconds — as blah0391's catch-up did on 13
+      // host's word — thirty seconds — as casey's catch-up did on 13
       // October, when the room went half a minute back.
       if (slowBack) await api(`/api/test/stall?user=${popped}&ms=${comeBack === "long" ? 35_000 : 9000}`);
       const poppedAt = Date.now();
@@ -2289,7 +2289,7 @@ function Runner() {
   /**
    * The host starting another title mid-film: everybody starts it together,
    * with a picture of it. The room's word that it waits for the new title
-   * reaches a player before the title does, and on 13 October monkey26
+   * reaches a player before the title does, and on 13 October jordan
    * answered it from the last film's buffer, 32 s of it in hand: the room
    * started without it, and it came in 2.5 s late with 0.4 s in hand.
    */
@@ -2388,11 +2388,11 @@ function Runner() {
   /**
    * A viewer joining a film already playing, whose picture stops just after it
    * starts: getting going, it catches up on its own, and the host — the room —
-   * plays on. On 13 October monkey26 joined, stopped two seconds in, and the
+   * plays on. On 13 October jordan joined, stopped two seconds in, and the
    * whole room waited nineteen seconds for it, the host with forty in hand.
    *
    * `afterS`: stopping that long after it starts instead, never having had
-   * much in hand — on 14 October monkey26, back from a pop-out, stopped at 33
+   * much in hand — on 14 October jordan, back from a pop-out, stopped at 33
    * seconds and the room held thirty for it, the host with a minute in hand.
    */
   async function runJoinerStalls(afterS = 0) {

@@ -58,7 +58,8 @@ export interface SideStats {
 }
 
 /** Styled: a typeset ASS subtitle's script, and the film's fonts. */
-export type SideKind = "pgs" | "previews" | "styled";
+/** `text` is never shared (a subtitle's lines are small and each player's own ask); it is only counted. */
+export type SideKind = "pgs" | "previews" | "styled" | "text";
 
 /** A chunk's bytes: well inside what every browser's data channel takes. */
 const CHUNK_BYTES = 32 * 1024;
@@ -201,6 +202,7 @@ export class SideShare {
     pgs: { fromPlayers: 0, fromBot: 0, sent: 0 },
     previews: { fromPlayers: 0, fromBot: 0, sent: 0 },
     styled: { fromPlayers: 0, fromBot: 0, sent: 0 },
+    text: { fromPlayers: 0, fromBot: 0, sent: 0 },
   };
   /** What this player is going to fetch, as told to the others. */
   private readonly needing = new Set<string>();

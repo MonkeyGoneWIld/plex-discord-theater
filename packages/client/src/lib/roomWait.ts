@@ -410,7 +410,7 @@ const LAST_SEGMENT_FOR_MS = 10 * 60_000;
 /**
  * Keep how long this player's last segment took, for the page that replaces
  * this one — Discord's pop-out reloads the activity, and the new page knew
- * nothing of the connection: blah0391 popped out on 12 October and landed six
+ * nothing of the connection: casey popped out on 12 October and landed six
  * seconds ahead of the room, where a 29 MB segment needed 5.6 to come.
  */
 export function rememberSegmentMs(ms: number, now = Date.now(), bytesPerS: number | null = null): void {
@@ -450,7 +450,7 @@ export function recentSegmentBytesPerS(now = Date.now()): number | null {
  * there when the room is: its own seek takes time, as long as it takes this
  * device to decode its way from the keyframe before the place to the place —
  * the longest of its last few seeks to picture it already had. On 23 October
- * blah0391's picture came in after a skip in The Punisher once the room had
+ * casey's picture came in after a skip in The Punisher once the room had
  * gone on; it went to where the room was, took three seconds to get there,
  * found the room gone on again, went again, and took two more: seven seconds
  * of the episode jumped over and twelve without a picture. Catch-up seeks
@@ -523,7 +523,7 @@ export const MAX_KEYFRAME_WAIT_S = 8;
  *
  * Every segment starts on a keyframe — a copy is cut at the film's own, an
  * encode forces one at each — and a seek decodes from the keyframe before the
- * place to the place. On blah0391's computer that goes at about the film's own
+ * place to the place. On casey's computer that goes at about the film's own
  * speed: catch-ups four seconds into a segment took over three on 23 and 24
  * October, the room had gone on when they landed, and it went again — three
  * jumps in seven seconds coming back to The Punisher at 22:52, two after a

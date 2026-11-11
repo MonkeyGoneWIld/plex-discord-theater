@@ -377,7 +377,7 @@ export interface SyncActions {
   /** Not the host: ask for the role (lib/hostRequest). */
   sendHostRequest: () => void;
   /** Host: answer a request for the role. `present`: by using the activity. */
-  answerHostRequest: (accept: boolean, present?: boolean) => void;
+  answerHostRequest: (accept: boolean) => void;
   /** A host the role was taken from while away: take it back. */
   reclaimHost: () => void;
   /** Whether this player looks away from the activity (lib/away). */
@@ -478,7 +478,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
   const wsRef = useRef<WebSocket | null>(null);
   /**
    * The role this player was last told it has, so each change is logged once.
-   * Run 29, B: the server made blah0391 host when the host left, twice, yet
+   * Run 29, B: the server made casey host when the host left, twice, yet
    * their page still offered "Suggest to host" and the People list showed no
    * host; nothing on the player's side said what it had been told.
    */
@@ -693,7 +693,7 @@ export function useSync({ instanceId, userId, username, enabled }: UseSyncOption
       sendSetCoHost: (targetUserId: string, value: boolean) =>
         send({ type: "set-cohost", userId: targetUserId, value }),
       sendHostRequest: () => send({ type: "host-request" }),
-      answerHostRequest: (accept: boolean, present = false) => send({ type: "host-request-answer", accept, present }),
+      answerHostRequest: (accept: boolean) => send({ type: "host-request-answer", accept }),
       reclaimHost: () => send({ type: "host-reclaim" }),
       sendActivityAway: (away: boolean) => send({ type: "activity-away", away }),
       // The viewer's own quality goes with every track change, unasked: the

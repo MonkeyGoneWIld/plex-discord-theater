@@ -138,14 +138,17 @@ function authHeaders(): Record<string, string> {
 
 export async function apiGet<T = unknown>(
   path: string,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; /** Told the answer's size, for Stats for nerds. */ onBytes?: (bytes: number) => void },
 ): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: authHeaders(),
     signal: options?.signal,
   });
   if (!res.ok) await throwApiError(res, path);
-  return res.json();
+  if (!options?.onBytes) return res.json();
+  const text = await res.text();
+  options.onBytes(new TextEncoder().encode(text).length);
+  return JSON.parse(text) as T;
 }
 
 // Short-lived cache for stable Plex metadata (fetchMeta, fetchChildren, …), so
@@ -888,6 +891,8 @@ export function fetchSubtitleCues(
   mediaIndex?: number,
   fresh = false,
   where?: { at: number; since?: string },
+  /** Told each answer's size as it comes (lib/sideShare countBot). */
+  onBytes?: (bytes: number) => void,
 ): Promise<SubtitleAnswer> {
   const params = new URLSearchParams();
   if (ratingKey) params.set("ratingKey", ratingKey);
@@ -898,7 +903,7 @@ export function fetchSubtitleCues(
   }
   const qs = params.toString();
   const path = `/api/plex/subtitles/${encodeURIComponent(String(streamId))}${qs ? `?${qs}` : ""}`;
-  return fresh || where ? apiGet(path) : cachedGet(path);
+  return fresh || where ? apiGet(path, { onBytes }) : cachedGet(path);
 }
 
 /**

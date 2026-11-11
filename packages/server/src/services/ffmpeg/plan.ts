@@ -155,7 +155,7 @@ export interface PlayerCaps {
    * A 10-bit picture plays smoothly: an HDR film, a 10-bit SDR file, an HDR
    * film mapped to SDR in HEVC Main10. Said by every player that decodes HEVC
    * or AV1, and taken back by one that keeps dropping frames on such a picture
-   * (the client's Player.tsx): blah0391's laptop dropped 10 to 39% of the
+   * (the client's Player.tsx): casey's laptop dropped 10 to 39% of the
    * frames of 10-bit HEVC in 5 of 14 streams from 22 to 29 October, and at
    * most 2.2% of 8-bit ones, Plex's 8-bit HEVC of Deadpool included. Without
    * it a player gets HEVC in 8 bits, a stream of its own (seatOf).
@@ -289,8 +289,10 @@ export function planCopy(
   const codec = (video.codec ?? "").toLowerCase();
   if (codec !== "h264" && codec !== "hevc" && codec !== "av1" && codec !== "vp9") return no(`video is ${codec || "unknown"}`);
   if (codec === "h264" && (video.bitDepth ?? 8) > 10) return no(`${video.bitDepth}-bit H.264`);
-  // High 10 for a player that decodes it (PlayerCaps.hi10).
-  if (codec === "h264" && (video.bitDepth ?? 8) > 8 && !req.hi10Ok) return no("10-bit H.264: not decoded by this player");
+  // High 10 is never copied. Discord's players said they decode it and then
+  // didn't: Redline, 11 November, "video decoder initialization failed" on
+  // the host and the viewer alike, the viewer left loading. hi10Ok is unread.
+  if (codec === "h264" && (video.bitDepth ?? 8) > 8) return no("10-bit H.264: not decoded by Discord's player");
   // Field by field, as TV is broadcast: Chrome's decoder gave up on the first
   // segment of Cunk on Shakespeare's 1080i copy on 21 October, for both
   // players and every retry, and a picture it did decode would be combed.
@@ -311,7 +313,7 @@ export function planCopy(
   if (hdr === "DV P5" || hdr === "DV P10.0") return no(`Dolby Vision ${hdr.slice(3)}: tone mapping needed`);
   // HEVC a browser maps is labelled as each screen fetches it, so screens in
   // HDR and SDR share it, and its peers (hdr-init.ts): on 29 October the host
-  // in HDR and blah0391 in SDR had a copy each. Else, for a screen in SDR,
+  // in HDR and casey in SDR had a copy each. Else, for a screen in SDR,
   // tone-mapped by the server (PlayerCaps.hdr).
   const sdrPeakNits = hdrPicture(hdr) && codec === "hevc" && browserMapped(hdr) && req.sdrPeakNits
     ? req.sdrPeakNits : null;
@@ -1022,7 +1024,7 @@ export function planEncode(src: SourceVersion, req: EncodeRequest): EncodePlan {
   const codec = av1Out && hdr === "SDR" ? "av1"
     : hevcOut && (!tonemap || tonemap.via !== "software") ? "hevc" : "h264";
   // 10 bits where the picture has them to keep; Deadpool's 8-bit H.264 had
-  // been made HEVC Main10 for nothing, which blah0391's laptop dropped a third
+  // been made HEVC Main10 for nothing, which casey's laptop dropped a third
   // of on 29 October, where Plex's 8-bit HEVC of it dropped none.
   const tenBit = codec === "hevc" && tenBitOk && (keepHdr || !!tonemap || pictureBits(video) > 8);
   const audio = pickAudio(src, req.audioStreamId);

@@ -9,8 +9,8 @@ let tracker: InstanceType<typeof TrackerServer> | null = null;
  *
  * Nothing else goes over it between a player's announces, two minutes apart,
  * and a connection that quiet gets dropped on the way from the player to the
- * bot: on 13 October blah0391's went within two minutes of joining a stream's
- * swarm, and monkey26, joining in that time, found nobody to share with — the
+ * bot: on 13 October casey's went within two minutes of joining a stream's
+ * swarm, and jordan, joining in that time, found nobody to share with — the
  * two met 85 seconds later, when it came back. So every TRACKER_PING_MS it
  * gets a ping, which the browser answers on its own, and a message its
  * tracker library reads and puts aside (KEEP_ALIVE): something going over it

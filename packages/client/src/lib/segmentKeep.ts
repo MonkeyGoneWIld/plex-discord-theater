@@ -16,7 +16,7 @@
  * For five minutes, as the bot lets the browser keep them; in one cache per
  * minute, so that letting go of what is older is deleting whole caches, and at
  * most KEEP_BYTES of this page's, the oldest minute let go first. Where Cache
- * Storage refuses — monkey26's first device that evening threw SecurityError
+ * Storage refuses — jordan's first device that evening threw SecurityError
  * opening it — nothing is kept or looked for, and everything goes as before.
  */
 import { logEvent, logWarn } from "./log";

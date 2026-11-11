@@ -1297,7 +1297,7 @@ console.log("\n— a stream rebuilt while paused is announced paused —");
 
 console.log("\n— a host alone popping out keeps the room —");
 {
-  // monkey26 on 12 October: alone, popped out, and came back 3.6s later to
+  // jordan on 12 October: alone, popped out, and came back 3.6s later to
   // nothing playing — the transcode had been killed as the socket closed.
   const [host] = await room("inst-alone", ["host"]);
   const sid = await startPlayback(host);
@@ -1315,7 +1315,7 @@ console.log("\n— a host alone popping out keeps the room —");
   check("held where it was left", near(state?.position ?? -1, 500, 0.5), "ok");
   check("waiting for the host's picture", state?.waiting, true);
   // Its page pings the stream, which keeps a copy measuring ahead: told it
-  // didn't drive it, blah0391's never did, and the room starved three minutes
+  // didn't drive it, casey's never did, and the room starved three minutes
   // later at the end of what had been measured (12 October).
   check("and it drives its stream again", state?.variant?.isOwner, true);
   back.send({ type: "heartbeat", position: 500, playing: true, waiting: false });
@@ -1456,7 +1456,7 @@ console.log("\n— a viewer back from a pop-out is on their own stream again —
 
 console.log("\n— the host back from a pop-out is on their own stream again —");
 {
-  // Run 29, C: blah0391, hosting Snowden on an 8 Mbps stream of their own with
+  // Run 29, C: casey, hosting Snowden on an 8 Mbps stream of their own with
   // the viewer on another, popped out on Firefox, the old page going first.
   // Their stream was stopped at the handover, and back 7 s later they were
   // given a new one at the default quality.
@@ -1650,7 +1650,7 @@ console.log("\n— the host closes as a viewer is still coming in: the viewer is
 
 console.log("\n— a page is handed back the quality its account last had in that browser —");
 {
-  // Run 29, C again: blah0391 on Firefox chose 8 Mbps, popped out, and the
+  // Run 29, C again: casey on Firefox chose 8 Mbps, popped out, and the
   // page opened at Original, Firefox keeping nothing between pages.
   instanceHosts.set("inst-sitting", { hostUserId: "u-host", guildId: null, channelId: null, createdAt: Date.now() });
   const firefox = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:159.0) Gecko/20100101 Firefox/159.0";

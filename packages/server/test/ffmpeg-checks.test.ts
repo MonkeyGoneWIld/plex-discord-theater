@@ -208,13 +208,13 @@ console.log("\n— AV1, Opus and FLAC copied, in fragmented MP4 —");
     vp9Copy.ok && [vp9Copy.codec, vp9Copy.fmp4, copyNeeds(vp9Copy)], ["vp9", true, ["vp9", "opus", "tenBit"]]);
   check("not for one that doesn't say so, nor 12-bit VP9", [why(vp9(8, {})), why(vp9(12))],
     ["VP9: not decoded by this player", "12-bit VP9"]);
-  // 10-bit H.264 (High 10) for a player that says it decodes it (PlayerCaps.hi10).
+  // 10-bit H.264 (High 10) is never copied: Discord's players said they
+  // decode it and then didn't (Redline, 11 November).
   const hi10 = (ask: Record<string, unknown>) =>
     planCopy(version({ codec: "h264", bitDepth: 10 }, { codec: "aac", channels: 2 }), { ...all, ...ask });
-  const hi10Copy = hi10({ hi10Ok: true });
-  check("10-bit H.264 for a player that decodes it is copied, in MPEG-TS",
-    hi10Copy.ok && [hi10Copy.codec, hi10Copy.fmp4, copyNeeds(hi10Copy)], ["h264", false, ["hi10", "tenBit"]]);
-  check("re-encoded for one that doesn't say so", why(hi10({})), "10-bit H.264: not decoded by this player");
+  check("10-bit H.264 is re-encoded, whatever the player says it decodes",
+    [why(hi10({ hi10Ok: true })), why(hi10({}))],
+    ["10-bit H.264: not decoded by Discord's player", "10-bit H.264: not decoded by Discord's player"]);
   // Open GOP (services/keyframes.ts): every keyframe a place to start, as fMP4 marks them.
   const gop = (openGop: boolean) => planCopy(version({ codec: "h264", bitDepth: 8 }, { codec: "aac", channels: 2 }), { ...all, openGop });
   check("open-GOP H.264 is copied in fMP4, closed-GOP in MPEG-TS",

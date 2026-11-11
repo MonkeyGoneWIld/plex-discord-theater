@@ -397,7 +397,7 @@ console.log("\n— what is kept for the page after this one —");
   s.named.get(`pdt-segments-${minute - 2}`)!.set(URL3, new Response("x", { headers: { "x-kept-at": String(Date.now() - 6 * 60_000) } }));
   check("one kept more than five minutes ago is as good as gone", await keptSegment(URL3), null);
 
-  // A device whose Cache Storage refuses — monkey26's first, on 14 October.
+  // A device whose Cache Storage refuses — jordan's first, on 14 October.
   s.refuse = true;
   useCacheStorageForTests(s);
   const URL4 = URL0.replace("00428", "00432");

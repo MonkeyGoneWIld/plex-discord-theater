@@ -4,6 +4,7 @@
  * in and when each pass came, whether a subtitle is loading, being read out
  * of the film or all there, and what happens to the audio.
  */
+import fs from "node:fs";
 import { clock, previewDetails, previewSummary, type PreviewStatus } from "../src/lib/previewStatus";
 import { coverageText, mergedSpans, subtitleDetails, subtitleSummary, type SubtitleLoadStatus } from "../src/lib/subtitleStatus";
 import { audioDetails, audioSummary, fileLines, type StreamNotes } from "../src/lib/streamNotes";
@@ -116,6 +117,17 @@ check("half the bytes from Discord's cache",
   { pct: 50, fromCache: 50_000_000, fromServer: 50_000_000, hits: 3, downloads: 8 });
 check("downloads with no length said: 0%, not a division by nothing",
   discordCacheShare({ hit: 1, of: 2, hitBytes: 0, bytes: 0 })?.pct, 0);
+
+console.log("\n— every row is in a section —");
+{
+  // The panel draws its sections' rows by name (BANDS): a row in none of
+  // them is built and never seen, as the Discord cache row was.
+  const src = fs.readFileSync(new URL("../src/components/StatsOverlay.tsx", import.meta.url), "utf8");
+  const banded = new Set([...src.matchAll(/rows: \[([^\]]+)\]/g)].flatMap((m) => [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1])));
+  const rows = [...src.matchAll(/^\s+label: "([^"]+)",(?: value| health| section)/gm)].map((m) => m[1]);
+  check("the rows Stats for nerds builds", rows.length >= 10, true);
+  check("  each is drawn in one of its sections", rows.filter((r) => !banded.has(r)), []);
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

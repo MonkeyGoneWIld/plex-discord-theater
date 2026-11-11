@@ -48,8 +48,8 @@
  *     seconds (the tracker library's websocket-tracker.js, not the engine).
  *     The library waited ten seconds and up to five minutes more, at random,
  *     before trying again, and a player is out of its stream's swarm all
- *     that time: on 13 October blah0391's connection dropped two minutes
- *     after it joined one, and monkey26, joining in that time, found nobody
+ *     that time: on 13 October casey's connection dropped two minutes
+ *     after it joined one, and jordan, joining in that time, found nobody
  *     to share with. The two met 85 seconds later, when it came back. Now two
  *     seconds and up to three more, doubling each time it fails again, to a
  *     minute at most.
@@ -61,7 +61,7 @@
  *     that lands on what the browser has kept moves back a few seconds before
  *     anything is loaded, and the engine, still at the place the page first
  *     went to, takes the segment playback asks for to be behind it — fetched
- *     by nobody. On 14 October blah0391's page sat on it for a minute with the
+ *     by nobody. On 14 October casey's page sat on it for a minute with the
  *     segment in the browser's cache all along.
  *
  * There used to be a third: a player on the same network as its peer left

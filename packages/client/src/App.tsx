@@ -132,7 +132,7 @@ export function App() {
 
   const effectiveIsHost = syncState.isHost ?? isHost;
   // Away from the activity: a request for a host's role counts down from 1 minute (lib/away).
-  useActivityAway(syncState.playing, (away) => syncActions.sendActivityAway(away));
+  useActivityAway((away) => syncActions.sendActivityAway(away));
 
   // Toast when promoted to host: on a genuine handover only, and only while
   // it is so (lib/usePromotedToast).
@@ -1107,6 +1107,7 @@ export function App() {
           onSetCoHost={(uid, value) => syncActions.sendSetCoHost(uid, value)}
           hostRequest={syncState.hostRequest}
           onRequestHost={() => syncActions.sendHostRequest()}
+          onAnswerHostRequest={(accept) => syncActions.answerHostRequest(accept)}
           onReclaimHost={() => syncActions.reclaimHost()}
           onClose={() => setShowPeoplePanel(false)}
         />
@@ -1118,7 +1119,7 @@ export function App() {
         selfUserId={userId}
         isHost={effectiveIsHost}
         hostName={syncState.hostUsername}
-        onAnswer={(accept, present) => syncActions.answerHostRequest(accept, present)}
+        onAnswer={(accept) => syncActions.answerHostRequest(accept)}
         onReclaim={() => syncActions.reclaimHost()}
       />
 

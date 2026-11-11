@@ -40,17 +40,19 @@ same list makes people co-hosts, up to 50 per room.
 ### Someone asks for it
 
 A host who stays in the Activity but walks away leaves everyone else unable
-to play or pick anything. Anyone else can select **Request host** in the
-people list. The host sees who asked and a countdown, with **Accept** and
-**Decline**. If the host doesn't answer in 5 minutes, the role passes to the
-person who asked.
+to play or pick anything. Anyone else can select **Request host** at the
+foot of the people list. The host sees who asked and a countdown, with
+**Accept** and **Decline**, on a card over the page and in the people list.
+If the host doesn't answer in 5 minutes, the role passes to the person who
+asked. Only the host's own **Decline** declines: nothing else they do in the
+Activity answers for them.
 
 - **The host is away:** the countdown is 1 minute, and drops to 1 minute if
   the host goes away while it runs. Away means the Activity has been hidden
-  for 30 seconds, or nothing has been touched for 3 minutes while nothing
-  plays. Discord's own idle status can't be read by an Activity.
+  for 30 seconds, or nothing has been touched for 3 minutes, whether or not
+  the film is playing. Discord's own idle status can't be read by an Activity.
 - **One request at a time:** everyone else sees who asked and the time left.
-- **The host declines, or uses the Activity while it counts down:** nobody
+- **The host declines:** nobody
   can ask for 15 minutes, and the person who asked can't ask again for 2 hours.
   A person who can't ask sees how long is left when they select the button.
 - **The role passes on:** nobody can ask the new host for 15 minutes. A host

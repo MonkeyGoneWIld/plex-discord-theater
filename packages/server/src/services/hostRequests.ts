@@ -9,14 +9,14 @@
  *
  * Kept from being a way to take the room from a host who is there:
  *  - One request at a time; everyone else sees who asked and the time left.
- *  - The host declining, or using the controls while it counts down (they are
- *    there), shuts requests for everyone for DECLINED_ROOM_MS and for the one
- *    who asked for DECLINED_USER_MS.
+ *  - The host declining shuts requests for everyone for DECLINED_ROOM_MS and
+ *    for the one who asked for DECLINED_USER_MS. Only their Decline does:
+ *    nothing else they do in the activity answers for them.
  *  - The role passed on, nobody may ask the new host for PROTECTED_MS; and a
  *    host it was taken from by the countdown may take it back within
  *    RECLAIM_MS, since they are the reason it moved.
  * A host the activity sees away (lib/away on their client: hidden, or nothing
- * touched while paused) has WAIT_AWAY_MS rather than WAIT_MS, and a countdown
+ * touched for a while, playing or not) has WAIT_AWAY_MS rather than WAIT_MS, and a countdown
  * longer than that drops to it when they go away. Discord's own idle status
  * isn't something an activity can read.
  *
@@ -95,7 +95,7 @@ export function hostWentAway(s: HostRequests, now: number): boolean {
   return true;
 }
 
-/** The host said no, or used the controls while it counted down. */
+/** The host said no. */
 export function declineRequest(s: HostRequests, now: number): ActiveRequest | null {
   const a = s.active;
   if (!a) return null;

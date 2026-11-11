@@ -24,7 +24,7 @@ function Header({ width, trail }: { width: number; trail: string[] }) {
           </span>
         ))}
       </nav>
-      <span style={{ flexShrink: 0, color: "#888" }}>monkey26 (Host) · 2</span>
+      <span style={{ flexShrink: 0, color: "#888" }}>jordan (Host) · 2</span>
     </div>
   );
 }

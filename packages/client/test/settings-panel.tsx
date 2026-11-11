@@ -33,7 +33,7 @@ function Fixture() {
       <div id="header" style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: 13, color: "#888", padding: 12 }}>
         <PlexAccountButton onHistoryChanged={() => {}} onOpenExternalLink={() => {}} />
         <InviteButton onInvite={async () => "unavailable" as never} />
-        <span>monkey26 (Host)</span>
+        <span>jordan (Host)</span>
         <button style={people}>1</button>
         <button style={gear} aria-label="Settings">
           <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true">

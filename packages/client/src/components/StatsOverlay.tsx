@@ -169,7 +169,7 @@ export interface Traffic {
  * written out as sentences they did not fit: on 28 October each kind's line ran
  * to sixty characters in a column with room for forty-five.
  */
-export function peerTraffic(kinds: Array<[string, Traffic, string]>): {
+export function peerTraffic(kinds: Array<[string, Traffic, string, boolean?]>): {
   total: Traffic;
   /** The share of everything received that came from peers, 0 to 100. */
   fromPeersPct: number;
@@ -180,7 +180,8 @@ export function peerTraffic(kinds: Array<[string, Traffic, string]>): {
   }), { fromPeers: 0, fromServer: 0, toPeers: 0 });
   const received = total.fromPeers + total.fromServer;
   const fromPeersPct = received > 0 ? Math.round((total.fromPeers / received) * 100) : 0;
-  const used = kinds.filter(([, k]) => k.fromPeers + k.fromServer + k.toPeers > 0);
+  // A kind's fourth part keeps its row with nothing in yet.
+  const used = kinds.filter(([, k, , always]) => always || k.fromPeers + k.fromServer + k.toPeers > 0);
   const head = (text: string, title: string) => <span style={styles.shareHead} title={title}>{text}</span>;
   return {
     total,
@@ -571,13 +572,15 @@ export function StatsOverlay({
   // as label and value, such as the Peers table.
   type Row = { label: string; value: string; health?: Health; section?: Section; details?: Array<[string, string, Health?]>; extra?: React.ReactNode; visual?: React.ReactNode; keep?: string };
   // The video by its P2P engine; subtitles and previews by lib/sideShare.
-  const side = (...kinds: Array<"pgs" | "styled" | "previews">): Traffic => kinds.map((k) => sideShare.statsFor(k))
+  const side = (...kinds: Array<"pgs" | "styled" | "previews" | "text">): Traffic => kinds.map((k) => sideShare.statsFor(k))
     .reduce((t, k) => ({ fromPeers: t.fromPeers + k.fromPlayers, fromServer: t.fromServer + k.fromBot, toPeers: t.toPeers + k.sent }),
       { fromPeers: 0, fromServer: 0, toPeers: 0 });
   const traffic = peerTraffic([
-    ["Video", { fromPeers: p2p.p2pBytes, fromServer: p2p.httpBytes, toPeers: p2p.uploadBytes }, "The picture and sound"],
-    ["Subtitles", side("pgs", "styled"), "Picture subtitles, and styled subtitles' scripts and fonts"],
-    ["Previews", side("previews"), "The seek bar's preview pictures"],
+    ["Video", { fromPeers: p2p.p2pBytes, fromServer: p2p.httpBytes, toPeers: p2p.uploadBytes }, "The picture and sound", true],
+    // Shown from the start, at 0 B, when the title has them: a row that came
+    // and went with its first bytes read as one that was missing.
+    ["Subtitles", side("text", "pgs", "styled"), "Subtitles: their text, pictures, scripts and fonts", !!subtitle?.track],
+    ["Previews", side("previews"), "The seek bar's preview pictures", previewPartId !== null],
   ]);
   const received = traffic.total.fromPeers + traffic.total.fromServer;
   // What came over HTTP, from Discord's cache or the server (lib/discordCache).
@@ -767,7 +770,7 @@ const BANDS: Array<{ label: string; rows: string[]; background: string; border: 
     background: "rgba(255,255,255,0.035)", border: "rgba(255,255,255,0.16)", color: "rgba(255,255,255,0.55)",
   },
   {
-    label: "Sync and network", rows: ["Sync", "Buffer", "Connection", "Peers"],
+    label: "Sync and network", rows: ["Sync", "Buffer", "Connection", "Peers", "Discord cache"],
     background: "rgba(106,162,232,0.07)", border: "rgba(106,162,232,0.42)", color: "#6aa2e8",
   },
   {

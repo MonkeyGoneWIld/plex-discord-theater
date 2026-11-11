@@ -6,26 +6,27 @@ import {
 
 /**
  * Asking an away host for the role, on screen (lib/hostRequest):
- *  - the host: who asked, the countdown, Accept / Decline. Using the
- *    activity while it counts down declines: they are there.
+ *  - the host: who asked, the countdown, Accept / Decline. Nothing else
+ *    answers: only their Decline declines.
  *  - who asked: the countdown, which they can minimize or hide and see again
  *    from the People panel.
  *  - a host the countdown took the role from: Reclaim host, for a while.
  * Below the top bar, at the right, and never over the People panel, which
- * says the same; styled as the pause request's card (TransportRequestCard).
+ * says the same, Accept and Decline included; styled as the pause request's
+ * card (TransportRequestCard). That a request was declined is said the way
+ * "You are now the host" is: the app's own notice, top centre, for a moment.
  */
 interface Props {
   view: HostRequestView | null;
   selfUserId: string | null;
   isHost: boolean;
   hostName: string | null;
-  onAnswer: (accept: boolean, present?: boolean) => void;
+  onAnswer: (accept: boolean) => void;
   onReclaim: () => void;
 }
 
-/** Input this soon after the host's prompt shows is from before it. */
-const SETTLE_MS = 1_500;
-const NOTE_MS = 8_000;
+/** As long as "You are now the host" (lib/usePromotedToast) and a line more to read. */
+const NOTE_MS = 3_000;
 
 /** "Lead-in " + a name that gives way first, as TransportRequestCard. */
 function Heading({ lead, name }: { lead: string; name: string }) {
@@ -59,7 +60,6 @@ export function HostRequestOverlay({ view, selfUserId, isHost, hostName, onAnswe
   }, [counting]);
 
   // A new request of mine opens; the People panel's button opens it again.
-  const activeKey = active ? `${active.requesterId}:${active.endsAt}` : null;
   useEffect(() => { if (mine) setMineShown("open"); }, [mine, active?.requesterId]);
   useEffect(() => {
     const show = () => setMineShown("open");
@@ -68,12 +68,12 @@ export function HostRequestOverlay({ view, selfUserId, isHost, hostName, onAnswe
   }, []);
   useEffect(() => { if (view?.reclaimUntil) setReclaimHidden(false); }, [view?.reclaimUntil]);
 
-  // How a request of mine ended, said for a moment.
+  // A request of mine declined, said for a moment. One that made me the host
+  // is said by the app's own "You are now the host".
   const wasMine = useRef(false);
   useEffect(() => {
-    if (wasMine.current && !mine) {
-      if (isHost) setNote("You are now the host.");
-      else if (view?.blocked?.why === "you-declined") setNote(`${hostName || "The host"} declined your host request.`);
+    if (wasMine.current && !mine && !isHost && view?.blocked?.why === "you-declined") {
+      setNote(`${hostName || "The host"} declined your host request`);
     }
     wasMine.current = mine;
   }, [mine, isHost, view?.blocked?.why, hostName]);
@@ -83,30 +83,9 @@ export function HostRequestOverlay({ view, selfUserId, isHost, hostName, onAnswe
     return () => clearTimeout(t);
   }, [note]);
 
-  // The host using the activity while it counts down: they are there, so no.
-  const shownAt = useRef(0);
-  useEffect(() => { if (forMe) shownAt.current = Date.now(); }, [forMe, activeKey]);
-  const answerRef = useRef(onAnswer);
-  answerRef.current = onAnswer;
-  useEffect(() => {
-    if (!forMe) return;
-    let answered = false;
-    const used = (e: Event) => {
-      if (answered || Date.now() - shownAt.current < SETTLE_MS) return;
-      const t = e.target as Element | null;
-      if (t?.closest?.("[data-host-request]")) return;
-      answered = true;
-      answerRef.current(false, true);
-    };
-    window.addEventListener("pointerdown", used, true);
-    window.addEventListener("keydown", used, true);
-    return () => {
-      window.removeEventListener("pointerdown", used, true);
-      window.removeEventListener("keydown", used, true);
-    };
-  }, [forMe, activeKey]);
-
-  if (panelOpen) return null;
+  // The notice is the app's, not a card: it shows over the People panel too.
+  const notice = note ? <div data-host-request-note style={styles.note} role="status">{note}</div> : null;
+  if (panelOpen) return notice;
 
   if (forMe && active) {
     return (
@@ -114,8 +93,8 @@ export function HostRequestOverlay({ view, selfUserId, isHost, hostName, onAnswe
         <div style={styles.card}>
           <Heading lead="Host requested by " name={active.requesterName || "a viewer"} />
           <p style={styles.body}>
-            Transfers in <b style={styles.time}>{clock(msUntil(view!, active.endsAt, now))}</b> unless you respond.
-            Using the Activity declines the request.
+            Host transfers in <b style={styles.time}>{clock(msUntil(view!, active.endsAt, now))}</b> unless
+            you respond.
           </p>
           <div style={styles.row}>
             <button className="btn" style={styles.primary} onClick={() => onAnswer(true)}>Accept</button>
@@ -175,14 +154,7 @@ export function HostRequestOverlay({ view, selfUserId, isHost, hostName, onAnswe
     );
   }
 
-  if (note) {
-    return (
-      <div data-host-request style={styles.wrap} role="status">
-        <div style={styles.note}>{note}</div>
-      </div>
-    );
-  }
-  return null;
+  return notice;
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -225,9 +197,11 @@ const styles: Record<string, React.CSSProperties> = {
     background: "none", border: "none", color: "#888", fontSize: "16px", lineHeight: 1, padding: "4px 8px",
     cursor: "pointer", fontFamily: "inherit",
   },
+  // The shape, place and type of App's "You are now the host" (promotedToast),
+  // in grey: it is news, not good news.
   note: {
-    pointerEvents: "auto", background: "rgba(0,0,0,0.85)", border: "1px solid rgba(255,255,255,0.1)",
-    borderRadius: "10px", padding: "10px 14px", color: "#f0f0f0", fontSize: "13px", overflowWrap: "anywhere",
-    boxShadow: "0 2px 12px rgba(0,0,0,0.5)",
+    position: "fixed", top: "16px", left: "50%", transform: "translateX(-50%)", padding: "10px 24px",
+    borderRadius: "8px", background: "rgba(60,60,60,0.95)", color: "#fff", fontSize: "14px", fontWeight: 600,
+    zIndex: 1000, pointerEvents: "none", maxWidth: "calc(100vw - 32px)", textAlign: "center", overflowWrap: "anywhere",
   },
 };

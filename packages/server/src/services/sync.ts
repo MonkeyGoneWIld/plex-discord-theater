@@ -57,7 +57,7 @@ const WS_MAX_PAYLOAD_BYTES = 1024 * 1024;
 /**
  * How long a room everybody has left keeps its stream, and its place in it.
  * Discord reloads an activity to pop it out of its window and back, and a
- * host watching alone is everybody: on 12 October monkey26 popped out alone,
+ * host watching alone is everybody: on 12 October jordan popped out alone,
  * the transcode was killed as the socket closed, and the page that came back
  * 3.6 seconds later found nothing playing. Long enough for a slow reload.
  */
@@ -218,7 +218,7 @@ const HEVC_OWN = "/hevc";
 /**
  * On the end of a stream's key, the stream of the same tracks for whoever on
  * it plays HEVC but drops frames on a 10-bit picture: HEVC Main, 8 bits, as
- * Plex's own HEVC is. On 29 October blah0391's laptop dropped 9–39% of the
+ * Plex's own HEVC is. On 29 October casey's laptop dropped 9–39% of the
  * frames of 10-bit HEVC in five sessions of fourteen, and never more than
  * 2.2% of 8-bit; Deadpool in Plex's 8-bit HEVC on main, none.
  */
@@ -962,8 +962,8 @@ const plainKeyOf = (key: string) => {
  * AAC. For someone who can, the stream itself — or, when that is a twin made
  * only because whoever brought it up couldn't take the file as it is, and
  * this player can, the stream it is the twin of: a copy, theirs to bring up if
- * nobody has yet. On 14 October monkey26 hosted from Firefox, which can't
- * decode HEVC, and blah0391, who can, watched a 12 Mbps re-encode of an HEVC
+ * nobody has yet. On 14 October jordan hosted from Firefox, which can't
+ * decode HEVC, and casey, who can, watched a 12 Mbps re-encode of an HEVC
  * film. A stream not running while its twin is: the twin, unless the twin
  * holds back from this player something it would have in a copy.
  *
@@ -982,8 +982,8 @@ const plainKeyOf = (key: string) => {
  *
  * What a twin holds back is its picture, when that was re-encoded for want of
  * something this player has: the sound of a copy is made for whoever brings it
- * up. On 2 November waawee hosted Rain Man from Vesktop, short of HEVC and
- * E-AC3, and monkey26, short of E-AC3 alone, watched the H.264 re-encode
+ * up. On 2 November sam hosted Rain Man from Vesktop, short of HEVC and
+ * E-AC3, and jordan, short of E-AC3 alone, watched the H.264 re-encode
  * rather than a copy of their own with the sound made AAC, as theirs had been
  * a minute before. Held back only sound, the twin holds it back from a player
  * that decodes it, as before.
@@ -1046,9 +1046,9 @@ function followHost(room: Room, v: Variant): void {
  * if somebody already has. Everyone else stays and hears nothing.
  *
  * A stream made H.264 and AAC only because its driver couldn't take the file
- * as it is takes its twin's key first, leaving the plain one for a copy. On 14 October monkey26
+ * as it is takes its twin's key first, leaving the plain one for a copy. On 14 October jordan
  * joined a room playing a copy of an HEVC film and the whole room went over to
- * a 12 Mbps re-encode for them; later the same evening, monkey26 hosting from
+ * a 12 Mbps re-encode for them; later the same evening, jordan hosting from
  * Firefox, everybody else watched one.
  */
 function sortByCaps(room: Room, roomId: string, v: Variant): void {
@@ -1635,7 +1635,7 @@ function settleLeftStream(room: Room, key: string): void {
  * Each player's quality as it last said (the client's lib/quality sitting), by
  * account and browser, handed back to the next page that account opens in that
  * browser: Firefox keeps nothing for the Activity between pages, and on
- * 4 November (run 29, C again) blah0391's 8 Mbps was gone after each pop-out,
+ * 4 November (run 29, C again) casey's 8 Mbps was gone after each pop-out,
  * the page opening at Original. Kept as sent, and read by the page by its own
  * rules — how long a sitting lasts, and which titles it is for. Held in memory
  * only, the most recent SITTINGS_MAX.
@@ -1677,7 +1677,7 @@ function ownChoiceOf(room: Room, client: RoomClient): OwnChoice | null {
 /**
  * What the host had, for them to come back to as a viewer does to theirs: the
  * stream, the subtitle drawn over it and the quality it was made at. Run 29, C:
- * blah0391, hosting Snowden on an 8 Mbps stream of their own, popped the
+ * casey, hosting Snowden on an 8 Mbps stream of their own, popped the
  * activity out; their stream was stopped the moment the room was handed over,
  * and back 7 s later they were given a new one at the default quality, their
  * Firefox page having kept nothing of the one before (no storage there).
@@ -2291,7 +2291,7 @@ export function attachWebSocketServer(server: Server): void {
         let isHost = instance.hostUserId === userId || reclaimingHost;
 
         // Somebody is always host. The host closing the Activity as a viewer
-        // was still loading into it (run 29, B: monkey26 at 06:03:14, blah0391
+        // was still loading into it (run 29, B: jordan at 06:03:14, casey
         // in 3 s later) left the room to end with nobody in it, and the viewer
         // came into a new one as its only person and not its host, the record
         // still naming the one who had gone: "Host: —", and "Suggest to host"
@@ -2445,7 +2445,7 @@ export function attachWebSocketServer(server: Server): void {
         }
         // Onto the stream this player can play, if the one it landed on isn't
         // — the host's, or its own coming back to it from another device:
-        // monkey26 moved from Firefox to Discord for Windows on 14 October
+        // jordan moved from Firefox to Discord for Windows on 14 October
         // and came back to the H.264 stream Firefox had needed (seatOf). Said
         // in the state below, the one word they need.
         const landedOn = client.variantKey ? room.state.variants.get(client.variantKey) : undefined;
@@ -2514,7 +2514,7 @@ export function attachWebSocketServer(server: Server): void {
                   // theirs, coming back to a room held for them (holdEmptyRoom),
                   // or their own one, coming back to it. Told otherwise, the page
                   // that came back never pinged it, and a copy measures only so
-                  // far past the last ping: on 12 October blah0391's stopped
+                  // far past the last ping: on 12 October casey's stopped
                   // three minutes after the pop-out, and the room starved at its
                   // end until the stream was restarted.
                   landed.ownerUserId === client.userId,
@@ -2794,6 +2794,10 @@ export function attachWebSocketServer(server: Server): void {
       if (type === "host-request-answer") {
         const a = room.hostRequests.active;
         if (!client.isHost || !a || a.hostId !== client.userId) return;
+        // Only the host's own Accept or Decline answers. A page from before
+        // 11 November said no by itself when the host touched anything
+        // (`present`): that isn't an answer.
+        if ((msg.accept !== true && msg.accept !== false) || msg.present === true) return;
         const now = Date.now();
         const asker = [...room.clients].find((c) => c.userId === a.requesterId);
         clearTimeout(room.hostRequestTimer);
@@ -2806,7 +2810,6 @@ export function attachWebSocketServer(server: Server): void {
         declineRequest(room.hostRequests, now);
         logEvent("Sync", "the host declined a request for the role", {
           room: roomId.substring(0, 8), by: a.requesterName ?? a.requesterId,
-          how: msg.accept === false && msg.present === true ? "used the activity" : "declined",
         });
         sendHostRequests(room);
         return;

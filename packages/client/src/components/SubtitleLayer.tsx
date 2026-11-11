@@ -1,3 +1,4 @@
+import { sideShare } from "../lib/sideShare";
 import { useEffect, useRef, useState } from "react";
 import { fetchSubtitleCues, type SubtitleCue } from "../lib/api";
 import { logEvent, logWarn } from "../lib/log";
@@ -316,7 +317,7 @@ export function SubtitleLayer({ streamId, ratingKey, mediaIndex, videoRef, offse
       if (asking) return;
       asking = true;
       const at = place ?? where();
-      fetchSubtitleCues(streamId, ratingKey, mediaIndex, true, { at, since: sig })
+      fetchSubtitleCues(streamId, ratingKey, mediaIndex, true, { at, since: sig }, (n) => sideShare.countBot("text", n))
         .then((r) => {
           asking = false;
           if (cancelled) return;

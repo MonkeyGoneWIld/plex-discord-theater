@@ -1385,6 +1385,9 @@ export function Controls({
         } else if (ahead) {
           contentType = ahead.contentType;
           const chunks = [...ahead.chunks];
+          // Fetched before the player opened: counted now, so Stats for
+          // nerds' Peers table agrees with its Thumbnails section.
+          sideShare.countBot("previews", chunks.reduce((n, c) => n + c.length, 0));
           body = {
             read: async () => (chunks.length ? { done: false, value: chunks.shift() } : { done: true }),
             cancel: async () => { chunks.length = 0; },

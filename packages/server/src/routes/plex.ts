@@ -5743,7 +5743,7 @@ router.get(
     // No place asked for, and nothing running for it: a room's stream starts
     // again where the room is, never at the top. A player taking up a room's
     // stream asks with no place, expecting it running; on 18 October the one
-    // monkey26 came back to had stopped seconds before, started again at 0:00
+    // jordan came back to had stopped seconds before, started again at 0:00
     // an hour and 48 minutes behind the room, and the player chased the room
     // through it a stretch at a time until it stuck.
     if (!offset) {

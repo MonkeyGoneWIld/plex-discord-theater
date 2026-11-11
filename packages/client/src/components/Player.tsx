@@ -2178,7 +2178,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * A window the browser won't start with sound: Firefox's, popped out of
    * Discord, before anything has been clicked in it. Its play() was refused,
    * and the picture sat paused behind the loading screen, its buffer full,
-   * until play was pressed: on 4 November blah0391's pop-outs at 09:16:31 and
+   * until play was pressed: on 4 November casey's pop-outs at 09:16:31 and
    * 09:17:55 sat 51 and 15 s, where the same page back in Discord played at
    * once. It starts without sound instead, which every browser allows, and the
    * sound comes back with the first click or key in the window, which does
@@ -2273,8 +2273,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * within the grace, say — and not yet playing in step with it. Until it is,
    * it follows the room's clock as a viewer joining would (lands a little
    * ahead and waits there) and tells the room nothing, so the clock runs on
-   * and nobody else stops. On 12 October monkey26 popped the activity out as
-   * host, came back to a stream that had played on under blah0391, reported
+   * and nobody else stops. On 12 October jordan popped the activity out as
+   * host, came back to a stream that had played on under casey, reported
    * 0:00 while it loaded, and the room went there and waited 21 seconds for
    * it. See steerHost.
    */
@@ -2591,7 +2591,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (v?.seeking && v.readyState >= HTMLMediaElement.HAVE_METADATA) return v.currentTime;
     // Nothing of this title played here yet — a page just opened, its stream
     // still starting: the room's place, not the 0 this page has. On 4
-    // November blah0391, back as host in a pop-out, pressed play before its
+    // November casey, back as host in a pop-out, pressed play before its
     // picture came, and the room went from 27:41 to 0 and then to 20:40, the
     // start of its stream.
     if (heldNothingYet(v, lastGoodPositionRef.current) && sync && sync.ratingKey === itemRef.current.ratingKey) {
@@ -2628,7 +2628,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
    * room that played on without it (hostCatchUpRef), where the room is, by the
    * clock it keeps for it. Silent then, the room's clock stopped thirty seconds
    * after the host's last word — the server's and every player's — and went
-   * back to it: on 13 October blah0391, back from a pop-out and catching up for
+   * back to it: on 13 October casey, back from a pop-out and catching up for
    * longer than that, saw the room's clock go half a minute back, followed it
    * there, and drove everybody back with it.
    */
@@ -2944,16 +2944,16 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     if (!v) return;
     // A stream of another title is nothing to this one: the one the last
     // title left, said again by the server after this player had stopped it.
-    // On 14 October blah0391 left a film and started Pirates of the Caribbean
+    // On 14 October casey left a film and started Pirates of the Caribbean
     // twenty seconds later, and the new title took up the old one's stream —
     // its session, and its audio and subtitle, which Pirates doesn't have:
     // no subtitle was ticked, and choosing one restarted the stream.
     if (v.ratingKey && v.ratingKey !== item.ratingKey) return;
     // The room's stream when this player mounted (adoptSessionIdRef) is this
     // player's to take up only when it is the one it is put on. On 18 October
-    // monkey26 came back as host in Firefox, which can't play the room's HEVC,
+    // jordan came back as host in Firefox, which can't play the room's HEVC,
     // and was put on an H.264 stream of its own — but took up the room's
-    // anyway, started it again as that, and blah0391, watching the copy, was
+    // anyway, started it again as that, and casey, watching the copy, was
     // left on a stream that was gone.
     if (adoptSessionIdRef.current && adoptSessionIdRef.current !== v.hlsSessionId) {
       logEvent("HLS", "not taking up the room's stream: this player is on another", {
@@ -3278,7 +3278,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
        * it gets there. It was told to play only if its picture was in at that
        * instant, and nothing told it later, so it sat paused; its first
        * heartbeat said so, and the room paused for everybody. On 16 October
-       * blah0391 handed monkey26 the room twice as they joined, and it stood
+       * casey handed jordan the room twice as they joined, and it stood
        * 12.6 and 15 seconds until somebody pressed play. Such a host catches
        * up with the room as one taking over a playing room does
        * (hostCatchUpRef): the room plays on by its clock, a wait ahead of it
@@ -3493,7 +3493,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
       // more (catchUpLeadS) — or to start on at the least, as any player says
       // it is ready. Until then the room plays on without it. A host that took
       // the room over with half a second stopped at once, and the room —
-      // everybody — with it; blah0391, back on 12 October with 2.9 s and
+      // everybody — with it; casey, back on 12 October with 2.9 s and
       // segments taking six to come, stopped it three seconds later.
       const leftS = Number.isFinite(v.duration) ? Math.max(0, v.duration - v.currentTime - 0.25) : Infinity;
       const cushionS = Math.min(Math.max(READY_AHEAD_S, catchUpLeadS(networkSegmentMsRef.current ?? recentSegmentMs())), leftS);
@@ -3504,7 +3504,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
        * gets to it, at the speed it comes in at, as a host's picture has to
        * be for the room to start again after it stopped (readyToGo) — waited
        * for as long as it takes, since nobody waits on it. On 18 October
-       * monkey26, back in Firefox on a re-encode coming in little faster
+       * jordan, back in Firefox on a re-encode coming in little faster
        * than it played, was in step with 8.8 s in hand, drove the room, ran
        * dry 9 s later, and the room waited 14 s for it.
        */
@@ -3532,8 +3532,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
        * Not in step, and out of time, or the room stopped running — paused,
        * or gathering everybody after a co-host's seek: go to where the room
        * is, and drive from there. Never the other way round — on 12 October
-       * monkey26's catch-up ran out 4.75 seconds behind, drove the room back
-       * to its own picture, and blah0391, who had played on, was left five
+       * jordan's catch-up ran out 4.75 seconds behind, drove the room back
+       * to its own picture, and casey, who had played on, was left five
        * seconds ahead and stopped to wait for it. A wait just ahead of the
        * room isn't cut short: the room is on its way (catchUpLeadS).
        */
@@ -4145,7 +4145,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   // depends on retryKey, which handleSeekRestart bumps, so markers and the preview
   // part id would be refetched and blanked on every restart-seek. Keying on
   // item.ratingKey also covers queue auto-advance, which reuses this same Player.
-  // Not on the role: blah0391, made host for the five seconds monkey26 was
+  // Not on the role: casey, made host for the five seconds jordan was
   // popping the activity out on 12 October, lost the seek bar's preview frames
   // to the blanking this does, and was left with none.
   useEffect(() => {
@@ -4798,8 +4798,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     // room went on with — catches up with the room before it drives it: see
     // hostCatchUpRef. So does one starting its own here, for the first time:
     // back in a browser that can't play the room's, on a stream of its own
-    // from where the room is. On 18 October monkey26, back in Firefox, had
-    // the room wait for that stream's picture instead, and blah0391 stopped
+    // from where the room is. On 18 October jordan, back in Firefox, had
+    // the room wait for that stream's picture instead, and casey stopped
     // with a minute and a half in hand.
     const restartingOwn = sessionOwner && !didAdoptRef.current && streamedHereRef.current;
 
@@ -5078,7 +5078,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
          * A follower joining a film already playing starts loading where it
          * will land — on the room or a little past it, see the landing below
          * (joinLeadS) — not at the start of the film. Left to the playlist, it fetched the film's
-         * first segments before going to the room: monkey26, rejoining May at
+         * first segments before going to the room: jordan, rejoining May at
          * 3:03 on 12 October, took two first, and the test page's late joiner
          * spent eleven seconds on them.
          */
@@ -5091,7 +5091,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           /**
            * And one coming onto a room standing still — held for this host
            * while it was away, waiting for somebody, or paused — starts
-           * loading where the room stands. blah0391, back from a pop-out alone
+           * loading where the room stands. casey, back from a pop-out alone
            * on 13 October, fetched the copy's first two segments first, 12 MB
            * from two and a half minutes back, before the one it went on from.
            */
@@ -5525,7 +5525,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
                   });
                 });
                 // And why two players in one swarm don't reach each other. On
-                // 12 October monkey26 and blah0391 sat in one for ten minutes,
+                // 12 October jordan and casey sat in one for ten minutes,
                 // each fetching every segment from the bot under the film's
                 // bitrate, and nothing said why. Each kind once a stream.
                 const p2pTrouble = new Set<string>();
@@ -5826,9 +5826,9 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
            * for this manifest (handleSeekRestart's commit), and tears it down
            * within the debounce. Announced, it told the room where it begins
            * after the skip that replaced it, and the room went there: on 16
-           * October blah0391 skipped twelve times in sixteen seconds, the room
+           * October casey skipped twelve times in sixteen seconds, the room
            * jumped to 46:35 after a skip to 20:02, and ended on 42:40 for a last
-           * skip to 31:37, with monkey26 stuck behind it for half a minute. So
+           * skip to 31:37, with jordan stuck behind it for half a minute. So
            * it is neither announced nor landed on nor played.
            */
           const newerTarget = seekOffsetRef.current;
@@ -5925,7 +5925,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
              * A follower lands a little past the room — as far as its last
              * segment took to come in — and waits there for it while that
              * part comes. Landed on it, it played the first half second it
-             * had and stopped: monkey26 rejoining May on 12 October stopped
+             * had and stopped: jordan rejoining May on 12 October stopped
              * three times in twenty seconds. With nothing known of its
              * connection, on the room, and its first picture decides — see
              * joinLeadS.
@@ -6835,7 +6835,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
          * A skip somewhere the browser's buffer doesn't hold needs room in it
          * for the segment it goes to. Full — 150 MB or so, forty seconds of a
          * heavy copy — the buffer refuses the segment, and hls.js empties it
-         * all and loads again: blah0391's rewind of twenty seconds on 13
+         * all and loads again: casey's rewind of twenty seconds on 13
          * October took 2.7 s that way, with the room waiting, for picture the
          * P2P engine had in memory all along. So what it holds ahead of the
          * place the skip goes to, and well behind it, goes first. The engine
@@ -8685,7 +8685,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
      * stream went on with whoever stood in: a skip to somewhere it already
      * has the picture for goes straight on, as the driver's own does
      * (handleHostSeek), rather than holding the room while it loads. On 13
-     * October blah0391's two rewinds after a pop-out held everybody 2.7 and
+     * October casey's two rewinds after a pop-out held everybody 2.7 and
      * 0.8 seconds. A co-host's skip the room waits for, as ever.
      */
     const ready = !!video && isHostRef.current && pictureHeldAt(video, positionSeconds) && enoughHeldAt(video, positionSeconds);
@@ -8764,7 +8764,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
   /**
    * The click a browser asked for before it would start this window
    * (playRefused), with the sound on: as play pressed, for one who runs the
-   * room — from where the room is now (hostPositionForRoom), as blah0391's
+   * room — from where the room is now (hostPositionForRoom), as casey's
    * press did on 4 November at 09:58:56 — and for anybody else, their start.
    */
   const startAfterRefusal = useCallback(() => {
@@ -10002,6 +10002,7 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           onSetCoHost={(uid, value) => syncActions?.sendSetCoHost(uid, value)}
           hostRequest={syncState.hostRequest}
           onRequestHost={syncActions ? () => syncActions.sendHostRequest() : undefined}
+          onAnswerHostRequest={syncActions ? (accept) => syncActions.answerHostRequest(accept) : undefined}
           onReclaimHost={() => syncActions?.reclaimHost()}
           onInvite={onInvite}
           onClose={() => setShowPeoplePanel(false)}

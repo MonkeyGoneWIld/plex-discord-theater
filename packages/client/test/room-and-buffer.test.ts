@@ -214,7 +214,7 @@ console.log("\n— a follower going past the room lands where its segment has pi
   check("0.82s from the end of a four-second segment: the start of the next",
     at(landingFor(27.167, copy4, Infinity)), at(27.989 + LAND_INTO_SEGMENT_S));
   check("half of it left: where it was going", landingFor(26, copy4, Infinity), 26);
-  // monkey26's on 12 October: seg 185 ran 569.03–589.44, and it landed at 576.01.
+  // jordan's on 12 October: seg 185 ran 569.03–589.44, and it landed at 576.01.
   const long = [{ start: 569.03, duration: 20.41 }, { start: 589.44, duration: 2.5 }];
   check("thirteen seconds of a twenty-second segment left: where it was going", landingFor(576.01, long, Infinity), 576.01);
   check("two and a half of it left: the next", at(landingFor(586.94, long, Infinity)), at(589.44 + LAND_INTO_SEGMENT_S));
@@ -230,7 +230,7 @@ console.log("\n— a follower going past the room lands where its segment has pi
   check("moved to the next segment: far enough in that hls.js calls off the one before",
     callsOffBefore(landingFor(27.167, copy4, Infinity), copy4[1]), true);
   check("and with one-second segments", callsOffBefore(landingFor(10.6, short, Infinity), short[0]), true);
-  // blah0391 on 4 November, back as host in a pop-out, pressed play before
+  // casey on 4 November, back as host in a pop-out, pressed play before
   // its picture came: the room went from 27:41 to 0, then to 20:40.
   check("a page with no picture that has played nothing can't tell its place", heldNothingYet({ readyState: 0 }, 0), true);
   check("…with its picture in, it can", heldNothingYet({ readyState: 2 }, 0), false);
@@ -246,7 +246,7 @@ console.log("\n— and far enough past it for what it lands in to come first —
 {
   const MB = 1_000_000;
   const at = (t: number) => Math.round(t * 100) / 100;
-  // blah0391 back from a pop-out on 13 October: 3.7 s past the room, in seg
+  // casey back from a pop-out on 13 October: 3.7 s past the room, in seg
   // 906 — 26.21 MB, 2721.4 to 2732.3 — its last page's segments coming at
   // about 26 Mbps.
   const segs = [{ start: 2715, duration: 6.4, bytes: 8 * MB }, { start: 2721.4, duration: 10.9, bytes: 26.21 * MB },
@@ -277,7 +277,7 @@ console.log("\n— and far enough past it for what it lands in to come first —
   check("no speed, no size: where it was going",
     [landingBySize(2725.08, 2721.38, segs, null, Infinity), landingBySize(2725.08, 2721.38, [{ start: 2721.4, duration: 10.9, bytes: null }], bps, Infinity), landingBySize(2725.08, 2721.38, null, bps, Infinity)],
     [2725.08, 2725.08, 2725.08]);
-  // blah0391 back from a pop-out on 14 October: its next 30 to 40 seconds in
+  // casey back from a pop-out on 14 October: its next 30 to 40 seconds in
   // the browser's cache, and it landed 10.7 s past the room all the same.
   const cached = segs.map((s) => ({ ...s, cached: true }));
   check("what it lands in, and after, out of the browser's cache: a second past the room",
@@ -345,7 +345,7 @@ console.log("\n— the last segment's time, kept across a reload —");
 
   // A catch-up aims past the room by what this device's seeks take.
   check("a device that hasn't seeked to picture it had goes to where the room is", [seekLeadS(recentSeeksMs()), SEEK_LEAD_UNKNOWN_S], [0, 0]);
-  // blah0391 on 23 October: three seconds to seek into what it had, then two.
+  // casey on 23 October: three seconds to seek into what it had, then two.
   let seeks = rememberSeekMs(recentSeeksMs(), 3_030);
   seeks = rememberSeekMs(seeks, 1_950);
   check("one whose seeks took 3 s and 2 s aims 3 s past it", seekLeadS(seeks), 3.03);
@@ -387,7 +387,7 @@ console.log("\n— picture enough in hand to go —");
   // A film of 10 Mbps, coming in at 40.
   const fast = readiness({ ...base, heldToS: 103.5, upcoming: segs(103.5, Array(14).fill(5)), bytesPerS: 5 * MB });
   check("well ahead of the film, three seconds in hand is enough, as it always was", [fast.ready, fast.why], [true, "the next minute comes in time"]);
-  // blah0391 back from a pop-out on 13 October: 3.02 s in hand, segments coming
+  // casey back from a pop-out on 13 October: 3.02 s in hand, segments coming
   // at about 28 Mbps, and one of 23 MB eleven seconds on.
   const back = readiness({ ...base, nowS: 1870.68, heldToS: 1873.7, upcoming: segs(1873.7, [4.95, 7, 23.36, 3.7, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]), bytesPerS: 3.5 * MB });
   check("with a heavy stretch coming that won't be in in time, it waits", [back.ready, back.why], [false, "the next minute won't come in time"]);
@@ -398,7 +398,7 @@ console.log("\n— picture enough in hand to go —");
   check("but a connection that won't catch the film up isn't waited on for ever", [backWaited.ready, backWaited.why], [true, "waited long enough for more"]);
   check("a skip well ahead of the film goes with three seconds in hand, as it always has",
     readiness({ ...base, heldToS: 103.5, upcoming: segs(103.5, Array(14).fill(5)), bytesPerS: 5 * MB, skip: true }).ready, true);
-  // monkey26 skipping 113522, a 20 Mbps copy, on 23 October: 3.55 s in hand,
+  // jordan skipping 113522, a 20 Mbps copy, on 23 October: 3.55 s in hand,
   // segments of 10 to 16 MB coming at 15 to 17 Mbps. It went, and stopped ten
   // seconds later.
   const skipped = readiness({ ...base, heldToS: 103.55, upcoming: segs(103.55, [13, 16, 10, 12, 14, 13, 12, 13, 14, 12, 13, 12, 13, 14]), bytesPerS: 2 * MB, skip: true });
@@ -417,7 +417,7 @@ console.log("\n— picture enough in hand to go —");
   check("more each time it has stopped", [afterStopsS(0), afterStopsS(1), afterStopsS(2), afterStopsS(3), afterStopsS(7)], [0, ...AFTER_STOPS_S, AFTER_STOPS_S[2]]);
   const slow = readiness({ ...base, heldToS: 100 + MAX_READY_CUSHION_S, upcoming: segs(130, Array(8).fill(30)), bytesPerS: 1 * MB });
   check("with eight seconds in hand it goes, whatever is coming", [slow.ready, slow.why], [true, "enough in hand"]);
-  // monkey26 starting a title on 14 October: its first segments came at
+  // jordan starting a title on 14 October: its first segments came at
   // 3 Mbps, then at 17 to 32 once it was playing; it went after waiting its
   // longest with 7.5 s, and never stopped.
   const firstSegments = segs(108.1, Array(13).fill(6.5));
@@ -459,7 +459,7 @@ console.log("\n— picture enough in hand to go —");
 
 console.log("\n— a seek in front of a stream's first picture —");
 {
-  // monkey26 on 18 October: the copy's first segment from its keyframe at
+  // jordan on 18 October: the copy's first segment from its keyframe at
   // 5913.95, its sound — and so its picture — from 5914.98; gaps before it,
   // as the bot lists a copy.
   const copy = [{ start: 0, duration: 5913.95, gap: true }, { start: 5913.95, duration: 4.05 }, { start: 5918, duration: 4 }];

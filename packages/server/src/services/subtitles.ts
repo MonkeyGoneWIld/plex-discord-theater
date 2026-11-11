@@ -36,8 +36,9 @@ export interface Cue {
  *
  * 2: ASS vector drawings dropped instead of drawn as their coordinates, signs
  *    animated frame by frame folded into one cue, alignment and italics kept.
+ * 3: ASS's hard space (\h) in SRT and VTT text is a space, not shown.
  */
-export const SUBTITLE_PARSER_VERSION = 2;
+export const SUBTITLE_PARSER_VERSION = 3;
 
 /** What a sidecar turned out to be. */
 export type SubtitleFormat = "vtt" | "srt" | "ass";
@@ -136,6 +137,10 @@ function cleanCueText(raw: string): string {
     // often. Only ones opening with a backslash: a bare {…} is more likely to
     // be something a character said.
     .replace(/\{\\[^}]*\}/g, "")
+    // ASS's hard space, left as it is written when captions inside a film
+    // (closed captions, which ffmpeg decodes as ASS) are made SRT: Garth
+    // Marenghi's Darkplace read "\h\h\hBlood. Crimson," on 11 November.
+    .replace(/\\h/g, " ")
     .replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (whole, body: string) => {
       if (body[0] === "#") {
         const code = body[1] === "x" || body[1] === "X"

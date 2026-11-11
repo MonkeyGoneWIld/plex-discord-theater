@@ -48,8 +48,8 @@ check("a wait, once pressed", waitText("you-declined", 7_200_000),
 console.log("\n— away —");
 check("here", isAway({ hiddenForMs: 0, idleForMs: 60_000 }), false);
 check("hidden half a minute", isAway({ hiddenForMs: 30_000, idleForMs: 0 }), true);
-check("nothing touched for 3 minutes, the film playing or not", isAway({ hiddenForMs: 0, idleForMs: 3 * 60_000 }), true);
-check("  for 2", isAway({ hiddenForMs: 0, idleForMs: 2 * 60_000 }), false);
+check("nothing touched for 7 minutes, the film playing or not", isAway({ hiddenForMs: 0, idleForMs: 7 * 60_000 }), true);
+check("  for 6", isAway({ hiddenForMs: 0, idleForMs: 6 * 60_000 }), false);
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

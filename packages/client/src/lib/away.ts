@@ -8,7 +8,7 @@ import { useEffect, useRef } from "react";
  * Discord's own idle status isn't something an activity can read.
  */
 export const HIDDEN_MS = 30_000;
-export const IDLE_MS = 3 * 60_000;
+export const IDLE_MS = 7 * 60_000;
 const LOOK_MS = 5_000;
 
 export function isAway(o: { hiddenForMs: number; idleForMs: number }): boolean {

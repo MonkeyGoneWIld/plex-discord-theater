@@ -49,7 +49,7 @@ Activity answers for them.
 
 - **The host is away:** the countdown is 1 minute, and drops to 1 minute if
   the host goes away while it runs. Away means the Activity has been hidden
-  for 30 seconds, or nothing has been touched for 3 minutes, whether or not
+  for 30 seconds, or nothing has been touched for 7 minutes, whether or not
   the film is playing. Discord's own idle status can't be read by an Activity.
 - **One request at a time:** everyone else sees who asked and the time left.
 - **The host declines:** nobody

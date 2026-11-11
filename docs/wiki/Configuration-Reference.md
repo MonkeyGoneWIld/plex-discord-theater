@@ -180,7 +180,7 @@ See [Admin Page](Admin-Page).
 
 | Setting | Default | Description |
 |---|---|---|
-| `ADMIN_PASSWORD` | None | Turns the admin page on, and is its password. Use 12 characters or more. |
+| `ADMIN_PASSWORD` | None | Turns the admin page and its history on, and is its password. Use 12 characters or more. |
 | `ADMIN_PORT` | `3050` | The admin page's port. It can't be `PORT`. Publish it in the compose file's `ports:`. |
 | `ADMIN_HOST` | `0.0.0.0` | The address it listens on inside the container. |
 

@@ -383,14 +383,13 @@ const server = app.listen(PORT, () => {
 attachWebSocketServer(server);
 
 // The admin page, on a port of its own (ADMIN_PORT), with ADMIN_PASSWORD set.
-const adminServer = startAdminServer(PORT);
+const admin = startAdminServer(PORT);
 
 async function shutdown(signal: string) {
   console.log(`${signal} received, shutting down gracefully`);
   stopCacheWarmer();
   // Its live feeds hold their connections open; they would keep it up.
-  adminServer?.close();
-  adminServer?.closeAllConnections();
+  admin?.close();
   const { stopAllActiveSessions } = await import("./routes/plex.js");
   await Promise.race([
     stopAllActiveSessions(),

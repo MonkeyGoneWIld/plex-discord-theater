@@ -59,7 +59,7 @@ const login = (password: string) => fetch(`${origin}/api/login`, {
 });
 
 console.log("\n— nothing without signing in —");
-for (const p of ["/api/overview", "/api/live", "/api/logs", "/api/logs/files", "/api/settings"]) {
+for (const p of ["/api/overview", "/api/live", "/api/logs", "/api/logs/files", "/api/settings", "/api/history", "/api/history/1", "/api/usage", "/api/requests"]) {
   const res = await fetch(origin + p);
   check(`${p}: 401`, [res.status, ((await res.json()) as { error?: string }).error], [401, "Sign in first"]);
 }
@@ -77,6 +77,8 @@ check("the password: 200, an HttpOnly, SameSite=Strict session cookie, not Secur
 const cookie = setCookie.split(";")[0];
 const get = (p: string) => fetch(origin + p, { headers: { Cookie: cookie } });
 check("  and the page knows it is signed in", await (await get("/api/session")).json(), { signedIn: true });
+const noHistory = await get("/api/history");
+check("  without a recorder, no history, and it says so", [noHistory.status, await noHistory.json()], [503, { error: "Nothing is recorded" }]);
 const noStore = (await get("/api/overview")).headers.get("cache-control");
 check("  the API's answers are never cached", noStore, "no-store");
 
@@ -155,6 +157,40 @@ const events = text.split("\n").filter((l) => l.startsWith("data: ")).map((l) =>
 check("the live feed: an event stream, the rooms again and again",
   [live.headers.get("content-type"), events.length >= 2, events[0]?.rooms.some((r) => r.id === roomId)],
   ["text/event-stream", true, true]);
+
+console.log("\n— the history, from the live room —");
+{
+  const { Recorder } = await import("../src/admin/recorder.js");
+  const recorder = new Recorder({ dbPath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "admin-hist-")), "admin.sqlite") });
+  const withHistory = http.createServer(createAdminApp({ password: PASSWORD, distDir: emptyDist, recorder }));
+  await new Promise<void>((r) => withHistory.listen(0, "127.0.0.1", r));
+  const at = `http://127.0.0.1:${(withHistory.address() as AddressInfo).port}`;
+  const c = ((await fetch(`${at}/api/login`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password: PASSWORD }) })).headers.get("set-cookie") ?? "").split(";")[0];
+  const hget = (p: string) => fetch(at + p, { headers: { Cookie: c } });
+  recorder.tick();
+  recorder.tick(Date.now() + 2_000);
+  type Plays = { plays: Array<{ id: number; title: string; guildId: string; names: string[]; streams: number; reencoded: number }> };
+  const plays = (await (await hget("/api/history")).json()) as Plays;
+  const p0 = plays.plays[0];
+  check("the room's play, as it goes: where, who, its streams",
+    [p0?.title, p0?.guildId, p0?.names, p0?.streams, p0?.reencoded], ["Ghost Stories", "999000", ["artemidorus", "crispymage"], 1, 1]);
+  type Play = { viewers: Array<{ username: string; watchedS: number }>; streams: Array<{ decision: string; reason: string }>; events: Array<{ kind: string }> };
+  const one = (await (await hget(`/api/history/${p0?.id}`)).json()) as Play;
+  check("  the whole of it: each viewer, each stream and why", [one.viewers.map((v) => v.username), one.streams.map((s) => [s.decision, s.reason])],
+    [["artemidorus", "crispymage"], [["transcode", "10-bit picture: frames dropped on this player"]]]);
+  check("  a play there isn't", [(await hget("/api/history/999999")).status, (await hget("/api/history/abc")).status], [404, 404]);
+  type Live = { rooms: Array<{ id: string; playId: number | null; clients: Array<{ userId: string; data?: { watchedS: number } }> }> };
+  const liveRoom = ((await (await hget("/api/overview")).json()) as Live).rooms.find((r) => r.id === roomId);
+  check("  the Now playing page: each viewer's play so far",
+    [liveRoom?.playId === p0?.id, liveRoom?.clients.map((cl) => [cl.userId, typeof cl.data?.watchedS])],
+    [true, [["111", "number"], ["222", "number"]]]);
+  const usage = (await (await hget("/api/usage")).json()) as { usage: Array<{ kind: string; userId: string; guildId: string }> };
+  check("  who came, where", usage.usage.map((u) => [u.kind, u.userId, u.guildId]).sort(), [["join", "111", "999000"], ["join", "222", "999000"]]);
+  check("  and title requests, none yet", await (await hget("/api/requests")).json(), { requests: [] });
+  withHistory.close();
+  recorder.close();
+}
 
 console.log("\n— logs —");
 const files = (await (await get("/api/logs/files")).json()) as { files: Array<{ name: string }> };
@@ -241,11 +277,17 @@ const free = (probe.address() as AddressInfo).port;
 await new Promise((r) => probe.close(r));
 process.env.ADMIN_PORT = String(free);
 process.env.ADMIN_HOST = "127.0.0.1";
+const { adminHooks } = await import("../src/services/admin-hooks.js");
 const started2 = startAdminServer(3000);
-for (let i = 0; i < 40 && !started2?.listening; i++) await sleep(25);
+for (let i = 0; i < 40 && !started2?.server.listening; i++) await sleep(25);
 const asked = await fetch(`http://127.0.0.1:${free}/api/session`).then((r) => r.json()).catch(() => null);
-check("  on a port of its own otherwise, ADMIN_PORT", [started2?.listening, asked], [true, { signedIn: false }]);
+check("  on a port of its own otherwise, ADMIN_PORT", [started2?.server.listening, asked], [true, { signedIn: false }]);
+check("  recording its history into admin.sqlite, beside the other databases",
+  [started2?.recorder !== null, adminHooks.on, fs.existsSync(path.join(process.env.THUMB_CACHE_DIR!, "admin.sqlite"))], [true, true, true]);
+const unsigned = await fetch(`http://127.0.0.1:${free}/api/history`);
+check("  which needs signing in too", unsigned.status, 401);
 started2?.close();
+check("  and stops recording when it stops", adminHooks.on, false);
 const { numberSetting } = await import("../src/services/env-settings.js");
 process.env.ADMIN_PORT = "0";
 check("  3050 unless ADMIN_PORT is a port", numberSetting("ADMIN_PORT", 3050, 1), 3050);

@@ -1,4 +1,6 @@
 import { Router, type Request, type Response } from "express";
+import { adminHooks, type RequestEvent } from "../services/admin-hooks.js";
+import { requestUserId } from "../middleware/auth.js";
 
 /**
  * Requesting non-library titles via a Seerr instance (Overseerr / Jellyseerr).
@@ -240,8 +242,26 @@ router.post("/request", async (req: Request, res: Response) => {
     res.status(400).json({ error: "Invalid tmdbId or mediaType" });
     return;
   }
+  // Who asked for what, and what came of it, for the admin page's history
+  // (admin/recorder.ts) while it records; with the title's name, which the
+  // Activity doesn't send, looked up after.
+  const heard = (outcome: RequestEvent["outcome"], status: number | null, error: string | null) => {
+    if (!adminHooks.on) return;
+    adminHooks.request({
+      at: Date.now(), userId: requestUserId(req), mediaType, tmdbId: tmdbId as number,
+      seasons: mediaType === "tv" ? (body.seasons as number[] | "all") : null, outcome, status, error,
+      title: seerrFetch(cfg, `/${mediaType}/${tmdbId as number}`)
+        .then(async (t) => {
+          if (!t?.ok) return null;
+          const d = (await t.json()) as { title?: unknown; name?: unknown };
+          const name = d.title ?? d.name;
+          return typeof name === "string" && name ? name : null;
+        })
+        .catch(() => null),
+    });
+  };
+  const body: Record<string, unknown> = { mediaType, mediaId: tmdbId };
   try {
-    const body: Record<string, unknown> = { mediaType, mediaId: tmdbId };
     if (mediaType === "tv") {
       const picked = Array.isArray(seasons)
         ? seasons.filter((n): n is number => Number.isInteger(n))
@@ -250,21 +270,25 @@ router.post("/request", async (req: Request, res: Response) => {
     }
     const r = await seerrFetch(cfg, "/request", { method: "POST", body: JSON.stringify(body) });
     if (!r) {
+      heard("failed", null, "Couldn't sign in to Seerr");
       res.status(502).json({ error: "Couldn't sign in to Seerr" });
       return;
     }
     if (!r.ok) {
       const text = await r.text().catch(() => "");
       console.warn("[Seerr] request failed:", r.status, text.slice(0, 200));
+      heard(r.status === 409 ? "already requested" : "failed", r.status, r.status === 409 ? null : text.slice(0, 200) || null);
       res.status(r.status === 409 ? 409 : 502)
         .json({ error: r.status === 409 ? "Already requested" : "Request failed" });
       return;
     }
     const data = (await r.json()) as { media?: { status?: number } };
     // A fresh request is at least PENDING (2); use the returned media status if richer.
+    heard("requested", data.media?.status ?? 2, null);
     res.json({ ok: true, status: data.media?.status ?? 2 });
   } catch (err) {
     console.error("[Seerr] request error:", err);
+    heard("failed", null, err instanceof Error ? err.message.slice(0, 200) : "Failed to reach Seerr");
     res.status(502).json({ error: "Failed to reach Seerr" });
   }
 });

@@ -18,6 +18,10 @@ delete process.env.LOG_TO_FILE;
 const { default: express } = await import("express");
 const { default: logsRouter } = await import("../src/routes/logs.js");
 const { closeLogger } = await import("../src/services/logger.js");
+// The route finds whose lines they are from the session (for the admin
+// page's history), so it opens the session database: closed before the
+// folder goes, which Windows won't delete with it open.
+const { closeSessionDb } = await import("../src/middleware/auth.js");
 
 let pass = 0;
 let fail = 0;
@@ -60,6 +64,7 @@ check("every line starts with a whole timestamp (the browser's id can't start on
   lines.filter((l) => !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z /.test(l)).map((l) => l.slice(0, 80)), []);
 check("what was sent is still there, on its own line", clientLines.some((l) => l.includes("by value")), true);
 
+closeSessionDb();
 fs.rmSync(dir, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

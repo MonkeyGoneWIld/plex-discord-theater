@@ -6,8 +6,10 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { AdminSessions, cookieToken, passwordMatches, requireAdmin, sessionCookie, SESSION_MS } from "./auth.js";
 import { logFiles, overview, readLog, settingsView } from "./data.js";
+import { Recorder } from "./recorder.js";
 import { numberSetting } from "../services/env-settings.js";
 import { logEvent } from "../services/logger.js";
+import { setAdminHooks } from "../services/admin-hooks.js";
 
 const here = import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname);
 
@@ -24,6 +26,8 @@ export interface AdminOptions {
   /** Login attempts allowed per address in 15 minutes. */
   loginsPer15Min?: number;
   liveEveryMs?: number;
+  /** The history (admin.sqlite); without one, the page shows only what is live. */
+  recorder?: Recorder;
 }
 
 /**
@@ -96,9 +100,14 @@ export function createAdminApp(opts: AdminOptions): express.Express {
   });
 
   const admin = requireAdmin(sessions);
+  const recorder = opts.recorder ?? null;
+  const live = () => {
+    const ov = overview(now());
+    return recorder ? recorder.annotate(ov) : ov;
+  };
 
   app.get("/api/overview", admin, (_req, res) => {
-    res.json(overview(now()));
+    res.json(live());
   });
 
   // Server-sent events: the rooms every LIVE_EVERY_MS, for as long as the
@@ -119,7 +128,7 @@ export function createAdminApp(opts: AdminOptions): express.Express {
         return;
       }
       try {
-        res.write(`data: ${JSON.stringify(overview(now()))}\n\n`);
+        res.write(`data: ${JSON.stringify(live())}\n\n`);
       } catch (err) {
         res.write(`event: problem\ndata: ${JSON.stringify({ error: err instanceof Error ? err.message : String(err) })}\n\n`);
       }
@@ -163,6 +172,31 @@ export function createAdminApp(opts: AdminOptions): express.Express {
     res.json(settingsView(now()));
   });
 
+  // The history. Lists are newest first, a page at a time: ?limit=, and
+  // ?before=<the last id shown> for the next.
+  const recorded = (req: Request, res: Response, next: () => void) => {
+    if (recorder) next();
+    else res.status(503).json({ error: "Nothing is recorded" });
+  };
+  app.get("/api/history", admin, recorded, (req: Request, res: Response) => {
+    res.json({ plays: recorder!.history({ limit: req.query.limit, before: req.query.before, q: req.query.q }) });
+  });
+  app.get("/api/history/:id", admin, recorded, (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    const play = Number.isInteger(id) && id > 0 ? recorder!.play(id) : null;
+    if (!play) {
+      res.status(404).json({ error: "No such play" });
+      return;
+    }
+    res.json(play);
+  });
+  app.get("/api/usage", admin, recorded, (req: Request, res: Response) => {
+    res.json({ usage: recorder!.usage({ limit: req.query.limit, before: req.query.before }) });
+  });
+  app.get("/api/requests", admin, recorded, (req: Request, res: Response) => {
+    res.json({ requests: recorder!.requests({ limit: req.query.limit, before: req.query.before }) });
+  });
+
   app.use("/api", (_req, res) => {
     res.status(404).json({ error: "Not found" });
   });
@@ -185,12 +219,27 @@ export function createAdminApp(opts: AdminOptions): express.Express {
   return app;
 }
 
+export interface AdminHandle {
+  server: http.Server;
+  recorder: Recorder | null;
+  /** Stop serving, and end every play still open in the history. */
+  close(): void;
+}
+
+/** admin.sqlite, beside the bot's other databases. */
+export function adminDbPath(): string {
+  const dir = process.env.THUMB_CACHE_DIR
+    ? path.resolve(process.env.THUMB_CACHE_DIR)
+    : path.resolve(here, "../../data");
+  return path.join(dir, "admin.sqlite");
+}
+
 /**
- * Start the admin page on ADMIN_PORT (3050), if ADMIN_PASSWORD is set. Off
- * otherwise. A port that can't be had is said in the log, and the bot goes
- * on without it.
+ * Start the admin page on ADMIN_PORT (3050), if ADMIN_PASSWORD is set, and
+ * its recorder. Off otherwise, and nothing is recorded. A port that can't be
+ * had is said in the log, and the bot goes on without it.
  */
-export function startAdminServer(mainPort: number): http.Server | null {
+export function startAdminServer(mainPort: number): AdminHandle | null {
   const password = process.env.ADMIN_PASSWORD ?? "";
   if (!password.trim()) {
     logEvent("Admin", "admin page off: set ADMIN_PASSWORD to turn it on");
@@ -205,12 +254,37 @@ export function startAdminServer(mainPort: number): http.Server | null {
   if (password.length < 12) {
     logEvent("Admin", "ADMIN_PASSWORD is short; one of 12 characters or more is far harder to guess", { length: password.length });
   }
-  const server = http.createServer(createAdminApp({ password }));
+  let recorder: Recorder | null = null;
+  try {
+    recorder = new Recorder({ dbPath: adminDbPath() });
+    setAdminHooks(recorder);
+    recorder.start();
+  } catch (err) {
+    // The live pages work without it.
+    recorder = null;
+    logEvent("Admin", "the admin page's history couldn't be opened; it shows only what is live", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  const stopRecording = () => {
+    setAdminHooks(null);
+    recorder?.close();
+  };
+  const server = http.createServer(createAdminApp({ password, recorder: recorder ?? undefined }));
   server.on("error", (err: NodeJS.ErrnoException) => {
     logEvent("Admin", "admin page couldn't start; the bot goes on without it", { port, host, error: err.code ?? err.message });
+    if (!server.listening) stopRecording();
   });
   server.listen(port, host, () => {
     logEvent("Admin", "admin page listening", { url: `http://${host === "0.0.0.0" ? "localhost" : host}:${port}` });
   });
-  return server;
+  return {
+    server,
+    recorder,
+    close() {
+      server.close();
+      server.closeAllConnections();
+      stopRecording();
+    },
+  };
 }

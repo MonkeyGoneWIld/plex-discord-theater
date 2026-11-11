@@ -18,6 +18,7 @@ import { ALL_CAPS, NO_CAPS, PLAYER_CAPS, type PlayerCap, type PlayerCaps } from 
 import { ffmpegBandwidth, ffmpegSessionKnown, isFfmpegSession, updateFfmpegPosition } from "./ffmpeg/engine.js";
 import { plexClientIdOf, startPlexReports, type ReportState, type StreamNow } from "./ffmpeg/plex-report.js";
 import { qualityKbps } from "./media-versions.js";
+import { adminHooks, type TransportType } from "./admin-hooks.js";
 
 /** Interval between WebSocket pings to detect dead connections. */
 const WS_PING_INTERVAL_MS = 30_000;
@@ -2907,11 +2908,27 @@ export function attachWebSocketServer(server: Server): void {
       // client-side gating is UX only and must never be trusted.
       if (!client.isHost && !(client.isCoHost && CO_HOST_ALLOWED_TYPES.has(type))) return;
 
+      // Where the room was when the command came, for the admin page's history.
+      let commandFromS = 0;
+      // A command the room acted on, told to the admin page's recorder (admin/
+      // recorder.ts), if it records: one refused or malformed isn't.
+      const by = client;
+      const inRoom = roomId;
+      const heard = (t: TransportType, ratingKey = room.state.ratingKey, title = room.state.title) => {
+        if (!adminHooks.on) return;
+        adminHooks.transport({
+          at: Date.now(), roomId: inRoom, type: t, userId: by.userId, username: by.username ?? null,
+          role: by.isHost ? "host" : by.isCoHost ? "co-host" : "viewer",
+          fromS: commandFromS, toS: room.state.position, ratingKey, title,
+        });
+      };
+
       // Every transport command, with the position the sender attached *and* the
       // room's current one. A command whose position lags the room is the exact
       // shape of the bug where a stale value reached the host and restarted its
       // transcode — invisible unless both numbers are recorded side by side.
       if (type === "play" || type === "pause" || type === "resume" || type === "seek" || type === "stop") {
+        commandFromS = interpolatedPosition(room.state);
         const sent = typeof msg.position === "number" ? msg.position : null;
         logEvent("Sync", `command ${type}`, {
           room: roomId.substring(0, 8),
@@ -3124,6 +3141,7 @@ export function attachWebSocketServer(server: Server): void {
           // whoever came with it gets a driver of their own for it.
           if (!itemChanged && hostWasOn && hostWasOn !== hostKey) settleLeftStream(room, hostWasOn);
           announceVariant(room, hostVariant);
+          heard("play");
           break;
         }
         case "pause": {
@@ -3140,6 +3158,7 @@ export function attachWebSocketServer(server: Server): void {
           room.state.awaitingHostTransport = !client.isHost;
           sendTo(ws, { type: "transport-state", playing: room.state.playing, transportRevision: room.state.transportRevision });
           broadcast(room, ws, { type: "pause", position: room.state.position, transportRevision: room.state.transportRevision });
+          heard("pause");
           break;
         }
         case "resume": {
@@ -3159,6 +3178,7 @@ export function attachWebSocketServer(server: Server): void {
             type: "resume", position: room.state.position, transportRevision: room.state.transportRevision,
             waiting: room.state.waiting, gather: room.state.gatherSeq,
           });
+          heard("resume");
           break;
         }
         case "seek": {
@@ -3183,6 +3203,7 @@ export function attachWebSocketServer(server: Server): void {
             openGather(room);
             updateWaiting(room, roomId, "a seek");
           }
+          heard("seek");
           break;
         }
         case "play-item": {
@@ -3208,6 +3229,8 @@ export function attachWebSocketServer(server: Server): void {
           // Every other stream the room was running goes with it — see
           // destroyAllVariants below.
           const stoppingSessionId = room.state.hlsSessionId;
+          const stoppedKey = room.state.ratingKey;
+          const stoppedTitle = room.state.title;
           for (const c of room.clients) c.variantKey = null;
           destroyAllVariants(room);
           room.state.ratingKey = null;
@@ -3234,6 +3257,7 @@ export function attachWebSocketServer(server: Server): void {
           if (stoppingSessionId) {
             killPlexTranscode(stoppingSessionId).catch(() => {});
           }
+          heard("stop", stoppedKey, stoppedTitle);
           break;
         }
         case "heartbeat": {

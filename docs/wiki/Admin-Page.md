@@ -2,8 +2,9 @@
 
 A page for the server's owner that shows what the bot is doing right now:
 every room, who is in it, each stream and why it is copied or re-encoded, the
-server's logs and its settings. It runs on a port of its own, apart from the
-Activity, and only once a password is set.
+server's logs and its settings. It also keeps a history of every play. It runs
+on a port of its own, apart from the Activity, and only once a password is
+set.
 
 ## Turning it on
 
@@ -78,7 +79,10 @@ Updated every 2 seconds.
   - whether they are watching, buffering, away from Discord or disconnected;
   - which stream they are on, their subtitle and quality;
   - what their player can decode;
-  - when they joined.
+  - when they joined;
+  - how long they have watched, the data their player has had (from the bot,
+    Discord's cache and other viewers), and their buffering, so far in this
+    play.
 
 A room on two streams, such as a viewer whose player can't decode the host's
 10-bit HEVC and is given an 8-bit stream of their own, shows both streams.
@@ -95,8 +99,52 @@ Times are UTC.
 The version, Node.js, uptime and memory. Then every setting the server reads,
 with its value, or "Not set" for one left at its default.
 
-The page shows what is happening now. It doesn't yet keep a history of past
-sessions.
+## History
+
+While the page is on, the bot records into `admin.sqlite`, in the data
+folder:
+
+- **Each play:** a title played in a room, from start to end. Where in Discord
+  it was, who hosted it, how long it played, and the most people watching at
+  once. How it ended: stopped, and by whom; another title; the room closing;
+  or the server stopping.
+- **Each viewer of a play:**
+  - how long they watched while it played;
+  - the data their player got, and where from: the bot, Discord's cache, or
+    other viewers;
+  - how many times their picture stopped for want of data, and for how long;
+  - their player's errors.
+- **Each stream a play made:** copied or re-encoded and why, its tracks,
+  quality and bitrate, who it was made for, and when it started and ended. A
+  stream started again, after a seek or under a new session, is a restart.
+- **What happened during the play, in order:**
+  - plays, pauses, and seeks from where to where, each with who did it;
+  - people joining, leaving, and going away from Discord;
+  - a viewer changing stream, subtitles or quality;
+  - the room waiting for its slowest viewer;
+  - buffering, loading after a seek, and player errors.
+- **Usage:** each launch of the Activity and each person joining a room, with
+  the Discord server and channel.
+- **Requests:** each title asked for through Seerr, by whom, and whether it
+  was requested, already requested, or failed.
+
+Players say what they have downloaded every 10 seconds. "From the bot" is
+what came over HTTP, less what Discord's cache answered.
+
+The history doesn't have pages of its own yet. Until it does, a signed-in
+browser can read it from the page's API:
+
+| Path | What |
+|---|---|
+| `/api/history` | Plays, newest first. `?q=` finds a title, a person's name or ID, or a server or channel ID. `?before=<id>` is the next page. |
+| `/api/history/<id>` | One play: its viewers, streams and everything that happened |
+| `/api/usage` | Launches and joins, newest first |
+| `/api/requests` | Title requests, newest first |
+
+Nothing is removed from `admin.sqlite` yet. To start over, stop the bot and
+delete the file. If the server is stopped without warning, its plays still
+open end where they were last seen when the bot starts again. Without
+`ADMIN_PASSWORD`, nothing is recorded.
 
 ## Next
 

@@ -1,6 +1,6 @@
 import { useState } from "react";
-import type { Client, Overview, Room, Stream } from "./types";
-import { ago, clock, quality, rate, short, utc } from "./format";
+import type { Client, Overview, Room, Stream, ViewerData } from "./types";
+import { ago, bytes, clock, quality, rate, short, utc } from "./format";
 
 /** What each note a stream's playlist carries is, in words (routes/plex.ts, streamNotes). */
 const NOTE_LABELS: Record<string, string> = {
@@ -119,14 +119,39 @@ function status(c: Client): { text: string; tone: string } {
   return { text: "Browsing", tone: "muted" };
 }
 
+/** What a viewer got, and from where: the bot, Discord's cache, other viewers. */
+function DataCell({ d }: { d: ViewerData }) {
+  const total = d.httpBytes + d.p2pBytes;
+  return (
+    <>
+      <strong className="nowrap">{bytes(total)}</strong>
+      <div className="muted small nowrap">From the bot {bytes(d.botBytes)}</div>
+      <div className="muted small nowrap">Discord's cache {bytes(d.edgeHitBytes)}</div>
+      <div className="muted small nowrap">Other viewers {bytes(d.p2pBytes)}</div>
+    </>
+  );
+}
+
+function BufferingCell({ d }: { d: ViewerData }) {
+  if (d.stalls === 0 && d.errors === 0) return <>None</>;
+  return (
+    <>
+      {d.stalls > 0 && <div className="nowrap">{d.stalls} {d.stalls === 1 ? "time" : "times"}, {clock(d.stalledMs / 1000)}</div>}
+      {d.errors > 0 && <div className="muted small">{d.errors} player {d.errors === 1 ? "error" : "errors"}</div>}
+    </>
+  );
+}
+
 function People({ room }: { room: Room }) {
   const streamOf = new Map(room.streams.map((s, i) => [s.variantKey, i + 1]));
+  const recorded = room.clients.some((c) => c.data);
   return (
     <table className="table">
       <thead>
         <tr>
           <th>Person</th><th>Discord ID</th><th>Role</th><th>Status</th><th>Stream</th>
           <th>Subtitle</th><th>Quality</th><th>Player can decode</th><th>Joined</th>
+          {recorded && <><th>Watched</th><th>Data</th><th>Buffering</th></>}
         </tr>
       </thead>
       <tbody>
@@ -143,6 +168,9 @@ function People({ room }: { room: Room }) {
               <td>{quality(c.quality)}</td>
               <td className="caps">{c.caps.length ? c.caps.map((cap) => CAP_LABELS[cap] ?? cap).join(", ") : "H.264 and AAC only"}{c.av1Encode ? " · encodes AV1" : ""}</td>
               <td title={utc(c.joinedAt)}>{ago((Date.now() - c.joinedAt) / 1000)} ago</td>
+              {recorded && (c.data
+                ? <><td>{clock(c.data.watchedS)}</td><td><DataCell d={c.data} /></td><td><BufferingCell d={c.data} /></td></>
+                : <><td>—</td><td>—</td><td>—</td></>)}
             </tr>
           );
         })}

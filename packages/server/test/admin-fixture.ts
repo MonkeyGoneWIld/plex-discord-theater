@@ -31,14 +31,20 @@ fs.writeFileSync(path.join(logDir, "theater-2026-11-09.log"), `2026-11-09T18:00:
 const password = process.env.ADMIN_PASSWORD?.trim() || "admin-fixture";
 const port = Number(process.env.ADMIN_PORT) || 3050;
 
-const { createAdminApp } = await import("../src/admin/server.js");
+const { createAdminApp, adminDbPath } = await import("../src/admin/server.js");
+const { Recorder } = await import("../src/admin/recorder.js");
+const { setAdminHooks } = await import("../src/services/admin-hooks.js");
 const { rememberStreamNotes } = await import("../src/services/stream-notes.js");
 const { attachWebSocketServer } = await import("../src/services/sync.js");
 const { createSession } = await import("../src/middleware/auth.js");
 const { instanceHosts } = await import("../src/routes/discord.js");
 const { WebSocket } = await import("ws");
 
-const server = http.createServer(createAdminApp({ password }));
+// Its history, recorded as on a real server, into the fixture's own folder.
+const recorder = new Recorder({ dbPath: adminDbPath() });
+setAdminHooks(recorder);
+recorder.start();
+const server = http.createServer(createAdminApp({ password, recorder }));
 attachWebSocketServer(server);
 await new Promise<void>((r) => server.listen(port, "127.0.0.1", r));
 const origin = `http://127.0.0.1:${port}`;
@@ -100,4 +106,27 @@ const idle = "i-310021-fixture";
 instanceHosts.set(idle, { hostUserId: "300000000000000001", guildId: "555000333", channelId: "444000333", createdAt: Date.now() - 2 * 60_000 });
 await join(idle, "300000000000000001", "lurker");
 
+// Each viewer's player, saying every 10 seconds what it has had: some from
+// the bot, some from Discord's cache, some from other viewers.
+const viewers = ["131481943547052032", "402115789012345678", "402115789012345679", "402115789012345680", "200000000000000001", "200000000000000002"];
+let sampled = 0;
+const feed = () => {
+  sampled++;
+  viewers.forEach((userId, i) => {
+    const mb = sampled * (3 + i);
+    recorder.clientLog({ at: Date.now(), userId, clientId: `fixture${i}`, entries: [{
+      t: Date.now(), level: "LOG", tag: "Health", msg: "sample",
+      data: { session: "fixture", httpMB: mb, p2pMB: i % 2 ? mb / 3 : 0, edgeHitMB: (mb * 0.4).toFixed(1), edgeMB: (mb * 0.9).toFixed(1) },
+    }] });
+  });
+  if (sampled === 3) {
+    const t = Date.now();
+    recorder.clientLog({ at: t, userId: "402115789012345680", clientId: "fixture3", entries: [
+      { t: t - 4_000, level: "WARN", tag: "Video", msg: "waiting (buffer starved)", data: { posS: 340, paused: false, seeking: false } },
+      { t: t - 1_600, level: "LOG", tag: "Video", msg: "playing", data: { posS: 340, paused: false, seeking: false } },
+    ] });
+  }
+};
+setTimeout(feed, 3_000);
+setInterval(feed, 10_000);
 console.log(`Admin fixture on http://localhost:${port} (password: ADMIN_PASSWORD, or the fixture's default)`);

@@ -215,6 +215,15 @@ export function isValidSession(token: string): boolean {
   return getSession(token) !== null;
 }
 
+/** The Discord user a request's session token belongs to, or null. */
+export function requestUserId(req: Request): string | null {
+  const header = req.headers.authorization;
+  const token = header?.startsWith("Bearer ")
+    ? header.slice(7)
+    : (typeof req.query.token === "string" ? req.query.token : undefined);
+  return token ? getSessionUserId(token) : null;
+}
+
 export function requireAuth(
   req: Request,
   res: Response,

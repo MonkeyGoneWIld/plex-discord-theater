@@ -2,6 +2,19 @@
 
 export type Notes = Record<string, string | number>;
 
+/** A viewer's play so far (admin/recorder.ts). */
+export interface ViewerData {
+  watchedS: number;
+  httpBytes: number;
+  p2pBytes: number;
+  edgeBytes: number;
+  edgeHitBytes: number;
+  botBytes: number;
+  stalls: number;
+  stalledMs: number;
+  errors: number;
+}
+
 export interface Client {
   userId: string;
   username: string | null;
@@ -16,6 +29,8 @@ export interface Client {
   quality: number;
   caps: string[];
   av1Encode: boolean;
+  /** While the admin page records. */
+  data?: ViewerData;
 }
 
 export interface Stream {
@@ -60,6 +75,7 @@ export interface Room {
   away: Array<{ userId: string; ratingKey: string | null; variantKey: string; quality: number }>;
   discord: { guildId: string | null; channelId: string | null; hostUserId: string | null; startedAt: number | null };
   streams: Stream[];
+  playId?: number | null;
 }
 
 export interface Overview {

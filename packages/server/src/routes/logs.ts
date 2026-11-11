@@ -1,5 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { writeClientLine } from "../services/logger.js";
+import { adminHooks, type ClientLogEntry as HeardEntry } from "../services/admin-hooks.js";
+import { requestUserId } from "../middleware/auth.js";
 
 const router = Router();
 
@@ -59,6 +61,8 @@ router.post("/client", (req: Request, res: Response) => {
   // batch was sent, so it absorbs the clock offset and leaves only the one-way
   // network delay. The browser's own reading is kept as clientT for reference.
   const skewMs = Number.isFinite(body.sentAt) ? Date.now() - (body.sentAt as number) : 0;
+  // For the admin page's history (admin/recorder.ts), while it records.
+  const heard: HeardEntry[] | null = adminHooks.on ? [] : null;
 
   for (const entry of entries) {
     const rawT = Number.isFinite(entry.t) ? (entry.t as number) : Date.now();
@@ -84,7 +88,12 @@ router.post("/client", (req: Request, res: Response) => {
     writeClientLine(
       oneLine(`${when.toISOString()}${levelTag} [client:${clientId}] [${tag}] ${msg}${renderData(entry.data)}${clientT} ip=${ip}`),
     );
+    heard?.push({
+      t: when.getTime(), level, tag, msg,
+      data: entry.data && typeof entry.data === "object" ? entry.data as Record<string, unknown> : {},
+    });
   }
+  if (heard) adminHooks.clientLog({ at: Date.now(), userId: requestUserId(req), clientId, entries: heard });
 
   res.json({ ok: true, written: entries.length });
 });

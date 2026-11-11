@@ -201,7 +201,9 @@ administrator API key is required.
   file, with tokens redacted, so a stream that failed can be traced afterwards.
 - **Admin page (optional):** on a port of its own, every room live: who is in
   it, each stream and why it is copied or re-encoded, then the details behind
-  it; and the logs and settings, secrets hidden.
+  it; and the logs and settings, secrets hidden. It keeps a history of every
+  play: who watched, the data each got and from where, their buffering, and
+  everything that changed, with launches and title requests.
   [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Admin-Page)
 
 ## Installation

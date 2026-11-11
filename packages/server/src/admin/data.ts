@@ -40,9 +40,34 @@ export interface StreamView {
   notesAt: number | null;
 }
 
-export interface RoomView extends Omit<AdminRoom, "variants"> {
+/** A viewer's play so far, as the recorder (admin/recorder.ts) has counted it. */
+export interface ViewerData {
+  /** Seconds they watched while the room played. */
+  watchedS: number;
+  /** Over HTTP: from the bot, through Discord's proxy. */
+  httpBytes: number;
+  /** From other viewers' players. */
+  p2pBytes: number;
+  /** Of the HTTP, what Discord's proxy answered with a cache status… */
+  edgeBytes: number;
+  /** …and what its cache had already, so the bot didn't send it. */
+  edgeHitBytes: number;
+  /** HTTP less what Discord's cache handed over. */
+  botBytes: number;
+  /** Times the picture stopped for want of data, not counting seeks. */
+  stalls: number;
+  stalledMs: number;
+  errors: number;
+}
+
+export type ClientView = AdminRoom["clients"][number] & { data?: ViewerData };
+
+export interface RoomView extends Omit<AdminRoom, "variants" | "clients"> {
+  clients: ClientView[];
   discord: { guildId: string | null; channelId: string | null; hostUserId: string | null; startedAt: number | null };
   streams: StreamView[];
+  /** Its play in the history, while the admin page records. */
+  playId?: number | null;
 }
 
 export interface Overview {

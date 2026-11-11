@@ -1,12 +1,20 @@
 # Plex Discord Theater
 
-Current release: **v2.2.0**. Images are published as
-`ghcr.io/monkeygonewild/plex-discord-theater:latest` and
-`ghcr.io/monkeygonewild/plex-discord-theater:2.2.0`.
+**Watch your Plex library together, inside Discord.**
 
-A Discord Activity for synchronized watch parties from a Plex Media Server. One
-person hosts, playback stays in lockstep for everyone in the room, and each
-viewer can independently select audio tracks, subtitles and quality.
+Plex Discord Theater is a Discord Activity for synchronized watch parties from
+your own Plex Media Server. One person hosts, playback stays in step for
+everyone in the room, and each viewer picks their own audio, subtitles and
+quality.
+
+![A synchronized Plex watch party running inside Discord](docs/screenshots/player.jpg)
+
+**[Documentation](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki)** ·
+**[Quick start](#quick-start)** ·
+**[Features](#features)** ·
+**[For server owners](#for-server-owners)**
+
+Current release: **v2.2.0** · `ghcr.io/monkeygonewild/plex-discord-theater:latest`
 
 > [!WARNING]
 > **This project was built with AI.** It was developed primarily with
@@ -14,249 +22,149 @@ viewer can independently select audio tracks, subtitles and quality.
 > a hobby project: run it on infrastructure you control, for people you know,
 > and do not expose it as a public service.
 
-![A synchronized Plex watch party running inside Discord](docs/screenshots/player.jpg)
+## Why you'll like it
 
-**[Read the documentation →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki)**
-
-## Overview
-
-Launch the Activity from any voice or text channel and invite friends. Everyone
-in the channel joins the same room automatically, no voice call needed.
-
-The Activity provides a full Plex browser, including:
-
-- The Plex home screen, movies, and TV libraries
-- Unified search across the local library and Plex Discover
-- Title pages with summaries, ratings, cast, versions, and tracks
-- Synchronized playback controls (pause, seek, skip intro, next episode)
-- Picture-in-picture, to keep watching while you browse
-- Viewer suggestions and host/co-host role management
-- Optional per-user sync of progress, watched status, and Universal Watchlist
+| | |
+|---|---|
+| **One room, one timeline** | The host plays, pauses and seeks, and everyone stays in step. No screen sharing, no countdowns. |
+| **Your whole library** | Browse the same home screen, libraries, search and title pages you know from Plex. |
+| **Everyone's own choices** | Each viewer picks their audio track, subtitles and quality without changing anyone else's. |
+| **The original picture** | Files your viewers can play are sent as they are, 4K and HDR included. Nothing is re-encoded unless it has to be. |
+| **Desktop and mobile** | Works in Discord on Windows, macOS, Linux, the web, iOS and Android. |
+| **Yours to run** | One Docker container beside your Plex server. Your Plex token never leaves it. |
 
 ## Features
 
-### Synchronized playback
+### Watch together
 
-The host controls the room timeline. Playback stays in sync for all viewers.
-Hosts can grant playback control to co-hosts or transfer the host role. Viewers
-can ask the host or a co-host to pause or resume.
+Launch the Activity from any voice or text channel and everyone who joins lands
+in the same room. The host controls the timeline, can name co-hosts, and can
+hand the room to someone else. Viewers can suggest what to watch next, ask for
+a pause, or ask to take over when the host has stepped away.
 
-### Plex browser
-
-The home screen renders the same hubs Plex generates, including Continue
-Watching and recommendation rows.
-
-![The Plex-style home screen inside the Activity](docs/screenshots/home.jpg)
-
-Search covers both the local library and Plex Discover. Results not present on
-the server are labelled **Not in library**.
-
-![Search results from the library and Plex Discover](docs/screenshots/search.jpg)
-
-Title pages include description, ratings, cast and crew, collections, similar titles, available versions,
-audio tracks, and subtitles. IMDb, TMDB, and Rotten Tomatoes critic and audience ratings come directly from Plex when available; no separate ratings API key is required.
-
-![A title page with playback details and track choices](docs/screenshots/title.jpg)
-
-Cast and crew pages list library titles first, followed by the rest of the
-person's filmography. Out-of-library titles can be requested when Seerr is
-connected.
-
-![A cast member's library titles and wider filmography](docs/screenshots/person.jpg)
-
-For TV shows, season pages show missing and unaired episodes with air dates, and
-available episodes can be played directly from the season view.
-
-### Per-viewer audio, subtitles and quality
-
-Each viewer picks their own audio track, subtitles and quality without
-changing anyone else's, and their choices carry into the next episode.
-
-A viewer on a slow connection can pick a lower quality and get a stream of
-their own, and a player that can't decode HEVC gets an H.264 stream of its own,
-so nobody else's picture is lowered for them. A viewer whose playback keeps
-stalling is offered a quality their connection can carry (**Buffering a
-lot?**).
-
-Subtitles are drawn by each player, styled the way Plex draws them. Their size,
-position, colour, background and font can be changed from the subtitle button
-in the player bar, which also moves subtitles that are out of sync earlier or
-later:
-
-![The subtitle panel open in the player, beside a subtitle drawn over the film](docs/screenshots/subtitle-look.jpg)
-
-**Settings** sets what every title starts with for you: subtitle and audio
-languages (subtitles can be shown only when the audio is in another language),
-default quality, volume, the subtitle look, and your watch history setting.
-
-### Playback features
-
-- **Viewer suggestions:** any participant can queue a title for the host.
-- **Up next:** a card offers the next episode near the end; nothing starts on
-  its own.
-- **Picture-in-picture:** press **Back** to keep watching in a small window
-  while you browse; double-click or tap it to return to the full player.
-- **Watch history settings:** choose whether watch parties count toward your
-  history always, or only when you host.
-- **Skip Intro / Skip Credits:** uses markers generated by Plex.
-- **Seek previews:** hover or scrub the timeline to see Plex-generated preview
-  frames.
-- **Video zoom:** fill the screen, match its width or height, widescreen,
-  ultrawide or a custom zoom, saved per title.
-- **Play Version:** choose between multiple versions of a title when available.
-- **Stats for nerds:** press `i` for codec, bitrate, buffer and connection, and
-  whether the video is copied or re-encoded and why.
-- **Watched controls:** mark a title watched, or apply the change to a whole
-  season or show. Works with or without a linked Plex account.
-
-Picture-in-picture keeps the film playing over the library:
+- **Up next** offers the next episode near the end. Nothing starts by itself.
+- **Skip Intro** and **Skip Credits**, from Plex's own markers.
+- **Picture-in-picture** keeps the film playing while you browse.
+- **Discord Rich Presence** shows what the room is watching on your profile.
 
 ![Picture-in-picture: the film playing in a floating window over a title page](docs/screenshots/pip-title.jpg)
 
-> [!NOTE]
-> Skip buttons and seek previews require Plex to have generated the underlying
-> data. Enable **Detect intros and credits** and **Generate video preview
-> thumbnails** under **Library → Edit → Advanced** in Plex.
+### A full Plex browser
 
-### Discord Rich Presence
+The home screen shows the hubs Plex generates, including Continue Watching.
+Search covers your library and Plex Discover, and title pages carry ratings,
+cast, collections, versions and tracks.
 
-Your Discord profile shows **Watching** with the title, its artwork and how far
-through it the room is. Anyone can switch to a plain watching status for
-themselves under **People**.
+![The Plex-style home screen inside the Activity](docs/screenshots/home.jpg)
 
-### Mobile support
+![A title page with playback details and track choices](docs/screenshots/title.jpg)
 
-The mobile layout includes compact library rows, stacked title pages, controls
-adapted to Discord's mobile header, a centered play button, and double-tap to
-skip ten seconds.
+### Audio, subtitles and quality for each viewer
+
+Every viewer chooses their own audio track, subtitles and quality, and those
+choices carry into the next episode. A viewer on a slow connection can lower
+their quality and gets a stream of their own, so nobody else's picture drops.
+
+Subtitles are drawn by each player. Their size, position, colour and timing
+can be adjusted from the player.
+
+![The subtitle panel open in the player, beside a subtitle drawn over the film](docs/screenshots/subtitle-look.jpg)
+
+### Built for phones too
 
 | ![Browsing movies on a phone](docs/screenshots/phone-browse.jpg) | ![A movie detail page on a phone](docs/screenshots/phone-title.jpg) |
 | :-- | :-- |
-| Browse with three posters per row. | Open a title without desktop-sized clutter. |
+| Compact library rows. | Title pages sized for a phone. |
 
-## Personal Plex sync
+### Personal Plex sync
 
-Each viewer can link their own Plex account, through Plex's own sign-in page:
-
-- Watched status and resume points sync both ways, Continue Watching included
-- Watch-party progress counts on every linked viewer's account
-- Their Plex Universal Watchlist appears as a tab
-
+Each viewer can link their own Plex account through Plex's sign-in page. Watch
+progress and watched status then sync to their account, and their Universal
+Watchlist appears as a tab.
 [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Personal-Plex-Sync)
 
-## Requests via Seerr
+### Requests through Seerr
 
-When Seerr is connected, **Request** buttons appear on titles not in the
-library.
+Connect Overseerr or Jellyseerr and a **Request** button appears on titles that
+are not in your library. Movies take one click; for shows, viewers choose the
+seasons.
+[More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Requesting-Titles)
 
 ![Requesting a movie from its title page](docs/screenshots/request-movie.jpg)
 
-Movies can be requested in one click. For shows, users can select which missing
-seasons to request and view what is already available or pending.
+## How it works
 
-![Choosing missing seasons to request](docs/screenshots/request-seasons.jpg)
+```mermaid
+flowchart LR
+  V1["Viewer in Discord"] <--> P["Discord's proxy and cache"]
+  V2["Viewer in Discord"] <--> P
+  V1 <-. "viewers share video with each other" .-> V2
+  P <--> T["Plex Discord Theater<br/>your Docker container"]
+  T <--> X["Your Plex Media Server"]
+```
 
-Requests authenticate to Seerr using the configured Plex account, so no Seerr
-administrator API key is required.
+- **The Activity** is a web app that Discord loads for everyone in the channel.
+  It talks only to your Theater container, through Discord's proxy.
+- **Theater** keeps the room in sync, asks Plex for the library, and serves the
+  video. Your Plex token stays on the server.
+- **Video** is sent as it is in the file whenever the viewer's device can play
+  it. Otherwise it is transcoded, by Plex or by Theater's own FFmpeg engine,
+  only for the viewers who need it.
+- **Delivery** is shared. Discord's proxy caches each piece of video, and
+  viewers on the same stream pass pieces to each other, so a full room costs
+  your upload far less than one stream per viewer.
 
 ## For server owners
 
-- **Original picture:** H.264 and HEVC files within your bitrate limit, 4K
-  included, are copied, not re-encoded, for players that can decode them.
-- **HEVC transcodes:** a sharper picture at the same bitrate for players that
-  decode HEVC, with Plex Pass and hardware encoding (or the ffmpeg engine).
-- **FFmpeg engine (optional):** the container makes the streams itself, on
-  Intel Quick Sync, VAAPI or NVIDIA NVENC, and Plex covers anything it can't
-  make. Beyond what Plex's transcoder does:
-  - **Picture subtitles drawn by each player** (PGS, and VobSub or DVB in the
-    film), instead of burned into a re-encoded picture, so Blu-ray, DVD and
-    broadcast subtitles don't stop a film from being copied.
-  - **HDR kept.** Re-encodes stay HDR10, and one stream serves screens in HDR
-    and in SDR alike, each shown at its best, so everyone shares it peer to
-    peer.
-  - **More copied as it is:** AV1 and VP9 video, Blu-ray H.264
-    with open GOPs, and Opus, FLAC, AC3 and EAC3 sound, for players that decode
-    them; 7.1 is kept as Opus 7.1.
-  - **A stream for each device:** H.265 rather than H.264 wherever it plays,
-    and a lighter picture for a device that drops frames, without changing
-    anyone else's.
-  - **Dolby Vision 5 in true colour,** seeks anywhere in the film without a
-    restart, and seek previews for files Plex has none for.
-
+- **Direct play first.** H.264 and HEVC files within your bitrate limit
+  are sent unchanged, 4K and HDR included.
+- **A stream for each device.** A viewer whose device can't play the room's
+  stream, or who lowers their quality, gets a stream of their own. Everyone
+  else keeps the original.
+- **Optional FFmpeg engine.** Theater can make the streams itself on Intel
+  Quick Sync, VAAPI or NVIDIA NVENC. It keeps HDR, draws Blu-ray and DVD
+  subtitles in the player without burning them in, and makes seek previews
+  for files Plex has none for.
   [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FFmpeg-Engine)
-- **Shared bandwidth:** viewers on the same stream pass segments to each other,
-  peer to peer, and Discord's proxy caches each segment for the other viewers
-  it serves, which eases your upload.
-- **qBittorrent upload limits (optional):**
+- **Dashboard.** An optional page on its own port, for you only. It shows what
+  is playing right now, who is watching, why each stream is direct or
+  transcoded, and where the data is coming from, with a full history,
+  statistics, users, requests, caches and logs.
+  [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Dashboard)
+- **qBittorrent upload limits.** The optional
   [plex-qbt-manager](https://github.com/MonkeyGoneWIld/plex-qbt-manager) makes
-  room in qBittorrent's upload while the room plays.
-  [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/qBittorrent-Manager-API)
-- **Instant skips back:** the films being played are kept in memory and on
-  disk, so going back plays at once.
-- **Fast title pages:** a background warm-up caches details and artwork for
-  your newest titles, holding off while a room plays.
-- **Private:** Plex tokens never reach a browser, and the Activity can be
-  limited to your own Discord servers.
-- **Diagnostic logs:** every viewer's player events land in the server's log
-  file, with tokens redacted, so a stream that failed can be traced afterwards.
-- **Dashboard (optional):** on a port of its own, every room live: who is in
-  it, each stream and why it is copied or re-encoded, then the details behind
-  it; and the logs and settings, secrets hidden. It keeps a history of every
-  play: who watched, the data each got and from where, their buffering, and
-  everything that changed. It also shows each person, each Discord server and
-  channel the bot is used in, who requested what, and what each cache holds;
-  statistics by day; each list as CSV or JSON; and the history kept until you
-  delete the oldest of it. Each session shows its poster, its progress, and a
-  live graph of delivery from the server, Discord's cache and other viewers.
-  [More →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Admin-Page)
+  room in qBittorrent's upload while people watch.
+- **Private by design.** Plex tokens never reach a browser, and the Activity
+  can be limited to your own Discord servers.
 
-## Installation
+## Quick start
 
-> **Full walkthrough:** the
-> [wiki](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Installation)
-> covers each step in detail, including
-> [the Discord side](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup)
-> and how to keep the app private.
+You need:
 
-### Requirements
-
-- Plex Media Server with transcoding enabled
+- A Plex Media Server
 - Docker
-- Optional, for the [ffmpeg engine](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FFmpeg-Engine):
-  the library mounted into the container, and a GPU for re-encodes (Intel Quick
-  Sync, VAAPI or NVIDIA NVENC)
 - A Discord application with Activities enabled
-- A public HTTPS address forwarding to port 3000: a Cloudflare Tunnel is
-  quickest, or any reverse proxy that passes WebSockets. Discord will not load
-  `localhost`. See
-  [HTTPS and Reverse Proxy](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/HTTPS-and-Reverse-Proxy).
+- A public HTTPS address that forwards to the container, such as a Cloudflare
+  Tunnel
 
-The [Requirements](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Requirements)
-page covers hardware, and how much upload each viewer needs.
+The [Installation guide](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Installation)
+walks through each step in detail.
 
-### 1. Discord application
+### 1. Create the Discord application
 
-Create an application in the
-[Discord Developer Portal](https://discord.com/developers/applications), enable
-**Activities → Settings**, add a URL mapping from `/` to your public HTTPS host,
-and copy the **Application ID** and **Client Secret**.
+In the [Discord Developer Portal](https://discord.com/developers/applications),
+create an application, enable **Activities**, map `/` to your public HTTPS
+host, and copy the **Application ID** and **Client Secret**.
+[Step by step →](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup)
 
-> An unverified Activity only works in Discord servers with fewer than 25
-> members. See
-> [Discord Application Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup).
-
-### 2. Plex token
+### 2. Get your Plex token
 
 Follow Plex's
-[authentication token guide](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)
-to get your `X-Plex-Token`.
+[authentication token guide](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/).
 
-### 3. Deploy
+### 3. Deploy with Docker Compose
 
-Paste this into Portainer, Dockge, or a `docker-compose.yml`. Fill in the six
-values under **Required**; everything else works as it is. Uncomment the
-**Recommended** ones for complete title and cast pages, and any optional
-settings you want.
+Fill in the six required values. Everything else has a sensible default.
 
 ```yaml
 services:
@@ -266,188 +174,78 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
-      # The dashboard (ADMIN_PASSWORD below). Plain HTTP: your LAN only.
+      # The dashboard, on your LAN only (set ADMIN_PASSWORD below).
       # - "192.168.1.10:3050:3050"
     volumes:
       - app-data:/data
-      # Optional: keep copied films on an SSD instead (and set
-      # STREAM_CACHE_DIR below to "/cache/stream").
-      # - /path/to/ssd/theater-stream-cache:/cache/stream
-      # Optional, for the ffmpeg engine: your library, read-only, at the
-      # path Plex has it.
-      # - /mnt/media:/data/media:ro
-    # Optional, for the ffmpeg engine: the GPU, for Intel Quick Sync or
-    # VAAPI. For NVIDIA NVENC, see the FFmpeg Engine page in the wiki.
-    # devices:
-    #   - /dev/dri:/dev/dri
     environment:
-      # ── Required ─────────────────────────────────────────────────────────
-      # From the Discord Developer Portal: Application ID and Client Secret.
+      # ── Required ──────────────────────────────────────────────
+      # From the Discord Developer Portal.
       DISCORD_CLIENT_ID: ""
       DISCORD_CLIENT_SECRET: ""
-      # Your Plex server as this container reaches it (not localhost, which
-      # is the container itself), and its X-Plex-Token.
+      # Your Plex server as the container reaches it, and its token.
       PLEX_URL: "http://192.168.1.50:32400"
       PLEX_TOKEN: ""
-      # Your public HTTPS address: https:// and the host you mapped in
-      # Discord, with no trailing slash.
+      # Your public HTTPS address, with no trailing slash.
       REDIRECT_URI: "https://watch.example.com"
       ALLOWED_ORIGINS: "https://watch.example.com"
 
-      # ── Defaults: change them only if you want to ────────────────────────
-      # Re-encode bitrate in kbps, average and peak (keep the peak at least
-      # the average). Each viewer downloads about this much.
-      VIDEO_BITRATE_KBPS: "20000"
-      VIDEO_PEAK_BITRATE_KBPS: "33000"
-      # Copy the original video when a player can decode it. "0" re-encodes
-      # everything.
-      DIRECT_STREAM: "1"
-      # The highest average bitrate (kbps) a file may have and still be
-      # copied; bigger files are re-encoded.
-      # Every viewer pulls a copy at the file's own bitrate, so keep it
-      # under your upload divided by how many usually watch.
-      DIRECT_STREAM_MAX_KBPS: "25000"
-      # HEVC re-encodes for players that can decode HEVC. Needs Plex Pass
-      # and hardware HEVC encoding in Plex; otherwise Plex sends H.264.
-      HEVC_TRANSCODE: "1"
-      # Memory for the films being played, MB, every stream together: copies,
-      # then re-encodes. A copy past its memory goes to STREAM_CACHE_DIR on
-      # disk until its stream ends. That folder is emptied at every start,
-      # so give it one of its own. Up to 8 GB of memory together: lower
-      # both on a small server.
-      DIRECT_STREAM_MEMORY_MB: "6144"
-      TRANSCODE_CACHE_MB: "2048"
-      STREAM_CACHE_DIR: "/data/stream-cache"
-      # Who makes the streams: "plex", or "ffmpeg" (see the ffmpeg engine
-      # settings below).
-      PLAYBACK_ENGINE: "plex"
+      # ── Recommended: complete title and cast pages ────────────
+      # Your plex.tv account token (not the server token above).
+      # PLEX_ACCOUNT_TOKEN: ""
+      # Free key from https://www.themoviedb.org/settings/api
+      # TMDB_API_KEY: ""
 
-      # ── Recommended: complete title, cast and Discover pages ─────────────
-      # Your plex.tv ACCOUNT token, not the server token above: detail pages
-      # for titles you don't own, and Seerr sign-in. How to find it: the
-      # wiki's Plex Setup page.
-      # PLEX_ACCOUNT_TOKEN: "your-plex-account-token"
-      # Collections, "More Like This" and cast pages.
-      # Free key: https://www.themoviedb.org/settings/api
-      # TMDB_API_KEY: "your-tmdb-v3-api-key"
-      # Missing-episode lists numbered the way Sonarr numbers them.
-      # Free key: https://thetvdb.com/api-information (a PIN only for a
-      # subscriber key).
-      # TVDB_API_KEY: "your-tvdb-api-key"
-      # TVDB_PIN: "your-tvdb-pin"
-
-      # ── Optional: uncomment what you want ────────────────────────────────
-      # The Request button, through Overseerr or Jellyseerr. Needs
-      # PLEX_ACCOUNT_TOKEN too.
+      # ── Optional ──────────────────────────────────────────────
+      # Limit the Activity to these Discord servers (IDs, comma-separated).
+      # ALLOWED_GUILD_IDS: ""
+      # The Request button, through Overseerr or Jellyseerr.
       # SEERR_URL: "https://requests.example.com"
-      # Only these Discord servers may use it: server IDs, comma-separated.
-      # ALLOWED_GUILD_IDS: "123456789012345678,234567890123456789"
-      # Anyone may ask an away host for the host role. On unless off.
-      # HOST_REQUESTS: "off"
-      # A stable key for linked Plex accounts; keep it across deployments.
-      # Without it, DISCORD_CLIENT_SECRET is used. Set it before anyone links
-      # a Plex account: adding or changing it later means everyone relinks.
-      # Make one with `openssl rand -hex 32`.
-      # PLEX_LINK_SECRET: "64-hex-characters-from-openssl"
-      # plex-qbt-manager's THEATER_API_KEY, for its upload limits.
-      # QBT_MANAGER_API_KEY: "a-long-random-secret"
-      # Password for the maintenance command that stops every stream the
-      # bot has on Plex. Unset, it works only from inside the container.
-      # ADMIN_SECRET: "a-long-random-secret"
-      # The dashboard on port 3050: rooms, streams, logs and settings, live.
-      # ADMIN_PASSWORD: "a-long-password"
+      # The dashboard on port 3050. Use 12 characters or more.
+      # ADMIN_PASSWORD: ""
 
-      # ── Optional: the ffmpeg engine ──────────────────────────────────────
-      # Set PLAYBACK_ENGINE above to "ffmpeg" and uncomment the library
-      # mount and devices at the top. The values shown are the defaults,
-      # except MEDIA_PATH_MAP; see the FFmpeg Engine page in the wiki.
-      # Only if Plex sees the library at other paths than this container:
-      # Plex's path=>the path here, comma-separated.
-      # MEDIA_PATH_MAP: "/media=>/data/media"
-      # FFMPEG_HWACCEL: "auto"                       # qsv, vaapi, nvenc, or none for the CPU
-      # FFMPEG_HWACCEL_DEVICE: "/dev/dri/renderD128"
-      # Re-encodes at once. Unset, 6 on the GPU and 2 on the CPU.
-      # FFMPEG_MAX_ENCODES: "6"
-      # Unset, each stream's whole film is made ahead (room for it in
-      # STREAM_CACHE_DIR); seconds hold each run that far ahead instead.
-      # FFMPEG_LOOKAHEAD: ""
-      # FFMPEG_AUDIO_CHANNELS: "6"                   # 2 for stereo AAC only
-      # FFMPEG_PREVIEWS: "on"                        # previews for files Plex has none for
-      # FFMPEG_HDR_REENCODE: "keep"                  # or "tonemap"
-      # FFMPEG_TONEMAP: "mobius"
-      # FFMPEG_HDR_ON_SDR: "browser"                 # or "server": HDR on a screen in SDR
-      # FFMPEG_HDR_ON_SDR_NITS: "200"
-      # FFMPEG_REPORT_TO_PLEX: "1"
-
-      # ── Leave this alone: it matches the volume above ────────────────────
+      # Leave this as it is: it matches the volume above.
       THUMB_CACHE_DIR: "/data"
 
 volumes:
   app-data:
 ```
 
-Deploy the stack, or run `docker compose up -d` next to the file. Then check it
-came up, and which integrations are live:
-
 ```bash
-docker logs plex-discord-theater 2>&1 | grep Config
+docker compose up -d
 ```
 
-> Prefer to build from source? Clone the repo and run `docker compose up -d
-> --build` — the bundled `docker-compose.yml` reads from a `.env` file instead.
-> See [.env.example](.env.example) and the
-> [Configuration Reference](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Configuration-Reference).
+Every setting, including bitrates, caches and the FFmpeg engine, is in the
+[Configuration Reference](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Configuration-Reference).
 
-### 4. Launch in Discord
+### 4. Launch it in Discord
 
-In a voice or text channel, open the **App Launcher** and pick the application.
-**Invite to Activity** brings others into the same room.
-
-Until the app is verified, friends need to be added under **App Testers** in the
-Developer Portal and accept the invite
-([how](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup#6-add-your-viewers-as-app-testers)).
-
+In a voice or text channel, open the **App Launcher** and pick your
+application. **Invite to Activity** brings others into the same room.
 [First Launch](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/First-Launch)
-walks through the first watch party and checks that everything works.
+covers your first watch party.
+
+> An unverified Discord application works in servers with fewer than 25
+> members, and each viewer must be added as an App Tester. See
+> [Discord Application Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup).
 
 ## Documentation
 
-The [wiki](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki) follows
-the order you set things up in.
-
-| | Page | Covers |
-|---|---|---|
-| **Set up** | [Requirements](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Requirements) | Hardware, bandwidth, HTTPS and Discord clients |
-| | [Discord Application Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup) | Creating the application, keeping it private, app testers, verification |
-| | [Plex Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Plex-Setup) | Tokens, `PLEX_URL`, and the Plex settings that matter |
-| | [HTTPS and Reverse Proxy](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/HTTPS-and-Reverse-Proxy) | Cloudflare Tunnel, nginx, Caddy and Traefik |
-| | [Installation](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Installation) | The compose file, the required values, and checking it works |
-| | [First Launch](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/First-Launch) | Opening the Activity, inviting viewers, a checklist |
-| **Configure** | [Configuration Reference](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Configuration-Reference) | Every setting, with its default |
-| | [Streaming and Quality](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Streaming-and-Quality) | Copies and re-encodes, per-viewer streams, bitrate limits |
-| | [FFmpeg Engine](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FFmpeg-Engine) | Making streams in the container on a GPU, HDR, picture subtitles |
-| | [Optional Integrations](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Optional-Integrations) | Plex Discover, TMDB, TVDB, ratings, Seerr |
-| | [qBittorrent Manager API](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/qBittorrent-Manager-API) | Lowering qBittorrent's upload while people watch |
-| **Use** | [Using the Activity](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Using-the-Activity) | The player, picture-in-picture, settings, messages |
-| | [Roles and Permissions](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Roles-and-Permissions) | Host, co-hosts and viewers |
-| | [Personal Plex Sync](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Personal-Plex-Sync) | Linking your own Plex account |
-| | [Requesting Titles](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Requesting-Titles) | Requests through Seerr |
-| **Maintain** | [Updating and Backups](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Updating-and-Backups) | Updates, settings changes, backups and restores |
-| | [Dashboard](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Admin-Page) | What is playing, for whom, and why, live, with posters and delivery graphs; history, statistics, users, servers, requests, caches, logs and settings |
-| | [Local Development](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Local-Development) | Running from source, the code's layout, tests |
-| **Help** | [Troubleshooting](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Troubleshooting) | Fixes, by where the problem appears |
-| | [FAQ](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FAQ) | Common questions |
+| | |
+|---|---|
+| **Set up** | [Requirements](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Requirements) · [Installation](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Installation) · [Discord Application Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Discord-Application-Setup) · [Plex Setup](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Plex-Setup) · [HTTPS and Reverse Proxy](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/HTTPS-and-Reverse-Proxy) · [First Launch](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/First-Launch) |
+| **Use** | [Using the Activity](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Using-the-Activity) · [Roles and Permissions](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Roles-and-Permissions) · [Personal Plex Sync](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Personal-Plex-Sync) · [Requesting Titles](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Requesting-Titles) |
+| **Run** | [Streaming and Quality](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Streaming-and-Quality) · [FFmpeg Engine](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FFmpeg-Engine) · [Dashboard](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Dashboard) · [Configuration Reference](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Configuration-Reference) · [Optional Integrations](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Optional-Integrations) · [Updating and Backups](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Updating-and-Backups) |
+| **Help** | [Troubleshooting](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Troubleshooting) · [FAQ](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/FAQ) · [Local Development](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Local-Development) |
 
 ## Data and privacy
 
-Plex tokens stay on the server: it proxies every Plex call and video segment.
-Linked Plex accounts sign in on Plex's own page, and their tokens are encrypted
-at rest. Sessions, watch history, linked accounts and cached artwork live in
-SQLite on the data volume and survive updates; the films being played are kept
-only until their stream ends. Cache sizes and the background warm-up are in the
-[Configuration Reference](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Configuration-Reference#caching-and-performance),
-and what to back up is in
-[Updating and Backups](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Updating-and-Backups#what-the-server-stores).
+Your Plex token stays on the server, which proxies every Plex request and all
+video. Viewers who link a Plex account sign in on Plex's own page, and their
+tokens are encrypted at rest. Sessions, watch history and cached artwork are
+kept in SQLite on the data volume. See
+[Updating and Backups](https://github.com/MonkeyGoneWIld/plex-discord-theater/wiki/Updating-and-Backups)
+for what is stored and what to back up.
 
 ## License
 

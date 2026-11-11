@@ -334,4 +334,41 @@ router.get("/poster", async (req: Request, res: Response) => {
   }
 });
 
+/** What Seerr says of a title now: its media status, and its latest request's (1 pending, 2 approved, 3 declined, 4 failed). */
+export interface SeerrNow { mediaStatus: number | null; requestStatus: number | null }
+
+const seerrNowKept = new Map<string, { at: number; value: SeerrNow | null }>();
+const SEERR_NOW_TTL_MS = 60_000;
+
+/**
+ * For the dashboard's Requests page, which recorded what Seerr said when a
+ * title was asked for: a request declined since still read "Pending". Asked
+ * again at most once a minute a title; null when Seerr can't be asked.
+ */
+export async function seerrNow(mediaType: string, tmdbId: number): Promise<SeerrNow | null> {
+  const cfg = seerrConfig();
+  if (!cfg || !MEDIA_TYPES.has(mediaType) || !Number.isInteger(tmdbId) || tmdbId <= 0) return null;
+  const key = `${mediaType}/${tmdbId}`;
+  const had = seerrNowKept.get(key);
+  if (had && Date.now() - had.at < SEERR_NOW_TTL_MS) return had.value;
+  let value: SeerrNow | null = null;
+  try {
+    const r = await seerrFetch(cfg, `/${mediaType}/${tmdbId}`);
+    if (r?.ok) {
+      const data = (await r.json()) as { mediaInfo?: { status?: number; requests?: Array<{ id?: number; status?: number }> } };
+      const requests = [...(data.mediaInfo?.requests ?? [])].sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+      value = {
+        mediaStatus: data.mediaInfo?.status ?? null,
+        requestStatus: requests.length ? requests[requests.length - 1].status ?? null : null,
+      };
+    }
+  } catch {
+    value = null;
+  }
+  seerrNowKept.delete(key);
+  seerrNowKept.set(key, { at: Date.now(), value });
+  if (seerrNowKept.size > 500) seerrNowKept.delete(seerrNowKept.keys().next().value!);
+  return value;
+}
+
 export default router;

@@ -430,6 +430,12 @@ console.log("\n— AV1, Opus and FLAC, by what each player decodes —");
   recordSessionVideoCodec(hi10Sid, "h264");
   recordSessionTenBit(hi10Sid, true);
   check("a copy of 10-bit H.264 needs 10-bit H.264", sessionNeeds(hi10Sid), ["hi10", "tenBit"]);
+  // What the dashboard is told a re-encode is sent as.
+  const { videoOutText } = await import("../src/routes/plex.js");
+  check("a re-encode's output, for the dashboard: the codec it is sent in, not the file's",
+    [videoOutText("av1", false, 1860, 1044), videoOutText("hevc", true, 3840, 2160), videoOutText("hevc", false, 1440, 1080),
+      videoOutText("h264", false), videoOutText("av1", true, 1920, 1080), videoOutText("unknown", false), videoOutText(undefined, false)],
+    ["AV1 \u00b7 1860\u00d71044", "HEVC Main 10 \u00b7 3840\u00d72160", "HEVC Main \u00b7 1440\u00d71080", "H.264", "AV1 \u00b7 10-bit \u00b7 1920\u00d71080", null, null]);
   check("and isn't HEVC", isHevcSession(sid), false);
   host.send({
     type: "play", ratingKey: "100", title: "A Film", subtitles: false,

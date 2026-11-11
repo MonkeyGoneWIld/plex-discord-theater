@@ -165,7 +165,7 @@ function noteFirstByte(key: string, ms: number): void {
  * edgeCacheOf. Counts of its answers (CF-Cache-Status), a part each.
  */
 const edgeAnswers = new Map<string, { hit: number; of: number; said: string }>();
-/** Every answer of Discord's cache since the page opened, and their bytes — see edgeTotals. */
+/** Every answer of Discord's cache since this stream started, and their bytes — see edgeTotals. */
 const edgeSum = { hit: 0, of: 0, hitBytes: 0, bytes: 0 };
 function noteEdge(key: string, response: Response): void {
   const said = response.headers.get("cf-cache-status");
@@ -196,13 +196,17 @@ export function edgeCacheOf(key: string): string | undefined {
   return a.hit === a.of ? "HIT" : a.hit === 0 ? a.said : `${a.hit}/${a.of} HIT`;
 }
 /**
- * What Discord's cache has said since the page opened, for the health log:
+ * What Discord's cache has said since this stream started, for the health log:
  * its answers (a part or a whole segment each), how many were HITs, and
  * their bytes as their Content-Length gave them. The "segment in" log covers
  * a stream's first four segments only; this covers the film.
  */
 export function edgeTotals(): { hit: number; of: number; hitBytes: number; bytes: number } {
   return { ...edgeSum };
+}
+/** A new stream: its Discord cache figures start from nothing, as its peer figures do. */
+export function resetEdgeTotals(): void {
+  Object.assign(edgeSum, { hit: 0, of: 0, hitBytes: 0, bytes: 0 });
 }
 /** Every download in parts under way: each one's way of starting more of its parts — see pumpSegmentParts. */
 const pumps = new Set<() => void>();

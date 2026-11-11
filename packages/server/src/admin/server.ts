@@ -9,6 +9,7 @@ import { logFiles, overview, readLog, settingsView } from "./data.js";
 import { MAX_GRAPH_DAYS, Recorder } from "./recorder.js";
 import { EXPORTS, exportFile, exportName, type ExportKind } from "./export.js";
 import { okRatingKey, plexTitles, type TitleSource } from "./titles.js";
+import { seerrNow, type SeerrNow } from "../routes/seerr.js";
 import { cachesView } from "./caches.js";
 import { numberSetting } from "../services/env-settings.js";
 import { logEvent } from "../services/logger.js";
@@ -33,6 +34,8 @@ export interface AdminOptions {
   recorder?: Recorder;
   /** Posters and running times; Plex's, unless the tests give their own. */
   titles?: TitleSource;
+  /** What Seerr says of a requested title now; Seerr's, unless the tests give their own. */
+  requestState?: (mediaType: string, tmdbId: number) => Promise<SeerrNow | null>;
 }
 
 /**
@@ -218,20 +221,31 @@ export function createAdminApp(opts: AdminOptions): express.Express {
   app.get("/api/usage", admin, recorded, (req: Request, res: Response) => {
     res.json({ usage: recorder!.usage({ limit: req.query.limit, before: req.query.before }) });
   });
-  app.get("/api/requests", admin, recorded, (req: Request, res: Response) => {
-    res.json({ requests: recorder!.requests({ limit: req.query.limit, before: req.query.before, q: req.query.q }) });
+  // Each request with what Seerr says of it now: the history has only what
+  // it said when the title was asked for.
+  const requestState = opts.requestState ?? seerrNow;
+  const withCurrent = async <T extends { mediaType: string; tmdbId: number }>(rows: T[]) => {
+    const keys = [...new Set(rows.map((r) => `${r.mediaType}/${r.tmdbId}`))].slice(0, 60);
+    const found = new Map(await Promise.all(keys.map(async (k) => {
+      const [type, id] = k.split("/");
+      return [k, await requestState(type, Number(id)).catch(() => null)] as const;
+    })));
+    return rows.map((r) => ({ ...r, current: found.get(`${r.mediaType}/${r.tmdbId}`) ?? null }));
+  };
+  app.get("/api/requests", admin, recorded, async (req: Request, res: Response) => {
+    res.json({ requests: await withCurrent(recorder!.requests({ limit: req.query.limit, before: req.query.before, q: req.query.q })) });
   });
   app.get("/api/people", admin, recorded, (req: Request, res: Response) => {
     res.json({ people: recorder!.people({ q: req.query.q, limit: req.query.limit, offset: req.query.offset }) });
   });
-  app.get("/api/people/:id", admin, recorded, (req: Request, res: Response) => {
+  app.get("/api/people/:id", admin, recorded, async (req: Request, res: Response) => {
     const id = String(req.params.id);
     const person = /^\d{1,25}$/.test(id) ? recorder!.person(id) : null;
     if (!person) {
       res.status(404).json({ error: "Nobody by that ID" });
       return;
     }
-    res.json(person);
+    res.json({ ...person, requests: await withCurrent(person.requests) });
   });
   app.get("/api/places", admin, recorded, (_req: Request, res: Response) => {
     res.json({ guilds: recorder!.places() });

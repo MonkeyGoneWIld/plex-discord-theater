@@ -1,7 +1,8 @@
 import { useState } from "react";
 import type { Client, Overview, Room, Stream } from "./types";
 import { ago, bytes, clock, quality, rate, utc } from "./format";
-import { BufferingCell, bufferingTone, DataCell, DecisionBadge, decisionOf, NotesList, streamLines, streamWhy } from "./parts";
+import { BufferingCell, bufferingTone, DataCell, DecisionBadge } from "./parts";
+import { StreamCard, type StreamInfo } from "./streams";
 import { Icon } from "./icons";
 import { Poster, titleLine, useTitles } from "./titles";
 import { Avatar, bps, FlowChart, pct, Progress, SOURCES, Spark, SplitBar, Stat, type FlowPoint } from "./viz";
@@ -42,54 +43,16 @@ function sessionTotals(room: Room) {
   return { server, cache, peers, total: server + cache + peers, stalls, stalledMs, errors };
 }
 
-function StreamBlock({ room, stream, n }: { room: Room; stream: Stream; n: number }) {
-  const [open, setOpen] = useState(false);
-  const s = { ...stream, started: !!stream.hlsSessionId };
-  const d = decisionOf(s);
-  return (
-    <div className={`stream tone-${d.tone}${open ? " open" : ""}`}>
-      <button className="stream-head" onClick={() => setOpen(!open)} aria-expanded={open}>
-        <span className="stream-main">
-          <span className="stream-line">
-            <span className="stream-n">Stream {n}</span>
-            <DecisionBadge s={s} />
-            {stream.isHostStream && <span className="badge outline">Host stream</span>}
-            <span className="stream-rate">{rate(stream.kbps)}</span>
-          </span>
-          <span className="stream-why">{streamWhy(s)}</span>
-          <span className="stream-facts">
-            {streamLines(stream).map(([k, v]) => <span key={k}><span className="muted">{k}</span> {v}</span>)}
-            <span><span className="muted">Engine</span> {stream.engine === "ffmpeg" ? "FFmpeg" : stream.engine === "plex" ? "Plex" : "—"}</span>
-            <span><span className="muted">Quality</span> {quality(stream.quality)}</span>
-          </span>
-        </span>
-        <span className="stream-viewers">
-          {stream.viewers.map((id) => <Avatar key={id} id={id} name={nameOf(room, id)} />)}
-          <span className="muted small">{stream.viewers.length} watching</span>
-          <span className={`chev${open ? " open" : ""}`}><Icon name="chevron" size={16} /></span>
-        </span>
-      </button>
-      {open && (
-        <div className="stream-detail">
-          <h4>Technical details</h4>
-          <dl className="grid">
-            <dt>Stream key</dt><dd className="mono">{stream.variantKey}</dd>
-            <dt>HLS session</dt><dd className="mono">{stream.hlsSessionId ?? "—"}</dd>
-            <dt>Bitrate</dt><dd>{rate(stream.kbps)}{stream.kbpsSource ? ` (${stream.kbpsSource})` : ""}</dd>
-            <dt>Audio track</dt><dd className="mono">{stream.audioStreamId}</dd>
-            <dt>Burned-in subtitle track</dt><dd className="mono">{stream.subtitleStreamId || "None"}</dd>
-            <dt>Requested by</dt><dd>{nameOf(room, stream.ownerUserId)} <span className="mono muted">{stream.ownerUserId ?? ""}</span></dd>
-            <dt>Start offset</dt><dd>{clock(stream.sessionOffset)}</dd>
-            <dt>Last watched</dt><dd>{stream.idleS === null ? "Being watched now" : `${ago(stream.idleS)} ago`}</dd>
-            <dt>Plex transcode key</dt><dd className="mono">{stream.plexTranscodeKey ?? "—"}</dd>
-            <dt>Plex player ID</dt><dd className="mono">{stream.plexClientId ?? "—"}</dd>
-            <dt>Playlist created</dt><dd>{utc(stream.notesAt)}</dd>
-          </dl>
-          <NotesList notes={stream.notes} />
-        </div>
-      )}
-    </div>
-  );
+/** A room's stream, as the shared card takes it. */
+function infoOf(room: Room, stream: Stream, n: number): StreamInfo {
+  return {
+    n, started: !!stream.hlsSessionId, decision: stream.decision, reason: stream.reason, notes: stream.notes, kbps: stream.kbps,
+    kbpsSource: stream.kbpsSource, engine: stream.engine, quality: stream.quality, variantKey: stream.variantKey,
+    hlsSessionId: stream.hlsSessionId, audioStreamId: stream.audioStreamId, subtitleStreamId: stream.subtitleStreamId,
+    ownerName: stream.ownerUserId ? nameOf(room, stream.ownerUserId) : null, ownerUserId: stream.ownerUserId, offsetS: stream.sessionOffset,
+    isHostStream: stream.isHostStream, viewers: stream.viewers.map((id) => ({ id, name: nameOf(room, id) })), idleS: stream.idleS,
+    plexTranscodeKey: stream.plexTranscodeKey, plexClientId: stream.plexClientId, notesAt: stream.notesAt,
+  };
 }
 
 function status(c: Client): { text: string; tone: string } {
@@ -262,7 +225,7 @@ function Session({ room, durationS, sub }: { room: Room; durationS: number | nul
       {room.streams.length > 0 && (
         <div className="session-block">
           <h4>Streams ({room.streams.length})</h4>
-          {room.streams.map((s, i) => <StreamBlock key={s.variantKey} room={room} stream={s} n={i + 1} />)}
+          {room.streams.map((s, i) => <StreamCard key={s.variantKey} s={infoOf(room, s, i + 1)} />)}
         </div>
       )}
 

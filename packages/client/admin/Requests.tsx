@@ -17,9 +17,27 @@ const MEDIA_STATUS: Record<number, string> = {
   1: "Unknown", 2: "Pending", 3: "Processing", 4: "Partly available", 5: "Available", 6: "Blocklisted", 7: "Deleted",
 };
 
+/** A request's state now, as Seerr has it: [label, tone]. Null when Seerr wasn't reached. */
+function current(r: TitleRequest): [string, string] | null {
+  const c = r.current;
+  if (!c) return null;
+  if (c.requestStatus === 3) return ["Declined", "bad"];
+  if (c.requestStatus === 4) return ["Failed in Seerr", "bad"];
+  if (c.mediaStatus === 5) return ["Available", "good"];
+  if (c.mediaStatus === 4) return ["Partially available", "good"];
+  if (c.mediaStatus === 3) return ["Processing", "info"];
+  if (c.requestStatus === 2) return ["Approved", "info"];
+  if (c.requestStatus === 1 || c.mediaStatus === 2) return ["Pending approval", "warn"];
+  if (c.mediaStatus === 6) return ["Blocklisted", "bad"];
+  return ["No longer requested", "muted"];
+}
+
 function said(r: TitleRequest) {
-  if (r.outcome === "requested") {
-    return r.status === null ? "—" : <span title={`Seerr media status ${r.status}`}>{MEDIA_STATUS[r.status] ?? `Status ${r.status}`}</span>;
+  const now = current(r);
+  if (r.outcome === "requested" || r.outcome === "already requested") {
+    const then = r.status !== null && r.outcome === "requested" ? MEDIA_STATUS[r.status] ?? `Status ${r.status}` : null;
+    if (now) return <span className={`badge ${now[1]}`} title={then ? `When requested: ${then}` : undefined}>{now[0]}</span>;
+    return then ? <span className="muted" title="Seerr could not be reached for the current status">{then} (when requested)</span> : "—";
   }
   return (
     <>
@@ -44,7 +62,7 @@ export function RequestRows({ requests, showWho = true }: { requests: TitleReque
         <thead>
           <tr>
             <th>Time</th>{showWho && <th>User</th>}{showWho && <th>Discord user ID</th>}<th>Title</th><th>Type</th>
-            <th>Seasons</th><th>TMDB ID</th><th>Result</th><th>Seerr status</th>
+            <th>Seasons</th><th>TMDB ID</th><th>Result</th><th>Status now</th>
           </tr>
         </thead>
         <tbody>

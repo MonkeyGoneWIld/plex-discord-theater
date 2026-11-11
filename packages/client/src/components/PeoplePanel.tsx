@@ -180,9 +180,9 @@ export function PeoplePanel({
             )}
             <p style={styles.requestHelp}>
               {button.kind === "ask" && "If the host does not respond within 5 minutes (1 minute if away), host transfers to you."}
-              {button.kind === "mine" && "Awaiting a response from the host. Select to view the request."}
+              {button.kind === "mine" && "Waiting for the host to respond. Press the button above to view your request."}
               {button.kind === "theirs" && "Only one host request can be active at a time."}
-              {button.kind === "wait" && (showWait ? waitText(button.why, button.leftMs) : "Requests are currently unavailable. Select for details.")}
+              {button.kind === "wait" && (showWait ? waitText(button.why, button.leftMs) : "Host requests are paused for now. Press Request host to see when you can ask again.")}
               {button.kind === "reclaim" && "Host was transferred while you were away."}
             </p>
           </div>

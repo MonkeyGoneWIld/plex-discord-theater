@@ -155,6 +155,8 @@ check("  in one line, the audio too",
   s?.summary, "Transcode: 10-bit picture: frames dropped on this player; audio converted (AC3 isn't played here)");
 check("  the playlist's notes for the details, an empty one left out",
   [s?.notes.kbps, "range" in (s?.notes ?? {})], [4000, false]);
+check("  its bitrate: the playlist's, until it has been measured, never the server's target",
+  [s?.kbps, s?.kbpsSource], [4000, "playlist"]);
 check("a copy, in one line", [summaryOf({ video: "copy" }), summaryOf({ video: "copy", audio: "transcode", audioReason: "AC3" })],
   ["Direct play", "Direct stream: audio converted (AC3)"]);
 check("a stream whose playlist isn't made yet", summaryOf({}), "Starting: details pending");
@@ -184,7 +186,9 @@ console.log("\n— the history, from the live room —");
       year: null, durationS: 1440, poster: true } : null),
     poster: async (k: string) => (k === "58860" ? { type: "image/png", body: Buffer.from([1, 2, 3]) } : null),
   };
-  const withHistory = http.createServer(createAdminApp({ password: PASSWORD, distDir: emptyDist, recorder, titles }));
+  // What Seerr says of a requested title now: declined since.
+  const requestState = async (type: string, id: number) => (type === "movie" && id === 129 ? { mediaStatus: 1, requestStatus: 3 } : null);
+  const withHistory = http.createServer(createAdminApp({ password: PASSWORD, distDir: emptyDist, recorder, titles, requestState }));
   await new Promise<void>((r) => withHistory.listen(0, "127.0.0.1", r));
   const at = `http://127.0.0.1:${(withHistory.address() as AddressInfo).port}`;
   const c = ((await fetch(`${at}/api/login`, { method: "POST", headers: { "Content-Type": "application/json" },
@@ -268,6 +272,12 @@ console.log("\n— the history, from the live room —");
     error: "=HYPERLINK(\"http://evil.test\",\"x\")" });
   const rq = (await (await hget("/api/export/requests.csv")).text()).split("\r\n")[1];
   check("  text a spreadsheet would run as a formula stays text", rq.endsWith(`"'=HYPERLINK(""http://evil.test"",""x"")"`), true);
+  type Asked = { requests: Array<{ tmdbId: number; current: unknown }> };
+  check("a request, with what Seerr says of it now: declined since it was made",
+    ((await (await hget("/api/requests")).json()) as Asked).requests.map((r) => [r.tmdbId, r.current]),
+    [[129, { mediaStatus: 1, requestStatus: 3 }]]);
+  check("  and on the person's page",
+    ((await (await hget("/api/people/222")).json()) as Asked).requests.map((r) => r.current), [{ mediaStatus: 1, requestStatus: 3 }]);
   check("  a file it doesn't make",
     [(await hget("/api/export/nope.csv")).status, (await hget("/api/export/history.xml")).status, await (await hget("/api/export/history")).json()],
     [404, 404, { error: "No such export" }]);

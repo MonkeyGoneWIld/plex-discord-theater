@@ -111,6 +111,7 @@ export function overview(now = Date.now()): Overview {
         : "plex";
       const decision = notes.video === "copy" || notes.video === "transcode" ? notes.video : null;
       const noted = typeof notes.kbps === "number" ? notes.kbps : Number(notes.kbps) || null;
+      const measured = fact?.bandwidth_source === "measured" ? fact.bandwidth_kbps ?? null : null;
       return {
         variantKey: v.key,
         hlsSessionId: v.hlsSessionId,
@@ -126,8 +127,11 @@ export function overview(now = Date.now()): Overview {
         decision,
         reason: decision === "transcode" ? String(notes.reason ?? "") || null : null,
         summary: summaryOf(notes),
-        kbps: fact?.bandwidth_kbps ?? noted,
-        kbpsSource: fact?.bandwidth_kbps ? fact.bandwidth_source ?? "measured" : noted ? "playlist" : null,
+        // Measured when it has been; else what its playlist says. The figure
+        // the qBittorrent manager is given before then is the server's
+        // target bitrate, which read as 20 Mbps for a 4.6 Mbps film.
+        kbps: measured ?? noted ?? fact?.bandwidth_kbps ?? null,
+        kbpsSource: measured ? "measured" : noted ? "playlist" : fact?.bandwidth_kbps ? "target" : null,
         plexTranscodeKey: fact?.plex_transcode_key ?? null,
         plexClientId: fact?.plex_client_id ?? null,
         notes,

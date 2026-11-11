@@ -54,7 +54,8 @@ import { LOOK_AHEAD_S, RECENT_STOPS_MS, comingInBytesPerS, readiness, type Readi
 import { bufferedRanges, coveredAheadS, forgetEvicted, heldRanges, JOIN_TOLERANCE_S, type HeldSegment } from "../lib/bufferAhead";
 import { backfillShare, backfillTitle, catchingUpTitle, loadingScreenSays, loadingTitle } from "../lib/loadingMessage";
 import { safeBackCutS, skipCutS } from "../lib/bufferTrim";
-import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, edgeCacheOf, edgeTotals, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
+import { rebuildToAdopt } from "../lib/adoptStream";
+import { MAX_PARTS, PARTS_AT_ONCE_BESIDE, edgeCacheOf, edgeTotals, resetEdgeTotals, fetchInPartsLater, firstByteMs, inBrowserCache, installSegmentParts, keepLater, partsFor, partsPeak, pumpSegmentParts, segmentBytesOf } from "../lib/segmentParts";
 import { NEXT_NEEDED_SLACK_S, nextNeededSegment, type ListedSegment } from "../lib/nextNeeded";
 import { guardPieceLoads, keyframeGroups, leadInBytes, opensOnKeyframe } from "../lib/keyframeGroups";
 import { keepStats, stopKeepingSegments } from "../lib/segmentKeep";
@@ -3035,7 +3036,13 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
           variant: v.variantKey, session: v.hlsSessionId.substring(0, 8),
         });
         adoptSessionIdRef.current = v.hlsSessionId;
-        setRetryKey((k) => k + 1);
+        // The stream effect takes this up when it runs. On mount it hasn't
+        // run yet and will, so asking for a rebuild as well made two runs:
+        // the first adopted the stream, and the second, 14 ms later, tore it
+        // down for a new one from 0:00. A host back in a room held for them
+        // at 0:43 waited 28.9 s on 11 November, and the room moved back 12 s
+        // to meet them.
+        if (rebuildToAdopt(hlsDepsRef.current !== null)) setRetryKey((k) => k + 1);
         return;
       }
       // A stream this client drives, which already has a transcode. Whatever
@@ -4751,6 +4758,8 @@ export function Player({ item, isHost, selfUserId = null, sharePresenceDetails, 
     const shownBeforeS = videoRef.current && videoRef.current.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
       ? videoRef.current.currentTime : lastGoodPositionRef.current;
     destroyLocal();
+    // Stats for nerds' Discord cache row is this stream's, as its Peers table is.
+    resetEdgeTotals();
 
     // A stream's current driver normally decides who creates a session. A new
     // title is the exception: only the host can change what the room is

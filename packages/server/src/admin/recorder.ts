@@ -743,7 +743,7 @@ export class Recorder {
    * The player's Health sample, every 10 seconds: what its stream has taken
    * from the network (httpMB, counting what Discord's proxy answered) and from
    * peers (p2pMB), since its player started, and what Discord's cache handed
-   * it (edgeHitMB of edgeMB), since the page opened. Counted by the change.
+   * it (edgeHitMB of edgeMB), since its stream started. Counted by the change.
    */
   private sample(key: string, userId: string, entry: ClientLogEntry): void {
     const d = entry.data;
@@ -757,7 +757,9 @@ export class Recorder {
     const baseline = !p.sampled && entry.t - this.startedAt < BASELINE_WINDOW_MS;
     // A new player (a new stream, a rebuild) counts from zero again.
     const restarted = p.sampled && (session !== p.session || p2p < p.p2p || http < p.http);
-    const pageReloaded = edge < p.edge || edgeHit < p.edgeHit;
+    // The Discord cache figures start again with each stream too (and with
+    // the page, on a player from before they did).
+    const pageReloaded = restarted || edge < p.edge || edgeHit < p.edgeHit;
     const delta = {
       http: baseline ? 0 : restarted ? http : http - p.http,
       p2p: baseline ? 0 : restarted ? p2p : p2p - p.p2p,

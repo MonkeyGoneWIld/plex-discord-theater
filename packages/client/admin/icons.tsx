@@ -36,14 +36,12 @@ export function Icon({ name, size = 18 }: { name: string; size?: number }) {
   );
 }
 
-/** The dashboard's mark: a screen with a play button, as its browser tab shows it. */
+/** The dashboard's mark: a play button on the app's amber, plain enough to read in a browser tab. */
 export function Logo({ size = 28 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
-      <rect width="32" height="32" rx="7" fill="#e5a00d" />
-      <rect x="6" y="8" width="20" height="13" rx="2" fill="#16181d" />
-      <path d="M14 11.5v6l5-3-5-3Z" fill="#e5a00d" />
-      <rect x="11" y="23" width="10" height="2" rx="1" fill="#16181d" />
+      <rect width="32" height="32" rx="8" fill="#e5a00d" />
+      <path d="M12 8.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72l-12.5-7.5A1 1 0 0 0 12 8.5Z" fill="#14161b" />
     </svg>
   );
 }

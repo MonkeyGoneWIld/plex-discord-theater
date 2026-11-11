@@ -23,7 +23,7 @@ const TABS: Array<{ id: Tab; label: string; group: "Monitor" | "Library" | "Syst
   { id: "requests", label: "Requests", group: "Library" },
   { id: "caches", label: "Caches", group: "System" },
   { id: "logs", label: "Logs", group: "System" },
-  { id: "settings", label: "Settings", group: "System" },
+  { id: "settings", label: "System", group: "System" },
 ];
 const GROUPS = ["Monitor", "Library", "System"] as const;
 

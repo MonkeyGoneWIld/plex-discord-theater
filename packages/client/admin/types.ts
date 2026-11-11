@@ -222,6 +222,8 @@ export interface TitleRequest {
   outcome: string;
   status: number | null;
   error: string | null;
+  /** What Seerr says of it now; null when it couldn't be asked. */
+  current?: { mediaStatus: number | null; requestStatus: number | null } | null;
 }
 
 export interface PersonPlace {

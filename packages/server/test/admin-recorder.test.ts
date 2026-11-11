@@ -146,8 +146,8 @@ const health = (o: Any, at: number) => ({ t: at, level: "LOG", tag: "Health", ms
 rec.clientLog({ at: t, userId: "222", clientId: "pageA", entries: [
   health({ httpMB: 4, p2pMB: 1, edge: "3/4 HIT", edgeHitMB: "1.0", edgeMB: "3.0" }, t),
   health({ httpMB: 10, p2pMB: 3, edgeHitMB: "4.0", edgeMB: "8.0" }, t + 10_000),
-  // A new player (another stream): its counters start again.
-  health({ session: "S9", httpMB: 2, p2pMB: 0, edgeHitMB: "4.0", edgeMB: "9.0" }, t + 20_000),
+  // A new player (another stream): its counters start again, Discord's cache's too.
+  health({ session: "S9", httpMB: 2, p2pMB: 0, edgeHitMB: "0.0", edgeMB: "1.0" }, t + 20_000),
 ] });
 // The host's player was playing before the recorder began: its first sample
 // only says where its counters stand.
@@ -335,6 +335,30 @@ const after = next.history()[0];
 check("a play a crashed server never ended ends where it was last seen",
   [after.title, after.endReason, after.endedAt === lastSeen], ["Millennium Actress", "server restarted", true]);
 next.close();
+
+console.log("\n— a new stream's counters, Discord's cache's too —");
+{
+  // A player's Discord cache figures start again with each stream. Its next
+  // stream had fetched more by its first sample than the last had in all:
+  // counted whole, not as the difference.
+  let at = t;
+  const one = { ...structuredClone(R1), id: "RC", ratingKey: "70001", title: "Solo", playing: true, clients: [client("777", "soloist", { role: "host" })], streams: [stream("v0", "SC1", { viewers: ["777"] })],
+    discord: { guildId: "G5", channelId: "C5", hostUserId: "777", startedAt: at } };
+  const solo = new Recorder({ dbPath: path.join(process.env.THUMB_CACHE_DIR, "counters.sqlite"), now: () => at, instances: () => new Map(),
+    source: () => ({ at, totals: {}, rooms: [one] }) as unknown as Overview });
+  solo.tick(at);
+  const say = (session: string, o: Any, when: number) => ({ t: when, level: "LOG", tag: "Health", msg: "sample", data: { session, p2pMB: 0, ...o } });
+  solo.clientLog({ at, userId: "777", clientId: "pageS", entries: [
+    say("SC1", { httpMB: 0, edgeHitMB: "0.0", edgeMB: "0.0" }, at),
+    say("SC1", { httpMB: 4, edgeHitMB: "2.0", edgeMB: "4.0" }, at + 10_000),
+    say("SC2", { httpMB: 1, edgeHitMB: "3.0", edgeMB: "6.0" }, at + 20_000),
+  ] });
+  at += 2_000;
+  solo.tick(at);
+  const v = solo.play(solo.history()[0].id)!.viewers[0];
+  check("each stream's Discord cache figures are counted whole", [v.httpBytes, v.edgeBytes, v.edgeHitBytes], [5e6, 10e6, 5e6]);
+  solo.close();
+}
 
 console.log("\n— graphs, the history file, removing old history —");
 // A recorder of its own, on a clock of its own: a play 40 days back, one

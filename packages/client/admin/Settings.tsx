@@ -2,19 +2,33 @@ import { useCallback, useEffect, useState } from "react";
 import { api, SignedOut } from "./api";
 import type { HistorySummary, SettingsView, TrimCounts } from "./types";
 import { ago, bytes, utc } from "./format";
+import { Icon } from "./icons";
 
-const SYSTEM_LABELS: Record<string, string> = {
-  version: "Version",
-  node: "Node.js",
-  platform: "Platform",
-  pid: "Process ID",
-  startedAt: "Started",
-  uptimeS: "Uptime",
-  rssMB: "Memory usage (MB)",
-  heapUsedMB: "JavaScript heap (MB)",
-  logDir: "Log directory",
-};
+/** Each setting's group, by its name: the first that matches. */
+const GROUPS: Array<[string, RegExp, string]> = [
+  ["Plex", /^PLEX_/, "The Plex server and account the Activity plays from."],
+  ["Discord", /^(DISCORD_|REDIRECT_URI|ALLOWED_ORIGINS|HOST_REQUESTS|PRESENCE)/, "The Discord application, its sign-in, and room behaviour."],
+  ["FFmpeg engine", /^(FFMPEG_|PLAYBACK_ENGINE)/, "The server's own FFmpeg: hardware, presets, subtitles and previews."],
+  ["Playback and quality", /^(DIRECT_STREAM|VIDEO_|AUDIO_|QUALITY|.*BITRATE)/, "What is sent unchanged, and the bitrates used when transcoding."],
+  ["Caches and storage", /^(THUMB_|WARM_|.*CACHE|DATA_|PREVIEW)/, "Where data is kept, how much, and for how long."],
+  ["Integrations", /^(SEERR_|TMDB_|TVDB_|QBT_|TRAKT_)/, "Seerr requests, TMDB and TVDB metadata, and the qBittorrent manager."],
+  ["Dashboard", /^ADMIN_/, "This dashboard, its port and its password."],
+  ["Logging", /^(LOG_|DEBUG)/, "Log files and their detail."],
+  ["Server", /^(PORT|NODE_ENV|SESSION_|HOST|TRUST_|TZ)/, "The Activity's own web server."],
+];
+const groupOf = (name: string) => GROUPS.find(([, re]) => re.test(name))?.[0] ?? "Other";
 
+function Fact({ icon, label, value, sub }: { icon: string; label: string; value: string; sub?: string }) {
+  return (
+    <div className="stat">
+      <div className="stat-head"><span className="stat-icon"><Icon name={icon} /></span><span className="stat-label">{label}</span></div>
+      <div className="stat-value small-value">{value}</div>
+      {sub && <div className="stat-sub">{sub}</div>}
+    </div>
+  );
+}
+
+/** The server's status, its history database, and its configuration, read-only. */
 export function Settings({ onError }: { onError: (e: unknown) => void }) {
   const [data, setData] = useState<SettingsView | null>(null);
   const [filter, setFilter] = useState("");
@@ -23,56 +37,89 @@ export function Settings({ onError }: { onError: (e: unknown) => void }) {
   useEffect(() => { api.settings().then(setData).catch(onError); }, [onError]);
   if (!data) return <p className="empty">Loading…</p>;
 
+  const sys = data.system;
   const f = filter.trim().toUpperCase();
   const rows = data.settings.filter((s) => (unset || s.set) && (!f || s.name.includes(f)));
-  const shown = (k: string, v: string | number | null) =>
-    v === null ? "—" : k === "uptimeS" ? ago(Number(v)) : k === "startedAt" ? utc(String(v)) : String(v);
+  const names = [...GROUPS.map(([g]) => g), "Other"];
+  const total = data.settings.filter((s) => s.set).length;
 
   return (
     <>
       <div className="page-head">
-        <h1>Settings</h1>
-        <p className="muted">Server status, the history database, and every environment setting the server reads.</p>
+        <h1>System</h1>
+        <p className="muted">The server's status, its history database, and its configuration.</p>
+      </div>
+
+      <div className="stats">
+        <Fact icon="check" label="Version" value={String(sys.version ?? "—")} sub={`Node.js ${String(sys.node ?? "—")}`} />
+        <Fact icon="clock" label="Uptime" value={sys.uptimeS === null || sys.uptimeS === undefined ? "—" : ago(Number(sys.uptimeS))}
+          sub={sys.startedAt ? `Started ${utc(String(sys.startedAt))}` : undefined} />
+        <Fact icon="pulse" label="Memory" value={sys.rssMB === null || sys.rssMB === undefined ? "—" : `${sys.rssMB} MB`}
+          sub={sys.heapUsedMB !== null && sys.heapUsedMB !== undefined ? `JavaScript heap ${sys.heapUsedMB} MB` : undefined} />
+        <Fact icon="caches" label="Platform" value={String(sys.platform ?? "—")} sub={`Process ${String(sys.pid ?? "—")}`} />
       </div>
       <section className="card">
-        <h3>System</h3>
+        <h3>Paths</h3>
         <dl className="grid">
-          {Object.entries(data.system).map(([k, v]) => (
-            <Pair key={k} label={SYSTEM_LABELS[k] ?? k} value={shown(k, v)} />
-          ))}
+          <dt>Log directory</dt><dd className="mono">{String(sys.logDir ?? "—")}</dd>
+          {Object.entries(sys).filter(([k]) => !["version", "node", "uptimeS", "startedAt", "rssMB", "heapUsedMB", "platform", "pid", "logDir"].includes(k))
+            .map(([k, v]) => <span key={k} style={{ display: "contents" }}><dt>{k}</dt><dd className="mono">{v === null ? "—" : String(v)}</dd></span>)}
         </dl>
       </section>
+
       <HistoryFile onError={onError} />
+
       <section className="card">
-        <div className="toolbar">
+        <div className="panel-head">
+          <h3>Configuration</h3>
+          <span className="muted small">{total} of {data.settings.length} settings are set</span>
+        </div>
+        <p className="note">
+          These are the environment settings the server reads, shown for reference. To change one, edit it in your Docker Compose
+          file or <span className="mono">.env</span> and restart the container. Passwords, keys and tokens only show whether they are set.
+        </p>
+        <div className="toolbar config-tools">
           <label className="grow">
-            <span>Filter settings</span>
-            <input type="search" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="e.g. FFMPEG" />
+            <span>Filter by name</span>
+            <input type="search" value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="For example FFMPEG" />
           </label>
           <label className="check">
-            <input type="checkbox" checked={unset} onChange={(e) => setUnset(e.target.checked)} /> Show settings left unset
+            <input type="checkbox" checked={unset} onChange={(e) => setUnset(e.target.checked)} /> Include settings left at their default
           </label>
         </div>
-        <p className="muted small">
-          Read from the server's environment. Passwords, keys and tokens show only whether they are set.
-        </p>
-        <table className="table">
-          <thead><tr><th>Setting</th><th>Value</th></tr></thead>
-          <tbody>
-            {rows.map((s) => (
-              <tr key={s.name}>
-                <td className="mono">{s.name}</td>
-                <td className={s.set ? (s.secret ? "muted" : "mono") : "muted"}>
-                  {s.set ? s.value : "Not set (default applies)"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {rows.length === 0 && <p className="empty">No settings match.</p>}
+        {names.map((g) => {
+          const mine = rows.filter((s) => groupOf(s.name) === g);
+          if (mine.length === 0) return null;
+          const about = GROUPS.find(([name]) => name === g)?.[2];
+          return (
+            <details key={g} className="config-group" open={!!f || mine.some((s) => s.set)}>
+              <summary>
+                <span className="config-name">{g}</span>
+                <span className="muted small">{about}</span>
+                <span className="badge muted">{mine.filter((s) => s.set).length} set{unset ? ` of ${mine.length}` : ""}</span>
+              </summary>
+              <table className="table config">
+                <tbody>
+                  {mine.map((s) => (
+                    <tr key={s.name}>
+                      <td className="mono">{s.name}</td>
+                      <td className={s.set ? (s.secret ? "muted" : "mono") : "muted"}>
+                        {s.set ? (s.secret ? <span className="badge good">Set</span> : s.value) : "Default"}
+                        {s.set && s.secret && s.value ? <span className="muted small"> {String(s.value).replace(/^set · /, "")}</span> : null}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          );
+        })}
       </section>
     </>
   );
 }
+
 
 const MAX_DAYS = 3650;
 

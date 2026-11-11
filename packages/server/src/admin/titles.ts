@@ -31,8 +31,8 @@ const INFO_TTL_MS = 6 * 3_600_000;
 const MISSING_TTL_MS = 5 * 60_000;
 const MAX_INFO = 2_000;
 const MAX_POSTERS = 300;
-const POSTER_WIDTH = 300;
-const POSTER_HEIGHT = 450;
+const POSTER_WIDTH = 480;
+const POSTER_HEIGHT = 720;
 
 interface Kept { at: number; info: TitleInfo | null; thumb: string | null }
 

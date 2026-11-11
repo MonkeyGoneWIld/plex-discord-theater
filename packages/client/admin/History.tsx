@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { api } from "./api";
-import type { PlayDetail, PlayEvent, PlayStream, PlaySummary } from "./types";
-import { bytes, clock, quality, rate, utc, utcTime } from "./format";
+import type { PlayEvent, PlaySummary } from "./types";
+import { bytes, clock, utc, utcTime } from "./format";
 import {
-  BufferingCell, bufferingTone, DataCell, DecisionBadge, Downloads, eventText, eventTone, GROUP_LABELS, groupOf, NotesList,
-  streamLines, streamWhy, useLoad, Where, Who, type EventGroup,
+  BufferingCell, bufferingTone, DataCell, Downloads, eventText, eventTone, GROUP_LABELS, groupOf, useLoad, Where, Who,
+  type EventGroup,
 } from "./parts";
+import { StreamCard } from "./streams";
+import { KeyMoments, SessionChart } from "./timeline";
 import { MiniChart } from "./lazy";
 import { Icon } from "./icons";
 import { Poster, titleLine, useTitles } from "./titles";
@@ -216,57 +218,35 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
         <div className="session-block">
           <h4>Streams ({streams.length})</h4>
           {streams.length === 0 ? <p className="muted">No stream was started.</p>
-            : streams.map((s, n) => <StreamCard key={s.id} n={n + 1} s={s} ownerName={nameOf(s.ownerUserId)} />)}
+            : streams.map((s, n) => (
+              <StreamCard key={s.id} s={{
+                n: n + 1, started: true, decision: s.decision, reason: s.reason, notes: s.notes, kbps: s.kbps, engine: s.engine,
+                quality: s.quality, variantKey: s.variantKey, hlsSessionId: s.hlsSessionId, audioStreamId: s.audioStreamId,
+                subtitleStreamId: s.subtitleStreamId, ownerName: nameOf(s.ownerUserId), ownerUserId: s.ownerUserId, offsetS: s.offsetS,
+                startedAt: s.startedAt, endedAt: s.endedAt, peakViewers: s.peakViewers,
+              }} />
+            ))}
         </div>
+      </section>
+
+      <section className="card">
+        <div className="panel-head">
+          <h3>Session overview</h3>
+          <span className="muted small">Playback, each stream and each viewer over time. Hover any bar or mark for details.</span>
+        </div>
+        <SessionChart data={data} />
+      </section>
+
+      <section className="card">
+        <div className="panel-head">
+          <h3>Key moments</h3>
+          <span className="muted small">What changed during the session, and why.</span>
+        </div>
+        <KeyMoments data={data} />
       </section>
 
       <Timeline events={events} />
     </>
-  );
-}
-
-function StreamCard({ n, s, ownerName }: { n: number; s: PlayStream; ownerName: string | null }) {
-  const [open, setOpen] = useState(false);
-  const tone = s.decision === "transcode" ? "warn" : s.decision === "copy" ? "good" : "muted";
-  return (
-    <div className={`stream tone-${tone}${open ? " open" : ""}`}>
-      <button className="stream-head" onClick={() => setOpen(!open)} aria-expanded={open}>
-        <span className="stream-main">
-          <span className="stream-line">
-            <span className="stream-n">Stream {n}</span>
-            <DecisionBadge s={s} />
-            <span className="stream-rate">{rate(s.kbps)}</span>
-          </span>
-          <span className="stream-why">{s.decision ? streamWhy(s) : "No playlist was created for this stream."}</span>
-          <span className="stream-facts">
-            {streamLines(s).map(([k, v]) => <span key={k}><span className="muted">{k}</span> {v}</span>)}
-            <span><span className="muted">Engine</span> {s.engine === "ffmpeg" ? "FFmpeg" : s.engine === "plex" ? "Plex" : "—"}</span>
-            <span><span className="muted">Quality</span> {quality(s.quality ?? 0)}</span>
-            <span><span className="muted">Active</span> {utcTime(s.startedAt)}–{s.endedAt ? utcTime(s.endedAt) : "now"} UTC</span>
-          </span>
-        </span>
-        <span className="stream-viewers">
-          <span className="muted small">For {ownerName ?? "the room"} · peak {s.peakViewers}</span>
-          <span className={`chev${open ? " open" : ""}`}><Icon name="chevron" size={16} /></span>
-        </span>
-      </button>
-      {open && (
-        <div className="stream-detail">
-          <h4>Technical details</h4>
-          <dl className="grid">
-            <dt>Stream key</dt><dd className="mono">{s.variantKey ?? "—"}</dd>
-            <dt>HLS session</dt><dd className="mono">{s.hlsSessionId}</dd>
-            <dt>Audio track</dt><dd className="mono">{s.audioStreamId ?? "—"}</dd>
-            <dt>Burned-in subtitle track</dt><dd className="mono">{s.subtitleStreamId || "None"}</dd>
-            <dt>Requested by</dt><dd>{ownerName ?? "The room"} <span className="mono muted">{s.ownerUserId ?? ""}</span></dd>
-            <dt>Start offset</dt><dd>{clock(s.offsetS ?? 0)}</dd>
-            <dt>Started</dt><dd>{utc(s.startedAt)}</dd>
-            <dt>Ended</dt><dd>{utc(s.endedAt)}</dd>
-          </dl>
-          <NotesList notes={s.notes} />
-        </div>
-      )}
-    </div>
   );
 }
 
@@ -286,7 +266,7 @@ function Timeline({ events }: { events: PlayEvent[] }) {
   return (
     <section className="card">
       <div className="panel-head">
-        <h3>Timeline <span className="muted">({events.length} events)</span></h3>
+        <h3>All events <span className="muted">({events.length})</span></h3>
         <div className="chips" role="group" aria-label="Filter events">
           {ALL_GROUPS.filter((g) => counts.get(g)).map((g) => (
             <button key={g} className={`chip g-${g} ${shown.has(g) ? "on" : ""}`} aria-pressed={shown.has(g)} onClick={() => toggle(g)}>

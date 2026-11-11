@@ -74,7 +74,9 @@ const fixtureTitles = {
     return { type: "image/svg+xml", body: Buffer.from(svg) };
   },
 };
-const server = http.createServer(createAdminApp({ password, recorder, titles: fixtureTitles }));
+const server = http.createServer(createAdminApp({ password, recorder, titles: fixtureTitles,
+  // What Seerr would say of each request now: one available, one declined, the rest pending.
+  requestState: async (_type, tmdbId) => (tmdbId === 129 ? { mediaStatus: 5, requestStatus: 2 } : tmdbId === 95396 ? { mediaStatus: 1, requestStatus: 3 } : { mediaStatus: 2, requestStatus: 1 }) }));
 attachWebSocketServer(server);
 await new Promise<void>((r) => server.listen(port, "127.0.0.1", r));
 const origin = `http://127.0.0.1:${port}`;
@@ -99,8 +101,8 @@ const ghosts = "i-156985-fixture";
 instanceHosts.set(ghosts, { hostUserId: "100000000000000001", guildId: "999000111", channelId: "888000111", createdAt: Date.now() - 40 * 60_000 });
 const copy = crypto.randomUUID();
 rememberStreamNotes(copy, {
-  engine: "ffmpeg", video: "copy", kbps: 3837, quality: "Original", videoFrom: "HEVC Main 10 1440x1080", range: "SDR",
-  audio: "transcode", audioFrom: "AC3 2.0", audioTo: "AAC 2.0 256 kbps", audioKbps: 256, audioReason: "AC3 isn't played by Discord's browser",
+  engine: "ffmpeg", video: "copy", kbps: 3837, videoFrom: "HEVC Main 10 · 10-bit · SDR · 1440×1080 · 23.976 fps", range: "SDR",
+  audio: "transcode", audioFrom: "AC3 2.0", audioTo: "AAC 2.0", audioKbps: 256, audioReason: "AC3 isn't played by Discord's browser",
 });
 const host = await join(ghosts, "100000000000000001", "alex");
 host({ type: "play", ratingKey: "58861", title: "Ghost Stories — S01E03", subtitles: false, hlsSessionId: copy,
@@ -112,7 +114,7 @@ robin({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 0 });
 const encode = crypto.randomUUID();
 rememberStreamNotes(encode, {
   engine: "ffmpeg", encoder: "qsv", video: "transcode", reason: "10-bit picture: frames dropped on this player",
-  kbps: 4000, allowed: 20000, quality: "Original", videoFrom: "HEVC Main 10 1440x1080", range: "SDR",
+  kbps: 4000, allowed: 20000, videoFrom: "HEVC Main 10 · 10-bit · SDR · 1440×1080 · 23.976 fps", videoTo: "HEVC Main · 1440×1080", range: "SDR",
   audio: "copy", audioFrom: "AAC 2.0",
 });
 await sleep(100);
@@ -123,7 +125,7 @@ const film = "i-204417-fixture";
 instanceHosts.set(film, { hostUserId: "200000000000000001", guildId: "777000222", channelId: "666000222", createdAt: Date.now() - 55 * 60_000 });
 const filmCopy = crypto.randomUUID();
 rememberStreamNotes(filmCopy, {
-  fallback: "", video: "copy", kbps: 18450, quality: "Original", videoFrom: "H.264 High 1920x1080", range: "SDR", audio: "copy", audioFrom: "AAC 5.1",
+  fallback: "", video: "copy", kbps: 18450, quality: "Original", videoFrom: "H.264 High · 8-bit · SDR · 1920×1080 · 24 fps", range: "SDR", audio: "copy", audioFrom: "AAC 5.1",
 });
 const filmHost = await join(film, "200000000000000001", "nightowl");
 filmHost({ type: "play", ratingKey: "173951", title: "The Long Goodbye", subtitles: false, hlsSessionId: filmCopy,

@@ -5255,6 +5255,15 @@ function refusedCopyReason(version: VersionFacts | null, askedKbps: number, room
  * this same playlist, so a viewer who joined later sees what the driver did.
  * Kept by session for the admin page too (services/stream-notes.ts).
  */
+/** What a re-encode sends, for the dashboard: "AV1 · 1860×1044", "HEVC Main 10 · 3840×2160". Null when unknown. */
+export function videoOutText(codec: string | undefined, tenBit: boolean, width?: number, height?: number): string | null {
+  const names: Record<string, string> = { h264: "H.264", hevc: `HEVC ${tenBit ? "Main 10" : "Main"}`, av1: "AV1", vp9: "VP9" };
+  const name = codec ? names[codec.toLowerCase()] : undefined;
+  if (!name) return null;
+  const bits = tenBit && codec!.toLowerCase() !== "hevc" ? " · 10-bit" : "";
+  return `${name}${bits}${width && height ? ` · ${width}×${height}` : ""}`;
+}
+
 function streamNotes(sessionId: string, notes: Record<string, string | number | null>): string[] {
   rememberStreamNotes(sessionId, notes);
   return Object.entries(notes)
@@ -5612,6 +5621,9 @@ async function startWithFfmpeg(o: {
     quality: o.quality || null,
     allowed: reason === null ? null : allowedKbps,
     videoFrom: o.picture?.text ?? null,
+    // What a re-encode is sent as: the dashboard read Redline as H.264 on
+    // 11 November, its host on AV1 and its viewer on HEVC.
+    videoTo: reason === null ? null : videoOutText(video.codec, tenBit, video.width, video.height),
     range,
     perScreen: perScreen ? 1 : null,
     ...audioNotes(decided, o.audioTracks, video.audioWhy),
@@ -6125,6 +6137,7 @@ router.get(
         // The file's picture, and the stream's range: a copy's is the file's,
         // and Plex re-encodes to SDR, tone-mapping an HDR file.
         videoFrom: picture?.text ?? null,
+        videoTo: videoCopied ? null : videoOutText(sessionVideoCodec.get(sessionId), false),
         range: videoCopied ? picture ? picture.hdr ?? "SDR" : null
           : picture?.hdr ? `SDR (tone-mapped from ${picture.hdr})` : picture ? "SDR" : null,
         ...audioNotes(audioDecided, audioTracks),

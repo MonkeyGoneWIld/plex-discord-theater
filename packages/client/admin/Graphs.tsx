@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "./api";
 import type { GraphDay, Graphs as GraphData } from "./types";
-import { bytes, clock } from "./format";
+import { bytes, clock, zoneLabel } from "./format";
 import { useLoad } from "./parts";
 import { Bars, byteUnit, ChartCard, COLORS, Columns, count, hours, SeriesTable, type Series } from "./charts";
 
@@ -60,7 +60,7 @@ export function Graphs({ onError }: { onError: (e: unknown) => void }) {
     <>
       <div className="page-head">
         <h1>Statistics</h1>
-        <p className="muted">Trends across the recorded history. Days are UTC, and a session counts on the day it started.</p>
+        <p className="muted">Trends across the recorded history. Days and hours are in your local time ({zoneLabel()}), and a session counts on the day it started.</p>
       </div>
       <div className="period" role="group" aria-label="Period">
         {PERIODS.map((p) => (
@@ -106,7 +106,7 @@ function GraphsBody({ g }: { g: GraphData }) {
     { key: "requests", label: "Requests", color: COLORS[1] },
   ];
   const hourRows = g.hours.map((h) => ({ ...h, label: String(h.hour).padStart(2, "0"),
-    title: `${String(h.hour).padStart(2, "0")}:00–${String(h.hour).padStart(2, "0")}:59 UTC` }));
+    title: `${String(h.hour).padStart(2, "0")}:00–${String(h.hour).padStart(2, "0")}:59` }));
   const weekRows = [1, 2, 3, 4, 5, 6, 0].map((w) => ({ ...g.weekdays[w], label: WEEKDAYS[w].slice(0, 3), title: WEEKDAYS[w] }));
   const titleRows = g.titles.map((x) => ({ ...x, name: x.title ?? `Plex item ${x.ratingKey}` }));
   const peopleRows = g.people.map((x) => ({ ...x, name: x.username ?? x.userId }));
@@ -160,11 +160,11 @@ function GraphsBody({ g }: { g: GraphData }) {
         <ChartCard title={`Launches and requests ${per}`} series={asks} table={table(asks, count)}>
           <Columns rows={chartRows} x="label" series={asks} fmt={count} tipTitle={tipTitle} />
         </ChartCard>
-        <ChartCard title="Sessions by hour" sub="Hour of the day, UTC" series={one("plays", "Sessions")}
-          table={table(one("plays", "Sessions"), count, hourRows, "Hour (UTC)")}>
+        <ChartCard title="Sessions by hour" sub="Hour of the day, local time" series={one("plays", "Sessions")}
+          table={table(one("plays", "Sessions"), count, hourRows, "Hour")}>
           <Columns rows={hourRows} x="label" series={one("plays", "Sessions")} fmt={count} tipTitle={tipTitle} />
         </ChartCard>
-        <ChartCard title="Sessions by weekday" sub="UTC" series={one("plays", "Sessions")}
+        <ChartCard title="Sessions by weekday" sub="Local time" series={one("plays", "Sessions")}
           table={table(one("plays", "Sessions"), count, weekRows, "Day")}>
           <Columns rows={weekRows} x="label" series={one("plays", "Sessions")} fmt={count} tipTitle={tipTitle} />
         </ChartCard>
@@ -223,7 +223,7 @@ function TopTable({ rows, cols }: {
 export function MiniChart({ kind, onError }: { kind: "plays" | "people" | "data"; onError: (e: unknown) => void }) {
   const { data } = useLoad(() => api.graphs(30), [], onError);
   if (!data) return null;
-  const more = <>Last 30 days, UTC · <a href="#graphs">All statistics</a></>;
+  const more = <>Last 30 days · <a href="#graphs">All statistics</a></>;
   const rows = data.daily.map((d) => ({ ...d, label: dayName(d.day), title: fullDay(d.day) }));
   if (kind === "plays") {
     const s: Series[] = [{ key: "plays", label: "Sessions", color: COLORS[0] }];

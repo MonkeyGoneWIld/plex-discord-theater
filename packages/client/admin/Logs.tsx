@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import type { LogFile, LogResult } from "./types";
-import { bytes, utcTime } from "./format";
+import { bytes, timeOfDay, zoneLabel } from "./format";
 
 export function Logs({ onError }: { onError: (e: unknown) => void }) {
   const [files, setFiles] = useState<LogFile[]>([]);
@@ -46,7 +46,7 @@ export function Logs({ onError }: { onError: (e: unknown) => void }) {
     <>
       <div className="page-head">
         <h1>Logs</h1>
-        <p className="muted">The server's log files, newest first, including lines reported by viewers' players. Times are UTC.</p>
+        <p className="muted">The server's log files, newest first, including lines reported by viewers' players. Times are in your local time ({zoneLabel()}); each file holds one day in UTC.</p>
       </div>
     <section className="card">
       <form className="toolbar" onSubmit={(e) => { e.preventDefault(); void load(); }}>
@@ -87,13 +87,13 @@ export function Logs({ onError }: { onError: (e: unknown) => void }) {
       {result && (
         <p className="muted small">
           {result.matched.toLocaleString()} of {result.scanned.toLocaleString()} lines match
-          {result.matched > result.lines.length ? `; the last ${result.lines.length} shown` : ""}. Times are UTC.
+          {result.matched > result.lines.length ? `; the last ${result.lines.length} shown` : ""}.
         </p>
       )}
       <div className="log">
         {result?.lines.map((l) => (
           <div key={l.n} className={`log-line ${l.level}`}>
-            <span className="log-time">{utcTime(l.at)}</span>
+            <span className="log-time">{timeOfDay(l.at)}</span>
             <span className="log-tag">{l.tag ?? ""}</span>
             <span className="log-text">{l.client && <span className="log-client" title="Reported by a viewer's player">player {l.client}</span>}{l.text}</span>
           </div>

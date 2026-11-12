@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "./api";
 import type { PlayEvent, PlaySummary } from "./types";
-import { bytes, clock, utc, utcTime } from "./format";
+import { bytes, clock, dateTime, timeOfDay } from "./format";
 import {
   BufferingCell, bufferingTone, DataCell, Downloads, eventText, eventTone, GROUP_LABELS, groupOf, useLoad, Where, Who,
   type EventGroup,
@@ -89,7 +89,7 @@ function PlayRow({ p, sub }: { p: PlaySummary; sub: string | null }) {
         <span className="play-main">
           <span className="play-title">{p.title ?? `Plex item ${p.ratingKey}`}</span>
           <span className="play-sub">
-            {sub ? `${sub} · ` : ""}{utc(p.startedAt)} · hosted by {p.hostName ?? p.hostUserId ?? "unknown"}
+            {sub ? `${sub} · ` : ""}{dateTime(p.startedAt)} · hosted by {p.hostName ?? p.hostUserId ?? "unknown"}
           </span>
           <span className="play-sub"><Where guildId={p.guildId} channelId={p.channelId} /></span>
         </span>
@@ -155,7 +155,7 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
             </div>
             <div className="facts">
               <span className="fact"><Icon name="users" size={14} />Host <strong><Who id={play.hostUserId} name={play.hostName} /></strong></span>
-              <span className="fact"><Icon name="clock" size={14} />{utc(play.startedAt)}{play.endedAt ? ` → ${utcTime(play.endedAt)}` : ""}</span>
+              <span className="fact"><Icon name="clock" size={14} />{dateTime(play.startedAt)}{play.endedAt ? ` → ${timeOfDay(play.endedAt)}` : ""}</span>
               <span className="fact" title="Discord server ID"><Icon name="places" size={14} />Server <span className="mono">{play.guildId ?? "—"}</span></span>
               <span className="fact" title="Discord channel ID">Channel <span className="mono">{play.channelId ?? "—"}</span></span>
               <span className="fact">Plex item <span className="mono">{play.ratingKey}</span></span>
@@ -205,8 +205,8 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
                     <td className="nowrap">{clock(v.watchedS)}</td>
                     <td><DataCell d={v} /></td>
                     <td><BufferingCell d={v} /></td>
-                    <td className="nowrap">{utcTime(v.firstSeen)}</td>
-                    <td className="nowrap">{utcTime(v.lastSeen)}</td>
+                    <td className="nowrap">{timeOfDay(v.firstSeen)}</td>
+                    <td className="nowrap">{timeOfDay(v.lastSeen)}</td>
                     <td className="mono">{v.userId}</td>
                   </tr>
                 ))}
@@ -281,14 +281,14 @@ function Timeline({ events }: { events: PlayEvent[] }) {
             <li key={e.id} className={`event ${eventTone(e)}`}>
               <button className="event-head" onClick={() => setOpen(open === e.id ? null : e.id)} aria-expanded={open === e.id}>
                 <span className={`marker g-${groupOf(e)} ${eventTone(e)}`} />
-                <span className="event-time mono">{utcTime(e.at)}</span>
+                <span className="event-time mono">{timeOfDay(e.at)}</span>
                 <span className="event-pos mono">{e.posS === null ? "" : clock(e.posS)}</span>
                 <span className="event-text">{eventText(e)}</span>
               </button>
               {open === e.id && (
                 <dl className="grid event-detail">
                   <dt>Event</dt><dd className="mono">{e.kind}</dd>
-                  <dt>Time</dt><dd>{utc(e.at)}</dd>
+                  <dt>Time</dt><dd>{dateTime(e.at)}</dd>
                   <dt>Playback position</dt><dd>{e.posS === null ? "—" : clock(e.posS)}</dd>
                   <dt>Viewer</dt><dd>{e.userId ? <><Who id={e.userId} name={e.username} /> <span className="mono muted">{e.userId}</span></> : "—"}</dd>
                   {Object.entries(e.detail ?? {}).map(([k, v]) => (

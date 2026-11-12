@@ -1,5 +1,5 @@
 import type { PlayDetail, PlayEvent, PlayStream } from "./types";
-import { clock, quality, utcTime } from "./format";
+import { clock, quality, timeOfDay } from "./format";
 import { decisionOf, eventText } from "./parts";
 import { Icon } from "./icons";
 import { Avatar } from "./viz";
@@ -59,7 +59,7 @@ function Lane({ label, sub, segs, marks, start, end }: {
 export function SessionChart({ data }: { data: PlayDetail }) {
   const { viewers, streams, events } = data;
   const [start, end] = span(data);
-  const when = (a: number, b: number) => `${utcTime(a)} – ${utcTime(b)} UTC (${clock((b - a) / 1000)})`;
+  const when = (a: number, b: number) => `${timeOfDay(a)} – ${timeOfDay(b)} (${clock((b - a) / 1000)})`;
 
   // Playback: playing, paused or held, from its play, pause and resume events.
   const playback: Seg[] = [];
@@ -77,7 +77,7 @@ export function SessionChart({ data }: { data: PlayDetail }) {
     if (e.kind === "play" || e.kind === "resume") { close(e.at); state = "playing"; }
     else if (e.kind === "pause") { close(e.at); state = "paused"; }
     else if (e.kind === "stop" || e.kind === "ended") { close(e.at); state = null; }
-    else if (e.kind === "seek") marks.push({ at: e.at, tone: "info", title: `${utcTime(e.at)} UTC · ${eventText(e)}` });
+    else if (e.kind === "seek") marks.push({ at: e.at, tone: "info", title: `${timeOfDay(e.at)} · ${eventText(e)}` });
   }
   close(end);
   const held: Seg[] = events.filter((e) => e.kind === "room waited").map((e) => {
@@ -97,7 +97,7 @@ export function SessionChart({ data }: { data: PlayDetail }) {
             segs={[{ from: s.startedAt, to, tone: d.tone === "warn" ? "warn" : d.tone === "good" ? "good" : "muted",
               title: `Stream ${i + 1} · ${d.label}${s.reason ? ` · ${s.reason}` : ""} · ${when(s.startedAt, to)}`, label: d.label }]}
             marks={events.filter((e) => e.kind === "stream restarted" && e.detail?.variant === s.variantKey)
-              .map((e) => ({ at: e.at, tone: "info", title: `${utcTime(e.at)} UTC · ${eventText(e)}` }))} />
+              .map((e) => ({ at: e.at, tone: "info", title: `${timeOfDay(e.at)} · ${eventText(e)}` }))} />
         );
       })}
       {viewers.map((v) => {
@@ -112,14 +112,14 @@ export function SessionChart({ data }: { data: PlayDetail }) {
             label={<span className="lane-person"><Avatar id={v.userId} name={v.username} size={20} />{v.username ?? v.userId}</span>}
             segs={[{ from: v.firstSeen, to: v.lastSeen, tone: "present", title: `${v.username ?? v.userId} · in the room ${when(v.firstSeen, v.lastSeen)}` }, ...stalls]}
             marks={mine.filter((e) => ["stream changed", "quality", "subtitles", "player error", "role"].includes(e.kind) && !(e.kind === "stream changed" && !e.detail?.from))
-              .map((e) => ({ at: e.at, tone: e.kind === "player error" ? "bad" : "accent", title: `${utcTime(e.at)} UTC · ${eventText(e)}` }))} />
+              .map((e) => ({ at: e.at, tone: e.kind === "player error" ? "bad" : "accent", title: `${timeOfDay(e.at)} · ${eventText(e)}` }))} />
         );
       })}
       <div className="lane lane-axis">
         <div className="lane-label" />
         <div className="lane-track">
           {[0, 0.25, 0.5, 0.75, 1].map((f) => (
-            <span key={f} style={{ left: `${f * 100}%` }} className={f === 1 ? "end" : f === 0 ? "start" : ""}>{utcTime(start + (end - start) * f)}</span>
+            <span key={f} style={{ left: `${f * 100}%` }} className={f === 1 ? "end" : f === 0 ? "start" : ""}>{timeOfDay(start + (end - start) * f)}</span>
           ))}
         </div>
       </div>
@@ -192,7 +192,7 @@ export function KeyMoments({ data }: { data: PlayDetail }) {
             <span className="moment-title">{m.title}</span>
             {m.why && <span className="moment-why">{m.why}</span>}
           </span>
-          <span className="moment-time mono">{utcTime(m.at)}{m.posS !== null ? <span className="muted"> · at {clock(m.posS)}</span> : null}</span>
+          <span className="moment-time mono">{timeOfDay(m.at)}{m.posS !== null ? <span className="muted"> · at {clock(m.posS)}</span> : null}</span>
         </li>
       ))}
     </ol>

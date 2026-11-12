@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { bytes, clock, utcTime } from "./format";
+import { bytes, clock, timeOfDay } from "./format";
 
 /**
  * The dashboard's small visuals, drawn by hand so the live page needs no
@@ -139,7 +139,7 @@ export function FlowChart({ points, requiredBps, height = 150, stepS = 10 }: {
         <span className="flow-max">{bps(max)}</span>
         {at && hover !== null && (
           <div className="chart-tip flow-tip" style={hover > points.length / 2 ? { right: `${100 - (hover / (points.length - 1)) * 100 + 2}%` } : { left: `${(hover / (points.length - 1)) * 100 + 2}%` }}>
-            <div className="tip-title">{utcTime(at[0])} UTC</div>
+            <div className="tip-title">{timeOfDay(at[0])}</div>
             {SOURCES.map((s, i) => (
               <div key={s.key} className="tip-row">
                 <span className="tip-key" style={{ background: s.color }} />

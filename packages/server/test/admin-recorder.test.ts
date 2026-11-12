@@ -30,6 +30,7 @@ function check(name: string, actual: unknown, expected: unknown) {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const { Recorder, flowSeries } = await import("../src/admin/recorder.js");
+const { zoneClock } = await import("../src/admin/zone.js");
 const { setAdminHooks, adminHooks } = await import("../src/services/admin-hooks.js");
 type Overview = import("../src/admin/data.js").Overview;
 type Inst = { hostUserId: string; guildId: string | null; channelId: string | null; createdAt: number };
@@ -453,6 +454,65 @@ check("  all of it: from the first day anything happened",
 check("  a period not a number is 30 days; one too long, ten years",
   [gr.graphs({ days: "lots" }).days, gr.graphs({ days: -3 }).days, gr.graphs({ days: 99_999 }).days, gr.graphs({ days: 99_999 }).daily.length],
   [30, 30, 3650, 3650]);
+
+// 12 November: the dashboard's days and hours were UTC's wherever it was
+// opened. Akira began on day D at 20:00 UTC and on day D + 1 at 03:00 UTC, and
+// it is 03:00 UTC on day D + 1 now.
+check("graphs: UTC unless a time zone is given, or what is given isn't one",
+  [week.zone, gr.graphs({ days: 7, zone: "Mars/Olympus" }).zone, gr.graphs({ days: 7, zone: "'; DROP TABLE plays" }).zone,
+    gr.graphs({ days: 7, zone: ["Asia/Tokyo"] }).zone, gr.graphs({ days: 7, zone: "Mars/Olympus" }).daily[6].day],
+  ["UTC", "UTC", "UTC", "UTC", (D + 1) * DAY]);
+const tokyo = gr.graphs({ days: 7, zone: "Asia/Tokyo" });
+check("  in Tokyo, nine hours ahead: both on day D + 1, at 05:00 and 12:00, and the week is Tokyo's",
+  [tokyo.zone, tokyo.daily.filter((x) => x.plays).map((x) => [x.day, x.plays, x.people, x.launches, x.requests]),
+    tokyo.hours.filter((h) => h.plays).map((h) => h.hour), tokyo.weekdays.filter((w) => w.plays).map((w) => [w.weekday, w.plays]),
+    tokyo.daily[6].day, tokyo.from, tokyo.to],
+  ["Asia/Tokyo", [[(D + 1) * DAY, 2, 3, 2, 1]], [5, 12], [[new Date((D + 1) * DAY).getUTCDay(), 2]],
+    (D + 1) * DAY, (D - 5) * DAY - 9 * 3_600_000, (D + 2) * DAY - 9 * 3_600_000]);
+const phoenix = gr.graphs({ days: 7, zone: "America/Phoenix" });
+check("  in Phoenix, seven hours behind: both on day D, at 13:00 and 20:00, and today is still day D",
+  [phoenix.daily.filter((x) => x.plays).map((x) => [x.day, x.plays]), phoenix.hours.filter((h) => h.plays).map((h) => h.hour),
+    phoenix.daily[6].day, phoenix.from, phoenix.to, phoenix.totals.plays],
+  [[[D * DAY, 2]], [13, 20], D * DAY, (D - 6) * DAY + 7 * 3_600_000, (D + 1) * DAY + 7 * 3_600_000, 2]);
+check("  in Kolkata, five and a half hours ahead: at 01:30 and 08:30",
+  gr.graphs({ days: 7, zone: "Asia/Kolkata" }).hours.filter((h) => h.plays).map((h) => h.hour), [1, 8]);
+{
+  // New York's clocks went back at 06:00 UTC on 1 November 2026.
+  const ny = zoneClock("America/New_York");
+  const H = 3_600_000;
+  const back = Date.UTC(2026, 10, 1, 6);
+  const nov1 = Date.UTC(2026, 10, 1) / DAY;
+  check("a time zone's clock: its summer and winter offsets, and UTC's none",
+    [ny.offset(Date.UTC(2026, 6, 1)) / H, ny.offset(Date.UTC(2026, 0, 15)) / H, ny.offset(back - 1000) / H, ny.offset(back) / H,
+      zoneClock(undefined).offset(back), zoneClock("UTC").zone, zoneClock("Etc/UTC").offset(back)],
+    [-4, -5, -4, -5, 0, "UTC", 0]);
+  check("  the day an instant is on, and when a day begins: the day the clocks go back is 25 hours long",
+    [ny.day(Date.UTC(2026, 10, 1, 3, 59)) - nov1, ny.day(Date.UTC(2026, 10, 1, 4)) - nov1,
+      ny.dayStart(nov1) - Date.UTC(2026, 10, 1, 4), ny.dayStart(nov1 + 1) - Date.UTC(2026, 10, 2, 5)],
+    [-1, 0, 0, 0]);
+  check("  as SQL: each side of a change by its own offset; none in the period, one offset; UTC, the column",
+    [ny.sql("at", Date.UTC(2026, 9, 25), Date.UTC(2026, 10, 8)), ny.sql("at", Date.UTC(2026, 10, 2), Date.UTC(2026, 10, 8)),
+      zoneClock("UTC").sql("at", 0, Date.UTC(2026, 10, 8))],
+    [`(at + CASE WHEN at < ${back} THEN ${-4 * H} ELSE ${-5 * H} END)`, `(at + ${-5 * H})`, "at"]);
+
+  // A history across that change: 23:30 in New York on 31 October (03:30 UTC
+  // on 1 November, summer time) and 23:30 on 1 November (04:30 UTC on the
+  // 2nd, winter time). By today's offset alone the first would be at 22:30.
+  const dstPath = path.join(process.env.THUMB_CACHE_DIR!, "dst.sqlite");
+  let dn = Date.UTC(2026, 10, 1, 3, 30);
+  const dst = new Recorder({ dbPath: dstPath, now: () => dn, instances: () => new Map(),
+    source: () => ({ at: dn, totals: {}, rooms: [] }) as unknown as Overview });
+  for (const at of [dn, Date.UTC(2026, 10, 2, 4, 30)]) {
+    dn = at;
+    dst.request({ at, userId: "333", mediaType: "movie", tmdbId: 149, seasons: null, outcome: "requested", status: 2, error: null });
+  }
+  dn = Date.UTC(2026, 10, 3, 12);
+  const across = dst.graphs({ days: 7, zone: "America/New_York" });
+  check("  graphs across a clock change: each request on the day it was by the clock then",
+    across.daily.filter((x) => x.requests).map((x) => [new Date(x.day).toISOString().slice(0, 10), x.requests]),
+    [["2026-10-31", 1], ["2026-11-01", 1]]);
+  dst.close();
+}
 
 const sum0 = gr.summary();
 check("the history file: where, how big, what it holds, from when",

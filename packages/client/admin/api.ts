@@ -2,6 +2,7 @@ import type {
   CachesResult, LogFile, LogResult, Overview, PersonDetail, PersonSummary, PlaceGuild, PlayDetail, PlaySummary,
   SettingsView, TitleInfo, TitleRequest, UsageRow, Graphs, HistorySummary, TrimCounts
 } from "./types";
+import { timeZone } from "./format";
 
 /** A query string of the values given. */
 function qs(q: Record<string, string | number | undefined | null>): string {
@@ -47,7 +48,8 @@ export const api = {
   usage: (q: { before?: number; limit?: number }) => call<{ usage: UsageRow[] }>(`/api/usage${qs(q)}`),
   requests: (q: { q?: string; before?: number; limit?: number }) => call<{ requests: TitleRequest[] }>(`/api/requests${qs(q)}`),
   caches: () => call<CachesResult>("/api/caches"),
-  graphs: (days: number) => call<Graphs>(`/api/graphs${qs({ days })}`),
+  /** By the day, hour and weekday of this browser's time zone. */
+  graphs: (days: number) => call<Graphs>(`/api/graphs${qs({ days, tz: timeZone() })}`),
   historyFile: (days?: number) => call<{ summary: HistorySummary; trim: TrimCounts | null }>(`/api/history-file${qs({ days })}`),
   trim: (days: number) => call<TrimCounts & { bytesBefore: number; bytesAfter: number }>("/api/history-file/trim", {
     method: "POST",

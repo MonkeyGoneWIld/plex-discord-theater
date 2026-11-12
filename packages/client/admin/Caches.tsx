@@ -2,7 +2,7 @@ import { SplitBar } from "./viz";
 import { useState } from "react";
 import { api } from "./api";
 import type { CacheSums, CacheView, CachesResult } from "./types";
-import { bytes, utc, utcTime } from "./format";
+import { bytes, dateTime, timeOfDay } from "./format";
 import { useLoad } from "./parts";
 import { MiniChart } from "./lazy";
 
@@ -17,7 +17,7 @@ export function Caches({ onError }: { onError: (e: unknown) => void }) {
       <div className="page-head with-action">
         <div>
           <h1>Caches</h1>
-          <p className="muted">What the server stores, and how much Discord's cache saves it. Read at {utcTime(data.at)} UTC.</p>
+          <p className="muted">What the server stores, and how much Discord's cache saves it. Read at {timeOfDay(data.at)}.</p>
         </div>
         <button className="ghost" onClick={reload} disabled={busy}>{busy ? "Refreshing…" : "Refresh"}</button>
       </div>
@@ -182,7 +182,7 @@ function CacheCard({ c }: { c: CacheView }) {
                       <td>{it.title ? <strong>{it.title}</strong> : <span className="muted">{it.ratingKey ? `Plex item ${it.ratingKey}` : "—"}</span>}</td>
                       <td className="mono">{it.name}</td>
                       <td className="nowrap">{it.bytes === null ? "—" : bytes(it.bytes)}</td>
-                      <td className="nowrap">{it.at ? utc(it.at) : "—"}</td>
+                      <td className="nowrap">{it.at ? dateTime(it.at) : "—"}</td>
                       <td className="small">{it.detail ?? ""}</td>
                     </tr>
                   ))}

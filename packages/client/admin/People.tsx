@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "./api";
 import type { PersonSummary } from "./types";
-import { clock, utc } from "./format";
+import { clock, dateTime } from "./format";
 import { BufferingCell, DataCell, Downloads, useLoad, Where } from "./parts";
 import { MiniChart } from "./lazy";
 import { RequestRows } from "./Requests";
@@ -69,7 +69,7 @@ function PersonRow({ p }: { p: PersonSummary }) {
     <tr className="link-row" onClick={open} tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter") open(); }}>
       <td><a href={`#people/${p.userId}`} onClick={(e) => e.stopPropagation()}><strong>{p.username ?? p.userId}</strong></a></td>
       <td className="mono">{p.userId}</td>
-      <td className="nowrap">{utc(p.lastSeen)}</td>
+      <td className="nowrap">{dateTime(p.lastSeen)}</td>
       <td>{p.plays}</td>
       <td>{p.hosted || "—"}</td>
       <td>{p.launches || "—"}</td>
@@ -102,8 +102,8 @@ function PersonPage({ id, onError }: { id: string; onError: (e: unknown) => void
           </div>
           <dl className="room-ids">
             <dt>Discord user ID</dt><dd className="mono">{p.userId}</dd>
-            <dt>First seen</dt><dd>{utc(p.firstSeen)}</dd>
-            <dt>Last seen</dt><dd>{utc(p.lastSeen)}</dd>
+            <dt>First seen</dt><dd>{dateTime(p.firstSeen)}</dd>
+            <dt>Last seen</dt><dd>{dateTime(p.lastSeen)}</dd>
           </dl>
         </header>
         <div className="tiles person-tiles">
@@ -124,8 +124,8 @@ function PersonPage({ id, onError }: { id: string; onError: (e: unknown) => void
                     <td className="mono">{pl.channelId ?? "—"}</td>
                     <td>{pl.launches || "—"}</td>
                     <td>{pl.joins || "—"}</td>
-                    <td className="nowrap">{utc(pl.first)}</td>
-                    <td className="nowrap">{utc(pl.last)}</td>
+                    <td className="nowrap">{dateTime(pl.first)}</td>
+                    <td className="nowrap">{dateTime(pl.last)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -147,7 +147,7 @@ function PersonPage({ id, onError }: { id: string; onError: (e: unknown) => void
                   const open = () => { location.hash = `history/${pl.id}`; };
                   return (
                     <tr key={pl.id} className="link-row" onClick={open} tabIndex={0} onKeyDown={(e) => { if (e.key === "Enter") open(); }}>
-                      <td className="nowrap">{utc(pl.startedAt)}</td>
+                      <td className="nowrap">{dateTime(pl.startedAt)}</td>
                       <td className="title-cell"><a href={`#history/${pl.id}`} onClick={(e) => e.stopPropagation()}><strong>{pl.title ?? pl.ratingKey}</strong></a></td>
                       <td><Where guildId={pl.guildId} channelId={pl.channelId} /></td>
                       <td>{roleName(pl.role)}</td>

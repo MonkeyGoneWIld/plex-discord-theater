@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "./api";
 import type { PlaceGuild, UsageRow } from "./types";
-import { clock, utc } from "./format";
+import { clock, dateTime } from "./format";
 import { Downloads, useLoad, Who } from "./parts";
 
 const PAGE = 50;
@@ -42,8 +42,8 @@ function GuildCard({ g }: { g: PlaceGuild }) {
           </div>
         </div>
         <dl className="room-ids">
-          <dt>First active</dt><dd>{utc(g.first)}</dd>
-          <dt>Last active</dt><dd>{utc(g.last)}</dd>
+          <dt>First active</dt><dd>{dateTime(g.first)}</dd>
+          <dt>Last active</dt><dd>{dateTime(g.last)}</dd>
         </dl>
       </header>
       <div className="table-wrap">
@@ -64,8 +64,8 @@ function GuildCard({ g }: { g: PlaceGuild }) {
                 </td>
                 <td>{c.plays || "—"}</td>
                 <td className="nowrap">{clock(c.playedS)}</td>
-                <td className="nowrap">{utc(c.first)}</td>
-                <td className="nowrap">{utc(c.last)}</td>
+                <td className="nowrap">{dateTime(c.first)}</td>
+                <td className="nowrap">{dateTime(c.last)}</td>
               </tr>
             ))}
           </tbody>
@@ -96,7 +96,7 @@ function Launches({ onError }: { onError: (e: unknown) => void }) {
             <tbody>
               {rows.map((u) => (
                 <tr key={u.id}>
-                  <td className="nowrap">{utc(u.at)}</td>
+                  <td className="nowrap">{dateTime(u.at)}</td>
                   <td>{kindName(u.kind)}</td>
                   <td><Who id={u.userId} name={u.username} /></td>
                   <td className="mono">{u.userId ?? "—"}</td>

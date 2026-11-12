@@ -17,19 +17,41 @@ export function ago(seconds: number): string {
   return m % 60 ? `${h} h ${m % 60} min` : `${h} h`;
 }
 
-/** 2026-11-10 23:36:04 UTC */
-export function utc(at: number | string | null | undefined): string {
+// Times are stored in UTC and shown on the clock of whoever has the page
+// open: 23:36 UTC is 18:36 to someone in New York, and that is what they read.
+
+const two = (n: number) => String(n).padStart(2, "0");
+
+/** 2026-11-10 18:36:04, local time. */
+export function dateTime(at: number | string | null | undefined): string {
   if (at === null || at === undefined) return "—";
   const d = new Date(at);
   if (Number.isNaN(d.getTime())) return "—";
-  return `${d.toISOString().slice(0, 19).replace("T", " ")} UTC`;
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${timeOfDay(at)}`;
 }
 
-/** 23:36:04 */
-export function utcTime(at: number | string | null | undefined): string {
+/** 18:36:04, local time. */
+export function timeOfDay(at: number | string | null | undefined): string {
   if (at === null || at === undefined) return "—";
   const d = new Date(at);
-  return Number.isNaN(d.getTime()) ? "—" : d.toISOString().slice(11, 19);
+  return Number.isNaN(d.getTime()) ? "—" : `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+}
+
+/** How far this browser's clock is from UTC: "UTC−5", "UTC+5:30", "UTC". */
+export function zoneLabel(at: Date = new Date()): string {
+  const minutes = -at.getTimezoneOffset();
+  if (!minutes) return "UTC";
+  const m = Math.abs(minutes);
+  return `UTC${minutes < 0 ? "−" : "+"}${Math.floor(m / 60)}${m % 60 ? `:${two(m % 60)}` : ""}`;
+}
+
+/** This browser's time zone by name, "Europe/London", for the server to group days by. */
+export function timeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
 }
 
 /** 12.4 Mbps, or 850 kbps. */

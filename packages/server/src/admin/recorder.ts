@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 import { overview, type ClientView, type Overview, type RoomView, type StreamView, type ViewerData } from "./data.js";
 import { instanceHosts } from "../routes/discord.js";
 import type { ClientLogEntry, ClientLogEvent, RequestEvent, TransportEvent } from "../services/admin-hooks.js";
+import { zoneClock } from "./zone.js";
 
 /**
  * The admin page's history (admin.sqlite): every play of a title in a room,
@@ -1115,23 +1116,27 @@ export class Recorder {
   // ─── Graphs, the file, trimming ──────────────────────────────
 
   /**
-   * The history by UTC day over the last `days` days (0: all of it): plays,
+   * The history by day over the last `days` days (0: all of it): plays,
    * people, the data sent and where from, streams, buffering, requests and
    * launches; plays by hour and weekday; the titles, people and servers most
    * watched; and why streams were re-encoded. A play counts on the day, hour
-   * and weekday it started.
+   * and weekday it started, on the clock of `zone`: the time zone of whoever
+   * has the page open, UTC when it isn't said.
    */
-  graphs(opts: { days?: unknown } = {}, now = this.now()): Graphs {
+  graphs(opts: { days?: unknown; zone?: unknown } = {}, now = this.now()): Graphs {
     const asked = Math.floor(Number(opts.days ?? 30));
     const days = Number.isFinite(asked) && asked >= 0 ? Math.min(asked, MAX_GRAPH_DAYS) : 30;
-    const today = Math.floor(now / DAY_MS);
+    const zone = zoneClock(opts.zone);
+    const today = zone.day(now);
     let first = today - Math.max(1, days) + 1;
     if (days === 0) {
       const r = this.st(`SELECT MIN(at) AS at FROM (SELECT MIN(started_at) AS at FROM plays
           UNION ALL SELECT MIN(at) FROM usage UNION ALL SELECT MIN(at) FROM requests)`).get() as { at: number | null };
-      first = r.at === null ? today : Math.max(today - MAX_GRAPH_DAYS + 1, Math.min(today, Math.floor(r.at / DAY_MS)));
+      first = r.at === null ? today : Math.max(today - MAX_GRAPH_DAYS + 1, Math.min(today, zone.day(r.at)));
     }
-    const from = first * DAY_MS;
+    const from = zone.dayStart(first);
+    const local = (column: string) => zone.sql(column, from, now);
+    const dayOf = (column: string) => `CAST(${local(column)} / 86400000 AS INTEGER)`;
     const byDay = new Map<number, GraphDay>();
     for (let d = first; d <= today; d++) byDay.set(d, emptyDay(d * DAY_MS));
     const rows = (sql: string) => this.st(sql).all({ from }) as Array<Record<string, unknown>>;
@@ -1141,14 +1146,14 @@ export class Recorder {
         if (g) fill(g, r);
       }
     };
-    const DAY = "CAST(started_at / 86400000 AS INTEGER)";
+    const DAY = dayOf("started_at");
     each(`SELECT ${DAY} AS d, COUNT(*) AS plays, COALESCE(SUM(played_s), 0) AS played, MAX(peak_viewers) AS peak
       FROM plays WHERE started_at >= @from GROUP BY d`, (g, r) => {
       g.plays = int(r.plays);
       g.playedS = Math.round(int(r.played));
       g.peakViewers = int(r.peak);
     });
-    each(`SELECT CAST(p.started_at / 86400000 AS INTEGER) AS d, COUNT(DISTINCT v.user_id) AS people,
+    each(`SELECT ${dayOf("p.started_at")} AS d, COUNT(DISTINCT v.user_id) AS people,
         SUM(v.watched_s) AS watched, SUM(v.http_bytes) AS http, SUM(v.edge_bytes) AS edge, SUM(v.edge_hit_bytes) AS hit,
         SUM(MAX(0, v.http_bytes - v.edge_hit_bytes)) AS bot, SUM(v.p2p_bytes) AS p2p,
         SUM(v.stalls) AS stalls, SUM(v.stalled_ms) AS stalled, SUM(v.errors) AS errors
@@ -1170,9 +1175,9 @@ export class Recorder {
       g.copies = int(r.copies);
       g.reencodes = int(r.reencodes);
     });
-    each(`SELECT CAST(at / 86400000 AS INTEGER) AS d, COUNT(*) AS n FROM requests WHERE at >= @from GROUP BY d`,
+    each(`SELECT ${dayOf("at")} AS d, COUNT(*) AS n FROM requests WHERE at >= @from GROUP BY d`,
       (g, r) => { g.requests = int(r.n); });
-    each(`SELECT CAST(at / 86400000 AS INTEGER) AS d, COUNT(*) AS n FROM usage WHERE kind = 'launch' AND at >= @from GROUP BY d`,
+    each(`SELECT ${dayOf("at")} AS d, COUNT(*) AS n FROM usage WHERE kind = 'launch' AND at >= @from GROUP BY d`,
       (g, r) => { g.launches = int(r.n); });
 
     const daily = [...byDay.values()];
@@ -1190,7 +1195,7 @@ export class Recorder {
     };
 
     const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, plays: 0, playedS: 0 }));
-    for (const r of rows(`SELECT CAST(started_at / 3600000 AS INTEGER) % 24 AS h, COUNT(*) AS plays,
+    for (const r of rows(`SELECT CAST(${local("started_at")} / 3600000 AS INTEGER) % 24 AS h, COUNT(*) AS plays,
         COALESCE(SUM(played_s), 0) AS played FROM plays WHERE started_at >= @from GROUP BY h`)) {
       const h = hours[int(r.h)];
       if (h) Object.assign(h, { plays: int(r.plays), playedS: Math.round(int(r.played)) });
@@ -1225,7 +1230,8 @@ export class Recorder {
       WHERE decision = 'transcode' AND started_at >= @from GROUP BY 1 ORDER BY n DESC, reason LIMIT 8`)
       .map((r) => ({ reason: String(r.reason), streams: int(r.n) }));
 
-    return { days, from, to: (today + 1) * DAY_MS, totals, daily, hours, weekdays, titles, people: topPeople, servers, reasons };
+    return { days, zone: zone.zone, from, to: zone.dayStart(today + 1), totals, daily, hours, weekdays, titles, people: topPeople,
+      servers, reasons };
   }
 
   /** The history file: how big it is, what it holds, and from when. */
@@ -1318,7 +1324,7 @@ const int = (v: unknown): number => {
 };
 
 export interface GraphDay {
-  /** Midnight UTC. */
+  /** The date, written as its midnight in UTC: a day on the clock of the zone asked for, not an instant. */
   day: number;
   plays: number;
   playedS: number;
@@ -1347,6 +1353,9 @@ function emptyDay(day: number): GraphDay {
 
 export interface Graphs {
   days: number;
+  /** The time zone its days, hours and weekdays are in. */
+  zone: string;
+  /** The instants its first day begins and its last ends. */
   from: number;
   to: number;
   totals: Omit<GraphDay, "day" | "peakViewers"> & { hitShare: number | null };

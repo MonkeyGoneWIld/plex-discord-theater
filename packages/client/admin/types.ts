@@ -319,7 +319,7 @@ export interface CachesResult {
 // ─── Graphs and the history file ────────────────────────────────
 
 export interface GraphDay {
-  /** Midnight UTC. */
+  /** The date, written as its midnight in UTC: a day in the time zone asked for, not an instant. */
   day: number;
   plays: number;
   playedS: number;
@@ -343,6 +343,8 @@ export interface GraphDay {
 
 export interface Graphs {
   days: number;
+  /** The time zone its days, hours and weekdays are in. */
+  zone: string;
   from: number;
   to: number;
   totals: Omit<GraphDay, "day" | "peakViewers"> & { hitShare: number | null };

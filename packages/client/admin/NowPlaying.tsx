@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Client, Overview, Room, Stream } from "./types";
-import { ago, bytes, clock, quality, rate, utc } from "./format";
+import { ago, bytes, clock, dateTime, quality, rate, zoneLabel } from "./format";
 import { BufferingCell, bufferingTone, DataCell, DecisionBadge } from "./parts";
 import { StreamCard, type StreamInfo } from "./streams";
 import { Icon } from "./icons";
@@ -127,7 +127,7 @@ function Viewers({ room }: { room: Room }) {
                     <td colSpan={recorded ? 7 : 4}>
                       <dl className="grid">
                         <dt>Discord user ID</dt><dd className="mono">{c.userId}</dd>
-                        <dt>Joined</dt><dd>{utc(c.joinedAt)} ({ago((Date.now() - c.joinedAt) / 1000)} ago)</dd>
+                        <dt>Joined</dt><dd>{dateTime(c.joinedAt)} ({ago((Date.now() - c.joinedAt) / 1000)} ago)</dd>
                         <dt>Stream key</dt><dd className="mono">{c.variantKey ?? "—"}</dd>
                         <dt>Quality limit</dt><dd>{quality(c.quality)}</dd>
                         <dt>Subtitle track</dt><dd className="mono">{c.subtitleStreamId || "Off"}</dd>
@@ -276,7 +276,7 @@ function Facts({ room, watching }: { room: Room; watching: number }) {
       <span className="fact"><Icon name="people" size={14} /><strong>{watching}</strong> of {room.clients.length} watching</span>
       <span className="fact" title="Discord server ID"><Icon name="places" size={14} />Server <span className="mono">{room.discord.guildId ?? "—"}</span></span>
       <span className="fact" title="Discord channel ID">Channel <span className="mono">{room.discord.channelId ?? "—"}</span></span>
-      <span className="fact" title={`Room ${room.id}`}><Icon name="clock" size={14} />Opened {utc(room.discord.startedAt)}</span>
+      <span className="fact" title={`Room ${room.id}`}><Icon name="clock" size={14} />Opened {dateTime(room.discord.startedAt)}</span>
       {room.playId ? <a className="fact" href={`#history/${room.playId}`}>Session timeline →</a> : null}
     </div>
   );
@@ -308,7 +308,7 @@ export function NowPlaying({ data }: { data: Overview | null }) {
     <>
       <div className="page-head">
         <h1>Now Playing</h1>
-        <p className="muted">Every active room, updated live. Times are UTC.</p>
+        <p className="muted">Every active room, updated live. Times are in your local time ({zoneLabel()}).</p>
       </div>
       <div className="stats">
         <Stat icon={<Icon name="now" />} label="Active sessions" value={playing.length}

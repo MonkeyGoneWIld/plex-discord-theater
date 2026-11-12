@@ -137,8 +137,8 @@ Select a session to open it:
 
 ## Statistics
 
-Trends over the last 7 days, 30 days, 90 days, a year, or all time. Days are
-UTC, and a session counts on the day it started.
+Trends over the last 7 days, 30 days, 90 days, a year, or all time. Days and
+hours are in your local time, and a session counts on the day it started.
 
 - Sessions, watch time, users, data delivered, the share of streams
   transcoded, and buffering.
@@ -191,7 +191,8 @@ made shows as such.
 
 The server's log files, newest first. Filter by level, tag or text, and show
 the last 200 to 5000 lines. **Follow** refreshes every 5 seconds. Lines
-reported by a viewer's player are labelled with that player. Times are UTC.
+reported by a viewer's player are labelled with that player. Times are in
+your local time; each file holds one day in UTC.
 
 ## System
 
@@ -239,7 +240,7 @@ A signed-in browser can read everything as files or JSON.
 | `/api/usage` | Launches and joins, newest first |
 | `/api/requests` | Title requests, with Seerr's current status |
 | `/api/caches` | Each cache and what it holds |
-| `/api/graphs` | Statistics by UTC day. `?days=` is the period: 30 unless given, 0 for all time. |
+| `/api/graphs` | Statistics by day. `?days=` is the period: 30 unless given, 0 for all time. `?tz=` is the time zone the days, hours and weekdays are in, such as `Europe/London`: UTC unless given. |
 | `/api/export/<list>.csv`, `.json` | `history`, `people`, `usage` or `requests`, as a file. `?q=` is the list's search. At most 200,000 rows. |
 | `/api/export/admin.sqlite` | A copy of the whole history database |
 

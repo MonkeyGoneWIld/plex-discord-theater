@@ -252,7 +252,7 @@ export function createAdminApp(opts: AdminOptions): express.Express {
   });
   // Graphs: the history by day, over the last ?days= days (0: all of it).
   app.get("/api/graphs", admin, recorded, (req: Request, res: Response) => {
-    res.json(recorder!.graphs({ days: req.query.days }));
+    res.json(recorder!.graphs({ days: req.query.days, zone: req.query.tz }));
   });
   // The history file, and what removing what is older than ?days= days would remove.
   const trimDays = (v: unknown): number | null => {

@@ -10,7 +10,7 @@ import { Places } from "./Places";
 import { Requests } from "./Requests";
 import { Caches } from "./Caches";
 import { GraphsTab } from "./lazy";
-import { utcTime } from "./format";
+import { timeOfDay, zoneLabel } from "./format";
 import { Icon, Logo } from "./icons";
 
 type Tab = "now" | "history" | "graphs" | "people" | "places" | "requests" | "caches" | "logs" | "settings";
@@ -142,9 +142,9 @@ export function App() {
           ))}
         </nav>
         <div className="sidebar-foot">
-          <span className={`live ${live}`} title={data ? `Last update ${utcTime(data.at)} UTC` : ""}>
+          <span className={`live ${live}`} title={data ? `Last update ${timeOfDay(data.at)}, your local time (${zoneLabel()})` : ""}>
             <span className="dot" />{live === "live" ? "Live" : live === "lost" ? "Reconnecting…" : "Connecting…"}
-            {data && <span className="muted"> · {utcTime(data.at)} UTC</span>}
+            {data && <span className="muted"> · {timeOfDay(data.at)}</span>}
           </span>
           <button className="ghost signout" onClick={async () => {
             await api.logout().catch(() => {});

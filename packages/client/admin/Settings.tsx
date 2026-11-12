@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, SignedOut } from "./api";
 import type { HistorySummary, SettingsView, TrimCounts } from "./types";
-import { ago, bytes, utc } from "./format";
+import { ago, bytes, dateTime } from "./format";
 import { Icon } from "./icons";
 
 /** Each setting's group, by its name: the first that matches. */
@@ -53,7 +53,7 @@ export function Settings({ onError }: { onError: (e: unknown) => void }) {
       <div className="stats">
         <Fact icon="check" label="Version" value={String(sys.version ?? "—")} sub={`Node.js ${String(sys.node ?? "—")}`} />
         <Fact icon="clock" label="Uptime" value={sys.uptimeS === null || sys.uptimeS === undefined ? "—" : ago(Number(sys.uptimeS))}
-          sub={sys.startedAt ? `Started ${utc(String(sys.startedAt))}` : undefined} />
+          sub={sys.startedAt ? `Started ${dateTime(String(sys.startedAt))}` : undefined} />
         <Fact icon="pulse" label="Memory" value={sys.rssMB === null || sys.rssMB === undefined ? "—" : `${sys.rssMB} MB`}
           sub={sys.heapUsedMB !== null && sys.heapUsedMB !== undefined ? `JavaScript heap ${sys.heapUsedMB} MB` : undefined} />
         <Fact icon="caches" label="Platform" value={String(sys.platform ?? "—")} sub={`Process ${String(sys.pid ?? "—")}`} />
@@ -161,7 +161,7 @@ function HistoryFile({ onError }: { onError: (e: unknown) => void }) {
           {summary.plays} sessions ({summary.open} in progress), {summary.events} timeline events,
           {" "}{summary.usage} launches and joins, {summary.requests} requests, {summary.people} users
         </dd>
-        <dt>Period covered</dt><dd>{summary.first ? `${utc(summary.first)} to ${utc(summary.last)}` : "No data yet"}</dd>
+        <dt>Period covered</dt><dd>{summary.first ? `${dateTime(summary.first)} to ${dateTime(summary.last)}` : "No data yet"}</dd>
       </dl>
 
       <h4>Backup</h4>
@@ -188,10 +188,10 @@ function HistoryFile({ onError }: { onError: (e: unknown) => void }) {
       {!valid && <p className="error small">A whole number of days, 1 to {MAX_DAYS}.</p>}
       {preview && (
         <div className="confirm" role="alert">
-          {nothing ? <p>No history is older than {n} {n === 1 ? "day" : "days"} ({utc(preview.before)}). Nothing would be deleted.</p> : (
+          {nothing ? <p>No history is older than {n} {n === 1 ? "day" : "days"} ({dateTime(preview.before)}). Nothing would be deleted.</p> : (
             <>
               <p>
-                This deletes everything older than {n} {n === 1 ? "day" : "days"}, recorded before {utc(preview.before)}: <strong>{preview.plays} sessions</strong> with
+                This deletes everything older than {n} {n === 1 ? "day" : "days"}, recorded before {dateTime(preview.before)}: <strong>{preview.plays} sessions</strong> with
                 their viewers, streams and {preview.events} timeline events; {preview.usage} launches and joins;
                 {" "}{preview.requests} requests; and {preview.people} users not seen since. Sessions in progress are kept.
               </p>

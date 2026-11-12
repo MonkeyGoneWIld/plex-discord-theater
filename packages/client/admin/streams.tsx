@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import type { Notes } from "./types";
-import { ago, clock, quality, rate, utc, utcTime } from "./format";
+import { ago, clock, quality, rate, dateTime, timeOfDay } from "./format";
 import { decisionOf, NOTE_LABELS } from "./parts";
 import { Icon } from "./icons";
 import { Avatar } from "./viz";
@@ -169,7 +169,7 @@ export function StreamCard({ s }: { s: StreamInfo }) {
             {row("Requested by", <>{s.ownerName ?? "The room"} <span className="mono muted">{s.ownerUserId ?? ""}</span></>)}
             {row("Start offset", clock(s.offsetS ?? 0))}
             {s.idleS !== undefined && row("Last watched", s.idleS === null ? "Being watched now" : `${ago(s.idleS)} ago`)}
-            {s.startedAt !== undefined && row("Active", `${utcTime(s.startedAt)} – ${s.endedAt ? utcTime(s.endedAt) : "now"} UTC`)}
+            {s.startedAt !== undefined && row("Active", `${timeOfDay(s.startedAt)} – ${s.endedAt ? timeOfDay(s.endedAt) : "now"}`)}
             {s.peakViewers !== undefined && row("Peak viewers", s.peakViewers)}
           </Group>
           <Group icon="logs" title="Identifiers">
@@ -177,7 +177,7 @@ export function StreamCard({ s }: { s: StreamInfo }) {
             {row("HLS session", s.hlsSessionId ?? "—", true)}
             {s.plexTranscodeKey !== undefined && row("Plex transcode key", s.plexTranscodeKey ?? "—", true)}
             {s.plexClientId !== undefined && row("Plex player ID", s.plexClientId ?? "—", true)}
-            {s.notesAt !== undefined && row("Playlist created", utc(s.notesAt))}
+            {s.notesAt !== undefined && row("Playlist created", dateTime(s.notesAt))}
             {other.map(([k, v]) => row(NOTE_LABELS[k] ?? k, String(v)))}
           </Group>
         </div>

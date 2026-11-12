@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "./api";
 import type { TitleRequest } from "./types";
-import { utc } from "./format";
+import { dateTime } from "./format";
 import { Downloads, useLoad, Who } from "./parts";
 
 const PAGE = 50;
@@ -68,7 +68,7 @@ export function RequestRows({ requests, showWho = true }: { requests: TitleReque
         <tbody>
           {requests.map((r) => (
             <tr key={r.id}>
-              <td className="nowrap">{utc(r.at)}</td>
+              <td className="nowrap">{dateTime(r.at)}</td>
               {showWho && <td><Who id={r.userId} name={r.username} /></td>}
               {showWho && <td className="mono">{r.userId ?? "—"}</td>}
               <td><strong>{r.title ?? "Unknown title"}</strong></td>

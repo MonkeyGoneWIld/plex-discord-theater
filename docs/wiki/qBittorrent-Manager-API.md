@@ -19,7 +19,7 @@ In the Theater service:
 ```yaml
 services:
   plex-discord-theater:
-    image: ghcr.io/monkeygonewild/plex-discord-theater:2.2.0
+    image: ghcr.io/monkeygonewild/plex-discord-theater:2.3.0
     environment:
       QBT_MANAGER_API_KEY: "the-shared-secret"
 ```

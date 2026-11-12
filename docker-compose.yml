@@ -8,7 +8,7 @@
 services:
   app:
     container_name: plex-discord-theater
-    image: ghcr.io/monkeygonewild/plex-discord-theater:latest # Pin a release tag, such as :2.2.0, for deliberate updates.
+    image: ghcr.io/monkeygonewild/plex-discord-theater:latest # Pin a release tag, such as :2.3.0, for deliberate updates.
     build:
       context: .
     restart: unless-stopped

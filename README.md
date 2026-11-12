@@ -14,7 +14,7 @@ quality.
 **[Features](#features)** ·
 **[For server owners](#for-server-owners)**
 
-Current release: **v2.2.0** · `ghcr.io/monkeygonewild/plex-discord-theater:latest`
+Current release: **v2.3.0** · `ghcr.io/monkeygonewild/plex-discord-theater:latest`
 
 > [!WARNING]
 > **This project was built with AI.** It was developed primarily with

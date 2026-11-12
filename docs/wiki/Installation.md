@@ -88,7 +88,7 @@ In a stack manager, deploy the stack.
 | Tag | Follows |
 |---|---|
 | `latest` | The newest release |
-| A version, such as `2.2.0` | That release only |
+| A version, such as `2.3.0` | That release only |
 
 ## Build from source
 

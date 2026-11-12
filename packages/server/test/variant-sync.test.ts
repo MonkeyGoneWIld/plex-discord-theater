@@ -22,7 +22,7 @@ process.env.PDT_AWAY_HOLD_MS = String(AWAY_MS);
 // Imported only now: the session, instance and history stores open their
 // databases wherever THUMB_CACHE_DIR points as they load, and a static import
 // would load them before the line above runs.
-const { attachWebSocketServer, closeWebSocketServer, sessionHasOtherWatchers } = await import("../src/services/sync.js");
+const { attachWebSocketServer, closeWebSocketServer, sessionHasOtherWatchers, adminRooms } = await import("../src/services/sync.js");
 const { createSession } = await import("../src/middleware/auth.js");
 const { instanceHosts } = await import("../src/routes/discord.js");
 
@@ -1307,8 +1307,14 @@ console.log("\n— a host alone popping out keeps the room —");
   await sleep(60);
   host.close();
   await sleep(300);
+  const held = adminRooms().find((r) => r.id === "inst-alone");
+  check("the dashboard is told the room is held, and who for", [held?.held, held?.heldFor?.hostUserId], [true, "u-host"]);
   const back = new Client("u-host", "host");
   await back.connect("inst-alone");
+  // 11 November: "The room is empty and held for its host to return." stayed
+  // on the dashboard over The Odyssey with two people watching it.
+  const again = adminRooms().find((r) => r.id === "inst-alone");
+  check("and that it isn't any more once its host is back", [again?.held, again?.heldFor, again?.clients.length], [false, null, 1]);
   const state = back.last("state");
   check("back within the hold, the film is still on", state?.ratingKey, "100");
   check("on the same stream", state?.hlsSessionId, sid);

@@ -180,7 +180,7 @@ function HistoryFile({ onError }: { onError: (e: unknown) => void }) {
         api.historyFile(n).then((f) => { setSummary(f.summary); setPreview(f.trim); }).catch(fail).finally(() => setBusy(false));
       }}>
         <label>
-          <span>Keep the most recent (days)</span>
+          <span>Delete history older than (days)</span>
           <input type="number" min={1} max={MAX_DAYS} step={1} value={days} onChange={(e) => { setDays(e.target.value); setPreview(null); }} />
         </label>
         <button type="submit" className="ghost" disabled={!valid || busy}>Preview deletion</button>
@@ -188,10 +188,10 @@ function HistoryFile({ onError }: { onError: (e: unknown) => void }) {
       {!valid && <p className="error small">A whole number of days, 1 to {MAX_DAYS}.</p>}
       {preview && (
         <div className="confirm" role="alert">
-          {nothing ? <p>There is nothing older than {utc(preview.before)} to delete.</p> : (
+          {nothing ? <p>No history is older than {n} {n === 1 ? "day" : "days"} ({utc(preview.before)}). Nothing would be deleted.</p> : (
             <>
               <p>
-                This deletes everything recorded before {utc(preview.before)}: <strong>{preview.plays} sessions</strong> with
+                This deletes everything older than {n} {n === 1 ? "day" : "days"}, recorded before {utc(preview.before)}: <strong>{preview.plays} sessions</strong> with
                 their viewers, streams and {preview.events} timeline events; {preview.usage} launches and joins;
                 {" "}{preview.requests} requests; and {preview.people} users not seen since. Sessions in progress are kept.
               </p>
@@ -202,7 +202,7 @@ function HistoryFile({ onError }: { onError: (e: unknown) => void }) {
                   api.trim(n).then((r) => {
                     setPreview(null);
                     setDone(`Deleted ${r.plays} sessions, ${r.events} timeline events, ${r.usage} launches and joins, ${r.requests} requests `
-                      + `and ${r.people} people. The file went from ${bytes(r.bytesBefore)} to ${bytes(r.bytesAfter)}.`);
+                      + `and ${r.people} users. The file went from ${bytes(r.bytesBefore)} to ${bytes(r.bytesAfter)}.`);
                     return load();
                   }).catch(fail).finally(() => setBusy(false));
                 }}>{busy ? "Deleting…" : "Delete permanently"}</button>

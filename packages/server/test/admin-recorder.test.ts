@@ -197,6 +197,19 @@ check("  and the room's delivery over the last minutes: a point every 10 s, the 
   [flow?.stepS, flow?.windowS, (flow?.points.length ?? 0) > 0, flow?.points.every((p) => p.length === 4 && p.every((n) => n >= 0))],
   [10, 30, true, true]);
 {
+  // 11 November: "Streams held for viewers who left moments ago:
+  // <their Discord ID> (<stream key>)". Who left is not among the room's clients.
+  const empty = structuredClone(R1);
+  empty.clients = [];
+  empty.held = true;
+  empty.heldFor = { hostUserId: "111", guildId: "G1", channelId: "C1" };
+  empty.away = [{ userId: "222", ratingKey: "58860", variantKey: "v1", quality: 0 }, { userId: "404", ratingKey: "58860", variantKey: "v2", quality: 0 }];
+  const names = rec.annotate({ at: t, totals: {}, rooms: [empty] } as unknown as Overview).rooms[0].names;
+  check("  and the names of those who have left it: its host, and who a stream is kept for (nobody it never saw)",
+    names, { 111: "alex", 222: "robin" });
+  check("  nobody named twice: those in the room have their names there", ov.rooms[0].names, {});
+}
+{
   // 1 Mbps from the server and 2 Mbps from Discord's cache, said every 10 s.
   const base = 1_800_000_000_000;
   const samples = [0, 10, 20, 30, 40].map((s) => ({ t: base + s * 1000, bot: s * 125_000, hit: s * 250_000, p2p: 0 }));

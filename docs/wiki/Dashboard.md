@@ -8,6 +8,8 @@ every session, with statistics, users, requests, caches and logs.
 It runs on a port of its own, apart from the Activity, and only once you set a
 password.
 
+![The Now Playing page: a session with its delivery graph, its stream and its viewers](https://raw.githubusercontent.com/MonkeyGoneWIld/plex-discord-theater/main/docs/screenshots/dashboard-now-playing.png)
+
 ## Turn it on
 
 1. Set `ADMIN_PASSWORD` to a password of 12 characters or more.
@@ -105,6 +107,11 @@ data they received with its split, and their buffering. Select a viewer for
 their Discord user ID, quality limit, subtitle track, and what their device
 can play.
 
+When everyone leaves a room, its session is kept for a short time so the host
+can return and continue. When a viewer on a stream of their own leaves, that
+stream is kept for a few seconds in case they return. The session says so, by
+name, while either is true.
+
 ## History
 
 Every session, newest first, each with its poster: the title, when it started,
@@ -116,6 +123,8 @@ Search finds a title, a viewer's name or Discord user ID, or a server or
 channel ID. **CSV** and **JSON** export every session the search finds.
 
 Select a session to open it:
+
+![A session in the history: its summary, viewers, stream and overview chart](https://raw.githubusercontent.com/MonkeyGoneWIld/plex-discord-theater/main/docs/screenshots/dashboard-session.png)
 
 | Section | Shows |
 |---|---|
@@ -169,6 +178,8 @@ made shows as such.
 
 ## Caches
 
+- **Storage used.** The total size of everything the server stores, and each
+  cache's size, share of the total, limit and number of items, largest first.
 - **Discord cache efficiency.** How much of the video players downloaded was
   served by Discord's cache instead of your server, over the last day, the
   last week and all time, and for each title.
@@ -187,9 +198,9 @@ reported by a viewer's player are labelled with that player. Times are UTC.
 - **Status.** Version, uptime, memory and platform.
 - **History database.** Where `admin.sqlite` is, its size, what it holds and
   the period it covers. **Download database** saves a copy. **Delete old
-  history** keeps the most recent days you choose: **Preview deletion** shows
-  what would go, and nothing is deleted until you confirm. Sessions in
-  progress are never deleted.
+  history** deletes everything older than the number of days you enter:
+  **Preview deletion** shows what would go, and nothing is deleted until you
+  confirm. Sessions in progress are never deleted.
 - **Configuration.** Every environment setting the server reads, grouped by
   area. They are shown for reference. To change one, edit your compose file
   or `.env` and restart the container.

@@ -244,6 +244,15 @@ a:hover { text-decoration: underline; }
 .meter { height: 8px; background: var(--surface-2); border-radius: 999px; overflow: hidden; margin-top: 12px; }
 .meter span { display: block; height: 100%; background: var(--accent); }
 .meter span.warn { background: var(--warn); }
+.storage-total { font-size: 26px; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.table.storage { margin-top: 12px; }
+.table.storage .num { text-align: right; font-variant-numeric: tabular-nums; }
+.table.storage tfoot td { border-top: 1px solid var(--border); border-bottom: 0; }
+.storage-share { min-width: 220px; width: 45%; }
+.storage-bar { display: inline-block; vertical-align: middle; width: calc(100% - 62px); height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.storage-bar span { display: block; height: 100%; border-radius: 999px; background: var(--series-1); }
+.storage-bar span.some { min-width: 3px; }
+.storage-pct { display: inline-block; width: 54px; margin-left: 8px; text-align: right; color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .cache-list { margin: 12px 0 0; }
 .cache-list .table { margin-top: 0; }
 .tabs { overflow-x: auto; scrollbar-width: none; min-width: 0; }

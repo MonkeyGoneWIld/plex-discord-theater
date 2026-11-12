@@ -110,8 +110,8 @@ function Launches({ onError }: { onError: (e: unknown) => void }) {
         </div>
       )}
       <div className="pager">
-        <button className="ghost" disabled={pages.length < 2} onClick={() => setPages(pages.slice(0, -1))}>Newer</button>
-        <button className="ghost" disabled={rows.length < PAGE} onClick={() => setPages([...pages, rows[rows.length - 1].id])}>Older</button>
+        <button className="ghost" disabled={pages.length < 2} onClick={() => setPages(pages.slice(0, -1))}>Previous</button>
+        <button className="ghost" disabled={rows.length < PAGE} onClick={() => setPages([...pages, rows[rows.length - 1].id])}>Next</button>
       </div>
     </section>
   );

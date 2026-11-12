@@ -17,14 +17,61 @@ export function Caches({ onError }: { onError: (e: unknown) => void }) {
       <div className="page-head with-action">
         <div>
           <h1>Caches</h1>
-          <p className="muted">How much Discord's cache saves the server, and what the server keeps on disk. Read at {utcTime(data.at)} UTC.</p>
+          <p className="muted">What the server stores, and how much Discord's cache saves it. Read at {utcTime(data.at)} UTC.</p>
         </div>
         <button className="ghost" onClick={reload} disabled={busy}>{busy ? "Refreshing…" : "Refresh"}</button>
       </div>
+      <Storage caches={data.caches} />
       <Discord d={data.discord} />
       {data.discord && <MiniChart kind="data" onError={onError} />}
       {data.caches.map((c) => <CacheCard key={c.id} c={c} />)}
     </>
+  );
+}
+
+/** Everything the server stores, and how much of it each cache is. One hue: the bars compare sizes. */
+function Storage({ caches }: { caches: CacheView[] }) {
+  const total = caches.reduce((sum, c) => sum + c.bytes, 0);
+  const items = caches.reduce((sum, c) => sum + c.items, 0);
+  const rows = [...caches].sort((a, b) => b.bytes - a.bytes);
+  return (
+    <section className="card">
+      <header className="room-head">
+        <div>
+          <h3>Storage used</h3>
+          <p className="muted small cache-what">The total size of everything the server stores, and each cache's share of it. Largest first.</p>
+        </div>
+        <div className="cache-size">
+          <strong className="storage-total">{bytes(total)}</strong>
+          <div className="muted small">{items.toLocaleString("en")} {items === 1 ? "item" : "items"} in {caches.length} caches</div>
+        </div>
+      </header>
+      <div className="table-wrap">
+        <table className="table storage">
+          <thead><tr><th>Cache</th><th>Share of total</th><th className="num">Size</th><th className="num">Limit</th><th className="num">Items</th></tr></thead>
+          <tbody>
+            {rows.map((c) => {
+              const part = total > 0 ? c.bytes / total : 0;
+              return (
+                <tr key={c.id}>
+                  <td><strong>{c.name}</strong></td>
+                  <td className="storage-share">
+                    <span className="storage-bar" aria-hidden><span style={{ width: `${part * 100}%` }} className={c.bytes > 0 ? "some" : ""} /></span>
+                    <span className="storage-pct">{part > 0 && part < 0.001 ? "<0.1%" : `${(part * 100).toFixed(1)}%`}</span>
+                  </td>
+                  <td className="num nowrap">{bytes(c.bytes)}</td>
+                  <td className="num nowrap muted">{c.limitBytes ? bytes(c.limitBytes) : "None"}</td>
+                  <td className="num">{c.items.toLocaleString("en")}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr><td><strong>Total</strong></td><td /><td className="num nowrap"><strong>{bytes(total)}</strong></td><td /><td className="num"><strong>{items.toLocaleString("en")}</strong></td></tr>
+          </tfoot>
+        </table>
+      </div>
+    </section>
   );
 }
 

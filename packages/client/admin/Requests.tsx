@@ -112,8 +112,8 @@ export function Requests({ onError }: { onError: (e: unknown) => void }) {
         <p className="empty">{query ? "No requests match this search." : "No requests have been recorded yet."}</p>
       ) : <RequestRows requests={requests} />}
       <div className="pager">
-        <button className="ghost" disabled={pages.length < 2} onClick={() => setPages(pages.slice(0, -1))}>Newer</button>
-        <button className="ghost" disabled={requests.length < PAGE} onClick={() => setPages([...pages, requests[requests.length - 1].id])}>Older</button>
+        <button className="ghost" disabled={pages.length < 2} onClick={() => setPages(pages.slice(0, -1))}>Previous</button>
+        <button className="ghost" disabled={requests.length < PAGE} onClick={() => setPages([...pages, requests[requests.length - 1].id])}>Next</button>
       </div>
     </section>
     </>

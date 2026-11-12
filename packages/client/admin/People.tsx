@@ -55,8 +55,8 @@ function PeopleList({ onError }: { onError: (e: unknown) => void }) {
         </div>
       )}
       <div className="pager">
-        <button className="ghost" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>Newer</button>
-        <button className="ghost" disabled={people.length < PAGE} onClick={() => setOffset(offset + PAGE)}>Older</button>
+        <button className="ghost" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>Previous</button>
+        <button className="ghost" disabled={people.length < PAGE} onClick={() => setOffset(offset + PAGE)}>Next</button>
       </div>
     </section>
     </>

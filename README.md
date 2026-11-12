@@ -137,6 +137,8 @@ flowchart LR
 - **Private by design.** Plex tokens never reach a browser, and the Activity
   can be limited to your own Discord servers.
 
+![The Theater Dashboard's Now Playing page: a session with its delivery graph, its stream and its viewers](docs/screenshots/dashboard-now-playing.png)
+
 ## Quick start
 
 You need:

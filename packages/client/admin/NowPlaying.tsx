@@ -23,7 +23,26 @@ const STATE: Record<State, { label: string; tone: string }> = {
   idle: { label: "Idle", tone: "muted" },
 };
 
-const nameOf = (room: Room, userId: string | null) => (userId ? room.clients.find((c) => c.userId === userId)?.username ?? userId : "—");
+/** A person's name where it is known: from the room, or from the history for somebody who has left. */
+const known = (room: Room, userId: string | null | undefined) =>
+  (userId ? room.clients.find((c) => c.userId === userId)?.username ?? room.names?.[userId] ?? null : null);
+const nameOf = (room: Room, userId: string | null) => (userId ? known(room, userId) ?? userId : "—");
+
+const listed = (names: string[]) => (names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`);
+
+/** A room everybody has left, in a sentence: who it is kept for. */
+function heldNote(room: Room): string {
+  const host = known(room, room.heldFor?.hostUserId ?? room.discord.hostUserId);
+  return `Everyone has left. The session is kept for a short time so ${host ?? "the host"} can return and continue from where they stopped.`;
+}
+
+/** Viewers who left a stream of their own a moment ago: by name, or by how many when a name isn't known. */
+function awayNote(room: Room): string {
+  const n = room.away.length;
+  const names = room.away.map((a) => known(room, a.userId)).filter((name): name is string => !!name);
+  const who = names.length === n ? listed(names) : n === 1 ? "A viewer" : `${n} viewers`;
+  return `${who} left a moment ago. ${n === 1 ? "Their stream is" : "Their streams are"} kept briefly in case they return.`;
+}
 
 /** What a room's players need each second to keep playing: each watched stream's bitrate, once a viewer. Nothing while paused. */
 const requiredBps = (room: Room) => (room.playing ? room.streams.reduce((sum, s) => sum + (s.kbps ?? 0) * 1000 * s.viewers.length, 0) : 0);
@@ -155,7 +174,7 @@ function Session({ room, durationS, sub }: { room: Room; durationS: number | nul
           <div>
             <h3>No title selected</h3>
             <div className="session-sub">
-              {room.heldFor ? "The room is empty and held for its host to return." : `${room.clients.length} ${room.clients.length === 1 ? "person is" : "people are"} browsing the library.`}
+              {room.held ? heldNote(room) : `${room.clients.length} ${room.clients.length === 1 ? "person is" : "people are"} browsing the library.`}
             </div>
           </div>
           <span className="badge muted">Idle</span>
@@ -234,12 +253,10 @@ function Session({ room, durationS, sub }: { room: Room; durationS: number | nul
         <Viewers room={room} />
       </div>
 
-      {(room.away.length > 0 || room.queue.length > 0 || room.heldFor) && (
+      {(room.away.length > 0 || room.queue.length > 0 || room.held) && (
         <div className="session-block">
-          {room.heldFor && <p className="note">The room is empty and held for its host to return.</p>}
-          {room.away.length > 0 && (
-            <p className="note">Streams held for viewers who left moments ago: {room.away.map((a) => `${nameOf(room, a.userId)} (${a.variantKey})`).join(", ")}</p>
-          )}
+          {room.held && <p className="note">{heldNote(room)}</p>}
+          {!room.held && room.away.length > 0 && <p className="note">{awayNote(room)}</p>}
           {room.queue.length > 0 && (
             <details className="queue">
               <summary>Up next ({room.queue.length})</summary>

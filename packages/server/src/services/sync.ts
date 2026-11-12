@@ -1104,7 +1104,9 @@ export interface AdminRoom {
   hostSubtitleId: number;
   coHostIds: string[];
   queue: Array<{ ratingKey: string; title: string; type: string }>;
-  /** For a room nobody is in, kept for its host to come back to. */
+  /** Nobody is in it now, and it is kept for them to come back to. */
+  held: boolean;
+  /** Who a held room is kept for; null once anybody is back in it. */
   heldFor: { hostUserId: string; guildId: string | null; channelId: string | null } | null;
   clients: Array<{
     userId: string;
@@ -1141,6 +1143,9 @@ export function adminRooms(now = Date.now()): AdminRoom[] {
   const tick = performance.now();
   return [...rooms].map(([id, room]) => {
     const s = room.state;
+    // room.heldFor stays on the room after its host is back: the page said
+    // "empty and held for its host" over a film two people were watching.
+    const held = room.emptyHold !== undefined && room.clients.size === 0;
     return {
       id,
       ratingKey: s.ratingKey,
@@ -1155,7 +1160,8 @@ export function adminRooms(now = Date.now()): AdminRoom[] {
       hostSubtitleId: s.hostSubtitleId,
       coHostIds: [...room.coHostIds],
       queue: s.queue.map((q) => ({ ratingKey: q.ratingKey, title: q.title, type: q.type })),
-      heldFor: room.heldFor ?? null,
+      held,
+      heldFor: held ? room.heldFor ?? null : null,
       clients: [...room.clients].map((c) => ({
         userId: c.userId,
         username: c.username,

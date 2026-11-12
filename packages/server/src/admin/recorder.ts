@@ -854,6 +854,17 @@ export class Recorder {
         const v = play?.viewers.get(c.userId);
         if (v) c.data = viewerData(v);
       }
+      // Who has left is no longer among its clients, and the page had only
+      // their Discord ID to show.
+      const here = new Set(room.clients.map((c) => c.userId));
+      const names: Record<string, string> = {};
+      const gone = [room.discord.hostUserId, room.heldFor?.hostUserId, ...room.away.map((a) => a.userId), ...room.streams.map((s) => s.ownerUserId)];
+      for (const id of gone) {
+        if (!id || here.has(id) || names[id]) continue;
+        const name = this.nameOf(id);
+        if (name) names[id] = name;
+      }
+      room.names = names;
     }
     return ov;
   }

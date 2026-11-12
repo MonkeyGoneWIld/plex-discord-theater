@@ -41,7 +41,7 @@ export function Logo({ size = 28 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
       <rect width="32" height="32" rx="8" fill="#e5a00d" />
-      <path d="M12 8.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72l-12.5-7.5A1 1 0 0 0 12 8.5Z" fill="#14161b" />
+      <path d="M10 8.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72l-12.5-7.5A1 1 0 0 0 10 8.5Z" fill="#14161b" />
     </svg>
   );
 }

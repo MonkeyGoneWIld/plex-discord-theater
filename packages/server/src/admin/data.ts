@@ -68,6 +68,8 @@ export interface RoomView extends Omit<AdminRoom, "variants" | "clients"> {
   streams: StreamView[];
   /** Its play in the history, while the admin page records. */
   playId?: number | null;
+  /** The names of people it mentions who aren't in it now: its host, who a stream is kept for. */
+  names?: Record<string, string>;
   /** Its delivery over the last minutes, by source (admin/recorder.ts flowSeries). */
   flow?: { stepS: number; windowS: number; points: Array<[number, number, number, number]> } | null;
 }

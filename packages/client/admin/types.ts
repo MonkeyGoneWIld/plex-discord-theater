@@ -70,12 +70,15 @@ export interface Room {
   hostSubtitleId: number;
   coHostIds: string[];
   queue: Array<{ ratingKey: string; title: string; type: string }>;
+  held: boolean;
   heldFor: { hostUserId: string; guildId: string | null; channelId: string | null } | null;
   clients: Client[];
   away: Array<{ userId: string; ratingKey: string | null; variantKey: string; quality: number }>;
   discord: { guildId: string | null; channelId: string | null; hostUserId: string | null; startedAt: number | null };
   streams: Stream[];
   playId?: number | null;
+  /** Names of people it mentions who have left it. */
+  names?: Record<string, string>;
   /** Delivery over the last minutes: [time, server, Discord cache, peers], bits a second. */
   flow?: { stepS: number; windowS: number; points: Array<[number, number, number, number]> } | null;
 }

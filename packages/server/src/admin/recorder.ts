@@ -176,6 +176,7 @@ interface ClientSnap {
   quality: number;
   role: string;
   away: boolean;
+  device: string | null;
 }
 
 interface RoomSnap {
@@ -192,6 +193,8 @@ interface RoomSnap {
   hostMove: { at: number; name: string | null; from: string; to: string; why: string | null } | null;
   /** The host's last change of subtitles: those following the host's change with them. */
   hostSubtitle: { at: number; name: string | null; from: number; to: number } | null;
+  /** The client each viewer was last on, by user id: one back on another is a switch. */
+  devices: Map<string, string>;
 }
 
 /** A stream's tracks, without what makes it somebody's own: "135844:0". */
@@ -558,7 +561,7 @@ export class Recorder {
     let snap = this.snaps.get(room.id);
     if (!snap) {
       snap = { clients: new Map(), ever: new Set(), playId: null, waitingSince: null, waitWhy: null, waitSwitching: null, hostMove: null,
-        hostSubtitle: null };
+        hostSubtitle: null, devices: new Map() };
       this.snaps.set(room.id, snap);
     }
     let play = this.open.get(room.id) ?? null;
@@ -630,7 +633,7 @@ export class Recorder {
     for (const c of room.clients) {
       const cur: ClientSnap = {
         connected: c.connected, variantKey: c.variantKey, subtitleStreamId: c.subtitleStreamId,
-        quality: c.quality, role: c.role, away: c.away,
+        quality: c.quality, role: c.role, away: c.away, device: c.device ?? null,
       };
       now.set(c.userId, cur);
       const prev = snap.clients.get(c.userId);
@@ -644,12 +647,26 @@ export class Recorder {
                  VALUES (?, 'join', ?, ?, ?, ?, ?)`)
           .run(at, room.id, c.userId, c.username, room.discord.guildId, room.discord.channelId);
       }
+      // Which client: the Discord app or a browser, on which system, and what
+      // its player plays; one back on another, or replaced by another, is a switch.
+      const before = snap.devices.get(c.userId) ?? null;
+      const device = c.device ?? null;
+      if (device) snap.devices.set(c.userId, device);
+      const switched = () => {
+        if (before && device && device !== before) {
+          this.event(play, room.id, at, "switched client", c.userId, c.username, room.positionS, { from: before, to: device, role: c.role });
+        }
+      };
       if (!prev?.connected) {
         const v = play?.viewers.get(c.userId);
         if (v) Object.assign(v, { joinedAt: at, streamAt: at });
-        this.event(play, room.id, at, prev ? "came back" : "joined", c.userId, c.username, room.positionS, { role: c.role });
+        this.event(play, room.id, at, prev ? "came back" : "joined", c.userId, c.username, room.positionS, {
+          role: c.role, ...(device ? { device } : {}), caps: c.caps, ...(c.av1Encode ? { av1Encode: true } : {}),
+        });
+        switched();
         continue;
       }
+      switched();
       const changed = (kind: string, from: unknown, to: unknown) =>
         this.event(play, room.id, at, kind, c.userId, c.username, room.positionS, { from, to });
       // Somebody who joined starts on a stream; they didn't move from one.

@@ -39,7 +39,7 @@ const { attachWebSocketServer } = await import("../src/services/sync.js");
 const { createSession } = await import("../src/middleware/auth.js");
 const { instanceHosts } = await import("../src/routes/discord.js");
 const { WebSocket } = await import("ws");
-const { backfill } = await import("./admin-fixture-history.js");
+const { backfill, AGENTS } = await import("./admin-fixture-history.js");
 
 // Its history, recorded as on a real server, into the fixture's own folder:
 // six weeks of it made up first, for the graphs.
@@ -89,13 +89,13 @@ await new Promise<void>((r) => server.listen(port, "127.0.0.1", r));
 const origin = `http://127.0.0.1:${port}`;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function join(roomId: string, userId: string, username: string) {
+async function join(roomId: string, userId: string, username: string, device: string) {
   const token = createSession(userId, null);
   const ws = new WebSocket(`${origin.replace(/^http/, "ws")}/ws?token=${token}`);
   const seen: Array<{ type: string }> = [];
   ws.on("message", (d) => seen.push(JSON.parse(String(d))));
   await new Promise<void>((r, j) => { ws.once("open", () => r()); ws.once("error", j); });
-  ws.send(JSON.stringify({ type: "join", sessionToken: token, instanceId: roomId, userId, username }));
+  ws.send(JSON.stringify({ type: "join", sessionToken: token, instanceId: roomId, userId, username, device }));
   for (let i = 0; i < 80 && !seen.some((m) => m.type === "state"); i++) await sleep(25);
   const send = (m: Record<string, unknown>) => ws.send(JSON.stringify(m));
   send({ type: "watching", value: true });
@@ -111,12 +111,12 @@ rememberStreamNotes(copy, {
   engine: "ffmpeg", video: "copy", kbps: 3837, videoFrom: "HEVC Main 10 · 10-bit · SDR · 1440×1080 · 23.976 fps", range: "SDR",
   audio: "transcode", audioFrom: "AC3 2.0", audioTo: "AAC 2.0", audioKbps: 256, audioReason: "Unsupported codec (AC3)",
 });
-const host = await join(ghosts, "100000000000000001", "alex");
+const host = await join(ghosts, "100000000000000001", "alex", AGENTS.desktop);
 host({ type: "play", ratingKey: "58861", title: "Ghost Stories — S01E03", subtitles: false, hlsSessionId: copy,
   position: 312, sessionOffset: 0, audioStreamId: 0, subtitleStreamId: 0 });
-await join(ghosts, "402115789012345678", "kit");
-await join(ghosts, "402115789012345679", "jo");
-const robin = await join(ghosts, "402115789012345680", "robin");
+await join(ghosts, "402115789012345678", "kit", AGENTS.iphone);
+await join(ghosts, "402115789012345679", "jo", AGENTS.firefox);
+const robin = await join(ghosts, "402115789012345680", "robin", AGENTS.chrome);
 robin({ type: "set-tracks", audioStreamId: 1, subtitleStreamId: 0 });
 const encode = crypto.randomUUID();
 rememberStreamNotes(encode, {
@@ -134,16 +134,16 @@ const filmCopy = crypto.randomUUID();
 rememberStreamNotes(filmCopy, {
   fallback: "", video: "copy", kbps: 18450, quality: "Original", videoFrom: "H.264 High · 8-bit · SDR · 1920×1080 · 24 fps", range: "SDR", audio: "copy", audioFrom: "AAC 5.1",
 });
-const filmHost = await join(film, "200000000000000001", "nightowl");
+const filmHost = await join(film, "200000000000000001", "nightowl", AGENTS.vesktop);
 filmHost({ type: "play", ratingKey: "173951", title: "The Long Goodbye", subtitles: false, hlsSessionId: filmCopy,
   position: 4210, sessionOffset: 0, audioStreamId: 0, subtitleStreamId: 0 });
-await join(film, "200000000000000002", "marlowe");
+await join(film, "200000000000000002", "marlowe", AGENTS.android);
 filmHost({ type: "pause" });
 
 // An Activity opened with nothing chosen yet.
 const idle = "i-310021-fixture";
 instanceHosts.set(idle, { hostUserId: "300000000000000001", guildId: "555000333", channelId: "444000333", createdAt: Date.now() - 2 * 60_000 });
-await join(idle, "300000000000000001", "lurker");
+await join(idle, "300000000000000001", "lurker", AGENTS.edge);
 
 // Each viewer's player, saying every 10 seconds what it has had: some from
 // the bot, some from Discord's cache, some from other viewers.

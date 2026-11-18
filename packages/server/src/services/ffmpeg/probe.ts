@@ -23,6 +23,9 @@ export interface ProbedStream {
   language: string | null;
   filename: string | null;
   mimetype: string | null;
+  /** How long the stream runs, as the file says (Matroska's DURATION tag, or
+   *  the stream's own length); null when it doesn't. */
+  durationS?: number | null;
 }
 
 export interface Probed {
@@ -35,6 +38,34 @@ export interface Probed {
 /** How long ffprobe gets: a file's header, from the mount or through Plex. */
 const PROBE_TIMEOUT_MS = 15_000;
 
+/**
+ * A stream's length, seconds: Matroska's DURATION tag ("01:56:42.848000000"),
+ * else the stream's own length. The tag first: Matroska gives a subtitle the
+ * whole file's length as its own, and its true one in the tag.
+ */
+export function streamLength(s: { duration?: string; tags?: Record<string, string> }): number | null {
+  const tag = Object.entries(s.tags ?? {}).find(([k]) => /^duration/i.test(k))?.[1];
+  const hms = tag ? /^(\d+):(\d{2}):(\d{2}(?:\.\d+)?)$/.exec(tag.trim()) : null;
+  if (hms) return Number(hms[1]) * 3600 + Number(hms[2]) * 60 + Number(hms[3]);
+  const own = Number(s.duration);
+  return Number.isFinite(own) && own > 0 ? own : null;
+}
+
+/** How much sooner than the file the sound may stop before it is filled with silence. */
+const SOUND_SHORT_S = 1;
+
+/**
+ * Where a file's picture ends, film time, when its sound stops more than a
+ * second before that (Verity: sound to 7002.8 s, the file to 7256.8 s): the
+ * converted sound is then filled with silence to there (plan.ts audioArgs).
+ * Null when the sound runs to the end, or the file doesn't say.
+ */
+export function soundPadTo(probed: Probed | null, audioIndex: number): number | null {
+  const end = probed?.durationS ?? null;
+  const sound = probed?.streams.find((s) => s.index === audioIndex)?.durationS ?? null;
+  return end !== null && sound !== null && sound < end - SOUND_SHORT_S ? end : null;
+}
+
 /** ffprobe's answer for a file, null when it couldn't say. */
 export function probe(input: string[]): Promise<Probed | null> {
   return new Promise((resolve) => {
@@ -43,7 +74,7 @@ export function probe(input: string[]): Promise<Probed | null> {
     try {
       child = spawn(ffprobePath(), [
         "-hide_banner", "-v", "error",
-        "-show_entries", "format=start_time,duration:stream=index,codec_type,codec_name:stream_tags=language,filename,mimetype",
+        "-show_entries", "format=start_time,duration:stream=index,codec_type,codec_name,duration:stream_tags=language,filename,mimetype,duration",
         "-of", "json", ...input,
       ], { stdio: ["ignore", "pipe", "ignore"] });
     } catch {
@@ -59,7 +90,7 @@ export function probe(input: string[]): Promise<Probed | null> {
       try {
         const json = JSON.parse(out) as {
           format?: { start_time?: string; duration?: string };
-          streams?: Array<{ index: number; codec_type?: string; codec_name?: string; tags?: Record<string, string> }>;
+          streams?: Array<{ index: number; codec_type?: string; codec_name?: string; duration?: string; tags?: Record<string, string> }>;
         };
         const start = Number(json.format?.start_time);
         const duration = Number(json.format?.duration);
@@ -73,6 +104,7 @@ export function probe(input: string[]): Promise<Probed | null> {
             language: s.tags?.language ?? s.tags?.LANGUAGE ?? null,
             filename: s.tags?.filename ?? null,
             mimetype: s.tags?.mimetype ?? null,
+            durationS: streamLength(s),
           })),
         });
       } catch {

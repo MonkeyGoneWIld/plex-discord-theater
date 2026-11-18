@@ -108,13 +108,15 @@ Updated every 2 seconds. The browser tab shows how many sessions are active.
 Select a stream for its details, in four groups: video, audio, delivery and
 identifiers. Audio and subtitle tracks show by name, with Plex's number beside.
 
-**Each viewer** shows their role and their player's state, from what it last
+**Each viewer** shows their role, the client they are on (the Discord desktop
+app, the Discord app on a phone, Vesktop, or a browser, and the system), and
+their player's state, from what it last
 reported: watching, loading (as they start, or after a seek), buffering and
 for how long, away or disconnected. Then which stream they are on, how long
 they have watched, the data they received with its split, what they sent to
 other viewers, and their buffering. Loading is not buffering and isn't counted as it. Select a viewer
-for their Discord user ID, quality limit, subtitle track by name, and what
-their device can play.
+for their Discord user ID, quality limit, subtitle track by name, what
+their device can play, and their client's user agent as it gave it.
 
 When everyone leaves a room, its session is kept for a short time so the host
 can return and continue. When a viewer on a stream of their own leaves, that
@@ -137,13 +139,14 @@ Select a session to open it:
 
 | Section | Shows |
 |---|---|
-| Summary | How it ended and who ended it, time played, viewers, streams, data delivered and buffering, then the data sources and peer-to-peer sharing |
-| Viewers | Each person's role, watch time, data received, data sent to other viewers, and buffering |
+| Summary | How it ended and who ended it, time played, viewers, streams, data delivered and buffering, then the data sources |
+| Viewers | Each person's role and client, the streams they were on, watch time, data received, data sent to other viewers, and buffering. Select a viewer for their Discord user ID, when they were first and last seen, each client they watched on and when (a viewer who moved from their computer to their phone shows both), what their player can play, and where their data came from and went |
 | Streams | Each stream, as on Now Playing |
-| Session overview | A chart of the session over time: one row for playback (playing, paused, waiting for the host), one for where in the title it was, one for each stream and one for each viewer, with marks where something changed. The position line is green while playing and dashed while paused; each seek is a step labelled with what made it (Skip Intro, Skip Credits, Timeline, Jump back, Jump forward), and the end of the title is labelled Finished. A dashed midline marks half way through the title. Buffering and player errors sit on the position line where they happened, so a bad part of a file shows. Where labels would overlap, as on a phone, some are left to their mark's hover. Hover any bar, line or mark for details. |
-| Viewing coverage | One bar per viewer across the whole title, and one for all viewers: the parts they saw, with buffering (a red bar) and player errors (a red diamond) where they happened in the title. Above them, a Seeks row draws each seek as an arc from where it left to where it landed, labelled with what made it, and a tick where the title finished. |
+| Session overview | A chart of the session over time: one row for playback (playing, paused, waiting for the host), one for where in the title it was, one for each stream and one for each viewer, with marks where something changed. The position line is green while playing and dashed while paused; each seek is a step labelled with what made it (Skip Intro, Skip Credits, Jump back, Jump forward), or for one on the seek bar how far it went (Seek +20:00, Seek −5:00), and the end of the title is labelled Finished. Lines across it mark points in the title, labelled on the left: every 5 minutes for an episode, every 30 for a film. Buffering and player errors sit on the position line where they happened, so a bad part of a file shows. Where labels would overlap, as on a phone, some are left to their mark's hover. Hover any bar, line or mark for details. |
+| Viewing coverage | One bar per viewer across the whole title, and one for all viewers: the parts they saw, with buffering (a red bar) and player errors (a red diamond) where they happened in the title. Above them, a Seeks row draws each seek as an arc from where it left to where it landed, labelled as on the position line, and a tick where the title finished. |
+| Peer-to-peer sharing | Who sent video to whom, and how much, largest first |
 | Key moments | The events that explain the session, newest first, each with its reason: a stream starting and why, the host changing a track and who moved with them, a viewer changing stream, quality or subtitles, Skip Intro and Skip Credits, a stream ending early, long buffering, and errors. This is where to look when a second stream started part way through. |
-| All events | Every event, newest first, with filters for playback, viewers, streams and tracks, and loading, buffering and errors. Each event names who did it and how: a seek says whether it came from Skip Intro, Skip Credits, the jump controls or the timeline, and a session's end says whether the title finished, the host closed the player, started the next episode or started a different title. Select an event for its details. |
+| All events | Every event, newest first, with filters for playback, viewers, streams and tracks, and loading, buffering and errors. Each event names who did it and how: a seek says whether it came from Skip Intro, Skip Credits, the jump controls or the seek bar, a viewer moving to another client says from which to which, and a session's end says whether the title finished, the host closed the player, started the next episode or started a different title. Select an event for its details. |
 
 Loading the start of a stream, or after a seek, is shown as loading, not
 buffering. History recorded by earlier versions is corrected the first time

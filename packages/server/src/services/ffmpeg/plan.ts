@@ -249,6 +249,10 @@ export type CopyPlan =
       audioWhy: string | null;
       /** What a converted track becomes; null when it is copied, or there is none. */
       audioOut: AudioOut | null;
+      /** Where the picture ends, film time, when the sound stops well before
+       *  it (probe.ts soundPadTo): the sound is then filled with silence to
+       *  there, read through an input of its own (soundInputArgs). */
+      padSoundToS?: number | null;
       codec: "h264" | "hevc" | "av1" | "vp9";
       /** In fragmented MP4 rather than MPEG-TS: AV1, VP9, Opus and FLAC don't go
        *  into MPEG-TS for a browser, and an HDR label is in the init. */
@@ -489,23 +493,25 @@ export function copyArgs(
   segmentSeconds = COPY_SEGMENT_S,
   toS: number | null = null,
 ): string[] {
+  // The copied picture starts at the keyframe the seek lands on, and the
+  // converted sound with it, not where the player asked: 1917 on 22 October
+  // landed a keyframe early, 10.5 s before, and its first segment went out
+  // with no sound. A player that took that one first failed on the next.
+  const seek = offsetS > 0 ? ["-ss", String(offsetS), "-noaccurate_seek"] : [];
   return [
     "-hide_banner", "-nostdin", "-loglevel", "error",
-    // The copied picture starts at the keyframe the seek lands on, and the
-    // converted sound with it, not where the player asked: 1917 on 22 October
-    // landed a keyframe early, 10.5 s before, and its first segment went out
-    // with no sound. A player that took that one first failed on the next.
-    ...(offsetS > 0 ? ["-ss", String(offsetS), "-noaccurate_seek"] : []),
+    ...seek,
     ...untilArgs(toS),
     "-copyts", "-start_at_zero",
     ...input,
+    ...soundInputArgs(plan, seek, toS, input),
     "-map", `0:${plan.video.index}`,
-    ...(plan.audio ? ["-map", `0:${plan.audio.index}`] : []),
+    ...(plan.audio ? ["-map", `${padsSound(plan) ? 1 : 0}:${plan.audio.index}`] : []),
     "-c:v", "copy",
     // HEVC in MP4 as Chrome's MSE takes it: parameter sets in the init.
     ...(plan.fmp4 && plan.codec === "hevc" ? ["-tag:v", "hvc1"] : []),
     ...sdrLabelArgs(plan),
-    ...audioArgs(plan),
+    ...audioArgs(plan, toS),
     ...(plan.fmp4 ? fmp4SegmentArgs(segmentSeconds) : segmentArgs(offsetS, toS ?? durationS, segmentSeconds)),
   ];
 }
@@ -515,25 +521,49 @@ function untilArgs(toS: number | null): string[] {
   return toS !== null ? ["-to", toS.toFixed(3)] : [];
 }
 
+type SoundOf = { audio: SourceStream | null; audioCopy: boolean; audioOut: AudioOut | null; padSoundToS?: number | null };
+
+/** Whether converted sound is filled with silence to the picture's end, read on its own. */
+export function padsSound(plan: SoundOf): boolean {
+  return !!plan.audio && !plan.audioCopy && plan.padSoundToS != null && plan.padSoundToS > 0;
+}
+
+/**
+ * The film opened a second time for its sound alone, on the same seek, when
+ * that sound is filled with silence (audioArgs). ffmpeg starts the silence
+ * when it finds the sound has run out, and one opening of the film runs out
+ * of everything only at the end of the file: Verity's silence came after all
+ * four minutes of picture past its sound's end, and those segments went out
+ * with no sound at all, so the player stalled at 7002.8 s and ended the film
+ * there (18 November). An opening read for the sound runs out where it does.
+ */
+function soundInputArgs(plan: SoundOf, seek: string[], toS: number | null, input: string[]): string[] {
+  return padsSound(plan) ? [...seek, ...untilArgs(toS), ...input] : [];
+}
+
 /**
  * The audio as it is, or as convertedAudio has it.
  *
- * Converted sound goes on as silence to the end of the picture (apad, with
- * -shortest to stop at the picture's end). A browser plays only as far as both
- * the picture and the sound are in, so a file whose sound stops early stalls
- * there for good: Verity's sound ends at 7002.8 s, its picture at 7256.8 s,
- * and the player sat "buffering" at 7002.8 (18 November), or took it for the
- * end of a broken stream and ended the film four minutes early (15 November).
+ * A browser plays only as far as both the picture and the sound are in, so a
+ * file whose sound stops early stalls there for good: Verity's sound ends at
+ * 7002.8 s, its picture at 7256.8 s, and the player sat "buffering" at 7002.8
+ * (18 November), or took it for the end of a broken stream and ended the film
+ * four minutes early (15 November). Such sound, converted, goes on as silence
+ * to the picture's end (padSoundToS, or `toS` for a run that stops earlier),
+ * read through an input of its own (soundInputArgs). Any other converted
+ * sound keeps apad with -shortest, as before.
  */
-export function audioArgs(plan: { audio: SourceStream | null; audioCopy: boolean; audioOut: AudioOut | null }): string[] {
+export function audioArgs(plan: SoundOf, toS: number | null = null): string[] {
   if (!plan.audio) return [];
   if (plan.audioCopy) return ["-c:a", "copy"];
   const out = plan.audioOut ?? { codec: "aac", channels: 2, kbps: AUDIO_KBPS };
-  if (out.codec === "flac") return ["-c:a", "flac", "-af", "aresample=async=1,apad", "-shortest"];
+  const fill = padsSound(plan)
+    ? ["-af", `aresample=async=1,apad,atrim=end=${Math.min(plan.padSoundToS!, toS ?? Infinity).toFixed(3)}`]
+    : ["-af", "aresample=async=1,apad", "-shortest"];
+  if (out.codec === "flac") return ["-c:a", "flac", ...fill];
   // libopus takes 7.1 and 6.1 in their standard layouts, which -ac makes of
   // the others (7.1 wide); it picks its sample rate, 48 kHz.
-  return ["-c:a", out.codec === "opus" ? "libopus" : "aac", "-ac", String(out.channels), "-b:a", `${out.kbps}k`,
-    "-af", "aresample=async=1,apad", "-shortest"];
+  return ["-c:a", out.codec === "opus" ? "libopus" : "aac", "-ac", String(out.channels), "-b:a", `${out.kbps}k`, ...fill];
 }
 
 /**
@@ -871,6 +901,10 @@ export type EncodePlan =
       audioCopy: boolean;
       audioWhy: string | null;
       audioOut: AudioOut | null;
+      /** Where the picture ends, film time, when the sound stops well before
+       *  it (probe.ts soundPadTo): the sound is then filled with silence to
+       *  there, read through an input of its own (soundInputArgs). */
+      padSoundToS?: number | null;
       codec: "h264" | "hevc" | "av1";
       /** HEVC Main10 rather than Main: HDR kept, HDR mapped to SDR on the GPU,
        *  or a 10-bit file — for a player that plays 10 bits smoothly
@@ -1249,20 +1283,23 @@ export function encodeArgs(
     : hw === "nvenc"
       ? ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-hwaccel_device", "cu"]
       : ["-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi", "-hwaccel_device", "va"];
+  const seek = offsetS > 0 ? ["-ss", String(offsetS)] : [];
   return [
     "-hide_banner", "-nostdin", "-loglevel", "error",
     ...init,
     ...decode,
-    ...(offsetS > 0 ? ["-ss", String(offsetS)] : []),
+    ...seek,
     ...untilArgs(toS),
     "-copyts", "-start_at_zero",
     ...(burn?.kind === "picture" && burn.canvas ? ["-canvas_size", burn.canvas] : []),
     ...input,
     ...sidecar,
+    // After the sidecar, so the graph's "1:s:0" is still the sidecar.
+    ...soundInputArgs(plan, seek, toS, input),
     ...(graph
       ? ["-filter_complex", graph, "-map", "[v]"]
       : ["-map", `0:${plan.video.index}`]),
-    ...(plan.audio ? ["-map", `0:${plan.audio.index}`] : []),
+    ...(plan.audio ? ["-map", `${padsSound(plan) ? (sidecar.length > 0 ? 2 : 1) : 0}:${plan.audio.index}`] : []),
     ...(graph ? [] : ["-vf", vf]),
     ...encoder,
     ...tags,
@@ -1270,7 +1307,7 @@ export function encodeArgs(
     ...sdrLabelArgs(plan),
     "-aspect", `${W}:${H}`,
     "-force_key_frames:v", `expr:gte(t,n_forced*${ENCODE_SEGMENT_S})`,
-    ...audioArgs(plan),
+    ...audioArgs(plan, toS),
     // Audio piles up while the GPU encoder starts; ffmpeg's default queue is
     // too short for that.
     "-max_muxing_queue_size", "4096",

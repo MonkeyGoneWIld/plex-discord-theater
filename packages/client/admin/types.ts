@@ -31,6 +31,8 @@ export interface Client {
   quality: number;
   caps: string[];
   av1Encode: boolean;
+  /** Its browser's user agent, as it gave it on joining (clients.ts clientName). */
+  device?: string | null;
   /** While the admin page records. */
   data?: ViewerData;
   /**

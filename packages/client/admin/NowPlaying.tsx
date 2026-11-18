@@ -3,16 +3,12 @@ import type { Client, Overview, Room, Stream } from "./types";
 import { ago, bytes, clock, dateTime, quality, rate, zoneLabel } from "./format";
 import { BufferingCell, bufferingTone, DataCell, DecisionBadge, PlaceName } from "./parts";
 import { switchedText, trackName } from "./events";
+import { clientName, formatsText } from "./clients";
 import { StreamCard, type StreamInfo } from "./streams";
 import { Icon } from "./icons";
 import { Poster, titleLine, useTitles } from "./titles";
 import { Avatar, bps, FlowChart, pct, Progress, ShareList, SOURCES, Spark, SplitBar, Stat, type FlowPoint } from "./viz";
 
-/** What a player can decode (ffmpeg/plan.ts, PLAYER_CAPS), by name. */
-const CAP_LABELS: Record<string, string> = {
-  hevc: "HEVC", av1: "AV1", vp9: "VP9", opus: "Opus", flac: "FLAC", ac3: "AC3", eac3: "E-AC3",
-  hdr: "HDR", tenBit: "10-bit", uhd: "4K", hi10: "10-bit H.264",
-};
 
 type State = "playing" | "paused" | "waiting" | "idle";
 
@@ -142,6 +138,7 @@ function Viewers({ room, tracks }: { room: Room; tracks: Record<string, string> 
                       <span>
                         <a href={`#people/${c.userId}`} onClick={(e) => e.stopPropagation()}>{c.username ?? c.userId}</a>
                         <span className={`role ${c.role}`}>{ROLE[c.role]}</span>
+                        {c.device && <span className="viewer-client">{clientName(c.device)}</span>}
                       </span>
                     </span>
                   </td>
@@ -164,7 +161,9 @@ function Viewers({ room, tracks }: { room: Room; tracks: Record<string, string> 
                         <dt>Subtitle track</dt>
                         <dd>{trackName({ tracks }, c.subtitleStreamId, "Off")}{c.subtitleStreamId ? <> <span className="mono muted">{c.subtitleStreamId}</span></> : null}</dd>
                         <dt>Supported formats</dt>
-                        <dd>{c.caps.length ? c.caps.map((cap) => CAP_LABELS[cap] ?? cap).join(", ") : "H.264 and AAC only"}{c.av1Encode ? " · AV1 encoding" : ""}</dd>
+                        <dd>{formatsText(c.caps, c.av1Encode)}</dd>
+                        <dt>Client</dt><dd>{clientName(c.device)}</dd>
+                        {c.device && <><dt>User agent</dt><dd className="mono small">{c.device}</dd></>}
                         {c.data && (
                           <>
                             <dt>Received from the server</dt><dd>{bytes(c.data.botBytes)}</dd>

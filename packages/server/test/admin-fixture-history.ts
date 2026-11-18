@@ -6,6 +6,18 @@
  */
 import type { Overview } from "../src/admin/data.js";
 
+// Clients as their players give them on joining: the user agents of the
+// Discord desktop app, its iPhone and Android apps, Vesktop, and browsers.
+export const AGENTS = {
+  desktop: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9268 Chrome/138.0.7204.251 Electron/44.0.0 Safari/537.36",
+  iphone: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+  android: "Mozilla/5.0 (Linux; Android 15; Pixel 8; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/141.0.0.0 Mobile Safari/537.36",
+  vesktop: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) vesktop/1.6.9 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36",
+  firefox: "Mozilla/5.0 (X11; Linux x86_64; rv:145.0) Gecko/20100101 Firefox/145.0",
+  chrome: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+  edge: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0",
+};
+
 type Any = Record<string, unknown>;
 type Inst = { hostUserId: string; guildId: string | null; channelId: string | null; createdAt: number };
 
@@ -78,7 +90,8 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
         clients: people.map(([userId, username], i) => ({
           userId, username, role: i === 0 ? "host" : "viewer", connected: true, watching: true, away: false, loading: false,
           joinedAt: g, variantKey: streams.find((s) => (s.viewers as string[]).includes(userId))?.variantKey ?? "v0",
-          subtitleStreamId: 0, quality: 0, caps: [], av1Encode: false,
+          subtitleStreamId: 0, quality: 0, caps: i === 0 ? ["hevc", "opus", "eac3"] : [], av1Encode: false,
+          device: [AGENTS.desktop, AGENTS.firefox, AGENTS.chrome, AGENTS.vesktop, AGENTS.edge][(i + n) % 5],
         })),
         streams,
       };
@@ -96,8 +109,11 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
           [Math.round((length * 0.65) / 10_000) * 10_000, 600, "timeline"]]
         : [];
       let ahead = 0;
+      // Every third session the last viewer moves to the Discord app on their phone halfway in.
+      const moves = n % 3 === 0 && people.length > 1 ? Math.round(length / 2 / 10_000) * 10_000 : null;
       while (g - start < length) {
         g += 10_000;
+        if (moves !== null && g - start === moves) room.clients.at(-1).device = AGENTS.iphone;
         const seek = seeks.find(([after]) => after === g - start);
         if (seek) {
           const fromS = (g - start) / 1000 + ahead;

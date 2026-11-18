@@ -1,5 +1,6 @@
 import type { PlayEvent, TrackPoint } from "./types";
 import { clock, quality } from "./format";
+import { clientName, formatsText } from "./clients";
 
 /**
  * A session's events as sentences, and what the pages draw of where in the
@@ -19,7 +20,7 @@ export type EventGroup = "playback" | "people" | "streams" | "problems" | "other
 const GROUPS: Record<string, EventGroup> = {
   play: "playback", pause: "playback", resume: "playback", seek: "playback", stop: "playback", ended: "playback",
   "reached the end": "playback",
-  joined: "people", "came back": "people", left: "people", "away from Discord": "people", "back in Discord": "people",
+  joined: "people", "came back": "people", "switched client": "people", left: "people", "away from Discord": "people", "back in Discord": "people",
   role: "people",
   "stream started": "streams", "stream restarted": "streams", "stream ended": "streams", "stream changed": "streams",
   subtitles: "streams", quality: "streams",
@@ -48,7 +49,7 @@ const END_REASONS: Record<string, string> = {
 
 /** The control a seek came from (client lib/commandCause.ts). */
 const SEEK_CAUSES: Record<string, string> = {
-  "skip intro": "Skip Intro", "skip credits": "Skip Credits", timeline: "the timeline",
+  "skip intro": "Skip Intro", "skip credits": "Skip Credits", timeline: "the seek bar",
   "jump back": "the jump-back control", "jump forward": "the jump-forward control",
 };
 
@@ -181,8 +182,9 @@ export function eventText(e: PlayEvent, ctx?: EventContext): string {
     case "reached the end": return d.early
       ? `${who} reached the end of the stream${Number.isFinite(Number(d.breakAtS)) ? ` at ${clock(Number(d.breakAtS))}` : ""}, before the length Plex reports; playback was ended there`
       : `${who} reached the end of the title`;
-    case "joined": return `${who} joined as ${role(d.role)}`;
-    case "came back": return `${who} reconnected`;
+    case "joined": return `${who} joined as ${role(d.role)}${d.device ? ` on ${clientName(d.device)}` : ""}`;
+    case "came back": return `${who} reconnected${d.device ? ` on ${clientName(d.device)}` : ""}`;
+    case "switched client": return `${who} moved from ${clientName(d.from)} to ${clientName(d.to)}`;
     case "left": return `${who} left`;
     case "away from Discord": return `${who} switched away from the Discord window`;
     case "back in Discord": return `${who} returned to the Discord window`;
@@ -234,6 +236,7 @@ const DETAIL_LABELS: Record<string, string> = {
   host: "Host", switching: "Host's change", variant: "Stream", summary: "Delivery", audioStreamId: "Audio",
   subtitleStreamId: "Subtitles", quality: "Quality", engine: "Engine", fromOffsetS: "Previous start", toOffsetS: "New start",
   offsetS: "Starts at", msg: "Message", tag: "Source", session: "Stream session", replaced: "Replaced session",
+  device: "Client", caps: "Supported formats",
 };
 
 const AS_IS = new Set(["askedBy", "host", "next", "msg", "tag", "session", "replaced", "summary", "engine"]);
@@ -252,6 +255,8 @@ export function eventDetails(e: PlayEvent, ctx?: EventContext): Array<[string, s
   if (d.byHost) out.push(["Changed by", "The host"]);
   if (d.unwatched) out.push(["Reason", "No viewers remained on it"]);
   if (d.early) out.push(["Ended early", "Yes: the stream ended before the length Plex reports"]);
+  // The agent as the player gave it, for a client not named above.
+  for (const ua of [d.device, e.kind === "switched client" ? d.to : null]) if (typeof ua === "string" && ua) out.push(["User agent", ua]);
   return out;
 }
 
@@ -269,7 +274,10 @@ function detailValue(kind: string, k: string, v: unknown, ctx?: EventContext): s
     case "audioStreamId": return trackName(ctx, v, "default");
     case "subtitleStreamId": return trackName(ctx, v);
     case "quality": return quality(Number(v));
+    case "device": return clientName(v);
+    case "caps": return formatsText(v);
     case "from": case "to":
+      if (kind === "switched client") return clientName(v);
       if (kind === "stream changed") return v ? streamLabel(ctx, v) : "—";
       if (kind === "subtitles") return trackName(ctx, v);
       if (kind === "quality") return quality(Number(v));
@@ -289,7 +297,7 @@ export const newestFirst = <T extends { at: number; id: number }>(list: T[]): T[
   [...list].sort((a, b) => b.at - a.at || b.id - a.id);
 
 const JUMP_LABELS: Record<string, string> = {
-  "skip intro": "Skip Intro", "skip credits": "Skip Credits", timeline: "Timeline", "jump back": "Jump back", "jump forward": "Jump forward",
+  "skip intro": "Skip Intro", "skip credits": "Skip Credits", "jump back": "Jump back", "jump forward": "Jump forward",
 };
 
 export interface Jump { at: number; fromS: number; toS: number; label: string; event: PlayEvent }
@@ -300,11 +308,27 @@ export function jumpsOf(events: PlayEvent[]): Jump[] {
     const fromS = Number(e.detail?.fromS);
     const toS = Number(e.detail?.toS);
     if (e.detail?.fromS == null || e.detail?.toS == null || !Number.isFinite(fromS) || !Number.isFinite(toS) || Math.abs(toS - fromS) < 1) return [];
-    return [{ at: e.at, fromS, toS, label: JUMP_LABELS[String(e.detail?.cause)] ?? "Seek", event: e }];
+    // One on the seek bar, or from no control known, by how far it went.
+    const by = `Seek ${toS > fromS ? "+" : "\u2212"}${clock(Math.abs(toS - fromS))}`;
+    return [{ at: e.at, fromS, toS, label: JUMP_LABELS[String(e.detail?.cause)] ?? by, event: e }];
   });
 }
 
 /** When, and where in the title, the title finished, if it did. */
+/**
+ * Where the position lane's lines go, seconds into the title: a round step
+ * that leaves at most five spaces over its length, so a short title gets
+ * closer lines (every 5 minutes over 24) and a film wider ones (every 30
+ * minutes over two hours).
+ */
+export function positionTicks(durationS: number): number[] {
+  const steps = [30, 60, 120, 300, 600, 900, 1200, 1800, 3600, 7200];
+  const step = steps.find((s) => durationS / s <= 5) ?? Math.ceil(durationS / 5 / 3600) * 3600;
+  const out: number[] = [];
+  for (let t = 0; t <= durationS + 0.5; t += step) out.push(t);
+  return out;
+}
+
 export function finishedAt(events: PlayEvent[]): { at: number; posS: number | null } | null {
   const e = events.find((x) => (x.kind === "ended" || x.kind === "stop") && x.detail?.cause === "finished");
   return e ? { at: e.at, posS: e.posS } : null;

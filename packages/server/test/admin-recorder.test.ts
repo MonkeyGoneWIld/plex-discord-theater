@@ -765,6 +765,46 @@ console.log("\n— loading the start, buffering, a seek; the host changing the a
   again.close();
 }
 
+console.log("\n— which client each viewer is on —");
+{
+  // 18 November: History named no viewer's client, nor one moving from their
+  // computer to their phone part way through.
+  let w = 1_950_000_000_000;
+  const DESK = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) discord/1.0.9268 Chrome/138.0 Electron/44.0.0 Safari/537.36";
+  const PHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
+  const wInst = new Map<string, Inst>([["RW", { hostUserId: "911", guildId: "G9", channelId: "C9", createdAt: w }]]);
+  const rw: Any = { ...structuredClone(R1), id: "RW", ratingKey: "90002", title: "Moving", discord: { guildId: "G9", channelId: "C9", hostUserId: "911", startedAt: w },
+    clients: [client("911", "host9", { role: "host", device: DESK }), client("922", "mover", { device: DESK, caps: ["hevc"], av1Encode: true })],
+    streams: [stream("v0", "SW1", { viewers: ["911", "922"] })] };
+  const wr = new Recorder({ dbPath: path.join(process.env.THUMB_CACHE_DIR!, "clients.sqlite"), now: () => w, instances: () => wInst,
+    source: () => ({ at: w, totals: {}, rooms: [rw] }) as unknown as Overview });
+  wr.transport({ at: w, roomId: "RW", type: "play", userId: "911", username: "host9", role: "host", fromS: 0, toS: 0, ratingKey: "90002", title: "Moving" });
+  wr.tick(w);
+  const wid = wr.history()[0].id;
+  const wStep = (ms: number) => { w += ms; wr.tick(w); };
+  const name = (ua: unknown) => (ua === DESK ? "desk" : ua === PHONE ? "phone" : null);
+  const theirs = () => wr.play(wid)!.events.filter((e) => e.userId === "922" && ["joined", "came back", "switched client", "left"].includes(e.kind))
+    .map((e) => { const d = (e.detail ?? {}) as Any; return [e.kind, name(d.device), name(d.from), name(d.to)]; });
+  wStep(2_000);
+  const joined = wr.play(wid)!.events.find((e) => e.userId === "922" && e.kind === "joined")?.detail as Any | undefined;
+  check("joining: on which client, and what its player plays", [name(joined?.device), joined?.caps, joined?.av1Encode], ["desk", ["hevc"], true]);
+  (rw.clients as Any[])[1] = client("922", "mover", { device: PHONE });
+  wStep(2_000);
+  wStep(2_000);
+  check("  on their phone instead, still connected: a switch, from which to which, said once",
+    theirs(), [["joined", "desk", null, null], ["switched client", null, "desk", "phone"]]);
+  (rw.clients as Any[])[1] = client("922", "mover", { device: PHONE, connected: false });
+  wStep(2_000);
+  (rw.clients as Any[])[1] = client("922", "mover", { device: DESK });
+  wStep(2_000);
+  check("  gone, then back on the computer: back on it, and a switch to it",
+    theirs().slice(2), [["left", null, null, null], ["came back", "desk", null, null], ["switched client", null, "phone", "desk"]]);
+  (rw.clients as Any[])[0] = client("911", "host9", { role: "host" });
+  wStep(2_000);
+  check("  a client that gives no agent: nothing said", wr.play(wid)!.events.filter((e) => e.userId === "911" && e.kind === "switched client").length, 0);
+  wr.close();
+}
+
 console.log("\n— what the bot's port sent, for the qBittorrent manager —");
 {
   // Six minutes of one stream at 8 Mbps: four with one viewer, the bot

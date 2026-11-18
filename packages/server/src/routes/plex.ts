@@ -63,7 +63,7 @@ import {
   ALL_CAPS, AUDIO_KBPS, aboveHd as aboveHdSize, HARDWARE_NAMES, NO_CAPS, copyArgs, copyNeeds, encodeArgs, encodeTargetKbps, hdrClass, hdrPicture, inputArgs, pickBurn,
   planCopy, planEncode, tonemapCurve, type AudioOut, type EncodeRequest, type PlayerCap, type PlayerCaps, type SourceStream, type SourceVersion,
 } from "../services/ffmpeg/plan.js";
-import { probe, probeExtradata, probeHdrMeta, probeOnce, trackMismatch } from "../services/ffmpeg/probe.js";
+import { probe, probeExtradata, probeHdrMeta, probeOnce, soundPadTo, trackMismatch } from "../services/ffmpeg/probe.js";
 import { bitmapCodecOf, vobsubHeader } from "../services/ffmpeg/bitmap-subtitles.js";
 import { prepareBurn, sidecarOnMount } from "../services/ffmpeg/burn-files.js";
 import { madePreview, makePreview, previewBody, previewPartOf, rememberPreviewPart } from "../services/ffmpeg/previews.js";
@@ -5394,6 +5394,20 @@ async function startWithFfmpeg(o: {
     }
     return trackMismatch(used.filter((s): s is SourceStream => !!s), found);
   };
+  // Converted sound that stops before the picture: filled with silence to the
+  // picture's end (plan.ts audioArgs). Verity, 18 November.
+  const padSoundTo = async (audio: (SourceStream & { index: number }) | null, copied: boolean): Promise<number | null> => {
+    if (!audio || copied) return null;
+    const found = await probed;
+    const to = soundPadTo(found, audio.index);
+    if (to !== null) {
+      logEvent("FFmpeg", "the sound stops before the picture: read on its own, and silent from there to the end", {
+        session, ratingKey: o.ratingKey, soundEndsS: found?.streams.find((s) => s.index === audio.index)?.durationS?.toFixed(2),
+        pictureEndsS: to.toFixed(2),
+      });
+    }
+    return to;
+  };
 
   const durationS = source.durationS ?? null;
   const okFor = (c: PlayerCaps) => ({
@@ -5442,6 +5456,7 @@ async function startWithFfmpeg(o: {
   if (copyPlan?.ok) {
     const differ = await tracksDiffer([copyPlan.video, copyPlan.audio]);
     if (differ) return toPlex(`tracks differ from Plex's: ${differ}`, "the file's tracks aren't Plex's", { why: differ });
+    const copy = { ...copyPlan, padSoundToS: await padSoundTo(copyPlan.audio, copyPlan.audioCopy) };
     const started = await startFfmpegRun({
       sessionId: o.sessionId,
       ratingKey: o.ratingKey,
@@ -5451,8 +5466,8 @@ async function startWithFfmpeg(o: {
       hdrMeta: filmHdr(copyPlan.sdrPeakNits),
       targetKbps: o.fileKbps,
       offsetS: o.offsetS,
-      args: copyArgs(copyPlan, input, o.offsetS, durationS),
-      fromStart: (toS) => copyArgs(copyPlan, input, 0, durationS, undefined, toS),
+      args: copyArgs(copy, input, o.offsetS, durationS),
+      fromStart: (toS) => copyArgs(copy, input, 0, durationS, undefined, toS),
       replaces: o.replaces,
     });
     if (!started.ok) return toPlex(`ffmpeg didn't start: ${started.why}`, "run didn't start", { why: started.why });
@@ -5527,13 +5542,15 @@ async function startWithFfmpeg(o: {
     if (!plan.ok) return toPlex(plan.why, "can't make it", { why: plan.why, notCopied: reason });
     const differ = await tracksDiffer([plan.video, plan.audio, plan.burn?.kind === "picture" ? plan.burn.sub : null]);
     if (differ) return toPlex(`tracks differ from Plex's: ${differ}`, "the file's tracks aren't Plex's", { why: differ });
-    const fromStart = (p: typeof plan) => p.ok ? (toS: number) => encodeArgs(p, input, 0, durationS, hwDevice(), toS) : undefined;
+    // The same track whatever the retry, so the same fill.
+    const padSoundToS = await padSoundTo(plan.audio, plan.audioCopy);
+    const fromStart = (p: typeof plan) => p.ok ? (toS: number) => encodeArgs({ ...p, padSoundToS }, input, 0, durationS, hwDevice(), toS) : undefined;
     const run = (p: Extract<typeof plan, { ok: true }>) => startFfmpegRun({
       sessionId: o.sessionId, ratingKey: o.ratingKey, codec: p.codec, encode: true,
       // AV1 is made in fragmented MP4, as an AV1 copy is; so is Opus sound.
       fmp4: p.fmp4, sdrPeakNits: p.sdrPeakNits, hdrMeta: filmHdr(p.sdrPeakNits),
       targetKbps: encodeTargetKbps(p), offsetS: o.offsetS,
-      args: encodeArgs(p, input, o.offsetS, durationS, hwDevice()),
+      args: encodeArgs({ ...p, padSoundToS }, input, o.offsetS, durationS, hwDevice()),
       fromStart: fromStart(p), replaces: o.replaces,
     });
     let started = await run(plan);

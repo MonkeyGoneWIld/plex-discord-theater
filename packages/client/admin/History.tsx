@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { api } from "./api";
-import type { PlayEvent, PlaySummary } from "./types";
+import type { PlayEvent, PlayStream, PlaySummary, PlayViewer } from "./types";
 import { bytes, clock, dateTime, short, timeOfDay } from "./format";
 import {
   BufferingCell, bufferingTone, DataCell, Downloads, eventText, eventTone, GROUP_LABELS, groupOf, PlaceName, useLoad, Where, Who,
@@ -8,7 +8,8 @@ import {
 } from "./parts";
 import { StreamCard } from "./streams";
 import { KeyMoments, SessionChart, Watched } from "./timeline";
-import { eventDetails, newestFirst, type EventContext } from "./events";
+import { eventDetails, newestFirst, streamLabel, type EventContext } from "./events";
+import { clientName, clientsOf, formatsText } from "./clients";
 import { MiniChart } from "./lazy";
 import { Icon } from "./icons";
 import { Poster, titleLine, useTitles } from "./titles";
@@ -198,44 +199,9 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
           <SplitBar server={server} cache={cache} peers={peers} />
         </div>
 
-        {(data.shares?.length ?? 0) > 0 && (
-          <div className="session-block">
-            <h4>Peer-to-peer sharing</h4>
-            <ShareList shares={data.shares ?? []} nameOf={(id) => nameOf(id) ?? id} />
-          </div>
-        )}
-
         <div className="session-block">
           <h4>Viewers ({viewers.length})</h4>
-          <div className="table-wrap">
-            <table className="table viewers">
-              <thead>
-                <tr><th>Viewer</th><th>Watched</th><th>Data received</th><th className="num">Sent to viewers</th><th>Buffering</th><th>First seen</th><th>Last seen</th><th>Discord user ID</th></tr>
-              </thead>
-              <tbody>
-                {viewers.map((v) => (
-                  <tr key={v.userId}>
-                    <td>
-                      <span className="person">
-                        <Avatar id={v.userId} name={v.username} size={28} />
-                        <span>
-                          <Who id={v.userId} name={v.username} />
-                          <span className={`role ${v.role ?? "viewer"}`}>{v.role === "host" ? "Host" : v.role === "co-host" ? "Co-host" : "Viewer"}</span>
-                        </span>
-                      </span>
-                    </td>
-                    <td className="nowrap">{clock(v.watchedS)}</td>
-                    <td><DataCell d={v} /></td>
-                    <td className="num">{v.upBytes > 0 ? bytes(v.upBytes) : "—"}</td>
-                    <td><BufferingCell d={v} /></td>
-                    <td className="nowrap">{timeOfDay(v.firstSeen)}</td>
-                    <td className="nowrap">{timeOfDay(v.lastSeen)}</td>
-                    <td className="mono">{v.userId}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <SessionViewers viewers={viewers} events={events} streams={streams} ctx={ctx} />
         </div>
 
         <div className="session-block">
@@ -268,6 +234,16 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
         <Watched data={data} durationS={i?.durationS ?? null} />
       </section>
 
+      {(data.shares?.length ?? 0) > 0 && (
+        <section className="card">
+          <div className="panel-head">
+            <h3>Peer-to-peer sharing</h3>
+            <span className="muted small">Video each viewer's player sent another's.</span>
+          </div>
+          <ShareList shares={data.shares ?? []} nameOf={(id) => nameOf(id) ?? id} />
+        </section>
+      )}
+
       <section className="card">
         <div className="panel-head">
           <h3>Key moments</h3>
@@ -278,6 +254,89 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
 
       <Timeline events={events} ctx={ctx} />
     </>
+  );
+}
+
+const ROLE: Record<string, string> = { host: "Host", "co-host": "Co-host", viewer: "Viewer" };
+
+/**
+ * A session's viewers as Now Playing shows them: who, on which client, on
+ * which streams, what they watched, received and sent, and how it went; each
+ * opens for the rest — the clients they moved between, when, and what their
+ * player plays.
+ */
+function SessionViewers({ viewers, events, streams: all, ctx }: { viewers: PlayViewer[]; events: PlayEvent[]; streams: PlayStream[]; ctx: EventContext }) {
+  const [open, setOpen] = useState<string | null>(null);
+  return (
+    <div className="table-wrap">
+      <table className="table viewers">
+        <thead>
+          <tr>
+            <th>Viewer</th><th>Streams</th><th>Watched</th><th>Data received</th><th className="num">Sent to viewers</th><th>Buffering</th>
+            <th aria-label="Details" />
+          </tr>
+        </thead>
+        <tbody>
+          {viewers.map((v) => {
+            const mine = events.filter((e) => e.userId === v.userId);
+            const clients = clientsOf(events, v.userId, v.lastSeen);
+            // The streams they moved onto; else their own, or the one everyone shared.
+            const onto = mine.filter((e) => e.kind === "stream changed" && e.detail?.to).map((e) => e.detail?.to);
+            const own = all.filter((s) => s.ownerUserId === v.userId).map((s) => s.variantKey);
+            const keys = onto.length ? onto : own.length ? own : all.filter((s) => !s.ownerUserId).slice(0, 1).map((s) => s.variantKey);
+            const streams = [...new Set(keys.map((k) => streamLabel(ctx, k)))];
+            const joined = [...mine].reverse().find((e) => (e.kind === "joined" || e.kind === "came back") && Array.isArray(e.detail?.caps));
+            const shown = open === v.userId;
+            return (
+              <Fragment key={v.userId}>
+                <tr className={`link-row${shown ? " open" : ""}`} onClick={() => setOpen(shown ? null : v.userId)}>
+                  <td>
+                    <span className="person">
+                      <Avatar id={v.userId} name={v.username} size={28} />
+                      <span>
+                        <span onClick={(e) => e.stopPropagation()}><Who id={v.userId} name={v.username} /></span>
+                        <span className={`role ${v.role ?? "viewer"}`}>{ROLE[v.role ?? "viewer"] ?? "Viewer"}</span>
+                        {clients.length > 0 && <span className="viewer-client">{clientName(clients.at(-1)!.device)}
+                          {clients.length > 1 ? ` (${clients.length} clients)` : ""}</span>}
+                      </span>
+                    </span>
+                  </td>
+                  <td className="nowrap">{streams.length ? streams.join(", ") : "—"}</td>
+                  <td className="nowrap">{clock(v.watchedS)}</td>
+                  <td><DataCell d={v} /></td>
+                  <td className="num">{v.upBytes > 0 ? bytes(v.upBytes) : "—"}</td>
+                  <td><BufferingCell d={v} /></td>
+                  <td className="chev-cell"><span className={`chev${shown ? " open" : ""}`}><Icon name="chevron" size={16} /></span></td>
+                </tr>
+                {shown && (
+                  <tr className="detail-row">
+                    <td colSpan={7}>
+                      <dl className="grid">
+                        <dt>Discord user ID</dt><dd className="mono">{v.userId}</dd>
+                        <dt>First seen</dt><dd>{dateTime(v.firstSeen)}</dd>
+                        <dt>Last seen</dt><dd>{dateTime(v.lastSeen)}</dd>
+                        <dt>{clients.length > 1 ? "Clients" : "Client"}</dt>
+                        <dd>{clients.length === 0 ? "Not recorded"
+                          : clients.map((c, n) => (
+                            <span key={n} className="client-span">{clientName(c.device)}
+                              <span className="muted"> · {timeOfDay(c.from)} – {timeOfDay(c.to)}</span></span>
+                          ))}</dd>
+                        <dt>Supported formats</dt>
+                        <dd>{joined ? formatsText(joined.detail?.caps, joined.detail?.av1Encode === true) : "Not recorded"}</dd>
+                        <dt>Received from the server</dt><dd>{bytes(v.botBytes)}</dd>
+                        <dt>Received from Discord's cache</dt><dd>{bytes(Math.min(v.edgeHitBytes, v.httpBytes))}</dd>
+                        <dt>Received from other viewers</dt><dd>{bytes(v.p2pBytes)}</dd>
+                        <dt>Sent to other viewers</dt><dd>{bytes(v.upBytes)}</dd>
+                      </dl>
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

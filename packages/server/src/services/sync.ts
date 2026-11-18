@@ -303,6 +303,9 @@ interface RoomClient {
   caps: PlayerCaps;
   /** Whether its player decodes AV1 on the GPU: a re-encode for it may be AV1. */
   av1Encode: boolean;
+  /** Its browser as it says on joining (user agent, 200 characters at most):
+   *  which Discord app, or browser, on which system. For the dashboard. */
+  device: string | null;
   /**
    * Whether this client's player is short of picture — joining, back from a
    * pop-out, its picture stopped: under fifteen seconds in hand — and needs
@@ -1145,6 +1148,8 @@ export interface AdminRoom {
     quality: number;
     caps: PlayerCap[];
     av1Encode: boolean;
+    /** Its browser's user agent: which Discord app, or browser, on which system. */
+    device: string | null;
   }>;
   /** Viewers who left a stream of their own a moment ago, kept for them. */
   away: Array<{ userId: string; ratingKey: string | null; variantKey: string; quality: number }>;
@@ -1201,6 +1206,7 @@ export function adminRooms(now = Date.now()): AdminRoom[] {
         quality: c.quality,
         caps: PLAYER_CAPS.filter((cap) => c.caps[cap]),
         av1Encode: c.av1Encode,
+        device: c.device,
       })),
       away: [...room.away].map(([userId, a]) => ({
         userId, ratingKey: a.ratingKey, variantKey: a.variantKey, quality: a.quality,
@@ -2446,6 +2452,7 @@ export function attachWebSocketServer(server: Server): void {
           // 10 bits unless said otherwise: a player before it was asked plays them.
           caps: Object.fromEntries(PLAYER_CAPS.map((cap) => [cap, cap === "tenBit" || cap === "uhd" ? msg[cap] !== false : msg[cap] === true])) as unknown as PlayerCaps,
           av1Encode: msg.av1 === true && msg.av1Encode === true,
+          device: typeof msg.device === "string" && msg.device.length > 0 ? msg.device.slice(0, 200) : null,
         };
         roomId = instanceId;
         room.clients.add(client);

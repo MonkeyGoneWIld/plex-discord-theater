@@ -3,7 +3,7 @@ import type { PlayDetail, PlayEvent, TrackPoint } from "./types";
 import { clock, quality, timeOfDay } from "./format";
 import { decisionOf } from "./parts";
 import {
-  eventText, finishedAt, jumpsOf, newestFirst, positionAt, streamDiff, streamLabel, switchedText, trackName, unionParts, type EventContext,
+  eventText, finishedAt, jumpsOf, newestFirst, positionAt, positionTicks, streamDiff, streamLabel, switchedText, trackName, unionParts, type EventContext,
 } from "./events";
 import { Icon } from "./icons";
 import { Avatar } from "./viz";
@@ -113,9 +113,10 @@ function PositionLane({ track, start, end, durationS, marks, jumps, finished }: 
   const [hover, setHover] = useState<number | null>(null);
   const [trackRef, trackWidth] = useWidth<HTMLDivElement>();
   const W = 1000;
-  const H = 84;
+  const H = 120;
   const x = (t: number) => ((t - start) / (end - start)) * W;
-  const y = (p: number) => H - 4 - (Math.min(p, durationS) / durationS) * (H - 8);
+  // Room at the top for the lane's name beside it, and for labels.
+  const y = (p: number) => H - 6 - (Math.min(p, durationS) / durationS) * (H - 28);
   const pt = (t: number, p: number) => `${x(t).toFixed(1)},${y(p).toFixed(1)}`;
   let played = "";
   let paused = "";
@@ -144,12 +145,12 @@ function PositionLane({ track, start, end, durationS, marks, jumps, finished }: 
   const top = (p: number) => (y(p) / H) * 100;
   // The title finishing is labelled too, so it takes its turn among the seeks.
   const shown = spaced([...jumps.map((j) => left(j.at)), finished ? left(finished.at) : -Infinity], labelGap(trackWidth));
+  const ticks = positionTicks(durationS);
   const at = hover === null ? null : start + (end - start) * hover;
   const posAt = at === null ? null : positionAt(track, at);
   return (
     <div className="lane lane-position">
-      <div className="lane-label">Position<span className="muted small">0:00 – {clock(durationS)}</span>
-        <span className="muted small">Midline {clock(durationS / 2)}</span></div>
+      <div className="lane-label">Position</div>
       <div className="lane-track position-track" ref={trackRef}
         onMouseMove={(e) => {
           const r = e.currentTarget.getBoundingClientRect();
@@ -157,11 +158,12 @@ function PositionLane({ track, start, end, durationS, marks, jumps, finished }: 
         }}
         onMouseLeave={() => setHover(null)}>
         <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true">
-          {[0.25, 0.5, 0.75].map((f) => <line key={f} className={`position-grid${f === 0.5 ? " mid" : ""}`} x1={0} x2={W} y1={y(durationS * f)} y2={y(durationS * f)} />)}
+          {ticks.map((t) => <line key={t} className="position-grid" x1={0} x2={W} y1={y(t)} y2={y(t)} />)}
           <path className="position-line paused" d={paused} />
           <path className="position-line" d={played} />
           <path className="position-seek" d={seeks} />
         </svg>
+        {ticks.map((t) => <span key={t} className="position-tick" style={{ top: `${top(t)}%` }}>{clock(t)}</span>)}
         {jumps.map((j, i) => (
           <span key={`j${i}`} className="position-mark seek" title={j.title} style={{ left: `${left(j.at)}%`, top: `${top(j.posS)}%` }} />
         ))}

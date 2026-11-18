@@ -9,7 +9,7 @@ import {
 import { StreamCard } from "./streams";
 import { KeyMoments, SessionChart, Watched } from "./timeline";
 import { eventDetails, newestFirst, streamLabel, type EventContext } from "./events";
-import { clientName, clientsOf, formatsText } from "./clients";
+import { clientName, clientsOf, formatsText, rolesOf } from "./clients";
 import { MiniChart } from "./lazy";
 import { Icon } from "./icons";
 import { Poster, titleLine, useTitles } from "./titles";
@@ -201,7 +201,7 @@ function PlayPage({ id, onError }: { id: number; onError: (e: unknown) => void }
 
         <div className="session-block">
           <h4>Viewers ({viewers.length})</h4>
-          <SessionViewers viewers={viewers} events={events} streams={streams} ctx={ctx} />
+          <SessionViewers viewers={viewers} events={events} lead={data.lead ?? []} streams={streams} ctx={ctx} />
         </div>
 
         <div className="session-block">
@@ -262,11 +262,15 @@ const ROLE: Record<string, string> = { host: "Host", "co-host": "Co-host", viewe
 /**
  * A session's viewers as Now Playing shows them: who, on which client, on
  * which streams, what they watched, received and sent, and how it went; each
- * opens for the rest — the clients they moved between, when, and what their
- * player plays.
+ * opens for the rest — their roles over it, the clients they moved between,
+ * when, and what each played. `lead` is what each did in the room before the
+ * session opened, where a host's joining is.
  */
-function SessionViewers({ viewers, events, streams: all, ctx }: { viewers: PlayViewer[]; events: PlayEvent[]; streams: PlayStream[]; ctx: EventContext }) {
+function SessionViewers({ viewers, events, lead, streams: all, ctx }: {
+  viewers: PlayViewer[]; events: PlayEvent[]; lead: PlayEvent[]; streams: PlayStream[]; ctx: EventContext;
+}) {
   const [open, setOpen] = useState<string | null>(null);
+  const whole = [...lead, ...events];
   return (
     <div className="table-wrap">
       <table className="table viewers">
@@ -279,13 +283,13 @@ function SessionViewers({ viewers, events, streams: all, ctx }: { viewers: PlayV
         <tbody>
           {viewers.map((v) => {
             const mine = events.filter((e) => e.userId === v.userId);
-            const clients = clientsOf(events, v.userId, v.lastSeen);
+            const clients = clientsOf(whole, v.userId, v.firstSeen, v.lastSeen);
+            const roles = rolesOf(whole, v.userId, v.firstSeen, v.lastSeen);
             // The streams they moved onto; else their own, or the one everyone shared.
             const onto = mine.filter((e) => e.kind === "stream changed" && e.detail?.to).map((e) => e.detail?.to);
             const own = all.filter((s) => s.ownerUserId === v.userId).map((s) => s.variantKey);
             const keys = onto.length ? onto : own.length ? own : all.filter((s) => !s.ownerUserId).slice(0, 1).map((s) => s.variantKey);
             const streams = [...new Set(keys.map((k) => streamLabel(ctx, k)))];
-            const joined = [...mine].reverse().find((e) => (e.kind === "joined" || e.kind === "came back") && Array.isArray(e.detail?.caps));
             const shown = open === v.userId;
             return (
               <Fragment key={v.userId}>
@@ -315,14 +319,21 @@ function SessionViewers({ viewers, events, streams: all, ctx }: { viewers: PlayV
                         <dt>Discord user ID</dt><dd className="mono">{v.userId}</dd>
                         <dt>First seen</dt><dd>{dateTime(v.firstSeen)}</dd>
                         <dt>Last seen</dt><dd>{dateTime(v.lastSeen)}</dd>
+                        {roles.length > 0 && <>
+                          <dt>{roles.length > 1 ? "Roles" : "Role"}</dt>
+                          <dd>{roles.length === 1 ? `${ROLE[roles[0].role]} throughout`
+                            : roles.map((r, n) => (
+                              <span key={n} className="client-span">{ROLE[r.role]}
+                                <span className="muted"> · {timeOfDay(r.from)} – {timeOfDay(r.to)}</span></span>
+                            ))}</dd>
+                        </>}
                         <dt>{clients.length > 1 ? "Clients" : "Client"}</dt>
                         <dd>{clients.length === 0 ? "Not recorded"
                           : clients.map((c, n) => (
                             <span key={n} className="client-span">{clientName(c.device)}
-                              <span className="muted"> · {timeOfDay(c.from)} – {timeOfDay(c.to)}</span></span>
+                              {clients.length > 1 && <span className="muted"> · {timeOfDay(c.from)} – {timeOfDay(c.to)}</span>}
+                              <span className="client-formats">Plays {c.caps ? formatsText(c.caps, c.av1Encode) : "formats not recorded"}</span></span>
                           ))}</dd>
-                        <dt>Supported formats</dt>
-                        <dd>{joined ? formatsText(joined.detail?.caps, joined.detail?.av1Encode === true) : "Not recorded"}</dd>
                         <dt>Received from the server</dt><dd>{bytes(v.botBytes)}</dd>
                         <dt>Received from Discord's cache</dt><dd>{bytes(Math.min(v.edgeHitBytes, v.httpBytes))}</dd>
                         <dt>Received from other viewers</dt><dd>{bytes(v.p2pBytes)}</dd>

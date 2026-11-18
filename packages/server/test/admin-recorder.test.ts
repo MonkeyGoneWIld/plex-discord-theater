@@ -805,6 +805,73 @@ console.log("\n— which client each viewer is on —");
   wr.close();
 }
 
+console.log("\n— the host before the session, and how the host changed —");
+{
+  // 18 November: the host joins before they choose a title, so their client
+  // and what it plays were in no session, and History said "Not recorded";
+  // and a change of host said who, never how.
+  let l = 1_960_000_000_000;
+  const DESK = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) discord/1.0.9268 Chrome/138.0 Electron/44.0.0 Safari/537.36";
+  const PHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
+  const lInst = new Map<string, Inst>([["RL", { hostUserId: "941", guildId: "G8", channelId: "C8", createdAt: l }]]);
+  const rl: Any = { ...structuredClone(R1), id: "RL", ratingKey: null, title: null, playing: false, roleWhy: null,
+    discord: { guildId: "G8", channelId: "C8", hostUserId: "941", startedAt: l },
+    clients: [client("941", "early", { role: "host", device: DESK, caps: ["hevc", "eac3"] })], streams: [] };
+  const lr = new Recorder({ dbPath: path.join(process.env.THUMB_CACHE_DIR!, "roles.sqlite"), now: () => l, instances: () => lInst,
+    source: () => ({ at: l, totals: {}, rooms: [rl] }) as unknown as Overview });
+  const lStep = (ms: number) => { l += ms; lr.tick(l); };
+  lStep(2_000);
+  // In the room before a title: a viewer comes in, and is made co-host.
+  (rl.clients as Any[]).push(client("952", "second", { device: PHONE }));
+  lStep(2_000);
+  rl.roleWhy = { at: l, why: "co-host given", by: "early", to: "second" };
+  (rl.clients as Any[])[1] = client("952", "second", { role: "co-host", device: PHONE });
+  lStep(2_000);
+  // Then a title.
+  Object.assign(rl, { ratingKey: "90003", title: "Roles", playing: true, streams: [stream("v0", "SL1", { viewers: ["941", "952"] })] });
+  lr.transport({ at: l, roomId: "RL", type: "play", userId: "941", username: "early", role: "host", fromS: 0, toS: 0, ratingKey: "90003", title: "Roles" });
+  lStep(2_000);
+  const lid = lr.history()[0].id;
+  const detail = () => lr.play(lid)!;
+  check("the session has nobody joining: they were in the room before it",
+    detail().events.filter((e) => e.kind === "joined").length, 0);
+  check("  what each did in the room before it comes with it: joined on what, playing what, and made co-host",
+    detail().lead.map((e) => [e.username, e.kind, (e.detail as Any)?.device === DESK ? "desk" : (e.detail as Any)?.device === PHONE ? "phone" : null,
+      (e.detail as Any)?.caps ?? null, (e.detail as Any)?.why ?? null]),
+    [["early", "joined", "desk", ["hevc", "eac3"], null], ["second", "joined", "phone", [], null], ["second", "role", null, null, "co-host given"]]);
+  check("  the co-host given: by whom", (detail().lead.at(-1)!.detail as Any).by, "early");
+
+  // The host hands over.
+  rl.roleWhy = { at: l, why: "handed over", by: "early", to: "second" };
+  (rl.clients as Any[])[0] = client("941", "early", { role: "co-host", device: DESK });
+  (rl.clients as Any[])[1] = client("952", "second", { role: "host", device: PHONE });
+  lStep(2_000);
+  const roles = () => detail().events.filter((e) => e.kind === "role").map((e) => {
+    const d = e.detail as Any;
+    return [e.username, d.from, d.to, d.why ?? null, d.by ?? null, d.target ?? null];
+  });
+  check("handing over: both changes say how, who had it, and who got it", roles(),
+    [["early", "host", "co-host", "handed over", "early", "second"], ["second", "co-host", "host", "handed over", "early", "second"]]);
+  // A change long after the room last said why is put down to nothing.
+  l += 30_000;
+  (rl.clients as Any[])[0] = client("941", "early", { role: "viewer", device: DESK });
+  lStep(2_000);
+  check("  a change the room said nothing of lately: no reason given", roles().at(-1), ["early", "co-host", "viewer", null, null, null]);
+  // On their phone instead, still in: the switch says what that client plays.
+  (rl.clients as Any[])[0] = client("941", "early", { role: "viewer", device: PHONE, caps: ["av1"] });
+  lStep(2_000);
+  const sw = detail().events.find((e) => e.kind === "switched client")?.detail as Any | undefined;
+  check("a switch of client: what the new one plays", sw?.caps, ["av1"]);
+  // Back in time as host, after the connection dropped.
+  (rl.clients as Any[])[1] = client("952", "second", { role: "host", device: PHONE, connected: false });
+  lStep(2_000);
+  rl.roleWhy = { at: l, why: "host back", by: null, to: "second" };
+  (rl.clients as Any[])[1] = client("952", "second", { role: "host", device: PHONE });
+  lStep(2_000);
+  check("  the host reconnecting in time: says so", (detail().events.filter((e) => e.kind === "came back").at(-1)?.detail as Any)?.why, "host back");
+  lr.close();
+}
+
 console.log("\n— what the bot's port sent, for the qBittorrent manager —");
 {
   // Six minutes of one stream at 8 Mbps: four with one viewer, the bot

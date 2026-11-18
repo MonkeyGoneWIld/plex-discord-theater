@@ -16,7 +16,7 @@ process.env.THUMB_CACHE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "host-reques
 process.env.PDT_HOST_REQUEST_WAIT_MS = "600";
 process.env.PDT_HOST_REQUEST_AWAY_MS = "200";
 
-const { attachWebSocketServer, closeWebSocketServer } = await import("../src/services/sync.js");
+const { attachWebSocketServer, closeWebSocketServer, adminRooms } = await import("../src/services/sync.js");
 const { createSession } = await import("../src/middleware/auth.js");
 const { instanceHosts } = await import("../src/routes/discord.js");
 
@@ -72,6 +72,11 @@ async function room(id: string, names: string[]) {
   return cs;
 }
 const isHost = (c: Client) => c.last("participants")?.participants.find((p: Msg) => p.userId === c.userId)?.isHost === true;
+/** How the room says its host or a co-host last changed, for the dashboard's history: how, who had it or gave it, who got it, away. */
+const roleWhy = (id: string) => {
+  const w = adminRooms().find((r) => r.id === id)?.roleWhy;
+  return w ? [w.why, w.by, w.to, w.away === true] : null;
+};
 
 console.log("\n— one request at a time, and a no —");
 {
@@ -122,6 +127,7 @@ console.log("\n— no answer, an away host, and taking it back —");
   check("an away host has the short wait", v.active.endsAt - v.now <= 200, true);
   await sleep(300);
   check("no answer: the role passes to the asker", [isHost(bea), isHost(host)], [true, false]);
+  check("  the history is told how: unanswered, the host away", roleWhy("hr-3"), ["request not answered", "host", "bea", true]);
   check("  who is told", bea.last("host-promoted") !== undefined, true);
   check("nobody may ask the new host straight away", cy.view(), { asker: null, blocked: "protected" });
   const h = host.last("host-request")!;
@@ -132,6 +138,7 @@ console.log("\n— no answer, an away host, and taking it back —");
   host.send({ type: "host-reclaim" });
   await sleep(60);
   check("  and it is theirs again", [isHost(host), isHost(bea)], [true, false]);
+  check("  the history is told: taken back, from whom", roleWhy("hr-3"), ["taken back", "bea", "host", false]);
   check("  once", host.last("host-request")!.reclaimUntil, null);
   for (const c of [host, bea, cy]) c.close();
   await sleep(60);
@@ -158,7 +165,33 @@ console.log("\n— a host who goes away mid-countdown, an asker who leaves —")
   host.send({ type: "host-request-answer", accept: true });
   await sleep(60);
   check("given: the asker is host", [isHost(cy), isHost(host)], [true, false]);
+  check("  the history is told: accepted", roleWhy("hr-4"), ["request accepted", "host", "cy", false]);
   check("  and nobody may take it back", host.last("host-request")!.reclaimUntil, null);
+  for (const c of [host, cy]) c.close();
+  await sleep(60);
+}
+
+console.log("\n— handing over, co-hosts, and the host leaving, for the history —");
+{
+  // 18 November: the dashboard's history said who became host, never how.
+  const [host, bea, cy] = await room("hr-6", ["host", "bea", "cy"]);
+  check("before anyone changes anything, nothing to say", roleWhy("hr-6"), null);
+  host.send({ type: "promote-host", userId: "u-bea" });
+  await sleep(60);
+  check("the host hands it over", [isHost(bea), roleWhy("hr-6")], [true, ["handed over", "host", "bea", false]]);
+  bea.send({ type: "set-cohost", userId: "u-cy", value: true });
+  await sleep(60);
+  check("a co-host given, by whom", roleWhy("hr-6"), ["co-host given", "bea", "cy", false]);
+  bea.send({ type: "set-cohost", userId: "u-cy", value: false });
+  await sleep(60);
+  check("  and taken away", roleWhy("hr-6"), ["co-host removed", "bea", "cy", false]);
+  bea.send({ type: "set-cohost", userId: "u-cy", value: false });
+  await sleep(60);
+  check("  taking away what isn't there says nothing new", roleWhy("hr-6"), ["co-host removed", "bea", "cy", false]);
+  bea.close();
+  await sleep(150);
+  const w = roleWhy("hr-6");
+  check("the host leaves: who took over, and that they left", [w?.[0], w?.[1]], ["host left", "bea"]);
   for (const c of [host, cy]) c.close();
   await sleep(60);
 }

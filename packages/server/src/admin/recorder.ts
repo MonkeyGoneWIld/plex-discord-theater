@@ -47,6 +47,10 @@ const SEEK_LOAD_BEFORE_MS = 1_000;
 const SEEK_LOAD_AFTER_MS = 3_000;
 /** A viewer following the host onto a stream this soon after the host moved followed them. */
 const HOST_MOVE_MS = 15_000;
+/** How long after the room notes how its host or a co-host changed a change seen is put down to it. */
+const ROLE_WHY_MS = 10_000;
+/** What a viewer had been doing in the room before a session: what their client and role were as it opened. */
+const LEAD_KINDS = ["joined", "came back", "switched client", "role", "left"];
 /** Players whose key is remembered, for who sent whom what: the most recent kept. */
 const MAX_PEER_KEYS = 500;
 /** How often the room's position in the title is written down, for the session's charts. */
@@ -328,6 +332,7 @@ CREATE TABLE IF NOT EXISTS events (
   detail TEXT
 );
 CREATE INDEX IF NOT EXISTS events_play ON events(play_id, at);
+CREATE INDEX IF NOT EXISTS events_room_user ON events(room_id, user_id, at);
 CREATE TABLE IF NOT EXISTS usage (
   id INTEGER PRIMARY KEY,
   at INTEGER NOT NULL,
@@ -654,14 +659,22 @@ export class Recorder {
       if (device) snap.devices.set(c.userId, device);
       const switched = () => {
         if (before && device && device !== before) {
-          this.event(play, room.id, at, "switched client", c.userId, c.username, room.positionS, { from: before, to: device, role: c.role });
+          this.event(play, room.id, at, "switched client", c.userId, c.username, room.positionS, {
+            from: before, to: device, role: c.role, caps: c.caps, ...(c.av1Encode ? { av1Encode: true } : {}),
+          });
         }
       };
+      // How the host or a co-host changed, as the room noted it a moment ago.
+      const rw = room.roleWhy && at - room.roleWhy.at <= ROLE_WHY_MS ? room.roleWhy : null;
+      const how = rw ? { why: rw.why, ...(rw.by ? { by: rw.by } : {}), ...(rw.to ? { target: rw.to } : {}), ...(rw.away ? { away: true } : {}) } : {};
       if (!prev?.connected) {
         const v = play?.viewers.get(c.userId);
         if (v) Object.assign(v, { joinedAt: at, streamAt: at });
+        // Host on coming in: back in time, or nobody else was.
+        const became = rw && c.role === "host" && (rw.why === "host back" || rw.why === "nobody was host") && rw.to === (c.username ?? c.userId);
         this.event(play, room.id, at, prev ? "came back" : "joined", c.userId, c.username, room.positionS, {
           role: c.role, ...(device ? { device } : {}), caps: c.caps, ...(c.av1Encode ? { av1Encode: true } : {}),
+          ...(became ? { why: rw.why } : {}),
         });
         switched();
         continue;
@@ -698,7 +711,9 @@ export class Recorder {
         });
       }
       if (c.quality !== prev.quality) changed("quality", prev.quality, c.quality);
-      if (c.role !== prev.role) changed("role", prev.role, c.role);
+      if (c.role !== prev.role) {
+        this.event(play, room.id, at, "role", c.userId, c.username, room.positionS, { from: prev.role, to: c.role, ...how });
+      }
       if (c.away !== prev.away) {
         this.event(play, room.id, at, c.away ? "away from Discord" : "back in Discord", c.userId, c.username, room.positionS, null);
       }
@@ -1324,10 +1339,20 @@ export class Recorder {
       const own = byViewer.get(v.userId);
       watched[v.userId] = watchedParts(own && own.length > 1 ? own : within(track, presenceOf(v, events)));
     }
+    // Each viewer's last few joins, client switches and role changes in the room
+    // before the session opened: a host is in the room before they choose a
+    // title, so their client and role are there, not in the session.
+    const lead = viewers.flatMap((v) => (this.st(`SELECT * FROM events WHERE room_id = ? AND user_id = ? AND at <= ?
+        AND (play_id IS NULL OR play_id <> ?) AND kind IN (${LEAD_KINDS.map(() => "?").join(", ")}) ORDER BY at DESC, id DESC LIMIT 8`)
+      .all(play.roomId, v.userId, play.startedAt, play.id, ...LEAD_KINDS) as Array<Record<string, unknown>>)
+      .reverse().map((e) => ({
+        id: Number(e.id), at: Number(e.at), kind: String(e.kind), userId: (e.user_id as string | null) ?? null,
+        username: (e.username as string | null) ?? null, posS: (e.pos_s as number | null) ?? null, detail: parse(e.detail),
+      })));
     const shares = (this.st("SELECT from_user, to_user, bytes FROM play_shares WHERE play_id = ? AND bytes > 0 ORDER BY bytes DESC")
       .all(id) as Array<{ from_user: string; to_user: string; bytes: number }>)
       .map((s) => ({ from: s.from_user, to: s.to_user, bytes: Number(s.bytes) }));
-    return { play, viewers, streams, events, track, watched, shares };
+    return { play, viewers, streams, events, lead, track, watched, shares };
   }
 
   usage(opts: { limit?: unknown; before?: unknown } = {}) {

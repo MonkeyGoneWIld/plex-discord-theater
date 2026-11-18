@@ -501,6 +501,26 @@ interface RoomState {
   hostSubtitleId: number;
 }
 
+/**
+ * How the host or a co-host changed, for the Theater Dashboard's history:
+ * `by` is who had the role or gave it (the host before, the host granting
+ * co-host, the host who left), `to` who got it; both by name.
+ */
+export interface RoleWhy {
+  at: number;
+  why: "handed over" | "request accepted" | "request not answered" | "taken back" | "host left" | "host not back"
+    | "host back" | "nobody was host" | "co-host given" | "co-host removed";
+  by: string | null;
+  to: string | null;
+  /** The host was away from the Discord window when a request for the role went unanswered. */
+  away?: boolean;
+}
+
+function noteRole(room: Room, why: RoleWhy["why"], by: RoomClient | string | null, to: RoomClient | string | null, away = false): void {
+  const name = (c: RoomClient | string | null) => (c === null || typeof c === "string" ? c : c.username ?? c.userId);
+  room.roleWhy = { at: Date.now(), why, by: name(by), to: name(to), ...(away ? { away: true } : {}) };
+}
+
 interface Room {
   clients: Set<RoomClient>;
   state: RoomState;
@@ -516,6 +536,8 @@ interface Room {
    * person, not to the connection.
    */
   coHostIds: Set<string>;
+  /** The latest change of host or co-host and how it came about, for the dashboard. */
+  roleWhy?: RoleWhy;
   /** Last forced history write for this room — see persistProgress. */
   lastForcedPersistAt: number;
   /** Everybody has left, and the room is kept for them — see holdEmptyRoom. */
@@ -1129,6 +1151,8 @@ export interface AdminRoom {
   hostVariantKey: string | null;
   hostSubtitleId: number;
   coHostIds: string[];
+  /** The latest change of host or co-host and how it came about. */
+  roleWhy: RoleWhy | null;
   queue: Array<{ ratingKey: string; title: string; type: string }>;
   /** Nobody is in it now, and it is kept for them to come back to. */
   held: boolean;
@@ -1189,6 +1213,7 @@ export function adminRooms(now = Date.now()): AdminRoom[] {
       hostVariantKey: s.hostVariantKey,
       hostSubtitleId: s.hostSubtitleId,
       coHostIds: [...room.coHostIds],
+      roleWhy: room.roleWhy ?? null,
       queue: s.queue.map((q) => ({ ratingKey: q.ratingKey, title: q.title, type: q.type })),
       held,
       heldFor: held ? room.heldFor ?? null : null,
@@ -1369,6 +1394,7 @@ function transferHost(room: Room, roomId: string, from: RoomClient, target: Room
   // off the person who had been running the room a second earlier. The
   // new host can still remove it from the people panel like any other
   // grant.
+  noteRole(room, why as RoleWhy["why"], from, target, why === "request not answered" && from.activityAway === true);
   from.isHost = false;
   from.isCoHost = true;
   room.coHostIds.add(from.userId);
@@ -1978,6 +2004,9 @@ function positionForCommand(
  */
 function handOverRoom(room: Room, roomId: string, leftVariantKey: string | null, leftName: string, keepLeft = false): void {
   const newHost = pickSuccessor(room.clients, leftVariantKey)!;
+  // Called with "nobody, in time" when a room held for its host is handed on without them.
+  const notBack = leftName === "nobody, in time";
+  noteRole(room, notBack ? "host not back" : "host left", notBack ? null : leftName, newHost);
   newHost.isHost = true;
   newHost.isCoHost = false;
   room.coHostIds.delete(newHost.userId);
@@ -2345,6 +2374,8 @@ export function attachWebSocketServer(server: Server): void {
           && !!out && out.userId === instance.hostUserId && out.userId !== userId
           && ![...room.clients].some((c) => c.isHost && c.userId !== userId);
         if (hostBackInTime || (!isHost && nobodyHost)) {
+          const holder = [...room.clients].find((c) => c.isHost && c.userId !== userId) ?? null;
+          noteRole(room, hostBackInTime ? "host back" : "nobody was host", hostBackInTime ? holder : null, username ?? userId);
           if (hostBackInTime) {
             lastHostOut.delete(instanceId);
             for (const existing of room.clients) {
@@ -2384,6 +2415,7 @@ export function attachWebSocketServer(server: Server): void {
           // The successor has been the active host since the disconnect. Move
           // that role back before adding the reconnecting socket, so the room
           // never has two hosts even for one roster broadcast.
+          noteRole(room, "host back", [...room.clients].find((c) => c.isHost && c.userId !== userId) ?? null, username ?? userId);
           for (const existing of room.clients) {
             if (!existing.isHost) continue;
             existing.isHost = false;
@@ -3504,6 +3536,7 @@ export function attachWebSocketServer(server: Server): void {
           } else {
             room.coHostIds.delete(targetId);
           }
+          if (value !== target.isCoHost) noteRole(room, value ? "co-host given" : "co-host removed", client, target);
           target.isCoHost = value;
           sendTo(target.ws, { type: "cohost-changed", isCoHost: target.isCoHost });
           broadcastParticipants(room);

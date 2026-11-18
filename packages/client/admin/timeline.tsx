@@ -7,6 +7,7 @@ import {
 } from "./events";
 import { Icon } from "./icons";
 import { Avatar } from "./viz";
+import { rolesOf } from "./clients";
 
 /**
  * A session at a glance, for the questions a list of events answers slowly:
@@ -252,10 +253,15 @@ export function SessionChart({ data, durationS, ctx }: { data: PlayDetail; durat
             title: `${e.kind === "buffering" ? "Buffering" : e.kind === "loaded at start" ? "Loading at start" : "Loading after seek"}`
               + `${e.posS !== null ? ` at ${clock(e.posS)}` : ""} · ${when(e.at - ms, e.at)}` };
         });
+        // While they were host or co-host: from what they came in as (some before the session opened), and each change.
+        const roles: Seg[] = rolesOf([...(data.lead ?? []), ...events], v.userId, v.firstSeen, v.lastSeen)
+          .filter((r) => r.role !== "viewer")
+          .map((r) => ({ from: r.from, to: r.to, tone: r.role === "host" ? "role-host" : "role-cohost",
+            title: `${v.username ?? v.userId} · ${r.role === "host" ? "host" : "co-host"} ${when(r.from, r.to)}` }));
         return (
           <Lane key={v.userId} start={start} end={end}
             label={<span className="lane-person"><Avatar id={v.userId} name={v.username} size={20} />{v.username ?? v.userId}</span>}
-            segs={[{ from: v.firstSeen, to: v.lastSeen, tone: "present", title: `${v.username ?? v.userId} · in the room ${when(v.firstSeen, v.lastSeen)}` }, ...stalls]}
+            segs={[{ from: v.firstSeen, to: v.lastSeen, tone: "present", title: `${v.username ?? v.userId} · in the room ${when(v.firstSeen, v.lastSeen)}` }, ...roles, ...stalls]}
             marks={mine.filter((e) => ["stream changed", "quality", "subtitles", "player error", "role"].includes(e.kind) && !(e.kind === "stream changed" && !e.detail?.from))
               .map((e) => ({ at: e.at, tone: e.kind === "player error" ? "error" : "accent", title: markTitle(e, ctx) }))} />
         );
@@ -275,6 +281,8 @@ export function SessionChart({ data, durationS, ctx }: { data: PlayDetail; durat
         <li><span className="swatch error-key" />Player error</li>
         <li><span className="swatch" style={{ background: "var(--info)" }} />Loading (start or after seek)</li>
         <li><span className="swatch" style={{ background: "var(--muted)" }} />Paused</li>
+        <li><span className="swatch" style={{ background: "var(--brand)" }} />Host</li>
+        <li><span className="swatch" style={{ background: "var(--cohost)" }} />Co-host</li>
         <li><span className="swatch mark" />Event</li>
       </ul>
     </div>

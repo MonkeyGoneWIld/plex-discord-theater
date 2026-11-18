@@ -42,6 +42,37 @@ const secs = (ms: unknown) => {
 };
 const role = (v: unknown) => (v === "co-host" ? "co-host" : v === "host" ? "host" : "viewer");
 
+/** How the host or a co-host changed (server sync.ts RoleWhy), for an event's details. */
+const ROLE_WHY: Record<string, string> = {
+  "handed over": "the host handed it over", "request accepted": "requested, and the host accepted",
+  "request not answered": "requested, and the host didn't answer in time", "taken back": "taken back by the host it was passed from",
+  "host left": "the host left", "host not back": "the host didn't come back in time", "host back": "the host reconnected in time",
+  "nobody was host": "nobody else was host", "co-host given": "given by the host", "co-host removed": "removed by the host",
+};
+
+/** A change of host or co-host, and how it came about: `by` had the role or gave it, `target` got it. */
+function roleText(who: string, d: Record<string, unknown>): string {
+  const by = d.by ? String(d.by) : "the host";
+  const target = d.target ? String(d.target) : "another viewer";
+  const away = d.away ? " (away from the Discord window)" : "";
+  const toHost = d.to === "host";
+  const now = d.to === "co-host" ? "a co-host" : "a viewer";
+  switch (d.why) {
+    case "handed over": return toHost ? `${who} became host: ${by} handed it over` : `${who} handed host to ${target} and is now co-host`;
+    case "request accepted": return toHost ? `${who} requested host and ${by} accepted` : `${who} accepted ${target}'s request for host and is now co-host`;
+    case "request not answered": return toHost ? `${who} requested host and got it: ${by} didn't answer in time${away}`
+      : `${who} didn't answer ${target}'s request for host in time${away}, so it passed to them; ${who} is now co-host`;
+    case "taken back": return toHost ? `${who} took host back from ${by}` : `${who} is now co-host: ${target} took host back`;
+    case "host left": return `${who} became host when ${by} left`;
+    case "host not back": return `${who} became host: the host didn't come back in time`;
+    case "host back": return toHost ? `${who} is host again` : `${who} is ${now} again: ${target} reconnected in time and is host`;
+    case "nobody was host": return `${who} became host: nobody else was`;
+    case "co-host given": return `${by} made ${who} a co-host`;
+    case "co-host removed": return `${by} removed ${who} as co-host`;
+  }
+  return `${who} became ${role(d.to)}`;
+}
+
 const END_REASONS: Record<string, string> = {
   stopped: "playback was stopped", "another title": "another title was started", "room closed": "all viewers left",
   "server stopped": "the server shut down", "server restarted": "the server restarted unexpectedly",
@@ -182,13 +213,14 @@ export function eventText(e: PlayEvent, ctx?: EventContext): string {
     case "reached the end": return d.early
       ? `${who} reached the end of the stream${Number.isFinite(Number(d.breakAtS)) ? ` at ${clock(Number(d.breakAtS))}` : ""}, before the length Plex reports; playback was ended there`
       : `${who} reached the end of the title`;
-    case "joined": return `${who} joined as ${role(d.role)}${d.device ? ` on ${clientName(d.device)}` : ""}`;
-    case "came back": return `${who} reconnected${d.device ? ` on ${clientName(d.device)}` : ""}`;
+    case "joined": return `${who} joined as ${role(d.role)}${d.device ? ` on ${clientName(d.device)}` : ""}`
+      + `${d.why === "nobody was host" ? ": nobody else was host" : ""}`;
+    case "came back": return `${who} reconnected${d.device ? ` on ${clientName(d.device)}` : ""}${d.why === "host back" ? " and is host again" : ""}`;
     case "switched client": return `${who} moved from ${clientName(d.from)} to ${clientName(d.to)}`;
     case "left": return `${who} left`;
     case "away from Discord": return `${who} switched away from the Discord window`;
     case "back in Discord": return `${who} returned to the Discord window`;
-    case "role": return `${who} became ${role(d.to)}`;
+    case "role": return roleText(who, d);
     case "stream changed": {
       const on = `${streamLabel(ctx, d.to)} (${tracksOf(ctx, d.to, d)})`;
       // Joining, or a new title: the stream they start on.
@@ -236,17 +268,27 @@ const DETAIL_LABELS: Record<string, string> = {
   host: "Host", switching: "Host's change", variant: "Stream", summary: "Delivery", audioStreamId: "Audio",
   subtitleStreamId: "Subtitles", quality: "Quality", engine: "Engine", fromOffsetS: "Previous start", toOffsetS: "New start",
   offsetS: "Starts at", msg: "Message", tag: "Source", session: "Stream session", replaced: "Replaced session",
-  device: "Client", caps: "Supported formats",
+  device: "Client", caps: "Supported formats", by: "Host before", target: "Host after", away: "Host away from Discord",
 };
+/** For a change of host or co-host, its details' labels where they differ. */
+const ROLE_LABELS: Record<string, string> = { why: "How" };
 
-const AS_IS = new Set(["askedBy", "host", "next", "msg", "tag", "session", "replaced", "summary", "engine"]);
+/** Who acted, for a co-host given or removed; the hosts either side, for the host changing. */
+function roleLabel(k: string, d: Record<string, unknown>): string | undefined {
+  const cohost = d.why === "co-host given" || d.why === "co-host removed";
+  if (k === "by" && cohost) return "By";
+  if (k === "target" && cohost) return undefined;
+  return ROLE_LABELS[k] ?? DETAIL_LABELS[k];
+}
+
+const AS_IS = new Set(["askedBy", "host", "next", "msg", "tag", "session", "replaced", "summary", "engine", "by", "target"]);
 
 /** An event's detail as labelled rows: what the expanded event shows. */
 export function eventDetails(e: PlayEvent, ctx?: EventContext): Array<[string, string]> {
   const d = e.detail ?? {};
   const out: Array<[string, string]> = [];
   for (const [k, v] of Object.entries(d)) {
-    const label = DETAIL_LABELS[k];
+    const label = e.kind === "role" ? roleLabel(k, d) : DETAIL_LABELS[k];
     if (!label || v === null || v === undefined || v === "") continue;
     const value = detailValue(e.kind, k, v, ctx);
     // Names and messages as they are; the dashboard's own words start with a capital.
@@ -268,7 +310,8 @@ function detailValue(kind: string, k: string, v: unknown, ctx?: EventContext): s
     case "reachedEnd": return v ? "Yes" : "No";
     case "cause": return SEEK_CAUSES[String(v)] ?? PLAY_CAUSES[String(v)] ?? STOP_CAUSES[String(v)] ?? (v === "finished" ? "The title finished" : String(v));
     case "reason": return kind === "ended" ? (END_REASONS[String(v)] ?? String(v)) : WAITED_FOR[String(v)] ?? String(v);
-    case "why": return WAITED_FOR[String(v)] ?? switchedText(v) ?? String(v);
+    case "why": return ROLE_WHY[String(v)] ?? WAITED_FOR[String(v)] ?? switchedText(v) ?? String(v);
+    case "away": return v ? "Yes" : "No";
     case "switching": return switchedText(v) ?? String(v);
     case "variant": return streamLabel(ctx, v);
     case "audioStreamId": return trackName(ctx, v, "default");

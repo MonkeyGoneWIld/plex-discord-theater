@@ -17,6 +17,8 @@
   --bad: #f26d6d;
   --bad-soft: #3b1a1a;
   --info: #5db2ec;
+  /* A co-host's stretch on the session chart; a host's is --brand. */
+  --cohost: #b18cf5;
   --info-soft: #12293a;
   /* Where data came from, in this order everywhere: the server, Discord's cache, other viewers
      (validated for colour vision and contrast on --surface), then chart chrome. */
@@ -48,6 +50,7 @@
     --bad: #c22f2f;
     --bad-soft: #fbe6e6;
     --info: #1b6fa8;
+    --cohost: #7a4fd6;
     --info-soft: #e2f0fa;
     --series-1: #2a78d6;
     --series-2: #eb6834;
@@ -297,6 +300,9 @@ button.bar-row:hover, button.bar-row:focus-visible { background: var(--surface-2
 /* A right-aligned figure with a column of words after it: room between them. */
 .table.viewers th.num, .table.viewers td.num { padding-right: 32px; }
 .client-span { display: block; }
+.client-span + .client-span { margin-top: 6px; }
+/* What that client's player plays, under it. */
+.client-formats { display: block; font-size: 12px; color: var(--muted); }
 .downloads { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; padding-bottom: 2px; }
 a.button {
   display: inline-block; border-radius: 6px; padding: 7px 14px; font-weight: 500; text-decoration: none;
@@ -584,6 +590,10 @@ a.fact, .fact a { color: var(--accent); }
 .lane-seg.info { background: var(--info); top: 0; bottom: 0; z-index: 1; opacity: .85; }
 .lane-seg.muted { background: var(--surface-3); color: var(--muted); }
 .lane-seg.present { background: var(--accent-soft); border: 1px solid var(--accent); }
+/* While a viewer was host or co-host: a line along the foot of their bar. */
+.lane-seg.role-host, .lane-seg.role-cohost { top: auto; bottom: 1px; height: 5px; padding: 0; border-radius: 3px; z-index: 1; min-width: 2px; }
+.lane-seg.role-host { background: var(--brand); }
+.lane-seg.role-cohost { background: var(--cohost); }
 .lane-mark {
   position: absolute; top: -2px; bottom: -2px; width: 3px; margin-left: -1px; border-radius: 2px; z-index: 2;
   background: var(--accent); box-shadow: 0 0 0 2px var(--surface);

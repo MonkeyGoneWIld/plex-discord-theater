@@ -8,7 +8,7 @@
  * "buffering"; tracks were numbers; and the oldest came first.
  */
 import { eventDetails, eventText, eventTone, finishedAt, groupOf, jumpsOf, newestFirst, positionAt, positionTicks, streamDiff, trackName, unionParts, variantParts } from "../admin/events";
-import { clientName, clientsOf } from "../admin/clients";
+import { clientName, clientsOf, rolesOf } from "../admin/clients";
 import type { PlayEvent, TrackPoint } from "../admin/types";
 
 let pass = 0;
@@ -138,6 +138,11 @@ check("the position lane's lines: closer for a short title, wider for a film, at
   [positionTicks(1_416), positionTicks(7_256).map((t) => t / 60), positionTicks(150)],
   [[0, 300, 600, 900, 1_200], [0, 30, 60, 90, 120], [0, 30, 60, 90, 120, 150]]);
 
+check("  the title finishing: when and where; closed or stopped part way is not finishing",
+  [finishedAt([ev("stop", { cause: "closed" }, "alex", 1), { ...ev("ended", { reason: "stopped", cause: "finished" }, null, 9), posS: 7_002 }]),
+    finishedAt([ev("ended", { reason: "stopped", cause: "closed" }, null, 9)])],
+  [{ at: 9, posS: 7_002 }, null]);
+
 // 18 November: History said nothing of which client a viewer watched on, nor
 // of one moving from their computer to their phone part way.
 console.log("\n— which client —");
@@ -165,15 +170,63 @@ check("  its details: the client by name, what it plays, and its user agent as g
   [["Role", "Viewer"], ["Client", "Firefox · Linux"], ["Supported formats", "HEVC, Opus"], ["User agent", UA.firefox]]);
 check("a viewer's clients in order, each from joining on it to moving on or being last seen",
   clientsOf([ev("joined", { device: UA.desktop }, "robin", 10), ev("play", null, "alex", 20), ev("switched client", { from: UA.desktop, to: UA.iphone }, "robin", 300),
-    ev("left", null, "robin", 400), ev("came back", { device: UA.iphone }, "robin", 500), { ...ev("joined", { device: UA.firefox }, "alex", 5), userId: "111" }], "222", 900),
-  [{ device: UA.desktop, from: 10, to: 300 }, { device: UA.iphone, from: 300, to: 900 }]);
+    ev("left", null, "robin", 400), ev("came back", { device: UA.iphone }, "robin", 500), { ...ev("joined", { device: UA.firefox }, "alex", 5), userId: "111" }], "222", 0, 900),
+  [{ device: UA.desktop, caps: null, av1Encode: false, from: 10, to: 300 }, { device: UA.iphone, caps: null, av1Encode: false, from: 300, to: 900 }]);
 check("  back on another after leaving: the first ends where they left",
-  clientsOf([ev("joined", { device: UA.desktop }, "robin", 10), ev("left", null, "robin", 400), ev("came back", { device: UA.android }, "robin", 500)], "222", 900),
-  [{ device: UA.desktop, from: 10, to: 400 }, { device: UA.android, from: 500, to: 900 }]);
-check("  the title finishing: when and where; closed or stopped part way is not finishing",
-  [finishedAt([ev("stop", { cause: "closed" }, "alex", 1), { ...ev("ended", { reason: "stopped", cause: "finished" }, null, 9), posS: 7_002 }]),
-    finishedAt([ev("ended", { reason: "stopped", cause: "closed" }, null, 9)])],
-  [{ at: 9, posS: 7_002 }, null]);
+  clientsOf([ev("joined", { device: UA.desktop }, "robin", 10), ev("left", null, "robin", 400), ev("came back", { device: UA.android }, "robin", 500)], "222", 0, 900),
+  [{ device: UA.desktop, caps: null, av1Encode: false, from: 10, to: 400 }, { device: UA.android, caps: null, av1Encode: false, from: 500, to: 900 }]);
+
+// 18 November: the host joins before choosing a title, so History had no client
+// for them; and a viewer on two clients had one list of formats for both.
+check("each client with what its player plays; joined before the session, from when the session saw them",
+  clientsOf([ev("joined", { device: UA.desktop, caps: ["hevc"], av1Encode: true }, "robin", 10), ev("joined", { device: UA.iphone, caps: ["av1"] }, "robin", 300),
+    ev("switched client", { from: UA.desktop, to: UA.iphone }, "robin", 300)], "222", 100, 900),
+  [{ device: UA.desktop, caps: ["hevc"], av1Encode: true, from: 100, to: 300 }, { device: UA.iphone, caps: ["av1"], av1Encode: false, from: 300, to: 900 }]);
+check("  a client left before the session isn't one of its own",
+  clientsOf([ev("joined", { device: UA.desktop }, "robin", 10), ev("left", null, "robin", 50), ev("joined", { device: UA.firefox }, "robin", 100)], "222", 100, 900)
+    .map((c) => [clientName(c.device), c.from, c.to]),
+  [["Firefox \u00b7 Linux", 100, 900]]);
+check("a viewer's roles over the session: from before it, each change, and the same either side of a time away as one",
+  rolesOf([ev("joined", { role: "viewer" }, "robin", 10), ev("role", { from: "viewer", to: "co-host" }, "robin", 50),
+    ev("role", { from: "co-host", to: "host" }, "robin", 300), ev("left", null, "robin", 400), ev("came back", { role: "host" }, "robin", 500),
+    ev("role", { from: "host", to: "viewer" }, "robin", 700), { ...ev("role", { to: "host" }, "alex", 20), userId: "111" }], "222", 100, 900),
+  [{ role: "co-host", from: 100, to: 300 }, { role: "host", from: 300, to: 700 }, { role: "viewer", from: 700, to: 900 }]);
+
+console.log("\n— how the host changed —");
+const roleEv = (who: string, from: string, to: string, d: Record<string, unknown>) => eventText(ev("role", { from, to, ...d }, who));
+check("each way the host changes, said for whoever got it and whoever had it",
+  [roleEv("sam", "viewer", "host", { why: "handed over", by: "alex", target: "sam" }),
+    roleEv("alex", "host", "co-host", { why: "handed over", by: "alex", target: "sam" }),
+    roleEv("sam", "viewer", "host", { why: "request accepted", by: "alex", target: "sam" }),
+    roleEv("alex", "host", "co-host", { why: "request accepted", by: "alex", target: "sam" }),
+    roleEv("sam", "viewer", "host", { why: "request not answered", by: "alex", target: "sam", away: true }),
+    roleEv("alex", "host", "co-host", { why: "request not answered", by: "alex", target: "sam" }),
+    roleEv("alex", "co-host", "host", { why: "taken back", by: "sam", target: "alex" }),
+    roleEv("sam", "host", "co-host", { why: "taken back", by: "sam", target: "alex" }),
+    roleEv("sam", "viewer", "host", { why: "host left", by: "alex", target: "sam" }),
+    roleEv("sam", "viewer", "host", { why: "host not back", target: "sam" }),
+    roleEv("sam", "host", "viewer", { why: "host back", by: "sam", target: "alex" }),
+    roleEv("sam", "viewer", "co-host", { why: "co-host given", by: "alex", target: "sam" }),
+    roleEv("sam", "co-host", "viewer", { why: "co-host removed", by: "alex", target: "sam" }),
+    roleEv("sam", "viewer", "host", {})],
+  ["sam became host: alex handed it over", "alex handed host to sam and is now co-host",
+    "sam requested host and alex accepted", "alex accepted sam's request for host and is now co-host",
+    "sam requested host and got it: alex didn't answer in time (away from the Discord window)",
+    "alex didn't answer sam's request for host in time, so it passed to them; alex is now co-host",
+    "alex took host back from sam", "sam is now co-host: alex took host back",
+    "sam became host when alex left", "sam became host: the host didn't come back in time",
+    "sam is a viewer again: alex reconnected in time and is host",
+    "alex made sam a co-host", "alex removed sam as co-host", "sam became host"]);
+check("  coming in as host: back in time, or nobody else was",
+  [eventText(ev("came back", { role: "host", why: "host back" }, "alex")), eventText(ev("joined", { role: "host", why: "nobody was host" }, "sam"))],
+  ["alex reconnected and is host again", "sam joined as host: nobody else was host"]);
+check("  its details: how, and the hosts either side; a co-host's, who gave it",
+  [eventDetails(ev("role", { from: "host", to: "co-host", why: "handed over", by: "alex", target: "sam" }, "alex")),
+    eventDetails(ev("role", { from: "viewer", to: "co-host", why: "co-host given", by: "alex", target: "sam" }, "sam")),
+    eventDetails(ev("role", { from: "viewer", to: "host", why: "request not answered", by: "alex", target: "sam", away: true }, "sam")).at(-1)],
+  [[["From", "Host"], ["To", "Co-host"], ["How", "The host handed it over"], ["Host before", "alex"], ["Host after", "sam"]],
+    [["From", "Viewer"], ["To", "Co-host"], ["How", "Given by the host"], ["By", "alex"]],
+    ["Host away from Discord", "Yes"]]);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

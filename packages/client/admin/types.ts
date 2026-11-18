@@ -230,6 +230,8 @@ export interface PlayDetail {
   viewers: PlayViewer[];
   streams: PlayStream[];
   events: PlayEvent[];
+  /** Each viewer's last joins, client switches and role changes in the room before the session opened. */
+  lead?: PlayEvent[];
   /** The room's position over the session. */
   track?: TrackPoint[];
   /** What of the title each viewer watched: [from, to] in seconds of it, by user id. */

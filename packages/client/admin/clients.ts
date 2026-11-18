@@ -56,28 +56,84 @@ export function clientName(ua: unknown): string {
 
 export interface ClientSpan {
   device: string;
+  /** What its player could play (PLAYER_CAPS), or null where it wasn't said. */
+  caps: string[] | null;
+  av1Encode: boolean;
   from: number;
   to: number;
+}
+
+const inOrder = (events: PlayEvent[], userId: string) =>
+  events.filter((e) => e.userId === userId).sort((a, b) => a.at - b.at || a.id - b.id);
+
+/** Spans cut to the session: from when the viewer was first seen in it to when they were last. */
+function within<T extends { from: number; to: number }>(spans: T[], firstSeen: number, lastSeen: number): T[] {
+  return spans.filter((s) => s.to > firstSeen && s.from < lastSeen)
+    .map((s) => ({ ...s, from: Math.max(s.from, firstSeen), to: Math.min(s.to, lastSeen) }));
 }
 
 /**
  * The clients a viewer watched on, in order, each from when they joined on it
  * to when they moved to the next or were last seen: from their "joined" and
- * "came back" events, which name it, and "switched client".
+ * "came back" events, which name it and what it plays, and "switched client".
+ * `events` may start before the session (PlayDetail.lead): a host is in the
+ * room before choosing a title, so what they joined on is there.
  */
-export function clientsOf(events: PlayEvent[], userId: string, lastSeen: number): ClientSpan[] {
+export function clientsOf(events: PlayEvent[], userId: string, firstSeen: number, lastSeen: number): ClientSpan[] {
   const out: ClientSpan[] = [];
-  const mine = events.filter((e) => e.userId === userId).sort((a, b) => a.at - b.at || a.id - b.id);
-  for (const e of mine) {
+  for (const e of inOrder(events, userId)) {
     const last = out.at(-1);
     // Gone for a while: the client's time ends there, unless they come back on it.
-    if (e.kind === "left") { if (last) last.to = e.at; continue; }
+    if (e.kind === "left") { if (last && last.to === lastSeen) last.to = e.at; continue; }
     const device = e.kind === "switched client" ? e.detail?.to
       : e.kind === "joined" || e.kind === "came back" ? e.detail?.device : null;
     if (typeof device !== "string" || !device) continue;
-    if (last?.device === device) { last.to = lastSeen; continue; }
+    const caps = Array.isArray(e.detail?.caps) ? (e.detail?.caps as string[]) : null;
+    const av1Encode = e.detail?.av1Encode === true;
+    if (last?.device === device) {
+      last.to = lastSeen;
+      if (caps) Object.assign(last, { caps, av1Encode });
+      continue;
+    }
     if (last && last.to === lastSeen) last.to = e.at;
-    out.push({ device, from: e.at, to: lastSeen });
+    out.push({ device, caps, av1Encode, from: e.at, to: lastSeen });
   }
-  return out;
+  return within(out, firstSeen, lastSeen);
+}
+
+export type Role = "host" | "co-host" | "viewer";
+export interface RoleSpan {
+  role: Role;
+  from: number;
+  to: number;
+}
+
+/**
+ * A viewer's role over the session: host, co-host or viewer, each from when it
+ * began: from what they joined as, and each change of it. Like clientsOf,
+ * `events` may start before the session.
+ */
+export function rolesOf(events: PlayEvent[], userId: string, firstSeen: number, lastSeen: number): RoleSpan[] {
+  const out: RoleSpan[] = [];
+  const asRole = (v: unknown): Role | null => (v === "host" || v === "co-host" || v === "viewer" ? v : null);
+  for (const e of inOrder(events, userId)) {
+    const last = out.at(-1);
+    if (e.kind === "left") { if (last && last.to === lastSeen) last.to = e.at; continue; }
+    const role = e.kind === "role" ? asRole(e.detail?.to)
+      : e.kind === "joined" || e.kind === "came back" || e.kind === "switched client" ? asRole(e.detail?.role) : null;
+    if (!role) continue;
+    if (last && last.to === lastSeen) {
+      if (last.role === role) continue;
+      last.to = e.at;
+    }
+    out.push({ role, from: e.at, to: lastSeen });
+  }
+  // The same role either side of a time away is one stretch of it.
+  const merged: RoleSpan[] = [];
+  for (const s of within(out, firstSeen, lastSeen)) {
+    const prev = merged.at(-1);
+    if (prev && prev.role === s.role) prev.to = Math.max(prev.to, s.to);
+    else merged.push({ ...s });
+  }
+  return merged;
 }

@@ -96,6 +96,11 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
         streams,
       };
       rooms = [room];
+      // Everyone is in the room a moment before the host chooses the title, as they are.
+      Object.assign(room, { ratingKey: null, title: null, playing: false });
+      rec.tick(g);
+      g += 15_000;
+      Object.assign(room, { ratingKey, title, playing: true });
       rec.transport({ at: g, roomId, type: "play", userId: hostId, username: people[0][1], role: "host", fromS: 0, toS: 0, ratingKey, title } as never);
       rec.tick(g);
       const start = g;
@@ -114,6 +119,20 @@ export async function backfill(dbPath: string, now: number, days = 45): Promise<
       while (g - start < length) {
         g += 10_000;
         if (moves !== null && g - start === moves) room.clients.at(-1).device = AGENTS.iphone;
+        // Every fourth session the host makes the second person co-host a third of the way in,
+        // and hands them host two thirds in, staying on as co-host.
+        if (n % 4 === 0 && people.length > 2) {
+          const third = Math.round(length / 3 / 10_000) * 10_000;
+          if (g - start === third) {
+            room.roleWhy = { at: g, why: "co-host given", by: people[0][1], to: people[1][1] };
+            room.clients[1].role = "co-host";
+          }
+          if (g - start === third * 2) {
+            room.roleWhy = { at: g, why: "handed over", by: people[0][1], to: people[1][1] };
+            Object.assign(room.clients[0], { role: "co-host" });
+            Object.assign(room.clients[1], { role: "host" });
+          }
+        }
         const seek = seeks.find(([after]) => after === g - start);
         if (seek) {
           const fromS = (g - start) / 1000 + ahead;
